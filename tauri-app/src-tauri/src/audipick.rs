@@ -661,14 +661,28 @@ fn inject_required_missing_roles(payload: &mut Value, kind: &str) {
         })
         .map(|role| Value::String((*role).to_owned()))
         .collect::<Vec<_>>();
+    let account_missing = !current.is_some_and(|mapping| {
+        ["accountCode", "accountName", "account"]
+            .iter()
+            .any(|role| mapping.get(*role).is_some_and(value_is_filled))
+    });
     if let Some(object) = payload.as_object_mut() {
         object.insert("requiredMissingRoles".into(), Value::Array(missing));
+        object.insert(
+            "requiredMissingAny".into(),
+            if account_missing {
+                json!([["accountCode", "accountName"]])
+            } else {
+                json!([])
+            },
+        );
     }
 }
 
 /// 明确告诉模型本次要复核的两类范围：所有已映射角色，以及所有尚未映射但
-/// 本工具允许使用的角色。`requiredMissingRoles` 只是会阻塞运行的金标子集，
-/// 不能替代完整范围；否则模型很容易只看必填项，漏掉币种、辅助核算等可选角色。
+/// 本工具允许使用的角色。`requiredMissingRoles` 是逐项必填子集，
+/// `requiredMissingAny` 是组内任一即可的必填子集；两者都不能替代完整范围，
+/// 否则模型很容易只看必填项，漏掉币种、辅助核算等可选角色。
 ///
 /// 同时把 Coding 能确定的可疑点单列出来，要求模型优先判断。这里只提供证据，
 /// 不自动删除或改写现有映射；尤其歧义表头仍必须交给样例语义或用户裁决。
@@ -1105,7 +1119,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
          TB 建议只能使用 tb.availableRoles 与 tb.headers，JE 建议只能使用 je.availableRoles 与 je.headers。\
          两侧 engineFacts 是 Coding 根据样例验证的处理事实；protected=true 的事实不得修改。\
          同一源列可合法承担 engineFacts.mappedRoles 中列出的多个角色，Coding 会在后续完成拆分、组合或标准化。\
-         requiredMissingRoles 是当前仍缺失的金标必填角色清单；只要 headers 与 sampleRows 中存在相容列，就必须逐项输出 change，不得只复核已有映射。\
+         requiredMissingRoles 是当前仍缺失的公共必填角色清单；requiredMissingAny 中每组至少补一个相容角色。只要 headers 与 sampleRows 中存在相容列，就必须输出 change，不得只复核已有映射。摘要是选填，不因缺失而阻拦。\
          crossRequiredRoles 是由另一侧当前映射触发的跨表待补角色；尤其 TB 已映射 currency 时，必须检查 JE 的逐行交易币种、外币或原币代码列，并在样例值为 ISO 币种代码时输出 JE currency 补充建议。不得用整列固定的本币/本位币列代替。\
          unmappedRoles 是尚未映射的完整角色清单：逐项查看 headers 与 sampleRows，有相容列就输出 change，没有可信候选则维持空缺。\
          mappedRolesToReview 是必须逐项复核的全部已有映射；不能用 changes 为空代替语义复核。status=keep 仅限样例值与角色含义相容；明显错配且有可信替代列用 replace 并同时输出 action=replace；明显错配但无可信替代列用 clear 并同时输出 action=clear；证据不足用 uncertain。suspectMappings 是 Coding 已发现的确定性疑点，必须优先处理。\
@@ -1271,7 +1285,7 @@ fn ledger_mapping_llm_call(
          \"currentColumn\":string,\"suggestedColumn\":string|null,\"confidence\":number,\
          \"action\":\"replace\"|\"clear\",\"reason\":string,\"scheme\":string}}],\"roleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"replace\"|\"clear\"|\"uncertain\",\"reason\":string}}]}}。action=clear 时省略 suggestedColumn。\
          mappedRolesToReview 是必须逐项复核的全部已有映射：每个角色必须返回一条 roleReviews，不能因为 changes 为空就声称完成。status=keep 仅限 sampleRows 证明当前列与角色相容；明显错配且有可信替代列用 replace 并同时输出 action=replace；明显错配但无可信替代列用 clear 并同时输出 action=clear；证据不足用 uncertain。\
-         unmappedRoles 是尚未映射的完整角色清单，有相容列就输出 change；requiredMissingRoles 是其中会阻塞运行的子集，必须优先；suspectMappings 必须优先复核。\
+         unmappedRoles 是尚未映射的完整角色清单，有相容列就输出 change；requiredMissingRoles 与 requiredMissingAny 是会阻塞运行的字段或任一槽，必须优先；摘要是选填；suspectMappings 必须优先复核。\
          {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{specific}{date_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     );
     let mut payload = params.get("payload").unwrap_or(params).clone();
@@ -2211,7 +2225,7 @@ fn kanzhang_mapping_prompt() -> String {
          reviews:[{{role:string,action:\"replace\"|\"clear\",currentColumn:string,suggestedColumn:string|null,confidence:number,reason:string}}],\
          roleReviews:[{{role:string,currentColumns:[string],status:\"keep\"|\"replace\"|\"clear\"|\"uncertain\",reason:string}}]}}。action=clear 时省略 suggestedColumn。\
          方案A＝净额列（可加方向列）；方案B＝借方与贷方两列，二者互斥。\
-         mappedRolesToReview 中每个已有角色都必须返回一条 roleReviews；不能用 fills/reviews 为空代替语义复核。unmappedRoles 逐项检查，有相容列就输出 fills；requiredMissingRoles 与 suspectMappings 优先。\
+         mappedRolesToReview 中每个已有角色都必须返回一条 roleReviews；不能用 fills/reviews 为空代替语义复核。unmappedRoles 逐项检查，有相容列就输出 fills；requiredMissingRoles、requiredMissingAny 与 suspectMappings 优先。requiredMissingAny 中每组至少补一个相容角色；摘要是选填，不因缺失而阻拦。\
          {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{je_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     )
 }
@@ -2754,6 +2768,32 @@ mod tests {
                 .expect("有该字段")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn 科目身份按编码名称任一提示且摘要不进必填清单() {
+        let mut missing_account = json!({
+            "availableRoles": ["date", "id", "accountCode", "accountName", "summary"],
+            "currentMapping": {"date": "日期", "id": "凭证号"},
+        });
+        inject_required_missing_roles(&mut missing_account, "je");
+        assert_eq!(missing_account["requiredMissingRoles"], json!([]));
+        assert_eq!(
+            missing_account["requiredMissingAny"],
+            json!([["accountCode", "accountName"]])
+        );
+
+        let mut name_only = json!({
+            "availableRoles": ["date", "id", "accountCode", "accountName", "summary"],
+            "currentMapping": {
+                "date": "日期",
+                "id": "凭证号",
+                "accountName": "科目名称"
+            },
+        });
+        inject_required_missing_roles(&mut name_only, "je");
+        assert_eq!(name_only["requiredMissingRoles"], json!([]));
+        assert_eq!(name_only["requiredMissingAny"], json!([]));
     }
 
     #[test]

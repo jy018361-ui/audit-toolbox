@@ -459,15 +459,23 @@ fn analyze_with_progress(
         ));
     }
     let report_end = parse_report_end(params)?;
-    let auxiliary_columns = fa_auxiliary_columns(
-        &tb,
-        &tb_map,
-        &je,
-        &je_map,
-        &assignments,
+    let auxiliary_columns = crate::fx::verified_auxiliary_columns_from_plan_headers(
         params,
-        entity_key_enabled,
-    );
+        &tb.headers,
+        &je.headers,
+        &ledger_mapping::AccountMatchPolicy::default(),
+    )
+    .unwrap_or_else(|| {
+        fa_auxiliary_columns(
+            &tb,
+            &tb_map,
+            &je,
+            &je_map,
+            &assignments,
+            params,
+            entity_key_enabled,
+        )
+    });
     let tb_lines = normalize_tb(
         &tb,
         &tb_map,
@@ -706,15 +714,23 @@ fn analyze_with_disk_je(
         Ok(())
     })?;
     let je = disk_table(je_spec, headers, selected_rows, disk.row_count());
-    let auxiliary_columns = fa_auxiliary_columns(
-        tb,
-        tb_map,
-        &je,
-        je_map,
-        &assignments,
+    let auxiliary_columns = crate::fx::verified_auxiliary_columns_from_plan_headers(
         params,
-        entity_key_enabled,
-    );
+        &tb.headers,
+        &je.headers,
+        &ledger_mapping::AccountMatchPolicy::default(),
+    )
+    .unwrap_or_else(|| {
+        fa_auxiliary_columns(
+            tb,
+            tb_map,
+            &je,
+            je_map,
+            &assignments,
+            params,
+            entity_key_enabled,
+        )
+    });
     let tb_lines = normalize_tb(
         tb,
         tb_map,

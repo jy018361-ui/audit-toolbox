@@ -30,6 +30,53 @@ function openMenu(onClose = vi.fn(), onApply = vi.fn()) {
   return { onClose, onApply };
 }
 
+it("目标科目初始不全选，搜索后全选只提交当前结果", () => {
+  anchor = document.createElement("button");
+  anchor.textContent = "选择目标科目";
+  document.body.appendChild(anchor);
+  const onApply = vi.fn();
+  const props = {
+    field: "目标科目",
+    anchor,
+    loading: false,
+    selected: [] as string[],
+    onSearch: () => undefined,
+    onApply,
+    onClose: () => undefined,
+    defaultSelectAll: false,
+  };
+  const { rerender } = render(
+    <ColumnFilterMenu
+      {...props}
+      data={{
+        values: ["1001-库存现金", "6602-管理费用", "6801-所得税费用"],
+        total: 3,
+        truncated: false,
+        keyword: "",
+      }}
+    />,
+  );
+
+  expect(
+    (screen.getByRole("checkbox", { name: "（全选）" }) as HTMLInputElement).checked,
+  ).toBe(false);
+  rerender(
+    <ColumnFilterMenu
+      {...props}
+      data={{
+        values: ["6602-管理费用"],
+        total: 1,
+        truncated: false,
+        keyword: "管理费用",
+      }}
+    />,
+  );
+  fireEvent.click(screen.getByRole("checkbox", { name: "（全选）" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认选择" }));
+
+  expect(onApply).toHaveBeenCalledWith(["6602-管理费用"]);
+});
+
 it("打开列筛选时聚焦搜索框，Escape 关闭后归还触发按钮", async () => {
   const { onClose } = openMenu();
   expect(screen.getByRole("dialog", { name: "筛选 科目" })).toBeTruthy();
@@ -59,4 +106,10 @@ it("上层确认框打开时 Escape 不连带关闭底下的筛选菜单", () =>
   fireEvent.keyDown(window, { key: "Escape" });
   expect(onClose).not.toHaveBeenCalled();
   modal.remove();
+});
+
+it("切换路由时关闭已打开的筛选浮层", () => {
+  const { onClose } = openMenu();
+  fireEvent(window, new PopStateEvent("popstate"));
+  expect(onClose).toHaveBeenCalledOnce();
 });

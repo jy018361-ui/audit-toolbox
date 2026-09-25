@@ -39,6 +39,7 @@ const jeHeaders = ["主体", "记账日期", "凭证号", "科目编码", "科�
 
 /** 识别结果由用例通过改写 entities 控制（单主体/多主体两版）。 */
 let inspectionEntities: string[] = [];
+let inspectionAuxiliary = false;
 
 const classify = (kind: "tb" | "je") => ({
   kind,
@@ -66,10 +67,13 @@ const inspect = (kind: "tb" | "je") => ({
           accountCode: "科目编码",
           accountName: "科目名称",
           currency: "币种",
+          openingForeignAmount: "期初余额",
           openingFunctionalAmount: "期初余额",
+          closingForeignAmount: "期末余额",
           closingFunctionalAmount: "期末余额",
           ytdFunctionalDebit: "本年累计借方",
           ytdFunctionalCredit: "本年累计贷方",
+          ...(inspectionAuxiliary ? { auxiliary: "科目名称" } : {}),
         }
       : {
           entity: "主体",
@@ -101,6 +105,7 @@ async function uploadBothSources() {
 beforeEach(() => {
   vi.clearAllMocks();
   inspectionEntities = [];
+  inspectionAuxiliary = false;
   mock.pickPath.mockResolvedValue(null);
   mock.jobStart.mockResolvedValue("fx-job-1");
   mock.jobListener = undefined;
@@ -133,8 +138,6 @@ beforeEach(() => {
     }
     if (method === "fx.inspect_tb") return inspect("tb");
     if (method === "fx.inspect_je") return inspect("je");
-    if (method === "fx.validate_currency_mapping")
-      return { valid: true, errors: [] };
     throw new Error(`unexpected ${method}`);
   });
 });
@@ -165,6 +168,10 @@ it.each([
     });
   });
   expect(screen.getByText("正在计算汇兑损益…")).toBeVisible();
+  // UI 审计 P3-3：只有被点击的「测算预览」进 loading 文案，
+  // 「重新测算」保持普通禁用文案，两个按钮不得同时转圈。
+  expect(screen.getByRole("button", { name: "测算中…" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "重新测算" })).toBeDisabled();
 
   await act(async () => {
     mock.jobListener?.({
@@ -181,21 +188,95 @@ it.each([
   expect((await screen.findAllByText(new RegExp(message))).length).toBeGreaterThan(0);
 });
 
-/** 回归（用户反馈 A）：同一输入状态下，无论底部「下一步」还是步骤条导航，
- *  反复进出第二步都不应重复调用 fx.validate_currency_mapping。 */
-it("同一输入下来回切换步骤不重复触发币种映射验证", async () => {
+it("测算结果列示客户与审计汇率并标明取得方式", async () => {
   render(<FxAuditPage tool={tool} />);
   await uploadBothSources();
-  const validateCalls = () =>
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  fireEvent.click(await screen.findByRole("button", { name: "下一步：测算与底稿" }));
+  fireEvent.change(await screen.findByLabelText("资产负债表日"), {
+    target: { value: "20251231" },
+  });
+  fireEvent.click(await screen.findByRole("button", { name: "测算预览" }));
+  await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith("fx.preview", expect.anything()));
+
+  await act(async () => {
+    mock.jobListener?.({
+      jobId: "fx-job-1",
+      toolId: "fx_audit",
+      phase: "completed",
+      current: 100,
+      total: 100,
+      message: "测算完成",
+      severity: "success",
+      outputPaths: [],
+      result: {
+        summary: {
+          formalMeasurementAvailable: true,
+          realizedGainLoss: 0,
+          unrealizedAdjustment: 107.1,
+          automaticMeasuredFxGainLoss: 107.1,
+          diagnosticMeasuredFxGainLoss: 107.1,
+          tbFxGainLoss: 0,
+          difference: 107.1,
+          differenceRatio: null,
+        },
+        unrealizedBalanceRollforward: [
+          {
+            monthEnd: "2025-12-31",
+            account: "长期借款—欧元",
+            currency: "EUR",
+            customerRate: 7.7,
+            customerRateBasis: "客户重估后账面本位币余额÷月末原币余额反推",
+            customerRateReliability: "反推",
+            officialRate: 8.2355,
+            customerVsAuditRateDifference: -0.5355,
+            customerVsAuditRateImpact: 107.1,
+            suggestedAdjustment: 107.1,
+          },
+          {
+            monthEnd: "2025-12-31",
+            account: "金额不足账户",
+            currency: "USD",
+            customerRate: null,
+            officialRate: 7.2,
+            suggestedAdjustment: 0,
+          },
+        ],
+      },
+    });
+  });
+
+  const comparison = await screen.findByRole("region", { name: "客户与审计汇率比较" });
+  expect(within(comparison).getByText("7.700000")).toBeVisible();
+  expect(within(comparison).getByText("8.235500")).toBeVisible();
+  expect(
+    within(comparison).getByText("反推｜客户重估后账面本位币余额÷月末原币余额反推"),
+  ).toBeVisible();
+  expect(within(comparison).queryByText("金额不足账户")).not.toBeInTheDocument();
+  expect(within(comparison).queryByText(/无法取得/)).not.toBeInTheDocument();
+  expect(within(comparison).getByText(/仅用于解释差异，不参与审计测算/)).toBeVisible();
+});
+
+it("上传就绪不扫描JE，第一步下一步才生成并复用辅助计划", async () => {
+  inspectionAuxiliary = true;
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  const auxiliaryCalls = () =>
     mock.engineCall.mock.calls.filter(
-      ([method]) => method === "fx.validate_currency_mapping",
+      ([method]) => method === "ledger.auxiliary_link",
     ).length;
+  expect(auxiliaryCalls()).toBe(0);
 
   fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
   await screen.findByRole("button", { name: "下一步：测算与底稿" });
-  expect(validateCalls()).toBe(1);
+  expect(auxiliaryCalls()).toBe(1);
+  expect(
+    mock.engineCall.mock.calls.some(
+      ([method]) => method === "fx.validate_currency_mapping",
+    ),
+  ).toBe(false);
 
-  // 底部「返回」再「下一步」：同一验证输入已通过，直接跳步。
+  // 底部「返回」再「下一步」：同一来源/映射计划直接复用。
   fireEvent.click(screen.getByRole("button", { name: "返回上传与识别" }));
   await screen.findByRole("button", { name: "下一步：确认TB科目类型" });
   fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
@@ -206,7 +287,19 @@ it("同一输入下来回切换步骤不重复触发币种映射验证", async (
   await screen.findByRole("button", { name: "下一步：确认TB科目类型" });
   fireEvent.click(screen.getByRole("button", { name: "2 TB科目类型确认" }));
   await screen.findByRole("button", { name: "下一步：测算与底稿" });
-  expect(validateCalls()).toBe(1);
+  expect(auxiliaryCalls()).toBe(1);
+});
+
+it("TB 未映射辅助字段时第一步下一步不调用辅助验证", async () => {
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  await screen.findByRole("button", { name: "下一步：测算与底稿" });
+  expect(
+    mock.engineCall.mock.calls.some(
+      ([method]) => method === "ledger.auxiliary_link",
+    ),
+  ).toBe(false);
 });
 
 /** 回归（用户反馈 B）：TB/JE 识别出多个实际主体时，第二步科目确认表必须

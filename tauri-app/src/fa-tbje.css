@@ -327,6 +327,25 @@
   justify-content: space-between;
   font-variant-numeric: tabular-nums;
 }
+
+.fa-tbje-summary-shell {
+  display: grid;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.fa-tbje-summary-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.fa-tbje-summary-toolbar > :first-child {
+  flex: 1 1 280px;
+  max-width: 520px;
+}
 .fa-tbje-confirm-footer {
   display: flex;
   align-items: center;

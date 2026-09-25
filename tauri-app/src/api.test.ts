@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 
 import {
@@ -10,6 +11,7 @@ import {
   telemetryTrack,
   updateReleaseNotes,
 } from "./api";
+import { DEMO_FLAG_KEY } from "./preview/demoRegistry";
 
 describe("browser preview API fallbacks", () => {
   it("keeps draft settings in memory without calling Tauri IPC", async () => {
@@ -34,5 +36,21 @@ describe("browser preview API fallbacks", () => {
     await expect(
       telemetryTrack("tool_open", "fx_audit"),
     ).resolves.toBeUndefined();
+  });
+
+  it("给回函选择器返回 PDF 演示文件，文件夹也匹配该类型", async () => {
+    localStorage.setItem(DEMO_FLAG_KEY, "1");
+    try {
+      const files = await pickPath("files", "选择回函 PDF 文件", ["pdf"]);
+      expect(files).toHaveLength(3);
+      expect(files).toEqual(expect.arrayContaining([
+        expect.stringMatching(/工商银行询证函回函\.pdf$/),
+      ]));
+      expect((files as string[]).every((path) => path.endsWith(".pdf"))).toBe(true);
+      await expect(pickPath("folder", "选择包含回函 PDF 的文件夹"))
+        .resolves.toMatch(/回函PDF$/);
+    } finally {
+      localStorage.removeItem(DEMO_FLAG_KEY);
+    }
   });
 });

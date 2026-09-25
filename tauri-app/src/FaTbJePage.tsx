@@ -31,9 +31,9 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useJobEvents } from "@/hooks/useJobEvents";
-import { useAuxiliaryLink } from "@/hooks/useAuxiliaryLink";
 import { AuxiliaryLinkStatusView } from "@/components/AuxiliaryLinkStatus";
 import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
 import { useTaskRestore } from "./restore";
@@ -47,6 +47,8 @@ import {
   resolveRoleLabels,
   scanLedgerUploadSources,
   selectLedgerSourcePair,
+  verifyAuxiliaryLink,
+  type AuxiliaryLinkResult,
   type EngineRoleLabels,
   type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
@@ -73,6 +75,20 @@ type Assignment = {
 };
 type Classification = LedgerWorkbookSheetClassification;
 
+function isRestoreInspection(value: unknown): value is Inspection {
+  if (!value || typeof value !== "object") return false;
+  const inspection = value as Partial<Inspection>;
+  return (
+    Array.isArray(inspection.headers) &&
+    Array.isArray(inspection.preview) &&
+    Array.isArray(inspection.sheets) &&
+    Array.isArray(inspection.entities) &&
+    Array.isArray(inspection.accounts) &&
+    typeof inspection.rowCount === "number" &&
+    Boolean(inspection.headerDetection)
+  );
+}
+
 type FaTbJeDraft = {
   step: 1 | 2 | 3;
   paths: Record<Kind, string>;
@@ -82,6 +98,7 @@ type FaTbJeDraft = {
   outputPath: string;
   sourceStatus: string;
   result?: unknown;
+  resultStale?: boolean;
   accountsReviewed: boolean;
   assignmentPage: number;
   accountQuery: string;
@@ -539,6 +556,9 @@ export function FaTbJePage() {
     () => faTbJeDraftCache?.sourceStatus ?? "",
   );
   const [result, setResult] = useState<unknown>(() => faTbJeDraftCache?.result);
+  const [resultStale, setResultStale] = useState(
+    () => faTbJeDraftCache?.resultStale ?? false,
+  );
   // 科目复核是必经步骤，用户在第 2 步按过「确认复核并继续」才算复核过。
   const [accountsReviewed, setAccountsReviewed] = useState(
     () => faTbJeDraftCache?.accountsReviewed ?? false,
@@ -549,6 +569,7 @@ export function FaTbJePage() {
   const [accountQuery, setAccountQuery] = useState(
     () => faTbJeDraftCache?.accountQuery ?? "",
   );
+  const [auxiliaryLink, setAuxiliaryLink] = useState<AuxiliaryLinkResult | null>(null);
   const restoredDraftOnMount = useRef(Boolean(faTbJeDraftCache));
   const uploadDropRef = useRef<HTMLDivElement>(null);
   const reviews = useLedgerDictReviews(engineCall, {
@@ -570,12 +591,19 @@ export function FaTbJePage() {
   const { job, setJob, activeJobId } = useJobEvents({
     toolId: "fa_list",
     onEvent: (event) => {
-      if (event.result) setResult(event.result);
+      if (event.phase === "completed" && event.result) {
+        setResult(event.result);
+        setResultStale(false);
+      }
       if (["completed", "failed", "cancelled"].includes(event.phase))
         setBusy(false);
-      if (event.phase === "failed") setError(event.message);
     },
   });
+  const invalidateResult = () => {
+    if (result) setResultStale(true);
+    activeJobId.current = "";
+    setJob(undefined);
+  };
 
   // 历史记录「继续任务」：保留已确认映射与科目分类，但必须重新读取完整
   // Inspection。仅用存档中的 Sheet/标题行伪造 Inspection，会缺 rowCount、
@@ -618,8 +646,21 @@ export function FaTbJePage() {
       typeof p.jeSource?.inputPath === "string" ? p.jeSource.inputPath : "";
     if (!tbPath && !jePath) return;
     const generation = ++restoreGeneration.current;
+    const snapshot = restore.snapshot as
+      | { inspects?: Partial<Record<Kind, unknown>> }
+      | null;
+    const cachedInspects: Partial<Record<Kind, Inspection>> = {};
+    if (restore.snapshotStatus === "valid" && snapshot?.inspects) {
+      if (isRestoreInspection(snapshot.inspects.tb))
+        cachedInspects.tb = snapshot.inspects.tb;
+      if (isRestoreInspection(snapshot.inspects.je))
+        cachedInspects.je = snapshot.inspects.je;
+    }
+    const snapshotComplete =
+      (!tbPath || Boolean(cachedInspects.tb)) &&
+      (!jePath || Boolean(cachedInspects.je));
     setPaths({ tb: tbPath, je: jePath });
-    setInspects({});
+    setInspects(snapshotComplete ? cachedInspects : {});
     setMappings({
       tb:
         p.tbMapping && typeof p.tbMapping === "object"
@@ -639,6 +680,11 @@ export function FaTbJePage() {
     setError("");
     setResult(undefined);
     setJob(undefined);
+    if (snapshotComplete) {
+      setBusy(false);
+      setSourceStatus("已从历史快照恢复 TB/JE 源信息，请复核映射与科目分类后继续。");
+      return;
+    }
     setBusy(true);
     setSourceStatus("正在重新识别历史任务的 TB/JE 源文件…");
     void (async () => {
@@ -658,16 +704,8 @@ export function FaTbJePage() {
                 headerRow: source.headerRow ?? 0,
                 headerDepth: source.headerDepth ?? 0,
               },
-            })) as Inspection;
-            if (
-              !Array.isArray(inspection.headers) ||
-              !Array.isArray(inspection.preview) ||
-              !Array.isArray(inspection.sheets) ||
-              !Array.isArray(inspection.entities) ||
-              !Array.isArray(inspection.accounts) ||
-              typeof inspection.rowCount !== "number" ||
-              !inspection.headerDetection
-            ) {
+            }, `${kind.toUpperCase()} ${fileName(path)}`)) as Inspection;
+            if (!isRestoreInspection(inspection)) {
               throw new Error("源文件识别结果不完整，请重新选择文件。");
             }
             return { kind, inspection, error: "" };
@@ -721,9 +759,7 @@ export function FaTbJePage() {
     jeEntities: entityKeyEnabled ? (inspects.je?.entities ?? []) : [],
     initialSelection: faTbJeDraftCache?.entityScope,
     onInvalidate: () => {
-      activeJobId.current = "";
-      setResult(undefined);
-      setJob(undefined);
+      invalidateResult();
     },
   });
   const missingMappings = {
@@ -734,29 +770,17 @@ export function FaTbJePage() {
     Boolean(inspects.tb && inspects.je) &&
     missingMappings.tb.length === 0 &&
     missingMappings.je.length === 0;
-  // 与汇兑损益同口径：只有数据源或两侧辅助核算明细映射变化才重新联动验证，
-  // 其余角色的映射调整沿用既有结论，不触发整表重读。
+  // 来源或辅助映射变化只让旧计划失效；真正的 TB→JE 验证由用户确认
+  // 第一步、进入科目复核时显式触发，不能在页面停留期间后台扫 JE。
   const auxiliaryLinkKey = inspects.tb && inspects.je
     ? JSON.stringify({
         tb: [source("tb"), mappings.tb.auxiliary ?? null],
         je: [source("je"), mappings.je.auxiliary ?? null],
       })
     : null;
-  const auxiliaryLink = useAuxiliaryLink(inspects.tb && inspects.je ? {
-    tbSource: source("tb"), jeSource: source("je"),
-    tbMapping: mappings.tb, jeMapping: mappings.je,
-    entityScope: entityScope.selection,
-    selectedAccounts: assignments.filter((item) => item.role !== "excluded").map((item) => ({
-      entity: item.entity, account: item.account,
-    })),
-  } : null, auxiliaryLinkKey);
   useEffect(() => {
-    if (!auxiliaryLink) return;
-    setMappings((current) => {
-      const tb = dropUnlinkedTbAuxiliary(current.tb, auxiliaryLink);
-      return tb === current.tb ? current : { ...current, tb };
-    });
-  }, [auxiliaryLink]);
+    setAuxiliaryLink(null);
+  }, [auxiliaryLinkKey]);
   // 显示层：payload 级分配行按「主体＋科目编码」合并成可视行——同一科目
   // 在 TB 与 JE 里可能拼出两种科目串，各自行参与引擎匹配、缺一不可，但
   // 复核时对用户就是同一个科目，只该看一行（见 groupAssignmentViews）。
@@ -818,6 +842,7 @@ export function FaTbJePage() {
       outputPath,
       sourceStatus,
       result,
+      resultStale,
       accountsReviewed,
       assignmentPage,
       accountQuery,
@@ -832,6 +857,7 @@ export function FaTbJePage() {
     outputPath,
     sourceStatus,
     result,
+    resultStale,
     accountsReviewed,
     assignmentPage,
     accountQuery,
@@ -876,6 +902,17 @@ export function FaTbJePage() {
       /\.(xlsx?|xlsm|csv|txt|tsv|parquet)$/i.test(path),
     );
     if (!files.length) return;
+    if (
+      (paths.tb || paths.je || assignments.length || result) &&
+      !(await confirmDialog({
+        title: "重新选择整组文件？",
+        message:
+          "这会清空当前 TB、JE、字段映射和科目分类。若只缺一侧文件，请使用下方对应卡片的“补充上传”。",
+        confirmLabel: "重新选择",
+        tone: "danger",
+      }))
+    )
+      return;
     restoreGeneration.current += 1;
     // 公共入口代表重新选择整组；分批补齐走下方待上传单侧卡片。
     reviews.clearReview("tb");
@@ -888,6 +925,7 @@ export function FaTbJePage() {
     setAssignmentPage(0);
     setAccountQuery("");
     setResult(undefined);
+    setResultStale(false);
     setOutputPath("");
     setStep(1);
     setBusy(true);
@@ -898,7 +936,13 @@ export function FaTbJePage() {
       const scan = await scanLedgerUploadSources<Classification>(
         engineCall,
         files,
-        { llmMethod: "fa_tbje.classify_source_llm" },
+        {
+          llmMethod: "fa_tbje.classify_source_llm",
+          onWorkbookStart: (path, index, total) =>
+            setSourceStatus(
+              `正在识别第 ${index + 1}/${total} 份：${fileName(path)}`,
+            ),
+        },
       );
       failures.push(
         ...scan.failures.map(
@@ -906,27 +950,37 @@ export function FaTbJePage() {
         ),
       );
       const selected = selectLedgerSourcePair(scan.sources);
-      const recognized: {
-        kind: Kind;
-        path: string;
-        inspected: Inspection;
-      }[] = [];
-      for (const item of selected) {
-        const kind = item.kind;
-        try {
-          const inspected = (await engineCall(`deposit.inspect_${kind}`, {
-            source: {
-              inputPath: item.path,
-              sheet: item.classification.sheet,
-              headerRow: 0,
-              headerDepth: 0,
-            },
-          })) as Inspection;
-          recognized.push({ kind, path: item.path, inspected });
-        } catch (e) {
-          failures.push(`${fileName(item.path)}：${errorText(e)}`);
-        }
-      }
+      let inspectedCount = 0;
+      const inspectedResults = await Promise.all(
+        selected.map(async (item, index) => {
+          const kind = item.kind;
+          setSourceStatus(
+            `正在读取第 ${index + 1}/${selected.length} 份 ${kind.toUpperCase()}：${fileName(item.path)}`,
+          );
+          try {
+            const inspected = (await engineCall(`deposit.inspect_${kind}`, {
+              source: {
+                inputPath: item.path,
+                sheet: item.classification.sheet,
+                headerRow: 0,
+                headerDepth: 0,
+              },
+            }, `${kind.toUpperCase()} ${fileName(item.path)}`)) as Inspection;
+            inspectedCount += 1;
+            setSourceStatus(
+              `已读取 ${inspectedCount}/${selected.length} 份，正在整理字段映射…`,
+            );
+            return { kind, path: item.path, inspected };
+          } catch (e) {
+            failures.push(`${fileName(item.path)}：${errorText(e)}`);
+            return undefined;
+          }
+        }),
+      );
+      const recognized = inspectedResults.filter(
+        (item): item is { kind: Kind; path: string; inspected: Inspection } =>
+          Boolean(item),
+      );
       for (const item of recognized) {
         setPaths((current) => ({ ...current, [item.kind]: item.path }));
         setInspects((current) => ({
@@ -976,7 +1030,7 @@ export function FaTbJePage() {
     setInspects((current) => ({ ...current, [kind]: undefined }));
     setMappings((current) => ({ ...current, [kind]: {} }));
     setAssignments([]);
-    setResult(undefined);
+    invalidateResult();
     setSourceStatus(`${kind.toUpperCase()} 已清除，请重新上传。`);
     setStep(1);
   }
@@ -997,7 +1051,7 @@ export function FaTbJePage() {
     try {
       const inspected = (await engineCall(`deposit.inspect_${kind}`, {
         source: { inputPath: path, sheet: "", headerRow: 0, headerDepth: 0 },
-      })) as Inspection;
+      }, `${kind.toUpperCase()} ${fileName(path)}`)) as Inspection;
       setPaths((current) => ({ ...current, [kind]: path }));
       setInspects((current) => ({ ...current, [kind]: inspected }));
       setMappings((current) => ({
@@ -1006,7 +1060,7 @@ export function FaTbJePage() {
       }));
       setAssignments([]);
       setAccountsReviewed(false);
-      setResult(undefined);
+      invalidateResult();
       setSourceStatus(
         `${kind.toUpperCase()} 已更换为 ${fileName(path)} / ${inspected.sheet}。`,
       );
@@ -1039,7 +1093,7 @@ export function FaTbJePage() {
               headerRow: 0,
               headerDepth: 0,
             },
-          })) as Inspection,
+          }, `${kind.toUpperCase()} ${fileName(source.path)}`)) as Inspection,
       );
       setPaths({ tb: "", je: "" });
       setInspects({});
@@ -1054,7 +1108,7 @@ export function FaTbJePage() {
       }
       setAssignments([]);
       setAccountsReviewed(false);
-      setResult(undefined);
+      invalidateResult();
       setSourceStatus(
         changed.length > 1
           ? "JE 与 TB 来源已交换，并按新类型重新识别。"
@@ -1073,6 +1127,16 @@ export function FaTbJePage() {
   ) {
     const current = inspects[kind];
     if (!current || !paths[kind]) return;
+    if (
+      (assignments.length || result) &&
+      !(await confirmDialog({
+        title: `重新读取 ${kind.toUpperCase()}？`,
+        message:
+          "Sheet 或标题行变化后，现有结果会标记为待重算。新表头中仍存在的人工字段映射及同一主体＋科目的分类会尽量保留；无法对应的项目需重新确认。",
+        confirmLabel: "重新读取",
+      }))
+    )
+      return;
     reviews.clearReview(kind);
     setBusy(true);
     setError("");
@@ -1084,12 +1148,23 @@ export function FaTbJePage() {
           headerRow: over.headerRow ?? current.headerRow,
           headerDepth: over.headerDepth ?? current.headerDepth,
         },
-      })) as Inspection;
+      }, `${kind.toUpperCase()} ${fileName(paths[kind])}`)) as Inspection;
       setInspects((value) => ({ ...value, [kind]: inspected }));
       setMappings((value) => ({
         ...value,
-        [kind]: inspected.suggestedMapping,
+        [kind]: Object.fromEntries(
+          Object.entries({
+            ...(inspected.suggestedMapping ?? {}),
+            ...value[kind],
+          }).filter(([, mapped]) =>
+            Array.isArray(mapped)
+              ? mapped.every((column) => inspected.headers.includes(column))
+              : !mapped || inspected.headers.includes(mapped),
+          ),
+        ) as Mapping,
       }));
+      setAccountsReviewed(false);
+      if (result) setResultStale(true);
       reviews.clearReview(kind);
     } catch (e) {
       setError(errorText(e));
@@ -1113,6 +1188,20 @@ export function FaTbJePage() {
       jeSource: source("je"),
       tbMapping: mappings.tb,
       jeMapping: mappings.je,
+      auxiliaryPlan:
+        auxiliaryLink?.planKey && auxiliaryLink.status === "verified"
+          ? {
+              planKey: auxiliaryLink.planKey,
+              groups: (auxiliaryLink.groups ?? []).map((item) => ({
+                entity: item.entity,
+                account: item.account,
+                tbColumn: item.tbColumn,
+                jeColumn: item.column,
+                anchorHits: item.anchorHits,
+                anchorTotal: item.anchorTotal,
+              })),
+            }
+          : undefined,
       accountAssignments: assignments.map((assignment) => ({
         ...assignment,
         category: normalizeFaCategory(assignment.category),
@@ -1121,6 +1210,11 @@ export function FaTbJePage() {
       jeFixedEntity: DEFAULT_ENTITY,
       entityScope: entityScope.selection,
       outputPath,
+      __restoreSnapshot: {
+        version: 1,
+        sources: ([paths.tb, paths.je] as string[]).filter(Boolean),
+        data: { inspects },
+      },
     };
   }
 
@@ -1128,27 +1222,34 @@ export function FaTbJePage() {
     if (!mappingsReady) return;
     setBusy(true);
     setError("");
-    setSourceStatus("正在按已确认字段映射刷新主体与科目清单…");
+    setSourceStatus("正在确认映射口径并刷新 TB 科目清单…");
     try {
-      const refreshed = await Promise.all(
-        (["tb", "je"] as const).map(
-          async (kind) =>
-            [
-              kind,
-              (await engineCall(`deposit.inspect_${kind}`, {
-                source: source(kind),
-                mapping: mappings[kind],
-              })) as Inspection,
-            ] as const,
-        ),
-      );
+      // 辅助核算属于映射口径，不依赖第二步才确认的固定资产目标科目。
+      // 后端会在 TB 未映射辅助字段或没有有效锚点时直接返回，不读取 JE。
+      const verified = await verifyAuxiliaryLink({
+        tbSource: source("tb"),
+        jeSource: source("je"),
+        tbMapping: mappings.tb,
+        jeMapping: mappings.je,
+        entityScope: entityScope.selection,
+      });
+      setAuxiliaryLink(verified);
+      const tbMapping = dropUnlinkedTbAuxiliary(mappings.tb, verified);
+      if (tbMapping !== mappings.tb) {
+        setMappings((current) => ({ ...current, tb: tbMapping }));
+      }
+      // 科目分类只以 TB 中真实存在的主体×科目为范围；JE 不在这里重读。
+      const refreshedTb = (await engineCall("deposit.inspect_tb", {
+        source: source("tb"),
+        mapping: tbMapping,
+      }, `TB ${fileName(paths.tb)}`)) as Inspection;
       setInspects((current) => ({
         ...current,
-        ...Object.fromEntries(refreshed),
+        tb: refreshedTb,
       }));
       setAccountsReviewed(false);
       setAssignmentPage(0);
-      setSourceStatus("已按当前映射刷新主体与科目清单，请复核分类。");
+      setSourceStatus("映射口径已确认；已按 TB 刷新主体与科目清单，请复核分类。");
       setStep(2);
     } catch (e) {
       setError(errorText(e));
@@ -1185,13 +1286,18 @@ export function FaTbJePage() {
       setStep(2);
       return;
     }
+    if (method === "fa.tbje_export" && resultStale) {
+      setError("输入或分类已变化，请先重新生成预览，再导出最新底稿。");
+      return;
+    }
     if (method.endsWith("export") && !outputPath) {
       setError("请选择输出路径。");
       return;
     }
     setBusy(true);
     setError("");
-    setResult(undefined);
+    // 重算期间保留上一版，便于对照；任务完成后由事件替换并清除待重算状态。
+    if (result) setResultStale(true);
     try {
       const id = await jobStart(method, payload());
       activeJobId.current = id;
@@ -1217,6 +1323,8 @@ export function FaTbJePage() {
   // 复核表把这两种写法合并成一行显示（见 groupAssignmentViews），本函数的
   // 同步范围恰好就是该行背后的整组原始串，改一处即整组生效。
   function updateAssignment(index: number, patch: Partial<Assignment>) {
+    invalidateResult();
+    setAccountsReviewed(false);
     const normalizedPatch =
       typeof patch.category === "string"
         ? { ...patch, category: normalizeFaCategory(patch.category) }
@@ -1237,6 +1345,8 @@ export function FaTbJePage() {
   }
 
   function applyRoleToAll(role: AccountRole) {
+    invalidateResult();
+    setAccountsReviewed(false);
     setAssignments((rows) => rows.map((row) => ({ ...row, role })));
   }
 
@@ -1257,7 +1367,13 @@ export function FaTbJePage() {
           },
         ]}
         current={step - 1}
-        onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3)}
+        onStepClick={(index) => {
+          if (index === 1 && step === 1) {
+            void openAccountReview();
+            return;
+          }
+          setStep((index + 1) as 1 | 2 | 3);
+        }}
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
 
@@ -1383,8 +1499,11 @@ export function FaTbJePage() {
                         mapping: mappings.tb,
                         labels: resolveRoleLabels(inspects.tb.roles, TB_LABELS),
                         tool: "fa_tbje",
-                        onApplied: (next) =>
-                          setMappings((value) => ({ ...value, tb: next })),
+                        onApplied: (next) => {
+                          invalidateResult();
+                          setAccountsReviewed(false);
+                          setMappings((value) => ({ ...value, tb: next }));
+                        },
                         missingAfter: (mapping) =>
                           faTbJeMissingMappings("tb", mapping),
                       }
@@ -1396,8 +1515,11 @@ export function FaTbJePage() {
                         mapping: mappings.je,
                         labels: resolveRoleLabels(inspects.je.roles, JE_LABELS),
                         tool: "fa_tbje",
-                        onApplied: (next) =>
-                          setMappings((value) => ({ ...value, je: next })),
+                        onApplied: (next) => {
+                          invalidateResult();
+                          setAccountsReviewed(false);
+                          setMappings((value) => ({ ...value, je: next }));
+                        },
                         missingAfter: (mapping) =>
                           faTbJeMissingMappings("je", mapping),
                       }
@@ -1421,16 +1543,18 @@ export function FaTbJePage() {
                   missing={missingMappings[kind]}
                   busy={reviews.reviewing[kind] || busy}
                   note={`${inspects[kind]!.rowCount.toLocaleString("zh-CN")} 行 × ${inspects[kind]!.headers.length} 列`}
-                  onChange={(next) =>
+                  onChange={(next) => {
+                    invalidateResult();
+                    setAccountsReviewed(false);
                     setMappings((current) => ({
                       ...current,
                       [kind]: next as Mapping,
-                    }))
-                  }
+                    }));
+                  }}
                 />
               ),
           )}
-          <Card variant="section">
+          {paths.tb && paths.je && <Card variant="section">
             <CardContent>
               <AuxiliaryLinkStatusView result={auxiliaryLink} />
               <div className="fa-tbje-step-actions">
@@ -1449,7 +1573,7 @@ export function FaTbJePage() {
                 </Button>
               </div>
             </CardContent>
-          </Card>
+          </Card>}
         </div>
       )}
 
@@ -1625,6 +1749,7 @@ export function FaTbJePage() {
                 }))}
                 disabled={busy}
                 onImport={(changed) => {
+                  invalidateResult();
                   const byKey = new Map(assignmentViews.map((view) => [JSON.stringify([view.entity, view.key]), view]));
                   const updates = new Map(changed.map((row) => {
                     const view = byKey.get(row.key)!;
@@ -1669,9 +1794,16 @@ export function FaTbJePage() {
           <Card variant="section">
             <CardHeader className="fa-tbje-card-head">
               <CardTitle>生成预览并导出五表</CardTitle>
-              <Badge variant="success">全部就绪</Badge>
+              <Badge variant={resultStale ? "warning" : "success"}>
+                {resultStale ? "结果待重算" : "全部就绪"}
+              </Badge>
             </CardHeader>
             <CardContent className="form-stack">
+              {resultStale && (
+                <div className="fa-tbje-inline-warning" role="status">
+                  输入、映射或科目分类已变化。下方仍保留上一次结果供对照，请重新生成预览后再导出。
+                </div>
+              )}
               <div className="fa-tbje-readiness-grid">
                 <div>
                   <span>TB</span>
@@ -1730,7 +1862,7 @@ export function FaTbJePage() {
                   生成预览
                 </Button>
                 <Button
-                  disabled={busy || reviewing || !outputPath}
+                  disabled={busy || reviewing || !outputPath || resultStale}
                   onClick={() => void run("fa.tbje_export")}
                 >
                   生成五表 Excel
@@ -1800,10 +1932,43 @@ export function FaSummaryTable({
   columns: string[];
   rows: FaSummaryRow[];
 }) {
+  const [query, setQuery] = useState("");
+  const [differencesOnly, setDifferencesOnly] = useState(false);
+  const matches = keywordFilterPredicate(query);
+  const visibleRows = rows.filter((row) => {
+    const values = Array.isArray(row.values) ? row.values : [];
+    if (
+      differencesOnly &&
+      (row.section !== "勾稽差异" ||
+        !values.some((value) => Math.abs(Number(value) || 0) >= 0.005))
+    )
+      return false;
+    return matches(`${row.section ?? ""} ${row.item ?? ""}`);
+  });
   let lastSection: string | null = null;
   return (
-    <div className="fa-tbje-account-table-wrap fa-tbje-summary-preview">
-      <table className="fa-tbje-account-table">
+    <div className="fa-tbje-summary-shell">
+      <div className="fa-tbje-summary-toolbar">
+        <KeywordFilter
+          value={query}
+          onChange={setQuery}
+          ariaLabel="搜索变动项目"
+          placeholder="搜索变动项目"
+          matched={visibleRows.length}
+          total={rows.length}
+        />
+        <Button
+          type="button"
+          size="sm"
+          variant={differencesOnly ? "default" : "secondary"}
+          onClick={() => setDifferencesOnly((value) => !value)}
+          aria-pressed={differencesOnly}
+        >
+          {differencesOnly ? "正在只看有差异" : "只看有差异"}
+        </Button>
+      </div>
+      <div className="fa-tbje-account-table-wrap fa-tbje-summary-preview">
+        <table className="fa-tbje-account-table">
         <thead>
           <tr>
             <th aria-label="分类" />
@@ -1817,7 +1982,7 @@ export function FaSummaryTable({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, index) => {
+          {visibleRows.map((row, index) => {
             const section =
               row.section && row.section !== lastSection ? row.section : "";
             lastSection = row.section ?? lastSection;
@@ -1857,8 +2022,16 @@ export function FaSummaryTable({
               </tr>
             );
           })}
+          {!visibleRows.length && (
+            <tr>
+              <td colSpan={columns.length + 3} className="fa-tbje-empty-table">
+                没有符合当前筛选条件的变动项目。
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

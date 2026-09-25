@@ -309,6 +309,8 @@ const FX_TB_HEADERS = [
   "期末余额",
   "本年累计借方",
   "本年累计贷方",
+  "期初原币余额",
+  "期末原币余额",
 ];
 
 const FX_TB_ACCOUNTS = [
@@ -394,7 +396,14 @@ const FX_TB_PREVIEW = [
   [COMPANY, "2202010101", "应付账款-关联方-合并范围内全资子公司-直接采购-库存商品", "华远（香港）贸易", "USD", "贷", money(2150000), "贷", money(1876000), money(12480000), money(12722000)],
   [COMPANY, "2202020101", "应付账款-关联方-香港全资子公司-代垫市场服务费-港币计价", "香港子公司", "HKD", "贷", money(432600), "贷", money(398100), money(2154000), money(2189500)],
   [COMPANY, "6603010201", "财务费用-汇兑损益-未实现汇兑损益", "", "CNY", "贷", money(0), "贷", money(0), money(35600), money(98400)],
-];
+].map((row) => {
+  const divisor = row[4] === "USD" ? 7.2 : row[4] === "HKD" ? 0.92 : 1;
+  return [
+    ...row,
+    money(Number(row[6].replaceAll(",", "")) / divisor),
+    money(Number(row[8].replaceAll(",", "")) / divisor),
+  ];
+});
 
 const FX_TB_ROLES = roleLabels([
   ["entity", "公司/核算主体"],
@@ -428,6 +437,8 @@ const FX_TB_MAPPING: Dict = {
   currency: "币种",
   openingFunctionalAmount: "期初余额",
   closingFunctionalAmount: "期末余额",
+  openingForeignAmount: "期初原币余额",
+  closingForeignAmount: "期末原币余额",
   ytdFunctionalDebit: "本年累计借方",
   ytdFunctionalCredit: "本年累计贷方",
 };
@@ -1116,6 +1127,26 @@ export const handlers: Record<string, (params: Record<string, unknown>) => unkno
     ledgerFormCatalog(typeof params.kind === "string" ? params.kind : "tb"),
   "ledger.review_mapping": () => ({ changes: [] }),
   "ledger.review_pair_mapping": () => ({ tbChanges: [], jeChanges: [], pairFindings: [] }),
+  "ledger.auxiliary_link": (params) => ({
+    tbAuxMapped: Boolean((params.tbMapping as Dict | undefined)?.auxiliary),
+    status: "verified",
+    column: typeof (params.jeMapping as Dict | undefined)?.auxiliary === "string"
+      ? (params.jeMapping as Dict).auxiliary : null,
+    anchorHits: 12,
+    anchorTotal: 12,
+    coverage: 1,
+    competingColumns: [],
+    warnings: [],
+    planKey: "demo-auxiliary-link",
+    groups: [],
+  }),
+  "ledger.currency_link": () => ({
+    required: false,
+    verified: true,
+    missingCurrencies: [],
+    affectedGroupCount: 0,
+    groups: [],
+  }),
   "ledger.check_mapping_alignment": () => ({
     aligned: true,
     errors: [],
@@ -1284,6 +1315,10 @@ const DEPOSIT_INTEREST_TOTAL = DEPOSIT_ROWS.filter((row) => row.rateResolved).re
   (sum, row) => sum + row.calculatedInterest,
   0,
 );
+/** 故意留待填利率的户数（演示「测算未完整」布局），完成文案与明细同源。 */
+const DEPOSIT_UNRESOLVED_COUNT = DEPOSIT_ROWS.filter(
+  (row) => !row.rateResolved,
+).length;
 const DEPOSIT_BOOKED = round2(DEPOSIT_INTEREST_TOTAL / 1.032);
 const DEPOSIT_DIFFERENCE = round2(DEPOSIT_INTEREST_TOTAL - DEPOSIT_BOOKED);
 
@@ -1310,9 +1345,18 @@ const depositPreviewEvents = (): DemoJobEvent[] => [
   jobEvent("queued", 0, "排队测算存款利息…"),
   jobEvent("running", 36, `正在按月归集 ${DEPOSIT_ROWS.length} 个计息账户的余额…`),
   jobEvent("running", 74, "正在匹配利率档位并逐户测算利息…"),
-  jobEvent("completed", 100, `测算完成：${DEPOSIT_ROWS.length} 个账户，测算利息 ${yuan(DEPOSIT_INTEREST_TOTAL)} 元，与 TB 勾稽一致。`, {
-    result: { summary: DEPOSIT_SUMMARY, rows: DEPOSIT_ROWS },
-  }),
+  jobEvent(
+    "completed",
+    100,
+    // 完成文案与 DEPOSIT_SUMMARY 同源现算：演示数据本就带勾稽差异和待定利率户，
+    // 不能写死「与 TB 勾稽一致」跟同屏明细矛盾。
+    `测算完成：${DEPOSIT_ROWS.length} 个账户，测算利息 ${yuan(DEPOSIT_INTEREST_TOTAL)} 元，` +
+      `与 TB 差异 ${yuan(DEPOSIT_SUMMARY.difference)} 元（${(DEPOSIT_SUMMARY.differenceRatio * 100).toFixed(2)}%），` +
+      `其中 ${DEPOSIT_UNRESOLVED_COUNT} 户利率待定。`,
+    {
+      result: { summary: DEPOSIT_SUMMARY, rows: DEPOSIT_ROWS },
+    },
+  ),
 ];
 
 const depositExportEvents = (): DemoJobEvent[] => [

@@ -220,3 +220,11 @@
     align-items: flex-start;
   }
 }
+.fa-result-summary .fa-output-button {
+  justify-self: start;
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+  white-space: normal;
+  text-align: left;
+}

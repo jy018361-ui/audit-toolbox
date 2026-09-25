@@ -68,6 +68,23 @@ fn probe_custom_dataset() {
         "TB 映射: {}",
         serde_json::to_string(&tb_i["suggestedMapping"]).unwrap()
     );
+    let tb_sign = audit_toolbox_lib::engine_call_for_test(
+        "fx.sign_probe",
+        serde_json::json!({
+            "source": {
+                "inputPath": tb.to_string_lossy(),
+                "sheet": tb_i["sheet"],
+                "headerRow": tb_i["headerRow"],
+                "headerDepth": tb_i["headerDepth"],
+            },
+            "mapping": tb_i["suggestedMapping"],
+        }),
+    )
+    .expect("TB 符号口径调查应当成功");
+    println!(
+        "TB 符号口径: {}",
+        serde_json::to_string(&tb_sign).unwrap_or_default()
+    );
     if let Some(preview) = tb_i["preview"].as_array() {
         println!("TB 前 3 行：");
         for row in preview.iter().take(3) {

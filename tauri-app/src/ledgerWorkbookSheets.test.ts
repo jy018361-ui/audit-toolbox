@@ -163,6 +163,47 @@ describe("工作簿 Sheet 分类", () => {
     ]);
   });
 
+  it("多工作簿识别最多并行两份，合并结果仍保持选入顺序", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const releases: Array<() => void> = [];
+    const call = vi.fn(
+      async (_method: string, params: Record<string, unknown>) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        active -= 1;
+        const path = (params.source as { inputPath: string }).inputPath;
+        return classification(path.split("/").pop()!, [path.split("/").pop()!]);
+      },
+    );
+    const started: string[] = [];
+    const running = scanLedgerUploadSources(
+      call,
+      ["C:/x/1.xlsx", "C:/x/2.xlsx", "C:/x/3.xlsx"],
+      { onWorkbookStart: (path) => started.push(path) },
+    );
+
+    await vi.waitFor(() => expect(call).toHaveBeenCalledTimes(2));
+    expect(maxActive).toBe(2);
+    releases.shift()?.();
+    await vi.waitFor(() => expect(call).toHaveBeenCalledTimes(3));
+    expect(maxActive).toBe(2);
+    releases.splice(0).forEach((release) => release());
+
+    const result = await running;
+    expect(started).toEqual([
+      "C:/x/1.xlsx",
+      "C:/x/2.xlsx",
+      "C:/x/3.xlsx",
+    ]);
+    expect(result.sources.map((item) => item.path)).toEqual([
+      "C:/x/1.xlsx",
+      "C:/x/2.xlsx",
+      "C:/x/3.xlsx",
+    ]);
+  });
+
   it("公共选对入口在所有工具中统一采用同一工作簿优先", () => {
     const sources = [
       { path: "C:/x/账套.xlsx", classification: classification("TB", undefined, { je: 1, tb: 8 }) },

@@ -97,9 +97,9 @@ export function onSyncBusyChange(
   return () => syncBusyListeners.delete(listener);
 }
 
-/** 终止等待的统一话术：页面 catch 到的就是这一句。 */
+/** 停止等待的统一话术：页面 catch 到的就是这一句。 */
 export const SYNC_BUSY_ABORTED_MESSAGE =
-  "已终止等待：界面已恢复，后台处理会自行收尾，但结果不再应用到页面。";
+  "已停止等待：界面已恢复，后台处理会自行收尾，但结果不再应用到页面。";
 
 /**
  * 终止当前全部同步调用的等待：等待窗立即关闭、页面的调用立刻收到失败，
@@ -351,6 +351,20 @@ export const pickPath = (
 ) => {
   if (!inTauri()) {
     if (demoDataEnabled()) {
+      // 文件类型必须与当前选择器一致。回函页会把选择结果直接列为 PDF；
+      // 返回通用 xlsx 样例会让演示界面出现“PDF 列表里是 Excel”的假数据。
+      if ((kind === "file" || kind === "files") &&
+        extensions.some((extension) => extension.toLowerCase().replace(/^\./, "") === "pdf")) {
+        const pdfs = [
+          demoPath("回函PDF\\工商银行询证函回函.pdf"),
+          demoPath("回函PDF\\建设银行询证函回函.pdf"),
+          demoPath("回函PDF\\华信客户回函扫描件.pdf"),
+        ];
+        return Promise.resolve(kind === "files" ? pdfs : pdfs[0]);
+      }
+      if (kind === "folder" && title.includes("回函 PDF")) {
+        return Promise.resolve(demoPath("回函PDF"));
+      }
       return Promise.resolve(
         kind === "files" ? [demoPath("样例文件.xlsx")] : demoPath("样例文件"),
       );

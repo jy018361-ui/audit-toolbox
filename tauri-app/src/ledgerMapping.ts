@@ -75,6 +75,58 @@ export function ledgerEntityKeyEnabled(
   return ledgerHasMappedRole(tbMapping, "entity") && ledgerHasMappedRole(jeMapping, "entity");
 }
 
+/** 引擎识别下发的账里真实「主体×科目」组合（inspect 的 entityAccounts 项）。 */
+export type LedgerEntityCombo = { entity: string; account: string };
+
+/**
+ * 组合里是否出现多个实际主体（「默认主体」占位不计）。
+ * 单主体账套不按主体拆行，维持原有清单布局。
+ */
+export function ledgerMultiEntityCombos(
+  combos: readonly LedgerEntityCombo[] | undefined | null,
+): boolean {
+  const names = new Set(
+    (combos ?? [])
+      .map((combo) => combo.entity.trim())
+      .filter((entity) => entity && entity !== DEFAULT_ENTITY),
+  );
+  return names.size > 1;
+}
+
+/**
+ * 科目编码 → 账里出现过该科目的主体清单（组合顺序去重）。
+ * 供确认清单把「主体×科目」拆成逐行，每行带出自己的余额与发生额。
+ */
+export function ledgerEntitiesByAccount(
+  combos: readonly LedgerEntityCombo[] | undefined | null,
+  codeOf: (account: string) => string,
+): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const combo of combos ?? []) {
+    const code = codeOf(combo.account);
+    if (!code) continue;
+    const list = map.get(code);
+    if (list) {
+      if (!list.includes(combo.entity)) list.push(combo.entity);
+    } else {
+      map.set(code, [combo.entity]);
+    }
+  }
+  return map;
+}
+
+/**
+ * 拆行用的主体清单：该科目在账里只属于一个主体时返回它（行上仍标注），
+ * 属于多个主体时全部返回，账里没有主体信息时返回 undefined（不拆行）。
+ */
+export function ledgerRowEntities(
+  entities: string[] | undefined,
+): string[] | undefined {
+  if (!entities?.length) return undefined;
+  if (entities.length === 1 && entities[0] === DEFAULT_ENTITY) return undefined;
+  return entities;
+}
+
 export type LedgerSourceKind = "je" | "tb";
 export type LedgerSourceClassification = {
   kind: LedgerSourceKind;
@@ -118,14 +170,16 @@ export type LedgerSourceScanResult<
 export async function classifyLedgerWorkbookSheets<
   T extends LedgerWorkbookSheetClassification,
 >(
-  call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  call: LedgerEngineCall,
   method: string,
   path: string,
 ): Promise<T[]> {
   const classify = (sheet: string) =>
-    call(method, {
-      source: { inputPath: path, sheet, headerRow: 0, headerDepth: 0 },
-    }) as Promise<T>;
+    call(
+      method,
+      { source: { inputPath: path, sheet, headerRow: 0, headerDepth: 0 } },
+      sheet ? `${fileName(path)} / ${sheet}` : fileName(path),
+    ) as Promise<T>;
   const first = await classify("");
   const names = [
     ...new Set(
@@ -223,38 +277,62 @@ export async function scanLedgerUploadSources<
     llmFallbacks: 0,
     failures: [],
   };
-  for (const [index, path] of paths.entries()) {
-    options.onWorkbookStart?.(path, index, paths.length);
-    try {
-      const sheets = await classifyLedgerWorkbookSheets<T>(
-        call,
-        options.classificationMethod ?? "deposit.classify_source",
-        path,
-      );
-      for (const scripted of sheets) {
-        if (!ledgerClassificationIsVisible(scripted)) {
-          result.hiddenSheets += 1;
-          continue;
-        }
-        // Rust 已经把「是否需要 LLM」作为分类结果的一部分。
-        // 高置信度的 TB/JE 不再为了「复核而复核」去跑一次网络；
-        // 只有低分或两类得分接近时才交给工具专属 LLM 判型。
-        if (!options.llmMethod || !scripted.needsLlm) {
-          result.sources.push({ path, classification: scripted });
-          continue;
-        }
-        const reviewed = await reviewLedgerSourceClassification(
+  // 工作簿互不依赖；最多并发两个，既缩短两份大账表的叠加等待，也避免无限
+  // Promise.all 在多文件批量页制造读取内存峰值。各文件先写自己的桶，最后按
+  // 用户选择顺序合并，保证配对优先级与旧串行实现完全一致。
+  const perWorkbook = paths.map((): LedgerSourceScanResult<T> => ({
+    sources: [],
+    hiddenSheets: 0,
+    llmFallbacks: 0,
+    failures: [],
+  }));
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < paths.length) {
+      const index = cursor++;
+      const path = paths[index];
+      const local = perWorkbook[index];
+      options.onWorkbookStart?.(path, index, paths.length);
+      try {
+        const sheets = await classifyLedgerWorkbookSheets<T>(
           call,
-          options.llmMethod,
-          `${path} / ${scripted.sheet}`,
-          scripted,
+          options.classificationMethod ?? "deposit.classify_source",
+          path,
         );
-        if (!reviewed.reviewed) result.llmFallbacks += 1;
-        result.sources.push({ path, classification: reviewed.classification });
+        for (const scripted of sheets) {
+          if (!ledgerClassificationIsVisible(scripted)) {
+            local.hiddenSheets += 1;
+            continue;
+          }
+          // Rust 已经把「是否需要 LLM」作为分类结果的一部分。
+          // 高置信度的 TB/JE 不再为了「复核而复核」去跑一次网络；
+          // 只有低分或两类得分接近时才交给工具专属 LLM 判型。
+          if (!options.llmMethod || !scripted.needsLlm) {
+            local.sources.push({ path, classification: scripted });
+            continue;
+          }
+          const reviewed = await reviewLedgerSourceClassification(
+            call,
+            options.llmMethod,
+            `${path} / ${scripted.sheet}`,
+            scripted,
+          );
+          if (!reviewed.reviewed) local.llmFallbacks += 1;
+          local.sources.push({ path, classification: reviewed.classification });
+        }
+      } catch (error) {
+        local.failures.push({ path, error });
       }
-    } catch (error) {
-      result.failures.push({ path, error });
     }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(2, paths.length) }, () => worker()),
+  );
+  for (const local of perWorkbook) {
+    result.sources.push(...local.sources);
+    result.hiddenSheets += local.hiddenSheets;
+    result.llmFallbacks += local.llmFallbacks;
+    result.failures.push(...local.failures);
   }
   return result;
 }
@@ -438,13 +516,13 @@ export function accountColumns(mapping: Mapping): string[] {
   return out;
 }
 
-// 金标（`汇兑损益测试资料/TB-4800.xlsx` 的 `je种类` / `tb种类` 两张表）要求的身份字段。
-// 一份合格的账表应该有这些列，缺了就拦——与各工具自己声明的必填取并集。
+// 账表公共身份字段。科目身份采用「编码／名称任一」槽位；摘要是可选业务
+// 信息，不作为 JE 运行门槛。与各工具自己声明的必填取并集。
 // `entity` 不在其中：金标 2026-08-24 修订时把它降为可选，汇兑损益仍自己要求它。
 // **Rust 侧 `ledger_mapping::identity_required` 是同一份，两边必须一致。**
 export const GOLD_IDENTITY: Record<"je" | "tb", string[]> = {
-  je: ["date", "id", "accountCode", "accountName", "summary"],
-  tb: ["accountCode", "accountName"],
+  je: ["date", "id"],
+  tb: [],
 };
 const GOLD_LABELS: Record<string, string> = {
   date: "记账日期",
@@ -458,9 +536,12 @@ export function missingGoldIdentity(
   kind: "je" | "tb",
   has: (role: string) => boolean,
 ): string[] {
-  return GOLD_IDENTITY[kind]
+  const missing = GOLD_IDENTITY[kind]
     .filter((role) => !has(role))
     .map((role) => GOLD_LABELS[role] ?? role);
+  if (!has("accountCode") && !has("accountName"))
+    missing.push("科目编码／科目名称（任一）");
+  return missing;
 }
 
 /** 引擎随识别结果下发的角色标签：`name` 是统一内核的标准角色名，`label` 是中文标签。 */
@@ -513,6 +594,8 @@ export type LedgerPlannedChange = LedgerChange & {
   currentColumn: string;
   attention: boolean;
   beforeValue?: string | string[];
+  /** 用户采纳前的整份映射；用于完整撤销采纳时连带发生的列互斥调整。 */
+  beforeMapping?: Record<string, string | string[]>;
   label: string;
   /** 清除错误映射时 suggestedColumn 为空，界面统一展示为“未映射”。 */
   action: "replace" | "clear";
@@ -633,7 +716,7 @@ export type LedgerEngineCall = (
 ) => Promise<unknown>;
 
 /**
- * 调用共用的映射复核，把够把握的建议应用到通用字典型映射上。
+ * 调用共用的映射复核，把通过纪律与取值校验的建议整理为待确认项。
  *
  * 汇兑损益、存款利息、借款利息用的都是「角色名 → 列名」的字典，与看账那套
  * 强类型结构不同，所以单独一个入口；纪律、卫生过滤在后端已经统一。
@@ -695,7 +778,13 @@ const ledgerMappingText = (value: string | string[] | undefined): string =>
     ? value.filter(Boolean).join("＋")
     : value?.trim() || "未映射";
 
-/** 后端完成提示词与硬规则过滤后，前端统一执行 60% 应用、待确认与撤销计划。 */
+/**
+ * 后端完成提示词与硬规则过滤后，前端统一生成“待采纳”计划。
+ *
+ * 审计映射不得因为后台复核返回而静默变化：即使建议置信度较高，也只展示给
+ * 用户确认。这里仍按原先的原子调整规则预演整批建议，借此剔除列占用冲突；
+ * 最终把可行建议全部还原成 pending，mapping 保持调用前的人工/Coding 结果。
+ */
 export function planLedgerChanges(
   headers: string[],
   sampleRows: string[][],
@@ -828,7 +917,59 @@ export function planLedgerChanges(
     }
     applied.push(planned);
   }
-  return { mapping: next, applied, pending };
+  return {
+    mapping: { ...current },
+    applied: [],
+    pending: [...applied, ...pending],
+  };
+}
+
+/**
+ * 用户明确采纳一条 LLM 建议时，按映射互斥规则安全落地。
+ * 自动复核只产出建议；真正改写映射统一经过此函数，避免同一列同时占用两个角色。
+ */
+export function applyLedgerPendingChange(
+  headers: string[],
+  sampleRows: string[][],
+  current: Record<string, string | string[]>,
+  change: LedgerPlannedChange,
+  multiColumnRoles: ReadonlySet<string> = LEDGER_MULTI_COLUMN_ROLES,
+): Record<string, string | string[]> {
+  const next = { ...current };
+  if (change.action === "clear") {
+    delete next[change.role];
+    return next;
+  }
+
+  const column = change.suggestedColumn.trim();
+  if (!column || !headers.includes(column)) return next;
+  for (const [role, value] of Object.entries(next)) {
+    if (
+      role === change.role ||
+      !(Array.isArray(value) ? value.includes(column) : value === column) ||
+      canShareCombinedAccountColumn(headers, sampleRows, column, change.role, role)
+    ) {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      const remaining = value.filter((item) => item !== column);
+      if (remaining.length) next[role] = remaining;
+      else delete next[role];
+    } else {
+      delete next[role];
+    }
+  }
+
+  if (multiColumnRoles.has(change.role)) {
+    const before = next[change.role];
+    const kept = (Array.isArray(before) ? before : before ? [before] : []).filter(
+      (item) => item?.trim() && !columnAllEmptyIn(headers, sampleRows, item),
+    );
+    next[change.role] = appendMappingColumn(kept, column);
+  } else {
+    next[change.role] = column;
+  }
+  return next;
 }
 
 export const ledgerErrorText = (error: unknown) => {
@@ -861,7 +1002,7 @@ export type LedgerReviewTarget = {
   /** 当前工具允许由多列共同组成的角色；公共默认含日期组成列。 */
   multiColumnRoles?: ReadonlySet<string>;
 };
-/** 一键复核里单个文件的结果：应用后的映射、采纳的建议数与失败原因。 */
+/** 一键复核里单个文件的结果：当前映射、已由用户采纳的建议与待采纳建议。 */
 export type LedgerReviewOutcome = {
   mapping: Record<string, string | string[]>;
   appliedCount: number;
@@ -1172,8 +1313,7 @@ export const isMultiRole = (
 ): role is "id" | "accountName" | "date" =>
   role === "id" || role === "accountName" || role === "date";
 // 预览表头下拉里的角色顺序，两个工具共用同一份，必填项标 true。
-// 科目编码与科目名称各自标 false：单独看谁都不是必填，但两者至少要映射一列，
-// 这条口径由 missingKanzhangRequiredRoles 统一判。
+// 科目编码与科目名称各自标 false：两者组成「任一」身份槽；摘要同样可选。
 export const LEDGER_ROLES: [keyof Mapping, string, boolean][] = [
   ["id", "凭证编号", true],
   ["accountCode", "科目编码", false],
@@ -1205,9 +1345,9 @@ export function normalizeLedgerRole(role?: string): keyof Mapping | undefined {
   if (alias) return alias;
   return LEDGER_ROLE_KEYS.has(key) ? (key as keyof Mapping) : undefined;
 }
-// 与 Rust `validate_kanzhang_mapping` 保持同一必填口径：**金标身份槽 ∪ 本工具必填**。
+// 与 Rust `validate_kanzhang_mapping` 保持同一必填口径：**公共身份槽 ∪ 本工具必填**。
 // 本工具自己要的是凭证 ID，以及方案 A 的金额列或方案 B 的借贷两列（方向列是选填）；
-// 金标另要求记账日期、科目编码、科目名称、摘要——缺了同样拦，只是理由不同。
+// 公共身份另要求记账日期及「科目编码／科目名称任一」，摘要不作硬门槛。
 export function missingKanzhangRequiredRoles(mapping: Mapping): string[] {
   const has = (role: string) => {
     if (role === "id")

@@ -113,18 +113,16 @@ describe("看账导出模式联动", () => {
 });
 
 describe("看账页面状态规则", () => {
-  it("缺少必填映射时按金标身份槽逐项列出", () => {
-    // 金标（TB-4800 的 je种类）要求日期、凭证号、科目编码、科目名称、摘要齐备，
-    // 看账自己另要金额方案。两者取并集，缺哪项报哪项。
+  it("科目编码或名称任一即可且摘要不作硬阻拦", () => {
+    // 公共身份要求日期、凭证号和科目身份；科目编码/名称任一即可，摘要可选。
+    // 看账自己另要金额方案。
     expect(missingKanzhangRequiredRoles({ id: [], accountName: [] })).toEqual([
       "记账日期",
       "凭证识别字段",
-      "科目编码",
-      "科目名称",
-      "摘要",
+      "科目编码／科目名称（任一）",
       "金额字段（方案A-金额，或方案B-借方和贷方）",
     ]);
-    // 只映射编码不再放行——金标要求编码与名称都到位。
+    // 只映射编码即可满足科目身份，摘要未映射也不拦。
     expect(
       missingKanzhangRequiredRoles({
         id: ["凭证号"],
@@ -132,15 +130,13 @@ describe("看账页面状态规则", () => {
         accountName: [],
         functionalAmount: "金额",
       }),
-    ).toEqual(["记账日期", "科目名称", "摘要"]);
-    // 全部齐备才放行。
+    ).toEqual(["记账日期"]);
+    // 只有名称也可放行。
     expect(
       missingKanzhangRequiredRoles({
         id: ["凭证号"],
-        accountCode: "会计科目",
         accountName: ["科目文本"],
         date: "记帐日期",
-        summary: "文本",
         functionalAmount: "金额",
       }),
     ).toEqual([]);

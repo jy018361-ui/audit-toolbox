@@ -19,6 +19,8 @@
   gap: var(--sp-2);
 }
 .jm-batch-row .kz-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-2);
@@ -28,8 +30,22 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  margin-left: auto;
   white-space: nowrap;
+}
+.jm-batch-settings {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+}
+.jm-delete-batch {
+  margin-left: auto;
+  color: var(--danger-fg);
+}
+.jm-delete-batch:hover:not(:disabled) {
+  background: var(--danger-bg);
 }
 .jm-batch-name input {
   width: 12rem;
@@ -43,7 +59,35 @@
 .jm-account-label {
   font-weight: 600;
 }
-/* 科目选择器长得像下拉框，但点开的是与列头漏斗同一个筛选面板。 */
+.jm-rule-note {
+  margin: 0;
+  font-weight: 400;
+}
+.jm-page .dt-header-inputs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+  margin-bottom: var(--sp-1);
+}
+.jm-page .dt-header-inputs .dt-header-control {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.jm-page .dt-header-inputs .ts-filter-trigger-compact {
+  flex: 0 0 30px;
+  width: 30px;
+  min-width: 30px;
+  height: 28px;
+  margin: 0;
+}
+.jm-page .dt-header-inputs .ts-filter-trigger-compact:focus-visible,
+.jm-account-picker:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+/* 目标科目入口使用搜索动作，与字段映射下拉和列筛选漏斗区分。 */
 .jm-account-picker {
   display: inline-flex;
   align-items: center;
@@ -88,7 +132,7 @@
   white-space: nowrap;
 }
 @media (max-width: 1100px) {
-  .jm-batch-name {
+  .jm-delete-batch {
     margin-left: 0;
   }
 }

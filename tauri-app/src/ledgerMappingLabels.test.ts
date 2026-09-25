@@ -79,7 +79,7 @@ describe("resolveRoleLabels", () => {
 });
 
 describe("planLedgerChanges", () => {
-  it("高置信度 clear 删除错误映射且保留撤销原值", () => {
+  it("高置信度 clear 也只形成待确认建议并保留原值", () => {
     const result = planLedgerChanges(
       ["科目名称"],
       [["库存现金"]],
@@ -95,8 +95,9 @@ describe("planLedgerChanges", () => {
         },
       ],
     );
-    expect(result.mapping.accountCode).toBeUndefined();
-    expect(result.applied[0]).toMatchObject({
+    expect(result.mapping.accountCode).toBe("科目名称");
+    expect(result.applied).toEqual([]);
+    expect(result.pending[0]).toMatchObject({
       action: "clear",
       suggestedColumn: "",
       beforeValue: "科目名称",
@@ -115,7 +116,7 @@ describe("planLedgerChanges", () => {
     expect(result.applied).toEqual([]);
   });
 
-  it("按整批建议原子交换科目身份且让摘要接管辅助核算中的文本列", () => {
+  it("整批纠偏只形成建议，不在用户确认前交换科目身份", () => {
     const result = planLedgerChanges(
       ["文本", "成本中心", "总账科目", "会计科目"],
       [["发放工资", "CC01", "1001010000", "库存现金-人民币"]],
@@ -150,11 +151,16 @@ describe("planLedgerChanges", () => {
         },
       ],
     );
-    expect(result.mapping.accountCode).toBe("总账科目");
-    expect(result.mapping.accountName).toEqual(["会计科目"]);
-    expect(result.mapping.summary).toBe("文本");
-    expect(result.mapping.auxiliary).toEqual(["成本中心"]);
-    expect(result.applied).toHaveLength(3);
+    expect(result.mapping).toEqual({
+      accountCode: "会计科目",
+      auxiliary: ["文本", "成本中心"],
+    });
+    expect(result.applied).toEqual([]);
+    expect(result.pending.map((item) => item.role)).toEqual([
+      "accountName",
+      "summary",
+      "accountCode",
+    ]);
   });
 
   it("只有经样例确认的编码名称混写列才允许两个科目角色共列", () => {
@@ -178,7 +184,8 @@ describe("planLedgerChanges", () => {
       ],
     );
     expect(accepted.mapping.accountCode).toBe("科目");
-    expect(accepted.mapping.accountName).toEqual(["科目"]);
+    expect(accepted.mapping.accountName).toBeUndefined();
+    expect(accepted.pending).toHaveLength(1);
 
     const rejected = planLedgerChanges(
       ["科目"],
@@ -195,6 +202,7 @@ describe("planLedgerChanges", () => {
     );
     expect(rejected.mapping).toEqual({ accountCode: "科目" });
     expect(rejected.applied).toHaveLength(0);
+    expect(rejected.pending).toHaveLength(0);
   });
 
   it("混写列也不允许摘要等其他角色与科目编码共列", () => {

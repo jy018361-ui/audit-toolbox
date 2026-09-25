@@ -256,6 +256,9 @@ export default function FileListDirectoryPage({
                   <div title={sourceDir || undefined}>
                     <FileDropInput
                       value={sourceDir}
+                      /* 文件夹回显完整路径：只显示末级名称会和占位文案混在一起，
+                         看起来像没选上。清空按钮由组件自带。 */
+                      displayValue={sourceDir}
                       placeholder="拖放或点击选择要扫描的文件夹"
                       onBrowse={() => void chooseSource()}
                       onClear={sourceDir ? clear : undefined}
@@ -344,15 +347,11 @@ export default function FileListDirectoryPage({
           <CardContent>
             {!scan ? (
               <EmptyState
-                title="等待扫描文件夹"
-                description="选择文件夹后，这里会显示前 50 个文件及目录层级。"
-                action={
-                  <Button
-                    variant="secondary"
-                    onClick={() => void chooseSource()}
-                  >
-                    选择文件夹
-                  </Button>
+                title={busy ? "正在扫描…" : "等待扫描文件夹"}
+                description={
+                  busy
+                    ? "扫描完成后，这里会显示前 50 个文件及目录层级。"
+                    : "从上方选择源文件夹后，这里会显示前 50 个文件及目录层级。"
                 }
               />
             ) : scan.fileCount === 0 ? (
@@ -408,11 +407,8 @@ export default function FileListDirectoryPage({
               </p>
             )}
             {!!scan?.skippedPaths?.length && (
-              <div className="warning-box">
-                <strong>
-                  以下 {scan.skippedPaths.length}{" "}
-                  个路径无法访问，已跳过（清单中不含其内容）
-                </strong>
+              <div className="warning-box file-list-skipped">
+                <strong>以下路径无法访问，已跳过：</strong>
                 <ul>
                   {scan.skippedPaths.slice(0, 20).map((path) => (
                     <li key={path} title={path}>

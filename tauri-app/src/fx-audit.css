@@ -556,6 +556,55 @@
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
+.fx-rate-comparison {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+}
+.fx-rate-comparison h4,
+.fx-rate-comparison p {
+  margin: 0;
+}
+.fx-rate-comparison p {
+  margin-top: 5px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.fx-rate-comparison-table-wrap {
+  overflow: auto;
+  max-height: 440px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.fx-rate-comparison table {
+  width: 100%;
+  min-width: 1500px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.fx-rate-comparison th,
+.fx-rate-comparison td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+}
+.fx-rate-comparison th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--muted);
+  color: var(--foreground);
+}
+.fx-rate-comparison th:nth-child(-n + 5),
+.fx-rate-comparison td:nth-child(-n + 5),
+.fx-rate-comparison th:nth-child(7),
+.fx-rate-comparison td:nth-child(7) {
+  text-align: left;
+}
 @media (max-width: 900px) {
   .fx-unrealized-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1148,6 +1197,14 @@
 }
 .fx-step-actions > .fx-hint {
   margin-right: auto;
+}
+.fx-step-actions-sticky {
+  position: sticky;
+  bottom: 0;
+  z-index: var(--layer-sticky, 2);
+  padding: var(--sp-3);
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface);
 }
 /* 提示语里的「回到上一步」：是按钮，但读起来该像正文里的链接。 */
 .fx-link-button {

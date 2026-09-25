@@ -8686,8 +8686,26 @@ mod tests {
         let rows = vec![
             vec!["1".into(), "本年利润".into(), "100".into(), "0".into()],
             vec!["1".into(), "收入".into(), "0".into(), "100".into()],
-            vec!["2".into(), "收入".into(), "50".into(), "0".into()],
-            vec!["2".into(), "银行".into(), "0".into(), "50".into()],
+            vec!["2".into(), "本年損益".into(), "100".into(), "0".into()],
+            vec!["2".into(), "收入".into(), "0".into(), "100".into()],
+            vec![
+                "3".into(),
+                "Income Summary".into(),
+                "100".into(),
+                "0".into(),
+            ],
+            vec!["3".into(), "收入".into(), "0".into(), "100".into()],
+            vec!["4".into(), "P&L Closing".into(), "100".into(), "0".into()],
+            vec!["4".into(), "收入".into(), "0".into(), "100".into()],
+            vec![
+                "5".into(),
+                "Retained Earnings".into(),
+                "100".into(),
+                "0".into(),
+            ],
+            vec!["5".into(), "收入".into(), "0".into(), "100".into()],
+            vec!["6".into(), "收入".into(), "50".into(), "0".into()],
+            vec!["6".into(), "银行".into(), "0".into(), "50".into()],
         ];
         let table = Table {
             path: PathBuf::new(),
@@ -8712,14 +8730,14 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
-        assert_eq!(analysis.loss_count, 1);
+        assert_eq!(analysis.loss_count, 5);
         assert_eq!(
             analysis
                 .rows
                 .iter()
                 .filter(|row| row.contains(&"损益结转".to_owned()))
                 .count(),
-            2
+            10
         );
         assert_eq!(analysis.voucher_type_loose.rows.len(), 2);
         assert!(
@@ -8727,7 +8745,7 @@ mod tests {
                 .voucher_type_loose
                 .rows
                 .iter()
-                .all(|row| row[1].contains('2'))
+                .all(|row| row[1].contains('6'))
         );
     }
     /// 造一张凭证：`accounts` 是「科目 -> 净额」，`targets` 是其中哪些算目标科目。

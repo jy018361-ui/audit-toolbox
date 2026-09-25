@@ -57,6 +57,21 @@
   align-items: center;
   justify-content: flex-end;
 }
+.loan-mode-context {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -2px 0 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+.loan-mode-context strong {
+  color: var(--foreground);
+}
 .loan-confirm-footer {
   display: flex;
   align-items: center;
@@ -281,11 +296,11 @@
   border-collapse: collapse;
 }
 .loan-rate-confirmation table {
-  min-width: 1480px;
+  min-width: 760px;
   table-layout: auto;
 }
 .loan-rate-table table {
-  min-width: 2250px;
+  min-width: 1740px;
   table-layout: fixed;
 }
 .loan-rate-confirmation th,
@@ -306,7 +321,7 @@
   min-width: 140px;
 }
 .loan-rate-confirmation th:nth-child(2) {
-  min-width: 320px;
+  min-width: 200px;
 }
 .loan-rate-confirmation th:nth-child(3),
 .loan-rate-confirmation th:nth-child(4) {
@@ -357,17 +372,17 @@
   position: sticky;
   left: 0;
   z-index: 2;
-  width: 140px;
-  min-width: 140px;
+  width: 110px;
+  min-width: 110px;
   background: var(--card);
 }
 .loan-rate-table th:nth-child(2),
 .loan-rate-table td:nth-child(2) {
   position: sticky;
-  left: 140px;
+  left: 110px;
   z-index: 2;
-  width: 220px;
-  min-width: 220px;
+  width: 180px;
+  min-width: 180px;
   background: var(--card);
 }
 .loan-rate-table td:nth-child(2) {
@@ -416,6 +431,63 @@
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--card);
+}
+.loan-list-summary {
+  margin-bottom: 10px;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+.loan-rate-input-stack {
+  display: grid;
+  gap: 3px;
+}
+.loan-provisional-rate {
+  color: var(--warning-fg);
+  font-size: 11px;
+  font-weight: 700;
+}
+.loan-rate-acknowledgement {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 12px;
+  padding: 11px 13px;
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-size: var(--fs-sm);
+}
+.loan-rate-acknowledgement input,
+.loan-exception-filter input {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+}
+.loan-result-filters {
+  display: flex;
+  align-items: end;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.loan-result-filters > label:first-child {
+  display: grid;
+  gap: 5px;
+  min-width: min(360px, 100%);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+.loan-exception-filter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+}
+.loan-result-filters > span {
+  min-height: 36px;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  line-height: 36px;
 }
 .loan-bridge-equation {
   display: grid;
@@ -546,4 +618,40 @@
   color: var(--muted-foreground);
   font-size: 11px;
   line-height: 1.4;
+}
+
+/* === UI 审计修复 P1-7（2026-09-24）：结果明细表金额列可读性 ===
+   症状：相邻金额列渲染成「18,000,000.002,000,000.00」粘连，最右列被
+   视口右缘裁切且看不出可横向滚动。追加以下规则（按后胜原则覆盖上方
+   同名列宽，不改动既有规则）：金额列右对齐 + 等宽数字、最小列宽加大、
+   列间细分隔线兜底、容器横向滚动条高对比提示。 */
+.loan-rate-table {
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 80%, transparent) transparent;
+}
+
+.loan-rate-table::-webkit-scrollbar {
+  height: 12px;
+}
+
+.loan-rate-table::-webkit-scrollbar-thumb {
+  min-width: 56px;
+  background-color: color-mix(in srgb, var(--text-muted) 80%, transparent);
+}
+
+.loan-rate-table th:nth-child(n + 4):nth-child(-n + 9),
+.loan-rate-table td:nth-child(n + 4):nth-child(-n + 9),
+.loan-rate-table th:nth-child(15),
+.loan-rate-table td:nth-child(15) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  min-width: 140px;
+  box-shadow: inset 1px 0 0 color-mix(in srgb, var(--border) 65%, transparent);
+}
+
+/* === UI 审计修复 P3-4（2026-09-24）：字段映射下拉选中项截断无省略号 ===
+   症状：预览表列头的映射下拉被列宽压窄，选中项（如「到期日（选填）」）
+   被硬裁成「到期日（设」且看不出还有下文。修复：截断时显示省略号；
+   悬浮查看全名由列头下拉的 aria-label/title 提示兜底。 */
+.loan-page .dt-header-control select {
+  text-overflow: ellipsis;
 }

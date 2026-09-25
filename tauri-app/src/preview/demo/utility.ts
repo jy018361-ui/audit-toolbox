@@ -553,6 +553,16 @@ export const handlers: Record<string, (params: DemoParams) => unknown> = {
   // Excel 批量合并
   "excel_merger.expand_paths": (params) => {
     const paths = asStringArray(params.paths);
+    // 回函工具的演示“选择文件夹”也需要展开为 PDF，不能把目录本身
+    // 回填到待处理文件列表。其他工具继续沿用原有样例路径。
+    if (paths.length === 1 && /[\\/]回函PDF[\\/]?$/.test(paths[0])) {
+      const inputPaths = [
+        `${paths[0]}\\工商银行询证函回函.pdf`,
+        `${paths[0]}\\建设银行询证函回函.pdf`,
+        `${paths[0]}\\华信客户回函扫描件.pdf`,
+      ];
+      return { inputPaths, fileCount: inputPaths.length };
+    }
     return { inputPaths: paths, fileCount: paths.length };
   },
   "excel_merger.scan_folder": (params) => {

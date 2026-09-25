@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
+  applyLedgerPendingChange,
   applyLedgerReviewsTogether,
-  LEDGER_MULTI_COLUMN_ROLES,
   ledgerMappingValueWarnings,
   type LedgerReviewOutcome,
   type LedgerReviewTarget,
@@ -113,7 +113,10 @@ export function useLedgerDictReviews(
         if (!mounted.current || generation.current[kind] !== started[kind])
           continue;
         const outcome = outcomes[kind]!;
-        if (!outcome.failed) slots[kind]!.onApplied(outcome.mapping);
+        // 自动复核只提出建议，不再为了“无变化”的当前映射触发页面作废结果。
+        // 真正的映射写回只发生在用户点击采纳/撤销时。
+        if (!outcome.failed && outcome.applied.length)
+          slots[kind]!.onApplied(outcome.mapping);
         // 结论必须与画面上的"尚未映射"清单一致：还缺着必填字段时，
         // "无需调整"就是在替 LLM 拍胸脯，用户却被必填校验拦着测不了算。
         const missing = outcome.failed
@@ -147,12 +150,21 @@ export function useLedgerDictReviews(
       const change = outcome?.applied[index];
       const slot = slotsRef.current[kind];
       if (!outcome || !change || !slot) return;
-      const mapping = { ...outcome.mapping };
-      if (change.beforeValue === undefined) delete mapping[change.role];
-      else
-        mapping[change.role] = Array.isArray(change.beforeValue)
-          ? [...change.beforeValue]
-          : change.beforeValue;
+      const mapping = change.beforeMapping
+        ? Object.fromEntries(
+            Object.entries(change.beforeMapping).map(([role, value]) => [
+              role,
+              Array.isArray(value) ? [...value] : value,
+            ]),
+          )
+        : { ...outcome.mapping };
+      if (!change.beforeMapping) {
+        if (change.beforeValue === undefined) delete mapping[change.role];
+        else
+          mapping[change.role] = Array.isArray(change.beforeValue)
+            ? [...change.beforeValue]
+            : change.beforeValue;
+      }
       slot.onApplied(mapping);
       const applied = outcome.applied.filter((_, at) => at !== index);
       const missingAfter = [...new Set(slot.missingAfter?.(mapping) ?? [])];
@@ -181,28 +193,26 @@ export function useLedgerDictReviews(
       const change = outcome?.pending[index];
       const slot = slotsRef.current[kind];
       if (!outcome || !change || !slot) return;
-      const mapping = { ...outcome.mapping };
-      const beforeValue = mapping[change.role];
-      if (change.action === "clear") delete mapping[change.role];
-      else
-        mapping[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
-          ? [
-              ...new Set([
-                ...(Array.isArray(beforeValue)
-                  ? beforeValue
-                  : beforeValue
-                    ? [beforeValue]
-                    : []),
-                change.suggestedColumn,
-              ]),
-            ]
-          : change.suggestedColumn;
+      const beforeValue = outcome.mapping[change.role];
+      const mapping = applyLedgerPendingChange(
+        slot.headers,
+        slot.preview,
+        outcome.mapping,
+        change,
+        slot.multiColumnRoles,
+      );
       slot.onApplied(mapping);
       const pending = outcome.pending.filter((_, at) => at !== index);
       const applied = [
         ...outcome.applied,
         {
           ...change,
+          beforeMapping: Object.fromEntries(
+            Object.entries(outcome.mapping).map(([role, value]) => [
+              role,
+              Array.isArray(value) ? [...value] : value,
+            ]),
+          ),
           beforeValue: Array.isArray(beforeValue)
             ? [...beforeValue]
             : beforeValue,

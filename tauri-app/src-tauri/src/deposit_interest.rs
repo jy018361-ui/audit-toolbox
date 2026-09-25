@@ -1524,7 +1524,10 @@ fn rate_tiers() -> Value {
 /// 计息/不计息之间改分类时不需要重新取键。
 fn account_currencies(params: &Value) -> Result<Value, AppError> {
     let cancel = AtomicBool::new(false);
-    let folded = fold_tb_accounts(params, &cancel, &|_, _, _, _| {}, 1)?;
+    // 第二步只负责按已确认的 TB 身份生成账户/币种/利率行。即使请求里
+    // 携带 jeSource，也绝不能在这里打开序时账；辅助拆户只消费第一步
+    // 已生成的 auxiliaryPlan，无计划或计划不可用时按主体＋科目降级。
+    let folded = fold_tb_accounts(params, &cancel, &|_, _, _, _| {}, 1, false)?;
     let rows = folded
         .accounts
         .iter()
@@ -1536,6 +1539,11 @@ fn account_currencies(params: &Value) -> Result<Value, AppError> {
                 "auxiliary": row.auxiliary,
                 "currency": row.currency,
                 "role": row.role,
+                // 第二步确认表直接列示余额：期末取 TB 期末余额；期初仅在
+                // TB 有年初列时给出——SAP 只出 MTD/YTD 的账，年初要等测算
+                // 阶段按「期末 − 期间发生额」倒推，清单阶段无从得知，置空。
+                "openingBalance": row.opening_from_tb.then_some(row.opening_balance),
+                "closingBalance": row.tb_closing_balance,
             })
         })
         .collect::<Vec<_>>();
@@ -1655,10 +1663,10 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         };
     // 第二步直接展示损益科目的发生额，避免年末结转后只看到零余额。
     // 该目录与第三步 `booked_occurrence` 复用同一取数与方向规则。
-    let account_metrics = if kind == "tb" {
+    let (account_metrics, entity_metrics) = if kind == "tb" {
         inspect_tb_account_metrics(&table, &mapping)
     } else {
-        Map::new()
+        (Map::new(), Map::new())
     };
     let entities = distinct_values(&table, &mapping, "entity");
     let entity_accounts = distinct_entity_accounts(&table, &mapping);
@@ -1685,6 +1693,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         "roles": engine_role_labels(kind),
         "entities": entities, "accounts": accounts, "accountsLeaf": accounts_leaf,
         "accountMetrics": account_metrics,
+        "entityMetrics": entity_metrics,
         "entityAccounts": entity_accounts,
         "suggestedAccountRoles": accounts.iter().map(|account|
             (account.clone(), Value::String(suggest_account_role(account).into()))
@@ -1698,7 +1707,10 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     }))
 }
 
-fn inspect_tb_account_metrics(table: &FxTable, mapping: &Map<String, Value>) -> Map<String, Value> {
+fn inspect_tb_account_metrics(
+    table: &FxTable,
+    mapping: &Map<String, Value>,
+) -> (Map<String, Value>, Map<String, Value>) {
     let leaf =
         ledger_mapping::tb_catalog_leaf_mask(&table.headers, &table.rows, &|role| match mapping
             .get(role)
@@ -1745,7 +1757,16 @@ fn inspect_tb_account_metrics(table: &FxTable, mapping: &Map<String, Value>) -> 
     } else {
         None
     };
-    let mut totals = BTreeMap::<String, (f64, f64, BTreeSet<String>)>::new();
+    // 年初列映射了才下发期初余额；SAP 只出 MTD/YTD 的账没有年初列，
+    // 置空让界面显示「—」，倒推口径由测算阶段负责。
+    let opening_basis = !column_indexes(table, mapping, "openingFunctionalDebit").is_empty()
+        || !column_indexes(table, mapping, "openingFunctionalCredit").is_empty()
+        || !column_indexes(table, mapping, "openingFunctionalAmount").is_empty();
+    let entity_index = column_index(table, mapping, "entity");
+    let mut totals = BTreeMap::<String, (f64, Option<f64>, f64, BTreeSet<String>)>::new();
+    // 主体×科目粒度的余额与发生额：逐户清单未就绪时，第二步按主体拆出的行
+    // 也能带出自己的数，而不是把几家公司的合计挂到每一行上。
+    let mut entity_totals = BTreeMap::<(String, String), (f64, Option<f64>, f64)>::new();
     for (row_index, row) in table.rows.iter().enumerate() {
         if !leaf.get(row_index).copied().unwrap_or(true) {
             continue;
@@ -1754,6 +1775,11 @@ fn inspect_tb_account_metrics(table: &FxTable, mapping: &Map<String, Value>) -> 
         if account.is_empty() {
             continue;
         }
+        let entity = entity_index
+            .and_then(|index| row.get(index))
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| ledger_mapping::DEFAULT_ENTITY.to_owned());
         let closing = signed(
             table,
             row,
@@ -1763,10 +1789,35 @@ fn inspect_tb_account_metrics(table: &FxTable, mapping: &Map<String, Value>) -> 
         )
         .or_else(|| cell_number(table, row, mapping, "closingFunctionalAmount"))
         .unwrap_or(0.0);
+        let opening = if opening_basis {
+            Some(
+                signed(
+                    table,
+                    row,
+                    mapping,
+                    "openingFunctionalDebit",
+                    "openingFunctionalCredit",
+                )
+                .or_else(|| cell_number(table, row, mapping, "openingFunctionalAmount"))
+                .unwrap_or(0.0),
+            )
+        } else {
+            None
+        };
         let entry = totals
             .entry(account.clone())
-            .or_insert_with(|| (0.0, 0.0, BTreeSet::new()));
+            .or_insert_with(|| (0.0, None, 0.0, BTreeSet::new()));
         entry.0 += closing;
+        if let Some(opening) = opening {
+            entry.1 = Some(entry.1.unwrap_or(0.0) + opening);
+        }
+        let entity_entry = entity_totals
+            .entry((entity, account.clone()))
+            .or_insert((0.0, None, 0.0));
+        entity_entry.0 += closing;
+        if let Some(opening) = opening {
+            entity_entry.1 = Some(entity_entry.1.unwrap_or(0.0) + opening);
+        }
         if occurrence_basis.is_some()
             && let Some((amount, note, _, _, _)) = booked_occurrence(
                 table,
@@ -1777,13 +1828,27 @@ fn inspect_tb_account_metrics(table: &FxTable, mapping: &Map<String, Value>) -> 
                 explicit_interest_income_name(&account),
             )
         {
-            entry.1 += amount;
-            entry.2.insert(note);
+            entry.2 += amount;
+            entry.3.insert(note);
+            entity_entry.2 += amount;
         }
     }
-    totals
+    let entity_metrics = entity_totals
         .into_iter()
-        .map(|(account, (closing, occurrence, details))| {
+        .map(|((entity, account), (closing, opening, occurrence))| {
+            (
+                format!("{entity}\u{1f}{account}"),
+                json!({
+                    "closing": closing,
+                    "opening": opening,
+                    "occurrence": occurrence_basis.map(|_| occurrence),
+                }),
+            )
+        })
+        .collect::<Map<_, _>>();
+    let account_metrics = totals
+        .into_iter()
+        .map(|(account, (closing, opening, occurrence, details))| {
             let basis = occurrence_basis.map(|fallback| {
                 if details.is_empty() {
                     format!("{fallback}（无非零发生）")
@@ -1795,12 +1860,14 @@ fn inspect_tb_account_metrics(table: &FxTable, mapping: &Map<String, Value>) -> 
                 account,
                 json!({
                     "closing": closing,
+                    "opening": opening,
                     "occurrence": occurrence_basis.map(|_| occurrence),
                     "occurrenceBasis": basis,
                 }),
             )
         })
-        .collect()
+        .collect();
+    (account_metrics, entity_metrics)
 }
 
 fn data_years(table: &FxTable, kind: &str, mapping: &Map<String, Value>) -> Vec<i32> {
@@ -2053,6 +2120,7 @@ fn fold_tb_accounts(
     cancel: &AtomicBool,
     progress: &dyn Fn(&str, usize, usize, &str),
     total: usize,
+    include_je: bool,
 ) -> Result<FoldedTb, AppError> {
     let entity_scope = entity_scope(params);
     let (tb, tb_map) = table_for(params, "tbSource", "tbMapping")?;
@@ -2271,9 +2339,13 @@ fn fold_tb_accounts(
         ));
     }
 
-    // JE 打开一次：身份预扫供公共匹配口径判定两侧编码歧义，逐月归集复用
-    // 同一份表/磁盘缓存，不再按参数各读各的。
-    let je_input = open_je_input(params, cancel, progress, total)?;
+    // 只有第三步正式测算才打开 JE：身份预扫与逐月归集复用同一份输入。
+    // 第二步账户清单严格 TB-only，避免用户尚未点击测算就遍历大序时账。
+    let je_input = if include_je {
+        open_je_input(params, cancel, progress, total)?
+    } else {
+        None
+    };
     let policy = {
         let tb_identities: Vec<(String, String, String)> = deposit_candidates
             .iter()
@@ -2292,9 +2364,12 @@ fn fold_tb_accounts(
         };
         ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities)
     };
-    // 第二步已经用 TB 锨点完整扫过 JE 时，来源指纹与当前映射
-    // 一致就直接复用认定列。计划失效、科目编码歧义或无计划时，
-    // 自动回到原来的全表反查。
+    // 第一阶段已经用 TB 锚点验证过 JE 时，来源指纹与当前映射一致就复用
+    // 认定列。正式测算允许在计划失效时重新验证；第二步清单绝不反查 JE，
+    // 只解析前端带来的计划，无计划即按主体＋科目折叠。
+    let prepared_auxiliary_plan = (!include_je)
+        .then(|| deposit_auxiliary_plan_from_params(&tb, params))
+        .flatten();
     let reused_auxiliary_columns = je_input.as_ref().and_then(|je| {
         let je_headers = match je {
             JeInput::Memory(table, _) => table.headers.as_slice(),
@@ -2308,7 +2383,9 @@ fn fold_tb_accounts(
         )
         .map(|columns| (columns, je_headers))
     });
-    let auxiliary_plan = if let Some((columns, je_headers)) = reused_auxiliary_columns {
+    let auxiliary_plan = if let Some(plan) = prepared_auxiliary_plan {
+        plan
+    } else if let Some((columns, je_headers)) = reused_auxiliary_columns {
         DepositAuxiliaryPlan {
             tb_columns: columns
                 .iter()
@@ -2678,7 +2755,7 @@ fn calculate(
         auxiliary_warnings,
         booked_interest_rows,
         booked_interest,
-    } = fold_tb_accounts(params, cancel, progress, total)?;
+    } = fold_tb_accounts(params, cancel, progress, total, true)?;
     let force_currency_two_point = currency_fallback_mode == "twoPointByCurrency";
     checkpoint(cancel, pause)?;
 
@@ -3287,6 +3364,49 @@ impl DepositAuxiliaryPlan {
             normalized
         }
     }
+}
+
+/// 第二步账户清单从第一阶段验证结果恢复辅助拆户口径。这里只校验 TB 列仍然
+/// 存在；不会为了核验计划而打开 JE。计划缺失、组信息不完整或 TB 列已变化时，
+/// 对应组不进入 `tb_columns`，自然降级成主体＋科目，而不是隐式重扫序时账。
+fn deposit_auxiliary_plan_from_params(
+    tb: &FxTable,
+    params: &Value,
+) -> Option<DepositAuxiliaryPlan> {
+    let groups = params.get("auxiliaryPlan")?.get("groups")?.as_array()?;
+    let mut plan = DepositAuxiliaryPlan::default();
+    for item in groups {
+        let entity = item
+            .get("entity")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let account = item
+            .get("account")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let tb_column = item
+            .get("tbColumn")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let je_column = item
+            .get("jeColumn")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if entity.is_empty() || account.is_empty() || tb_column.is_empty() || je_column.is_empty() {
+            continue;
+        }
+        let Some(tb_index) = ledger_mapping::header_index(&tb.headers, tb_column) else {
+            continue;
+        };
+        let key = (entity.to_owned(), account.to_owned());
+        plan.tb_columns.insert(key.clone(), tb_index);
+        plan.verified_columns.insert(key, je_column.to_owned());
+    }
+    Some(plan)
 }
 
 fn open_je_input(
@@ -4174,12 +4294,10 @@ fn mapped_roles(mapping: &Map<String, Value>) -> HashSet<&str> {
 /// 3. **余额槽按「任一即可」放行**——期初／期末家族里映射了任意一列就算整槽
 ///    到齐。只映射借方一列的余额表（贷方全表为空）真实存在，前端判的也是
 ///    「净额｜借方｜贷方三选一」；
-/// 4. **序时账的科目名称／摘要豁免**——逐月余额还原只依赖日期、科目编码与
-///    金额方案；真实 SAP 导出（`G/L Account`＋`Text`）就没有这两列，前端在
-///    界面上仍按金标拦，worker 路径维持旧版放行。
+/// 4. **摘要可选**——公共身份规则已经把摘要降为可选，存款不再另行伪装映射。
 ///
-/// 其余一律硬拦：TB 科目编码／科目名称、期末余额槽、无序时账时的期初余额槽、
-/// 序时账的记账日期与科目编码、金额方案，报错指名道姓缺哪个角色。
+/// 其余一律硬拦：TB/JE 均须有科目编码或名称任一；另要求 TB 期末余额槽、
+/// 无序时账时的期初余额槽，以及 JE 记账日期和金额方案。
 fn require_mappings(
     kind: &str,
     mapping: &Map<String, Value>,
@@ -4220,9 +4338,6 @@ fn require_mappings(
         }
     }
     if kind == "je" {
-        // 豁免 4：序时账的科目名称／摘要不作硬性要求。
-        mapped.insert("accountName");
-        mapped.insert("summary");
         // JE 金额方案同样是「净额｜借方｜贷方任一即可」，借方一列也能算
         // （净额 = 借 − 贷，贷方缺列按 0 处理）。
         const AMOUNTS: &[&str] = &["functionalAmount", "functionalDebit", "functionalCredit"];
@@ -6086,6 +6201,26 @@ mod tests {
         preview_keys.sort();
         assert_eq!(listed_keys, preview_keys, "默认行键与测算结果不一致");
         assert_eq!(listed_keys.len(), 2, "{listed:#?}");
+        let bank = listed["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| {
+                row["account"]
+                    .as_str()
+                    .is_some_and(|name| name.contains("银行存款-中行"))
+            })
+            .unwrap();
+        // 清单直接带出每户余额供第二步列示：默认合并口径下两行币种
+        // 折叠成一户，期初/期末是两行之和。
+        assert!(
+            (bank["openingBalance"].as_f64().unwrap() - 13_000.0).abs() < 0.01,
+            "{bank:?}"
+        );
+        assert!(
+            (bank["closingBalance"].as_f64().unwrap() - 24_000.0).abs() < 0.01,
+            "{bank:?}"
+        );
         assert!(
             listed["rows"]
                 .as_array()
@@ -6270,7 +6405,12 @@ mod tests {
             "currencyFallbackMode": "twoPointByCurrency",
             "accountRoles": {"660302 财务费用-利息收入": "interest_income"}
         });
-        let listed = call("deposit.account_currencies", params.clone()).unwrap();
+        // 第二步清单必须严格 TB-only：即使携带的 JE 路径不存在也应成功，
+        // 证明这里没有打开或遍历序时账。第三步 preview 仍使用真实 JE。
+        let mut list_params = params.clone();
+        list_params["jeSource"]["inputPath"] =
+            json!(dir.join("第二步绝不能打开.xlsx").to_string_lossy());
+        let listed = call("deposit.account_currencies", list_params).unwrap();
         let mut listed_keys: Vec<String> = listed["rows"]
             .as_array()
             .unwrap()
@@ -6294,6 +6434,59 @@ mod tests {
         preview_keys.sort();
         assert_eq!(listed_keys, preview_keys, "含序时账时行键与测算结果不一致");
         assert_eq!(listed_keys.len(), 2, "{listed:#?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 第二步账户清单只读tb并消费已有辅助计划() {
+        let dir = std::env::temp_dir().join(format!(
+            "deposit-account-list-tb-only-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec!["科目编码", "科目名称", "银行账户", "期初余额", "期末余额"],
+                vec!["1002", "银行存款", "中行-001", "100", "120"],
+                vec!["1002", "银行存款", "工行-002", "200", "230"],
+            ],
+        );
+        let params = json!({
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": {
+                "accountCode": "科目编码",
+                "accountName": "科目名称",
+                "auxiliary": "银行账户",
+                "openingFunctionalAmount": "期初余额",
+                "closingFunctionalAmount": "期末余额"
+            },
+            // 故意给不存在的 JE：清单若触碰 JE，本测试会直接失败。
+            "jeSource": {"inputPath": dir.join("不存在的-je.xlsx").to_string_lossy()},
+            "jeMapping": {"accountCode": "科目编码"},
+            "auxiliaryPlan": {
+                "planKey": "validated-in-step-one",
+                "groups": [{
+                    "entity": ledger_mapping::DEFAULT_ENTITY,
+                    "account": "1002",
+                    "tbColumn": "银行账户",
+                    "jeColumn": "对方户名"
+                }]
+            }
+        });
+        let listed = call("deposit.account_currencies", params).unwrap();
+        let rows = listed["rows"].as_array().unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "已验证辅助计划应把同一科目拆成两户: {listed:#?}"
+        );
+        let auxiliaries = rows
+            .iter()
+            .map(|row| row["auxiliary"].as_str().unwrap_or(""))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(auxiliaries, BTreeSet::from(["中行-001", "工行-002"]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7787,6 +7980,15 @@ mod tests {
             json!(888.0),
             "第二步应下发与第三步相同的发生额口径"
         );
+        assert_eq!(
+            tb["accountMetrics"]["1002 银行存款"]["opening"],
+            json!(1_200_000.0_f64),
+            "第二步应下发 TB 年初余额供直接列示"
+        );
+        assert_eq!(
+            tb["accountMetrics"]["1002 银行存款"]["closing"],
+            json!(2_400_000.0_f64)
+        );
         assert!(
             tb["accountMetrics"]["660299 财务费用-融资成本"]["occurrenceBasis"]
                 .as_str()
@@ -8462,6 +8664,13 @@ mod tests {
                 kind,
             )
             .unwrap();
+            if kind == "tb" {
+                // 夹具没有年初余额列：期初置空（界面显示「—」，测算阶段
+                // 倒推），期末照常下发供第二步列示。
+                let metrics = &inspected["accountMetrics"]["1002 银行存款"];
+                assert!(metrics["opening"].is_null(), "{metrics:?}");
+                assert_eq!(metrics["closing"], json!(2000.0_f64), "{metrics:?}");
+            }
             let roles = inspected["roles"].as_array().unwrap_or(&empty);
             let engine = ledger_mapping::roles(kind);
             assert!(!roles.is_empty(), "{kind} 的角色标签表不应为空");
@@ -8707,8 +8916,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Rust 侧必填硬校验：缺金标身份（科目名称）指名道姓报中文错，
-    /// 而不是沉默算错账。此前必填只在前端手写，worker 路径不拦。
+    /// Rust 侧必填硬校验：已有科目编码时不再强求名称；真正缺少的余额
+    /// 方案仍须指名道姓报中文错。此前必填只在前端手写，worker 路径不拦。
     #[test]
     fn 必填映射缺失时指名道姓报错() {
         let dir = std::env::temp_dir().join(format!("deposit-required-{}", std::process::id()));
@@ -8745,8 +8954,8 @@ mod tests {
         let err = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap_err();
         assert_eq!(err.code, "MAPPING_INCOMPLETE");
         assert!(
-            err.user_message.contains("科目名称"),
-            "报错要说清缺哪个角色: {}",
+            !err.user_message.contains("科目名称"),
+            "已有编码时名称不得硬阻拦: {}",
             err.user_message
         );
         assert!(

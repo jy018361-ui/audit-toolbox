@@ -1,5 +1,41 @@
 # UI 修改记录
 
+## 2026-09-24 · 全面 UI/UE 审计整改（P1 七项 + P2/P3 批次）
+
+### 目标
+
+- 落地全面截图审计（`artifacts/ui-audit-20260924-full/`）的全部整改：消除"失败被当
+  成功""排队像完成"等状态误导，统一任务状态口径，清理跨轮错误残留，补齐
+  文件名回显、危险操作警示与术语一致性。
+
+### 设计决策
+
+- 任务终态呈现统一：`<progress>` 显式接管渲染（0% 空轨道+排队呼吸脉冲）；
+  状态词去重；悬浮胶囊与页内横幅共用 `jobStatusText` 映射（queued=排队中）；
+  失败/取消显示真实中断进度（注入与演示回放记录最近运行进度）。
+- 失败/取消语境不再宣称"处理完成"：ResultView 默认文案中性化并新增 `stale`
+  警示条（WP 服务单/AudiPick 已接线）；Excel 合并取消改中性提示条、
+  "返回匹配网格调整"仅在生成过匹配网格时出现。
+- 错误单源单次：TBJE/看账在新任务启动与取消时清上一轮 ErrorBox，同文错误
+  不再顶部+页内重复；TS 管理加载失败时"文件已加载"chip 回退并撤下旧预览。
+- 交互与可读性：函证进度运行中主按钮换"停止"；RollForward 状态卡计数接入
+  任务事件（已生成/失败回填）、开关单行不断词、状态卡"已终止"改"已取消"；
+  f x/借款仅被点的按钮进加载态；金额列右对齐加分隔线；映射下拉与函证列头
+  省略号；TS 多 Sheet 提示降为 info 样式；主按钮可用/禁用对比度拉开；
+  悬浮胶囊抬高不再遮挡操作按钮；清缓存按钮改红描边危险样式。
+- 文案与术语：导览「开发中」→「试用」、「最底下」→「顶部」；面包屑对齐
+  「正负数凭证标记」；"本期归还"统一；"返回上一步"→"上一步"；AudiPick 侧栏
+  英文改中文；存款"测算受限"横幅改写影响范围；演示数据完成横幅改为按实际
+  差异计算生成（不再写死"勾稽一致"）。
+
+### 验证方式
+
+- `npm test`（94 个测试文件 904 项通过）；`npm run build`（tsc + vite）通过
+- 逐项截图复检：`artifacts/ui-audit-20260924-full/screenshots/FIX-*.png`；
+  审计报告/问题清单/修复记录见 `artifacts/ui-audit-20260924-full/`
+- 部分修复落在带其他会话未提交改动的文件中，按显式清单分批提交，见
+  `artifacts/ui-audit-20260924-full/修复记录.md`
+
 ## 2026-09-24 · Excel 合并·智能表头匹配·外部审计修复
 
 ### 目标
@@ -25,6 +61,26 @@
 - `cargo test --manifest-path src-tauri/Cargo.toml --lib excel_`
 - `cargo test --test header_match_je_probe -- --ignored`（真实 JE 样例端到端）
 
+## 2026-09-24 · 二轮任务状态与布局收口
+
+### 目标
+
+- 修复真实任务事件、窄窗口和弹窗状态下的重复反馈、空白卡片、误导状态与横向内容可发现性。
+- 保留现有业务流程和未提交改动；AudiPick 专属界面不纳入本轮。
+
+### 设计决策
+
+- 失败详情归入同一任务状态区，避免页面顶部与任务卡重复报警；终态不再沿用旧成功结果或旧复核状态。
+- 统一“试用”标识；缓存统计失败给出可重试操作；文件夹清单避免重复入口，演示数据与工具文件类型一致。
+- 看账删除批次先确认，筛选浮层切路由关闭；窄窗宽表提示可横向滚动并支持键盘聚焦，TBJE 结果操作列在窄窗保持可见。
+- 固定资产、Roll Forward 和账表页面收紧结果操作，按有效数据决定是否展示结果区。
+
+### 验证方式
+
+- `npm test -- --reporter=dot`：93 个文件、891 项通过；`npm run build` 通过。
+- 生产预览的 `scripts/task-event-page-audit.cjs`：非 AudiPick 工具在 1600/1180/1000 三档共 153/153 个任务场景触达、1081 个位置状态、0 个布局失败。
+- `scripts/overlay-layout-audit.cjs`：75 个弹窗与叠层场景、0 个越界；四套主题的静态矩阵中，非 AudiPick 页面无布局失败（AudiPick 专属页面按本轮范围排除）。
+
 ## 2026-09-23 · Excel 合并·智能表头匹配（第一期）
 
 ### 目标
@@ -49,6 +105,311 @@
 - `npx vitest run src/components/HeaderMatchGrid.test.tsx src/ExcelMergerPage.test.ts src/components/ui/styleContract.test.ts`
 - `cargo test --manifest-path src-tauri/Cargo.toml --lib excel_`
 - 行为口径与验收矩阵见 [EXCEL_MERGER_PARITY.md](EXCEL_MERGER_PARITY.md) 2026-09-23 段。
+
+## 2026-09-24 · 汇兑损益客户与审计汇率对比
+
+### 目标
+
+- 在测算预览及导出底稿中列示客户隐含汇率、审计汇率与相应差异。
+- 客户隐含汇率完全静默反推，不增加映射负担，也不把源表用途不明的汇率列当作客户政策汇率。
+
+### 设计决策
+
+- JE、TB 均不增加“客户汇率”映射；源表汇率列不读取。只从原币与本位币金额反推隐含汇率，无法反推时静默跳过，不展示提示。
+- 客户隐含汇率仅用于差异解释；已实现与未实现审计金额仍全部由官方汇率驱动。
+- 预览按影响金额展示前 100 行；Excel 在存在可反推记录时新增“客户与审计汇率比较”完整明细页。单条无法可靠反推时整行省略；若全部无法反推，则预览不显示该区域、Excel 也不生成比较页，全程不提示。
+
+### 验证方式
+
+- `npx vitest run src/FxAuditPage.test.ts src/FxAuditPageUi.test.tsx`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib 客户汇率`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib manual_unrealized_voucher_is_comparison_evidence_not_measurement_object`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib 汇率比较页`
+- `npm run build`
+
+## 2026-09-23 · TB／JE 科目身份与摘要必填口径统一
+
+### 目标
+
+- 消除看账、TBJE、汇兑、存款、借款与 FA 页面对科目编码／名称要求不一致的问题。
+- 允许没有摘要列的合格 JE 继续运行。
+
+### 设计决策
+
+- 科目编码与科目名称改为任一必填，缺失提示合并为「科目编码／科目名称（任一）」；摘要仍可映射，但显示为选填。
+- 映射下拉新增「科目身份（至少映射一项）」分组，不再给编码、名称分别加必填星号。
+- 只调整映射门禁和提示，不改变 TBJE 科目匹配优先级，也不改变辅助字段验证成功后才进入勾稽键的流程。
+
+### 验证方式
+
+- `npx vitest run src/KanzhangParityPage.test.ts src/DepositInterestPage.test.ts src/LoanInterestPage.test.ts src/FxAuditPage.test.ts src/TbjeCheckPage.test.tsx src/FaTbJePage.test.ts src/ledgerForms.test.ts src/JeSignMarkPage.test.tsx`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib 必填`
+
+## 2026-09-23 · 主窗口启动时自动适配屏幕可用区域
+
+### 目标
+
+- 修复高缩放比小屏（用户反馈：1920×1200 配 Windows 150% 缩放，可用宽度仅 1280 逻辑像素）上默认 1440×900 窗口右/下缘溢出屏幕、标题栏按钮和右侧信息被裁掉且无法拖回的问题。
+
+### 设计决策
+
+- 启动时读取窗口所在屏幕的可用区域（系统已扣除任务栏），按逻辑像素换算后与默认窗口尺寸比较：放得下保持原尺寸（只缩不放），放不下收缩到可用区域并在工作区内居中。
+- 适配只影响超出屏幕的情形，常规大屏与多显示器各自的窗口位置不受影响；屏幕信息查询失败时跳过适配，保持原有开窗行为。
+- 窗口最小尺寸（1000×680）与用户手动缩放行为均不变；本项只约束"启动那一刻"的窗口大小。
+- 换算与收缩逻辑收敛在 `window_fit::fit_startup_size` 纯函数中，覆盖大屏、150% 缩放小屏、紧凑屏、超大屏四类用例。
+
+### 验证方式
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib window_fit`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib`
+
+## 2026-09-23 · 借款及账表工具分步计算收口
+
+### 目标
+
+- 消除借款利息第二步及其他账表工具在用户尚未启动测算时隐式遍历 JE 的长等待。
+- 明确“映射验证、业务确认、正式测算”三层职责，并一次性统一辅助核算计划的生成与复用。
+
+### 设计决策
+
+- 第一步负责来源、字段映射及按需辅助联动；只有 TB 映射辅助且存在有效锚点才允许读取 JE。验证覆盖全部 TB 主体＋科目，不依赖第二步目标科目。
+- 借款与存款第二步改为 TB-only 轻量准备；借款明细还原、逐笔有效利率、JE 发生额归集均延后到第三步显式点击测算。
+- 汇兑、FA TBJE、TBJE 完整性核对移除页面就绪后的自动扫描；验证结果以带指纹计划交给正式任务复用。FA 第二步只刷新 TB 科目目录。
+- TBJE 批量验证最多并发两组并展示进度；失败只影响本组，计划失效时由计算侧安全重验。
+
+### 验证方式
+
+- `npx vitest run src/LoanInterestPage.test.ts src/LoanInterestPageUi.test.tsx src/DepositInterestPage.test.ts src/DepositInterestInteractions.test.tsx`
+- `npx vitest run src/FxAuditPage.test.ts src/FxAuditPageUi.test.tsx src/TbjeCheckPage.test.tsx src/FaPageDesign.test.ts`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib deposit_interest`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib fx::`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib tbje_check`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib fa_tbje`
+- `npm run build`
+
+## 2026-09-23 · 汇兑损益原币字段改为硬门槛
+
+### 目标
+
+- 删除“币种线索文本”映射及由科目名称、备注猜测原币币种的入口；JE、TB 均须提供明确的原币币种列。
+- 将 JE 原币金额、TB 期初/期末原币余额与本位币余额列为正式测算必填基础，资料不完整时不再输出看似精确的正式底稿。
+
+### 设计决策
+
+- 多个真实原币币种列的候选确认仍保留；它解决“选哪一列”，不再提供“没有币种列时猜一个”的退路。
+- 前后端使用同一必填口径：JE 必须有原币币种、原币金额和本位币金额；TB 必须有原币币种、期初/期末原币余额、期初/期末本位币余额及累计（或本期）借贷发生额。
+- 币种须在每个正文行明确填列；原币金额与余额须提供完整的净额列或借贷分列方案。借贷分列两侧同时空白允许表达本位币行的零原币发生额/余额，避免把真实账套中正常的本位币行误报为资料缺失。
+- 旧草稿中的 `currencyText` 由后端主动忽略，不能绕过新门禁；映射面板不再展示该角色。
+- 资料不完整或原币/本位币余额滚动未通过时，页面只显示“诊断测算合计”和具体原因，禁用生成底稿；后端导出入口再次拦截。
+- 客户账面汇兑损益比较数改为 JE 剔除期间损益结转后的净额；TB 借贷毛发生额只在“检查与勾稽”中作诊断，不再冒充账面净损益。
+- TB 期初/期末的原币与本位币余额分别判断“自带符号”口径，不再共用标记；修复南嶺样例中负债原币余额被翻成借方、滚动差异恰好放大两倍的问题。
+- 跨 worker 预览缓存键加入算法版本；口径或结果契约改变后不再回放旧测算结果。
+
+### 验证方式
+
+- `npx vitest run src/FxAuditPage.test.ts`
+- `npx vitest run src/FxAuditPageUi.test.tsx`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib fx::`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib`
+- `npm test -- --run`
+- `npm run build`
+
+## 2026-09-22 · 正负数标记目标科目搜索不再夹带全量科目
+
+### 目标
+
+- 修复正负数标记的目标科目面板首次打开时隐式勾中全部科目，导致用户搜索“管理费用”后确认选择，任务仍提交搜索前全部科目的问题。
+
+### 设计决策
+
+- 通用列漏斗继续保持 Excel 语义：空筛选首次载入显示全选；目标科目选择器单独关闭首次全选，因为这里的空数组表示“尚未选择目标”，不能等价成全量科目。
+- 搜索不会丢弃用户此前显式选择的科目；但未被用户显式选择的初始全量值不再进入隐藏选中集合。搜索后点击“全选”只选择当前搜索结果。
+
+### 验证方式
+
+- `npx vitest run src/components/ColumnFilterMenu.test.tsx src/JeSignMarkPage.test.tsx`
+- `npm run build`
+
+## 2026-09-22 · 科目确认清单按主体拆行（存款/借款/汇兑统一口径）
+
+### 目标
+
+- 多主体账套里，第二步科目清单此前只在辅助核算拆行时才带主体，普通行一律显示“—”，用户无法判断眼前的科目是几家公司的合并还是某一家的余额。
+- 存款、借款、汇兑三个工具的科目确认清单统一改为：TB 里同一科目出现在多个主体名下时按「主体×科目」拆行，每行带主体编号并显示该主体自己的余额/发生额；FA List 此前已按主体×科目组合铺行，无需改动；TBJE 引擎本身按主体＋科目汇总，不受影响。
+
+### 设计决策
+
+- 主体信息一律取自引擎识别下发的「主体×科目」真实组合（`entityAccounts`，此前只有存款下发，现补齐借款 `loan.inspect` 与汇兑 `fx.inspect_tb/je`），前端绝不做主体×科目笛卡尔积，避免造出账里不存在的组合。
+- 拆行前提与引擎建户一致：TB 与 JE 双侧都映射了主体列、且账里确实出现多个主体。只映射一侧或单主体账套维持一科一行；引擎逐户行按“默认主体”合并时，主体列显示「未区分主体」，不再留“—”。
+- 余额跟着行走：借款清单新增 `byEntity` 主体小计（科目合计不变）；存款逐户清单本就带每户期初/期末，清单未就绪时回退到识别阶段新增的 `entityMetrics`（主体␟科目粒度），最后才回退科目合计。
+- 分类与存款类型是科目属性，不随主体分叉：按主体拆出的行与原科目行共用账户级分类/档位覆盖；逐户利率差异由引擎行键（主体×科目×币种）承接，第三步逐户改价不受影响。辅助核算展开与主体拆行叠加时，已展开辅助的主体不再补科目兜底行，未展开的主体照常补，行数不重复也不丢失。
+
+### 验证方式
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib deposit_interest`（62 项）、`--lib loan_interest`（68 项，含科目清单按主体附带余额小计）、`--lib fx::`（109 项，含识别下发主体科目组合）
+- `npm test`（前端 92 个文件 873 项全过，含三页主体拆行新单测）
+- `npx tsc -b`
+
+## 2026-09-22 · 存款利息第二步科目表列示期初/期末余额
+
+### 目标
+
+- 第二步“科目分类与存款类型”清单此前只对利息收入行显示 TB 发生额，用户无法在分类时直接核对各户余额；现按户列示期初余额与期末余额。
+- 多主体／多币种账套下，主体列此前对未拆户的行显示“—”，余额也无处可看；现在逐户行直接带上各自的余额。
+
+### 设计决策
+
+- 余额跟着逐户清单走：`deposit.account_currencies` 的建户行新增 `openingBalance`／`closingBalance`，多主体、分币种、辅助拆户各显示各的数，与行上的主体／币种一致；逐户清单未返回或旧后端时回退到识别阶段的账户级合计（`accountMetrics` 新增 `opening`），保证浏览器预览模式也有数。
+- 期初只在 TB 映射了年初余额列时下发；SAP 只出本期/本年发生额的账显示“—”而非编造 0，倒推口径仍由第三步测算负责，列头问号写明这一行为。
+- 期末取 TB 期末余额净额（借方为正、贷方为负），与第三步勾稽基准同口径；“下载科目确认表”导出列保持不变（回传按列位置解析，此次不动）。
+
+### 验证方式
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib deposit_interest`（模块 62 项全过，含清单余额、识别期初下发与无年初列置空三处新断言）
+- `npx vitest run src/DepositInterestPage.test.ts src/DepositInterestInteractions.test.tsx src/DepositInterestLinks.test.tsx src/DepositInterestStyles.test.ts`
+- `npx tsc -b`
+
+## 2026-09-22 · 同步等待弹窗降噪与字段复核状态去重
+
+### 目标
+
+- 重做同步操作等待弹窗，消除标题、任务列表和说明反复表达“正在处理”的冗余。
+- 字段映射完成结论只在统一“一键复核”区域出现，避免相同状态在每张预览卡里重复占位。
+
+### 设计决策
+
+- 多任务弹窗改为“正在处理＋数量徽标＋紧凑任务清单”，清单只写动作和对象；说明压缩为最小化与停止等待的实际后果，次要操作在左、破坏性操作在右。
+- 任务清单限制自身高度并独立滚动，长文件名允许换行；保留焦点锁定、最小化后的焦点归还、不可用 Escape 误关和 reduced-motion 行为。
+- 汇兑损益、存款利息的 JE/TB 映射预览不再重复展示“已复核 · 无需调整”等完成结论；复核进行中仍显示锁定提示，异常、必填缺失和币种确认继续就近展示。
+
+### 验证方式
+
+- `npx vitest run src/components/SyncBusyDialog.test.tsx src/components/LedgerReviewAll.test.tsx`
+- `npx vitest run src/FxAuditPageUi.test.tsx src/FxAuditPage.test.ts src/DepositInterestInteractions.test.tsx src/DepositInterestLinks.test.tsx src/DepositInterestPage.test.ts src/DepositInterestStyles.test.ts`
+- `npm run build`
+- `OVERLAY_AUDIT_CAPTURE_ALL=1 node scripts/overlay-layout-audit.cjs`（75 个浮层/窗口组合，0 个几何、溢出、焦点或层级失败）
+
+## 2026-09-22 · TBJE 批量复核安全与定位效率
+
+### 目标
+
+- 避免输入小改动立即丢失整批核对结果，以及 LLM 返回时静默覆盖人工映射。
+- 缩短多文件、多组账表的识别和对齐等待，并让用户知道当前处理对象。
+- 提升批量失败与差异结果的检索、筛选和回到映射定位效率。
+
+### 设计决策
+
+- 配对、Sheet、标题行或映射变化后保留上一版结果，显示“结果待重算”并暂停导出；重新核对成功后恢复。
+- LLM 自动联合复核只生成待采纳建议，不自动改写映射；复核进行中锁定文件、配对和映射编辑。采纳时继续执行列互斥校验，并支持完整撤销。
+- 工作簿识别、来源读取与核对前对齐最多并发两份，保持原选入顺序合并；页面显示文件名或 `N/M` 进度。同步等待窗改为“停止等待”，明确后台仍会收尾。
+- 批量失败在红色错误框完整列出；结果增加全文搜索、“只看需复核”与“检查映射”跳转。手工入口改名为“手动添加 TB 组”，非第一步拖入文件也会回到添加步继续识别。
+
+### 验证方式
+
+- `npx vitest run src/TbjeCheckPage.test.tsx src/components/LedgerReviewAll.test.tsx src/ledgerMappingLabels.test.ts src/ledgerWorkbookSheets.test.ts src/components/SyncBusyDialog.test.tsx`
+- `npm run build`
+
+## 2026-09-22 · FA List 流程安全与结果核对优化
+
+### 目标
+
+- 消除两期清单模式中“下一步实际开始匹配”、关键异常出现过晚、Sheet 变化静默重置等不确定行为。
+- TB＋JE 与两期清单统一采用“旧结果保留并标记待重算”的策略，避免用户误把旧结果当作当前结果导出。
+
+### 设计决策
+
+- 工具目录和页内引导同时说明“TB＋JE 变动表 / 两期资产清单”两条路径，并记住用户上次使用的模式。
+- 两期清单的匹配统计在第一步完成后立即展示；按钮改为“开始匹配”，步骤正文统一为三步。更换主文件、移除文件及已有结果后的 Sheet/标题行重读均先确认，并尽量保留新表头中仍有效的人工映射。
+- LLM 自动复核只展示待采纳建议，不再静默改写映射；历史任务优先恢复轻量识别快照，无快照时自动重读并回到第一步复核。
+- 两种模式均保留上一版结果并显示“结果待重算”；旧结果不可直接导出。TB＋JE 汇总预览增加项目搜索与“只看有差异”，宽表继续在局部容器内横向滚动。
+- 多文件识别最多并发两份，并显示“第 N/M 份＋文件名”；两期清单读取同时把两侧文件名传给页面状态和同步等待窗。
+
+### 验证方式
+
+- `npm run build`
+- `npx vitest run src/faListUi.test.ts src/FaPageDesign.test.ts src/FaTbJePage.test.ts src/faDropTarget.test.ts`
+
+## 2026-09-22 · 新手指引文案批改落地与汇兑损益单一模式
+
+### 目标
+
+- 按用户对《新手指引文案清单.xlsx》的批改合并全部 34 处修改：取消计划中的「它是怎么算的」新增段落，精简各工具步骤提示，删工作台导览「最近使用」步。
+- 汇兑损益测算移除「仅已实现／仅未实现」两个单边模式，只保留「已实现＋未实现」。
+
+### 设计决策
+
+- 步骤提示新增「精简」口径（suppressGenericHints）：开启后只有剧本里写到的步骤弹提示，没写到的保持安静、不回退通用文案——折旧测算、折旧政策对比、汇兑损益全静默，存款利息只留「科目与利率核对」、借款利息只留「利率确认」。
+- 引导剧本的 purpose 改为可省略：AudiPick 用途一目了然，导览直接从「要准备什么」讲起。
+- 工作台导览删「最近使用」一步；工作台的最近使用区块本身保留。
+- 正负数凭证标记的「做完得到什么」补齐直接匹配（同凭证一正一负配对）与跨凭证匹配（跨凭证按同金额配对、行标「跨行已匹配」）的解释。
+- 汇兑损益模式固定为 combined：删除模式切换栏，上传区标明「两份都必传」；Rust 引擎的 realized/unrealized 分支与测试保留不动，只是界面不再可达，旧任务草稿恢复时忽略保存的 mode。
+
+### 验证方式
+
+- `npx vitest run src/components/tour/BeginnerTour.test.tsx src/components/tour/StepTourHint.test.tsx src/FxAuditPage.test.ts`
+- `npm run build`、`npm test`（对照主干基线，无新增失败）
+
+## 2026-09-22 · 借款利息步骤门禁、利率确认与大表复核
+
+### 目标
+
+- 阻止 TB＋JE 模式绕过科目/利率确认直接进入底稿，并消除 3.00% 暂估利率被误当成已确认合同利率的风险。
+- 统一两种资料模式进入第三步的行为，保留参数变化前结果供对照，同时提升大台账与结果异常的定位效率。
+
+### 设计决策
+
+- 第三步同时校验映射、科目清单、至少一个借款科目及当前利率明细；进入第三步只导航，不再隐式启动任务。正式导出前必须勾选利率复核声明，Rust worker 对 TB 映射、科目、利率明细及确认标记执行第二道校验。
+- 3.00% 明确标为带日期的参考暂估值；参数变化后旧结果保留并标记“结果待重算”，隐藏旧输出入口且禁止导出，重新生成预览后才恢复为当前结果。
+- 完整台账识别不再静默截断 2,000 行，利率确认区按 100 行分页展示且全量参与测算；页面持续显示当前资料模式，结果增加关键字搜索及“只看有差异或待确认”。
+- 清理利率确认表遗留的超宽最小宽度，并压缩结果表固定宽度，减少窄窗口无意义横向滚动。
+- 多文件判型后，TB 与 JE 的字段读取也并行执行；页面显示第 N/M 份文件，等待窗显示具体文件名与 Sheet，失败仍按选入顺序汇总。
+
+### 验证方式
+
+- `npx vitest run src/LoanInterestPage.test.ts src/LoanInterestPageUi.test.tsx`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest::tests`
+- `npm run build`
+
+## 2026-09-22 · 存款利息流程门禁与文件状态安全
+
+### 目标
+
+- 防止更换 TB／JE 后沿用上一批文件的逐户分类、档位和利率，并统一顶部步骤条与底部按钮的进入门禁。
+- 让后台验证失败、异常利率输入限制和大表复核状态对用户可见。
+
+### 设计决策
+
+- 整组更换、单侧更换／移除及 TB／JE 类型互换均清理旧文件派生的科目与明细覆盖；同源历史恢复仍依文件指纹回填。
+- 用户手工改过资产负债表日后，切换 Sheet 或标题行不再被识别建议静默覆盖。
+- 辅助联动、逐户币种和利率档位加载失败以非阻断警告展示；结果表增加关键词搜索与“只看异常／待复核”。
+- “计息科目”不再包含默认不计息的库存现金；20% 页面输入上限就地说明，旧测算结果继续以“结果待重算”保留供对照。
+- 多文件判型和后续 TB／JE 字段读取均最多并发两份，页面显示第 N/M 份文件，等待窗显示具体文件名与 Sheet。
+
+### 验证方式
+
+- `npx vitest run src/DepositInterestInteractions.test.tsx src/DepositInterestPage.test.ts`
+- `npm run build`
+
+## 2026-09-22 · 历史任务优先恢复轻量识别快照
+
+### 目标
+
+- 从历史记录继续账表任务时，源文件未变化则直接恢复表头、预览、科目清单等页面状态，避免再次等待完整识别。
+
+### 设计决策
+
+- 快照与普通任务参数分列保存，单条上限 256 KB；不保存完整表格数据、不传入 worker，也不随历史列表批量读取。
+- Rust 在任务启动时记录源文件路径、大小和修改时间；继续任务时全部指纹一致才下发快照，文件缺失、变化或版本不兼容均自动回退原重新识别流程。
+- 首批接入 FA TB＋JE、存款利息、借款利息、汇兑损益与 TBJE 完整性核对；恢复提示明确区分“使用本机识别快照”与“源文件变化后重新识别”。
+
+### 验证方式
+
+- `npm run build`
+- `npx vitest run src/AppNavigationSettings.test.tsx src/HistoryRestore.test.tsx src/DepositInterestInteractions.test.tsx src/LoanInterestPageUi.test.tsx src/TbjeCheckPage.test.tsx`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib restore_snapshot_is_separate_bounded_and_fingerprinted`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib restore_snapshot_requires_unchanged_source_fingerprint`
+
 ## 2026-09-22 · 汇兑损益合并 TB 未拆币种提示
 
 ### 目标

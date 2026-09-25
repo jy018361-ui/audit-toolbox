@@ -7,7 +7,6 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "./kanzhang-parity.css";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { EmptyState } from "@/components/EmptyState";
 import { displayFileName } from "@/fileDisplay";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StepIndicator } from "@/components/StepIndicator";
@@ -17,6 +16,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { LedgerSourceCard } from "@/components/LedgerSourceCard";
 import { LedgerLlmReview } from "@/components/LedgerLlmReview";
 import { LedgerMappingPreview } from "@/components/LedgerMappingPreview";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { SwitchInput } from "@/components/SwitchInput";
 import {
   accountColumns,
@@ -291,7 +291,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     autoOutputKey.current=key;
     patch({outputPath:draft.inputPath?defaultKanzhangOutputPath(draft.inputPath,draft.sheet):""});
   },[draft.inputPath,draft.sheet,draft.outputTouched,draft.outputPath]);
-  useEffect(()=>{let off=()=>{};void listenJobEvents(event=>{if(event.toolId!=="kanzhang")return;const pendingAccounts=accountsJob.current;if(pendingAccounts&&!pendingAccounts.id&&event.phase==="queued")pendingAccounts.id=event.jobId;const isAccountsJob=Boolean(pendingAccounts?.id===event.jobId);setJob(event);if(event.result){setResult(event.result);const payload=event.result as (Inspect&{values?:string[];codes?:string[];total?:number})|undefined;if(event.phase==="completed"&&Array.isArray(payload?.headers))applyInspect(payload);if(event.phase==="completed"&&isAccountsJob&&Array.isArray(payload?.values)){setAccounts(payload.values);setAccountCodes(payload.codes??[]);setAccountTotal(payload.total??payload.values.length);setAccountsKey(pendingAccounts?.key??"");setSearchResults([]);setSelectedAvailable([]);}}const done=["completed","failed","cancelled"].includes(event.phase);if(done&&isAccountsJob){if(event.phase!=="completed")setAccountsKey(pendingAccounts?.key??"");setAccountsBusy(false);accountsJob.current=undefined;}setBusy(!done);if(event.phase==="failed")setError(event.message);}).then(value=>off=value);return()=>off();},[]);
+  useEffect(()=>{let off=()=>{};void listenJobEvents(event=>{if(event.toolId!=="kanzhang")return;const pendingAccounts=accountsJob.current;if(pendingAccounts&&!pendingAccounts.id&&event.phase==="queued")pendingAccounts.id=event.jobId;const isAccountsJob=Boolean(pendingAccounts?.id===event.jobId);setJob(event);if(event.result){setResult(event.result);const payload=event.result as (Inspect&{values?:string[];codes?:string[];total?:number})|undefined;if(event.phase==="completed"&&Array.isArray(payload?.headers))applyInspect(payload);if(event.phase==="completed"&&isAccountsJob&&Array.isArray(payload?.values)){setAccounts(payload.values);setAccountCodes(payload.codes??[]);setAccountTotal(payload.total??payload.values.length);setAccountsKey(pendingAccounts?.key??"");setSearchResults([]);setSelectedAvailable([]);}}const done=["completed","failed","cancelled"].includes(event.phase);if(done&&isAccountsJob){if(event.phase!=="completed")setAccountsKey(pendingAccounts?.key??"");setAccountsBusy(false);accountsJob.current=undefined;}setBusy(!done);if(event.phase==="failed")setError(event.message);if(event.phase==="cancelled")setError("");}).then(value=>off=value);return()=>off();},[]);
   const batch=draft.batches[draft.activeBatch]??draft.batches[0];
   // 输入框一敲就过滤（旧版是 StringVar trace）；只有科目被截断时才需要回后端补捞。
   const pool=useMemo(()=>{
@@ -330,7 +330,8 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     void loadAccounts(accountMappingKey);
   },[draft.step,draft.inspect,accountMappingKey,accountsKey,accountsBusy]);
   async function loadAccounts(key:string){
-    setAccountsBusy(true);
+    // 读取是新一轮任务的起点：先清掉上一轮留下的错误横幅。
+    setAccountsBusy(true);setError("");
     try{
       if(draft.inspect?.lowMemory){
         const request:{id?:string;key:string}={key};accountsJob.current=request;
@@ -344,7 +345,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     }catch(e){setError(kanzhangErrorText(e));setAccountsKey(key);accountsJob.current=undefined;setAccountsBusy(false);}
     finally{if(!draft.inspect?.lowMemory)setAccountsBusy(false);}
   }
-  async function searchAccounts(){try{const criteria=accountSearchCriteria(query);const value=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth,mapping:draft.mapping,keyword:criteria.keyword,codePrefixes:criteria.codePrefixes.join(","),limit:20000}) as {values:string[]};setSearchResults(value.values);setSelectedAvailable([]);}catch(e){setError(kanzhangErrorText(e));}}
+  async function searchAccounts(){setError("");try{const criteria=accountSearchCriteria(query);const value=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth,mapping:draft.mapping,keyword:criteria.keyword,codePrefixes:criteria.codePrefixes.join(","),limit:20000}) as {values:string[]};setSearchResults(value.values);setSelectedAvailable([]);}catch(e){setError(kanzhangErrorText(e));}}
   function skipReview(){llmGeneration.current+=1;setLlmBusy(false);setLlmFailed(false);setLlmStatus("已跳过本次 LLM 复核，保留当前字段映射，可自行调整后继续。");}
   async function reviewMapping(baseMapping?:Mapping,baseInspect?:Inspect){
     const target=baseInspect??draft.inspect;
@@ -437,9 +438,31 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   // 拖拽的 window 监听只在开始拖时注册一次，用 ref 拿到最新的 moveAccounts，
   // 免得落点用到的是上一次渲染的批次和剔除列表。
   moveRef.current=moveAccounts;
-  const deleteBatch=()=>{if(draft.batches.length===1){updateBatch({accounts:[]});return;}const next=draft.batches.filter((_,index)=>index!==draft.activeBatch);patch({batches:next,activeBatch:Math.max(0,draft.activeBatch-1)});};
+  const deleteBatch=async()=>{
+    const accepted=await confirmDialog({
+      title:`删除「${batch.name}」？`,
+      message:draft.batches.length===1
+        ?`将清空当前批次已选的 ${batch.accounts.length} 个目标科目。原始文件不会受影响。`
+        :`将移除当前批次及其已选的 ${batch.accounts.length} 个目标科目。原始文件不会受影响。`,
+      confirmLabel:"删除批次",
+      tone:"danger",
+    });
+    if(!accepted)return;
+    if(draft.batches.length===1){updateBatch({accounts:[]});return;}
+    const next=draft.batches.filter((_,index)=>index!==draft.activeBatch);
+    patch({batches:next,activeBatch:Math.max(0,draft.activeBatch-1)});
+  };
   const addNextBatch=()=>{patch(addKanzhangNextBatch(draft.batches,selectedAvailable));setSelectedAvailable([]);setSelectedTarget([]);};
-  const clearBatches=()=>{patch(clearKanzhangBatches());setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setSelectedAvailable([]);setSelectedTarget([]);};
+  const clearBatches=async()=>{
+    const accepted=await confirmDialog({
+      title:`删除全部 ${draft.batches.length} 个批次？`,
+      message:"将清空所有批次及已选目标科目。原始文件不会受影响。",
+      confirmLabel:"删除全部批次",
+      tone:"danger",
+    });
+    if(!accepted)return;
+    patch(clearKanzhangBatches());setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setSelectedAvailable([]);setSelectedTarget([]);
+  };
   async function applyAuditFocusPresets(){
     setAccountsBusy(true);setError("");
     try{
@@ -623,4 +646,4 @@ function ShuttleList({zone,values,selected,onSelect,onDragBegin,drag,emptyText}:
 function Check({label,value,onChange,disabled=false}:{label:string;value:boolean;onChange:(value:boolean)=>void;disabled?:boolean}){return <label aria-disabled={disabled}><SwitchInput checked={value} disabled={disabled} onChange={onChange} ariaLabel={label}/>{label}</label>}
 function PresetSummary({summary}:{summary:PresetApplySummary}){const empty=summary.matches.filter(value=>!value.accounts.length);return <div className="kz-hint" role="status"><b>预设已套用：</b>新增 {summary.created} 个、更新 {summary.updated} 个预设批次。{summary.matches.map(value=><span key={value.preset.id}> {value.preset.name.replace("预设｜","")} {value.accounts.length} 个；</span>)}{empty.length>0&&<span>未命中：{empty.map(value=>value.preset.name.replace("预设｜","")).join("、")}。</span>}{summary.skippedExcludes.length>0&&<span> 已在剔除/例外中而未加入：{summary.skippedExcludes.join("、")}。</span>}</div>}
 function PrimaryPresetSummary({summary}:{summary:PrimaryPresetSummary}){return <div className="kz-hint" role="status"><b>全科目批次已生成：</b>共 {summary.groups.length} 个一级科目；新增 {summary.created} 个、更新 {summary.updated} 个、移除 {summary.removed} 个旧的全科目预设批次。已排除货币资金 {summary.skippedCash.length} 个科目{summary.skippedExcludes.length>0&&`，另跳过剔除/例外 ${summary.skippedExcludes.length} 个科目`}。</div>}
-function Result({job,result}:{job?:JobEvent;result?:unknown}){const object=result&&typeof result==="object"?result as Record<string,unknown>:undefined;const paths=[...new Set([...(job?.outputPaths??[]),...(Array.isArray(object?.outputPaths)?object.outputPaths.filter((value):value is string=>typeof value==="string"):[])])];const warnings=Array.isArray(object?.warnings)?object.warnings.filter((value):value is string=>typeof value==="string"):[];const batches=Array.isArray(object?.batches)?object.batches as Record<string,unknown>[]:[];const rows=typeof object?.rows==="number"?object.rows:undefined;const showProgress=shouldShowKanzhangJobProgress(job?.phase);return <Card variant="workspace" className="kz-result"><CardHeader><CardTitle>预览与结果</CardTitle></CardHeader><CardContent>{job&&showProgress&&<JobProgress job={job} onCancel={(jobId)=>jobCancel(jobId)} cancelLabel="取消任务"/>}{warnings.length>0&&<div className="warning-box"><b>明细已导出，但有部分结果未生成：</b><ul>{warnings.map((value,index)=><li key={index}>{value}</li>)}</ul></div>}{rows!==undefined&&<p>筛选后共 <b>{rows}</b> 行，可继续调整科目或进入导出。</p>}{paths.length>0&&<div className="kz-outputs">{paths.map(path=><Button key={path} variant="secondary" size="sm" title={path} onClick={()=>void openOutput(path)}><span>打开：</span><span>{path.split(/[\\/]/).pop()}</span></Button>)}</div>}{batches.length>0&&<div className="kz-summary">{batches.map((batch,index)=><div key={index}><b>{String(batch.name??`批次${index+1}`)}</b><span>明细 {String(batch.rows??0)} 行</span><span>损益结转 {String(batch.lossTransferVouchers??0)} 笔</span></div>)}</div>}{!result&&!showProgress&&<EmptyState compact title="等待筛选结果" description="执行筛选或导出后显示结果。"/>}</CardContent></Card>}
+function Result({job,result}:{job?:JobEvent;result?:unknown}){const object=result&&typeof result==="object"?result as Record<string,unknown>:undefined;const paths=[...new Set([...(job?.outputPaths??[]),...(Array.isArray(object?.outputPaths)?object.outputPaths.filter((value):value is string=>typeof value==="string"):[])])];const warnings=Array.isArray(object?.warnings)?object.warnings.filter((value):value is string=>typeof value==="string"):[];const batches=Array.isArray(object?.batches)?object.batches as Record<string,unknown>[]:[];const rows=typeof object?.rows==="number"?object.rows:undefined;const showProgress=shouldShowKanzhangJobProgress(job?.phase);if(!showProgress&&warnings.length===0&&rows===undefined&&paths.length===0&&batches.length===0)return null;return <Card variant="workspace" className="kz-result"><CardHeader><CardTitle>预览与结果</CardTitle></CardHeader><CardContent>{job&&showProgress&&<JobProgress job={job} onCancel={(jobId)=>jobCancel(jobId)} cancelLabel="取消任务"/>}{warnings.length>0&&<div className="warning-box"><b>明细已导出，但有部分结果未生成：</b><ul>{warnings.map((value,index)=><li key={index}>{value}</li>)}</ul></div>}{rows!==undefined&&<p>筛选后共 <b>{rows}</b> 行，可继续调整科目或进入导出。</p>}{paths.length>0&&<div className="kz-outputs">{paths.map(path=><Button key={path} variant="secondary" size="sm" title={path} onClick={()=>void openOutput(path)}><span>打开：</span><span>{path.split(/[\\/]/).pop()}</span></Button>)}</div>}{batches.length>0&&<div className="kz-summary">{batches.map((batch,index)=><div key={index}><b>{String(batch.name??`批次${index+1}`)}</b><span>明细 {String(batch.rows??0)} 行</span><span>损益结转 {String(batch.lossTransferVouchers??0)} 笔</span></div>)}</div>}</CardContent></Card>}

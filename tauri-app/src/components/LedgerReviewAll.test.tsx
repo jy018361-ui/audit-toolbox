@@ -225,7 +225,8 @@ describe("共享账表复核生命周期", () => {
       second.resolve({ changes: [] });
       await next;
     });
-    expect(nextApplied).toHaveBeenCalledWith({ accountCode: "B编码" });
+    expect(nextApplied).not.toHaveBeenCalled();
+    expect(result.current.results.tb?.mapping).toEqual({ accountCode: "B编码" });
     expect(result.current.reviewing.tb).toBe(false);
   });
 
@@ -251,7 +252,8 @@ describe("共享账表复核生命周期", () => {
       await pending;
     });
     expect(jeApplied).not.toHaveBeenCalled();
-    expect(tbApplied).toHaveBeenCalledOnce();
+    expect(tbApplied).not.toHaveBeenCalled();
+    expect(result.current.results.tb?.mapping).toEqual({ accountCode: "A编码" });
     expect(Object.keys(await pending)).toEqual(["tb"]);
   });
 
@@ -321,9 +323,10 @@ describe("共享账表复核生命周期", () => {
         }),
       }),
     );
-    expect(tbApplied).toHaveBeenCalledWith({ accountCode: "TB新编码" });
-    expect(jeApplied).toHaveBeenCalledWith({ accountCode: "JE新编码" });
-    expect(result.current.results.je?.applied[0].attention).toBe(true);
+    expect(tbApplied).not.toHaveBeenCalled();
+    expect(jeApplied).not.toHaveBeenCalled();
+    expect(result.current.results.tb?.pending).toHaveLength(1);
+    expect(result.current.results.je?.pending[0].attention).toBe(true);
   });
 
   it("只上传一侧时单表复核请求要带上 tool 供后端区分工具纪律", async () => {
@@ -382,7 +385,7 @@ describe("共享账表复核生命周期", () => {
     expect(result.current.status.je).not.toContain("无需调整");
   });
 
-  it("已应用建议但仍有缺口的，结论要把剩余缺口一并交代", async () => {
+  it("有待确认建议且仍有缺口的，结论要把两件事一并交代", async () => {
     const request = deferred();
     const applied = vi.fn();
     const { result } = renderHook(() =>
@@ -413,12 +416,12 @@ describe("共享账表复核生命周期", () => {
       });
       await pending;
     });
-    expect(applied).toHaveBeenCalledWith({ accountCode: "B编码" });
-    expect(result.current.status.tb).toContain("已自动调整 1 项");
+    expect(applied).not.toHaveBeenCalled();
+    expect(result.current.status.tb).toContain("1 项建议待确认");
     expect(result.current.status.tb).toContain("仍缺 1 项：期初余额");
   });
 
-  it("低于 60% 的建议不展示，撤销后按当前明细实时重算复核状态", async () => {
+  it("低于 60% 的建议不展示，采纳后仍可撤销并实时重算复核状态", async () => {
     const applied = vi.fn();
     const { result } = renderHook(() =>
       useLedgerDictReviews(async () => ({
@@ -439,9 +442,13 @@ describe("共享账表复核生命周期", () => {
         },
       });
     });
+    expect(applied).not.toHaveBeenCalled();
+    expect(result.current.status.tb).toContain("1 项建议待确认");
+    expect(result.current.results.tb?.pending).toHaveLength(1);
+
+    act(() => result.current.acceptPending("tb", 0));
+    expect(applied).toHaveBeenCalledWith({ accountCode: "B编码" });
     expect(result.current.status.tb).toContain("已自动调整 1 项");
-    expect(result.current.results.tb?.pending).toEqual([]);
-    expect(result.current.status.tb).not.toContain("建议待确认");
 
     act(() => result.current.undoChange("tb", 0));
     expect(result.current.status.tb).not.toContain("已自动调整");

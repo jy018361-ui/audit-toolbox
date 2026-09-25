@@ -442,7 +442,11 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
           setJobId(e.jobId);
           setStatusFilter("all");
         }
-        const outputs = [...(e.outputPaths ?? []), ...(r.outputPaths ?? [])];
+        // 事件级与结果级 outputPaths 通常是同一个文件（Rust 两侧都会下发），
+        // 合并时按路径去重，否则导出后渲染两个一模一样的「打开导出文件」。
+        const outputs = [
+          ...new Set([...(e.outputPaths ?? []), ...(r.outputPaths ?? [])]),
+        ];
         if (outputs.length) {
           setExportOutputs(outputs);
           for (const p of outputs) void openOutput(p);

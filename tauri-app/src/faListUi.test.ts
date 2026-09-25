@@ -140,6 +140,27 @@ describe("FA List migration parity", () => {
 });
 
 describe("FA LLM 复核先改后核", () => {
+  it("两期清单可配置为只给建议，高置信度也不静默改映射", () => {
+    const plan = planFaLlmChanges({
+      ...baseInput,
+      autoApply: false,
+      autoApplied: [
+        {
+          role: "original_value",
+          file_side: "file1",
+          suggested_column: "期初原值",
+          confidence: 0.98,
+        },
+      ],
+    });
+    expect(plan.beginMapping.originalValue).toBe("期末原值");
+    expect(plan.changes).toEqual([]);
+    expect(plan.pending[0]).toMatchObject({
+      id: "begin.originalValue",
+      suggested: "期初原值",
+    });
+  });
+
   it("clear 能删除确定错误且无替代列的已有映射", () => {
     const plan = planFaLlmChanges({
       ...baseInput,
@@ -457,6 +478,27 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
       depreciation: "",
       keys: [] as string[],
     },
+  });
+
+  it("补充清单也可配置为只给建议，不自动改写", () => {
+    const plan = planFaSupplementChanges({
+      ...supplement(),
+      autoApply: false,
+      autoApplied: [
+        {
+          role: "addition_date",
+          file_side: "file1",
+          suggested_column: "入账日期",
+          confidence: 0.99,
+        },
+      ],
+    });
+    expect(plan.addition.date).toBe("");
+    expect(plan.changes).toEqual([]);
+    expect(plan.pending[0]).toMatchObject({
+      id: "addition.date",
+      suggested: "入账日期",
+    });
   });
 
   it("按角色前缀落到新增或处置清单，并记录改前改后", () => {

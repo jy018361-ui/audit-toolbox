@@ -82,6 +82,10 @@ describe("FileListDirectoryPage", () => {
     sessionStorage.clear();
     render(<FileListDirectoryPage tool={tool} />);
     expect(screen.getByText("等待扫描文件夹")).toBeVisible();
-    expect(screen.getByRole("button", { name: "选择文件夹" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "源文件夹 *" })).toBeEnabled();
+    expect(
+      within(screen.getByRole("region", { name: "等待扫描文件夹" }))
+        .queryByRole("button"),
+    ).not.toBeInTheDocument();
   });
 });

@@ -49,6 +49,11 @@ async function evaluateStable(page, callback, argument) {
   }
 }
 
+async function replayJobs(page) {
+  await page.waitForFunction(() => Boolean(window.__demoTaskReplay), null, { timeout: 10_000 });
+  return evaluateStable(page, () => window.__demoTaskReplay?.jobs() ?? []);
+}
+
 async function findFirstJob(page, tool) {
   if (tool.id === "audit_roll_forward") {
     const create = page.getByRole("button", { name: "新建项目", exact: true });
@@ -81,7 +86,7 @@ async function findFirstJob(page, tool) {
     ? [...jobs].reverse().find((job) => preferred.includes(job.method))
     : jobs.at(-1);
   for (let step = 0; step < 14; step += 1) {
-    const before = await page.evaluate(() => window.__demoTaskReplay.jobs());
+    const before = await replayJobs(page);
     const active = selectJob(before);
     if (active) return active;
     const buttons = await currentButtons(page);
@@ -119,7 +124,7 @@ async function findFirstJob(page, tool) {
   if (process.env.TASK_EVENT_AUDIT_DEBUG) {
     console.log("page-errors", tool.id, await page.locator(".main .error-box:visible").allTextContents());
   }
-  const jobs = await page.evaluate(() => window.__demoTaskReplay.jobs());
+  const jobs = await replayJobs(page);
   return selectJob(jobs);
 }
 
@@ -173,18 +178,20 @@ async function capture(page, tool, viewport, scenario, phase, job, results) {
   const coverage = [];
   try {
     for (const viewport of viewports) {
-      const context = await browser.newContext({ viewport, reducedMotion: "reduce" });
-      const page = await context.newPage();
-      await page.addInitScript(() => {
-        localStorage.setItem("audit-toolbox.demo-data", "1");
-        localStorage.setItem("audit-toolbox.newbie-tour.v2", JSON.stringify({ newbieMode: false, workspaceDone: true }));
-      });
       for (const tool of tools) {
         for (const scenario of scenarios) {
+          // 每个场景使用独立浏览器上下文，避免设置、任务和历史状态串到下一个工具。
+          const context = await browser.newContext({ viewport, reducedMotion: "reduce" });
+          const page = await context.newPage();
+          await page.addInitScript(() => {
+            localStorage.setItem("audit-toolbox.demo-data", "1");
+            localStorage.setItem("audit-toolbox.newbie-tour.v2", JSON.stringify({ newbieMode: false, workspaceDone: true }));
+          });
+          try {
           console.log(`Auditing ${viewport.width} ${tool.id} ${scenario.name}`);
           // Query nonce forces a full document reload so replay jobs from the previous
           // terminal scenario cannot leak into the next one on the same hash route.
-          await page.goto(`${baseUrl}/?taskAudit=${viewport.width}-${tool.id}-${scenario.name}#${tool.route}`,
+          await page.goto(`${baseUrl}/?demo=1&taskAudit=${viewport.width}-${tool.id}-${scenario.name}#${tool.route}`,
             { waitUntil: "commit", timeout: 15_000 });
           await page.locator(".page-header:visible").first().waitFor({ timeout: 12_000 }).catch(() => {});
           const replayReady = await page.waitForFunction(() => Boolean(window.__demoTaskReplay), null, { timeout: 5_000 })
@@ -193,7 +200,7 @@ async function capture(page, tool, viewport, scenario, phase, job, results) {
             coverage.push({ toolId: tool.id, viewport: viewport.width, scenario: scenario.name, status: "harness-unavailable" });
             continue;
           }
-          await page.evaluate(() => window.__demoTaskReplay.setAutoPlayback(false));
+          await evaluateStable(page, () => window.__demoTaskReplay?.setAutoPlayback(false));
           const job = await findFirstJob(page, tool);
           if (!job) {
             coverage.push({ toolId: tool.id, viewport: viewport.width, scenario: scenario.name, status: "job-not-reached" });
@@ -202,13 +209,16 @@ async function capture(page, tool, viewport, scenario, phase, job, results) {
           if (process.env.TASK_EVENT_AUDIT_DEBUG) console.log("selected-job", job);
           coverage.push({ toolId: tool.id, viewport: viewport.width, scenario: scenario.name, status: "injected", method: job.method });
           for (const phase of scenario.phases) {
-            await page.evaluate(({ id, next }) => window.__demoTaskReplay.inject(id, next),
+            await page.waitForFunction(() => Boolean(window.__demoTaskReplay), null, { timeout: 10_000 });
+            await evaluateStable(page, ({ id, next }) => window.__demoTaskReplay?.inject(id, next),
               { id: job.jobId, next: phase });
             await capture(page, tool, viewport, scenario.name, phase, job, results);
           }
+          } finally {
+            await context.close();
+          }
         }
       }
-      await context.close();
     }
   } finally {
     await browser.close();

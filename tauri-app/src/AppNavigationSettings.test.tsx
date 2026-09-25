@@ -256,10 +256,47 @@ it("从 FA TB+JE 历史任务继续时重新读取完整源信息，不因缺失
   expect(screen.getAllByText("8 行")).toHaveLength(2);
   expect(engineCall).toHaveBeenCalledWith("deposit.inspect_tb", expect.objectContaining({
     source: expect.objectContaining({ inputPath: params.tbSource.inputPath }),
-  }));
+  }), "TB tb.xlsx");
   expect(engineCall).toHaveBeenCalledWith("deposit.inspect_je", expect.objectContaining({
     source: expect.objectContaining({ inputPath: params.jeSource.inputPath }),
-  }));
+  }), "JE je.xlsx");
+});
+
+it("FA TB+JE 源文件未变化时直接恢复识别快照", async () => {
+  const params = {
+    tbSource: { inputPath: "C:\\test\\tb.xlsx", sheet: "TB", headerRow: 1, headerDepth: 1 },
+    jeSource: { inputPath: "C:\\test\\je.xlsx", sheet: "JE", headerRow: 1, headerDepth: 1 },
+    tbMapping: { accountCode: "科目编码", openingFunctionalAmount: "期初", closingFunctionalAmount: "期末" },
+    jeMapping: { accountCode: "科目编码", id: "凭证号", date: "日期", functionalAmount: "金额" },
+    accountAssignments: [],
+  };
+  const inspection = (sheet: string) => ({
+    headers: ["科目编码", "金额"], sheet, sheets: [sheet], headerRow: 1,
+    headerDepth: 1, rowCount: 8, preview: [["1601", "100"]], entities: [],
+    accounts: ["1601 固定资产"], suggestedMapping: {}, suggestedAccountRoles: {},
+    mappingCandidates: [], headerDetection: { needsConfirmation: false, candidates: [] },
+    dataYears: [2026],
+  });
+  vi.mocked(historyGet).mockResolvedValue([{
+    jobId: "fa-snapshot", toolId: "fa_list", method: "fa.tbje_export", params,
+    status: "completed", message: "已生成", outputPaths: [],
+    startedAt: "2026-09-22T08:00:00+08:00", finishedAt: null,
+  }]);
+  vi.mocked(historyRestore).mockResolvedValue({
+    jobId: "fa-snapshot", toolId: "fa_list", params,
+    snapshotStatus: "valid",
+    snapshot: { inspects: { tb: inspection("TB"), je: inspection("JE") } },
+    missingPaths: [], authorizedPathCount: 2, method: "fa.tbje_export",
+  });
+  render(<MemoryRouter initialEntries={["/history"]}><App /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole("button", { name: "继续任务" }));
+  expect(await screen.findByText("已从历史快照恢复 TB/JE 源信息，请复核映射与科目分类后继续。")).toBeVisible();
+  expect(screen.getAllByText("8 行")).toHaveLength(2);
+  expect(
+    vi.mocked(engineCall).mock.calls.some(([method]) =>
+      String(method).startsWith("deposit.inspect_"),
+    ),
+  ).toBe(false);
 });
 
 it.each(["/tasks", "/diagnostics"])(
@@ -302,11 +339,11 @@ it("marks preview tools as trials in the sidebar without disabling them", async 
 
   for (const name of ["AudiPick 智能合同审阅", "WP Roll Forward"]) {
     const link = sidebar.getByRole("link", {
-      name: new RegExp(`${name}.*开发中.*结果请复核`),
+      name: new RegExp(`${name}.*试用.*结果请复核`),
     });
     expect(link).toBeVisible();
-    expect(link).toHaveAttribute("title", "开发中功能，使用结果请复核。");
-    expect(within(link).getByText("开发中")).toBeVisible();
+    expect(link).toHaveAttribute("title", "试用功能，结果请复核。");
+    expect(within(link).getByText("试用")).toBeVisible();
   }
 
   expect(

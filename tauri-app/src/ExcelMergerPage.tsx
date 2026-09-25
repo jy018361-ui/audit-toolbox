@@ -92,6 +92,8 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState<JobEvent>();
   const [error, setError] = useState("");
+  // 取消是用户主动叫停的中性结果，与失败分开提示，不进红色错误框。
+  const [notice, setNotice] = useState("");
   const [result, setResult] = useState<unknown>();
   const activeJobId = useRef("");
   const addPaths = (incoming: string[]) =>
@@ -127,14 +129,24 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         // green "处理完成。" directly under the red failure banner.
         if (event.phase === "failed" || event.phase === "cancelled") {
           setResult(undefined);
-          const payload = event.result as
-            { error?: { userMessage?: string } } | undefined;
-          setError(payload?.error ? errorText(payload.error) : event.message);
-          // 匹配网格还挂着：失败后一键返回调整重试，人工调整不丢。
-          setGridReturnable(true);
+          if (event.phase === "cancelled") {
+            // 取消与失败分流：取消不弹红色错误，也不引导回匹配网格
+            //（那是失败后的补救路径）。
+            setError("");
+            setNotice("任务已取消，已合并的部分不会写入输出。");
+            setGridReturnable(false);
+          } else {
+            setNotice("");
+            const payload = event.result as
+              { error?: { userMessage?: string } } | undefined;
+            setError(payload?.error ? errorText(payload.error) : event.message);
+            // 匹配网格还挂着：失败后一键返回调整重试，人工调整不丢。
+            setGridReturnable(true);
+          }
         } else if (event.result) {
           setResult(event.result);
           setGridReturnable(false);
+          setNotice("");
         }
         setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
       }
@@ -159,6 +171,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     pendingTargetSheets.current = null;
     setResult(undefined);
     setJob(undefined);
+    setNotice("");
     activeJobId.current = "";
     setShowMatch(false);
   }, [paths]);
@@ -212,6 +225,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     if (typeof p.addHyperlinks === "boolean")
       setAddHyperlinks(p.addHyperlinks);
     setError("");
+    setNotice("");
     setResult(undefined);
     setJob(undefined);
   });
@@ -379,6 +393,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     }
     setBusy(true);
     setError("");
+    setNotice("");
     setResult(undefined);
     try {
       const jobId = await jobStart("excel_merger.merge", {
@@ -753,12 +768,17 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             {outputMode === "one_workbook" ? "xlsx" : outputFormat}
           </p>
           {error && <div className="error-box">{error}</div>}
-          {error && gridReturnable && (
+          {error && gridReturnable && matchPreview && (
             <div className="error-box grid-return">
               <span>合并失败，匹配网格里的人工调整仍然保留。</span>
               <Button variant="secondary" size="sm" onClick={() => setShowMatch(true)}>
                 返回匹配网格调整
               </Button>
+            </div>
+          )}
+          {notice && !error && (
+            <div className="merge-cancel-notice" role="status">
+              {notice}
             </div>
           )}
           <div className="actions">

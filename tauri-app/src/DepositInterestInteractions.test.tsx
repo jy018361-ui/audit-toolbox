@@ -263,6 +263,14 @@ it("只有科目身份映射变化才需要重建科目目录", () => {
 });
 
 describe("存款科目手工分类请求", () => {
+  it("利率档位加载失败不再静默，会显示可恢复警告", async () => {
+    mock.engineCall.mockRejectedValueOnce(new Error("网络不可用"));
+    render(<DepositInterestPage tool={tool} />);
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "存款利率档位暂时加载失败",
+    );
+  });
+
   it("未上传 TB 时保留空状态、删除重复提示且底部主按钮禁用", () => {
     render(<DepositInterestPage tool={tool} />);
     expect(
@@ -395,7 +403,7 @@ describe("存款科目手工分类请求", () => {
         headerRow: 0,
         headerDepth: 0,
       },
-    });
+    }, "fixture-tb.xlsx / TB");
     goToStep(STEP2);
     const leafInput = await screen.findByRole("combobox", {
       name: `${leaf}的分类`,
@@ -432,6 +440,10 @@ describe("存款科目手工分类请求", () => {
     expect(
       screen.queryByText("内置挂牌利率可能已过期"),
     ).not.toBeInTheDocument();
+    expect(screen.getByText("计息科目 1")).toBeVisible();
+    expect(
+      screen.getByText(/页面上限为 20%/),
+    ).toBeVisible();
     fireEvent.change(screen.getByRole("combobox", { name: `${bank}的分类` }), {
       target: { value: "cash_on_hand" },
     });
@@ -489,6 +501,105 @@ describe("存款科目手工分类请求", () => {
   });
 });
 
+/** 第二步直接列示余额：逐户行按主体/币种各显各的期初与期末；
+ *  TB 没有年初列的户期初显示「—」（测算阶段倒推），界面不得编造 0。 */
+describe("第二步余额列示", () => {
+  it("余额列按户显示期初与期末，缺年初列时留空", async () => {
+    mock.engineCall.mockImplementation(async (method: string) => {
+      if (method === "deposit.rate_tiers")
+        return {
+          categories: [
+            { key: "demand", label: "活期存款", terms: [{ key: "demand", label: "" }] },
+          ],
+          tiers: [
+            {
+              key: "demand",
+              category: "demand",
+              categoryLabel: "活期存款",
+              termLabel: "",
+              label: "活期存款",
+              autoApply: true,
+              listedRate: 0.0005,
+            },
+          ],
+          ratesStale: false,
+          links: [],
+          linkGroups: [],
+        };
+      if (method === "deposit.account_currencies")
+        return {
+          rows: [
+            {
+              key: "2000 | 1002",
+              entity: "2000",
+              account: bank,
+              auxiliary: "",
+              currency: "本位币合并",
+              role: "deposit",
+              openingBalance: 1000,
+              closingBalance: 2000,
+            },
+            {
+              key: "2002 | 1002",
+              entity: "2002",
+              account: bank,
+              auxiliary: "",
+              currency: "本位币合并",
+              role: "deposit",
+              openingBalance: null,
+              closingBalance: 3000,
+            },
+          ],
+          multiCurrencyAccounts: [],
+        };
+      if (method === "deposit.classify_source")
+        return {
+          kind: "tb",
+          scores: { je: 1, tb: 10 },
+          headers: inspection.headers,
+          preview: inspection.preview,
+          sheet: "TB",
+          headerRow: 1,
+          headerDepth: 1,
+        };
+      if (method === "deposit.inspect_tb")
+        return {
+          ...inspection,
+          accountMetrics: {
+            [bank]: { opening: 4000, closing: 5000, occurrence: 0 },
+          },
+        };
+      throw new Error(`unexpected ${method}`);
+    });
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "拖放或选择 TB、序时账文件（可同时选择）",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled(),
+    );
+    goToStep(STEP2);
+    // 轻量逐户清单会替换刚进入页面时的科目级兜底行；等待清单余额出现，
+    // 避免抓到随后被卸载的旧 select 节点。
+    expect(await screen.findByRole("cell", { name: "1,000" })).toBeVisible();
+    expect(
+      screen.getByRole("columnheader", { name: /^期初余额/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("columnheader", { name: /^期末余额/ }),
+    ).toBeVisible();
+    // 有逐户行时按户拆示：2000 户期初 1,000、期末 2,000；2002 户没有
+    // 年初列，期初显示「—」，期末 3,000。
+    expect(screen.getByRole("cell", { name: "2,000" })).toBeVisible();
+    expect(screen.getByRole("cell", { name: "3,000" })).toBeVisible();
+    expect(
+      screen.getAllByRole("cell", { name: "—" }).length,
+    ).toBeGreaterThan(0);
+  });
+});
+
 /** 手填利率的回归：受控输入若每敲一个字符就"数字→文本"来回转，
  *  敲到「0.0」时会被改写回「0」，小数点连着后面的位数一起被吞，
  *  用户永远填不进 0.05%。编辑期间必须原样保留用户敲的文本。 */
@@ -501,7 +612,7 @@ describe("利率手工填写", () => {
       }),
     );
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled(),
+      expect(screen.getByRole("button", { name: STEP3 })).not.toBeDisabled(),
     );
     goToStep(STEP2);
     const box = await screen.findByRole("spinbutton", {
@@ -585,6 +696,13 @@ describe("JE 币种资料提示", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "分币种的年末余额（JE推导）仅供参考",
     );
+    const resultSearch = screen.getByRole("textbox", {
+      name: "搜索科目、辅助户、主体或币种",
+    });
+    fireEvent.change(resultSearch, { target: { value: "不存在的科目" } });
+    expect(screen.getByText("没有符合当前筛选条件的账户。")).toBeVisible();
+    fireEvent.change(resultSearch, { target: { value: "1002013636" } });
+    expect(screen.queryByText("没有符合当前筛选条件的账户。")).not.toBeInTheDocument();
     const openWorkbook = screen.getByRole("button", {
       name: "打开 Excel 底稿",
     });
@@ -689,6 +807,40 @@ describe("导航步骤切换不重复验证", () => {
     mock.engineCall.mock.calls.filter(([m]) => m === "ledger.currency_link")
       .length;
 
+  it("第一步不后台生成账户清单，进入第二步才做轻量准备且不启动测算", async () => {
+    withBothSources();
+    render(<DepositInterestPage tool={tool} />);
+    await waitFor(() =>
+      expect(mock.engineCall).toHaveBeenCalledWith(
+        "deposit.inspect_tb",
+        expect.anything(),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled(),
+    );
+    expect(
+      mock.engineCall.mock.calls.some(
+        ([method]) => method === "ledger.auxiliary_link",
+      ),
+    ).toBe(false);
+    expect(
+      mock.engineCall.mock.calls.filter(
+        ([method]) => method === "deposit.account_currencies",
+      ),
+    ).toHaveLength(0);
+
+    goToStep(STEP2);
+    await waitFor(() =>
+      expect(
+        mock.engineCall.mock.calls.filter(
+          ([method]) => method === "deposit.account_currencies",
+        ),
+      ).toHaveLength(1),
+    );
+    expect(mock.jobStart).not.toHaveBeenCalled();
+  });
+
   it("来回切换步骤不重跑币种衔接验证", async () => {
     withBothSources();
     render(<DepositInterestPage tool={tool} />);
@@ -768,6 +920,7 @@ describe("贷方余额弹窗已下线", () => {
       screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }),
     );
     await waitFor(() => expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled());
+    goToStep(STEP2);
     goToStep(STEP3);
     fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
     await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
@@ -789,6 +942,86 @@ describe("贷方余额弹窗已下线", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+describe("存款步骤门禁与来源状态", () => {
+  it("从上传页点击第三步只进入确认页，不能绕过科目与利率确认", async () => {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "拖放或选择 TB、序时账文件（可同时选择）",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: STEP3 })).not.toBeDisabled(),
+    );
+    goToStep(STEP3);
+    expect(
+      await screen.findByText("请先复核科目分类与利率，再进入测算与底稿。"),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: STEP2 })).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(
+      screen.queryByRole("button", { name: "测算预览" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("更换文件会清空旧科目覆盖，但保留用户手改的资产负债表日", async () => {
+    const detailKey = `默认主体\u001f${bank}\u001f旧辅助户`;
+    publishTaskRestore({
+      jobId: "history-with-detail-overrides",
+      toolId: "deposit_interest",
+      method: "deposit.calculate",
+      params: {
+        tbSource: {
+          inputPath: "fixture-tb.xlsx",
+          sheet: "TB",
+          headerRow: 1,
+          headerDepth: 1,
+        },
+        tbMapping: mapping,
+        accountRoles: { [bank]: "deposit" },
+        accountRoleOverrides: { [leaf]: "interest_income" },
+        accountTierOverrides: { [bank]: "term_1y" },
+        accountDetailRoleOverrides: { [detailKey]: "other_monetary" },
+        accountDetailTierOverrides: { [detailKey]: "term_1y" },
+        rateOverrides: { "old-engine-row": { annualRate: 0.0125 } },
+        accountRateOverrides: { [detailKey]: 0.0125 },
+        reportEnd: "2025-12-31",
+      },
+      missingPaths: [],
+      authorizedPathCount: 1,
+    });
+    render(<DepositInterestPage tool={tool} />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled(),
+    );
+    goToStep(STEP2);
+    goToStep(STEP3);
+    fireEvent.change(screen.getByLabelText("资产负债表日"), {
+      target: { value: "2024-09-30" },
+    });
+    goToStep(STEP1);
+    mock.pickPath.mockResolvedValueOnce("replacement-tb.xlsx");
+    fireEvent.click(screen.getByRole("button", { name: "fixture-tb.xlsx" }));
+    expect(await screen.findByText("replacement-tb.xlsx")).toBeVisible();
+    goToStep(STEP2);
+    goToStep(STEP3);
+    expect(screen.getByLabelText("资产负债表日")).toHaveValue("2024-09-30");
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+    expect(mock.jobStart.mock.calls[0][1]).toMatchObject({
+      accountRoleOverrides: {},
+      accountDetailRoleOverrides: {},
+      accountTierOverrides: {},
+      accountDetailTierOverrides: {},
+      rateOverrides: {},
+      accountRateOverrides: {},
+      reportEnd: "2024-09-30",
+    });
   });
 });
 

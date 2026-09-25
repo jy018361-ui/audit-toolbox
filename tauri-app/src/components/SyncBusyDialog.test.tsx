@@ -70,7 +70,7 @@ describe("同步操作等待弹窗", () => {
       vi.advanceTimersByTime(1);
     });
     expect(screen.getByText("正在导入文档")).toBeTruthy();
-    expect(screen.getByText(/无法中途暂停/)).toBeTruthy();
+    expect(screen.getByText(/可以最小化后继续浏览/)).toBeTruthy();
 
     // 完成后自动关闭
     act(() => {
@@ -102,9 +102,28 @@ describe("同步操作等待弹窗", () => {
     act(() => {
       vi.advanceTimersByTime(1000);
     });
-    expect(screen.getByText("正在处理 2 项操作")).toBeTruthy();
-    expect(screen.getByText("正在导入文档")).toBeTruthy();
-    expect(screen.getByText("正在OCR 识别")).toBeTruthy();
+    expect(screen.getByText("正在处理")).toBeTruthy();
+    expect(screen.getByText("2 项进行中")).toBeTruthy();
+    expect(screen.getByText("导入文档")).toBeTruthy();
+    expect(screen.getByText("OCR 识别")).toBeTruthy();
+  });
+
+  it("同类并发操作聚合数量，并保留不同处理对象", () => {
+    render(<SyncBusyDialog />);
+    act(() => {
+      void engineCall("fx.inspect_tb", {}, "01TB.xlsx / Sheet1");
+      void engineCall("fx.inspect_tb", {}, "02TB.xlsx / Sheet1");
+      void engineCall("fx.inspect_tb", {}, "02TB.xlsx / Sheet1");
+    });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByText("3 项进行中")).toBeTruthy();
+    expect(screen.getByText("读取 TB 账表")).toBeTruthy();
+    expect(screen.getByText("×3")).toBeTruthy();
+    fireEvent.click(screen.getByText("查看 2 个处理对象"));
+    expect(screen.getByText("01TB.xlsx / Sheet1")).toBeTruthy();
+    expect(screen.getByText("02TB.xlsx / Sheet1 ×2")).toBeTruthy();
   });
 
   it("调用方给了明细时，把在处理哪份数据一并亮出来", () => {
@@ -138,12 +157,13 @@ describe("同步操作等待弹窗", () => {
     act(() => {
       vi.advanceTimersByTime(1000);
     });
-    expect(screen.getByText("正在处理 3 项操作")).toBeTruthy();
-    expect(screen.getByText("正在读取 TB 账表：04TB.XLSX / Sheet1")).toBeTruthy();
-    expect(screen.getByText("正在读取序时账：04序时账.xlsx / 序时账")).toBeTruthy();
+    expect(screen.getByText("正在处理")).toBeTruthy();
+    expect(screen.getByText("3 项进行中")).toBeTruthy();
+    expect(screen.getByText("读取 TB 账表：04TB.XLSX / Sheet1")).toBeTruthy();
+    expect(screen.getByText("读取序时账：04序时账.xlsx / 序时账")).toBeTruthy();
     expect(
       screen.getByText(
-        "正在联合复核字段映射：01科目余额表（TB）.xls ＋ 01序时账 (JE).xlsx",
+        "联合复核字段映射：01科目余额表（TB）.xls ＋ 01序时账 (JE).xlsx",
       ),
     ).toBeTruthy();
   });
@@ -158,12 +178,12 @@ describe("同步操作等待弹窗", () => {
     act(() => {
       vi.advanceTimersByTime(1000);
     });
-    expect(screen.getByText("正在处理 3 项操作")).toBeTruthy();
+    expect(screen.getByText("正在处理")).toBeTruthy();
+    expect(screen.getByText("3 项进行中")).toBeTruthy();
     expect(
-      screen.getByText("正在复核外汇来源分类：04TB.XLSX / Sheet1"),
+      screen.getByText("复核外汇来源分类：04TB.XLSX / Sheet1"),
     ).toBeTruthy();
-    expect(screen.getByText("正在校验币种映射")).toBeTruthy();
-    expect(screen.queryByText(/^正在处理$/)).toBeNull();
+    expect(screen.getByText("校验币种映射")).toBeTruthy();
   });
 
   it("ESC 和点遮罩关不掉：这类操作没法安全中止，弹窗只能等它完成", () => {
@@ -178,7 +198,7 @@ describe("同步操作等待弹窗", () => {
     expect(screen.getByText("正在导入文档")).toBeTruthy();
   });
 
-  it("终止等待：页面立刻收到失败、弹窗关闭，后台迟到的结果被丢弃", async () => {
+  it("停止等待：页面立刻收到失败、弹窗关闭，后台迟到的结果被丢弃", async () => {
     render(<SyncBusyDialog />);
     const caught: unknown[] = [];
     let pending: Promise<unknown> = Promise.resolve({});
@@ -195,11 +215,11 @@ describe("同步操作等待弹窗", () => {
     });
     expect(screen.getByText("正在读取序时账：04序时账.xlsx")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "终止等待" }));
+    fireEvent.click(screen.getByRole("button", { name: "停止等待" }));
     await pending;
     await flush();
     expect(caught).toHaveLength(1);
-    expect((caught[0] as Error).message).toContain("已终止等待");
+    expect((caught[0] as Error).message).toContain("已停止等待");
     // 弹窗关闭，也不留右下角小条：终止就是不要了。
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByText(/点击展开/)).toBeNull();
@@ -242,7 +262,8 @@ describe("同步操作等待弹窗", () => {
     // 点小条展开回弹窗。
     fireEvent.click(screen.getByRole("button", { name: /展开处理进度/ }));
     expect(screen.getByRole("dialog")).toBeTruthy();
-    expect(screen.getByText("正在处理 2 项操作")).toBeTruthy();
+    expect(screen.getByText("正在处理")).toBeTruthy();
+    expect(screen.getByText("2 项进行中")).toBeTruthy();
 
     // 全部完成弹窗关闭；转空闲后新一批慢操作照常弹出，小条不残留。
     act(() => {

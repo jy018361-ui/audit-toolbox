@@ -50,7 +50,9 @@ import { DateInput } from "@/components/DateInput";
 import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { useJobEvents } from "@/hooks/useJobEvents";
+import "./fa-list.css";
 import {
   FaSummaryRow,
   FaSummaryTable,
@@ -89,6 +91,22 @@ type FaInspectResult = {
   end: FaInspectSide;
   suggestedMapping: { begin: FaMapping; end: FaMapping };
 };
+function isFaInspectResult(value: unknown): value is FaInspectResult {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<FaInspectResult>;
+  const validSide = (side: FaInspectSide | undefined) =>
+    Boolean(
+      side &&
+        Array.isArray(side.headers) &&
+        Array.isArray(side.preview) &&
+        Array.isArray(side.sheets),
+    );
+  return (
+    validSide(candidate.begin) &&
+    validSide(candidate.end) &&
+    Boolean(candidate.suggestedMapping)
+  );
+}
 type FaSupplementInspect = FaInspectSide & {
   suggestedMapping?: FaMapping & { matchKeysVerified?: boolean };
 };
@@ -189,6 +207,7 @@ type FaListDraft = {
   disposalInspect?: FaSupplementInspect;
   result?: unknown;
   matchStats?: FaMatchStats;
+  resultStale?: boolean;
   supplementAutoHandled: boolean;
 };
 
@@ -199,6 +218,11 @@ type FaMatchStats = {
   endOnly?: number;
   unmatchedAddition?: number;
   unmatchedDisposal?: number;
+  duplicates?: {
+    hasDuplicates?: boolean;
+    duplicateValueCount?: number;
+    duplicateRowCount?: number;
+  };
 };
 
 function faMatchStatsFromResult(value: unknown): FaMatchStats | undefined {
@@ -211,6 +235,31 @@ function faMatchStatsFromResult(value: unknown): FaMatchStats | undefined {
   )
     return undefined;
   return value.stats as FaMatchStats;
+}
+
+function faSuggestionMessage(
+  review: { enabled?: boolean; failed?: boolean; message?: string },
+  accepted: number,
+  pending: number,
+): string {
+  if (review.failed || !review.enabled || review.message?.includes("跳过本次 LLM"))
+    return faReviewDisplayMessage(review, accepted, pending);
+  const acceptedText = accepted ? `已采纳 ${accepted} 项` : "";
+  const pendingText = pending
+    ? `发现 ${pending} 项建议，尚未改动，请逐条核对后采纳`
+    : "";
+  if (acceptedText && pendingText)
+    return `LLM 复核完成：${acceptedText}；${pendingText}。`;
+  if (acceptedText) return `LLM 复核完成：${acceptedText}。`;
+  if (pendingText) return `LLM 复核完成：${pendingText}。`;
+  return "LLM 复核完成：现有映射与 LLM 判断一致，未做改动。";
+}
+
+// 待采纳建议的理由来自引擎/LLM 原文，可能残留旧「自动采纳」口径的说法
+// （如「已自动补上映射」）。这些项实际尚未改动、等着用户逐条决定，理由
+// 必须与「尚未改动」的结论一致，否则同卡片自相矛盾（UI 审计 P3-8）。
+function pendingReasonText(reason: string): string {
+  return reason.replace(/已自动(?=补上|调整|修正)/g, "建议");
 }
 
 // Tool routes unmount when the user switches tools. Keep the unfinished FA
@@ -251,7 +300,7 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
         detail={
           mode === "tbje"
             ? "公共 TB/JE 引擎识别与映射；固定资产业务层生成变动汇总、新增、处置、JE底表和对方科目汇总。"
-            : "按期初、期末两份固定资产表按组合键匹配，生成 FA List、变动与汇总底稿。"
+            : "按期初、期末两份固定资产表按组合键匹配，先核对仅期初、仅期末与重复键，再决定是否补充新增、处置清单。"
         }
       />
       <div
@@ -279,6 +328,9 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
           两期固定资产清单
         </button>
       </div>
+      <p className="hint fa-mode-guide">
+        有科目余额表和序时账请选择“TB＋JE 变动表”；有期初、期末资产卡片请选择“两期固定资产清单”。
+      </p>
       {mode === "cards" ? <FaCardListPage /> : <FaTbJePage />}
     </div>
   );
@@ -341,6 +393,8 @@ function FaCardListPage() {
     draft?.supplementAutoHandled ?? false,
   );
   const [busy, setBusy] = useState(false);
+  const [inspectStatus, setInspectStatus] = useState("");
+  const [restoreStatus, setRestoreStatus] = useState("");
   const [llmBusy, setLlmBusy] = useState(false);
   const [llmReview, setLlmReview] = useState<FaLlmReview>();
   const [llmChanges, setLlmChanges] = useState<FaMappingChange[]>([]);
@@ -361,19 +415,18 @@ function FaCardListPage() {
   const { job, setJob, activeJobId } = useJobEvents({
     toolId: "fa_list",
     onEvent: (event) => {
-      if (event.result) {
+      if (event.phase === "completed" && event.result) {
         setResult(event.result);
+        setResultStale(false);
         const stats = faMatchStatsFromResult(event.result);
         if (stats) setMatchStats(stats);
       }
       setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
-      if (event.phase === "failed") setError(event.message);
     },
   });
 
-  // 历史记录「继续任务」：回填两份清单与映射/匹配键/补充表等全部配置，
-  // 不自动重新读取——重新读取同一对文件时用存档映射/匹配键顶回建议值
-  // （见 inspect），换文件照旧。
+  // 历史记录「继续任务」：回填两份清单与映射/匹配键/补充表等全部配置。
+  // 有有效快照时直接恢复；否则自动重新读取，并用存档映射/匹配键顶回建议值。
   // restore key 用 "fa_list:cards" 与账表核对子页区分（见 restore.ts）。
   const restoredFaCardsRef = useRef<{
     beginPath: string;
@@ -402,6 +455,15 @@ function FaCardListPage() {
       disposalSupplement?: Partial<FaSupplementConfig>;
       outputPath?: string;
     };
+    const snapshot = restore.snapshot as
+      | { inspection?: unknown }
+      | null
+      | undefined;
+    const restoredInspection =
+      restore.snapshotStatus === "valid" &&
+      isFaInspectResult(snapshot?.inspection)
+        ? snapshot.inspection
+        : undefined;
     if (typeof p.beginPath !== "string" || !p.beginPath) return;
     if (typeof p.endPath !== "string" || !p.endPath) return;
     const isMapping = (value: unknown): value is FaMapping =>
@@ -419,14 +481,16 @@ function FaCardListPage() {
         : null;
     llmReviewGeneration.current += 1;
     supplementReviewGeneration.current += 1;
-    setStep(2);
+    // 恢复后先回到“文件与匹配”核对来源和映射；旧实现直接落到第二步，
+    // 但匹配统计并未随历史参数保存，用户只会看到一个空的补充清单页。
+    setStep(1);
     setBeginPath(p.beginPath);
     setEndPath(p.endPath);
     setBeginSheet(p.beginSheet ?? "");
     setEndSheet(p.endSheet ?? "");
     setBeginHeaderRow(p.beginHeaderRow != null ? String(p.beginHeaderRow) : "");
     setEndHeaderRow(p.endHeaderRow != null ? String(p.endHeaderRow) : "");
-    setInspection(undefined);
+    setInspection(restoredInspection);
     setBeginKeys(Array.isArray(p.beginKeys) ? p.beginKeys : []);
     setEndKeys(Array.isArray(p.endKeys) ? p.endKeys : []);
     setBeginMapping(
@@ -465,6 +529,28 @@ function FaCardListPage() {
     setError("");
     setJob(undefined);
     setResult(undefined);
+    setMatchStats(undefined);
+    setResultStale(false);
+    if (restoredInspection) {
+      setRestoreStatus("已从历史快照恢复两期清单，请复核文件、匹配 ID 与字段映射后继续。");
+      return;
+    }
+    setRestoreStatus("正在重新读取历史任务的两期清单…");
+    void inspect({
+      beginPath: p.beginPath,
+      endPath: p.endPath,
+      beginSheet: p.beginSheet ?? "",
+      endSheet: p.endSheet ?? "",
+      beginHeaderRow:
+        p.beginHeaderRow != null ? String(p.beginHeaderRow) : "",
+      endHeaderRow: p.endHeaderRow != null ? String(p.endHeaderRow) : "",
+    }).then((ok) => {
+      setRestoreStatus(
+        ok
+          ? "历史任务文件已重新读取，请复核匹配 ID 与字段映射后继续。"
+          : "历史任务文件未能重新读取，请检查错误提示并重新选择文件。",
+      );
+    });
   });
   // Tauri 会拦截 DOM 文件拖放，因此仍监听窗口级事件；但落点必须
   // 命中实际上传框，不能用窗口左右/上下中线猜测。
@@ -479,7 +565,7 @@ function FaCardListPage() {
   const disposalDropRef = useRef<HTMLDivElement>(null);
   const dragScaleFactorRef = useRef(1);
   applyPathRef.current = (slot, value) => {
-    if (slot === "begin" || slot === "end") applyPath(slot, value);
+    if (slot === "begin" || slot === "end") void applyPath(slot, value);
     else applySupplementPath(slot, value);
   };
   useEffect(() => {
@@ -547,12 +633,16 @@ function FaCardListPage() {
     setDragHover(active ? kind : null);
   };
   const [result, setResult] = useState<unknown>(draft?.result);
+  const [resultStale, setResultStale] = useState(draft?.resultStale ?? false);
   // Export results intentionally contain no preview statistics. Keep the last
   // successful merge statistics separately so exporting does not lock step 2.
   const [matchStats, setMatchStats] = useState<FaMatchStats | undefined>(
     draft?.matchStats ?? faMatchStatsFromResult(draft?.result),
   );
   const [error, setError] = useState("");
+  const markResultStale = () => {
+    if (matchStats || faMatchStatsFromResult(result)) setResultStale(true);
+  };
   // LLM 复核是异步的。界面在等待期间会锁定手工映射；这里仍以最新状态应用，
   // 防止其他状态更新或后续流程调整被异步结果整体覆盖。
   const faStateRef = useRef({
@@ -596,6 +686,7 @@ function FaCardListPage() {
       disposalInspect,
       result,
       matchStats,
+      resultStale,
       supplementAutoHandled,
     };
   });
@@ -691,7 +782,21 @@ function FaCardListPage() {
     disposal,
   ]);
   // 把选中的路径应用到期初/期末（点击选择与拖拽上传共用）。
-  function applyPath(side: "begin" | "end", value: string) {
+  async function applyPath(side: "begin" | "end", value: string) {
+    const previousSource = side === "begin" ? beginPath : endPath;
+    if (
+      previousSource &&
+      previousSource !== value &&
+      (inspection || faStats) &&
+      !(await confirmDialog({
+        title: `更换${side === "begin" ? "期初" : "期末"}清单？`,
+        message:
+          "更换主清单会重置补充清单配置；上一版匹配结果会保留并标记待重算，另一侧文件会保留并自动重新读取。",
+        confirmLabel: "更换并重新读取",
+        tone: "danger",
+      }))
+    )
+      return;
     // 点击选择和拖拽共用本入口；换主文件时旧 LLM/补充清单状态都失效。
     llmReviewGeneration.current += 1;
     supplementReviewGeneration.current += 1;
@@ -706,7 +811,6 @@ function FaCardListPage() {
     setAdditionInspect(undefined);
     setDisposalInspect(undefined);
     // 换了源文件就放弃上次手选的保存位置，让默认落点跟着新文件重新算。
-    const previousSource = side === "begin" ? beginPath : endPath;
     if (previousSource !== value) setOutputPathTouched(false);
     const nextBegin = side === "begin" ? value : beginPath;
     const nextEnd = side === "end" ? value : endPath;
@@ -726,13 +830,22 @@ function FaCardListPage() {
       setEndHeaderRow("");
     }
     setInspection(undefined);
-    setResult(undefined);
-    setMatchStats(undefined);
+    setRestoreStatus("");
+    if (faStats) setResultStale(true);
+    else {
+      setResult(undefined);
+      setMatchStats(undefined);
+      setResultStale(false);
+    }
     setStep(1);
     setSupplementAutoHandled(false);
     // 与补充清单一致：选完文件自动解析。主文件需要两个都选好才解析。
     if (nextBegin && nextEnd) {
-      void inspect({ beginPath: nextBegin, endPath: nextEnd });
+      void inspect({
+        beginPath: nextBegin,
+        endPath: nextEnd,
+        preserveMappings: Boolean(faStats),
+      });
     }
   }
   async function choose(side: "begin" | "end") {
@@ -742,16 +855,21 @@ function FaCardListPage() {
       ["xlsx", "xls", "xlsm", "csv", "txt"],
     );
     if (typeof value === "string") {
-      applyPath(side, value);
-      setLlmReview(undefined);
-      setSupplementLlmReview(undefined);
-      setAddition(emptyFaSupplement());
-      setDisposal(emptyFaSupplement());
-      setAdditionInspect(undefined);
-      setDisposalInspect(undefined);
+      await applyPath(side, value);
     }
   }
-  function clearMainFile(side: "begin" | "end") {
+  async function clearMainFile(side: "begin" | "end") {
+    if (
+      (inspection || faStats) &&
+      !(await confirmDialog({
+        title: `移除${side === "begin" ? "期初" : "期末"}清单？`,
+        message:
+          "移除任一主清单会清空字段映射和补充清单配置；上一版匹配结果会保留并标记待重算。",
+        confirmLabel: "移除并清空",
+        tone: "danger",
+      }))
+    )
+      return false;
     if (side === "begin") {
       setBeginPath("");
       setBeginSheet("");
@@ -778,8 +896,13 @@ function FaCardListPage() {
     setSupplementLlmReview(undefined);
     setLlmBusy(false);
     setSupplementLlmBusy(false);
-    setResult(undefined);
-    setMatchStats(undefined);
+    if (faStats) setResultStale(true);
+    else {
+      setResult(undefined);
+      setMatchStats(undefined);
+      setResultStale(false);
+    }
+    setRestoreStatus("");
     setOutputPath("");
     setOutputPathTouched(false);
     setJob(undefined);
@@ -787,26 +910,43 @@ function FaCardListPage() {
     setSupplementAutoHandled(false);
     setStep(1);
   }
-  async function inspect(overrides?: { beginPath?: string; endPath?: string }) {
+  async function inspect(overrides?: {
+    beginPath?: string;
+    endPath?: string;
+    beginSheet?: string;
+    endSheet?: string;
+    beginHeaderRow?: string;
+    endHeaderRow?: string;
+    preserveMappings?: boolean;
+  }) {
     const bPath = overrides?.beginPath ?? beginPath;
     const ePath = overrides?.endPath ?? endPath;
+    const bSheet = overrides?.beginSheet ?? beginSheet;
+    const eSheet = overrides?.endSheet ?? endSheet;
+    const bHeader = overrides?.beginHeaderRow ?? beginHeaderRow;
+    const eHeader = overrides?.endHeaderRow ?? endHeaderRow;
     if (!bPath || !ePath) {
       setError("请选择期初和期末文件。");
-      return;
+      return false;
     }
     setBusy(true);
     setError("");
+    setInspectStatus(
+      `正在读取期初「${displayFileName(bPath)}」与期末「${displayFileName(ePath)}」…`,
+    );
     try {
-      const value = (await engineCall("fa.inspect", {
-        beginPath: bPath,
-        endPath: ePath,
-        beginSheet: beginSheet || undefined,
-        endSheet: endSheet || undefined,
-        beginHeaderRow: beginHeaderRow.trim()
-          ? Number(beginHeaderRow)
-          : undefined,
-        endHeaderRow: endHeaderRow.trim() ? Number(endHeaderRow) : undefined,
-      })) as FaInspectResult;
+      const value = (await engineCall(
+        "fa.inspect",
+        {
+          beginPath: bPath,
+          endPath: ePath,
+          beginSheet: bSheet || undefined,
+          endSheet: eSheet || undefined,
+          beginHeaderRow: bHeader.trim() ? Number(bHeader) : undefined,
+          endHeaderRow: eHeader.trim() ? Number(eHeader) : undefined,
+        },
+        `期初 ${displayFileName(bPath)} ＋ 期末 ${displayFileName(ePath)}`,
+      )) as FaInspectResult;
       setInspection(value);
       setSupplementAutoHandled(false);
       setLlmBypassed(false);
@@ -856,42 +996,163 @@ function FaCardListPage() {
           ? stash
           : undefined;
       if (match) restoredFaCardsRef.current = null;
+      const keepExisting = overrides?.preserveMappings && !match;
+      const keepValidMapping = (
+        current: FaMapping,
+        suggested: FaMapping,
+        headers: string[],
+      ): FaMapping => {
+        const kept: FaMapping = { ...suggested };
+        for (const [key, raw] of Object.entries(current)) {
+          if (key === "matchKeys") continue;
+          if (typeof raw === "string" && headers.includes(raw))
+            (kept as Record<string, unknown>)[key] = raw;
+        }
+        return kept;
+      };
+      const keptBeginKeys = beginKeys.filter((key) =>
+        value.begin.headers.includes(key),
+      );
+      const keptEndKeys = endKeys.filter((key) => value.end.headers.includes(key));
+      const canKeepKeys =
+        keepExisting &&
+        keptBeginKeys.length > 0 &&
+        keptBeginKeys.length === beginKeys.length &&
+        keptEndKeys.length === endKeys.length;
+      const nextBeginKeys = match
+        ? match.beginKeys
+        : canKeepKeys
+          ? keptBeginKeys
+          : suggestedBeginKeys;
+      const nextEndKeys = match
+        ? match.endKeys
+        : canKeepKeys
+          ? keptEndKeys
+          : suggestedEndKeys;
       setBeginMapping(
         match
           ? { ...match.beginMapping, matchKeys: match.beginKeys }
-          : { ...suggestedBegin, matchKeys: suggestedBeginKeys },
+          : {
+              ...(keepExisting
+                ? keepValidMapping(beginMapping, suggestedBegin, value.begin.headers)
+                : suggestedBegin),
+              matchKeys: nextBeginKeys,
+            },
       );
       setEndMapping(
         match
           ? { ...match.endMapping, matchKeys: match.endKeys }
-          : { ...suggestedEnd, matchKeys: suggestedEndKeys },
+          : {
+              ...(keepExisting
+                ? keepValidMapping(endMapping, suggestedEnd, value.end.headers)
+                : suggestedEnd),
+              matchKeys: nextEndKeys,
+            },
       );
-      setBeginKeys(match ? match.beginKeys : suggestedBeginKeys);
-      setEndKeys(match ? match.endKeys : suggestedEndKeys);
-      setResult(value);
-      if (match) return;
-      void reviewLlm({
-        beginPath: bPath,
-        endPath: ePath,
-        beginSheet: value.begin.selectedSheet,
-        endSheet: value.end.selectedSheet,
-        beginHeaderRow: value.begin.detectedHeaderRow,
-        endHeaderRow: value.end.detectedHeaderRow,
-        beginMapping: suggestedBegin,
-        endMapping: suggestedEnd,
-        beginKeys: suggestedBeginKeys,
-        endKeys: suggestedEndKeys,
-      });
+      setBeginKeys(nextBeginKeys);
+      setEndKeys(nextEndKeys);
+      // 重新读取 Sheet/标题行时保留上一版匹配结果供对照；新的结构单独存入
+      // inspection。首次读取仍在结果区显示文件结构摘要。
+      if (!overrides?.preserveMappings) setResult(value);
+      if (overrides?.preserveMappings) markResultStale();
+      if (!match)
+        void reviewLlm({
+          beginPath: bPath,
+          endPath: ePath,
+          beginSheet: value.begin.selectedSheet,
+          endSheet: value.end.selectedSheet,
+          beginHeaderRow: value.begin.detectedHeaderRow,
+          endHeaderRow: value.end.detectedHeaderRow,
+          beginMapping: suggestedBegin,
+          endMapping: suggestedEnd,
+          beginKeys: suggestedBeginKeys,
+          endKeys: suggestedEndKeys,
+        });
+      return true;
     } catch (e) {
       setError(errorText(e));
+      return false;
     } finally {
       setBusy(false);
+      setInspectStatus("");
     }
   }
-  // LLM 认为该改就直接改，改动逐条进变更清单供核对，不认可可撤销。
+  async function reinspectMain(
+    side: "begin" | "end",
+    next: { sheet?: string; headerRow?: string },
+  ) {
+    const currentInspection =
+      side === "begin" ? inspection?.begin : inspection?.end;
+    const currentSheet = currentInspection?.selectedSheet ?? "";
+    const currentHeader = String(currentInspection?.detectedHeaderRow ?? "");
+    const candidateSheet = next.sheet ?? (side === "begin" ? beginSheet : endSheet);
+    const candidateHeader =
+      next.headerRow ?? (side === "begin" ? beginHeaderRow : endHeaderRow);
+    if (
+      candidateSheet === currentSheet &&
+      (candidateHeader || currentHeader) === currentHeader
+    )
+      return;
+    if (faStats) {
+      const accepted = await confirmDialog({
+        title: "重新读取清单？",
+        message:
+          "更换 Sheet 或标题行会使现有匹配结果待重算。仍存在于新表头中的人工映射会保留；已消失的列将恢复为自动建议。",
+        confirmLabel: "重新读取",
+      });
+      if (!accepted) {
+        if (side === "begin") {
+          setBeginSheet(currentSheet);
+          setBeginHeaderRow(currentHeader);
+        } else {
+          setEndSheet(currentSheet);
+          setEndHeaderRow(currentHeader);
+        }
+        return;
+      }
+    }
+    markResultStale();
+    const nextBeginSheet = side === "begin" ? (next.sheet ?? beginSheet) : beginSheet;
+    const nextEndSheet = side === "end" ? (next.sheet ?? endSheet) : endSheet;
+    const nextBeginHeader =
+      side === "begin" ? (next.headerRow ?? beginHeaderRow) : beginHeaderRow;
+    const nextEndHeader =
+      side === "end" ? (next.headerRow ?? endHeaderRow) : endHeaderRow;
+    if (side === "begin") {
+      if (next.sheet !== undefined) setBeginSheet(next.sheet);
+      if (next.headerRow !== undefined) setBeginHeaderRow(next.headerRow);
+    } else {
+      if (next.sheet !== undefined) setEndSheet(next.sheet);
+      if (next.headerRow !== undefined) setEndHeaderRow(next.headerRow);
+    }
+    await inspect({
+      beginSheet: nextBeginSheet,
+      endSheet: nextEndSheet,
+      beginHeaderRow: nextBeginHeader,
+      endHeaderRow: nextEndHeader,
+      preserveMappings: true,
+    });
+  }
+  async function rereadMain() {
+    if (!faStats) {
+      await inspect();
+      return;
+    }
+    const accepted = await confirmDialog({
+      title: "重新读取两份清单？",
+      message:
+        "重新读取会使现有匹配结果待重算。仍存在于表头中的人工映射会保留。",
+      confirmLabel: "重新读取",
+    });
+    if (!accepted) return;
+    markResultStale();
+    await inspect({ preserveMappings: true });
+  }
+  // 自动复核只生成建议；用户逐条采纳后才改映射，并保留撤销入口。
   function applyLlmPlan(review: FaLlmReview) {
     const current = faStateRef.current;
     const plan = planFaLlmChanges({
+      autoApply: false,
       beginMapping: current.beginMapping,
       endMapping: current.endMapping,
       beginKeys: current.beginKeys,
@@ -909,8 +1170,9 @@ function FaCardListPage() {
     setLlmPending(plan.pending);
     return plan.changes;
   }
-  // 采纳低把握建议后同样进变更清单，保留反悔的机会。
+  // 采纳建议后进入变更清单，保留反悔的机会。
   function acceptLlmPending(item: FaPendingSuggestion) {
+    markResultStale();
     const apply = item.apply;
     if (apply.kind === "matchKeys") {
       setLlmChanges((current) => [
@@ -960,6 +1222,7 @@ function FaCardListPage() {
     setLlmPending((current) => current.filter((value) => value.id !== item.id));
   }
   function undoLlmChange(change: FaMappingChange) {
+    markResultStale();
     if (change.restore.kind === "matchKeys") {
       setBeginKeys(change.restore.begin);
       setEndKeys(change.restore.end);
@@ -1166,9 +1429,10 @@ function FaCardListPage() {
       setDisposalInspect(undefined);
     }
   }
-  // 与主流程一致：补充清单的 LLM 建议也是先改后核，改动进清单可撤销。
+  // 与主流程一致：补充清单的 LLM 建议也必须先由用户采纳。
   function applySupplementLlmPlan(review: FaLlmReview) {
     const plan = planFaSupplementChanges({
+      autoApply: false,
       addition: faStateRef.current.addition,
       disposal: faStateRef.current.disposal,
       autoApplied: review.autoApplied,
@@ -1311,6 +1575,15 @@ function FaCardListPage() {
     additionSupplement: supplementPayload(addition),
     disposalSupplement: supplementPayload(disposal),
     outputPath: outputPath || undefined,
+    ...(inspection
+      ? {
+          __restoreSnapshot: {
+            version: 1,
+            sources: [beginPath, endPath],
+            data: { inspection },
+          },
+        }
+      : {}),
   });
   async function start(method: "fa.match" | "fa.export") {
     if (!beginPath || !endPath) {
@@ -1323,6 +1596,11 @@ function FaCardListPage() {
     }
     if (method === "fa.export" && !balanceSheetDate.trim()) {
       setError("请填写资产负债表日，折旧测算与跨期新增分析都以它为截止。");
+      return;
+    }
+    if (method === "fa.export" && resultStale) {
+      setError("输入或映射已变化，请先重新开始匹配，再导出最新底稿。");
+      setStep(1);
       return;
     }
     if (method === "fa.match" && llmBusy) {
@@ -1357,7 +1635,6 @@ function FaCardListPage() {
     }
     setBusy(true);
     setError("");
-    setResult(undefined);
     try {
       const jobId = await jobStart(method, {
         ...payload(),
@@ -1402,6 +1679,7 @@ function FaCardListPage() {
     key: keyof FaMapping,
     value: string | string[],
   ) => {
+    markResultStale();
     const isMatchKeys = key === "matchKeys";
     const arrayValue = isMatchKeys
       ? Array.isArray(value)
@@ -2042,6 +2320,8 @@ function FaCardListPage() {
             <Button
               key={path}
               variant="default"
+              className="fa-output-button"
+              title={path}
               onClick={() => void openOutput(path)}
             >
               打开结果：{displayFileName(path)}
@@ -2076,8 +2356,12 @@ function FaCardListPage() {
       <StepIndicator
         steps={[
           { key: "1", label: "文件与匹配" },
-          { key: "2", label: "补充清单", disabled: !faStats },
-          { key: "3", label: "导出", disabled: !faStats },
+          {
+            key: "2",
+            label: "补充清单",
+            disabled: !faStats || resultStale,
+          },
+          { key: "3", label: "导出", disabled: !faStats || resultStale },
         ]}
         current={step - 1}
         onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3)}
@@ -2092,15 +2376,41 @@ function FaCardListPage() {
                   ? "2. 补充清单映射（可选）"
                   : "3. 保存并导出"}
             </CardTitle>
-            <Badge variant={busy ? "info" : inspection ? "success" : "neutral"}>
-              {busy ? "处理中" : inspection ? "已读取" : "等待文件"}
+            <Badge
+              variant={
+                busy
+                  ? "info"
+                  : resultStale
+                    ? "warning"
+                    : inspection
+                      ? "success"
+                      : "neutral"
+              }
+            >
+              {busy
+                ? "处理中"
+                : resultStale
+                  ? "结果待重算"
+                  : inspection
+                    ? "已读取"
+                    : "等待文件"}
             </Badge>
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
+            {inspectStatus && (
+              <p className="hint" role="status" aria-live="polite">
+                {inspectStatus}
+              </p>
+            )}
+            {restoreStatus && !inspectStatus && (
+              <p className="hint" role="status" aria-live="polite">
+                {restoreStatus}
+              </p>
+            )}
             {/* The result pane only exists on step 3, so a merge started from
               step 1 used to run with no visible progress at all. */}
-            {job && job.phase !== "completed" && (
+            {step !== 3 && job && job.phase !== "completed" && (
               <JobProgress
                 job={job}
                 onCancel={async (jobId) => {
@@ -2139,10 +2449,12 @@ function FaCardListPage() {
                       {inspection?.begin.sheets.length ? (
                         <select
                           value={beginSheet}
-                          onChange={(e) => {
-                            setBeginSheet(e.target.value);
-                            setBeginHeaderRow("");
-                          }}
+                          onChange={(e) =>
+                            void reinspectMain("begin", {
+                              sheet: e.target.value,
+                              headerRow: "",
+                            })
+                          }
                         >
                           {inspection.begin.sheets.map((value) => (
                             <option key={value}>{value}</option>
@@ -2155,6 +2467,12 @@ function FaCardListPage() {
                             setBeginSheet(e.target.value);
                             setBeginHeaderRow("");
                           }}
+                          onBlur={() =>
+                            void reinspectMain("begin", {
+                              sheet: beginSheet,
+                              headerRow: "",
+                            })
+                          }
                         />
                       )}
                     </Field>
@@ -2162,7 +2480,14 @@ function FaCardListPage() {
                       <Input
                         value={beginHeaderRow}
                         placeholder="自动"
-                        onChange={(e) => setBeginHeaderRow(e.target.value)}
+                        onChange={(e) => {
+                          setBeginHeaderRow(e.target.value);
+                        }}
+                        onBlur={() =>
+                          void reinspectMain("begin", {
+                            headerRow: beginHeaderRow,
+                          })
+                        }
                       />
                     </Field>
                   </div>
@@ -2191,10 +2516,12 @@ function FaCardListPage() {
                       {inspection?.end.sheets.length ? (
                         <select
                           value={endSheet}
-                          onChange={(e) => {
-                            setEndSheet(e.target.value);
-                            setEndHeaderRow("");
-                          }}
+                          onChange={(e) =>
+                            void reinspectMain("end", {
+                              sheet: e.target.value,
+                              headerRow: "",
+                            })
+                          }
                         >
                           {inspection.end.sheets.map((value) => (
                             <option key={value}>{value}</option>
@@ -2207,6 +2534,12 @@ function FaCardListPage() {
                             setEndSheet(e.target.value);
                             setEndHeaderRow("");
                           }}
+                          onBlur={() =>
+                            void reinspectMain("end", {
+                              sheet: endSheet,
+                              headerRow: "",
+                            })
+                          }
                         />
                       )}
                     </Field>
@@ -2214,7 +2547,14 @@ function FaCardListPage() {
                       <Input
                         value={endHeaderRow}
                         placeholder="自动"
-                        onChange={(e) => setEndHeaderRow(e.target.value)}
+                        onChange={(e) => {
+                          setEndHeaderRow(e.target.value);
+                        }}
+                        onBlur={() =>
+                          void reinspectMain("end", {
+                            headerRow: endHeaderRow,
+                          })
+                        }
                       />
                     </Field>
                   </div>
@@ -2224,7 +2564,7 @@ function FaCardListPage() {
                     variant="secondary"
                     size="sm"
                     disabled={busy}
-                    onClick={() => void inspect()}
+                    onClick={() => void rereadMain()}
                   >
                     {busy ? "正在读取表格…" : "读取表格 + LLM 复核"}
                   </Button>
@@ -2244,7 +2584,7 @@ function FaCardListPage() {
                     >
                       停止
                     </Button>
-                  ) : !faStats ? (
+                  ) : !faStats || resultStale ? (
                     <Button
                       variant="default"
                       disabled={
@@ -2254,7 +2594,7 @@ function FaCardListPage() {
                       }
                       onClick={() => void start("fa.match")}
                     >
-                      下一步
+                      {resultStale ? "重新开始匹配" : "开始匹配"}
                     </Button>
                   ) : (
                     <>
@@ -2314,7 +2654,7 @@ function FaCardListPage() {
                           <div className="fa-review-conclusion" role="status">
                             <strong>复核结论</strong>
                             <p>
-                              {faReviewDisplayMessage(
+                              {faSuggestionMessage(
                                 llmReview,
                                 llmChanges.length,
                                 llmPending.length,
@@ -2389,7 +2729,7 @@ function FaCardListPage() {
                             </span>
                             {!!item.reason && (
                               <span>
-                                {item.reason}
+                                {pendingReasonText(item.reason)}
                                 {item.confidence
                                   ? `（把握 ${Math.round(item.confidence * 100)}%）`
                                   : ""}
@@ -2426,19 +2766,35 @@ function FaCardListPage() {
                   </>
                 )}
                 {faStats && (
-                  <div className="fa-next-choice">
-                    <strong>
-                      合并完成：共 {faStats.rows ?? 0} 行，期初期末均有{" "}
-                      {faStats.both ?? 0} 行。
-                    </strong>
-                    <span>是否有新增清单或处置清单需要补充映射？</span>
+                  <div className="fa-next-choice" role="status">
+                    <strong>匹配完成，请先核对关键统计</strong>
+                    <StatGrid
+                      items={[
+                        { label: "合并总行数", value: faStats.rows ?? 0 },
+                        { label: "两期均有", value: faStats.both ?? 0 },
+                        { label: "仅期初", value: faStats.beginOnly ?? 0 },
+                        { label: "仅期末", value: faStats.endOnly ?? 0 },
+                      ]}
+                      columns={4}
+                    />
+                    {faStats.duplicates?.hasDuplicates && (
+                      <div className="warning-box">
+                        发现 {faStats.duplicates.duplicateValueCount ?? 0} 个重复匹配键（涉及 {faStats.duplicates.duplicateRowCount ?? 0} 行），请复核后再继续。
+                      </div>
+                    )}
+                    {resultStale && (
+                      <div className="warning-box">
+                        输入或映射已变化，上述为上一次结果；请重新开始匹配。
+                      </div>
+                    )}
+                    <span>核对完成后，再选择是否补充新增或处置清单。</span>
                   </div>
                 )}
               </>
             )}
             {step === 2 && (
               <>
-                <h3>3. 本期变动清单</h3>
+                <h3>2. 本期变动清单（可选）</h3>
                 {supplementLlmBusy && (
                   <p className="hint">
                     补充清单 LLM
@@ -2486,7 +2842,7 @@ function FaCardListPage() {
                     size="sm"
                     onClick={() => setStep(1)}
                   >
-                    返回上一步
+                    上一步
                   </Button>
                   <Button
                     type="button"
@@ -2548,7 +2904,7 @@ function FaCardListPage() {
                       <div className="fa-review-conclusion" role="status">
                         <strong>复核结论</strong>
                         <p>
-                          {faReviewDisplayMessage(
+                          {faSuggestionMessage(
                             supplementLlmReview,
                             supplementLlmChanges.length,
                             supplementLlmPending.length,
@@ -2595,7 +2951,7 @@ function FaCardListPage() {
                         </span>
                         {!!item.reason && (
                           <span>
-                            {item.reason}
+                            {pendingReasonText(item.reason)}
                             {item.confidence
                               ? `（把握 ${Math.round(item.confidence * 100)}%）`
                               : ""}
@@ -2629,7 +2985,7 @@ function FaCardListPage() {
             )}
             {step === 3 && (
               <>
-                <h3>4. 输出</h3>
+                <h3>3. 输出</h3>
                 <div className="form-grid">
                   <Field label="期初显示名称">
                     <Input
@@ -2676,7 +3032,7 @@ function FaCardListPage() {
                     disabled={busy}
                     onClick={() => setStep(2)}
                   >
-                    返回上一步
+                    上一步
                   </Button>
                   {busy && job ? (
                     <Button
@@ -2689,7 +3045,7 @@ function FaCardListPage() {
                   ) : (
                     <Button
                       variant="default"
-                      disabled={!inspection}
+                      disabled={!inspection || resultStale}
                       onClick={() => void start("fa.export")}
                     >
                       生成 FA List 底稿

@@ -28,6 +28,7 @@ mod tabular;
 mod tbje_check;
 mod telemetry;
 mod update_notes;
+mod window_fit;
 mod wp;
 #[cfg(test)]
 mod xls_input_tests;
@@ -558,7 +559,11 @@ async fn job_start(
     // __dbPath/textPath 之前克隆用户原始参数存档。存档失败不拦任务本身，
     // 只是该条历史记录没有恢复按钮。
     let user_params = params.clone();
-    let job_id = job_start_inner(excel_merger, &storage, &method, params).await?;
+    let mut worker_params = params;
+    if let Some(object) = worker_params.as_object_mut() {
+        object.remove("__restoreSnapshot");
+    }
+    let job_id = job_start_inner(excel_merger, &storage, &method, worker_params).await?;
     let _ = storage.record_job_params(
         &job_id,
         excel_merger::tool_id(&method),
@@ -829,6 +834,7 @@ fn history_restore(
 ) -> Result<Value, AppError> {
     let record = storage.history_params(job_id.as_str())?;
     let params = record.get("params").cloned().unwrap_or_else(|| json!({}));
+    let (snapshot, snapshot_status) = validate_restore_snapshot(record.get("snapshot"));
     let mut collected: Vec<String> = Vec::new();
     collect_path_like(&params, &mut collected);
     let mut missing: Vec<String> = Vec::new();
@@ -846,9 +852,56 @@ fn history_restore(
         "jobId": job_id,
         "toolId": record.get("toolId").cloned().unwrap_or_else(|| json!("")),
         "params": params,
+        "snapshot": snapshot,
+        "snapshotStatus": snapshot_status,
         "missingPaths": missing,
         "authorizedPathCount": authorized
     }))
+}
+
+/// 校验任务启动时记录的源文件指纹。只有所有文件仍存在，且大小与修改时间
+/// 完全一致时才把识别快照交给前端；否则前端沿用原来的重新识别流程。
+fn validate_restore_snapshot(raw: Option<&Value>) -> (Value, &'static str) {
+    let Some(object) = raw.and_then(Value::as_object) else {
+        return (Value::Null, "none");
+    };
+    if object.is_empty() {
+        return (Value::Null, "none");
+    }
+    if object.get("version").and_then(Value::as_u64) != Some(1) {
+        return (Value::Null, "incompatible");
+    }
+    let Some(sources) = object.get("sources").and_then(Value::as_array) else {
+        return (Value::Null, "incompatible");
+    };
+    if sources.is_empty() {
+        return (Value::Null, "incompatible");
+    }
+    for source in sources {
+        let Some(source) = source.as_object() else {
+            return (Value::Null, "incompatible");
+        };
+        let Some(path) = source.get("path").and_then(Value::as_str) else {
+            return (Value::Null, "incompatible");
+        };
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return (Value::Null, "missing");
+        };
+        let modified_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_millis() as u64);
+        if source.get("size").and_then(Value::as_u64) != Some(metadata.len())
+            || source.get("modifiedMs").and_then(Value::as_u64) != modified_ms
+        {
+            return (Value::Null, "stale");
+        }
+    }
+    match object.get("data") {
+        Some(data) => (data.clone(), "valid"),
+        None => (Value::Null, "incompatible"),
+    }
 }
 
 /// 递归收集 params 里形如 Windows 绝对路径的字符串（盘符或 UNC 开头）。
@@ -1207,8 +1260,7 @@ pub fn engine_call_for_test(
         );
     }
     // Excel 合并·智能表头匹配探针：match_preview 只读识别；merge_probe 按
-    // 调用方给的完整计划真实合并到指定输出，供真实 JE 样例回归
-    // （tests/header_match_je_probe.rs，--ignored）。
+    // 调用方给的完整计划真实合并到指定输出，供真实 JE 样例回归。
     if method == "excel_merger.match_preview" {
         return excel_merger::call(method, params);
     }
@@ -1296,6 +1348,39 @@ pub fn engine_call_for_test(
     })
 }
 
+/// 高缩放比小屏（如 1920×1200 配 Windows 150% 缩放，可用宽度仅 1280 逻辑像素）
+/// 上，默认 1440×900 的窗口会右/下溢出屏幕，右缘内容既看不到也拖不回来。
+/// 启动时按窗口所在屏幕的可用区域（已扣除任务栏）收缩窗口并居中，保证完整
+/// 可见；屏幕够大时原样保留默认尺寸，只缩不放。屏幕查询失败则跳过，不动窗口。
+fn fit_main_window_to_screen(app: &tauri::App) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let (Ok(Some(monitor)), Ok(inner)) = (window.current_monitor(), window.inner_size()) else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    let work = monitor.work_area();
+    let available = (
+        f64::from(work.size.width) / scale,
+        f64::from(work.size.height) / scale,
+    );
+    let desired = (
+        f64::from(inner.width) / scale,
+        f64::from(inner.height) / scale,
+    );
+    let fitted = window_fit::fit_startup_size(desired, available);
+    if fitted == desired {
+        return;
+    }
+    let fitted_w = (fitted.0 * scale).round() as i32;
+    let fitted_h = (fitted.1 * scale).round() as i32;
+    let x = work.position.x + ((work.size.width as i32 - fitted_w) / 2).max(0);
+    let y = work.position.y + ((work.size.height as i32 - fitted_h) / 2).max(0);
+    let _ = window.set_size(tauri::LogicalSize::new(fitted.0, fitted.1));
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
 pub fn run() {
     let dirs = project_dirs().expect("AuditToolbox data directory");
     std::fs::create_dir_all(dirs.data_local_dir()).expect("create data directory");
@@ -1329,6 +1414,7 @@ pub fn run() {
             ));
             app.state::<telemetry::Telemetry>()
                 .track("app_start", None, None, None, None);
+            fit_main_window_to_screen(app);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1398,6 +1484,36 @@ mod tests {
         ];
         expected.sort();
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn restore_snapshot_requires_unchanged_source_fingerprint() {
+        let path = std::env::temp_dir().join(format!(
+            "audit-toolbox-snapshot-{}-{}.csv",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&path, "a,b\n1,2\n").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let modified_ms = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let snapshot = json!({
+            "version":1,
+            "sources":[{"path":path,"size":metadata.len(),"modifiedMs":modified_ms}],
+            "data":{"headers":["a","b"]}
+        });
+        let (data, status) = validate_restore_snapshot(Some(&snapshot));
+        assert_eq!(status, "valid");
+        assert_eq!(data["headers"], json!(["a", "b"]));
+
+        std::fs::write(&path, "a,b\n1,222\n").unwrap();
+        let (_, status) = validate_restore_snapshot(Some(&snapshot));
+        assert_eq!(status, "stale");
+        let _ = std::fs::remove_file(path);
     }
 
     /// 前端按型号分组、按型号标必填，全靠这份下发的槽位定义；型号名也必须是

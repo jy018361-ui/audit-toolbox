@@ -295,71 +295,97 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
       if (event.toolId !== "audit_roll_forward") return;
       setJob(event);
       if (event.result) setValidation(event.result);
-      setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
-      if (["completed", "failed", "cancelled"].includes(event.phase)) {
-        const target = jobCompanyRef.current;
-        if (target) {
-          const status =
-            event.phase === "completed"
-              ? "已完成"
-              : event.phase === "cancelled"
-                ? "已终止"
-                : "部分失败";
-          setProjects((current) =>
-            current.map((p) =>
-              p.id !== target.projectId
-                ? p
-                : {
-                    ...p,
-                    companies: p.companies.map((c) => {
-                      if (target.companyId && c.id !== target.companyId)
-                        return c;
-                      const root = (event.result ?? {}) as Record<
-                        string,
-                        unknown
-                      >;
-                      const directRows = Array.isArray(root.results)
-                        ? root.results
-                        : [];
-                      const companyRows = Array.isArray(root.companies)
-                        ? (root.companies.find(
-                            (row) =>
-                              String(
-                                (row as Record<string, unknown>).companyName ??
-                                  "",
-                              ) === c.name,
-                          ) as Record<string, unknown> | undefined)
-                        : undefined;
-                      const rows = directRows.length
-                        ? directRows
-                        : Array.isArray(companyRows?.results)
-                          ? companyRows.results
-                          : [];
-                      const generated = rows.filter((row) =>
-                        Boolean((row as Record<string, unknown>).success),
-                      ).length;
-                      const failed = rows.length - generated;
-                      return {
-                        ...c,
-                        status,
-                        generated,
-                        failed,
-                        last_message: rows.length
-                          ? `${generated}/${rows.length}`
-                          : event.message,
-                      };
-                    }),
-                  },
-            ),
-          );
-          if (
-            event.phase === "completed" &&
-            preferencesRef.current.openOutputAfterSuccess &&
-            event.outputPaths[0]
-          ) {
-            void openOutput(event.outputPaths[0]);
-          }
-        }
+      const terminal = ["completed", "failed", "cancelled"].includes(
+        event.phase,
+      );
+      setBusy(!terminal);
+      const target = jobCompanyRef.current;
+      if (!target) return;
+      // 状态卡与任务事件同源刷新：运行期先切到排队中/处理中，终态再回填
+      // 已生成/失败计数，避免横幅与角标已在推进而状态卡停在"未处理/0"。
+      const status = terminal
+        ? event.phase === "completed"
+          ? "已完成"
+          : event.phase === "cancelled"
+            ? "已取消"
+            : "部分失败"
+        : event.phase === "queued"
+          ? "排队中"
+          : "处理中";
+      setProjects((current) =>
+        current.map((p) =>
+          p.id !== target.projectId
+            ? p
+            : {
+                ...p,
+                companies: p.companies.map((c) => {
+                  if (target.companyId && c.id !== target.companyId) return c;
+                  if (!terminal) {
+                    if (c.status === status) return c;
+                    return { ...c, status };
+                  }
+                  const root = (event.result ?? {}) as Record<
+                    string,
+                    unknown
+                  >;
+                  const directRows = Array.isArray(root.results)
+                    ? root.results
+                    : [];
+                  const companyRows = Array.isArray(root.companies)
+                    ? (root.companies.find(
+                        (row) =>
+                          String(
+                            (row as Record<string, unknown>).companyName ?? "",
+                          ) === c.name,
+                      ) as Record<string, unknown> | undefined)
+                    : undefined;
+                  const rows = directRows.length
+                    ? directRows
+                    : Array.isArray(companyRows?.results)
+                      ? companyRows.results
+                      : [];
+                  const generated = rows.filter((row) =>
+                    Boolean((row as Record<string, unknown>).success),
+                  ).length;
+                  const failed = rows.length - generated;
+                  // 整体失败的终态与演示剧本可能没有逐科目 results：只带
+                  // generated/failed 汇总，或只有 error。没有 results 时用
+                  // 汇总回填；连汇总也没有的失败按"全部科目未完成"计，
+                  // 避免状态卡停在 已生成 0 / 失败 0 与横幅自相矛盾。
+                  const summaryGenerated =
+                    typeof root.generated === "number"
+                      ? root.generated
+                      : undefined;
+                  const summaryFailed =
+                    typeof root.failed === "number" ? root.failed : undefined;
+                  const finalGenerated = rows.length
+                    ? generated
+                    : (summaryGenerated ?? 0);
+                  const finalFailed = rows.length
+                    ? failed
+                    : (summaryFailed ??
+                      (event.phase === "failed"
+                        ? Math.max(c.subjects.length - finalGenerated, 0)
+                        : 0));
+                  return {
+                    ...c,
+                    status,
+                    generated: finalGenerated,
+                    failed: finalFailed,
+                    last_message: rows.length
+                      ? `${generated}/${rows.length}`
+                      : event.message,
+                  };
+                }),
+              },
+        ),
+      );
+      if (
+        event.phase === "completed" &&
+        preferencesRef.current.openOutputAfterSuccess &&
+        event.outputPaths[0]
+      ) {
+        void openOutput(event.outputPaths[0]);
       }
     }).then((value) => {
       off = value;
@@ -820,12 +846,11 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           detail="项目、公司、科目、CRA 与处理任务统一保存在工具箱中。"
         />
         <Card className="list-card" variant="section">
-          <EmptyState title="还没有年度结转项目" description="先创建项目与公司，再选择上年底稿、输出位置和需要结转的科目。" />
-          <div className="actions">
-            <Button variant="default" onClick={addProject}>
-              新建项目
-            </Button>
-          </div>
+          <EmptyState
+            title="还没有年度结转项目"
+            description="先创建项目与公司，再选择上年底稿、输出位置和需要结转的科目。"
+            action={<Button variant="default" onClick={addProject}>新建项目</Button>}
+          />
         </Card>
       </>
     );
@@ -847,7 +872,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
         current={job || validation !== undefined ? 3 : company?.subjects.length && company.prior_path ? 2 : company ? 1 : 0}
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
-      <div className="merger-layout">
+      <div className="merger-layout roll-setup-layout">
         <section className="form-card">
           <div className="section-title">
             <h2>1. 项目与公司</h2>

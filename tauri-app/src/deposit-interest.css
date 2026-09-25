@@ -277,6 +277,52 @@
 .deposit-rate-head p {
   margin: 0;
 }
+.deposit-result-filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.deposit-result-filters > input {
+  width: min(420px, 100%);
+}
+.deposit-result-filters label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.deposit-result-filters label input {
+  width: 16px;
+  height: 16px;
+}
+.deposit-table td.deposit-empty-filter {
+  padding: 28px;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+.deposit-rate-limit-hint {
+  margin: 0 0 10px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.deposit-validation-warnings {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+.deposit-validation-warnings p {
+  margin: var(--sp-1) 0 0;
+}
+.deposit-validation-warnings ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
 .deposit-rate-head p {
   margin-top: 5px;
   color: var(--muted-foreground);
@@ -290,7 +336,7 @@
 }
 .deposit-table > table {
   width: 100%;
-  min-width: 1990px;
+  min-width: 1480px;
   table-layout: auto;
   border-collapse: collapse;
   /* 固定列（前两列）必须涂不透明底色盖住横向滚动的内容；普通单元格若保持
@@ -321,8 +367,8 @@
   position: sticky;
   left: 0;
   z-index: 2;
-  width: 150px;
-  min-width: 150px;
+  width: 120px;
+  min-width: 120px;
   background: var(--deposit-row-bg, var(--card));
 }
 .deposit-table > table > thead th:first-child {
@@ -332,10 +378,10 @@
 .deposit-table > table > thead th:nth-child(2),
 .deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(2) {
   position: sticky;
-  left: 150px;
+  left: 120px;
   z-index: 2;
-  width: 300px;
-  min-width: 300px;
+  width: 220px;
+  min-width: 220px;
   background: var(--deposit-row-bg, var(--card));
 }
 .deposit-table > table > thead th:nth-child(2) {
@@ -344,12 +390,12 @@
 }
 .deposit-table > table > thead th:nth-child(3),
 .deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(3) {
-  min-width: 190px;
+  min-width: 150px;
 }
 .deposit-table > table > thead th:nth-child(9),
 .deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(9) {
-  width: 180px;
-  min-width: 150px;
+  width: 150px;
+  min-width: 130px;
   overflow-wrap: anywhere;
 }
 .deposit-table > table > thead th:nth-child(n + 4):nth-child(-n + 8),
@@ -360,7 +406,7 @@
   > td:nth-child(n + 4):nth-child(-n + 8),
 .deposit-table > table > thead th:nth-child(10),
 .deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(10) {
-  min-width: 130px;
+  min-width: 110px;
   text-align: right;
   white-space: nowrap;
 }
@@ -370,7 +416,7 @@
 .deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(12),
 .deposit-table > table > thead th:nth-child(13),
 .deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(13) {
-  min-width: 105px;
+  min-width: 88px;
   text-align: center;
 }
 .deposit-table select,
@@ -849,4 +895,34 @@ span.deposit-rate-missing {
   border-radius: 8px;
   background: var(--muted);
   font-size: 13px;
+}
+
+/* === UI 审计修复 P1-7（2026-09-24）：结果明细表金额列可读性 ===
+   症状同借款利息结果表：相邻金额列粘连、最右列被视口右缘裁切且无
+   横向滚动提示。追加规则（后胜覆盖，不改既有规则）：金额列最小列宽
+   加大 + 列间细分隔线兜底，容器滚动条高对比提示。选择器沿用上方
+   :not(.deposit-month-row) 结构，不波及展开的按月明细行。 */
+.deposit-table {
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 80%, transparent) transparent;
+}
+
+.deposit-table::-webkit-scrollbar {
+  height: 12px;
+}
+
+.deposit-table::-webkit-scrollbar-thumb {
+  min-width: 56px;
+  background-color: color-mix(in srgb, var(--text-muted) 80%, transparent);
+}
+
+.deposit-table > table > thead th:nth-child(n + 5):nth-child(-n + 8),
+.deposit-table > table > thead th:nth-child(10),
+.deposit-table
+  > table
+  > tbody
+  > tr:not(.deposit-month-row)
+  > td:nth-child(n + 5):nth-child(-n + 8),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(10) {
+  min-width: 130px;
+  box-shadow: inset 1px 0 0 color-mix(in srgb, var(--border) 65%, transparent);
 }

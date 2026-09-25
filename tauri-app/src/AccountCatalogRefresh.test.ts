@@ -47,15 +47,21 @@ describe("四个账表工具的科目清单刷新契约", () => {
     expect(text).toMatch(/function source\(kind: Kind\)[\s\S]*?mapping: x\.mapping/);
   });
 
-  it("FA：进入科目复核前按已确认映射重读 TB 与 JE，再重建全部 TB 科目", () => {
+  it("FA：确认辅助映射后只重读 TB，按实际 TB 科目重建分类", () => {
     const text = source("FaTbJePage.tsx");
+    const start = text.indexOf("async function openAccountReview()");
+    const end = text.indexOf("async function run(", start);
+    const review = text.slice(start, end);
 
-    expect(text).toContain("async function openAccountReview()");
-    expect(text).toContain('(["tb", "je"] as const).map');
-    expect(text).toMatch(
-      /engineCall\(`deposit\.inspect_\$\{kind\}`,[\s\S]*?source: source\(kind\),[\s\S]*?mapping: mappings\[kind\]/,
-    );
-    expect(text).toContain("setAccountsReviewed(false)");
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(review).toContain("const verified = await verifyAuxiliaryLink");
+    expect(review).toContain("const tbMapping = dropUnlinkedTbAuxiliary(mappings.tb, verified)");
+    expect(review).toContain('engineCall("deposit.inspect_tb"');
+    expect(review).toContain('source: source("tb")');
+    expect(review).toContain("mapping: tbMapping");
+    expect(review).not.toContain("deposit.inspect_je");
+    expect(review).toContain("setAccountsReviewed(false)");
     expect(text).toContain("[...new Set(inspects.tb?.accounts ?? [])]");
     expect(text).toContain("faReviewEntityAccounts(inspects.tb?.entityAccounts, entityKeyEnabled)");
   });

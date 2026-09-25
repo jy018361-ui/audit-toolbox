@@ -29,6 +29,20 @@ afterEach(() => {
 });
 
 describe("browser preview task replay", () => {
+  it("汇兑演示 TB 提供独立原币列与公共联动返回，能走到测算任务", () => {
+    localStorage.setItem(DEMO_FLAG_KEY, "1");
+    const inspect = demoLookup("fx.inspect_tb")?.({ source: { sheet: "TB" } }) as {
+      headers: string[];
+      preview: string[][];
+      suggestedMapping: Record<string, string>;
+    };
+    expect(inspect.suggestedMapping.openingForeignAmount).toBe("期初原币余额");
+    expect(inspect.suggestedMapping.closingForeignAmount).toBe("期末原币余额");
+    expect(inspect.preview.every((row) => row.length === inspect.headers.length)).toBe(true);
+    expect(demoLookup("ledger.auxiliary_link")?.({ tbMapping: { auxiliary: "辅助核算" } })).toMatchObject({ status: "verified" });
+    expect(demoLookup("ledger.currency_link")?.({})).toMatchObject({ required: false, verified: true });
+  });
+
   it("holds automatic playback and injects terminal events through the normal listeners", () => {
     vi.useFakeTimers();
     setDemoAutoPlayback(false);
@@ -85,6 +99,38 @@ describe("browser preview task replay", () => {
     expect(seen).toEqual(["cancelled"]);
     expect(injectDemoJobEvent(jobId, "completed")).toBeUndefined();
     unsubscribe();
+  });
+
+  it("按工具给注入的失败状态说明原因，不沿用之前的成功文案", () => {
+    setDemoAutoPlayback(false);
+    const jobId = id();
+    registerDemoReplayJob(jobId, "pdf2excel.convert", "pdf_to_excel", events);
+    injectDemoJobEvent(jobId, "running");
+    const failed = injectDemoJobEvent(jobId, "failed");
+    expect(failed?.phase).toBe("failed");
+    expect(failed?.message).toMatch(/PDF 转换中断/);
+    expect(failed?.outputPaths).toEqual([]);
+  });
+
+  it("补发终态缺省事件时沿用最近一次 running 的中断进度，不再落在完成的 100%", () => {
+    vi.useFakeTimers();
+    // 场景一（P3-2）：任务已播完（completed 2/2）再注入失败/取消，进度应为中断点而非 100%
+    const finishedId = id();
+    registerDemoReplayJob(finishedId, "fx.run", "fx_audit", events);
+    vi.advanceTimersByTime(2_000);
+    const failed = injectDemoJobEvent(finishedId, "failed");
+    expect(failed?.current).toBe(1);
+    expect(failed?.total).toBe(2);
+    const cancelled = injectDemoJobEvent(finishedId, "cancelled");
+    expect(cancelled?.current).toBe(1);
+    expect(cancelled?.total).toBe(2);
+
+    // 场景二：排队尚未开始就被取消，无 running 进度可沿用，停在 0 而不是虚构进度
+    setDemoAutoPlayback(false);
+    const queuedId = id();
+    registerDemoReplayJob(queuedId, "fx.run", "fx_audit", events);
+    const queuedCancel = injectDemoJobEvent(queuedId, "cancelled");
+    expect(queuedCancel?.current).toBe(0);
   });
 });
 

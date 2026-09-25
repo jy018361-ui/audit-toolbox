@@ -6,6 +6,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import "./SyncBusyDialog.css";
 import {
   onSyncBusyChange,
   syncBusyAbortAll,
@@ -102,12 +103,35 @@ function busyText(entry?: SyncBusyEntry): string {
   return `正在${label}${entry?.detail ? `：${entry.detail}` : ""}`;
 }
 
+/** 多任务列表不重复「正在」；弹窗标题已经表达了统一的进行中状态。 */
+type BusyGroup = {
+  method: string;
+  count: number;
+  details: Map<string, number>;
+};
+
+/** 仅按同一动作合组，具体文件/对象在组内逐项保留。 */
+function groupEntries(entries: SyncBusyEntry[]): BusyGroup[] {
+  const groups = new Map<string, BusyGroup>();
+  for (const entry of entries) {
+    let group = groups.get(entry.method);
+    if (!group) {
+      group = { method: entry.method, count: 0, details: new Map() };
+      groups.set(entry.method, group);
+    }
+    group.count += 1;
+    const detail = entry.detail?.trim() ?? "";
+    group.details.set(detail, (group.details.get(detail) ?? 0) + 1);
+  }
+  return [...groups.values()];
+}
+
 /**
  * 同步操作（engineCall）的全局等待窗：导入文档、OCR 识别这类「一口气完成」
  * 的调用没有进度事件可听，超过 1 秒仍未返回就弹出转圈提示，完成自动关闭。
  *
  * 和 JobDialog（后台任务弹窗）是两回事：这类操作在引擎里一口气跑完，没有
- * 可续跑的断点，「暂停/继续」做不到；「终止等待」也只掐断前端的等待——
+ * 可续跑的断点，「暂停/继续」做不到；「停止等待」也只掐断前端的等待——
  * 立即恢复界面、页面不再采用其结果，后台处理仍会自行收尾。等不到头又不想
  * 干等就用「最小化」：弹窗收成右下角小条，点小条随时展开回来；全部操作
  * 结束后小条自动消失，下一批慢操作照常重新弹出。
@@ -195,6 +219,7 @@ export function SyncBusyDialog({
   );
 
   const first = entries[0];
+  const groups = groupEntries(entries);
   const dialogOpen = visible && Boolean(first);
   const pillShown = !dialogOpen && dismissedSession !== null && entries.length > 0;
 
@@ -234,39 +259,68 @@ export function SyncBusyDialog({
           onPointerDownOutside={(event) => event.preventDefault()}
           onInteractOutside={(event) => event.preventDefault()}
         >
-          <div className="sync-busy-body" aria-live="polite">
+          <div className="sync-busy-header" aria-live="polite">
             <span className="sync-busy-spinner" aria-hidden="true" />
-            <div className="sync-busy-text">
-              <DialogTitle>
-                {entries.length > 1
-                  ? `正在处理 ${entries.length} 项操作`
-                  : busyText(first)}
-              </DialogTitle>
-              {/* 多任务列表用 ul；DialogDescription 渲染成 <p>，p 里嵌不了 ul */}
-              {entries.length > 1 && (
-                <ul className="sync-busy-list">
-                  {entries.map((entry) => (
-                    <li key={entry.id}>{busyText(entry)}</li>
-                  ))}
-                </ul>
-              )}
-              <DialogDescription>
-                这类操作一口气完成，无法中途暂停。等不及可以先最小化到右下角；
-                终止等待则立即恢复界面，后台处理会自行收尾，但结果不再应用到页面。
-              </DialogDescription>
+            <div className="sync-busy-heading">
+              <div className="sync-busy-title-row">
+                <DialogTitle>
+                  {entries.length > 1 ? "正在处理" : busyText(first)}
+                </DialogTitle>
+                {entries.length > 1 && (
+                  <span className="sync-busy-count">
+                    {entries.length} 项进行中
+                  </span>
+                )}
+              </div>
             </div>
           </div>
+          {/* 多任务列表用 ul；DialogDescription 渲染成 <p>，p 里嵌不了 ul。 */}
+          {entries.length > 1 && (
+            <ul className="sync-busy-list" aria-label="进行中的操作">
+              {groups.map((group) => {
+                const details = [...group.details];
+                const singleDetail = details.length === 1 ? details[0][0] : "";
+                return <li key={group.method}>
+                  <span className="sync-busy-item-dot" aria-hidden="true" />
+                  <div className="sync-busy-group">
+                    <span>
+                      {labelOf(group.method)}{singleDetail ? `：${singleDetail}` : ""}
+                      {group.count > 1 && (
+                        <span className="sync-busy-group-count"> ×{group.count}</span>
+                      )}
+                    </span>
+                    {details.length > 1 && (
+                      <details className="sync-busy-group-details">
+                        <summary>查看 {details.length} 个处理对象</summary>
+                        <ul>
+                          {details.map(([detail, count]) => (
+                            <li key={detail || "__unspecified__"}>
+                              {detail || "未提供对象名称"}
+                              {count > 1 ? ` ×${count}` : ""}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
+                  </div>
+                </li>;
+              })}
+            </ul>
+          )}
+          <DialogDescription className="sync-busy-note">
+            可以最小化后继续浏览。停止等待不会中止后台处理，本次结果也不会应用。
+          </DialogDescription>
           <div className="sync-busy-actions">
+            <Button type="button" variant="secondary" size="sm" onClick={minimize}>
+              最小化
+            </Button>
             <Button
               type="button"
               variant="destructive"
               size="sm"
               onClick={() => syncBusyAbortAll()}
             >
-              终止等待
-            </Button>
-            <Button type="button" variant="secondary" size="sm" onClick={minimize}>
-              最小化
+              停止等待
             </Button>
           </div>
         </DialogContent>

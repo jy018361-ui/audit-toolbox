@@ -790,6 +790,18 @@ summary:focus-visible {
   border-color: var(--focus-ring);
   background: var(--surface-muted);
 }
+/*
+ * 危险动作修饰符（如设置页「立刻清理全部缓存」）：沿用次按钮的描边骨架，
+ * 换成红色描边，与确认弹窗的 danger 基调一致，避免不可逆操作看起来像普通次按钮。
+ */
+.secondary.danger {
+  color: var(--danger-fg);
+  border-color: var(--danger-border);
+}
+.secondary.danger:hover:not(:disabled) {
+  border-color: var(--danger-fg);
+  background: var(--danger-bg);
+}
 .primary,
 .secondary {
   min-height: 40px;
@@ -3701,14 +3713,17 @@ body:has(.sync-busy-pill) .job-command-notice {
 }
 /* 同步操作等待窗（导入/OCR 这类一口气完成的调用），比任务弹窗更轻 */
 .sync-busy-dialog {
-  width: min(430px, calc(100vw - 48px));
+  width: min(480px, calc(100vw - 48px));
   max-height: calc(100dvh - 2 * var(--sp-4));
   overflow: hidden;
+  padding: 0;
+  gap: 0;
 }
-.sync-busy-body {
+.sync-busy-header {
   display: flex;
   align-items: flex-start;
-  gap: var(--sp-4);
+  gap: var(--sp-3);
+  padding: var(--sp-5) var(--sp-5) var(--sp-4);
 }
 .sync-busy-spinner {
   flex: none;
@@ -3725,23 +3740,73 @@ body:has(.sync-busy-pill) .job-command-notice {
     transform: rotate(360deg);
   }
 }
-.sync-busy-text {
+.sync-busy-heading {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.sync-busy-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.sync-busy-count {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 18px;
+}
 .sync-busy-list {
-  margin: var(--sp-1) 0 0;
-  padding-left: var(--sp-4);
-  max-height: min(45dvh, 360px);
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0 var(--sp-5) var(--sp-4);
+  padding: var(--sp-3);
+  max-height: min(38dvh, 300px);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  list-style: none;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-muted);
+}
+.sync-busy-list li {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--sp-3);
+  overflow-wrap: anywhere;
+  color: var(--text);
+  line-height: var(--lh-body);
+}
+.sync-busy-item-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: var(--brand);
+}
+.sync-busy-note {
+  margin: 0;
+  padding: var(--sp-3) var(--sp-5);
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-caption);
 }
 .sync-busy-actions {
   display: flex;
   justify-content: flex-end;
   gap: var(--sp-2);
-  margin-top: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5) var(--sp-4);
+  background: var(--surface);
 }
 /* 同步等待窗最小化后的右下角小条：与任务弹窗小条同款视觉，点击展开回等待窗，
    全部操作结束后由组件自行收掉。 */
@@ -4070,4 +4135,73 @@ input[type="checkbox"].switch-input:disabled {
 
 .aux-link-status--warn {
   color: var(--warning-fg);
+}
+
+/* === UI 审计修复 P1-1（2026-09-24）：任务弹窗进度条轨道显式接管 ===
+   与 task-state.css 中 .job-progress 的修复同源：原生 <progress> 的轨道色
+   会被 WebView2 从 accent 色派生成深灰，0%/排队时看着像已完成。
+   仅追加规则，不改上方既有 accent-color 方案。 */
+.job-dialog-row progress {
+  -webkit-appearance: none;
+  appearance: none;
+  overflow: hidden;
+  background-color: color-mix(in srgb, var(--border) 55%, var(--surface-page));
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.job-dialog-row progress::-webkit-progress-bar {
+  background-color: transparent;
+  border-radius: var(--r-pill);
+}
+
+.job-dialog-row progress::-webkit-progress-value {
+  background-color: var(--brand-accent);
+  border-radius: var(--r-pill);
+  transition: width 0.25s ease;
+}
+
+.job-dialog-row progress.progress-tone-warning::-webkit-progress-value { background-color: var(--warning-dot); }
+.job-dialog-row progress.progress-tone-danger::-webkit-progress-value { background-color: var(--danger-fg); }
+.job-dialog-row progress.progress-tone-success::-webkit-progress-value { background-color: var(--success-fg); }
+
+/* === UI 审计修复 P3-6 / P3-11（2026-09-24）：仅追加，不改上方既有内容 === */
+
+/* P3-6a：常规信息提示盒（首个使用者：TS 管理的多 Sheet 提醒）。
+   与 .warning-box 同构，但换成中性蓝的 info 三件套 token，
+   不再把"数据可能不在这一张"这类普通提示渲染成错误红。 */
+.info-box {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--info-border);
+  border-radius: var(--r-sm);
+  background: var(--info-bg);
+  color: var(--info-fg);
+  font-size: var(--fs-sm);
+}
+
+/* P3-6b：已选文件名要与标签/占位文案拉开层次（对齐看账页 kz-path
+   「占位灰、值深」的读感）：值用正文深色加粗，标签保持中灰。
+   仅作用于 TS 管理页，不动其他页面的文件槽。 */
+.ts-manager-page .file-drop-slot-value {
+  color: var(--ink-strong);
+  font-weight: var(--fw-medium);
+}
+
+/* P3-11：主按钮可用/禁用对比度。
+   可用态此前会在悬停时被冲淡成浅青，明度与禁用灰几乎一样，分不清能不能点；
+   现在默认态向 --brand-deep 压深一档、悬停再深一档（不再变浅），
+   禁用态降透明度并去掉投影。只针对主按钮（default variant 与 .primary），
+   不影响 destructive 危险按钮与 secondary 次按钮。
+   本文件是无 layer 的普通规则，按级联规则可覆盖组件库 utilities 层的背景色。 */
+[data-slot="button"][data-variant="default"]:not(:disabled),
+.primary:not(:disabled) {
+  background: color-mix(in srgb, var(--brand) 78%, var(--brand-deep));
+}
+[data-slot="button"][data-variant="default"]:hover:not(:disabled),
+.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--brand) 55%, var(--brand-deep));
+}
+[data-slot="button"][data-variant="default"]:disabled,
+.primary:disabled {
+  opacity: calc(var(--disabled-opacity) - 0.15);
+  box-shadow: none;
 }

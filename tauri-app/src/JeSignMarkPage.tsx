@@ -15,13 +15,13 @@ import "./kanzhang-parity.css";
 import "./je-sign-mark.css";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JargonTip } from "@/components/JargonTip";
 import { SwitchInput } from "@/components/SwitchInput";
-import { CircleMinus, Equal } from "lucide-react";
+import { CircleMinus, Equal, Search } from "lucide-react";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { JobProgress } from "@/components/JobProgress";
 import { LedgerSourceCard } from "@/components/LedgerSourceCard";
 import { LedgerLlmReview } from "@/components/LedgerLlmReview";
@@ -772,7 +772,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   return (
     <div className="kz-page jm-page">
       <PageHeader
-        eyebrow="凭证对冲标记"
+        eyebrow="正负数凭证标记"
         title={tool.name}
         detail="加载凭证、确认字段映射，在预览表头按列筛选并按批次选定目标科目，导出带正负数智能匹配标记的完整凭证明细。"
       />
@@ -900,7 +900,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       {draft.inspect && (
         <section className="kz-card jm-batches">
           <div className="jm-batch-row">
-            <div className="kz-tabs">
+            <div className="kz-tabs" aria-label="标记批次">
               {draft.batches.map((value, index) => (
                 <button
                   key={`${value.name}-${index}`}
@@ -921,15 +921,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             >
               新增批次
             </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() =>
-                patch(removeBatch(draft.batches, draft.activeBatch))
-              }
-            >
-              删除批次
-            </Button>
+          </div>
+          <div className="jm-batch-settings">
             <label className="jm-batch-name">
               批次名称
               <Input
@@ -945,10 +938,29 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                 }
               />
             </label>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="jm-delete-batch"
+              onClick={async () => {
+                const accepted = await confirmDialog({
+                  title: `删除「${batch.name}」？`,
+                  message: draft.batches.length === 1
+                    ? `这会清空当前批次已选的 ${batch.accounts.length} 个目标科目，不会删除原始文件。`
+                    : `这会移除当前批次及其已选的 ${batch.accounts.length} 个目标科目，不会删除原始文件。`,
+                  confirmLabel: "删除批次",
+                  tone: "danger",
+                });
+                if (accepted) patch(removeBatch(draft.batches, draft.activeBatch));
+              }}
+              disabled={draft.batches.length === 1 && batch.accounts.length === 0}
+            >
+              删除批次
+            </Button>
           </div>
           <div className="jm-account-row">
             <span className="jm-account-label">
-              {accountFilterTitle(draft.mapping)}
+              目标科目
             </span>
             <button
               type="button"
@@ -971,8 +983,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                 ? "正在确定科目字段…"
                 : batch.accounts.length
                   ? `已选 ${batch.accounts.length} 个`
-                  : "点击选择目标科目"}
-              <span className="ts-filter-icon">▼</span>
+                  : "选择目标科目"}
+              <Search size={16} aria-hidden="true" />
             </button>
             {filterCount > 0 && (
               <span className="jm-filter-note">
@@ -987,10 +999,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               </span>
             )}
           </div>
-          <p className="kz-note">
-            <b>目标科目</b>决定哪些行打标记，按批次各选一套；<b>其他列的漏斗</b>
-            是数据过滤，按凭证生效——
-            凭证里只要有一行命中，整张凭证保留，标记只落在目标科目行上。
+          <p className="kz-note jm-rule-note">
+            每批次选择一组目标科目；表头漏斗按整张凭证筛选，标记只落在目标科目行。
           </p>
         </section>
       )}
@@ -1010,6 +1020,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               field={header}
               chosen={chosen}
               expanded={menu?.field === header}
+              compact
               onToggle={(anchor) => {
                 if (!anchor) {
                   setMenu(undefined);
@@ -1113,6 +1124,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             isAccountMenu(menu.field) ? "搜索科目编码或名称" : undefined
           }
           splitCode={isAccountMenu(menu.field)}
+          defaultSelectAll={!isAccountMenu(menu.field)}
           valueNote={
             isAccountMenu(menu.field)
               ? (value) => {
@@ -1158,6 +1170,9 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
         })
       : undefined;
   const showProgress = shouldShowKanzhangJobProgress(job?.phase);
+  // 读取文件也会产生 job/result，但只有标记导出才有值得展示的结果。
+  // 失败或取消后上方已显示任务反馈，这里不再留下空白结果卡。
+  if (!showProgress && !paths.length && !batches.length && !sign?.applied) return null;
   return (
     <Card variant="workspace" className="kz-result">
       <CardHeader>
@@ -1210,7 +1225,6 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
             {sign.basis ? `。依据：${sign.basis}` : ""}
           </p>
         )}
-        {!result && !showProgress && <EmptyState compact title="等待标记结果" description="选好目标科目后点「标记并导出」。" />}
       </CardContent>
     </Card>
   );

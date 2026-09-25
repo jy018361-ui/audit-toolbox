@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
+import { ListFilter } from "lucide-react";
 
 /** 引擎用这个字面量表示"该列为空"，勾选它等价于筛选空值行。 */
 export const BLANK_TOKEN = "<空白>";
@@ -36,6 +37,7 @@ export function ColumnFilterMenu({
   valueNote,
   searchPlaceholder,
   splitCode,
+  defaultSelectAll = true,
 }: {
   field: string;
   anchor: HTMLElement;
@@ -51,12 +53,18 @@ export function ColumnFilterMenu({
   searchPlaceholder?: string;
   /** 科目面板专用：把「编码-名称」拼接串拆成两段展示；其余列不拆。 */
   splitCode?: boolean;
+  /**
+   * 首次载入时是否把全部取值视为已选。普通列筛选以“全选”等价于“不筛选”；
+   * 目标科目选择以空数组表示“尚未选择”，必须关闭此行为，避免搜索后把隐藏的
+   * 全量科目连同当前结果一起提交。
+   */
+  defaultSelectAll?: boolean;
 }) {
   const [keyword, setKeyword] = useState(data?.keyword ?? "");
   const [checked, setChecked] = useState<Set<string>>(() => new Set(selected));
   const panel = useRef<HTMLDivElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
-  const initialized = useRef(selected.length > 0);
+  const initialized = useRef(selected.length > 0 || !defaultSelectAll);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const closeAndRestoreFocus = () => {
@@ -72,8 +80,9 @@ export function ColumnFilterMenu({
     maxHeight: number;
   }>();
 
-  // 无筛选时 Excel 默认显示「全选」。首次取值异步返回后补齐勾选；若结果被截断，
-  // 则不能把眼前这一批冒充整列全选，否则直接应用会意外只保留前 VALUE_LIMIT 项。
+  // 普通列无筛选时 Excel 默认显示「全选」。首次取值异步返回后补齐勾选；若结果
+  // 被截断，则不能把眼前这一批冒充整列全选。目标科目面板会关闭 defaultSelectAll，
+  // 因为空数组在那里表示“尚未选择”，不是“选择整列”。
   useEffect(() => {
     // Portal 初次挂载后让浏览器完成当前点击/焦点事件，再移入菜单。
     const frame = window.requestAnimationFrame(() => searchInput.current?.focus());
@@ -101,11 +110,18 @@ export function ColumnFilterMenu({
         closeAndRestoreFocusRef.current();
       }
     }
+    // 页面切换时按钮可能仍留在隐藏的路由树中。Portal 必须主动关闭，
+    // 否则会盖住下一页并继续拦截键盘/指针事件。
+    const closeOnNavigation = () => onCloseRef.current();
     window.addEventListener("pointerdown", pointerDown, true);
     window.addEventListener("keydown", keyDown);
+    window.addEventListener("hashchange", closeOnNavigation);
+    window.addEventListener("popstate", closeOnNavigation);
     return () => {
       window.removeEventListener("pointerdown", pointerDown, true);
       window.removeEventListener("keydown", keyDown);
+      window.removeEventListener("hashchange", closeOnNavigation);
+      window.removeEventListener("popstate", closeOnNavigation);
     };
   }, []);
 
@@ -327,14 +343,14 @@ function splitAccountCode(value: string): { code: string; name: string } | undef
 }
 
 /** 预览表头里的漏斗按钮：已筛选的显示勾中个数，再次点击收起面板。 */
-export function ColumnFilterTrigger({field,chosen,expanded,onToggle}:{
-  field:string;chosen:string[];expanded:boolean;onToggle:(anchor:HTMLElement|undefined)=>void;
+export function ColumnFilterTrigger({field,chosen,expanded,onToggle,compact=false}:{
+  field:string;chosen:string[];expanded:boolean;onToggle:(anchor:HTMLElement|undefined)=>void;compact?:boolean;
 }){
   return (
     <button
       type="button"
       data-ts-filter-trigger=""
-      className={`ts-filter-trigger${chosen.length ? " active" : ""}`}
+      className={`ts-filter-trigger${chosen.length ? " active" : ""}${compact ? " ts-filter-trigger-compact" : ""}`}
       aria-label={`筛选 ${field}${chosen.length ? `，已选 ${chosen.length} 项` : ""}`}
       aria-expanded={expanded}
       title={
@@ -350,7 +366,7 @@ export function ColumnFilterTrigger({field,chosen,expanded,onToggle}:{
         onToggle(event.currentTarget);
       }}
     >
-      <span className="ts-filter-icon">▼</span>
+      {compact ? <ListFilter size={16} aria-hidden="true" /> : <span className="ts-filter-icon">▼</span>}
       {chosen.length > 0 && (
         <span className="ts-filter-badge">{chosen.length}</span>
       )}

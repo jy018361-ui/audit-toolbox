@@ -26,6 +26,7 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { EmptyState } from "@/components/EmptyState";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -46,6 +47,7 @@ import { useJobEvents } from "@/hooks/useJobEvents";
 import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
 import { errorText } from "@/lib/errors";
 import {
+  applyLedgerPendingChange,
   applyLedgerReviewsTogether,
   dropUnlinkedTbAuxiliary,
   ledgerEntityKeyEnabled,
@@ -335,13 +337,16 @@ const presenceLabel = (presence: string) =>
       : "两边都有";
 
 /** 结果预览：三条核对的差异就地展开，不用先导出工作簿才能看到数字。 */
-function OutcomeDetail({ result }: { result: CheckResult }) {
+function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: string }) {
+  const keyword = query.trim().toLocaleLowerCase("zh-CN");
+  const matches = (value: unknown) =>
+    !keyword || JSON.stringify(value).toLocaleLowerCase("zh-CN").includes(keyword);
   const rollforwardUnits = (result.rollforward.units ?? []).filter(
     (unit) => unit.mismatched,
   );
-  const tbItems = result.tbVsJe.items ?? [];
-  const unclassified = result.equation.unclassified ?? [];
-  const ambiguous = result.equation.ambiguous ?? [];
+  const tbItems = (result.tbVsJe.items ?? []).filter(matches);
+  const unclassified = (result.equation.unclassified ?? []).filter(matches);
+  const ambiguous = (result.equation.ambiguous ?? []).filter(matches);
   const equationSides = (
     [
       ["年初", result.equation.opening],
@@ -383,7 +388,7 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {unit.items.slice(0, PREVIEW_CAP).map((item, index) => (
+                {unit.items.filter(matches).slice(0, PREVIEW_CAP).map((item, index) => (
                   <TableRow key={index}>
                     <TableCell>{item.sourceRow}</TableCell>
                     <TableCell className="tbje-text-cell">
@@ -623,6 +628,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   >({});
   const [detail, setDetail] = useState<string | undefined>();
   const [outcomes, setOutcomes] = useState<GroupOutcome[]>([]);
+  const [resultsStale, setResultsStale] = useState(false);
+  const [resultQuery, setResultQuery] = useState("");
+  const [onlyReviewResults, setOnlyReviewResults] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -640,6 +648,8 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const intakeSectionRef = useRef<HTMLElement | null>(null);
   const pairingSectionRef = useRef<HTMLElement | null>(null);
   const resultSectionRef = useRef<HTMLElement | null>(null);
+  const pageRef = useRef<HTMLElement | null>(null);
+  const intakeRef = useRef<(paths: string[]) => void>(() => undefined);
   const automaticReviewKeysRef = useRef(new Set<string>());
   const scopeEntityGroups = visibleGroups.filter((group) =>
     group.tb && group.je && ledgerEntityKeyEnabled(
@@ -724,6 +734,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       const payload = event.result as { groups?: GroupOutcome[] } | undefined;
       if (payload?.groups) {
         setOutcomes(payload.groups);
+        setResultsStale(false);
         setCurrentStep(2);
       }
       const single = event.result as { outputPath?: string } | undefined;
@@ -732,19 +743,31 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       const batch = event.result as { outputDirectory?: string } | undefined;
       if (typeof batch?.outputDirectory === "string")
         setExported({ path: batch.outputDirectory, batch: true });
-      if (["completed", "failed", "cancelled"].includes(event.phase))
+      if (["completed", "failed", "cancelled"].includes(event.phase)) {
         setBusy(false);
+        setStatus("");
+      }
       if (event.phase === "failed") setError(event.message);
+      if (event.phase === "cancelled") {
+        // 取消是新的终态：上一轮失败留下的红色错误框就地清掉，只保留
+        // 取消横幅，避免旧失败信息跨轮残留（新任务各入口已另行清错）。
+        setError("");
+      }
     },
   });
 
   useEffect(() => {
     const drops = listenPositionedFileDrops(({ paths, x, y }) => {
       if (
-        !depositDropTargetInside(x, y, dropRef.current?.getBoundingClientRect())
+        !depositDropTargetInside(x, y, pageRef.current?.getBoundingClientRect())
       )
         return;
-      void intake(paths);
+      const rect = dropRef.current?.getBoundingClientRect();
+      if (rect && !depositDropTargetInside(x, y, rect)) return;
+      // 离开第一步后上传框会卸载；此时拖入文件应回到添加页继续处理，不能
+      // 像没有收到拖放一样静默失效。
+      if (!rect) setCurrentStep(0);
+      intakeRef.current(paths);
     });
     return () => {
       void drops.then((unlisten) => unlisten());
@@ -752,10 +775,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 历史记录「继续任务」：把存档里的 TB/JE 文件重新批量识别（自动配对），
-  // 完成后用存档映射覆盖建议映射。此前手动「不配对序时账」的组会被重新
-  // 自动配对，需要的话在配对页再清一次。run_batch 是组数组，单组导出的
-  // 存档把组字段放在顶层，两种形状都兼容。
+  // 历史记录「继续任务」：文件指纹有效时恢复识别与配对快照；旧任务、快照
+  // 超限或源文件变化时，才把 TB/JE 文件重新批量识别并自动配对。run_batch
+  // 是组数组，单组导出的存档把组字段放在顶层，两种形状都兼容。
   useTaskRestore(tool.id, (restore) => {
     type TbjeGroupParams = {
       tbSource?: { inputPath?: unknown; sheet?: unknown };
@@ -779,6 +801,44 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     setError("");
     setOutcomes([]);
     setExported(undefined);
+    const snapshot = restore.snapshot as
+      | { groups?: PairedGroup[]; inspects?: Record<string, Inspection> }
+      | null;
+    const cachedInspects = snapshot?.inspects;
+    const snapshotComplete =
+      restore.snapshotStatus === "valid" &&
+      Array.isArray(snapshot?.groups) &&
+      cachedInspects &&
+      [...paths].every((path) =>
+        Object.values(cachedInspects).some(
+          (inspection) =>
+            inspection &&
+            Array.isArray(inspection.headers) &&
+            typeof inspection.rowCount === "number" &&
+            snapshot.groups?.some(
+              (group) => group.tb?.path === path || group.je?.path === path,
+            ),
+        ),
+      );
+    if (snapshotComplete) {
+      setGroups(snapshot!.groups!);
+      setInspects(cachedInspects!);
+      setMappings((current) => {
+        const next = { ...current };
+        for (const group of groups) {
+          const tbPath = group?.tbSource?.inputPath;
+          if (typeof tbPath === "string" && group.tbMapping)
+            next[pairingFileKey({ path: tbPath, sheet: String(group.tbSource?.sheet ?? "") })] = group.tbMapping;
+          const jePath = group?.jeSource?.inputPath;
+          if (typeof jePath === "string" && group.jeMapping)
+            next[pairingFileKey({ path: jePath, sheet: String(group.jeSource?.sheet ?? "") })] = group.jeMapping;
+        }
+        return next;
+      });
+      setStatus("已从历史快照恢复源信息，请复核配对与映射后继续。");
+      setCurrentStep(1);
+      return;
+    }
     void (async () => {
       await intake([...paths]);
       setMappings((current) => {
@@ -833,6 +893,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
 
   /** 批量识别：每份文件判类型、读表头、给映射建议。配对不读文件内容。 */
   async function intake(selected: string[]) {
+    if (busy) return;
     const existingPaths = new Set(
       groups
         .flatMap((group) => [group.tb?.path, group.je?.path])
@@ -867,45 +928,86 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         (failure) => `${fileName(failure.path)}：${errorText(failure.error)}`,
       ),
     );
-    for (const item of classifiedSources) {
-      // 批量页不能把全批来源拿去做“两文件联合判型”；那会为了凑 TB/JE
-      // 数量而把明确的 04JE 辅助 Sheet 强行改成 TB。
-      const kind = item.classification.kind as LedgerKind;
-      const provisionalKey = pairingFileKey({
-        path: item.path,
-        sheet: item.classification.sheet,
-      });
-      // 重复选入只当“确认要这份”；已换标题行、改过映射的 Sheet 原样保留。
-      if (nextInspects[provisionalKey]) continue;
-      try {
-        const inspected = (await engineCall(
-          `fx.inspect_${kind}`,
-          {
-            source: {
-              inputPath: item.path,
-              sheet: item.classification.sheet,
-              headerRow: 0,
-              headerDepth: 0,
-            },
-          },
-          `${fileName(item.path)} / ${item.classification.sheet}`,
-        )) as Inspection;
-        const source: PairingFile = {
+    type InspectedSource = {
+      source: PairingFile;
+      inspection: Inspection;
+      mapping: Mapping;
+    };
+    const inspectedByIndex: Array<InspectedSource | undefined> = Array.from({
+      length: classifiedSources.length,
+    });
+    const inspectFailures: Array<string | undefined> = Array.from({
+      length: classifiedSources.length,
+    });
+    let inspectCursor = 0;
+    let inspectCompleted = 0;
+    const inspectWorker = async () => {
+      while (inspectCursor < classifiedSources.length) {
+        const index = inspectCursor++;
+        const item = classifiedSources[index];
+        const kind = item.classification.kind as LedgerKind;
+        const provisionalKey = pairingFileKey({
           path: item.path,
-          sheet: inspected.sheet,
-          kind,
-          entities: inspected.entities,
-        };
-        const key = pairingFileKey(source);
-        nextInspects[key] = inspected;
-        nextMappings[key] = inspected.suggestedMapping;
-        recognized.push(source);
-      } catch (e) {
-        failures.push(
-          `${fileName(item.path)} / ${item.classification.sheet}：${errorText(e)}`,
+          sheet: item.classification.sheet,
+        });
+        // 重复选入只当“确认要这份”；已换标题行、改过映射的 Sheet 原样保留。
+        if (nextInspects[provisionalKey]) {
+          inspectCompleted += 1;
+          setStatus(`正在读取 ${inspectCompleted} / ${classifiedSources.length} 个账表…`);
+          continue;
+        }
+        setStatus(
+          `正在读取 ${index + 1} / ${classifiedSources.length}：${fileName(item.path)} / ${item.classification.sheet}`,
         );
+        try {
+          const inspection = (await engineCall(
+            `fx.inspect_${kind}`,
+            {
+              source: {
+                inputPath: item.path,
+                sheet: item.classification.sheet,
+                headerRow: 0,
+                headerDepth: 0,
+              },
+            },
+            `${fileName(item.path)} / ${item.classification.sheet}`,
+          )) as Inspection;
+          inspectedByIndex[index] = {
+            source: {
+              path: item.path,
+              sheet: inspection.sheet,
+              kind,
+              entities: inspection.entities,
+            },
+            inspection,
+            mapping: inspection.suggestedMapping,
+          };
+        } catch (e) {
+          inspectFailures[index] =
+            `${fileName(item.path)} / ${item.classification.sheet}：${errorText(e)}`;
+        } finally {
+          inspectCompleted += 1;
+          setStatus(`正在读取 ${inspectCompleted} / ${classifiedSources.length} 个账表…`);
+        }
       }
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(2, classifiedSources.length) },
+        () => inspectWorker(),
+      ),
+    );
+    // 读取可以并行，合并仍按用户选入顺序，避免改变原配对优先级。
+    for (const inspected of inspectedByIndex) {
+      if (!inspected) continue;
+      const key = pairingFileKey(inspected.source);
+      nextInspects[key] = inspected.inspection;
+      nextMappings[key] = inspected.mapping;
+      recognized.push(inspected.source);
     }
+    failures.push(
+      ...inspectFailures.filter((message): message is string => Boolean(message)),
+    );
     // 二次添加不推翻已有配对：配好对的组（包括用户手工调整过的）原样保留，
     // 手工选过「不配对」的 TB 组也原样保留，只有「没配上 JE 的 TB」「没被
     // 认领的 JE」和新文件一起重新自动配对——分两批拖入仍能配上，但用户确认
@@ -944,15 +1046,17 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     );
     setLlmReviewStatus("");
     if (displayedGroups.length > 0) setCurrentStep(1);
+    if (failures.length) setError(failures.join("\n"));
     setStatus(
       failures.length
-        ? `${failures.length} 个来源没读成：${failures[0]}`
+        ? `已识别其余可用来源；${failures.length} 个来源失败，请展开上方错误查看。`
         : hiddenSheets
           ? `已识别可用账表；${hiddenSheets} 张低置信度工作表未显示。`
           : "",
     );
     setBusy(false);
   }
+  intakeRef.current = (paths) => void intake(paths);
 
   /** 换一个 sheet 重读：识别默认挑内容最多的表，但审计师加工过的副本
    *  可能与原始导出并存——最终读哪张由用户说了算。 */
@@ -1163,10 +1267,15 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   );
 
   const runnable = visibleGroups.filter((group) => Boolean(group.tb));
-  function invalidateResults(clearLlm = true) {
+  function invalidateResults(clearLlm = true, discard = false) {
     activeJobId.current = "__inputs_changed__";
-    setOutcomes([]);
-    setDetail(undefined);
+    if (discard) {
+      setOutcomes([]);
+      setDetail(undefined);
+      setResultsStale(false);
+    } else if (outcomes.length) {
+      setResultsStale(true);
+    }
     setExported(undefined);
     setJob(undefined);
     if (clearLlm) {
@@ -1226,7 +1335,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     clearedTbsRef.current.clear();
     setStatus("");
     setCurrentStep(0);
-    invalidateResults();
+    invalidateResults(true, true);
   }
 
   function selectJe(groupId: string, sourceId?: string) {
@@ -1286,10 +1395,15 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       return targets.tb || targets.je;
     });
     if (!candidates.length || llmReviewBusy) return;
-    invalidateResults(false);
     setError("");
     if (!background) setBusy(true);
     setLlmReviewBusy(true);
+    // 复核期间先移除本轮旧建议，避免用户采纳旧建议后被稍晚返回的新结果覆盖。
+    setLlmReviews((current) => {
+      const next = { ...current };
+      for (const group of candidates) delete next[group.id];
+      return next;
+    });
     setLlmReviewStatus(`正在联合复核 0 / ${candidates.length} 组…`);
     let cursor = 0;
     let completed = 0;
@@ -1303,14 +1417,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         );
         if (Object.values(result).some((item) => item?.failed)) failed += 1;
         setLlmReviews((current) => ({ ...current, [group.id]: result }));
-        setMappings((current) => {
-          const next = { ...current };
-          if (group.tb && result.tb && !result.tb.failed)
-            next[pairingFileKey(group.tb)] = result.tb.mapping;
-          if (group.je && result.je && !result.je.failed)
-            next[pairingFileKey(group.je)] = result.je.mapping;
-          return next;
-        });
+        // 自动复核只登记建议；映射只在用户逐条点击“采纳”后变化。
         completed += 1;
         setLlmReviewStatus(
           `正在联合复核 ${completed} / ${candidates.length} 组…`,
@@ -1333,7 +1440,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   }
 
   // 上传识别和自动配对全部收口后，默认执行一次字段映射联合复核。
-  // key 只包含来源身份，LLM 回写 mappings 不会反过来触发第二轮。
+  // key 只包含来源身份；自动复核只生成建议，不回写 mappings。
   const completeAutomaticReviewKeys =
     tbjeCompleteAutomaticReviewKeys(visibleGroups);
   const automaticReviewKey = completeAutomaticReviewKeys.length
@@ -1360,12 +1467,21 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     const outcome = llmReviews[group.id]?.[kind];
     const change = outcome?.applied[index];
     if (!file || !outcome || !change) return;
-    const mapping = { ...outcome.mapping };
-    if (change.beforeValue === undefined) delete mapping[change.role];
-    else
-      mapping[change.role] = Array.isArray(change.beforeValue)
-        ? [...change.beforeValue]
-        : change.beforeValue;
+    const mapping = change.beforeMapping
+      ? Object.fromEntries(
+          Object.entries(change.beforeMapping).map(([role, value]) => [
+            role,
+            Array.isArray(value) ? [...value] : value,
+          ]),
+        )
+      : { ...outcome.mapping };
+    if (!change.beforeMapping) {
+      if (change.beforeValue === undefined) delete mapping[change.role];
+      else
+        mapping[change.role] = Array.isArray(change.beforeValue)
+          ? [...change.beforeValue]
+          : change.beforeValue;
+    }
     const applied = outcome.applied.filter((_, at) => at !== index);
     setMappings((current) => ({
       ...current,
@@ -1390,28 +1506,27 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     const outcome = llmReviews[group.id]?.[kind];
     const change = outcome?.pending[index];
     if (!file || !outcome || !change) return;
-    const mapping = { ...outcome.mapping };
-    const beforeValue = mapping[change.role];
-    if (change.action === "clear") delete mapping[change.role];
-    else
-      mapping[change.role] = MULTI_COLUMN_ROLES.has(change.role)
-        ? [
-            ...new Set([
-              ...(Array.isArray(beforeValue)
-                ? beforeValue
-                : beforeValue
-                  ? [beforeValue]
-                  : []),
-              change.suggestedColumn,
-            ]),
-          ]
-        : change.suggestedColumn;
+    const inspected = inspects[pairingFileKey(file)];
+    const beforeValue = outcome.mapping[change.role];
+    const mapping = applyLedgerPendingChange(
+      inspected?.headers ?? [],
+      inspected?.preview ?? [],
+      outcome.mapping,
+      change,
+      MULTI_COLUMN_ROLES,
+    );
     const pending = outcome.pending.filter((_, at) => at !== index);
     const applied = [
       ...outcome.applied,
-      {
-        ...change,
-        beforeValue: Array.isArray(beforeValue)
+        {
+          ...change,
+          beforeMapping: Object.fromEntries(
+            Object.entries(outcome.mapping).map(([role, value]) => [
+              role,
+              Array.isArray(value) ? [...value] : value,
+            ]),
+          ),
+          beforeValue: Array.isArray(beforeValue)
           ? [...beforeValue]
           : beforeValue,
         currentColumn: Array.isArray(beforeValue)
@@ -1463,90 +1578,52 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       params.jeSource = je;
       params.jeMapping = mappings[pairingFileKey(group.je!)] ?? {};
       const auxiliary = auxLinks[group.id];
-      // 第二步已经完整认定的组才下发复用；混合/失败状态交给
-      // Rust 按原路径重扫，保留逐组警告与降级语义。
-      if (auxiliary?.planKey && auxiliary.status === "verified") {
-        params.auxiliaryPlan = {
-          planKey: auxiliary.planKey,
-          groups: (auxiliary.groups ?? []).map((item) => ({
-            entity: item.entity,
-            account: item.account,
-            tbColumn: item.tbColumn,
-            jeColumn: item.column,
-            anchorHits: item.anchorHits,
-            anchorTotal: item.anchorTotal,
-          })),
-        };
-      }
+      attachAuxiliaryPlan(params, auxiliary);
     }
     return params;
   }
 
-  // 逐组联动验证的触发键只认「配对组成＋各组数据源」：本工具的映射面板
-  // 不提供辅助核算角色，其余角色的映射调整不改变联动结论，不再触发逐组
-  // 整表重读——与汇兑损益、存款利息同一口径。
-  const auxLinkSourceOf = (file?: PairingFile) => {
-    if (!file) return null;
-    const inspected = inspects[pairingFileKey(file)];
-    return [
-      file.path,
-      inspected?.sheet ?? "",
-      inspected?.headerRow ?? 0,
-      inspected?.headerDepth ?? 0,
-    ];
-  };
-  const auxLinksKey = JSON.stringify(
-    groups
-      .filter((group) => group.tb && group.je)
-      .map((group) => [
-        group.id,
-        auxLinkSourceOf(group.tb),
-        auxLinkSourceOf(group.je),
-        group.tb ? mappings[pairingFileKey(group.tb)]?.auxiliary ?? null : null,
-        group.je ? mappings[pairingFileKey(group.je)]?.auxiliary ?? null : null,
-      ]),
-  );
-  useEffect(() => {
-    let cancelled = false;
-    const paired = groups.filter((group) => group.tb && group.je);
-    if (!paired.length) {
-      setAuxLinks({});
-      return;
-    }
-    setAuxLinks({});
-    void (async () => {
-      const next: Record<string, AuxiliaryLinkResult | null> = {};
-      for (const group of paired) {
-        next[group.id] = await verifyAuxiliaryLink(paramsOf(group));
-      }
-      if (!cancelled) {
-        setAuxLinks(next);
-        setMappings((current) => {
-          let changed = false;
-          const updated = { ...current };
-          for (const group of paired) {
-            if (!group.tb) continue;
-            const key = pairingFileKey(group.tb);
-            const mapping = current[key];
-            if (!mapping) continue;
-            const cleaned = dropUnlinkedTbAuxiliary(mapping, next[group.id]);
-            if (cleaned !== mapping) {
-              updated[key] = cleaned;
-              changed = true;
-            }
-          }
-          return changed ? updated : current;
-        });
-      }
-    })();
-    return () => {
-      cancelled = true;
+  function attachAuxiliaryPlan(
+    params: Record<string, unknown>,
+    auxiliary: AuxiliaryLinkResult | null | undefined,
+  ) {
+    delete params.auxiliaryPlan;
+    // 映射阶段已完整认定的组才下发复用；混合/失败状态交给 Rust
+    // 按原路径处理，保留逐组警告与降级语义。
+    if (!auxiliary?.planKey || auxiliary.status !== "verified") return;
+    params.auxiliaryPlan = {
+      planKey: auxiliary.planKey,
+      groups: (auxiliary.groups ?? []).map((item) => ({
+        entity: item.entity,
+        account: item.account,
+        tbColumn: item.tbColumn,
+        jeColumn: item.column,
+        anchorHits: item.anchorHits,
+        anchorTotal: item.anchorTotal,
+      })),
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auxLinksKey]);
+  }
+
+  function restoreSnapshotParam() {
+    return {
+      version: 1,
+      sources: [
+        ...new Set(
+          groups
+            .flatMap((group) => [group.tb?.path, group.je?.path])
+            .filter((path): path is string => Boolean(path)),
+        ),
+      ],
+      data: { groups, inspects },
+    };
+  }
 
   /** 导出某一组的差异明细。逐组导——十组的明细塞一个工作簿没法看。 */
   async function exportGroup(label: string) {
+    if (resultsStale) {
+      setError("当前结果对应修改前的输入，请先重新核对再导出。");
+      return;
+    }
     const group = runnable.find((item) => item.label === label);
     if (!group?.tb) return;
     const suggested = group.tb.path.replace(/\.[^.\/]+$/, `_完整性核对.xlsx`);
@@ -1563,6 +1640,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       const id = await jobStart("tbje_check.export", {
         ...paramsOf(group),
         outputPath: picked,
+        __restoreSnapshot: restoreSnapshotParam(),
       });
       activeJobId.current = id;
       setJob({
@@ -1579,6 +1657,10 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
 
   /** 一次选目录，把所有成功核对的组分别导出为完整工作簿。 */
   async function exportAll() {
+    if (resultsStale) {
+      setError("当前结果对应修改前的输入，请先重新核对再导出。");
+      return;
+    }
     const successful = runnable.filter((group) =>
       outcomes.some((outcome) => outcome.label === group.label && outcome.ok),
     );
@@ -1592,6 +1674,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       const id = await jobStart("tbje_check.export_batch", {
         groups: successful.map(paramsOf),
         outputDirectory: picked,
+        __restoreSnapshot: restoreSnapshotParam(),
       });
       activeJobId.current = id;
       setJob({
@@ -1609,57 +1692,120 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   async function runAll() {
     if (!runnable.length) return;
     setError("");
-    setOutcomes([]);
+    // 新结果成功返回前保留上一版，预检或任务失败时仍可回看原结果。
+    if (outcomes.length) setResultsStale(true);
     setBusy(true);
     try {
-      const alignedGroups: Record<string, unknown>[] = [];
+      const alignedByIndex: Array<Record<string, unknown> | undefined> =
+        Array.from({ length: runnable.length });
       const correctedMappings: Record<string, Mapping> = {};
       const alignmentWarnings: string[] = [];
       // 对齐失败的组要指名道姓地报出来，并且只跳过该组——
       // 其余组照常核对，不能一组映射问题拖住整批。
       const alignmentFailures: string[] = [];
-      for (const group of runnable) {
-        const groupParams = paramsOf(group);
-        if (group.je) {
-          const alignment = (await engineCall(
-            "ledger.check_mapping_alignment",
-            groupParams,
-            `「${group.label}」组`,
-          )) as {
-            aligned?: boolean;
-            errors?: string[];
-            warnings?: string[];
-            fix?: {
-              jeMapping?: Mapping;
-              tbMapping?: Mapping;
-            };
-          };
-          if (alignment.aligned === false) {
+      let alignmentCursor = 0;
+      let alignmentCompleted = 0;
+      setStatus(`正在对齐 0 / ${runnable.length} 组…`);
+      const alignWorker = async () => {
+        while (alignmentCursor < runnable.length) {
+          const index = alignmentCursor++;
+          const group = runnable[index];
+          const groupParams = paramsOf(group);
+          try {
+            if (group.je) {
+              const alignment = (await engineCall(
+                "ledger.check_mapping_alignment",
+                groupParams,
+                `「${group.label}」组`,
+              )) as {
+                aligned?: boolean;
+                errors?: string[];
+                warnings?: string[];
+                fix?: {
+                  jeMapping?: Mapping;
+                  tbMapping?: Mapping;
+                };
+              };
+              if (alignment.aligned === false) {
+                alignmentFailures.push(
+                  `「${group.label}」组（${group.tb ? fileName(group.tb.path) : "无余额表"} × ${fileName(group.je.path)}）：${alignment.errors?.join("；") || "TB与JE的科目字段无法对齐。"}`,
+                );
+                continue;
+              }
+              if (alignment.fix?.tbMapping && group.tb) {
+                groupParams.tbMapping = {
+                  ...(groupParams.tbMapping as Mapping),
+                  ...alignment.fix.tbMapping,
+                };
+                correctedMappings[pairingFileKey(group.tb)] =
+                  groupParams.tbMapping as Mapping;
+              }
+              if (alignment.fix?.jeMapping) {
+                groupParams.jeMapping = {
+                  ...(groupParams.jeMapping as Mapping),
+                  ...alignment.fix.jeMapping,
+                };
+                correctedMappings[pairingFileKey(group.je)] =
+                  groupParams.jeMapping as Mapping;
+              }
+              alignmentWarnings.push(...(alignment.warnings ?? []));
+            }
+            alignedByIndex[index] = groupParams;
+          } catch (alignmentError) {
             alignmentFailures.push(
-              `「${group.label}」组（${group.tb ? fileName(group.tb.path) : "无余额表"} × ${fileName(group.je.path)}）：${alignment.errors?.join("；") || "TB与JE的科目字段无法对齐。"}`,
+              `「${group.label}」组（${group.tb ? fileName(group.tb.path) : "无余额表"}${group.je ? ` × ${fileName(group.je.path)}` : ""}）：${errorText(alignmentError)}`,
             );
-            continue;
+          } finally {
+            alignmentCompleted += 1;
+            setStatus(`正在对齐 ${alignmentCompleted} / ${runnable.length} 组…`);
           }
-          if (alignment.fix?.tbMapping && group.tb) {
-            groupParams.tbMapping = {
-              ...(groupParams.tbMapping as Mapping),
-              ...alignment.fix.tbMapping,
-            };
-            correctedMappings[pairingFileKey(group.tb)] =
-              groupParams.tbMapping as Mapping;
-          }
-          if (alignment.fix?.jeMapping) {
-            groupParams.jeMapping = {
-              ...(groupParams.jeMapping as Mapping),
-              ...alignment.fix.jeMapping,
-            };
-            correctedMappings[pairingFileKey(group.je)] =
-              groupParams.jeMapping as Mapping;
-          }
-          alignmentWarnings.push(...(alignment.warnings ?? []));
         }
-        alignedGroups.push(groupParams);
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(2, runnable.length) }, () => alignWorker()),
+      );
+      // 辅助核算验证是字段映射确认的一部分：只在用户点击“开始核对”后
+      // 执行，不在页面停留或业务筛选变化时后台扫描 JE。验证范围覆盖
+      // 当前组全部 TB 主体×科目，后续正式核对只复用认定列。
+      const auxiliaryNext: Record<string, AuxiliaryLinkResult | null> = {};
+      const auxiliaryIndexes = alignedByIndex
+        .map((params, index) => ({ params, index }))
+        .filter((item) => Boolean(item.params && runnable[item.index]?.je));
+      let auxiliaryCursor = 0;
+      let auxiliaryCompleted = 0;
+      if (auxiliaryIndexes.length) {
+        setStatus(`正在验证辅助字段 0 / ${auxiliaryIndexes.length} 组…`);
+        const auxiliaryWorker = async () => {
+          while (auxiliaryCursor < auxiliaryIndexes.length) {
+            const { params, index } = auxiliaryIndexes[auxiliaryCursor++];
+            const group = runnable[index];
+            const groupParams = params!;
+            const result = await verifyAuxiliaryLink(groupParams);
+            auxiliaryNext[group.id] = result;
+            const tbMapping = groupParams.tbMapping as Mapping;
+            const cleaned = dropUnlinkedTbAuxiliary(tbMapping, result);
+            if (cleaned !== tbMapping && group.tb) {
+              groupParams.tbMapping = cleaned;
+              correctedMappings[pairingFileKey(group.tb)] = cleaned;
+            }
+            attachAuxiliaryPlan(groupParams, result);
+            auxiliaryCompleted += 1;
+            setStatus(
+              `正在验证辅助字段 ${auxiliaryCompleted} / ${auxiliaryIndexes.length} 组…`,
+            );
+          }
+        };
+        await Promise.all(
+          Array.from(
+            { length: Math.min(2, auxiliaryIndexes.length) },
+            () => auxiliaryWorker(),
+          ),
+        );
       }
+      setAuxLinks(auxiliaryNext);
+      const alignedGroups = alignedByIndex.filter(
+        (group): group is Record<string, unknown> => Boolean(group),
+      );
       if (Object.keys(correctedMappings).length) {
         setMappings((current) => ({ ...current, ...correctedMappings }));
       }
@@ -1668,15 +1814,25 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
           `有 ${alignmentFailures.length} 组因科目字段无法对齐已跳过，其余组继续核对：\n${alignmentFailures.join("\n")}`,
         );
       }
-      if (alignmentWarnings.length) setStatus(alignmentWarnings[0]);
+      if (alignmentWarnings.length)
+        setStatus(
+          `${alignmentWarnings.length} 条对齐提示：${alignmentWarnings[0]}`,
+        );
+      else
+        setStatus(
+          `已完成 ${runnable.length} 组映射对齐${auxiliaryIndexes.length ? "与辅助字段验证" : ""}，正在启动核对…`,
+        );
       if (!alignedGroups.length) {
+        setStatus("");
         setBusy(false);
         return;
       }
       const id = await jobStart("tbje_check.run_batch", {
         groups: alignedGroups,
+        __restoreSnapshot: restoreSnapshotParam(),
       });
       activeJobId.current = id;
+      setStatus("");
       setJob({
         jobId: id,
         toolId: "tbje_check",
@@ -1685,22 +1841,32 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       } as never);
     } catch (e) {
       setError(errorText(e));
+      setStatus("");
       setBusy(false);
     }
   }
 
-  const resultReviewCount = outcomes.filter(
+  const outcomeNeedsReview = (outcome: GroupOutcome) =>
+    !outcome.ok ||
+    [
+      outcome.result?.rollforward,
+      outcome.result?.tbVsJe,
+      outcome.result?.equation,
+    ].some((verdict) => !verdict?.performed || verdict.passed !== true);
+  const resultReviewCount = outcomes.filter(outcomeNeedsReview).length;
+  const resultKeyword = resultQuery.trim().toLocaleLowerCase("zh-CN");
+  const displayedOutcomes = outcomes.filter(
     (outcome) =>
-      !outcome.ok ||
-      [
-        outcome.result?.rollforward,
-        outcome.result?.tbVsJe,
-        outcome.result?.equation,
-      ].some((verdict) => !verdict?.performed || verdict.passed !== true),
-  ).length;
+      (!onlyReviewResults || outcomeNeedsReview(outcome)) &&
+      (!resultKeyword ||
+        outcome.label.toLocaleLowerCase("zh-CN").includes(resultKeyword) ||
+        JSON.stringify(outcome.result ?? outcome.error)
+          .toLocaleLowerCase("zh-CN")
+          .includes(resultKeyword)),
+  );
 
   return (
-    <main className="tool-page fx-page tbje-page">
+    <main ref={pageRef} className="tool-page fx-page tbje-page">
       <PageHeader
         eyebrow="账套完整性"
         title={tool.name}
@@ -1724,7 +1890,11 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         onStepClick={goToStep}
       />
 
-      {error && <ErrorBox error={error} onDismiss={() => setError("")} />}
+      {error && !(job?.phase === "failed" && job.message === error) && (
+        // 错误来自当前任务的失败事件时，下方 JobProgress 横幅已原样展示
+        // 同一条消息，顶部错误框不再重复渲染；其余来源的错误照常显示。
+        <ErrorBox error={error} onDismiss={() => setError("")} />
+      )}
       {job && (
         <JobProgress
           job={job}
@@ -1754,7 +1924,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 <FileDropInput
                   value=""
                   placeholder="把多组 TB 与 JE 一起拖进来，或点击选择"
-                  disabled={busy}
+                  disabled={busy || llmReviewBusy}
                   onBrowse={() => void browse()}
                   onDragStateChange={setDropActive}
                   highlight={dropActive}
@@ -1764,19 +1934,32 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 <Button
                   type="button"
                   variant="secondary"
-                  disabled={busy}
+                  disabled={busy || llmReviewBusy}
                   onClick={() => void pickManualSource("tb")}
                 >
                   <Plus aria-hidden="true" />
-                  手动添加配对组
+                  手动添加 TB 组
                 </Button>
               </div>
               {visibleGroups.length === 0 && (
-                <EmptyState
-                  compact
-                  title="准备核对资料"
-                  description="加入至少一份科目余额表（TB）；如需发生额勾稽，再加入对应的序时账（JE）。支持一次拖入多组文件。"
-                />
+                <>
+                  <EmptyState
+                    compact
+                    title="准备核对资料"
+                    description="加入至少一份科目余额表（TB）；如需发生额勾稽，再加入对应的序时账（JE）。支持一次拖入多组文件。"
+                  />
+                  {/* 空态也保留与配对页一致的底部主操作栏：禁用占位告诉用户
+                      下一步去哪，不至于面对空白表单无从下手。 */}
+                  <div className="tbje-actions">
+                    <Button
+                      type="button"
+                      disabled
+                      title="先添加科目余额表（TB）与序时账（JE），再进入配对确认。"
+                    >
+                      下一步：确认配对
+                    </Button>
+                  </div>
+                </>
               )}
               {status && (
                 <p className="tbje-status" role="status" aria-live="polite">
@@ -1817,16 +2000,16 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 <Button
                   type="button"
                   variant="secondary"
-                  disabled={busy}
+                  disabled={busy || llmReviewBusy}
                   onClick={() => void pickManualSource("tb")}
                 >
                   <Plus aria-hidden="true" />
-                  手动添加配对组
+                  手动添加 TB 组
                 </Button>
                 <Button
                   type="button"
                   variant="secondary"
-                  disabled={busy || !visibleGroups.length}
+                  disabled={busy || llmReviewBusy || !visibleGroups.length}
                   onClick={() => void reviewAllGroups()}
                 >
                   {llmReviewBusy
@@ -1836,7 +2019,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 <Button
                   type="button"
                   variant="ghost"
-                  disabled={busy || !visibleGroups.length}
+                  disabled={busy || llmReviewBusy || !visibleGroups.length}
                   className="tbje-remove-all"
                   onClick={removeAllGroups}
                 >
@@ -1846,6 +2029,11 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 {llmReviewStatus && (
                   <span className="tbje-llm-status" aria-live="polite">
                     {llmReviewStatus}
+                  </span>
+                )}
+                {currentStep === 1 && status && (
+                  <span className="tbje-llm-status" role="status" aria-live="polite">
+                    {status}
                   </span>
                 )}
               </div>
@@ -1890,7 +2078,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                 ? `${group.tb.path}（点击更换）`
                                 : "选择 TB Excel"
                             }
-                            disabled={busy}
+                            disabled={busy || llmReviewBusy}
                             onClick={() => void pickManualSource("tb", group.id)}
                           >
                             {group.tb ? fileName(group.tb.path) : "选择 TB Excel"}
@@ -1908,7 +2096,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                   <select
                                     aria-label="余额表使用的工作表"
                                     value={inspected.sheet}
-                                    disabled={busy || sheets.length === 1}
+                                    disabled={busy || llmReviewBusy || sheets.length === 1}
                                     onChange={(event) =>
                                       void switchSheet(
                                         group.tb!,
@@ -1991,7 +2179,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                 ? `${group.je.path}（点击更换）`
                                 : "选择 JE Excel"
                             }
-                            disabled={busy}
+                            disabled={busy || llmReviewBusy}
                             onClick={() => void pickManualSource("je", group.id)}
                           >
                             {group.je ? fileName(group.je.path) : "选择 JE Excel"}
@@ -2002,7 +2190,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                           title={group.je?.path}
                           aria-label={`为第 ${group.label} 组选择序时账`}
                           value={group.je ? pairingFileKey(group.je) : ""}
-                          disabled={busy}
+                          disabled={busy || llmReviewBusy}
                           onChange={(event) =>
                             selectJe(
                               group.id,
@@ -2032,7 +2220,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                   <select
                                     aria-label="序时账使用的工作表"
                                     value={inspected.sheet}
-                                    disabled={busy || sheets.length === 1}
+                                    disabled={busy || llmReviewBusy || sheets.length === 1}
                                     onChange={(event) =>
                                       void switchSheet(
                                         group.je!,
@@ -2108,7 +2296,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                           type="button"
                           variant="ghost"
                           size="sm"
-                          disabled={busy}
+                          disabled={busy || llmReviewBusy}
                           className="tbje-remove-group"
                           onClick={() => removeGroup(group)}
                         >
@@ -2183,7 +2371,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                               mapping={
                                 (mappings[pairingFileKey(file)] ?? {}) as MappingDict
                               }
-                              disabled={busy}
+                              disabled={busy || llmReviewBusy}
                               onHeaderChange={(row, depth) =>
                                 void switchSheet(
                                   file,
@@ -2220,7 +2408,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
               <div className="tbje-actions">
                 <Button
                   type="button"
-                  disabled={busy || !runnable.length}
+                  disabled={busy || llmReviewBusy || !runnable.length}
                   onClick={() => void runAll()}
                 >
                   开始核对 {runnable.length} 组
@@ -2246,6 +2434,29 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
               </CardTitle>
             </CardHeader>
             <CardContent>
+              {resultsStale && (
+                <div className="tbje-results-stale" role="alert">
+                  <strong>结果待重算</strong>
+                  <span>输入、配对或映射已经变化；下面保留的是修改前结果，重新核对前不可导出。</span>
+                </div>
+              )}
+              <div className="tbje-result-filters" role="search" aria-label="筛选核对结果">
+                <Input
+                  value={resultQuery}
+                  onChange={(event) => setResultQuery(event.target.value)}
+                  placeholder="搜索组名、科目或异常内容…"
+                  aria-label="搜索核对结果"
+                />
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={onlyReviewResults}
+                    onChange={(event) => setOnlyReviewResults(event.target.checked)}
+                  />
+                  只看需复核
+                </label>
+                <span className="fx-hint">显示 {displayedOutcomes.length} / {outcomes.length} 组</span>
+              </div>
               <div className="tbje-result-toolbar">
                 <div className="tbje-result-overview" role="status">
                   <Badge
@@ -2267,14 +2478,17 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 <Button
                   type="button"
                   variant="outline"
-                  disabled={busy || !outcomes.some((outcome) => outcome.ok)}
+                  disabled={
+                    busy || resultsStale || !outcomes.some((outcome) => outcome.ok)
+                  }
                   onClick={() => void exportAll()}
                 >
                   <Download aria-hidden="true" />
                   导出全部结果
                 </Button>
               </div>
-              <div className="tbje-result-table-wrap">
+              <p className="tbje-result-scroll-hint">结果表可左右滚动，查看其余核对列；操作列保持可见。</p>
+              <div className="tbje-result-table-wrap" role="region" aria-label="核对结果表，可横向滚动" tabIndex={0}>
                 <Table className="tbje-result-table">
                   <caption className="sr-only">TB/JE 完整性核对结果</caption>
                   <colgroup>
@@ -2296,7 +2510,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {outcomes.map((outcome) => (
+                    {displayedOutcomes.map((outcome) => (
                       <Fragment key={outcome.label}>
                         <TableRow>
                           <TableCell className="tbje-group-result">
@@ -2390,6 +2604,24 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                   <Download aria-hidden="true" />
                                   导出明细
                                 </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => {
+                                    const group = visibleGroups.find(
+                                      (item) => item.label === outcome.label,
+                                    );
+                                    if (!group) return;
+                                    setCurrentStep(1);
+                                    setExpanded({
+                                      groupId: group.id,
+                                      kind: group.tb ? "tb" : "je",
+                                    });
+                                  }}
+                                >
+                                  检查映射
+                                </Button>
                               </div>
                             )}
                           </TableCell>
@@ -2402,7 +2634,10 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                 id={`tbje-result-detail-${outcome.label}`}
                                 colSpan={5}
                               >
-                                <OutcomeDetail result={outcome.result} />
+                                <OutcomeDetail
+                                  result={outcome.result}
+                                  query={resultQuery}
+                                />
                               </TableCell>
                             </TableRow>
                           )}

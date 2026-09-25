@@ -254,6 +254,7 @@ export type FaLlmPlanInput = {
   autoApplied?: FaLlmSuggestionLike[];
   fieldReviews?: FaLlmSuggestionLike[];
   matchReview?: FaMatchReviewLike;
+  autoApply?: boolean;
   roleLabels: Record<string, string>;
 };
 export type FaLlmPlan = {
@@ -326,6 +327,7 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
     const before = mappings[side][key];
     if (faValueText(before) === faValueText(column)) return;
     if (
+      input.autoApply !== false &&
       shouldAutoApplyFa(item.confidence) &&
       (item.action !== "clear" || item.autoClearSafe === true)
     ) {
@@ -384,7 +386,10 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
       faValueText(endKeys) !== faValueText(suggestedEnd));
   if (matchChanged && !isVisibleLlmReviewConfidence(match?.confidence)) {
     // 低于 60% 的匹配键猜测不展示，也不应用。
-  } else if (matchChanged && !shouldAutoApplyFa(match?.confidence)) {
+  } else if (
+    matchChanged &&
+    (input.autoApply === false || !shouldAutoApplyFa(match?.confidence))
+  ) {
     pending.push({
       id: "matchKeys",
       label: "匹配 ID",
@@ -460,6 +465,7 @@ export type FaSupplementPlanInput = {
   autoApplied?: FaLlmSuggestionLike[];
   fieldReviews?: FaLlmSuggestionLike[];
   matchReview?: FaMatchReviewLike;
+  autoApply?: boolean;
 };
 export type FaSupplementPlan = {
   addition: FaSupplementSideState;
@@ -522,6 +528,7 @@ export function planFaSupplementChanges(
     const before = sides[spec.target][spec.key];
     if (faValueText(before) === faValueText(column)) return;
     if (
+      input.autoApply !== false &&
       shouldAutoApplyFa(item.confidence) &&
       (item.action !== "clear" || item.autoClearSafe === true)
     ) {

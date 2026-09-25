@@ -2974,19 +2974,19 @@ impl Tool {
     /// 分列二选一」由形态槽（[`resolve_form`]）把关，平铺列表表达不了这种或然。
     pub(crate) fn required(self, kind: &str) -> &'static [&'static str] {
         match (self, kind) {
-            (Tool::FxAudit, "je") => &["date", "id", "accountCode", "currency"],
-            (Tool::FxAudit, _) => &["accountCode"],
-            (Tool::DepositInterest, "je") => &["date", "accountCode"],
-            (Tool::DepositInterest, _) => &["accountCode"],
-            (Tool::LoanInterest, "je") => &["date", "accountCode"],
-            (Tool::LoanInterest, _) => &["accountCode"],
-            (Tool::Ledger, "je") => &["id", "accountCode"],
-            (Tool::Ledger, _) => &["accountCode"],
+            (Tool::FxAudit, "je") => &["date", "id", "currency"],
+            (Tool::FxAudit, _) => &[],
+            (Tool::DepositInterest, "je") => &["date"],
+            (Tool::DepositInterest, _) => &[],
+            (Tool::LoanInterest, "je") => &["date"],
+            (Tool::LoanInterest, _) => &[],
+            (Tool::Ledger, "je") => &["id"],
+            (Tool::Ledger, _) => &[],
             // 固定资产底稿自己的必填：TB 要科目＋期初＋期末，JE 要凭证号＋日期＋
             // 科目＋金额方案——除科目（金标身份槽）与凭证号／日期外，余额与金额
             // 方案都交给形态槽，与 fa_tbje 原 `validate_required` 的口径一致。
-            (Tool::FaTbje, "je") => &["date", "id", "accountCode"],
-            (Tool::FaTbje, _) => &["accountCode"],
+            (Tool::FaTbje, "je") => &["date", "id"],
+            (Tool::FaTbje, _) => &[],
         }
     }
 
@@ -2997,7 +2997,7 @@ impl Tool {
     }
 }
 
-/// 金标（`TB-4800.xlsx` 的 `je种类` / `tb种类` 两张表）要求的身份字段。
+/// 公共账表身份字段。
 ///
 /// 与形态无关——同一张表的所有型号要求同一组身份字段，所以不放进 [`Form`]。
 /// `entity` 是可选：金标 2026-08-24 修订时把它从 required 降为可选，
@@ -3007,11 +3007,7 @@ pub(crate) fn identity_required(kind: &str) -> &'static [&'static str] {
     if kind == "loan" {
         return &[];
     }
-    if kind == "je" {
-        &["date", "id", "accountCode", "accountName", "summary"]
-    } else {
-        &["accountCode", "accountName"]
-    }
+    if kind == "je" { &["date", "id"] } else { &[] }
 }
 
 /// 一条缺失的必填项，带上**是谁在要求**。
@@ -3031,6 +3027,19 @@ pub(crate) struct MissingRole {
 /// 同一个角色被两边都要求时只报一条，且标为金标——它是更底层的要求。
 pub(crate) fn missing_required(tool: Tool, kind: &str, mapped: &HashSet<&str>) -> Vec<MissingRole> {
     let mut out: Vec<MissingRole> = Vec::new();
+    // 科目身份是公共「任一」槽：编码与名称任一到位即可。编码存在时下游
+    // 匹配策略仍优先编码；缺编码时才启用既有的双侧名称验证。摘要是可选
+    // 信息，不进入运行门槛。
+    if matches!(kind, "tb" | "je")
+        && !mapped.contains("accountCode")
+        && !mapped.contains("accountName")
+    {
+        out.push(MissingRole {
+            role: "accountIdentity",
+            label: "科目编码／科目名称（任一）",
+            from_gold: true,
+        });
+    }
     let mut push = |role: &'static str, from_gold: bool| {
         if mapped.contains(role) || out.iter().any(|m| m.role == role) {
             return;
@@ -3159,10 +3168,20 @@ pub(crate) fn signed_balance(
     convention: SignConvention,
     self_signed: bool,
 ) -> f64 {
-    if !self_signed || v.debit.is_some() || v.credit.is_some() {
+    if v.debit.is_some() || v.credit.is_some() {
         return signed_amount(v, convention);
     }
-    v.amount.unwrap_or(0.0)
+    if self_signed {
+        return v.amount.unwrap_or(0.0);
+    }
+    // `self_signed = false` 已经是余额列级证据：这一列是“绝对值＋方向”，
+    // 它的方向不能再被全表发生额投票得到的 `Signed` 口径覆盖。否则
+    // TB 发生额已带符号、余额却仍是正数配“贷”方向时，负债余额会被
+    // 误读为借方正数，滚动勾稽刚好差两倍。
+    if v.direction.as_deref().is_some_and(|d| !d.trim().is_empty()) {
+        return signed_amount(v, SignConvention::Unsigned);
+    }
+    signed_amount(v, convention)
 }
 
 /// 按借贷**两侧**拆开的取数：`(借方, 贷方)`，各自保留正负。
@@ -7741,7 +7760,19 @@ const ACCOUNT_NAME_KEY_PREFIX: char = '\u{1d}';
 /// 本期真实收入/费用发生方向。
 pub(crate) fn is_profit_transfer_account(account: &str) -> bool {
     let normalized = normalize_name(account);
-    normalized.contains("本年利润") || normalized.contains("未分配利润")
+    [
+        "本年利润",
+        "本年利潤",
+        "本年损益",
+        "本年損益",
+        "未分配利润",
+        "未分配利潤",
+        "incomesummary",
+        "plclosing",
+        "retainedearnings",
+    ]
+    .iter()
+    .any(|term| normalized.contains(term))
 }
 
 // ---------------------------------------------------------------------------
@@ -9312,6 +9343,36 @@ mod tests {
     }
 
     #[test]
+    fn 损益结转承接科目兼容简繁英文() {
+        for account in [
+            "4103 本年利润",
+            "4103 本年利潤",
+            "本年损益",
+            "本年損益",
+            "未分配利润",
+            "未分配利潤",
+            "Income Summary",
+            "P&L Closing",
+            "Retained Earnings",
+        ] {
+            assert!(
+                is_profit_transfer_account(account),
+                "未识别损益结转承接科目: {account}"
+            );
+        }
+        for account in [
+            "主营业务收入",
+            "Profit and Loss Expense",
+            "Earnings per Share",
+        ] {
+            assert!(
+                !is_profit_transfer_account(account),
+                "普通损益科目不应被误判: {account}"
+            );
+        }
+    }
+
+    #[test]
     fn 公共科目匹配仅在编码真实一对多时追加名称() {
         let tb = vec![
             ("A".into(), "943100".into(), "现金".into()),
@@ -10192,10 +10253,11 @@ mod tests {
         let missing = missing_required_labels(Tool::FxAudit, "je", &mapped);
         assert!(missing.contains(&"记账日期"), "{missing:?}");
         assert!(missing.contains(&"原币币种"), "{missing:?}");
-        assert!(!missing.contains(&"科目编码"));
-        // 金标身份槽也在并集里：科目名称、摘要、凭证识别字段都要补。
-        assert!(missing.contains(&"科目名称"), "{missing:?}");
-        assert!(missing.contains(&"摘要"), "{missing:?}");
+        assert!(!missing.contains(&"科目编码／科目名称（任一）"));
+        // 编码已经满足科目身份；名称与摘要均为可选，只补凭证识别字段。
+        assert!(missing.contains(&"凭证识别字段"), "{missing:?}");
+        assert!(!missing.contains(&"科目名称"), "{missing:?}");
+        assert!(!missing.contains(&"摘要"), "{missing:?}");
     }
 
     #[test]
@@ -10746,27 +10808,28 @@ mod tests {
     }
 
     #[test]
-    fn 必填是金标身份槽与工具声明的并集() {
-        // 看账只声明了凭证识别字段与科目编码，金标另要求日期、科目名称、摘要。
+    fn 必填是公共身份槽与工具声明的并集() {
+        // 编码已满足公共科目身份；看账另需凭证号，公共层另需日期，摘要可选。
         let mapped: HashSet<&str> = ["id", "accountCode", "functionalAmount"]
             .into_iter()
             .collect();
         let missing = missing_required(Tool::Ledger, "je", &mapped);
         let roles: Vec<&str> = missing.iter().map(|m| m.role).collect();
         assert!(roles.contains(&"date"), "{roles:?}");
-        assert!(roles.contains(&"accountName"), "{roles:?}");
-        assert!(roles.contains(&"summary"), "{roles:?}");
+        assert!(!roles.contains(&"accountIdentity"), "{roles:?}");
+        assert!(!roles.contains(&"accountName"), "{roles:?}");
+        assert!(!roles.contains(&"summary"), "{roles:?}");
         // 已映射的不报，金额形态 JE3 已成立也不报。
         assert!(!roles.contains(&"id"));
         assert!(!roles.contains(&"accountCode"));
         assert!(!roles.contains(&"functionalAmount"));
-        // 每条都要说得清是谁在要求。
+        // 日期要说得清是公共要求。
         assert!(missing.iter().all(|m| !m.label.is_empty()));
         assert!(
             missing
                 .iter()
-                .find(|m| m.role == "summary")
-                .expect("有摘要")
+                .find(|m| m.role == "date")
+                .expect("有日期")
                 .from_gold
         );
     }
@@ -12085,6 +12148,12 @@ mod tests {
         );
         assert_eq!(
             signed_balance(&贷方(100.0), SignConvention::Unsigned, false),
+            -100.0
+        );
+        // 全表发生额即使投票为“已带符号”，也不能覆盖余额列已经
+        // 判定的“绝对值＋方向”口径。
+        assert_eq!(
+            signed_balance(&贷方(100.0), SignConvention::Signed, false),
             -100.0
         );
         // 借贷分列没有方向列可言，`self_signed` 不该改变它的折算。
@@ -13843,10 +13912,9 @@ mod tests {
             .iter()
             .map(|m| m.role)
             .collect();
-        assert!(missing.contains(&"accountCode"), "{missing:?}");
-        // 补上编码后 TB 不再报缺。
-        let mut tb_full = tb_mapped;
-        tb_full.insert("accountCode");
+        assert!(!missing.contains(&"accountIdentity"), "{missing:?}");
+        // 只有名称已经满足科目身份，TB 不再报缺。
+        let tb_full = tb_mapped;
         assert!(
             missing_required(Tool::FaTbje, "tb", &tb_full).is_empty(),
             "{:?}",
@@ -13859,11 +13927,13 @@ mod tests {
             "id",
             "accountCode",
             "accountName",
-            "summary",
             "functionalDebit",
             "functionalCredit",
         ]);
         assert!(missing_required(Tool::FaTbje, "je", &je_full).is_empty());
+        let mut je_name_only = je_full.clone();
+        je_name_only.remove("accountCode");
+        assert!(missing_required(Tool::FaTbje, "je", &je_name_only).is_empty());
         // 少凭证号要被拦下。
         let mut je_no_voucher = je_full;
         je_no_voucher.remove("id");

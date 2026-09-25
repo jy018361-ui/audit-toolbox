@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JeSignMarkPage } from "./JeSignMarkPage";
 import type { ToolManifest } from "./types";
@@ -38,8 +38,8 @@ function seedLoadedDraft() {
         preview: [["V1", "应付账款", "100"]],
         dimensions: { rows: 1, columns: 3 },
       },
-      // 金标要求日期、凭证号、科目编码、科目名称、摘要齐备，缺一项流程就会被拦。
-      mapping: { id: ["凭证号"], accountCode: "科目编码", accountName: ["科目"], date: "日期", summary: "摘要", functionalAmount: "金额" },
+      // 科目名称单独即可满足身份；摘要是选填，不应阻拦工具进入已加载状态。
+      mapping: { id: ["凭证号"], accountName: ["科目"], date: "日期", functionalAmount: "金额" },
       batches: [{ name: "批次1", accounts: [] }],
       activeBatch: 0,
       columnFilters: {},
@@ -58,7 +58,10 @@ describe("JeSignMarkPage", () => {
 
   it("shows only the loading card before a file is read", () => {
     render(<JeSignMarkPage tool={tool} />);
-    expect(screen.getByText("正负数凭证标记")).toBeInTheDocument();
+    // 面包屑与标题已统一为侧栏名「正负数凭证标记」，同文案出现两处，按标题角色断言。
+    expect(
+      screen.getByRole("heading", { level: 1, name: "正负数凭证标记" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("拖放或点击选择凭证文件")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "读取并自动映射" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "新增批次" })).not.toBeInTheDocument();
@@ -73,9 +76,10 @@ describe("JeSignMarkPage", () => {
     expect(screen.getByRole("button", { name: "读取并自动映射" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新增批次" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "删除批次" })).toBeInTheDocument();
-    expect(screen.getByText("点击选择目标科目")).toBeInTheDocument();
+    expect(screen.getByText("选择目标科目")).toBeInTheDocument();
     expect(screen.getByText("标记与导出")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "标记并导出" })).toBeInTheDocument();
+    expect(screen.queryByText("标记结果")).not.toBeInTheDocument();
 
     // 看账的三步走在这里不该出现，尤其是被剪掉的「科目筛选」独立步骤。
     expect(screen.queryByText("科目筛选")).not.toBeInTheDocument();
@@ -195,7 +199,7 @@ describe("JeSignMarkPage", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "筛选 金额" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("点击选择目标科目"));
+    fireEvent.click(screen.getByText("选择目标科目"));
     await waitFor(() =>
       expect(screen.getByText("6602050001")).toBeInTheDocument(),
     );
@@ -203,5 +207,24 @@ describe("JeSignMarkPage", () => {
     expect(screen.getByText("管理费用-办公费")).toBeInTheDocument();
     expect(screen.getByTitle("1122 应收账款")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("搜索科目编码或名称")).toBeInTheDocument();
+    expect(
+      (screen.getByRole("checkbox", { name: "（全选）" }) as HTMLInputElement)
+        .checked,
+    ).toBe(false);
+  });
+
+  it("任务失败后保留错误反馈，不留下空结果卡", async () => {
+    seedLoadedDraft();
+    const { listenJobEvents } = await import("./api");
+    let emit: ((event: never) => void) | undefined;
+    vi.mocked(listenJobEvents).mockImplementationOnce(async (callback) => {
+      emit = callback as (event: never) => void;
+      return () => undefined;
+    });
+    render(<JeSignMarkPage tool={tool} />);
+    await waitFor(() => expect(emit).toBeDefined());
+    act(() => emit?.({ toolId: "je_sign_mark", jobId: "job-1", phase: "failed", message: "文件无法读取" } as never));
+    expect(screen.getByText("文件无法读取")).toBeInTheDocument();
+    expect(screen.queryByText("标记结果")).not.toBeInTheDocument();
   });
 });

@@ -47,6 +47,19 @@
   margin-top: var(--sp-2);
 }
 
+.settings-page .cache-stat-error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--r-md);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+
 .settings-page .settings-col > .list-card > p + .field,
 .settings-page .settings-col > .list-card > .field + .field,
 .settings-page .settings-col > .list-card > p + .theme-picker,

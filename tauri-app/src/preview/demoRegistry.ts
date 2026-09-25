@@ -59,6 +59,8 @@ type DemoReplayJob = {
   cursor: number;
   timers: Array<ReturnType<typeof setTimeout>>;
   lastEvent?: JobEvent;
+  /** 最近一次 running 事件的进度：终态缺省事件从中断处续算，而不是落在完成的 100%。 */
+  lastRunningEvent?: JobEvent;
 };
 const replayJobs = new Map<string, DemoReplayJob>();
 let autoPlayback = true;
@@ -71,6 +73,7 @@ function clearReplayTimers(job: DemoReplayJob): void {
 function publishReplayEvent(job: DemoReplayJob, event: DemoJobEvent): JobEvent {
   const complete = { ...event, jobId: job.jobId, toolId: job.toolId };
   job.lastEvent = complete;
+  if (event.phase === "running") job.lastRunningEvent = complete;
   emitDemoJobEvent(complete);
   return complete;
 }
@@ -84,6 +87,18 @@ function scheduleReplay(job: DemoReplayJob): void {
       publishReplayEvent(job, event);
     }, 260 * (offset + 1)));
   });
+}
+
+function demoFailureMessage(method: string): string {
+  if (method === "file_list.scan") return "演示失败：模拟目录读取中断。请重新选择文件夹并扫描。";
+  if (method === "file_list.export") return "演示失败：模拟清单写入失败。请检查输出位置后重试。";
+  if (method === "pdf2excel.convert") return "演示失败：模拟 PDF 转换中断。请检查回函文件后重试。";
+  if (method.startsWith("excel_merger.")) return "演示失败：模拟表格合并中断。请检查输入文件后重试。";
+  if (method.startsWith("tbje_check.")) return "演示失败：模拟账表核对中断。请检查 TB、JE 映射后重试。";
+  if (method.startsWith("fx.")) return "演示失败：模拟汇兑测算中断。请检查来源与币种映射后重试。";
+  if (method.startsWith("deposit.")) return "演示失败：模拟存款测算中断。请检查余额表与利率设置后重试。";
+  if (method.startsWith("loan.")) return "演示失败：模拟借款测算中断。请检查借款表与利率设置后重试。";
+  return "演示失败：模拟处理过程中断。请检查本工具的输入资料后重试。";
 }
 
 /** Register a preview job so browser audits can hold or inject its actual event stream. */
@@ -122,11 +137,16 @@ export function injectDemoJobEvent(
   const plannedIndex = job.events.findIndex((event, index) => index >= job.cursor && event.phase === phase);
   const planned = plannedIndex >= 0 ? job.events[plannedIndex] : undefined;
   const latest = job.lastEvent ?? job.events[Math.max(0, job.cursor - 1)];
+  // P3-2：补发 failed/cancelled 缺省事件时，进度沿用最近一次 running 的中断点，
+  // 不再继承 completed 事件的 current=total，避免“处理失败 100%”“已取消 100%”。
+  const progressBase = phase === "failed" || phase === "cancelled"
+    ? job.lastRunningEvent ?? latest
+    : latest;
   const event: DemoJobEvent = {
-    current: planned?.current ?? latest?.current ?? 0,
-    total: planned?.total ?? latest?.total ?? 100,
+    current: planned?.current ?? progressBase?.current ?? 0,
+    total: planned?.total ?? progressBase?.total ?? 100,
     message: planned?.message ?? (
-      phase === "failed" ? "演示任务处理失败，请检查输入后重试。"
+      phase === "failed" ? demoFailureMessage(job.method)
         : phase === "cancelled" ? "演示任务已取消。"
           : phase === "paused" ? "演示任务已暂停。" : "演示任务处理中…"
     ),

@@ -1,10 +1,31 @@
 # FA List：原版与 Tauri 一比一迁移清单
 
+2026-09-23 TB＋JE 性能口径补充：辅助核算属于第一步字段映射验证，不再在
+页面就绪后自动扫描，也不按第二步选定的固定资产科目缩小验证范围。用户点击
+“复核科目分类”时才验证；TB 未映射辅助或没有有效锚点时后端不读取 JE。
+第二步科目清单只按 TB 刷新，不再重读 JE；第三步正式测算复用第一步的
+`auxiliaryPlan`，文件或映射指纹失效时才回退重验。回归：
+`npx vitest run src/FaPageDesign.test.ts`、
+`cargo test --manifest-path src-tauri/Cargo.toml --lib fa_tbje`。
+
 2026-09-20 补充：诺桥美国单侧主体样例中，TB 原始公司代码为 3000、JE 无主体列，复核页现在按公共有效主体显示“默认主体”，使已确认的 4 个原值与 1 个折旧科目可进入测算；旧任务保存的 3000 确认项在身份全集确为默认主体时也能命中。艾维特苏州的 `01-1401-000-000-000` 等分段编码按完整编码分组，不再把 86 个科目压成账套段 `01` 的一行；源表含 5 个固定资产原值科目和 1 个累计折旧科目。回归：`npx vitest run src/FaTbJePage.test.ts`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 单侧映射主体时双方一律按默认主体处理`。
 
 基线以 `tools/fa_list/gui/main_window.py`、`file_and_match_config.py` 以及
 `FileHandler → DataPreprocessor → MergeEngine → PivotEngine → Exporter`
 实际生效的调用路径为准，不以旧说明文档或废弃页面为准。
+
+2026-09-22 UX 与状态安全补充：工具目录与页内引导现在同时说明“TB＋JE
+变动表”和“两期资产清单”两种模式。两期清单第一步的执行按钮明确为“开始
+匹配”，匹配完成后立即显示仅期初、仅期末与重复键统计；正文统一为三步。
+更换/移除主文件及已有结果后的 Sheet、标题行重读会先确认，并尽量保留新表头
+仍存在的人工映射。LLM 复核只提出建议，用户采纳后才写回映射。历史任务优先
+恢复带文件指纹的轻量识别快照，无有效快照时自动重读并回到第一步复核。
+
+两种模式的输入、映射或科目分类变化后均保留上一版结果并标记“结果待重算”；
+旧结果仅供对照，不可直接导出。TB＋JE 汇总预览支持项目搜索与“只看有差异”。
+公共账表来源识别最多并发两份，并显示当前第 N/M 份及文件名；两期清单读取也
+把两侧文件名传入页面和同步等待窗。回归命令：
+`npx vitest run src/faListUi.test.ts src/FaPageDesign.test.ts src/FaTbJePage.test.ts src/faDropTarget.test.ts`。
 
 已扫描原版 `tools/fa_list` 下 25 个 Python 文件。`main_window.py` 中后定义的
 `show_step` 会覆盖前一版本；当前有效主流程只有“文件与匹配 → 可选补充清单 →

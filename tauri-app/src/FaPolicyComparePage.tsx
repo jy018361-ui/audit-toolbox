@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import { markToolPageLive } from "./toolPageActivity";
+import "./fa-list.css";
 import {
   engineCall,
   jobCancel,
@@ -149,7 +150,6 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     toolId: "fa_policy_compare",
     onEvent: (event) => {
       setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
-      if (event.phase === "failed") setError(event.message);
     },
   });
   // 双槽拖放：期初/期末两个上传框分别命中（落点坐标已换算成 CSS 像素）。
@@ -834,7 +834,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
-            {job && job.phase !== "completed" && (
+            {step === 1 && job && job.phase !== "completed" && (
               <JobProgress
                 job={job}
                 onCancel={async (jobId) => {
@@ -859,6 +859,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                       >
                         <div ref={side === "begin" ? beginDropRef : endDropRef}>
                           <FileDropInput
+                            className="fa-file-slot"
                             value={side === "begin" ? beginPath : endPath}
                             placeholder={
                               side === "begin"
@@ -1053,7 +1054,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                     size="sm"
                     onClick={() => setStep(1)}
                   >
-                    返回上一步
+                    上一步
                   </Button>
                   {busy && job ? (
                     <Button
@@ -1082,6 +1083,8 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                   <Button
                     key={output}
                     variant="default"
+                    className="fa-output-button"
+                    title={output}
                     onClick={() => void openOutput(output)}
                   >
                     打开结果：{displayFileName(output)}

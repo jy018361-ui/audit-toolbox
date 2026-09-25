@@ -28,6 +28,24 @@ describe("借款利息测算", () => {
     })).toMatchObject([{ entity: "甲", auxiliary: "A银行" }]);
     expect(loanAccountReviewRows([account], null)).toMatchObject([{ reviewKey: "200101" }]);
   });
+  it("多主体账套按主体拆行，余额取该主体自己的 byEntity 小计", () => {
+    const account = {
+      key: "250101", code: "250101", name: "长期借款", account: "250101 长期借款",
+      opening: 300, closing: 260,
+      byEntity: [
+        { entity: "2000", opening: 100, closing: 60, occurrence: 5 },
+        { entity: "2002", opening: 200, closing: 200 },
+      ],
+    };
+    expect(loanAccountReviewRows([account], null, true)).toEqual([
+      expect.objectContaining({ reviewKey: "2000\u001f250101\u001f", entity: "2000", opening: 100, closing: 60, occurrence: 5 }),
+      expect.objectContaining({ reviewKey: "2002\u001f250101\u001f", entity: "2002", opening: 200, closing: 200 }),
+    ]);
+    // 开关关闭（单主体或主体未成键）时维持一科一行。
+    expect(loanAccountReviewRows([account], null, false)).toEqual([
+      expect.objectContaining({ reviewKey: "250101", opening: 300, closing: 260 }),
+    ]);
+  });
   it("恢复旧任务时保留人工映射并补入新版主体建议", () => {
     expect(
       mergeRestoredLoanMapping(
@@ -82,14 +100,19 @@ describe("借款利息测算", () => {
         closingPrincipal: 110,
       }),
     ).toBeNull());
-  // 金标要求 TB 的科目编码与名称都到位，缺名称同样拦。借款明细/辅助核算
-  // 按业务口径是选填：不进必填清单，缺了由引擎在测算入口明确报错。
+  // 科目编码与名称任一即可。借款明细/辅助核算按业务口径是选填：
+  // 不进必填清单，缺了由引擎在测算入口明确报错。
   it("不允许TB明细缺少借款识别和本金余额", () =>
     expect(loanMissing("tb", { accountCode: "科目编码" })).toEqual([
-      "科目名称",
       "期初余额",
       "期末余额",
     ]));
+  it("仅映射科目名称同样满足科目身份", () =>
+    expect(loanMissing("tb", {
+      accountName: "科目名称",
+      openingFunctionalAmount: "期初余额",
+      closingFunctionalAmount: "期末余额",
+    })).toEqual([]));
   it("借款明细/辅助核算为选填，缺它不拦映射", () =>
     expect(
       loanMissing("tb", {

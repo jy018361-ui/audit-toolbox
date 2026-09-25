@@ -110,7 +110,6 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
     toolId: "fa_dep_calc",
     onEvent: (event) => {
       setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
-      if (event.phase === "failed") setError(event.message);
     },
   });
   // 单槽拖放：落点必须命中上传框（Fx 页模式：api 层已把物理像素换算成 CSS 像素）。
@@ -855,6 +854,8 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                     <Button
                       key={output}
                       variant="default"
+                      className="fa-output-button"
+                      title={output}
                       onClick={() => void openOutput(output)}
                     >
                       打开结果：{displayFileName(output)}

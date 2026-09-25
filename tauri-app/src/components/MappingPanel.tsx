@@ -264,9 +264,12 @@ export function MappingPanel(props: MappingPanelProps) {
             )
         : (role: string, label: string, group?: MappingGroup) =>
             option(role, label, group);
+    const extra = props.headerExtras?.(header);
     return (
-      <label className="dt-header-control" key={header}>
+      <div className={extra ? "dt-header-inputs" : undefined} key={header}>
+      <label className="dt-header-control">
         <select
+          aria-label={`将「${header}」映射为字段`}
           className={
             toggleMode
               ? held.length
@@ -336,8 +339,9 @@ export function MappingPanel(props: MappingPanelProps) {
               ))
             : roles.map(([role, label]) => renderOption(role, label))}
         </select>
-        {props.headerExtras?.(header)}
       </label>
+      {extra}
+      </div>
     );
   });
 

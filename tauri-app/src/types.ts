@@ -47,6 +47,10 @@ export const TaskRestoreSchema = z.object({
   jobId: z.string(),
   toolId: z.string(),
   params: z.record(z.string(), z.unknown()).default({}),
+  snapshot: z.unknown().nullable().optional(),
+  snapshotStatus: z
+    .enum(["valid", "none", "missing", "stale", "incompatible"])
+    .optional(),
   missingPaths: z.array(z.string()).default([]),
   authorizedPathCount: z.number().default(0),
   method: z.string().default(""),

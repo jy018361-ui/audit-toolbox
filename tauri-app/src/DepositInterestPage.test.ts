@@ -9,6 +9,55 @@ import {
   depositBalanceCheckStatus, depositRateCheckStatus,
   depositDisplayAmount,
 } from "./DepositInterestPage";
+import { DEFAULT_ENTITY, ledgerEntitiesByAccount } from "./ledgerMapping";
+
+describe("存款第二步主体拆行", () => {
+  const combos = [
+    { entity: "2000", account: "100201 银行存款" },
+    { entity: "2002", account: "100201 银行存款" },
+    { entity: "2000", account: "660301 财务费用-利息收入" },
+  ];
+  const byAccount = ledgerEntitiesByAccount(combos, depositAccountCode);
+
+  it("多主体账套按主体×科目拆行，各行带主体", () => {
+    expect(depositAccountReviewRows(["100201 银行存款"], null, byAccount)).toEqual([
+      { key: "2000\u001f100201 银行存款", account: "100201 银行存款", entity: "2000" },
+      { key: "2002\u001f100201 银行存款", account: "100201 银行存款", entity: "2002" },
+    ]);
+  });
+  it("仅单主体出现的科目只出一行且标注该主体", () => {
+    expect(depositAccountReviewRows(["660301 财务费用-利息收入"], null, byAccount)).toEqual([
+      { key: "2000\u001f660301 财务费用-利息收入", account: "660301 财务费用-利息收入", entity: "2000" },
+    ]);
+  });
+  it("组合缺失或只有默认主体时维持一科一行", () => {
+    expect(depositAccountReviewRows(["100201 银行存款"], null, null)).toEqual([
+      { key: "100201 银行存款", account: "100201 银行存款" },
+    ]);
+    const single = ledgerEntitiesByAccount(
+      [{ entity: DEFAULT_ENTITY, account: "100201 银行存款" }],
+      depositAccountCode,
+    );
+    expect(depositAccountReviewRows(["100201 银行存款"], null, single)).toEqual([
+      { key: "100201 银行存款", account: "100201 银行存款" },
+    ]);
+  });
+  it("已验证辅助的主体不再补科目兜底行，未验证的主体补兜底", () => {
+    const link = {
+      tbAuxMapped: true, status: "verified", column: "账户", anchorHits: 1, anchorTotal: 1,
+      coverage: 1, competingColumns: [], warnings: [],
+      groups: [
+        { entity: "2000", account: "100201", reviewVerified: true,
+          details: [{ key: "a银行", display: "A银行" }], tbAuxMapped: true,
+          status: "verified", column: "账户", anchorHits: 1, anchorTotal: 1,
+          coverage: 1, competingColumns: [], warnings: [] },
+      ],
+    } as Parameters<typeof depositAccountReviewRows>[1];
+    const rows = depositAccountReviewRows(["100201 银行存款"], link, byAccount);
+    expect(rows.filter((row) => row.auxiliaryKey).map((row) => row.entity)).toEqual(["2000"]);
+    expect(rows.filter((row) => !row.auxiliaryKey).map((row) => row.entity)).toEqual(["2002"]);
+  });
+});
 
 describe("存款余额勾稽与利率状态分别显示", () => {
   it("第二步发生额保留红字方向并使用千分位", () => {
@@ -67,8 +116,9 @@ describe("deposit account list merge", () => {
 
 describe("deposit interest upload and mapping parity", () => {
   it("shows missing TB mappings until an opening and closing balance scheme exists", () => {
-    expect(depositMissingRequired("tb", {})).toEqual(["科目编码", "科目名称", "期末余额方案", "期初余额方案（或上传序时账）"]);
+    expect(depositMissingRequired("tb", {})).toEqual(["科目编码／科目名称（任一）", "期末余额方案", "期初余额方案（或上传序时账）"]);
     expect(depositMissingRequired("tb", {accountCode: "科目编码", accountName: "科目名称", openingFunctionalDebit: "年初借方", closingFunctionalAmount: "期末余额"})).toEqual([]);
+    expect(depositMissingRequired("tb", {accountName: "科目名称", openingFunctionalDebit: "年初借方", closingFunctionalAmount: "期末余额"})).toEqual([]);
     // 历史保存的映射把编码与名称混在一个 account 里，仍然要能读。
     expect(depositMissingRequired("tb", {account: ["科目编码"], openingFunctionalDebit: "年初借方", closingFunctionalAmount: "期末余额"})).toEqual([]);
   });
@@ -79,8 +129,9 @@ describe("deposit interest upload and mapping parity", () => {
     expect(depositMissingRequired("tb", sap, true)).toEqual([]);
   });
   it("only requires a period and amount scheme for the optional journal", () => {
-    expect(depositMissingRequired("je", {})).toEqual(["记账日期", "凭证识别字段", "科目编码", "科目名称", "摘要", "发生额方案"]);
+    expect(depositMissingRequired("je", {})).toEqual(["记账日期", "凭证识别字段", "科目编码／科目名称（任一）", "发生额方案"]);
     expect(depositMissingRequired("je", {accountCode: "科目", accountName: "科目名称", id: "凭证号", summary: "摘要", date: "记账日期", functionalDebit: "借方金额"})).toEqual([]);
+    expect(depositMissingRequired("je", {accountName: "科目名称", id: "凭证号", date: "记账日期", functionalDebit: "借方金额"})).toEqual([]);
     expect(depositMissingRequired("je", {accountCode: "G/L Account", accountName: "GL Description", id: "Document Number", summary: "Text", date: "Posting Date", functionalAmount: "Company Code Currency Value"})).toEqual([]);
     // 序时账只映射会计期间不再放行——后端一直硬性要求日期列，
     // 旧版在这里放过去，用户点下测算才撞上「尚未映射记账日期」。

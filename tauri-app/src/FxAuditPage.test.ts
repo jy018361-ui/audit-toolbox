@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   fxAccountCurrencyDetail,
   fxAccountDisplayList,
+  fxAccountCodeOf,
   fxCatalogMappingKey,
   fxCurrencyOptions,
   fxResolveEntityCurrencies,
@@ -16,11 +17,9 @@ import {
   fxConfirmationImportPatches,
   fxDetailCurrencyOverridesPayload,
   fxMultiEntityNames,
-  fxAllowedModes,
   fxApplyJobResult,
   fxAttachRole,
   fxLinkedJeAuxiliaryColumn,
-  fxDefaultMode,
   fxQualityAction,
   fxDetachRole,
   fxDropTargetAt,
@@ -96,6 +95,7 @@ describe("汇兑检查提示", () => {
 import {
   applyLedgerReviewsTogether,
   DEFAULT_ENTITY,
+  ledgerEntitiesByAccount,
   resolveLedgerPairKinds,
   reviewLedgerSourceClassification,
   selectLedgerSourcePair,
@@ -284,6 +284,21 @@ describe("fx audit mode selection", () => {
     ]);
   });
 
+  it("多主体账套按主体×科目拆行，各行带主体；组合缺失维持原状", () => {
+    const combos = [
+      { entity: "2000", account: "1002 银行存款" },
+      { entity: "2002", account: "1002 银行存款" },
+    ];
+    const byAccount = ledgerEntitiesByAccount(combos, fxAccountCodeOf);
+    expect(fxAccountReviewRows(["1002 银行存款"], null, byAccount)).toEqual([
+      { key: "2000\u001f1002 银行存款", account: "1002 银行存款", entity: "2000" },
+      { key: "2002\u001f1002 银行存款", account: "1002 银行存款", entity: "2002" },
+    ]);
+    expect(fxAccountReviewRows(["1002 银行存款"], null, null)).toEqual([
+      { key: "1002 银行存款", account: "1002 银行存款" },
+    ]);
+  });
+
   it("科目确认把货币性项目与汇兑损益排在非货币性和其他损益之前", () => {
     const rows = fxAccountReviewRows([
       "1601 固定资产",
@@ -363,27 +378,15 @@ describe("fx audit mode selection", () => {
   it("先给出可用或受限的结果结论；缺外币余额科目只作提示、不再拦截", () => {
     expect(fxResultTrustStatus({}).tone).toBe("usable");
     expect(
+      fxResultTrustStatus({ formalMeasurementAvailable: false }).title,
+    ).toBe("当前仅能形成诊断测算");
+    expect(
       fxResultTrustStatus({ tbFxGainLoss: 10, reconciliationPassed: false })
         .tone,
     ).toBe("limited");
     expect(
       fxResultTrustStatus({ unrealizedBalanceBasisComplete: false }).tone,
     ).toBe("usable");
-  });
-
-  it("uses two-point unrealized mode for TB only", () => {
-    expect(fxDefaultMode(false, true)).toBe("unrealized");
-    expect(fxAllowedModes(false, true)).toEqual(["unrealized"]);
-  });
-  it("uses realized mode for JE only", () =>
-    expect(fxDefaultMode(true, false)).toBe("realized"));
-  it("defaults to combined when both sources exist", () => {
-    expect(fxDefaultMode(true, true)).toBe("combined");
-    expect(fxAllowedModes(true, true)).toEqual([
-      "realized",
-      "unrealized",
-      "combined",
-    ]);
   });
 });
 describe("fx audit upload and mapping parity", () => {
@@ -458,17 +461,13 @@ describe("fx audit upload and mapping parity", () => {
     expect(fxMissingRequired("je", {}, false, "默认主体")).toEqual([
       "记账日期",
       "凭证识别字段",
-      "科目编码",
-      "科目名称",
-      "摘要",
+      "科目编码／科目名称（任一）",
       "原币币种",
       "原币金额方案",
       "本位币金额方案",
     ]);
   });
-  it("仅未实现模式下JE不再要求原币币种与原币金额", () => {
-    // 本位币记账的序时账没有外币列是常态：TB 才有外币信息，用户手动选
-    // 「仅未实现」时 JE 不该再被原币两件套拦住。
+  it("JE 原币币种与原币金额在所有模式都必填", () => {
     expect(
       fxMissingRequired(
         "je",
@@ -484,8 +483,7 @@ describe("fx audit upload and mapping parity", () => {
         "默认主体",
         "unrealized",
       ),
-    ).toEqual([]);
-    // 币种已映射时原币金额记法仍要提示——月度测算会把外币变动当 0。
+    ).toEqual(["原币币种", "原币金额方案"]);
     expect(
       fxMissingRequired(
         "je",
@@ -503,7 +501,6 @@ describe("fx audit upload and mapping parity", () => {
         "unrealized",
       ),
     ).toEqual(["原币金额方案"]);
-    // 其他模式下口径不变。
     expect(
       fxMissingRequired(
         "je",
@@ -523,15 +520,16 @@ describe("fx audit upload and mapping parity", () => {
   });
   it("limits TB missing prompts to the fixed required field set", () => {
     expect(fxMissingRequired("tb", {}, true, "默认主体")).toEqual([
-      "科目编码",
-      "科目名称",
-      "币种列或币种线索文本",
-      "期初原币或本位币余额",
-      "期末原币或本位币余额",
+      "科目编码／科目名称（任一）",
+      "原币币种",
+      "期初原币余额",
+      "期末原币余额",
+      "期初本位币余额",
+      "期末本位币余额",
       "本年累计（或本期）借/贷方发生额",
     ]);
   });
-  it("accepts either original or functional TB balances at each endpoint", () => {
+  it("TB 原币与本位币期初期末余额必须同时完整", () => {
     expect(
       fxMissingRequired(
         "tb",
@@ -547,17 +545,18 @@ describe("fx audit upload and mapping parity", () => {
         true,
         "默认主体",
       ),
-    ).toEqual([]);
+    ).toEqual(["期初原币余额", "期末本位币余额"]);
   });
-  it("accepts a currency clue column when the TB has no currency column", () => {
+  it("科目名称不能替代 TB 原币币种列", () => {
     expect(
       fxMissingRequired(
         "tb",
         {
           accountCode: "科目编码",
           accountName: "科目名称",
-          currencyText: "文本",
+          openingForeignAmount: "期初原币",
           openingFunctionalAmount: "期初本币",
+          closingForeignAmount: "期末原币",
           closingFunctionalAmount: "期末本币",
           ytdFunctionalDebit: "借方",
           ytdFunctionalCredit: "贷方",
@@ -565,7 +564,7 @@ describe("fx audit upload and mapping parity", () => {
         true,
         "默认主体",
       ),
-    ).toEqual([]);
+    ).toEqual(["原币币种"]);
   });
   it("still accepts the legacy combined account mapping", () => {
     expect(
@@ -574,7 +573,9 @@ describe("fx audit upload and mapping parity", () => {
         {
           account: ["科目代码", "科目名称"],
           currency: "币种",
+          openingForeignAmount: "期初原币",
           openingFunctionalAmount: "期初本币",
+          closingForeignAmount: "期末原币",
           closingFunctionalAmount: "期末本币",
           ytdFunctionalDebit: "借方",
           ytdFunctionalCredit: "贷方",
@@ -589,7 +590,9 @@ describe("fx audit upload and mapping parity", () => {
       accountCode: "科目编码",
       accountName: "科目名称",
       currency: "币种",
+      openingForeignAmount: "期初原币",
       openingFunctionalAmount: "期初本币",
+      closingForeignAmount: "期末原币",
       closingFunctionalAmount: "期末本币",
       ytdFunctionalDebit: "借方",
     };
@@ -730,10 +733,12 @@ describe("fx audit upload and mapping parity", () => {
     expect(payload.tb).toBeTruthy();
     expect(payload.je).toBeTruthy();
     expect(outcomes.je?.failed).toBe(false);
-    expect(outcomes.je?.mapping.accountCode).toBe("科目编码");
+    expect(outcomes.je?.mapping.accountCode).toBeUndefined();
+    expect(outcomes.je?.pending).toHaveLength(1);
     expect(outcomes.tb?.failed).toBe(false);
-    expect(outcomes.tb?.appliedCount).toBe(1);
-    expect(outcomes.tb?.mapping.accountCode).toBe("科目编码");
+    expect(outcomes.tb?.appliedCount).toBe(0);
+    expect(outcomes.tb?.pending).toHaveLength(1);
+    expect(outcomes.tb?.mapping.accountCode).toBeUndefined();
   });
   it("只复核已上传的文件，未上传的不产生结果", async () => {
     const started: string[] = [];
@@ -753,7 +758,7 @@ describe("fx audit upload and mapping parity", () => {
     expect(outcomes.je).toBeUndefined();
     expect(outcomes.tb?.appliedCount).toBe(0);
   });
-  it("公共 LLM 复核会保留凭证字与凭证号组成的多列凭证键", async () => {
+  it("公共 LLM 复核对多列凭证键只给待采纳建议", async () => {
     const call = async () => ({
       changes: [{ role: "id", suggestedColumn: "凭证号", confidence: 0.94 }],
     });
@@ -766,8 +771,12 @@ describe("fx audit upload and mapping parity", () => {
       },
     });
     expect(outcomes.je?.failed).toBe(false);
-    expect(outcomes.je?.mapping.id).toEqual(["凭证字", "凭证号"]);
-    expect(outcomes.je?.appliedCount).toBe(1);
+    expect(outcomes.je?.mapping.id).toEqual(["凭证字"]);
+    expect(outcomes.je?.appliedCount).toBe(0);
+    expect(outcomes.je?.pending[0]).toMatchObject({
+      role: "id",
+      suggestedColumn: "凭证号",
+    });
   });
   it("复核建议允许科目名称与编码共用混写列（03号样例形态）", async () => {
     // 科目编码与名称写在同一格（1001010000:库存现金-人民币），自动映射
@@ -793,8 +802,12 @@ describe("fx audit upload and mapping parity", () => {
       },
     });
     expect(outcomes.tb?.failed).toBe(false);
-    expect(outcomes.tb?.appliedCount).toBe(1);
-    expect(outcomes.tb?.mapping.accountName).toEqual([combined]);
+    expect(outcomes.tb?.appliedCount).toBe(0);
+    expect(outcomes.tb?.mapping.accountName).toBeUndefined();
+    expect(outcomes.tb?.pending[0]).toMatchObject({
+      role: "accountName",
+      suggestedColumn: combined,
+    });
   });
   it("keeps preview data when export adds an output path", () => {
     const preview = {
@@ -879,8 +892,6 @@ describe("同一列的多重映射", () => {
     mapping = fxAttachRole(mapping, "科目文本", "auxiliary");
     expect(mapping.accountName).toEqual(["科目文本"]);
     expect(mapping.auxiliary).toEqual(["科目文本"]);
-    mapping = fxAttachRole(mapping, "科目文本", "currencyText");
-    expect(mapping.auxiliary).toEqual(["科目文本"]);
   });
 
   it("不同科目指向不同 JE 列时不回填", () => {
@@ -896,24 +907,6 @@ describe("同一列的多重映射", () => {
     expect(fxLinkedJeAuxiliaryColumn(result)).toBeNull();
     expect(fxLinkedJeAuxiliaryColumn({ ...result, groups: [result.groups![0]] })).toBe("账户名");
   });
-  it("币种线索文本可以叠加在科目名称上", () => {
-    let m: Record<string, string | string[]> = {};
-    m = fxAttachRole(m, "科目名称", "accountName");
-    m = fxAttachRole(m, "科目名称", "currencyText");
-    expect(m.accountName).toEqual(["科目名称"]);
-    expect(m.currencyText).toBe("科目名称");
-  });
-
-  it("换成别的字段时挤掉原有的正经角色，但留住币种线索", () => {
-    let m: Record<string, string | string[]> = {};
-    m = fxAttachRole(m, "科目全称", "accountName");
-    m = fxAttachRole(m, "科目全称", "currencyText");
-    m = fxAttachRole(m, "科目全称", "accountCode");
-    expect(m).not.toHaveProperty("accountName");
-    expect(m.accountCode).toBe("科目全称");
-    expect(m.currencyText).toBe("科目全称");
-  });
-
   it("两个正经角色不能共用一列", () => {
     let m: Record<string, string | string[]> = {};
     m = fxAttachRole(m, "期初余额", "openingFunctionalAmount");
@@ -925,43 +918,10 @@ describe("同一列的多重映射", () => {
   it("摘掉标记只影响指定的那一个", () => {
     let m: Record<string, string | string[]> = {};
     m = fxAttachRole(m, "科目名称", "accountName");
-    m = fxAttachRole(m, "科目名称", "currencyText");
-    m = fxDetachRole(m, "科目名称", "currencyText");
+    m = fxAttachRole(m, "科目名称", "auxiliary");
+    m = fxDetachRole(m, "科目名称", "auxiliary");
     expect(m.accountName).toEqual(["科目名称"]);
-    expect(m).not.toHaveProperty("currencyText");
-  });
-});
-
-describe("跨表对齐后的币种线索", () => {
-  /**
-   * 4800 的 TB 有独立「文本」列（`银行存款-建行USD4150-4800`），初次识别会把它
-   * 当币种线索；跨表对齐发现它才是与 JE 同口径的科目名称，于是建议改映射。
-   * 两个角色共用这一列即可——科目名称里写着账户币种正是线索的来源。
-   */
-  it("对齐把科目名称改到币种线索那一列时，线索角色要留住", () => {
-    const before: Record<string, string | string[]> = {
-      accountCode: "科目代码",
-      accountName: ["科目名称一级", "科目名称二级"],
-      currencyText: "文本",
-    };
-    const fix = { accountName: "文本" };
-    // 展开带索引签名的对象时 TS 会丢掉索引签名，不标注的话 after 只剩 fix 里那一个键。
-    const after: Record<string, string | string[]> = { ...before, ...fix };
-    expect(after.accountName).toBe("文本");
-    expect(after.currencyText).toBe("文本");
-    // 币种线索还在，就不会冒出「尚未映射：币种列或币种线索文本」。
-    expect(
-      fxMissingRequired(
-        "tb",
-        {
-          ...after,
-          openingFunctionalAmount: "期初金额-本位币",
-          closingFunctionalAmount: "期末金额-本位币",
-        },
-        false,
-        "3300",
-      ),
-    ).not.toContain("币种列或币种线索文本");
+    expect(m).not.toHaveProperty("auxiliary");
   });
 });
 
@@ -1097,38 +1057,7 @@ describe("科目币种覆盖", () => {
     expect(detail.jeMultiCurrency).toBe(true);
   });
 
-  it("2301 科目名称币种优先于币种一致的 JE 币种列", () => {
-    const account = "10020002 招商银行-美元资本金（2301）";
-    const detail = fxAccountCurrencyDetail(
-      account,
-      {
-        [account]: {
-          detected: "USD",
-          source: "币种列",
-          seen: ["USD"],
-          columnSeen: ["USD"],
-          columnDetected: "USD",
-          needsConfirmation: false,
-        },
-      },
-      {
-        [account]: {
-          detected: "USD",
-          source: "科目文本",
-          seen: ["USD"],
-          textDetected: "USD",
-          needsConfirmation: false,
-        },
-      },
-    );
-    expect(detail.detected).toBe("USD");
-    expect(detail.source).toBe("科目文本");
-    expect(detail.side).toBe("TB");
-    expect(detail.fellBack).toBe(false);
-    expect(detail.jeMultiCurrency).toBe(false);
-  });
-
-  it("没有 TB 币种列和科目名线索时才采纳币种一致的 JE 币种列", () => {
+  it("没有 TB 币种列时采纳币种一致的 JE 币种列", () => {
     const detail = fxAccountCurrencyDetail("1133 其他应收款", {
       "1133 其他应收款": {
         detected: "EUR",
@@ -1146,7 +1075,6 @@ describe("科目币种覆盖", () => {
   it("界面括号里标出币种是怎么取到的，含来自 TB 还是 JE", () => {
     expect(fxCurrencySourceLabel("JE", "币种列")).toBe("JE币种列");
     expect(fxCurrencySourceLabel("TB", "币种列")).toBe("TB币种列");
-    expect(fxCurrencySourceLabel("TB", "科目文本")).toBe("TB科目名");
     // 退回本位币列等于没认出账户币种，不必再区分来自哪份文件。
     expect(fxCurrencySourceLabel("TB", "本位币列")).toBe("按本位币");
     expect(fxCurrencySourceLabel("", "")).toBe("按本位币");
@@ -1236,19 +1164,15 @@ describe("科目币种覆盖", () => {
 });
 
 describe("fxCurrencyRequirement：币种类角色的下拉必填口径", () => {
-  it("TB 侧原币币种与币种线索二选一——都没映射时双双必填", () => {
+  it("TB 侧原币币种始终必填", () => {
     expect(fxCurrencyRequirement("tb", {}, "combined", "currency")).toBe("required");
-    expect(fxCurrencyRequirement("tb", {}, "combined", "currencyText")).toBe("required");
-  });
-  it("TB 侧映射其一后另一个转选填", () => {
     const mapping = { currency: "币种" };
-    expect(fxCurrencyRequirement("tb", mapping, "combined", "currency")).toBe("optional");
-    expect(fxCurrencyRequirement("tb", mapping, "combined", "currencyText")).toBe("optional");
+    expect(fxCurrencyRequirement("tb", mapping, "combined", "currency")).toBe("required");
   });
-  it("JE 侧原币币种依模式：已实现/组合必填，仅未实现转选填", () => {
+  it("JE 侧原币币种不再因模式降为选填", () => {
     expect(fxCurrencyRequirement("je", {}, "realized", "currency")).toBe("required");
     expect(fxCurrencyRequirement("je", {}, "combined", "currency")).toBe("required");
-    expect(fxCurrencyRequirement("je", {}, "unrealized", "currency")).toBe("optional");
+    expect(fxCurrencyRequirement("je", {}, "unrealized", "currency")).toBe("required");
   });
   it("本位币币种恒为选填，其余角色不干预", () => {
     expect(fxCurrencyRequirement("tb", {}, "combined", "functionalCurrency")).toBe("optional");

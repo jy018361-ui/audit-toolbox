@@ -314,7 +314,7 @@ function expandedToolIds(ids: readonly string[]) {
   return ids.flatMap((id) => TOOL_SUBGROUPS[id]?.ids ?? [id]);
 }
 
-const DEVELOPMENT_HINT = "开发中功能，使用结果请复核。";
+const TRIAL_HINT = "试用功能，结果请复核。";
 
 async function openAudiPickWindow(): Promise<void> {
   const existing = await WebviewWindow.getByLabel("audipick");
@@ -343,7 +343,7 @@ async function openAudiPickWindow(): Promise<void> {
 
 /**
  * 侧边栏工具入口统一消费清单里的 migrationStatus。
- * preview 工具仍可进入，但必须在点击前让用户知道它还在开发中；状态不写死
+ * preview 工具仍可进入，但必须在点击前让用户知道它处于试用阶段；状态不写死
  * 在具体工具名上，后续工具转正只需修改 tool-catalog.json。
  */
 function SidebarToolLink({
@@ -353,15 +353,15 @@ function SidebarToolLink({
   tool: ToolManifest;
   className?: string;
 }) {
-  const developing = tool.migrationStatus === "preview";
-  const accessibleName = developing
-    ? `${tool.name}，开发中。${DEVELOPMENT_HINT}`
+  const trial = tool.migrationStatus === "preview";
+  const accessibleName = trial
+    ? `${tool.name}，试用。${TRIAL_HINT}`
     : undefined;
   return (
     <NavLink
       to={tool.route}
       className={className}
-      title={developing ? DEVELOPMENT_HINT : undefined}
+      title={trial ? TRIAL_HINT : undefined}
       aria-label={accessibleName}
       onClick={(event) => {
         if (tool.id !== "audipick" || !("__TAURI_INTERNALS__" in window))
@@ -376,9 +376,9 @@ function SidebarToolLink({
         {TOOL_BADGE[tool.id] ?? tool.name.slice(0, 1)}
       </span>
       <span className="tool-nav-label">{tool.name}</span>
-      {developing && (
+      {trial && (
         <span className="tool-status-badge" aria-hidden="true">
-          开发中
+          试用
         </span>
       )}
     </NavLink>
@@ -1075,7 +1075,7 @@ function Dashboard({
                         </span>
                         <h3>{tool.name}</h3>
                         {preview && (
-                          <span className="tool-card-status">开发中</span>
+                          <span className="tool-card-status">试用</span>
                         )}
                       </div>
                       <p>{tool.description}</p>
@@ -1172,7 +1172,7 @@ function ToolPage({
       <>
       {tool.migrationStatus === "preview" && (
         <div className="tool-trial-notice" role="note">
-          <strong>开发中</strong><span>{DEVELOPMENT_HINT}</span>
+          <strong>试用</strong><span>{TRIAL_HINT}</span>
         </div>
       )}
       <Suspense fallback={<ToolPageLoading />}>
@@ -2267,7 +2267,7 @@ export function Settings({
               </button>
               <span>
                 API Key
-                留空时使用已保存的密钥；测试成功后仍需点击页面底部“保存配置”。
+                留空时使用已保存的密钥；测试成功后仍需点击页面底部「保存配置」。
               </span>
             </div>
             {llmTestResult && (
@@ -2450,13 +2450,18 @@ export function Settings({
             <p>
               缓存读过的科目余额表与序时账，再次打开同一份文件直接命中，不必重新解析。
             </p>
-            <p className="cache-usage">
-              {cacheStat
-                ? `已缓存 ${formatBytes(cacheStat.bytes)}`
-                : cacheStatError
-                  ? "占用读取失败"
-                  : "读取中…"}
-            </p>
+            {cacheStatError ? (
+              <div className="cache-stat-error" role="alert">
+                <span>缓存占用读取失败，请重新读取后再决定是否清理。</span>
+                <Button type="button" variant="outline" size="sm" onClick={() => void refreshCacheStat()}>
+                  重新读取
+                </Button>
+              </div>
+            ) : (
+              <p className="cache-usage">
+                {cacheStat ? `已缓存 ${formatBytes(cacheStat.bytes)}` : "读取中…"}
+              </p>
+            )}
             <label className="field">
               <span>自动清理</span>
               <select
@@ -2483,7 +2488,7 @@ export function Settings({
             </label>
             <div className="actions">
               <button
-                className="secondary"
+                className="secondary danger"
                 disabled={
                   cacheBusy ||
                   ((cacheStat?.bytes ?? 0) === 0 && !clearHistoryWithCache)

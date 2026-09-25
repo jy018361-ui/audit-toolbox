@@ -127,7 +127,7 @@ export async function engineCall(
     // 用仓库内固定样例回放引擎返回，让"有数据之后"的布局可被随时检查。
     const handler = demoLookup(method);
     if (handler) return structuredClone(handler(params));
-    throw new Error("浏览器预览模式不能处理本地文件，请使用 Tauri 应用。 ");
+    throw previewUnavailable("处理本地文件");
   }
   const id = ++syncBusySeq;
   return new Promise((resolve, reject) => {

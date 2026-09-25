@@ -3182,12 +3182,11 @@ fn scoped_entity_for<'a>(
 
 /// 逐科目检测账户币种，并记录**依据来自哪里**。
 ///
-/// 与 `currency_for` 用同一套优先级，只是跳过用户覆盖——这里要的正是未覆盖的
-/// 原始判断，好让界面能告诉用户：这个科目的币种是有凭据的，还是只是退回了本位币。
-///
-/// 退回本位币的那些正是需要人工指定的。TB 只有一列「货币」且整列同值时，
-/// 它登记的是主体本位币而不是账户币种；科目文本里若又没写币种线索，
-/// 工具就认不出这是外币账户。实测 4800 有 6 个应付／其他应付科目因此被当成
+/// 币种只认两处：原币币种列（有凭据）与本位币列（登记的是主体本位币，
+/// 不是账户币种）。这里跳过用户覆盖——要的正是未覆盖的原始判断，好让界面
+/// 能告诉用户：这个科目的币种是有凭据的，还是只是退回了本位币。退回本位币
+/// 列的那些正是需要人工指定的：TB 只有一列「货币」且整列同值时认不出外币
+/// 账户。实测 4800 有 6 个应付／其他应付科目因此被当成
 /// 本位币账户，而 JE 里明明有 HKD／JPY 的业务，测算时找不到余额基础只能隔离。
 fn detect_account_currencies(
     table: &FxTable,
@@ -3197,7 +3196,6 @@ fn detect_account_currencies(
     type CurrencyTally = (
         BTreeMap<String, usize>,
         u8,
-        BTreeMap<String, usize>,
         BTreeMap<String, usize>,
         BTreeMap<String, usize>,
     );
@@ -3224,7 +3222,7 @@ fn detect_account_currencies(
             *entry.2.entry(mapped).or_default() += 1;
         }
         if !functional.is_empty() {
-            *entry.4.entry(functional).or_default() += 1;
+            *entry.3.entry(functional).or_default() += 1;
         }
     }
     let most_common = |counts: &BTreeMap<String, usize>| {
@@ -3237,7 +3235,7 @@ fn detect_account_currencies(
     tally
         .into_iter()
         .map(
-            |(account, (counts, rank, column_counts, text_counts, functional_counts))| {
+            |(account, (counts, rank, column_counts, functional_counts))| {
                 // 一个科目下挂多种币种时取出现最多的那个当主币种；
                 // 全部币种都放进 seen，界面把它们列进下拉框，用户不必凭记忆输。
                 let detected = most_common(&counts);
@@ -3252,7 +3250,6 @@ fn detect_account_currencies(
                         "seen": counts.keys().cloned().collect::<Vec<_>>(),
                         "columnSeen": column_counts.keys().cloned().collect::<Vec<_>>(),
                         "columnDetected": most_common(&column_counts),
-                        "textDetected": most_common(&text_counts),
                         "functionalDetected": most_common(&functional_counts),
                         // 只有退回本位币列的才是「没真识别出来」，这些要提示人确认。
                         "needsConfirmation": rank <= 1,
@@ -10863,225 +10860,6 @@ fn calculate_inferred_opening_unrealized(
         classification,
     )?;
     Ok((monthly, quality))
-}
-
-fn calculate_back_calculated_unrealized(
-    params: &Value,
-    snapshot: &RateSnapshot,
-    start: NaiveDate,
-    end: NaiveDate,
-    tb_table: &FxTable,
-    tb_mapping: &Map<String, Value>,
-) -> Result<(Vec<Value>, Vec<Value>), AppError> {
-    let (je_table, je_mapping) = load_mapped_je_table(params)?;
-    let account_policy = account_match_policy(params)?;
-    let derive_opening = !amount_scheme_ok(tb_mapping, "openingFunctional");
-    let mut balances = HashMap::<String, f64>::new();
-    let mut closing_balances = HashMap::<String, f64>::new();
-    for row in tb_leaf_records(tb_table, tb_mapping) {
-        let account = account_name(&row, tb_mapping);
-        let currency = currency_for(&row, tb_mapping, &account, params);
-        if currency.is_empty()
-            || !matches!(
-                role_for_row(&row, tb_mapping, &account, params).as_str(),
-                "cash" | "monetary_asset" | "monetary_liability"
-            )
-        {
-            continue;
-        }
-        let entity = scoped_entity_for(&row, tb_mapping, params, ledger_mapping::EntitySide::Tb);
-        // 走统一匹配键：币种在两边来源不同（TB 从科目文本抽、JE 读凭证货币列），
-        // 进键会让同一账户被判成两个。重估仍按币种做，币种在端点字段里。
-        let key = balance_match_key_for_account(entity, &account, "", false, &account_policy);
-        if derive_opening {
-            let closing =
-                signed_amount(&row, tb_mapping, "closingFunctional").map_err(|detail| {
-                    error(
-                        "NUMERIC_PARSE_FAILED",
-                        "TB期末本位币余额无法解析。",
-                        Some(format!("第{}行：{detail}", row.source_row)),
-                    )
-                })?;
-            closing_balances.insert(key, closing);
-        } else {
-            let opening =
-                signed_amount(&row, tb_mapping, "openingFunctional").map_err(|detail| {
-                    error(
-                        "NUMERIC_PARSE_FAILED",
-                        "TB期初本位币余额无法解析。",
-                        Some(format!("第{}行：{detail}", row.source_row)),
-                    )
-                })?;
-            balances.insert(key, opening);
-        }
-    }
-
-    let id_indexes = std::iter::once(first_col(&je_mapping, "date"))
-        .flatten()
-        .chain(mapped_cols(&je_mapping, "id"))
-        .filter_map(|name| je_table.headers.iter().position(|header| header == &name))
-        .collect::<Vec<_>>();
-    let account_indexes = account_columns(&je_mapping)
-        .iter()
-        .filter_map(|name| je_table.headers.iter().position(|header| header == name))
-        .collect::<Vec<_>>();
-    let loss_keys =
-        tabular::detect_loss_transfer_ids(&je_table.rows, &id_indexes, &account_indexes);
-    let mut groups = BTreeMap::<(NaiveDate, String), Vec<RowRecord>>::new();
-    for (row, raw) in records(&je_table).into_iter().zip(je_table.rows.iter()) {
-        if !is_je_business_row(&row, &je_mapping) {
-            continue;
-        }
-        let Some(date) = parse_date(cell(&row, &je_mapping, "date")) else {
-            continue;
-        };
-        let id = voucher_id(&row, &je_mapping, params);
-        if !loss_keys.contains(&tabular::voucher_key(raw, &id_indexes)) {
-            groups.entry((date, id)).or_default().push(row);
-        }
-    }
-    if derive_opening {
-        let mut movements = HashMap::<String, f64>::new();
-        for rows in groups.values() {
-            for row in rows {
-                let account = account_name(row, &je_mapping);
-                let role = role_for_row(row, &je_mapping, &account, params);
-                if !matches!(
-                    role.as_str(),
-                    "cash" | "monetary_asset" | "monetary_liability"
-                ) {
-                    continue;
-                }
-                let entity =
-                    scoped_entity_for(row, &je_mapping, params, ledger_mapping::EntitySide::Je);
-                let currency = currency_for(row, &je_mapping, &account, params);
-                if currency.is_empty() || currency == functional_currency(entity, params) {
-                    continue;
-                }
-                // 走统一匹配键：币种在两边来源不同（TB 从科目文本抽、JE 读凭证货币列），
-                // 进键会让同一账户被判成两个。重估仍按币种做，币种在端点字段里。
-                let key =
-                    balance_match_key_for_account(entity, &account, "", false, &account_policy);
-                *movements.entry(key).or_default() += signed_amount(row, &je_mapping, "functional")
-                    .map_err(|detail| {
-                        error(
-                            "NUMERIC_PARSE_FAILED",
-                            "JE本位币金额无法解析。",
-                            Some(format!("第{}行：{detail}", row.source_row)),
-                        )
-                    })?;
-            }
-        }
-        for (key, closing) in closing_balances {
-            balances.insert(
-                key.clone(),
-                closing - movements.get(&key).copied().unwrap_or(0.0),
-            );
-        }
-    }
-    let mut output = Vec::new();
-    let mut quality = vec![json!({
-        "source": "TB+JE", "type": "原币余额倒算",
-        "severity": "提示",
-        "detail": "TB无原币余额；仅对科目名称/JE币种识别出的外币货币性项目，以月末官方汇率倒算原币，并用完整凭证识别客户重估。"
-    })];
-    for ((date, id), rows) in groups {
-        if date < start || date > end {
-            continue;
-        }
-        let summary = rows
-            .iter()
-            .map(|row| cell(row, &je_mapping, "summary"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let display_id = display_voucher_id(&id);
-        let manual = manual_classification(params, &display_id);
-        let manual_realized = manual == Some("已实现汇兑损益");
-        // 重估识别只看结构（外币货币性项目原币不动而本位币变动），
-        // 凭证类型与摘要文字不参与认定。
-        let revaluation_signal = !manual_realized;
-        let mut movements = BTreeMap::<String, (String, String, String, String, f64, f64)>::new();
-        for row in &rows {
-            let account = account_name(row, &je_mapping);
-            let role = role_for_row(row, &je_mapping, &account, params);
-            let standard_monetary = matches!(
-                role.as_str(),
-                "cash" | "monetary_asset" | "monetary_liability"
-            );
-            if !standard_monetary {
-                continue;
-            }
-            let entity =
-                scoped_entity_for(row, &je_mapping, params, ledger_mapping::EntitySide::Je)
-                    .to_owned();
-            let currency = currency_for(row, &je_mapping, &account, params);
-            if currency.is_empty() || currency == functional_currency(&entity, params) {
-                continue;
-            }
-            let foreign = signed_amount(row, &je_mapping, "foreign").map_err(|detail| {
-                error(
-                    "NUMERIC_PARSE_FAILED",
-                    "JE原币金额无法解析。",
-                    Some(format!("第{}行：{detail}", row.source_row)),
-                )
-            })?;
-            let functional = signed_amount(row, &je_mapping, "functional").map_err(|detail| {
-                error(
-                    "NUMERIC_PARSE_FAILED",
-                    "JE本位币金额无法解析。",
-                    Some(format!("第{}行：{detail}", row.source_row)),
-                )
-            })?;
-            // 走统一匹配键：币种在两边来源不同（TB 从科目文本抽、JE 读凭证货币列），
-            // 进键会让同一账户被判成两个。重估仍按币种做，币种在端点字段里。
-            let key = balance_match_key_for_account(&entity, &account, "", false, &account_policy);
-            let item = movements
-                .entry(key)
-                .or_insert((entity, account, role, currency, 0.0, 0.0));
-            item.4 += foreign;
-            item.5 += functional;
-        }
-        for (key, (entity, account, role, currency, foreign_movement, functional_movement)) in
-            movements
-        {
-            let before = balances.get(&key).copied().unwrap_or(0.0);
-            let after = before + functional_movement;
-            let is_revaluation = revaluation_signal
-                && foreign_movement.abs() < 0.01
-                && functional_movement.abs() >= 0.01;
-            if is_revaluation {
-                if let Some((official_rate, published_date)) = rate(
-                    snapshot,
-                    date,
-                    &currency,
-                    &functional_currency(&entity, params),
-                ) {
-                    let inferred_foreign = after / official_rate;
-                    let audit_closing = inferred_foreign * official_rate;
-                    let pnl = -(audit_closing - before);
-                    output.push(json!({
-                        "monthEnd": date, "voucherId": display_id.clone(),
-                        "entity": entity, "account": account, "role": role,
-                        "currency": currency, "functionalCurrency": functional_currency(&entity, params),
-                        "preRevaluationFunctional": before,
-                        "clientRevaluationExcluded": functional_movement,
-                        "postRevaluationFunctional": after,
-                        "officialRate": official_rate, "publishedDate": published_date,
-                        "inferredForeign": inferred_foreign,
-                        "auditClosingFunctional": audit_closing,
-                        "unrealizedGainLoss": pnl, "suggestedAdjustment": pnl,
-                        "method": "客户月末重估凭证复核（TB无原币余额，暂按账面重估金额）",
-                        "rateSource": "央行中间价（仅用于倒算原币展示）",
-                        "evidence": summary
-                    }));
-                } else {
-                    quality.push(json!({"source":"JE", "type":"汇率缺失", "voucherId":display_voucher_id(&id), "currency":currency, "severity":"隔离"}));
-                }
-            }
-            balances.insert(key, after);
-        }
-    }
-    Ok((output, quality))
 }
 
 fn calculate_monthly_unrealized(

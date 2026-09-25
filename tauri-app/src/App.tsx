@@ -1371,12 +1371,13 @@ const HISTORY_STATUS: Record<
 > = {
   completed: { label: "已完成", tone: "ready" },
   success: { label: "已完成", tone: "ready" },
-  failed: { label: "失败", tone: "danger" },
+  failed: { label: "处理失败", tone: "danger" },
   cancelled: { label: "已取消", tone: "preview" },
   canceled: { label: "已取消", tone: "preview" },
   running: { label: "处理中", tone: "preview" },
-  queued: { label: "等待中", tone: "preview" },
+  queued: { label: "排队中", tone: "preview" },
   paused: { label: "已暂停", tone: "preview" },
+  memory_paused: { label: "已暂停", tone: "preview" },
 };
 
 function History({ catalog }: { catalog: ToolManifest[] }) {

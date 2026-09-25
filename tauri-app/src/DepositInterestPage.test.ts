@@ -115,17 +115,18 @@ describe("deposit account list merge", () => {
 });
 
 describe("deposit interest upload and mapping parity", () => {
-  it("shows missing TB mappings until an opening and closing balance scheme exists", () => {
-    expect(depositMissingRequired("tb", {})).toEqual(["科目编码／科目名称（任一）", "期末余额方案", "期初余额方案（或上传序时账）"]);
+  it("shows missing TB mappings until a closing balance scheme exists", () => {
+    expect(depositMissingRequired("tb", {})).toEqual(["科目编码／科目名称（任一）", "期末余额方案"]);
     expect(depositMissingRequired("tb", {accountCode: "科目编码", accountName: "科目名称", openingFunctionalDebit: "年初借方", closingFunctionalAmount: "期末余额"})).toEqual([]);
     expect(depositMissingRequired("tb", {accountName: "科目名称", openingFunctionalDebit: "年初借方", closingFunctionalAmount: "期末余额"})).toEqual([]);
     // 历史保存的映射把编码与名称混在一个 account 里，仍然要能读。
     expect(depositMissingRequired("tb", {account: ["科目编码"], openingFunctionalDebit: "年初借方", closingFunctionalAmount: "期末余额"})).toEqual([]);
   });
-  it("drops the opening-balance requirement once a journal is supplied", () => {
-    // SAP 的 Trial Balance LC/GC 只有 MTD/YTD，没有年初余额列。
+  it("opening balance is optional regardless of journal (missing treated as zero)", () => {
+    // SAP 的 Trial Balance LC/GC 只有 MTD/YTD，没有年初余额列：
+    // 有序时账按「期末 − 期间发生额」倒推，无序时账依据按 0 参与全年平均。
     const sap = {accountCode: "GL Account", accountName: "GL Description", closingFunctionalAmount: "YTD Act (Local Curr)"};
-    expect(depositMissingRequired("tb", sap)).toEqual(["期初余额方案（或上传序时账）"]);
+    expect(depositMissingRequired("tb", sap)).toEqual([]);
     expect(depositMissingRequired("tb", sap, true)).toEqual([]);
   });
   it("only requires a period and amount scheme for the optional journal", () => {

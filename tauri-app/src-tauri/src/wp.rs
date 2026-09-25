@@ -2607,7 +2607,8 @@ fn assign_local_sheet_ids(book: &mut Workbook) {
 }
 
 /// umya 3.0.1 把 `calcPr` 写死成只有 `calcId`，也完全不支持 `pageSetUpPr`。
-/// 这两项旧版都有（打开时全部重算、缩放到一页宽），只能在写盘后补进 XML。
+/// 旧版在写盘后补进这两项 XML；其中「打开时全部重算」自 2026-09-08 起显式
+/// 关闭（fullCalcOnLoad=0，见 WP_RUST_PARITY 当日条目），只有缩放到一页宽沿用。
 fn finalize_workbook_xml(path: &Path) -> Result<()> {
     let data = fs::read(path)?;
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(data))

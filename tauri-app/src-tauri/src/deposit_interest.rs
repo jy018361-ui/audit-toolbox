@@ -2875,10 +2875,17 @@ fn calculate(
         // 平线，却把 jeReconciled 留成 false，界面和底稿反而显示“未执行”。
         account.je_reconciled = je_backed && account.opening_from_tb;
         if !account.opening_from_tb {
-            let net: f64 = series
-                .map(|all| all.iter().map(|(debit, credit)| debit - credit).sum())
-                .unwrap_or(0.0);
-            account.opening_balance = account.tb_closing_balance - net;
+            // 有序时账依据（已归集逐月发生额）才倒推年初；未提供序时账或
+            // 按币种两点法主动不用时没有发生额可减，年初按 0 参与全年平均，
+            // 不再冒充期末数——口径写进底稿注释。
+            account.opening_balance = if has_je {
+                let net: f64 = series
+                    .map(|all| all.iter().map(|(debit, credit)| debit - credit).sum())
+                    .unwrap_or(0.0);
+                account.tb_closing_balance - net
+            } else {
+                0.0
+            };
         }
 
         let mut opening = account.opening_balance;
@@ -2958,10 +2965,11 @@ fn calculate(
             ));
         }
         if !account.opening_from_tb {
-            notes.push(
-                "TB 未提供年初余额，已按“期末余额 − 期间内发生额”倒推；此时期末余额必然勾稽，不构成独立复核证据。"
-                    .into(),
-            );
+            notes.push(if has_je {
+                "TB 未提供年初余额，已按“期末余额 − 期间内发生额”倒推；此时期末余额必然勾稽，不构成独立复核证据。".into()
+            } else {
+                "余额表未提供年初余额，已按 0 参与全年平均计算；请以存款协议或期初对账单确认年初余额。".into()
+            });
         }
         if !account.rate_resolved {
             notes.push(format!(
@@ -2987,6 +2995,8 @@ fn calculate(
         if !je_backed {
             notes.push(if has_je {
                 "序时账期间内没有任何行匹配到该科目，已直接按（期初余额＋期末余额）÷2 暂估全年平均余额；不推导月末余额，也不执行 JE 勾稽。".into()
+            } else if je_input.is_some() {
+                "已选择按币种两点法，本户不使用序时账还原逐月余额，按（年初＋年末）÷2 计算全年平均余额。".into()
             } else {
                 "未提供序时账，已直接按（期初余额＋期末余额）÷2 暂估全年平均余额；不推导月末余额，也不执行 JE 勾稽。".into()
             });
@@ -4301,7 +4311,7 @@ fn mapped_roles(mapping: &Map<String, Value>) -> HashSet<&str> {
 fn require_mappings(
     kind: &str,
     mapping: &Map<String, Value>,
-    has_je: bool,
+    _has_je: bool,
 ) -> Result<(), AppError> {
     let mut mapped = mapped_roles(mapping);
     // 豁免 2：本年累计／本期发生额不硬性要求。
@@ -4331,11 +4341,11 @@ fn require_mappings(
             }
         }
     }
-    // 豁免 1：有序时账时年初余额整槽豁免（期末倒推）。
-    if has_je {
-        for role in OPENING {
-            mapped.insert(role);
-        }
+    // 豁免 1：年初余额整槽豁免——有序时账依据时按「期末 − 期间发生额」倒推；
+    // 没有序时账依据（未提供，或按币种两点法主动不使用）时按 0 参与全年平均，
+    // 底稿注释注明口径。
+    for role in OPENING {
+        mapped.insert(role);
     }
     if kind == "je" {
         // JE 金额方案同样是「净额｜借方｜贷方任一即可」，借方一列也能算
@@ -7423,6 +7433,81 @@ mod tests {
     }
 
     #[test]
+    fn 缺年初余额且无序时账依据时按零参与平均() {
+        let dir = tempfile::tempdir().unwrap();
+        let tb_path = dir.path().join("tb.xlsx");
+        let je_path = dir.path().join("je.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec!["科目编码", "科目名称", "期末余额借方"],
+                vec!["100201", "银行存款-年末户", "200"],
+            ],
+        );
+        write_fixture(
+            &je_path,
+            &[
+                vec!["记账日期", "凭证号", "科目编码", "科目名称", "借方", "贷方"],
+                vec!["2025-06-01", "记-1", "100201", "银行存款-年末户", "80", "0"],
+            ],
+        );
+        let base = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": {
+                "accountCode": "科目编码", "accountName": "科目名称",
+                "closingFunctionalDebit": "期末余额借方"
+            },
+            "jeSource": {"inputPath": je_path.to_string_lossy()},
+            "jeMapping": {
+                "date": "记账日期", "id": "凭证号", "accountCode": "科目编码",
+                "accountName": "科目名称", "functionalDebit": "借方",
+                "functionalCredit": "贷方"
+            }
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        // 按币种两点法：序时账已提供但该模式不使用，年初不得冒充期末数。
+        let mut two_point_params = base.clone();
+        two_point_params["currencyFallbackMode"] = json!("twoPointByCurrency");
+        let two_point = run_job(
+            "deposit.preview",
+            two_point_params,
+            &|_, _, _, _| {},
+            cancel.clone(),
+            &pause,
+        )
+        .unwrap();
+        let row = &two_point["rows"][0];
+        assert_eq!(row["openingBalance"], json!(0.0), "{row:#?}");
+        assert_eq!(row["tbClosingBalance"], json!(200.0));
+        assert_eq!(row["status"], "两点法推算");
+        assert!(
+            row["note"].as_str().unwrap_or("").contains("已按 0 参与全年平均计算"),
+            "底稿注释应说明按 0 而非倒推：{row:#?}"
+        );
+
+        // 完全未提供序时账：年初同样按 0，不再被校验拦死。
+        let mut no_je_params = base.clone();
+        no_je_params.as_object_mut().unwrap().remove("jeSource");
+        no_je_params.as_object_mut().unwrap().remove("jeMapping");
+        let no_je = run_job(
+            "deposit.preview",
+            no_je_params,
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        )
+        .unwrap();
+        let row = &no_je["rows"][0];
+        assert_eq!(row["openingBalance"], json!(0.0), "{row:#?}");
+        assert!(
+            row["note"].as_str().unwrap_or("").contains("已按 0 参与全年平均计算"),
+            "{row:#?}"
+        );
+    }
+
+    #[test]
     fn je零发生额账户按零推导并确认与tb勾稽() {
         let dir = tempfile::tempdir().unwrap();
         let tb_path = dir.path().join("tb.xlsx");
@@ -8918,6 +9003,7 @@ mod tests {
 
     /// Rust 侧必填硬校验：已有科目编码时不再强求名称；真正缺少的余额
     /// 方案仍须指名道姓报中文错。此前必填只在前端手写，worker 路径不拦。
+    /// 年初余额自 2026-09-25 起不再必填（按 0 参与平均或按发生额倒推）。
     #[test]
     fn 必填映射缺失时指名道姓报错() {
         let dir = std::env::temp_dir().join(format!("deposit-required-{}", std::process::id()));
@@ -8928,11 +9014,10 @@ mod tests {
             &[
                 vec![
                     "科目编码",
-                    "期末余额借方",
                     "本期借方发生额",
                     "本期贷方发生额",
                 ],
-                vec!["1002", "2000", "1000", "0"],
+                vec!["1002", "1000", "0"],
             ],
         );
         let tb = inspect(
@@ -8959,8 +9044,8 @@ mod tests {
             err.user_message
         );
         assert!(
-            err.user_message.contains("期初"),
-            "无序时账时年初余额方案必填: {}",
+            err.user_message.contains("期末"),
+            "期末余额方案必填: {}",
             err.user_message
         );
         assert!(
@@ -8972,10 +9057,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 有序时账时年初余额可缺（期末倒推，SAP Trial Balance 形态）；
-    /// 不给序时账时年初余额回到必填——与前端 depositMissingRequired 同口径。
+    /// 年初余额可缺：有序时账按「期末 − 期间发生额」倒推（SAP Trial Balance
+    /// 形态）；无序时账依据时按 0 参与全年平均、底稿注明，不再必填拦截。
     #[test]
-    fn 有序时账时年初余额可缺无序时账时必填() {
+    fn 缺年初余额时倒推或按零处理而不是报错() {
         let dir = std::env::temp_dir().join(format!("deposit-opening-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let tb_path = dir.join("tb.xlsx");
@@ -9036,25 +9121,29 @@ mod tests {
         .unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
         let pause = PauseCheckpoint::unpaused(cancel.clone());
-        // 无序时账：年初余额必填，报错指名「期初」。
+        // 无序时账：年初按 0 参与全年平均，不再作为必填拦截。
         let params = json!({
             "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
             "tbSource": {"inputPath": tb_path.to_string_lossy()},
             "tbMapping": tb["suggestedMapping"]
         });
-        let err = run_job(
+        let result = run_job(
             "deposit.preview",
             params,
             &|_, _, _, _| {},
             cancel.clone(),
             &pause,
         )
-        .unwrap_err();
-        assert_eq!(err.code, "MAPPING_INCOMPLETE");
+        .unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["openingBalance"], json!(0.0), "{rows:#?}");
         assert!(
-            err.user_message.contains("期初"),
-            "缺年初余额应报期初方案: {}",
-            err.user_message
+            rows[0]["note"]
+                .as_str()
+                .unwrap_or("")
+                .contains("已按 0 参与全年平均计算"),
+            "无序时账依据时底稿注释应说明按 0：{rows:#?}"
         );
         // 有序时账：年初倒推，正常放行且勾稽通过。
         let params = json!({

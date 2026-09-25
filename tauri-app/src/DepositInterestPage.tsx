@@ -437,15 +437,8 @@ export function depositMissingRequired(
       has("closingFunctionalCredit")
     ))
       missing.push("期末余额方案");
-    if (
-      !hasJe &&
-      !(
-        has("openingFunctionalAmount") ||
-        has("openingFunctionalDebit") ||
-        has("openingFunctionalCredit")
-      )
-    )
-      missing.push("期初余额方案（或上传序时账）");
+    // 年初余额不再必填：有序时账按「期末 − 期间发生额」倒推，没有序时账
+    // 依据时按 0 参与全年平均，底稿注释注明口径（与后端校验同口径）。
   } else {
     // 序时账一律走记账日期：会计期间只在科目余额表上有用，
     // 旧版把两者当成二选一放行，后端却硬性要求日期列。

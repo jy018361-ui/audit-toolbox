@@ -471,7 +471,7 @@ export function loanEquation(
 const ANY_OF: Record<string, string[][]> = {
   tb: [
     ["accountCode", "accountName", "account"],
-    // 期初余额不再必填：缺失时后端按 0 参与测算并在利率行注明。
+    // 期初余额不再必填：缺失时后端按 0 参与测算（2026-09-25，与存款同口径）。
     [
       "closingFunctionalAmount",
       "closingFunctionalDebit",

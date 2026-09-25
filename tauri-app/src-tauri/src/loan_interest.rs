@@ -161,16 +161,6 @@ fn prepare_rates(params: &Value) -> Result<Value, AppError> {
     let functional_currency = functional_currency_param(params);
     let entity_scope = entity_scope(params);
     let (tb, tm) = source(params, "tbSource")?;
-    // 期初余额未映射时按 0 参与测算（用户定案，与存款同口径），
-    // 在第二步利率行的依据说明里注明，不作为硬拦截。
-    let opening_unmapped = [
-        "openingFunctionalAmount",
-        "openingFunctionalDebit",
-        "openingFunctionalCredit",
-        "openingPrincipal",
-    ]
-    .iter()
-    .all(|role| mapped_names(&tm, "tb", role).is_empty());
     let je_mapping = params
         .get("jeSource")
         .and_then(|value| value.get("mapping"))
@@ -322,11 +312,7 @@ fn prepare_rates(params: &Value) -> Result<Value, AppError> {
                 "calculatedInterest": 0.0,
                 "principalDays": 0.0,
                 "matchStatus": "待测算",
-                "matchBasis": if opening_unmapped {
-                    "利率行由 TB 轻量生成；TB 未提供期初余额，测算按 0 参与平均，请以借款合同或账面期初复核；本金变动、勾稽与利息在第三步测算"
-                } else {
-                    "利率行由 TB 轻量生成；本金变动、勾稽与利息在第三步测算"
-                },
+                "matchBasis": "利率行由 TB 轻量生成；本金变动、勾稽与利息在第三步测算",
             })
         })
         .collect::<Vec<_>>();
@@ -1452,7 +1438,7 @@ fn validate_run_request(method: &str, params: &Value) -> Result<(), AppError> {
         ],
     );
     // 期初余额自 2026-09-25 起不再必填（与存款同口径）：缺失时按 0 参与
-    // 测算，第二步利率行的依据说明会注明，请用户以合同或账面期初复核。
+    // 测算，不作为硬拦截，也不在利率行另加说明。
     let je_ready = ["date", "id"]
         .iter()
         .all(|role| mapped_role(params, "jeSource", role))
@@ -7174,7 +7160,7 @@ mod tests {
     }
 
     #[test]
-    fn tb缺期初余额不再拦截且利率行注明按零测算() {
+    fn tb缺期初余额不再拦截且按零参与测算() {
         let fixture = SyntheticLedger::new(&[["4.2%", "浮动", "", "90"]]);
         let mut book = Workbook::new();
         let sheet = book.add_worksheet();
@@ -7206,17 +7192,15 @@ mod tests {
             "loanAccounts": ["2001"]
         });
         // 第二步轻量方法不设期初余额门禁（入口门禁的期初豁免由
-        // tb任务入口拦截不完整字段映射 覆盖），直接验证产出与注明。
+        // tb任务入口拦截不完整字段映射 覆盖），直接验证按零产出。
         let result = call("loan.prepare_rates", params).unwrap();
         let rows = result["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1, "{result:#?}");
         assert_eq!(rows[0]["openingPrincipal"], 0.0);
-        assert!(
-            rows[0]["matchBasis"]
-                .as_str()
-                .unwrap()
-                .contains("按 0 参与平均"),
-            "利率行依据应注明按 0 测算：{rows:#?}"
+        assert_eq!(
+            rows[0]["matchBasis"],
+            "利率行由 TB 轻量生成；本金变动、勾稽与利息在第三步测算",
+            "利率行依据说明保持原样，不追加期初口径说明：{rows:#?}"
         );
     }
     #[test]

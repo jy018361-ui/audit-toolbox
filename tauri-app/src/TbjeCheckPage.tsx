@@ -1,4 +1,11 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   engineCall,
   jobCancel,
@@ -14,6 +21,7 @@ import {
   TB_LABELS,
 } from "./DepositInterestPage";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { useTableColumnResize } from "@/components/useTableColumnResize";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { LedgerReviewCompact } from "@/components/LedgerReviewAll";
 import { llmReviewPresentation } from "@/components/llmReviewPresentation";
@@ -336,6 +344,45 @@ const presenceLabel = (presence: string) =>
       ? "仅序时账"
       : "两边都有";
 
+/**
+ * 预览表滚动容器：只包一张预览表，接入统一列宽调整（拖拽／双击自适应／右键重置，本机记忆）。
+ * 结果明细各检查块的表在条件与循环里渲染（搜索关键字变化还会中途增删），
+ * 故列宽钩子放在本组件内，随表一起挂载／卸载。
+ */
+function TbjePreviewTableScroll({
+  storageKey,
+  children,
+}: {
+  storageKey: string;
+  children: ReactNode;
+}) {
+  const resize = useTableColumnResize<HTMLDivElement>({ storageKey });
+  return (
+    <div className="tbje-preview-scroll" ref={resize.ref}>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * 核对结果表容器：只包结果这一张表，接入统一列宽调整。
+ * 结果区在核对完成后才渲染，列宽钩子须随本组件挂载，不能常驻页面组件。
+ */
+function TbjeResultTableWrap({ children }: { children: ReactNode }) {
+  const resize = useTableColumnResize<HTMLDivElement>({ storageKey: "tbje.result" });
+  return (
+    <div
+      className="tbje-result-table-wrap"
+      role="region"
+      aria-label="核对结果表，可横向滚动"
+      tabIndex={0}
+      ref={resize.ref}
+    >
+      {children}
+    </div>
+  );
+}
+
 /** 结果预览：三条核对的差异就地展开，不用先导出工作簿才能看到数字。 */
 function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: string }) {
   const keyword = query.trim().toLocaleLowerCase("zh-CN");
@@ -372,7 +419,7 @@ function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: st
             {CHECK_NAMES.rollforward}不平（{unit.unit}）{unit.mismatched} /{" "}
             {unit.checked} 行
           </h4>
-          <div className="tbje-preview-scroll">
+          <TbjePreviewTableScroll storageKey="tbje.detail.rollforward">
             <Table className="tbje-preview-table">
               <TableHeader>
                 <TableRow>
@@ -417,7 +464,7 @@ function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: st
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </TbjePreviewTableScroll>
           {unit.items.length > PREVIEW_CAP && (
             <p className="fx-hint">
               仅显示前 {PREVIEW_CAP} 行，共 {unit.items.length}{" "}
@@ -431,7 +478,7 @@ function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: st
           <h4>
             {CHECK_NAMES.tbVsJe}差异 {tbItems.length} 个科目
           </h4>
-          <div className="tbje-preview-scroll">
+          <TbjePreviewTableScroll storageKey="tbje.detail.tb-vs-je">
             <Table className="tbje-preview-table">
               <TableHeader>
                 <TableRow>
@@ -503,7 +550,7 @@ function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: st
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </TbjePreviewTableScroll>
           {tbItems.length > PREVIEW_CAP && (
             <p className="fx-hint">
               仅显示前 {PREVIEW_CAP} 条，共 {tbItems.length}{" "}
@@ -521,7 +568,7 @@ function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: st
                 "部分余额缺少可靠借贷方向；下表仅为已覆盖小计，不据此判断通过或不平。"}
             </p>
           )}
-          <div className="tbje-preview-scroll">
+          <TbjePreviewTableScroll storageKey="tbje.detail.equation">
             <Table className="tbje-preview-table">
               <TableHeader>
                 <TableRow>
@@ -553,7 +600,7 @@ function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: st
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </TbjePreviewTableScroll>
         </div>
       )}
       {unclassified.length > 0 && (
@@ -565,7 +612,7 @@ function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: st
             这些科目未按编码识别为资产、负债、权益、成本或损益。方向可靠的余额已纳入
             BS 与 PL 金额勾稽，但不会猜测会计要素；请核对编码或后续补充分类。
           </p>
-          <div className="tbje-preview-scroll">
+          <TbjePreviewTableScroll storageKey="tbje.detail.unclassified">
             <Table className="tbje-preview-table">
               <TableHeader>
                 <TableRow>
@@ -594,7 +641,7 @@ function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: st
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </TbjePreviewTableScroll>
         </div>
       )}
       {ambiguous.length > 0 && (
@@ -2382,6 +2429,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                 (mappings[pairingFileKey(file)] ?? {}) as MappingDict
                               }
                               disabled={busy || llmReviewBusy}
+                              resizeKey={`tbje.mapping.${file.kind}`}
                               onHeaderChange={(row, depth) =>
                                 void switchSheet(
                                   file,
@@ -2498,7 +2546,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 </Button>
               </div>
               <p className="tbje-result-scroll-hint">结果表可左右滚动，查看其余核对列；操作列保持可见。</p>
-              <div className="tbje-result-table-wrap" role="region" aria-label="核对结果表，可横向滚动" tabIndex={0}>
+              <TbjeResultTableWrap>
                 <Table className="tbje-result-table">
                   <caption className="sr-only">TB/JE 完整性核对结果</caption>
                   <colgroup>
@@ -2655,7 +2703,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                     ))}
                   </TableBody>
                 </Table>
-              </div>
+              </TbjeResultTableWrap>
               {exported && (
                 <div className="tbje-exported" role="status" aria-live="polite">
                   <span title={exported.path}>
@@ -2700,6 +2748,7 @@ function LedgerMappingPanel(props: {
   onHeaderChange?: (row: number, depth: number) => void;
   onKindChange?: () => void;
   onChange: (next: MappingDict) => void;
+  resizeKey?: string;
 }) {
   // 标签优先取引擎随识别结果下发的 roles（deposit.inspect_* 响应），
   // 未下发或没有该角色时回落本地标签表——清单与顺序仍由本地表定。
@@ -2724,6 +2773,7 @@ function LedgerMappingPanel(props: {
       formNote={describeForm(match, (role) => labels[role] ?? role)}
       multi={MULTI_COLUMN_ROLES}
       busy={props.disabled}
+      resizeKey={props.resizeKey}
       toolbar={
         props.onHeaderChange ? (
           <>

@@ -5,6 +5,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
+import { useTableColumnResize } from "@/components/useTableColumnResize";
 import "./AudiPickLegacyContract.css";
 
 export type AudiPickLegacyContractView = "detail" | "workpaper";
@@ -446,6 +447,62 @@ function ContractDetail(props: AudiPickLegacyContractProps) {
   );
 }
 
+/** 底稿条目列表表：独立成子组件挂列宽调整——没有结果行时表格不渲染，
+ *  hook 必须随表格一起挂载才能接管列宽。模板字段变化后表头列随之
+ *  变化，列宽记忆按新表头自动作废。 */
+function WorkpaperRowsTable({
+  workpaper,
+  selectedId,
+}: {
+  workpaper: AudiPickLegacyWorkpaper;
+  selectedId?: string;
+}) {
+  const resize = useTableColumnResize<HTMLDivElement>({
+    storageKey: "audipick.contract-rows",
+  });
+  return (
+    <div className="aplc-table-scroll" ref={resize.ref}>
+      <table>
+        <thead>
+          <tr>
+            {workpaper.columns.map((column) => (
+              <th key={column.key}>{column.label}</th>
+            ))}
+            <th>复核状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          {workpaper.rows.map((row) => (
+            <tr
+              key={row.id}
+              className={row.id === selectedId ? "selected" : ""}
+              onClick={() => workpaper.onSelectRow(row.id)}
+            >
+              {workpaper.columns.map((column) => (
+                <td key={column.key}>
+                  {valueText(row.values[column.key]) || "—"}
+                </td>
+              ))}
+              <td>
+                <button
+                  type="button"
+                  className={row.reviewed ? "aplc-reviewed" : "aplc-pending"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    workpaper.onToggleReviewed(row.id);
+                  }}
+                >
+                  {row.reviewed ? "已复核" : "待复核"}
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function WorkpaperView(props: AudiPickLegacyContractProps) {
   const { workpaper } = props;
   const selected =
@@ -555,47 +612,10 @@ function WorkpaperView(props: AudiPickLegacyContractProps) {
         <div className="aplc-work-grid">
           <section className="aplc-card aplc-result-list">
             <header>条目列表</header>
-            <div className="aplc-table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    {workpaper.columns.map((column) => (
-                      <th key={column.key}>{column.label}</th>
-                    ))}
-                    <th>复核状态</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {workpaper.rows.map((row) => (
-                    <tr
-                      key={row.id}
-                      className={row.id === selected?.id ? "selected" : ""}
-                      onClick={() => workpaper.onSelectRow(row.id)}
-                    >
-                      {workpaper.columns.map((column) => (
-                        <td key={column.key}>
-                          {valueText(row.values[column.key]) || "—"}
-                        </td>
-                      ))}
-                      <td>
-                        <button
-                          type="button"
-                          className={
-                            row.reviewed ? "aplc-reviewed" : "aplc-pending"
-                          }
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            workpaper.onToggleReviewed(row.id);
-                          }}
-                        >
-                          {row.reviewed ? "已复核" : "待复核"}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <WorkpaperRowsTable
+              workpaper={workpaper}
+              selectedId={selected?.id}
+            />
           </section>
 
           <section className="aplc-card aplc-result-detail">

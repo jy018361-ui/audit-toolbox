@@ -2116,6 +2116,7 @@ function FaCardListPage() {
           </div>
         }
         maxHeight={430}
+        resizeKey="fa-list.preview"
         headerControls={controls}
       />
     );

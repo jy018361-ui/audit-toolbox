@@ -29,6 +29,7 @@ import { confirmDialog } from "@/components/ConfirmDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
+import { useTableColumnResize } from "@/components/useTableColumnResize";
 
 const CACHE_KEY = "audit-toolbox:file-list-directory:v1";
 
@@ -378,40 +379,7 @@ export default function FileListDirectoryPage({
                 <p className="hint">
                   {scan.fileCount} 个文件 · {scan.maxDepth + 1} 级目录列
                 </p>
-                <div className="file-list-table-wrap">
-                  <table className="file-list-table">
-                    <thead>
-                      <tr>
-                        {Array.from(
-                          { length: scan.maxDepth + 1 },
-                          (_, index) => (
-                            <th key={index}>{index + 1}级文件夹</th>
-                          ),
-                        )}
-                        <th>文件名称</th>
-                        <th>相对路径</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {scan.preview.map((row) => (
-                        <tr key={row.fullPath}>
-                          {Array.from(
-                            { length: scan.maxDepth + 1 },
-                            (_, index) => (
-                              <td key={index} title={row.levels[index] ?? ""}>
-                                {row.levels[index] ?? ""}
-                              </td>
-                            ),
-                          )}
-                          <td title={row.name}>{row.name}</td>
-                          <td title={row.relativePath}>
-                            {displayFileName(row.relativePath)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <FileListScanTable scan={scan} />
               </>
             )}
             {scan && scan.fileCount > scan.preview.length && (
@@ -462,5 +430,44 @@ export default function FileListDirectoryPage({
         </Card>
       </div>
     </>
+  );
+}
+
+/** 扫描预览表：独立成子组件挂列宽调整——扫描结果出现前表格不渲染，
+ *  hook 必须随表格一起挂载才能接管列宽。目录层数变化后表头列数
+ *  随之变化，列宽记忆按新表头自动作废。 */
+function FileListScanTable({ scan }: { scan: FileListScan }) {
+  const resize = useTableColumnResize<HTMLDivElement>({
+    storageKey: "file-list.directory",
+  });
+  return (
+    <div className="file-list-table-wrap" ref={resize.ref}>
+      <table className="file-list-table">
+        <thead>
+          <tr>
+            {Array.from({ length: scan.maxDepth + 1 }, (_, index) => (
+              <th key={index}>{index + 1}级文件夹</th>
+            ))}
+            <th>文件名称</th>
+            <th>相对路径</th>
+          </tr>
+        </thead>
+        <tbody>
+          {scan.preview.map((row) => (
+            <tr key={row.fullPath}>
+              {Array.from({ length: scan.maxDepth + 1 }, (_, index) => (
+                <td key={index} title={row.levels[index] ?? ""}>
+                  {row.levels[index] ?? ""}
+                </td>
+              ))}
+              <td title={row.name}>{row.name}</td>
+              <td title={row.relativePath}>
+                {displayFileName(row.relativePath)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

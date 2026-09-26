@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { DateInput } from "@/components/DateInput";
+import { useTableColumnResize } from "@/components/useTableColumnResize";
 import "./AudiPickLegacyLoanAudit.css";
 
 export type AudiPickLoanAuditProject = {
@@ -1193,40 +1194,7 @@ function Repayment({ model }: { model: AudiPickLoanAuditModel }) {
       {model.repaymentPlan.length ? (
         <details className="alla-card alla-plan" open>
           <summary>查看逐笔还款明细（{model.repaymentPlan.length}笔）</summary>
-          <div className="alla-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>合同编号</th>
-                  <th>还款日</th>
-                  <th>币种</th>
-                  <th className="is-number">本金金额</th>
-                  <th>解析口径</th>
-                  <th>状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {model.repaymentPlan.map((row, index) => (
-                  <tr key={`${row.debtId}-${row.date}-${index}`}>
-                    <td>{row.contractNo}</td>
-                    <td>{row.date}</td>
-                    <td>{row.currency || "未明确"}</td>
-                    <td className="is-number">
-                      {row.amount === null
-                        ? row.amountText
-                        : formatAmount(row.amount, row.currency)}
-                    </td>
-                    <td>{row.source}</td>
-                    <td>
-                      <Badge tone={row.amount === null ? "amber" : "green"}>
-                        {row.status}
-                      </Badge>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <RepaymentPlanTable rows={model.repaymentPlan} />
         </details>
       ) : (
         <Empty>还款日期均待明确，未生成计划行。</Empty>
@@ -1243,57 +1211,7 @@ function Repayment({ model }: { model: AudiPickLoanAuditModel }) {
                 <h2>按月还本矩阵 · {CURRENCY_NAMES[currency] ?? currency}</h2>
                 <Badge tone="blue">{debts.length}笔债项</Badge>
               </div>
-              <div className="alla-table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>还款月份</th>
-                      {debts.map((debt) => (
-                        <th
-                          className="is-number"
-                          title={debt.contractName}
-                          key={debt.id}
-                        >
-                          {debt.displayName}
-                        </th>
-                      ))}
-                      <th className="is-number">当月合计</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {model.monthlyMatrix.months.map((month) => (
-                      <tr key={month}>
-                        <td>{month.replace("-", "年")}月</td>
-                        {debts.map((debt) => {
-                          const cell =
-                            model.monthlyMatrix.rowByDebtId[debt.id]?.cells[
-                              month
-                            ];
-                          return (
-                            <td
-                              className={`is-number${cell?.hasUncertain ? " is-uncertain" : ""}`}
-                              key={debt.id}
-                            >
-                              {!cell
-                                ? "—"
-                                : cell.amount === null
-                                  ? "待明确"
-                                  : `${cell.amount.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}${cell.hasUncertain ? " + 待明确" : ""}`}
-                            </td>
-                          );
-                        })}
-                        <td className="is-number is-total">
-                          {model.monthlyMatrix.totalsByCurrency[currency]?.[
-                            month
-                          ]?.toLocaleString("zh-CN", {
-                            maximumFractionDigits: 2,
-                          }) ?? "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <MonthlyMatrixTable model={model} currency={currency} debts={debts} />
               <p className="alla-caption">
                 行按月份列示，列为独立债项；不同币种分表。“每季度末”只落入3、6、9、12月，绝不平均分摊到季度内各月。
               </p>
@@ -1312,6 +1230,117 @@ function Repayment({ model }: { model: AudiPickLoanAuditModel }) {
           </ul>
         </section>
       )}
+    </div>
+  );
+}
+
+/** 逐笔还款明细表：独立成子组件挂列宽调整——没有计划行时表格不渲染，
+ *  hook 必须随表格一起挂载才能接管列宽。 */
+function RepaymentPlanTable({ rows }: { rows: RepaymentRow[] }) {
+  const resize = useTableColumnResize<HTMLDivElement>({
+    storageKey: "audipick.loan.repayment",
+  });
+  return (
+    <div className="alla-table-wrap" ref={resize.ref}>
+      <table>
+        <thead>
+          <tr>
+            <th>合同编号</th>
+            <th>还款日</th>
+            <th>币种</th>
+            <th className="is-number">本金金额</th>
+            <th>解析口径</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => (
+            <tr key={`${row.debtId}-${row.date}-${index}`}>
+              <td>{row.contractNo}</td>
+              <td>{row.date}</td>
+              <td>{row.currency || "未明确"}</td>
+              <td className="is-number">
+                {row.amount === null
+                  ? row.amountText
+                  : formatAmount(row.amount, row.currency)}
+              </td>
+              <td>{row.source}</td>
+              <td>
+                <Badge tone={row.amount === null ? "amber" : "green"}>
+                  {row.status}
+                </Badge>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** 按月还本矩阵表：渲染在按币种循环里，hook 不能进循环——独立成子组件，
+ *  每个币种一张表、各用各的记忆键；列为债项名，债项变化后记忆自动作废。 */
+function MonthlyMatrixTable({
+  model,
+  currency,
+  debts,
+}: {
+  model: AudiPickLoanAuditModel;
+  currency: string;
+  debts: AudiPickLoanAuditDebt[];
+}) {
+  const resize = useTableColumnResize<HTMLDivElement>({
+    storageKey: `audipick.loan.matrix.${currency.toLowerCase()}`,
+  });
+  return (
+    <div className="alla-table-wrap" ref={resize.ref}>
+      <table>
+        <thead>
+          <tr>
+            <th>还款月份</th>
+            {debts.map((debt) => (
+              <th
+                className="is-number"
+                title={debt.contractName}
+                key={debt.id}
+              >
+                {debt.displayName}
+              </th>
+            ))}
+            <th className="is-number">当月合计</th>
+          </tr>
+        </thead>
+        <tbody>
+          {model.monthlyMatrix.months.map((month) => (
+            <tr key={month}>
+              <td>{month.replace("-", "年")}月</td>
+              {debts.map((debt) => {
+                const cell =
+                  model.monthlyMatrix.rowByDebtId[debt.id]?.cells[month];
+                return (
+                  <td
+                    className={`is-number${cell?.hasUncertain ? " is-uncertain" : ""}`}
+                    key={debt.id}
+                  >
+                    {!cell
+                      ? "—"
+                      : cell.amount === null
+                        ? "待明确"
+                        : `${cell.amount.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}${cell.hasUncertain ? " + 待明确" : ""}`}
+                  </td>
+                );
+              })}
+              <td className="is-number is-total">
+                {model.monthlyMatrix.totalsByCurrency[currency]?.[
+                  month
+                ]?.toLocaleString("zh-CN", {
+                  maximumFractionDigits: 2,
+                }) ?? "—"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

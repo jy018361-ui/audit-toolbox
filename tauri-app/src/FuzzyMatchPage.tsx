@@ -29,6 +29,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/EmptyState";
 import { SwitchInput } from "@/components/SwitchInput";
+import { useTableColumnResize } from "@/components/useTableColumnResize";
 import { errorText } from "@/lib/errors";
 import "./fuzzy-match.css";
 
@@ -806,6 +807,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                       missing={[]}
                       busy={busy}
                       maxHeight={260}
+                      resizeKey={`fuzzy.preview.${kind}`}
                       onChange={(next) => setSource(kind, { mapping: next })}
                     />
                   )}
@@ -965,77 +967,11 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
               },
             )}
           </div>
-          <div className="fuzzy-table">
-            <table>
-              <thead>
-                <tr>
-                  <th>A 原文</th>
-                  <th>匹配对象</th>
-                  <th>状态</th>
-                  <th>总分</th>
-                  <th>理由</th>
-                  <th>确认状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {statusFilter === "invalid" ? (
-                  <tr>
-                    <td colSpan={6} className="fuzzy-empty">
-                      空白等无效值不参与匹配，导出底稿中会单独列示。
-                    </td>
-                  </tr>
-                ) : rows.filter(
-                    (r) =>
-                      statusFilter === "all" || rowLevel(r) === statusFilter,
-                  ).length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="fuzzy-empty">
-                      当前分类下没有明细行。
-                    </td>
-                  </tr>
-                ) : (
-                  rows
-                    .filter(
-                      (r) =>
-                        statusFilter === "all" || rowLevel(r) === statusFilter,
-                    )
-                    .map((r) => {
-                      const best = bestCandidate(r);
-                      const level = rowLevel(r);
-                      const c = confirmMap.get(r.aIndex);
-                      const accepted = r.matches.find(
-                        (m) => m.bIndex === c?.bIndex,
-                      );
-                      const confirmState = !c
-                        ? level === "suspect"
-                          ? "待确认"
-                          : "—"
-                        : c.action === "accept"
-                          ? `已采纳（${accepted?.bValue ?? `B#${c.bIndex}`}）`
-                          : "已拒绝（都不是）";
-                      return (
-                        <tr key={r.aIndex}>
-                          <td title={r.aValue}>{r.aValue}</td>
-                          <td title={best?.bValue}>{best?.bValue ?? "—"}</td>
-                          <td>
-                            <span
-                              className={`fuzzy-level fuzzy-level-${level}`}
-                            >
-                              {ROW_LEVEL_LABEL[level]}
-                            </span>
-                          </td>
-                          <td>{best ? formatScore(best.total) : "—"}</td>
-                          <td title={best?.reasons.join("，")}>
-                            {best?.reasons.join("，") || "—"}
-                          </td>
-                          <td>{confirmState}</td>
-                        </tr>
-                      );
-                    })
-                )}
-              </tbody>
-            </table>
-          </div>
+          <FuzzyResultTable
+            rows={rows}
+            statusFilter={statusFilter}
+            confirmMap={confirmMap}
+          />
         </section>
       )}
 
@@ -1125,6 +1061,91 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         </div>
       )}
     </main>
+  );
+}
+
+/** 匹配结果明细表：独立成子组件挂列宽调整——匹配结果出现前表格不渲染，
+ *  hook 必须随表格一起挂载才能接管列宽。 */
+function FuzzyResultTable({
+  rows,
+  statusFilter,
+  confirmMap,
+}: {
+  rows: FuzzyResultRow[];
+  statusFilter: RowLevel | "invalid" | "all";
+  confirmMap: Map<number, Confirmation>;
+}) {
+  const resize = useTableColumnResize<HTMLDivElement>({
+    storageKey: "fuzzy.results",
+  });
+  return (
+    <div className="fuzzy-table" ref={resize.ref}>
+      <table>
+        <thead>
+          <tr>
+            <th>A 原文</th>
+            <th>匹配对象</th>
+            <th>状态</th>
+            <th>总分</th>
+            <th>理由</th>
+            <th>确认状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          {statusFilter === "invalid" ? (
+            <tr>
+              <td colSpan={6} className="fuzzy-empty">
+                空白等无效值不参与匹配，导出底稿中会单独列示。
+              </td>
+            </tr>
+          ) : rows.filter(
+              (r) => statusFilter === "all" || rowLevel(r) === statusFilter,
+            ).length === 0 ? (
+            <tr>
+              <td colSpan={6} className="fuzzy-empty">
+                当前分类下没有明细行。
+              </td>
+            </tr>
+          ) : (
+            rows
+              .filter(
+                (r) => statusFilter === "all" || rowLevel(r) === statusFilter,
+              )
+              .map((r) => {
+                const best = bestCandidate(r);
+                const level = rowLevel(r);
+                const c = confirmMap.get(r.aIndex);
+                const accepted = r.matches.find(
+                  (m) => m.bIndex === c?.bIndex,
+                );
+                const confirmState = !c
+                  ? level === "suspect"
+                    ? "待确认"
+                    : "—"
+                  : c.action === "accept"
+                    ? `已采纳（${accepted?.bValue ?? `B#${c.bIndex}`}）`
+                    : "已拒绝（都不是）";
+                return (
+                  <tr key={r.aIndex}>
+                    <td title={r.aValue}>{r.aValue}</td>
+                    <td title={best?.bValue}>{best?.bValue ?? "—"}</td>
+                    <td>
+                      <span className={`fuzzy-level fuzzy-level-${level}`}>
+                        {ROW_LEVEL_LABEL[level]}
+                      </span>
+                    </td>
+                    <td>{best ? formatScore(best.total) : "—"}</td>
+                    <td title={best?.reasons.join("，")}>
+                      {best?.reasons.join("，") || "—"}
+                    </td>
+                    <td>{confirmState}</td>
+                  </tr>
+                );
+              })
+          )}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

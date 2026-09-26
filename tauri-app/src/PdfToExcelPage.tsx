@@ -23,6 +23,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useJobEvents } from "@/hooks/useJobEvents";
 import { EmptyState } from "@/components/EmptyState";
+import { useTableColumnResize } from "@/components/useTableColumnResize";
 import {
   dedupePdfPaths,
   fileStatusLabel,
@@ -369,40 +370,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
             {result && summary ? (
               <>
                 <p className="hint">{summarizeFileResultsText(summary)}</p>
-                <div className="data-table">
-                  <div className="data-table-scroll">
-                    <table className="data-table-table">
-                      <thead>
-                        <tr>
-                          <th>文件名</th>
-                          <th>状态</th>
-                          <th>页数</th>
-                          <th>正文行数</th>
-                          <th>表格数</th>
-                          <th>表格数据行</th>
-                          <th>失败原因</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {result.files.map((row, index) => (
-                          <tr key={`${row.outputPath || row.name}#${index}`}>
-                            <td title={row.name}>{row.name}</td>
-                            <td>
-                              <span className={fileStatusPill(row)}>
-                                {fileStatusLabel(row)}
-                              </span>
-                            </td>
-                            <td>{row.pages}</td>
-                            <td>{row.textRows}</td>
-                            <td>{row.tables}</td>
-                            <td>{row.tableDataRows}</td>
-                            <td title={row.error}>{row.error}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
+                <PdfConvertResultTable files={result.files} />
                 {openTarget && (
                   <div className="actions">
                     <Button
@@ -432,5 +400,53 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
         </Card>
       </div>
     </>
+  );
+}
+
+/** 转换结果表：独立成子组件挂列宽调整——结果未出来时表格不渲染，
+ *  hook 必须随表格一起挂载才能接管列宽。 */
+function PdfConvertResultTable({
+  files,
+}: {
+  files: PdfConvertResult["files"];
+}) {
+  const resize = useTableColumnResize<HTMLDivElement>({
+    storageKey: "pdf-to-excel.preview",
+  });
+  return (
+    <div className="data-table">
+      <div className="data-table-scroll" ref={resize.ref}>
+        <table className="data-table-table">
+          <thead>
+            <tr>
+              <th>文件名</th>
+              <th>状态</th>
+              <th>页数</th>
+              <th>正文行数</th>
+              <th>表格数</th>
+              <th>表格数据行</th>
+              <th>失败原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            {files.map((row, index) => (
+              <tr key={`${row.outputPath || row.name}#${index}`}>
+                <td title={row.name}>{row.name}</td>
+                <td>
+                  <span className={fileStatusPill(row)}>
+                    {fileStatusLabel(row)}
+                  </span>
+                </td>
+                <td>{row.pages}</td>
+                <td>{row.textRows}</td>
+                <td>{row.tables}</td>
+                <td>{row.tableDataRows}</td>
+                <td title={row.error}>{row.error}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }

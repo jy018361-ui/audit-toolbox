@@ -80,6 +80,8 @@ export type MappingPanelProps = {
   onToggle?: (header: string, role: string) => void;
   busy?: boolean;
   maxHeight?: number;
+  /** 列宽调整记忆键：各工具页面传入自己的键，映射预览表即支持拖拽调宽（本机记忆）。 */
+  resizeKey?: string;
 };
 
 const asColumns = (value: string | string[] | undefined): string[] =>
@@ -380,6 +382,7 @@ export function MappingPanel(props: MappingPanelProps) {
         headerControls={controls}
         trailingColumns={props.trailingColumns}
         maxHeight={props.maxHeight ?? 380}
+        resizeKey={props.resizeKey}
       />
     </section>
   );

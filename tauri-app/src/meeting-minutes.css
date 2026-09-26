@@ -1,0 +1,140 @@
+/* 会议纪要助手：页面级样式 + 全局检测弹窗/录音指示。
+   间距、字号、圆角一律引用全局 token（styles.css），不写字面量。 */
+
+/* ===== 页面 ===== */
+
+.meeting-page .meeting-section {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.meeting-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--sp-3);
+}
+
+.meeting-status-item {
+  display: grid;
+  gap: var(--sp-1);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+}
+
+.meeting-status-item dt {
+  font-size: var(--fs-xs);
+  color: var(--label);
+}
+
+.meeting-status-item dd {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.meeting-resident-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.meeting-options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--sp-3);
+}
+
+.meeting-options-grid label {
+  display: grid;
+  gap: var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--label);
+}
+
+.meeting-file-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.meeting-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.meeting-result-card {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.meeting-result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--label);
+}
+
+.meeting-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+/* ===== 全局：检测询问弹窗 ===== */
+
+.meeting-ask-dialog {
+  max-width: 460px;
+}
+
+.meeting-ask-error {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  color: var(--danger-fg);
+  font-size: var(--fs-sm);
+}
+
+/* ===== 全局：录音指示胶囊（右下角） ===== */
+
+.meeting-recording-capsule {
+  position: fixed;
+  right: var(--sp-4);
+  bottom: var(--sp-4);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--surface);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-pill);
+  box-shadow: var(--shadow-overlay);
+}
+
+.meeting-recording-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--danger-fg);
+  animation: meeting-recording-pulse 1.6s ease-in-out infinite;
+}
+
+.meeting-recording-text {
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes meeting-recording-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}

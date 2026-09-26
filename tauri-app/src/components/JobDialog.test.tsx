@@ -142,6 +142,8 @@ describe("任务进度弹窗", () => {
 
   it("胶囊与页内共用状态映射：排队任务显示排队中而非处理中", () => {
     renderDialog([job({ phase: "queued", current: 0, total: 100, message: "排队等待合并" })]);
+    expect(screen.getByText("任务排队中")).toBeTruthy();
+    expect(screen.getByText("排队中")).toBeTruthy();
     fireEvent.click(screen.getByText("最小化"));
     expect(screen.getByText("Excel 批量合并 · 排队中 0%")).toBeTruthy();
     expect(screen.queryByText(/处理中/)).toBeNull();
@@ -164,11 +166,22 @@ describe("任务进度弹窗", () => {
 
   it("多个任务同时在跑时逐条列出", () => {
     renderDialog([job(), job({ jobId: "job-2", toolId: "fa_list" })]);
-    expect(screen.getByText("正在处理 2 个任务")).toBeTruthy();
+    expect(screen.getByText("2 个任务进行中")).toBeTruthy();
     expect(screen.getAllByText("暂停").length).toBe(2);
   });
 
-  it("弹窗展示期间页面内联进度条让位，最小化后回来", () => {
+  it("长任务消息默认收起，仍可用键盘操作的按钮展开查看全文", () => {
+    renderDialog([job({ message: "正在读取客户提供的工作簿。".repeat(12) })]);
+    const message = screen.getByText("正在读取客户提供的工作簿。".repeat(12));
+    expect(message.className).toContain("job-dialog-message--clamped");
+    const expand = screen.getByRole("button", { name: "展开消息" });
+    expect(expand.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(expand);
+    expect(message.className).not.toContain("job-dialog-message--clamped");
+    expect(screen.getByRole("button", { name: "收起消息" }).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("弹窗与最小化任务条接管期间，页面不重复显示内联进度", () => {
     const running = job();
     render(
       <JobDialogProvider jobs={[running]} nameOf={nameOf}>
@@ -179,6 +192,7 @@ describe("任务进度弹窗", () => {
     expect(screen.queryByText("取消任务")).toBeNull();
 
     fireEvent.click(screen.getByText("最小化"));
-    expect(screen.getByText("正在合并第 3 个文件")).toBeTruthy();
+    expect(screen.getByText("Excel 批量合并 · 处理中 30%")).toBeTruthy();
+    expect(screen.queryByText("正在合并第 3 个文件")).toBeNull();
   });
 });

@@ -1288,7 +1288,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     if (
       !(await confirmDialog({
         title: "确认移除分组",
-        message: `确认移除第 ${group.label} 组？只会从本次核对中清除，不会删除原文件。`,
+        message: `确认移除「${group.label}」分组？只会从本次核对中清除，不会删除原文件。`,
         confirmLabel: "移除",
         tone: "danger",
       }))
@@ -1416,8 +1416,18 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
           reviewTargetsOf(group),
         );
         if (Object.values(result).some((item) => item?.failed)) failed += 1;
+        const appliedMappings: Record<string, Record<string, string | string[]>> = {};
+        for (const kind of ["tb", "je"] as const) {
+          const file = group[kind];
+          const outcome = result[kind];
+          if (file && outcome && !outcome.failed && outcome.applied.length)
+            appliedMappings[pairingFileKey(file)] = outcome.mapping;
+        }
+        if (Object.keys(appliedMappings).length) {
+          setMappings((current) => ({ ...current, ...appliedMappings }));
+          invalidateResults(false);
+        }
         setLlmReviews((current) => ({ ...current, [group.id]: result }));
-        // 自动复核只登记建议；映射只在用户逐条点击“采纳”后变化。
         completed += 1;
         setLlmReviewStatus(
           `正在联合复核 ${completed} / ${candidates.length} 组…`,
@@ -1440,7 +1450,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   }
 
   // 上传识别和自动配对全部收口后，默认执行一次字段映射联合复核。
-  // key 只包含来源身份；自动复核只生成建议，不回写 mappings。
+  // key 只包含来源身份；高置信建议自动写回映射。
   const completeAutomaticReviewKeys =
     tbjeCompleteAutomaticReviewKeys(visibleGroups);
   const automaticReviewKey = completeAutomaticReviewKeys.length

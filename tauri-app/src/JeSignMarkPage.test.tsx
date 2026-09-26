@@ -50,6 +50,14 @@ function seedLoadedDraft() {
 }
 
 describe("JeSignMarkPage", () => {
+  it("取消后页首提供独立警示徽标和重试方向", async () => {
+    const { listenJobEvents } = await import("./api");
+    const { container } = render(<JeSignMarkPage tool={tool} />);
+    const callback = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+    act(() => callback?.({ toolId: "je_sign_mark", jobId: "cancel-test", phase: "cancelled", current: 1, total: 2, message: "任务已取消", severity: "info", outputPaths: [] }));
+    expect(screen.getByText("已取消")).toHaveAttribute("data-variant", "warning");
+    expect(container.querySelector('[data-variant="warning"]')?.closest('[role="status"]')).toHaveTextContent("可重新读取或导出");
+  });
   afterEach(() => {
     // vitest 未开全局 cleanup，不手动卸载的话上一条用例的 DOM 会留到下一条。
     cleanup();
@@ -79,6 +87,8 @@ describe("JeSignMarkPage", () => {
     expect(screen.getByText("选择目标科目")).toBeInTheDocument();
     expect(screen.getByText("标记与导出")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "标记并导出" })).toBeInTheDocument();
+    expect(screen.getByText("导出文件格式与列说明")).toBeInTheDocument();
+    expect(screen.getByText("请先在上方选择至少一个目标科目。")).toBeInTheDocument();
     expect(screen.queryByText("标记结果")).not.toBeInTheDocument();
 
     // 看账的三步走在这里不该出现，尤其是被剪掉的「科目筛选」独立步骤。

@@ -25,6 +25,10 @@ import {
   legacyImport,
   listenJobEvents,
   llmTest,
+  meetingAsrTest,
+  meetingAutostartStatus,
+  meetingDetectSetEnabled,
+  meetingSetAutostart,
   pickPath,
   secretSet,
   settingsGet,
@@ -64,6 +68,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { ConfirmDialogHost, confirmDialog } from "@/components/ConfirmDialog";
 import { displayFileName } from "@/fileDisplay";
 import { SyncBusyDialog } from "@/components/SyncBusyDialog";
+import { MeetingWatch } from "@/components/MeetingWatch";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ResultView } from "@/components/ResultView";
 import { EmptyState } from "@/components/EmptyState";
@@ -149,6 +154,11 @@ const FaPolicyComparePage = lazy(() =>
     default: m.FaPolicyComparePage,
   })),
 );
+const MeetingMinutesPage = lazy(() =>
+  import("./MeetingMinutesPage").then((m) => ({
+    default: m.MeetingMinutesPage,
+  })),
+);
 
 const DEDICATED_TOOL_PAGES: Record<
   string,
@@ -172,6 +182,7 @@ const DEDICATED_TOOL_PAGES: Record<
   fuzzy_match: FuzzyMatchPage,
   fa_dep_calc: FaDepCalcPage,
   fa_policy_compare: FaPolicyComparePage,
+  meeting_minutes: MeetingMinutesPage,
 };
 
 const NAV = [
@@ -264,6 +275,7 @@ const TOOL_BADGE: Record<string, string> = {
   deposit_interest: "存",
   fuzzy_match: "模",
   tbje_check: "核",
+  meeting_minutes: "会",
 };
 
 // 侧边栏可折叠子分组：分组头只是展开/收起的开关（不走路由），
@@ -306,7 +318,12 @@ const TOOL_GROUPS = [
   },
   {
     label: "运营工具",
-    ids: ["ts_manager", "confirmation_progress", "wp_service_generator"],
+    ids: [
+      "ts_manager",
+      "confirmation_progress",
+      "wp_service_generator",
+      "meeting_minutes",
+    ],
   },
 ] as const;
 
@@ -385,10 +402,15 @@ function SidebarToolLink({
   );
 }
 
+/// 工具目录的加载三态：ToolPage 据此区分「加载中」「确认不存在」「加载失败」，
+/// 不再让加载态借用「工具不存在」的错误措辞（真机审计 P2-001）。
+type CatalogStatus = "loading" | "ready" | "error";
+
 export default function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const [catalog, setCatalog] = useState<ToolManifest[]>([]);
+  const [catalogStatus, setCatalogStatus] = useState<CatalogStatus>("loading");
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
   const [jobs, setJobs] = useState<Record<string, JobEvent>>({});
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
@@ -504,9 +526,13 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    if (previousPath.current !== location.pathname && toolDrawerOpen) {
+    const routeChanged = previousPath.current !== location.pathname;
+    if (routeChanged && toolDrawerOpen) {
       window.setTimeout(() => toolDrawerButton.current?.focus(), 0);
     }
+    // Settings and long tool pages share the document scroller. Without a
+    // reset, returning to the workspace can open with its heading cut off.
+    if (routeChanged) window.scrollTo(0, 0);
     previousPath.current = location.pathname;
     setToolDrawerOpen(false);
     // Closing is driven by route changes; including the open flag would close
@@ -589,9 +615,13 @@ export default function App() {
     void Promise.all([toolCatalog(), appBootstrap()])
       .then(([c, b]) => {
         setCatalog(c);
+        setCatalogStatus("ready");
         setBootstrap(b);
       })
-      .catch((error) => setStartupError(appErrorText(error)))
+      .catch((error) => {
+        setCatalogStatus("error");
+        setStartupError(appErrorText(error));
+      })
       .finally(() => setStartupReady(true));
     void listenJobEvents((e) => {
       invalidateHistoryCache();
@@ -635,6 +665,7 @@ export default function App() {
       <SyncBusyDialog />
       <JobCommandNotice />
       <ConfirmDialogHost />
+      <MeetingWatch />
       <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
         <a className="skip-navigation" href="#main-content" onClick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus(); }}>跳过导航，进入工作区</a>
         <WindowControls />
@@ -838,6 +869,14 @@ export default function App() {
             <SimplePage
               title="启动失败"
               text={`${startupError} 请刷新后重试。`}
+              action={
+                <Button
+                  variant="secondary"
+                  onClick={() => window.location.reload()}
+                >
+                  重新加载
+                </Button>
+              }
             />
           ) : (
             <>
@@ -889,7 +928,11 @@ export default function App() {
                     onBackToHistory={() => navigate("/history")}
                   >
                     <ToolTourProvider toolId={toolId}>
-                      <ToolPage catalog={catalog} toolId={toolId} />
+                      <ToolPage
+                        catalog={catalog}
+                        catalogStatus={catalogStatus}
+                        toolId={toolId}
+                      />
                     </ToolTourProvider>
                   </ToolRecoveryBoundary>
                 )}
@@ -944,6 +987,18 @@ function ToolPageLoading() {
       <div>
         <strong>正在打开工具…</strong>
         <p>首次使用时加载对应模块，之后会直接复用。</p>
+      </div>
+    </div>
+  );
+}
+
+function ToolCatalogLoading() {
+  return (
+    <div className="app-loading" role="status" aria-live="polite">
+      <span className="loading-dot" aria-hidden="true" />
+      <div>
+        <strong>正在加载工具目录…</strong>
+        <p>工具清单就绪后即可打开对应工具。</p>
       </div>
     </div>
   );
@@ -1010,6 +1065,7 @@ function Dashboard({
       <DataHandlingNotice
         mode="network-assisted"
         className="dashboard-data-notice"
+        collapsibleDetails
         title="数据处理边界"
         description="多数文件处理在本机完成；启用 AI 或云端 OCR 时，会按你在设置中的配置调用外部服务。"
         details="历史记录只保存任务状态、时间、输出路径和任务输入参数（用于「继续任务」恢复现场），不保存客户表格内容。"
@@ -1112,11 +1168,13 @@ function appErrorText(error: unknown): string {
   return "操作失败，请检查输入后重试。";
 }
 
-function ToolPage({
+export function ToolPage({
   catalog,
+  catalogStatus,
   toolId: explicitToolId,
 }: {
   catalog: ToolManifest[];
+  catalogStatus: CatalogStatus;
   toolId?: string;
 }) {
   const { toolId: routeToolId = "" } = useParams();
@@ -1164,8 +1222,34 @@ function ToolPage({
       void stop.then((fn) => fn());
     };
   }, []);
-  if (!tool || !def)
-    return <SimplePage title="工具不存在" text="工具登记信息尚未加载。" />;
+  if (!tool || !def) {
+    // 目录还没加载完时只能下「加载中」的结论；确认加载完成仍找不到，
+    // 才允许说「工具不存在」，加载失败则单独给出重试入口。
+    if (catalogStatus === "loading") return <ToolCatalogLoading />;
+    if (catalogStatus === "error")
+      return (
+        <SimplePage
+          title="工具目录加载失败"
+          text="工具目录没有加载成功，请重新加载应用再试。"
+          action={
+            <Button variant="secondary" onClick={() => window.location.reload()}>
+              重新加载
+            </Button>
+          }
+        />
+      );
+    return (
+      <SimplePage
+        title="工具不存在"
+        text="工具目录里没有这个工具，可能是链接有误或工具已下线。"
+        action={
+          <NavLink className="primary empty-state-link" to="/">
+            返回工作台
+          </NavLink>
+        }
+      />
+    );
+  }
   const DedicatedPage = DEDICATED_TOOL_PAGES[tool.id];
   if (DedicatedPage)
     return (
@@ -1594,6 +1678,8 @@ export function Settings({
     ocrEngine: "ai",
     ocrApiKey: "",
     ocrSecret: "",
+    meetingDetectEnabled: true,
+    asrApiKey: "",
   });
   const [message, setMessage] = useState("");
   const [testingLlm, setTestingLlm] = useState(false);
@@ -1601,6 +1687,14 @@ export function Settings({
     ok: boolean;
     text: string;
   }>();
+  const [testingAsr, setTestingAsr] = useState(false);
+  const [asrTestResult, setAsrTestResult] = useState<{
+    ok: boolean;
+    text: string;
+  }>();
+  // 开机自启是注册表项、勾选即生效，不进保存条脏检查。
+  const [autostartEnabled, setAutostartEnabled] = useState(false);
+  const [autostartBusy, setAutostartBusy] = useState(false);
   const [backupPath, setBackupPath] = useState("");
   // 本地缓存：大表读一次就存一份 Parquet，之后每步都命中缓存。
   // 它只增不减，所以要给用户一个看得见、清得掉的入口。
@@ -1632,6 +1726,11 @@ export function Settings({
   useEffect(() => {
     void refreshCacheStat();
   }, []);
+  useEffect(() => {
+    void meetingAutostartStatus()
+      .then((value) => setAutostartEnabled(Boolean(value.enabled)))
+      .catch(() => undefined);
+  }, []);
   const [updateStatus, setUpdateStatus] = useState("");
   const [updateOpen, setUpdateOpen] = useState(false);
   const updateTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1647,6 +1746,7 @@ export function Settings({
   const [checkedUpdateVersion, setCheckedUpdateVersion] = useState<string>();
   const updateCheckLock = useRef(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateCheckConfirmed, setUpdateCheckConfirmed] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<{
     downloaded: number;
@@ -1686,6 +1786,7 @@ export function Settings({
     updateCheckLock.current = true;
     setUpdateOpen(true);
     setCheckingUpdate(true);
+    setUpdateCheckConfirmed(false);
     setReleaseNotes(undefined);
     setNotesError("");
     setFallbackNotes("");
@@ -1694,6 +1795,7 @@ export function Settings({
     setUpdateStatus("正在检查 GitHub Release…");
     try {
       const update = await check({ timeout: 15000 });
+      setUpdateCheckConfirmed(true);
       onAvailableUpdateChange(update ?? null);
       setUpdateStatus(
         update
@@ -1780,6 +1882,7 @@ export function Settings({
       .then((value) => {
         const llm = (value.llm ?? {}) as Record<string, unknown>;
         const ocr = (value.ocr ?? {}) as Record<string, unknown>;
+        const meeting = (value.meeting ?? {}) as Record<string, unknown>;
         setForm((x) => {
           const next = {
             ...x,
@@ -1791,6 +1894,7 @@ export function Settings({
             timeout: String(llm.timeout ?? x.timeout),
             thinkingEnabled: Boolean(llm.thinking_enabled),
             ocrEngine: String(ocr.engine ?? x.ocrEngine),
+            meetingDetectEnabled: meeting.detect_enabled !== false,
           };
           const cache = (value.cache ?? {}) as Record<string, unknown>;
           const mode = String(cache.cleanup ?? "weekly");
@@ -1900,19 +2004,70 @@ export function Settings({
       setTestingLlm(false);
     }
   }
+  async function testAsrConnection() {
+    setAsrTestResult(undefined);
+    setTestingAsr(true);
+    try {
+      const result = await meetingAsrTest(form.asrApiKey);
+      setAsrTestResult({
+        ok: true,
+        text: `${result.message} 响应耗时 ${result.elapsedMs} 毫秒。`,
+      });
+    } catch (e) {
+      const value =
+        e && typeof e === "object" ? (e as Record<string, unknown>) : undefined;
+      const userMessage = value?.userMessage ?? value?.message;
+      const detail = typeof value?.detail === "string" ? value.detail : "";
+      const text =
+        typeof userMessage === "string"
+          ? `${userMessage}${detail ? `（${detail}）` : ""}`
+          : e instanceof Error
+            ? e.message
+            : String(e);
+      setAsrTestResult({ ok: false, text });
+    } finally {
+      setTestingAsr(false);
+    }
+  }
+  async function toggleAutostart(checked: boolean) {
+    if (autostartBusy) return;
+    const previous = autostartEnabled;
+    setAutostartEnabled(checked);
+    setAutostartBusy(true);
+    try {
+      await meetingSetAutostart(checked);
+    } catch (e) {
+      setAutostartEnabled(previous);
+      setSaveFailed(true);
+      setMessage(appErrorText(e));
+    } finally {
+      setAutostartBusy(false);
+    }
+  }
   async function save() {
     if (saving) return;
     setSaving(true);
     setSaveFailed(false);
     setMessage("");
     try {
+      // meeting 命名空间合并写：工具页可能已写入 background_resident，
+      // 这里只覆盖 detect_enabled，其余键原样保留。
+      const current = ((await settingsGet().catch(() => ({}))) ??
+        {}) as Record<string, unknown>;
+      const meetingNamespace = {
+        ...((current.meeting as Record<string, unknown> | undefined) ?? {}),
+        detect_enabled: form.meetingDetectEnabled,
+      };
       await settingsSet({
         llm: {
           ...llmSettings(),
         },
         ocr: { engine: form.ocrEngine },
         cache: { cleanup: cacheMode },
+        meeting: meetingNamespace,
       });
+      // 检测开关保存后立即生效，不必重启应用。
+      await meetingDetectSetEnabled(form.meetingDetectEnabled);
       if (form.apiKey)
         await secretSet(
           form.apiType === "dify_chat" ? "dify_api_key" : "llm_api_key",
@@ -1920,11 +2075,13 @@ export function Settings({
         );
       if (form.ocrApiKey) await secretSet("baidu_ocr_key", form.ocrApiKey);
       if (form.ocrSecret) await secretSet("baidu_ocr_secret", form.ocrSecret);
+      if (form.asrApiKey) await secretSet("bailian_asr_key", form.asrApiKey);
       const savedForm = {
         ...form,
         apiKey: "",
         ocrApiKey: "",
         ocrSecret: "",
+        asrApiKey: "",
       };
       savedSettingsSignature.current = settingsSignature(savedForm, cacheMode);
       setForm(savedForm);
@@ -1997,9 +2154,11 @@ export function Settings({
                   ? "正在安装"
                   : checkingUpdate
                     ? "正在检查"
-                    : availableUpdate
-                      ? "可安装"
-                      : "已是最新"}
+                    : !updateCheckConfirmed
+                      ? "未确认"
+                      : availableUpdate
+                        ? "可安装"
+                        : "已是最新"}
               </span>
               <Button
                 variant="ghost"
@@ -2266,10 +2425,7 @@ export function Settings({
               >
                 {testingLlm ? "正在测试…" : "测试 LLM 连接"}
               </button>
-              <span>
-                API Key
-                留空时使用已保存的密钥；测试成功后仍需点击页面底部「保存配置」。
-              </span>
+              <span>留空使用已保存密钥；测试成功后仍需保存配置。</span>
             </div>
             {llmTestResult && (
               <div
@@ -2372,6 +2528,62 @@ export function Settings({
                 </button>
               </div>
             </details>
+          </section>
+          <section className="list-card">
+            <h2>语音转写（百炼）</h2>
+            <p className="settings-note">
+              供会议纪要助手使用：录音上传阿里云百炼转写（按用量计费，新开通通常有免费额度）；
+              纪要整理继续使用上方统一 LLM 配置。
+            </p>
+            <div className="form-grid">
+              <label className="field settings-toggle">
+                <span>会议自动检测</span>
+                <SwitchInput
+                  checked={form.meetingDetectEnabled}
+                  onChange={(checked: boolean) =>
+                    set("meetingDetectEnabled", checked)
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>百炼 API 密钥</span>
+                <input
+                  type="password"
+                  value={form.asrApiKey}
+                  onChange={(e) => set("asrApiKey", e.target.value)}
+                  placeholder="留空表示不修改"
+                />
+              </label>
+              <label className="field settings-toggle">
+                <span>开机自启（登录后驻留托盘监控）</span>
+                <SwitchInput
+                  checked={autostartEnabled}
+                  disabled={autostartBusy}
+                  onChange={(checked: boolean) => void toggleAutostart(checked)}
+                />
+              </label>
+            </div>
+            <p className="settings-note">
+              「开机自启」勾选后立即生效：登录 Windows
+              后工具箱自动在系统托盘启动会议监控，不弹窗口；取消「后台常驻」会同时取消开机自启。
+            </p>
+            <div className="settings-test-row">
+              <button
+                className="secondary"
+                disabled={testingAsr}
+                onClick={() => void testAsrConnection()}
+              >
+                {testingAsr ? "正在测试…" : "测试百炼连接"}
+              </button>
+              <span>密钥请到阿里云百炼控制台创建；留空使用已保存密钥。</span>
+            </div>
+            {asrTestResult && (
+              <div
+                className={`settings-test-result ${asrTestResult.ok ? "success" : "failed"}`}
+              >
+                {asrTestResult.text}
+              </div>
+            )}
           </section>
         </div>
         <div className="settings-col">
@@ -2574,12 +2786,21 @@ export function Settings({
   );
 }
 
-function SimplePage({ title, text }: { title: string; text: string }) {
+function SimplePage({
+  title,
+  text,
+  action,
+}: {
+  title: string;
+  text: string;
+  action?: ReactElement;
+}) {
   return (
     <>
       <PageHeader eyebrow="审计工具箱" title={title} detail={text} />
       <div className="list-card">
         <div className="empty">{text}</div>
+        {action ? <div className="simple-page-action">{action}</div> : null}
       </div>
     </>
   );

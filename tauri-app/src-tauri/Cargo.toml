@@ -1,6 +1,6 @@
 [package]
 name = "audit-toolbox"
-version = "2.0.0-alpha.98"
+version = "2.0.0-alpha.99"
 description = "统一的 Tauri 审计工具箱"
 authors = ["Audit Toolbox"]
 edition = "2024"
@@ -17,7 +17,7 @@ custom-protocol = ["tauri/custom-protocol"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
@@ -47,11 +47,15 @@ polars = { version = "=0.54.4", default-features = false, features = ["lazy", "p
 # planner without forwarding its optional chrono dependency.  Unify that
 # feature on the same polars-io crate so clean/manual builds are reproducible.
 polars-io = { version = "=0.54.4", default-features = false, features = ["dtype-datetime"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 umya-spreadsheet = "=3.0.1"
 pdfplumber = "0.3"
 regex = "1"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
+wasapi = "0.24.0"
+hound = "3.5.1"
+tauri-plugin-notification = "2.4.0"
+tauri-plugin-autostart = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

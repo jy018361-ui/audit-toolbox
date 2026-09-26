@@ -39,6 +39,30 @@ import {
 } from "./FxAuditPage";
 
 describe("汇兑损益科目确认表", () => {
+  it("源行按主体、名称、辅助与币种保留独立复核键", () => {
+    const accounts = ["1002 银行存款", "1002 其他存款"];
+    const identities = [
+      { entity: "甲", account: accounts[0], auxiliary: "", currency: "CNY" },
+      { entity: "乙", account: accounts[0], auxiliary: "", currency: "CNY" },
+      { entity: "甲", account: accounts[1], auxiliary: "", currency: "CNY" },
+      { entity: "甲", account: accounts[0], auxiliary: "", currency: "USD" },
+    ];
+    const rows = fxAccountReviewRows(accounts, null,
+      new Map([[accounts[0], ["甲", "乙"]], [accounts[1], ["甲"]]]), identities);
+    expect(rows).toHaveLength(4);
+    expect(new Set(rows.map((row) => row.key)).size).toBe(4);
+  });
+  it("同编码异名按实际主体列示，不复制编码级辅助组", () => {
+    const accounts = ["6711.03 制造部", "6711.03 销售部"];
+    const entities = new Map([
+      [accounts[0], ["甲公司"]],
+      [accounts[1], ["乙公司"]],
+    ]);
+    expect(fxAccountReviewRows(accounts, null, entities).map((row) => [row.entity, row.account])).toEqual([
+      ["甲公司", accounts[0]], ["乙公司", accounts[1]],
+    ]);
+  });
+
   const rows = [
     { key: "1002", account: "1002 银行存款" },
     { key: "主体\u001f1002\u001fUSD户", account: "1002 银行存款", entity: "主体", auxiliary: "美元户", auxiliaryKey: "USD户" },
@@ -153,6 +177,7 @@ describe("fx audit mode selection", () => {
     const before = fxCatalogMappingKey({ accountCode: "科目编码", accountName: "科目名称", closingFunctionalAmount: "期末" });
     expect(fxCatalogMappingKey({ accountCode: "科目编码", accountName: "科目名称", closingFunctionalAmount: "余额" })).toBe(before);
     expect(fxCatalogMappingKey({ accountCode: "正确编码", accountName: "科目名称", closingFunctionalAmount: "期末" })).not.toBe(before);
+    expect(fxCatalogMappingKey({ accountCode: "科目编码", accountName: "科目名称", currency: "币种" })).not.toBe(before);
   });
 
   it("公司本位币选项包含自动识别值与常备币种并去重", () => {
@@ -732,12 +757,13 @@ describe("fx audit upload and mapping parity", () => {
     expect(payload.tb).toBeTruthy();
     expect(payload.je).toBeTruthy();
     expect(outcomes.je?.failed).toBe(false);
-    expect(outcomes.je?.mapping.accountCode).toBeUndefined();
-    expect(outcomes.je?.pending).toHaveLength(1);
+    expect(outcomes.je?.mapping.accountCode).toBe("科目编码");
+    expect(outcomes.je?.appliedCount).toBe(1);
+    expect(outcomes.je?.pending).toHaveLength(0);
     expect(outcomes.tb?.failed).toBe(false);
-    expect(outcomes.tb?.appliedCount).toBe(0);
-    expect(outcomes.tb?.pending).toHaveLength(1);
-    expect(outcomes.tb?.mapping.accountCode).toBeUndefined();
+    expect(outcomes.tb?.appliedCount).toBe(1);
+    expect(outcomes.tb?.pending).toHaveLength(0);
+    expect(outcomes.tb?.mapping.accountCode).toBe("科目编码");
   });
   it("只复核已上传的文件，未上传的不产生结果", async () => {
     const started: string[] = [];
@@ -757,7 +783,7 @@ describe("fx audit upload and mapping parity", () => {
     expect(outcomes.je).toBeUndefined();
     expect(outcomes.tb?.appliedCount).toBe(0);
   });
-  it("公共 LLM 复核对多列凭证键只给待采纳建议", async () => {
+  it("公共 LLM 复核对高置信多列凭证键自动追加", async () => {
     const call = async () => ({
       changes: [{ role: "id", suggestedColumn: "凭证号", confidence: 0.94 }],
     });
@@ -770,9 +796,9 @@ describe("fx audit upload and mapping parity", () => {
       },
     });
     expect(outcomes.je?.failed).toBe(false);
-    expect(outcomes.je?.mapping.id).toEqual(["凭证字"]);
-    expect(outcomes.je?.appliedCount).toBe(0);
-    expect(outcomes.je?.pending[0]).toMatchObject({
+    expect(outcomes.je?.mapping.id).toEqual(["凭证字", "凭证号"]);
+    expect(outcomes.je?.appliedCount).toBe(1);
+    expect(outcomes.je?.applied[0]).toMatchObject({
       role: "id",
       suggestedColumn: "凭证号",
     });
@@ -801,9 +827,9 @@ describe("fx audit upload and mapping parity", () => {
       },
     });
     expect(outcomes.tb?.failed).toBe(false);
-    expect(outcomes.tb?.appliedCount).toBe(0);
-    expect(outcomes.tb?.mapping.accountName).toBeUndefined();
-    expect(outcomes.tb?.pending[0]).toMatchObject({
+    expect(outcomes.tb?.appliedCount).toBe(1);
+    expect(outcomes.tb?.mapping.accountName).toEqual([combined]);
+    expect(outcomes.tb?.applied[0]).toMatchObject({
       role: "accountName",
       suggestedColumn: combined,
     });

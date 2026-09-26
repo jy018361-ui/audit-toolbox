@@ -1,6 +1,7 @@
 import {
+  AUTO_ACCEPT_LLM_CONFIDENCE,
   isVisibleLlmReviewConfidence,
-  MIN_VISIBLE_LLM_REVIEW_CONFIDENCE,
+  shouldAutoAcceptLlmReview,
 } from "@/llmReviewConfidence";
 
 export function shouldShowFaAdditionFields(additionMethod?: string): boolean {
@@ -199,10 +200,10 @@ export function faMissingOptionalRoles<T extends readonly [string, string]>(
     .map(([, label]) => label);
 }
 export const FA_LOW_CONFIDENCE = 0.7;
-// 把握达到门槛才自动改；明确低于门槛的结果直接隐藏。
-export const FA_AUTO_APPLY_MIN = MIN_VISIBLE_LLM_REVIEW_CONFIDENCE;
+// 仅高于 75% 才自动改；明确低于可见门槛的结果直接隐藏。
+export const FA_AUTO_APPLY_MIN = AUTO_ACCEPT_LLM_CONFIDENCE;
 export const shouldAutoApplyFa = (confidence?: number) =>
-  confidence === undefined || confidence >= FA_AUTO_APPLY_MIN;
+  shouldAutoAcceptLlmReview(confidence);
 export type FaPendingSuggestion = {
   id: string;
   label: string;
@@ -638,7 +639,7 @@ export function planFaSupplementChanges(
 export function faReviewSummary(applied: number, pending = 0): string {
   const done = applied ? `已自动调整 ${applied} 项，不合适可逐条撤销` : "";
   const ask = pending
-    ? `另有 ${pending} 项把握不足 ${Math.round(FA_AUTO_APPLY_MIN * 100)}%，未改动，请确认是否采纳`
+    ? `另有 ${pending} 项未自动采纳，请确认是否采纳`
     : "";
   if (done && ask) return `LLM 复核完成：${done}；${ask}。`;
   if (done) return `LLM 复核完成：${done}。`;

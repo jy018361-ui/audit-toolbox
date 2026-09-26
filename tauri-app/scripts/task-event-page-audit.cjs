@@ -35,7 +35,10 @@ const preferredMethods = {
   fa_dep_calc: ["fa.dep_export"],
   fa_policy_compare: ["fa.policy_export"],
 };
-const output = fs.mkdtempSync(path.join(os.tmpdir(), "toolbox-real-task-events-"));
+const output = process.env.TASK_EVENT_AUDIT_OUTPUT
+  ? path.resolve(process.env.TASK_EVENT_AUDIT_OUTPUT)
+  : fs.mkdtempSync(path.join(os.tmpdir(), "toolbox-real-task-events-"));
+fs.mkdirSync(output, { recursive: true });
 
 async function evaluateStable(page, callback, argument) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -158,7 +161,9 @@ async function capture(page, tool, viewport, scenario, phase, job, results) {
       jobId: job.jobId, method: job.method, visibleState, issues,
     };
     results.push(record);
-    if (issues.length || process.env.TASK_EVENT_AUDIT_CAPTURE_ALL === "1") {
+    if (issues.length || process.env.TASK_EVENT_AUDIT_CAPTURE_ALL === "1" ||
+      (process.env.TASK_EVENT_AUDIT_CAPTURE_TOP === "1" && index === 0 &&
+        (phase === "running" || phase === scenario))) {
       const file = `${viewport.width}-${tool.id}-${scenario}-${phase}-${index}`
         .replace(/[^a-zA-Z0-9._-]+/g, "_");
       await page.screenshot({ path: path.join(output, `${file}.png`) });

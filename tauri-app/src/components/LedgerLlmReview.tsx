@@ -12,6 +12,8 @@ export function LedgerLlmReview({busy,failed,status,mapping,changes,pending,onSk
   changes:MappingChange[];pending:Review[];
   onSkip:()=>void;onUndo:(change:MappingChange)=>void;onAccept:(item:Review)=>void;onKeep:(item:Review)=>void;
 }){
+  // 正常且无建议时，上方字段映射已有状态，避免再出现一张“无需调整”卡。
+  if (!busy && !failed && !changes.length && !pending.length) return null;
   const presentation = llmReviewPresentation({ busy, failed, applied: changes.length, pending: pending.length });
   return <div className={`fa-llm-review ${failed||pending.length?"warning":""}`}>
     <div className="section-title"><h3>LLM 映射复核</h3><span className={`pill ${busy?"preview":failed||pending.length?"warning":"ready"}`}>{busy?"复核中":failed?"失败（不阻塞）":presentation.label.replace(/^已复核 · /, "")}</span></div>

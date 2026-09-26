@@ -132,8 +132,19 @@
 /* 合并表（科目确认＋利率设置）：基础列含余额与发生额，主体/辅助核算列按账套有无增减。
    表格横向滚动，列宽交给浏览器按内容分配，输入框给定最小宽防挤成细缝。 */
 .loan-account-confirm.loan-confirm-table table {
-  min-width: 1640px;
+  width: max-content;
+  min-width: 100%;
   table-layout: auto;
+}
+.loan-account-confirm.loan-confirm-table th:nth-last-child(2),
+.loan-account-confirm.loan-confirm-table td:nth-last-child(2) {
+  min-width: 104px;
+  white-space: nowrap;
+}
+.loan-account-confirm.loan-confirm-table th:last-child,
+.loan-account-confirm.loan-confirm-table td:last-child {
+  min-width: 220px;
+  max-width: 320px;
 }
 .loan-account-confirm.loan-confirm-table td {
   white-space: nowrap;
@@ -300,8 +311,9 @@
   table-layout: auto;
 }
 .loan-rate-table table {
-  min-width: 1740px;
-  table-layout: fixed;
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
 }
 .loan-rate-confirmation th,
 .loan-rate-confirmation td,
@@ -503,6 +515,22 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
+.loan-bridge-equation .fx-bridge-metric strong,
+.loan-result-summary .fx-bridge-metric strong {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+@media (min-width: 901px) and (max-width: 1180px) {
+  .loan-bridge-equation {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .loan-bridge-equation .fx-operator {
+    display: none;
+  }
+}
 .loan-ok,
 .loan-review {
   display: inline-flex;
@@ -644,7 +672,8 @@
 .loan-rate-table td:nth-child(15) {
   text-align: right;
   font-variant-numeric: tabular-nums;
-  min-width: 140px;
+  min-width: 158px;
+  padding-inline: 12px;
   box-shadow: inset 1px 0 0 color-mix(in srgb, var(--border) 65%, transparent);
 }
 

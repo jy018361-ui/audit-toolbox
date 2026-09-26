@@ -1,0 +1,3 @@
+.pdf-convert-stack [data-slot="card-content"] > .error-box + .drop-zone {
+  margin-top: var(--sp-3);
+}

@@ -12,6 +12,15 @@
   flex-direction: column;
   gap: var(--sp-3);
 }
+.jm-source-loaded .kz-two {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.jm-source-loaded .kz-actions {
+  margin-top: var(--sp-2);
+}
+.jm-source-loaded .fa-llm-review {
+  margin-block: var(--sp-2);
+}
 .jm-batch-row {
   display: flex;
   align-items: center;
@@ -142,12 +151,13 @@
  * 走了兜底、账被筛过或无法判定时整卡转警示底色，提醒用户确认。
  */
 .jm-sign {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
-  padding: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
   background: var(--surface-sunken);
 }
 .jm-sign.warn {
@@ -159,6 +169,22 @@
   align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-2);
+}
+.jm-source-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.jm-source-footer .jm-sign {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.jm-source-footer > button {
+  flex: 0 0 auto;
+}
+.jm-sign-head .jm-sign-choices {
+  margin-left: 0;
 }
 .jm-sign-title {
   font-weight: 600;
@@ -187,15 +213,33 @@
 }
 .jm-sign-applied {
   font-weight: 600;
+  margin: 0;
 }
 .jm-sign-basis {
+  grid-column: 1 / -1;
   color: var(--text-muted);
   font-size: 0.85rem;
 }
+.jm-sign-basis summary,
+.jm-export-help summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--brand-link);
+}
+.jm-sign-basis p {
+  margin: var(--sp-1) 0 0;
+}
 .jm-sign-warning {
+  grid-column: 1 / -1;
   color: var(--warning-fg);
   font-size: 0.85rem;
   font-weight: 600;
+}
+.jm-export-help {
+  margin-top: var(--sp-2);
+}
+.jm-export-help .kz-hint {
+  margin-bottom: 0;
 }
 
 .jm-export-options {
@@ -225,6 +269,21 @@
 }
 
 @media (max-width: 760px) {
+  .jm-source-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .jm-source-footer > button {
+    align-self: flex-end;
+  }
+  .jm-source-loaded .kz-two,
+  .jm-sign {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .jm-sign-basis,
+  .jm-sign-warning {
+    grid-column: 1;
+  }
   .jm-sign-choices {
     width: 100%;
     margin-left: 0;
@@ -235,4 +294,7 @@
     min-width: 0;
     white-space: normal;
   }
+}
+.jm-page .kz-actions + .kz-result {
+  margin-top: var(--sp-4);
 }

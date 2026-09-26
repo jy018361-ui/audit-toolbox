@@ -11,10 +11,18 @@ import {
   BootstrapSchema,
   HistoryRowSchema,
   JobEventSchema,
+  MeetingEventSchema,
+  MeetingRecordStartSchema,
+  MeetingRecordStopSchema,
+  MeetingStatusSchema,
   TaskRestoreSchema,
   ToolManifestSchema,
   type HistoryRow,
   type JobEvent,
+  type MeetingEvent,
+  type MeetingRecordStart,
+  type MeetingRecordStop,
+  type MeetingStatus,
   type TaskRestore,
 } from "./types";
 
@@ -197,6 +205,7 @@ const DEMO_JOB_TOOL_ID_RULES: Array<[prefix: string, toolId: string]> = [
   ["loan.", "loan_interest"],
   ["pdf2excel.", "pdf_to_excel"],
   ["fuzzy.", "fuzzy_match"],
+  ["meeting.", "meeting_minutes"],
 ];
 
 const demoJobToolId = (method: string): string =>
@@ -339,6 +348,74 @@ export const legacyImport = (path: string) =>
   inTauri()
     ? invoke("legacy_import", { path })
     : Promise.reject(previewUnavailable("导入迁移备份"));
+
+// ===== 会议纪要助手 =====
+
+export const meetingStatus = () =>
+  inTauri()
+    ? invoke<MeetingStatus>("meeting_status").then((value) =>
+        MeetingStatusSchema.parse(value),
+      )
+    : Promise.resolve<MeetingStatus>({
+        watchEnabled: true,
+        resident: false,
+        inCall: false,
+        logFound: true,
+        recording: false,
+      });
+
+export const meetingDetectSetEnabled = (enabled: boolean) =>
+  inTauri()
+    ? invoke<void>("meeting_detect_set_enabled", { enabled })
+    : Promise.resolve();
+
+/** 后台常驻：开＝关窗缩到托盘继续监控；关＝关窗即退出。落库并即时生效。 */
+export const meetingSetResident = (enabled: boolean) =>
+  inTauri()
+    ? invoke<void>("meeting_set_resident", { enabled })
+    : Promise.resolve();
+
+/** 开机自启（注册表 Run 项，勾选即写入、立即生效）。 */
+export const meetingAutostartStatus = () =>
+  inTauri()
+    ? invoke<{ enabled: boolean }>("meeting_autostart_status")
+    : Promise.resolve({ enabled: false });
+
+export const meetingSetAutostart = (enabled: boolean) =>
+  inTauri()
+    ? invoke<{ enabled: boolean }>("meeting_set_autostart", { enabled })
+    : Promise.resolve({ enabled });
+
+export const meetingRecordStart = () =>
+  inTauri()
+    ? invoke<MeetingRecordStart>("meeting_record_start").then((value) =>
+        MeetingRecordStartSchema.parse(value),
+      )
+    : Promise.reject(previewUnavailable("开始会议录音"));
+
+export const meetingRecordStop = () =>
+  inTauri()
+    ? invoke<MeetingRecordStop>("meeting_record_stop").then((value) =>
+        MeetingRecordStopSchema.parse(value),
+      )
+    : Promise.reject(previewUnavailable("停止会议录音"));
+
+export const meetingAsrTest = (apiKey?: string) =>
+  inTauri()
+    ? invoke<{ ok: boolean; message: string; elapsedMs: number }>(
+        "meeting_asr_test",
+        { apiKey: apiKey?.trim() || null },
+      )
+    : Promise.reject(previewUnavailable("测试百炼语音转写连接"));
+
+export async function listenMeetingEvents(
+  callback: (event: MeetingEvent) => void,
+): Promise<UnlistenFn> {
+  if (!inTauri()) return () => undefined;
+  return listen("meeting-event", (e) =>
+    callback(MeetingEventSchema.parse(e.payload)),
+  );
+}
 // `defaultDirectory` only decides where the dialog opens. An unreachable path
 // (typically a corporate UNC share reached from outside the intranet) is not an
 // error: the system dialog silently falls back to its own default folder.

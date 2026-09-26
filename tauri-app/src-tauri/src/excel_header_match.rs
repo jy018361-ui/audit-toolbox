@@ -555,6 +555,10 @@ pub(crate) struct FileAssignment {
     pub header_rows_count: usize,
     /// 该文件拍平后的表头（含独立列名，供重排与日志使用）。
     pub headers: Vec<String>,
+    /// 未匹配（独立）列在匹配网格未匹配区里的用户排序（源列下标）。
+    /// 决定独立列在合并输出中的先后；未列出的列按源顺序垫后。
+    #[serde(default)]
+    pub independent_order: Vec<usize>,
     pub columns: Vec<ColumnDecision>,
 }
 
@@ -785,6 +789,7 @@ mod tests {
                 header_row: 0,
                 header_rows_count: 1,
                 headers: vec!["日期".into()],
+                independent_order: vec![],
                 columns: vec![ColumnDecision {
                     source: 0,
                     target: Some(5),

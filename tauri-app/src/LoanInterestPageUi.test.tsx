@@ -398,9 +398,8 @@ it("借款 TB＋JE 一键联合复核并按单列映射写回，不会白屏", a
     ),
   );
 
-  expect((await screen.findAllByText(/已复核 · 1 项建议待确认/))[0]).toBeVisible();
-  expect(screen.getByText(/尚未生效/)).toBeVisible();
-  fireEvent.click(screen.getByRole("button", { name: "采纳" }));
+  expect((await screen.findAllByText(/已复核 · 已自动调整 1 项/))[0]).toBeVisible();
+  expect(screen.queryByText(/尚未生效/)).not.toBeInTheDocument();
   expect(screen.getByText(/已生效/)).toBeVisible();
   expect(screen.getByRole("button", { name: "撤销" })).toBeVisible();
   expect(

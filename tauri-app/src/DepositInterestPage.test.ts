@@ -12,6 +12,19 @@ import {
 import { DEFAULT_ENTITY, ledgerEntitiesByAccount } from "./ledgerMapping";
 
 describe("存款第二步主体拆行", () => {
+  it("源行按主体、科目名称、有效辅助项和币种保留独立身份", () => {
+    const accounts = ["1002 银行存款", "1002 其他存款"];
+    const identities = [
+      { entity: "甲", account: accounts[0], auxiliary: "", currency: "CNY" },
+      { entity: "乙", account: accounts[0], auxiliary: "", currency: "CNY" },
+      { entity: "甲", account: accounts[1], auxiliary: "", currency: "CNY" },
+      { entity: "甲", account: accounts[0], auxiliary: "", currency: "USD" },
+    ];
+    const rows = depositAccountReviewRows(accounts, null,
+      new Map([[accounts[0], ["甲", "乙"]], [accounts[1], ["甲"]]]), identities);
+    expect(rows).toHaveLength(4);
+    expect(new Set(rows.map((row) => row.key)).size).toBe(4);
+  });
   const combos = [
     { entity: "2000", account: "100201 银行存款" },
     { entity: "2002", account: "100201 银行存款" },
@@ -102,6 +115,18 @@ describe("存款第二步辅助明细", () => {
 });
 
 describe("deposit account list merge", () => {
+  it("同编码异名按真实主体组合列示，不复制辅助验证组", () => {
+    const accounts = ["6711.03 制造部", "6711.03 销售部"];
+    const entities = new Map([
+      [accounts[0], ["甲公司"]],
+      [accounts[1], ["乙公司"]],
+    ]);
+    const rows = depositAccountReviewRows(accounts, null, entities);
+    expect(rows.map((row) => [row.entity, row.account])).toEqual([
+      ["甲公司", accounts[0]], ["乙公司", accounts[1]],
+    ]);
+  });
+
   it("清单只来自 TB：同科目编码去重，保留 TB 首见写法", () => {
     expect(
       mergeAccountList(["66030002 利息", "利息 66030002", "1002 银行存款"]),

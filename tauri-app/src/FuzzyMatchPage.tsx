@@ -14,6 +14,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
+import { Badge } from "@/components/ui/badge";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
 import { JargonTip } from "@/components/JargonTip";
 import { Button } from "@/components/ui/button";
@@ -451,10 +452,13 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
           setExportOutputs(outputs);
           for (const p of outputs) void openOutput(p);
         }
-      } else if (e.phase === "failed" || e.phase === "cancelled") {
+      } else if (e.phase === "failed") {
         setBusy(false);
         const p = e.result as { error?: { userMessage?: string } } | undefined;
         setError(p?.error ? errorText(p.error) : e.message);
+      } else if (e.phase === "cancelled") {
+        setBusy(false);
+        setError("");
       }
     });
     return () => {
@@ -705,7 +709,20 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         detail="对两列公司名称、人名、地址或通用文本做模糊匹配：高相似度自动采纳，疑似项逐条人工确认，确认进度可续作并导出底稿。"
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
+      {job?.phase === "cancelled" && (
+        <div className="flex flex-wrap items-center gap-2" role="status">
+          <Badge variant="warning">已取消</Badge>
+          <span className="hint">本次任务已停止；已选来源和设置仍保留，可重新运行。</span>
+        </div>
+      )}
       {restoreNote && <p className="fa-missing-hint">{restoreNote}</p>}
+      {summary && job?.phase === "completed" && (
+        <div className="flex flex-wrap items-center gap-2" role="status">
+          <Badge variant="success">匹配完成</Badge>
+          <span className="hint">自动 {formatCount(summary.autoCount)} · 待确认 {formatCount(summary.suspectCount)} · 未匹配 {formatCount(summary.unmatchedCount)}</span>
+          <a className="text-sm underline" href="#fuzzy-match-results">查看匹配结果</a>
+        </div>
+      )}
 
       <div className="fuzzy-sources">
         {(["a", "b"] as Kind[]).map((kind) => {
@@ -786,7 +803,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                       rows={s.inspection.preview}
                       mapping={s.mapping}
                       roles={[["column", "匹配列"]]}
-                      missing={columnOf(s) ? [] : ["匹配列"]}
+                      missing={[]}
                       busy={busy}
                       maxHeight={260}
                       onChange={(next) => setSource(kind, { mapping: next })}
@@ -896,7 +913,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                 开始匹配
               </Button>
             </div>
-            {jobKind === "match" && job && (
+            {jobKind === "match" && job && job.phase !== "cancelled" && (
               <JobProgress
                 job={job}
                 onCancel={busy ? (id) => jobCancel(id) : undefined}
@@ -910,7 +927,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
       </Card>
 
       {summary && (
-        <section className="fuzzy-result">
+        <section className="fuzzy-result scroll-mt-4" id="fuzzy-match-results">
           <div className="fx-result-heading">
             <div>
               <h3>匹配结果</h3>
@@ -1083,7 +1100,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
               </Button>
             ))}
           </div>
-          {jobKind === "export" && job && (
+          {jobKind === "export" && job && job.phase !== "cancelled" && (
             <JobProgress
               job={job}
               onCancel={busy ? (id) => jobCancel(id) : undefined}

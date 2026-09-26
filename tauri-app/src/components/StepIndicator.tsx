@@ -5,6 +5,8 @@ export type Step = {
   key: string;
   label: string;
   disabled?: boolean;
+  /** 该步骤执行失败：显示警示标记而非序号/对勾，优先级高于 active/done。 */
+  status?: "error";
 };
 
 export type StepIndicatorProps = {
@@ -20,7 +22,7 @@ export type StepIndicatorProps = {
 };
 
 /**
- * 统一的步骤条（三态：active / done / disabled）。
+ * 统一的步骤条（三态：active / done / disabled；单步可选 status:"error" 失败态）。
  * 取代 FA 的 .fa-steps 与看账的 .kz-steps 两套重复实现。
  * 不用 ShadCN Tabs——Tabs 只有 active/inactive，缺少 done（已完成）三态。
  *
@@ -44,8 +46,9 @@ export function StepIndicator({
     >
       <ol className="step-indicator-list">
         {steps.map((step, index) => {
-        const done = showCompleted && index < current;
-        const active = index === current;
+        const failed = step.status === "error";
+        const done = showCompleted && index < current && !failed;
+        const active = index === current && !failed;
         // disabled 只由外部传入的 step.disabled 决定。
         // 不能用 (!done && !active) 自动禁用：FA 的步骤 2/3 的可用性由
         // 业务条件（如 !faStats）控制，匹配完成后应可点击进入。
@@ -58,10 +61,11 @@ export function StepIndicator({
                   "step-indicator-item",
                   active && "active",
                   done && "done",
+                  failed && "error",
                   disabled && "disabled",
                 )}
                 aria-current={active ? "step" : undefined}
-                aria-label={`${index + 1} ${step.label}${done ? "（已完成）" : ""}`}
+                aria-label={`${index + 1} ${step.label}${done ? "（已完成）" : ""}${failed ? "（失败）" : ""}`}
                 disabled={disabled}
                 onClick={() => onStepClick?.(index)}
               >
@@ -78,12 +82,15 @@ export function StepIndicator({
                         pathLength={24}
                       />
                     </svg>
+                  ) : failed ? (
+                    "!"
                   ) : (
                     index + 1
                   )}
                 </span>
                 <span className="step-indicator-label">{step.label}</span>
                 {done ? <span className="sr-only">（已完成）</span> : null}
+                {failed ? <span className="sr-only">（失败）</span> : null}
               </button>
           </li>
         );

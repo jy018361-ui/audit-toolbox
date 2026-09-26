@@ -54,6 +54,7 @@ vi.mock("@tauri-apps/api/app", () => ({
 vi.mock("./theme", () => ({ setSavedTheme: vi.fn() }));
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubGlobal("scrollTo", vi.fn());
   vi.mocked(historyGet).mockResolvedValue([]);
   vi.mocked(engineCall).mockResolvedValue({ bytes: 0, files: 0 });
   vi.mocked(check).mockResolvedValue(null);
@@ -65,7 +66,10 @@ beforeEach(() => {
     warnings: [],
   });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 it("uses continuous eight-digit entry for declarative date fields", () => {
   const onChange = vi.fn();
@@ -107,6 +111,24 @@ it("presents one product identity and groups every catalog tool once", async () 
     catalog.length,
   );
   expect(document.querySelectorAll(".metrics .metric")).toHaveLength(3);
+});
+
+it("returns to the top when navigating away from a long settings page", async () => {
+  const scrollTo = vi.fn();
+  vi.stubGlobal("scrollTo", scrollTo);
+  try {
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("heading", { name: "设置" });
+    fireEvent.click(screen.getAllByRole("link", { name: "工作台" })[0]);
+    await screen.findByRole("heading", { name: "今天要处理什么？" });
+    expect(scrollTo).toHaveBeenCalledWith(0, 0);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 it("发现新版本时侧边栏「设置」显示圆点提示而非文字", async () => {
@@ -613,6 +635,7 @@ it("shows this version's notes when up to date and refreshes on reopening", asyn
   render(<UpdateSettings />);
   fireEvent.click(screen.getByRole("button", { name: "软件更新" }));
   await screen.findByText("本版更新内容");
+  expect(screen.getByText("已是最新")).toBeVisible();
   // 单版本说明不显示版本计数；版本号只保留标题区一处
   expect(screen.queryByText("1 个版本")).not.toBeInTheDocument();
   expect(
@@ -662,6 +685,9 @@ it("does not offer a stale update when a fresh check fails", async () => {
     screen.queryByRole("button", { name: /确认更新到/ }),
   ).not.toBeInTheDocument();
   expect(updateReleaseNotes).not.toHaveBeenCalled();
+  expect(screen.getByText("未确认")).toBeVisible();
+  expect(screen.queryByText("已是最新")).not.toBeInTheDocument();
+  expect(screen.queryByText("可安装")).not.toBeInTheDocument();
 });
 
 it("disables duplicate checks and installation while release notes are loading", async () => {

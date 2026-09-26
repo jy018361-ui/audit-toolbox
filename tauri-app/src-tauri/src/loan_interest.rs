@@ -208,11 +208,13 @@ fn prepare_rates(params: &Value) -> Result<Value, AppError> {
         ));
     }
     let loan_id_mapped = !mapped_names(&tm, "tb", "loanId").is_empty();
+    let review_roles = account_review_roles(params);
     let mut folds = fold_loan_rows(
         &tb,
         &tm,
         &tb_leaf,
         &loan_accounts,
+        &review_roles,
         loan_id_mapped,
         entity_key_enabled,
         &entity_scope,
@@ -240,6 +242,7 @@ fn prepare_rates(params: &Value) -> Result<Value, AppError> {
         .into_iter()
         .flatten()
         .filter_map(|item| {
+            if item.get("role").is_some() { return None; }
             Some((
                 (
                     item.get("entity")?.as_str()?.to_owned(),
@@ -263,19 +266,16 @@ fn prepare_rates(params: &Value) -> Result<Value, AppError> {
                 .unwrap_or(true)
         });
     }
+    let ambiguous_names = ambiguous_fold_names(&folds);
     let inline_rates = inline_rate_rows(params);
     let rows = folds
         .into_iter()
         .map(|fold| {
-            let account_key = if fold.code.trim().is_empty() {
-                fold.account.as_str()
-            } else {
-                fold.code.as_str()
-            };
+            let account_key = fold_row_account_key(&fold, &ambiguous_names);
             let stable_key = if split_by_currency {
-                tb_currency_row_key(&fold.entity, account_key, &fold.raw_id, &fold.currency)
+                tb_currency_row_key(&fold.entity, &account_key, &fold.raw_id, &fold.currency)
             } else {
-                tb_row_key(&fold.entity, account_key, &fold.raw_id)
+                tb_row_key(&fold.entity, &account_key, &fold.raw_id)
             };
             let loan_id = if fold.raw_id.trim().is_empty() {
                 fold.account.clone()
@@ -370,8 +370,10 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
     #[derive(Clone)]
     struct CatalogAccount {
         key: String,
+        identity: String,
         code: String,
         name: String,
+        currency: String,
         account: String,
         opening: f64,
         closing: f64,
@@ -379,6 +381,7 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
         /// 该科目各主体的余额小计：第二步按主体拆行时逐行带出自己的余额，
         /// 而不是把几家公司的合计挂到每一行上。
         by_entity: BTreeMap<String, (f64, f64)>,
+        review_auxiliaries: BTreeSet<(String, String)>,
     }
     let mut order = Vec::<String>::new();
     let mut grouped = HashMap::<String, CatalogAccount>::new();
@@ -388,6 +391,7 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
         }
         let code = role_text(&tb, row, &tm, "tb", "accountCode");
         let name = role_text(&tb, row, &tm, "tb", "accountName");
+        let currency = role_text(&tb, row, &tm, "tb", "currency");
         let account = account_text(&tb, row, &tm, "tb");
         if account.trim().is_empty() {
             continue;
@@ -431,6 +435,8 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
         } else {
             norm(&code)
         };
+        let identity = serde_json::to_string(&(key.clone(), norm(&name), norm(&currency)))
+            .expect("科目身份可序列化");
         let entity = {
             let raw = role_text(&tb, row, &tm, "tb", "entity");
             if raw.trim().is_empty() {
@@ -439,10 +445,15 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
                 raw
             }
         };
-        if let Some(existing) = grouped.get_mut(&key) {
+        let auxiliary = {
+            let loan_id = role_text(&tb, row, &tm, "tb", "loanId");
+            if loan_id.trim().is_empty() { role_text(&tb, row, &tm, "tb", "auxiliary") }
+            else { loan_id }
+        };
+        if let Some(existing) = grouped.get_mut(&identity) {
             existing.opening += opening;
             existing.closing += closing;
-            let entry = existing.by_entity.entry(entity).or_insert((0.0, 0.0));
+            let entry = existing.by_entity.entry(entity.clone()).or_insert((0.0, 0.0));
             entry.0 += opening;
             entry.1 += closing;
             if existing.name.trim().is_empty() && !name.trim().is_empty() {
@@ -452,19 +463,26 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
                 existing.account = account;
             }
             existing.row_indexes.push(row_index);
+            if !auxiliary.trim().is_empty() {
+                existing.review_auxiliaries.insert((entity.clone(), auxiliary));
+            }
         } else {
-            order.push(key.clone());
+            order.push(identity.clone());
             grouped.insert(
-                key.clone(),
+                identity.clone(),
                 CatalogAccount {
                     key,
+                    identity,
                     code,
                     name,
+                    currency,
                     account,
                     opening,
                     closing,
                     row_indexes: vec![row_index],
-                    by_entity: BTreeMap::from([(entity, (opening, closing))]),
+                    by_entity: BTreeMap::from([(entity.clone(), (opening, closing))]),
+                    review_auxiliaries: if auxiliary.trim().is_empty() { BTreeSet::new() }
+                        else { BTreeSet::from([(entity, auxiliary)]) },
                 },
             );
         }
@@ -570,14 +588,19 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
             };
             json!({
                 "key": account.key,
+                "identity": account.identity,
                 "code": account.code,
                 "name": account.name,
+                "currency": account.currency,
                 "account": account.account,
                 "opening": account.opening,
                 "closing": account.closing,
                 "occurrence": occurrence,
                 "occurrenceBasis": occurrence_detail,
                 "byEntity": by_entity,
+                "reviewAuxiliaries": account.review_auxiliaries.iter()
+                    .map(|(entity, auxiliary)| json!({"entity": entity, "auxiliary": auxiliary}))
+                    .collect::<Vec<_>>(),
                 "suggestedType": suggested_type,
                 "suggestionReason": suggestion.reason,
             })
@@ -1268,6 +1291,7 @@ fn interest_expense_occurrence(
 }
 
 fn booked_interest_expense(params: &Value) -> Result<BookedInterestExpense, AppError> {
+    let review_roles = account_review_roles(params);
     let selected = params
         .get("interestExpenseAccounts")
         .and_then(Value::as_array)
@@ -1319,6 +1343,12 @@ fn booked_interest_expense(params: &Value) -> Result<BookedInterestExpense, AppE
         if !selected.iter().any(|selected_key| *selected_key == key) {
             continue;
         }
+        let name = role_text(&tb, row, &mapping, "tb", "accountName");
+        let currency = role_text(&tb, row, &mapping, "tb", "currency");
+        let entity = role_text(&tb, row, &mapping, "tb", "entity");
+        let auxiliary = role_text(&tb, row, &mapping, "tb", "loanId");
+        if account_review_role(&review_roles, &entity, &key, &name, &currency, &auxiliary)
+            .is_some_and(|role| role != "interest_expense") { continue; }
         let direction = expense_account_direction(&account, &catalog);
         let (amount, basis) = interest_expense_occurrence(
             &tb, row, &mapping, convention, direction,
@@ -3243,11 +3273,69 @@ fn collapse_folds_to_account(folds: Vec<LoanFold>, split_by_currency: bool) -> V
 }
 
 #[allow(clippy::too_many_arguments)]
+#[derive(Clone)]
+struct AccountReviewRole {
+    entity: String,
+    account: String,
+    name: String,
+    currency: String,
+    auxiliary: String,
+    role: String,
+}
+
+fn ambiguous_fold_names(folds: &[LoanFold]) -> std::collections::HashSet<(String, String, String)> {
+    let mut names = HashMap::<(String, String, String), BTreeSet<String>>::new();
+    for fold in folds {
+        names.entry((fold.entity.clone(), norm(&fold.code), fold.currency.clone()))
+            .or_default().insert(norm(&fold.name));
+    }
+    names.into_iter().filter_map(|(key, values)| (values.len() > 1).then_some(key)).collect()
+}
+
+fn fold_row_account_key(fold: &LoanFold,
+    ambiguous: &std::collections::HashSet<(String, String, String)>) -> String {
+    let base = if fold.code.trim().is_empty() { &fold.account } else { &fold.code };
+    if ambiguous.contains(&(fold.entity.clone(), norm(&fold.code), fold.currency.clone())) {
+        format!("{base}\u{1e}{}", norm(&fold.name))
+    } else {
+        base.to_owned()
+    }
+}
+
+fn account_review_roles(params: &Value) -> Vec<AccountReviewRole> {
+    params.get("loanReviewSelections").and_then(Value::as_array)
+        .into_iter().flatten().filter_map(|item| {
+            let role = item.get("role")?.as_str()?;
+            if !matches!(role, "loan" | "interest_expense" | "skip") { return None; }
+            Some(AccountReviewRole {
+                entity: norm(item.get("entity").and_then(Value::as_str).unwrap_or("")),
+                account: norm(item.get("account")?.as_str()?),
+                name: norm(item.get("name").and_then(Value::as_str).unwrap_or("")),
+                currency: norm(item.get("currency").and_then(Value::as_str).unwrap_or("")),
+                auxiliary: norm(item.get("auxiliary").and_then(Value::as_str).unwrap_or("")),
+                role: role.to_owned(),
+            })
+        }).collect()
+}
+
+fn account_review_role<'a>(roles: &'a [AccountReviewRole], entity: &str,
+    account: &str, name: &str, currency: &str, auxiliary: &str) -> Option<&'a str> {
+    let (entity, account, name, currency, auxiliary) =
+        (norm(entity), norm(account), norm(name), norm(currency), norm(auxiliary));
+    roles.iter().filter(|row| row.account == account && row.name == name
+        && row.currency == currency && (row.entity.is_empty() || row.entity == entity
+            || (entity.is_empty() && row.entity == norm(ledger_mapping::DEFAULT_ENTITY)))
+        && (row.auxiliary.is_empty() || row.auxiliary == auxiliary))
+        .max_by_key(|row| (u8::from(!row.entity.is_empty()), u8::from(!row.auxiliary.is_empty())))
+        .map(|row| row.role.as_str())
+}
+
 fn fold_loan_rows(
     tb: &Table,
     tm: &Map<String, Value>,
     tb_leaf: &[bool],
     loan_accounts: &Option<std::collections::HashSet<String>>,
+    review_roles: &[AccountReviewRole],
     loan_id_mapped: bool,
     entity_key_enabled: bool,
     entity_scope: &ledger_mapping::EntityScope,
@@ -3288,11 +3376,8 @@ fn fold_loan_rows(
             entity_scope,
         );
         let name = role_text(tb, row, tm, "tb", "accountName");
-        let detail_key = if !raw_id.trim().is_empty() {
-            norm(&raw_id)
-        } else {
-            norm(&name)
-        };
+        let detail_key = format!("{}\u{1e}{}", norm(&name),
+            if !raw_id.trim().is_empty() { norm(&raw_id) } else { String::new() });
         let currency = if split_by_currency {
             // 2026-09-25 用户定案（与存款同口径）：币种列的显式标注是分户
             // 依据——标了币种（含人民币）自成桶，只有空白/认不出才归
@@ -3301,6 +3386,10 @@ fn fold_loan_rows(
         } else {
             String::new()
         };
+        if account_review_role(review_roles, &entity,
+            &if code.is_empty() { norm(&account) } else { norm(&code) },
+            &name, &role_text(tb, row, tm, "tb", "currency"), &raw_id)
+            .is_some_and(|role| role != "loan") { continue; }
         let key = (
             entity.clone(),
             if code.is_empty() {
@@ -3481,6 +3570,7 @@ fn calculate_tb_impl(
         .into_iter()
         .flatten()
         .filter_map(|item| {
+            if item.get("role").is_some() { return None; }
             Some((
                 (
                     item.get("entity")?.as_str()?.to_owned(),
@@ -3501,12 +3591,14 @@ fn calculate_tb_impl(
             None,
         ));
     }
+    let review_roles = account_review_roles(params);
     // 维度拆行先折叠成整户借款，科目配对、JE 归集、兜底全部按整户口径。
     let mut folds = fold_loan_rows(
         &tb,
         &tm,
         &tb_leaf,
         &loan_accounts,
+        &review_roles,
         loan_id_mapped,
         entity_key_enabled,
         &entity_scope,
@@ -3673,6 +3765,7 @@ fn calculate_tb_impl(
     // 消歧到笔，名称消歧只在编码下唯一时有效；都消不开留给 TB 发生额兜底
     // （编码汇总口径），不强行归集、绝不重复计数。
     let mut code_rows: HashMap<(String, String, String), usize> = HashMap::new();
+    let ambiguous_names = ambiguous_fold_names(&folds);
     let mut code_name_rows: HashMap<(String, String, String, String), usize> = HashMap::new();
     for fold in &folds {
         if fold.code.is_empty() {
@@ -3839,15 +3932,11 @@ fn calculate_tb_impl(
         }
         let mut rate_type = "fixed".into();
         let (mut fixed, mut benchmark, mut bps) = (None, None, None);
-        let account_key = if tb_code.trim().is_empty() {
-            &account
-        } else {
-            &tb_code
-        };
+        let account_key = fold_row_account_key(fold, &ambiguous_names);
         let stable_key = if split_by_currency {
-            tb_currency_row_key(&entity, account_key, &raw_id, &currency)
+            tb_currency_row_key(&entity, &account_key, &raw_id, &currency)
         } else {
-            tb_row_key(&entity, account_key, &raw_id)
+            tb_row_key(&entity, &account_key, &raw_id)
         };
         if let Some(row) = inline_rates.iter().find(|rate| {
             if !rate.row_key.trim().is_empty() {
@@ -8353,6 +8442,38 @@ mod tests {
             .unwrap();
         assert_eq!(loan["byEntity"].as_array().unwrap().len(), 0, "{loan:#?}");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn 同编码不同科目名称或币种分别进入借款确认清单() {
+        let fixture = SyntheticLedger::new(&[]);
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        sheet.set_name("TB").unwrap();
+        for (r, row) in [
+            ["主体", "编码", "科目", "币种", "期末贷"],
+            ["甲", "2001", "银行借款", "CNY", "100"],
+            ["乙", "2001", "银行借款", "CNY", "200"],
+            ["甲", "2001", "股东借款", "CNY", "300"],
+            ["甲", "2001", "银行借款", "USD", "400"],
+        ].iter().enumerate() {
+            for (c, value) in row.iter().enumerate() {
+                sheet.write_string(r as u32, c as u16, *value).unwrap();
+            }
+        }
+        let path = fixture.dir.join("tb-accounts-full-identity.xlsx");
+        book.save(&path).unwrap();
+        let out = tb_accounts(&json!({"tbSource": {
+            "source": {"inputPath": path, "sheet": "TB", "headerRow": 1, "headerDepth": 1},
+            "mapping": {"entity": "主体", "accountCode": "编码", "accountName": "科目",
+                "currency": "币种", "closingFunctionalCredit": "期末贷"}
+        }})).unwrap();
+        let accounts = out["accounts"].as_array().unwrap();
+        assert_eq!(accounts.len(), 3, "{out:#?}");
+        assert_eq!(accounts.iter().find(|item| item["name"] == "银行借款" && item["currency"] == "CNY")
+            .unwrap()["byEntity"].as_array().unwrap().len(), 2);
+        assert_eq!(accounts.iter().map(|item| item["identity"].as_str().unwrap())
+            .collect::<std::collections::HashSet<_>>().len(), 3);
     }
 
     #[test]

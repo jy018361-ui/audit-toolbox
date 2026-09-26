@@ -22,6 +22,32 @@
   align-items: center;
   gap: var(--sp-2) var(--sp-3);
   min-width: 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-muted);
+}
+
+.job-progress .job-banner.danger {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
+.job-progress .job-banner.warning {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+
+.job-progress .job-banner.success {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+
+.job-progress .job-banner:is(.danger, .warning, .success) :is(.job-progress-state, .job-pct) {
+  color: inherit;
 }
 
 .job-progress .job-cancel {

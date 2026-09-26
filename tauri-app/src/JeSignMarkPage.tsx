@@ -14,6 +14,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "./kanzhang-parity.css";
 import "./je-sign-mark.css";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
@@ -156,7 +157,6 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   const showReview =
     llmBusy ||
     llmFailed ||
-    Boolean(llmStatus) ||
     changes.length > 0 ||
     pending.length > 0;
   const ready = Boolean(draft.inspect) && missingRequired.length === 0;
@@ -777,8 +777,10 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         detail="加载凭证、确认字段映射，在预览表头按列筛选并按批次选定目标科目，导出带正负数智能匹配标记的完整凭证明细。"
       />
       {error && <ErrorBox error={error} onDismiss={() => setError("")} />}
+      {job?.phase === "cancelled" && <div className="flex flex-wrap items-center gap-2" role="status"><Badge variant="warning">已取消</Badge><span className="hint">本次任务已停止；文件与批次设置仍保留，可重新读取或导出。</span></div>}
 
       <LedgerSourceCard
+        className={draft.inspect ? "jm-source-loaded" : undefined}
         inputPath={draft.inputPath}
         sheet={draft.sheet}
         knownSheets={draft.knownSheets}
@@ -819,14 +821,14 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             )}
             {scheme && (
               <p className="kz-hint">
-                金额口径已按方案{scheme}成立，方案{scheme === "A" ? "B" : "A"}
-                的字段已停用；如需切换，先清空当前方案的字段。
+                金额方案{scheme}已生效；切换前请先清空当前方案的字段。
                 <JargonTip
                   term="金额方案"
                   text="金额记在一列并配借贷方向列（方案A），或分借方、贷方两列（方案B），二选一即可。"
                 />
               </p>
             )}
+            <div className="jm-source-footer">
             {(signReport || signError || signLoading) && (
               <div className={`jm-sign${signWarnings.length ? " warn" : ""}`}>
                 <div className="jm-sign-head">
@@ -868,7 +870,10 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                       : signApplied}
                 </p>
                 {!signLoading && !signError && signReport && (
-                  <p className="jm-sign-basis">依据：{signReport.basis}</p>
+                  <details className="jm-sign-basis">
+                    <summary>查看判定依据</summary>
+                    <p>{signReport.basis}</p>
+                  </details>
                 )}
                 {signWarnings.map((text) => (
                   <p key={text} className="jm-sign-warning">
@@ -877,22 +882,22 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                 ))}
               </div>
             )}
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={busy || llmBusy}
+                onClick={() => void reviewMapping()}
+                aria-label="重新进行 LLM 复核"
+              >
+                {llmBusy ? "复核中…" : "复核映射"}
+              </Button>
+            </div>
             {missingRequired.length > 0 && (
               <p className="fa-missing-hint">
                 尚未映射：{missingRequired.join("、")}
                 （请在各列顶部的下拉框中选择对应字段）
               </p>
             )}
-            <div className="kz-actions">
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={busy || llmBusy}
-                onClick={() => void reviewMapping()}
-              >
-                {llmBusy ? "LLM 正在复核…" : "重新进行 LLM 复核"}
-              </Button>
-            </div>
           </>
         )}
       </LedgerSourceCard>
@@ -1068,7 +1073,9 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               )}
             </div>
           </label>
-          <p className="kz-hint">
+          <details className="jm-export-help">
+            <summary>导出文件格式与列说明</summary>
+            <p className="kz-hint">
             {draft.outputTouched
               ? "已指定保存位置，导出会以这个文件名为基准。"
               : "默认保存到凭证文件所在目录，文件名为「正负数标记_源文件名[_工作表]_<时间戳>.csv」（导出时按当前时间生成）。"}
@@ -1076,7 +1083,13 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             出工作簿；明细最前面是
             {draft.markLossTransfer ? "【损益结转】" : ""}
             【辅助_绝对值】【辅助_符号】【智能匹配状态】列，后接原始列。
-          </p>
+            </p>
+          </details>
+          {!validBatches.length && (
+            <p className="fa-missing-hint" role="status">
+              请先在上方选择至少一个目标科目。
+            </p>
+          )}
           <div className="kz-actions">
             {busy && job ? (
               <Button
@@ -1096,11 +1109,6 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               </Button>
             )}
           </div>
-          {!validBatches.length && (
-            <p className="fa-missing-hint">
-              还没有为任何批次选择目标科目，导出前请先选。
-            </p>
-          )}
           <Result job={job} result={result} />
         </section>
       )}
@@ -1193,6 +1201,7 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
                 key={path}
                 variant="secondary"
                 size="sm"
+                title={path}
                 onClick={() => void openOutput(path)}
               >
                 <span>打开：</span>

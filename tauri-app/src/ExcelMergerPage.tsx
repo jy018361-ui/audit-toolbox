@@ -25,12 +25,7 @@ import {
   type HeaderMatchPreview,
   type HeaderMatchingPlanJson,
 } from "@/components/HeaderMatchGrid";
-import { HeaderAliasManager } from "@/components/HeaderAliasManager";
 import "./header-match.css";
-
-const HEADER_MATCHING_STORAGE_KEY = "merger.headerMatching";
-
-type AliasEntry = { source: string; target: string };
 
 type MergerFile = {
   path: string;
@@ -70,14 +65,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   const [sheetAction, setSheetAction] = useState("merge_all");
   const [targetSheets, setTargetSheets] = useState<string[]>([]);
   const [addHyperlinks, setAddHyperlinks] = useState(true);
-  // 智能表头匹配：开关状态记住上次选择；仅纵向合并成一张大表时可用。
-  const [headerMatching, setHeaderMatching] = useState(() => {
-    try {
-      return window.localStorage.getItem(HEADER_MATCHING_STORAGE_KEY) === "on";
-    } catch {
-      return false;
-    }
-  });
+  // 智能表头匹配恒定开启（纵向合并成一张大表时必经确认页），不再提供开关。
   const [templatePath, setTemplatePath] = useState("");
   const [matchPreview, setMatchPreview] = useState<HeaderMatchPreview>();
   const [showMatch, setShowMatch] = useState(false);
@@ -87,8 +75,6 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   const [gridReturnable, setGridReturnable] = useState(false);
   // 上传过的外部模板在下拉里保持可选，切走也能切回来。
   const [externalTemplate, setExternalTemplate] = useState("");
-  const [aliasManagerOpen, setAliasManagerOpen] = useState(false);
-  const [aliasCount, setAliasCount] = useState(0);
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState<JobEvent>();
   const [error, setError] = useState("");
@@ -297,16 +283,6 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     }
   }
   useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        HEADER_MATCHING_STORAGE_KEY,
-        headerMatching ? "on" : "off",
-      );
-    } catch {
-      // 本地存储不可用（隐私模式等）只是不记忆，不影响本次使用。
-    }
-  }, [headerMatching]);
-  useEffect(() => {
     if (!paths.some((path) => path === templatePath)) setTemplatePath(paths[0] ?? "");
   }, [paths, templatePath]);
 
@@ -343,31 +319,37 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   async function rematchColumns(
     templateHeaders: string[],
     headers: string[],
+    hints?: [string, string][],
   ): Promise<HeaderMatchPreview["rows"][number]["matches"]> {
     const value = (await engineCall("excel_merger.rematch", {
       templateHeaders,
       headers,
+      aliases: (hints ?? []).map(([source, target]) => ({ source, target })),
     })) as { matches: HeaderMatchPreview["rows"][number]["matches"] };
     return value.matches ?? [];
   }
 
-  async function refreshAliasCount() {
+  /** 导入对照表（随合并结果导出的两列 Excel）；返回给匹配网格展示的
+   * 结果文案，用户取消选择时返回 null。导入只入本机记忆，网格里点
+   * 「重新匹配」即按新对照生效，不打断当前的人工调整。 */
+  async function importAliases(): Promise<string | null> {
+    const picked = await pickPath("files", "导入对照表（两列：源列名、目标列名）", [
+      "xlsx",
+      "xls",
+      "xlsm",
+    ]);
+    if (typeof picked !== "string") return null;
     try {
-      const value = (await engineCall("excel_merger.alias_list", {})) as {
-        aliases?: AliasEntry[];
-      };
-      setAliasCount(value.aliases?.length ?? 0);
-    } catch {
-      setAliasCount(0);
+      const value = (await engineCall("excel_merger.alias_import", {
+        path: picked,
+      })) as { imported?: number };
+      const count = value.imported ?? 0;
+      return count > 0
+        ? `已导入 ${count} 条对照；点「重新匹配」即可按新对照生效`
+        : "对照表里没有可导入的配对";
+    } catch (e) {
+      return `导入失败：${errorText(e)}`;
     }
-  }
-
-  useEffect(() => {
-    void refreshAliasCount();
-  }, []);
-
-  async function openAliasManager() {
-    setAliasManagerOpen(true);
   }
 
   async function chooseExternalTemplate() {
@@ -440,9 +422,10 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     );
   }
   const currentStep = excelMergerStep(paths.length, files.length, Boolean(job));
+  // 智能表头匹配恒定开启：纵向合并成一张大表时必经匹配确认页。
   const headerMatchAvailable =
     outputMode === "one_sheet" && direction === "vertical";
-  const headerMatchActive = headerMatching && headerMatchAvailable;
+  const headerMatchActive = headerMatchAvailable;
   const clearFiles = async () => {
     if (!paths.length) return;
     if (
@@ -479,12 +462,12 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           </div>
           <button
             type="button"
-            className="drop-zone"
+            className={`drop-zone${paths.length ? " merger-drop-zone-filled" : ""}`}
             data-tour="tool-upload"
             onClick={() => void chooseFiles()}
           >
-            <strong>拖放文件或文件夹到窗口</strong>
-            <span>支持 XLSX、XLS、XLSM、CSV、TXT，也可点击添加文件</span>
+            <strong>{paths.length ? "继续添加文件或文件夹" : "拖放文件或文件夹到窗口"}</strong>
+            {!paths.length && <span>支持 XLSX、XLS、XLSM、CSV、TXT，也可点击添加文件</span>}
           </button>
           <div className="merger-toolbar">
             <Button variant="secondary" onClick={() => void chooseFiles()}>
@@ -685,27 +668,6 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
               )}
             </div>
           )}
-          <fieldset disabled={!headerMatchAvailable}>
-            <legend>智能表头匹配</legend>
-            <label className="check-row" title={headerMatchAvailable ? "按模板文件的表头自动对齐各文件的列名，合并前先预览确认" : "仅纵向合并成一张大表时可用"}>
-              <SwitchInput
-                checked={headerMatching && headerMatchAvailable}
-                onChange={setHeaderMatching}
-              />
-              {headerMatchAvailable
-                ? "按模板表头自动对齐列（合并前先预览确认）"
-                : "仅纵向合并成一张大表时可用"}
-            </label>
-            <div className="alias-entry">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => void openAliasManager()}
-              >
-                我的对照表{aliasCount ? `（${aliasCount}）` : ""}
-              </Button>
-            </div>
-          </fieldset>
           <label className="check-row">
             <SwitchInput
               checked={addHyperlinks}
@@ -767,10 +729,10 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             文件名自动生成：Excel合并结果_日期_时间.
             {outputMode === "one_workbook" ? "xlsx" : outputFormat}
           </p>
-          {error && <div className="error-box">{error}</div>}
+          {error && job?.phase !== "failed" && <div className="error-box">{error}</div>}
           {error && gridReturnable && matchPreview && (
-            <div className="error-box grid-return">
-              <span>合并失败，匹配网格里的人工调整仍然保留。</span>
+            <div className="merge-grid-return">
+              <span>匹配网格中的人工调整已保留。</span>
               <Button variant="secondary" size="sm" onClick={() => setShowMatch(true)}>
                 返回匹配网格调整
               </Button>
@@ -810,7 +772,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         <h2>进度与结果</h2>
         {job ? (
           <>
-            <JobProgress job={job} />
+            <JobProgress job={job} detail={job.phase === "failed" ? error : undefined} />
             {result && <ResultView value={result} />}
           </>
         ) : result ? (
@@ -856,6 +818,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             ]}
             onTemplateChange={(path) => void startMatchPreview(path)}
             onExternalTemplate={() => void chooseExternalTemplate()}
+            onImportAliases={importAliases}
             onRematch={rematchColumns}
             onCancel={() => setShowMatch(false)}
             onConfirm={(plan) => {
@@ -865,14 +828,6 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             }}
           />
         </div>
-      )}
-      {aliasManagerOpen && (
-        <HeaderAliasManager
-          onClose={() => {
-            setAliasManagerOpen(false);
-            void refreshAliasCount();
-          }}
-        />
       )}
     </>
   );

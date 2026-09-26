@@ -417,7 +417,7 @@ describe("buildToolTourSteps", () => {
 
   it("目录里每个工具都有针对性剧本，文案齐全（purpose 可省略）", () => {
     const catalog = toolCatalogJson as { id: string }[];
-    expect(catalog).toHaveLength(18);
+    expect(catalog).toHaveLength(19);
     for (const entry of catalog) {
       const script = TOOL_TOUR_SCRIPTS[entry.id];
       expect(script, `${entry.id} 缺少导览剧本`).toBeDefined();

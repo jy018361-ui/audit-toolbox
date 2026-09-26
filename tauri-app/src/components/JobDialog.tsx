@@ -18,6 +18,7 @@ import { jobCancel, jobPause } from "@/api";
 import { errorText, isJobGone } from "@/lib/errors";
 import type { JobEvent } from "@/types";
 import { jobStatusText } from "./JobProgress";
+import "./JobDialog.css";
 
 /** 结束态的三个 phase 由 Rust 侧统一约定（excel_merger.rs）。 */
 const FINISHED = ["completed", "failed", "cancelled"];
@@ -27,7 +28,7 @@ export function isJobRunning(job: JobEvent): boolean {
 }
 
 type JobDialogApi = {
-  /** 弹窗此刻是否正展示该任务（最小化时为 false）。 */
+  /** 该任务是否由全局弹窗或最小化任务条接管。 */
   owns: (jobId: string) => boolean;
   isPaused: (jobId: string) => boolean;
   togglePause: (jobId: string) => void;
@@ -35,8 +36,8 @@ type JobDialogApi = {
 
 /**
  * 弹窗接管了哪些任务。页面里内联的 JobProgress 据此让位——同一个任务
- * 同时出现在弹窗和页面里会看着像跑了两遍。最小化时弹窗只剩右下角一条，
- * 这时把内联进度还给页面，用户仍能在原处看到细节。
+ * 同时出现在弹窗和页面里会看着像跑了两遍。最小化后仍由右下角任务条
+ * 接管进度，点击任务条即可展开详细进度和暂停／停止操作。
  *
  * 暂停状态也挂在这里：Roll Forward 和 AudiPick 页面自己也有暂停按钮，
  * 两边各记一份迟早对不上（弹窗里暂停了，页面按钮还写着「暂停」）。
@@ -47,7 +48,7 @@ const JobDialogContext = createContext<JobDialogApi>({
   togglePause: () => undefined,
 });
 
-/** 该任务此刻是否由弹窗展示（最小化时为 false）。 */
+/** 该任务此刻是否由全局进度层展示。 */
 export function useJobOwnedByDialog(jobId: string | undefined): boolean {
   const { owns } = useContext(JobDialogContext);
   return jobId ? owns(jobId) : false;
@@ -108,15 +109,29 @@ type JobRowProps = {
 };
 
 function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop, pending, stopRequested, operationError }: JobRowProps) {
+  const [messageExpanded, setMessageExpanded] = useState(false);
   const pct = percent(job);
   const tone = toneOf(job);
+  const longMessage = job.message.length > 100;
   return (
     <section className="job-dialog-row" aria-label={`${label}任务进度`}>
       <div className="job-dialog-row-head">
-        <strong>{label}</strong>
-        <span className="job-pct">{memoryPaused ? "内存等待" : paused ? "已暂停" : job.total > 0 ? `${pct}%` : "处理中"}</span>
+        <strong title={label}>{label}</strong>
+        <span className="job-pct">{memoryPaused ? "内存等待" : paused ? "已暂停" : job.phase === "queued" ? "排队中" : job.total > 0 ? `${pct}%` : "处理中"}</span>
       </div>
-      <p className="job-dialog-message" aria-live="polite" aria-atomic="true">{job.message}</p>
+      <p className={`job-dialog-message ${longMessage && !messageExpanded ? "job-dialog-message--clamped" : ""}`} aria-live="polite" aria-atomic="true">{job.message}</p>
+      {longMessage && (
+        <Button
+          type="button"
+          variant="link"
+          size="xs"
+          className="job-dialog-expand"
+          aria-expanded={messageExpanded}
+          onClick={() => setMessageExpanded((value) => !value)}
+        >
+          {messageExpanded ? "收起消息" : "展开消息"}
+        </Button>
+      )}
       <progress
         className={`progress-tone-${paused ? "warning" : tone}`}
         aria-label={`${label}进度`}
@@ -186,10 +201,10 @@ export function JobDialogProvider({
   }, [runningIds]);
 
   const owns = useCallback(
-    (jobId: string) => !minimized && running.some((job) => job.jobId === jobId),
+    (jobId: string) => running.some((job) => job.jobId === jobId),
     // running 每次事件都是新数组，用 id 串做依赖，避免每帧重建导致下游重渲。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [minimized, runningIds],
+    [runningIds],
   );
 
   const runCommand = async (jobId: string, command: "pause" | "stop", request: () => Promise<boolean>) => {
@@ -274,11 +289,11 @@ export function JobDialogProvider({
           <DialogHeader>
             <DialogTitle>
               {running.length > 1
-                ? `正在处理 ${running.length} 个任务`
-                : "正在处理"}
+                ? `${running.length} 个任务进行中`
+                : first?.phase === "queued" ? "任务排队中" : "正在处理"}
             </DialogTitle>
             <DialogDescription>
-              处理期间可以暂停，稍后从中断处继续；也可以最小化到右下角，先去用别的工具。
+              可最小化继续使用。停止后将请求取消任务。
             </DialogDescription>
           </DialogHeader>
           <div className="job-dialog-rows" role="list" aria-label="进行中的任务">

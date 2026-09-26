@@ -240,8 +240,11 @@ fn 定长tb修正同时作用于发生额与bspl勾稽() {
 
     let result = run(&params(&dir, true), &AtomicBool::new(false)).unwrap();
     assert_eq!(result["rollforward"]["passed"], json!(true), "{result:#}");
-    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
-    assert_eq!(result["tbVsJe"]["accounts"], json!(2), "{result:#}");
+    // TB 明确映射了五个不同科目名称，JE 只给一个统称；本次口径不再
+    // 按编码静默合并它们，发生额核对应如实列出待匹配差异。
+    assert_eq!(result["tbVsJe"]["passed"], json!(false), "{result:#}");
+    assert_eq!(result["tbVsJe"]["accounts"], json!(7), "{result:#}");
+    assert_eq!(result["tbVsJe"]["mismatched"], json!(6), "{result:#}");
     assert_eq!(result["equation"]["passed"], json!(true), "{result:#}");
     assert_eq!(result["equation"]["accounts"], json!(6), "{result:#}");
     assert_eq!(

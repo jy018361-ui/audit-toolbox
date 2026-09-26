@@ -79,7 +79,30 @@ describe("resolveRoleLabels", () => {
 });
 
 describe("planLedgerChanges", () => {
-  it("高置信度 clear 也只形成待确认建议并保留原值", () => {
+  it("75% 留待确认，超过 75% 才自动采纳", () => {
+    const input = (confidence: number) => planLedgerChanges(
+      ["旧编码", "新编码"],
+      [["1001", "1001"]],
+      { accountCode: "旧编码" },
+      { accountCode: "科目编码" },
+      [{ role: "accountCode", suggestedColumn: "新编码", confidence }],
+    );
+    expect(input(0.75)).toMatchObject({
+      mapping: { accountCode: "旧编码" },
+      applied: [],
+      pending: [expect.objectContaining({ confidence: 0.75 })],
+    });
+    expect(input(0.751)).toMatchObject({
+      mapping: { accountCode: "新编码" },
+      applied: [expect.objectContaining({
+        confidence: 0.751,
+        beforeMapping: { accountCode: "旧编码" },
+      })],
+      pending: [],
+    });
+  });
+
+  it("高于 75% 且标记安全的 clear 自动采纳", () => {
     const result = planLedgerChanges(
       ["科目名称"],
       [["库存现金"]],
@@ -95,9 +118,9 @@ describe("planLedgerChanges", () => {
         },
       ],
     );
-    expect(result.mapping.accountCode).toBe("科目名称");
-    expect(result.applied).toEqual([]);
-    expect(result.pending[0]).toMatchObject({
+    expect(result.mapping.accountCode).toBeUndefined();
+    expect(result.pending).toEqual([]);
+    expect(result.applied[0]).toMatchObject({
       action: "clear",
       suggestedColumn: "",
       beforeValue: "科目名称",
@@ -116,7 +139,7 @@ describe("planLedgerChanges", () => {
     expect(result.applied).toEqual([]);
   });
 
-  it("整批纠偏只形成建议，不在用户确认前交换科目身份", () => {
+  it("高置信整批纠偏按原子计划交换科目身份", () => {
     const result = planLedgerChanges(
       ["文本", "成本中心", "总账科目", "会计科目"],
       [["发放工资", "CC01", "1001010000", "库存现金-人民币"]],
@@ -152,15 +175,17 @@ describe("planLedgerChanges", () => {
       ],
     );
     expect(result.mapping).toEqual({
-      accountCode: "会计科目",
-      auxiliary: ["文本", "成本中心"],
+      accountCode: "总账科目",
+      accountName: ["会计科目"],
+      summary: "文本",
+      auxiliary: ["成本中心"],
     });
-    expect(result.applied).toEqual([]);
-    expect(result.pending.map((item) => item.role)).toEqual([
+    expect(result.applied.map((item) => item.role)).toEqual([
       "accountName",
       "summary",
       "accountCode",
     ]);
+    expect(result.pending).toEqual([]);
   });
 
   it("只有经样例确认的编码名称混写列才允许两个科目角色共列", () => {
@@ -184,8 +209,9 @@ describe("planLedgerChanges", () => {
       ],
     );
     expect(accepted.mapping.accountCode).toBe("科目");
-    expect(accepted.mapping.accountName).toBeUndefined();
-    expect(accepted.pending).toHaveLength(1);
+    expect(accepted.mapping.accountName).toEqual(["科目"]);
+    expect(accepted.applied).toHaveLength(1);
+    expect(accepted.pending).toEqual([]);
 
     const rejected = planLedgerChanges(
       ["科目"],

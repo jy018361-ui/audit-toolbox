@@ -73,7 +73,7 @@ pub(crate) struct PauseCheckpoint {
 }
 
 impl PauseCheckpoint {
-    fn new(pause_path: PathBuf, cancel: Arc<AtomicBool>) -> Self {
+    pub(crate) fn new(pause_path: PathBuf, cancel: Arc<AtomicBool>) -> Self {
         Self { pause_path, cancel }
     }
 
@@ -732,6 +732,8 @@ pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
     "tbje_check.run_batch",
     "tbje_check.export",
     "tbje_check.export_batch",
+    "meeting.generate",
+    "meeting.summarize",
 ];
 
 fn is_supported_job_method(method: &str) -> bool {
@@ -900,6 +902,8 @@ pub fn worker_main() -> i32 {
         "Rust TBJE 完整性核对引擎正在处理…"
     } else if request.method.starts_with("fuzzy.") {
         "Rust 两列匹配引擎正在处理…"
+    } else if request.method.starts_with("meeting.") {
+        "会议纪要引擎正在处理…"
     } else {
         "Rust Polars 表格引擎正在处理…"
     };
@@ -945,6 +949,8 @@ pub fn worker_main() -> i32 {
         crate::pdf_to_excel::run_job(&request.method, request.params, &progress, cancel, &pause)
     } else if request.method.starts_with("tbje_check.") {
         crate::tbje_check::run_job(&request.method, request.params, &progress, cancel, &pause)
+    } else if request.method.starts_with("meeting.") {
+        crate::meeting_minutes::run_job(&request.method, request.params, &progress, cancel, &pause)
     } else if request.method.starts_with("fuzzy.") {
         // 匹配结果按 jobId 落本机结果库（导出与跨会话恢复都靠它），worker 拿
         // 不到 Tauri state，这里把 WorkerRequest 自带的 jobId 注入 params。
@@ -1064,6 +1070,8 @@ pub(crate) fn tool_id(method: &str) -> &'static str {
         "pdf_to_excel"
     } else if method.starts_with("fuzzy.") {
         "fuzzy_match"
+    } else if method.starts_with("meeting.") {
+        "meeting_minutes"
     } else {
         "Excel_Merger"
     }
@@ -1228,6 +1236,8 @@ pub fn call(method: &str, params: Value) -> Result<Value, AppError> {
         "excel_merger.match_preview" => match_preview(&params),
         "excel_merger.rematch" => {
             // 人工修正表头行/层数后按新表头重跑机器匹配，避免全部归零重来。
+            // `aliases` 为匹配网格「重新匹配」时携带的本次人工配对（教材提示），
+            // 与本机对照表合并后参与打分——只补未匹配列由前端状态保证。
             let template_headers = params
                 .get("templateHeaders")
                 .and_then(Value::as_array)
@@ -1244,10 +1254,34 @@ pub fn call(method: &str, params: Value) -> Result<Value, AppError> {
                 .filter_map(Value::as_str)
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            let aliases = crate::excel_header_match::load_aliases();
+            let mut aliases = crate::excel_header_match::load_aliases();
+            aliases.extend(
+                params
+                    .get("aliases")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| {
+                                let source = item.get("source")?.as_str()?.trim().to_string();
+                                let target = item.get("target")?.as_str()?.trim().to_string();
+                                if source.is_empty() || target.is_empty() {
+                                    None
+                                } else {
+                                    Some((source, target))
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            );
             Ok(json!({
                 "matches": crate::excel_header_match::match_columns(&template_headers, &headers, &aliases),
             }))
+        }
+        "excel_merger.alias_import" => {
+            let path = required_string(&params, "path")?;
+            import_aliases(Path::new(&path))
         }
         "excel_merger.alias_list" => {
             let aliases = crate::excel_header_match::load_aliases();
@@ -1357,7 +1391,7 @@ pub fn merge(
         }
         Ok(warnings)
     })();
-    let warnings = match operation {
+    let mut warnings = match operation {
         Ok(warnings) => warnings,
         Err(err) => {
             let _ = fs::remove_file(&working_output);
@@ -1373,11 +1407,20 @@ pub fn merge(
     let header_matched = params.header_matching.is_some();
     if let Some(plan) = params.header_matching.as_ref() {
         if !plan.remember_aliases.is_empty() {
-            // 用户勾选「记住本次手动对应关系」：合并成功后写入个人对照表，
-            // 下次匹配这些配对直接按机器绿采信。失败不影响合并结果。
+            // 匹配网格确认计划时始终携带人工配对（对照表隐身化，无勾选）：
+            // 合并成功后写入本机对照表，下次匹配直接按机器绿采信。
             crate::excel_header_match::save_aliases(&plan.remember_aliases);
         }
     }
+    // 随行对照表：每次成功导出都写一份到输出目录（精确到秒命名），
+    // 换电脑导入即可复现本次匹配口径。失败只提示，不影响合并结果。
+    let alias_sidecar = match write_alias_sidecar(&output) {
+        Ok(path) => path,
+        Err(err) => {
+            warnings.push(err.user_message);
+            None
+        }
+    };
     Ok(json!({
         "engine": "rust",
         "inputFiles": inputs.len(),
@@ -1387,6 +1430,7 @@ pub fn merge(
         "targetSheets": params.target_sheets,
         "headerMatching": header_matched,
         "excelAutomation": params.output_mode == "one_workbook",
+        "aliasTablePath": alias_sidecar,
         "warnings": warnings,
         "outputPaths": [output.to_string_lossy()]
     }))
@@ -2214,7 +2258,18 @@ fn build_matched_layout(
     for (assignment_index, assignment) in plan.assignments.iter().enumerate() {
         // 本文件内同名列各自成列（并进一列会互相覆盖），从第二个起加序号。
         let mut seen_in_file: HashMap<String, usize> = HashMap::new();
-        for column in &assignment.columns {
+        // 独立列按用户在未匹配区排好的顺序落位（independent_order），
+        // 未列出的列垫在后面按源顺序——排序即输出顺序。
+        let mut independent_columns: Vec<&crate::excel_header_match::ColumnDecision> =
+            assignment.columns.iter().collect();
+        independent_columns.sort_by_key(|column| {
+            let position = assignment
+                .independent_order
+                .iter()
+                .position(|&source| source == column.source);
+            (position.unwrap_or(usize::MAX), column.source)
+        });
+        for column in independent_columns {
             if column.discard || column.target.is_some() {
                 continue;
             }
@@ -3058,6 +3113,138 @@ fn validate_params(params: &MergeParams) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 导入对照表：接受「源列名、目标列名」两列布局的 Excel（随合并结果
+/// 导出的随行对照表即此格式），并入本机对照表（去重）。表头行可写
+/// 「源列名/目标列名」也可省略——省略时按首行起的前两列非空取值。
+fn import_aliases(path: &Path) -> Result<Value, AppError> {
+    if !path.is_file() {
+        return Err(error(
+            "PATH_NOT_FOUND",
+            "找不到所选对照表文件。",
+            Some(path.display().to_string()),
+        ));
+    }
+    let mut workbook = open_workbook_auto(path).map_err(|err| {
+        error(
+            "WORKBOOK_READ_FAILED",
+            &format!("无法读取对照表：{err}"),
+            Some(path.display().to_string()),
+        )
+    })?;
+    let Some(sheet) = workbook.sheet_names().first().cloned() else {
+        return Err(error(
+            "WORKBOOK_READ_FAILED",
+            "对照表文件里没有工作表。",
+            Some(path.display().to_string()),
+        ));
+    };
+    let range = workbook.worksheet_range(&sheet).map_err(|err| {
+        error(
+            "SHEET_READ_FAILED",
+            &format!("无法读取对照表工作表：{err}"),
+            Some(format!("{} / {sheet}", path.display())),
+        )
+    })?;
+    let rows: Vec<Vec<String>> = range
+        .rows()
+        .map(|row| row.iter().map(|cell| cell.to_string().trim().to_string()).collect())
+        .collect();
+    let pairs = parse_alias_pairs(&rows);
+    if !pairs.is_empty() {
+        crate::excel_header_match::save_aliases(&pairs);
+    }
+    let aliases = crate::excel_header_match::load_aliases();
+    Ok(json!({
+        "imported": pairs.len(),
+        "total": aliases.len(),
+        "aliases": aliases
+            .iter()
+            .map(|(source, target)| json!({"source": source, "target": target}))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+/// 从「源列名、目标列名」两列布局提取配对（纯逻辑，便于单测）：
+/// 首行若恰含「源列名/目标列名」表头则跳过；之后每行取这两列，双双
+/// 非空才成一对，空行跳过。
+fn parse_alias_pairs(rows: &[Vec<String>]) -> Vec<(String, String)> {
+    let Some(first) = rows.first() else {
+        return Vec::new();
+    };
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if width < 2 {
+        return Vec::new();
+    }
+    let source_col = first
+        .iter()
+        .position(|cell| cell.trim() == "源列名")
+        .unwrap_or(0);
+    let target_col = first
+        .iter()
+        .position(|cell| cell.trim() == "目标列名")
+        .unwrap_or(if source_col == 0 { 1 } else { 0 });
+    let has_header = source_col != target_col
+        && first
+            .get(source_col)
+            .map(|value| value.trim())
+            .unwrap_or("")
+            == "源列名";
+    rows.iter()
+        .skip(if has_header { 1 } else { 0 })
+        .filter_map(|row| {
+            let source = row.get(source_col)?.trim().to_string();
+            let target = row.get(target_col)?.trim().to_string();
+            if source.is_empty() || target.is_empty() {
+                None
+            } else {
+                Some((source, target))
+            }
+        })
+        .collect()
+}
+
+/// 随行对照表：每次成功导出合并结果时，在输出同目录写一份
+/// 「对照表_年月日_时分秒.xlsx」（精确到秒，重名顺延 _2），两列布局、
+/// 人可直接编辑。它是可携带的匹配口径：换电脑/同事导入即可复现。
+/// 写失败不拦合并，只进 warnings。
+fn write_alias_sidecar(output: &Path) -> Result<Option<PathBuf>, AppError> {
+    let aliases = crate::excel_header_match::load_aliases();
+    if aliases.is_empty() {
+        return Ok(None);
+    }
+    let Some(directory) = output.parent() else {
+        return Ok(None);
+    };
+    let stamp = Local::now().format("%Y%m%d_%H%M%S");
+    let mut path = directory.join(format!("对照表_{stamp}.xlsx"));
+    let mut index = 1usize;
+    while path.exists() {
+        path = directory.join(format!("对照表_{stamp}_{index}.xlsx"));
+        index += 1;
+    }
+    let mut workbook = Workbook::new();
+    let mut sheet = new_constant_sheet(&mut workbook, 1)?;
+    sheet
+        .write_string(0, 0, "源列名")
+        .map_err(xlsx_error)?;
+    sheet
+        .write_string(0, 1, "目标列名")
+        .map_err(xlsx_error)?;
+    for (index, (source, target)) in aliases.iter().enumerate() {
+        let row = (index + 1) as u32;
+        sheet
+            .write_string(row, 0, source)
+            .map_err(xlsx_error)?;
+        sheet
+            .write_string(row, 1, target)
+            .map_err(xlsx_error)?;
+    }
+    workbook
+        .save(&path)
+        .map_err(|err| error("XLSX_WRITE_FAILED", "对照表随行文件写入失败。", Some(err.to_string())))?;
+    Ok(Some(path))
+}
+
 fn resolve_output(params: &MergeParams, inputs: &[PathBuf]) -> Result<PathBuf, AppError> {
     if let Some(path) = params
         .output_path
@@ -3475,6 +3662,96 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn matched_merge_orders_independent_columns_by_user_order() {
+        let root = std::env::temp_dir().join(format!("audit-match-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let template = root.join("A.xlsx");
+        let other = root.join("B.xlsx");
+        sample_book(&template, "Sheet1", &[
+            &["日期", "金额"],
+            &["2026-01-01", "100.00"],
+        ]);
+        sample_book(&other, "Sheet1", &[
+            &["日期", "备注", "附注", "金额"],
+            &["2026-02-01", "银行回单", "补充说明", "300.00"],
+        ]);
+        let output = root.join("independent-order.xlsx");
+        let mut params = base_params(&[template.clone(), other.clone()], &output);
+        params["headerMatching"] = json!({
+            "templatePath": template.to_string_lossy(),
+            "templateHeaders": ["日期", "金额"],
+            "rememberAliases": [],
+            "assignments": [
+                assignment_json(&template, "Sheet1", 0, 1,
+                    &["日期", "金额"],
+                    &[column_json(0, Some(0), false), column_json(1, Some(1), false)]),
+                // 用户在未匹配区把「附注」拖到「备注」前面：输出顺序跟随。
+                assignment_json(&other, "Sheet1", 0, 1,
+                    &["日期", "备注", "附注", "金额"],
+                    &[
+                        column_json(0, Some(0), false),
+                        column_json(1, None, false),
+                        column_json(2, None, false),
+                        column_json(3, Some(1), false),
+                    ]),
+            ],
+        });
+        params["headerMatching"]["assignments"][1]["independentOrder"] = json!([2, 1]);
+        test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+        let rows = read_merged_sheet(&output, "Merged");
+        assert_eq!(
+            rows[0],
+            vec!["来源文件", "来源Sheet", "日期", "金额", "附注", "备注"],
+            "独立列按用户排序输出"
+        );
+        assert_eq!(rows[2][4], "补充说明");
+        assert_eq!(rows[2][5], "银行回单");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn alias_import_parses_two_column_layout() {
+        let with_header = vec![
+            vec!["源列名".into(), "目标列名".into()],
+            vec!["记账日期".into(), "日期".into()],
+            vec!["".into(), "".into()],
+            vec!["本月合计".into(), "金额".into()],
+        ];
+        assert_eq!(
+            parse_alias_pairs(&with_header),
+            vec![
+                ("记账日期".to_string(), "日期".to_string()),
+                ("本月合计".to_string(), "金额".to_string()),
+            ],
+            "表头行跳过，空行跳过"
+        );
+        let without_header = vec![
+            vec!["记账日期".into(), "日期".into()],
+            vec!["本月合计".into(), "金额".into()],
+        ];
+        assert_eq!(parse_alias_pairs(&without_header).len(), 2, "无表头时首行即数据");
+        let single_column = vec![vec!["只有一列".into()]];
+        assert!(parse_alias_pairs(&single_column).is_empty());
+        assert!(parse_alias_pairs(&[]).is_empty());
+    }
+
+    #[test]
+    fn rematch_accepts_session_hint_aliases() {
+        let value = call(
+            "excel_merger.rematch",
+            json!({
+                "templateHeaders": ["金额"],
+                "headers": ["本月合计"],
+                "aliases": [{"source": "本月合计", "target": "金额"}],
+            }),
+        )
+        .unwrap();
+        let matches = value["matches"].as_array().unwrap();
+        assert_eq!(matches[0]["target"], json!(0));
+        assert_eq!(matches[0]["reason"], "我的对照表");
     }
 
     #[test]

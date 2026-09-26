@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { KanzhangParityPage } from "./KanzhangParityPage";
 import { publishTaskRestore } from "./restore";
@@ -33,6 +33,12 @@ const tool: ToolManifest = {
 const DRAFT_CACHE = "audit-toolbox.kanzhang.draft.v4";
 
 describe("kanzhang history resume", () => {
+  it("取消反馈独立于任务浮层保留在页首", () => {
+    const { container } = render(<KanzhangParityPage tool={tool} />);
+    act(() => jobEventsCallback?.({ toolId: "kanzhang", jobId: "cancel-test", phase: "cancelled", current: 1, total: 2, message: "任务已取消", severity: "info", outputPaths: [] }));
+    expect(screen.getByText("已取消")).toHaveAttribute("data-variant", "warning");
+    expect(container.querySelector('[data-variant="warning"]')?.closest('[role="status"]')).toHaveTextContent("可重新读取或运行");
+  });
   afterEach(() => {
     cleanup();
     sessionStorage.clear();

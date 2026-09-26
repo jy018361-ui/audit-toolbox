@@ -99,8 +99,8 @@ describe("18 个工具的动态任务状态契约", () => {
     expect(jobStatusText(makeJob({ phase: "merge", current: 3, total: 10 }))).toBe("处理中 30%");
     expect(jobStatusText(makeJob({ phase: "queued", current: 0, total: 0 }))).toBe("排队中");
     expect(jobStatusText(makeJob({ phase: "completed", current: 10, total: 10 }))).toBe("已完成 100%");
-    expect(jobStatusText(makeJob({ phase: "failed", current: 4, total: 10, severity: "error" }))).toBe("处理失败 40%");
-    expect(jobStatusText(makeJob({ phase: "cancelled", current: 4, total: 10 }))).toBe("已取消 40%");
+    expect(jobStatusText(makeJob({ phase: "failed", current: 4, total: 10, severity: "error" }))).toBe("处理失败");
+    expect(jobStatusText(makeJob({ phase: "cancelled", current: 4, total: 10 }))).toBe("已取消");
     // 运行态最多 99%，与页内进度条口径一致
     expect(jobStatusText(makeJob({ phase: "write", current: 10, total: 10 }))).toBe("处理中 99%");
   });

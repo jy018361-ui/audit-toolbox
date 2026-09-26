@@ -1148,11 +1148,10 @@ function FaCardListPage() {
     markResultStale();
     await inspect({ preserveMappings: true });
   }
-  // 自动复核只生成建议；用户逐条采纳后才改映射，并保留撤销入口。
+  // 高于 75% 且满足校验的建议自动采纳，其余建议由用户确认。
   function applyLlmPlan(review: FaLlmReview) {
     const current = faStateRef.current;
     const plan = planFaLlmChanges({
-      autoApply: false,
       beginMapping: current.beginMapping,
       endMapping: current.endMapping,
       beginKeys: current.beginKeys,
@@ -1429,10 +1428,9 @@ function FaCardListPage() {
       setDisposalInspect(undefined);
     }
   }
-  // 与主流程一致：补充清单的 LLM 建议也必须先由用户采纳。
+  // 与主流程一致：高于 75% 且满足校验的补充清单建议自动采纳。
   function applySupplementLlmPlan(review: FaLlmReview) {
     const plan = planFaSupplementChanges({
-      autoApply: false,
       addition: faStateRef.current.addition,
       disposal: faStateRef.current.disposal,
       autoApplied: review.autoApplied,
@@ -2131,13 +2129,14 @@ function FaCardListPage() {
     const headers = info?.headers ?? [];
     const title = kind === "addition" ? "本期新增清单" : "本期处置清单";
     return (
-      <div className="fa-side">
+      <div className="fa-side fa-supplement-side">
         <h3 className="fa-side-title">{title}</h3>
-        <Field label={title}>
+        <Field label="清单文件">
           <div ref={kind === "addition" ? additionDropRef : disposalDropRef}>
             <FileDropInput
               value={config.path}
-              placeholder={title}
+              placeholder="拖放或点击选择文件"
+              hideFilledLabel
               onBrowse={() => void chooseSupplement(kind)}
               onClear={
                 config.path && !busy && !supplementLlmBusy
@@ -2151,6 +2150,8 @@ function FaCardListPage() {
               disabled={supplementLlmBusy}
             />
           </div>
+        </Field>
+        <div className="fa-supplement-file-actions">
           <Button
             type="button"
             variant="secondary"
@@ -2163,9 +2164,10 @@ function FaCardListPage() {
             }
             onClick={() => void inspectSupplement(kind)}
           >
-            读取
+            读取清单
           </Button>
-        </Field>
+          {info && <span>已读取 {headers.length} 列</span>}
+        </div>
         {info && (
           <div className="form-grid">
             {!!info.sheets.length && (
@@ -2373,7 +2375,7 @@ function FaCardListPage() {
               {step === 1
                 ? "1. 选择文件并配置"
                 : step === 2
-                  ? "2. 补充清单映射（可选）"
+                  ? "2. 补充清单（可选）"
                   : "3. 保存并导出"}
             </CardTitle>
             <Badge
@@ -2722,7 +2724,7 @@ function FaCardListPage() {
                           >
                             <strong>
                               {item.label}
-                              <em>把握不足，未改动</em>
+                              <em>待确认，未改动</em>
                             </strong>
                             <span className="fa-change-diff">
                               {item.current} → {item.suggested}
@@ -2794,7 +2796,6 @@ function FaCardListPage() {
             )}
             {step === 2 && (
               <>
-                <h3>2. 本期变动清单（可选）</h3>
                 {supplementLlmBusy && (
                   <p className="hint">
                     补充清单 LLM
@@ -2944,7 +2945,7 @@ function FaCardListPage() {
                       <div className="fa-review-item fa-pending" key={item.id}>
                         <strong>
                           {item.label}
-                          <em>把握不足，未改动</em>
+                          <em>待确认，未改动</em>
                         </strong>
                         <span className="fa-change-diff">
                           {item.current} → {item.suggested}

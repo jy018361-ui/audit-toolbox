@@ -16,6 +16,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { ResultView } from "@/components/ResultView";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/EmptyState";
 
@@ -139,6 +140,13 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
     }
   }
 
+  // 生成任务失败/取消后 job 事件仍留在 state 里；此时第 2 步绝不能按
+  // "已完成"渲染（P2-004：红色报错与绿色对勾并存自相矛盾）。
+  // 失败 → 第 2 步显示警示态；取消/失败 → current 回退到第 2 步等待重试。
+  const jobInterrupted =
+    job?.phase === "failed" || job?.phase === "cancelled";
+  const jobFailed = job?.phase === "failed";
+
   return (
     <>
       <PageHeader
@@ -149,11 +157,21 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
       <StepIndicator
         steps={[
           { key: "1", label: "选择目录" },
-          { key: "2", label: "检查输入" },
+          {
+            key: "2",
+            label: "检查输入",
+            status: jobFailed ? "error" : undefined,
+          },
           { key: "3", label: "生成结果" },
         ]}
-        current={job ? 2 : folder ? 1 : 0}
+        current={job && !jobInterrupted ? 2 : folder ? 1 : 0}
       />
+      {job?.phase === "cancelled" && (
+        <div className="flex flex-wrap items-center gap-2" role="status">
+          <Badge variant="warning">已取消</Badge>
+          <span className="hint">本次生成已停止；工作目录仍保留，可检查输入后重新生成。</span>
+        </div>
+      )}
       <div className="workspace wp-workspace">
         <Card variant="section">
           <CardHeader>
@@ -227,8 +245,8 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
               />
             ) : (
               <EmptyState
-                title={busy ? "正在处理工作目录" : "尚未生成结果"}
-                description="选择目录后先检查输入，再生成服务方案。"
+                title={job?.phase === "cancelled" ? "生成已取消" : busy ? "正在处理工作目录" : "尚未生成结果"}
+                description={job?.phase === "cancelled" ? "工作目录仍保留，可检查输入后重新生成。" : "选择目录后先检查输入，再生成服务方案。"}
               />
             )}
           </CardContent>

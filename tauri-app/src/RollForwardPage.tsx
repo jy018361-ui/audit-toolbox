@@ -872,6 +872,13 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
         current={job || validation !== undefined ? 3 : company?.subjects.length && company.prior_path ? 2 : company ? 1 : 0}
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
+      {job && ["failed", "cancelled"].includes(job.phase) && (
+        <div className="flex flex-wrap items-center gap-2" role={job.phase === "failed" ? "alert" : "status"}>
+          <Badge variant={job.phase === "failed" ? "danger" : "warning"}>{job.phase === "failed" ? "结转失败" : "已取消"}</Badge>
+          <span className="hint">{job.phase === "failed" ? "本次结转未完成，请查看下方结果原因并重试对应科目。" : "本次结转已停止；项目与公司设置仍保留，可重新运行。"}</span>
+          <a className="text-sm underline" href="#roll-forward-results">查看检查与结果</a>
+        </div>
+      )}
       <div className="merger-layout roll-setup-layout">
         <section className="form-card">
           <div className="section-title">
@@ -1438,7 +1445,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           </div>
         )}
       </section>
-      <section className="result-card merger-progress">
+      <section className="result-card merger-progress scroll-mt-4" id="roll-forward-results">
         <div className="section-title">
           <h2>4. 运行检查与结果</h2>
           <span>{company?.status}</span>
@@ -1497,7 +1504,8 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
         </div>
         {job && (
           <>
-            <JobProgress job={job} />
+            {!["failed", "cancelled"].includes(job.phase) && <JobProgress job={job} />}
+            {job.phase === "failed" && job.message && <p className="hint">失败原因：{job.message}</p>}
             {job.outputPaths.map((path) => (
               <Button
                 key={path}

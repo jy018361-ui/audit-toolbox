@@ -2337,7 +2337,7 @@ fn local_ocr(image: &str) -> Result<Value, AppError> {
     }))
 }
 
-fn request_llm(
+pub(crate) fn request_llm(
     config: &Value,
     prompt: &str,
     text: &str,

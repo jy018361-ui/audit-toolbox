@@ -70,7 +70,7 @@ describe("同步操作等待弹窗", () => {
       vi.advanceTimersByTime(1);
     });
     expect(screen.getByText("正在导入文档")).toBeTruthy();
-    expect(screen.getByText(/可以最小化后继续浏览/)).toBeTruthy();
+    expect(screen.getByText(/可最小化继续使用/)).toBeTruthy();
 
     // 完成后自动关闭
     act(() => {

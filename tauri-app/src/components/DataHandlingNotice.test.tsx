@@ -32,4 +32,9 @@ describe("DataHandlingNotice", () => {
       expect(screen.getByRole("complementary").getAttribute("data-mode")).toBe(mode);
     },
   );
+  it("keeps the workspace disclosure concise until details are requested", () => {
+    render(<DataHandlingNotice mode="network-assisted" title="数据处理边界" description="本机处理为主。" details="外部服务仅在启用后调用。" collapsibleDetails />);
+    expect(screen.getByText("了解详情")).toBeTruthy();
+    expect(screen.getByText("外部服务仅在启用后调用。").closest("details")?.open).toBe(false);
+  });
 });

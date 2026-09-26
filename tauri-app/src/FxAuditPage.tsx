@@ -116,6 +116,7 @@ type Inspection = {
   accounts: string[];
   /** 末级科目清单（引擎目录末级掩码下发）；旧任务缺省时回退 accounts。 */
   accountsLeaf?: string[];
+  reviewAccounts?: Array<{ entity: string; account: string; auxiliary: string; currency: string }>;
   /** 账里真实存在的「主体×科目」组合；旧任务/预览模式缺省。 */
   entityAccounts?: Array<{ entity: string; account: string }>;
   suggestedMapping: Record<string, string>;
@@ -257,6 +258,7 @@ type FxAccountReviewRow = {
   /** 辅助核算拆行所属主体（联动验证组下发）；末级兜底行没有主体信息。 */
   entity?: string;
   auxiliary?: string;
+  currency?: string;
 };
 
 /** 逐辅助户覆盖键：主体␟归一化科目编码␟归一化辅助值，与存款利息同口径。 */
@@ -284,10 +286,33 @@ export function fxAccountReviewRows(
   accounts: string[],
   link: AuxiliaryLinkResult | null,
   entitiesByAccount: Map<string, string[]> | null = null,
+  sourceIdentities?: Array<{ entity: string; account: string; auxiliary: string; currency: string }>,
 ): FxAccountReviewRow[] {
+  if (sourceIdentities?.length) {
+    const allowed = new Set(accounts);
+    const seen = new Set<string>();
+    return sourceIdentities.flatMap((identity) => {
+      if (!allowed.has(identity.account)) return [];
+      const entity = entitiesByAccount ? identity.entity : undefined;
+      const verified = (link?.groups ?? []).some((group) => group.reviewVerified
+        && group.entity === identity.entity && group.account === fxAccountCodeOf(identity.account));
+      const auxiliary = verified ? identity.auxiliary : "";
+      const key = JSON.stringify([entity ?? "", identity.account, auxiliary, identity.currency]);
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [{ key, account: identity.account, entity,
+        auxiliary: auxiliary || undefined, currency: identity.currency }];
+    });
+  }
+  const codeCounts = new Map<string, number>();
+  for (const account of accounts) {
+    const code = fxAccountCodeOf(account);
+    codeCounts.set(code, (codeCounts.get(code) ?? 0) + 1);
+  }
   return accounts.flatMap((account) => {
     const code = fxAccountCodeOf(account);
-    const groups = (link?.groups ?? []).filter(
+    // 辅助验证组只按编码定位；同码异名时不把同一明细组重复挂到多个名称。
+    const groups = (codeCounts.get(code) ?? 0) > 1 ? [] : (link?.groups ?? []).filter(
       (group) => group.account === code,
     );
     const expanded = groups.flatMap((group) =>
@@ -301,7 +326,7 @@ export function fxAccountReviewRows(
         : [],
     );
     const rowEntities =
-      entitiesByAccount?.get(code) ?? (entitiesByAccount ? [] : undefined);
+      entitiesByAccount?.get(account) ?? entitiesByAccount?.get(code) ?? (entitiesByAccount ? [] : undefined);
     const baseEntities = ledgerRowEntities(rowEntities) ?? [undefined];
     // 兜底行判定：未拆主体时沿用旧口径——只要还有未验证的辅助组就保留
     // 一行科目合计；按主体拆行时，已有验证通过辅助展开的主体不再补行。
@@ -400,7 +425,7 @@ export function fxConfirmationRows(
     const roleLabel = ROLE_OPTIONS.find(([value]) => value === role)?.[1] ?? "非货币性项目";
     const currency = role === "non_monetary" || role === "other_pnl"
       ? "N/A"
-      : (row.auxiliary ? detailCurrencies[row.key] : accountCurrencies[row.account]) ||
+      : (row.auxiliary || row.key.startsWith("[") ? detailCurrencies[row.key] : accountCurrencies[row.account]) ||
         fxAccountCurrencyDetail(row.account, jeCurrencyDetails, tbCurrencyDetails).detected ||
         fallbackFunctional;
     const subject = row.auxiliary ? `${row.account} · ${row.auxiliary}` : row.account;
@@ -451,7 +476,7 @@ export function fxConfirmationImportPatches(
     if (currency && currency !== "N/A" && !CURRENCY_OPTIONS.includes(currency))
       throw new Error(`${item.key}：请选择有效的账户币种。`);
     if (item.values[roleIndex] !== original.values[roleIndex]) {
-      if (row.auxiliary) {
+      if (row.auxiliary || row.key.startsWith("[")) {
         if (role === (accountRoles[row.account] ?? "non_monetary")) detailRoleDeletes.push(row.key);
         else detailRoles[row.key] = role;
       }
@@ -463,7 +488,7 @@ export function fxConfirmationImportPatches(
       const override = role === "non_monetary" || role === "other_pnl" || currency === "N/A" || currency === inherited
         ? ""
         : currency;
-      if (row.auxiliary) {
+      if (row.auxiliary || row.key.startsWith("[")) {
         if (override) detailCurrencies[row.key] = override;
         else detailCurrencyDeletes.push(row.key);
       }
@@ -978,7 +1003,7 @@ export function fxCatalogMappingKey(
   mapping: Record<string, string | string[]>,
 ): string {
   return JSON.stringify(
-    ["entity", "account", "accountCode", "accountName"].map((role) => [
+    ["entity", "account", "accountCode", "accountName", "auxiliary", "currency"].map((role) => [
       role,
       mapping[role] ?? "",
     ]),
@@ -1128,6 +1153,18 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   >();
   const activeJob = useRef("");
   const activeJobMethod = useRef<"fx.preview" | "fx.export">("fx.preview");
+  // 用户导入的自定义汇率只在当前页面会话内生效：不落库、不跨任务留存，
+  // 换文件或恢复官方即失效，避免旧口径的汇率悄悄影响之后的审计测算。
+  const [customRates, setCustomRates] = useState<{
+    snapshot: Record<string, unknown>;
+    fileName: string;
+    currencyCount?: number;
+    dateCount?: number;
+  } | null>(null);
+  const [ratesStage, setRatesStage] = useState<"exporting" | "importing">();
+  const [ratesJob, setRatesJob] = useState<JobEvent>();
+  const [ratesNote, setRatesNote] = useState("");
+  const ratesJobId = useRef("");
   const uploadDropRef = useRef<HTMLDivElement>(null);
   const entityKeyEnabled = je && tb
     ? ledgerEntityKeyEnabled(tbMapping, jeMapping)
@@ -1225,8 +1262,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     [tb?.entityAccounts, entityKeyEnabled],
   );
   const reviewRows = useMemo(
-    () => fxAccountReviewRows(accounts, auxiliaryLink, entityRowsByAccount),
-    [accounts, auxiliaryLink, entityRowsByAccount],
+    () => fxAccountReviewRows(accounts, auxiliaryLink, entityRowsByAccount, tb?.reviewAccounts),
+    [accounts, auxiliaryLink, entityRowsByAccount, tb?.reviewAccounts],
   );
   const orderedReviewRows = useMemo(
     () => fxSortAccountReviewRows(reviewRows, accountRoles, accountDetailRoles),
@@ -1512,6 +1549,27 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       void classifyAndInspect(paths);
     });
     const jobs = listenJobEvents((event) => {
+      // 汇率导出走独立任务：结果不是测算结果，不能混进 result 状态。
+      if (event.jobId && event.jobId === ratesJobId.current) {
+        setRatesJob(event);
+        if (event.phase === "completed") {
+          setRatesStage(undefined);
+          setRatesJob(undefined);
+          const output = (event.result as { outputPath?: string } | undefined)
+            ?.outputPath;
+          setRatesNote(
+            typeof output === "string" && output
+              ? `汇率已导出：${output}`
+              : "汇率文件已生成。",
+          );
+        } else if (event.phase === "failed" || event.phase === "cancelled") {
+          setRatesStage(undefined);
+          setRatesJob(undefined);
+          const failure = event.result as { error?: unknown } | undefined;
+          setError(failure?.error ? errorText(failure.error) : event.message);
+        }
+        return;
+      }
       if (event.jobId !== activeJob.current) return;
       setJob(event);
       if (event.result)
@@ -1574,6 +1632,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     setJob(undefined);
     setCompletedStage(undefined);
     setActiveStage(undefined);
+    setCustomRates(null);
+    setRatesNote("");
     setManualClassifications({});
     setAccountRoles({});
     setAccountRolesTouched({});
@@ -1629,8 +1689,10 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
         : "";
       setSourceStatus(
         scan.llmFallbacks
-          ? `${selectedSources.length} 个账表来源已由本机规则识别${hiddenText}；智能复核不可用的来源已保留识别结果。`
-          : `${selectedSources.length} 个账表来源已完成本机识别与智能复核${hiddenText}。`,
+          ? `智能复核不可用，已保留本机识别结果${hiddenText}。`
+          : scan.hiddenSheets
+            ? `${scan.hiddenSheets} 张低置信度 Sheet 已忽略，请核对已选工作表。`
+            : "",
       );
       if (failures.length) setError(failures.join("；"));
     } finally {
@@ -1959,6 +2021,31 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
+  // 本次测算该注入哪份汇率快照：导入的自定义汇率优先（区间须覆盖当前
+  // 报告期），否则复用上一次测算结果带回的官方快照，都没有就现抓官方。
+  function ratesForPayload(): Record<string, unknown> | undefined {
+    const start = fxReportStart(reportEnd);
+    const custom = customRates?.snapshot as
+      | { startDate?: unknown; endDate?: unknown }
+      | undefined;
+    if (
+      custom &&
+      typeof custom.startDate === "string" &&
+      typeof custom.endDate === "string" &&
+      custom.startDate <= start &&
+      custom.endDate >= reportEnd
+    ) {
+      return customRates?.snapshot;
+    }
+    const snapshot = result?.rateSnapshot as
+      | { startDate?: string; endDate?: string }
+      | undefined;
+    if (snapshot?.startDate === start && snapshot?.endDate === reportEnd) {
+      return snapshot as Record<string, unknown>;
+    }
+    return undefined;
+  }
+
   function payload(
     method: "fx.preview" | "fx.export",
     overrides = manualClassifications,
@@ -1970,12 +2057,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
             entityCurrencies[fixedEntity] ?? defaultFunctionalCurrency,
         };
     const start = fxReportStart(reportEnd);
-    const snapshot = result?.rateSnapshot as
-      { startDate?: string; endDate?: string } | undefined;
-    const reusableSnapshot =
-      snapshot?.startDate === start && snapshot?.endDate === reportEnd
-        ? snapshot
-        : undefined;
+    const reusableSnapshot = ratesForPayload();
     const cachedTranslations = (result?.accountTranslations ?? {}) as Record<
       string,
       string
@@ -2020,12 +2102,18 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       accountDetailRoleOverrides: Object.fromEntries(
         Object.entries(accountDetailRoles).filter(([, role]) => role !== ""),
       ),
+      accountReviewRoles: Object.fromEntries(reviewRows.map((row) => [
+        row.key, accountDetailRoles[row.key] ?? accountRoles[row.account] ?? "non_monetary",
+      ])),
       accountDetailCurrencyOverrides: fxDetailCurrencyOverridesPayload(
         accountDetailCurrencies,
         reviewRows,
         accountRoles,
         accountDetailRoles,
       ),
+      accountReviewCurrencies: Object.fromEntries(reviewRows
+        .filter((row) => accountDetailCurrencies[row.key])
+        .map((row) => [row.key, accountDetailCurrencies[row.key]])),
       ...(tb && je && auxiliaryLink?.planKey
         ? { auxiliaryPlan: {
             planKey: auxiliaryLink.planKey,
@@ -2148,6 +2236,79 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   }
   async function recalculateClassifications() {
     await run("fx.preview", manualClassifications, "fx.recalculate");
+  }
+
+  async function exportRates() {
+    setError("");
+    if (!reportEnd) return setError("请先选择资产负债表日。");
+    const path = await pickPath(
+      "save",
+      "保存汇率文件",
+      ["xlsx"],
+      `汇率中间价_${reportEnd}.xlsx`,
+    );
+    if (typeof path !== "string" || !path) return;
+    setRatesNote("");
+    setRatesStage("exporting");
+    try {
+      ratesJobId.current = await jobStart("fx.export_rates", {
+        reportStart: fxReportStart(reportEnd),
+        reportEnd,
+        outputPath: path,
+        ...(ratesForPayload() ? { rateSnapshot: ratesForPayload() } : {}),
+      });
+    } catch (e) {
+      setRatesStage(undefined);
+      setError(errorText(e));
+    }
+  }
+
+  async function importRates() {
+    setError("");
+    if (!reportEnd) return setError("请先选择资产负债表日。");
+    const picked = await pickPath("file", "选择修改后的汇率Excel", [
+      "xlsx",
+      "xls",
+    ]);
+    if (typeof picked !== "string" || !picked) return;
+    setRatesStage("importing");
+    try {
+      const response = (await engineCall("fx.import_rates", {
+        inputPath: picked,
+        reportStart: fxReportStart(reportEnd),
+        reportEnd,
+      })) as {
+        rateSnapshot?: Record<string, unknown>;
+        summary?: { currencyCount?: number; dateCount?: number };
+      };
+      if (!response?.rateSnapshot)
+        throw new Error("导入未返回汇率数据。");
+      setCustomRates({
+        snapshot: response.rateSnapshot,
+        fileName: displayFileName(picked),
+        currencyCount: response.summary?.currencyCount,
+        dateCount: response.summary?.dateCount,
+      });
+      // 汇率口径变了，旧测算结果不再可信：清掉预览，等用户按新口径重测。
+      setResult(undefined);
+      setJob(undefined);
+      setCompletedStage(undefined);
+      setRatesNote(
+        `已导入自定义汇率，之后的测算与底稿将按导入的汇率执行；如需撤销请点「恢复官方汇率」。`,
+      );
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setRatesStage(undefined);
+    }
+  }
+
+  function revertToOfficialRates() {
+    setCustomRates(null);
+    setRatesNote("");
+    setResult(undefined);
+    setJob(undefined);
+    setCompletedStage(undefined);
   }
 
   return (
@@ -2644,6 +2805,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                               }
                             >
                               {displayName}
+                              {row.currency && <small> · {row.currency}</small>}
                               {!row.auxiliary && !/\s/.test(account.trim()) && (
                                 <small className="fx-account-name-missing">
                                   名称未识别，请返回检查“科目名称”映射
@@ -2653,7 +2815,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                             <select
                               value={rowRole}
                               onChange={(e) => {
-                                if (row.auxiliary) {
+                                if (row.auxiliary || row.key.startsWith("[")) {
                                   setAccountDetailRoles((v) => ({
                                     ...v,
                                     [row.key]: e.target.value,
@@ -2717,12 +2879,12 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                                           : "系统未识别到该科目的币种，请手工指定"
                                   }
                                   value={
-                                    (row.auxiliary
+                                    (row.auxiliary || row.key.startsWith("[")
                                       ? accountDetailCurrencies[row.key]
                                       : accountCurrencies[account]) ?? ""
                                   }
                                   onChange={(e) => {
-                                    if (row.auxiliary) {
+                                    if (row.auxiliary || row.key.startsWith("[")) {
                                       setAccountDetailCurrencies((v) => ({
                                         ...v,
                                         [row.key]: e.target.value,
@@ -2867,7 +3029,32 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   选择位置
                 </Button>
               </div>
-              <p className="fx-rate-note">汇率取自中国人民银行。</p>
+              {customRates ? (
+                <p className="fx-rate-note">
+                  已导入自定义汇率：{customRates.fileName}
+                  {typeof customRates.currencyCount === "number" &&
+                  typeof customRates.dateCount === "number"
+                    ? `（${customRates.currencyCount}个币种 × ${customRates.dateCount}天）`
+                    : ""}
+                  。测算与底稿将按导入的汇率执行，底稿「使用说明」中会如实标注为用户导入口径。
+                  {ratesForPayload() !== customRates?.snapshot &&
+                    " 导入区间不覆盖当前报告期，本次测算将改用官方汇率。"}
+                  <button
+                    type="button"
+                    className="fx-link-button"
+                    onClick={revertToOfficialRates}
+                  >
+                    恢复官方汇率
+                  </button>
+                </p>
+              ) : (
+                <p className="fx-rate-note">汇率取自中国人民银行。</p>
+              )}
+              {ratesNote && (
+                <p className="fx-rate-note" role="status">
+                  {ratesNote}
+                </p>
+              )}
               {(requiredMappingsMissing.length > 0 ||
                 currencyConfirmationMissing) && (
                 <p className="fx-warning" aria-live="polite">
@@ -2889,9 +3076,10 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   补齐字段映射。
                 </p>
               )}
-              <p className="fx-stage-note">
-                “测算预览”会执行完整汇兑损益测算并在下方展示结果；修改凭证分类后点击“重新测算”。“生成Excel底稿”只生成并保存当前口径的底稿，不会清空已显示的预览结果。
-              </p>
+              <details className="fx-stage-note">
+                <summary>测算与导出说明</summary>
+                <p>测算预览会在下方展示结果；修改分类后可重新测算。生成 Excel 底稿不会清空预览结果。</p>
+              </details>
               <div className="fx-actions">
                 <Button
                   variant="secondary"
@@ -2936,7 +3124,31 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                     ? "正在生成底稿…"
                     : "生成Excel底稿"}
                 </Button>
+                <Button
+                  variant="secondary"
+                  disabled={Boolean(ratesStage)}
+                  onClick={() => void exportRates()}
+                >
+                  {ratesStage === "exporting" ? "正在导出汇率…" : "导出汇率"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  disabled={Boolean(ratesStage)}
+                  onClick={() => void importRates()}
+                >
+                  {ratesStage === "importing" ? "正在导入汇率…" : "导入汇率"}
+                </Button>
+                <JargonTip
+                  term="汇率导出与导入"
+                  text={"导出汇率：把当前报告期测算采用的官方人民币汇率中间价（含报告期前35天）存成Excel，可直接查看，也可以只修改数值。\n导入汇率：把修改后的汇率文件导回，之后的测算与Excel底稿都按导入的汇率执行，底稿「使用说明」会如实标注口径为「用户导入」；请勿改动日期列与币种表头。\n恢复官方汇率：一键撤销导入，回到官方牌价口径并清空旧测算结果。"}
+                />
               </div>
+              {ratesJob && ratesStage === "exporting" && (
+                <JobProgress
+                  job={ratesJob}
+                  onCancel={(id) => jobCancel(id)}
+                />
+              )}
               {activeJobMethod.current === "fx.export" ? (
                 busy ? (
                   <div className="fx-export-stage" role="status">
@@ -2948,9 +3160,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 ) : (
                   completedStage === "fx.export" &&
                   outputsFrom(result).length > 0 && (
-                    <p className="fx-export-complete" role="status">
-                      Excel底稿已生成；测算预览结果已保留在下方。
-                    </p>
+                    <p className="fx-export-complete" role="status">底稿已生成，可在下方结果区打开。</p>
                   )
                 )
               ) : (
@@ -3396,7 +3606,7 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
     <>
     {prominentWarnings.length > 0 && (
       <div className="fx-prominent-warnings" role="status">
-        <strong>测算已完成，请复核以下来源问题</strong>
+        <strong>以下来源问题需复核</strong>
         <ul>{prominentWarnings.map((message, index) => <li key={index}>{message}</li>)}</ul>
       </div>
     )}

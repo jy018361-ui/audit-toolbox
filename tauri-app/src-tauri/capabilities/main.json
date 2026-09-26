@@ -17,6 +17,7 @@
     "core:window:allow-is-maximized",
     "core:window:allow-close",
     "process:default",
+    "notification:default",
     "updater:default"
   ]
 }

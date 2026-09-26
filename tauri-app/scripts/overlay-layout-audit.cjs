@@ -16,6 +16,7 @@ const scenarios = [
   "step", "success", "jargon", "fuzzy", "job-success-stack",
   "step-confirm-stack", "jargon-confirm-stack", "currency", "filter",
   "filter-confirm-stack", "job-pill-confirm-stack",
+  "dual-pill",
 ];
 
 const auditOverlay = () => {
@@ -117,6 +118,10 @@ const auditOverlay = () => {
           await page.locator(".job-dialog-pill").waitFor();
           await page.getByRole("dialog", { name: "停止后台任务并清空记录？" }).waitFor();
         }
+        if (scenario === "dual-pill") {
+          await page.locator(".job-dialog-pill").waitFor();
+          await page.locator(".sync-busy-pill").waitFor();
+        }
         if (scenario === "filter-confirm-stack") {
           await page.locator(".ts-filter-menu").waitFor();
           await page.getByRole("dialog", { name: "确认当前筛选？" }).waitFor();
@@ -135,6 +140,8 @@ const auditOverlay = () => {
                 ? '[data-slot="dialog-content"]'
                 : scenario === "job-pill-confirm-stack"
                   ? '[data-slot="dialog-content"][data-state="open"]'
+                : scenario === "dual-pill"
+                  ? ".job-dialog-pill"
                 : '[role="dialog"]';
         await page.locator(expected).waitFor();
         await page.evaluate(async () => {
@@ -142,6 +149,15 @@ const auditOverlay = () => {
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         });
         const issues = await page.evaluate(auditOverlay);
+
+        if (scenario === "dual-pill") {
+          const overlapping = await page.evaluate(() => {
+            const a = document.querySelector(".job-dialog-pill")?.getBoundingClientRect();
+            const b = document.querySelector(".sync-busy-pill")?.getBoundingClientRect();
+            return Boolean(a && b && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top);
+          });
+          if (overlapping) issues.push("concurrent minimized task pills overlap");
+        }
 
         if (scenario === "filter") {
           const focusedSearch = await page.getByRole("textbox", { name: "搜索超长科目名称" })

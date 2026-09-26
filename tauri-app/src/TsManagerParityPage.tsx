@@ -630,6 +630,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
         current={step - 1}
         onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3)}
       />
+      {job?.phase === "cancelled" && <div className="flex flex-wrap items-center gap-2" role="status"><Badge variant="warning">已取消</Badge><span className="hint">本次任务已停止；文件与筛选设置仍保留，可重新加载或导出。</span></div>}
       <div className="fa-stack">
         <Card>
           <CardHeader>
@@ -640,7 +641,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   ? "2. 条件筛选（在预览表头按列勾选）"
                   : "3. 输出与导出"}
             </CardTitle>
-            <Badge
+            {(!headers.length || busy || loadJobFailed) && <Badge
               variant="outline"
               className={
                 busy
@@ -659,7 +660,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   : headers.length
                     ? "文件已加载"
                     : "待加载文件"}
-            </Badge>
+            </Badge>}
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
@@ -874,7 +875,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
 
         <Card>
           <CardHeader>
-            <CardTitle>文件预览与任务结果</CardTitle>
+            <CardTitle>数据预览</CardTitle>
           </CardHeader>
           <CardContent>
             {state.inspect && (
@@ -929,25 +930,32 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                 headerControls={headerControls}
               />
             )}
-            {/* The export already returns these counts; legacy showed them in a
-                completion dialog so the run could be reconciled afterwards. */}
-            {exportSummary.length > 0 && (
-              <StatGrid
-                columns={3}
-                items={exportSummary.map((item) => ({
-                  label: item.label,
-                  value: item.value,
-                }))}
+            {!state.inspect && !job && (
+              <EmptyState
+                compact
+                title="准备工时数据"
+                description="选择 Timesheet 文件并加载后，可核对表头和前 20 行，再按列筛选。"
               />
             )}
-            {outputPaths.length > 0 && (
-              <div className="output-list">
-                <p className="ts-result-overview" role="status">
-                  <Badge variant="outline" className="badge-ready">
-                    导出完成
-                  </Badge>
-                  <span>请打开文件核对筛选范围与汇总结果。</span>
-                </p>
+          </CardContent>
+        </Card>
+        {outputPaths.length > 0 && (
+          <Card className="ts-export-result-card">
+            <CardHeader>
+              <CardTitle>本次导出</CardTitle>
+              <Badge variant="success">已完成</Badge>
+            </CardHeader>
+            <CardContent>
+              {exportSummary.length > 0 && (
+                <StatGrid
+                  columns={4}
+                  items={exportSummary.map((item) => ({
+                    label: item.label,
+                    value: item.value,
+                  }))}
+                />
+              )}
+              <div className="output-list" aria-label="导出文件">
                 {outputPaths.map((path) => (
                   <Button
                     type="button"
@@ -961,16 +969,9 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   </Button>
                 ))}
               </div>
-            )}
-            {!state.inspect && !job && (
-              <EmptyState
-                compact
-                title="准备工时数据"
-                description="选择 Timesheet 文件并加载后，可核对表头和前 20 行，再按列筛选。"
-              />
-            )}
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        )}
       </div>
       {menu && (
         <ColumnFilterMenu

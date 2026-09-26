@@ -33,6 +33,10 @@ struct Assignment {
     #[serde(default)]
     entity: Option<String>,
     account: String,
+    #[serde(default)]
+    auxiliary: Option<String>,
+    #[serde(default)]
+    currency: Option<String>,
     role: String,
     #[serde(default)]
     category: String,
@@ -46,8 +50,10 @@ struct Assigned {
 
 #[derive(Default)]
 struct AssignmentIndex {
+    exact: HashMap<(String, String, String, String, String), Assigned>,
     codes: HashMap<(String, String), Assigned>,
-    names: HashMap<(String, String), Assigned>,
+    ambiguous_codes: HashSet<(String, String)>,
+    names: HashMap<(String, String, String, String), Assigned>,
 }
 
 #[derive(Clone)]
@@ -55,6 +61,8 @@ struct AccountIdentity {
     entity: String,
     code: String,
     name: String,
+    auxiliary: String,
+    currency: String,
     display: String,
     legacy_display: String,
 }
@@ -863,6 +871,8 @@ fn account_identity_from_row(
         entity: resolve_entity(side, &raw_entity, entity_key_enabled, entity_scope),
         code: ledger_mapping::account_code_of(&raw_code),
         name,
+        auxiliary: join(row, &indexes(table, map, "auxiliary")),
+        currency: text(table, row, map, "currency"),
         display: display.to_owned(),
         legacy_display: join(row, &account_indexes(table, map)),
     }
@@ -3311,6 +3321,8 @@ fn account_identities(
                 entity: resolve_entity(side, &raw_entity, entity_key_enabled, &entity_scope),
                 code: ledger_mapping::account_code_of(&raw_code),
                 name,
+                auxiliary: join(row, &indexes(table, map, "auxiliary")),
+                currency: text(table, row, map, "currency"),
                 display: display[i].clone(),
                 legacy_display: join(row, &account_indexes(table, map)),
             }
@@ -3373,6 +3385,8 @@ fn assignment_index_from_identities(
                 .is_none_or(|entity| entity.trim() == id.entity || only_default_entity)
                 && (norm(&a.account) == norm(&id.display)
                     || norm(&a.account) == norm(&id.legacy_display))
+                && a.auxiliary.as_ref().is_none_or(|value| norm(value) == norm(&id.auxiliary))
+                && a.currency.as_ref().is_none_or(|value| value.trim().eq_ignore_ascii_case(id.currency.trim()))
         }) {
             let name_key = (id.entity.clone(), ledger_mapping::normalize_name(&id.name));
             if id.code.is_empty() && !valid_names.contains(&name_key) {
@@ -3385,53 +3399,78 @@ fn assignment_index_from_identities(
                     None,
                 ));
             }
+            let exact_key = assignment_identity(id);
+            if out.exact.get(&exact_key).is_some_and(|old| old != &assigned) {
+                return Err(error(
+                    "FA_TBJE_ACCOUNT_ASSIGNMENT_CONFLICT",
+                    format!("主体 {} 的科目 {} 存在冲突分类，请逐项复核。", id.entity, id.display),
+                    None,
+                ));
+            }
+            out.exact.insert(exact_key, assigned.clone());
             if !id.code.is_empty() {
-                insert_assignment(
-                    &mut out.codes,
-                    (
-                        id.entity.clone(),
-                        ledger_mapping::normalize_account_code(&id.code),
-                    ),
-                    &assigned,
-                )?;
+                let code_key = (
+                    id.entity.clone(),
+                    ledger_mapping::normalize_account_code(&id.code),
+                );
+                if !out.ambiguous_codes.contains(&code_key) {
+                    if out.codes.get(&code_key).is_some_and(|old| old != &assigned) {
+                        out.codes.remove(&code_key);
+                        out.ambiguous_codes.insert(code_key);
+                    } else {
+                        out.codes.insert(code_key, assigned.clone());
+                    }
+                }
             }
             if valid_names.contains(&name_key) {
-                insert_assignment(&mut out.names, name_key, &assigned)?;
+                let key = (name_key.0, name_key.1, norm(&id.auxiliary), id.currency.trim().to_ascii_uppercase());
+                if out.names.get(&key).is_some_and(|old| old != &assigned) {
+                    return Err(error("FA_TBJE_ACCOUNT_ASSIGNMENT_CONFLICT", format!("主体 {} 的科目名称 {} 存在冲突分类。", id.entity, id.name), None));
+                }
+                out.names.insert(key, assigned.clone());
             }
+        }
+    }
+    // 同一主体、编码下只要有不同名称／辅助／币种，就不能用编码把一条
+    // 已分类的确认项扩散到另一条（包括被用户明确排除的行）。
+    let mut variants = BTreeMap::<(String, String), BTreeSet<(String, String, String)>>::new();
+    for id in tb_ids.iter().chain(je_ids) {
+        if id.code.is_empty() {
+            continue;
+        }
+        variants.entry((id.entity.clone(), ledger_mapping::normalize_account_code(&id.code)))
+            .or_default()
+            .insert((ledger_mapping::normalize_name(&id.name), norm(&id.auxiliary), id.currency.trim().to_ascii_uppercase()));
+    }
+    for (key, identities) in variants {
+        if identities.len() > 1 {
+            out.codes.remove(&key);
+            out.ambiguous_codes.insert(key);
         }
     }
     Ok(out)
 }
 
-fn insert_assignment(
-    map: &mut HashMap<(String, String), Assigned>,
-    key: (String, String),
-    value: &Assigned,
-) -> Result<(), AppError> {
-    if map.get(&key).is_some_and(|old| old != value) {
-        return Err(error(
-            "FA_TBJE_ACCOUNT_ASSIGNMENT_CONFLICT",
-            format!(
-                "主体 {} 的科目 {} 被分配了不同角色或类别，请在科目分类区统一确认。",
-                key.0, key.1
-            ),
-            None,
-        ));
-    }
-    map.insert(key, value.clone());
-    Ok(())
+fn assignment_identity(id: &AccountIdentity) -> (String, String, String, String, String) {
+    (
+        id.entity.clone(),
+        ledger_mapping::normalize_account_code(&id.code),
+        ledger_mapping::normalize_name(&id.name),
+        norm(&id.auxiliary),
+        id.currency.trim().to_ascii_uppercase(),
+    )
 }
 
 fn find_assignment<'a>(map: &'a AssignmentIndex, id: &AccountIdentity) -> Option<&'a Assigned> {
-    map.codes
+    map.exact.get(&assignment_identity(id)).or_else(|| map.codes
         .get(&(
             id.entity.clone(),
             ledger_mapping::normalize_account_code(&id.code),
         ))
         .or_else(|| {
             map.names
-                .get(&(id.entity.clone(), ledger_mapping::normalize_name(&id.name)))
-        })
+                .get(&(id.entity.clone(), ledger_mapping::normalize_name(&id.name), norm(&id.auxiliary), id.currency.trim().to_ascii_uppercase()))
+        }))
 }
 fn category_of(a: &Assigned) -> String {
     if a.category.trim().is_empty() {

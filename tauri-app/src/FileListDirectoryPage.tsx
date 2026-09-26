@@ -223,6 +223,8 @@ export default function FileListDirectoryPage({
 
   const terminal =
     job && ["completed", "failed", "cancelled"].includes(job.phase);
+  const interrupted = job?.phase === "failed" || job?.phase === "cancelled";
+  const scanInterrupted = interrupted && !scan;
   return (
     <>
       <PageHeader
@@ -238,14 +240,24 @@ export default function FileListDirectoryPage({
         current={step - 1}
         onStepClick={(index) => setStep((index + 1) as 1 | 2)}
       />
+      {interrupted && (
+        job.phase === "cancelled" ? (
+          <div className="flex flex-wrap items-center gap-2" role="status">
+            <Badge variant="warning">已取消</Badge>
+            <span className="hint">本次任务已停止；已选文件夹仍保留，可重新扫描或导出。</span>
+          </div>
+        ) : (
+          <JobProgress job={job} detail="请检查所选文件夹与访问权限后重试。" />
+        )
+      )}
       <div className="fa-stack">
         <Card>
           <CardHeader>
             <CardTitle>
               {step === 1 ? "1. 选择扫描范围" : "2. 确认输出并生成"}
             </CardTitle>
-            <Badge className={scan ? "badge-ready" : "badge-neutral"}>
-              {busy && !scan ? "扫描中" : scan ? "扫描完成" : "待选择"}
+            <Badge className={scan && !interrupted ? "badge-ready" : "badge-neutral"}>
+              {busy && !scan ? "扫描中" : interrupted ? job.phase === "cancelled" ? "已取消" : "处理失败" : scan ? "扫描完成" : "待选择"}
             </Badge>
           </CardHeader>
           <CardContent>
@@ -347,9 +359,11 @@ export default function FileListDirectoryPage({
           <CardContent>
             {!scan ? (
               <EmptyState
-                title={busy ? "正在扫描…" : "等待扫描文件夹"}
+                title={scanInterrupted ? job.phase === "cancelled" ? "扫描已取消" : "扫描失败" : busy ? "正在扫描…" : "等待扫描文件夹"}
                 description={
-                  busy
+                  scanInterrupted
+                    ? "已选文件夹仍保留，可点击上方“重新扫描”再次尝试。"
+                    : busy
                     ? "扫描完成后，这里会显示前 50 个文件及目录层级。"
                     : "从上方选择源文件夹后，这里会显示前 50 个文件及目录层级。"
                 }
@@ -421,7 +435,7 @@ export default function FileListDirectoryPage({
                 )}
               </div>
             )}
-            {job && (
+            {job && !interrupted && (
               <JobProgress
                 job={job}
                 onCancel={() => jobCancel(activeJobId)}

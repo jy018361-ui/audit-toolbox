@@ -61,20 +61,28 @@ function makePreview(): HeaderMatchPreview {
   };
 }
 
-function setup(preview = makePreview()) {
+function setup(
+  preview = makePreview(),
+  extra: Partial<Parameters<typeof HeaderMatchGrid>[0]> = {},
+) {
   const onConfirm = vi.fn();
   const onTemplateChange = vi.fn();
   const onExternalTemplate = vi.fn();
   const onCancel = vi.fn();
-  const onRematch = vi.fn(async (_templateHeaders: string[], headers: string[]) =>
-    headers.map((header) => {
-      const index = preview.template.headers.indexOf(header);
-      return {
-        target: index >= 0 ? index : null,
-        confidence: index >= 0 ? 1 : 0,
-        reason: index >= 0 ? "名称一致" : "",
-      };
-    }),
+  const onRematch = vi.fn(
+    async (
+      _templateHeaders: string[],
+      headers: string[],
+      _hints?: [string, string][],
+    ) =>
+      headers.map((header) => {
+        const index = preview.template.headers.indexOf(header);
+        return {
+          target: index >= 0 ? index : null,
+          confidence: index >= 0 ? 1 : 0,
+          reason: index >= 0 ? "名称一致" : "",
+        };
+      }),
   );
   render(
     <HeaderMatchGrid
@@ -88,6 +96,7 @@ function setup(preview = makePreview()) {
       onRematch={onRematch}
       onCancel={onCancel}
       onConfirm={onConfirm}
+      {...extra}
     />,
   );
   return { onConfirm, onTemplateChange, onExternalTemplate, onCancel, onRematch };
@@ -96,12 +105,53 @@ function setup(preview = makePreview()) {
 const statOf = (key: string) =>
   document.querySelector(`[data-stat="${key}"]`)?.textContent ?? "";
 
+it("操作说明默认折叠，关键动作仍可操作且保留键盘帮助", () => {
+  setup();
+  const summary = screen.getByText("操作说明");
+  expect(summary.closest("details")?.open).toBe(false);
+  expect(screen.getByRole("button", { name: /开始合并/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "下一处待确认" })).toBeTruthy();
+  expect(summary.closest("details")?.textContent).toContain("键盘 Tab 定位格子，Enter 确认建议");
+  cleanup();
+});
+
 /** 模板第 col 列的表头单元格（drop 目标）。 */
 const columnHeader = (col: number) =>
   document.querySelector(`th[data-column="${col}"]`) as HTMLElement;
 
+/** 未匹配区第 row 行第 slot 个槽位（drop 目标）。 */
+const unmatchedSlot = (row: number, slot: number) =>
+  document.querySelector(`[data-drop="unm:${row}:${slot}"]`) as HTMLElement;
+
 const confirmButton = () =>
   screen.getByRole("button", { name: /开始合并/ }) as HTMLButtonElement;
+
+const rematchButton = () =>
+  screen.getByRole("button", { name: /重新匹配/ }) as HTMLButtonElement;
+
+/** 指针拖拽：mock elementFromPoint 命中目标格，模拟按下-移动-抬起。
+ * 打包版窗口里 HTML5 DnD 被文件拖放接管吞掉，网格拖拽走指针事件，
+ * 测试也必须走同一条路才测得出真实行为。 */
+function pointerDrag(chip: HTMLElement, target: HTMLElement) {
+  // jsdom 没有实现 elementFromPoint，先补一个占位再打桩。
+  if (typeof document.elementFromPoint !== "function") {
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      writable: true,
+      value: () => null,
+    });
+  }
+  const spy = vi
+    .spyOn(document, "elementFromPoint")
+    .mockReturnValue(target as Element);
+  try {
+    fireEvent.pointerDown(chip, { button: 0, pointerId: 7, clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(chip, { pointerId: 7, clientX: 60, clientY: 40 });
+    fireEvent.pointerUp(chip, { pointerId: 7, clientX: 60, clientY: 40 });
+  } finally {
+    spy.mockRestore();
+  }
+}
 
 describe("两层表头拍平（前端本地口径）", () => {
   it("父级向右填充，父子用连字符连接", () => {
@@ -126,24 +176,24 @@ describe("表头匹配网格", () => {
     expect(statOf("unmatched")).toBe("1 未匹配");
   });
 
-  it("未匹配区的格子拖到列上即建立映射", async () => {
+  it("未匹配区的格子拖到列上即建立映射，人工配对始终进对照表", async () => {
     const { onConfirm } = setup();
     const note = screen.getByText("备注").closest("[data-cell]") as HTMLElement;
-    fireEvent.dragStart(note);
-    fireEvent.drop(columnHeader(2));
+    pointerDrag(note, columnHeader(2));
     fireEvent.click(confirmButton());
     await waitFor(() => expect(onConfirm).toHaveBeenCalled());
     const plan = onConfirm.mock.calls[0][0] as HeaderMatchingPlanJson;
     const bColumns = plan.assignments[1].columns;
     expect(bColumns[2].target).toBe(2);
     expect(bColumns[2].manual).toBe(true);
+    // 对照表隐身化：没有勾选，人工配对默认随计划带回。
+    expect(plan.rememberAliases).toContainEqual(["备注", "金额"]);
   });
 
   it("拖到已占用列直接交换而不是报错", async () => {
     const { onConfirm } = setup();
     const voucher = screen.getByText("单据编号").closest("[data-cell]") as HTMLElement;
-    fireEvent.dragStart(voucher);
-    fireEvent.drop(columnHeader(0));
+    pointerDrag(voucher, columnHeader(0));
     await waitFor(() => screen.getByText(/已与「记账日期」交换/));
     fireEvent.click(confirmButton());
     await waitFor(() => expect(onConfirm).toHaveBeenCalled());
@@ -151,6 +201,41 @@ describe("表头匹配网格", () => {
     const bColumns = plan.assignments[1].columns;
     expect(bColumns[0].target).toBe(1);
     expect(bColumns[1].target).toBe(0);
+  });
+
+  it("未匹配列在本行内拖动排序，排序即输出顺序", async () => {
+    const preview = makePreview();
+    preview.rows[1].headers = ["记账日期", "单据编号", "备注", "附注"];
+    preview.rows[1].matches = [
+      { target: 0, confidence: 0.92, reason: "常见同义写法" },
+      { target: 1, confidence: 0.75, reason: "相似度 75%" },
+      { target: null, confidence: 0, reason: "" },
+      { target: null, confidence: 0, reason: "" },
+    ];
+    const { onConfirm } = setup(preview);
+    // 把第 4 列「附注」拖到未匹配区第 0 格（备注前面）。
+    const note2 = screen.getByText("附注").closest("[data-cell]") as HTMLElement;
+    pointerDrag(note2, unmatchedSlot(1, 0));
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(onConfirm).toHaveBeenCalled());
+    const plan = onConfirm.mock.calls[0][0] as HeaderMatchingPlanJson;
+    expect(plan.assignments[1].independentOrder).toEqual([3, 2]);
+  });
+
+  it("跨行拖入未匹配区不生效（排序只在本行内）", async () => {
+    const preview = makePreview();
+    preview.rows[1].headers = ["记账日期", "单据编号", "备注", "附注"];
+    preview.rows[1].matches = [
+      { target: 0, confidence: 0.92, reason: "常见同义写法" },
+      { target: 1, confidence: 0.75, reason: "相似度 75%" },
+      { target: null, confidence: 0, reason: "" },
+      { target: null, confidence: 0, reason: "" },
+    ];
+    setup(preview);
+    const note2 = screen.getByText("附注").closest("[data-cell]") as HTMLElement;
+    // A 行（row 0）的未匹配槽位：B 行的格子拖过去应当无效。
+    pointerDrag(note2, unmatchedSlot(0, 0));
+    expect(statOf("unmatched")).toBe("2 未匹配");
   });
 
   it("右键菜单可移至未匹配区与丢弃", async () => {
@@ -179,7 +264,7 @@ describe("表头匹配网格", () => {
     expect(confirmButton().textContent).toBe("开始合并");
   });
 
-  it("确认时生成带表头识别信息的合并计划", async () => {
+  it("确认时生成带表头识别信息与独立列顺序的合并计划", async () => {
     const { onConfirm } = setup();
     fireEvent.click(confirmButton());
     await waitFor(() => expect(onConfirm).toHaveBeenCalled());
@@ -192,8 +277,49 @@ describe("表头匹配网格", () => {
     expect(b.headerRow).toBe(1);
     expect(b.headerRowsCount).toBe(1);
     expect(b.headers).toEqual(["记账日期", "单据编号", "备注"]);
+    expect(b.independentOrder).toEqual([2]);
     expect(b.columns[0]).toMatchObject({ source: 0, target: 0 });
     expect(b.columns[2]).toMatchObject({ source: 2, target: null, discard: false });
+  });
+
+  it("移出模板列延迟清除：格子先不动，重新匹配后才清走", async () => {
+    const { onConfirm } = setup();
+    fireEvent.contextMenu(columnHeader(2));
+    fireEvent.click(screen.getByText("移出此模板列（重新匹配后生效）"));
+    // A 行配在「金额」上的格子原地不动，统计仍是 4 绿。
+    expect(statOf("green")).toBe("4 匹配");
+    fireEvent.click(rematchButton());
+    await waitFor(() => expect(statOf("green")).toBe("3 匹配"));
+    expect(statOf("unmatched")).toBe("2 未匹配");
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(onConfirm).toHaveBeenCalled());
+    const plan = onConfirm.mock.calls[0][0] as HeaderMatchingPlanJson;
+    expect(plan.templateHeaders).toEqual(["日期", "凭证号"]);
+    expect(plan.assignments[0].columns[2].target).toBeNull();
+    expect(plan.assignments[0].independentOrder).toEqual([2]);
+  });
+
+  it("重新匹配以人工配对为教材，只补未匹配列", async () => {
+    const { onRematch } = setup();
+    // 教材：把 B 的「备注」人工拖到金额列。
+    const note = screen.getByText("备注").closest("[data-cell]") as HTMLElement;
+    pointerDrag(note, columnHeader(2));
+    expect(statOf("unmatched")).toBe("0 未匹配");
+    // 再把 A 的「金额」移到未匹配区，制造一个待补列。
+    fireEvent.contextMenu(
+      document.querySelector('[data-cell="0-2"]') as HTMLElement,
+    );
+    fireEvent.click(screen.getByText("移至未匹配区"));
+    expect(statOf("green")).toBe("4 匹配");
+    fireEvent.click(rematchButton());
+    await waitFor(() => expect(statOf("green")).toBe("5 匹配"));
+    // 教材提示逐行下发；A 的金额按名称一致补回，B 的备注维持人工配对。
+    expect(onRematch).toHaveBeenNthCalledWith(
+      1,
+      ["日期", "凭证号", "金额"],
+      ["日期", "凭证号", "金额"],
+      [["备注", "金额"]],
+    );
   });
 
   it("展开数据预览并人工修正表头行后自动重跑机器匹配", async () => {
@@ -209,21 +335,10 @@ describe("表头匹配网格", () => {
     expect(onRematch).toHaveBeenCalledWith(
       ["日期", "凭证号", "金额"],
       ["2026-02-01", "D-1", "回单"],
+      [],
     );
     // 新表头三列与模板无同名，重跑后全部回到未匹配。
     expect(statOf("unmatched")).toBe("3 未匹配");
-  });
-
-  it("勾选记住对照表后人工配对进入计划", async () => {
-    const { onConfirm } = setup();
-    fireEvent.click(screen.getByText("记住本次手动对应关系，以后自动匹配"));
-    const note = screen.getByText("备注").closest("[data-cell]") as HTMLElement;
-    fireEvent.dragStart(note);
-    fireEvent.drop(columnHeader(2));
-    fireEvent.click(confirmButton());
-    await waitFor(() => expect(onConfirm).toHaveBeenCalled());
-    const plan = onConfirm.mock.calls[0][0] as HeaderMatchingPlanJson;
-    expect(plan.rememberAliases).toContainEqual(["备注", "金额"]);
   });
 
   it("手动移入未匹配区的列计入未匹配而不是匹配", async () => {
@@ -237,16 +352,45 @@ describe("表头匹配网格", () => {
     expect(statOf("unmatched")).toBe("2 未匹配");
   });
 
-  it("列头菜单可整列剔除且剔除列不进输出", async () => {
-    const { onConfirm } = setup();
-    fireEvent.contextMenu(columnHeader(2));
-    fireEvent.click(screen.getByText("此列全部不合并"));
-    fireEvent.click(confirmButton());
-    await waitFor(() => expect(onConfirm).toHaveBeenCalled());
-    const plan = onConfirm.mock.calls[0][0] as HeaderMatchingPlanJson;
-    expect(plan.templateHeaders).toEqual(["日期", "凭证号"]);
-    // A 文件原第 3 列（金额）随标准列剔除而失去目标，target 重编号后仍指向正确列。
-    expect(plan.assignments[0].columns[0].target).toBe(0);
-    expect(plan.assignments[0].columns[2].target).toBeNull();
+  it("一键展开与收起全部", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "全部展开" }));
+    expect(screen.getAllByText("回单").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "全部收起" }));
+    expect(screen.queryByText("回单")).toBeNull();
+  });
+
+  it("文件名右键可直接设为模板", () => {
+    const { onTemplateChange } = setup();
+    const fileCells = document.querySelectorAll(".hmg-file-cell");
+    fireEvent.contextMenu(fileCells[2] as HTMLElement);
+    fireEvent.click(screen.getByText("设为模板"));
+    expect(onTemplateChange).toHaveBeenCalledWith("C:/tmp/B.xlsx");
+  });
+
+  it("模板下拉选择外部文件入口", () => {
+    const { onExternalTemplate } = setup();
+    const select = document.querySelector(".hmg-template select") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "__pick_external__" } });
+    expect(onExternalTemplate).toHaveBeenCalled();
+  });
+
+  it("导入对照表后展示结果提示", async () => {
+    setup(makePreview(), {
+      onImportAliases: vi.fn(async () => "已导入 3 条对照；点「重新匹配」即可按新对照生效"),
+    });
+    fireEvent.click(screen.getByRole("button", { name: /导入对照表/ }));
+    await waitFor(() =>
+      expect(screen.getByText(/已导入 3 条对照/)).toBeTruthy(),
+    );
+  });
+
+  it("模板列头拖到未匹配区即移出该列", async () => {
+    setup();
+    pointerDrag(columnHeader(2), unmatchedSlot(1, 0));
+    expect(statOf("green")).toBe("4 匹配");
+    await waitFor(() =>
+      expect(screen.getByText(/模板列已移出/)).toBeTruthy(),
+    );
   });
 });

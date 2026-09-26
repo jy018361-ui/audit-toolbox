@@ -20,8 +20,9 @@ const RESTORE_BLOCKED_METHODS = new Set([
   "ts.filter",
   "file_list.scan",
   "fuzzy.export",
-  // 汇率拉取是测算的辅助步骤，存档里没有账表配置。
+  // 汇率拉取/导出是测算的辅助步骤，存档里没有账表配置。
   "fx.fetch_rates",
+  "fx.export_rates",
 ]);
 
 /** 历史行是否可恢复：有参数存档，且不是被排除的子步骤方法。 */

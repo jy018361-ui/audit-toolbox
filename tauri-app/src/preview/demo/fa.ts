@@ -806,15 +806,13 @@ const outputEcho = (
 // build_summary_lines（short_labels）同口径给变动汇总：类别为列、数值为数字。
 // ---------------------------------------------------------------------------
 
-/** 合并后的行：重复键 10010003 在期末清单出现两次，透视配对成两行（both 15）。 */
+/** 与两侧 inspect 预览保持一致：14 条两期均有、各 2 条单边资产。 */
 const mergedPlan = (): Array<
   [FaAssetSeed | undefined, FaAssetSeed | undefined]
 > => {
   const disposed = ASSETS.filter((asset) => asset.disposed);
   const rows: Array<[FaAssetSeed | undefined, FaAssetSeed | undefined]> =
     BOTH.map((asset) => [asset, asset]);
-  const duplicated = BOTH.find((asset) => asset.code === "10010003");
-  if (duplicated) rows.push([duplicated, duplicated]);
   for (const asset of disposed) rows.push([asset, undefined]);
   for (const asset of ADDED) rows.push([undefined, asset]);
   return rows;
@@ -921,23 +919,21 @@ const movementSummary = (): {
   return { columns, rows };
 };
 
-// 合并统计：两期均在 14 张卡 + 重复键多配 1 行 = both 15，处置 2、新增 2，
-// 共 19 行；补充清单里 3001/3002 开头的各 6 笔在两期清单中无对应卡。
-// 剧本刻意安排期末清单里「10010003」出现两次：重复键告警框要有内容可看，
-// 合并聚合口径也会把这张期末卡按两行计入变动汇总。
+// 默认主链使用无重复键数据，与 inspect 的两侧预览一致；异常告警应由
+// 专门的错误剧本覆盖，不混入“正常导出成功”的视觉验收。
 const MERGE_STATS = {
-  rows: 19,
-  both: 15,
+  rows: 18,
+  both: 14,
   beginOnly: 2,
   endOnly: 2,
-  duplicates: { hasDuplicates: true, duplicateValueCount: 1, duplicateRowCount: 2 },
+  duplicates: { hasDuplicates: false, duplicateValueCount: 0, duplicateRowCount: 0 },
   unmatchedAddition: 6,
   unmatchedDisposal: 6,
 };
 
 const faMatchResult = (): Record<string, unknown> => ({
   engine: "rust-fa",
-  message: "完全外连接完成，共 19 行。",
+  message: "完全外连接完成，共 18 行。",
   stats: MERGE_STATS,
   summary: movementSummary(),
 });

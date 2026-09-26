@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -10,6 +11,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FileListDirectoryPage from "./FileListDirectoryPage";
+import { jobStart, listenJobEvents } from "./api";
 import type { ToolManifest } from "./types";
 
 vi.mock("./api", () => ({
@@ -32,6 +34,7 @@ const tool: ToolManifest = {
 
 describe("FileListDirectoryPage", () => {
   beforeEach(() => {
+    vi.mocked(jobStart).mockResolvedValue("job-scan");
     sessionStorage.setItem(
       "audit-toolbox:file-list-directory:v1",
       JSON.stringify({
@@ -87,5 +90,33 @@ describe("FileListDirectoryPage", () => {
       within(screen.getByRole("region", { name: "等待扫描文件夹" }))
         .queryByRole("button"),
     ).not.toBeInTheDocument();
+  });
+
+  it.each(["failed", "cancelled"])("扫描 %s 后首屏显示明确终态与重试方向", async (phase) => {
+    sessionStorage.clear();
+    render(<FileListDirectoryPage tool={tool} />);
+    const { pickPath } = await import("./api");
+    vi.mocked(pickPath).mockResolvedValueOnce("C:\\客户资料");
+    fireEvent.click(screen.getByRole("button", { name: "源文件夹 *" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("file_list.scan", { sourceDir: "C:\\客户资料" }));
+    await waitFor(() => expect(vi.mocked(listenJobEvents).mock.calls.length).toBeGreaterThan(1));
+    const callback = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+    act(() => callback?.({
+      jobId: "job-scan",
+      toolId: "file_list_directory",
+      phase,
+      current: 1,
+      total: 3,
+      message: phase === "failed" ? "目录无访问权限" : "任务已取消",
+      severity: phase === "failed" ? "error" : "warning",
+      outputPaths: [],
+    }));
+    expect(screen.getByText(phase === "failed" ? "扫描失败" : "扫描已取消")).toBeVisible();
+    expect(screen.getByText(/已选文件夹仍保留，可点击上方/)).toBeVisible();
+    expect(screen.queryByText("等待扫描文件夹")).not.toBeInTheDocument();
+    if (phase === "cancelled") {
+      expect(document.querySelector(".job-progress-error")).toBeNull();
+      expect(screen.getAllByText("已取消").find((node) => node.getAttribute("data-variant") === "warning")).toBeInTheDocument();
+    }
   });
 });

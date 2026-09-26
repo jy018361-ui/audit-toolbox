@@ -327,3 +327,128 @@ it("多主体账套第二步出现主体列，单主体不出现", async () => {
   expect(within(singleHead).queryByText("主体")).not.toBeInTheDocument();
   expect(document.querySelector(".fx-entity-cell")).toBeNull();
 });
+
+/** 上传两表并直达第三步（测算与底稿）。 */
+async function gotoRatesStep() {
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  fireEvent.click(await screen.findByRole("button", { name: "下一步：测算与底稿" }));
+  await screen.findByLabelText("资产负债表日");
+}
+
+/** 回归（汇率导出/导入）：第三步按钮行提供导出、导入与悬停说明。 */
+it("第三步提供汇率导出导入按钮与功能说明提示", async () => {
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  await gotoRatesStep();
+  expect(screen.getByRole("button", { name: "导出汇率" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "导入汇率" })).toBeVisible();
+  expect(screen.getByText("汇率取自中国人民银行。")).toBeVisible();
+  // 说明 icon：聚焦即出现气泡，讲清导出、导入与恢复官方三件事。
+  fireEvent.focus(screen.getByRole("button", { name: "什么是汇率导出与导入" }));
+  const tip = await screen.findByRole("tooltip");
+  expect(tip).toHaveTextContent("导出汇率");
+  expect(tip).toHaveTextContent("导入汇率");
+  expect(tip).toHaveTextContent("恢复官方汇率");
+});
+
+/** 回归（汇率导入）：导入后测算注入自定义快照，恢复官方即回到现抓口径。 */
+it("导入自定义汇率后按导入口径测算并可一键恢复官方", async () => {
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  await gotoRatesStep();
+  fireEvent.change(screen.getByLabelText("资产负债表日"), {
+    target: { value: "20251231" },
+  });
+  mock.pickPath.mockResolvedValue("C:/rates/修改后汇率.xlsx");
+  mock.engineCall.mockImplementation(async (method: string) => {
+    if (method === "fx.import_rates")
+      return {
+        rateSnapshot: {
+          source: "用户导入：修改后汇率.xlsx（2026-09-25 10:00 导入）",
+          responseHash: "custom-hash-1",
+          startDate: "2024-11-27",
+          endDate: "2025-12-31",
+          rates: [],
+        },
+        summary: { currencyCount: 25, dateCount: 400 },
+      };
+    throw new Error(`unexpected ${method}`);
+  });
+  fireEvent.click(screen.getByRole("button", { name: "导入汇率" }));
+  expect(await screen.findByText(/已导入自定义汇率：修改后汇率.xlsx/)).toBeVisible();
+  expect(screen.getByText(/25个币种 × 400天/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "恢复官方汇率" })).toBeVisible();
+
+  // 导入生效后的测算必须携带自定义快照（内容指纹进引擎缓存键的前提）。
+  fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenCalledWith(
+      "fx.preview",
+      expect.objectContaining({
+        rateSnapshot: expect.objectContaining({ responseHash: "custom-hash-1" }),
+      }),
+    ),
+  );
+  // 让这轮测算正常结束、页面退出 busy，才能继续验证恢复官方后的口径。
+  await act(async () => {
+    mock.jobListener?.({
+      jobId: "fx-job-1",
+      toolId: "fx_audit",
+      phase: "completed",
+      current: 100,
+      total: 100,
+      message: "测算完成",
+      severity: "success",
+      outputPaths: [],
+      result: { summary: { formalMeasurementAvailable: true } },
+    });
+  });
+
+  // 一键恢复官方：状态行回官方口径，测算不再携带快照。
+  fireEvent.click(screen.getByRole("button", { name: "恢复官方汇率" }));
+  expect(await screen.findByText("汇率取自中国人民银行。")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenCalledWith("fx.preview", expect.anything()),
+  );
+  const lastCall = mock.jobStart.mock.calls.at(-1);
+  expect(lastCall?.[1].rateSnapshot).toBeUndefined();
+});
+
+/** 回归（汇率导出）：走任务通道，完成后回报文件位置且不污染测算结果。 */
+it("导出汇率走任务通道并回报文件位置", async () => {
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  await gotoRatesStep();
+  fireEvent.change(screen.getByLabelText("资产负债表日"), {
+    target: { value: "20251231" },
+  });
+  mock.pickPath.mockResolvedValue("C:/out/汇率中间价_20251231.xlsx");
+  mock.jobStart.mockResolvedValue("rates-job-9");
+  fireEvent.click(screen.getByRole("button", { name: "导出汇率" }));
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenCalledWith(
+      "fx.export_rates",
+      expect.objectContaining({
+        outputPath: "C:/out/汇率中间价_20251231.xlsx",
+        reportEnd: "2025-12-31",
+      }),
+    ),
+  );
+  await act(async () => {
+    mock.jobListener?.({
+      jobId: "rates-job-9",
+      toolId: "fx_audit",
+      phase: "completed",
+      current: 2,
+      total: 2,
+      message: "汇率文件已生成。",
+      severity: "success",
+      outputPaths: [],
+      result: { outputPath: "C:/out/汇率中间价_20251231.xlsx" },
+    });
+  });
+  expect(await screen.findByText(/汇率已导出/)).toBeVisible();
+  // 汇率导出的完成事件不得混进测算结果状态。
+  expect(screen.queryByText("Excel底稿已生成；测算预览结果已保留在下方。")).not.toBeInTheDocument();
+});

@@ -143,6 +143,23 @@ function JobPillConfirmFixture() {
   );
 }
 
+function DualPillFixture() {
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      document.querySelector<HTMLButtonElement>(".job-dialog-footer button")?.click();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+  return (
+    <JobDialogProvider jobs={[job("job-dual", "文件处理", 37)]} nameOf={(toolId) => toolId}>
+      <SyncBusyDialog
+        fixtureEntries={[{ id: 1, method: "fx.inspect_je", detail: "01序时账.xlsx" }]}
+        fixtureMinimized
+      />
+    </JobDialogProvider>
+  );
+}
+
 function FilterFixture({ withConfirm = false }: { withConfirm?: boolean }) {
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
   useEffect(() => {
@@ -249,6 +266,7 @@ export function OverlayStateFixture() {
         {scenario === "filter" && <FilterFixture />}
         {scenario === "filter-confirm-stack" && <FilterFixture withConfirm />}
         {scenario === "job-pill-confirm-stack" && <JobPillConfirmFixture />}
+        {scenario === "dual-pill" && <DualPillFixture />}
         {scenario === "jargon-confirm-stack" && (
           <div><JargonTip term={longText} text={`${longPath}。${longError}`} /><ConfirmFixture /></div>
         )}

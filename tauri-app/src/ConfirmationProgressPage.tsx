@@ -141,7 +141,10 @@ export default function ConfirmationProgressPage({
         setBusy(false);
         if (event.result && typeof event.result === "object")
           setResult(event.result as Record<string, unknown>);
-      } else if (event.phase === "failed" || event.phase === "cancelled") {
+      } else if (event.phase === "cancelled") {
+        setBusy(false);
+        setError("");
+      } else if (event.phase === "failed") {
         setBusy(false);
         const payload = event.result as
           { error?: { userMessage?: string } } | undefined;
@@ -336,7 +339,7 @@ export default function ConfirmationProgressPage({
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
             {job &&
-              !["completed", "failed", "cancelled"].includes(job.phase) && (
+              !["completed", "failed"].includes(job.phase) && (
                 <JobProgress
                   job={job}
                   onCancel={() => cancel()}
@@ -383,7 +386,6 @@ export default function ConfirmationProgressPage({
             )}
             {step === 2 && (
               <>
-                <h3>报告范围</h3>
                 <div className="confirmation-modes">
                   {CONFIRMATION_MODE_OPTIONS.map(({ value, label, detail }) => (
                     <label
@@ -413,7 +415,7 @@ export default function ConfirmationProgressPage({
                     className="confirmation-success"
                     title={inspection.outputDirectory}
                   >
-                    字段检查通过，报告将保存到：
+                    报告保存位置：
                     {displayFileName(inspection.outputDirectory)}
                   </div>
                 ) : null}
@@ -451,7 +453,7 @@ export default function ConfirmationProgressPage({
                     className="confirmation-success"
                     title={inspection.outputDirectory}
                   >
-                    字段检查通过，报告将保存到：
+                    报告保存位置：
                     {displayFileName(inspection.outputDirectory)}
                   </div>
                 ) : null}
@@ -497,7 +499,7 @@ export default function ConfirmationProgressPage({
 
         <Card>
           <CardHeader>
-            <CardTitle>数据检查与结果</CardTitle>
+            <CardTitle>清单检查</CardTitle>
           </CardHeader>
           <CardContent>
             {!inspection && !job && (
@@ -536,66 +538,56 @@ export default function ConfirmationProgressPage({
                 />
               </>
             )}
-            {/* The engine records a per-type outcome including why a report was
-                skipped.  Showing only the generated paths made a missing report
-                indistinguishable from a tool failure. */}
-            {reports.length > 0 && (
-              <div className="confirmation-outputs">
-                <h3>本次处理的报告</h3>
-                <p className="confirmation-result-overview" role="status">
-                  <Badge
-                    variant="outline"
-                    className={
-                      reports.some((report) => report.status === "skipped")
-                        ? "badge-warning"
-                        : "badge-ready"
-                    }
-                  >
-                    {reports.some((report) => report.status === "skipped")
-                      ? "部分报告未生成"
-                      : "报告处理完成"}
-                  </Badge>
-                  <span>
-                    请核对报告类型与数量；未生成的报告请查看下方原因。
-                  </span>
-                </p>
-                {reports.map((report, index) => (
-                  <p
-                    key={String(report.type ?? index)}
-                    className={
-                      report.status === "skipped"
-                        ? "confirmation-skipped"
-                        : undefined
-                    }
-                  >
-                    {String(report.label ?? report.type ?? "")}：
-                    {report.status === "skipped"
-                      ? `未生成（${String(report.reason ?? "没有符合类型的数据")}）`
-                      : `已生成${typeof report.summaryRows === "number" ? `，${report.summaryRows} 行` : ""}`}
-                  </p>
-                ))}
-              </div>
-            )}
-            {outputPaths.length > 0 && (
-              <div className="confirmation-outputs">
-                <h3>报告已生成</h3>
-                {outputPaths.map((path) => (
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    className="confirmation-output-link"
-                    key={path}
-                    title={path}
-                    onClick={() => void openOutput(path)}
-                  >
-                    打开：{displayFileName(path)}
-                  </Button>
-                ))}
-              </div>
-            )}
           </CardContent>
         </Card>
+        {(reports.length > 0 || outputPaths.length > 0) && (
+          <Card className="confirmation-report-card">
+            <CardHeader>
+              <CardTitle>本次报告</CardTitle>
+              <Badge
+                variant={reports.some((report) => report.status === "skipped") ? "warning" : "success"}
+              >
+                {reports.some((report) => report.status === "skipped") ? "部分未生成" : "已完成"}
+              </Badge>
+            </CardHeader>
+            <CardContent>
+              {reports.length > 0 && (
+                <div className="confirmation-report-list" role="status">
+                  {reports.map((report, index) => (
+                    <div
+                      key={String(report.type ?? index)}
+                      className={report.status === "skipped" ? "confirmation-report-row is-skipped" : "confirmation-report-row"}
+                    >
+                      <strong>{String(report.label ?? report.type ?? "报告")}</strong>
+                      <span>
+                        {report.status === "skipped"
+                          ? `未生成：${String(report.reason ?? "没有符合类型的数据")}`
+                          : `已生成${typeof report.summaryRows === "number" ? ` · ${report.summaryRows} 行` : ""}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {outputPaths.length > 0 && (
+                <div className="confirmation-output-actions" aria-label="报告文件">
+                  {outputPaths.map((path) => (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="confirmation-output-link"
+                      key={path}
+                      title={path}
+                      onClick={() => void openOutput(path)}
+                    >
+                      打开：{displayFileName(path)}
+                    </Button>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
       </div>
     </div>
   );

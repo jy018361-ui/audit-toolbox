@@ -56,3 +56,39 @@ export const TaskRestoreSchema = z.object({
   method: z.string().default(""),
 });
 export type TaskRestore = z.infer<typeof TaskRestoreSchema>;
+
+/** 会议纪要助手：Rust 侧 meeting-event 事件载荷（Teams 通话开始/结束）。 */
+export const MeetingEventSchema = z.object({
+  type: z.enum(["call_started", "call_ended"]),
+  at: z.string(),
+});
+export type MeetingEvent = z.infer<typeof MeetingEventSchema>;
+
+/** 会议检测与录音的当前状态（meeting_status 命令返回）。 */
+export const MeetingStatusSchema = z.object({
+  watchEnabled: z.boolean(),
+  resident: z.boolean(),
+  inCall: z.boolean(),
+  logFound: z.boolean(),
+  recording: z.boolean(),
+});
+export type MeetingStatus = z.infer<typeof MeetingStatusSchema>;
+
+export const MeetingRecordStartSchema = z.object({
+  startedAt: z.string(),
+  recordDir: z.string(),
+  systemOk: z.boolean(),
+  micOk: z.boolean(),
+  warnings: z.array(z.string()).default([]),
+});
+export type MeetingRecordStart = z.infer<typeof MeetingRecordStartSchema>;
+
+export const MeetingRecordStopSchema = z.object({
+  audioPath: z.string(),
+  recordDir: z.string(),
+  durationSec: z.number(),
+  sizeBytes: z.number(),
+  startedAt: z.string(),
+  warnings: z.array(z.string()).default([]),
+});
+export type MeetingRecordStop = z.infer<typeof MeetingRecordStopSchema>;

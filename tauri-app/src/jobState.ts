@@ -52,7 +52,9 @@ export function jobPresentation(job: JobEvent): JobPresentation {
       : null;
   // 阶段计数走完后仍可能有写盘、校验或原子替换。结束事件抵达前保留 1%，
   // 避免用户看到“100%”却仍需等待。
-  const percent = calculatedPercent === null
+  const percent = job.phase === "failed" || job.phase === "cancelled"
+    ? null
+    : calculatedPercent === null
     ? null
     : TERMINAL_JOB_PHASES.includes(job.phase as (typeof TERMINAL_JOB_PHASES)[number])
       ? calculatedPercent

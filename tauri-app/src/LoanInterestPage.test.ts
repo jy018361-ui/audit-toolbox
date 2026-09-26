@@ -46,6 +46,37 @@ describe("借款利息测算", () => {
       expect.objectContaining({ reviewKey: "250101", opening: 300, closing: 260 }),
     ]);
   });
+  it("同编码的不同科目名称和币种保留独立复核键", () => {
+    const base = { key: "2001", code: "2001", opening: 10, closing: 10 };
+    const accounts = [
+      { ...base, identity: '["2001","银行借款","cny"]', name: "银行借款", currency: "CNY", account: "2001 银行借款" },
+      { ...base, identity: '["2001","股东借款","cny"]', name: "股东借款", currency: "CNY", account: "2001 股东借款" },
+    ];
+    const rows = loanAccountReviewRows(accounts, null);
+    expect(new Set(rows.map((row) => row.reviewKey)).size).toBe(2);
+    expect(rows.map((row) => row.name)).toEqual(["银行借款", "股东借款"]);
+  });
+  it("同编码多名称的辅助明细只挂到拥有该辅助值的科目", () => {
+    const base = { key: "2001", code: "2001", currency: "CNY", opening: 10, closing: 10 };
+    const accounts = [
+      { ...base, identity: "银行", name: "银行借款", account: "2001 银行借款", reviewAuxiliaries: [{ entity: "甲", auxiliary: "A银行" }] },
+      { ...base, identity: "股东", name: "股东借款", account: "2001 股东借款", reviewAuxiliaries: [{ entity: "甲", auxiliary: "股东甲" }] },
+    ];
+    const link = {
+      tbAuxMapped: true, status: "verified", column: "辅助", anchorHits: 2, anchorTotal: 2,
+      coverage: 1, competingColumns: [], warnings: [], groups: [{
+        entity: "甲", account: "2001", reviewVerified: true,
+        details: [{ key: "A银行", display: "A银行" }, { key: "股东甲", display: "股东甲" }],
+        tbAuxMapped: true, status: "verified", column: "辅助", anchorHits: 2,
+        anchorTotal: 2, coverage: 1, competingColumns: [], warnings: [],
+      }],
+    } as Parameters<typeof loanAccountReviewRows>[1];
+    const rows = loanAccountReviewRows(accounts, link);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => [row.name, row.auxiliary])).toEqual([
+      ["银行借款", "A银行"], ["股东借款", "股东甲"],
+    ]);
+  });
   it("恢复旧任务时保留人工映射并补入新版主体建议", () => {
     expect(
       mergeRestoredLoanMapping(

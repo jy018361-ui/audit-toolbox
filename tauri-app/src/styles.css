@@ -353,6 +353,18 @@ summary:focus-visible {
   background: var(--window-close-active);
   color: var(--window-close-fg);
 }
+/* === UI 审计修复（2026-09-25）：真机无边框窗口滚动后，右上角内容会钻进透明的
+   窗口按钮底下（步骤条/页头与按钮互相叠压）。给按钮组加一条自上而下的衬条
+   （页面底色渐变到透明），滚动时按钮区始终与内容可辨；衬条本身不拦点击，
+   pointer-events 下放给按钮自身，拖拽手柄不受影响。仅真机 frameless 生效。 */
+.frameless .window-controls {
+  background: linear-gradient(to bottom, var(--surface-page) 55%, transparent);
+  padding: 0 0 var(--sp-2) var(--sp-3);
+  pointer-events: none;
+}
+.frameless .window-controls button {
+  pointer-events: auto;
+}
 /* 品牌区与页头现在是拖拽手柄（双击=最大化），拖动时选中文字只会闪一下，关掉 */
 .brand,
 .page-header {
@@ -527,9 +539,9 @@ summary:focus-visible {
 }
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--sp-3);
-  margin: var(--sp-5) 0;
+  margin: var(--sp-3) 0;
 }
 .metric,
 .tool-card,
@@ -542,7 +554,7 @@ summary:focus-visible {
   box-shadow: var(--shadow-card);
 }
 .metric {
-  padding: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
 }
 .metric span {
   font-size: var(--fs-xs);
@@ -552,7 +564,7 @@ summary:focus-visible {
   display: block;
   font-size: var(--fs-xl);
   line-height: var(--lh-section-title);
-  margin-top: var(--sp-2);
+  margin-top: var(--sp-1);
   color: var(--brand-link);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -851,6 +863,13 @@ summary:focus-visible {
   border: 1px dashed var(--border);
   border-radius: var(--r-md);
 }
+/* SimplePage 的可选操作区（如「返回工作台」「重新加载」），
+   跟在提示文案卡下方，居中摆放。 */
+.simple-page-action {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--sp-4);
+}
 .empty-state {
   display: grid;
   justify-items: center;
@@ -954,6 +973,14 @@ summary:focus-visible {
   font-size: var(--fs-xs);
   line-height: 1.5;;
 }
+.data-handling-notice-details summary {
+  width: fit-content;
+  color: var(--brand-link);
+  cursor: pointer;
+}
+.data-handling-notice-details > div {
+  margin-top: var(--sp-1);
+}
 
 .link-button {
   display: block;
@@ -1031,7 +1058,7 @@ summary:focus-visible {
     grid-template-columns: 1fr;
   }
   .metrics {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .fa-preview-stack {
     grid-template-columns: 1fr;
@@ -1767,6 +1794,17 @@ summary:focus-visible {
 .step-indicator-item.done .step-indicator-index {
   /* 对勾是已完成态的核心信号，不能落在基类的灰色上 */
   color: var(--brand);
+}
+/* 失败态：步骤执行出错（如输入检查失败）时以警示色标记，绝不显示完成对勾 */
+.step-indicator-item.error {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+.step-indicator-item.error .step-indicator-index {
+  background: var(--danger-fg);
+  color: var(--surface);
+  font-weight: var(--fw-strong);
 }
 .step-indicator-item.disabled {
   cursor: not-allowed;

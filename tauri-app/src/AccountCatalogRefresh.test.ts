@@ -63,6 +63,7 @@ describe("四个账表工具的科目清单刷新契约", () => {
     expect(review).not.toContain("deposit.inspect_je");
     expect(review).toContain("setAccountsReviewed(false)");
     expect(text).toContain("[...new Set(inspects.tb?.accounts ?? [])]");
-    expect(text).toContain("faReviewEntityAccounts(inspects.tb?.entityAccounts, entityKeyEnabled)");
+    expect(text).toContain("faReviewEntityAccounts(effective, entityKeyEnabled)");
+    expect(text).toContain("const effective = raw?.map((pair) => (");
   });
 });

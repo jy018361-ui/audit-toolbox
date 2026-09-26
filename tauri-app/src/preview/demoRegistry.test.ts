@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   cancelDemoJob,
   DEMO_FLAG_KEY,
+  demoJobLookup,
   demoLookup,
   demoReplayJobs,
   injectDemoJobEvent,
@@ -23,12 +24,26 @@ const events: DemoJobEvent[] = [
 ];
 
 afterEach(() => {
+  window.history.replaceState({}, "", "/");
   setDemoAutoPlayback(true);
   localStorage.removeItem(DEMO_FLAG_KEY);
   vi.useRealTimers();
 });
 
 describe("browser preview task replay", () => {
+  it("缺币种开关只改变显式启用的浏览器 demo 验证返回", () => {
+    localStorage.setItem(DEMO_FLAG_KEY, "1");
+    window.history.replaceState({}, "", "/?demo=1&demoCurrencyMissing=1");
+    expect(demoLookup("ledger.currency_link")?.({})).toMatchObject({
+      required: true, verified: false, missingCurrencies: ["USD", "HKD"], affectedGroupCount: 2,
+      groups: [{ verified: false }, { verified: false }],
+    });
+    window.history.replaceState({}, "", "/?demo=1");
+    expect(demoLookup("ledger.currency_link")?.({})).toMatchObject({ required: false, verified: true });
+    localStorage.removeItem(DEMO_FLAG_KEY);
+    window.history.replaceState({}, "", "/?demoCurrencyMissing=1");
+    expect(demoLookup("ledger.currency_link")).toBeUndefined();
+  });
   it("汇兑演示 TB 提供独立原币列与公共联动返回，能走到测算任务", () => {
     localStorage.setItem(DEMO_FLAG_KEY, "1");
     const inspect = demoLookup("fx.inspect_tb")?.({ source: { sheet: "TB" } }) as {
@@ -135,6 +150,66 @@ describe("browser preview task replay", () => {
 });
 
 describe("browser preview shared engine handlers", () => {
+  it("Excel 默认智能匹配演示返回可提交的模板、逐 Sheet 匹配和真实预览行", () => {
+    localStorage.setItem(DEMO_FLAG_KEY, "1");
+    const path = "C:\\演示数据\\样例文件.xlsx";
+    const preview = demoLookup("excel_merger.match_preview")?.({
+      inputPaths: [path], templatePath: path, sheetAction: "merge_all", targetSheets: [],
+    }) as {
+      template: { path: string; headers: string[]; rawRows: string[][]; detection: { headerRow: number } };
+      rows: Array<{ path: string; sheet: string; headers: string[]; matches: Array<{ target: number | null }>; preview: string[][]; rawRows: string[][] }>;
+    };
+    expect(preview.template.path).toBe(path);
+    expect(preview.template.detection.headerRow).toBe(0);
+    expect(preview.rows.map((row) => row.sheet)).toEqual(["销售出库单", "回款登记"]);
+    for (const row of preview.rows) {
+      expect(row.path).toBe(path);
+      expect(row.matches).toHaveLength(row.headers.length);
+      expect(row.rawRows[0]).toEqual(row.headers);
+      expect(row.preview).toEqual(row.rawRows.slice(1));
+    }
+    expect(preview.rows[1].matches.at(-1)?.target).toBeNull();
+    expect(demoLookup("excel_merger.match_preview")?.({
+      inputPaths: [path], sheetAction: "match_selected", targetSheets: ["回款登记"],
+    })).toMatchObject({ rows: [{ sheet: "回款登记" }] });
+    expect(demoJobLookup("excel_merger.merge")).toBeTypeOf("function");
+  });
+
+  it("Excel 多 Sheet 演示成功态的处理数量与输出、警告一致", () => {
+    localStorage.setItem(DEMO_FLAG_KEY, "1");
+    const events = demoJobLookup("excel_merger.merge")?.({
+      inputPaths: ["C:\\演示数据\\样例文件.xlsx"],
+      outputMode: "one_workbook",
+    });
+    expect(events?.find((event) => event.phase === "running")?.message).not.toContain("跳过");
+    const completed = events?.find((event) => event.phase === "completed");
+    expect(completed?.message).toContain("1 / 1 个文件");
+    expect(completed?.outputPaths).toHaveLength(1);
+    expect(completed?.result).toMatchObject({
+      inputFiles: 1, fileCount: 1, rows: 3842, warnings: [],
+      outputPaths: completed?.outputPaths,
+    });
+  });
+
+  it("FA List 默认匹配结果与两侧导入预览一致，不把重复键异常混入正常导出链", () => {
+    localStorage.setItem(DEMO_FLAG_KEY, "1");
+    const inspected = demoLookup("fa.inspect")?.({}) as {
+      begin: { preview: unknown[][] };
+      end: { preview: unknown[][] };
+    };
+    const completed = demoJobLookup("fa.match")?.({}).find((event) => event.phase === "completed");
+    const result = completed?.result as {
+      stats: { rows: number; both: number; beginOnly: number; endOnly: number; duplicates: { hasDuplicates: boolean } };
+    };
+    expect(result.stats).toMatchObject({
+      rows: 18, both: 14, beginOnly: 2, endOnly: 2,
+      duplicates: { hasDuplicates: false },
+    });
+    expect(result.stats.rows).toBe(result.stats.both + result.stats.beginOnly + result.stats.endOnly);
+    expect(inspected.begin.preview).toHaveLength(result.stats.both + result.stats.beginOnly);
+    expect(inspected.end.preview).toHaveLength(result.stats.both + result.stats.endOnly);
+  });
+
   it("keeps FX currency mappings while preserving the TBJE sheet fixture", () => {
     localStorage.setItem(DEMO_FLAG_KEY, "1");
     const inspectTb = demoLookup("fx.inspect_tb");

@@ -1,6 +1,7 @@
 import {
+  AUTO_ACCEPT_LLM_CONFIDENCE,
   isVisibleLlmReviewConfidence,
-  MIN_VISIBLE_LLM_REVIEW_CONFIDENCE,
+  shouldAutoAcceptLlmReview,
 } from "@/llmReviewConfidence";
 import { fileName } from "./tbjePairing";
 
@@ -105,11 +106,14 @@ export function ledgerEntitiesByAccount(
   for (const combo of combos ?? []) {
     const code = codeOf(combo.account);
     if (!code) continue;
-    const list = map.get(code);
-    if (list) {
-      if (!list.includes(combo.entity)) list.push(combo.entity);
-    } else {
-      map.set(code, [combo.entity]);
+    // 同编码不同科目名称各自只列实际出现的主体；代码键只留给旧任务回退。
+    for (const key of [combo.account, code]) {
+      const list = map.get(key);
+      if (list) {
+        if (!list.includes(combo.entity)) list.push(combo.entity);
+      } else {
+        map.set(key, [combo.entity]);
+      }
     }
   }
   return map;
@@ -594,7 +598,7 @@ export type LedgerPlannedChange = LedgerChange & {
   currentColumn: string;
   attention: boolean;
   beforeValue?: string | string[];
-  /** 用户采纳前的整份映射；用于完整撤销采纳时连带发生的列互斥调整。 */
+  /** 建议生效前的整份映射；用于撤销时恢复连带发生的列互斥调整。 */
   beforeMapping?: Record<string, string | string[]>;
   label: string;
   /** 清除错误映射时 suggestedColumn 为空，界面统一展示为“未映射”。 */
@@ -779,11 +783,8 @@ const ledgerMappingText = (value: string | string[] | undefined): string =>
     : value?.trim() || "未映射";
 
 /**
- * 后端完成提示词与硬规则过滤后，前端统一生成“待采纳”计划。
- *
- * 审计映射不得因为后台复核返回而静默变化：即使建议置信度较高，也只展示给
- * 用户确认。这里仍按原先的原子调整规则预演整批建议，借此剔除列占用冲突；
- * 最终把可行建议全部还原成 pending，mapping 保持调用前的人工/Coding 结果。
+ * 后端完成提示词与硬规则过滤后，高于 75% 且不冲突的建议自动采纳；
+ * 其余可见建议待人工确认。原子预演避免一批建议因返回顺序产生列占用误判。
  */
 export function planLedgerChanges(
   headers: string[],
@@ -810,16 +811,14 @@ export function planLedgerChanges(
         change.role in labels &&
         ledgerMappingText(current[change.role]) !== "未映射" &&
         change.autoClearSafe === true &&
-        change.confidence !== undefined &&
-        change.confidence >= AUTO_APPLY_MIN
+        shouldAutoApply(change.confidence)
       );
     const column = change?.suggestedColumn?.trim();
     return (
       !!column &&
       change.role in labels &&
       headers.includes(column) &&
-      change.confidence !== undefined &&
-      change.confidence >= AUTO_APPLY_MIN
+      shouldAutoApply(change.confidence)
     );
   });
   const vacatedByRole = new Map<string, Set<string>>();
@@ -855,13 +854,18 @@ export function planLedgerChanges(
       label: labels[change.role] ?? change.role,
     };
     if (
-      change.confidence === undefined ||
-      change.confidence < AUTO_APPLY_MIN ||
+      !shouldAutoApply(change.confidence) ||
       (action === "clear" && change.autoClearSafe !== true)
     ) {
       pending.push(planned);
       continue;
     }
+    planned.beforeMapping = Object.fromEntries(
+      Object.entries(next).map(([role, value]) => [
+        role,
+        Array.isArray(value) ? [...value] : value,
+      ]),
+    );
     if (action === "clear") {
       delete next[change.role];
       applied.push(planned);
@@ -918,9 +922,9 @@ export function planLedgerChanges(
     applied.push(planned);
   }
   return {
-    mapping: { ...current },
-    applied: [],
-    pending: [...applied, ...pending],
+    mapping: next,
+    applied,
+    pending,
   };
 }
 
@@ -1002,7 +1006,7 @@ export type LedgerReviewTarget = {
   /** 当前工具允许由多列共同组成的角色；公共默认含日期组成列。 */
   multiColumnRoles?: ReadonlySet<string>;
 };
-/** 一键复核里单个文件的结果：当前映射、已由用户采纳的建议与待采纳建议。 */
+/** 一键复核里单个文件的结果：当前映射、已生效的建议与待采纳建议。 */
 export type LedgerReviewOutcome = {
   mapping: Record<string, string | string[]>;
   appliedCount: number;
@@ -1263,10 +1267,10 @@ export function isRedundantKanzhangReview(
     return current.length === 1 && current[0]?.trim() === suggested;
   return typeof current === "string" && current.trim() === suggested;
 }
-// 把握达到门槛的直接改（可撤销）；明确低于门槛的结果直接隐藏。
-export const AUTO_APPLY_MIN = MIN_VISIBLE_LLM_REVIEW_CONFIDENCE;
+// 明确高于 75% 才自动采纳；低于可见门槛的建议由上游隐藏。
+export const AUTO_APPLY_MIN = AUTO_ACCEPT_LLM_CONFIDENCE;
 export const shouldAutoApply = (confidence?: number) =>
-  confidence === undefined || confidence >= AUTO_APPLY_MIN;
+  shouldAutoAcceptLlmReview(confidence);
 export function kanzhangReviewSummary(
   applied: number,
   pending: number,

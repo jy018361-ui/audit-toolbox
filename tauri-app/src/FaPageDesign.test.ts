@@ -35,10 +35,11 @@ describe("固定资产与凭证页视觉契约", () => {
   it("FA 两期清单明确任务动作、三步编号与待重算门禁", () => {
     const page = source("FaListPage");
     expect(page).toContain('"开始匹配"');
-    expect(page).toContain('<h3>2. 本期变动清单（可选）</h3>');
+    expect(page).toContain('"2. 补充清单（可选）"');
+    expect(page).not.toContain('<h3>2. 本期变动清单（可选）</h3>');
     expect(page).toContain('<h3>3. 输出</h3>');
     expect(page).toContain('disabled={!inspection || resultStale}');
-    expect(page).toContain('autoApply: false');
+    expect(page).not.toContain('autoApply: false');
     expect(page).toContain('__restoreSnapshot');
     expect(page).toContain('期初 ${displayFileName(bPath)} ＋ 期末 ${displayFileName(ePath)}');
     expect(page).toContain('已从历史快照恢复两期清单，请复核文件、匹配 ID 与字段映射后继续。');

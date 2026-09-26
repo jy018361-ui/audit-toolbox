@@ -38,3 +38,12 @@
   padding: 0;
   overflow-wrap: anywhere;
 }
+
+/* 后台任务与同步调用可能并发：两条最小化任务条不能占用同一个右下角位置。 */
+body:has(.job-dialog-pill) .sync-busy-pill {
+  bottom: calc(max(var(--sp-5), env(safe-area-inset-bottom)) + 112px);
+}
+
+body:has(.job-dialog-pill):has(.sync-busy-pill) .job-command-notice {
+  bottom: calc(max(var(--sp-5), env(safe-area-inset-bottom)) + 176px);
+}

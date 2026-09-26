@@ -54,7 +54,7 @@ describe("任务型页面纵向布局契约", () => {
   });
 
   it("审查矩阵逐项覆盖 catalog 的全部工具", () => {
-    expect(catalog).toHaveLength(18);
+    expect(catalog).toHaveLength(19);
     for (const tool of catalog) expect(audit).toContain(`\`${tool.id}\``);
   });
 

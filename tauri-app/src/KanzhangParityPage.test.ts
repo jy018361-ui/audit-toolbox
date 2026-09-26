@@ -301,13 +301,14 @@ describe("看账页面状态规则", () => {
     ).toBe(false);
   });
 
-  it("把握达到六成才自动改，否则交回用户", () => {
+  it("把握严格高于 75% 才自动改，否则交回用户", () => {
     expect(shouldAutoApply(0.95)).toBe(true);
-    expect(shouldAutoApply(0.6)).toBe(true);
+    expect(shouldAutoApply(0.751)).toBe(true);
+    expect(shouldAutoApply(0.75)).toBe(false);
+    expect(shouldAutoApply(0.6)).toBe(false);
     expect(shouldAutoApply(0.59)).toBe(false);
     expect(shouldAutoApply(0.2)).toBe(false);
-    // LLM 没给把握时按原有行为直接应用
-    expect(shouldAutoApply(undefined)).toBe(true);
+    expect(shouldAutoApply(undefined)).toBe(false);
   });
 
   it("复核结论分别交代改了什么和还要你定什么", () => {
@@ -623,9 +624,9 @@ describe("科目编码与科目名称拆成两个角色", () => {
       ],
     });
     expect(result.mapping.summary).toBeUndefined();
-    expect(result.mapping.accountCode).toBe("科目编码");
-    expect(result.pending).toEqual([]);
-    expect(result.changes.map((item) => item.role)).toEqual(["accountCode"]);
+    expect(result.mapping.accountCode).toBeUndefined();
+    expect(result.pending).toEqual([expect.objectContaining({ role: "accountCode", confidence: 0.6 })]);
+    expect(result.changes).toEqual([]);
   });
 });
 

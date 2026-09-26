@@ -1,5 +1,5 @@
 // 通用工具的浏览器预览演示数据，覆盖四个工具的同步 engineCall 方法：
-//   1. Excel 批量合并（ExcelMergerPage）：excel_merger.expand_paths / scan_folder / inspect
+//   1. Excel 批量合并（ExcelMergerPage）：excel_merger.expand_paths / scan_folder / inspect / match_preview
 //   2. 两列模糊匹配（FuzzyMatchPage）：fuzzy.inspect / get_results / save_confirm
 //   3. TBJE 完整性核对（TbjeCheckPage）：deposit.classify_source / fx.inspect_tb / fx.inspect_je /
 //      ledger.check_mapping_alignment / ledger.forms / ledger.review_mapping / ledger.review_pair_mapping
@@ -109,6 +109,59 @@ const mergerInspectResult = (paths: string[]) => {
     files,
     availableSheets,
     engine: "rust",
+  };
+};
+
+/** 仅预览模式使用的表头识别样例，字段结构对齐 Rust match_preview。 */
+const mergerMatchPreview = (params: DemoParams) => {
+  const paths = asStringArray(params.inputPaths);
+  const inputPaths = paths.length ? paths : DEFAULT_MERGER_PATHS.slice(0, 2);
+  const action = asString(params.sheetAction) || "merge_all";
+  const selected = asStringArray(params.targetSheets);
+  const templatePath = asString(params.templatePath) || inputPaths[0];
+  const headersFor = (sheet: string) => sheet === "回款登记"
+    ? ["日期", "单据编号", "客户名称", "金额", "备注"]
+    : ["日期", "单据编号", "客户名称", "金额"];
+  const rawRowsFor = (sheet: string) => {
+    const headers = headersFor(sheet);
+    return [
+      headers,
+      ["2026-01-08", "XS-001", "华东集团有限公司", "128500.00", ...(headers.length > 4 ? ["首期回款"] : [])],
+      ["2026-01-15", "XS-002", "北方实业有限公司", "73900.00", ...(headers.length > 4 ? ["尾款"] : [])],
+    ];
+  };
+  const detection = { headerRow: 0, headerRowsCount: 1, confidence: 0.98, needsReview: false };
+  const targetFiles = inputPaths.flatMap((path) => {
+    const file = toMergerFile(path);
+    if (file.error) return [];
+    const sheets = file.sheets.length ? file.sheets : ["CSV"];
+    const chosen = action === "match_selected"
+      ? sheets.filter((sheet) => selected.includes(sheet))
+      : action === "default" ? sheets.slice(0, 1) : sheets;
+    return chosen.map((sheet) => ({ path, name: file.name, sheet }));
+  });
+  const templateSheet = toMergerFile(templatePath).sheets[0] || "CSV";
+  const templateRows = rawRowsFor(templateSheet);
+  const templateHeaders = templateRows[0];
+  return {
+    engine: "rust",
+    template: {
+      path: templatePath, name: fileNameOf(templatePath), headers: templateHeaders,
+      detection, external: !inputPaths.includes(templatePath), rawRows: templateRows,
+    },
+    rows: targetFiles.map(({ path, name, sheet }) => {
+      const rawRows = rawRowsFor(sheet);
+      return {
+        path, name, sheet, headers: rawRows[0], detection,
+        matches: rawRows[0].map((header) => ({
+          target: templateHeaders.indexOf(header) >= 0 ? templateHeaders.indexOf(header) : null,
+          confidence: templateHeaders.includes(header) ? 0.99 : 0,
+          reason: templateHeaders.includes(header) ? "表头完全一致" : "模板中无对应列",
+        })),
+        preview: rawRows.slice(1), rawRows,
+      };
+    }),
+    aliases: [],
   };
 };
 
@@ -576,6 +629,7 @@ export const handlers: Record<string, (params: DemoParams) => unknown> = {
   },
   "excel_merger.inspect": (params) =>
     mergerInspectResult(asStringArray(params.inputPaths)),
+  "excel_merger.match_preview": (params) => mergerMatchPreview(params),
 
   // 两列模糊匹配
   "fuzzy.inspect": (params) => fuzzyInspectResult(params.kind, params.source),
@@ -650,7 +704,7 @@ const mergerMergeEvents = (params: DemoParams): DemoJobEvent[] => {
       phase: "running",
       current: Math.max(fileCount - 1, 1),
       total: fileCount,
-      message: `正在读取源文件并校验 Sheet 结构（${fileCount} 个，其中 1 个无法读取将跳过）…`,
+      message: `正在读取 ${fileCount} 个源文件并校验 Sheet 结构…`,
       severity: "info",
       outputPaths: [],
     },
@@ -666,7 +720,7 @@ const mergerMergeEvents = (params: DemoParams): DemoJobEvent[] => {
       phase: "completed",
       current: fileCount,
       total: fileCount,
-      message: `合并完成：${fileCount - 1} / ${fileCount} 个文件共 3,842 行写入输出文件。`,
+      message: `合并完成：${fileCount} / ${fileCount} 个文件共 3,842 行写入输出文件。`,
       severity: "success",
       outputPaths: [outputPath],
       result: {
@@ -679,9 +733,7 @@ const mergerMergeEvents = (params: DemoParams): DemoJobEvent[] => {
         sheetAction,
         targetSheets: asStringArray(params.targetSheets),
         excelAutomation: outputMode === "one_workbook",
-        warnings: [
-          "旧版报表备份.xls：无法读取工作簿（文件格式无法识别），已跳过",
-        ],
+        warnings: [],
         outputPaths: [outputPath],
       },
     },

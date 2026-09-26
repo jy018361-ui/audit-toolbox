@@ -70,6 +70,8 @@ type AccountRole = "cost" | "depreciation" | "excluded";
 type Assignment = {
   entity?: string;
   account: string;
+  auxiliary?: string;
+  currency?: string;
   role: AccountRole;
   category: string;
 };
@@ -200,7 +202,7 @@ const SAYS_DEPRECIATION =
 const SAYS_NOT_IN_SCOPE = /使用权|使用權|清账|清賬|right[-\s]?of[-\s]?use/i;
 /** 名称一出现就不是原值：减值准备、清理清算过渡户、折旧费／摊销／租赁费等费用科目。 */
 const SAYS_NOT_COST =
-  /减值准备|減值準備|impairment|清理|清算|折旧费|折舊費|摊销|攤銷|租赁费|租賃費/i;
+  /减值准备|減值準備|impairment|清理|清算|折旧费|折舊費|摊销|攤銷|租赁费|租賃費|固定资产.*(?:处置|损失)|固定資產.*(?:處置|損失)|(?:处置|损失).*固定资产|(?:處置|損失).*固定資產/i;
 /** 非标准数字编码进表的唯一窄门：名称**明确**写出「固定资产」。
  *  1601/1602 不适用时靠自身或上级科目名匹配（用户定的口径），宽词一律不算。 */
 const SAYS_FA_EXPLICIT = /固定资产|固定資產/i;
@@ -305,12 +307,14 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
     }
     return roleFromName(name);
   };
-  const roleOf = (code: string, depth: number): AccountRole => {
-    const cached = resolved.get(code);
+  const roleOf = (code: string, name: string, depth: number): AccountRole => {
+    const cacheKey = `${code}\u001f${name}`;
+    const cached = resolved.get(cacheKey);
     if (cached) return cached;
-    const name = chart.get(code) ?? "";
     const parent = depth < 32 ? nearestParent(chart, code) : "";
-    const base = parent ? roleOf(parent, depth + 1) : rootRole(code, name || code);
+    const base = parent
+      ? roleOf(parent, chart.get(parent) ?? "", depth + 1)
+      : rootRole(code, name || code);
     let role = base;
     // 名称修正对整枝生效（含继承为「排除」的枝）：累计折旧提为折旧，
     // 清理／折旧费／使用权压回排除；被排除的数字编码若自身名称明确写出
@@ -325,13 +329,13 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
     ) {
       role = "cost";
     }
-    resolved.set(code, role);
+    resolved.set(cacheKey, role);
     return role;
   };
   return parts.map(({ account, code, name }) => ({
     account,
-    role: code ? roleOf(code, 0) : roleFromName(name),
-    category: faCategory((code ? firstName.get(code) : name) || account),
+    role: code ? roleOf(code, name || chart.get(code) || "", 0) : roleFromName(name),
+    category: faCategory(name || (code ? firstName.get(code) : "") || account),
   }));
 }
 
@@ -376,7 +380,18 @@ export function faAssignmentsForEntities(
 }
 
 /** 账里真实存在的「主体×科目」组合（inspect_* 的 entityAccounts 项）。 */
-export type EntityAccountPair = { entity: string; account: string };
+export type EntityAccountPair = { entity: string; account: string; auxiliary?: string; currency?: string };
+
+const faAssignmentIdentity = (row: Pick<Assignment, "entity" | "account" | "auxiliary" | "currency">) => {
+  const { code, name } = splitFaAccount(row.account);
+  return JSON.stringify([
+    row.entity || DEFAULT_ENTITY,
+    code || "",
+    name || (code ? "" : row.account.trim()),
+    row.auxiliary ?? "",
+    row.currency ?? "",
+  ]);
+};
 
 /** TB 在前、JE 在后合并两侧真实组合，按「主体＋科目串」去重（TB 写法优先保留）。 */
 export function unionEntityAccounts(
@@ -389,10 +404,10 @@ export function unionEntityAccounts(
     const entity = pair.entity?.trim() || DEFAULT_ENTITY;
     const account = pair.account?.trim() ?? "";
     if (!account) continue;
-    const key = JSON.stringify([entity, account]);
+    const key = faAssignmentIdentity({ entity, account, auxiliary: pair.auxiliary, currency: pair.currency });
     if (seen.has(key)) continue;
     seen.add(key);
-    pairs.push({ entity, account });
+    pairs.push({ entity, account, ...(pair.auxiliary ? { auxiliary: pair.auxiliary } : {}), ...(pair.currency ? { currency: pair.currency } : {}) });
   }
   return pairs;
 }
@@ -431,19 +446,21 @@ export function faAssignmentsForEntityAccounts(
   const orderOf = (account: string) =>
     ROLE_ORDER[suggested.get(account)?.role ?? "excluded"];
   return pairs
-    .map(({ entity, account }, index) => ({ entity, account, index }))
+    .map(({ entity, account, auxiliary, currency }, index) => ({ entity, account, auxiliary, currency, index }))
     .sort(
       (a, b) => orderOf(a.account) - orderOf(b.account) || a.index - b.index,
     )
-    .map(({ entity, account }) => {
+    .map(({ entity, account, auxiliary, currency }) => {
       const previous = current.find(
-        (item) => item.account === account && item.entity === entity,
+        (item) => faAssignmentIdentity(item) === faAssignmentIdentity({ entity, account, auxiliary, currency }),
       );
       return previous
         ? normalizeAssignmentCategory(previous)
         : {
             ...(suggested.get(account) ?? suggestFaAccount(account)),
             entity,
+            auxiliary,
+            currency,
           };
     });
 }
@@ -451,6 +468,8 @@ export function faAssignmentsForEntityAccounts(
 /** 科目复核表的一行（显示层）：同一「主体＋科目编码」的 TB/JE 两种写法合并。 */
 export type AssignmentView = {
   entity: string;
+  auxiliary?: string;
+  currency?: string;
   /** 分组键：科目编码；认不出编码时用科目串本身。 */
   key: string;
   /** 展示用科目串：优先带名称的写法，否则纯编码写法。 */
@@ -481,8 +500,7 @@ export function groupAssignmentViews(
   >();
   assignments.forEach((row, index) => {
     const entity = row.entity ?? DEFAULT_ENTITY;
-    const code = splitFaAccount(row.account).code;
-    const key = JSON.stringify([entity, code || row.account]);
+    const key = faAssignmentIdentity(row);
     const group = groups.get(key) ?? { entity, rows: [] };
     group.rows.push({ row, index });
     groups.set(key, group);
@@ -498,7 +516,9 @@ export function groupAssignmentViews(
     const first = group.rows[0];
     return {
       entity: group.entity,
-      key: splitFaAccount(first.row.account).code || first.row.account,
+      key: faAssignmentIdentity(first.row),
+      auxiliary: first.row.auxiliary,
+      currency: first.row.currency,
       label:
         accounts.find((account) => splitFaAccount(account).name) ?? accounts[0],
       sources: (["tb", "je"] as const).filter((kind) => sourceSet.has(kind)),
@@ -751,8 +771,17 @@ export function FaTbJePage() {
   // 其中的对方科目不能进入固定资产科目分类。旧后端／浏览器预览没有
   // entityAccounts 时，回退为 TB 主体 × TB 科目。
   const entityAccountPairs = useMemo(
-    () => faReviewEntityAccounts(inspects.tb?.entityAccounts, entityKeyEnabled),
-    [inspects.tb?.entityAccounts, entityKeyEnabled],
+    () => {
+      const raw = inspects.tb?.reviewAccounts ?? inspects.tb?.entityAccounts;
+      const verified = auxiliaryLink?.status === "verified";
+      const effective = raw?.map((pair) => ({
+        ...pair,
+        auxiliary: verified && "auxiliary" in pair && typeof pair.auxiliary === "string"
+          ? pair.auxiliary : undefined,
+      }));
+      return faReviewEntityAccounts(effective, entityKeyEnabled);
+    },
+    [inspects.tb?.reviewAccounts, inspects.tb?.entityAccounts, entityKeyEnabled, auxiliaryLink?.status],
   );
   const entityScope = useEntityScopeConfirmation({
     tbEntities: entityKeyEnabled ? (inspects.tb?.entities ?? []) : [],
@@ -781,9 +810,7 @@ export function FaTbJePage() {
   useEffect(() => {
     setAuxiliaryLink(null);
   }, [auxiliaryLinkKey]);
-  // 显示层：payload 级分配行按「主体＋科目编码」合并成可视行——同一科目
-  // 在 TB 与 JE 里可能拼出两种科目串，各自行参与引擎匹配、缺一不可，但
-  // 复核时对用户就是同一个科目，只该看一行（见 groupAssignmentViews）。
+  // 确认行按主体、编码、名称、有效辅助值和币种区分；只有完整身份相同才合并。
   const assignmentViews = useMemo(
     () => groupAssignmentViews(assignments),
     [assignments],
@@ -903,7 +930,7 @@ export function FaTbJePage() {
     );
     if (!files.length) return;
     if (
-      (paths.tb || paths.je || assignments.length || result) &&
+      (paths.tb || paths.je) &&
       !(await confirmDialog({
         title: "重新选择整组文件？",
         message:
@@ -1009,12 +1036,9 @@ export function FaTbJePage() {
       }
       setSourceStatus(
         recognized.length
-          ? `${recognized.length} 个来源完成公共账表引擎识别与${scan.llmFallbacks ? "可用时的" : ""} LLM 复核${scan.hiddenSheets ? `，${scan.hiddenSheets} 张低置信度 Sheet 已忽略` : ""}：${recognized
-              .map(
-                ({ kind, path }) =>
-                  `${kind.toUpperCase()}「${fileName(path)}」`,
-              )
-              .join("；")}。`
+          ? scan.hiddenSheets
+            ? `${scan.hiddenSheets} 张低置信度 Sheet 已忽略，请核对已选工作表。`
+            : ""
           : "没有文件识别成功，请检查文件内容后重试。",
       );
       if (failures.length) setError(failures.join("；"));
@@ -1332,12 +1356,10 @@ export function FaTbJePage() {
     setAssignments((rows) => {
       const target = rows[index];
       if (!target) return rows;
-      const code = splitFaAccount(target.account).code;
+      const identity = faAssignmentIdentity(target);
       return rows.map((row, rowIndex) =>
         rowIndex === index ||
-        (Boolean(code) &&
-          row.entity === target.entity &&
-          splitFaAccount(row.account).code === code)
+        faAssignmentIdentity(row) === identity
           ? { ...row, ...normalizedPatch }
           : row,
       );
@@ -1569,7 +1591,7 @@ export function FaTbJePage() {
                   disabled={!mappingsReady || reviewing || busy}
                   onClick={() => void openAccountReview()}
                 >
-                  复核科目分类
+                  下一步：复核科目分类
                 </Button>
               </div>
             </CardContent>
@@ -1635,6 +1657,8 @@ export function FaTbJePage() {
                   <tr>
                     <th>主体</th>
                     <th>科目</th>
+                    <th>辅助字段</th>
+                    <th>币种</th>
                     <th>角色</th>
                     <th>资产类别</th>
                   </tr>
@@ -1652,6 +1676,8 @@ export function FaTbJePage() {
                           </span>
                         </div>
                       </td>
+                      <td>{view.auxiliary || "—"}</td>
+                      <td>{view.currency || "—"}</td>
                       <td>
                         <select
                           aria-label={`${view.label}的科目角色`}
@@ -1692,7 +1718,7 @@ export function FaTbJePage() {
                   ))}
                   {!pagedViews.length && (
                     <tr>
-                      <td colSpan={4} className="fa-tbje-empty-table">
+                      <td colSpan={6} className="fa-tbje-empty-table">
                         {accountQuery.trim()
                           ? "没有匹配的科目。"
                           : "没有可复核的 TB 科目。"}
@@ -1738,12 +1764,14 @@ export function FaTbJePage() {
                 columns={[
                   { key: "entity", title: "主体" },
                   { key: "account", title: "科目" },
+                  { key: "auxiliary", title: "辅助字段" },
+                  { key: "currency", title: "币种" },
                   { key: "role", title: "角色", editable: true, options: ["排除", "固定资产原值", "累计折旧"] },
                   { key: "category", title: "资产类别", editable: true },
                 ]}
                 rows={assignmentViews.map((view) => ({
                   key: JSON.stringify([view.entity, view.key]),
-                  values: [view.entity, view.label,
+                  values: [view.entity, view.label, view.auxiliary ?? "", view.currency ?? "",
                     view.role === "cost" ? "固定资产原值" : view.role === "depreciation" ? "累计折旧" : "排除",
                     view.category],
                 }))}
@@ -1753,13 +1781,13 @@ export function FaTbJePage() {
                   const byKey = new Map(assignmentViews.map((view) => [JSON.stringify([view.entity, view.key]), view]));
                   const updates = new Map(changed.map((row) => {
                     const view = byKey.get(row.key)!;
-                    const role: AccountRole = row.values[2] === "固定资产原值" ? "cost" : row.values[2] === "累计折旧" ? "depreciation" : "excluded";
-                    if (role !== "excluded" && !row.values[3].trim())
+                    const role: AccountRole = row.values[4] === "固定资产原值" ? "cost" : row.values[4] === "累计折旧" ? "depreciation" : "excluded";
+                    if (role !== "excluded" && !row.values[5].trim())
                       throw new Error(`${view.label}：固定资产原值或累计折旧科目必须填写资产类别。`);
-                    return [row.key, { role, category: normalizeFaCategory(row.values[3]) }] as const;
+                    return [row.key, { role, category: normalizeFaCategory(row.values[5]) }] as const;
                   }));
                   setAssignments((current) => current.map((row) => {
-                    const key = JSON.stringify([row.entity ?? DEFAULT_ENTITY, splitFaAccount(row.account).code || row.account]);
+                    const key = JSON.stringify([row.entity ?? DEFAULT_ENTITY, faAssignmentIdentity(row)]);
                     return updates.has(key) ? { ...row, ...updates.get(key)! } : row;
                   }));
                   setAccountsReviewed(false);

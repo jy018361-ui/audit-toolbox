@@ -26,6 +26,8 @@ describe("FA TB+JE account role presets", () => {
       category: "机器设备",
     });
     expect(suggestFaAccount("2202 应付账款").role).toBe("excluded");
+    expect(suggestFaAccount("6711.03 处置固定资产净损失").role).toBe("excluded");
+    expect(suggestFaAccount("6711.03 制造部").role).toBe("excluded");
   });
 
   it("拆科目串时不把纯英文名的首个单词当编码", () => {
@@ -168,7 +170,7 @@ describe("FA TB+JE account role presets", () => {
     expect(normalizeFaCategory("_房屋_建筑物")).toBe("房屋建筑物");
   });
 
-  it("同一科目在 TB 与 JE 里拼法不同也归一到同一角色与类别", () => {
+  it("同编码不同名称分别保留自身资产类别", () => {
     // TB 侧「名称 代码」、JE 侧「代码 名称」，名称取的列还不一样。
     // 不归一的话两条分类会带着不同类别送进引擎，原值与累计折旧永远配不上对。
     const rows = suggestFaAccounts([
@@ -180,8 +182,8 @@ describe("FA TB+JE account role presets", () => {
     expect(rows.map((item) => [item.role, item.category])).toEqual([
       ["cost", "机器设备"],
       ["depreciation", "机器设备"],
-      ["cost", "机器设备"],
-      ["depreciation", "机器设备"],
+      ["cost", "机器设备-检测仪器"],
+      ["depreciation", "机器设备-检测仪器"],
     ]);
   });
 
@@ -306,6 +308,14 @@ describe("FA TB+JE account role presets", () => {
 });
 
 describe("FA TB+JE 真实主体×科目组合", () => {
+  it("不同主体的相同编码、名称、辅助和币种保持两条确认行", () => {
+    const rows = faAssignmentsForEntityAccounts(faReviewEntityAccounts([
+      { entity: "甲公司", account: "160101 机器设备", auxiliary: "生产部", currency: "CNY" },
+      { entity: "乙公司", account: "160101 机器设备", auxiliary: "生产部", currency: "CNY" },
+    ]), []);
+    expect(groupAssignmentViews(rows).map((row) => row.entity)).toEqual(["甲公司", "乙公司"]);
+  });
+
   it("科目复核只采用 TB 科目，不把 JE 独有的对方科目带入清单", () => {
     const rows = faReviewEntityAccounts([
       { entity: "默认主体", account: "1601020000 固定资产-房屋" },
@@ -382,7 +392,7 @@ describe("FA TB+JE 真实主体×科目组合", () => {
     );
   });
 
-  it("同一（主体，编码）的两种写法合并为一行，来源标签 TB+JE，payload 仍含两条原始串", () => {
+  it("同主体同编码但名称不同的两种写法分别保留", () => {
     const pairs = unionEntityAccounts(
       [
         {
@@ -405,13 +415,11 @@ describe("FA TB+JE 真实主体×科目组合", () => {
     const views = groupAssignmentViews(rows, (entity, account) =>
       account.includes("Fixed assets") ? ["tb" as const] : ["je" as const],
     );
-    expect(views).toHaveLength(1);
-    expect(views[0].sources).toEqual(["tb", "je"]);
+    expect(views).toHaveLength(2);
+    expect(views[0].sources).toEqual(["tb"]);
     expect(views[0].label).toBe("1601020000 Fixed assets_Machinery equipment");
-    expect(views[0].accounts).toEqual([
-      "1601020000 Fixed assets_Machinery equipment",
-      "1601020000",
-    ]);
+    expect(views[0].accounts).toEqual(["1601020000 Fixed assets_Machinery equipment"]);
+    expect(views[1].sources).toEqual(["je"]);
   });
 
   it("保留用户已确认的角色与类别（按主体＋科目串匹配），排序口径与旧版一致", () => {
@@ -477,7 +485,7 @@ describe("FA TB+JE 真实主体×科目组合", () => {
       },
     ]);
     expect(views).toHaveLength(2);
-    expect(views.map((view) => view.key)).toEqual([
+    expect(views.map((view) => view.label)).toEqual([
       "Accumulated Depreciation",
       "Accumulated Depreciation - Vehicles",
     ]);
@@ -539,7 +547,7 @@ describe("FA TB+JE 三步向导（源码契约）", () => {
       '<td\n                        className="fa-tbje-account-cell"',
     );
     expect(source).toContain(
-      "faReviewEntityAccounts(inspects.tb?.entityAccounts, entityKeyEnabled)",
+      "faReviewEntityAccounts(effective, entityKeyEnabled)",
     );
     expect(source).toContain('ariaLabel="筛选科目"');
     expect(source).toContain('placeholder="输入科目编码或名称"');

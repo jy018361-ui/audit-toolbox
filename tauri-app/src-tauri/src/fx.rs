@@ -105,6 +105,34 @@ fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppE
 }
 
 fn preview_cache_key(params: &Value) -> String {
+    cache_hash(&mut normalized_preview_params(params))
+}
+
+/// 汇率快照整体不进缓存键——官方快照每次抓取 `fetched_at` 都不同，全量
+/// 进键会让预览缓存永远失效。但快照**内容指纹**必须进键：用户导入自定义
+/// 汇率后，同一套账表参数绝不能复用官方口径的旧预览，否则改汇率等于没改。
+/// 注入快照的参数以 `responseHash` 代替整包参与哈希。
+fn preview_cache_key_with_rate_hash(params: &Value, hash: &str) -> String {
+    let mut normalized = normalized_preview_params(params);
+    if let Some(object) = normalized.as_object_mut() {
+        object.insert(
+            "__rateSnapshotHash".into(),
+            Value::String(hash.to_owned()),
+        );
+    }
+    cache_hash(&mut normalized)
+}
+
+fn cache_hash(normalized: &Value) -> String {
+    let bytes = serde_json::to_vec(normalized).unwrap_or_default();
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn normalized_preview_params(params: &Value) -> Value {
+    let rate_hash = params
+        .pointer("/rateSnapshot/responseHash")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let mut normalized = params.clone();
     if let Some(object) = normalized.as_object_mut() {
         // These fields are outputs or export-only destinations.  They do not
@@ -116,6 +144,9 @@ fn preview_cache_key(params: &Value) -> String {
             "accountTranslations",
         ] {
             object.remove(key);
+        }
+        if let Some(hash) = rate_hash {
+            object.insert("__rateSnapshotHash".into(), Value::String(hash));
         }
         let fingerprints = ["jeSource", "tbSource"]
             .into_iter()
@@ -132,8 +163,7 @@ fn preview_cache_key(params: &Value) -> String {
             Value::String(FX_PREVIEW_CACHE_SCHEMA.to_owned()),
         );
     }
-    let bytes = serde_json::to_vec(&normalized).unwrap_or_default();
-    hex::encode(Sha256::digest(bytes))
+    normalized
 }
 
 fn preview_cache_dir() -> Option<PathBuf> {
@@ -384,6 +414,7 @@ pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
         "fx.account_roles" => account_roles(&params),
         "fx.entities" => entities(&params),
         "fx.rate_status" => rate_status(&params),
+        "fx.import_rates" => import_rates(&params),
         "fx.import_classifications" => import_classifications(&params),
         _ => Err(error(
             "METHOD_NOT_FOUND",
@@ -665,7 +696,14 @@ pub(crate) fn run_job(
             progress("rates", 2, 2, "汇率快照已锁定。");
             Ok(json!({"rateSnapshot": snapshot, "missing": snapshot.missing}))
         }
+        "fx.export_rates" => export_rates(&params, progress),
         "fx.preview" => {
+            // 注入快照（官方复用或用户导入）时，缓存键自动带上汇率内容指纹，
+            // 否则官方口径的旧结果顶着同一个键被复用，用户改汇率等于没改。
+            let injected_rate_hash = params
+                .pointer("/rateSnapshot/responseHash")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             let token = preview_cache_key(&params);
             if let Some(result) = cached_preview(&token) {
                 progress(
@@ -685,10 +723,27 @@ pub(crate) fn run_job(
             prepare_matched_entity_tables(&mut params)?;
             detect_and_inject_sign_conventions(&mut params)?;
             let mut result = calculate(&params, progress, &cancel, pause)?;
+            // 导出端注入结果快照后重算的键 = 「参数 + 汇率指纹」。注入快照的
+            // 测算本来就带指纹；默认抓取路径按结果快照补一把，previewToken
+            // 才能对得上，导出不重算。
+            let export_token = match &injected_rate_hash {
+                Some(_) => token.clone(),
+                None => result
+                    .pointer("/rateSnapshot/responseHash")
+                    .and_then(Value::as_str)
+                    .map(|hash| preview_cache_key_with_rate_hash(&params, hash))
+                    .unwrap_or_else(|| token.clone()),
+            };
             if let Some(object) = result.as_object_mut() {
-                object.insert("previewToken".into(), Value::String(token.clone()));
+                object.insert("previewToken".into(), Value::String(export_token.clone()));
             }
-            store_preview(token, result.clone());
+            // 带汇率指纹的键之外再登记裸键：注入快照的测算**不写**裸键（否则
+            // 恢复官方口径后会拿回自定义汇率的结果），默认路径两个键都写，
+            // 直接导出（不带快照）时也能命中。
+            if injected_rate_hash.is_none() {
+                store_preview(token, result.clone());
+            }
+            store_preview(export_token, result.clone());
             // The full source/classification arrays are retained in the native cache for
             // export. The preview UI consumes the compact controls and voucher detail, so
             // avoid serializing tens of thousands of unused rows across the Tauri bridge.
@@ -1039,6 +1094,11 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         })
         .collect::<BTreeMap<_, _>>();
     let account_currency_details = detect_account_currencies(&table, &mapping);
+    let review_accounts = if kind == "tb" {
+        crate::deposit_interest::distinct_review_accounts(&table, &mapping)
+    } else {
+        vec![]
+    };
     Ok(json!({
         "kind": kind, "path": table.path, "sheet": table.sheet, "sheets": table.sheets,
         "headerRow": table.header_row, "headerDepth": table.header_depth,
@@ -1066,6 +1126,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         "sampledPreview": table.sampled,
         "entities": distinct_values_from_mapping(&table, &mapping, "entity"),
         "entityAccounts": entity_account_combos(&table, &mapping),
+        "reviewAccounts": review_accounts,
         "accounts": accounts, "accountsLeaf": accounts_leaf,
         "accountRoleSuggestions": account_role_suggestions,
         "accountRoleDetails": account_role_details,
@@ -3311,10 +3372,17 @@ fn attach_account_override_indexes(params: &mut Value) {
         ("accountCurrencies", "__accountCurrenciesByCode"),
     ] {
         let mut indexed = Map::new();
+        let mut ambiguous = HashSet::new();
         if let Some(values) = params.get(source).and_then(Value::as_object) {
             for (account, value) in values {
                 let key = normalized_account_match_key(account);
-                if !key.is_empty() && !indexed.contains_key(&key) {
+                if key.is_empty() || ambiguous.contains(&key) {
+                    continue;
+                }
+                if indexed.get(&key).is_some_and(|previous| previous != value) {
+                    indexed.remove(&key);
+                    ambiguous.insert(key);
+                } else {
                     indexed.insert(key, value.clone());
                 }
             }
@@ -3329,6 +3397,26 @@ fn currency_for(
     account: &str,
     params: &Value,
 ) -> String {
+    if let Some(overrides) = params.get("accountReviewCurrencies").and_then(Value::as_object) {
+        let raw_currency = mapped_cols(mapping, "currency").iter()
+            .filter_map(|column| row.get(column.as_str()))
+            .map(|value| value.trim()).filter(|value| !value.is_empty())
+            .collect::<Vec<_>>().join(" ");
+        let auxiliary = mapped_cols(mapping, "auxiliary").iter()
+            .filter_map(|column| row.get(column.as_str()))
+            .map(|value| value.trim()).filter(|value| !value.is_empty())
+            .collect::<Vec<_>>().join(" ");
+        for entity in [entity_for(row, mapping, params), ""] {
+            for aux in [auxiliary.as_str(), ""] {
+                let key = serde_json::to_string(&(entity, account, aux, raw_currency.as_str()))
+                    .expect("汇兑复核身份可序列化");
+                if let Some(code) = overrides.get(&key).and_then(Value::as_str)
+                    .map(normalize_currency).filter(|code| !code.is_empty()) {
+                    return code;
+                }
+            }
+        }
+    }
     // 逐辅助户的手选币种最优先（比科目级更细）；键失配时自然回落。
     if let Some(code) = has_detail_overrides(params, "accountDetailCurrencyOverrides")
         .then(|| {
@@ -7919,6 +8007,25 @@ fn role_for_row(
     account: &str,
     params: &Value,
 ) -> String {
+    if let Some(roles) = params.get("accountReviewRoles").and_then(Value::as_object) {
+        let raw_currency = mapped_cols(mapping, "currency").iter()
+            .filter_map(|column| row.get(column.as_str()))
+            .map(|value| value.trim()).filter(|value| !value.is_empty())
+            .collect::<Vec<_>>().join(" ");
+        let auxiliary = mapped_cols(mapping, "auxiliary").iter()
+            .filter_map(|column| row.get(column.as_str()))
+            .map(|value| value.trim()).filter(|value| !value.is_empty())
+            .collect::<Vec<_>>().join(" ");
+        for entity in [entity_for(row, mapping, params), ""] {
+            for aux in [auxiliary.as_str(), ""] {
+                let key = serde_json::to_string(&(entity, account, aux, raw_currency.as_str()))
+                    .expect("汇兑复核身份可序列化");
+                if let Some(role) = roles.get(&key).and_then(Value::as_str) {
+                    return role.to_owned();
+                }
+            }
+        }
+    }
     if let Some(role) = has_detail_overrides(params, "accountDetailRoleOverrides")
         .then(|| {
             detail_override(
@@ -7967,6 +8074,472 @@ fn rate_status(params: &Value) -> Result<Value, AppError> {
         "cached": path.is_file(), "path": path,
         "source": RATE_SOURCE, "sourceUrl": SAFE_URL
     }))
+}
+
+/// 把测算实际采用的汇率快照导出为 Excel：布局与底稿「汇率表」一致
+/// （行=日期、列=币种，数值=每 1 单位外币兑人民币中间价），用户可查看、
+/// 修改数值后再经 `import_rates` 导回，让测算按修改后的口径执行。
+/// CNY 恒为 1、由引擎自行补足，导出文件不设 CNY 列，避免误改。
+fn export_rates(
+    params: &Value,
+    progress: &dyn Fn(&str, usize, usize, &str),
+) -> Result<Value, AppError> {
+    let snapshot = match params.get("rateSnapshot") {
+        Some(value) if !value.is_null() => serde_json::from_value(value.clone()).map_err(|e| {
+            error(
+                "RATE_SNAPSHOT_INVALID",
+                "汇率快照格式无效。",
+                Some(e.to_string()),
+            )
+        })?,
+        _ => {
+            progress("rates", 0, 2, "正在获取人民币汇率中间价…");
+            let snapshot = obtain_rates(params)?;
+            progress("rates", 2, 2, "汇率快照已锁定。");
+            snapshot
+        }
+    };
+    if snapshot.rates.is_empty() {
+        return Err(error(
+            "RATE_SNAPSHOT_EMPTY",
+            "汇率快照中没有可导出的牌价。",
+            None,
+        ));
+    }
+    let output = params
+        .get("outputPath")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| error("INVALID_PARAMS", "请先选择汇率文件的保存位置。", None))?;
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| {
+                error(
+                    "OUTPUT_WRITE_FAILED",
+                    "无法创建汇率文件目录。",
+                    Some(e.to_string()),
+                )
+            })?;
+        }
+    }
+    progress("export", 0, 2, "正在生成汇率文件…");
+    write_rate_export_workbook(&output, &snapshot)?;
+    progress("export", 2, 2, "汇率文件已生成。");
+    let mut matrix: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    for point in &snapshot.rates {
+        if point.currency != "CNY" {
+            matrix
+                .entry(point.requested_date.clone())
+                .or_default()
+                .insert(point.currency.clone(), point.cny_per_unit);
+        }
+    }
+    let currencies = matrix
+        .values()
+        .flat_map(|row| row.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    let dates = matrix.keys().cloned().collect::<Vec<_>>();
+    Ok(json!({
+        "outputPath": output,
+        "startDate": dates.first().cloned().unwrap_or_default(),
+        "endDate": dates.last().cloned().unwrap_or_default(),
+        "currencyCount": currencies.len(),
+        "dateCount": dates.len(),
+        "source": snapshot.source,
+    }))
+}
+
+fn write_rate_export_workbook(path: &Path, snapshot: &RateSnapshot) -> Result<(), AppError> {
+    let mut workbook = Workbook::new();
+    write_rate_export_sheet(workbook.add_worksheet(), snapshot)?;
+    workbook.save(path).map_err(xlsx_err)?;
+    Ok(())
+}
+
+fn write_rate_export_sheet(sheet: &mut Worksheet, snapshot: &RateSnapshot) -> Result<(), AppError> {
+    let (header, _) = formats();
+    let rate_format = Format::new().set_num_format("0.00000000");
+    let mut matrix: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    for point in &snapshot.rates {
+        if point.currency != "CNY" {
+            matrix
+                .entry(point.requested_date.clone())
+                .or_default()
+                .insert(point.currency.clone(), point.cny_per_unit);
+        }
+    }
+    let currencies = matrix
+        .values()
+        .flat_map(|row| row.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    sheet.set_name("汇率").map_err(xlsx_err)?;
+    // 冻结到表头行下方 + 首列，长表滚动时日期列不消失。
+    sheet.set_freeze_panes(7, 1).map_err(xlsx_err)?;
+    let intro: [( &str, String ); 5] = [
+        (
+            "标题",
+            "汇兑损益测算·人民币汇率中间价（可修改后导回）".into(),
+        ),
+        ("来源", snapshot.source.clone()),
+        (
+            "覆盖区间",
+            format!(
+                "{} ~ {}（报告期前35天起逐日；非公布日沿用最近公布日牌价）",
+                matrix.keys().next().cloned().unwrap_or_default(),
+                matrix.keys().next_back().cloned().unwrap_or_default()
+            ),
+        ),
+        (
+            "导出时间",
+            Utc::now().format("%Y-%m-%d %H:%M").to_string(),
+        ),
+        (
+            "使用说明",
+            "数值=每1单位外币兑人民币的中间价，可直接修改；改完在工具第三步「导入汇率」选回本文件，测算与底稿将按修改后的汇率执行，并在底稿中如实标注为用户导入口径。请勿改动日期列、币种表头或增删日期行。".into(),
+        ),
+    ];
+    for (row, (label, value)) in intro.iter().enumerate() {
+        sheet.write_string(row as u32, 0, *label).map_err(xlsx_err)?;
+        sheet
+            .write_string(row as u32, 1, value)
+            .map_err(xlsx_err)?;
+    }
+    sheet
+        .write_string_with_format(6, 0, "日期", &header)
+        .map_err(xlsx_err)?;
+    for (column, currency) in currencies.iter().enumerate() {
+        sheet
+            .write_string_with_format(6, (column + 1) as u16, currency, &header)
+            .map_err(xlsx_err)?;
+    }
+    for (row_index, (date, row)) in matrix.iter().enumerate() {
+        let excel_row = (row_index + 7) as u32;
+        sheet.write_string(excel_row, 0, date).map_err(xlsx_err)?;
+        for (column, currency) in currencies.iter().enumerate() {
+            if let Some(rate) = row.get(currency) {
+                sheet
+                    .write_number_with_format(excel_row, (column + 1) as u16, *rate, &rate_format)
+                    .map_err(xlsx_err)?;
+            }
+        }
+    }
+    sheet.set_column_width(0, 14).map_err(xlsx_err)?;
+    for column in 0..currencies.len() {
+        sheet
+            .set_column_width((column + 1) as u16, 12)
+            .map_err(xlsx_err)?;
+    }
+    Ok(())
+}
+
+/// 读取（通常是导出后修改过的）汇率 Excel，构造可注入测算的汇率快照。
+/// 校验失败一律明确报错：审计工具里静默丢币种、丢日期比失败更危险。
+fn import_rates(params: &Value) -> Result<Value, AppError> {
+    let path = params
+        .get("inputPath")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| error("INVALID_PARAMS", "请选择要导入的汇率Excel文件。", None))?;
+    let mut book = open_workbook_auto(path).map_err(|e| {
+        error(
+            "SOURCE_READ_FAILED",
+            "无法读取汇率文件。",
+            Some(e.to_string()),
+        )
+    })?;
+    let sheet_names = book.sheet_names();
+    // 页签名优先认「汇率」；用户把导出文件另存/复制改了页签名时，退化为
+    // 在所有页签里找「日期+币种代码」的数据区。
+    let mut target: Option<String> = sheet_names
+        .iter()
+        .find(|name| name.as_str() == "汇率")
+        .cloned();
+    if target.is_none() {
+        for name in &sheet_names {
+            if let Ok(range) = book.worksheet_range(name) {
+                if rate_import_header_row(&range).is_some() {
+                    target = Some(name.clone());
+                    break;
+                }
+            }
+        }
+    }
+    let Some(sheet_name) = target else {
+        return Err(error(
+            "RATE_IMPORT_INVALID",
+            "未找到汇率表：需要以「日期」为第一列表头、币种代码为列名的数据区。",
+            Some(path.to_owned()),
+        ));
+    };
+    let range = book.worksheet_range(&sheet_name).map_err(|e| {
+        error(
+            "SOURCE_READ_FAILED",
+            "无法读取汇率表内容。",
+            Some(e.to_string()),
+        )
+    })?;
+    let Some((header_row, currency_columns, unknown_headers)) =
+        rate_import_header_row(&range)
+    else {
+        return Err(error(
+            "RATE_IMPORT_INVALID",
+            "未找到汇率表：需要以「日期」为第一列表头、币种代码为列名的数据区。",
+            Some(path.to_owned()),
+        ));
+    };
+    if !unknown_headers.is_empty() {
+        return Err(error(
+            "RATE_IMPORT_INVALID",
+            format!(
+                "汇率表头包含无法识别的币种代码：{}。请使用ISO币种代码（如USD、EUR），拼错的币种会被静默丢弃。",
+                unknown_headers.join("、")
+            ),
+            None,
+        ));
+    }
+    let mut points: Vec<RatePoint> = Vec::new();
+    let mut seen: HashMap<(String, String), f64> = HashMap::new();
+    let mut data_rows = 0usize;
+    for (row_index, row) in range.rows().enumerate().skip(header_row + 1) {
+        let Some(date) = rate_import_cell_date(row.first()) else {
+            // 整行为空可以容忍（导出不会产生，手改也不影响数据区识别）。
+            if row.iter().all(|cell| matches!(cell, Data::Empty)) {
+                continue;
+            }
+            return Err(error(
+                "RATE_IMPORT_INVALID",
+                format!("第{}行的日期无法识别，请保持“YYYY-MM-DD”格式。", row_index + 1),
+                None,
+            ));
+        };
+        data_rows += 1;
+        let requested = date.format("%Y-%m-%d").to_string();
+        for (column, currency) in &currency_columns {
+            let Some(cell) = row.get(*column) else {
+                continue;
+            };
+            if matches!(cell, Data::Empty) {
+                continue;
+            }
+            let Some(value) = rate_import_cell_number(cell) else {
+                return Err(error(
+                    "RATE_IMPORT_INVALID",
+                    format!(
+                        "第{}行{currency}列的数值无法识别，请填写大于0的数字。",
+                        row_index + 1
+                    ),
+                    None,
+                ));
+            };
+            if !value.is_finite() || value <= 0.0 {
+                return Err(error(
+                    "RATE_IMPORT_INVALID",
+                    format!("第{}行{currency}列的数值必须大于0。", row_index + 1),
+                    None,
+                ));
+            }
+            match seen.get(&(requested.clone(), currency.clone())) {
+                Some(previous) if (*previous - value).abs() > 1e-12 => {
+                    return Err(error(
+                        "RATE_IMPORT_INVALID",
+                        format!("{requested} 的 {currency} 出现两个不同的数值，请删除重复行。"),
+                        None,
+                    ));
+                }
+                _ => {
+                    seen.insert((requested.clone(), currency.clone()), value);
+                }
+            }
+            points.push(RatePoint {
+                requested_date: requested.clone(),
+                published_date: requested.clone(),
+                currency: currency.clone(),
+                cny_per_unit: value,
+            });
+        }
+    }
+    if data_rows == 0 || points.is_empty() {
+        return Err(error(
+            "RATE_IMPORT_INVALID",
+            "汇率文件中没有可导入的牌价数据。",
+            None,
+        ));
+    }
+    // CNY 恒为 1，由引擎按日期补足（交叉汇率计算需要 CNY 锚点）。
+    let dates = points
+        .iter()
+        .map(|point| point.requested_date.clone())
+        .collect::<BTreeSet<_>>();
+    for requested in &dates {
+        points.push(RatePoint {
+            requested_date: requested.clone(),
+            published_date: requested.clone(),
+            currency: "CNY".into(),
+            cny_per_unit: 1.0,
+        });
+    }
+    points.sort_by(|a, b| {
+        (
+            a.requested_date.clone(),
+            normalize_currency(&a.currency),
+            a.cny_per_unit.to_bits(),
+        )
+            .cmp(&(
+                b.requested_date.clone(),
+                normalize_currency(&b.currency),
+                b.cny_per_unit.to_bits(),
+            ))
+    });
+    let first = points
+        .iter()
+        .map(|point| point.requested_date.as_str())
+        .min()
+        .unwrap_or_default()
+        .to_owned();
+    let last = points
+        .iter()
+        .map(|point| point.requested_date.as_str())
+        .max()
+        .unwrap_or_default()
+        .to_owned();
+    // 覆盖校验与官方抓取同口径：报告期前推35天起逐日，月初牌价（上月末
+    // 重估点）必须能精确命中。区间不够时直接拒绝，用户重新按当前报告期
+    // 导出再改，比带着缺口跑出一片「汇率缺失」更有可操作性。
+    let (period_start, period_end) = (
+        params.get("reportStart").and_then(Value::as_str),
+        params.get("reportEnd").and_then(Value::as_str),
+    );
+    if let (Some(start), Some(end)) = (period_start, period_end) {
+        let (Some(start_date), Some(end_date)) = (parse_date(start), parse_date(end)) else {
+            return Err(error(
+                "REPORT_DATE_INVALID",
+                "报告期日期格式无效。",
+                None,
+            ));
+        };
+        let required_from = (start_date - Duration::days(35))
+            .format("%Y-%m-%d")
+            .to_string();
+        let required_to = end_date.format("%Y-%m-%d").to_string();
+        if first.as_str() > required_from.as_str() || last.as_str() < required_to.as_str() {
+            return Err(error(
+                "RATE_RANGE_INSUFFICIENT",
+                format!(
+                    "导入的汇率区间 {first}~{last} 不足以覆盖当前报告期所需区间 \
+                     {required_from}~{required_to}（报告期及其前35天）。请按当前报告期导出汇率文件后修改，或补齐缺失日期。"
+                ),
+                None,
+            ));
+        }
+    }
+    // 内容指纹作 responseHash：同内容重复导入得到同一快照身份，预览缓存
+    // 与汇率索引都能正确复用；内容一变（哪怕改了一个汇率）身份即变。
+    let mut digest = Sha256::new();
+    for point in &points {
+        digest.update(format!(
+            "{}|{}|{:.10}\n",
+            point.requested_date, point.currency, point.cny_per_unit
+        ));
+    }
+    let response_hash = hex::encode(digest.finalize());
+    let file_name = Path::new(path)
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let start_date = period_start.unwrap_or(first.as_str()).to_owned();
+    let end_date = period_end.unwrap_or(last.as_str()).to_owned();
+    let snapshot = RateSnapshot {
+        source: format!("用户导入：{file_name}（{} 导入）", Utc::now().format("%Y-%m-%d %H:%M")),
+        source_url: String::new(),
+        fetched_at: Utc::now().to_rfc3339(),
+        response_hash,
+        start_date,
+        end_date,
+        rates: points,
+        missing: Vec::new(),
+    };
+    let currency_count = snapshot
+        .rates
+        .iter()
+        .map(|point| point.currency.clone())
+        // CNY 是导入侧自动补的锚点，不算用户提供的币种。
+        .filter(|currency| currency != "CNY")
+        .collect::<BTreeSet<_>>()
+        .len();
+    Ok(json!({
+        "rateSnapshot": snapshot,
+        "summary": {
+            "fileName": file_name,
+            "currencyCount": currency_count,
+            "dateCount": dates.len(),
+            "firstDate": first,
+            "lastDate": last,
+        }
+    }))
+}
+
+/// 在表格前 30 行里找汇率数据区表头：第一列是「日期」，其后至少一列是
+/// 已知币种代码。返回（表头行号, [(列号, 币种)], 无法识别的表头文字）——
+/// 拼错的币种代码必须让导入失败，静默丢列会让用户以为改动了汇率。
+fn rate_import_header_row(
+    range: &calamine::Range<Data>,
+) -> Option<(usize, Vec<(usize, String)>, Vec<String>)> {
+    for (row_index, row) in range.rows().enumerate().take(30) {
+        let first = row
+            .first()
+            .map(|cell| match cell {
+                Data::String(value) => value.trim().to_owned(),
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+        if first != "日期" {
+            continue;
+        }
+        let mut columns = Vec::new();
+        let mut unknown = Vec::new();
+        for (column, cell) in row.iter().enumerate().skip(1) {
+            let text = match cell {
+                Data::String(value) => value.trim().to_owned(),
+                _ => continue,
+            };
+            if text.is_empty() {
+                continue;
+            }
+            let code = normalize_currency(&text);
+            if supported_currencies().contains(code.as_str()) {
+                columns.push((column, code));
+            } else {
+                unknown.push(text);
+            }
+        }
+        if columns.is_empty() {
+            continue;
+        }
+        return Some((row_index, columns, unknown));
+    }
+    None
+}
+
+fn rate_import_cell_date(cell: Option<&Data>) -> Option<NaiveDate> {
+    let cell = cell?;
+    match cell {
+        Data::String(value) => parse_date(value.trim())
+            .or_else(|| parse_date(&value.trim().replace('/', "-"))),
+        Data::DateTimeIso(value) => parse_date(value.trim())
+            .or_else(|| parse_date(&value.trim().replace('/', "-"))),
+        Data::DateTime(value) => value.as_datetime().map(|datetime| datetime.date()),
+        _ => None,
+    }
+}
+
+fn rate_import_cell_number(cell: &Data) -> Option<f64> {
+    match cell {
+        Data::Float(value) => Some(*value),
+        Data::Int(value) => Some(*value as f64),
+        Data::String(value) => value.trim().parse::<f64>().ok(),
+        _ => None,
+    }
 }
 
 fn rate_cache_dir() -> Result<PathBuf, AppError> {
@@ -11013,6 +11586,12 @@ fn export_workbook(params: &Value, result: &Value) -> Result<String, AppError> {
     let partial = output.with_extension("partial.xlsx");
     let mut workbook = Workbook::new();
     let mode = result.get("mode").and_then(Value::as_str).unwrap_or("");
+    // 用户导入的汇率快照必须如实落款：底稿不能把自定义口径冒充官方牌价。
+    let rate_source = result
+        .pointer("/rateSnapshot/source")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(RATE_SOURCE);
     write_user_conclusion_sheet(&mut workbook, params, result)?;
     write_user_calculation_sheet(&mut workbook, result)?;
     write_rate_comparison_sheet(&mut workbook, result)?;
@@ -11025,7 +11604,7 @@ fn export_workbook(params: &Value, result: &Value) -> Result<String, AppError> {
                 "汇兑损益审计重算；结果需结合业务资料与审计判断复核。",
             ),
             ("测算模式", mode),
-            ("汇率口径", RATE_SOURCE),
+            ("汇率口径", rate_source),
             (
                 "重要说明",
                 "已实现仅按单张凭证内的资金结构识别：货币资金净额非零，且对方货币性项目净额非零；未实现按外币原币净额为零、本位币净额非零识别。汇兑损益科目、凭证类型和摘要不参与定性。",
@@ -11056,6 +11635,7 @@ fn export_workbook(params: &Value, result: &Value) -> Result<String, AppError> {
                     .unwrap_or(""),
             ),
             ("测算模式", mode),
+            ("汇率口径", rate_source),
         ],
     )?;
     write_mapping_sheet(&mut workbook, "JE字段映射", params.get("jeMapping"))?;
@@ -16765,6 +17345,193 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         let mut changed = base.clone();
         changed["manualClassifications"]["E-1"] = json!("未实现汇兑损益");
         assert_ne!(preview_cache_key(&base), preview_cache_key(&changed));
+    }
+
+    #[test]
+    fn 汇率快照内容指纹参与预览缓存键() {
+        let base = json!({"mode":"combined", "reportEnd":"2025-12-31"});
+        let mut official = base.clone();
+        official["rateSnapshot"] = json!({
+            "responseHash":"hash-a", "fetchedAt":"2025-01-01T00:00:00Z", "rates":[]
+        });
+        let mut refetched = official.clone();
+        refetched["rateSnapshot"]["fetchedAt"] = json!("2025-06-01T00:00:00Z");
+        // 同一内容两次抓取只有时间戳不同：预览缓存必须能复用。
+        assert_eq!(preview_cache_key(&official), preview_cache_key(&refetched));
+
+        let mut custom = base.clone();
+        custom["rateSnapshot"] = json!({"responseHash":"hash-b", "rates":[]});
+        // 用户导入自定义汇率后，绝不能顶着旧键复用官方口径的预览。
+        assert_ne!(preview_cache_key(&base), preview_cache_key(&custom));
+        assert_ne!(preview_cache_key(&official), preview_cache_key(&custom));
+
+        // 默认抓取路径（参数无快照）测算后按结果快照补指纹登记；注入同一
+        // 快照的导出端重算出的键必须与它相等，导出才不会重算。
+        assert_eq!(
+            preview_cache_key_with_rate_hash(&base, "hash-a"),
+            preview_cache_key(&official)
+        );
+    }
+
+    #[test]
+    fn 汇率导出导入往返一致() {
+        let dir = std::env::temp_dir().join(format!(
+            "fx-rates-roundtrip-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let start = NaiveDate::from_ymd_opt(2024, 12, 11).unwrap();
+        let end = NaiveDate::from_ymd_opt(2025, 2, 1).unwrap();
+        let mut rates = Vec::new();
+        let mut cursor = start;
+        while cursor <= end {
+            let date = cursor.format("%Y-%m-%d").to_string();
+            for (currency, value) in [("USD", 7.1), ("EUR", 7.8), ("CNY", 1.0)] {
+                rates.push(RatePoint {
+                    requested_date: date.clone(),
+                    published_date: date.clone(),
+                    currency: currency.into(),
+                    cny_per_unit: value,
+                });
+            }
+            cursor += Duration::days(1);
+        }
+        let day_count = rates.len() / 3;
+        let snapshot = RateSnapshot {
+            source: "测试官方来源".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash("rates_roundtrip"),
+            start_date: "2025-01-15".into(),
+            end_date: "2025-02-01".into(),
+            rates,
+            missing: Vec::new(),
+        };
+        let output = dir.join("汇率.xlsx");
+        let exported = export_rates(
+            &json!({"rateSnapshot": snapshot, "outputPath": output}),
+            &|_, _, _, _| {},
+        )
+        .unwrap();
+        assert!(output.is_file());
+        // CNY 恒为 1 不导出，避免用户误改锚点。
+        assert_eq!(exported["currencyCount"], json!(2));
+        assert_eq!(exported["dateCount"], json!(day_count));
+
+        let import_params = json!({
+            "inputPath": output,
+            "reportStart": "2025-01-15",
+            "reportEnd": "2025-02-01",
+        });
+        let imported = import_rates(&import_params).unwrap();
+        let snap = &imported["rateSnapshot"];
+        let points = snap["rates"].as_array().unwrap();
+        // CNY 由导入侧补 1.0（交叉汇率锚点），其余逐点还原。
+        assert_eq!(points.len(), day_count * 3);
+        assert!(points
+            .iter()
+            .filter(|point| point["currency"] == json!("CNY"))
+            .all(|point| point["cnyPerUnit"] == json!(1.0)));
+        assert!(points
+            .iter()
+            .filter(|point| point["currency"] == json!("USD"))
+            .all(|point| point["cnyPerUnit"] == json!(7.1)));
+        assert!(snap["source"].as_str().unwrap().contains("用户导入"));
+        assert_eq!(snap["responseHash"].as_str().unwrap().len(), 64);
+        assert_eq!(
+            imported["summary"]["currencyCount"],
+            json!(2)
+        );
+        // 内容指纹确定性：同一文件重复导入得到同一快照身份，缓存可复用。
+        let again = import_rates(&import_params).unwrap();
+        assert_eq!(
+            again["rateSnapshot"]["responseHash"],
+            snap["responseHash"]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 汇率导入拦截拼错币种与非正数值() {
+        let dir = std::env::temp_dir().join(format!(
+            "fx-rates-invalid-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.set_name("汇率").unwrap();
+        sheet.write_string(0, 0, "日期").unwrap();
+        sheet.write_string(0, 1, "USB").unwrap();
+        sheet.write_string(0, 2, "USD").unwrap();
+        sheet.write_string(1, 0, "2025-01-10").unwrap();
+        sheet.write_number(1, 1, 7.1).unwrap();
+        sheet.write_number(1, 2, 7.1).unwrap();
+        let unknown = dir.join("拼错币种.xlsx");
+        workbook.save(&unknown).unwrap();
+        let err = import_rates(&json!({"inputPath": unknown})).unwrap_err();
+        assert_eq!(err.code, "RATE_IMPORT_INVALID");
+        assert!(err.user_message.contains("USB"), "{}", err.user_message);
+
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.set_name("汇率").unwrap();
+        sheet.write_string(0, 0, "日期").unwrap();
+        sheet.write_string(0, 1, "USD").unwrap();
+        sheet.write_string(1, 0, "2025-01-10").unwrap();
+        sheet.write_number(1, 1, -7.1).unwrap();
+        let negative = dir.join("负数汇率.xlsx");
+        workbook.save(&negative).unwrap();
+        let err = import_rates(&json!({"inputPath": negative})).unwrap_err();
+        assert_eq!(err.code, "RATE_IMPORT_INVALID");
+        assert!(err.user_message.contains("大于0"), "{}", err.user_message);
+
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.set_name("汇率").unwrap();
+        sheet.write_string(0, 0, "日期").unwrap();
+        sheet.write_string(0, 1, "USD").unwrap();
+        sheet.write_string(1, 0, "2025-01-10").unwrap();
+        sheet.write_number(1, 1, 7.1).unwrap();
+        sheet.write_string(2, 0, "2025-01-10").unwrap();
+        sheet.write_number(2, 1, 7.3).unwrap();
+        let duplicate = dir.join("重复日期.xlsx");
+        workbook.save(&duplicate).unwrap();
+        let err = import_rates(&json!({"inputPath": duplicate})).unwrap_err();
+        assert_eq!(err.code, "RATE_IMPORT_INVALID");
+        assert!(err.user_message.contains("两个不同的数值"), "{}", err.user_message);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 汇率导入区间不足时明确拒绝() {
+        let dir = std::env::temp_dir().join(format!(
+            "fx-rates-coverage-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        // 报告期 2025-01-01~2025-01-31 需要汇率覆盖 2024-11-27 起；
+        // 只给 2025-01-02 之后的两天必然不足。
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.set_name("汇率").unwrap();
+        sheet.write_string(0, 0, "日期").unwrap();
+        sheet.write_string(0, 1, "USD").unwrap();
+        sheet.write_string(1, 0, "2025-01-02").unwrap();
+        sheet.write_number(1, 1, 7.1).unwrap();
+        sheet.write_string(2, 0, "2025-01-03").unwrap();
+        sheet.write_number(2, 1, 7.1).unwrap();
+        let path = dir.join("区间不足.xlsx");
+        workbook.save(&path).unwrap();
+        let err = import_rates(&json!({
+            "inputPath": path,
+            "reportStart": "2025-01-01",
+            "reportEnd": "2025-01-31",
+        }))
+        .unwrap_err();
+        assert_eq!(err.code, "RATE_RANGE_INSUFFICIENT");
+        assert!(err.user_message.contains("2024-11-27"), "{}", err.user_message);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

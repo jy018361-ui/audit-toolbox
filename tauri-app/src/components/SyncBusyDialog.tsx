@@ -308,7 +308,7 @@ export function SyncBusyDialog({
             </ul>
           )}
           <DialogDescription className="sync-busy-note">
-            可以最小化后继续浏览。停止等待不会中止后台处理，本次结果也不会应用。
+            可最小化继续使用。停止等待后结果不会应用，后台处理可能继续。
           </DialogDescription>
           <div className="sync-busy-actions">
             <Button type="button" variant="secondary" size="sm" onClick={minimize}>

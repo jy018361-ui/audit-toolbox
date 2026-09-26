@@ -15,7 +15,35 @@
 // 形状对齐 Rust 引擎同名方法的返回（见 fx.rs / deposit_interest.rs /
 // ledger_mapping.rs 的 inspect / classify / rate_tiers），可对照排查字段。
 
+import loanVisualAccounts from "./loanVisualFixture.json";
+import type { CurrencyLinkResult } from "@/ledgerMapping";
+
 type Dict = Record<string, unknown>;
+
+// 与 tests/fixtures/ui-visual 的虚构 TB 同源；只用于浏览器视觉压力场景。
+const visualStressEnabled = () =>
+  typeof location !== "undefined" &&
+  new URLSearchParams(location.search).get("visualStress") === "1";
+
+const loanPreviewAccounts = () =>
+  visualStressEnabled() ? loanVisualAccounts : loanVisualAccounts.slice(0, 8);
+
+const loanPreparedRates = () => loanPreviewAccounts()
+  .filter((account) => account.suggestedType === "loan")
+  .map((account) => ({
+    entity: account.byEntity[0]?.entity ?? "默认主体",
+    rowKey: account.key,
+    accountCode: account.code,
+    accountName: account.name,
+    currency: account.currency,
+    loanId: account.account,
+    openingPrincipal: account.opening,
+    additions: Math.max(0, account.closing - account.opening),
+    reductions: Math.max(0, account.opening - account.closing),
+    closingPrincipal: account.closing,
+    rateType: "fixed" as const,
+    fixedRate: 0.03,
+  }));
 
 const COMPANY = "北京华远国际贸易有限公司";
 const REPORT_END = "2025-12-31";
@@ -1121,6 +1149,8 @@ export const handlers: Record<string, (params: Record<string, unknown>) => unkno
   // —— 借款利息测算 ——
   "loan.inspect": (params) =>
     loanInspection(typeof params.kind === "string" ? params.kind : "ledger"),
+  "loan.tb_accounts": () => ({ accounts: loanPreviewAccounts() }),
+  "loan.prepare_rates": () => ({ rows: loanPreparedRates() }),
 
   // —— 公共账表引擎（三个工具共用） ——
   "ledger.forms": (params) =>
@@ -1140,13 +1170,29 @@ export const handlers: Record<string, (params: Record<string, unknown>) => unkno
     planKey: "demo-auxiliary-link",
     groups: [],
   }),
-  "ledger.currency_link": () => ({
+  "ledger.currency_link": (): CurrencyLinkResult => typeof location !== "undefined"
+    && new URLSearchParams(location.search).get("demoCurrencyMissing") === "1"
+    ? {
+      required: true,
+      verified: false,
+      missingCurrencies: ["USD", "HKD"],
+      affectedGroupCount: 2,
+      groups: ["USD", "HKD"].map((currency, index) => ({
+        entity: COMPANY,
+        account: `虚构多币种账户${index + 1}`,
+        foreignCurrencies: [currency],
+        matchedCurrencies: [],
+        missingCurrencies: [currency],
+        verified: false,
+      })),
+    }
+    : ({
     required: false,
     verified: true,
     missingCurrencies: [],
     affectedGroupCount: 0,
     groups: [],
-  }),
+    }),
   "ledger.check_mapping_alignment": () => ({
     aligned: true,
     errors: [],

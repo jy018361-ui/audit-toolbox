@@ -7,6 +7,7 @@
   --hmg-panel-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
   --hmg-menu-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
   --hmg-toast-bg: rgba(15, 23, 42, 0.92);
+  --hmg-ghost-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
   position: fixed;
   inset: 0;
   z-index: 60;
@@ -120,6 +121,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  user-select: none;
+  touch-action: none;
 }
 
 .hmg-th-excluded {
@@ -128,9 +131,44 @@
 }
 
 .hmg-unmatched-col {
-  min-width: 200px;
   font-weight: 500;
   color: var(--text-muted);
+}
+
+/* 未匹配区平铺：每个未匹配列各占一格，槽位底色与已匹配区区分。 */
+.hmg-slot-unmatched {
+  background: var(--surface-sunken);
+  border-radius: 6px;
+}
+
+/* 移出模板列后尚未清理的格子：半透明＋虚线，提示点「重新匹配」后清走。 */
+.hmg-cell-pending-clear {
+  opacity: 0.55;
+  border-style: dashed;
+}
+
+/* 指针拖拽：跟手幽灵与落点高亮。 */
+.hmg-ghost {
+  position: fixed;
+  z-index: 80;
+  pointer-events: none;
+  background: var(--info-bg);
+  color: var(--info-fg);
+  border: 1px solid var(--info-border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  box-shadow: var(--hmg-ghost-shadow);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-drop].hmg-drop-hover {
+  outline: 2px dashed var(--brand);
+  outline-offset: -2px;
 }
 
 .hmg-file-col {
@@ -212,6 +250,7 @@
   padding: 4px 8px;
   cursor: grab;
   user-select: none;
+  touch-action: none;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -265,16 +304,6 @@
 .hmg-manual-mark {
   margin-right: 4px;
   font-size: var(--fs-xs);
-}
-
-.hmg-unmatched-slot {
-  max-width: 260px;
-}
-
-.hmg-unmatched-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
 }
 
 .hmg-template-row .hmg-file-cell {
@@ -338,13 +367,6 @@
   padding: 10px 16px;
   border-top: 1px solid var(--border-soft);
   flex-wrap: wrap;
-}
-
-.hmg-remember {
-  font-size: var(--fs-sm);
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .hmg-discard-zone {
@@ -452,70 +474,19 @@
   margin: 0;
   font-size: var(--fs-xs);
   color: var(--text-muted);
-  flex: 1;
-  min-width: 240px;
+  margin-top: var(--sp-2);
+  max-width: 560px;
 }
-
-.alias-entry {
-  margin-top: 4px;
-}
+.hmg-help { align-self: center; min-width: 90px; }
+.hmg-help summary { cursor: pointer; color: var(--text-muted); font-size: var(--fs-xs); }
+.hmg-help[open] { flex-basis: 100%; }
+.hmg-help summary:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
 
 .grid-return {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.alias-panel {
-  max-width: 560px;
-  margin: auto;
-  align-self: center;
-}
-
-.alias-list {
-  padding: 12px 16px;
-  overflow: auto;
-  max-height: 50vh;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.alias-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border-soft);
-  border-radius: 6px;
-  font-size: var(--fs-sm);
-}
-
-.alias-source,
-.alias-target {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.alias-source {
-  color: var(--danger-fg);
-}
-
-.alias-target {
-  color: var(--success-fg);
-}
-
-.alias-arrow {
-  color: var(--muted-soft);
-}
-
-.alias-empty {
-  color: var(--text-muted);
-  font-size: var(--fs-sm);
-  padding: 8px;
 }
 
 

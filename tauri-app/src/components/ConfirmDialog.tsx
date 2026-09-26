@@ -8,7 +8,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { cn } from "@/lib/utils";
 import { dedupeRepeatedText } from "@/lib/presentationText";
 
 export type ConfirmDialogOptions = {
@@ -120,11 +119,8 @@ export function ConfirmDialogHost() {
           </Button>
           <Button
             type="button"
+            variant={danger ? "destructive" : "default"}
             onClick={() => settle(true)}
-            className={cn(
-              danger &&
-                "border-transparent bg-[var(--danger-fg)] text-white hover:bg-[var(--danger-fg)]/85 focus-visible:border-[var(--danger-fg)] focus-visible:ring-[var(--danger-fg)]/50",
-            )}
           >
             {request.confirmLabel ?? (danger ? "删除" : "确认")}
           </Button>

@@ -51,6 +51,9 @@ describe("真实工具页任务事件状态", () => {
     const { container } = render(<ExcelMergerPage tool={tool("excel_merger", "Excel 批量合并")} />);
     fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
     await screen.findByText("1 个文件");
+    // 智能表头匹配恒定开启（纵向单表必经确认页）；本用例盯任务事件状态，
+    // 切到多 Sheet 工作簿模式走原「开始合并」路径。
+    fireEvent.click(screen.getByRole("radio", { name: "合并成一个工作簿（多 Sheet）" }));
     fireEvent.click(screen.getByRole("button", { name: "检查文件与 Sheet" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "开始合并" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "开始合并" }));
@@ -61,6 +64,8 @@ describe("真实工具页任务事件状态", () => {
     emit(event("Excel_Merger", "failed", "合并失败", { error: { userMessage: "文件被占用" } }));
     expect(state("failed")).toHaveTextContent("合并失败");
     expect(container).toHaveTextContent("文件被占用");
+    expect(container.querySelectorAll(".error-box")).toHaveLength(0);
+    expect(state("failed")).toHaveTextContent("文件被占用");
     expect(container).not.toHaveTextContent("处理完成");
     emit(event("Excel_Merger", "cancelled", "用户已取消"));
     expect(state("cancelled")).toHaveTextContent("用户已取消");
@@ -70,7 +75,7 @@ describe("真实工具页任务事件状态", () => {
     expect(state("completed")?.closest(".merger-progress")).toHaveTextContent("运行结束");
   });
 
-  it("PDF 转 Excel：运行、部分成功、失败和取消均在进度/结果卡内", async () => {
+  it("PDF 转 Excel：运行与结果在结果卡内，取消在页首清楚提示", async () => {
     const api = await import("./api");
     vi.mocked(api.pickPath).mockResolvedValue(["C:/客户/函证.pdf"]);
     const { container } = render(<PdfToExcelPage tool={tool("pdf_to_excel", "PDF 转 Excel")} />);
@@ -92,10 +97,12 @@ describe("真实工具页任务事件状态", () => {
     emit(event("pdf_to_excel", "failed", "转换失败"));
     expect(state("failed")).toHaveTextContent("转换失败");
     emit(event("pdf_to_excel", "cancelled", "已取消"));
-    expect(state("cancelled")).toHaveTextContent("已取消");
+    expect(container.querySelector('[data-variant="warning"]')).toHaveTextContent("已取消");
+    expect(container).toHaveTextContent("本次转换已停止");
+    expect(container.querySelector(".error-box")).toBeNull();
   });
 
-  it("文件夹清单：扫描运行、扫描完成、导出失败和取消保留同一结果卡", async () => {
+  it("文件夹清单：扫描运行、完成和失败有反馈，取消在页首提示", async () => {
     const api = await import("./api");
     vi.mocked(api.pickPath).mockResolvedValue("C:/客户资料");
     const { container } = render(<FileListDirectoryPage tool={tool("file_list_directory", "文件夹超链接清单")} />);
@@ -110,7 +117,8 @@ describe("真实工具页任务事件状态", () => {
     emit(event("file_list_directory", "failed", "导出失败"));
     expect(state("failed")).toHaveTextContent("导出失败");
     emit(event("file_list_directory", "cancelled", "已取消扫描"));
-    expect(state("cancelled")).toHaveTextContent("已取消扫描");
+    expect(container.querySelector('[data-variant="warning"]')).toHaveTextContent("已取消");
+    expect(container).toHaveTextContent("本次任务已停止");
   });
 
   it("模糊匹配：运行、失败、取消、完成后结果处于同一工作流", async () => {
@@ -130,7 +138,9 @@ describe("真实工具页任务事件状态", () => {
     emit(event("fuzzy_match", "failed", "匹配失败"));
     expect(state("failed")).toHaveTextContent("匹配失败");
     emit(event("fuzzy_match", "cancelled", "匹配取消"));
-    expect(state("cancelled")).toHaveTextContent("匹配取消");
+    expect(container.querySelector('[data-variant="warning"]')).toHaveTextContent("已取消");
+    expect(container).toHaveTextContent("本次任务已停止");
+    expect(container.querySelector(".error-box")).toBeNull();
     emit(event("fuzzy_match", "completed", "匹配完成", { summary: { rowsA: 1, rowsB: 1, autoCount: 0, suspectCount: 0, unmatchedCount: 1, invalidCount: 0, elapsedMs: 10 }, rows: [{ aIndex: 0, aValue: "甲公司", matches: [] }] }));
     expect(container).toHaveTextContent("匹配结果");
     expect(container).toHaveTextContent("未匹配");

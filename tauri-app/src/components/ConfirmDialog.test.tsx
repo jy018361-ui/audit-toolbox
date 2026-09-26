@@ -28,7 +28,10 @@ describe("ConfirmDialog", () => {
     expect(
       await screen.findByText("该项目下的全部资料会一并删除，且无法恢复。"),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    const destructive = screen.getByRole("button", { name: "删除" });
+    expect(destructive).toHaveAttribute("data-variant", "destructive");
+    expect(destructive.className).not.toContain("bg-[var(--danger-fg)]");
+    fireEvent.click(destructive);
 
     await waitFor(() => expect(result).toBe(true));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -44,7 +47,7 @@ describe("ConfirmDialog", () => {
       result = value;
     });
 
-    expect(await screen.findByRole("button", { name: "确认" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "确认" })).toHaveAttribute("data-variant", "default");
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
 
     await waitFor(() => expect(result).toBe(false));

@@ -23,6 +23,7 @@ export const TASK_STATE_TOOL_IDS = [
   "wp_service_generator",
   "fuzzy_match",
   "tbje_check",
+  "meeting_minutes",
 ] as const;
 
 export const TASK_STATE_SCENARIOS = [

@@ -29,7 +29,10 @@ const viewports = [
   { width: 1000, height: 680, label: "1000-minimum" },
 ].filter((viewport) => !requestedViewports.size || requestedViewports.has(String(viewport.width)) ||
   requestedViewports.has(viewport.label));
-const output = fs.mkdtempSync(path.join(os.tmpdir(), "toolbox-workflow-layout-"));
+const output = process.env.WORKFLOW_AUDIT_OUTPUT
+  ? path.resolve(process.env.WORKFLOW_AUDIT_OUTPUT)
+  : fs.mkdtempSync(path.join(os.tmpdir(), "toolbox-workflow-layout-"));
+fs.mkdirSync(output, { recursive: true });
 
 const auditGeometry = () => {
   const root = document.querySelector("main, .main");
@@ -298,7 +301,7 @@ async function captureState(page, tool, viewport, stateLabel, results) {
       issues,
     };
     results.push(record);
-    if (issues.length) {
+    if (issues.length || process.env.WORKFLOW_AUDIT_CAPTURE_ALL === "1") {
       const fileName = `${viewport.label}-${tool.id}-${stateLabel}-${record.scroll}`.replace(/[^a-zA-Z0-9._-]+/g, "_");
       await page.screenshot({ path: path.join(output, `${fileName}.png`) });
     }

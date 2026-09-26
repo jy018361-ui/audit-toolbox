@@ -34,6 +34,7 @@ import {
   summarizeFileResultsText,
   type PdfConvertResult,
 } from "./pdfToExcelUi";
+import "./pdf-to-excel.css";
 
 export function pdfToExcelStep(
   fileCount: number,
@@ -59,11 +60,12 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
       if (event.phase === "completed" && isPdfConvertResult(event.result)) {
         setResult(event.result);
       }
-      if (event.phase === "failed" || event.phase === "cancelled") {
+      if (event.phase === "failed") {
         const payload = event.result as
           { error?: { userMessage?: string } } | undefined;
         setError(payload?.error ? errorText(payload.error) : event.message);
       }
+      if (event.phase === "cancelled") setError("");
     },
   });
 
@@ -191,7 +193,19 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
         ]}
         current={currentStep}
       />
-      <div className="fa-stack">
+      {summary && (
+        <div className="pdf-result-callout" role="status">
+          <strong>转换完成：成功 {summary.successCount} 份，失败 {summary.failCount} 份</strong>
+          <span>逐份结果与失败原因见下方「进度与结果」。</span>
+        </div>
+      )}
+      {job?.phase === "cancelled" && (
+        <div className="flex flex-wrap items-center gap-2" role="status">
+          <Badge variant="warning">已取消</Badge>
+          <span className="hint">本次转换已停止；文件列表仍保留，可直接重新开始。</span>
+        </div>
+      )}
+      <div className="fa-stack pdf-convert-stack">
         <Card>
           <CardHeader>
             <CardTitle>1. 选择回函 PDF</CardTitle>
@@ -205,16 +219,16 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
             <ErrorBox error={error} onDismiss={() => setError("")} />
             <button
               type="button"
-              className="drop-zone"
+              className={`drop-zone${pdfPaths.length ? " pdf-drop-zone-filled" : ""}`}
               data-tour="tool-upload"
               disabled={busy}
               onClick={() => void chooseFiles()}
             >
-              <strong>拖放回函 PDF 或文件夹到窗口</strong>
-              <span>
+              <strong>{pdfPaths.length ? "继续添加 PDF 或文件夹" : "拖放回函 PDF 或文件夹到窗口"}</strong>
+              {!pdfPaths.length && <span>
                 可一次拖入多份；拖入文件夹会自动找出其中的全部
                 PDF，也可点击选择文件
-              </span>
+              </span>}
             </button>
             <div className="merger-toolbar">
               <Button
@@ -288,9 +302,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                 />
               )}
             </div>
-            <p className="hint">
-              已添加 {pdfPaths.length} 份 PDF；重复拖入的同一份只保留一次。
-            </p>
+            {!pdfPaths.length && <p className="hint">重复拖入的同一份只保留一次。</p>}
           </CardContent>
         </Card>
 
@@ -347,7 +359,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
             <CardTitle>3. 进度与结果</CardTitle>
           </CardHeader>
           <CardContent>
-            {job && job.phase !== "completed" && (
+            {job && job.phase !== "completed" && job.phase !== "cancelled" && (
               <JobProgress
                 job={job}
                 onCancel={(jobId) => jobCancel(jobId)}

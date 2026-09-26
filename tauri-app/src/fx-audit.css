@@ -118,6 +118,10 @@
   color: var(--muted-foreground);
   font-size: 13px;
 }
+/* 导入口径生效时状态行承载「恢复官方汇率」链接按钮，与正文留一点间距。 */
+.fx-rate-note .fx-link-button {
+  margin-left: 6px;
+}
 .fx-source-meta {
   display: grid;
   grid-template-columns: minmax(9rem, 1fr) 5.5rem 6rem;
@@ -241,6 +245,9 @@
 }
 .fx-actions {
   display: flex;
+  /* 测算三键 + 汇率导出/导入 + 提示icon，窄窗口放不下时整钮换行。 */
+  flex-wrap: wrap;
+  align-items: center;
   gap: 10px;
   margin: 14px 0;
 }
@@ -680,6 +687,14 @@
   color: var(--muted-foreground);
   font-size: 13px;
   line-height: 1.6;
+}
+.fx-stage-note summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--brand-link);
+}
+.fx-stage-note p {
+  margin: var(--sp-2) 0 0;
 }
 .fx-export-stage {
   display: flex;

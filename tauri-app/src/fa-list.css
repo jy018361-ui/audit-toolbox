@@ -26,3 +26,21 @@
 .fa-list-shell .dt-header-control select {
   text-overflow: ellipsis;
 }
+
+.fa-list-shell .fa-supplement-side {
+  min-width: 0;
+}
+.fa-list-shell .fa-supplement-side .fa-side-title {
+  margin-bottom: var(--sp-3);
+}
+.fa-list-shell .fa-supplement-file-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.fa-list-shell .fa-supplement-file-actions span {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}

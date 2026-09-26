@@ -1,6 +1,15 @@
 .deposit-page {
   padding-bottom: 40px;
 }
+.deposit-page .fx-bridge-equation {
+  align-items: stretch;
+}
+.deposit-page .fx-bridge-equation .fx-bridge-metric {
+  align-content: center;
+}
+.deposit-page .fx-bridge-equation .fx-operator {
+  align-self: center;
+}
 /* 映射未补齐的行内警告做成小警告条：统一警告令牌，不再是橄榄色裸文本。 */
 .deposit-page .fx-warning {
   color: var(--warning-fg);
@@ -335,8 +344,8 @@
   border-radius: 10px;
 }
 .deposit-table > table {
-  width: 100%;
-  min-width: 1480px;
+  width: max-content;
+  min-width: 100%;
   table-layout: auto;
   border-collapse: collapse;
   /* 固定列（前两列）必须涂不透明底色盖住横向滚动的内容；普通单元格若保持
@@ -367,9 +376,10 @@
   position: sticky;
   left: 0;
   z-index: 2;
-  width: 120px;
-  min-width: 120px;
+  width: 148px;
+  min-width: 148px;
   background: var(--deposit-row-bg, var(--card));
+  white-space: nowrap;
 }
 .deposit-table > table > thead th:first-child {
   z-index: 3;
@@ -378,11 +388,26 @@
 .deposit-table > table > thead th:nth-child(2),
 .deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(2) {
   position: sticky;
-  left: 120px;
+  left: 148px;
   z-index: 2;
-  width: 220px;
-  min-width: 220px;
+  width: 312px;
+  min-width: 312px;
   background: var(--deposit-row-bg, var(--card));
+}
+.deposit-validation-warnings summary {
+  cursor: pointer;
+}
+.deposit-validation-warnings summary small {
+  margin-left: var(--sp-2);
+  font-size: var(--fs-xs);
+}
+.deposit-table .deposit-account-cell strong,
+.deposit-table .deposit-account-cell small {
+  display: block;
+  max-width: 292px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .deposit-table > table > thead th:nth-child(2) {
   z-index: 3;

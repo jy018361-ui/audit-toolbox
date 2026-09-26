@@ -1128,7 +1128,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
               )}
             </div>
           </aside>
-        ) : (
+        ) : !outputPaths.length ? (
           <Card variant="workspace" className="fa-result-workspace">
             <CardHeader>
               <CardTitle>导出结果</CardTitle>
@@ -1145,12 +1145,15 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                   cancelLabel="取消任务"
                 />
               )}
-              {!outputPaths.length && (
+              {!job && (
                 <EmptyState compact title="等待结果" description="确认期初、期末映射无误后点击「生成折旧政策对比」。" />
+              )}
+              {job?.phase === "completed" && (
+                <EmptyState compact title="导出已完成" description="任务没有返回可打开的结果文件，请检查保存位置。" />
               )}
             </CardContent>
           </Card>
-        )}
+        ) : null}
       </div>
     </>
   );

@@ -16,6 +16,7 @@ import {
   planFaLlmChanges,
   planFaSupplementChanges,
   sanitizeFaBeginMapping,
+  shouldAutoApplyFa,
   shouldAutoPrefillFaAddition,
   shouldShowFaAdditionFields,
   shouldShowFaPreviewWorkspace,
@@ -37,6 +38,12 @@ const baseInput = {
 };
 
 describe("FA List migration parity", () => {
+  it("仅高于 75% 的字段建议自动采纳", () => {
+    expect(shouldAutoApplyFa(0.75)).toBe(false);
+    expect(shouldAutoApplyFa(0.751)).toBe(true);
+    expect(shouldAutoApplyFa(undefined)).toBe(false);
+  });
+
   it("hides the optional addition group when addition method is unmapped", () => {
     expect(shouldShowFaAdditionFields(undefined)).toBe(false);
     expect(shouldShowFaAdditionFields(" ")).toBe(false);
@@ -226,7 +233,7 @@ describe("FA LLM 复核先改后核", () => {
         { role: "addition_date", file_side: "file1", suggested_column: "资本化日期" },
       ],
       fieldReviews: [
-        { role: "current_year_dep", suggested_mapping: { file1: "本年折旧", file2: "本年至今折旧" } },
+        { role: "current_year_dep", suggested_mapping: { file1: "本年折旧", file2: "本年至今折旧" }, confidence: 0.95 },
       ],
     });
     expect(plan.beginMapping.currentYearDep).toBeUndefined();
@@ -306,7 +313,7 @@ describe("FA LLM 复核先改后核", () => {
     expect(plan.beginMapping.originalValue).toBe("期末原值");
   });
 
-  it("把握 60% 到 70% 之间照改，但标为需重点核对", () => {
+  it("把握 65% 的建议留待确认", () => {
     const plan = planFaLlmChanges({
       ...baseInput,
       fieldReviews: [
@@ -317,9 +324,9 @@ describe("FA LLM 复核先改后核", () => {
         },
       ],
     });
-    expect(plan.beginMapping.category).toBe("资产分类");
-    expect(plan.changes[0].attention).toBe(true);
-    expect(plan.pending).toEqual([]);
+    expect(plan.beginMapping.category).toBe("类别");
+    expect(plan.changes).toEqual([]);
+    expect(plan.pending[0]).toMatchObject({ confidence: 0.65, suggested: "资产分类" });
   });
 
   it("把握不足 60% 的一律不改且不展示", () => {
@@ -426,10 +433,10 @@ describe("FA LLM 复核先改后核", () => {
       "LLM 复核完成：已自动调整 2 项，不合适可逐条撤销。",
     );
     expect(faReviewSummary(2, 1)).toBe(
-      "LLM 复核完成：已自动调整 2 项，不合适可逐条撤销；另有 1 项把握不足 60%，未改动，请确认是否采纳。",
+      "LLM 复核完成：已自动调整 2 项，不合适可逐条撤销；另有 1 项未自动采纳，请确认是否采纳。",
     );
     expect(faReviewSummary(0, 1)).toBe(
-      "LLM 复核完成：另有 1 项把握不足 60%，未改动，请确认是否采纳。",
+      "LLM 复核完成：另有 1 项未自动采纳，请确认是否采纳。",
     );
     expect(faReviewSummary(0)).toBe(
       "LLM 复核完成：现有映射与 LLM 判断一致，未做改动。",
@@ -441,7 +448,7 @@ describe("FA LLM 复核先改后核", () => {
       ),
     ).toBe("LLM 复核完成：现有脚本映射无需补充，匹配键已复核。");
     expect(faReviewNarrative("LLM 映射复核完成。", 2, 1)).toBe(
-      "LLM 复核完成：已自动调整 2 项，不合适可逐条撤销；另有 1 项把握不足 60%，未改动，请确认是否采纳。",
+      "LLM 复核完成：已自动调整 2 项，不合适可逐条撤销；另有 1 项未自动采纳，请确认是否采纳。",
     );
     expect(faReviewNarrative("LLM 映射复核完成。", 0)).toBe(
       "LLM 复核完成：现有映射与 LLM 判断一致，未做改动。",
@@ -516,14 +523,14 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
         {
           role: "disposal_orig",
           suggested_mapping: { file2: "处置原值" },
-          // 正好压线，仍然自动改
+          // 低于自动采纳门槛，留待确认
           confidence: 0.6,
           reason: "该列才是处置原值",
         },
       ],
     });
     expect(plan.addition.date).toBe("入账日期");
-    expect(plan.disposal.originalValue).toBe("处置原值");
+    expect(plan.disposal.originalValue).toBe("原值");
     const dateChange = plan.changes.find((item) => item.id === "addition.date");
     expect(dateChange).toMatchObject({
       label: "新增清单 变动日期",
@@ -531,21 +538,11 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
       after: "入账日期",
       attention: false,
     });
-    const origChange = plan.changes.find(
-      (item) => item.id === "disposal.originalValue",
-    );
-    expect(origChange).toMatchObject({
-      before: "原值",
-      after: "处置原值",
-      // 把握 60% 低于阈值，需要重点核对
-      attention: true,
-      restore: {
-        kind: "supplement",
-        target: "disposal",
-        key: "originalValue",
-        value: "原值",
-      },
-    });
+    expect(plan.pending).toContainEqual(expect.objectContaining({
+      id: "disposal.originalValue",
+      confidence: 0.6,
+      suggested: "处置原值",
+    }));
   });
 
   it("两张清单的匹配键各自独立记录", () => {
@@ -553,6 +550,7 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
       ...supplement(),
       matchReview: {
         action: "replace",
+        confidence: 0.95,
         suggested_file1_columns: ["资产编号", "名称"],
         suggested_file2_columns: ["编号"],
         reasons: ["与第一步口径一致"],

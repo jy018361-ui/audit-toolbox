@@ -246,8 +246,10 @@ const entityDisplay = (entity?: string) =>
 
 type TbAccount = {
   key: string;
+  identity?: string;
   code: string;
   name: string;
+  currency?: string;
   account: string;
   opening: number;
   closing: number;
@@ -261,6 +263,7 @@ type TbAccount = {
     closing: number;
     occurrence?: number | null;
   }>;
+  reviewAuxiliaries?: Array<{ entity: string; auxiliary: string }>;
   /** 仅用于初始化科目角色，不在界面展示内部判断过程。 */
   suggestedType?: LoanAccountRole;
   suggestionReason?: string;
@@ -290,15 +293,27 @@ export function loanAccountReviewRows(
   link: AuxiliaryLinkResult | null,
   splitEntity = false,
 ): LoanAccountReviewRow[] {
+  const sameCodeCounts = new Map<string, number>();
+  for (const account of accounts)
+    sameCodeCounts.set(account.key, (sameCodeCounts.get(account.key) ?? 0) + 1);
   return accounts.flatMap((account) => {
+    const identity = account.identity ?? account.key;
+    // 公共辅助计划只按编码返回组；同码多名称时不能把一组辅助户复制到每个名称。
     const groups = (link?.groups ?? []).filter(
       (group) => group.account === account.key,
     );
+    const sourceAuxiliaries = account.reviewAuxiliaries ?? [];
+    const detailsOf = (group: (typeof groups)[number]) => {
+      if ((sameCodeCounts.get(account.key) ?? 0) <= 1) return group.details ?? [];
+      return (group.details ?? []).filter((detail) => sourceAuxiliaries.some((source) =>
+        source.entity === group.entity && [detail.key, detail.display]
+          .some((value) => normKey(value) === normKey(source.auxiliary))));
+    };
     const expanded = groups.flatMap((group) =>
       group.reviewVerified
-        ? (group.details ?? []).map((detail) => ({
+        ? detailsOf(group).map((detail) => ({
             ...account,
-            reviewKey: reviewKey(group.entity, account.key, detail.key),
+            reviewKey: reviewKey(group.entity, identity, detail.key),
             entity: group.entity,
             auxiliary: detail.display,
             auxiliaryKey: detail.key,
@@ -306,12 +321,12 @@ export function loanAccountReviewRows(
         : [],
     );
     const allGroupsVerified =
-      groups.length > 0 && groups.every((group) => group.reviewVerified);
+      groups.length > 0 && groups.every((group) => group.reviewVerified && detailsOf(group).length > 0);
     const hasVerifiedGroup = (baseEntity: string | undefined) =>
       baseEntity === undefined
         ? allGroupsVerified
         : groups.some(
-            (group) => group.reviewVerified && group.entity === baseEntity,
+            (group) => group.reviewVerified && group.entity === baseEntity && detailsOf(group).length > 0,
           );
     const rowEntities = splitEntity
       ? ledgerRowEntities(
@@ -322,7 +337,7 @@ export function loanAccountReviewRows(
     const fallbacks = baseEntities
       .filter((baseEntity) => !hasVerifiedGroup(baseEntity))
       .map((baseEntity) => {
-        if (!baseEntity) return { ...account, reviewKey: account.key };
+        if (!baseEntity) return { ...account, reviewKey: identity };
         const amounts = account.byEntity?.find(
           (item) => item.entity === baseEntity,
         );
@@ -331,7 +346,7 @@ export function loanAccountReviewRows(
           opening: amounts?.opening ?? account.opening,
           closing: amounts?.closing ?? account.closing,
           occurrence: amounts ? (amounts.occurrence ?? account.occurrence) : account.occurrence,
-          reviewKey: reviewKey(baseEntity, account.key, ""),
+          reviewKey: reviewKey(baseEntity, identity, ""),
           entity: baseEntity,
         };
       });
@@ -805,7 +820,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setLoanAccountRoles(
         Object.fromEntries(
           (res.accounts ?? []).map((a) => [
-            a.key,
+            a.identity ?? a.key,
             restored || restoredExpenses
               ? restored?.includes(a.key)
                 ? "loan"
@@ -829,15 +844,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, mode, sources.tb.inspection, sources.tb.mapping, tbAccounts.length]);
   const selectedLoanAccounts = () =>
-    tbAccounts
-      .filter((a) => loanAccountRoles[a.key] === "loan")
-      .map((a) => a.key);
+    [...new Set(loanAccountReviewRows(tbAccounts, auxLink, loanSplitEntity)
+      .filter((row) => loanReviewRole(row) === "loan").map((row) => row.key))];
   const selectedInterestExpenseAccounts = () =>
-    tbAccounts
-      .filter((a) => loanAccountRoles[a.key] === "interest_expense")
-      .map((a) => a.key);
+    [...new Set(loanAccountReviewRows(tbAccounts, auxLink, loanSplitEntity)
+      .filter((row) => loanReviewRole(row) === "interest_expense").map((row) => row.key))];
   const loanReviewRole = (row: LoanAccountReviewRow) =>
-    loanDetailRoles[row.reviewKey] ?? loanAccountRoles[row.key] ?? "skip";
+    loanDetailRoles[row.reviewKey] ?? loanAccountRoles[row.identity ?? row.key] ?? "skip";
   // 主体拆行开关：TB 与 JE 双侧映射主体列、且 TB 里确实出现多个主体时启用
   // （与引擎建户的主体键口径一致）；单主体账套维持一科一行。
   const loanSplitEntity =
@@ -845,11 +858,14 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     ledgerMultiEntityCombos(sources.tb.inspection?.entityAccounts);
   const loanReviewSelections = () =>
     loanAccountReviewRows(tbAccounts, auxLink, loanSplitEntity)
-      .filter((row) => row.auxiliaryKey)
       .map((row) => ({
         entity: row.entity ?? "",
         account: row.key,
-        auxiliary: row.auxiliaryKey,
+        reviewKey: row.reviewKey,
+        name: row.name,
+        currency: row.currency ?? "",
+        auxiliary: row.auxiliaryKey ?? "",
+        role: loanReviewRole(row),
         selected: loanReviewRole(row) === "loan",
       }));
   /** 借款利率表的自动生成键：借款科目/利息支出科目选择（含辅助明细勾选）
@@ -996,7 +1012,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           );
       }
       setPairStatus(
-        `${picked.length} 个账表来源已识别${scan.hiddenSheets ? `；${scan.hiddenSheets} 张低置信度 Sheet 已忽略` : ""}。`,
+        scan.hiddenSheets
+          ? `${scan.hiddenSheets} 张低置信度 Sheet 已忽略，请核对已选工作表。`
+          : "",
       );
       if (failures.length) setError(failures.join("；"));
     } finally {
@@ -1234,7 +1252,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       rateRows?: PasteRateRow[];
       loanAccounts?: string[];
       interestExpenseAccounts?: string[];
-      loanReviewSelections?: Array<{ entity?: string; account?: string; auxiliary?: string; selected?: boolean }>;
+      loanReviewSelections?: Array<{ entity?: string; account?: string; reviewKey?: string; name?: string; currency?: string; auxiliary?: string; role?: LoanAccountRole; selected?: boolean }>;
       outputPath?: string;
       currencyFallbackMode?: CurrencyFallbackMode;
       functionalCurrency?: string;
@@ -1311,10 +1329,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       Array.isArray(p.loanReviewSelections)
         ? Object.fromEntries(
             p.loanReviewSelections
-              .filter((item) => item.account && item.auxiliary)
+              .filter((item) => item.reviewKey || (item.account && item.auxiliary))
               .map((item) => [
-                reviewKey(item.entity ?? "", item.account ?? "", item.auxiliary ?? ""),
-                item.selected === false ? "skip" : "loan",
+                item.reviewKey ?? reviewKey(item.entity ?? "", item.account ?? "", item.auxiliary ?? ""),
+                item.role ?? (item.selected === false ? "skip" : "loan"),
               ]),
           )
         : {},
@@ -1544,25 +1562,23 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
    *  同一笔明细只会出现一次；被改成排除/利息支出的科目在渲染层把关不展示，
    *  已填利率仍留在 tbRateEdits 里不丢。 */
   const reviewRateDetails = useMemo(() => {
-    // 科目行侧：主键（norm(key)）＋编码/科目文本候选都认，兼容旧任务数据。
-    const accountByCandidate = new Map<string, string>();
-    for (const account of orderedTbAccounts) {
-      const primaryKey = normKey(account.key);
-      for (const candidate of [account.key, account.code, account.account]) {
-        const normalized = normKey(candidate);
-        if (normalized && !accountByCandidate.has(normalized))
-          accountByCandidate.set(normalized, primaryKey);
-      }
-    }
+    const bucket = (account: LoanAccountReviewRow) =>
+      `${normKey(account.identity ?? account.key)}\u001f${normKey(account.entity ?? "")}`;
     const byAccount = new Map<string, LoanRow[]>();
     for (const row of rows) {
-      const primaryKey = rateRowAccountKeyCandidates(row).find((key) =>
-        accountByCandidate.has(key),
-      );
-      const accountKey = primaryKey
-        ? accountByCandidate.get(primaryKey)!
-        : undefined;
-      if (!accountKey) continue;
+      const candidates = rateRowAccountKeyCandidates(row);
+      const matches = orderedTbAccounts.filter((account) =>
+        candidates.some((key) => [account.key, account.code, account.account]
+          .some((candidate) => normKey(candidate) === key)));
+      const preferred = matches.find((account) =>
+        (!row.accountName || normKey(account.name) === normKey(row.accountName))
+        && (!account.entity || normKey(account.entity) === normKey(row.entity))
+        && (!account.currency || !row.currency || normKey(account.currency) === normKey(row.currency)))
+        ?? matches.find((account) =>
+          !row.accountName || normKey(account.name) === normKey(row.accountName))
+        ?? matches[0];
+      if (!preferred) continue;
+      const accountKey = bucket(preferred);
       const list = byAccount.get(accountKey);
       if (list) list.push(row);
       else byAccount.set(accountKey, [row]);
@@ -1575,7 +1591,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     // 第一遍：辅助明细行按辅助核算对号入座。
     for (const account of orderedTbAccounts) {
       if (!account.auxiliaryKey) continue;
-      const mine = (byAccount.get(normKey(account.key)) ?? []).filter((detail) =>
+      const mine = (byAccount.get(bucket(account)) ?? []).filter((detail) =>
         auxMatch(detail, account),
       );
       mine.forEach((detail) => claimed.add(loanRowKey(detail)));
@@ -1584,7 +1600,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     // 第二遍：普通科目行兜底接收未被认领的明细。
     for (const account of orderedTbAccounts) {
       if (account.auxiliaryKey) continue;
-      const rest = (byAccount.get(normKey(account.key)) ?? []).filter(
+      const rest = (byAccount.get(bucket(account)) ?? []).filter(
         (detail) => !claimed.has(loanRowKey(detail)),
       );
       if (!rest.length) continue;
@@ -1596,7 +1612,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       const orphans = list.filter((detail) => !claimed.has(loanRowKey(detail)));
       if (!orphans.length) continue;
       const target = orderedTbAccounts.find(
-        (account) => normKey(account.key) === accountKey,
+        (account) => bucket(account) === accountKey,
       );
       if (!target || loanReviewRole(target) !== "loan") continue;
       assignment.set(target.reviewKey, [
@@ -1659,7 +1675,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       selectedAccountCount > 0 &&
       rows.length > 0);
   const selectedInterestExpenseCount = tbAccounts.filter(
-    (row) => loanAccountRoles[row.key] === "interest_expense",
+    (row) => loanAccountRoles[row.identity ?? row.key] === "interest_expense",
   ).length;
   /** 合并表的条件列：辅助核算列在「辅助验证展开」或「利率明细带辅助核算」时显示；
    *  主体列只在账套确实区分主体时显示，单一主体账套不浪费列宽——TB/JE 识别出
@@ -1668,6 +1684,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const showAuxiliaryColumn =
     orderedTbAccounts.some((row) => Boolean(row.auxiliaryKey)) ||
     rows.some((row) => Boolean(row.auxiliary?.trim()));
+  const showCurrencyColumn = tbAccounts.some((row) => Boolean(row.currency?.trim()));
   const showEntityDimension = mode !== "tb" ||
     ledgerEntityKeyEnabled(sources.tb.mapping, sources.je.mapping);
   const multiEntityLedger = useMemo(() => {
@@ -1845,11 +1862,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           else setStep(next);
         }}
       />
-      <div className="loan-mode-context" role="status">
-        <strong>当前模式</strong>
-        <span>{mode === "ledger" ? "完整借款台账" : "TB＋JE"}</span>
-        {resultStale && <Badge variant="outline" className="badge-warning">结果待重算</Badge>}
-      </div>
+      {step !== 0 && (
+        <div className="loan-mode-context" role="status">
+          <strong>资料模式</strong>
+          <span>{mode === "ledger" ? "完整借款台账" : "TB＋JE"}</span>
+          {resultStale && <Badge variant="outline" className="badge-warning">结果待重算</Badge>}
+        </div>
+      )}
       <CurrencyFallbackDialog
         open={currencyFallbackPrompt !== null}
         affectedGroupCount={currencyFallbackPrompt?.affectedGroupCount ?? 0}
@@ -2248,6 +2267,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                           {showSubject && <th>主体</th>}
                           <th>科目编码</th>
                           <th>科目名称</th>
+                          {showCurrencyColumn && <th>币种</th>}
                           {showAuxiliaryColumn && <th>辅助核算</th>}
                           <th>科目类型</th>
                           <th>期初余额</th>
@@ -2308,6 +2328,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                             )}
                             <td>{a.code}</td>
                             <td title={a.account}>{a.name || a.account}</td>
+                            {showCurrencyColumn && <td>{a.currency || "—"}</td>}
                             {showAuxiliaryColumn && (
                               <td title={a.auxiliary || inline?.auxiliary || undefined}>
                                 {a.auxiliary || inline?.auxiliary || "—"}
@@ -2319,10 +2340,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                                 value={role}
                                 onChange={(e) => {
                                   const next = e.target.value as LoanAccountRole;
-                                  if (a.auxiliaryKey) {
+                                  if (a.auxiliaryKey || a.entity) {
                                     setLoanDetailRoles((v) => ({ ...v, [a.reviewKey]: next }));
                                   } else {
-                                    setLoanAccountRoles((v) => ({ ...v, [a.key]: next }));
+                                    setLoanAccountRoles((v) => ({ ...v, [a.identity ?? a.key]: next }));
                                   }
                                   invalidateResults();
                                   setAccountChangeNote(
@@ -2397,6 +2418,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                               <td title={detail.accountName || detail.loanId}>
                                 {detail.accountName || detail.loanId}
                               </td>
+                              {showCurrencyColumn && <td>{detail.currency || "—"}</td>}
                               {showAuxiliaryColumn && (
                                 <td title={detail.auxiliary || undefined}>{detail.auxiliary || "—"}</td>
                               )}
@@ -2481,8 +2503,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                           } });
                         }
                       }
-                      setLoanDetailRoles((current) => ({ ...current, ...Object.fromEntries(roleUpdates.filter(({ account }) => account.auxiliaryKey).map(({ account, role }) => [account.reviewKey, role])) }));
-                      setLoanAccountRoles((current) => ({ ...current, ...Object.fromEntries(roleUpdates.filter(({ account }) => !account.auxiliaryKey).map(({ account, role }) => [account.key, role])) }));
+                      setLoanDetailRoles((current) => ({ ...current, ...Object.fromEntries(roleUpdates.filter(({ account }) => account.auxiliaryKey || account.entity).map(({ account, role }) => [account.reviewKey, role])) }));
+                      setLoanAccountRoles((current) => ({ ...current, ...Object.fromEntries(roleUpdates.filter(({ account }) => !account.auxiliaryKey && !account.entity).map(({ account, role }) => [account.identity ?? account.key, role])) }));
                       invalidateResults();
                       setTbRateEdits((current) => {
                         const next = { ...current };

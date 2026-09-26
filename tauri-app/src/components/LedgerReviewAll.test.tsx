@@ -323,9 +323,10 @@ describe("共享账表复核生命周期", () => {
         }),
       }),
     );
-    expect(tbApplied).not.toHaveBeenCalled();
+    expect(tbApplied).toHaveBeenCalledWith({ accountCode: "TB新编码" });
     expect(jeApplied).not.toHaveBeenCalled();
-    expect(result.current.results.tb?.pending).toHaveLength(1);
+    expect(result.current.results.tb?.applied).toHaveLength(1);
+    expect(result.current.results.tb?.pending).toHaveLength(0);
     expect(result.current.results.je?.pending[0].attention).toBe(true);
   });
 
@@ -410,7 +411,7 @@ describe("共享账表复核生命周期", () => {
           {
             role: "accountCode",
             suggestedColumn: "B编码",
-            confidence: 0.9,
+            confidence: 0.7,
           },
         ],
       });
@@ -426,7 +427,7 @@ describe("共享账表复核生命周期", () => {
     const { result } = renderHook(() =>
       useLedgerDictReviews(async () => ({
         changes: [
-          { role: "accountCode", suggestedColumn: "B编码", confidence: 0.9 },
+          { role: "accountCode", suggestedColumn: "B编码", confidence: 0.7 },
           { role: "accountName", suggestedColumn: "B名称", confidence: 0.59 },
         ],
       })),

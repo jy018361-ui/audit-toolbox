@@ -67,8 +67,7 @@ export function JobProgress({
       setCancelPending(false);
     }
   }
-  // 进度弹窗正展示同一个任务时这里让位，免得一个任务看着像跑了两遍。
-  // 弹窗最小化后 owned 转 false，内联进度条回到页面上。
+  // 全局弹窗或最小化任务条接管时让位，同一进度只呈现一次。
   const owned = useJobOwnedByDialog(job.jobId);
   const total = Number.isFinite(job.total) ? Math.max(job.total, 0) : 0;
   const max = Math.max(total, 1);

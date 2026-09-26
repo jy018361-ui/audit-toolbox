@@ -1017,15 +1017,18 @@ fn role_for(account: &str, params: &Value) -> String {
     // 与 `fx::role_for` 同一口径——否则用户在科目分类里手工指定的利息收入
     // 科目在测算时被悄悄丢掉，基准数又变回「未识别」。
     let code = account_code(account);
-    if let Some(role) = roles.and_then(|values| {
-        values.iter().find_map(|(candidate, role)| {
+    let code_roles = roles
+        .into_iter()
+        .flat_map(|values| values.iter())
+        .filter_map(|(candidate, role)| {
             (account_code(candidate) == code)
                 .then(|| role.as_str())
                 .flatten()
                 .filter(|value| *value != "unassigned")
         })
-    }) {
-        return role.to_owned();
+        .collect::<BTreeSet<_>>();
+    if code_roles.len() == 1 {
+        return (*code_roles.iter().next().unwrap()).to_owned();
     }
     // 自动识别有结论（名称关键词或编码前缀命中）时相信它；判成 excluded 时
     // 再给一次「上级科目继承」：界面科目清单包含非末级汇总行，而测算只读
@@ -1670,6 +1673,11 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     };
     let entities = distinct_values(&table, &mapping, "entity");
     let entity_accounts = distinct_entity_accounts(&table, &mapping);
+    let review_accounts = if kind == "tb" {
+        distinct_review_accounts(&table, &mapping)
+    } else {
+        vec![]
+    };
     let years = data_years(&table, kind, &mapping);
     let close = table
         .header_candidates
@@ -1695,6 +1703,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         "accountMetrics": account_metrics,
         "entityMetrics": entity_metrics,
         "entityAccounts": entity_accounts,
+        "reviewAccounts": review_accounts,
         "suggestedAccountRoles": accounts.iter().map(|account|
             (account.clone(), Value::String(suggest_account_role(account).into()))
         ).collect::<Map<_, _>>(),
@@ -1965,6 +1974,73 @@ fn distinct_entity_accounts(
         .collect()
 }
 
+fn confirmed_review_role<'a>(params: &'a Value, entity: &str, account: &str,
+    auxiliary: &str, currency: &str) -> Option<&'a str> {
+    let roles = params.get("accountReviewRoles")?.as_object()?;
+    for scope in [entity, ""] {
+        for aux in [auxiliary, ""] {
+            let key = serde_json::to_string(&(scope, account, aux, currency)).ok()?;
+            if let Some(role) = roles.get(&key).and_then(Value::as_str) {
+                return Some(role);
+            }
+        }
+    }
+    None
+}
+
+/// TB 科目确认的源行身份：先由公共金额勾稽剔除汇总行，再按已映射字段去重。
+/// 辅助字段只有通过 TB→JE 验证而保留在映射中才参与这里的身份。
+pub(crate) fn distinct_review_accounts(
+    table: &FxTable,
+    mapping: &Map<String, Value>,
+) -> Vec<Map<String, Value>> {
+    let account_indexes = account_columns(table, mapping);
+    if account_indexes.is_empty() {
+        return vec![];
+    }
+    let keep = ledger_mapping::tb_catalog_leaf_mask(&table.headers, &table.rows, &|role| {
+        match mapping.get(role) {
+            Some(Value::String(value)) => vec![value.clone()],
+            Some(Value::Array(values)) => values.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+            _ => vec![],
+        }
+    });
+    let entity_index = column_index(table, mapping, "entity");
+    let auxiliary_indexes = column_indexes(table, mapping, "auxiliary");
+    let currency_index = column_index(table, mapping, "currency");
+    let mut seen = BTreeSet::<(String, String, String, String)>::new();
+    for (index, row) in table.rows.iter().enumerate() {
+        if !keep.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        let account = join_columns(row, &account_indexes);
+        if account.is_empty() || ledger_mapping::is_report_footer_value(&account) {
+            continue;
+        }
+        let entity = entity_index
+            .and_then(|column| row.get(column))
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| ledger_mapping::DEFAULT_ENTITY.to_owned());
+        let auxiliary = join_columns(row, &auxiliary_indexes);
+        let currency = currency_index
+            .and_then(|column| row.get(column))
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_default();
+        seen.insert((entity, account, auxiliary, currency));
+    }
+    seen.into_iter()
+        .map(|(entity, account, auxiliary, currency)| {
+            let mut item = Map::new();
+            item.insert("entity".into(), Value::String(entity));
+            item.insert("account".into(), Value::String(account));
+            item.insert("auxiliary".into(), Value::String(auxiliary));
+            item.insert("currency".into(), Value::String(currency));
+            item
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // 业务计算
 // ---------------------------------------------------------------------------
@@ -2226,13 +2302,16 @@ fn fold_tb_accounts(
         } else {
             account
         };
-        let role = role_for(&account, params);
         let entity = scoped_entity(
             &cell_text(&tb, row, &tb_map, "entity"),
             entity_key_enabled,
             ledger_mapping::EntitySide::Tb,
             &entity_scope,
         );
+        let raw_auxiliary = cell_text(&tb, row, &tb_map, "auxiliary");
+        let raw_currency = cell_text(&tb, row, &tb_map, "currency");
+        let role = confirmed_review_role(params, &entity, &account, &raw_auxiliary, &raw_currency)
+            .map(str::to_owned).unwrap_or_else(|| role_for(&account, params));
         if role == "interest_income" {
             // 利息收入是损益类贷方科目：优先用本期发生额净额，只有余额
             // 可用时退回期末余额净额。已结转形态（借贷同额）按红字与
@@ -2293,8 +2372,8 @@ fn fold_tb_accounts(
         if role == "cash_on_hand" && !params["includeCashOnHand"].as_bool().unwrap_or(false) {
             continue;
         }
-        let auxiliary = cell_text(&tb, row, &tb_map, "auxiliary");
-        let currency = cell_text(&tb, row, &tb_map, "currency");
+        let auxiliary = raw_auxiliary;
+        let currency = raw_currency;
         // 货币资金是借方余额资产，净额一律按"借方－贷方"。
         let opening = tb_balance(
             &tb,
@@ -2473,17 +2552,19 @@ fn fold_tb_accounts(
                 .cloned()
                 .unwrap_or_default();
         }
+        let confirmed_role = confirmed_review_role(params, &candidate.entity, &candidate.account,
+            &candidate.auxiliary, &candidate.currency);
         let detail_key = format!(
             "{}\u{1f}{}\u{1f}{}",
             group.0,
             group.1,
             ledger_mapping::anchor_norm(&candidate.auxiliary)
         );
-        if let Some(role) = params
+        if let Some(role) = confirmed_role.or_else(|| params
             .get("accountDetailRoleOverrides")
             .and_then(Value::as_object)
             .and_then(|values| values.get(&detail_key))
-            .and_then(Value::as_str)
+            .and_then(Value::as_str))
         {
             candidate.role = role.to_owned();
         }
@@ -5346,7 +5427,7 @@ fn write_parameters(
             match summary["currencyFallbackMode"].as_str().unwrap_or("") {
                 "functional" => "统一使用本位币匡算：各币种余额合并，使用 JE 本位币发生额还原逐月余额。",
                 "twoPointByCurrency" => "按币种使用年初、年末平均值：分别填写利率，不使用 JE 还原逐月余额。",
-                _ => "TB、JE 按币种正常匹配。",
+                _ => "未指定多币种口径：各币种余额按主体＋科目合并为整户测算，币种列示为「本位币合并」。",
             }
             .into(),
         ),
@@ -8643,6 +8724,26 @@ mod tests {
         assert_eq!(mapping["summary"], json!("文本"));
         assert_eq!(mapping["auxiliary"], json!(["成本中心"]));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 科目确认完整身份不会跨主体去重() {
+        let dir = std::env::temp_dir().join(format!("deposit-review-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tb.xlsx");
+        write_fixture(&path, &[
+            vec!["主体", "科目编码", "科目名称", "币种", "期初余额", "期末余额"],
+            vec!["甲公司", "1002", "银行存款", "CNY", "40", "50"],
+            vec!["乙公司", "1002", "银行存款", "CNY", "60", "70"],
+        ]);
+        let inspected = inspect(&json!({
+            "source": {"inputPath": path.to_string_lossy()},
+            "mapping": {"entity":"主体", "accountCode":"科目编码", "accountName":"科目名称", "currency":"币种", "openingFunctionalAmount":"期初余额", "closingFunctionalAmount":"期末余额"}
+        }), "tb").unwrap();
+        let identities = inspected["reviewAccounts"].as_array().unwrap();
+        assert_eq!(identities.len(), 2);
+        let subjects = identities.iter().map(|row| row["entity"].as_str().unwrap()).collect::<BTreeSet<_>>();
+        assert_eq!(subjects, BTreeSet::from(["甲公司", "乙公司"]));
     }
 
     #[test]

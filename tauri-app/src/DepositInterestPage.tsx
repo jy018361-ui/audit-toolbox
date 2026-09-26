@@ -117,6 +117,13 @@ export type Inspection = {
       供 FA List 等页面按真实搭配铺科目复核清单；旧后端／预览模式不下发，
       使用方需自行回退。 */
   entityAccounts?: Array<{ entity: string; account: string }>;
+  /** 金额勾稽后的 TB 科目确认项；辅助/币种字段仅在当前映射有效时下发。 */
+  reviewAccounts?: Array<{
+    entity: string;
+    account: string;
+    auxiliary: string;
+    currency: string;
+  }>;
   suggestedMapping: Record<string, string | string[]>;
   /** 引擎随识别结果全量下发的角色标签（`{name,label}`）；缺失时回落本页的标签表。 */
   roles?: EngineRoleLabels;
@@ -311,8 +318,8 @@ export function depositAccountCode(account: string): string {
   return token ?? account.trim();
 }
 
-/** 科目分类清单只来自 TB 余额表：该步是 TB 科目分类确认，与 JE 无关
- *  （全工具统一口径）。清单内同一科目编码去重，保留 TB 首见写法；
+/** 科目分类清单只来自 TB 余额表：该步是 TB 科目分类确认，与 JE 无关。
+ *  同编码不同名称不能互相吞并；编码与名称相同、仅排列顺序不同的行合并。
  *  排序把已映射为计息科目/利息收入的排在前面，excluded 沉底——
  *  用户要核对的正是参与测算的那批科目。 */
 export function mergeAccountList(tbAccounts: string[]): string[] {
@@ -320,8 +327,12 @@ export function mergeAccountList(tbAccounts: string[]): string[] {
   const merged: string[] = [];
   for (const account of tbAccounts) {
     const code = depositAccountCode(account);
-    if (seen.has(code)) continue;
-    seen.add(code);
+    const name = code === account.trim()
+      ? ""
+      : account.replace(code, "").trim().replace(/\s+/g, " ").toUpperCase();
+    const identity = JSON.stringify([code.toUpperCase(), name]);
+    if (!identity || seen.has(identity)) continue;
+    seen.add(identity);
     merged.push(account);
   }
   return merged;
@@ -332,7 +343,7 @@ export function depositCatalogMappingKey(
   mapping: Record<string, string | string[]>,
 ): string {
   return JSON.stringify(
-    ["entity", "account", "accountCode", "accountName"].map((role) => [
+    ["entity", "account", "accountCode", "accountName", "auxiliary", "currency"].map((role) => [
       role,
       mapping[role] ?? "",
     ]),
@@ -345,7 +356,10 @@ type DepositAccountReviewRow = {
   entity?: string;
   auxiliary?: string;
   auxiliaryKey?: string;
+  currency?: string;
 };
+
+type SourceReviewIdentity = { entity: string; account: string; auxiliary: string; currency: string };
 
 const depositDetailKey = (entity: string, account: string, auxiliary: string) =>
   `${entity}\u001f${account}\u001f${auxiliary}`;
@@ -360,10 +374,36 @@ export function depositAccountReviewRows(
   accounts: string[],
   link: AuxiliaryLinkResult | null,
   entitiesByAccount: Map<string, string[]> | null = null,
+  sourceIdentities?: SourceReviewIdentity[],
 ): DepositAccountReviewRow[] {
+  if (sourceIdentities?.length) {
+    const allowed = new Set(accounts);
+    const seen = new Set<string>();
+    return sourceIdentities.flatMap((identity) => {
+      if (!allowed.has(identity.account)) return [];
+      const entity = entitiesByAccount ? identity.entity : undefined;
+      const verified = (link?.groups ?? []).some((group) =>
+        group.reviewVerified && group.entity === identity.entity
+        && group.account === depositAccountCode(identity.account));
+      const auxiliary = verified ? identity.auxiliary : "";
+      const key = JSON.stringify([entity ?? "", identity.account, auxiliary, identity.currency]);
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [{ key, account: identity.account, entity,
+        auxiliary: auxiliary || undefined, auxiliaryKey: auxiliary || undefined,
+        currency: identity.currency }];
+    });
+  }
+  const codeCounts = new Map<string, number>();
+  for (const account of accounts) {
+    const code = depositAccountCode(account);
+    codeCounts.set(code, (codeCounts.get(code) ?? 0) + 1);
+  }
   return accounts.flatMap((account) => {
     const code = depositAccountCode(account);
-    const groups = (link?.groups ?? []).filter(
+    // 公共辅助计划按编码索引；同码异名时无法知道明细属于哪个名称，
+    // 不能把同一组辅助明细复制到每个科目名称下面。
+    const groups = (codeCounts.get(code) ?? 0) > 1 ? [] : (link?.groups ?? []).filter(
       (group) => group.account === code,
     );
     const expanded = groups.flatMap((group) =>
@@ -378,7 +418,7 @@ export function depositAccountReviewRows(
         : [],
     );
     const rowEntities =
-      entitiesByAccount?.get(code) ?? (entitiesByAccount ? [] : undefined);
+      entitiesByAccount?.get(account) ?? entitiesByAccount?.get(code) ?? (entitiesByAccount ? [] : undefined);
     const baseEntities = ledgerRowEntities(rowEntities) ?? [undefined];
     // 兜底行判定：未拆主体时沿用旧口径——只要还有未验证的辅助组就保留
     // 一行科目合计；按主体拆行时，已有验证通过辅助展开的主体不再补行。
@@ -773,11 +813,13 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     [tb?.entityAccounts, tbMapping, jeMapping],
   );
   const reviewAccounts = useMemo(
-    () => depositAccountReviewRows(accounts, auxLink, entityRowsByAccount),
-    [accounts, auxLink, entityRowsByAccount],
+    () => depositAccountReviewRows(accounts, auxLink, entityRowsByAccount, tb?.reviewAccounts),
+    [accounts, auxLink, entityRowsByAccount, tb?.reviewAccounts],
   );
   const reviewRole = (row: DepositAccountReviewRow) =>
-    accountDetailRoleOverrides[row.key] ?? accountRoles[row.account] ?? "";
+    accountDetailRoleOverrides[row.key]
+    ?? (row.auxiliaryKey ? accountDetailRoleOverrides[depositDetailKey(row.entity ?? "", depositAccountCode(row.account), row.auxiliaryKey)] : undefined)
+    ?? accountRoles[row.account] ?? "";
   // 账户级覆盖的键：辅助明细行用明细键，其余行（含按主体拆出的行）共用
   // 科目键——分类与存款类型是科目属性，不随主体分叉；利率的逐户差异由
   // 引擎行键（主体×科目×币种）承接。
@@ -1259,7 +1301,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       }
       setSourceStatus(
         scan.hiddenSheets
-          ? `${selected.length} 个账表来源已识别；${scan.hiddenSheets} 张低置信度 Sheet 已忽略。`
+          ? `${scan.hiddenSheets} 张低置信度 Sheet 已忽略，请核对已选工作表。`
           : "",
       );
       if (failures.length) setError(failures.join("；"));
@@ -1484,6 +1526,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       accountRoleOverrides,
       accountTierOverrides,
       accountDetailRoleOverrides,
+      accountReviewRoles: Object.fromEntries(reviewAccounts.map((row) => [row.key, reviewRole(row)])),
       accountDetailTierOverrides,
       rateOverrides,
       accountRateOverrides,
@@ -1775,6 +1818,13 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     const candidates =
       engineRowsByCode.get(depositAccountCode(row.account)) ?? [];
     return candidates.filter((item) => {
+      if (tb?.reviewAccounts?.length && item.account.trim() !== row.account.trim())
+        return false;
+      if (row.currency) {
+        const raw = row.currency.trim().toUpperCase();
+        const mapped = ["RMB", "人民币", "人民币元"].includes(raw) ? "CNY" : raw;
+        if (item.currency.toUpperCase() !== mapped) return false;
+      }
       if (
         row.entity &&
         row.entity !== DEFAULT_ENTITY &&
@@ -1845,15 +1895,18 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       />
       <ErrorBox error={step === 2 && error === terminalJobError(job) ? "" : error} onDismiss={() => setError("")} />
       {Object.keys(validationWarnings).length > 0 && (
-        <section className="deposit-validation-warnings" role="status" aria-live="polite">
-          <strong>部分后台验证未完成</strong>
-          <p>仅影响逐户利率等信息的自动带出，不影响整体测算结论；可按下列提示手工补齐后继续。</p>
+        <details className="deposit-validation-warnings" role="status" aria-live="polite">
+          <summary>
+            有 {Object.keys(validationWarnings).length} 项资料未自动带出，可手工补充
+            <small>{Object.values(validationWarnings)[0]?.split("，")[0]}</small>
+          </summary>
+          <p>不影响已完成的测算；涉及利率的账户请在下方确认后重算。</p>
           <ul>
             {Object.entries(validationWarnings).map(([key, warning]) => (
               <li key={key}>{warning}</li>
             ))}
           </ul>
-        </section>
+        </details>
       )}
       <StepIndicator
         steps={[
@@ -2287,7 +2340,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                             const currency =
                               variant && lines.length > 1
                                 ? `（${variant.currency}）`
-                                : "";
+                                : row.currency ? `（${row.currency}）` : "";
                             const rate = variant
                               ? (engineRateOf(variant.key) ?? effectiveRate)
                               : effectiveRate;
@@ -2330,20 +2383,20 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                                   className="deposit-account-role"
                                   aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的分类`}
                                   value={
-                                    row.auxiliaryKey
+                                    (tb?.reviewAccounts?.length || row.auxiliaryKey)
                                       ? (accountDetailRoleOverrides[row.key] ??
                                         "")
                                       : (accountRoleOverrides[row.account] ?? "")
                                   }
                                   onChange={(e) => {
                                     const value = e.target.value;
-                                    const setter = row.auxiliaryKey
+                                    const setter = (tb?.reviewAccounts?.length || row.auxiliaryKey)
                                       ? setAccountDetailRoleOverrides
                                       : setAccountRoleOverrides;
                                     setter((current) => {
                                       const next = { ...current };
-                                      const overrideKey =
-                                        accountOverrideKey(row);
+                                      const overrideKey = (tb?.reviewAccounts?.length || row.auxiliaryKey)
+                                        ? row.key : row.account;
                                       if (value) next[overrideKey] = value;
                                       else delete next[overrideKey];
                                       return next;
@@ -2608,7 +2661,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                         ? manualRate
                         : depositEffectiveTierRate(tier, tierRates);
                       const isRateRow = ["deposit", "other_monetary"].includes(reviewRole(row));
-                      const identity = [row.entity, row.auxiliary].filter(Boolean).join(" / ");
+                      const identity = [row.entity, row.auxiliary, row.currency].filter(Boolean).join(" / ");
                       return { key: row.key, values: [
                         `${row.account}${identity ? ` · ${identity}` : ""}`,
                         ROLE_OPTIONS.find(([key]) => key === reviewRole(row))?.[1] ?? "",
@@ -2645,8 +2698,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                           rateUpdates[row.key] = undefined;
                         }
                       }
-                      setAccountRoleOverrides((current) => ({ ...current, ...Object.fromEntries(Object.entries(roleUpdates).filter(([key]) => !byKey.get(key)?.auxiliaryKey)) }));
-                      setAccountDetailRoleOverrides((current) => ({ ...current, ...Object.fromEntries(Object.entries(roleUpdates).filter(([key]) => byKey.get(key)?.auxiliaryKey)) }));
+                      setAccountRoleOverrides((current) => ({ ...current, ...Object.fromEntries(Object.entries(roleUpdates).filter(([key]) => !tb?.reviewAccounts?.length && !byKey.get(key)?.auxiliaryKey).map(([key, role]) => [byKey.get(key)?.account ?? key, role])) }));
+                      setAccountDetailRoleOverrides((current) => ({ ...current, ...Object.fromEntries(Object.entries(roleUpdates).filter(([key]) => tb?.reviewAccounts?.length || byKey.get(key)?.auxiliaryKey)) }));
                       setAccountTierOverrides((current) => ({ ...current, ...Object.fromEntries(Object.entries(tierUpdates).filter(([key]) => !byKey.get(key)?.auxiliaryKey)) }));
                       setAccountDetailTierOverrides((current) => ({ ...current, ...Object.fromEntries(Object.entries(tierUpdates).filter(([key]) => byKey.get(key)?.auxiliaryKey)) }));
                       setAccountRateOverrides((current) => {
@@ -3626,8 +3679,9 @@ export function Results({
                   </td>
                   <td className="deposit-account-cell" title={row.account}>
                     <strong>{row.account}</strong>
-                    {row.auxiliary && <small>辅助：{row.auxiliary}</small>}
-                    <small>币种：{row.currency || "未标币种"}</small>
+                    <small title={[row.auxiliary && `辅助：${row.auxiliary}`, `币种：${row.currency || "未标币种"}`].filter(Boolean).join(" · ")}>
+                      {row.auxiliary ? `辅助：${row.auxiliary} · ` : ""}币种：{row.currency || "未标币种"}
+                    </small>
                   </td>
                   <td title={row.tierMatchedBy}>
                     <div className="deposit-tier-picker">

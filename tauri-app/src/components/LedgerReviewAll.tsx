@@ -113,8 +113,7 @@ export function useLedgerDictReviews(
         if (!mounted.current || generation.current[kind] !== started[kind])
           continue;
         const outcome = outcomes[kind]!;
-        // 自动复核只提出建议，不再为了“无变化”的当前映射触发页面作废结果。
-        // 真正的映射写回只发生在用户点击采纳/撤销时。
+        // 高置信且安全的建议自动写回；其余建议仍待人工采纳。
         if (!outcome.failed && outcome.applied.length)
           slots[kind]!.onApplied(outcome.mapping);
         // 结论必须与画面上的"尚未映射"清单一致：还缺着必填字段时，
@@ -315,6 +314,11 @@ export function LedgerReviewAll(props: {
   const subject = props.present
     .map((kind) => props.names[kind])
     .join(both ? "＋" : "");
+  const statusKinds = props.present.filter((kind) => {
+    const result = props.results?.[kind];
+    return !result || result.failed || props.reviewing[kind] || result.applied.length > 0 ||
+      result.pending.length > 0 || Boolean(result.missingAfter?.length) || Boolean(result.mappingWarnings?.length);
+  });
   return (
     <section className="fx-review-all" aria-label="字段映射一键复核">
       <div>
@@ -328,8 +332,8 @@ export function LedgerReviewAll(props: {
             。
           </p>
         )}
-        <div className="fx-review-states" aria-live="polite">
-          {props.present.map((kind) =>
+        {statusKinds.length > 0 && <div className="fx-review-states" aria-live="polite">
+          {statusKinds.map((kind) =>
             (() => {
               const result = props.results?.[kind];
               const presentation = result
@@ -363,7 +367,7 @@ export function LedgerReviewAll(props: {
               );
             })(),
           )}
-        </div>
+        </div>}
         <LedgerReviewCompact
           present={props.present}
           names={props.names}

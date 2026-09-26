@@ -2,6 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import {
   cleanup,
+  act,
   fireEvent,
   render,
   screen,
@@ -9,8 +10,8 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import ConfirmationProgressPage from "./ConfirmationProgressPage";
-import { engineCall, pickPath } from "./api";
-import type { ToolManifest } from "./types";
+import { engineCall, pickPath, jobStart, listenJobEvents } from "./api";
+import type { ToolManifest, JobEvent } from "./types";
 vi.mock("./api", () => ({
   engineCall: vi.fn(),
   jobCancel: vi.fn(),
@@ -96,4 +97,31 @@ it("选择文件后启用「检查数据」，点击执行检查而不是等下�
   expect(
     screen.getByRole("button", { name: "下一步：报告范围" }),
   ).toBeEnabled();
+});
+
+it("取消报告任务显示取消状态而不渲染失败错误框", async () => {
+  let receive: ((event: JobEvent) => void) | undefined;
+  vi.mocked(listenJobEvents).mockImplementation(async (callback) => {
+    receive = callback;
+    return () => undefined;
+  });
+  vi.mocked(jobStart).mockResolvedValue("confirmation-cancel-test");
+  vi.mocked(pickPath).mockResolvedValue(inspection.path);
+  vi.mocked(engineCall).mockResolvedValue(inspection);
+  const { container } = render(<ConfirmationProgressPage tool={tool} />);
+  fireEvent.click(screen.getByText("拖放或点击选择 Excel 函证清单").closest("button") as HTMLButtonElement);
+  await waitFor(() => expect(screen.getByRole("button", { name: "检查数据" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "检查数据" }));
+  await screen.findByText("字段检查通过");
+  fireEvent.click(screen.getByRole("button", { name: "3 生成报告" }));
+  fireEvent.click(screen.getByRole("button", { name: "生成进度报告" }));
+  await waitFor(() => expect(jobStart).toHaveBeenCalled());
+  await act(async () => receive?.({
+    jobId: "confirmation-cancel-test", toolId: tool.id,
+    phase: "cancelled", current: 1, total: 2,
+    message: "已取消报告生成，可调整资料后重试。", severity: "warning", outputPaths: [],
+  }));
+  expect(container.querySelector('[data-job-state="cancelled"]')).toBeInTheDocument();
+  expect(container.querySelector('.error-box')).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "生成进度报告" })).toBeEnabled();
 });

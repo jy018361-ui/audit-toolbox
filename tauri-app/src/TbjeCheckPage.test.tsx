@@ -431,9 +431,8 @@ describe("TbjeCheckPage", () => {
       screen.getByRole("button", { name: "LLM 一键联合复核 1 组" }),
     );
     await screen.findByText("联合复核完成：已复核 1 组。");
-    expect(screen.getAllByText("已复核 · 2 项建议待确认")).not.toHaveLength(0);
-    fireEvent.click(screen.getAllByRole("button", { name: "采纳" })[0]);
-    fireEvent.click(screen.getAllByRole("button", { name: "采纳" })[0]);
+    expect(screen.getAllByText("已复核 · 已自动调整 2 项")).not.toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "采纳" })).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /JE 缺少 .*必填映射/ }),
     ).not.toBeInTheDocument();

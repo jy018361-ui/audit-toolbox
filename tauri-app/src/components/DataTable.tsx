@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useTableColumnResize } from "./useTableColumnResize";
 
 export type DataTableProps = {
   columns: string[];
@@ -7,6 +8,11 @@ export type DataTableProps = {
   caption?: ReactNode;
   maxHeight?: number;
   emptyText?: string;
+  /**
+   * 列宽调整记忆键：传入即启用 Excel 式拖拽调宽（本机记忆）。
+   * 同一处表格跨会话共用一个键；列结构变化后旧记忆自动作废。
+   */
+  resizeKey?: string;
   /** 每列表头上方渲染的控件（如映射下拉），长度须与 columns 一致 */
   headerControls?: ReactNode[];
   /**
@@ -28,13 +34,15 @@ export function DataTable({
   caption,
   maxHeight = 430,
   emptyText = "暂无数据",
+  resizeKey,
   headerControls,
   trailingColumns,
 }: DataTableProps) {
+  const resize = useTableColumnResize<HTMLDivElement>({ storageKey: resizeKey ?? "" });
   return (
     <div className="data-table">
       {caption != null && <div className="data-table-caption">{caption}</div>}
-      <div className="data-table-scroll" style={{ maxHeight }}>
+      <div className="data-table-scroll" style={{ maxHeight }} ref={resize.ref}>
         {rows.length === 0 && !headerControls?.length ? (
           <div className="empty">{emptyText}</div>
         ) : (

@@ -7,6 +7,7 @@ import "./styles.css";
 import "./settings.css";
 import "./merger.css";
 import "./fa-dep-calc.css";
+import "./table-resize.css";
 import { restoreSavedTheme } from "./theme";
 import { ApplicationErrorBoundary } from "./components/ApplicationErrorBoundary";
 
@@ -36,6 +37,9 @@ async function renderApp() {
   } else if (import.meta.env.DEV && params.has("fa-pivot-fixture")) {
     const { FaPivotFixture } = await import("./preview/FaPivotFixture");
     content = <FaPivotFixture />;
+  } else if (import.meta.env.DEV && params.has("col-resize-fixture")) {
+    const { ColResizeFixture } = await import("./preview/ColResizeFixture");
+    content = <ColResizeFixture />;
   }
   root.render(
     <React.StrictMode>

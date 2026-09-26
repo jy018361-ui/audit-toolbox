@@ -1,0 +1,46 @@
+/*
+ * 表格列宽调整（useTableColumnResize）的公共样式。
+ * 句柄绝对定位在表头单元格的右边界上，平时透明，
+ * 悬停 / 聚焦 / 拖动时显示分隔线。颜色一律走设计令牌。
+ */
+
+.tcr-handle {
+  position: absolute;
+  top: 0;
+  /* 句柄完全收在本列内侧：越出表头单元格的部分会被后续同层级的
+     粘性表头列盖住（命中测试落不到句柄上），跨边界一半热区是死的。 */
+  right: 0;
+  width: 9px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 3;
+}
+
+.tcr-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 2px;
+  border-radius: var(--r-pill, 2px);
+  background: transparent;
+}
+
+.tcr-handle:hover::after,
+.tcr-handle:focus-visible::after,
+.tcr-handle[data-dragging="1"]::after {
+  background: var(--border-strong, var(--border));
+}
+
+.tcr-handle:focus-visible {
+  outline: 2px solid var(--border-strong, var(--border));
+  outline-offset: -2px;
+}
+
+/* 拖动期间全局锁定列宽光标，避免经过按钮等元素时指针跳动 */
+html.tcr-dragging,
+html.tcr-dragging * {
+  cursor: col-resize;
+}

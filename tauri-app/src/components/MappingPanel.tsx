@@ -319,7 +319,6 @@ export function MappingPanel(props: MappingPanelProps) {
                 <optgroup
                   key={group.title}
                   label={`${group.title}${group.status ? ` · ${group.status}` : ""}`}
-                  disabled={group.status === "未适配"}
                   className={
                     group.status === "未适配"
                       ? "dt-group-unavailable"

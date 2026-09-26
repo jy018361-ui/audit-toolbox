@@ -271,7 +271,7 @@ describe("共用字段映射面板", () => {
     );
   });
 
-  it("公共必填在分组内标星，未适配形态整组禁用", () => {
+  it("公共必填在分组内标星，未适配形态仅灰显不禁选", () => {
     const { selects } = panel({
       groups: [
         {
@@ -288,7 +288,13 @@ describe("共用字段映射面板", () => {
       groups[0].querySelector('option[value="accountCode"]'),
     ).toHaveTextContent("科目编码＊");
     expect(groups[1].label).toContain("未适配");
-    expect(groups[1]).toBeDisabled();
+    // 颜色状态类保留，但整组仍可选择——冲突只提示不拦截，
+    // 换形态不必先清空已有映射；缺字段组合由运行前后端校验拦截。
+    expect(groups[1]).toHaveClass("dt-group-unavailable");
+    expect(groups[1]).not.toBeDisabled();
+    expect(
+      groups[1].querySelector('option[value="functionalAmount"]'),
+    ).not.toBeDisabled();
   });
 
   it("已适配分组使用绿色状态类，已选字段控件保持映射态", () => {

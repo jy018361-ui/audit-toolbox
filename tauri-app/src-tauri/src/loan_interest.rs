@@ -7551,6 +7551,242 @@ mod tests {
         }
     }
 
+    // —— 合成台账回归测试集（tests/fixtures/借款台账测试集）——
+    // 与仅本机的 AUDIT_LOAN_TESTSET_DIR 客户样例验收互补：那套考真实世界的脏，
+    // 这套考已知口径的准——18 份台账覆盖表头布局（大标题/两级表头/一表多段/多
+    // Sheet）、列名流派（客户经理版/ERP/金蝶CSV）、内容写法（日期/利率/币种/状态
+    // 混排）、业务形态（台账A/B/C/D四型+混合型+工整对照），由 generate.py 复现。
+    fn synthetic_ledger_set_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/借款台账测试集")
+    }
+
+    /// 逐份验收：表头行自动探测、关键角色映射建议、按标准答案映射全流程测算，
+    /// 逐笔利息与 标准答案.json 对齐（容差 0.01 元）。
+    #[test]
+    fn 合成台账测试集逐份验收() {
+        let dir = synthetic_ledger_set_dir();
+        let answer_text = std::fs::read_to_string(dir.join("标准答案.json"))
+            .expect("标准答案.json 应随测试集提交（由 generate.py 生成）");
+        let answers: Value = serde_json::from_str(&answer_text).expect("标准答案.json 解析失败");
+        let files = answers["files"].as_array().expect("标准答案 files 数组");
+        assert_eq!(files.len(), 18, "合成测试集应为 18 份台账");
+        let mut failures: Vec<String> = vec![];
+        for spec in files {
+            let file = spec["file"].as_str().unwrap();
+            let sheet = spec["sheet"].as_str().unwrap_or("");
+            let path = dir.join(file);
+            let mut ip = inspect_params(&path, 0);
+            ip["source"]["sheet"] = json!(sheet);
+            let inspected = inspect(&ip)
+                .unwrap_or_else(|e| panic!("[{}] inspect 失败: {}", file, e.user_message));
+            let header_row = inspected["headerRow"].as_u64().unwrap_or(0) as usize;
+            let expect_row = spec["expectHeaderRow"].as_u64().unwrap_or(0) as usize;
+            if header_row != expect_row {
+                failures.push(format!(
+                    "[{}] 表头行探测 {} ≠ 预期 {}",
+                    file, header_row, expect_row
+                ));
+            }
+            let suggested = inspected["suggestedMapping"].as_object().cloned().unwrap_or_default();
+            for (role, col) in spec["expectSuggested"].as_object().unwrap() {
+                if suggested.get(role).and_then(Value::as_str) != Some(col.as_str().unwrap()) {
+                    failures.push(format!(
+                        "[{}] 映射建议 {} 期望 {}，实际 {:?}",
+                        file,
+                        role,
+                        col.as_str().unwrap(),
+                        suggested.get(role)
+                    ));
+                }
+            }
+            let mut pp = preview_params(&path, expect_row, spec["mapping"].clone());
+            pp["ledgerSource"]["source"]["sheet"] = json!(sheet);
+            let result = match run_preview(&pp) {
+                Ok(v) => v,
+                Err(e) => {
+                    failures.push(format!("[{}] preview 失败: {}", file, e.user_message));
+                    continue;
+                }
+            };
+            let rows = result["rows"].as_array().cloned().unwrap_or_default();
+            let expect_count = spec["expectLoanCount"].as_u64().unwrap_or(0) as usize;
+            if rows.len() != expect_count {
+                let ids: Vec<&str> = rows
+                    .iter()
+                    .map(|r| r["loanId"].as_str().unwrap_or(""))
+                    .collect();
+                failures.push(format!(
+                    "[{}] 借款笔数 {} ≠ 预期 {}；实际识别到 {:?}",
+                    file,
+                    rows.len(),
+                    expect_count,
+                    ids
+                ));
+            }
+            for loan in spec["loans"].as_array().unwrap() {
+                let id = loan["id"].as_str().unwrap();
+                let want = loan["interest"].as_f64().unwrap_or(0.0);
+                let ccy = loan["currency"].as_str().unwrap_or("CNY");
+                match rows.iter().find(|r| r["loanId"].as_str() == Some(id)) {
+                    None => failures.push(format!("[{}] 未找到借款 {}", file, id)),
+                    Some(r) => {
+                        let got = r["calculatedInterest"].as_f64().unwrap_or(0.0);
+                        if (got - want).abs() > 0.01 {
+                            failures.push(format!(
+                                "[{}] {} 利息 {:.2} ≠ 预期 {:.2}（差 {:+.2}）",
+                                file,
+                                id,
+                                got,
+                                want,
+                                got - want
+                            ));
+                        }
+                        if ccy != "CNY" {
+                            let got_ccy = r["currency"].as_str().unwrap_or("");
+                            if !got_ccy.is_empty() && got_ccy != ccy {
+                                failures.push(format!(
+                                    "[{}] {} 币种 {} ≠ 预期 {}",
+                                    file, id, got_ccy, ccy
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            let total: f64 = rows
+                .iter()
+                .map(|r| r["calculatedInterest"].as_f64().unwrap_or(0.0))
+                .sum();
+            println!("[{}] {} 笔 合计 {:.2} 元", file, rows.len(), total);
+        }
+        assert!(
+            failures.is_empty(),
+            "合成台账测试集回归失败 {} 项：\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    /// 临时诊断：对与标准答案有差异的行打印口径依据（matchBasis/利率/积数）。
+    #[test]
+    #[ignore = "仅排查合成台账口径差异时手工运行"]
+    fn 诊断_合成台账差异明细() {
+        // 日期取数探针：直接看 endDate 角色在两份文件里读出的文本与解析结果
+        for (probe, sheet, header_row) in [
+            ("04-南岭矿业集团有限公司-借款情况表.xlsx", "借款台账", 1usize),
+            ("05-恒信工贸有限公司-银行借款台账.xlsx", "", 1),
+        ] {
+            let spec = SourceSpec {
+                input_path: synthetic_ledger_set_dir()
+                    .join(probe)
+                    .to_string_lossy()
+                    .into_owned(),
+                sheet: sheet.into(),
+                header_row,
+                header_depth: 1,
+            };
+            let table = load_ledger_table(&spec).unwrap();
+            let idx = table.headers.iter().position(|h| h == "到期日").unwrap();
+            println!("PROBE {} 到期日列下标 {}", probe, idx);
+            for row in table.rows.iter().take(3) {
+                println!("  cell={:?} parsed={:?}", row.get(idx), parse_date(row.get(idx).map_or("", |v| v)));
+            }
+        }
+        // 内部字段探针：起止日/期末/还款方式在 calculate 之后、计息之前的实际值
+        for probe in ["06-中晟机械制造股份有限公司-短期借款明细.xlsx",
+                      "14-中兴电气股份有限公司-借款合同台账.xlsx"] {
+            let answers: Value = serde_json::from_str(
+                &std::fs::read_to_string(synthetic_ledger_set_dir().join("标准答案.json")).unwrap(),
+            )
+            .unwrap();
+            let spec = answers["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["file"].as_str() == Some(probe))
+                .unwrap();
+            let mut pp = preview_params(
+                &synthetic_ledger_set_dir().join(probe),
+                1,
+                spec["mapping"].clone(),
+            );
+            pp["ledgerSource"]["source"]["sheet"] = json!("");
+            let rows = calculate(&pp).unwrap();
+            println!("FIELDS {} → {} 行", probe, rows.len());
+            for r in rows.iter().take(4) {
+                println!(
+                    "  {} cs={:?} ce={:?} open={} close={} repaid={} method={:?}",
+                    r.loan_id, r.contract_start, r.contract_end,
+                    r.contract_opening, r.closing_principal, r.repaid, r.repayment_method
+                );
+            }
+        }
+
+        let dir = synthetic_ledger_set_dir();
+        let answers: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("标准答案.json")).unwrap(),
+        )
+        .unwrap();
+        for spec in answers["files"].as_array().unwrap() {
+            let file = spec["file"].as_str().unwrap();
+            let sheet = spec["sheet"].as_str().unwrap_or("");
+            let expect_row = spec["expectHeaderRow"].as_u64().unwrap_or(0) as usize;
+            let mut pp = preview_params(&dir.join(file), expect_row, spec["mapping"].clone());
+            pp["ledgerSource"]["source"]["sheet"] = json!(sheet);
+            let result = match run_preview(&pp) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("[{}] preview 失败: {}", file, e.user_message);
+                    continue;
+                }
+            };
+            let rows = result["rows"].as_array().unwrap();
+            println!("===== {} 共 {} 行（预期 {}）", file, rows.len(), spec["expectLoanCount"]);
+            for r in rows.iter().take(2) {
+                println!(
+                    "  row {} | open={:?} close={:?} | basis: {}",
+                    r["loanId"].as_str().unwrap_or(""),
+                    r["openingPrincipal"],
+                    r["closingPrincipal"],
+                    r["matchBasis"].as_str().unwrap_or("")
+                );
+            }
+            let mut shown = 0;
+            for loan in spec["loans"].as_array().unwrap() {
+                let id = loan["id"].as_str().unwrap();
+                let want = loan["interest"].as_f64().unwrap_or(0.0);
+                let hit = rows.iter().find(|r| r["loanId"].as_str() == Some(id));
+                let got = hit
+                    .map(|r| r["calculatedInterest"].as_f64().unwrap_or(0.0))
+                    .unwrap_or(f64::NAN);
+                if hit.is_none() {
+                    println!("  -- {} 未找到（工具行 ID 不匹配？）", id);
+                }
+                if (got - want).abs() > 0.01 && shown < 4 {
+                    shown += 1;
+                    println!("  -- {} 利息 {:.2} 预期 {:.2}", id, got, want);
+                    if let Some(r) = hit {
+                        println!(
+                            "     basis: {}",
+                            r["matchBasis"].as_str().unwrap_or("")
+                        );
+                        println!(
+                            "     rateType={} fixed={:?} bench={:?} bps={:?} eff={:?} days={:?} open={:?} close={:?}",
+                            r["rateType"],
+                            r["fixedRate"],
+                            r["benchmarkRate"],
+                            r["spreadBps"],
+                            r["effectiveRate"],
+                            r["principalDays"],
+                            r["openingPrincipal"],
+                            r["closingPrincipal"],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// 读子代理标准答案（利息测算 Excel 的「明细」sheet），返回 (公司 -> (笔数, 应计利息人民币元合计))。
     pub(crate) fn expected_by_company(
         file: &str,

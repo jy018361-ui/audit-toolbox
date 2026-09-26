@@ -7,6 +7,9 @@ import { useCallback, useEffect, useRef } from "react";
  *   右键边界重置整表列宽。
  * - 列宽按 `storageKey` 记在本机 localStorage，下次打开保持；
  *   表头列数或列名变化后旧记忆自动作废，回到自然布局。
+ * - 句柄对读屏软件隐藏（aria-hidden）：带名称的句柄会混进表头单元格的
+ *   可访问名（读成「科目 调整『科目』列宽」），列宽调整按 Excel 对等
+ *   只走鼠标，表头语义保持干净。
  *
  * 接入方式：把返回的 `ref` 挂在**只包含一张表**的容器元素上
  * （容器即表格本身也可以）。表格可以晚于容器渲染（如空数据时不渲染表），
@@ -27,9 +30,6 @@ export const TABLE_COLUMN_RESIZE_MIN_WIDTH = 56;
 export const TABLE_COLUMN_RESIZE_MAX_FIT_WIDTH = 720;
 /** 双击自适应时在量得的内容宽度上再加的余量（边框、句柄、取整） */
 const AUTO_FIT_SLACK = 10;
-/** 键盘单次方向键的调整步长；Shift 组合用于微调 */
-const KEYBOARD_STEP = 16;
-const KEYBOARD_FINE_STEP = 2;
 
 export type TableColumnResizeOptions = {
   /** 记忆键：同一处表格跨会话共用；空串表示禁用 */
@@ -222,12 +222,9 @@ class TableColumnResizeController {
         th.dataset.tcrPositioned = "1";
         th.style.position = "relative";
       }
-      const label = normalizeHeaderLabel(th.textContent);
       const handle = document.createElement("div");
       handle.className = "tcr-handle";
-      handle.setAttribute("role", "separator");
-      handle.setAttribute("aria-orientation", "vertical");
-      handle.setAttribute("aria-label", `调整「${label}」列宽`);
+      handle.setAttribute("aria-hidden", "true");
       handle.title = "拖动调整列宽；双击自适应内容；右键重置整表列宽";
       const index = th.cellIndex;
       handle.addEventListener("pointerdown", (event) => this.onPointerDown(event, index, handle));
@@ -236,7 +233,6 @@ class TableColumnResizeController {
         event.preventDefault();
         this.resetAll();
       });
-      handle.addEventListener("keydown", (event) => this.onKeyDown(event, index));
       th.appendChild(handle);
       this.handles.push({ th, handle });
     });
@@ -448,19 +444,6 @@ class TableColumnResizeController {
       this.applyWidths(this.currentWidths);
       this.persist();
     }
-  }
-
-  private onKeyDown(event: KeyboardEvent, index: number): void {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    event.preventDefault();
-    const current = this.captureCurrentWidths();
-    if (current.length === 0) return;
-    const direction = event.key === "ArrowRight" ? 1 : -1;
-    const step = event.shiftKey ? KEYBOARD_FINE_STEP : KEYBOARD_STEP;
-    const next = current.slice();
-    next[index] = clampWidth(next[index] + direction * step, this.config.minWidth);
-    this.applyWidths(next);
-    this.persist();
   }
 }
 

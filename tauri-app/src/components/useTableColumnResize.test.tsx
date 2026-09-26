@@ -214,19 +214,13 @@ describe("useTableColumnResize + DataTable 接入", () => {
     expect(container.querySelectorAll(".tcr-handle")).toHaveLength(2);
   });
 
-  it("键盘方向键可调宽，Shift 微调", () => {
+  it("句柄对读屏软件隐藏，不混入表头可访问名", () => {
     const { container } = render(
-      <DataTable resizeKey="demo.key" columns={["列A"]} rows={[["1"]]} />,
+      <DataTable resizeKey="demo.a11y" columns={["科目编码"]} rows={[["1"]]} />,
     );
-    const table = container.querySelector("table")!;
-    setCellWidths(table, [100]);
     const [handle] = Array.from(container.querySelectorAll<HTMLDivElement>(".tcr-handle"));
-
-    fireEvent.keyDown(handle, { key: "ArrowRight" });
-    expect((table.querySelectorAll("colgroup col")[0] as HTMLElement).style.width).toBe("116px");
-
-    fireEvent.keyDown(handle, { key: "ArrowLeft", shiftKey: true });
-    expect((table.querySelectorAll("colgroup col")[0] as HTMLElement).style.width).toBe("114px");
+    expect(handle.getAttribute("aria-hidden")).toBe("true");
+    expect(handle.getAttribute("role")).toBeNull();
   });
 
   it("表结构未就绪时（空数据无表格）出现表格后自动接管", async () => {

@@ -1,10 +1,33 @@
 # 看账小工具迁移功能矩阵
 
+## 2026-09-26：月/日分列账型的日期识别与 LLM 复核对齐 TBJE 公共引擎
+
+- 裸「月」「日」两列（纯数字、无年份、无完整日期列）的账型此前死路一条：date 角色的冲突词（年/月/期间）让脚本建议永远映射不上日期，页面持续提示「尚未映射：记账日期」。现在 `suggest_mapping`（看账与正负数凭证标记全部入口共用）接入公共 `pair_month_day_date_columns` 配对，并新增脚本级兜底 `month_day_date_fallback`：全表没有任何完整日期列、且恰有一列取值全为纯月份的「月」列时，直接把月＋日组成 date；多个月份列（歧义）、样例不足 5 行不猜，完整日期列在场时完整日期优先。
+- LLM 复核（`kanzhang.llm_mapping`，两页共用）从严格日期策略切到与 TBJE 相同的复合日期策略：提示词附公共复合日期规则；模型建议的月/日组成列在卫生过滤中放行（无完整日期列前提）；模型漏提 date 时按样例兜底补进 fills（月＋日各一条，0.99 置信自动采纳）。此前模型即使建议「月」列也会被冲突词丢弃。
+- 前端采纳复核建议时，date/id 等多列角色由「整组覆盖」改为「追加组成键」：LLM 分两条返回的月、日建议同时保留，与 planLedgerChanges／applyLedgerPendingChange 的既有口径一致；单列角色仍为改指语义。
+- 月份归集（凭证类型 Sheet 与自定义透视「日期自动转月份」）对无年份月/日组成列的口径：先从源文件名取报告期年份（恰一个落在 1990–2100 的 4 位数字段才作数，跨年区间如「2024-2025」不猜），取不到时按占位年 1900 让「月＋日」仍然算日期；月份桶在占位口径下只标「01月」，不亮占位年份，文件名取到年份或取值自带年份时仍标「YYYY-MM」。自定义透视的日期列字段改按整组日期映射还原月份（月/日分列也能出月份列），不再只看单列原始值。
+- 凭证识别键（coding 匹配）行为不变：本就用日期映射列的原始值拼键，月/日分列映射后即可区分凭证。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 裸月日分列兜底直接组成日期`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 看账建议把裸月日分列直接指为日期`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 无年份月日的月份桶按文件名年份或占位年份归集`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 看账复核放行裸月日组成列且漏提时补进fills`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 看账复核提示词带复合日期纪律`；`npx vitest run src/ledgerMappingLabels.test.ts src/KanzhangParityPage.test.ts src/JeSignMarkPage.test.tsx`。
+
+## 2026-09-26：重复合并标题与自动表头层数
+
+- TBJEPBC 的 2026.01–08 序时账第 1 行为跨 36 列的合并报表标题，底层每格都存有同一文字。旧双层判据把 36 个非空格当成分组表头，第 1 行因此胜出；页面又固定使用 1 层，预览得到重复标题列名而丢失全部字段映射。
+- 公共表头识别要求双层上层至少有两个不同的有效分组名；重复标题按单行报表标题跳过。看账／正负数标记的自动模式同时采用识别出的起始行和层数，人工行号或层数仍可单独覆盖。自动结论缓存换为 `auto-header-v2`，同时存行号与层数，旧误判不复用。
+- 该文件的 `会计科目` 为 `编码-名称` 混写，现有公共科目拆分规则仍不以连字符作分隔；此项与表头识别独立，尚未保留自动编码拆分行为。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 重复合并标题不冒充双层表头`、`cargo test --manifest-path src-tauri/Cargo.toml --lib kanzhang_inspect_merges_double_header`、`npx tsc -b`。
+
 ## 2026-09-26：审计关注预设的关键词只认科目首段（一级科目）
 
 - 实测 2221010102/2221010142「应交税费-应交增值税-进项税额-专用发票17%/13%：固定资产」凭全称包含「固定资产」误入固定资产批次——尾段「：固定资产」是辅助核算标注，科目本身仍是税金科目。预设名称匹配改为只对首段进行：先剥行首嵌入的编码段与尾部括号备注，再按层级分隔取首段；英文单词内的连字符/斜杠（Short-term Borrowings、A/P）不拆。
 - 编码前缀命中与损益让路口径不变；无独立编码列时同样只按首段名称匹配，「研发费用-…-无形资产摊销」不再进无形资产批次（2026-09-06 记录的「无独立编码列时维持纯名称匹配」全称包含行为废止）。首段不含关键词的科目（如「待处理财产损溢-待处理固定资产损溢」）不再自动进批次，可手工加入。
 - 回归：`npx vitest run src/KanzhangParityPage.test.ts`（新增「辅助核算标注里的关键词不把科目拉进无关预设批次」「英文科目名的连字符与斜杠不拆首段」，更新无编码列用例）。
+
+## 2026-09-26：暂停看账导出套表的 LLM 分析
+
+- 仅暂停导出套表时的 LLM 分析。读取后的 LLM 字段映射复核保持原样，仍可自动运行或手动重试。
+- 普通及大 CSV 磁盘导出均不调用套表分析模型、不生成 `LLM分析` Sheet。旧草稿或旧任务即使传入 `llmAnalysis=true`、全局设置开启 LLM，也按停用处理。
+- `科目汇总` 仍按所选目标科目命中的完整凭证明细逐行分组，金额是借正贷负的净额之和，另计分录行数；暂未增加借方、贷方列。源表借贷分列时可在汇总前分开累计；只有净额列时需依赖方向或已确认的符号口径，不能单凭最终净额还原两边发生额。
+- 回归：`npm run build`；`npx vitest run src/KanzhangParityPage.test.ts`；`cargo test --manifest-path src-tauri/Cargo.toml --lib kanzhang_export_writes_advanced_sheets_and_multiple_batches`；`cargo test --manifest-path src-tauri/Cargo.toml --lib disk_export_batch_aggregation_keeps_suite_totals`。
 
 ## 2026-09-23：科目身份任一满足，摘要选填
 

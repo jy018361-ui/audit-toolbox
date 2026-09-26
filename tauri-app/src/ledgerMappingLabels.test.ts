@@ -38,6 +38,37 @@ it("看账和正负数标记共用日期多列凭证键", () => {
   ).toEqual(["记账日期", "凭证号"]);
 });
 
+it("LLM 分两条返回的月/日日期建议同时落进 date", () => {
+  const source = { id: ["凭证号"], accountName: [] };
+  const result = applyLedgerReviews(source, {
+    fills: [
+      { role: "date", suggestedColumn: "月", confidence: 0.9 },
+      { role: "date", suggestedColumn: "日", confidence: 0.9 },
+    ],
+  });
+  // 多列角色是追加组成键：第二条不能把第一条冲掉。
+  expect(result.mapping.date).toEqual(["月", "日"]);
+  expect(result.changes).toEqual([
+    expect.objectContaining({ role: "date", after: ["月", "日"] }),
+  ]);
+  // 重复建议不产生重复列。
+  const again = applyLedgerReviews(result.mapping, {
+    fills: [{ role: "date", suggestedColumn: "月", confidence: 0.9 }],
+  });
+  expect(again.mapping.date).toEqual(["月", "日"]);
+});
+
+it("复核对单列角色仍是改指而非追加", () => {
+  const source = { id: ["凭证号"], accountName: [] };
+  const result = applyLedgerReviews(source, {
+    fills: [
+      { role: "accountCode", suggestedColumn: "科目编码", confidence: 0.9 },
+      { role: "accountCode", suggestedColumn: "会计科目", confidence: 0.9 },
+    ],
+  });
+  expect(result.mapping.accountCode).toBe("会计科目");
+});
+
 // 五个账表工具此前各抄一份「角色名→中文标签」，改成后端下发＋本地兜底之后，
 // 这里钉住三条：后端优先、缺项回落、整段缺失时行为与从前完全一致。
 describe("resolveRoleLabels", () => {

@@ -68,6 +68,13 @@ export function ledgerHasMappedRole(
     : Boolean(value?.trim());
 }
 
+/** 第二步统一在科目列展示有效辅助值；身份键仍分别保留科目和辅助字段。 */
+export function ledgerReviewAccountLabel(account: string, auxiliary?: string | null): string {
+  const name = account.trim();
+  const detail = auxiliary?.trim();
+  return detail ? `${name} · ${detail}` : name;
+}
+
 /** 主体仅在 TB 与 JE 双侧均确认映射后成为匹配键。 */
 export function ledgerEntityKeyEnabled(
   tbMapping: Record<string, string | string[] | undefined>,
@@ -1472,7 +1479,14 @@ export function applyLedgerReviews(
       continue;
     }
     const before = next[role];
-    const after = clear ? undefined : isMultiRole(role) ? [column] : column;
+    // 多列角色是「追加组成键」（date 的月/日分列、id 的凭证字＋凭证号），
+    // LLM 分多条返回时必须同时保留，第二条不能把第一条冲掉；与
+    // planLedgerChanges／applyLedgerPendingChange 的口径一致。
+    const after = clear
+      ? undefined
+      : isMultiRole(role)
+        ? appendMappingColumn(before, column)
+        : column;
     next = { ...next, [role]: after };
     applied.push({
       role,

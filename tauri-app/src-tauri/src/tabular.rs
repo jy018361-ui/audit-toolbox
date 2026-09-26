@@ -193,10 +193,6 @@ struct KanzhangParams {
     /// 可多选。旧版允许把任意列拖进值字段，迁移时被写死成了净额。
     #[serde(default)]
     pivot_values: Vec<String>,
-    #[serde(default = "default_true")]
-    llm_analysis: bool,
-    #[serde(default, rename = "__settings")]
-    settings: Value,
     #[serde(default = "default_excel_chunk")]
     rows_per_sheet: usize,
 }
@@ -1077,8 +1073,12 @@ fn ensure_kanzhang_batch_has_rows(batch: &LedgerBatch, rows: usize) -> Result<()
 /// 否则前端的自动值 `0` 与读取阶段已解析的行号会将同一份大 CSV 分成两份缓存。
 fn parse_kanzhang_job(params: Value) -> Result<KanzhangParams, AppError> {
     let mut job: KanzhangParams = parse(params, "看账参数不完整。")?;
-    job.header_row =
-        resolve_auto_header_row(&job.input_path, job.sheet.as_deref(), job.header_row)?;
+    let (row, depth) =
+        resolve_auto_header_layout(&job.input_path, job.sheet.as_deref(), job.header_row)?;
+    job.header_row = row;
+    if job.header_depth == 0 {
+        job.header_depth = depth;
+    }
     Ok(job)
 }
 
@@ -2003,6 +2003,9 @@ fn analyze_ledger(
         });
     }
     let amounts = ledger_amounts(rows, &table.headers, mapping, &id_indexes, None);
+    // 月/日组成列没有年份时的报告期年份：先从源文件名取；取不到就按
+    // 占位年 1900 让「月＋日」仍然算日期（月份桶只标月份，不亮占位年份）。
+    let fallback_year = year_from_filename(&table.path);
     let summary = ledger_summary_from_amounts(rows, &account_indexes, &amounts.net)?;
     let key_label = voucher_key_label(&table.headers, &id_indexes);
     let voucher_pivot = build_voucher_pivot_rust(
@@ -2023,6 +2026,7 @@ fn analyze_ledger(
         &account_indexes,
         &target_set,
         &loss_ids,
+        fallback_year,
     );
     let voucher_type_loose = build_voucher_type_rows(&infos, false, &key_label);
     let voucher_type_strict = build_voucher_type_rows(&infos, true, &key_label);
@@ -2035,24 +2039,10 @@ fn analyze_ledger(
         &job.pivot_rows,
         &job.pivot_columns,
         &loss_ids,
+        fallback_year,
     )?;
-    let llm_analysis = if job.llm_analysis
-        && job
-            .settings
-            .get("llm")
-            .and_then(|value| value.get("enabled"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    {
-        let payload = json!({"targetAccounts":targets,"subjectSummary":{"headers":&summary.headers,"rows":summary.rows.iter().take(40).collect::<Vec<_>>()},"voucherTypesStrict":{"headers":&voucher_type_strict.headers,"rows":voucher_type_strict.rows.iter().take(80).collect::<Vec<_>>()},"voucherTypesLoose":{"headers":&voucher_type_loose.headers,"rows":voucher_type_loose.rows.iter().take(40).collect::<Vec<_>>()},"customPivot":custom_pivot.as_ref().map(|pivot|json!({"headers":&pivot.headers,"rows":pivot.rows.iter().take(80).collect::<Vec<_>>() }))});
-        crate::audipick::kanzhang_llm_call(
-            &json!({"mode":"analysis","payload":payload}),
-            &job.settings,
-        )
-        .ok()
-    } else {
-        None
-    };
+    // 看账的 LLM 分析暂时停用，旧任务即使传入 llmAnalysis=true 也不调用模型。
+    let llm_analysis = None;
     Ok(LedgerAnalysis {
         headers,
         rows: enriched,
@@ -2355,6 +2345,59 @@ pub(crate) fn ledger_row_keys(
     )
 }
 
+/// 从映射到 `date` 的列还原月份桶。月/日组成列没有年份时，日期按占位年
+/// 1900 仍然成立（用户口径：月＋日就是日期），桶标签只保留月份（「01月」），
+/// 不把占位年份亮给用户；取值自带年份或文件名里能取到年份时仍标「YYYY-MM」。
+fn ledger_month_bucket(
+    headers: &[String],
+    row: &[String],
+    date_indexes: &[usize],
+    fallback_year: Option<i32>,
+) -> Option<String> {
+    if date_indexes.is_empty() {
+        return None;
+    }
+    if let Some(date) =
+        ledger_mapping::parse_mapped_date(headers, row, date_indexes, fallback_year)
+    {
+        return Some(date.format("%Y-%m").to_string());
+    }
+    ledger_mapping::parse_mapped_date(headers, row, date_indexes, Some(1900))
+        .map(|date| format!("{}月", date.format("%m")))
+        .or_else(|| {
+            date_indexes
+                .iter()
+                .filter_map(|index| row.get(*index))
+                .find_map(|value| parse_month(value))
+        })
+}
+
+/// 从源文件名里找报告期年份：收集全部 4 位（或 8 位 yyyymmdd 的前 4 位）
+/// 且落在 1990..=2100 的数字段；恰有一个不同年份才作数。跨年区间
+/// （如「2024-2025」）或没有年份时不猜，调用方落到占位口径。
+fn year_from_filename(path: &std::path::Path) -> Option<i32> {
+    let stem = path.file_stem()?.to_string_lossy();
+    let mut years = Vec::new();
+    for chunk in stem.split(|c: char| !c.is_ascii_digit()) {
+        let year = match chunk.len() {
+            4 => chunk.parse::<i32>().ok(),
+            8 => chunk[..4].parse::<i32>().ok(),
+            _ => None,
+        };
+        if let Some(year) = year {
+            if (1990..=2100).contains(&year) {
+                years.push(year);
+            }
+        }
+    }
+    years.sort_unstable();
+    years.dedup();
+    match years.as_slice() {
+        [single] => Some(*single),
+        _ => None,
+    }
+}
+
 fn voucher_infos(
     rows: &[Vec<String>],
     headers: &[String],
@@ -2364,6 +2407,7 @@ fn voucher_infos(
     account_indexes: &[usize],
     targets: &HashSet<String>,
     loss_ids: &HashSet<String>,
+    fallback_year: Option<i32>,
 ) -> Vec<VoucherInfo> {
     // 凭证按「在底稿里第一次出现」的顺序排列，不能用 BTreeMap 的字典序：
     // 旧版的归类是两阶段并查集，谁先出现谁就当基准组的种子，顺序会直接改变归并结果。
@@ -2402,15 +2446,7 @@ fn voucher_infos(
                 bucket.push(value.to_owned());
             }
         }
-        if let Some(month) = ledger_mapping::parse_mapped_date(headers, row, &date_indexes, None)
-            .map(|value| value.format("%Y-%m").to_string())
-            .or_else(|| {
-                date_indexes
-                    .iter()
-                    .filter_map(|index| row.get(*index))
-                    .find_map(|value| parse_month(value))
-            })
-        {
+        if let Some(month) = ledger_month_bucket(headers, row, &date_indexes, fallback_year) {
             *month_nets
                 .entry(id.clone())
                 .or_default()
@@ -2634,6 +2670,7 @@ fn build_custom_ledger_pivot(
     row_fields: &[String],
     column_fields: &[String],
     loss_ids: &HashSet<String>,
+    fallback_year: Option<i32>,
 ) -> Result<Option<PivotResult>, AppError> {
     if row_fields.is_empty() {
         return Ok(None);
@@ -2653,11 +2690,13 @@ fn build_custom_ledger_pivot(
         .iter()
         .filter_map(|name| header_index(&table.headers, name).map(|index| (name.clone(), index)))
         .collect::<Vec<_>>();
-    let date_indexes = mapping
+    let date_index_set = mapping
         .date
         .iter()
         .filter_map(|name| header_index(&table.headers, name))
         .collect::<HashSet<_>>();
+    let mut date_indexes = date_index_set.iter().copied().collect::<Vec<_>>();
+    date_indexes.sort_unstable();
     let id_indexes = ledger_id_indexes(&table.headers, mapping);
     let mut columns = BTreeSet::new();
     let mut values = BTreeMap::<Vec<String>, BTreeMap<String, f64>>::new();
@@ -2675,11 +2714,16 @@ fn build_custom_ledger_pivot(
             column_indexes
                 .iter()
                 .map(|(_, position)| {
-                    let raw = row.get(*position).map(String::as_str).unwrap_or("");
-                    if date_indexes.contains(position) {
-                        parse_month(raw).unwrap_or_else(|| "Unknown".into())
+                    // 列字段命中日期映射时按整组日期映射还原月份（月/日分列
+                    // 也能出「01月」），不再只看单列原始值。
+                    if date_index_set.contains(position) {
+                        ledger_month_bucket(&table.headers, row, &date_indexes, fallback_year)
+                            .unwrap_or_else(|| "Unknown".into())
                     } else {
-                        raw.to_owned()
+                        row.get(*position)
+                            .map(String::as_str)
+                            .unwrap_or("")
+                            .to_owned()
                     }
                 })
                 .collect::<Vec<_>>()
@@ -3462,7 +3506,8 @@ fn auto_header_memo_path(path: &Path, sheet: Option<&str>) -> Result<PathBuf, Ap
     hasher.update(meta.len().to_le_bytes());
     hasher.update(modified.to_le_bytes());
     hasher.update(sheet.unwrap_or("<auto>").as_bytes());
-    hasher.update(b"auto-header-v1");
+    // v2 同时记住行号与层数，并废弃曾把重复的合并标题记为第 1 行的旧结论。
+    hasher.update(b"auto-header-v2");
     let key = hex::encode(hasher.finalize());
     Ok(cache_root()?
         .join("ts")
@@ -3470,13 +3515,13 @@ fn auto_header_memo_path(path: &Path, sheet: Option<&str>) -> Result<PathBuf, Ap
         .join(format!("{key}.header")))
 }
 
-fn remember_auto_header(path: &Path, sheet: Option<&str>, header_row: usize) {
+fn remember_auto_header(path: &Path, sheet: Option<&str>, layout: (usize, usize)) {
     let Ok(memo_path) = auto_header_memo_path(path, sheet) else {
         return;
     };
     let partial = memo_path.with_extension("header.partial");
     if fs::create_dir_all(memo_path.parent().unwrap_or(Path::new("."))).is_ok()
-        && fs::write(&partial, header_row.to_string()).is_ok()
+        && fs::write(&partial, format!("{},{}", layout.0, layout.1)).is_ok()
     {
         let _ = replace_file(&partial, &memo_path);
     }
@@ -3487,13 +3532,13 @@ fn remember_auto_header(path: &Path, sheet: Option<&str>, header_row: usize) {
 /// 第 1 行），表头在第 2/4 行的余额表（TBJEPBC 06/09/10 号样例）第一步就报
 /// 「请先确认科目编码或科目名称字段映射」，而同一文件在存款/汇兑引擎里能自动
 /// 认出。大 CSV 走流式路径暂不探测，`0` 仍按第 1 行处理。
-fn resolve_auto_header_row(
+fn resolve_auto_header_layout(
     input_path: &str,
     sheet: Option<&str>,
     header_row: usize,
-) -> Result<usize, AppError> {
+) -> Result<(usize, usize), AppError> {
     if header_row != 0 {
-        return Ok(header_row);
+        return Ok((header_row, 1));
     }
     let path = Path::new(input_path);
     if !path.is_file() {
@@ -3504,13 +3549,23 @@ fn resolve_auto_header_row(
         ));
     }
     if large_csv::applies(path) {
-        return Ok(1);
+        return Ok((1, 1));
+    }
+    if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("parquet"))
+    {
+        return Ok((1, 1));
     }
     if let Ok(memo_path) = auto_header_memo_path(path, sheet) {
         if let Some(remembered) = fs::read_to_string(&memo_path)
             .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|value| (1..=30).contains(value))
+            .and_then(|value| {
+                let (row, depth) = value.trim().split_once(',')?;
+                Some((row.parse::<usize>().ok()?, depth.parse::<usize>().ok()?))
+            })
+            .filter(|(row, depth)| (1..=30).contains(row) && (1..=2).contains(depth))
         {
             touch_cache(&memo_path);
             return Ok(remembered);
@@ -3526,15 +3581,16 @@ fn resolve_auto_header_row(
     {
         // 直接流式解压工作表 XML 的前 32 行；失败时再回退到 calamine，
         // 兼容个别非标准 OOXML 文件，不让性能优化改变可读范围。
-        if let Ok((selected_sheet, resolved)) = crate::fx::lightweight_xlsx_header_row(path, sheet)
+        if let Ok((selected_sheet, row, depth)) =
+            crate::fx::lightweight_xlsx_header_layout(path, sheet)
         {
             if sheet.is_none() {
                 // 标题探测已经顺手比较了各 Sheet 的维度和表头分，不要让随后
                 // 的正式读取再通过 calamine 把每张表完整解析一遍来选表。
                 remember_auto_sheet(path, &selected_sheet);
             }
-            remember_auto_header(path, sheet, resolved);
-            return Ok(resolved);
+            remember_auto_header(path, sheet, (row, depth));
+            return Ok((row, depth));
         }
     }
     let rows: Vec<Vec<String>> = if crate::spreadsheet_input::is_text(path) {
@@ -3571,13 +3627,10 @@ fn resolve_auto_header_row(
             .collect()
     };
     let resolved = if rows.is_empty() {
-        1
+        (1, 1)
     } else {
-        (0..rows.len().min(30))
-            .map(|index| (index + 1, ledger_mapping::header_row_score(&rows, index)))
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(row, _)| row)
-            .unwrap_or(1)
+        // 与普通账表读取相同的联合判据，避免回退路径丢掉层数。
+        crate::fx::infer_public_header_layout(&rows)
     };
     remember_auto_header(path, sheet, resolved);
     Ok(resolved)
@@ -3587,11 +3640,15 @@ fn resolve_auto_header_row(
 /// 之后缓存键与读取用的都是确定值，同一文件不会因两次探测不一致而分裂。
 fn parse_ledger_source(params: Value, message: &str) -> Result<SourceParams, AppError> {
     let mut source: SourceParams = parse(params, message)?;
-    source.header_row = resolve_auto_header_row(
+    let (row, depth) = resolve_auto_header_layout(
         &source.input_path,
         source.sheet.as_deref(),
         source.header_row,
     )?;
+    source.header_row = row;
+    if source.header_depth == 0 {
+        source.header_depth = depth;
+    }
     Ok(source)
 }
 
@@ -4765,7 +4822,7 @@ fn write_kanzhang_suite_workbook(
 ) -> Result<(), AppError> {
     let mut workbook = Workbook::new();
     let range = targets_range(&analysis.target_accounts);
-    // 页签顺序照旧版排：凭证 → 凭证类型-宽松 → 凭证类型-严格 → 透视分析 → _targets → LLM分析。
+    // 页签顺序沿用旧版的前四页；当前停用 LLM 分析页。
     // 「科目汇总」是新版才有的页，插在旧版四页之后，免得把复核人熟悉的位置挤走。
     if include_pivot || !analysis.summary.rows.is_empty() {
         // 「凭证」是给透视和类型表当底稿的中间表，旧版套表里是隐藏的：
@@ -5278,6 +5335,27 @@ fn suggest_mapping(headers: &[String], rows: &[Vec<String>]) -> LedgerMapping {
         mapping.credit = None;
         if mapping.direction.is_none() {
             mapping.direction = combined;
+        }
+    }
+    // 与汇兑损益／存款／借款同款：date 落在月份列时把同表的「日」列一并挂进
+    // 来（合并表头「年-月」＋「年-日」的账型）；裸「月」「日」分列连冲突词
+    // 都过不去、date 连建议都没有时，再走一层脚本级兜底。
+    if mapping.date.len() <= 1 {
+        let mut json_mapping = serde_json::Map::new();
+        if let [single] = mapping.date.as_slice() {
+            json_mapping.insert("date".to_owned(), Value::String(single.clone()));
+        }
+        ledger_mapping::month_day_date_fallback(headers, rows, &mut json_mapping);
+        if let Some(value) = json_mapping.get("date") {
+            mapping.date = match value {
+                Value::String(one) => vec![one.clone()],
+                Value::Array(all) => all
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+                _ => Vec::new(),
+            };
         }
     }
     mapping
@@ -6557,8 +6635,12 @@ fn export_je_mark(
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
     let mut job: JeMarkParams = parse(params, "正负数标记参数不完整。")?;
-    job.header_row =
-        resolve_auto_header_row(&job.input_path, job.sheet.as_deref(), job.header_row)?;
+    let (row, depth) =
+        resolve_auto_header_layout(&job.input_path, job.sheet.as_deref(), job.header_row)?;
+    job.header_row = row;
+    if job.header_depth == 0 {
+        job.header_depth = depth;
+    }
     if job.header_depth > 1 && large_csv::applies(Path::new(&job.input_path)) {
         return Err(error(
             "LARGE_CSV_DOUBLE_HEADER",
@@ -6977,6 +7059,15 @@ mod tests {
         sheet.write_number(2, 2, 100.0).unwrap();
         workbook.save(&path).unwrap();
 
+        let automatic = inspect_kanzhang(json!({
+            "inputPath": path.to_string_lossy(),
+            "headerRow": 0,
+            "headerDepth": 0,
+        }))
+        .unwrap();
+        assert_eq!(automatic["headerRow"], json!(1));
+        assert_eq!(automatic["headerDepth"], json!(2));
+
         let value = inspect_kanzhang(json!({
             "inputPath": path.to_string_lossy(),
             "headerRow": 1,
@@ -7002,6 +7093,46 @@ mod tests {
     }
 
     #[test]
+    fn 重复合并标题不冒充双层表头() {
+        let dir = temp_dir("kz-repeated-title");
+        let path = dir.join("je.xlsx");
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        for col in 0..36 {
+            // 某些 ERP 导出在合并区域内把标题值实际写进每个底层格子。
+            sheet.write_string(0, col, "记账凭证明细查询").unwrap();
+        }
+        for (col, header) in [
+            "年度", "期间", "记账日期", "凭证号", "行号", "预制凭证号", "业务类型", "业务单号",
+            "摘要", "借方金额", "贷方金额", "会计科目",
+        ]
+        .iter()
+        .enumerate()
+        {
+            sheet.write_string(1, col as u16, *header).unwrap();
+        }
+        for col in 12..36 {
+            sheet.write_string(1, col, format!("辅助字段{col}")).unwrap();
+        }
+        sheet.write_string(2, 2, "2026-01-04").unwrap();
+        sheet.write_string(2, 3, "0000000001").unwrap();
+        sheet.write_number(2, 9, 5450.0).unwrap();
+        sheet.write_string(2, 11, "1219000101-其他应收款").unwrap();
+        workbook.save(&path).unwrap();
+
+        let value = inspect_kanzhang(json!({
+            "inputPath": path.to_string_lossy(), "headerRow": 0, "headerDepth": 0
+        }))
+        .unwrap();
+        assert_eq!(value["headerRow"], json!(2));
+        assert_eq!(value["headerDepth"], json!(1));
+        assert_eq!(value["headers"][2], json!("记账日期"));
+        assert_eq!(value["headers"][11], json!("会计科目"));
+        assert_eq!(value["suggestedMapping"]["date"], json!(["记账日期"]));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn auto_header_row_memo_is_reused() {
         let dir = temp_dir("kz-auto-header-memo");
         let path = dir.join("ledger.xlsx");
@@ -7021,17 +7152,17 @@ mod tests {
         workbook.save(&path).unwrap();
 
         assert_eq!(
-            resolve_auto_header_row(path.to_str().unwrap(), None, 0).unwrap(),
-            3
+            resolve_auto_header_layout(path.to_str().unwrap(), None, 0).unwrap(),
+            (3, 1)
         );
         let memo = auto_header_memo_path(&path, None).unwrap();
-        assert_eq!(fs::read_to_string(&memo).unwrap(), "3");
+        assert_eq!(fs::read_to_string(&memo).unwrap(), "3,1");
 
         // 改写记忆值，证明第二次在打开并解析工作簿之前已返回缓存结论。
-        fs::write(&memo, "2").unwrap();
+        fs::write(&memo, "2,2").unwrap();
         assert_eq!(
-            resolve_auto_header_row(path.to_str().unwrap(), None, 0).unwrap(),
-            2
+            resolve_auto_header_layout(path.to_str().unwrap(), None, 0).unwrap(),
+            (2, 2)
         );
         let _ = fs::remove_file(memo);
         fs::remove_dir_all(&dir).unwrap();
@@ -8354,6 +8485,100 @@ mod tests {
         assert_eq!(parse_month("2026/1/3").as_deref(), Some("2026-01"));
     }
 
+    /// 裸「月」「日」分列的账型：自动建议直接把两列组成 date，不再要求
+    /// 用户手填；表里有完整日期列时仍按完整日期走。
+    #[test]
+    fn 看账建议把裸月日分列直接指为日期() {
+        let headers: Vec<String> = ["月", "日", "凭证号", "科目名称", "借方", "贷方"]
+            .iter()
+            .map(|value| value.to_string())
+            .collect();
+        let rows: Vec<Vec<String>> = (1..=20)
+            .map(|index| {
+                vec![
+                    format!("{}", (index - 1) % 12 + 1),
+                    format!("{}", (index - 1) % 28 + 1),
+                    format!("记-{index:04}"),
+                    "管理费用".to_owned(),
+                    "100.00".to_owned(),
+                    String::new(),
+                ]
+            })
+            .collect();
+        let mapping = suggest_mapping(&headers, &rows);
+        assert_eq!(mapping.date, vec!["月".to_owned(), "日".to_owned()]);
+
+        // 完整日期列在场时不受兜底影响，仍是单列完整日期。
+        let full_headers: Vec<String> = [
+            "月",
+            "日",
+            "记账日期",
+            "凭证号",
+            "科目名称",
+            "借方",
+            "贷方",
+        ]
+        .iter()
+        .map(|value| value.to_string())
+        .collect();
+        let full_rows: Vec<Vec<String>> = (1..=20)
+            .map(|index| {
+                vec![
+                    format!("{}", (index - 1) % 12 + 1),
+                    format!("{}", (index - 1) % 28 + 1),
+                    format!("2025-01-{:02}", (index - 1) % 28 + 1),
+                    format!("记-{index:04}"),
+                    "管理费用".to_owned(),
+                    "100.00".to_owned(),
+                    String::new(),
+                ]
+            })
+            .collect();
+        let full_mapping = suggest_mapping(&full_headers, &full_rows);
+        assert_eq!(full_mapping.date, vec!["记账日期".to_owned()]);
+    }
+
+    /// 月/日组成列没有年份时：文件名取到年份标「YYYY-MM」，取不到按
+    /// 占位年 1900 让月＋日仍算日期，月份桶只标「01月」不亮占位年份。
+    #[test]
+    fn 无年份月日的月份桶按文件名年份或占位年份归集() {
+        assert_eq!(
+            year_from_filename(std::path::Path::new("C:/账/2025年序时账.xlsx")),
+            Some(2025)
+        );
+        assert_eq!(
+            year_from_filename(std::path::Path::new("序时账20250109.xlsx")),
+            Some(2025)
+        );
+        assert_eq!(
+            year_from_filename(std::path::Path::new("序时账.xlsx")),
+            None
+        );
+        // 跨年区间猜不出唯一年份。
+        assert_eq!(
+            year_from_filename(std::path::Path::new("2024-2025序时账.xlsx")),
+            None
+        );
+
+        let headers = vec!["月".to_owned(), "日".to_owned()];
+        let indexes = vec![0usize, 1];
+        let row = vec!["1".to_owned(), "9".to_owned()];
+        assert_eq!(
+            ledger_month_bucket(&headers, &row, &indexes, Some(2025)),
+            Some("2025-01".to_owned())
+        );
+        assert_eq!(
+            ledger_month_bucket(&headers, &row, &indexes, None),
+            Some("01月".to_owned())
+        );
+        // 取值自带年份时以值为准。
+        let with_year = vec!["2025-01".to_owned(), String::new()];
+        assert_eq!(
+            ledger_month_bucket(&headers, &with_year, &indexes, None),
+            Some("2025-01".to_owned())
+        );
+    }
+
     #[test]
     fn voucher_type_drops_rows_that_are_zero_everywhere_but_keeps_offsetting_months() {
         let mut netted = voucher_info("V1", &[("A", 100.0), ("X", -100.0)], &["A"], &[]);
@@ -8880,6 +9105,7 @@ mod tests {
             &account_indexes,
             &targets,
             &loss_ids,
+            None,
         );
 
         for (strict, file) in [(false, "expect_loose.csv"), (true, "expect_strict.csv")] {
@@ -9035,6 +9261,7 @@ mod tests {
             &[1],
             &HashSet::from(["a".to_owned()]),
             &HashSet::new(),
+            None,
         );
         assert_eq!(
             infos
@@ -9614,7 +9841,7 @@ mod tests {
         let input = root.join("ledger.csv");
         let output = root.join("result.xlsx");
         fs::write(&input,"凭证号,日期,摘要,科目名称,借方金额,贷方金额\n1,2026-01-10,销售,收入,100,0\n1,2026-01-10,销售,银行,0,100\n2,2026-02-10,采购,成本,50,0\n2,2026-02-10,采购,银行,0,50\n").unwrap();
-        let result=export_kanzhang(json!({"inputPath":input,"outputPath":output,"targetBatches":[{"name":"收入","accounts":["收入"]},{"name":"成本","accounts":["成本"]}],"excludeAccounts":["银行"],"includePivot":true,"includeVoucherTypes":true,"markLossTransfer":true,"pivotRows":["科目名称"],"pivotColumns":["日期"]}),&|_,_,_,_|{},&AtomicBool::new(false)).unwrap();
+        let result=export_kanzhang(json!({"inputPath":input,"outputPath":output,"targetBatches":[{"name":"收入","accounts":["收入"]},{"name":"成本","accounts":["成本"]}],"excludeAccounts":["银行"],"includePivot":true,"includeVoucherTypes":true,"markLossTransfer":true,"pivotRows":["科目名称"],"pivotColumns":["日期"],"llmAnalysis":true,"__settings":{"llm":{"enabled":true}}}),&|_,_,_,_|{},&AtomicBool::new(false)).unwrap();
         assert_eq!(result["batchCount"], 2);
         assert!(output.exists());
         assert!(root.join("result_成本_02.xlsx").exists());
@@ -10162,7 +10389,8 @@ mod tests {
                 "date": "记账日期", "direction": "借贷方向", "summary": "摘要"
             },
             "targetBatches": [{"name": "收入", "accounts": ["收入"]}],
-            "includePivot": true, "includeVoucherTypes": true, "llmAnalysis": false
+            "includePivot": true, "includeVoucherTypes": true, "llmAnalysis": true,
+            "__settings": {"llm": {"enabled": true}}
         }))
         .unwrap();
         let result = export_kanzhang_disk(&job, &|_, _, _, _| {}, &AtomicBool::new(false))
@@ -10180,6 +10408,7 @@ mod tests {
         assert!(rows.iter().any(|row| row == &["银行", "-100", "1"]));
         assert!(rows.iter().any(|row| row == &["现金", "-50", "1"]));
         assert!(workbook.worksheet_range("凭证类型-严格").is_ok());
+        assert!(!workbook.sheet_names().contains(&"LLM分析".to_owned()));
         let _ = fs::remove_dir_all(root);
     }
 

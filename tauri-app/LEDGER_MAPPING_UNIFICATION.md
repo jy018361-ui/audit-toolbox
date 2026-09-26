@@ -1,5 +1,32 @@
 # 账表映射统一方案
 
+## 2026-09-26：复合日期能力补齐看账/正负数凭证标记通道
+
+- 看账与正负数凭证标记的 LLM 复核走的是 `kanzhang.llm_mapping` 旧通道，此前硬编码 `ReviewDatePolicy::Strict`，绕开公共复核日期纪律：模型建议的月/日组成列被 date 冲突词丢弃、漏提时也无兜底，源表只有裸「月」「日」列时「记账日期」永远映射不上（公共 `review_date_policy` 与其测试早已期望这两个工具按 TbjeComposite 执行）。该通道现改用 `review_date_policy(Some("kanzhang"))`，提示词附 `REVIEW_JE_TBJE_COMPOSITE_DATE`，漏提兜底 `supplement_tbje_required_je_changes` 从只补 `changes` 扩展为同构补 `fills`（看账通道的输出结构）。
+- 新增两个公共函数：`full_date_column_exists`（自 audipick 私有实现上移，LLM 组成列豁免与脚本兜底共用同一把「完整日期优先」闸）与 `month_day_date_fallback`（date 无建议、全表无完整日期列、恰一个纯月份「月」列时脚本级组成月＋日，多月份列/样例不足不猜）。看账侧 `suggest_mapping` 全部入口接入兜底与 `pair_month_day_date_columns` 配对；fx/存款/借款既有接线不变。
+- 无年份月/日的年份口径（看账月份归集）：源文件名恰一个 1990–2100 的 4 位年份才作数（yyyymmdd 取前 4 位，跨年区间不猜）；取不到时按占位年 1900 让「月＋日」仍算日期，月份桶只标「01月」；取到年份或值自带年份时标「YYYY-MM」。汇兑/存款/借款继续用各自报告期参数，不受影响。
+- 前端 `applyLedgerReviews`（看账/正负数标记共用的复核采纳入口）多列角色改追加语义（`appendMappingColumn`），与 `planLedgerChanges`／`applyLedgerPendingChange` 对齐；此前 LLM 分两条返回的月、日建议第二条冲掉第一条。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 裸月日分列兜底直接组成日期`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 看账复核放行裸月日组成列且漏提时补进fills`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 看账建议把裸月日分列直接指为日期`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 无年份月日的月份桶按文件名年份或占位年份归集`、`npx vitest run src/ledgerMappingLabels.test.ts`。
+
+## 2026-09-26：TB 父子汇总只按本位币勾稽
+
+- 公共 `tb_leaf_mask`、科目确认目录及空编码维度吸收共用的汇总金额列，仅取已映射的本位币期初／期末余额和本位币发生额；原币余额、原币发生额不参与父子判定。余额按借贷方向转成净额，发生额借贷分侧比较。
+- 有明确编码或级次父子关系时，同主体的上级与直接下级可跨币种按本位币求和；非连续科目树也不按币种分区。同编码不同币种仍是平行行，不因本位币金额巧合相等而互删；本位币不能完整勾稽的非零父项继续保留。
+- 用友汇兑样例中的 `1002`、`1122`、`2202` 币种为空且原币栏为空，但本位币四组金额分别等于各币种下级之和，确认目录应仅保留下级。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 跨币种父子仅用本位币勾稽且平行币种不互删`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 用友汇兑样例跨币种总科目不进入确认目录`。
+
+## 2026-09-26：用友单一方向列与本期发生额的联合判据
+
+- 汇兑用友样例 TB 只有一列“方向”和本期借贷发生额。此前方向列共享判据只读取已映射的本年累计发生额，但本期列须在方向完整后才可勾稽提升，形成先后依赖；负债期初取贷方负数、期末误取正数，TB＋JE 滚动出现余额两倍的伪差异。
+- 公共方向共享判据优先用本年累计列；缺失时用本期借贷列对“期初＋发生＝期末”投票。仍要求至少三条有效行、共享方案严格胜出；采用本期列时另要求 3–9 行全部通过、10 行以上至少 95% 通过，与本期发生额提升门槛一致，避免不完整期间的偶然匹配翻号。
+- 汇兑映射先完成方向共享，再复用原有本期发生额勾稽提升流程；用友样例的方向列可同时作用于期初和期末，未改变其他 TBJE 符号折算规则。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 本期发生列可为用友式单一方向列提供共享证据`。
+
+## 2026-09-26：Oracle JE Entered／Accounted 借贷列归属
+
+- JE 的 `Entered Debit/Credit` 明确对应原币借/贷，`Accounted Debit/Credit` 明确对应本位币借/贷；别名识别增加完整词，反向角色增加冲突词，阻止普通 `debit/credit` 命中把 Entered 误判成本位币，也阻止 LLM 建议对调两套口径。
+- 汇兑映射面板在缺“原币金额方案”时逐项列出还缺的原币借/贷角色；识别到这四个 Oracle 表头时，直接说明 Entered 与 Accounted 的口径。既有“原币净额”单列方案仍可用。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib oracle_entered与accounted金额不得对调`、`npx vitest run src/FxAuditPage.test.ts src/FxAuditPageUi.test.tsx`。
+
 ## 2026-09-25：科目确认按金额勾稽与完整身份列示
 
 - 公共 `tb_catalog_leaf_mask` 以计算的金额勾稽掩码为基础；编码前缀、科目级次仅提供父子结构证据，非零金额无法完整勾稽时保留父项供复核。金额全零且有同主体、同币种下级编码的父项可从确认目录安全隐藏。同编码不同科目名称的汇总行若等于连续多条明细在各金额列之和，剔除汇总行并保留明细名称；仅一条同额不能据此折叠。

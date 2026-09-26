@@ -528,9 +528,15 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
         ));
     }
     if mode != "analysis" {
-        // 与汇兑损益共用同一套卫生过滤，不再各写一份。看账按天取数，
-        // 不启用汇兑损益的记账日期月度兜底。
-        sanitize_mapping_changes(&mut value, &payload, "je", ReviewDatePolicy::Strict);
+        // 与汇兑损益共用同一套卫生过滤，不再各写一份。复合日期（年/月/日
+        // 拆分列组成 date）是 JE 公共能力：看账按天取数由公共日期解析器
+        // 结合报告期年份还原，与 TBJE 的复核纪律同口径。
+        sanitize_mapping_changes(
+            &mut value,
+            &payload,
+            "je",
+            review_date_policy(Some("kanzhang")),
+        );
         sanitize_role_reviews(&mut value, &payload, "roleReviews");
         value["reviewCoverage"] =
             mapping_review_coverage(&value, &payload, "roleReviews", "reviews");
@@ -1375,10 +1381,18 @@ fn value_is_filled(value: &Value) -> bool {
 
 /// LLM 复核后的窄兜底：只补 JE 侧仍缺失、且从表头＋样例能唯一确定的
 /// 科目编码、摘要与日期组成列。它不是第二套泛化自动映射器。
+/// TBJE 通道输出 `changes`、看账/正负数凭证标记通道输出 `fills`，
+/// 结构同构，两个数组都要兜底。
 fn supplement_tbje_required_je_changes(value: &mut Value, payload: &Value) {
-    let Some(changes) = value.get_mut("changes").and_then(Value::as_array_mut) else {
-        return;
-    };
+    for key in ["changes", "fills"] {
+        let Some(changes) = value.get_mut(key).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        supplement_required_je_changes_into(changes, payload);
+    }
+}
+
+fn supplement_required_je_changes_into(changes: &mut Vec<Value>, payload: &Value) {
     let headers = payload
         .get("headers")
         .and_then(Value::as_array)
@@ -1528,7 +1542,7 @@ fn supplement_tbje_required_je_changes(value: &mut Value, payload: &Value) {
                     "currentColumn": "",
                     "suggestedColumn": column,
                     "confidence": 0.99,
-                    "reason": "LLM 复核后按样例值补齐：TBJE 使用月份或年月／月日组成凭证日期键。"
+                    "reason": "LLM 复核后按样例值补齐：月份或年月／月日组成凭证日期键。"
                 }));
             }
         }
@@ -1600,34 +1614,11 @@ fn tbje_date_component_column(headers: &[String], rows: &[Vec<String>], index: u
         || (year_header && integer_component_column(rows, index, 1900..=2100))
 }
 
-/// 是否已经存在真正的完整日期候选。TBJE 只有在整张样例找不到完整日期时
-/// 才放开组成列，确保“完整日期优先”不仅写在提示词里，也由代码强制执行。
+/// 是否已经存在真正的完整日期候选：语义已上移公共引擎
+/// （`ledger_mapping::full_date_column_exists`），LLM 复核与脚本级
+/// 月/日兜底共用同一把闸。
 fn has_full_date_column(headers: &[String], rows: &[Vec<String>]) -> bool {
-    headers.iter().enumerate().any(|(index, header)| {
-        let normalized = crate::ledger_mapping::normalize_header(header);
-        if !(normalized.contains("日期")
-            || normalized.contains("date")
-            || normalized.contains("过账日")
-            || normalized.contains("記賬日"))
-        {
-            return false;
-        }
-        let mut seen = 0;
-        for row in rows {
-            let text = row.get(index).map(String::as_str).unwrap_or("").trim();
-            if text.is_empty() {
-                continue;
-            }
-            // 年月能被 parse_date 按 1 日收下，但它仍是月度粒度，不算完整日期。
-            if crate::ledger_mapping::parse_month(text).is_some()
-                || crate::ledger_mapping::parse_date(text).is_none()
-            {
-                return false;
-            }
-            seen += 1;
-        }
-        seen > 0
-    })
+    crate::ledger_mapping::full_date_column_exists(headers, rows)
 }
 
 fn sanitize_change_list(
@@ -2218,6 +2209,8 @@ pub(crate) fn fx_account_translation_llm_call(
 fn kanzhang_mapping_prompt() -> String {
     let je_instruction = review_je_instruction();
     let review_common = review_common_instruction();
+    // 与 TBJE 同一条复合日期纪律：一些 ERP 把年份写在标题、月日拆成两列。
+    let composite_date = review_date_instruction(review_date_policy(Some("kanzhang")));
     format!(
         "你是会计凭证字段映射复核助手。输出严格 JSON：\
          {{scheme:\"A\"|\"B\"|\"\",schemeReason:string,\
@@ -2226,7 +2219,7 @@ fn kanzhang_mapping_prompt() -> String {
          roleReviews:[{{role:string,currentColumns:[string],status:\"keep\"|\"replace\"|\"clear\"|\"uncertain\",reason:string}}]}}。action=clear 时省略 suggestedColumn。\
          方案A＝净额列（可加方向列）；方案B＝借方与贷方两列，二者互斥。\
          mappedRolesToReview 中每个已有角色都必须返回一条 roleReviews；不能用 fills/reviews 为空代替语义复核。unmappedRoles 逐项检查，有相容列就输出 fills；requiredMissingRoles、requiredMissingAny 与 suspectMappings 优先。requiredMissingAny 中每组至少补一个相容角色；摘要是选填，不因缺失而阻拦。\
-         {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{je_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
+         {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{je_instruction}{composite_date}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     )
 }
 
@@ -2989,6 +2982,63 @@ mod tests {
         assert!(
             fallback["changes"].as_array().expect("changes").is_empty(),
             "已有完整日期时不得退回组成列：{fallback:#}"
+        );
+    }
+
+    /// 看账/正负数凭证标记的复核通道（fills/reviews 结构）与 TBJE 同一条
+    /// 复合日期纪律：裸「月」「日」列的建议放行；模型漏提时兜底补进 fills。
+    #[test]
+    fn 看账复核放行裸月日组成列且漏提时补进fills() {
+        let payload = json!({
+            "headers": ["月", "日", "凭证号"],
+            "currentMapping": {"id": "凭证号"},
+            "sampleRows": [
+                ["1", "9", "0001"],
+                ["1", "10", "0002"],
+                ["2", "15", "0003"],
+                ["2", "21", "0004"],
+                ["3", "5", "0005"],
+                ["3", "18", "0006"]
+            ],
+        });
+        let mut review = json!({"fills": [
+            {"role":"date","action":"replace","suggestedColumn":"月","confidence":0.9,"reason":"月份组成列"},
+            {"role":"date","action":"replace","suggestedColumn":"日","confidence":0.9,"reason":"日号组成列"},
+        ]});
+        sanitize_mapping_changes(
+            &mut review,
+            &payload,
+            "je",
+            review_date_policy(Some("kanzhang")),
+        );
+        let fills = review["fills"].as_array().expect("fills");
+        assert_eq!(fills.len(), 2, "月/日组成列建议应双双放行：{review:#}");
+
+        // 模型漏提 date 时，兜底把两条组成列补进 fills（0.99 高置信）。
+        let mut silent = json!({"fills": [], "reviews": []});
+        sanitize_mapping_changes(
+            &mut silent,
+            &payload,
+            "je",
+            review_date_policy(Some("kanzhang")),
+        );
+        let fills = silent["fills"].as_array().expect("fills");
+        let columns: Vec<&str> = fills
+            .iter()
+            .filter_map(|fill| fill["suggestedColumn"].as_str())
+            .collect();
+        assert!(
+            columns.contains(&"月") && columns.contains(&"日"),
+            "漏提时应补齐月+日组成列：{silent:#}"
+        );
+    }
+
+    #[test]
+    fn 看账复核提示词带复合日期纪律() {
+        let prompt = kanzhang_mapping_prompt();
+        assert!(
+            prompt.contains(REVIEW_JE_TBJE_COMPOSITE_DATE),
+            "看账提示词应包含公共复合日期规则：{prompt}"
         );
     }
 

@@ -1453,3 +1453,108 @@ it("仅 TB 有主体映射时按默认主体复核，不显示原始主体列", 
   await screen.findByText("确认借款及利息支出科目并设置利率");
   expect(screen.queryByRole("columnheader", { name: "主体" })).not.toBeInTheDocument();
 });
+
+/** 第一步「清空」必须连识别信息一并清除（回归：清空只清路径与映射时，
+ *  残留的识别信息让来源身份变化，自动复核被再次触发；台账模式下
+ *  「已识别 N 行」与可点的「下一步」也会残留）。 */
+function pairReviewCalls() {
+  return mock.engineCall.mock.calls.filter(([m]) => m === "ledger.review_pair_mapping");
+}
+
+it("TB＋JE 清空后识别信息不再残留，也不会再触发自动复核", async () => {
+  const tbHeaders = ["科目编码", "科目名称", "期初余额", "期末余额"];
+  const jeHeaders = ["记账日期", "凭证号", "科目编码", "贷方金额"];
+  const classify = (kind: "tb" | "je") => ({
+    kind,
+    scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
+    sheet: kind === "tb" ? "余额表" : "序时账",
+    headerRow: 1,
+    headerDepth: 1,
+    headers: kind === "tb" ? tbHeaders : jeHeaders,
+    preview: [(kind === "tb" ? tbHeaders : jeHeaders).map(() => "x")],
+  });
+  const inspect = (kind: "tb" | "je") => ({
+    headers: kind === "tb" ? tbHeaders : jeHeaders,
+    preview: [(kind === "tb" ? tbHeaders : jeHeaders).map(() => "x")],
+    rowCount: 2,
+    sheet: kind === "tb" ? "余额表" : "序时账",
+    sheets: [kind === "tb" ? "余额表" : "序时账"],
+    headerRow: 1,
+    headerDepth: 1,
+    suggestedMapping:
+      kind === "tb"
+        ? { accountCode: "科目编码", accountName: "科目名称" }
+        : { date: "记账日期", accountCode: "科目编码" },
+  });
+  mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
+  mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
+    const p = params as { kind?: string; source?: { inputPath?: string } };
+    if (method === "ledger.forms") return [];
+    if (method === "ledger.currency_link")
+      return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
+    if (method === "deposit.classify_source")
+      return p.source?.inputPath?.endsWith("je.xlsx") ? classify("je") : classify("tb");
+    if (method === "loan.inspect")
+      return p.kind === "je" ? inspect("je") : inspect("tb");
+    if (method === "ledger.review_pair_mapping") return {};
+    throw new Error(`unexpected ${method}`);
+  });
+  render(<LoanInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "TB＋JE" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }),
+  );
+  expect(await screen.findByText("已识别：TB 科目余额表")).toBeVisible();
+  expect(await screen.findByText("已识别：JE 序时账")).toBeVisible();
+  // 双侧识别完成后自动复核一次是设计行为；等它发出并收尾。
+  await waitFor(() => expect(pairReviewCalls().length).toBeGreaterThan(0));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "一键复核 TB＋JE" })).toBeEnabled(),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "清空" }));
+  expect(
+    await screen.findByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }),
+  ).toBeVisible();
+  // 识别信息随清空卸下：复核区块与来源卡消失，回到空态。
+  expect(screen.queryByLabelText("字段映射一键复核")).not.toBeInTheDocument();
+  expect(screen.queryByText("已识别：TB 科目余额表")).not.toBeInTheDocument();
+  expect(screen.queryByText("已识别：JE 序时账")).not.toBeInTheDocument();
+  // 清空不得再次触发自动 LLM 复核（来源身份变化误判为换新文件）。
+  await waitFor(() =>
+    expect(screen.getByRole("region", { name: "准备 TB 与 JE" })).toBeVisible(),
+  );
+  expect(pairReviewCalls().length).toBe(1);
+});
+
+it("完整台账清空后「已识别」信息消失且下一步重新禁用", async () => {
+  const ledgerHeaders = ["合同号", "本金", "起始日", "到期日", "利率"];
+  mock.pickPath.mockResolvedValue("ledger.xlsx");
+  mock.engineCall.mockImplementation(async (method: string) => {
+    if (method === "ledger.forms") return [];
+    if (method === "loan.inspect")
+      return {
+        headers: ledgerHeaders,
+        preview: [ledgerHeaders.map(() => "x")],
+        rowCount: 3,
+        sheet: "台账",
+        sheets: ["台账"],
+        headerRow: 1,
+        headerDepth: 1,
+        suggestedMapping: { loanId: "合同号" },
+      };
+    throw new Error(`unexpected ${method}`);
+  });
+  render(<LoanInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "选择完整借款台账文件" }));
+  expect(await screen.findByText("已识别 3 行 × 5 列")).toBeVisible();
+
+  fireEvent.click(screen.getByRole("button", { name: "清空" }));
+  expect(
+    await screen.findByRole("button", { name: "选择完整借款台账文件" }),
+  ).toBeVisible();
+  expect(screen.queryByText("已识别 3 行 × 5 列")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "下一步：利率确认" }),
+  ).toBeDisabled();
+});

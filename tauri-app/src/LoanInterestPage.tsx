@@ -546,7 +546,9 @@ export function loanMissing(
 }
 
 export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
-  const empty = (): Source => ({ path: "", mapping: {} });
+  // inspection 必须显式置 undefined：setSource 是合并语义，「清空」若不带它，
+  // 旧识别信息会残留，来源身份（路径）一变还触发一次多余的自动 LLM 复核。
+  const empty = (): Source => ({ path: "", inspection: undefined, mapping: {} });
   const [mode, setMode] = useState<Mode>("ledger");
   const [sources, setSources] = useState<Record<Kind, Source>>({
     ledger: empty(),

@@ -135,14 +135,45 @@ export const AUDIT_FOCUS_PRESETS:AuditFocusPreset[]=[
 ];
 export type PresetMatch={preset:AuditFocusPreset;accounts:string[]};
 export type PresetApplySummary={matches:PresetMatch[];skippedExcludes:string[];created:number;updated:number};
+// 名称关键词只认科目名称的「首段」（一级科目）：中文科目的语义归属由一级科目决定，
+// 后面的明细段与「：」后的辅助核算标注只是业务背景——「应交税费-应交增值税-进项税额-
+// 专用发票17%：固定资产」说的是这笔进项税产生自购固定资产，科目本身仍是税金科目
+// （实测 2221010102/2221010142 两条凭全称包含「固定资产」误入固定资产批次）。
+// 行首嵌入的编码段与尾部括号备注同样不承载科目归属，取首段前一并剥掉。
+const SUBJECT_SEGMENT_SPLIT=/([-—–>／/|:：\\])/;
+const splitSubjectNameSegments=(display:string):string[]=>{
+  const parts=display.split(SUBJECT_SEGMENT_SPLIT);
+  const segments:string[]=[];let buffer=parts[0]??"";
+  for(let index=1;index<parts.length;index+=2){
+    const separator=parts[index]??"";const following=parts[index+1]??"";
+    // 夹在两个英文字母之间的连字符/斜杠是单词的一部分（Short-term Borrowings、A/P），不是科目层级分隔。
+    const joinsEnglish="-/／".includes(separator)&&/[A-Za-z]$/.test(buffer)&&/^[A-Za-z]/.test(following);
+    if(joinsEnglish){buffer+=separator+following;continue;}
+    segments.push(buffer);buffer=following;
+  }
+  segments.push(buffer);
+  return segments.map(segment=>segment.trim()).filter(Boolean);
+};
+const CODE_LIKE_SEGMENT=/^(?=[\dA-Za-z]*\d)[\dA-Za-z]{3,}$/;
+export const presetSubjectRoot=(value:string,code:string):string=>{
+  let display=value.trim();
+  const exact=code.trim();
+  if(exact&&display.startsWith(exact))display=display.slice(exact.length);
+  display=display.replace(/(?:\s*[（(][^（()）]*[）)])+\s*$/,"");
+  const segments=splitSubjectNameSegments(display);
+  const first=segments[0]??"";
+  // 首段是纯编码（1601010000-固定资产-…）时编码本身不算语义，往下取真正的一级科目名。
+  if(CODE_LIKE_SEGMENT.test(first)&&segments.length>1)return (segments[1]??"").trim();
+  return first;
+};
 // 名称词典优先、损益编码让路：摊销/折旧类费用科目（`5301 研发支出-…-无形资产摊销`、
 // `6602 管理费用-折旧和长期待摊费用`）名称里带资产字样，但它们是损益科目，
 // 归各自的费用批次（6601/6602/6603 编码前缀），不能靠名称再混进资产批次。
-// 无编码列（codes 为空）时没有这层证据，维持纯名称匹配。
+// 无编码列（codes 为空）时没有编码证据，同样只按首段名称匹配。
 const looksLikePnlCode=(code:string):boolean=>/^[567]/.test(code);
 export const matchAuditFocusPresets=(values:string[],codes:string[]):PresetMatch[]=>AUDIT_FOCUS_PRESETS.map(preset=>({preset,accounts:values.filter((value,index)=>{
   const code=(codes[index]??"").trim();
-  const nameHit=preset.pattern.test(value)&&!looksLikePnlCode(code);
+  const nameHit=preset.pattern.test(presetSubjectRoot(value,code))&&!looksLikePnlCode(code);
   return nameHit||preset.codePrefixes.some(prefix=>code.startsWith(prefix));
 })}));
 export function applyAuditFocusPresetBatches(batches:Batch[],values:string[],codes:string[],excludes:string[]):{batches:Batch[];summary:PresetApplySummary}{
@@ -502,9 +533,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
       patch({outputPath:target});
     }
     try{const jobId=await jobStart(method,{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth,mapping:draft.mapping,targetBatches:valid,excludeAccounts:draft.excludes,outputPath:target||undefined,
-      // 套表和 LLM 分析在旧版里没有开关，一律生成；这里写死 true，
-      // 顺带覆盖掉早期版本残留在 sessionStorage 草稿里的 false。
-      includePivot:true,includeVoucherTypes:true,includeCounterpart:draft.includeCounterpart,includeSuite:draft.includeSuite,llmAnalysis:true,
+      includePivot:true,includeVoucherTypes:true,includeCounterpart:draft.includeCounterpart,includeSuite:draft.includeSuite,llmAnalysis:false,
       markLossTransfer:draft.markLossTransfer,pivotRows:draft.pivotRows,pivotColumns:draft.pivotColumns,pivotValues:draft.pivotValues});setJob({jobId,toolId:"kanzhang",phase:"queued",current:0,total:1,message:"任务已进入队列",severity:"info",outputPaths:[]});}catch(e){setBusy(false);setError(kanzhangErrorText(e));}}
   const headers=draft.inspect?.headers??[];
   const scheme=activeAmountScheme(draft.mapping);

@@ -780,14 +780,68 @@ describe("看账其他交互口径", () => {
     expect(matches.intangible_assets).toEqual([values[3]]);
     expect(matches.long_term_prepaid).toEqual([]);
     expect(matches.administrative_expense).toEqual([values[1], values[2]]);
-    // 无编码列时维持纯名称匹配（历史行为）。
+    // 无编码列时仍按名称匹配，但只认首段：首段「研发费用」不含资产关键词，
+    // 尾段的「无形资产摊销」不再把费用科目拉进无形资产批次。
     const noCodes = Object.fromEntries(
       matchAuditFocusPresets([values[0]], [""]).map((match) => [
         match.preset.id,
         match.accounts,
       ]),
     );
-    expect(noCodes.intangible_assets).toEqual([values[0]]);
+    expect(noCodes.intangible_assets).toEqual([]);
+  });
+
+  it("辅助核算标注里的关键词不把科目拉进无关预设批次", () => {
+    // 实测样例：应交税费-应交增值税-进项税额-专用发票17%：固定资产，尾段「：固定资产」
+    // 是进项税的辅助核算标注（这笔税产生自购固定资产），科目本身仍是税金科目，
+    // 旧的全称包含匹配把它误入固定资产批次。同类：括号备注、往来科目下的设备款。
+    const values = [
+      "2221010102-应交税费-应交增值税-进项税额-专用发票17%：固定资产",
+      "2221010142-应交税费-应交增值税-进项税额-专用发票13%：固定资产",
+      "应交税费-应交增值税-进项税额-专用发票9%：无形资产",
+      "2202010000-应付账款-设备款（固定资产）",
+      "1601010000-固定资产-房屋建筑物",
+      "固定资产-机器设备",
+      "1602000000-累计折旧",
+    ];
+    const codes = [
+      "2221010102",
+      "2221010142",
+      "2221010199",
+      "2202010000",
+      "1601010000",
+      "",
+      "1602000000",
+    ];
+    const matches = Object.fromEntries(
+      matchAuditFocusPresets(values, codes).map((match) => [
+        match.preset.id,
+        match.accounts,
+      ]),
+    );
+    expect(matches.fixed_assets).toEqual([values[4], values[5], values[6]]);
+    expect(matches.accounts_payable).toEqual([values[3]]);
+    // 三条进项税不属于任何预设批次，也不再被尾段关键词误抓。
+    expect(
+      ["fixed_assets", "intangible_assets"].flatMap((id) => matches[id]),
+    ).not.toContain(values[0]);
+    expect(["fixed_assets", "intangible_assets"].flatMap((id) => matches[id])).not.toContain(
+      values[1],
+    );
+    expect(matches.intangible_assets).not.toContain(values[2]);
+  });
+
+  it("英文科目名的连字符与斜杠不拆首段", () => {
+    const values = ["Short-term Borrowings", "Fixed Asset - Machinery", "A/P - Trade Payables"];
+    const matches = Object.fromEntries(
+      matchAuditFocusPresets(values, ["", "", ""]).map((match) => [
+        match.preset.id,
+        match.accounts,
+      ]),
+    );
+    expect(matches.short_term_loans).toEqual([values[0]]);
+    expect(matches.fixed_assets).toEqual([values[1]]);
+    expect(matches.accounts_payable).toEqual([values[2]]);
   });
 
   it("重复套用更新预设、保留人工批次并尊重剔除项", () => {

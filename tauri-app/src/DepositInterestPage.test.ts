@@ -3,11 +3,12 @@ import {
   depositAccountReviewRows,
   depositAccountCode, mergeAccountList,
   depositAutoRate, depositDropTargetInside, depositEffectiveTierRate, depositFirstTierOf,
-  depositMissingRequired, depositMonthlyAverage, depositMonthlyInterest, depositRateAboveBenchmark,
+  depositMissingRequired, depositMissingDetails, depositMonthlyAverage, depositMonthlyInterest, depositRateAboveBenchmark,
   depositPercentToRate, depositRateOutOfPractice, depositRateToPercent, depositReportStart,
   depositTermsOf, depositJeLayout, JE_LAYOUT_LABEL,
   depositBalanceCheckStatus, depositRateCheckStatus,
   depositDisplayAmount,
+  depositAccountOverrideKey, depositConfirmationImport,
 } from "./DepositInterestPage";
 import { DEFAULT_ENTITY, ledgerEntitiesByAccount } from "./ledgerMapping";
 
@@ -80,12 +81,12 @@ describe("存款余额勾稽与利率状态分别显示", () => {
   it("差异为零但使用暂估利率时仍显示已勾稽", () => {
     expect(depositBalanceCheckStatus({ jeReconciled: true, reconciliationDiff: -0.00001 })).toBe("已勾稽");
     expect(depositBalanceCheckStatus({ jeReconciled: true, reconciliationDiff: 0.006 })).toBe("待复核");
-    expect(depositRateCheckStatus({ rateResolved: true, rateSource: "挂牌暂估值（待确认）", status: "待确认利率" })).toBe("待确认利率");
+    expect(depositRateCheckStatus({ rateResolved: true, rateSource: "市场中枢暂估值（待确认）", status: "待确认利率" })).toBe("待确认利率");
   });
 
   it("来源文案统一后，是否待确认只看标记位不看文案", () => {
-    expect(depositRateCheckStatus({ rateResolved: true, rateSource: "挂牌暂估值", rateProvisional: true, status: "已勾稽" })).toBe("待确认利率");
-    expect(depositRateCheckStatus({ rateResolved: true, rateSource: "挂牌暂估值", rateProvisional: false, status: "已勾稽" })).toBe("已填利率");
+    expect(depositRateCheckStatus({ rateResolved: true, rateSource: "市场中枢暂估值", rateProvisional: true, status: "已勾稽" })).toBe("待确认利率");
+    expect(depositRateCheckStatus({ rateResolved: true, rateSource: "市场中枢暂估值", rateProvisional: false, status: "已勾稽" })).toBe("已填利率");
   });
 
   it("两点法的零差异不冒充 JE 勾稽，余额差异不被利率状态掩盖", () => {
@@ -147,6 +148,14 @@ describe("deposit interest upload and mapping parity", () => {
     // 历史保存的映射把编码与名称混在一个 account 里，仍然要能读。
     expect(depositMissingRequired("tb", {account: ["科目编码"], openingFunctionalDebit: "年初借方", closingFunctionalAmount: "期末余额"})).toEqual([]);
   });
+  it("把存款金额方案展开为可选的具体列", () => {
+    expect(depositMissingDetails("tb", {})).toContain(
+      "期末余额方案（期末本位币净额、借方或贷方，任选一列）",
+    );
+    expect(depositMissingDetails("je", {})).toContain(
+      "发生额方案（本位币净额、借方或贷方，任选一列）",
+    );
+  });
   it("opening balance is optional regardless of journal (missing treated as zero)", () => {
     // SAP 的 Trial Balance LC/GC 只有 MTD/YTD，没有年初余额列：
     // 有序时账按「期末 − 期间发生额」倒推，无序时账依据按 0 参与全年平均。
@@ -196,17 +205,27 @@ describe("deposit interest calculation", () => {
 
 const tier = (key: string, category: string, categoryLabel: string, termLabel: string,
   benchmarkRate: number | null, listedRate: number | null, autoApply = false,
-  practiceLow: number | null = null, practiceHigh: number | null = null) =>
+  practiceLow: number | null = null, practiceHigh: number | null = null,
+  defaultRate: number | null = listedRate) =>
   ({key, category, categoryLabel, termLabel, label: termLabel ? `${categoryLabel}（${termLabel}）` : categoryLabel,
-    benchmarkRate, listedRate, autoApply, practiceLow, practiceHigh, practiceNote: ""});
+    benchmarkRate, listedRate, defaultRate, autoApply, practiceLow, practiceHigh, practiceNote: ""});
 
 const demandTier = tier("demand", "demand", "活期存款", "", 0.0035, 0.0005, true, 0.0005, 0.0035);
+// 合同议价档位（不自动套用）。
 const threeYearTier = tier("term_3y", "term", "定期存款", "3年", 0.0275, 0.0125, false, 0.0125, 0.019);
+// 标准 3 年定存：挂牌 1.25%（参考下限），中枢默认 1.55%，实务区间 1.25%~1.90%。
+const autoThreeYearTier = tier("term_3y", "term", "定期存款", "3年", 0.0275, 0.0125, true, 0.0125, 0.019, 0.0155);
 const customTier = tier("custom", "custom", "自定义（按存款协议）", "", null, null);
 
-describe("only demand deposits get an automatic rate", () => {
-  it("auto-applies the listed rate for current accounts", () => {
+describe("automatic rates default to the market-center value", () => {
+  it("keeps the listed rate for current accounts (listed = market there)", () => {
     expect(depositAutoRate(demandTier)).toBe(0.0005);
+  });
+  it("prefers the market-center default over the listed floor and falls back for old backends", () => {
+    expect(depositAutoRate(autoThreeYearTier)).toBe(0.0155);
+    // 旧后端负载没有 defaultRate 字段时回落挂牌值，不显示空白。
+    const legacy = {...autoThreeYearTier, defaultRate: null};
+    expect(depositAutoRate(legacy)).toBe(0.0125);
   });
   it("leaves contract-negotiated tiers blank so the auditor must fetch the real rate", () => {
     expect(depositAutoRate(threeYearTier)).toBeUndefined();
@@ -314,6 +333,108 @@ describe("序时账的金额形态", () => {
     expect(JE_LAYOUT_LABEL.split).toBe("借贷分列");
     expect(JE_LAYOUT_LABEL.directed).toBe("金额＋方向列");
     expect(JE_LAYOUT_LABEL.single).toBe("单一金额列");
-    expect(JE_LAYOUT_LABEL.none).toBe("尚未映射金额字段");
+    expect(JE_LAYOUT_LABEL.none).toBe("尚未映射本位币净额、借方或贷方");
+  });
+});
+
+describe("存款科目确认表回传", () => {
+  const importTiers = {
+    benchmarkDate: "2015-10-24", listedDate: "2025-05-20",
+    benchmarkSource: "", listedSource: "", practiceSource: "", authority: "",
+    autoApplyPolicy: "", links: [], linkGroups: [],
+    listedRateDate: "2025-05-20", rateAgeMonths: 15, ratesStale: true, staleMessage: "",
+    categories: [
+      {key: "demand", label: "活期存款", terms: [{key: "demand", label: ""}]},
+      {key: "term", label: "定期存款", terms: [
+        {key: "term_3m", label: "3个月"}, {key: "term_1y", label: "1年"},
+      ]},
+    ],
+    tiers: [
+      tier("demand", "demand", "活期存款", "", 0.0035, 0.0005, true, 0.0005, 0.0035),
+      tier("term_3m", "term", "定期存款", "3个月", null, 0.011),
+    ],
+  };
+  // sourceIdentities 路径：行键是 JSON 数组串（alpha.99 起）。
+  const plainRow = { key: JSON.stringify(["", "1002 银行存款", "", ""]), account: "1002 银行存款" };
+  const auxRow = {
+    key: JSON.stringify(["甲", "1002 银行存款", "工行基本户", ""]),
+    account: "1002 银行存款", auxiliary: "工行基本户", auxiliaryKey: "工行基本户",
+  };
+  const rows = [plainRow, auxRow];
+
+  it("利率写到页面读取的覆盖键：普通行用科目全文，辅助行用行键", () => {
+    const plan = depositConfirmationImport([
+      { key: plainRow.key, values: ["1002 银行存款", "银行存款（计息）", "定期存款", "3个月", "1.35"] },
+      { key: auxRow.key, values: ["1002 银行存款 · 工行基本户", "银行存款（计息）", "活期存款", "", "0.5"] },
+    ], rows, importTiers, true);
+    expect(plan.rateUpdates).toEqual({
+      "1002 银行存款": depositPercentToRate("1.35"),
+      [auxRow.key]: depositPercentToRate("0.5"),
+    });
+    expect(plan.rateByRowKey).toEqual({
+      [plainRow.key]: depositPercentToRate("1.35"),
+      [auxRow.key]: depositPercentToRate("0.5"),
+    });
+  });
+  it("存款类型分表：普通行按科目键，辅助行按行键", () => {
+    const plan = depositConfirmationImport([
+      { key: plainRow.key, values: ["1002 银行存款", "银行存款（计息）", "定期存款", "3个月", ""] },
+    ], rows, importTiers, true);
+    expect(plan.tierAccountUpdates).toEqual({ "1002 银行存款": "term_3m" });
+    expect(plan.tierDetailUpdates).toEqual({});
+    expect(plan.rateUpdates[plainRow.key]).toBeUndefined();
+  });
+  it("辅助行的类型进明细表，利率留空表示回到档位默认", () => {
+    const plan = depositConfirmationImport([
+      { key: auxRow.key, values: ["1002 银行存款 · 工行基本户", "其他货币资金（计息）", "活期存款", "", ""] },
+    ], rows, importTiers, true);
+    expect(plan.tierDetailUpdates).toEqual({ [auxRow.key]: "demand" });
+    expect(plan.tierAccountUpdates).toEqual({});
+    expect(plan.rateUpdates).toEqual({ [auxRow.key]: undefined });
+  });
+  it("旧路径（无源行身份）时分类按科目键写科目级表", () => {
+    const legacyRow = { key: "1002 银行存款", account: "1002 银行存款" };
+    const plan = depositConfirmationImport([
+      { key: legacyRow.key, values: ["1002 银行存款", "利息收入（勾稽基准）", "", "", ""] },
+    ], [legacyRow], importTiers, false);
+    expect(plan.roleAccountUpdates).toEqual({ "1002 银行存款": "interest_income" });
+    expect(plan.rateUpdates).toEqual({ "1002 银行存款": undefined });
+  });
+  it("非计息角色的利率覆盖一并清空", () => {
+    const plan = depositConfirmationImport([
+      { key: plainRow.key, values: ["1002 银行存款", "不参与测算", "", "", ""] },
+    ], rows, importTiers, true);
+    expect(plan.rateUpdates).toEqual({ "1002 银行存款": undefined });
+  });
+  it("非法输入按中文报错", () => {
+    expect(() => depositConfirmationImport([
+      { key: plainRow.key, values: ["1002 银行存款", "未知分类", "", "", ""] },
+    ], rows, importTiers, true)).toThrow("请选择有效的科目分类");
+    expect(() => depositConfirmationImport([
+      { key: plainRow.key, values: ["1002 银行存款", "银行存款（计息）", "定期存款", "8个月", ""] },
+    ], rows, importTiers, true)).toThrow("存款类型与期限不匹配");
+    expect(() => depositConfirmationImport([
+      { key: plainRow.key, values: ["1002 银行存款", "银行存款（计息）", "定期存款", "3个月", "abc"] },
+    ], rows, importTiers, true)).toThrow("年利率须填写数字百分比");
+    expect(() => depositConfirmationImport([
+      { key: "不存在的行", values: ["", "", "", "", ""] },
+    ], rows, importTiers, true)).toThrow("已不在当前确认清单");
+  });
+});
+
+describe("账户级覆盖键", () => {
+  it("辅助行用行键、普通行用科目全文，读写同键", () => {
+    const auxRow = {
+      key: JSON.stringify(["甲", "1002 银行存款", "工行基本户", ""]),
+      account: "1002 银行存款", auxiliary: "工行基本户", auxiliaryKey: "工行基本户",
+    };
+    const plainRow = { key: JSON.stringify(["", "1002 银行存款", "", ""]), account: "1002 银行存款" };
+    const legacyAuxRow = {
+      key: "甲\u001f1002\u001f工行基本户", account: "1002 银行存款",
+      auxiliaryKey: "工行基本户",
+    };
+    expect(depositAccountOverrideKey(auxRow)).toBe(auxRow.key);
+    expect(depositAccountOverrideKey(plainRow)).toBe("1002 银行存款");
+    expect(depositAccountOverrideKey(legacyAuxRow)).toBe(legacyAuxRow.key);
   });
 });

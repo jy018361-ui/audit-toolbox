@@ -260,7 +260,7 @@
   padding: 0 var(--sp-2);
   border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
-  background: var(--surface-muted);
+  background: var(--control-bg);
   color: var(--ink);
   font-size: var(--fs-sm);
 }
@@ -521,7 +521,7 @@
   padding: 0 var(--sp-2);
   border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
-  background: var(--surface-muted);
+  background: var(--control-bg);
   color: var(--ink);
   font-size: var(--fs-xs);
 }

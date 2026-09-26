@@ -361,11 +361,11 @@ it("marks preview tools as trials in the sidebar without disabling them", async 
 
   for (const name of ["AudiPick 智能合同审阅", "WP Roll Forward"]) {
     const link = sidebar.getByRole("link", {
-      name: new RegExp(`${name}.*试用.*结果请复核`),
+      name: new RegExp(`${name}.*即将上线.*即将正式上线`),
     });
     expect(link).toBeVisible();
-    expect(link).toHaveAttribute("title", "试用功能，结果请复核。");
-    expect(within(link).getByText("试用")).toBeVisible();
+    expect(link).toHaveAttribute("title", "功能完善中，即将正式上线。");
+    expect(within(link).getByText("即将上线")).toBeVisible();
   }
 
   expect(
@@ -719,4 +719,35 @@ it("disables duplicate checks and installation while release notes are loading",
   expect(
     screen.getByRole("button", { name: "确认更新到 v1.0.1" }),
   ).toBeEnabled();
+});
+
+it("语音转写通道可切换为 Token Plan 套餐通道并随保存落库", async () => {
+  render(
+    <MemoryRouter initialEntries={["/settings"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  await screen.findByRole("heading", { name: "设置" });
+  // 默认通用通道：只有通用密钥入口，没有套餐配置格子。
+  expect(screen.getByLabelText("百炼 API 密钥")).toBeInTheDocument();
+  expect(screen.queryByLabelText("套餐地址")).not.toBeInTheDocument();
+  // 切到套餐通道：地址/模型/密钥三格出现，测试按钮换成套餐通道。
+  fireEvent.change(screen.getByLabelText("转写通道"), {
+    target: { value: "token_plan" },
+  });
+  expect(screen.getByLabelText("套餐地址")).toBeInTheDocument();
+  expect(screen.getByLabelText("套餐转写模型")).toBeInTheDocument();
+  expect(screen.getByLabelText(/套餐 API 密钥/)).toBeInTheDocument();
+  expect(screen.queryByLabelText("百炼 API 密钥")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "测试套餐通道" }),
+  ).toBeInTheDocument();
+  // 保存后通道选择写入 meeting 命名空间，供转写任务读取。
+  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+  await waitFor(() => expect(vi.mocked(settingsSet)).toHaveBeenCalled());
+  const payload = vi.mocked(settingsSet).mock.calls[0][0] as {
+    meeting: Record<string, unknown>;
+  };
+  expect(payload.meeting.asr_channel).toBe("token_plan");
+  expect(payload.meeting.plan_model).toBe("qwen-audio-3.0-realtime-plus");
 });

@@ -9,10 +9,6 @@ describe("借款测算宽表", () => {
     expect(css).toMatch(/\.loan-rate-table table\s*\{[^}]*table-layout:\s*auto/);
     expect(css).toMatch(/\.loan-rate-table th:nth-child\(n \+ 4\)[\s\S]*?min-width:\s*158px/);
   });
-  it("匹配结论与依据保有可读列宽", () => {
-    expect(css).toMatch(/\.loan-confirm-table th:nth-last-child\(2\)[\s\S]*?min-width:\s*104px/);
-    expect(css).toMatch(/\.loan-confirm-table th:last-child[\s\S]*?min-width:\s*220px/);
-  });
   it("本金汇总金额保持单行，窄桌面窗口使用两列卡片", () => {
     expect(css).toMatch(/\.loan-bridge-equation \.fx-bridge-metric strong,[\s\S]*?white-space:\s*nowrap/);
     expect(css).toMatch(/@media \(min-width: 901px\) and \(max-width: 1180px\)[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);

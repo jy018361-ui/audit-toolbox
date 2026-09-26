@@ -257,6 +257,10 @@ export type FaLlmPlanInput = {
   matchReview?: FaMatchReviewLike;
   autoApply?: boolean;
   roleLabels: Record<string, string>;
+  /** 子工具只接受自身下拉框提供的字段角色。 */
+  allowedRoleKeys?: readonly string[];
+  /** 复核建议须落到预览表中实际存在的列，才可标记为已生效。 */
+  headersBySide?: Partial<Record<FaSide, readonly string[]>>;
 };
 export type FaLlmPlan = {
   beginMapping: FaMappingLike;
@@ -276,6 +280,8 @@ const faValueText = (value?: string | string[] | boolean): string => {
   return value?.trim() ? value.trim() : "未映射";
 };
 const sideLabel = (side: FaSide) => (side === "begin" ? "期初" : "期末");
+const normalizeFaHeader = (value: string) =>
+  value.replace(/[\s_\-()/（）\[\]【】]/g, "").toLowerCase();
 
 export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
   const mappings: Record<FaSide, FaMappingLike> = {
@@ -325,6 +331,15 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
   ) => {
     if (!isVisibleLlmReviewConfidence(item.confidence)) return;
     if (side === "begin" && FA_FILE2_ONLY_MAPPING_KEYS.has(key)) return;
+    const headers = input.headersBySide?.[side];
+    if (column !== undefined && headers) {
+      const candidate = column;
+      const exact = headers.find((header) => header.trim() === candidate.trim());
+      column = exact ?? headers.find(
+        (header) => normalizeFaHeader(header) === normalizeFaHeader(candidate),
+      );
+      if (column === undefined) return;
+    }
     const before = mappings[side][key];
     if (faValueText(before) === faValueText(column)) return;
     if (
@@ -351,7 +366,7 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
     ...(input.fieldReviews ?? []),
   ]) {
     const key = FA_LLM_ROLE_MAP[item.role];
-    if (!key) continue;
+    if (!key || (input.allowedRoleKeys && !input.allowedRoleKeys.includes(key))) continue;
     if (item.action === "clear" && item.file_side) {
       consider(item.file_side === "file1" ? "begin" : "end", key, undefined, item);
       continue;

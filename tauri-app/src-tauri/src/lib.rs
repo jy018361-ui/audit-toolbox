@@ -3,6 +3,7 @@
 mod account_confirmation;
 mod audipick;
 mod bailian_asr;
+mod bailian_plan_asr;
 mod confirmation;
 mod deposit_interest;
 #[cfg(windows)]
@@ -18,6 +19,7 @@ mod fx;
 #[cfg(test)]
 mod ledger_engine_parity_tests;
 mod ledger_mapping;
+mod header_detection;
 mod loan_interest;
 mod lpr;
 mod meeting_minutes;
@@ -961,7 +963,12 @@ fn audipick_pdf_bytes(
 fn secret_set(name: String, value: String) -> Result<(), AppError> {
     if !matches!(
         name.as_str(),
-        "llm_api_key" | "dify_api_key" | "baidu_ocr_key" | "baidu_ocr_secret" | "bailian_asr_key"
+        "llm_api_key"
+            | "dify_api_key"
+            | "baidu_ocr_key"
+            | "baidu_ocr_secret"
+            | "bailian_asr_key"
+            | "bailian_plan_asr_key"
     ) {
         return Err(AppError::new(
             "SECRET_NAME_DENIED",
@@ -987,7 +994,12 @@ fn secret_delete(name: String) -> Result<(), AppError> {
     // 与 secret_set 同一份白名单：写入有界，删除不得旁路。
     if !matches!(
         name.as_str(),
-        "llm_api_key" | "dify_api_key" | "baidu_ocr_key" | "baidu_ocr_secret" | "bailian_asr_key"
+        "llm_api_key"
+            | "dify_api_key"
+            | "baidu_ocr_key"
+            | "baidu_ocr_secret"
+            | "bailian_asr_key"
+            | "bailian_plan_asr_key"
     ) {
         return Err(AppError::new(
             "SECRET_NAME_DENIED",
@@ -1050,11 +1062,29 @@ fn meeting_detect_set_enabled(
     meeting.set_watch_enabled(enabled);
 }
 
+/// 连接测试按设置页选中的通道分流：给了套餐参数走 realtime 连接测试，
+/// 否则按通用通道验证上传凭证密钥。
 #[tauri::command]
-async fn meeting_asr_test(api_key: Option<String>) -> Result<Value, AppError> {
-    tauri::async_runtime::spawn_blocking(move || bailian_asr::test_connection(api_key.as_deref()))
-        .await
-        .map_err(|_| AppError::new("ASR_TEST_FAILED", "连接测试异常结束。", true, None))?
+async fn meeting_asr_test(
+    api_key: Option<String>,
+    plan_base_url: Option<String>,
+    plan_model: Option<String>,
+    plan_api_key: Option<String>,
+) -> Result<Value, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if plan_base_url.is_some() || plan_model.is_some() {
+            let params = bailian_plan_asr::PlanTestParams {
+                base_url: plan_base_url.unwrap_or_default(),
+                model: plan_model.unwrap_or_default(),
+                api_key: plan_api_key,
+            };
+            bailian_plan_asr::test_connection(&params)
+        } else {
+            bailian_asr::test_connection(api_key.as_deref())
+        }
+    })
+    .await
+    .map_err(|_| AppError::new("ASR_TEST_FAILED", "连接测试异常结束。", true, None))?
 }
 
 /// meeting 命名空间内合并写入单个开关，避免页面直写整份设置覆盖其他键。
@@ -1998,6 +2028,27 @@ mod tests {
             assert!(
                 excel_merger::SUPPORTED_JOB_METHODS.contains(&method),
                 "{method}"
+            );
+        }
+    }
+
+    /// 任务通道有两道门：`is_direct_job_method`（job_start 转发前）与
+    /// `ExcelMergerService::start` 的 `SUPPORTED_JOB_METHODS`（worker 派发前）。
+    /// `任务通道的两份白名单必须一致` 只查 SUPPORTED→is_direct 单向，反向漏登记
+    /// （is_direct 有了、SUPPORTED 没有）当时静默通过，用户点「导出汇率」才报
+    /// 「未找到 Rust 表格任务方法。」——汇兑四条方法双向断言堵住这个方向。
+    #[test]
+    fn 汇兑的四条任务方法都能进两道任务白名单() {
+        for method in [
+            "fx.fetch_rates",
+            "fx.preview",
+            "fx.export",
+            "fx.export_rates",
+        ] {
+            assert!(is_direct_job_method(method), "{method} 未登记 is_direct_job_method");
+            assert!(
+                excel_merger::SUPPORTED_JOB_METHODS.contains(&method),
+                "{method} 未登记 SUPPORTED_JOB_METHODS，点下去会报「未找到 Rust 表格任务方法。」"
             );
         }
     }

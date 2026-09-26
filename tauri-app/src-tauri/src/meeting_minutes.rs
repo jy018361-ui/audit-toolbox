@@ -17,7 +17,7 @@ use std::{
     },
 };
 
-use crate::{AppError, bailian_asr, excel_merger::PauseCheckpoint};
+use crate::{AppError, bailian_asr, bailian_plan_asr, excel_merger::PauseCheckpoint};
 
 type Progress<'a> = bailian_asr::Progress<'a>;
 
@@ -88,11 +88,26 @@ fn generate(params: &Value, progress: Progress, cancel: &Arc<AtomicBool>) -> Res
             Some(audio_path.to_string_lossy().into_owned()),
         ));
     }
-    let transcription = bailian_asr::transcribe_file(&audio_path, progress, cancel)?;
+    let settings = params.get("__settings").cloned().unwrap_or(Value::Null);
+    // 套餐通道（token_plan）：密钥只能访问套餐端点，走 realtime 协议刷套餐
+    // 额度；通用通道维持 paraformer 文件转写。套餐转写不区分说话人，
+    // speakers=0，转写稿与纪要提示词都按无说话人分支处理。
+    let transcription = if settings.pointer("/meeting/asr_channel").and_then(Value::as_str)
+        == Some("token_plan")
+    {
+        let config = bailian_plan_asr::PlanAsrConfig::from_settings(&settings);
+        bailian_plan_asr::transcribe_file(&audio_path, progress, cancel, &config)?
+    } else {
+        bailian_asr::transcribe_file(&audio_path, progress, cancel)?
+    };
     if cancel.load(Ordering::Relaxed) {
         return Err(cancelled());
     }
-    let transcript = bailian_asr::transcript_text(&transcription.sentences);
+    let transcript = if transcription.speakers > 0 {
+        bailian_asr::transcript_text(&transcription.sentences)
+    } else {
+        bailian_plan_asr::transcript_text_plain(&transcription.sentences)
+    };
     let title = string_param(params, "title").unwrap_or_else(default_title);
     let stamp = output_stamp();
     let output_dir = output_dir_for(&audio_path, &stamp);
@@ -195,19 +210,33 @@ fn output_dir_for(source: &Path, stamp: &str) -> PathBuf {
 
 /// 生成纪要文本。提示词里绝不能出现英文单词「json」——
 /// 公共 LLM 请求器对 DeepSeek 会按该词切换 JSON 输出模式，纪要需要 Markdown。
-fn build_minutes_prompt(detail: &str, participants: &[String], title: &str) -> String {
+/// `has_speakers=false` 对应套餐转写通道：转写稿没有说话人标签，
+/// 提示词改为禁止虚构发言人，不得沿用「说话人N」相关规则。
+fn build_minutes_prompt(detail: &str, participants: &[String], title: &str, has_speakers: bool) -> String {
     let detail_rules = match detail {
         "brief" => "本纪要为简要档：只输出「三、会议结论」和「四、待办事项」两个栏目，其余栏目省略。",
         "detailed" => "本纪要为详细档：「二、讨论要点」按议题分小节详细展开，归纳各方发言立场与理由，可引用关键原话。",
         _ => "本纪要为标准档：「二、讨论要点」按议题归纳，每个议题 2-5 条要点。",
     };
-    let participant_rules = if participants.is_empty() {
-        "转写稿中的说话人以「说话人1、说话人2」标注，请原样保留。".to_string()
-    } else {
-        format!(
+    let participant_rules = match (has_speakers, participants.is_empty()) {
+        (true, true) => {
+            "转写稿中的说话人以「说话人1、说话人2」标注，请原样保留。".to_string()
+        }
+        (true, false) => {
+            format!(
             "本次会议的参会人名单：{}。请结合发言内容把「说话人N」对应到名单中的真实姓名；确实无法判断的保留原标签，不得张冠李戴。",
             participants.join("、")
         )
+        }
+        (false, false) => {
+            format!(
+            "本次会议的参会人名单：{}。转写稿没有区分说话人，名单仅供「会议信息」栏目使用，不要把发言归属到具体个人。",
+            participants.join("、")
+        )
+        }
+        (false, true) => {
+            "本转写稿没有区分说话人；请用「与会人员提出」等中性表述归纳发言，不得虚构发言人。".to_string()
+        }
     };
     format!(
         "你是审计团队的会议秘书。请根据下面的会议转写稿，输出一份 Markdown 格式的会议纪要，标题为「# {title}」。\n\n\
@@ -253,7 +282,10 @@ fn summarize_with_llm(
         let truncated: String = body.chars().take(TRANSCRIPT_LIMIT).collect();
         body = format!("{truncated}\n\n（转写稿过长，已截断，仅依据以上内容生成纪要。）");
     }
-    let prompt = build_minutes_prompt(detail, participants, title);
+    // 套餐通道的转写稿没有说话人标签，重出纪要也要走无说话人提示词分支；
+    // 以转写稿里是否出现「说话人」判定，两种通道都成立。
+    let has_speakers = transcript.contains("说话人");
+    let prompt = build_minutes_prompt(detail, participants, title, has_speakers);
     crate::audipick::request_llm(&config, &prompt, &body, None)
         .map(|markdown| markdown.trim().to_string())
         .map_err(|error| {
@@ -312,7 +344,7 @@ mod tests {
     #[test]
     fn prompt_contains_fixed_sections_and_never_triggers_llm_json_mode() {
         for detail in ["brief", "standard", "detailed"] {
-            let prompt = build_minutes_prompt(detail, &["张三".into(), "李四".into()], "测试会议");
+            let prompt = build_minutes_prompt(detail, &["张三".into(), "李四".into()], "测试会议", true);
             assert!(prompt.contains("## 一、会议信息"));
             assert!(prompt.contains("## 二、讨论要点"));
             assert!(prompt.contains("## 三、会议结论"));
@@ -321,9 +353,21 @@ mod tests {
             // DeepSeek JSON 模式以提示词中的小写 json 为开关，纪要必须避开。
             assert!(!prompt.to_ascii_lowercase().contains("json"));
         }
-        let brief = build_minutes_prompt("brief", &[], "测试会议");
+        let brief = build_minutes_prompt("brief", &[], "测试会议", true);
         assert!(brief.contains("只输出「三、会议结论」和「四、待办事项」"));
         assert!(brief.contains("原样保留"));
+    }
+
+    /// 套餐转写通道没有说话人标签：提示词不得再提「说话人N」映射，
+    /// 且明确禁止虚构发言人——这是该通道纪要质量的底线。
+    #[test]
+    fn prompt_without_speakers_forbids_invented_attribution() {
+        let no_participants = build_minutes_prompt("standard", &[], "测试会议", false);
+        assert!(no_participants.contains("不得虚构发言人"));
+        assert!(!no_participants.contains("原样保留"));
+        let with_participants = build_minutes_prompt("standard", &["张三".into()], "测试会议", false);
+        assert!(with_participants.contains("名单仅供「会议信息」栏目使用"));
+        assert!(with_participants.contains("不要把发言归属到具体个人"));
     }
 
     #[test]

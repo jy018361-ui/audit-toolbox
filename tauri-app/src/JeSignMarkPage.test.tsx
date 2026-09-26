@@ -83,7 +83,7 @@ describe("JeSignMarkPage", () => {
 
     expect(screen.getByRole("button", { name: "读取并自动映射" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新增批次" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "删除批次" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "清空批次" })).toBeInTheDocument();
     expect(screen.getByText("选择目标科目")).toBeInTheDocument();
     expect(screen.getByText("标记与导出")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "标记并导出" })).toBeInTheDocument();
@@ -94,6 +94,20 @@ describe("JeSignMarkPage", () => {
     // 看账的三步走在这里不该出现，尤其是被剪掉的「科目筛选」独立步骤。
     expect(screen.queryByText("科目筛选")).not.toBeInTheDocument();
     expect(screen.queryByText("透视与导出")).not.toBeInTheDocument();
+  });
+
+  it("keeps batch naming out of the default view and opens inline rename on demand", () => {
+    seedLoadedDraft();
+    render(<JeSignMarkPage tool={tool} />);
+
+    expect(screen.queryByRole("textbox", { name: "批次名称" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重命名" }));
+    const input = screen.getByRole("textbox", { name: "批次名称" });
+    expect(input).toHaveFocus();
+    fireEvent.change(input, { target: { value: "费用复核" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
+    expect(screen.getByRole("button", { name: "费用复核 · 0 个科目" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "批次名称" })).not.toBeInTheDocument();
   });
 
   it("offers profit-transfer marking in the export card", () => {

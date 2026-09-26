@@ -332,6 +332,14 @@ function expandedToolIds(ids: readonly string[]) {
 }
 
 const TRIAL_HINT = "试用功能，结果请复核。";
+const UPCOMING_HINT = "功能完善中，即将正式上线。";
+
+/** 目录迁移状态 → 侧边栏/工作台卡片角标文案；ready 不加角标。 */
+function toolStatusLabel(status: ToolManifest["migrationStatus"]) {
+  if (status === "preview") return "试用";
+  if (status === "upcoming") return "即将上线";
+  return undefined;
+}
 
 async function openAudiPickWindow(): Promise<void> {
   const existing = await WebviewWindow.getByLabel("audipick");
@@ -360,8 +368,8 @@ async function openAudiPickWindow(): Promise<void> {
 
 /**
  * 侧边栏工具入口统一消费清单里的 migrationStatus。
- * preview 工具仍可进入，但必须在点击前让用户知道它处于试用阶段；状态不写死
- * 在具体工具名上，后续工具转正只需修改 tool-catalog.json。
+ * preview/upcoming 工具仍可进入，但必须在点击前让用户知道它未到正式版；
+ * 状态不写死在具体工具名上，后续工具转正只需修改 tool-catalog.json。
  */
 function SidebarToolLink({
   tool,
@@ -370,15 +378,17 @@ function SidebarToolLink({
   tool: ToolManifest;
   className?: string;
 }) {
-  const trial = tool.migrationStatus === "preview";
-  const accessibleName = trial
-    ? `${tool.name}，试用。${TRIAL_HINT}`
+  const statusLabel = toolStatusLabel(tool.migrationStatus);
+  const statusHint =
+    tool.migrationStatus === "upcoming" ? UPCOMING_HINT : TRIAL_HINT;
+  const accessibleName = statusLabel
+    ? `${tool.name}，${statusLabel}。${statusHint}`
     : undefined;
   return (
     <NavLink
       to={tool.route}
       className={className}
-      title={trial ? TRIAL_HINT : undefined}
+      title={statusLabel ? statusHint : undefined}
       aria-label={accessibleName}
       onClick={(event) => {
         if (tool.id !== "audipick" || !("__TAURI_INTERNALS__" in window))
@@ -393,9 +403,9 @@ function SidebarToolLink({
         {TOOL_BADGE[tool.id] ?? tool.name.slice(0, 1)}
       </span>
       <span className="tool-nav-label">{tool.name}</span>
-      {trial && (
+      {statusLabel && (
         <span className="tool-status-badge" aria-hidden="true">
-          试用
+          {statusLabel}
         </span>
       )}
     </NavLink>
@@ -1118,7 +1128,7 @@ function Dashboard({
               </div>
               <div className="card-grid">
                 {tools.map((tool) => {
-                  const preview = tool.migrationStatus === "preview";
+                  const statusLabel = toolStatusLabel(tool.migrationStatus);
                   return (
                     <NavLink
                       className="tool-card"
@@ -1130,8 +1140,8 @@ function Dashboard({
                           {TOOL_BADGE[tool.id] ?? tool.name.slice(0, 1)}
                         </span>
                         <h3>{tool.name}</h3>
-                        {preview && (
-                          <span className="tool-card-status">试用</span>
+                        {statusLabel && (
+                          <span className="tool-card-status">{statusLabel}</span>
                         )}
                       </div>
                       <p>{tool.description}</p>
@@ -1257,6 +1267,11 @@ export function ToolPage({
       {tool.migrationStatus === "preview" && (
         <div className="tool-trial-notice" role="note">
           <strong>试用</strong><span>{TRIAL_HINT}</span>
+        </div>
+      )}
+      {tool.migrationStatus === "upcoming" && (
+        <div className="tool-trial-notice" role="note">
+          <strong>即将上线</strong><span>{UPCOMING_HINT}</span>
         </div>
       )}
       <Suspense fallback={<ToolPageLoading />}>
@@ -1680,6 +1695,10 @@ export function Settings({
     ocrSecret: "",
     meetingDetectEnabled: true,
     asrApiKey: "",
+    asrChannel: "paraformer",
+    planBaseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com",
+    planModel: "qwen-audio-3.0-realtime-plus",
+    planApiKey: "",
   });
   const [message, setMessage] = useState("");
   const [testingLlm, setTestingLlm] = useState(false);
@@ -1895,6 +1914,10 @@ export function Settings({
             thinkingEnabled: Boolean(llm.thinking_enabled),
             ocrEngine: String(ocr.engine ?? x.ocrEngine),
             meetingDetectEnabled: meeting.detect_enabled !== false,
+            asrChannel:
+              meeting.asr_channel === "token_plan" ? "token_plan" : "paraformer",
+            planBaseUrl: String(meeting.plan_base_url ?? x.planBaseUrl),
+            planModel: String(meeting.plan_model ?? x.planModel),
           };
           const cache = (value.cache ?? {}) as Record<string, unknown>;
           const mode = String(cache.cleanup ?? "weekly");
@@ -2008,7 +2031,14 @@ export function Settings({
     setAsrTestResult(undefined);
     setTestingAsr(true);
     try {
-      const result = await meetingAsrTest(form.asrApiKey);
+      const result =
+        form.asrChannel === "token_plan"
+          ? await meetingAsrTest(undefined, {
+              baseUrl: form.planBaseUrl.trim(),
+              model: form.planModel.trim(),
+              apiKey: form.planApiKey.trim() || undefined,
+            })
+          : await meetingAsrTest(form.asrApiKey);
       setAsrTestResult({
         ok: true,
         text: `${result.message} 响应耗时 ${result.elapsedMs} 毫秒。`,
@@ -2057,6 +2087,9 @@ export function Settings({
       const meetingNamespace = {
         ...((current.meeting as Record<string, unknown> | undefined) ?? {}),
         detect_enabled: form.meetingDetectEnabled,
+        asr_channel: form.asrChannel,
+        plan_base_url: form.planBaseUrl.trim(),
+        plan_model: form.planModel.trim(),
       };
       await settingsSet({
         llm: {
@@ -2076,12 +2109,15 @@ export function Settings({
       if (form.ocrApiKey) await secretSet("baidu_ocr_key", form.ocrApiKey);
       if (form.ocrSecret) await secretSet("baidu_ocr_secret", form.ocrSecret);
       if (form.asrApiKey) await secretSet("bailian_asr_key", form.asrApiKey);
+      if (form.planApiKey)
+        await secretSet("bailian_plan_asr_key", form.planApiKey);
       const savedForm = {
         ...form,
         apiKey: "",
         ocrApiKey: "",
         ocrSecret: "",
         asrApiKey: "",
+        planApiKey: "",
       };
       savedSettingsSignature.current = settingsSignature(savedForm, cacheMode);
       setForm(savedForm);
@@ -2532,10 +2568,22 @@ export function Settings({
           <section className="list-card">
             <h2>语音转写（百炼）</h2>
             <p className="settings-note">
-              供会议纪要助手使用：录音上传阿里云百炼转写（按用量计费，新开通通常有免费额度）；
-              纪要整理继续使用上方统一 LLM 配置。
+              供会议纪要助手使用。通用通道：录音上传百炼文件转写，按录音时长计费
+              （新开通通常有免费额度），自动区分说话人；套餐通道：走 Token Plan
+              专属实时接口，转写消耗套餐 token，不区分说话人，仅支持 WAV
+              录音（工具箱自录会议即为 WAV）。纪要整理继续使用上方统一 LLM 配置。
             </p>
             <div className="form-grid">
+              <label className="field">
+                <span>转写通道</span>
+                <select
+                  value={form.asrChannel}
+                  onChange={(e) => set("asrChannel", e.target.value)}
+                >
+                  <option value="paraformer">通用通道（区分说话人）</option>
+                  <option value="token_plan">Token Plan 套餐通道</option>
+                </select>
+              </label>
               <label className="field settings-toggle">
                 <span>会议自动检测</span>
                 <SwitchInput
@@ -2543,15 +2591,6 @@ export function Settings({
                   onChange={(checked: boolean) =>
                     set("meetingDetectEnabled", checked)
                   }
-                />
-              </label>
-              <label className="field">
-                <span>百炼 API 密钥</span>
-                <input
-                  type="password"
-                  value={form.asrApiKey}
-                  onChange={(e) => set("asrApiKey", e.target.value)}
-                  placeholder="留空表示不修改"
                 />
               </label>
               <label className="field settings-toggle">
@@ -2562,6 +2601,45 @@ export function Settings({
                   onChange={(checked: boolean) => void toggleAutostart(checked)}
                 />
               </label>
+              {form.asrChannel === "token_plan" ? (
+                <>
+                  <label className="field">
+                    <span>套餐地址</span>
+                    <input
+                      value={form.planBaseUrl}
+                      onChange={(e) => set("planBaseUrl", e.target.value)}
+                      placeholder="https://token-plan.cn-beijing.maas.aliyuncs.com"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>套餐转写模型</span>
+                    <input
+                      value={form.planModel}
+                      onChange={(e) => set("planModel", e.target.value)}
+                      placeholder="qwen-audio-3.0-realtime-plus"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>套餐 API 密钥（sk-sp- 开头）</span>
+                    <input
+                      type="password"
+                      value={form.planApiKey}
+                      onChange={(e) => set("planApiKey", e.target.value)}
+                      placeholder="留空表示不修改"
+                    />
+                  </label>
+                </>
+              ) : (
+                <label className="field">
+                  <span>百炼 API 密钥</span>
+                  <input
+                    type="password"
+                    value={form.asrApiKey}
+                    onChange={(e) => set("asrApiKey", e.target.value)}
+                    placeholder="留空表示不修改"
+                  />
+                </label>
+              )}
             </div>
             <p className="settings-note">
               「开机自启」勾选后立即生效：登录 Windows
@@ -2573,9 +2651,17 @@ export function Settings({
                 disabled={testingAsr}
                 onClick={() => void testAsrConnection()}
               >
-                {testingAsr ? "正在测试…" : "测试百炼连接"}
+                {testingAsr
+                  ? "正在测试…"
+                  : form.asrChannel === "token_plan"
+                    ? "测试套餐通道"
+                    : "测试百炼连接"}
               </button>
-              <span>密钥请到阿里云百炼控制台创建；留空使用已保存密钥。</span>
+              <span>
+                {form.asrChannel === "token_plan"
+                  ? "地址与模型按「我的订阅」页面填写；密钥留空使用已保存密钥。"
+                  : "密钥请到阿里云百炼控制台创建；留空使用已保存密钥。"}
+              </span>
             </div>
             {asrTestResult && (
               <div

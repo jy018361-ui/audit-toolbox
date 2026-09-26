@@ -107,7 +107,7 @@ const EMPTY: JeMarkDraft = {
   sheet: "",
   knownSheets: [],
   headerRow: 0,
-  headerDepth: 1,
+  headerDepth: 0,
   mapping: EMPTY_MAPPING,
   batches: [newBatch(0)],
   activeBatch: 0,
@@ -148,6 +148,9 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   const [signLoading, setSignLoading] = useState(false);
   const [signError, setSignError] = useState("");
   const signGeneration = useRef(0);
+  const [renamingBatch, setRenamingBatch] = useState(false);
+  const [batchNameDraft, setBatchNameDraft] = useState("");
+  const batchNameInputRef = useRef<HTMLInputElement>(null);
 
   const patch = (value: Partial<JeMarkDraft>) =>
     setDraft((current) => ({ ...current, ...value }));
@@ -161,6 +164,21 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     pending.length > 0;
   const ready = Boolean(draft.inspect) && missingRequired.length === 0;
   const validBatches = validJeMarkBatches(draft.batches);
+
+  useEffect(() => {
+    if (renamingBatch) batchNameInputRef.current?.focus();
+  }, [renamingBatch, draft.activeBatch]);
+
+  function saveBatchName() {
+    const name = batchNameDraft.trim();
+    if (!name) return;
+    patch({
+      batches: draft.batches.map((value, index) =>
+        index === draft.activeBatch ? { ...value, name } : value,
+      ),
+    });
+    setRenamingBatch(false);
+  }
 
   function clearAll() {
     llmGeneration.current += 1;
@@ -348,6 +366,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       knownSheets: [],
       sheet: "",
       headerRow: 0,
+      headerDepth: 0,
       mapping: EMPTY_MAPPING,
       batches: clearAccountsOnMappingChange(draft.batches),
       columnFilters: {},
@@ -793,7 +812,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         needsReload={!draft.inspect && draft.knownSheets.length > 0}
         onBrowse={chooseInput}
         onClear={clearAll}
-        onSheetChange={(value) => invalidate({ sheet: value, headerRow: 0 })}
+        onSheetChange={(value) => invalidate({ sheet: value, headerRow: 0, headerDepth: 0 })}
         onHeaderRowChange={(value) => invalidate({ headerRow: value })}
         onHeaderDepthChange={(value) => invalidate({ headerDepth: value })}
         onInspect={inspect}
@@ -904,95 +923,139 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
 
       {draft.inspect && (
         <section className="kz-card jm-batches">
+          <h2>批次与目标科目</h2>
           <div className="jm-batch-row">
             <div className="kz-tabs" aria-label="标记批次">
               {draft.batches.map((value, index) => (
                 <button
+                  type="button"
                   key={`${value.name}-${index}`}
                   className={index === draft.activeBatch ? "active" : ""}
-                  onClick={() => patch({ activeBatch: index })}
+                  aria-pressed={index === draft.activeBatch}
+                  onClick={() => {
+                    setRenamingBatch(false);
+                    patch({ activeBatch: index });
+                  }}
                 >
-                  {value.name} ({value.accounts.length})
+                  {value.name} · {value.accounts.length} 个科目
                 </button>
               ))}
             </div>
             <Button
+              type="button"
               variant="secondary"
               size="sm"
+              aria-label="新增批次"
               onClick={() => {
                 const next = addBatch(draft.batches);
                 patch(next);
+                setBatchNameDraft(next.batches[next.activeBatch].name);
+                setRenamingBatch(true);
               }}
             >
-              新增批次
+              ＋ 新增批次
             </Button>
           </div>
           <div className="jm-batch-settings">
-            <label className="jm-batch-name">
-              批次名称
-              <Input
-                value={batch.name}
-                onChange={(e) =>
-                  patch({
-                    batches: draft.batches.map((value, index) =>
-                      index === draft.activeBatch
-                        ? { ...value, name: e.target.value }
-                        : value,
-                    ),
-                  })
-                }
-              />
-            </label>
+            {renamingBatch ? (
+              <div className="jm-rename-row">
+                <label className="jm-batch-name">
+                  批次名称
+                  <Input
+                    ref={batchNameInputRef}
+                    value={batchNameDraft}
+                    onChange={(event) => setBatchNameDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") saveBatchName();
+                      if (event.key === "Escape") setRenamingBatch(false);
+                    }}
+                    aria-invalid={!batchNameDraft.trim() || undefined}
+                  />
+                </label>
+                <Button type="button" size="sm" onClick={saveBatchName} disabled={!batchNameDraft.trim()}>
+                  保存名称
+                </Button>
+                <Button type="button" variant="ghost" size="sm" onClick={() => setRenamingBatch(false)}>
+                  取消
+                </Button>
+              </div>
+            ) : (
+              <div className="jm-current-batch">
+                <span className="jm-current-batch-label">当前批次</span>
+                <strong title={batch.name}>{batch.name}</strong>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setBatchNameDraft(batch.name);
+                    setRenamingBatch(true);
+                  }}
+                >
+                  重命名
+                </Button>
+              </div>
+            )}
             <Button
+              type="button"
               variant="ghost"
               size="sm"
               className="jm-delete-batch"
               onClick={async () => {
+                const onlyBatch = draft.batches.length === 1;
                 const accepted = await confirmDialog({
-                  title: `删除「${batch.name}」？`,
-                  message: draft.batches.length === 1
+                  title: onlyBatch ? `清空「${batch.name}」？` : `删除「${batch.name}」？`,
+                  message: onlyBatch
                     ? `这会清空当前批次已选的 ${batch.accounts.length} 个目标科目，不会删除原始文件。`
                     : `这会移除当前批次及其已选的 ${batch.accounts.length} 个目标科目，不会删除原始文件。`,
-                  confirmLabel: "删除批次",
+                  confirmLabel: onlyBatch ? "清空批次" : "删除批次",
                   tone: "danger",
                 });
-                if (accepted) patch(removeBatch(draft.batches, draft.activeBatch));
+                if (accepted) {
+                  setRenamingBatch(false);
+                  patch(removeBatch(draft.batches, draft.activeBatch));
+                }
               }}
               disabled={draft.batches.length === 1 && batch.accounts.length === 0}
             >
-              删除批次
+              {draft.batches.length === 1 ? "清空批次" : "删除批次"}
             </Button>
           </div>
-          <div className="jm-account-row">
-            <span className="jm-account-label">
-              目标科目
-            </span>
-            <button
-              type="button"
-              data-ts-filter-trigger=""
-              className={`jm-account-picker${batch.accounts.length ? " active" : ""}`}
-              disabled={llmBusy || missingRequired.length > 0}
-              aria-expanded={menu?.field === ACCOUNT_MENU}
-              onClick={(event) => {
-                if (menu?.field === ACCOUNT_MENU) {
-                  setMenu(undefined);
-                  return;
-                }
-                openMenu(
-                  ACCOUNT_MENU,
-                  event.currentTarget,
-                );
-              }}
-            >
-              {llmBusy
-                ? "正在确定科目字段…"
-                : batch.accounts.length
-                  ? `已选 ${batch.accounts.length} 个`
-                  : "选择目标科目"}
-              <Search size={16} aria-hidden="true" />
-            </button>
+          <div className="jm-account-block">
+            <span className="jm-account-label">目标科目</span>
+            <div className="jm-account-row">
+              <Button
+                type="button"
+                variant={batch.accounts.length ? "outline" : "default"}
+                data-ts-filter-trigger=""
+                className="jm-account-picker"
+                disabled={llmBusy || missingRequired.length > 0}
+                aria-expanded={menu?.field === ACCOUNT_MENU}
+                onClick={(event) => {
+                  if (menu?.field === ACCOUNT_MENU) {
+                    setMenu(undefined);
+                    return;
+                  }
+                  openMenu(ACCOUNT_MENU, event.currentTarget);
+                }}
+              >
+                {llmBusy
+                  ? "正在确定科目字段…"
+                  : batch.accounts.length
+                    ? "修改目标科目"
+                    : "选择目标科目"}
+                <Search size={16} aria-hidden="true" />
+              </Button>
+              <span className="jm-account-summary" title={batch.accounts.join("、")}>
+                {batch.accounts.length
+                  ? `已选 ${batch.accounts.length} 个：${batch.accounts.slice(0, 2).join("、")}${batch.accounts.length > 2 ? "…" : ""}`
+                  : missingRequired.length > 0
+                    ? "请先完成预览表中的科目字段映射"
+                    : "尚未选择"}
+              </span>
+            </div>
             {filterCount > 0 && (
-              <span className="jm-filter-note">
+              <div className="jm-filter-note">
                 另有 {filterCount} 列设了筛选条件，对所有批次一致生效
                 <Button
                   variant="secondary"
@@ -1001,11 +1064,11 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                 >
                   清除列筛选
                 </Button>
-              </span>
+              </div>
             )}
           </div>
           <p className="kz-note jm-rule-note">
-            每批次选择一组目标科目；表头漏斗按整张凭证筛选，标记只落在目标科目行。
+            标记只应用于所选科目行；表头筛选对整张凭证生效。
           </p>
         </section>
       )}

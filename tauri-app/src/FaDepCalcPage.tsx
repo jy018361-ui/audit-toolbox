@@ -394,8 +394,9 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       setError("请先选择并读取期末清单。");
       return;
     }
-    if (depMissingRoles(mapping).length) {
-      setError("还有必填字段未映射，请在预览表头下拉中补全。");
+    const unmapped = depMissingRoles(mapping);
+    if (unmapped.length) {
+      setError(`尚未映射：${unmapped.join("、")}。请在预览表头下拉中补全。`);
       return;
     }
     if (!isValidIsoDate(balanceSheetDate)) {

@@ -76,7 +76,7 @@ export type { Mapping, MappingChange, MappingChangeSource } from "./ledgerMappin
 
 export type Batch = { name: string; accounts: string[]; presetId?: string };
 export type KanzhangDraft = { inputPath: string; sheet: string; knownSheets:string[]; headerRow: number; headerDepth: number; inspect?: Inspect; mapping: Mapping; batches: Batch[]; activeBatch: number; excludes: string[]; outputPath: string; outputTouched: boolean; includePivot: boolean; includeVoucherTypes: boolean; includeCounterpart:boolean; includeSuite:boolean; markLossTransfer: boolean; llmAnalysis:boolean; pivotRows: string[]; pivotColumns: string[]; pivotValues: string[]; step: number };
-const EMPTY: KanzhangDraft = { inputPath:"",sheet:"",knownSheets:[],headerRow:0,headerDepth:1,mapping:EMPTY_MAPPING,batches:[{name:"批次1",accounts:[]}],activeBatch:0,excludes:[],outputPath:"",outputTouched:false,includePivot:true,includeVoucherTypes:true,includeCounterpart:true,includeSuite:true,markLossTransfer:true,llmAnalysis:true,pivotRows:[],pivotColumns:[],pivotValues:[],step:1 };
+const EMPTY: KanzhangDraft = { inputPath:"",sheet:"",knownSheets:[],headerRow:0,headerDepth:0,mapping:EMPTY_MAPPING,batches:[{name:"批次1",accounts:[]}],activeBatch:0,excludes:[],outputPath:"",outputTouched:false,includePivot:true,includeVoucherTypes:true,includeCounterpart:true,includeSuite:true,markLossTransfer:true,llmAnalysis:false,pivotRows:[],pivotColumns:[],pivotValues:[],step:1 };
 const CACHE="audit-toolbox.kanzhang.draft.v4";
 export const setCounterpartMode=(enabled:boolean):Pick<KanzhangDraft,"includeCounterpart"|"includeSuite">=>({includeCounterpart:enabled,includeSuite:enabled});
 const loadDraft=():KanzhangDraft=>{try{const value={...EMPTY,...JSON.parse(sessionStorage.getItem(CACHE)||"{}")} as KanzhangDraft;return value.includeCounterpart?value:{...value,includeSuite:false};}catch{return EMPTY;}};
@@ -551,7 +551,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
         detectedHeaderRow={draft.headerRow===0?draft.inspect?.headerRow:undefined}
         dragHover={dragHover} busy={busy} job={job} needsReload={!draft.inspect&&draft.knownSheets.length>0}
         onBrowse={chooseInput} onClear={clearAll}
-        onSheetChange={value=>setDraft(current=>invalidateKanzhangInspection({...current,headerRow:0},{sheet:value}))}
+        onSheetChange={value=>setDraft(current=>invalidateKanzhangInspection({...current,headerRow:0,headerDepth:0},{sheet:value}))}
         onHeaderRowChange={value=>setDraft(current=>invalidateKanzhangInspection(current,{headerRow:value}))}
         onHeaderDepthChange={value=>setDraft(current=>invalidateKanzhangInspection(current,{headerDepth:value}))}
         onInspect={inspect} onCancel={(jobId)=>jobCancel(jobId)}

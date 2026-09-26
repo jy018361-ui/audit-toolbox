@@ -1367,7 +1367,7 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
         "sheets": table.sheets,
         "sheet": table.sheet,
         "headerRow": table.header_row,
-        "headerDepth": 1,
+        "headerDepth": table.header_depth,
         "headers": table.headers,
         "preview": table.rows.iter().take(8).collect::<Vec<_>>(),
         "rowCount": table.rows.len(),
@@ -2161,6 +2161,7 @@ struct Table {
     sheet: String,
     sheets: Vec<String>,
     header_row: usize,
+    header_depth: usize,
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
 }
@@ -2247,18 +2248,24 @@ fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
                 .collect(),
         )
     };
-    let header_row = if spec.header_row > 0 {
-        spec.header_row
-    } else {
-        detect_header(&all)
-    };
+    let (header_index, inferred_depth) = crate::header_detection::layout(
+        &all, 30, |r| r.iter().filter(|v| header_cell_hit(v)).count() as f64,
+        header_cell_hit, (spec.header_row > 0).then(|| spec.header_row - 1),
+    );
+    let header_index = if spec.header_row == 0 && spec.header_depth == 1 {
+        detect_header(&all) - 1
+    } else { header_index };
+    let header_row = header_index + 1;
     if header_row == 0 || header_row > all.len() {
         return Err(error("HEADER_ROW_INVALID", "标题行超出数据范围。", None));
     }
     let width = all.iter().map(Vec::len).max().unwrap_or(0);
-    let mut headers = (0..width)
-        .map(|i| all[header_row - 1].get(i).cloned().unwrap_or_default())
-        .collect::<Vec<_>>();
+    let depth = if spec.header_depth == 0 { inferred_depth } else { spec.header_depth.clamp(1, 2) };
+    let mut headers = if depth > 1 {
+        crate::fx::merge_headers(&all[header_index..(header_index + depth).min(all.len())], width)
+    } else {
+        (0..width).map(|i| all[header_index].get(i).cloned().unwrap_or_default()).collect()
+    };
     for (i, h) in headers.iter_mut().enumerate() {
         if h.trim().is_empty() {
             *h = format!("未命名列{}", i + 1);
@@ -2266,7 +2273,7 @@ fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
     }
     let rows = all
         .into_iter()
-        .skip(header_row + spec.header_depth.saturating_sub(1))
+        .skip(header_index + depth)
         .filter(|r| r.iter().any(|v| !v.trim().is_empty()))
         .map(|mut r| {
             r.resize(width, String::new());
@@ -2277,6 +2284,7 @@ fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
         sheet,
         sheets,
         header_row,
+        header_depth: depth,
         headers,
         rows,
     })
@@ -2289,13 +2297,9 @@ fn read_text(path: &Path) -> Result<Vec<Vec<String>>, AppError> {
 /// 表头行特征：多数单元格是含名称类关键词的短文本（数据行的编号/金额/长
 /// 机构名不满足）。
 fn detect_header(rows: &[Vec<String>]) -> usize {
-    let score = |r: &Vec<String>| r.iter().filter(|v| header_cell_hit(v)).count();
-    rows.iter()
-        .take(30)
-        .enumerate()
-        .max_by_key(|(i, r)| (score(r), std::cmp::Reverse(*i)))
-        .map(|(i, _)| i + 1)
-        .unwrap_or(1)
+    crate::header_detection::select_row(rows, 30, |r| {
+        r.iter().filter(|v| header_cell_hit(v)).count() as f64
+    }) + 1
 }
 
 fn header_cell_hit(v: &str) -> bool {
@@ -2361,6 +2365,17 @@ fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppE
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn 通用表头模糊匹配双层不混入正文() {
+        let path = std::env::temp_dir().join(format!("fuzzy-header-{}.csv", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "客户清单,客户清单,客户清单,客户清单\n客户信息,,交易金额,\n编号,名称,金额,数量\n001,客户甲,100,10\n").unwrap();
+        let spec: super::SourceSpec = serde_json::from_value(serde_json::json!({"inputPath":path,"headerRow":0,"headerDepth":0})).unwrap();
+        let table = super::load_table(&spec).unwrap();
+        assert_eq!((table.header_row, table.header_depth), (2, 2));
+        assert_eq!(table.headers[1], "客户信息-名称");
+        assert_eq!(table.rows.len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
     use super::*;
 
     fn opts(match_type: &str) -> MatchOptions {

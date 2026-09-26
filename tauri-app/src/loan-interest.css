@@ -126,7 +126,7 @@
   padding: 6px 28px 6px 9px;
   border: 1px solid var(--control-border);
   border-radius: var(--radius-md);
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
 }
 /* 合并表（科目确认＋利率设置）：基础列含余额与发生额，主体/辅助核算列按账套有无增减。
@@ -136,16 +136,6 @@
   min-width: 100%;
   table-layout: auto;
 }
-.loan-account-confirm.loan-confirm-table th:nth-last-child(2),
-.loan-account-confirm.loan-confirm-table td:nth-last-child(2) {
-  min-width: 104px;
-  white-space: nowrap;
-}
-.loan-account-confirm.loan-confirm-table th:last-child,
-.loan-account-confirm.loan-confirm-table td:last-child {
-  min-width: 220px;
-  max-width: 320px;
-}
 .loan-account-confirm.loan-confirm-table td {
   white-space: nowrap;
 }
@@ -154,7 +144,7 @@
   padding: 4px 8px;
   border: 1px solid var(--control-border);
   border-radius: 8px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
 }
 .loan-account-confirm.loan-confirm-table input[type="number"] {
@@ -191,11 +181,6 @@
   color: var(--success-fg);
   font-size: 11px;
   white-space: nowrap;
-}
-.loan-account-confirm td.loan-match-basis {
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .loan-suggestion {
   display: inline-block;
@@ -278,7 +263,7 @@
   padding: 6px 9px;
   border: 1px solid var(--control-border);
   border-radius: 8px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
 }
 .loan-output-row {

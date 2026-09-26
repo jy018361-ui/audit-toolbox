@@ -666,7 +666,7 @@ describe("JE 币种资料提示", () => {
               category: "demand",
               termLabel: "",
               tierMatchedBy: "默认按活期",
-              rateSource: "挂牌暂估值",
+              rateSource: "市场中枢暂估值",
               annualRate: 0.0005,
               rateResolved: true,
               rateProvisional: true,
@@ -897,6 +897,7 @@ describe("第二步按币种拆行", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled());
     goToStep(STEP2);
     const cny = await screen.findByRole("spinbutton", { name: `${bank}（CNY）的年利率` });
+    expect(screen.queryByRole("columnheader", { name: "币种" })).not.toBeInTheDocument();
     const usd = screen.getByRole("spinbutton", { name: `${bank}（USD）的年利率` });
     expect(cny).toHaveValue(0.05);
     expect(usd).toHaveValue(0.05);
@@ -946,6 +947,30 @@ describe("贷方余额弹窗已下线", () => {
 });
 
 describe("存款步骤门禁与来源状态", () => {
+  it("资产负债表日为空时仍可进入第三步填写，测算时才提示补齐", async () => {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "拖放或选择 TB、序时账文件（可同时选择）",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: STEP3 })).not.toBeDisabled(),
+    );
+    goToStep(STEP2);
+    goToStep(STEP3);
+    fireEvent.change(screen.getByLabelText("资产负债表日"), {
+      target: { value: "" },
+    });
+    goToStep(STEP2);
+    goToStep(STEP3);
+    expect(screen.getByLabelText("资产负债表日")).toHaveValue("");
+    expect(screen.queryByText("请先确认资产负债表日。")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    expect(screen.getByText("请选择资产负债表日。")).toBeVisible();
+    expect(mock.jobStart).not.toHaveBeenCalled();
+  });
+
   it("从上传页点击第三步只进入确认页，不能绕过科目与利率确认", async () => {
     render(<DepositInterestPage tool={tool} />);
     fireEvent.click(

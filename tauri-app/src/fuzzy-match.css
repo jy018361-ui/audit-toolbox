@@ -45,7 +45,7 @@
   padding: 6px 9px;
   border: 1px solid var(--control-border);
   border-radius: 8px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
 }
 .fuzzy-source-meta input {

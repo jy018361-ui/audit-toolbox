@@ -277,25 +277,35 @@
   font-weight: 600;
 }
 
-/* 科目复核表固定 4 列，列宽按 主体/科目/角色/类别 分配，科目列超长省略。 */
+/* 科目复核表只有必要维度才成列；科目名称与有效辅助值共用一列。 */
 .fa-tbje-account-table.fa-tbje-review-table {
-  table-layout: fixed;
+  table-layout: auto;
+  min-width: 54rem;
 }
 
-.fa-tbje-review-table th:nth-child(1) {
-  width: 14%;
+.fa-tbje-review-table .fa-tbje-review-entity {
+  min-width: 8rem;
 }
 
-.fa-tbje-review-table th:nth-child(2) {
-  width: 42%;
+.fa-tbje-review-table .fa-tbje-review-account {
+  width: 48%;
+  min-width: 21rem;
 }
 
-.fa-tbje-review-table th:nth-child(3) {
-  width: 19%;
+.fa-tbje-review-table .fa-tbje-review-currency {
+  min-width: 6rem;
 }
 
-.fa-tbje-review-table th:nth-child(4) {
-  width: 25%;
+.fa-tbje-review-table .fa-tbje-review-role {
+  min-width: 12rem;
+}
+
+.fa-tbje-review-table .fa-tbje-review-category {
+  min-width: 12rem;
+}
+
+.fa-tbje-review-table th {
+  white-space: nowrap;
 }
 
 .fa-tbje-account-name {

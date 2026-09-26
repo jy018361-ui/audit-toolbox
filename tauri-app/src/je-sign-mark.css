@@ -11,6 +11,12 @@
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+  width: 100%;
+  max-width: 62rem;
+  align-self: start;
+}
+.jm-batches h2 {
+  margin: 0;
 }
 .jm-source-loaded .kz-two {
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -26,38 +32,63 @@
   align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-2);
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--border);
 }
 .jm-batch-row .kz-tabs {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-2);
   margin: 0;
 }
-.jm-batch-name {
+.jm-batch-row .kz-tabs button {
+  padding: var(--sp-2) var(--sp-3);
+  white-space: nowrap;
+}
+.jm-current-batch,
+.jm-rename-row {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.jm-current-batch-label {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.jm-current-batch strong {
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+.jm-batches .jm-batch-name {
+  display: grid;
+  gap: var(--sp-1);
+  margin: 0;
 }
 .jm-batch-settings {
   display: flex;
-  align-items: end;
+  align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-3);
-  padding-top: var(--sp-2);
-  border-top: 1px solid var(--border);
 }
 .jm-delete-batch {
-  margin-left: auto;
+  margin-left: var(--sp-2);
   color: var(--danger-fg);
 }
 .jm-delete-batch:hover:not(:disabled) {
   background: var(--danger-bg);
 }
 .jm-batch-name input {
-  width: 12rem;
+  width: min(18rem, 100%);
+}
+.jm-account-block {
+  display: grid;
+  gap: var(--sp-2);
 }
 .jm-account-row {
   display: flex;
@@ -68,9 +99,20 @@
 .jm-account-label {
   font-weight: 600;
 }
+.jm-account-summary {
+  min-width: 0;
+  max-width: 36rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
 .jm-rule-note {
   margin: 0;
   font-weight: 400;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
 }
 .jm-page .dt-header-inputs {
   display: flex;
@@ -96,31 +138,10 @@
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
-/* 目标科目入口使用搜索动作，与字段映射下拉和列筛选漏斗区分。 */
+/* 目标科目是当前批次的主操作；未选择时使用共享主按钮样式。 */
 .jm-account-picker {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-width: 12rem;
+  min-width: 11rem;
   justify-content: space-between;
-  border: 1px solid var(--border);
-  background: var(--surface-sunken);
-  color: inherit;
-  padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--r-md);
-  cursor: pointer;
-}
-.jm-account-picker:hover:not(:disabled),
-.jm-account-picker[aria-expanded="true"] {
-  border-color: var(--brand-link);
-}
-.jm-account-picker.active {
-  border-color: var(--brand-link);
-  font-weight: 600;
-}
-.jm-account-picker:disabled {
-  cursor: default;
-  opacity: 0.6;
 }
 .jm-filter-note {
   display: inline-flex;

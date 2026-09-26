@@ -29,6 +29,9 @@ import {
 const inTauri = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/** 页面据此区分桌面应用与浏览器预览（后者无本机能力，需明确降级提示）。 */
+export const runningInDesktopApp = inTauri;
+
 // Browser preview is a first-class UI review surface. Keep non-sensitive
 // settings in memory so pages that persist draft UI state do not call Tauri's
 // IPC bridge when it is unavailable. File, secret, and engine operations still
@@ -400,11 +403,22 @@ export const meetingRecordStop = () =>
       )
     : Promise.reject(previewUnavailable("停止会议录音"));
 
-export const meetingAsrTest = (apiKey?: string) =>
+/** 语音转写连接测试：传 plan 走套餐通道（realtime 连接测试），
+ *  否则按通用通道验证 paraformer 上传凭证密钥。 */
+export const meetingAsrTest = (
+  apiKey?: string,
+  plan?: { baseUrl: string; model: string; apiKey?: string },
+) =>
   inTauri()
     ? invoke<{ ok: boolean; message: string; elapsedMs: number }>(
         "meeting_asr_test",
-        { apiKey: apiKey?.trim() || null },
+        plan
+          ? {
+              planBaseUrl: plan.baseUrl,
+              planModel: plan.model,
+              planApiKey: plan.apiKey?.trim() || null,
+            }
+          : { apiKey: apiKey?.trim() || null },
       )
     : Promise.reject(previewUnavailable("测试百炼语音转写连接"));
 

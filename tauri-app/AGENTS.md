@@ -51,7 +51,7 @@ Rust 测试迭代经验（2026-09，详见全局 AGENTS.md「Rust 工程经验�
   stdin 一行 JSON 请求、stdout 逐行 JSON 事件；取消/暂停靠 `%TEMP%\AuditToolbox\rust-job-cancel\` 下的
   标记文件协作。**worker 里不能用 Tauri state**，所需设置必须由 `lib.rs` 提前注入 params
   （`__settings` / `__llmOptions`，来自 SQLite Storage + Windows 凭据管理器）。
-- `secret_set` 只接受 `llm_api_key` / `dify_api_key` / `baidu_ocr_key` / `baidu_ocr_secret` 四个名字。
+- `secret_set` 只接受 `llm_api_key` / `dify_api_key` / `baidu_ocr_key` / `baidu_ocr_secret` / `bailian_asr_key` / `bailian_plan_asr_key` 六个名字。
 
 ### 文件系统安全边界
 

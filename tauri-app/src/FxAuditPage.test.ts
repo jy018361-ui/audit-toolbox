@@ -26,6 +26,8 @@ import {
   fxMergeJobResult,
   fxCurrencyRequirement,
   fxMissingRequired,
+  fxMissingDetails,
+  fxJeAmountMappingHint,
   fxPreviewTokenFor,
   fxReportStart,
   fxRequiredSources,
@@ -490,6 +492,25 @@ describe("fx audit upload and mapping parity", () => {
       "原币金额方案",
       "本位币金额方案",
     ]);
+  });
+  it("JE 原币方案明确列出缺少的角色及 Oracle 列口径", () => {
+    const headers = ["Entered Debit", "Entered Credit", "Accounted Debit", "Accounted Credit"];
+    expect(fxJeAmountMappingHint({ functionalDebit: "Entered Debit", functionalCredit: "Entered Credit" }, headers))
+      .toContain("还缺：原币借方、原币贷方");
+    expect(fxJeAmountMappingHint({ functionalDebit: "Entered Debit", functionalCredit: "Entered Credit" }, headers))
+      .toContain("Entered Debit/Credit 对应原币借方/贷方");
+    expect(fxJeAmountMappingHint({ foreignDebit: "借", functionalAmount: "本币" }, []))
+      .toContain("还缺：原币贷方");
+    expect(fxJeAmountMappingHint({ foreignDebit: "借", foreignCredit: "贷", functionalAmount: "本币" }, []))
+      .toBeUndefined();
+  });
+  it("汇兑其他复合槽位按当前映射列出缺失角色", () => {
+    expect(fxMissingDetails("je", { functionalDebit: "本币借方" }))
+      .toContain("本位币还缺：本位币贷方；也可映射单列本位币净额");
+    expect(fxMissingDetails("tb", { openingForeignDebit: "年初原币借方" }))
+      .toContain("期初原币余额还缺：期初原币贷方；也可映射单列期初原币净额");
+    expect(fxMissingDetails("tb", { ytdFunctionalDebit: "累计借方" }))
+      .toContain("发生额还缺：本年累计本位币贷方；或补齐本期本位币借方、本期本位币贷方（任选一组）");
   });
   it("JE 原币币种与原币金额在所有模式都必填", () => {
     expect(

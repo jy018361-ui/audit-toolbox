@@ -459,7 +459,7 @@ fn analyze_with_progress(
         }
     }
     let assignments = assignment_index(params, &tb, &tb_map, &je, &je_map, entity_key_enabled)?;
-    if assignments.codes.is_empty() && assignments.names.is_empty() {
+    if assignments.exact.is_empty() {
         return Err(error(
             "FA_TBJE_ACCOUNTS_REQUIRED",
             "请至少确认一个固定资产原值或累计折旧科目。",
@@ -515,25 +515,9 @@ fn analyze_with_progress(
     let (additions, disposals, mut totals) = classify_movements(&mut je_lines);
     let mut warnings = Vec::new();
     let tb_accounts = account_identities(&tb, &tb_map, params, EntitySide::Tb, entity_key_enabled);
-    for id in account_identities(&je, &je_map, params, EntitySide::Je, entity_key_enabled) {
-        if find_assignment(&assignments, &id).is_some()
-            && !tb_accounts.iter().any(|other| {
-                other.entity == id.entity
-                    && ((!id.code.is_empty() && other.code == id.code)
-                        || (id.code.is_empty() || other.code.is_empty())
-                            && ledger_mapping::normalize_name(&other.name)
-                                == ledger_mapping::normalize_name(&id.name))
-            })
-        {
-            let warning = format!(
-                "主体 {} 的已确认科目 {} 仅存在于 JE，已保留变动；TB 期初/期末无对应科目，请复核勾稽差异。",
-                id.entity, id.display
-            );
-            if !warnings.contains(&warning) {
-                warnings.push(warning);
-            }
-        }
-    }
+    let je_accounts = account_identities(&je, &je_map, params, EntitySide::Je, entity_key_enabled);
+    append_je_only_warnings(&mut warnings, &tb_accounts, &je_accounts, &assignments);
+    append_unmatched_account_warnings(&mut warnings, &tb_accounts, &je_accounts, &assignments);
     for line in &tb_lines {
         let slot = totals
             .entry((line.entity.clone(), line.category.clone()))
@@ -682,7 +666,7 @@ fn analyze_with_disk_je(
     let je_identities = unique.into_values().collect::<Vec<_>>();
     let tb_identities = account_identities(tb, tb_map, params, EntitySide::Tb, entity_key_enabled);
     let assignments = assignment_index_from_identities(params, &tb_identities, &je_identities)?;
-    if assignments.codes.is_empty() && assignments.names.is_empty() {
+    if assignments.exact.is_empty() {
         return Err(error(
             "FA_TBJE_ACCOUNTS_REQUIRED",
             "请至少确认一个固定资产原值或累计折旧科目。",
@@ -775,6 +759,7 @@ fn analyze_with_disk_je(
     let (additions, disposals, mut totals) = classify_movements(&mut je_lines);
     let mut warnings = Vec::new();
     append_je_only_warnings(&mut warnings, &tb_identities, &je_identities, &assignments);
+    append_unmatched_account_warnings(&mut warnings, &tb_identities, &je_identities, &assignments);
     add_tb_totals(&mut totals, &tb_lines);
     Ok(Analysis {
         tb: tb_lines,
@@ -920,6 +905,52 @@ fn append_je_only_warnings(
                 warnings.push(warning);
             }
         }
+    }
+}
+
+/// 同码却没有进入业务分类的 JE 行必须显式提示。完整凭证可能因为另一条
+/// 累计折旧行而被读入，单看 JE 明细行数无法发现原值行被当作对方科目。
+fn append_unmatched_account_warnings(
+    warnings: &mut Vec<String>,
+    tb_accounts: &[AccountIdentity],
+    je_accounts: &[AccountIdentity],
+    assignments: &AssignmentIndex,
+) {
+    let mut seen = BTreeSet::new();
+    let confirmed = tb_accounts
+        .iter()
+        .filter(|tb| !tb.code.is_empty() && find_assignment(assignments, tb).is_some())
+        .map(|tb| ((
+            tb.entity.clone(),
+            ledger_mapping::normalize_account_code(&tb.code),
+            norm(&tb.auxiliary),
+            tb.currency.trim().to_ascii_uppercase(),
+        ), tb))
+        .collect::<HashMap<_, _>>();
+    for je in je_accounts {
+        if je.code.is_empty() || find_assignment(assignments, je).is_some() {
+            continue;
+        }
+        let tb = confirmed.get(&(
+            je.entity.clone(),
+            ledger_mapping::normalize_account_code(&je.code),
+            norm(&je.auxiliary),
+            je.currency.trim().to_ascii_uppercase(),
+        ));
+        let Some(tb) = tb else { continue };
+        let key = (je.entity.clone(), je.code.clone(), je.name.clone());
+        if seen.insert(key) && seen.len() <= 10 {
+            warnings.push(format!(
+                "主体 {} 的 JE 科目 {} 未匹配到已确认的 TB 科目 {}，相关分录未纳入固定资产变动；请复核两侧科目名称及分类。",
+                je.entity, je.display, tb.display
+            ));
+        }
+    }
+    if seen.len() > 10 {
+        warnings.push(format!(
+            "另有 {} 个同编码 JE 科目未匹配，请复核科目名称。",
+            seen.len() - 10
+        ));
     }
 }
 
@@ -3448,7 +3479,108 @@ fn assignment_index_from_identities(
             out.ambiguous_codes.insert(key);
         }
     }
+    // TB 常给末级短名，JE 则给「上级_末级」全路径。只有编码、主体、辅助、
+    // 币种均相同，路径前缀可在 TB 的上级科目中逐段验证，且两侧一一对应时，
+    // 才把已确认的 TB 分类精确赋给该 JE 身份。绝不恢复同码无条件扩散。
+    let parent_names = tb_ids
+        .iter()
+        .filter(|id| !id.code.is_empty())
+        .map(|id| (
+            id.entity.clone(),
+            ledger_mapping::normalize_account_code(&id.code),
+            ledger_mapping::normalize_name(&id.name),
+        ))
+        .collect::<HashSet<_>>();
+    let mut tb_by_code = HashMap::<(String, String, String, String), Vec<&AccountIdentity>>::new();
+    for tb in tb_ids {
+        if tb.code.is_empty() || !out.exact.contains_key(&assignment_identity(tb)) {
+            continue;
+        }
+        tb_by_code
+            .entry((
+                tb.entity.clone(),
+                ledger_mapping::normalize_account_code(&tb.code),
+                norm(&tb.auxiliary),
+                tb.currency.trim().to_ascii_uppercase(),
+            ))
+            .or_default()
+            .push(tb);
+    }
+    let mut candidates = BTreeMap::<
+        (String, String, String, String, String),
+        BTreeSet<(String, String, String, String, String)>,
+    >::new();
+    for je in je_ids {
+        if je.code.is_empty() {
+            continue;
+        }
+        let je_key = assignment_identity(je);
+        let lookup = (
+            je.entity.clone(),
+            ledger_mapping::normalize_account_code(&je.code),
+            norm(&je.auxiliary),
+            je.currency.trim().to_ascii_uppercase(),
+        );
+        let Some(matches) = tb_by_code.get(&lookup) else { continue };
+        for tb in matches {
+            let tb_key = assignment_identity(tb);
+            if tb_key == je_key || verified_account_path_alias(tb, je, &parent_names) {
+                candidates.entry(je_key.clone()).or_default().insert(tb_key);
+            }
+        }
+    }
+    let mut reverse_count = HashMap::<(String, String, String, String, String), usize>::new();
+    for tb_keys in candidates.values() {
+        if tb_keys.len() == 1 {
+            *reverse_count.entry(tb_keys.iter().next().unwrap().clone()).or_default() += 1;
+        }
+    }
+    for (je_key, tb_keys) in candidates {
+        if out.exact.contains_key(&je_key) || tb_keys.len() != 1 {
+            continue;
+        }
+        let tb_key = tb_keys.into_iter().next().unwrap();
+        if reverse_count.get(&tb_key) == Some(&1) {
+            if let Some(assigned) = out.exact.get(&tb_key).cloned() {
+                out.exact.insert(je_key, assigned);
+            }
+        }
+    }
     Ok(out)
+}
+
+fn verified_account_path_alias(
+    tb: &AccountIdentity,
+    je: &AccountIdentity,
+    parent_names: &HashSet<(String, String, String)>,
+) -> bool {
+    let parts = je
+        .name
+        .split(['_', '\\', '/', '>', '＞'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() < 2
+        || ledger_mapping::normalize_name(parts[parts.len() - 1])
+            != ledger_mapping::normalize_name(&tb.name)
+    {
+        return false;
+    }
+    let code = ledger_mapping::normalize_account_code(&tb.code);
+    let mut previous_level = 0;
+    parts[..parts.len() - 1].iter().all(|part| {
+        let name = ledger_mapping::normalize_name(part);
+        let level = code.char_indices().map(|(i, _)| i).skip(1).find(|&i| {
+            i > previous_level
+                && parent_names.contains(&(tb.entity.clone(), code[..i].to_owned(), name.clone()))
+        });
+        if let Some(level) = level {
+            previous_level = level;
+            true
+        } else {
+            false
+        }
+    })
 }
 
 fn assignment_identity(id: &AccountIdentity) -> (String, String, String, String, String) {
@@ -3842,6 +3974,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[ignore = "requires the local TBJEPBC fixture directory"]
+    fn pbc10_原值路径别名与真实账表分毫勾稽() {
+        let dir = PathBuf::from(std::env::var("FA_TBJE_PBC_DIR").expect("FA_TBJE_PBC_DIR"));
+        let tb_path = dir.join("10科目余额表.xlsx");
+        let je_path = dir.join("10序时账 (2).xlsx");
+        let tb_spec = SourceSpec {
+            input_path: tb_path.to_string_lossy().into_owned(),
+            sheet: "Sheet1".into(),
+            header_row: 2,
+            header_depth: 2,
+        };
+        let je_spec = SourceSpec {
+            input_path: je_path.to_string_lossy().into_owned(),
+            sheet: "Sheet1".into(),
+            header_row: 1,
+            header_depth: 1,
+        };
+        let tb = load_fx_table(&tb_spec).unwrap();
+        let je = load_fx_table(&je_spec).unwrap();
+        let tb_map = json!({
+            "accountCode":tb.headers[0], "accountName":tb.headers[1],
+            "openingFunctionalDebit":tb.headers[4], "openingFunctionalCredit":tb.headers[5],
+            "ytdFunctionalDebit":tb.headers[8], "ytdFunctionalCredit":tb.headers[9],
+            "closingFunctionalDebit":tb.headers[10], "closingFunctionalCredit":tb.headers[11]
+        });
+        let je_map = json!({
+            "date":je.headers[0], "id":[je.headers[3],je.headers[4]],
+            "accountCode":je.headers[6], "accountName":je.headers[7],
+            "summary":je.headers[5], "functionalDebit":je.headers[10],
+            "functionalCredit":je.headers[11]
+        });
+        let tb_mapping = serde_json::from_value::<Map<String, Value>>(tb_map.clone()).unwrap();
+        let identities = account_identities(&tb, &tb_mapping, &json!({}), EntitySide::Tb, false);
+        let assignments = identities.iter().filter(|id| {
+            id.code.starts_with("1601.") || id.code == "1602"
+        }).map(|id| json!({
+            "account":id.display,
+            "role":if id.code == "1602" { "depreciation" } else { "cost" },
+            "category":if id.code == "1602" { "固定资产" } else { id.name.as_str() }
+        })).collect::<Vec<_>>();
+        let params = json!({
+            "tbSource":tb_spec, "jeSource":je_spec,
+            "tbMapping":tb_map, "jeMapping":je_map,
+            "accountAssignments":assignments
+        });
+        let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+        let cost = analysis.totals.values().fold(CategoryTotals::default(), |mut sum, row| {
+            sum.opening_cost += row.opening_cost;
+            sum.closing_cost += row.closing_cost;
+            sum.additions += row.additions;
+            sum.disposals += row.disposals;
+            sum.reclass_cost += row.reclass_cost;
+            sum
+        });
+        assert!((cost.opening_cost - 51_131_540.85).abs() < 0.01);
+        assert!((cost.closing_cost - 54_123_314.66).abs() < 0.01);
+        assert!((cost.additions - cost.disposals + cost.reclass_cost - 2_991_773.81).abs() < 0.01);
+        assert!((cost.opening_cost + cost.additions - cost.disposals + cost.reclass_cost - cost.closing_cost).abs() < 0.01);
+        assert!(!analysis.warnings.iter().any(|warning| warning.contains("1601") && warning.contains("未匹配")));
     }
 
     /// 本机真实样例回归入口：汇兑损益测试资料（科目余额表.xls ＋ 序时账-1.xlsx）。
@@ -4585,6 +4779,74 @@ mod tests {
             "reportEnd":"2025-12-31","outputPath":out
         });
         (dir, out, params)
+    }
+
+    #[test]
+    fn 已验证上级路径别名纳入原值且勾稽归零() {
+        let (dir, _, mut params) = fixture();
+        let tb = dir.join("tb.csv");
+        let je = dir.join("je.csv");
+        let tb_text = std::fs::read_to_string(&tb).unwrap().replace(
+            "A,1601,机器设备,1000,500,200,1300",
+            "A,1601,固定资产,0,0,0,0\nA,1601.001,机器设备,1000,500,200,1300",
+        );
+        std::fs::write(&tb, tb_text).unwrap();
+        let je_text = std::fs::read_to_string(&je).unwrap().replace(
+            ",1601,机器设备,",
+            ",1601.001,固定资产_机器设备,",
+        );
+        std::fs::write(&je, je_text).unwrap();
+        params["accountAssignments"][0]["account"] = json!("1601.001 机器设备");
+        let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+        let totals = &analysis.totals[&(String::from("A"), String::from("机器设备"))];
+        assert_eq!(totals.opening_cost, 1000.0);
+        assert_eq!(totals.closing_cost, 1300.0);
+        assert_eq!(totals.additions, 500.0);
+        assert_eq!(totals.disposals, 200.0);
+        assert!((totals.opening_cost + totals.additions - totals.disposals - totals.closing_cost).abs() < 0.005);
+        assert!(!analysis.warnings.iter().any(|warning| warning.contains("未匹配")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 同码异名及别名一对多不自动继承分类() {
+        let (dir, _, mut params) = fixture();
+        let tb = dir.join("tb.csv");
+        let je = dir.join("je.csv");
+        let tb_text = std::fs::read_to_string(&tb).unwrap().replace(
+            "A,1601,机器设备,1000,500,200,1300",
+            "A,1601,固定资产,0,0,0,0\nA,1601.001,机器设备,1000,500,200,1300",
+        );
+        std::fs::write(&tb, tb_text).unwrap();
+        let je_text = std::fs::read_to_string(&je).unwrap().replace(
+            ",1601,机器设备,",
+            ",1601.001,无形资产_机器设备,",
+        );
+        std::fs::write(&je, je_text).unwrap();
+        params["accountAssignments"][0]["account"] = json!("1601.001 机器设备");
+        let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+        assert_eq!(analysis.additions.len(), 0);
+        assert_eq!(analysis.disposals.len(), 0);
+        assert!(analysis.warnings.iter().any(|warning| warning.contains("未匹配")));
+
+        // 两种 JE 名称均可拆出同一叶名时，一对多也不能猜测。
+        let tb_text = std::fs::read_to_string(&tb).unwrap().replace(
+            "A,1601.001,机器设备,1000,500,200,1300",
+            "A,1601.0,明细,0,0,0,0\nA,1601.001,机器设备,1000,500,200,1300",
+        );
+        std::fs::write(&tb, tb_text).unwrap();
+        let je_text = std::fs::read_to_string(&je)
+            .unwrap()
+            .replace("无形资产_机器设备", "固定资产_机器设备")
+            .replace(
+                "A,2025-01-10,V1,1601.001,固定资产_机器设备,购置,500,0",
+                "A,2025-01-10,V1,1601.001,固定资产_明细_机器设备,购置,500,0",
+            );
+        std::fs::write(&je, je_text).unwrap();
+        let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+        assert_eq!(analysis.additions.len(), 0);
+        assert!(analysis.warnings.iter().any(|warning| warning.contains("未匹配")));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

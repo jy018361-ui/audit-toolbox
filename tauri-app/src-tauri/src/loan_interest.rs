@@ -4387,20 +4387,29 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
         .set_background_color("#DDEBF7");
     let floating_bps_input = Format::new().set_background_color("#DDEBF7");
     // 列序与下面的公式一一对应，改这里必须同步改 `LPR_SHEET` 那几条公式。
-    // A借款标识 B期初 C增加 D减少 E期末余额(台账) F期末余额(推算) G勾稽差异
+    // A借款标识 B期初 C增加 D减少 E期末余额(台账/TB) F期末余额(推算) G勾稽差异
     // H利率类型 I固定利率 J定价基准日 K LPR品种 L基准利率 M加减点 N有效年利率
     // O计息积数(元·天) P测算利息 Q状态 R依据 S主体 T稳定行键 U..台账原始列
-    let row_label = if params.get("mode").and_then(Value::as_str) == Some("tb") {
+    let tb_mode = params.get("mode").and_then(Value::as_str) == Some("tb");
+    let row_label = if tb_mode {
         "辅助核算/借款行"
     } else {
         "借款标识"
     };
+    // TB＋JE 模式下期初/期末金额的来源就是 TB 科目余额表，列名如实标注来源，
+    // 复核者才能把 E 列与手里的 TB 对上（台账模式则保持「台账」字样）。
+    let opening_header = if tb_mode { "期初本金（TB）" } else { "期初本金" };
+    let closing_header = if tb_mode {
+        "期末余额（TB）"
+    } else {
+        "期末余额（台账）"
+    };
     let headers = [
         row_label,
-        "期初本金",
+        opening_header,
         "本期增加",
         "本期减少",
-        "期末余额（台账）",
+        closing_header,
         "期末余额（推算）",
         "勾稽差异",
         "利率类型",
@@ -4650,7 +4659,85 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
     // 其余像消失了一样）——长文本列与原始信息区定宽，其余列交给 autofit。
     ws.set_column_width(17, 60).map_err(xlsx)?;
     ws.set_column_hidden(19).map_err(xlsx)?;
-    ws.write_string((rows.len() + 3) as u32, 0, "利率填写：固定选“固定”，仅填黄色固定利率；浮动选“浮动”，填写蓝色基准利率和加减点。365为年利率折算基数，不是每笔计息天数；每次本金增减对应的实际天数请见“计息分段明细”。").map_err(xlsx)?;
+    // 测算与账面利息对比：界面第三步的「测算利息支出／TB 利息支出／差异」
+    // 三张指标卡此前只显示在页面上，底稿里没有——复核者拿到 Excel 无从对比。
+    // 测算值引用 P 列合计公式（明细一改就跟着动）；账面值来自用户勾选的
+    // 利息支出科目在 TB 上的发生额；差异为正表示测算大于账面。
+    let block = Format::new().set_bold();
+    let n = rows.len();
+    let total_excel_row = n + 2; // 1-based：第 1 行表头、第 2..=n+1 行数据、合计在 n+2
+    let booked = booked_interest_expense(params)?;
+    let basis_text = if booked.selected {
+        booked
+            .details
+            .iter()
+            .map(|detail| {
+                format!(
+                    "{} {}：{}",
+                    detail.get("accountCode").and_then(Value::as_str).unwrap_or(""),
+                    detail.get("account").and_then(Value::as_str).unwrap_or(""),
+                    detail.get("basis").and_then(Value::as_str).unwrap_or(""),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("；")
+    } else {
+        "未选择利息支出科目，未做账面对比（TB＋JE 模式第二步勾选利息支出科目后可对比）".to_string()
+    };
+    let calc_row = (n + 5) as u32; // 1-based n+6
+    let booked_row = (n + 6) as u32; // 1-based n+7
+    let diff_row = (n + 7) as u32; // 1-based n+8
+    ws.write_string_with_format((n + 3) as u32, 0, "测算与账面利息对比", &block)
+        .map_err(xlsx)?;
+    for (c, h) in ["项目", "金额", "说明"].iter().enumerate() {
+        ws.write_string_with_format((n + 4) as u32, c as u16, *h, &header)
+            .map_err(xlsx)?;
+    }
+    let calculated_total: f64 = rows.iter().map(|row| row.calculated_interest).sum();
+    ws.write_string(calc_row, 0, "测算利息支出").map_err(xlsx)?;
+    ws.write_formula_with_format(
+        calc_row,
+        1,
+        Formula::new(format!("=P{total_excel_row}"))
+            .set_result(calculated_total.to_string()),
+        &amount,
+    )
+    .map_err(xlsx)?;
+    ws.write_string(calc_row, 2, "本金×利率×计息天数÷365；计息过程见「计息分段明细」")
+        .map_err(xlsx)?;
+    ws.write_string(booked_row, 0, "账面利息支出（TB 利息科目）")
+        .map_err(xlsx)?;
+    if booked.selected {
+        ws.write_number_with_format(booked_row, 1, booked.amount, &amount)
+            .map_err(xlsx)?;
+    } else {
+        ws.write_blank(booked_row, 1, &amount).map_err(xlsx)?;
+    }
+    ws.write_string(booked_row, 2, &basis_text).map_err(xlsx)?;
+    ws.write_string(diff_row, 0, "差异（测算－账面）").map_err(xlsx)?;
+    ws.write_formula_with_format(
+        diff_row,
+        1,
+        Formula::new(format!(
+            "=IF(ISNUMBER(B{n7}),B{n6}-B{n7},\"\")",
+            n6 = n + 6,
+            n7 = n + 7
+        ))
+        .set_result(if booked.selected {
+            (calculated_total - booked.amount).to_string()
+        } else {
+            String::new()
+        }),
+        &amount,
+    )
+    .map_err(xlsx)?;
+    ws.write_string(diff_row, 2, "差异为正表示测算大于账面").map_err(xlsx)?;
+    ws.write_string(
+        (n + 9) as u32,
+        0,
+        "利率填写：固定选“固定”，仅填黄色固定利率；浮动选“浮动”，填写蓝色基准利率和加减点。365为年利率折算基数，不是每笔计息天数；每次本金增减对应的实际天数请见“计息分段明细”。",
+    )
+    .map_err(xlsx)?;
     if let Some(mode) = params.get("currencyFallbackMode").and_then(Value::as_str) {
         let label = match mode {
             "functional" => {
@@ -4662,7 +4749,7 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
             _ => "",
         };
         if !label.is_empty() {
-            ws.write_string((rows.len() + 4) as u32, 0, label)
+            ws.write_string((n + 10) as u32, 0, label)
                 .map_err(xlsx)?;
         }
     }
@@ -5139,18 +5226,24 @@ fn load_ledger_table(spec: &SourceSpec) -> Result<Table, AppError> {
                 .collect(),
         )
     };
-    let header_row = if spec.header_row > 0 {
-        spec.header_row
-    } else {
-        detect_header(&all)
-    };
+    let (header_index, inferred_depth) = crate::header_detection::layout(
+        &all, 30, |r| r.iter().filter(|v| header_cell_hit(v)).count() as f64,
+        header_cell_hit, (spec.header_row > 0).then(|| spec.header_row - 1),
+    );
+    let header_index = if spec.header_row == 0 && spec.header_depth == 1 {
+        detect_header(&all) - 1
+    } else { header_index };
+    let header_row = header_index + 1;
     if header_row == 0 || header_row > all.len() {
         return Err(error("HEADER_ROW_INVALID", "标题行超出数据范围。", None));
     }
     let width = all.iter().map(Vec::len).max().unwrap_or(0);
-    let mut headers = (0..width)
-        .map(|i| all[header_row - 1].get(i).cloned().unwrap_or_default())
-        .collect::<Vec<_>>();
+    let depth = if spec.header_depth == 0 { inferred_depth } else { spec.header_depth.clamp(1, 2) };
+    let mut headers = if depth > 1 {
+        crate::fx::merge_headers(&all[header_index..(header_index + depth).min(all.len())], width)
+    } else {
+        (0..width).map(|i| all[header_index].get(i).cloned().unwrap_or_default()).collect()
+    };
     for (i, h) in headers.iter_mut().enumerate() {
         if h.trim().is_empty() {
             *h = format!("未命名列{}", i + 1)
@@ -5158,7 +5251,7 @@ fn load_ledger_table(spec: &SourceSpec) -> Result<Table, AppError> {
     }
     let rows = all
         .into_iter()
-        .skip(header_row + spec.header_depth.saturating_sub(1))
+        .skip(header_index + depth)
         .filter(|r| r.iter().any(|v| !v.trim().is_empty()))
         .map(|mut r| {
             r.resize(width, String::new());
@@ -5170,7 +5263,7 @@ fn load_ledger_table(spec: &SourceSpec) -> Result<Table, AppError> {
         sheet,
         sheets,
         header_row,
-        header_depth: 1,
+        header_depth: depth,
         headers,
         rows,
     })
@@ -5181,13 +5274,9 @@ fn read_text(path: &Path) -> Result<Vec<Vec<String>>, AppError> {
 }
 fn detect_header(rows: &[Vec<String>]) -> usize {
     // 表头行特征：多数单元格是含关键词的短文本（数据行的日期/金额/长机构名不满足）。
-    let score = |r: &Vec<String>| r.iter().filter(|v| header_cell_hit(v)).count();
-    rows.iter()
-        .take(30)
-        .enumerate()
-        .max_by_key(|(i, r)| (score(r), std::cmp::Reverse(*i)))
-        .map(|(i, _)| i + 1)
-        .unwrap_or(1)
+    crate::header_detection::select_row(rows, 30, |r| {
+        r.iter().filter(|v| header_cell_hit(v)).count() as f64
+    }) + 1
 }
 /// 单元格是否像表头列名：非空、短文本（≤12字符）、含台账关键词。
 fn header_cell_hit(v: &str) -> bool {
@@ -6451,6 +6540,21 @@ mod loan_form_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn 通用表头借款台账双层并保留手动单层() {
+        let path = std::env::temp_dir().join(format!("loan-header-{}.csv", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "借款登记簿,借款登记簿,借款登记簿,借款登记簿\n借款信息,,金额信息,\n银行,编号,本金,利率\n某银行,001,100,3.5\n").unwrap();
+        let spec: super::SourceSpec = serde_json::from_value(serde_json::json!({"inputPath":path,"headerRow":0,"headerDepth":0})).unwrap();
+        let table = super::load_ledger_table(&spec).unwrap();
+        assert_eq!((table.header_row, table.header_depth), (2, 2));
+        assert_eq!(table.headers[2], "金额信息-本金");
+        assert_eq!(table.rows.len(), 1);
+        let manual: super::SourceSpec = serde_json::from_value(serde_json::json!({"inputPath":path,"headerRow":3,"headerDepth":1})).unwrap();
+        let table = super::load_ledger_table(&manual).unwrap();
+        assert_eq!(table.headers[2], "本金");
+        assert_eq!(table.rows.len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
     use super::*;
 
     fn valid_tb_run_request() -> Value {
@@ -7102,6 +7206,115 @@ mod tests {
             formulas.get_value((1, 13)).unwrap(),
             "IF(H2=\"浮动\",IF(ISNUMBER(L2),L2+M2/10000,0),IF(ISNUMBER(I2),I2,0))"
         );
+    }
+
+    /// TB＋JE 模式底稿：金额列标注 TB 来源，并带「测算与账面利息对比」块
+    /// （测算利息支出＝P 列合计、账面利息支出＝勾选科目在 TB 上的发生额、
+    /// 差异为活公式），复核者在 Excel 里即可完成界面第三步的对比。
+    #[test]
+    fn tb模式底稿带tb列名与测算账面利息对比块() {
+        let fixture = SyntheticLedger::new(&[["4.2%", "浮动", "", "90"]]);
+        let mut book = Workbook::new();
+        for (name, data) in [
+            (
+                "TB",
+                vec![
+                    vec!["编码", "科目", "借款", "期初贷", "期末贷", "本年借方", "本年贷方"],
+                    vec!["2001", "短期借款", "工行贷款", "1000000", "1100000", "0", "0"],
+                    vec!["6603", "财务费用-利息支出", "", "0", "0", "30000", "0"],
+                ],
+            ),
+            (
+                "JE",
+                vec![
+                    vec!["编码", "科目", "借款", "日期", "借方", "贷方"],
+                    vec!["2001", "短期借款", "工行贷款", "2025-07-01", "0", "100000"],
+                ],
+            ),
+        ] {
+            let sheet = book.add_worksheet();
+            sheet.set_name(name).unwrap();
+            for (r, row) in data.iter().enumerate() {
+                for (c, value) in row.iter().enumerate() {
+                    sheet.write_string(r as u32, c as u16, *value).unwrap();
+                }
+            }
+        }
+        let path = fixture.dir.join("tb-export-compare.xlsx");
+        book.save(&path).unwrap();
+        let mut params = json!({
+            "mode": "tb",
+            "reportStart": "2025-01-01",
+            "reportEnd": "2025-12-31",
+            "tbSource": {"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{
+                "accountCode":"编码","accountName":"科目","loanId":"借款",
+                "openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷",
+                "ytdFunctionalDebit":"本年借方","ytdFunctionalCredit":"本年贷方"
+            }},
+            "jeSource": {"source":{"inputPath":path,"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{
+                "accountCode":"编码","accountName":"科目","loanId":"借款",
+                "date":"日期","functionalDebit":"借方","functionalCredit":"贷方"
+            }},
+            "interestExpenseAccounts": ["6603"],
+            "rateRows": [{"loanId":"工行贷款","rateType":"fixed","fixedRate":0.0365}]
+        });
+        let mut rows = calculate(&params).unwrap();
+        calculate_interest(&mut rows, &params).unwrap();
+        let n = rows.len();
+        assert_eq!(n, 1, "TB＋JE 模式应只有借款科目行进入测算");
+        params["outputPath"] = json!(fixture.dir.join("result.xlsx"));
+        let out = export(&rows, &params).unwrap();
+        let mut book = open_workbook_auto(&out).unwrap();
+        let values = book.worksheet_range("借款变动与利息测算").unwrap();
+        let formulas = book.worksheet_formula("借款变动与利息测算").unwrap();
+        // 金额列名标注来源：TB＋JE 模式期初/期末就是 TB 余额。
+        assert_eq!(
+            values.get_value((0, 1)).unwrap().to_string(),
+            "期初本金（TB）"
+        );
+        assert_eq!(
+            values.get_value((0, 4)).unwrap().to_string(),
+            "期末余额（TB）"
+        );
+        // 对比块：标题、测算（引用 P 列合计）、账面（TB 发生额静态值）、差异公式。
+        assert_eq!(
+            values.get_value(((n + 3) as u32, 0)).unwrap().to_string(),
+            "测算与账面利息对比"
+        );
+        assert_eq!(
+            formulas.get_value(((n + 5) as u32, 1)).unwrap(),
+            &format!("P{}", n + 2)
+        );
+        assert_eq!(
+            values.get_value(((n + 6) as u32, 1)).unwrap().to_string(),
+            "30000"
+        );
+        let total: f64 = rows.iter().map(|row| row.calculated_interest).sum();
+        let diff_cached = values
+            .get_value(((n + 7) as u32, 1))
+            .unwrap()
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(f64::NAN);
+        assert!(
+            (diff_cached - (total - 30_000.0)).abs() < 0.01,
+            "差异缓存应＝测算－账面：{diff_cached}"
+        );
+        let diff_formula = formulas
+            .get_value(((n + 7) as u32, 1))
+            .unwrap()
+            .clone();
+        assert!(
+            diff_formula.contains(&format!("B{}", n + 7)) && diff_formula.contains(&format!("B{}", n + 6)),
+            "差异应是引用测算/账面两格的活公式：{diff_formula}"
+        );
+        // 账面行的说明带科目与发生额口径。
+        let basis = values
+            .get_value(((n + 6) as u32, 2))
+            .unwrap()
+            .to_string();
+        assert!(basis.contains("6603") && basis.contains("借方减贷方"), "{basis}");
+        let _ = std::fs::remove_file(&out);
     }
 
     #[test]

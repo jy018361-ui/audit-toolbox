@@ -721,6 +721,7 @@ pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
     "fx.fetch_rates",
     "fx.preview",
     "fx.export",
+    "fx.export_rates",
     "loan.preview",
     "loan.export",
     "deposit.preview",

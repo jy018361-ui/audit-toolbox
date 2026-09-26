@@ -1,6 +1,6 @@
 [package]
 name = "audit-toolbox"
-version = "2.0.0-alpha.99"
+version = "2.0.0-alpha.100"
 description = "统一的 Tauri 审计工具箱"
 authors = ["Audit Toolbox"]
 edition = "2024"
@@ -54,6 +54,11 @@ regex = "1"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
 wasapi = "0.24.0"
 hound = "3.5.1"
+# 套餐转写通道：realtime 协议是 WebSocket，用一次性 current-thread runtime
+# 驱动 tokio-tungstenite（TLS 后端与 reqwest 同为 rustls）。
+tokio = { version = "1", features = ["rt", "time", "net", "macros"] }
+tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tauri-plugin-notification = "2.4.0"
 tauri-plugin-autostart = "2"
 

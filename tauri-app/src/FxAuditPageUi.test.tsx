@@ -188,7 +188,7 @@ it.each([
   expect((await screen.findAllByText(new RegExp(message))).length).toBeGreaterThan(0);
 });
 
-it("测算结果列示客户与审计汇率并标明取得方式", async () => {
+it("客户隐含汇率和重复的未实现模块不在预览界面展示", async () => {
   render(<FxAuditPage tool={tool} />);
   await uploadBothSources();
   fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
@@ -246,15 +246,12 @@ it("测算结果列示客户与审计汇率并标明取得方式", async () => {
     });
   });
 
-  const comparison = await screen.findByRole("region", { name: "客户与审计汇率比较" });
-  expect(within(comparison).getByText("7.700000")).toBeVisible();
-  expect(within(comparison).getByText("8.235500")).toBeVisible();
-  expect(
-    within(comparison).getByText("反推｜客户重估后账面本位币余额÷月末原币余额反推"),
-  ).toBeVisible();
-  expect(within(comparison).queryByText("金额不足账户")).not.toBeInTheDocument();
-  expect(within(comparison).queryByText(/无法取得/)).not.toBeInTheDocument();
-  expect(within(comparison).getByText(/仅用于解释差异，不参与审计测算/)).toBeVisible();
+  expect(await screen.findByText("汇兑损益测算结果")).toBeVisible();
+  expect(screen.getByText("未实现汇兑损益")).toBeVisible();
+  expect(screen.queryByText("未实现汇兑损益测算")).not.toBeInTheDocument();
+  expect(screen.queryByText("与客户入账差异")).not.toBeInTheDocument();
+  expect(screen.queryByText("客户与审计汇率比较")).not.toBeInTheDocument();
+  expect(screen.queryByText("7.700000")).not.toBeInTheDocument();
 });
 
 it("上传就绪不扫描JE，第一步下一步才生成并复用辅助计划", async () => {

@@ -78,7 +78,7 @@ React 页面 → src/api.ts → Tauri invoke → src-tauri/src/lib.rs（命令�
 
 FA 与 Roll Forward 的 LLM 参数不是前端传的，而是 `lib.rs` 在分发前从 `Storage` + Windows 凭据管理器读出来，
 注入 `params.__settings` / `params.__llmOptions`（见 `inject_fa_settings` / `inject_roll_forward_llm`）。
-`secret_set` 只接受 `llm_api_key` / `dify_api_key` / `baidu_ocr_key` / `baidu_ocr_secret` 四个名字，其余拒绝。
+`secret_set` 只接受 `llm_api_key` / `dify_api_key` / `baidu_ocr_key` / `baidu_ocr_secret` / `bailian_asr_key` / `bailian_plan_asr_key` 六个名字，其余拒绝。
 
 ### 文件系统安全边界
 

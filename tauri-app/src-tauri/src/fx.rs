@@ -1570,12 +1570,7 @@ fn infer_xlsx_header_layout(all: &[XlsxSampleRow]) -> (usize, usize, Vec<(usize,
         if second_hits == 0 || combined_hits <= first_hits + 2 {
             continue;
         }
-        if compact[index]
-            .iter()
-            .filter(|cell| !cell.trim().is_empty())
-            .count()
-            < 2
-        {
+        if !has_distinct_header_groups(&compact[index]) {
             continue;
         }
         let width = compact[index].len().max(compact[index + 1].len());
@@ -1597,11 +1592,11 @@ fn infer_xlsx_header_layout(all: &[XlsxSampleRow]) -> (usize, usize, Vec<(usize,
 ///
 /// `calamine::worksheet_range` 会先物化整张工作表；对只想查看表头的调用者，
 /// 直接从 zip 中流式解压到前若干个 `</row>`，可避免在正式读取前把大表完整
-/// 解压一次。这里只返回标题行，正式读取仍由公共 Parquet 缓存入口完成。
-pub(crate) fn lightweight_xlsx_header_row(
+/// 解压一次。这里返回工作表、标题行和层数；正式读取仍由公共 Parquet 缓存入口完成。
+pub(crate) fn lightweight_xlsx_header_layout(
     path: &Path,
     requested_sheet: Option<&str>,
-) -> Result<(String, usize), AppError> {
+) -> Result<(String, usize, usize), AppError> {
     let sheets = xlsx_sheet_entries(path)?;
     let shared = xlsx_shared_strings(path);
     let date_styles = xlsx_date_styles(path);
@@ -1635,7 +1630,8 @@ pub(crate) fn lightweight_xlsx_header_row(
     }
     let (sheet, rows, _) =
         best.ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿中没有可读取的数据Sheet。", None))?;
-    Ok((sheet, infer_xlsx_header_layout(&rows).0))
+    let (row, depth, _) = infer_xlsx_header_layout(&rows);
+    Ok((sheet, row, depth))
 }
 
 fn load_large_xlsx_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<FxTable>, AppError> {
@@ -2164,17 +2160,16 @@ pub(crate) fn normalize_header(v: &str) -> String {
 
 fn combined_semantic_score(a: &[String], b: &[String]) -> usize {
     let width = a.len().max(b.len());
-    ledger_mapping::header_semantic_hits(
-        &(0..width)
-            .map(|i| {
-                format!(
-                    "{}{}",
-                    a.get(i).map(String::as_str).unwrap_or(""),
-                    b.get(i).map(String::as_str).unwrap_or("")
-                )
-            })
-            .collect::<Vec<_>>(),
-    )
+    // 合并表头的上层空格承接左侧分组名；评分必须先作同样的横向填充。
+    // 否则「凭证信息｜空｜金额」覆盖下层「凭证号｜摘要｜借方」时，
+    // 摘要列的上层线索在评分阶段丢失，双层候选会被错误跳过。
+    ledger_mapping::header_semantic_hits(&merge_headers(&[a.to_vec(), b.to_vec()], width))
+}
+
+/// 双层表头的上层必须有不同的分组名。部分 Excel 导出把一整行合并标题的
+/// 相同文字实际写进每个底层单元格，单数非空格子会把它误认为分组表头。
+fn has_distinct_header_groups(row: &[String]) -> bool {
+    !crate::header_detection::is_title(row)
 }
 
 /// Jointly infer the first header row and its depth. A two-row TB header must
@@ -2196,16 +2191,11 @@ fn infer_header_layout(all: &[Vec<String>]) -> (usize, usize, Vec<(usize, f64)>)
         if second_hits == 0 || combined_hits <= first_hits + 2 {
             continue;
         }
-        // 只有一格有字的上一行是**标题行**（「序时账」「XX公司科目余额表」），不是分组表头。
+        // 只有一个不同名称的上一行是**标题行**（「序时账」「XX公司科目余额表」），不是分组表头。
         // [`merge_headers`] 会把它顺延到每一列，于是每个列名都被冠上标题前缀
         // （「序时账-公司代码」），既污染映射标签，也与看账那侧的单行读取对不上。
-        // 真正的两行表头（期初｜期末 覆在 借方｜贷方 上）上一行至少有两格有字。
-        if all[index]
-            .iter()
-            .filter(|cell| !cell.trim().is_empty())
-            .count()
-            < 2
-        {
+        // 真正的两行表头（期初｜期末 覆在 借方｜贷方 上）上一行至少有两个不同分组名。
+        if !has_distinct_header_groups(&all[index]) {
             continue;
         }
         let width = all[index].len().max(all[index + 1].len());
@@ -2221,6 +2211,11 @@ fn infer_header_layout(all: &[Vec<String>]) -> (usize, usize, Vec<(usize, f64)>)
         }
     }
     (best.0, best.1, row_scores)
+}
+
+pub(crate) fn infer_public_header_layout(all: &[Vec<String>]) -> (usize, usize) {
+    let (row, depth, _) = infer_header_layout(all);
+    (row, depth)
 }
 
 /// 看账/TS 的双层表头也走同一套合并规则，跨工具列名口径才一致。

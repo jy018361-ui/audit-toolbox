@@ -243,6 +243,57 @@ describe("FA LLM 复核先改后核", () => {
     expect(plan.changes.map((item) => item.id)).toEqual(["end.currentYearDep"]);
     expect(plan.pending).toEqual([]);
   });
+  it("政策对比只展示并应用下拉框提供的角色", () => {
+    const plan = planFaLlmChanges({
+      ...baseInput,
+      roleLabels: { currentYearDep: "本年折旧", originalValue: "原值" },
+      allowedRoleKeys: ["currentYearDep", "originalValue"],
+      autoApplied: [
+        { role: "current_year_dep", file_side: "file2", suggested_column: "本年至今折旧", confidence: 0.95 },
+        { role: "addition_method", file_side: "file2", suggested_column: "资产来源", confidence: 0.95 },
+      ],
+      fieldReviews: [
+        { role: "addition_date", file_side: "file2", suggested_mapping: { file2: "资本化日期" }, confidence: 0.65 },
+      ],
+    });
+    expect(plan.changes.map(({ label }) => label)).toEqual(["期末 本年折旧"]);
+    expect(plan.pending).toEqual([]);
+    expect(plan.endMapping.currentYearDep).toBe("本年至今折旧");
+    expect(plan.endMapping.additionMethod).toBeUndefined();
+    expect(plan.endMapping.additionDate).toBeUndefined();
+  });
+  it("LLM 建议只在命中真实表头后生效，并使用下拉框的原始列名", () => {
+    const plan = planFaLlmChanges({
+      ...baseInput,
+      roleLabels: { currentYearDep: "本年折旧", life: "使用寿命" },
+      allowedRoleKeys: ["currentYearDep", "life"],
+      headersBySide: { end: ["本年至今折旧（会计准", "资产使用年限"] },
+      autoApplied: [
+        { role: "current_year_dep", file_side: "file2", suggested_column: "本年至今折旧(会计准", confidence: 0.95 },
+        { role: "life", file_side: "file2", suggested_column: "不存在的寿命列", confidence: 0.95 },
+      ],
+    });
+    expect(plan.changes).toHaveLength(1);
+    expect(plan.changes[0]).toMatchObject({ label: "期末 本年折旧", after: "本年至今折旧（会计准" });
+    expect(plan.endMapping.currentYearDep).toBe("本年至今折旧（会计准");
+    expect(plan.endMapping.life).toBeUndefined();
+    expect(faMappedRolesForColumn("本年至今折旧（会计准", [["currentYearDep", "本年折旧"]], plan.endMapping))
+      .toEqual([["currentYearDep", "本年折旧"]]);
+  });
+  it("FA 匹配工具的新增字段建议使用下拉框中文名称", () => {
+    const plan = planFaLlmChanges({
+      ...baseInput,
+      roleLabels: { ...roleLabels, additionMethod: "新增方式", additionDate: "新增日期" },
+      autoApplied: [
+        { role: "addition_method", file_side: "file2", suggested_column: "资产来源", confidence: 0.95 },
+      ],
+      fieldReviews: [
+        { role: "addition_date", file_side: "file2", suggested_mapping: { file2: "资本化日期" }, confidence: 0.65 },
+      ],
+    });
+    expect(plan.changes[0].label).toBe("期末 新增方式");
+    expect(plan.pending[0].label).toBe("期末 新增日期");
+  });
   it("覆盖已有映射时留下改前改后和撤销所需的原值", () => {
     const plan = planFaLlmChanges({
       ...baseInput,

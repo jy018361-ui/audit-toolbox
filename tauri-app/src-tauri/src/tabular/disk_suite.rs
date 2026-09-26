@@ -1721,37 +1721,6 @@ pub(super) fn write_suite(
             row_field_count: 1,
         }
     };
-    let llm_analysis = if job.llm_analysis
-        && job
-            .settings
-            .get("llm")
-            .and_then(|v| v.get("enabled"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    {
-        let preview = |name: &str, limit: usize| -> Result<Vec<Vec<String>>, AppError> {
-            let mut stmt=ledger.db.prepare("SELECT rowdata FROM suite_output WHERE sheet=?1 ORDER BY sort_head DESC,sort_rank DESC,sort_label,sort_account,seq LIMIT ?2").map_err(db_error)?;
-            stmt.query_map(params![name, limit as i64], |r| r.get::<_, String>(0))
-                .map_err(db_error)?
-                .map(|r| {
-                    r.map_err(db_error)
-                        .and_then(|s| serde_json::from_str(&s).map_err(json_error))
-                })
-                .collect()
-        };
-        let strict = preview("凭证类型-严格", 80)?;
-        let loose = preview("凭证类型-宽松", 40)?;
-        let payload = json!({"targetAccounts":targets,"subjectSummary":{"headers":&summary.headers,"rows":&summary.rows},
-            "voucherTypesStrict":{"headers":["科目名称-类型","凭证","摘要","科目名称",NET_VALUE_FIELD],"rows":strict},
-            "voucherTypesLoose":{"headers":["科目名称-类型","凭证","摘要","科目名称",NET_VALUE_FIELD],"rows":loose}});
-        crate::audipick::kanzhang_llm_call(
-            &json!({"mode":"analysis","payload":payload}),
-            &job.settings,
-        )
-        .ok()
-    } else {
-        None
-    };
     let has_direction = if job.include_pivot {
         ledger
             .db
@@ -2099,9 +2068,6 @@ pub(super) fn write_suite(
         ws.set_hidden(true);
     }
     progress("write", 6, 7, "正在压缩并保存看账套表…");
-    if let Some(value) = llm_analysis.as_ref() {
-        write_llm_analysis_sheet(workbook.add_worksheet(), value)?;
-    }
     activate_first_visible_sheet(&mut workbook);
     let partial = partial_path(path);
     if let Err(failure) = workbook.save(&partial).map_err(xlsx_error) {

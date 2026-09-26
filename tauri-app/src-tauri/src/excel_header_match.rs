@@ -75,7 +75,11 @@ pub(crate) fn detect_header_with_merges(
     }
     let mut best = (0usize, 0.0_f64);
     let mut second = f64::MIN;
+    let has_fields = rows.iter().take(scan).any(|row| !crate::header_detection::is_title(row));
     for i in 0..scan {
+        if has_fields && crate::header_detection::is_title(&rows[i]) {
+            continue;
+        }
         let score = header_row_score(rows, i);
         if score > best.1 {
             second = best.1;
@@ -92,7 +96,7 @@ pub(crate) fn detect_header_with_merges(
         && rows
             .get(best.0 - 1)
             .is_some_and(|row| {
-                row.iter().filter(|v| !v.trim().is_empty()).count() >= 2
+                !crate::header_detection::is_title(row)
             })
         && merges.iter().any(|&(r1, c1, r2, c2)| {
             let width = (c2 - c1 + 1) as usize;
@@ -617,6 +621,15 @@ pub(crate) fn validate_plan(plan: &HeaderMatchingPlan) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 通用表头合并工具排除重复标题() {
+        let sheet = vec![vec!["记账凭证明细查询".into(); 6],
+            vec!["日期".into(), "凭证号".into(), "科目编码".into(), "摘要".into(), "借方金额".into(), "贷方金额".into()],
+            vec!["2026-01-04".into(), "001".into(), "1001".into(), "收款".into(), "100".into(), "0".into()]];
+        let detected = detect_header_with_merges(&sheet, &[(0, 0, 0, 5)]).unwrap();
+        assert_eq!((detected.header_row, detected.header_rows_count), (1, 1));
+    }
 
     fn rows(input: &[&[&str]]) -> Vec<Vec<String>> {
         input

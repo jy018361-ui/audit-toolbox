@@ -55,8 +55,13 @@ fn entity_scope(params: &Value) -> ledger_mapping::EntityScope {
 // ---------------------------------------------------------------------------
 
 /// 央行基准存款利率自 2015-10-24 起未再调整；挂牌参考值取国有大行 2025-05-20
-/// 调整后的水平。两者都只是"合理性参照"，实际计息利率以存款协议/对账单为准，
-/// 所以每一档都可以在界面和导出的 Excel 里被覆盖。
+/// 调整后的水平。自动套用的默认值另有第三套口径：**市场中枢暂估利率**
+/// （2026-09 与使用方确认）——大行挂牌价接近市场下限，而被审计单位多在
+/// 股份制/城商行开户，直接套挂牌会系统性低估利息收入，漏掉少计利息的
+/// 完整性问题，因此协定/通知/定期/大额存单的默认值取实务常见区间中部；
+/// 活期与保证金维持挂牌水平（活期就是大行真实成交价，保证金本就按活期
+/// 或不计息）。三者都只是"合理性参照"，实际计息利率以存款协议/对账单为准，
+/// 每一档都可以在界面和导出的 Excel 里被覆盖。
 pub(crate) const PBC_BENCHMARK_DATE: &str = "2015-10-24";
 pub(crate) const LISTED_REFERENCE_DATE: &str = "2025-05-20";
 
@@ -69,9 +74,12 @@ pub(crate) struct Tier {
     /// 央行基准。**只作合理性上限参照，不参与测算**——3 年期基准 2.75% 对比
     /// 实际 1.25%，拿它算会把利息放大一倍以上。`None` 表示央行从未公布该档。
     pub(crate) benchmark: Option<f64>,
-    /// 国有大行挂牌参考值。
+    /// 国有大行挂牌参考值。挂牌价接近市场下限，只作界面参考列，不参与测算。
     pub(crate) listed: Option<f64>,
-    /// 是否自动套用挂牌暂估利率。有挂牌值的标准人民币档位为 true；
+    /// 自动套用的暂估默认值＝市场中枢利率（实务常见区间中部，2026-09 口径）。
+    /// `None` 时回落挂牌值——活期、保证金两档本来就维持挂牌水平。
+    pub(crate) default_rate: Option<f64>,
+    /// 是否自动套用暂估默认利率。有挂牌值的标准人民币档位为 true；
     /// 自定义、外币特殊产品没有统一报价，仍须填写实际利率。
     pub(crate) auto_apply: bool,
     /// 实务中常见区间（下限, 上限）——不是权威数据，只用于提示利率是否离谱。
@@ -87,6 +95,7 @@ const fn tier(
     term_label: &'static str,
     benchmark: Option<f64>,
     listed: Option<f64>,
+    default_rate: Option<f64>,
     auto_apply: bool,
     practice: Option<(f64, f64)>,
     practice_note: &'static str,
@@ -98,13 +107,14 @@ const fn tier(
         term_label,
         benchmark,
         listed,
+        default_rate,
         auto_apply,
         practice,
         practice_note,
     }
 }
 
-// 参数顺序：档位键, 大类键, 大类名, 期限名, 央行基准, 大行挂牌, 是否自动套用, 实务区间, 实务说明
+// 参数顺序：档位键, 大类键, 大类名, 期限名, 央行基准, 大行挂牌, 中枢默认采用值, 是否自动套用, 实务区间, 实务说明
 const RATE_TIERS: &[Tier] = &[
     tier(
         "demand",
@@ -113,9 +123,10 @@ const RATE_TIERS: &[Tier] = &[
         "",
         Some(0.0035),
         Some(0.0005),
+        Some(0.0005),
         true,
         Some((0.0005, 0.0035)),
-        "对公活期几乎没有议价空间，国有大行普遍就是挂牌 0.05%；老协议里仍挂 0.35% 的情况也见得到。默认值仅用于暂估，仍需核对实际利率。",
+        "对公活期几乎没有议价空间，国有大行普遍就是挂牌 0.05%，默认值即按挂牌；老协议里仍挂 0.35% 的情况也见得到。余额长期较大的活期户应考虑改按协定/通知存款测算，仍需核对实际利率。",
     ),
     tier(
         "agreement",
@@ -124,9 +135,10 @@ const RATE_TIERS: &[Tier] = &[
         "",
         Some(0.0115),
         Some(0.0020),
+        Some(0.0080),
         true,
         Some((0.0020, 0.0150)),
-        "挂牌与实际差最大的一档。超出约定留存额的部分按协定利率计息，大客户议价后普遍高于挂牌，务必看协议。",
+        "挂牌与实际差最大的一档：大行挂牌仅 0.20%，协议利率议价后普遍在 0.5%~1.3%，故默认按市场中枢 0.80% 暂估。超出约定留存额的部分才按协定利率计息，务必按协议核对。",
     ),
     tier(
         "notice_1d",
@@ -135,6 +147,7 @@ const RATE_TIERS: &[Tier] = &[
         "1天",
         Some(0.0080),
         Some(0.0010),
+        Some(0.0025),
         true,
         Some((0.0010, 0.0045)),
         "2024 年 5 月起银行下调通知存款利率并取消自律上限加点，实际水平明显低于央行基准。",
@@ -146,6 +159,7 @@ const RATE_TIERS: &[Tier] = &[
         "7天",
         Some(0.0135),
         Some(0.0055),
+        Some(0.0080),
         true,
         Some((0.0055, 0.0100)),
         "企业闲置资金最常用的一档；股份制银行和城商行通常高于国有大行。",
@@ -157,6 +171,7 @@ const RATE_TIERS: &[Tier] = &[
         "3个月",
         Some(0.0110),
         Some(0.0065),
+        Some(0.0090),
         true,
         Some((0.0065, 0.0110)),
         "股份制银行、城商行普遍在大行挂牌上加 20~40BP。",
@@ -168,6 +183,7 @@ const RATE_TIERS: &[Tier] = &[
         "6个月",
         Some(0.0130),
         Some(0.0085),
+        Some(0.0110),
         true,
         Some((0.0085, 0.0130)),
         "股份制银行、城商行普遍在大行挂牌上加 20~40BP。",
@@ -179,6 +195,7 @@ const RATE_TIERS: &[Tier] = &[
         "1年",
         Some(0.0150),
         Some(0.0095),
+        Some(0.0120),
         true,
         Some((0.0095, 0.0150)),
         "最常见的企业定存期限；中小银行 1 年期做到 1.3%~1.5% 并不少见。",
@@ -190,6 +207,7 @@ const RATE_TIERS: &[Tier] = &[
         "2年",
         Some(0.0210),
         Some(0.0105),
+        Some(0.0130),
         true,
         Some((0.0105, 0.0160)),
         "期限越长，挂牌与中小银行报价的差距越大。",
@@ -201,6 +219,7 @@ const RATE_TIERS: &[Tier] = &[
         "3年",
         Some(0.0275),
         Some(0.0125),
+        Some(0.0155),
         true,
         Some((0.0125, 0.0190)),
         "央行基准 2.75% 已严重脱离实际，只能当上限参照；拿它测算会把利息放大一倍以上。",
@@ -212,6 +231,7 @@ const RATE_TIERS: &[Tier] = &[
         "5年",
         None,
         Some(0.0130),
+        Some(0.0160),
         true,
         Some((0.0130, 0.0200)),
         "央行从未公布 5 年期存款基准；部分银行 5 年期报价甚至低于 3 年期。",
@@ -223,6 +243,7 @@ const RATE_TIERS: &[Tier] = &[
         "1年",
         None,
         Some(0.0110),
+        Some(0.0125),
         true,
         Some((0.0100, 0.0140)),
         "大额存单通常比同期定存高 10~25BP，按 20 万/100 万/1000 万起存分档，起存越高利率越高。",
@@ -234,6 +255,7 @@ const RATE_TIERS: &[Tier] = &[
         "2年",
         None,
         Some(0.0120),
+        Some(0.0135),
         true,
         Some((0.0110, 0.0155)),
         "大额存单通常比同期定存高 10~25BP。",
@@ -245,6 +267,7 @@ const RATE_TIERS: &[Tier] = &[
         "3年",
         None,
         Some(0.0140),
+        Some(0.0160),
         true,
         Some((0.0130, 0.0185)),
         "部分国有大行已阶段性停发 3 年期大额存单，若账上有则多为往年存续单。",
@@ -256,15 +279,17 @@ const RATE_TIERS: &[Tier] = &[
         "",
         Some(0.0005),
         Some(0.0005),
+        Some(0.0005),
         true,
         Some((0.0000, 0.0035)),
-        "保证金/冻结/保函/信用证存款通常按活期或协定利率计息，部分银行不计息；默认按活期水平暂估，务必按协议核对，不计息的手工改 0。",
+        "保证金/冻结/保函/信用证存款通常按活期或协定利率计息，部分银行不计息；默认按活期水平暂估，务必按协议核对，不计息的可直接把利率改成 0。",
     ),
     tier(
         "unknown",
         "unknown",
         "期限不明（待人工确认）",
         "",
+        None,
         None,
         None,
         false,
@@ -276,6 +301,7 @@ const RATE_TIERS: &[Tier] = &[
         "custom",
         "自定义（按存款协议）",
         "",
+        None,
         None,
         None,
         false,
@@ -386,11 +412,15 @@ pub(crate) fn tier_rate(key: &str) -> Option<f64> {
     find_tier(key)?.listed
 }
 
-/// 自动套用的暂估利率。有挂牌值的人民币标准档位均可先形成测算；
-/// 自定义、外币特殊产品没有可靠统一报价，仍须用户填实际利率。
+/// 自动套用的暂估利率＝市场中枢默认值（协定/通知/定期/大额存单高于大行
+/// 挂牌下限；活期、保证金维持挂牌水平）。自定义、外币特殊产品没有可靠
+/// 统一报价，仍须用户填实际利率。
 pub(crate) fn auto_rate(key: &str) -> Option<f64> {
     let tier = find_tier(key)?;
-    tier.auto_apply.then_some(tier.listed).flatten()
+    if !tier.auto_apply {
+        return None;
+    }
+    tier.default_rate.or(tier.listed)
 }
 
 /// 央行基准，**仅作合理性上限参照**，不参与任何测算。
@@ -1078,19 +1108,36 @@ fn tier_for<'a>(account: &str, auxiliary: &str, params: &'a Value) -> (&'a str, 
 }
 
 fn detail_tier_for<'a>(
+    entity: &str,
     account: &str,
     auxiliary: &str,
+    currency: &str,
     detail_key: &str,
     params: &'a Value,
 ) -> (&'a str, String) {
-    if let Some(tier) = params
+    let overrides = params
         .get("accountDetailTierOverrides")
-        .and_then(Value::as_object)
+        .and_then(Value::as_object);
+    if let Some(tier) = overrides
         .and_then(|values| values.get(detail_key))
         .and_then(Value::as_str)
         .filter(|tier| find_tier(tier).is_some())
     {
         return (tier, "用户按辅助明细指定存款类型".into());
+    }
+    // 前端按确认行键（JSON 数组）写的存款类型同样认账。币种是行键的组成
+    // 部分，但引擎行的币种经过归并（如空币种标成「本位币合并」），与前端
+    // 原文可能不同，故币种再带一层空串回退。
+    if let Some(tier) = overrides.and_then(|values| {
+        let mut keys = Vec::new();
+        for tagged in [currency, ""] {
+            keys.extend(review_row_key_variants(entity, account, auxiliary, tagged));
+        }
+        keys.iter().find_map(|key| values.get(key)).and_then(Value::as_str)
+    })
+    .filter(|tier| find_tier(tier).is_some())
+    {
+        return (tier, "用户在科目分类中指定存款类型".into());
     }
     tier_for(account, auxiliary, params)
 }
@@ -1491,7 +1538,7 @@ fn rate_tiers() -> Value {
         ),
         "practiceSource": "实务区间是常见报价范围的经验值，不是官方公布数据，仅用来提示填入的利率是否明显离谱。",
         "authority": "以上三组都只是默认值和合理性参照。审计依据应当是客户的存款协议、银行对账单或银行出具的利息清单。",
-        "autoApplyPolicy": "有挂牌参考值的活期、协定、通知、定期和大额存单档位均先按默认值暂估并纳入测算，状态标记为待确认利率；用户填写的档位或账户实际利率优先。自定义、外币特殊产品仍须手填实际利率。",
+        "autoApplyPolicy": "活期、保证金维持大行挂牌水平默认；协定、通知、定期和大额存单按内置市场中枢暂估利率（实务常见区间中部，高于大行挂牌下限）自动纳入测算，状态标记为待确认利率；用户填写的档位或账户实际利率优先。自定义、外币特殊产品仍须手填实际利率。",
         "listedRateDate": LISTED_REFERENCE_DATE,
         "rateAgeMonths": age,
         "ratesStale": stale,
@@ -1514,6 +1561,7 @@ fn rate_tiers() -> Value {
             "key": tier.key, "category": tier.category, "categoryLabel": tier.category_label,
             "termLabel": tier.term_label, "label": tier_label(tier.key),
             "benchmarkRate": tier.benchmark, "listedRate": tier.listed,
+            "defaultRate": tier.default_rate.or(tier.listed),
             "autoApply": tier.auto_apply,
             "practiceLow": tier.practice.map(|x| x.0), "practiceHigh": tier.practice.map(|x| x.1),
             "practiceNote": tier.practice_note
@@ -1974,15 +2022,27 @@ fn distinct_entity_accounts(
         .collect()
 }
 
+/// 科目确认表行键（JSON 数组）的候选梯子：主体与辅助各带空串回退，
+/// 与前端 `depositAccountReviewRows` 的行键同构。角色、存款类型、逐户
+/// 利率三类按行键写的覆盖都走这张梯子命中，不把行键硬翻译成明细复合键。
+fn review_row_key_variants(entity: &str, account: &str, auxiliary: &str, currency: &str) -> Vec<String> {
+    let mut keys = Vec::with_capacity(4);
+    for scope in [entity, ""] {
+        for aux in [auxiliary, ""] {
+            if let Ok(key) = serde_json::to_string(&(scope, account, aux, currency)) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
 fn confirmed_review_role<'a>(params: &'a Value, entity: &str, account: &str,
     auxiliary: &str, currency: &str) -> Option<&'a str> {
     let roles = params.get("accountReviewRoles")?.as_object()?;
-    for scope in [entity, ""] {
-        for aux in [auxiliary, ""] {
-            let key = serde_json::to_string(&(scope, account, aux, currency)).ok()?;
-            if let Some(role) = roles.get(&key).and_then(Value::as_str) {
-                return Some(role);
-            }
+    for key in review_row_key_variants(entity, account, auxiliary, currency) {
+        if let Some(role) = roles.get(&key).and_then(Value::as_str) {
+            return Some(role);
         }
     }
     None
@@ -2077,8 +2137,8 @@ pub(crate) struct AccountRow {
     pub(crate) annual_rate: f64,
     /// false = 这一户还没有可用利率，测算利息不计入合计。
     pub(crate) rate_resolved: bool,
-    /// 利率是否直接取自内置挂牌表（未经任何用户改写）。来源文案统一为
-    /// 「挂牌暂估值」后，「待确认利率」状态与"系统预设利率"汇总都由它驱动。
+    /// 利率是否直接取自内置市场中枢默认表（未经任何用户改写）。来源文案统一为
+    /// 「市场中枢暂估值」后，「待确认利率」状态与"系统预设利率"汇总都由它驱动。
     #[serde(default)]
     pub(crate) rate_provisional: bool,
     /// 填入的利率高于该档央行基准时的提示（基准只作上限参照）。
@@ -2666,7 +2726,9 @@ fn fold_tb_accounts(
             key.1,
             ledger_mapping::anchor_norm(&auxiliary)
         );
-        let (tier, matched_by) = detail_tier_for(&account_text, &auxiliary, &detail_key, params);
+        let (tier, matched_by) = detail_tier_for(
+            &key.0, &account_text, &auxiliary, &currency, &detail_key, params,
+        );
         detail_keys.insert(row_key.clone(), detail_key.clone());
         let meta = find_tier(tier);
         accounts.push(AccountRow {
@@ -3063,7 +3125,7 @@ fn calculate(
         }
         if default_rate {
             notes.push(
-                "当前利率为内置挂牌暂估值，已纳入测算；请按存款协议、银行对账单或利息清单确认。"
+                "当前利率为内置市场中枢暂估利率，已纳入测算；请按存款协议、银行对账单或利息清单确认。"
                     .into(),
             );
         }
@@ -3255,7 +3317,7 @@ fn calculate(
     }))
 }
 
-/// 利率优先级：账户级手填 > 用户改写的档位利率 > 内置挂牌暂估值。
+/// 利率优先级：账户级手填 > 用户改写的档位利率 > 内置市场中枢暂估值。
 /// 账户级手填有两个入口：测算结果表的历史覆盖（rateOverrides，按测算行键）
 /// 与科目确认表的逐户改写（accountRateOverrides，按科目/辅助明细键）。
 /// 来源文案保留真实来源；是否"直接取自内置挂牌表、未经用户确认"
@@ -3305,9 +3367,9 @@ fn resolve_rate(
     {
         return done(rate, "自定义档位利率", false);
     }
-    // 内置挂牌值只作暂估，必须明确提示用户按协议或对账单复核。
+    // 内置中枢默认值只作暂估，必须明确提示用户按协议或对账单复核。
     match auto_rate(&tier) {
-        Some(rate) => done(rate, "挂牌暂估值", true),
+        Some(rate) => done(rate, "市场中枢暂估值", true),
         None => ResolvedRate {
             tier,
             rate: 0.0,
@@ -3319,8 +3381,8 @@ fn resolve_rate(
 }
 
 /// 科目确认表（第二步）的逐户利率改写。键空间与存款类型覆盖同一套：
-/// 辅助明细键（主体␟科目␟辅助）优先，其次科目全文；全文因 TB/JE 拼法
-/// 不同对不上时按科目编码回退。
+/// 辅助明细键（主体␟科目␟辅助）优先，其次确认行键（JSON 数组，币种带
+/// 空串回退），再次科目全文；全文因 TB/JE 拼法不同对不上时按科目编码回退。
 fn account_rate_for(
     account: &AccountRow,
     detail_key: &str,
@@ -3328,6 +3390,22 @@ fn account_rate_for(
 ) -> Option<f64> {
     let rates = rates?;
     if let Some(rate) = rates.get(detail_key).and_then(Value::as_f64) {
+        return Some(rate);
+    }
+    let mut row_keys = Vec::new();
+    for tagged in [account.currency.as_str(), ""] {
+        row_keys.extend(review_row_key_variants(
+            &account.entity,
+            &account.account,
+            &account.auxiliary,
+            tagged,
+        ));
+    }
+    if let Some(rate) = row_keys
+        .iter()
+        .find_map(|key| rates.get(key))
+        .and_then(Value::as_f64)
+    {
         return Some(rate);
     }
     if let Some(rate) = rates.get(&account.account).and_then(Value::as_f64) {
@@ -5380,7 +5458,7 @@ fn write_rate_tiers(sheet: &mut Worksheet, params: &Value) -> Result<(), AppErro
     let mut y = RATE_TIERS.len() as u32 + 2;
     let age = listed_rate_age_months();
     let mut lines = vec![
-        "默认暂估范围：有挂牌参考值的活期、协定、通知、定期和大额存单档位均先按默认值暂估并纳入测算；用户改写值优先。自定义、外币特殊产品仍须填实际利率。所有暂估值均须按存款协议、对账单或利息清单确认。".to_string(),
+        "默认暂估口径：活期、保证金维持大行挂牌水平；协定、通知、定期和大额存单按市场中枢暂估利率（实务常见区间中部，高于大行挂牌下限——挂牌价接近市场下限，直接套用会系统性低估利息收入）自动纳入测算；用户改写值优先。自定义、外币特殊产品仍须填实际利率。所有暂估值均须按存款协议、对账单或利息清单确认。".to_string(),
         format!("央行基准来源：中国人民银行《金融机构人民币存款基准利率调整表》，{PBC_BENCHMARK_DATE} 起执行，至今未再调整。仅作合理性上限参照，不参与测算——3 年期基准 2.75% 对比实际约 1.25%，拿它算会把利息放大一倍以上。"),
         format!("大行挂牌来源：国有大型商业银行人民币存款挂牌利率，{LISTED_REFERENCE_DATE} 调整后水平；2022 年建立存款利率市场化调整机制后由各行自主报价，已多轮下调。"),
         "实务常见区间：常见报价范围的经验值，不是官方公布数据，只用于提示填入的利率是否明显偏离。".to_string(),
@@ -5987,8 +6065,8 @@ mod tests {
         assert_eq!(usd["tier"], "demand");
         assert!(usd["rateResolved"].as_bool().unwrap());
         assert_eq!(usd["annualRate"], json!(0.0005));
-        // 来源统一为「挂牌暂估值」，外币默认值的待确认提示交给标记位。
-        assert_eq!(usd["rateSource"], json!("挂牌暂估值"));
+        // 来源统一为「市场中枢暂估值」，外币默认值的待确认提示交给标记位。
+        assert_eq!(usd["rateSource"], json!("市场中枢暂估值"));
         assert_eq!(usd["rateProvisional"], json!(true));
         assert!(usd["tierMatchedBy"].as_str().unwrap().contains("USD"));
         let rmb = rows_of(&result, "RMB CMB");
@@ -7163,9 +7241,9 @@ mod tests {
         let resolved = resolve_rate(&row, None, None, None, "");
         assert!(resolved.resolved);
         assert_eq!(resolved.rate, 0.0005);
-        // 来源文案已统一：外币户与人民币户同显「挂牌暂估值」，
+        // 来源文案已统一：外币户与人民币户同显「市场中枢暂估值」，
         // 待确认提示由 provisional 标记承担。
-        assert_eq!(resolved.source, "挂牌暂估值");
+        assert_eq!(resolved.source, "市场中枢暂估值");
         assert!(resolved.provisional);
         // 人民币户不受影响，仍自动套活期挂牌。
         let rmb = AccountRow {
@@ -7774,6 +7852,37 @@ mod tests {
     }
 
     #[test]
+    fn rate_tiers_payload_exposes_default_rate_above_listed_floor() {
+        // 前端「本次采用」列默认取 defaultRate：协定/通知/定期/大额存单
+        // 必须高于大行挂牌下限；活期、保证金维持挂牌水平；无报价档位为 null。
+        let payload = rate_tiers();
+        let find = |key: &str| {
+            payload["tiers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tier| tier["key"] == json!(key))
+                .unwrap()
+                .clone()
+        };
+        let agreement = find("agreement");
+        assert_eq!(agreement["listedRate"], json!(0.0020));
+        assert_eq!(agreement["defaultRate"], json!(0.0080));
+        let term_1y = find("term_1y");
+        assert_eq!(term_1y["defaultRate"], json!(0.0120));
+        assert!(
+            term_1y["defaultRate"].as_f64().unwrap()
+                > term_1y["listedRate"].as_f64().unwrap()
+        );
+        for key in ["demand", "margin"] {
+            let tier = find(key);
+            assert_eq!(tier["defaultRate"], tier["listedRate"]);
+        }
+        assert_eq!(find("custom")["defaultRate"], json!(null));
+        assert_eq!(find("unknown")["defaultRate"], json!(null));
+    }
+
+    #[test]
     fn only_built_in_reference_urls_are_allowed() {
         assert!(is_reference_url("http://www.pbc.gov.cn/"));
         // 前缀相同也不放行，避免"以官网开头"就被当成可信地址。
@@ -7826,11 +7935,11 @@ mod tests {
         };
         let custom = json!({"demand": 0.002});
         let custom = custom.as_object();
-        // 活期的内置默认：来源统一为「挂牌暂估值」，且必须标记待确认。
+        // 活期的内置默认：来源统一为「市场中枢暂估值」，且必须标记待确认。
         let resolved = resolve_rate(&row, None, None, None, "");
         assert_eq!(
             (resolved.rate, resolved.source.as_str()),
-            (0.0005, "挂牌暂估值")
+            (0.0005, "市场中枢暂估值")
         );
         assert!(resolved.provisional);
         // 档位级改写盖过内置默认：属于用户改写，不再是待确认的暂估。
@@ -7848,13 +7957,14 @@ mod tests {
             (0.0125, "本账户手工指定")
         );
         assert!(!resolved.provisional);
-        // 切到定期档后自动带出该档挂牌暂估值
+        // 切到定期档后自动带出该档市场中枢暂估值（3 年期中枢 1.55%，
+        // 高于大行挂牌 1.25%）
         let overrides = json!({"K": {"tier": "term_3y"}});
         let resolved = resolve_rate(&row, overrides.as_object(), None, None, "");
         assert_eq!(resolved.tier, "term_3y");
         assert!(resolved.resolved);
         assert!(resolved.provisional);
-        assert!((resolved.rate - 0.0125).abs() < 1e-12);
+        assert!((resolved.rate - 0.0155).abs() < 1e-12);
         // 档位级填了就能用
         let tier_rates = json!({"term_3y": 1.35});
         let resolved = resolve_rate(
@@ -7896,7 +8006,7 @@ mod tests {
         let rates = json!({"1002 银行存款-人民币户": 0.0053});
         let resolved = resolve_rate(&row, None, rates.as_object(), None, "别的明细键");
         assert_eq!(resolved.rate, 0.0053);
-        // 表里没写就回落内置挂牌暂估。
+        // 表里没写就回落内置市场中枢暂估。
         let resolved = resolve_rate(&row, None, None, None, "别的明细键");
         assert_eq!(resolved.rate, 0.0005);
         assert!(resolved.provisional);
@@ -7937,16 +8047,19 @@ mod tests {
     }
 
     #[test]
-    fn standard_listed_tiers_get_provisional_rates() {
-        // 有挂牌值的标准档位都自动带出暂估值。
+    fn standard_tiers_get_market_center_provisional_rates() {
+        // 标准人民币档位自动带出市场中枢暂估值（协定/通知/定期/大额存单
+        // 高于大行挂牌下限，活期维持挂牌）；挂牌参考列保持大行挂牌价。
         assert_eq!(auto_rate("demand"), Some(0.0005));
-        assert_eq!(auto_rate("agreement"), Some(0.0020));
-        assert_eq!(auto_rate("notice_7d"), Some(0.0055));
-        assert_eq!(auto_rate("term_1y"), Some(0.0095));
-        assert_eq!(auto_rate("term_3y"), Some(0.0125));
-        assert_eq!(auto_rate("cd_1y"), Some(0.0110));
+        assert_eq!(auto_rate("agreement"), Some(0.0080));
+        assert_eq!(auto_rate("notice_7d"), Some(0.0080));
+        assert_eq!(auto_rate("term_1y"), Some(0.0120));
+        assert_eq!(auto_rate("term_3y"), Some(0.0155));
+        assert_eq!(auto_rate("cd_1y"), Some(0.0125));
+        assert_eq!(auto_rate("margin"), Some(0.0005));
         assert_eq!(auto_rate("custom"), None);
         assert_eq!(tier_rate("term_3y"), Some(0.0125));
+        assert_eq!(tier_rate("agreement"), Some(0.0020));
         assert_eq!(tier_rate("custom"), None);
     }
 
@@ -7975,8 +8088,67 @@ mod tests {
         assert!(!resolved.provisional);
 
         let resolved = resolve_rate(&row, None, None, None, "");
-        assert_eq!(resolved.source, "挂牌暂估值");
+        assert_eq!(resolved.source, "市场中枢暂估值");
         assert!(resolved.provisional);
+    }
+
+    #[test]
+    fn 科目确认行键的利率覆盖可命中测算行() {
+        // 前端按确认行键（JSON 数组串）写账户级利率：普通行币种留空，
+        // 引擎行币种是归并标签（本位币合并），靠币种空串回退命中。
+        let row = AccountRow {
+            key: "K".into(),
+            account: "100201 银行存款".into(),
+            currency: "本位币合并".into(),
+            tier: "demand".into(),
+            ..blank_row()
+        };
+        let rates = serde_json::from_value::<Map<String, Value>>(json!({
+            "no-match-key": 0.99,
+            "[\"\",\"100201 银行存款\",\"\",\"\"]": 0.0135
+        }))
+        .unwrap();
+        assert_eq!(account_rate_for(&row, "", Some(&rates)), Some(0.0135));
+        let resolved = resolve_rate(&row, None, Some(&rates), None, "");
+        assert_eq!(resolved.source, "科目确认表手工指定");
+        assert_eq!(resolved.rate, 0.0135);
+    }
+
+    #[test]
+    fn 科目确认行键的存款类型覆盖可命中() {
+        let params = json!({
+            "accountDetailTierOverrides": {
+                "别的键": "demand",
+                "[\"甲\",\"100201 银行存款\",\"工行户\",\"\"]": "term_3m"
+            }
+        });
+        let (tier, reason) = detail_tier_for(
+            "甲", "100201 银行存款", "工行户", "本位币合并", "", &params,
+        );
+        assert_eq!(tier, "term_3m");
+        assert_eq!(reason, "用户在科目分类中指定存款类型");
+    }
+
+    #[test]
+    fn 账户级手填利率优先于档位改写() {
+        // 测算行键上的逐户改价（rateOverrides）仍最优先，行键利率不让位。
+        let row = AccountRow {
+            key: "100201 银行存款".into(),
+            account: "100201 银行存款".into(),
+            tier: "demand".into(),
+            ..blank_row()
+        };
+        let row_overrides = serde_json::from_value::<Map<String, Value>>(json!({
+            "100201 银行存款": { "tier": "demand", "annualRate": 0.02 }
+        }))
+        .unwrap();
+        let account_rates = serde_json::from_value::<Map<String, Value>>(json!({
+            "100201 银行存款": 0.0135
+        }))
+        .unwrap();
+        let resolved = resolve_rate(&row, Some(&row_overrides), Some(&account_rates), None, "");
+        assert_eq!(resolved.rate, 0.02);
+        assert_eq!(resolved.source, "本账户手工指定");
     }
 
     #[test]
@@ -7991,8 +8163,8 @@ mod tests {
         };
         let resolved = resolve_rate(&row, None, None, None, "");
         assert!(resolved.resolved);
-        assert_eq!(resolved.rate, 0.0125);
-        assert_eq!(resolved.source, "挂牌暂估值");
+        assert_eq!(resolved.rate, 0.0155);
+        assert_eq!(resolved.source, "市场中枢暂估值");
         assert!(resolved.provisional);
     }
 
@@ -9740,7 +9912,7 @@ mod tests {
                     "本期贷方发生额",
                 ],
                 vec!["1002", "银行存款", "1200000", "2400000", "1200000", "0"],
-                // 定期存款自动带出挂牌暂估利率，状态必须提示待确认。
+                // 定期存款自动带出市场中枢暂估利率，状态必须提示待确认。
                 vec![
                     "1012",
                     "其他货币资金-1年定期存款",
@@ -9822,7 +9994,7 @@ mod tests {
         assert_eq!(summary["monthlySource"], "序时账逐月还原");
         let rows = result["rows"].as_array().unwrap();
 
-        // 活期：自动套用挂牌默认值，余额勾稽通过。
+        // 活期：自动套用市场中枢默认值（＝挂牌 0.05%），余额勾稽通过。
         let demand = rows.iter().find(|r| r["tier"] == json!("demand")).unwrap();
         assert_eq!(
             demand["derivedClosingBalance"].as_f64().unwrap(),
@@ -9830,28 +10002,29 @@ mod tests {
         );
         assert!(demand["reconciliationDiff"].as_f64().unwrap().abs() < 0.01);
         assert_eq!(demand["status"], "待确认利率");
-        assert_eq!(demand["rateSource"], "挂牌暂估值");
+        assert_eq!(demand["rateSource"], "市场中枢暂估值");
         assert_eq!(demand["rateProvisional"], json!(true));
         assert!(demand["rateResolved"].as_bool().unwrap());
         // 12 个月月均余额之和 21,600,000；活期挂牌 0.05% ÷ 12 → 900。
         assert!((demand["averageBalance"].as_f64().unwrap() - 1_800_000.0).abs() < 0.01);
 
-        // 定期：自动套用挂牌暂估值并纳入测算，但状态明确待确认。
+        // 定期：自动套用市场中枢暂估值并纳入测算，但状态明确待确认。
         let term = rows.iter().find(|r| r["tier"] == json!("term_1y")).unwrap();
         assert!(term["rateResolved"].as_bool().unwrap());
-        assert_eq!(term["rateSource"], "挂牌暂估值");
+        assert_eq!(term["rateSource"], "市场中枢暂估值");
         assert_eq!(term["rateProvisional"], json!(true));
         assert_eq!(term["status"], "待确认利率");
         // 该定期户在 JE 中没有发生额，且 TB 年初＝年末；按零发生额推导后
         // 期末与 TB 一致，仍属于有效勾稽。
         assert_eq!(term["jeReconciled"], true);
-        assert!((term["annualRate"].as_f64().unwrap() - 0.0095).abs() < 1e-12);
+        assert!((term["annualRate"].as_f64().unwrap() - 0.0120).abs() < 1e-12);
 
         assert_eq!(summary["missingRateCount"], 0);
         assert_eq!(summary["defaultRateCount"], 2);
-        assert!((summary["calculatedInterest"].as_f64().unwrap() - 5_650.0).abs() < 0.01);
+        // 50 万定期 × 中枢 1.20% = 6,000；活期 900。合计 6,900、差异 6,000。
+        assert!((summary["calculatedInterest"].as_f64().unwrap() - 6_900.0).abs() < 0.01);
         assert!((summary["bookedInterestIncome"].as_f64().unwrap() - 900.0).abs() < 0.01);
-        assert!((summary["difference"].as_f64().unwrap() - 4_750.0).abs() < 0.01);
+        assert!((summary["difference"].as_f64().unwrap() - 6_000.0).abs() < 0.01);
         // 暂估利率尚未确认，不能判为最终勾稽通过。
         assert_eq!(summary["reconciliationPassed"], json!(false));
 
@@ -9939,7 +10112,7 @@ mod tests {
             );
         assert!(!summary_text.contains("档位匹配依据"));
         assert!(summary_text.contains("待确认利率"));
-        assert!(summary_text.contains("挂牌暂估值"));
+        assert!(summary_text.contains("市场中枢暂估值"));
         // 勾稽块并入汇总表后，比较标题与账面明细必须在同一张 sheet 里。
         assert!(
             summary_text.contains("存款利息测算与账面利息收入比较"),
@@ -9950,7 +10123,7 @@ mod tests {
             "账面利息收入科目明细应列示借贷发生额与期末余额"
         );
         assert!(
-            text.contains("有挂牌参考值的活期、协定、通知、定期和大额存单")
+            text.contains("市场中枢暂估利率")
                 && text.contains("暂估")
                 && text.contains("确认"),
             "档位表缺少标准档位默认暂估政策说明"

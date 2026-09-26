@@ -33,7 +33,8 @@ export function LedgerSourceCard({inputPath,sheet,knownSheets,headerRow,headerDe
       <label>标题行<select value={String(headerRow)} onChange={e=>onHeaderRowChange(Number(e.target.value))}>
         {HEADER_ROW_CHOICES.map(value=><option key={value} value={String(value)}>{value===0?"自动识别":`第 ${value} 行`}</option>)}
       </select></label>
-      {onHeaderDepthChange&&<label>表头层数<select value={String(headerDepth??1)} disabled={headerDepthDisabled} onChange={e=>onHeaderDepthChange(Number(e.target.value))}>
+      {onHeaderDepthChange&&<label>表头层数<select value={String(headerDepth??0)} disabled={headerDepthDisabled} onChange={e=>onHeaderDepthChange(Number(e.target.value))}>
+        <option value="0">自动识别</option>
         <option value="1">1层</option>
         <option value="2">2层</option>
       </select></label>}

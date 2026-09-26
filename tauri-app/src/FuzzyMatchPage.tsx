@@ -78,6 +78,8 @@ export type FuzzySummary = {
 export type ScoreBand = "all" | "70-80" | "80-90";
 type RowLevel = "auto" | "suspect" | "unmatched";
 type Inspection = {
+  headerRow?: number;
+  headerDepth?: number;
   headers: string[];
   preview: string[][];
   rowCount: number;
@@ -87,6 +89,7 @@ type Inspection = {
 type SourceState = {
   path: string;
   headerRow: number;
+  headerDepth?: number;
   inspection?: Inspection;
   mapping: MappingDict;
 };
@@ -303,7 +306,7 @@ const formatCount = (value: number) => value.toLocaleString("zh-CN");
 export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   const emptySource = (): SourceState => ({
     path: "",
-    headerRow: 1,
+    headerRow: 0,
     mapping: {},
   });
   const [sources, setSources] = useState<Record<Kind, SourceState>>({
@@ -377,8 +380,8 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   >({});
   useTaskRestore(tool.id, (restore) => {
     const p = restore.params as {
-      sourceA?: { inputPath?: string; headerRow?: number; column?: string };
-      sourceB?: { inputPath?: string; headerRow?: number; column?: string };
+      sourceA?: { inputPath?: string; headerRow?: number; headerDepth?: number; column?: string };
+      sourceB?: { inputPath?: string; headerRow?: number; headerDepth?: number; column?: string };
       matchType?: string;
       autoThreshold?: number;
       suspectThreshold?: number;
@@ -391,6 +394,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         next[kind] = {
           path: src.inputPath,
           headerRow: src.headerRow ?? 1,
+          headerDepth: src.headerDepth ?? 1,
           mapping:
             typeof src.column === "string" && src.column
               ? { column: src.column }
@@ -544,7 +548,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     try {
       const x = (await engineCall("fuzzy.inspect", {
         kind,
-        source: { inputPath: path, sheet, headerRow, headerDepth: 1 },
+        source: { inputPath: path, sheet, headerRow, headerDepth: headerRow === 0 ? 0 : current.inspection?.headerDepth ?? current.headerDepth ?? 1 },
       })) as Inspection;
       // 历史恢复后重新读取同一文件：存档的选中列顶回（一次性消费，换文件
       // 照旧清空待选）。
@@ -557,7 +561,8 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         restoredColumns.current[kind] = undefined;
       setSource(kind, {
         path,
-        headerRow,
+        headerRow: x.headerRow ?? headerRow,
+        headerDepth: x.headerDepth ?? 1,
         inspection: x,
         mapping: column ? { column } : {},
       });
@@ -577,7 +582,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     if (typeof picked !== "string") return;
     invalidateMatchResult();
     setSource(kind, { path: picked, inspection: undefined, mapping: {} });
-    await inspect(kind, { path: picked, sheet: "", headerRow: 1 });
+    await inspect(kind, { path: picked, sheet: "", headerRow: 0 });
   }
 
   /** 拖放落地：取第一个表格类文件投给命中的来源卡，非表格文件忽略。 */
@@ -586,7 +591,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     if (!file) return;
     invalidateMatchResult();
     setSource(kind, { path: file, inspection: undefined, mapping: {} });
-    await inspect(kind, { path: file, sheet: "", headerRow: 1 });
+    await inspect(kind, { path: file, sheet: "", headerRow: 0 });
   }
 
   useEffect(() => {
@@ -624,12 +629,14 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
           inputPath: sources.a.path,
           sheet: sources.a.inspection.sheet,
           headerRow: sources.a.headerRow,
+          headerDepth: sources.a.inspection.headerDepth ?? 1,
           column: columnOf(sources.a),
         },
         sourceB: {
           inputPath: sources.b.path,
           sheet: sources.b.inspection.sheet,
           headerRow: sources.b.headerRow,
+          headerDepth: sources.b.inspection.headerDepth ?? 1,
           column: columnOf(sources.b),
         },
         matchType,

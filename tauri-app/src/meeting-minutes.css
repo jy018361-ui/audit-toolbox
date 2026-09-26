@@ -8,15 +8,28 @@
   gap: var(--sp-3);
 }
 
+/* Keep the page's card rhythm tighter than the shared default while retaining
+   the shared 24px card inset. */
+.meeting-page [data-slot="card"] {
+  gap: var(--sp-4);
+}
+
 .meeting-status-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: var(--sp-3);
 }
 
+@media (max-width: 1279px) {
+  .meeting-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .meeting-status-item {
   display: grid;
-  gap: var(--sp-1);
+  align-content: center;
+  gap: var(--sp-2);
   padding: var(--sp-3) var(--sp-4);
   background: var(--surface-muted);
   border: 1px solid var(--border-soft);
@@ -62,6 +75,12 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+
+.meeting-import-note {
+  margin: var(--sp-2) 0 var(--sp-3);
+  line-height: var(--lh-body);
 }
 
 .meeting-result-card {

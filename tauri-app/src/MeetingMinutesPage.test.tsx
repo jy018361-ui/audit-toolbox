@@ -37,6 +37,7 @@ vi.mock("./api", () => ({
   openOutput: vi.fn(async () => true),
   pickPath: vi.fn(async () => null),
   listenJobEvents: vi.fn(async () => () => undefined),
+  runningInDesktopApp: vi.fn(() => true),
 }));
 vi.mock("./toolPageActivity", () => ({
   markToolPageLive: vi.fn(),
@@ -136,6 +137,24 @@ describe("MeetingMinutesPage", () => {
         detailLevel: "standard",
       }),
     );
+  });
+
+  it("浏览器预览模式：给出降级提示并禁用本机操作按钮", async () => {
+    const { runningInDesktopApp } = await import("./api");
+    vi.mocked(runningInDesktopApp).mockReturnValueOnce(false);
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(
+      screen.getByText(/浏览器中预览界面，Teams 检测、录音与生成纪要需在桌面应用中使用/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/浏览器预览模式：界面仅供查看/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "手动开始记录" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "从导入录音生成纪要" }),
+    ).toBeDisabled();
   });
 
   it("displayAudioFileName 只显示文件名", () => {

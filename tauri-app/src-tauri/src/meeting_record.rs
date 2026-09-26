@@ -235,6 +235,74 @@ fn write_err(error: impl std::fmt::Display) -> AppError {
     record_error("MEETING_MIX_FAILED", "写入混音文件失败。", Some(error.to_string()))
 }
 
+/// 已完成初始化的采集会话：进入轮询循环前创建，就绪信号在此时发回启动方。
+struct PreparedCapture {
+    capture: wasapi::AudioCaptureClient,
+    writer: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
+    client: wasapi::AudioClient,
+}
+
+fn prepare_capture(device_direction: Direction, path: &Path) -> Result<PreparedCapture, String> {
+    let enumerator = DeviceEnumerator::new().map_err(stringify)?;
+    let device = enumerator.get_default_device(&device_direction).map_err(stringify)?;
+    let mut client = device.get_iaudioclient().map_err(stringify)?;
+    let format = WaveFormat::new(16, 16, &SampleType::Int, SAMPLE_RATE as usize, 1, None);
+    // 回环：Render 设备 + Capture 方向 + 共享模式 = AUDCLNT_STREAMFLAGS_LOOPBACK。
+    client
+        .initialize_client(
+            &format,
+            &Direction::Capture,
+            &StreamMode::PollingShared {
+                autoconvert: true,
+                buffer_duration_hns: BUFFER_DURATION_HNS,
+            },
+        )
+        .map_err(stringify)?;
+    let capture = client.get_audiocaptureclient().map_err(stringify)?;
+    // WASAPI 初始化后必须显式 Start 才有数据包流动，否则永远读到空。
+    client.start_stream().map_err(stringify)?;
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    let writer = WavWriter::create(path, spec).map_err(|e| e.to_string())?;
+    Ok(PreparedCapture {
+        capture,
+        writer,
+        client,
+    })
+}
+
+fn capture_loop(
+    capture: &wasapi::AudioCaptureClient,
+    writer: &mut hound::WavWriter<std::io::BufWriter<std::fs::File>>,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        loop {
+            match capture.get_next_packet_size() {
+                Ok(Some(0)) | Ok(None) => break,
+                Ok(Some(frames)) => {
+                    let mut buffer = vec![0u8; frames as usize * 2];
+                    let (read, _info) = capture.read_from_device(&mut buffer).map_err(stringify)?;
+                    for pair in buffer[..read as usize * 2].chunks_exact(2) {
+                        let sample = i16::from_le_bytes([pair[0], pair[1]]);
+                        writer.write_sample(sample).map_err(|e| e.to_string())?;
+                    }
+                }
+                Err(error) => return Err(stringify(error)),
+            }
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    Ok(())
+}
+
 fn run_capture(
     device_direction: Direction,
     stop: &AtomicBool,
@@ -246,62 +314,32 @@ fn run_capture(
         Direction::Capture => "mic",
     };
     // COM 多线程套间：本线程独占使用，线程结束时随线程释放。
-    let mta = wasapi::initialize_mta();
-    if mta.is_err() {
-        ready.send((label, Err("初始化 Windows 音频组件失败。".into()))).ok();
-        return Err("初始化 Windows 音频组件失败。".into());
+    if wasapi::initialize_mta().is_err() {
+        let message = "初始化 Windows 音频组件失败。".to_string();
+        ready.send((label, Err(message.clone()))).ok();
+        return Err(message);
     }
-    let init = (|| -> Result<(), String> {
-        let enumerator = DeviceEnumerator::new().map_err(stringify)?;
-        let device = enumerator.get_default_device(&device_direction).map_err(stringify)?;
-        let mut client = device.get_iaudioclient().map_err(stringify)?;
-        let format = WaveFormat::new(16, 16, &SampleType::Int, SAMPLE_RATE as usize, 1, None);
-        // 回环：Render 设备 + Capture 方向 + 共享模式 = AUDCLNT_STREAMFLAGS_LOOPBACK。
-        client
-            .initialize_client(
-                &format,
-                &Direction::Capture,
-                &StreamMode::PollingShared {
-                    autoconvert: true,
-                    buffer_duration_hns: BUFFER_DURATION_HNS,
-                },
-            )
-            .map_err(stringify)?;
-        let capture = client.get_audiocaptureclient().map_err(stringify)?;
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: SAMPLE_RATE,
-            bits_per_sample: 16,
-            sample_format: SampleFormat::Int,
-        };
-        let mut writer = WavWriter::create(path, spec).map_err(|e| e.to_string())?;
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                break;
-            }
-            loop {
-                match capture.get_next_packet_size() {
-                    Ok(Some(0)) | Ok(None) => break,
-                    Ok(Some(frames)) => {
-                        let mut buffer = vec![0u8; frames as usize * 2];
-                        let (read, _info) = capture.read_from_device(&mut buffer).map_err(stringify)?;
-                        for pair in buffer[..read as usize * 2].chunks_exact(2) {
-                            let sample = i16::from_le_bytes([pair[0], pair[1]]);
-                            writer.write_sample(sample).map_err(|e| e.to_string())?;
-                        }
-                    }
-                    Err(error) => return Err(stringify(error)),
-                }
-            }
-            thread::sleep(POLL_INTERVAL);
+    // 就绪信号必须在进入采集循环【之前】发回：启动方只等 5 秒，
+    // 放到循环结束后发会让每次开录都超时误报"无法打开设备"。
+    let prepared = match prepare_capture(device_direction, path) {
+        Ok(prepared) => {
+            ready.send((label, Ok(()))).ok();
+            prepared
         }
-        writer.finalize().map_err(|e| e.to_string())?;
-        Ok(())
-    })();
-    ready
-        .send((label, init.clone().map_err(|message| message.clone())))
-        .ok();
-    init
+        Err(message) => {
+            ready.send((label, Err(message.clone()))).ok();
+            return Err(message);
+        }
+    };
+    let PreparedCapture {
+        capture,
+        mut writer,
+        client,
+    } = prepared;
+    capture_loop(&capture, &mut writer, stop)?;
+    let _ = client.stop_stream();
+    writer.finalize().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn stringify(error: impl std::fmt::Debug) -> String {
@@ -388,5 +426,40 @@ mod tests {
         let bytes = [0u8, 0];
         assert_eq!(i16::from_le_bytes(bytes), 0);
         let _ = std::io::sink().write_all(&bytes);
+    }
+
+    /// 真实设备链路诊断（手动运行）：
+    /// `cargo test --lib meeting_record -- --ignored --nocapture`
+    #[test]
+    #[ignore = "需要真实音频设备，仅手动诊断运行"]
+    fn live_start_and_finalize() {
+        let dir = tempfile::tempdir().unwrap();
+        match start(dir.path()) {
+            Ok(recording) => {
+                let record_dir = recording.dir.clone();
+                println!("启动成功: {}", recording_summary(&recording));
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                let active = Arc::new(recording);
+                match finalize(active) {
+                    Ok(result) => println!("收尾成功: {result}"),
+                    Err(error) => println!("收尾失败: code={} detail={:?}", error.code, error.detail),
+                }
+                if let Ok(entries) = fs::read_dir(&record_dir) {
+                    for entry in entries.flatten() {
+                        println!(
+                            "文件: {} -> {} 字节",
+                            entry.path().display(),
+                            entry.metadata().map(|meta| meta.len()).unwrap_or(0)
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                println!(
+                    "启动失败: code={} user={} detail={:?}",
+                    error.code, error.user_message, error.detail
+                );
+            }
+        }
     }
 }

@@ -82,8 +82,8 @@
   padding-top: 12px;
 }
 .deposit-account-list table {
-  width: 100%;
-  min-width: 1040px;
+  width: max-content;
+  min-width: 100%;
   border-collapse: separate;
   border-spacing: 0;
 }
@@ -105,31 +105,16 @@
 .deposit-account-list tr:last-child td {
   border-bottom: 0;
 }
-.deposit-account-list th:first-child,
-.deposit-account-list td:first-child {
-  width: 38%;
+.deposit-account-list .deposit-review-account {
+  min-width: 22rem;
 }
-.deposit-account-list th:nth-child(2),
-.deposit-account-list td:nth-child(2) {
-  width: 204px;
+.deposit-account-list .deposit-review-currency-col {
+  min-width: 6rem;
 }
-.deposit-account-list th:nth-child(3),
-.deposit-account-list td:nth-child(3) {
-  width: 150px;
-  min-width: 138px;
+.deposit-account-list .deposit-account-amount {
+  min-width: 9rem;
   text-align: right;
   font-variant-numeric: tabular-nums;
-}
-.deposit-account-list th:nth-child(4),
-.deposit-account-list td:nth-child(4) {
-  width: 172px;
-  min-width: 172px;
-}
-/* 第五列＝利率（%）：数字输入框保持窄列，别把科目列挤没。 */
-.deposit-account-list th:nth-child(5),
-.deposit-account-list td:nth-child(5) {
-  width: 128px;
-  min-width: 118px;
 }
 .deposit-account-list .deposit-pct input {
   width: 84px;
@@ -140,7 +125,7 @@
   padding: 6px 28px 6px 9px;
   border: 1px solid var(--control-border);
   border-radius: var(--radius-md);
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
 }
 .deposit-account-tier {
@@ -173,21 +158,12 @@
   color: var(--muted-foreground);
   text-align: center;
 }
-/* 多主体账套：确认表加“主体”列，科目列相应收窄。 */
-.deposit-account-list table.deposit-multi-entity
-  th:nth-child(1),
-.deposit-account-list table.deposit-multi-entity
-  td:nth-child(1) {
-  width: 128px;
+/* 多主体账套：仅实际存在多个主体且映射有效时增加主体列。 */
+.deposit-account-list table.deposit-multi-entity th:first-child,
+.deposit-account-list table.deposit-multi-entity td:first-child {
   min-width: 96px;
 }
-.deposit-account-list table.deposit-multi-entity
-  th:nth-child(2),
-.deposit-account-list table.deposit-multi-entity
-  td:nth-child(2) {
-  width: 30%;
-}
-/* 按币种拆出的后续行：主体/科目列只标币种，其余列留空对齐。 */
+/* 按币种拆出的后续行仍显示完整科目身份。 */
 .deposit-account-sub td {
   color: var(--muted-foreground);
 }
@@ -240,7 +216,7 @@
   padding: 6px 9px;
   border: 1px solid var(--control-border);
   border-radius: 8px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
 }
 /* 输出文件格子里输入框和"选择位置"按钮并排，按钮不单独占一格，
@@ -450,7 +426,7 @@
   padding: 5px 8px;
   border: 1px solid var(--control-border);
   border-radius: 7px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
 }
 .deposit-table input {
@@ -610,7 +586,7 @@
   padding: 4px 8px;
   border: 1px solid var(--control-border);
   border-radius: 7px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
   text-align: right;
 }

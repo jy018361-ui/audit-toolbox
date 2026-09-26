@@ -29,6 +29,7 @@ import {
   ledgerHasMappedRole,
   ledgerMultiEntityCombos,
   ledgerRowEntities,
+  ledgerReviewAccountLabel,
   correctLedgerSourceKinds,
   missingGoldIdentity,
   resolveRoleLabels,
@@ -46,6 +47,7 @@ import {
   useLedgerForms,
 } from "@/ledgerForms";
 import { MappingPanel } from "@/components/MappingPanel";
+import { useTableColumnResize } from "@/components/useTableColumnResize";
 import { StepIndicator } from "@/components/StepIndicator";
 import {
   completeLedgerPairReviewKey,
@@ -995,6 +997,75 @@ export function fxMissingRequired(
   return [...new Set(fxMissingRaw(kind, mapping, _hasJe, fixedEntity, mode))];
 }
 
+/** 把“金额方案”翻译成当前还需要点选的列，避免用户在宽表里猜组合。 */
+export function fxJeAmountMappingHint(
+  mapping: Record<string, string | string[]>,
+  headers: string[],
+): string | undefined {
+  if (!fxMissingRequired("je", mapping, true, "").includes("原币金额方案"))
+    return undefined;
+  const has = (role: string) => {
+    const value = mapping[role];
+    return Array.isArray(value)
+      ? value.some((item) => Boolean(item.trim()))
+      : Boolean(value?.trim());
+  };
+  const missing = [
+    !has("foreignDebit") && "原币借方",
+    !has("foreignCredit") && "原币贷方",
+  ].filter(Boolean).join("、");
+  const oracleHeaders = ["Entered Debit", "Entered Credit", "Accounted Debit", "Accounted Credit"];
+  if (oracleHeaders.every((header) => headers.some((value) => value.trim().toLowerCase() === header.toLowerCase()))) {
+    return `原币金额方案还缺：${missing}。此表 Entered Debit/Credit 对应原币借方/贷方，Accounted Debit/Credit 对应本位币借方/贷方；请核对当前映射。`;
+  }
+  return `原币金额方案还缺：${missing}；可映射原币借方＋原币贷方，或改用单列原币净额。`;
+}
+
+/** 展示层展开复合槽位；不改变必填判定及业务映射口径。 */
+export function fxMissingDetails(
+  kind: "je" | "tb",
+  mapping: Record<string, string | string[]>,
+  headers: string[] = [],
+): string[] {
+  const has = (role: string) => {
+    const value = mapping[role];
+    return Array.isArray(value)
+      ? value.some((item) => Boolean(item.trim()))
+      : Boolean(value?.trim());
+  };
+  const pair = (prefix: string, label: string) => {
+    const roleLabel = label.replace("余额", "");
+    const missing = [
+      !has(`${prefix}Debit`) && `${roleLabel}借方`,
+      !has(`${prefix}Credit`) && `${roleLabel}贷方`,
+    ].filter(Boolean).join("、");
+    return `${label}还缺：${missing}；也可映射单列${roleLabel}净额`;
+  };
+  return fxMissingRequired(kind, mapping, true, "").map((item) => {
+    if (item === "原币金额方案") return fxJeAmountMappingHint(mapping, headers) ?? item;
+    if (item === "本位币金额方案") return pair("functional", "本位币");
+    const balances: Record<string, [string, string]> = {
+      期初原币余额: ["openingForeign", "期初原币余额"],
+      期末原币余额: ["closingForeign", "期末原币余额"],
+      期初本位币余额: ["openingFunctional", "期初本位币余额"],
+      期末本位币余额: ["closingFunctional", "期末本位币余额"],
+    };
+    if (balances[item]) return pair(...balances[item]);
+    if (item === "本年累计（或本期）借/贷方发生额") {
+      const ytd = [
+        !has("ytdFunctionalDebit") && "本年累计本位币借方",
+        !has("ytdFunctionalCredit") && "本年累计本位币贷方",
+      ].filter(Boolean).join("、");
+      const period = [
+        !has("periodFunctionalDebit") && "本期本位币借方",
+        !has("periodFunctionalCredit") && "本期本位币贷方",
+      ].filter(Boolean).join("、");
+      return `发生额还缺：${ytd}；或补齐${period}（任选一组）`;
+    }
+    return item;
+  });
+}
+
 /**
  * inspect 下发的科目、主体和主体×科目目录只依赖账表身份字段。
  * 金额、日期等映射变化不需要重新读取整本工作簿。
@@ -1299,10 +1370,10 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   const requiredSources = fxRequiredSources(mode);
   const requiredMappingsMissing = [
     ...(je && requiredSources.je
-      ? fxMissingRequired("je", jeMapping, true, fixedEntity)
+      ? fxMissingDetails("je", jeMapping, je.headers)
       : []),
     ...(tb && requiredSources.tb
-      ? fxMissingRequired("tb", tbMapping, Boolean(je), fixedEntity)
+      ? fxMissingDetails("tb", tbMapping, tb.headers)
       : []),
   ];
   const defaultFunctionalCurrency = tb?.uniformCurrency || "CNY";
@@ -1941,7 +2012,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 : reviewed;
             }),
             missingAfter: (mapping) =>
-              fxMissingRequired("je", mapping, true, fixedEntity, mode),
+              fxMissingDetails("je", mapping, je?.headers ?? []),
           }
         : undefined,
       tb: tb
@@ -1953,7 +2024,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
             tool: "fx_audit",
             onApplied: setTbMapping,
             missingAfter: (mapping) =>
-              fxMissingRequired("tb", mapping, Boolean(je), fixedEntity),
+              fxMissingDetails("tb", mapping, tb?.headers ?? []),
           }
         : undefined,
     });
@@ -2203,7 +2274,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       return setError("未实现测算需先上传并识别TB。");
     const jeMissing =
       je && requiredSources.je
-        ? fxMissingRequired("je", jeMapping, true, fixedEntity)
+        ? fxMissingDetails("je", jeMapping, je.headers)
         : [];
     if (jeMissing.length)
       return setError(
@@ -2211,7 +2282,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       );
     const tbMissing =
       tb && requiredSources.tb
-        ? fxMissingRequired("tb", tbMapping, Boolean(je), fixedEntity)
+        ? fxMissingDetails("tb", tbMapping, tb.headers)
         : [];
     if (tbMissing.length)
       return setError(
@@ -2618,13 +2689,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 inspection={je}
                 mapping={jeMapping}
                 labels={JE_LABELS}
-                missing={fxMissingRequired(
-                  "je",
-                  jeMapping,
-                  true,
-                  fixedEntity,
-                  mode,
-                )}
+                missing={fxMissingDetails("je", jeMapping, je.headers)}
                 banner={
                   reviewing.je ? (
                     <p aria-live="polite" className="fx-hint">
@@ -2650,12 +2715,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 inspection={tb}
                 mapping={tbMapping}
                 labels={TB_LABELS}
-                missing={fxMissingRequired(
-                  "tb",
-                  tbMapping,
-                  Boolean(je),
-                  fixedEntity,
-                )}
+                missing={fxMissingDetails("tb", tbMapping, tb.headers)}
                 banner={
                   <>
                     {reviewing.tb ? (
@@ -2752,9 +2812,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                       </div>
                       {renderedRows.map((row) => {
                         const account = row.account;
-                        const displayName = row.auxiliary
-                          ? `${account} · ${row.auxiliary}`
-                          : account;
+                        const displayName = ledgerReviewAccountLabel(account, row.auxiliary);
                         const detail =
                           tb?.accountRoleDetails?.[account] ??
                           je?.accountRoleDetails?.[account];
@@ -3471,6 +3529,7 @@ function FxPreview(props: {
   return (
     <MappingPanel
       title={props.title}
+      resizeKey={`fx.mapping-${props.kind}`}
       note={`${props.inspection.rowCount} 行 × ${props.inspection.headers.length} 列`}
       headers={props.inspection.headers}
       rows={props.inspection.preview}
@@ -3561,6 +3620,26 @@ function fxQualityImpact(severity: string, type: string): string {
   if (severity === "待复核" || severity === "重要提示") return "结果需复核";
   return "不影响测算";
 }
+/** 单张表的列宽调整容器：以组件形式挂统一列宽能力的 ref，
+ *  容器与表格同时挂载（结果晚到、区块后展开的表也能正常接管），
+ *  且不改变现有 DOM 结构。 */
+function FxResizableTableBox({
+  storageKey,
+  className,
+  children,
+}: {
+  storageKey: string;
+  className: string;
+  children: ReactNode;
+}) {
+  const resize = useTableColumnResize<HTMLDivElement>({ storageKey });
+  return (
+    <div className={className} ref={resize.ref}>
+      {children}
+    </div>
+  );
+}
+
 /** 测算跑完后的全部检查结论。
  *
  *  这些结论一直都在算，但以前只写进 Excel 底稿的「数据质量 / 异常与限制 /
@@ -3631,7 +3710,10 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
         {groups.length > 0 && (
           <section>
             <h5>需要检查的数据</h5>
-            <div className="fx-checks-table fx-checks-quality">
+            <FxResizableTableBox
+              storageKey="fx.checks-quality"
+              className="fx-checks-table fx-checks-quality"
+            >
               <table>
                 <thead>
                   <tr>
@@ -3654,7 +3736,7 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </FxResizableTableBox>
           </section>
         )}
         {tbRows.length > 0 && (
@@ -3666,7 +3748,10 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
               JE 剔除损益结转后的净额与该 TB 诊断金额差异：
               {money(reconciliation.jeTbDifference)}。
             </p>
-            <div className="fx-checks-table">
+            <FxResizableTableBox
+              storageKey="fx.checks-tb"
+              className="fx-checks-table"
+            >
               <table>
                 <thead>
                   <tr>
@@ -3691,7 +3776,7 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </FxResizableTableBox>
           </section>
         )}
       </div>
@@ -3734,7 +3819,10 @@ function RollforwardIssues({
         </Button>
       </div>
       {open && (
-        <div className="fx-rollforward-table">
+        <FxResizableTableBox
+          storageKey="fx.rollforward-issues"
+          className="fx-rollforward-table"
+        >
           <table>
             <thead>
               <tr>
@@ -3767,7 +3855,7 @@ function RollforwardIssues({
               ))}
             </tbody>
           </table>
-        </div>
+        </FxResizableTableBox>
       )}
     </section>
   );
@@ -3781,51 +3869,6 @@ function FxResult({ result }: { result: Record<string, unknown> }) {
     ? summary.formalMeasurementGateReasons.map(String)
     : [];
   const outputs = (result.outputPaths ?? []) as string[];
-  const rollforward = (result.unrealizedBalanceRollforward ?? []) as Array<
-    Record<string, unknown>
-  >;
-  const realizedRates = (result.realized ?? []) as Array<Record<string, unknown>>;
-  const rateRows = [
-    ...realizedRates.map((item) => ({
-      type: "已实现",
-      period: item.date,
-      voucherId: item.voucherId,
-      account: item.account,
-      currency: item.currency,
-      customerRate: item.customerRate,
-      customerRateBasis: item.customerRateBasis ?? "",
-      reliability: item.customerRateReliability ?? "",
-      auditOpeningRate: item.monthOpeningRate,
-      auditRate: item.officialRate,
-      openingDifference: item.customerVsAuditOpeningRateDifference,
-      auditDifference: item.customerVsAuditTransactionRateDifference,
-      impact: item.carryingBasisDifference,
-    })),
-    ...rollforward.map((item) => ({
-      type: "未实现",
-      period: item.monthEnd,
-      voucherId: "",
-      account: item.account,
-      currency: item.currency,
-      customerRate: item.customerRate,
-      customerRateBasis: item.customerRateBasis ?? "",
-      reliability: item.customerRateReliability ?? "",
-      auditOpeningRate: null,
-      auditRate: item.officialRate,
-      openingDifference: null,
-      auditDifference: item.customerVsAuditRateDifference,
-      impact: item.customerVsAuditRateImpact,
-    })),
-  ]
-    .filter((item) => item.customerRate != null)
-    .sort(
-      (left, right) =>
-        Math.abs(Number(right.impact ?? 0)) - Math.abs(Number(left.impact ?? 0)),
-    );
-  const unrealizedComparisonDifference = rollforward.reduce(
-    (sum, item) => sum + Number(item.suggestedAdjustment ?? 0),
-    0,
-  );
   const amount = (value: unknown) => {
     const number = Number(value ?? 0);
     return new Intl.NumberFormat("zh-CN", {
@@ -3841,10 +3884,6 @@ function FxResult({ result }: { result: Record<string, unknown> }) {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
         }).format(Number(value));
-  const rate = (value: unknown) =>
-    value == null || !Number.isFinite(Number(value))
-      ? "—"
-      : Number(value).toFixed(6);
   const bookKnown = summary.tbFxGainLoss != null;
   const bookSplit = summary.tbFxGainLossPresentation === "split";
   const passed = summary.reconciliationPassed === true;
@@ -4037,67 +4076,6 @@ function FxResult({ result }: { result: Record<string, unknown> }) {
         </div>
       )}
       <FxChecks result={result} />
-      {rollforward.length > 0 && (
-        <section className="fx-unrealized-module">
-          <div>
-            <h4>未实现汇兑损益测算</h4>
-            <p>
-              月末按官方汇率重估各外币账户余额，得出审计口径的未实现汇兑损益；右边是与客户已入账数的差额。
-            </p>
-          </div>
-          <div className="fx-unrealized-metrics">
-            {metric(
-              "与客户入账差异",
-              unrealizedComparisonDifference,
-              "审计重估损益 − 客户已入账未实现汇兑损益",
-              "warning",
-            )}
-          </div>
-        </section>
-      )}
-      {rateRows.length > 0 && (
-        <section className="fx-rate-comparison" aria-labelledby="fx-rate-comparison-title">
-          <div>
-            <h4 id="fx-rate-comparison-title">客户与审计汇率比较</h4>
-            <p>
-              客户隐含汇率由原币金额与本位币金额静默反推，仅用于解释差异，不参与审计测算。
-            </p>
-          </div>
-          <div className="fx-rate-comparison-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>类型</th><th>日期/月末</th><th>凭证号</th><th>科目</th><th>币种</th>
-                  <th>客户隐含汇率</th><th>反推依据</th><th>审计月初汇率</th>
-                  <th>审计交易日/月末汇率</th><th>对月初汇率差</th>
-                  <th>对交易日/月末汇率差</th><th>汇率基础影响</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rateRows.slice(0, 100).map((item, index) => (
-                  <tr key={`${String(item.type)}-${String(item.period)}-${String(item.voucherId)}-${String(item.account)}-${index}`}>
-                    <td>{String(item.type)}</td>
-                    <td>{String(item.period ?? "")}</td>
-                    <td>{String(item.voucherId ?? "")}</td>
-                    <td title={String(item.account ?? "")}>{String(item.account ?? "")}</td>
-                    <td>{String(item.currency ?? "")}</td>
-                    <td>{rate(item.customerRate)}</td>
-                    <td>{`${String(item.reliability)}｜${String(item.customerRateBasis)}`}</td>
-                    <td>{item.type === "已实现" ? rate(item.auditOpeningRate) : "—"}</td>
-                    <td>{rate(item.auditRate)}</td>
-                    <td>{item.type === "已实现" ? rate(item.openingDifference) : "—"}</td>
-                    <td>{rate(item.auditDifference)}</td>
-                    <td>{item.impact == null ? "—" : amount(item.impact)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {rateRows.length > 100 && (
-            <p>预览按影响金额展示前100行；Excel底稿列示全部{rateRows.length}行。</p>
-          )}
-        </section>
-      )}
     </section>
   );
 }

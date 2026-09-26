@@ -27,6 +27,7 @@ import {
   meetingStatus,
   openOutput,
   pickPath,
+  runningInDesktopApp,
 } from "./api";
 import { markToolPageLive } from "./toolPageActivity";
 import type { MeetingStatus, ToolManifest } from "./types";
@@ -163,7 +164,10 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   }
 
   const recording = status?.recording;
-  const watchHint = !status
+  const previewMode = !runningInDesktopApp();
+  const watchHint = previewMode
+    ? "浏览器预览模式：界面仅供查看，会议检测与录音请在桌面应用中使用。"
+    : !status
     ? "正在读取状态…"
     : !status.logFound
       ? "未找到新版 Teams 日志（未安装或未启动 Teams 时无法自动检测，可手动记录或导入录音）。"
@@ -196,6 +200,12 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
           job={job}
           onCancel={busy && activeJobId ? (id) => void jobCancel(id) : undefined}
         />
+      )}
+      {previewMode && (
+        <div className="tool-trial-notice" role="note">
+          <strong>预览模式</strong>
+          <span>当前在浏览器中预览界面，Teams 检测、录音与生成纪要需在桌面应用中使用。</span>
+        </div>
       )}
 
       <section className="meeting-section" aria-labelledby="meeting-record-title">
@@ -259,7 +269,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                 <Button
                   variant="default"
                   onClick={() => void startRecording()}
-                  disabled={recordBusy || busy}
+                  disabled={recordBusy || busy || previewMode}
                 >
                   手动开始记录
                 </Button>
@@ -326,7 +336,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
             <div className="meeting-actions-row">
               <Button
                 variant="secondary"
-                disabled={!importPath || busy || recording}
+                disabled={!importPath || busy || recording || previewMode}
                 onClick={() => void startGenerate({ audioPath: importPath })}
               >
                 从导入录音生成纪要

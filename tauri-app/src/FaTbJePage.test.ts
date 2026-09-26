@@ -268,8 +268,8 @@ describe("FA TB+JE account role presets", () => {
   it("blocks the next step until TB and JE required roles are mapped", () => {
     expect(faTbJeMissingMappings("tb", {})).toEqual([
       "科目编码或科目名称",
-      "期初余额",
-      "期末余额",
+      "期初余额（还缺期初本位币借方、期初本位币贷方；或映射期初本位币净额）",
+      "期末余额（还缺期末本位币借方、期末本位币贷方；或映射期末本位币净额）",
     ]);
     expect(
       faTbJeMissingMappings("tb", {
@@ -279,6 +279,11 @@ describe("FA TB+JE account role presets", () => {
         closingFunctionalAmount: "期末余额",
       }),
     ).toEqual([]);
+    expect(faTbJeMissingMappings("tb", {
+      accountCode: "科目编码",
+      openingFunctionalDebit: "期初借方",
+      closingFunctionalAmount: "期末净额",
+    })).toEqual(["期初余额（还缺期初本位币贷方；或映射期初本位币净额）"]);
     expect(
       faTbJeMissingMappings("je", {
         accountName: "科目名称",

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { JobEvent, ToolManifest } from "./types";
 import { useTaskRestore } from "./restore";
 import {
@@ -15,7 +15,9 @@ import {
   DEFAULT_ENTITY,
   dropUnlinkedTbAuxiliary,
   ledgerEntityKeyEnabled,
+  ledgerHasMappedRole,
   ledgerMultiEntityCombos,
+  ledgerReviewAccountLabel,
   ledgerRowEntities,
   verifyAuxiliaryLink,
   verifyCurrencyLink,
@@ -66,6 +68,7 @@ import {
   type LoanRateSetting,
 } from "@/loanRateTypes";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { useTableColumnResize } from "@/components/useTableColumnResize";
 import { JargonTip } from "@/components/JargonTip";
 import { NumberInput } from "@/components/NumberInput";
 import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
@@ -1679,14 +1682,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const selectedInterestExpenseCount = tbAccounts.filter(
     (row) => loanAccountRoles[row.identity ?? row.key] === "interest_expense",
   ).length;
-  /** 合并表的条件列：辅助核算列在「辅助验证展开」或「利率明细带辅助核算」时显示；
-   *  主体列只在账套确实区分主体时显示，单一主体账套不浪费列宽——TB/JE 识别出
-   *  多个实际主体（「默认主体」占位不算）时必须显示，其余沿用辅助拆行/利率明细
-   *  自带主体的旧口径。 */
-  const showAuxiliaryColumn =
-    orderedTbAccounts.some((row) => Boolean(row.auxiliaryKey)) ||
-    rows.some((row) => Boolean(row.auxiliary?.trim()));
-  const showCurrencyColumn = tbAccounts.some((row) => Boolean(row.currency?.trim()));
+  /** TB 科目复核统一将辅助值并入科目，币种按 TB 映射决定是否展示。 */
+  const showCurrencyColumn = mode === "tb"
+    ? ledgerHasMappedRole(sources.tb.mapping, "currency")
+    : tbAccounts.some((row) => Boolean(row.currency?.trim()));
   const showEntityDimension = mode !== "tb" ||
     ledgerEntityKeyEnabled(sources.tb.mapping, sources.je.mapping);
   const multiEntityLedger = useMemo(() => {
@@ -1699,8 +1698,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       .filter((value) => value && value !== DEFAULT_ENTITY);
     return new Set(names).size > 1;
   }, [sources.tb.inspection, sources.je.inspection, showEntityDimension]);
-  const showSubject =
-    showEntityDimension && (
+  const showSubject = mode === "tb"
+    ? showEntityDimension && multiEntityLedger
+    : showEntityDimension && (
       multiEntityLedger ||
       orderedTbAccounts.some((row) => Boolean(row.entity)) ||
       rows.some((row) => Boolean(row.entity && row.entity !== DEFAULT_ENTITY))
@@ -1740,7 +1740,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const mappingWarnings = Array.isArray(result?.mappingWarnings)
     ? result.mappingWarnings.filter((item): item is string => typeof item === "string")
     : [];
-  /** 利率编辑六格（利率类型／执行利率／浮动基准／加减点／匹配状态／匹配依据）：
+  /** 利率编辑四格（利率类型／执行利率／浮动基准／加减点）：
    *  合并表里科目行的单一明细与辅助子行共用；手填值以百分数展示
    *  （3.85 ↔ 0.0385），行键沿用 tbRateEdits（按明细行 rowKey），
    *  与合并科目确认表的下载、回传及测算 payload 同一口径。 */
@@ -1822,10 +1822,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
             }
           />
         </td>
-        <td>{detail.matchStatus || "—"}</td>
-        <td className="loan-match-basis" title={detail.matchBasis}>
-          {detail.matchBasis || "—"}
-        </td>
       </>
     );
   };
@@ -1891,20 +1887,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           <section className="fx-mode-bar" data-tour="tool-mode">
             <Button
               type="button"
-              variant={mode === "ledger" ? "default" : "ghost"}
-              className={mode === "ledger" ? "active" : ""}
-              aria-pressed={mode === "ledger"}
-              onClick={() => {
-                invalidateResults();
-                setCurrencyFallbackMode("");
-                setCurrencyFallbackPrompt(null);
-                setMode("ledger");
-              }}
-            >
-              完整借款台账
-            </Button>
-            <Button
-              type="button"
               variant={mode === "tb" ? "default" : "ghost"}
               className={mode === "tb" ? "active" : ""}
               aria-pressed={mode === "tb"}
@@ -1916,6 +1898,20 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               }}
             >
               TB＋JE
+            </Button>
+            <Button
+              type="button"
+              variant={mode === "ledger" ? "default" : "ghost"}
+              className={mode === "ledger" ? "active" : ""}
+              aria-pressed={mode === "ledger"}
+              onClick={() => {
+                invalidateResults();
+                setCurrencyFallbackMode("");
+                setCurrencyFallbackPrompt(null);
+                setMode("ledger");
+              }}
+            >
+              完整借款台账
             </Button>
           </section>
           <Card>
@@ -2259,29 +2255,30 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       description="进入本步骤后按已确认的借款科目自动生成利率明细，并在本表利率列逐笔确认；科目类型改动后也会自动刷新。若因映射缺失未自动生成，请回第一步补齐映射后再进入本步骤。"
                     />
                   )}
-                  <div
-                    className={`loan-account-confirm loan-confirm-table${showSubject ? " has-subject" : ""}${showAuxiliaryColumn ? " has-auxiliary" : ""}`}
-                    ref={accountListRef}
+                  <ResizableTableBox
+                    resizeKey="loan.step2-accounts"
+                    className={`loan-account-confirm loan-confirm-table${showSubject ? " has-subject" : ""}`}
+                    containerRef={accountListRef}
                   >
                     <table>
                       <thead>
                         <tr>
-                          {showSubject && <th>主体</th>}
-                          <th>科目编码</th>
-                          <th>科目名称</th>
-                          {showCurrencyColumn && <th>币种</th>}
-                          {showAuxiliaryColumn && <th>辅助核算</th>}
-                          <th>科目类型</th>
-                          <th>期初余额</th>
-                          <th>期末余额</th>
-                          <th>
+                          {/* 列宽句柄会注入带 aria-label 的分隔条，混进表头可访问名；
+              各 th 显式声明本列名称，读屏与角色查询仍得到干净表头。 */}
+                          {showSubject && <th aria-label="主体">主体</th>}
+                          <th aria-label="科目">科目</th>
+                          {showCurrencyColumn && <th aria-label="币种">币种</th>}
+                          <th aria-label="科目类型">科目类型</th>
+                          <th aria-label="期初余额">期初余额</th>
+                          <th aria-label="期末余额">期末余额</th>
+                          <th aria-label="发生额">
                             发生额
                             <JargonTip
                               term="发生额"
                               text="优先取本年累计借贷发生额，其次取本期借贷发生额；已结转的损益科目按登记方向还原。第三步有发生额时用发生额比较，没有发生额列时才使用余额。"
                             />
                           </th>
-                          <th>利率类型</th>
+                          <th aria-label="利率类型">利率类型</th>
                           <th aria-label="执行利率（%）">
                             执行利率（%）
                             <JargonTip
@@ -2289,16 +2286,14 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                               text="无合同利率时暂按 2026-08-20 一年期 LPR 3.00% 预填。该数值仅用于预览，请根据合同、函证或其他审计证据确认后再导出底稿。"
                             />
                           </th>
-                          <th>浮动基准（%）</th>
-                          <th>
+                          <th aria-label="浮动基准（%）">浮动基准（%）</th>
+                          <th aria-label="加减点（BP）">
                             加减点（BP）
                             <JargonTip
                               term="加减点（BP）"
                               text="BP＝万分之一。浮动利率＝基准利率＋加减点BP÷10000。"
                             />
                           </th>
-                          <th>匹配状态</th>
-                          <th>匹配依据</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2328,14 +2323,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                                 {a.entity || (inline ? entityDisplay(inline.entity) : "—")}
                               </td>
                             )}
-                            <td>{a.code}</td>
-                            <td title={a.account}>{a.name || a.account}</td>
+                            <td title={ledgerReviewAccountLabel(a.account, a.auxiliary || inline?.auxiliary)}>
+                              {ledgerReviewAccountLabel(a.account, a.auxiliary || inline?.auxiliary)}
+                            </td>
                             {showCurrencyColumn && <td>{a.currency || "—"}</td>}
-                            {showAuxiliaryColumn && (
-                              <td title={a.auxiliary || inline?.auxiliary || undefined}>
-                                {a.auxiliary || inline?.auxiliary || "—"}
-                              </td>
-                            )}
                             <td>
                               <select
                                 aria-label={`${a.account}的科目类型`}
@@ -2384,8 +2375,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                                 <td>—</td>
                                 <td>—</td>
                                 <td>—</td>
-                                <td>{rateRows.length} 笔明细</td>
-                                <td className="loan-match-basis">按辅助核算拆分为 {rateRows.length} 笔，请在下方明细行逐笔设置利率</td>
                               </>
                             ) : role === "loan" ? (
                               <>
@@ -2393,19 +2382,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                                 <td>—</td>
                                 <td>—</td>
                                 <td>—</td>
-                                <td>{busy ? "生成中" : rows.length ? "无借款行" : "待生成"}</td>
-                                <td className="loan-match-basis">
-                                  {busy
-                                    ? "正在按最新科目选择生成利率明细…"
-                                    : rows.length
-                                      ? "本次生成的利率明细未包含该科目；请检查借款明细列映射或科目类型选择"
-                                      : "利率明细自动生成后在此填写利率"}
-                                </td>
                               </>
                             ) : (
                               <>
-                                <td>—</td>
-                                <td>—</td>
                                 <td>—</td>
                                 <td>—</td>
                                 <td>—</td>
@@ -2416,14 +2395,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                           ...detailRows.map((detail) => (
                             <tr key={`rate-${loanRowKey(detail)}`} className="is-rate-detail">
                               {showSubject && <td>{entityDisplay(detail.entity)}</td>}
-                              <td>{detail.accountCode || "—"}</td>
-                              <td title={detail.accountName || detail.loanId}>
-                                {detail.accountName || detail.loanId}
+                              <td title={ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary)}>
+                                {ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary)}
                               </td>
                               {showCurrencyColumn && <td>{detail.currency || "—"}</td>}
-                              {showAuxiliaryColumn && (
-                                <td title={detail.auxiliary || undefined}>{detail.auxiliary || "—"}</td>
-                              )}
                               <td>
                                 <span className="loan-detail-tag">借款明细</span>
                               </td>
@@ -2437,17 +2412,17 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                         })}
                       </tbody>
                     </table>
-                  </div>
+                  </ResizableTableBox>
                   <div className="loan-confirm-footer">
                     <AccountConfirmationActions
                     tool="loan"
                     title="借款利息"
-                    context={JSON.stringify([source("tb"), source("je"), orderedTbAccounts.map((account) => account.reviewKey), confirmationRateRows.map(loanRowKey)])}
+                    context={JSON.stringify(["review-layout-v2", source("tb"), source("je"), orderedTbAccounts.map((account) => account.reviewKey), confirmationRateRows.map(loanRowKey)])}
                     columns={[
                       { key: "kind", title: "行类型" },
-                      { key: "entity", title: "主体" },
+                      ...(showSubject ? [{ key: "entity", title: "主体" }] : []),
                       { key: "account", title: "科目／借款明细" },
-                      { key: "auxiliary", title: "辅助核算" },
+                      ...(showCurrencyColumn ? [{ key: "currency", title: "币种" }] : []),
                       { key: "role", title: "科目类型", editable: true, options: ["借款科目", "利息支出科目", "排除"] },
                       { key: "rateType", title: "利率类型", editable: true, options: ["固定", "浮动"] },
                       { key: "fixedRate", title: "执行利率（%）", editable: true },
@@ -2457,17 +2432,21 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                     rows={[
                       ...orderedTbAccounts.map((account): ConfirmationRow => ({
                         key: `account:${account.reviewKey}`,
-                        editable: [false, false, false, false, true, false, false, false, false],
-                        values: ["科目", account.entity ?? "", account.account, account.auxiliary ?? "",
+                        editable: [false, ...(showSubject ? [false] : []), false, ...(showCurrencyColumn ? [false] : []), true, false, false, false, false],
+                        values: ["科目", ...(showSubject ? [account.entity ?? ""] : []),
+                          ledgerReviewAccountLabel(account.account, account.auxiliary),
+                          ...(showCurrencyColumn ? [account.currency ?? ""] : []),
                           loanReviewRole(account) === "loan" ? "借款科目" : loanReviewRole(account) === "interest_expense" ? "利息支出科目" : "排除",
                           "", "", "", ""],
                       })),
                       ...confirmationRateRows.map((detail): ConfirmationRow => {
                         const edit = resolvedTbRate(detail);
                         return { key: `rate:${loanRowKey(detail)}`,
-                          editable: [false, false, false, false, false, true, true, true, true],
+                          editable: [false, ...(showSubject ? [false] : []), false, ...(showCurrencyColumn ? [false] : []), false, true, true, true, true],
                           values: [
-                          "借款明细", detail.entity ?? "", detail.accountName || detail.loanId, detail.auxiliary ?? "", "",
+                          "借款明细", ...(showSubject ? [detail.entity ?? ""] : []),
+                          ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary),
+                          ...(showCurrencyColumn ? [detail.currency ?? ""] : []), "",
                           edit.rateType === "floating" ? "浮动" : "固定",
                           edit.fixedRate == null ? "" : String(edit.fixedRate * 100),
                           edit.benchmarkRate == null ? "" : String(edit.benchmarkRate * 100),
@@ -2481,6 +2460,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       const ratesByKey = new Map(confirmationRateRows.map((row) => [`rate:${loanRowKey(row)}`, row]));
                       const roleUpdates: Array<{ account: LoanAccountReviewRow; role: LoanAccountRole }> = [];
                       const rateUpdates: Array<{ detail: LoanRow; patch: Partial<PasteRateRow> }> = [];
+                      const roleIndex = 2 + Number(showSubject) + Number(showCurrencyColumn);
                       const percent = (value: string, label: string) => {
                         if (!value) return undefined;
                         const parsed = Number(value);
@@ -2490,17 +2470,17 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       for (const item of changed) {
                         if (item.key.startsWith("account:")) {
                           const account = accountsByKey.get(item.key)!;
-                          const role: LoanAccountRole = item.values[4] === "借款科目" ? "loan" : item.values[4] === "利息支出科目" ? "interest_expense" : "skip";
+                          const role: LoanAccountRole = item.values[roleIndex] === "借款科目" ? "loan" : item.values[roleIndex] === "利息支出科目" ? "interest_expense" : "skip";
                           if (account.auxiliaryKey && role === "interest_expense") throw new Error(`${account.account}：辅助行不能设为利息支出科目。`);
                           roleUpdates.push({ account, role });
                         } else {
                           const detail = ratesByKey.get(item.key)!;
-                          const spread = item.values[8] ? Number(item.values[8]) : undefined;
+                          const spread = item.values[roleIndex + 4] ? Number(item.values[roleIndex + 4]) : undefined;
                           if (spread !== undefined && !Number.isFinite(spread)) throw new Error(`${detail.loanId}：加减点必须为数字。`);
                           rateUpdates.push({ detail, patch: {
-                            rateType: item.values[5] === "浮动" ? "floating" : "fixed",
-                            fixedRate: percent(item.values[6], `${detail.loanId}执行利率`),
-                            benchmarkRate: percent(item.values[7], `${detail.loanId}浮动基准`),
+                            rateType: item.values[roleIndex + 1] === "浮动" ? "floating" : "fixed",
+                            fixedRate: percent(item.values[roleIndex + 2], `${detail.loanId}执行利率`),
+                            benchmarkRate: percent(item.values[roleIndex + 3], `${detail.loanId}浮动基准`),
                             spreadBps: spread,
                           } });
                         }
@@ -2819,6 +2799,38 @@ function LoanSourceCard(props: {
   );
 }
 
+/**
+ * 条件渲染数据表的列宽调整容器：复用原容器 div（className 不变），只把
+ * resize ref 与既有引用一并挂上，DOM 结构与样式完全不动。列宽 hook 在挂载
+ * 时绑定容器，而本页的表随步骤切换反复卸载重挂，页面级 hook 只在首次挂载时
+ * 绑定一次，所以由本组件的每次挂载重新接管。containerRef 供原有的滚动复位
+ * 等引用继续指向同一个 div。
+ */
+function ResizableTableBox({
+  resizeKey,
+  className,
+  containerRef,
+  children,
+}: {
+  resizeKey: string;
+  className?: string;
+  containerRef?: React.RefObject<HTMLDivElement | null>;
+  children: ReactNode;
+}) {
+  const resize = useTableColumnResize<HTMLDivElement>({ storageKey: resizeKey });
+  return (
+    <div
+      className={className}
+      ref={(node) => {
+        resize.ref.current = node;
+        if (containerRef) containerRef.current = node;
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 function Mapping({
   kind,
   source,
@@ -2888,6 +2900,7 @@ function Mapping({
         missing={loanMissing(kind, source.mapping, x.forms)}
         busy={busy || reviewing}
         maxHeight={360}
+        resizeKey={`loan.mapping.${kind === "rateLedger" ? "rate-ledger" : kind}`}
         toolbar={
           <>
             <label>
@@ -2951,6 +2964,10 @@ function LedgerRateConfirmation({
 }) {
   const pageSize = 100;
   const [page, setPage] = useState(0);
+  // 容器 div 在本组件内无条件渲染，ref 直接挂原 div（翻页控件在容器外）。
+  const confirmationResize = useTableColumnResize<HTMLDivElement>({
+    storageKey: "loan.rate-confirmation",
+  });
   const pageCount = Math.max(1, Math.ceil(inspection.preview.length / pageSize));
   const visiblePage = Math.min(page, pageCount - 1);
   const visibleRows = inspection.preview.slice(
@@ -2972,21 +2989,21 @@ function LedgerRateConfirmation({
         <div className="loan-list-summary" role="status">
           共 {inspection.rowCount} 行，当前显示第 {visiblePage * pageSize + 1}–{Math.min((visiblePage + 1) * pageSize, inspection.preview.length)} 行；全部行均参与测算。
         </div>
-        <div className="loan-rate-confirmation">
+        <div className="loan-rate-confirmation" ref={confirmationResize.ref}>
           <table>
             <thead>
               <tr>
-                <th>借款标识</th>
-                <th>台账利率</th>
-                <th>利率类型</th>
-                <th>
+                <th aria-label="借款标识">借款标识</th>
+                <th aria-label="台账利率">台账利率</th>
+                <th aria-label="利率类型">利率类型</th>
+                <th aria-label="加减点（BP）">
                   加减点（BP）
                   <JargonTip
                     term="加减点（BP）"
                     text="BP＝万分之一。浮动利率＝基准利率＋加减点BP÷10000。"
                   />
                 </th>
-                <th>状态</th>
+                <th aria-label="状态">状态</th>
               </tr>
             </thead>
             <tbody>
@@ -3072,6 +3089,10 @@ export function Results({
 }) {
   const [query, setQuery] = useState("");
   const [exceptionsOnly, setExceptionsOnly] = useState(false);
+  // 容器 div 在本组件内无条件渲染，ref 直接挂原 div。
+  const resultsResize = useTableColumnResize<HTMLDivElement>({
+    storageKey: "loan.results",
+  });
   const total = rows.reduce((s, r) => s + Number(r.calculatedInterest ?? 0), 0);
   const totals = rows.reduce(
     (sum, row) => ({
@@ -3205,26 +3226,26 @@ export function Results({
           )}
         </div>
       </div>
-      <div className="loan-rate-table">
+      <div className="loan-rate-table" ref={resultsResize.ref}>
         <table>
           <thead>
             <tr>
-              <th>主体</th>
-              <th>借款标识</th>
-              <th>币种</th>
-              <th>期初本金</th>
-              <th>本期增加</th>
-              <th>本期归还</th>
-              <th>推算期末</th>
-              <th>台账／TB 期末</th>
-              <th>本金差异</th>
-              <th>本金勾稽</th>
-              <th>利率类型</th>
-              <th>固定/基准利率</th>
-              <th>加点 BP</th>
-              <th>有效利率</th>
-              <th>测算利息</th>
-              <th>
+              <th aria-label="主体">主体</th>
+              <th aria-label="借款标识">借款标识</th>
+              <th aria-label="币种">币种</th>
+              <th aria-label="期初本金">期初本金</th>
+              <th aria-label="本期增加">本期增加</th>
+              <th aria-label="本期归还">本期归还</th>
+              <th aria-label="推算期末">推算期末</th>
+              <th aria-label="台账／TB 期末">台账／TB 期末</th>
+              <th aria-label="本金差异">本金差异</th>
+              <th aria-label="本金勾稽">本金勾稽</th>
+              <th aria-label="利率类型">利率类型</th>
+              <th aria-label="固定/基准利率">固定/基准利率</th>
+              <th aria-label="加点 BP">加点 BP</th>
+              <th aria-label="有效利率">有效利率</th>
+              <th aria-label="测算利息">测算利息</th>
+              <th aria-label="计息口径">
                 计息口径{" "}
                 <JargonTip
                   term="计息口径"

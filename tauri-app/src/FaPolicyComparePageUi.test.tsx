@@ -2,6 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { engineCall, pickPath } from "./api";
 import { FaPolicyComparePage } from "./FaPolicyComparePage";
 import type { JobEvent, ToolManifest } from "./types";
 
@@ -25,6 +26,8 @@ const tool: ToolManifest = {
 
 afterEach(() => {
   currentJob = undefined;
+  vi.mocked(engineCall).mockReset();
+  vi.mocked(pickPath).mockReset();
   cleanup();
 });
 
@@ -58,4 +61,31 @@ it("导出结束但没有返回文件时给出可执行的下一步", () => {
   renderExport(event("completed"));
   expect(screen.queryByText("等待结果")).not.toBeInTheDocument();
   expect(screen.getByText("任务没有返回可打开的结果文件，请检查保存位置。")).toBeVisible();
+});
+
+it("期末 LLM 建议生效后，对应预览表头下拉显示本年折旧", async () => {
+  vi.mocked(pickPath)
+    .mockResolvedValueOnce("C:\\begin.xlsx")
+    .mockResolvedValueOnce("C:\\end.xlsx");
+  vi.mocked(engineCall).mockImplementation(async (method) => {
+    if (method === "fa.inspect") return {
+      begin: { headers: ["卡片编号"], preview: [["A1"]], sheets: ["Data"], selectedSheet: "Data", detectedHeaderRow: 1, dimensions: { rows: 1, columns: 1 } },
+      end: { headers: ["卡片编号", "本年至今折旧（会计准"], preview: [["A1", "100"]], sheets: ["Data"], selectedSheet: "Data", detectedHeaderRow: 1, dimensions: { rows: 1, columns: 2 } },
+      suggestedMapping: { begin: { matchKeys: ["卡片编号"] }, end: { matchKeys: ["卡片编号"] } },
+    } as never;
+    if (method === "fa.review") return {
+      enabled: true, passed: true, message: "LLM 映射复核完成。",
+      autoApplied: [{ role: "current_year_dep", file_side: "file2", suggested_column: "本年至今折旧(会计准", confidence: 0.95, action: "fill" }],
+      fieldReviews: [], matchReview: { action: "keep" },
+    } as never;
+    throw new Error(`Unexpected method: ${method}`);
+  });
+  render(<FaPolicyComparePage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: /1 文件与匹配/ }));
+  fireEvent.click(screen.getByText("拖放或点击选择年初清单"));
+  await screen.findByText("begin.xlsx");
+  fireEvent.click(screen.getByText("拖放或点击选择年末清单"));
+  const select = await screen.findByTitle("本年折旧");
+  expect(select).toHaveValue("currentYearDep");
+  expect(screen.getByText("期末 本年折旧")).toBeVisible();
 });

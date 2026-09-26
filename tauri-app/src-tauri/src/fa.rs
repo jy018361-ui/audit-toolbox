@@ -710,10 +710,15 @@ pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
         .map(str::to_owned);
     if let (Some(side), Some(column)) = (side, column) {
         let headers = payload_headers(payload, &side);
-        if !headers.is_empty() && resolve_payload_header(payload, &side, &column).is_none() {
-            object.insert("confidence".into(), json!(0.0));
-            object.insert("action".into(), json!("review"));
-            object.remove("suggested_column");
+        if !headers.is_empty() {
+            if let Some(header) = resolve_payload_header(payload, &side, &column) {
+                // 前端下拉框按原始表头精确匹配；不能把规范化后相同的模型写法原样返回。
+                object.insert("suggested_column".into(), Value::String(header));
+            } else {
+                object.insert("confidence".into(), json!(0.0));
+                object.insert("action".into(), json!("review"));
+                object.remove("suggested_column");
+            }
         }
     }
 }
@@ -2049,7 +2054,7 @@ pub(crate) fn load_table(
         let hi = header
             .map(|v| v.saturating_sub(1))
             .unwrap_or_else(|| detect_header(&matrix));
-        let headers = unique_headers(matrix.get(hi).cloned().unwrap_or_default());
+        let headers = asset_headers(&matrix, hi);
         let mapping = suggest_mapping(&Table {
             path: path.into(),
             sheet: Some(sheet.clone()),
@@ -2093,11 +2098,12 @@ pub(crate) fn load_table(
         }
     }
     let (_, sheet, hi, matrix) = best.unwrap();
-    let headers = unique_headers(matrix.get(hi).cloned().unwrap_or_default());
+    let depth = asset_header_depth(&matrix, hi);
+    let headers = asset_headers(&matrix, hi);
     let width = headers.len();
     let rows = matrix
         .into_iter()
-        .skip(hi + 1)
+        .skip(hi + depth)
         .filter(|r| r.iter().any(|v| !v.trim().is_empty()))
         .map(|mut r| {
             r.resize(width, String::new());
@@ -2120,11 +2126,12 @@ fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
     let hi = header
         .map(|v| v.saturating_sub(1))
         .unwrap_or_else(|| detect_header(&matrix));
-    let headers = unique_headers(matrix.get(hi).cloned().unwrap_or_default());
+    let depth = asset_header_depth(&matrix, hi);
+    let headers = asset_headers(&matrix, hi);
     let width = headers.len();
     let rows = matrix
         .into_iter()
-        .skip(hi + 1)
+        .skip(hi + depth)
         .filter(|r| r.iter().any(|v| !v.trim().is_empty()))
         .map(|mut r| {
             r.resize(width, String::new());
@@ -2143,25 +2150,30 @@ fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
 }
 
 fn detect_header(rows: &[Vec<String>]) -> usize {
-    rows.iter()
-        .take(20)
-        .enumerate()
-        .max_by_key(|(_, r)| {
+    crate::header_detection::layout(rows, 20, |r| {
             let nonempty = r.iter().filter(|v| !v.trim().is_empty()).count();
             let keywords = r
                 .iter()
                 .filter(|v| {
-                    [
-                        "编号", "编码", "名称", "类别", "原值", "折旧", "寿命", "日期",
-                    ]
-                    .iter()
-                    .any(|x| v.contains(x))
+                    asset_header_hit(v)
                 })
                 .count();
-            nonempty + keywords * 4
-        })
-        .map(|(i, _)| i)
-        .unwrap_or(0)
+            (nonempty + keywords * 4) as f64
+        }, asset_header_hit, None).0
+}
+fn asset_header_hit(value: &str) -> bool {
+    ["编号", "编码", "名称", "类别", "原值", "折旧", "寿命", "日期"]
+        .iter().any(|word| value.contains(word))
+}
+fn asset_header_depth(rows: &[Vec<String>], start: usize) -> usize {
+    crate::header_detection::depth(rows, start, asset_header_hit)
+}
+fn asset_headers(rows: &[Vec<String>], start: usize) -> Vec<String> {
+    let depth = asset_header_depth(rows, start);
+    if depth == 2 {
+        let width = rows[start].len().max(rows[start + 1].len());
+        unique_headers(crate::fx::merge_headers(&rows[start..start + depth], width))
+    } else { unique_headers(rows.get(start).cloned().unwrap_or_default()) }
 }
 fn unique_headers(row: Vec<String>) -> Vec<String> {
     let mut counts = HashMap::new();
@@ -6152,6 +6164,19 @@ fn xlsx_error(e: rust_xlsxwriter::XlsxError) -> AppError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn 通用表头固定资产双层与手动行号读取一致() {
+        let path = std::env::temp_dir().join(format!("asset-header-{}.csv", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "资产清单,资产清单,资产清单,资产清单\n资产信息,,金额,\n编号,名称,原值,折旧\n001,设备甲,100,10\n").unwrap();
+        let auto = super::load_csv(&path, None).unwrap();
+        assert_eq!(auto.header_row, 2);
+        assert_eq!(auto.headers[2], "金额-原值");
+        assert_eq!(auto.rows.len(), 1);
+        let manual = super::load_csv(&path, Some(2)).unwrap();
+        assert_eq!(auto.headers, manual.headers);
+        assert_eq!(auto.rows, manual.rows);
+        std::fs::remove_file(path).unwrap();
+    }
     use super::*;
 
     fn xlsx_entry(path: &Path, entry: &str) -> String {
@@ -6665,6 +6690,27 @@ mod tests {
         assert_eq!(
             value["fieldReviews"][0]["suggested_mapping"],
             json!({"file2":"本年折旧"})
+        );
+    }
+    #[test]
+    fn llm_suggestion_uses_the_exact_source_header_for_ui_mapping() {
+        let value = finalize_llm_review(
+            json!({
+                "suggestions":[{
+                    "role":"current_year_dep",
+                    "file_side":"file2",
+                    "suggested_column":"本年至今折旧(会计准",
+                    "confidence":0.95,
+                    "action":"fill"
+                }],
+                "matchReview":{"action":"keep"}
+            }),
+            json!({"file2":{"headers":["本年至今折旧（会计准"]}}),
+            false,
+        );
+        assert_eq!(
+            value["autoApplied"][0]["suggested_column"],
+            "本年至今折旧（会计准"
         );
     }
     #[test]

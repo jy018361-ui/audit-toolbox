@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
@@ -14,6 +15,7 @@ import {
   TB_LABELS,
 } from "./DepositInterestPage";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { useTableColumnResize } from "@/components/useTableColumnResize";
 import {
   completeLedgerPairReviewKey,
   LedgerReviewAll,
@@ -44,6 +46,8 @@ import {
   DEFAULT_ENTITY,
   dropUnlinkedTbAuxiliary,
   ledgerEntityKeyEnabled,
+  ledgerHasMappedRole,
+  ledgerReviewAccountLabel,
   resolveRoleLabels,
   scanLedgerUploadSources,
   selectLedgerSourcePair,
@@ -121,6 +125,13 @@ const hasMapped = (mapping: Mapping, role: string) => {
 
 export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
   const missing: string[] = [];
+  const amountPairHint = (prefix: string, label: string) => {
+    const absent = [
+      !hasMapped(mapping, `${prefix}Debit`) && `${label}借方`,
+      !hasMapped(mapping, `${prefix}Credit`) && `${label}贷方`,
+    ].filter(Boolean).join("、");
+    return `还缺${absent}；或映射${label}净额`;
+  };
   if (!hasMapped(mapping, "accountCode") && !hasMapped(mapping, "accountName"))
     missing.push("科目编码或科目名称");
   if (kind === "tb") {
@@ -132,8 +143,8 @@ export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
       hasMapped(mapping, "closingFunctionalAmount") ||
       (hasMapped(mapping, "closingFunctionalDebit") &&
         hasMapped(mapping, "closingFunctionalCredit"));
-    if (!opening) missing.push("期初余额");
-    if (!closing) missing.push("期末余额");
+    if (!opening) missing.push(`期初余额（${amountPairHint("openingFunctional", "期初本位币")}）`);
+    if (!closing) missing.push(`期末余额（${amountPairHint("closingFunctional", "期末本位币")}）`);
   } else {
     if (!hasMapped(mapping, "id")) missing.push("凭证标识");
     if (!hasMapped(mapping, "date")) missing.push("记账日期");
@@ -141,7 +152,7 @@ export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
       hasMapped(mapping, "functionalAmount") ||
       (hasMapped(mapping, "functionalDebit") &&
         hasMapped(mapping, "functionalCredit"));
-    if (!amount) missing.push("本位币金额或借贷金额");
+    if (!amount) missing.push(`本位币金额（${amountPairHint("functional", "本位币")}）`);
   }
   return missing;
 }
@@ -548,6 +559,26 @@ function fileName(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
+/** 单张表的列宽调整容器：以组件形式挂统一列宽能力的 ref，
+ *  容器与表格同时挂载（进入第二步才出现的复核表也能正常接管），
+ *  且不改变现有 DOM 结构。 */
+function FaTbJeResizableTableBox({
+  storageKey,
+  className,
+  children,
+}: {
+  storageKey: string;
+  className: string;
+  children: ReactNode;
+}) {
+  const resize = useTableColumnResize<HTMLDivElement>({ storageKey });
+  return (
+    <div className={className} ref={resize.ref}>
+      {children}
+    </div>
+  );
+}
+
 export function FaTbJePage() {
   // 草稿缓存非空说明本页此前有现场：登记后不参与 LRU 淘汰，
   // 保活到应用退出（避免重挂载后再次被清）。
@@ -815,6 +846,9 @@ export function FaTbJePage() {
     () => groupAssignmentViews(assignments),
     [assignments],
   );
+  const showReviewEntity = entityKeyEnabled &&
+    new Set(assignmentViews.map((view) => view.entity)).size > 1;
+  const showReviewCurrency = ledgerHasMappedRole(mappings.tb, "currency");
   const includedViews = assignmentViews.filter(
     (view) => view.role !== "excluded",
   );
@@ -1291,7 +1325,13 @@ export function FaTbJePage() {
       return;
     }
     if (!mappingsReady) {
-      setError("TB 或 JE 仍有必填字段未映射，请返回「上传与映射」步骤处理。");
+      const unmapped = [
+        ...missingMappings.tb.map((role) => `TB ${role}`),
+        ...missingMappings.je.map((role) => `JE ${role}`),
+      ];
+      setError(unmapped.length
+        ? `尚未映射：${unmapped.join("、")}。请返回「上传与映射」步骤处理。`
+        : "请先在「上传与映射」步骤完成 TB 和 JE 识别。");
       setStep(1);
       return;
     }
@@ -1651,33 +1691,32 @@ export function FaTbJePage() {
                 total={assignmentViews.length}
               />
             </div>
-            <div className="fa-tbje-account-table-wrap">
+            <FaTbJeResizableTableBox
+              storageKey="fa.step2-review"
+              className="fa-tbje-account-table-wrap"
+            >
               <table className="fa-tbje-account-table fa-tbje-review-table">
                 <thead>
                   <tr>
-                    <th>主体</th>
-                    <th>科目</th>
-                    <th>辅助字段</th>
-                    <th>币种</th>
-                    <th>角色</th>
-                    <th>资产类别</th>
+                    {showReviewEntity && <th className="fa-tbje-review-entity">主体</th>}
+                    <th className="fa-tbje-review-account">科目</th>
+                    {showReviewCurrency && <th className="fa-tbje-review-currency">币种</th>}
+                    <th className="fa-tbje-review-role">角色</th>
+                    <th className="fa-tbje-review-category">资产类别</th>
                   </tr>
                 </thead>
                 <tbody>
                   {pagedViews.map(({ view, index }) => (
                     <tr key={JSON.stringify([view.entity, view.key])}>
-                      <td>
-                        <Badge variant="outline">{view.entity}</Badge>
-                      </td>
-                      <td title={view.accounts.join("；")}>
+                      {showReviewEntity && <td><Badge variant="outline">{view.entity}</Badge></td>}
+                      <td title={[...view.accounts, view.auxiliary].filter(Boolean).join("；")}>
                         <div className="fa-tbje-account-cell">
                           <span className="fa-tbje-account-name">
-                            {view.label}
+                            {ledgerReviewAccountLabel(view.label, view.auxiliary)}
                           </span>
                         </div>
                       </td>
-                      <td>{view.auxiliary || "—"}</td>
-                      <td>{view.currency || "—"}</td>
+                      {showReviewCurrency && <td>{view.currency || "—"}</td>}
                       <td>
                         <select
                           aria-label={`${view.label}的科目角色`}
@@ -1718,7 +1757,7 @@ export function FaTbJePage() {
                   ))}
                   {!pagedViews.length && (
                     <tr>
-                      <td colSpan={6} className="fa-tbje-empty-table">
+                      <td colSpan={3 + Number(showReviewEntity) + Number(showReviewCurrency)} className="fa-tbje-empty-table">
                         {accountQuery.trim()
                           ? "没有匹配的科目。"
                           : "没有可复核的 TB 科目。"}
@@ -1727,7 +1766,7 @@ export function FaTbJePage() {
                   )}
                 </tbody>
               </table>
-            </div>
+            </FaTbJeResizableTableBox>
             <div className="fa-tbje-confirm-footer">
               <div className="fa-tbje-pagination">
                 <span>
@@ -1760,18 +1799,18 @@ export function FaTbJePage() {
               <AccountConfirmationActions
                 tool="fa_tbje"
                 title="固定资产TBJE"
-                context={JSON.stringify([paths, mappings, assignmentViews.map((view) => [view.entity, view.key])])}
+                context={JSON.stringify(["review-layout-v2", paths, mappings, assignmentViews.map((view) => [view.entity, view.key])])}
                 columns={[
-                  { key: "entity", title: "主体" },
+                  ...(showReviewEntity ? [{ key: "entity", title: "主体" }] : []),
                   { key: "account", title: "科目" },
-                  { key: "auxiliary", title: "辅助字段" },
-                  { key: "currency", title: "币种" },
+                  ...(showReviewCurrency ? [{ key: "currency", title: "币种" }] : []),
                   { key: "role", title: "角色", editable: true, options: ["排除", "固定资产原值", "累计折旧"] },
                   { key: "category", title: "资产类别", editable: true },
                 ]}
                 rows={assignmentViews.map((view) => ({
                   key: JSON.stringify([view.entity, view.key]),
-                  values: [view.entity, view.label, view.auxiliary ?? "", view.currency ?? "",
+                  values: [...(showReviewEntity ? [view.entity] : []), ledgerReviewAccountLabel(view.label, view.auxiliary),
+                    ...(showReviewCurrency ? [view.currency ?? ""] : []),
                     view.role === "cost" ? "固定资产原值" : view.role === "depreciation" ? "累计折旧" : "排除",
                     view.category],
                 }))}
@@ -1781,10 +1820,11 @@ export function FaTbJePage() {
                   const byKey = new Map(assignmentViews.map((view) => [JSON.stringify([view.entity, view.key]), view]));
                   const updates = new Map(changed.map((row) => {
                     const view = byKey.get(row.key)!;
-                    const role: AccountRole = row.values[4] === "固定资产原值" ? "cost" : row.values[4] === "累计折旧" ? "depreciation" : "excluded";
-                    if (role !== "excluded" && !row.values[5].trim())
+                    const roleIndex = Number(showReviewEntity) + 1 + Number(showReviewCurrency);
+                    const role: AccountRole = row.values[roleIndex] === "固定资产原值" ? "cost" : row.values[roleIndex] === "累计折旧" ? "depreciation" : "excluded";
+                    if (role !== "excluded" && !row.values[roleIndex + 1].trim())
                       throw new Error(`${view.label}：固定资产原值或累计折旧科目必须填写资产类别。`);
-                    return [row.key, { role, category: normalizeFaCategory(row.values[5]) }] as const;
+                    return [row.key, { role, category: normalizeFaCategory(row.values[roleIndex + 1]) }] as const;
                   }));
                   setAssignments((current) => current.map((row) => {
                     const key = JSON.stringify([row.entity ?? DEFAULT_ENTITY, faAssignmentIdentity(row)]);
@@ -1939,7 +1979,7 @@ function FaTbJeSummaryPreview({ value }: { value: unknown }) {
         <CardTitle>固定资产汇总变动表（预览）</CardTitle>
       </CardHeader>
       <CardContent>
-        <FaSummaryTable columns={columns} rows={rows} />
+        <FaSummaryTable columns={columns} rows={rows} resizeKey="fa.summary-preview" />
       </CardContent>
     </Card>
   );
@@ -1956,10 +1996,16 @@ export type FaSummaryRow = {
 export function FaSummaryTable({
   columns,
   rows,
+  resizeKey,
 }: {
   columns: string[];
   rows: FaSummaryRow[];
+  /** 统一列宽记忆键；不传则本表不启用列宽调整（两期清单入口共用本表，保持原样）。 */
+  resizeKey?: string;
 }) {
+  const resize = useTableColumnResize<HTMLDivElement>({
+    storageKey: resizeKey ?? "",
+  });
   const [query, setQuery] = useState("");
   const [differencesOnly, setDifferencesOnly] = useState(false);
   const matches = keywordFilterPredicate(query);
@@ -1995,7 +2041,10 @@ export function FaSummaryTable({
           {differencesOnly ? "正在只看有差异" : "只看有差异"}
         </Button>
       </div>
-      <div className="fa-tbje-account-table-wrap fa-tbje-summary-preview">
+      <div
+        className="fa-tbje-account-table-wrap fa-tbje-summary-preview"
+        ref={resize.ref}
+      >
         <table className="fa-tbje-account-table">
         <thead>
           <tr>
@@ -2089,8 +2138,16 @@ function FaTbJeCounterpartPreview({ value }: { value: unknown }) {
       </CardHeader>
       <CardContent>
         <div className="fa-tbje-pivot-grid">
-          <FaPivotTable title="原值对方科目" rows={cost} />
-          <FaPivotTable title="累计折旧对方科目" rows={depreciation} />
+          <FaPivotTable
+            title="原值对方科目"
+            rows={cost}
+            resizeKey="fa.pivot-cost"
+          />
+          <FaPivotTable
+            title="累计折旧对方科目"
+            rows={depreciation}
+            resizeKey="fa.pivot-depreciation"
+          />
         </div>
       </CardContent>
     </Card>
@@ -2107,10 +2164,16 @@ type CounterpartRow = {
 export function FaPivotTable({
   title,
   rows,
+  resizeKey,
 }: {
   title: string;
   rows: CounterpartRow[];
+  /** 统一列宽记忆键；不传则本表不启用列宽调整（预览夹具等复用处保持原样）。 */
+  resizeKey?: string;
 }) {
+  const resize = useTableColumnResize<HTMLDivElement>({
+    storageKey: resizeKey ?? "",
+  });
   const totals = rows.reduce<{ debit: number; credit: number }>(
     (acc, row) => ({
       debit: acc.debit + (Number(row.debit) || 0),
@@ -2121,7 +2184,7 @@ export function FaPivotTable({
   return (
     <div className="fa-tbje-pivot-block">
       <h4>{title}</h4>
-      <div className="fa-tbje-account-table-wrap">
+      <div className="fa-tbje-account-table-wrap" ref={resize.ref}>
         <table className="fa-tbje-account-table fa-tbje-pivot-preview">
           <colgroup>
             <col className="fa-tbje-pivot-col-entity" />
@@ -2414,6 +2477,7 @@ function FaTbJeMappingPanel(props: {
   return (
     <MappingPanel
       title={`${props.kind.toUpperCase()} 字段映射`}
+      resizeKey={`fa.mapping-${props.kind}`}
       headers={props.headers}
       rows={props.rows}
       mapping={props.mapping}

@@ -546,11 +546,18 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   expect(
     screen.queryByRole("columnheader", { name: "主体" }),
   ).not.toBeInTheDocument();
-  // 合并后利率列已并入科目表：表头一次带全科目与利率两组列。
+  expect(screen.queryByRole("columnheader", { name: "币种" })).not.toBeInTheDocument();
+  // 合并后利率列已并入科目表：表头一次带全科目与利率两组列；
+  // 匹配状态／匹配依据两列已按用户要求删除。
   expect(screen.getByRole("columnheader", { name: "科目类型" })).toBeVisible();
   expect(screen.getByRole("columnheader", { name: "发生额" })).toBeVisible();
   expect(screen.getByRole("columnheader", { name: "执行利率（%）" })).toBeVisible();
-  expect(screen.getByRole("columnheader", { name: "匹配依据" })).toBeVisible();
+  expect(
+    screen.queryByRole("columnheader", { name: "匹配状态" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("columnheader", { name: "匹配依据" }),
+  ).not.toBeInTheDocument();
   const loanSelect = await screen.findByRole("combobox", { name: "2001 短期借款的科目类型" });
   expect((loanSelect as HTMLSelectElement).value).toBe("loan");
   const skipSelect = await screen.findByRole("combobox", { name: "1122 应收账款的科目类型" });
@@ -692,14 +699,12 @@ it("手填利率后进入第三步不自动测算且未确认不可导出", asyn
     }),
     "生成借款利率明细",
   ));
-  // 第二步使用同步的 TB 轻量利率行；JE 匹配信息在第三步测算后才出现。
-  expect(
-    await screen.findByRole("columnheader", { name: "辅助核算" }),
-  ).toBeVisible();
+  // 第二步使用同步的 TB 轻量利率行；辅助值并入科目列。
+  expect(await screen.findByRole("columnheader", { name: "科目" })).toBeVisible();
+  expect(screen.queryByRole("columnheader", { name: "辅助核算" })).not.toBeInTheDocument();
   expect(screen.queryByText(/共 1 笔借款明细，已填利率 0 笔/)).not.toBeInTheDocument();
   // 科目与利率合并为一张表：科目列与利率列同在这一张表头里。
-  expect(screen.getByRole("columnheader", { name: "科目编码" })).toBeVisible();
-  expect(screen.getByRole("columnheader", { name: "科目名称" })).toBeVisible();
+  expect(screen.getByRole("columnheader", { name: "科目" })).toBeVisible();
   expect(screen.getByRole("columnheader", { name: "执行利率（%）" })).toBeVisible();
   const loanRateInput = await screen.findByRole("spinbutton", {
     name: "2001 短期借款的执行利率",
@@ -715,11 +720,12 @@ it("手填利率后进入第三步不自动测算且未确认不可导出", asyn
     "该数值仅用于预览，请根据合同、函证或其他审计证据确认后再导出底稿",
   );
   fireEvent.mouseLeave(rateTip);
-  // 借款行利率可编辑，单一明细的辅助核算就地显示在科目行的辅助核算列。
+  // 借款行利率可编辑，单一明细的辅助值并入科目列。
   expect(loanRateInput).toBeEnabled();
   const loanRow = loanRateInput.closest("tr")!;
-  expect(within(loanRow).getByText("A银行")).toBeVisible();
-  expect(within(loanRow).getByText("利率行由 TB 轻量生成")).toBeVisible();
+  expect(within(loanRow).getByText(/A银行/)).toBeVisible();
+  // 匹配状态／匹配依据两列已删除：匹配依据不再随行展示。
+  expect(within(loanRow).queryByText("利率行由 TB 轻量生成")).not.toBeInTheDocument();
   // 利息支出行利率列不可编辑：只有「—」，没有利率输入与利率类型下拉。
   const expenseRow = screen
     .getByRole("combobox", { name: "66030001 财务费用-利息支出的科目类型" })
@@ -728,7 +734,7 @@ it("手填利率后进入第三步不自动测算且未确认不可导出", asyn
   expect(
     within(expenseRow).queryByRole("combobox", { name: /的利率类型/ }),
   ).not.toBeInTheDocument();
-  expect(within(expenseRow).getAllByText("—").length).toBeGreaterThanOrEqual(6);
+  expect(within(expenseRow).getAllByText("—").length).toBeGreaterThanOrEqual(4);
   expect(screen.queryByText("JE里无借款辅助明细，默认按科目维度进行利息测算")).not.toBeInTheDocument();
   expect(
     screen.queryByText("未通过辅助验证的主体＋科目已合并；验证成功的其他科目仍按辅助核算拆分。请按各行匹配依据复核。"),
@@ -930,7 +936,7 @@ it("选择本位币后利率明细按新口径自动重算并携带 functionalCu
       summary: { loanCount: 1 },
     },
   });
-  expect(await screen.findByText("长期借款-美洲银行")).toBeVisible();
+  expect(await screen.findByText(/长期借款-美洲银行/)).toBeVisible();
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "下一步：测算与底稿" })).toBeEnabled(),
   );
@@ -965,7 +971,10 @@ it("选择本位币后利率明细按新口径自动重算并携带 functionalCu
       summary: { loanCount: 1 },
     },
   });
-  expect(await screen.findByText("利率行由 TB 轻量生成")).toBeVisible();
+  // 匹配依据列已删除：改用该行的执行利率输入确认新明细已渲染。
+  expect(
+    await screen.findByRole("spinbutton", { name: "241000 长期借款-美洲银行的执行利率" }),
+  ).toBeEnabled();
 });
 
 /** 缺陷回归：手动把某行科目类型改成「借款科目」后，无需点「重新生成借款利率表」，
@@ -1239,7 +1248,7 @@ it("同一科目多笔辅助借款各行设置利率，改类型不丢已填利�
   const rateB = screen.getByRole("spinbutton", { name: "B银行借款的执行利率" });
   expect(rateA).toBeEnabled();
   expect(rateB).toBeEnabled();
-  expect(screen.getAllByText("利率行由 TB 轻量生成")).toHaveLength(2);
+  expect(screen.queryByText("利率行由 TB 轻量生成")).not.toBeInTheDocument();
   fireEvent.change(rateA, { target: { value: "3.85" } });
   // 排除 A 银行只隐藏这一行的利率；切回借款时保留已填值。
   const roleSelect = screen.getAllByRole("combobox", {

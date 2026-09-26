@@ -1,5 +1,36 @@
 # UI 修改记录
 
+## 2026-09-26 · 语音转写新增 Token Plan 套餐通道
+
+### 目标
+
+- 用户购买百炼 Token Plan 后只有套餐专属密钥（`sk-sp-`），通用转写通道用不了；套餐地址上的语音识别走 realtime WebSocket 协议（实测 `qwen-audio-3.0-realtime-plus` 逐字转写可用），需要给工具箱接上这条通道，转写费用刷套餐 token。
+
+### 设计决策
+
+- 「语音转写（百炼）」卡片新增「转写通道」选择：通用通道（paraformer 文件转写，按时长计费、区分说话人）不变为默认；套餐通道展示套餐地址/转写模型/套餐密钥三格，密钥存 Windows 凭据管理器（新增白名单 `bailian_plan_asr_key`），连接测试按所选通道分流（套餐通道只建会话不喂音频，零 token 消耗）。
+- Rust 新增 `bailian_plan_asr` 模块：16 位 WAV 按 120 秒切段、每段独立会话（session.update 关自动断句 → 分片 append → commit → 取 `input_audio_transcription.completed` 整段文字），绝不发 `response.create` 以免模型回话浪费输出 token；每段 5 分钟超时、段间与等待中可取消。
+- 套餐通道不区分说话人：转写稿无「说话人N」标签（每段一行带时间戳），纪要提示词按无说话人分支走（禁止虚构发言人、参会人名单只进「会议信息」）；`meeting.summarize` 重出纪要按转写稿是否含「说话人」自动识别分支。套餐通道仅支持 WAV（工具箱自录会议即 WAV），导入 mp3 等格式仍走通用通道。
+- 设置存 `meeting.asr_channel/plan_base_url/plan_model` 三键，随既有 `__settings` 注入 worker，无新增任务方法。
+
+### 验证方式
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib bailian`、`cargo test --manifest-path src-tauri/Cargo.toml --lib meeting`（新增：ws_url 推导、WAV 切段时间戳、非 16 位拒绝、无说话人转写稿、无说话人提示词）；`npx vitest run src/AppNavigationSettings.test.tsx`（通道切换与保存落库）；`npm run build`。
+
+## 2026-09-26 · 模糊匹配新文件自动读取表头
+
+### 目标
+
+- 新上传／拖入文件不再强制按第 1 行读取，重复报表标题与有证据的双层表头按公共结构判据处理。
+
+### 设计决策
+
+- 保留名称类关键词；读取后回显实际行号，检测到的层数传入匹配任务与历史恢复。已有手动行号继续可调整。
+
+### 验证方式
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib 通用表头模糊匹配`；`npx vitest run src/FuzzyMatchPage.test.ts src/FuzzyMatchPage.test.tsx`；`npx tsc -b`。
+
 ## 2026-09-26 · 月/日分列账型的日期识别与复核采纳
 
 ### 目标

@@ -455,7 +455,7 @@ pub(crate) fn transcript_text(sentences: &[Sentence]) -> String {
     output
 }
 
-fn format_timestamp(ms: i64) -> String {
+pub(crate) fn format_timestamp(ms: i64) -> String {
     let total_seconds = ms / 1000;
     format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
 }

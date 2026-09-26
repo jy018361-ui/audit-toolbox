@@ -387,6 +387,8 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         endMapping: suggestedEnd,
         beginKeys: suggestedBeginKeys,
         endKeys: suggestedEndKeys,
+        beginHeaders: value.begin.headers,
+        endHeaders: value.end.headers,
       });
     } catch (e) {
       setError(errorText(e));
@@ -410,6 +412,8 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
       endMapping: PolicyMapping;
       beginKeys: string[];
       endKeys: string[];
+      beginHeaders: string[];
+      endHeaders: string[];
     }> = {},
   ) {
     const bPath = override.beginPath ?? beginPath;
@@ -451,6 +455,11 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
           ...POLICY_MAPPING_ROLES,
           ["matchKeys", "资产ID"],
         ]),
+        allowedRoleKeys: POLICY_MAPPING_ROLES.map(([key]) => key),
+        headersBySide: {
+          begin: override.beginHeaders ?? inspection?.begin.headers,
+          end: override.endHeaders ?? inspection?.end.headers,
+        },
       });
       setBeginMapping({ ...plan.beginMapping, matchKeys: plan.beginKeys });
       setEndMapping({ ...plan.endMapping, matchKeys: plan.endKeys });
@@ -627,8 +636,12 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
       setError("期初和期末必须选择数量相同的匹配列。");
       return;
     }
-    if (missingRoles("begin").length || missingRoles("end").length) {
-      setError("还有必填字段未映射，请在预览表头下拉中补全。");
+    const unmapped = [
+      ...missingRoles("begin").map((role) => `期初${role}`),
+      ...missingRoles("end").map((role) => `期末${role}`),
+    ];
+    if (unmapped.length) {
+      setError(`尚未映射：${unmapped.join("、")}。请在预览表头下拉中补全。`);
       return;
     }
     let target = outputPath;

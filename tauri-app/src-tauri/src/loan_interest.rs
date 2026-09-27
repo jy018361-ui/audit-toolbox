@@ -157,6 +157,14 @@ pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
 /// 勾稽、LPR 或利息计算。辅助明细是否可以拆分，完全信任第一步传入的
 /// `auxiliaryLink.groups` 验证计划；未验证的组退回主体＋科目口径。
 fn prepare_rates(params: &Value) -> Result<Value, AppError> {
+    if params.get("mode").and_then(Value::as_str) == Some("ledger") {
+        let rows = calculate_ledger(params)?;
+        let mut keys = std::collections::HashSet::new();
+        if rows.iter().any(|r|!keys.insert(r.row_key.clone())) {
+            return Err(error("LOAN_ID_DUPLICATED", "同一主体内借款标识重复，请先补充唯一借款标识。", None));
+        }
+        return Ok(json!({"rows": ledger_confirmation_defaults(&rows, params)?}));
+    }
     let currency_mode = currency_fallback_mode(params)?;
     let functional_currency = functional_currency_param(params);
     let entity_scope = entity_scope(params);
@@ -4109,6 +4117,125 @@ fn apply_overrides(rows: &mut [LoanRow], params: &Value) {
         }
     }
 }
+/// 完整借款清单的默认确认信息；默认日期只是一项可修改的合同假设。
+fn ledger_confirmation_defaults(rows: &[LoanRow], params: &Value) -> Result<Vec<Value>, AppError> {
+    let start = date(params, "reportStart")?;
+    let end = date(params, "reportEnd")?;
+    Ok(rows.iter().map(|r| {
+        let contract = r.contract_start.is_some();
+        let new_in_period = r.contract_start.is_some_and(|d| d >= start && d <= end);
+        let matured = r.contract_end.is_some_and(|d| d >= start && d <= end);
+        let before_period = r.contract_end.is_some_and(|d| d < start) && r.closing_principal == 0.0;
+        let mapped = |role: &str| params.get("ledgerSource").and_then(|v|v.get("mapping")).and_then(|v|v.get(role))
+            .is_some_and(|v|v.as_str().is_some_and(|s|!s.trim().is_empty()) || v.as_array().is_some_and(|a|!a.is_empty()));
+        let opening = if contract && !mapped("openingPrincipal") { if new_in_period || before_period { 0.0 } else { r.contract_opening } } else { r.opening_principal };
+        let added = if contract && new_in_period && !mapped("drawdownAmount") { r.contract_opening } else { r.additions };
+        let reduced = if contract && matured && !mapped("repaymentAmount") && r.ledger_closing.unwrap_or(0.0) == 0.0 {
+            opening + added
+        } else { r.reductions };
+        let mut additions = vec![];
+        let mut repayments = vec![];
+        if !r.events.is_empty() {
+            for (d, a) in &r.events {
+                if *d < start || *d > end { continue; }
+                if *a > 0.0 { additions.push(json!({"date":d.to_string(),"amount":a,"basis":"台账提取"})); }
+                if *a < 0.0 { repayments.push(json!({"date":d.to_string(),"amount":-a,"basis":"台账提取"})); }
+            }
+        } else {
+            if added > 0.0 { additions.push(json!({"date":r.contract_start.map(|d|d.to_string()).unwrap_or_default(),"amount":added,"basis":"按合同开始日默认"})); }
+            if reduced > 0.0 { repayments.push(json!({"date":r.contract_end.map(|d|d.to_string()).unwrap_or_default(),"amount":reduced,"basis":"按到期日默认"})); }
+        }
+        let mapping = params.get("ledgerSource").and_then(|v|v.get("mapping"));
+        let raw = |role: &str| -> Option<&str> {
+            let field = mapping.and_then(|v|v.get(role))?;
+            let column = field.as_str().or_else(||field.as_array().and_then(|a|a.first()).and_then(Value::as_str))?;
+            let index = r.source_columns.iter().position(|h|h==column).or_else(|| {
+                let suggested = suggest(&r.source_columns, "ledger");
+                suggested.get(role).and_then(Value::as_str).and_then(|c|r.source_columns.iter().position(|h|h==c))
+            })?;
+            r.source_cells.get(index).map(String::as_str).filter(|s|!s.trim().is_empty())
+        };
+        let original_closing = raw("closingPrincipal").and(r.ledger_closing);
+        if r.events.is_empty() {
+            if let Some(d) = raw("drawdownDate").and_then(parse_date).or_else(||raw("startDate").and_then(parse_date)) {
+                for event in &mut additions { event["date"] = json!(d.to_string()); event["basis"] = json!(if raw("drawdownDate").is_some() { "台账提取" } else { "按合同开始日默认" }); }
+            }
+            if let Some(d) = raw("repaymentDate").and_then(parse_date).or_else(||raw("endDate").and_then(parse_date)) {
+                for event in &mut repayments { event["date"] = json!(d.to_string()); event["basis"] = json!(if raw("repaymentDate").is_some() { "台账提取" } else { "按到期日默认" }); }
+            }
+        }
+        json!({"rowKey":r.row_key,"loanId":r.loan_id,"entity":r.entity,
+            "opening":opening,"added":added,"reduced":reduced,"closing":original_closing,
+            "originalClosing":original_closing,"rateType":r.rate_type,"spreadBps":r.spread_bps.unwrap_or(0.0),"fixedRate":r.fixed_rate,"benchmarkRate":r.benchmark_rate,"contractStart":r.contract_start.map(|d|d.to_string()),
+            "contractEnd":r.contract_end.map(|d|d.to_string()),"additions":additions,"repayments":repayments})
+    }).collect())
+}
+
+fn apply_ledger_confirmation(rows: &mut [LoanRow], params: &Value) -> Result<(), AppError> {
+    let Some(all) = params.get("ledgerInformation").and_then(Value::as_object) else { return Ok(()); };
+    if params.get("mode").and_then(Value::as_str) != Some("ledger") { return Ok(()); }
+    let start = date(params, "reportStart")?;
+    let end = date(params, "reportEnd")?;
+    for r in rows {
+        let v = all.get(&r.row_key).ok_or_else(||error("LOAN_INFORMATION_REQUIRED", "请先确认完整台账信息。", Some(r.loan_id.clone())))?;
+        let amount = |key: &str| -> Result<f64, AppError> {
+            v.get(key).and_then(Value::as_f64).filter(|a|a.is_finite() && *a >= 0.0)
+                .ok_or_else(||error("LOAN_INFORMATION_INVALID", "借款金额未填写或不是有效的非负数。", Some(format!("{} {key}",r.loan_id))))
+        };
+        let opening = amount("opening")?;
+        let added = amount("added")?;
+        let reduced = amount("reduced")?;
+        let closing = amount("closing")?;
+        let mut events = vec![];
+        for (key, sign, expected) in [("additions",1.0,added),("repayments",-1.0,reduced)] {
+            let items = v.get(key).and_then(Value::as_array).ok_or_else(||error("LOAN_INFORMATION_INVALID", "请补齐新增与还款明细。", Some(r.loan_id.clone())))?;
+            let mut sum = 0.0;
+            for item in items {
+                let d = item.get("date").and_then(Value::as_str).and_then(parse_date)
+                    .filter(|d| *d >= start && *d <= end)
+                    .ok_or_else(||error("LOAN_EVENT_DATE_INVALID", "新增或还款日期须填写且在报告期内。", Some(r.loan_id.clone())))?;
+                let a = item.get("amount").and_then(Value::as_f64).filter(|a|a.is_finite() && *a > 0.0)
+                    .ok_or_else(||error("LOAN_INFORMATION_INVALID", "新增或还款金额必须大于零。", Some(r.loan_id.clone())))?;
+                sum += a;
+                events.push((d,a*sign));
+            }
+            if (sum-expected).abs() >= 0.005 { return Err(error("LOAN_EVENT_TOTAL_MISMATCH", "明细合计与本期新增或减少金额不一致。", Some(r.loan_id.clone()))); }
+        }
+        if (opening+added-reduced-closing).abs() >= 0.005 {
+            return Err(error("LOAN_BALANCE_MISMATCH", "年初余额＋新增－减少与期末余额不一致。", Some(r.loan_id.clone())));
+        }
+        events.sort_by_key(|e|e.0);
+        let mut balance = opening;
+        let mut i = 0;
+        while i < events.len() {
+            let d = events[i].0;
+            while i < events.len() && events[i].0 == d { balance += events[i].1; i += 1; }
+            if balance < -0.005 { return Err(error("LOAN_NEGATIVE_PRINCIPAL", "还款后本金为负，请检查日期和金额。", Some(r.loan_id.clone()))); }
+        }
+        r.opening_principal = opening;
+        r.additions = added;
+        r.reductions = reduced;
+        r.closing_principal = closing;
+        r.events = events;
+        for (key, target) in [("fixedRate", &mut r.fixed_rate), ("benchmarkRate", &mut r.benchmark_rate)] {
+            if let Some(value) = v.get(key) {
+                *target = if value.is_null() { None } else { Some(value.as_f64().filter(|a|a.is_finite() && *a >= 0.0)
+                    .ok_or_else(||error("LOAN_RATE_INVALID", "利率必须为有效的非负数。", Some(r.loan_id.clone())))?) };
+            }
+        }
+        r.rate_type = v.get("rateType").and_then(Value::as_str).filter(|s|*s=="fixed" || *s=="floating")
+            .ok_or_else(||error("LOAN_RATE_INVALID", "请选择固定或浮动利率。", Some(r.loan_id.clone())))?.into();
+        r.spread_bps = Some(v.get("spreadBps").and_then(Value::as_f64).filter(|a|a.is_finite())
+            .ok_or_else(||error("LOAN_RATE_INVALID", "请填写有效加减点。", Some(r.loan_id.clone())))?);
+        let rate = if r.rate_type == "floating" { r.benchmark_rate } else { r.fixed_rate };
+        if rate.is_none() { return Err(error("LOAN_RATE_INVALID", "请填写执行利率或基准利率。", Some(r.loan_id.clone()))); }
+        r.match_status = "已匹配".into();
+        let source_basis = r.match_basis.split('；').next().unwrap_or("客户借款台账").to_owned();
+        r.match_basis = format!("{source_basis}；按用户确认的台账金额及新增/还款日期分段计息（合同日期默认值可编辑，原始台账字段单独保留）");
+    }
+    Ok(())
+}
+
 fn calculate_interest(rows: &mut [LoanRow], params: &Value) -> Result<(), AppError> {
     let start = date(params, "reportStart")?;
     let end = date(params, "reportEnd")?;
@@ -4119,6 +4246,8 @@ fn calculate_interest(rows: &mut [LoanRow], params: &Value) -> Result<(), AppErr
             None,
         ));
     }
+    apply_ledger_confirmation(rows, params)?;
+    if params.get("ledgerInformation").and_then(Value::as_object).is_some() { apply_overrides(rows, params); }
     let days = (end - start).num_days() + 1;
     for row in rows {
         // 浮动利率：基准利率已列示时按“基准+点数”推算；
@@ -4186,7 +4315,7 @@ fn calculate_interest(rows: &mut [LoanRow], params: &Value) -> Result<(), AppErr
         //     - 年内到期：视同到期结清，本金=期初/合同金额计至到期日
         //     - 存续：本金=合同金额-累计已还（已还视同期初前发生）
         // 天数：算头不算尾——止于年中到期日当天不计息，止于报告期末当天计息（全年365天）。
-        if let Some(cs) = row.contract_start {
+        if let Some(cs) = row.contract_start.filter(|_| params.get("ledgerInformation").and_then(Value::as_object).is_none()) {
             let ce = row.contract_end.unwrap_or(end);
             let settled = row.contract_end.map(|c| c <= end).unwrap_or(false);
             let from = cs.max(start);
@@ -10060,5 +10189,59 @@ mod loan_real_ledger_mapping_tests {
             Some("功能范围文本"),
             "04 JE 的分录文本应映射摘要；不能拿科目名称重复凑摘要: {mapping:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod ledger_information_tests {
+    use super::*;
+    use super::tests::SyntheticLedger;
+    #[test]
+    fn 确认明细拆分新增还款逐日计息且不重复汇总() {
+        let fixture = SyntheticLedger::new(&[["4", "", "", ""]]);
+        let mut params = fixture.params();
+        let mut rows = calculate(&params).unwrap();
+        let key = rows[0].row_key.clone();
+        params["ledgerInformation"] = json!({key.clone():{"opening":0.0,"added":10000000.0,"reduced":2000000.0,"closing":8000000.0,
+            "rateType":"fixed","spreadBps":0.0,"fixedRate":0.04,
+            "additions":[{"date":"2025-04-01","amount":5000000.0},{"date":"2025-05-01","amount":5000000.0}],
+            "repayments":[{"date":"2025-06-01","amount":2000000.0}]}});
+        calculate_interest(&mut rows,&params).unwrap();
+        let expected = (5000000.0*30.0 + 10000000.0*31.0 + 8000000.0*214.0)*0.04/365.0;
+        assert!((rows[0].calculated_interest-expected).abs()<0.001);
+        assert_eq!(rows[0].additions,10000000.0);
+        assert_eq!(rows[0].match_status,"已匹配");
+        params["ledgerInformation"][&key]["additions"][0]["amount"] = json!(6000000.0);
+        assert_eq!(calculate_interest(&mut rows,&params).unwrap_err().code,"LOAN_EVENT_TOTAL_MISMATCH");
+        params["ledgerInformation"][&key]["additions"][0]["amount"] = json!(5000000.0);
+        params["ledgerInformation"][&key]["repayments"][0]["date"] = json!("2026-03-31");
+        assert_eq!(calculate_interest(&mut rows,&params).unwrap_err().code,"LOAN_EVENT_DATE_INVALID");
+    }
+    #[test]
+    fn 华源01样例默认还款保留到期日并保留空白期末() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+            .join("tests/fixtures/借款台账测试集/01-华源控股集团有限公司-借款明细表.xlsx");
+        let params = json!({"mode":"ledger","reportStart":"2025-01-01","reportEnd":"2025-12-31",
+            "ledgerSource":{"source":{"inputPath":path,"sheet":"","headerRow":3,"headerDepth":1},
+            "mapping":{"loanId":"合同编号","principal":"借款金额","startDate":"起始日","endDate":"到期日","rate":"年利率（%）","closingPrincipal":"期末余额"}}});
+        let result = prepare_rates(&params).unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        let partial = rows.iter().find(|r|r["loanId"]=="HG-2024-002").unwrap();
+        assert_eq!(partial["opening"],53025000.0);
+        assert_eq!(partial["reduced"],3025000.0);
+        assert_eq!(partial["repayments"][0]["date"],"2027-01-22");
+        let blank = rows.iter().find(|r|r["loanId"]=="HG-2023-025").unwrap();
+        assert!(blank["closing"].is_null());
+        assert_eq!(blank["repayments"][0]["date"],"2025-09-07");
+        assert_eq!(blank["reduced"],6295000.0);
+    }
+    #[test]
+    fn 确认默认完整清单与空白余额保持未提供() {
+        let fixture = SyntheticLedger::new(&[["4", "", "", ""],["3.5", "", "", ""]]);
+        let params = fixture.params();
+        let result = prepare_rates(&params).unwrap();
+        assert_eq!(result["rows"].as_array().unwrap().len(),2);
+        assert!(result["rows"][0]["closing"].is_null());
+        assert_eq!(result["rows"][0]["opening"],1000000.0);
     }
 }

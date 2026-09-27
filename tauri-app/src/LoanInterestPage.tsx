@@ -1,3 +1,4 @@
+import { LoanLedgerConfirmation, ledgerInformationErrors, type LedgerInformation } from "./LoanLedgerConfirmation";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { JobEvent, ToolManifest } from "./types";
 import { useTaskRestore } from "./restore";
@@ -64,7 +65,6 @@ import {
   loanRateOverrides,
   loanRateValue,
   loanReportStart,
-  resolveLoanRates,
   type LoanRateSetting,
 } from "@/loanRateTypes";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
@@ -569,6 +569,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   >({});
   const [outputPath, setOutputPath] = useState("");
   const [rows, setRows] = useState<LoanRow[]>([]);
+  const [ledgerInformation, setLedgerInformation] = useState<Record<string, LedgerInformation>>({});
+  const [ledgerInformationKey, setLedgerInformationKey] = useState("");
+  const [ledgerConfirmed, setLedgerConfirmed] = useState(false);
   // 利率确认（TB 模式）：用户从 Excel 复制粘贴的利率区域原文，与匹配出的逐笔利率。
   // 粘贴原文保留（方便换映射后一键重匹配），匹配结果随 TB 来源/映射变化作废。
   /** 「确认科目与利率」步骤：TB 末级科目清单（loan.tb_accounts 下发）。 */
@@ -752,7 +755,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setCurrencyFallbackMode("");
       setCurrencyFallbackPrompt(null);
     }
-    if (kind === "ledger") setRateEdits({});
+    if (kind === "ledger") { setRateEdits({}); setLedgerInformation({}); setLedgerInformationKey(""); setLedgerConfirmed(false); }
     // TB 的文件/Sheet/映射一变，借款行清单就可能变：科目确认与手填利率作废，
     // 回到第二步重新确认。
     if (kind === "tb") {
@@ -785,19 +788,19 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         loanSingleColumnMapping(sources.ledger.mapping),
       )
     : [];
-  const rateRows = resolveLoanRates(rateDefaults, rateEdits);
-  const editRate = (index: number, patch: Partial<LoanRateSetting>) => {
-    invalidateResults();
-    setRateEdits((v) => ({ ...v, [index]: { ...v[index], ...patch } }));
-  };
   const editResultRate = (index: number, patch: ResultRateEdit) => {
+    if (mode === "ledger") {
+      setLedgerConfirmed(false);
+      const key = loanRowKey(rows[index]);
+      setLedgerInformation(current => current[key] ? {...current, [key]: {...current[key], ...patch}} : current);
+    }
     setResultStale(true);
     setRatesConfirmed(false);
     const id = loanRowKey(rows[index]);
     setRows((v) =>
       v.map((row, i) => (i === index ? { ...row, ...patch } : row)),
     );
-    setResultRateEdits((v) => ({ ...v, [id]: { ...v[id], ...patch } }));
+    if (mode !== "ledger") setResultRateEdits((v) => ({ ...v, [id]: { ...v[id], ...patch } }));
   };
   // 步骤 2 停在"可选的利率确认"上时，禁用的下一步其实卡的是步骤 1 的映射——
   // 把缺什么明说并给一键返回，不让用户在可选步骤上猜哪里没完成。
@@ -1138,7 +1141,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     if (stash && samePath(stash.path, path))
       restoredLoanMappings.current[kind] = undefined;
     setSource(kind, { path, inspection: x, mapping });
-    if (kind === "ledger") setRateEdits({});
+    if (kind === "ledger") { setRateEdits({}); setLedgerInformation({}); setLedgerInformationKey(""); setLedgerConfirmed(false); }
     // TB/JE 识别出数据年度就预填表日：期间起点、LPR 取期和 JE 归集都由它
     // 推导，账套不是本年度时留着默认值会把这三处全部带偏。
     if (kind === "tb" || kind === "je") {
@@ -1170,6 +1173,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         mode === "ledger"
           ? loanRateOverrides(rateDefaults, rateEdits)
           : undefined,
+      ledgerInformation: mode === "ledger" ? ledgerInformation : undefined,
       ledgerSource: source("ledger"),
       tbSource: source("tb"),
       jeSource: source("je"),
@@ -1250,6 +1254,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     const p = restore.params as {
       mode?: string;
       reportEnd?: string;
+      ledgerInformation?: Record<string, LedgerInformation>;
       ledgerSource?: LoanSourceParams;
       tbSource?: LoanSourceParams;
       jeSource?: LoanSourceParams;
@@ -1348,6 +1353,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           (p.rateRows as PasteRateRow[]).map((r) => [loanRowKey(r), r]),
         ),
       );
+    if (p.ledgerInformation) setLedgerInformation(p.ledgerInformation);
     if (p.mode === "ledger" || p.mode === "tb") setMode(p.mode);
     if (typeof p.reportEnd === "string" && p.reportEnd)
       setReportEnd(p.reportEnd);
@@ -1419,6 +1425,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   });
   async function run(method: "loan.preview" | "loan.export") {
     setError("");
+    if (mode === "ledger" && !ledgerReady) return setError("请先完成台账信息校验并确认金额、利率及发生日期。");
     if (!reportEnd) return setError("请选择资产负债表日。");
     for (const kind of activeKinds) {
       if (!sources[kind].inspection)
@@ -1529,6 +1536,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   }
   /** 两种模式进入第三步都只导航，不隐式启动耗时任务。 */
   function advanceToRunStep() {
+    if (mode === "ledger" && !ledgerReady) { setError("请先完成台账信息校验并确认金额、利率及发生日期。"); return; }
     if (!mappingsReady) {
       setError("请先补齐字段映射。");
       return;
@@ -1705,6 +1713,25 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       orderedTbAccounts.some((row) => Boolean(row.entity)) ||
       rows.some((row) => Boolean(row.entity && row.entity !== DEFAULT_ENTITY))
     );
+  const ledgerSourceKey = JSON.stringify({source: source("ledger"), reportEnd});
+  useEffect(() => {
+    if (mode !== "ledger" || step !== 1 || !mappingsReady || ledgerInformationKey === ledgerSourceKey) return;
+    let cancelled = false;
+    setLedgerConfirmed(false);
+    setRatesBusy(true);
+    const request = payload();
+    delete request.ledgerInformation;
+    void engineCall("loan.prepare_rates", request).then(value => {
+      if (cancelled) return;
+      const list = (value as {rows: LedgerInformation[]}).rows;
+      setLedgerInformation(old => Object.fromEntries(list.map(row => [row.rowKey, ledgerInformationKey === "" ? (old[row.rowKey] ?? row) : row])));
+      setLedgerInformationKey(ledgerSourceKey);
+    }).catch(e => { if (!cancelled) { setError(errorText(e)); setLedgerInformationKey(ledgerSourceKey); } })
+      .finally(() => { if (!cancelled) setRatesBusy(false); });
+    return () => { cancelled = true; };
+  }, [mode, step, mappingsReady, ledgerSourceKey, ledgerInformationKey]);
+  const ledgerErrors = Object.values(ledgerInformation).flatMap(row => ledgerInformationErrors(row, loanReportStart(reportEnd), reportEnd));
+  const ledgerReady = ledgerInformationKey === ledgerSourceKey && Object.keys(ledgerInformation).length > 0 && !ledgerErrors.length && ledgerConfirmed;
   // 进入「确认科目与利率」即自动生成利率确认表，且科目选择（含辅助明细勾选、
   // 利息支出科目、主体范围）一变就自动按新选择重新生成：生成是必经动作，
   // 利率填写入口必须随科目类型实时出现，不再依赖「重新生成借款利率表」按钮。
@@ -1850,7 +1877,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       <StepIndicator
         steps={[
           { key: "source", label: "上传与识别" },
-          { key: "rates", label: mode === "tb" ? "确认科目与利率" : "利率确认", disabled: !sourcesReady },
+          { key: "rates", label: mode === "tb" ? "确认科目与利率" : "台账信息确认", disabled: !sourcesReady },
           { key: "run", label: "测算与底稿", disabled: !mappingsReady || !tbRunReady },
         ]}
         current={step}
@@ -2169,7 +2196,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               disabled={!sourcesReady || reviewingAny}
               onClick={() => void enterTbRateStep()}
             >
-              {mode === "tb" ? "下一步：确认科目与利率" : "下一步：利率确认"}
+              {mode === "tb" ? "下一步：确认科目与利率" : "下一步：台账信息确认"}
             </Button>
           </div>
         </>
@@ -2178,13 +2205,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       {step === 1 && (
         <>
           {mode === "ledger" ? (
-            <LedgerRateConfirmation
-              inspection={ledgerInspection!}
-              mapping={sources.ledger.mapping}
-              rates={rateRows}
-              busy={busy}
-              onEdit={editRate}
-            />
+            <>
+              <label className="loan-report-date">资产负债表日<DateInput aria-label="资产负债表日" value={reportEnd} disabled={busy || ratesBusy} onChange={value => { invalidateResults(); setLedgerConfirmed(false); setReportEnd(value); }} /></label>
+              <div className="fx-actions"><Button variant="secondary" disabled={busy || ratesBusy} onClick={() => { invalidateResults(); setLedgerConfirmed(false); setLedgerInformation({}); setLedgerInformationKey(""); }}>恢复台账默认信息</Button><span role="status">{ratesBusy ? "正在读取完整台账信息…" : `${Object.keys(ledgerInformation).length} 笔借款，${Object.values(ledgerInformation).filter(row=>ledgerInformationErrors(row,loanReportStart(reportEnd),reportEnd).length).length} 笔待补充或修正`}</span></div>
+              <LoanLedgerConfirmation rows={Object.values(ledgerInformation)} start={loanReportStart(reportEnd)} end={reportEnd} busy={busy || ratesBusy}
+                onEdit={row => { invalidateResults(); setLedgerConfirmed(false); setLedgerInformation(v => ({...v,[row.rowKey]:row})); }} />
+              <label className="loan-rate-acknowledgement"><input type="checkbox" checked={ledgerConfirmed} disabled={busy || ratesBusy || !!ledgerErrors.length || !Object.keys(ledgerInformation).length} onChange={e=>setLedgerConfirmed(e.target.checked)} /><span>我已复核台账金额、利率和新增／还款日期，包括按合同日期生成的默认信息。</span></label>
+            </>
           ) : (
             <div className="loan-confirm-workspace">
               <Card>
@@ -2532,7 +2559,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               返回上传与识别
             </Button>
             <Button
-              disabled={!mappingsReady || busy || accountsBusy || ratesBusy || !tbRunReady}
+              disabled={!mappingsReady || busy || accountsBusy || ratesBusy || !tbRunReady || (mode === "ledger" && !ledgerReady)}
               onClick={advanceToRunStep}
             >
               下一步：测算与底稿
@@ -2684,11 +2711,11 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
             </CardContent>
           </Card>
           {result && rows.length > 0 && (
-            <Results rows={rows} editRate={editResultRate} result={result} stale={resultStale} />
+            <Results rows={rows} editRate={editResultRate} result={result} stale={resultStale} sourceMode={mode} />
           )}
           <div className="fx-step-actions">
             <Button variant="secondary" onClick={() => setStep(1)}>
-              返回利率确认
+              {mode === "ledger" ? "返回台账信息确认" : "返回利率确认"}
             </Button>
           </div>
         </>
@@ -2949,139 +2976,14 @@ function Mapping({
   );
 }
 
-function LedgerRateConfirmation({
-  inspection,
-  mapping,
-  rates,
-  busy,
-  onEdit,
-}: {
-  inspection: Inspection;
-  mapping: LoanMapping;
-  rates: LoanRateSetting[];
-  busy: boolean;
-  onEdit: (index: number, patch: Partial<LoanRateSetting>) => void;
-}) {
-  const pageSize = 100;
-  const [page, setPage] = useState(0);
-  // 容器 div 在本组件内无条件渲染，ref 直接挂原 div（翻页控件在容器外）。
-  const confirmationResize = useTableColumnResize<HTMLDivElement>({
-    storageKey: "loan.rate-confirmation",
-  });
-  const pageCount = Math.max(1, Math.ceil(inspection.preview.length / pageSize));
-  const visiblePage = Math.min(page, pageCount - 1);
-  const visibleRows = inspection.preview.slice(
-    visiblePage * pageSize,
-    (visiblePage + 1) * pageSize,
-  );
-  const valueAt = (row: string[], role: string) => {
-    const mapped = mapping[role];
-    const column = Array.isArray(mapped) ? mapped[0] : mapped;
-    const index = inspection.headers.indexOf(column ?? "");
-    return index >= 0 ? (row[index] ?? "") : "";
-  };
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>借款利率确认</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="loan-list-summary" role="status">
-          共 {inspection.rowCount} 行，当前显示第 {visiblePage * pageSize + 1}–{Math.min((visiblePage + 1) * pageSize, inspection.preview.length)} 行；全部行均参与测算。
-        </div>
-        <div className="loan-rate-confirmation" ref={confirmationResize.ref}>
-          <table>
-            <thead>
-              <tr>
-                <th aria-label="借款标识">借款标识</th>
-                <th aria-label="台账利率">台账利率</th>
-                <th aria-label="利率类型">利率类型</th>
-                <th aria-label="加减点（BP）">
-                  加减点（BP）
-                  <JargonTip
-                    term="加减点（BP）"
-                    text="BP＝万分之一。浮动利率＝基准利率＋加减点BP÷10000。"
-                  />
-                </th>
-                <th aria-label="状态">状态</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleRows.map((row, localIndex) => {
-                const index = visiblePage * pageSize + localIndex;
-                const sourceRate = valueAt(row, "rate");
-                const loanId =
-                  valueAt(row, "loanId") ||
-                  valueAt(row, "lender") ||
-                  `第 ${index + 1} 行`;
-                const rate = rates[index] ?? {
-                  rateType: "fixed",
-                  spreadBps: 0,
-                };
-                return (
-                  <tr key={`${loanId}-${index}`}>
-                    <td title={loanId}>{loanId}</td>
-                    <td>{sourceRate || "—"}</td>
-                    <td>
-                      <select
-                        className="loan-rate-pick"
-                        disabled={busy}
-                        value={rate.rateType}
-                        onChange={(event) =>
-                          onEdit(index, {
-                            rateType: event.target
-                              .value as LoanRateSetting["rateType"],
-                          })
-                        }
-                      >
-                        <option value="fixed">固定</option>
-                        <option value="floating">浮动</option>
-                      </select>
-                    </td>
-                    <td>
-                      <NumberInput
-                        label={`${loanId}的加减点`}
-                        className="loan-rate-bps loan-manual-number"
-                        step="1"
-                        disabled={busy || rate.rateType !== "floating"}
-                        value={rate.spreadBps}
-                        onCommit={(text) =>
-                          onEdit(index, { spreadBps: loanBps(text) })
-                        }
-                      />
-                    </td>
-                    <td>
-                      <Badge
-                        variant="outline"
-                        className={sourceRate ? "badge-ready" : "badge-warning"}
-                      >
-                        {sourceRate ? "已识别" : "待补充"}
-                      </Badge>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        {pageCount > 1 && (
-          <div className="loan-account-list-pages">
-            <Button type="button" variant="secondary" disabled={visiblePage === 0} onClick={() => setPage(visiblePage - 1)}>上一页</Button>
-            <span>第 {visiblePage + 1} / {pageCount} 页</span>
-            <Button type="button" variant="secondary" disabled={visiblePage >= pageCount - 1} onClick={() => setPage(visiblePage + 1)}>下一页</Button>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
 export function Results({
   rows,
   editRate,
   result,
   stale = false,
+  sourceMode = "tb",
 }: {
+  sourceMode?: "ledger" | "tb";
   rows: LoanRow[];
   editRate: (index: number, patch: ResultRateEdit) => void;
   result?: Record<string, unknown>;
@@ -3170,7 +3072,7 @@ export function Results({
       <div className="loan-result-overview" role="status">
         {stale && <Badge variant="outline" className="badge-warning">结果待重算，仅供对照</Badge>}
         <Badge variant="outline" className={principalDifferenceCount ? "badge-warning" : "badge-ready"}>
-          {principalDifferenceCount ? `${principalDifferenceCount} 笔本金有差异` : "本金已勾稽"}
+          {principalDifferenceCount ? `${principalDifferenceCount} 笔本金有差异` : rows.some(row => row.ledgerClosing != null) ? "四栏与来源余额一致" : "未提供来源期末余额"}
         </Badge>
         <Badge variant="outline" className={measurementReviewCount ? "badge-warning" : "badge-ready"}>
           {measurementReviewCount ? `${measurementReviewCount} 笔计息口径待确认` : "计息口径已确认"}
@@ -3216,11 +3118,11 @@ export function Results({
         </div>
         <div className="loan-result-summary">
           {metric("测算利息支出", total)}
-          {metric(
+          {(sourceMode === "tb" || hasInterestExpenseAccount) && metric(
             "TB 利息支出",
             hasInterestExpenseAccount ? bookedInterestExpense : "未选择科目",
           )}
-          {metric(
+          {(sourceMode === "tb" || hasInterestExpenseAccount) && metric(
             "差异（测算－TB）",
             hasInterestExpenseAccount ? interestExpenseDifference : "—",
           )}
@@ -3237,7 +3139,7 @@ export function Results({
               <th aria-label="本期增加">本期增加</th>
               <th aria-label="本期归还">本期归还</th>
               <th aria-label="推算期末">推算期末</th>
-              <th aria-label="台账／TB 期末">台账／TB 期末</th>
+              <th aria-label={sourceMode === "ledger" ? "台账期末余额" : "TB 期末余额"}>{sourceMode === "ledger" ? "台账期末余额" : "TB 期末余额"}</th>
               <th aria-label="本金差异">本金差异</th>
               <th aria-label="本金勾稽">本金勾稽</th>
               <th aria-label="利率类型">利率类型</th>

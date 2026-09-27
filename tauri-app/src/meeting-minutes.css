@@ -118,6 +118,49 @@
   font-size: var(--fs-sm);
 }
 
+/* ===== 会议询问小窗（独立置顶窗口，不进 App 壳） ===== */
+
+.meeting-ask-window {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-5);
+  background: var(--background);
+}
+
+.meeting-ask-window-card {
+  display: grid;
+  gap: var(--sp-3);
+  width: 100%;
+  max-width: 400px;
+  padding: var(--sp-5);
+  background: var(--card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-overlay);
+}
+
+.meeting-ask-window-card h1 {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+.meeting-ask-window-card p {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+
+.meeting-ask-window-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
 /* ===== 全局：录音指示胶囊（右下角） ===== */
 
 .meeting-recording-capsule {

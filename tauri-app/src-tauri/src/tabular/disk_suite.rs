@@ -344,13 +344,13 @@ fn initialize(db: &Connection) -> Result<(), AppError> {
         DROP TABLE IF EXISTS suite_output; DROP TABLE IF EXISTS suite_stage;
         CREATE TEMP TABLE suite_stage(
           seq INTEGER NOT NULL,id TEXT NOT NULL,account TEXT NOT NULL,net REAL NOT NULL,
-          direction TEXT NOT NULL,month TEXT NOT NULL,summary TEXT NOT NULL,loss INTEGER NOT NULL
+          direction TEXT NOT NULL,month TEXT NOT NULL,summary TEXT NOT NULL,loss INTEGER NOT NULL,debit REAL,credit REAL
         );
         CREATE TEMP TABLE suite_vouchers(id TEXT PRIMARY KEY,seq INTEGER NOT NULL,loss INTEGER NOT NULL);
         CREATE TEMP TABLE suite_nets(id TEXT,account TEXT,net REAL,PRIMARY KEY(id,account));
         CREATE TEMP TABLE suite_month(id TEXT,month TEXT,account TEXT,net REAL,PRIMARY KEY(id,month,account));
         CREATE TEMP TABLE suite_summaries(id TEXT,value TEXT,seq INTEGER,PRIMARY KEY(id,value));
-        CREATE TEMP TABLE suite_subject(account TEXT PRIMARY KEY,net REAL,count INTEGER);
+        CREATE TEMP TABLE suite_subject(account TEXT PRIMARY KEY,net REAL,count INTEGER,debit REAL,credit REAL);
         CREATE TEMP TABLE suite_pivot(id TEXT,account TEXT,direction TEXT,net REAL,PRIMARY KEY(id,account,direction));
         CREATE TEMP TABLE suite_custom(rowkey TEXT,col TEXT,net REAL,PRIMARY KEY(rowkey,col));
         CREATE TEMP TABLE suite_shapes(seq INTEGER PRIMARY KEY,id TEXT,full TEXT,signs TEXT);
@@ -498,7 +498,7 @@ fn aggregate(
     // ledgers. SQLite is substantially faster when it groups the unindexed
     // staging rows once after the scan.
     let mut insert_stage = transaction
-        .prepare("INSERT INTO suite_stage VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")
+        .prepare("INSERT INTO suite_stage VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)")
         .map_err(db_error)?;
     let runtime_budget = crate::resource_budget::budget()?;
     let decode_batch_bytes = (runtime_budget.batch_bytes / 8).max(2 * 1024 * 1024) as usize;
@@ -551,6 +551,7 @@ fn aggregate(
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .unwrap_or("");
+            let sides = ledger_summary_sides(row, headers, mapping, record.net);
             insert_stage
                 .execute(params![
                     record.seq,
@@ -560,7 +561,9 @@ fn aggregate(
                     direction_value,
                     month,
                     summary_value,
-                    loss
+                    loss,
+                    sides.map(|s| s.0),
+                    sides.map(|s| s.1)
                 ])
                 .map_err(db_error)?;
             count += 1;
@@ -602,7 +605,7 @@ fn aggregate(
     aggregate_progress(3, "正在批量汇总科目和方向…");
     db.execute_batch(
         "INSERT INTO suite_subject
-           SELECT account,SUM(net),COUNT(*) FROM suite_stage GROUP BY account;
+           SELECT account,SUM(net),COUNT(*),CASE WHEN COUNT(debit)=COUNT(*) THEN SUM(debit) END,CASE WHEN COUNT(credit)=COUNT(*) THEN SUM(credit) END FROM suite_stage GROUP BY account;
          INSERT INTO suite_pivot
            SELECT id,account,direction,SUM(net) FROM suite_stage
            GROUP BY id,account,direction;",
@@ -1702,12 +1705,14 @@ pub(super) fn write_suite(
     let summary = {
         let mut stmt = ledger
             .db
-            .prepare("SELECT account,net,count FROM suite_subject ORDER BY account LIMIT 40")
+            .prepare("SELECT account,net,count,debit,credit FROM suite_subject ORDER BY account LIMIT 40")
             .map_err(db_error)?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(vec![
                     r.get(0)?,
+                    r.get::<_, Option<f64>>(3)?.map(format_number).unwrap_or_default(),
+                    r.get::<_, Option<f64>>(4)?.map(format_number).unwrap_or_default(),
                     format_number(r.get(1)?),
                     r.get::<_, i64>(2)?.to_string(),
                 ])
@@ -1716,7 +1721,7 @@ pub(super) fn write_suite(
             .collect::<Result<Vec<_>, _>>()
             .map_err(db_error)?;
         PivotResult {
-            headers: vec!["科目名称".into(), "净额".into(), "行数".into()],
+            headers: vec!["科目名称".into(), "借方金额".into(), "贷方金额".into(), "净额".into(), "行数".into()],
             rows,
             row_field_count: 1,
         }
@@ -2035,7 +2040,7 @@ pub(super) fn write_suite(
         headers(ws, &summary.headers)?;
         let mut stmt = ledger
             .db
-            .prepare("SELECT account,net,count FROM suite_subject ORDER BY account")
+            .prepare("SELECT account,net,count,debit,credit FROM suite_subject ORDER BY account")
             .map_err(db_error)?;
         let mut rows = stmt.query([]).map_err(db_error)?;
         let mut index = 1u32;
@@ -2048,6 +2053,8 @@ pub(super) fn write_suite(
                 index,
                 &[
                     row.get(0).map_err(db_error)?,
+                    row.get::<_, Option<f64>>(3).map_err(db_error)?.map(format_number).unwrap_or_default(),
+                    row.get::<_, Option<f64>>(4).map_err(db_error)?.map(format_number).unwrap_or_default(),
                     format_number(row.get(1).map_err(db_error)?),
                     row.get::<_, i64>(2).map_err(db_error)?.to_string(),
                 ],

@@ -33,6 +33,11 @@ export const workspaceTourSteps: TourStep[] = [
     body: "工作台按同样的分组铺开工具卡片，点击任意卡片就能进入对应工具。",
   },
   {
+    id: "table-tips",
+    title: "表格小技巧",
+    body: "各工具里的数据表都能像 Excel 一样调列宽：拖动列边界加宽、双击边界自动贴合内容、右键重置整表。调好的列宽会记在本机，下次打开不用再调。",
+  },
+  {
     id: "nav-history",
     targetSelector: '[data-tour="nav-history"]',
     title: "历史记录",

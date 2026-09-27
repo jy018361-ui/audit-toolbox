@@ -453,7 +453,7 @@ it("本金无差异与计息口径分开显示，并列示利息支出差异", (
       }}
     />,
   );
-  expect(screen.getByText("本金已勾稽")).toBeVisible();
+  expect(screen.getByText("四栏与来源余额一致")).toBeVisible();
   expect(screen.getByText("待填利率")).toBeVisible();
   expect(screen.queryByText("1 笔待复核")).not.toBeInTheDocument();
   expect(screen.getByText("TB 利息支出")).toBeVisible();
@@ -1564,6 +1564,37 @@ it("完整台账清空后「已识别」信息消失且下一步重新禁用", a
   ).toBeVisible();
   expect(screen.queryByText("已识别 3 行 × 5 列")).not.toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "下一步：利率确认" }),
+    screen.getByRole("button", { name: "下一步：台账信息确认" }),
   ).toBeDisabled();
+});
+
+
+it("完整台账确认金额日期后测算携带确认明细，编辑后须重新确认", async () => {
+  const headers = ["合同号", "本金", "起始日", "到期日", "利率", "期末余额"];
+  mock.pickPath.mockResolvedValue("ledger.xlsx");
+  mock.engineCall.mockImplementation(async (method: string) => {
+    if (method === "ledger.forms") return [];
+    if (method === "loan.inspect") return {headers,preview:[["合同甲","1000000","2024-01-01","2027-12-31","4","1000000"]],rowCount:1,sheet:"台账",sheets:["台账"],headerRow:1,headerDepth:1,
+      suggestedMapping:{loanId:"合同号",principal:"本金",startDate:"起始日",endDate:"到期日",rate:"利率",closingPrincipal:"期末余额"}};
+    if (method === "loan.prepare_rates") return {rows:[{rowKey:"ledger甲",loanId:"合同甲",entity:"默认主体",opening:1000000,added:0,reduced:0,closing:1000000,originalClosing:1000000,contractStart:"2024-01-01",contractEnd:"2027-12-31",rateType:"fixed",fixedRate:.04,benchmarkRate:null,spreadBps:0,additions:[],repayments:[]}]};
+    throw new Error(`unexpected ${method}`);
+  });
+  render(<LoanInterestPage tool={tool}/>);
+  fireEvent.click(screen.getByRole("button",{name:"选择完整借款台账文件"}));
+  const next = await screen.findByRole("button",{name:"下一步：台账信息确认"});
+  await waitFor(()=>expect(next).toBeEnabled());
+  fireEvent.click(next);
+  expect(await screen.findByLabelText("合同甲年初余额")).toHaveValue(1000000);
+  const runStep = screen.getByRole("button",{name:"下一步：测算与底稿"});
+  expect(runStep).toBeDisabled();
+  const confirm=screen.getByRole("checkbox",{name:/我已复核台账金额/});
+  fireEvent.click(confirm);
+  expect(runStep).toBeEnabled();
+  fireEvent.change(screen.getByLabelText("合同甲执行利率"),{target:{value:"0.05"}});
+  expect(confirm).not.toBeChecked();
+  expect(runStep).toBeDisabled();
+  fireEvent.click(confirm);
+  fireEvent.click(runStep);
+  fireEvent.click(screen.getByRole("button",{name:"测算预览"}));
+  await waitFor(()=>expect(mock.jobStart).toHaveBeenCalledWith("loan.preview",expect.objectContaining({ledgerInformation:expect.objectContaining({ledger甲:expect.objectContaining({fixedRate:.05,opening:1000000,additions:[]})})})));
 });

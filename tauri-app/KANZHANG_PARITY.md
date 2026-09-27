@@ -1,5 +1,12 @@
 # 看账小工具迁移功能矩阵
 
+## 2026-09-27：科目汇总增加借贷发生额
+
+- 普通与大 CSV 磁盘导出的科目汇总统一为科目名称、借方金额、贷方金额、净额、行数；仍取命中目标的完整凭证。
+- 借贷分列逐行累计，红字保留负数；贷方列已带净额负号时按公共符号识别结果转回贷方发生额。金额加方向按分录方向还原；没有可识别方向的单金额不猜，同一科目任一行方向不明则借贷汇总留空，净额和行数继续输出。
+- 字段映射 LLM 维持开启；套表 LLM 分析继续停用。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 科目汇总`；`cargo test --manifest-path src-tauri/Cargo.toml --lib disk_export_batch_aggregation_keeps_suite_totals`；真实输入设置 `KANZHANG_REAL_SAMPLE` 与 `KANZHANG_REAL_OUTPUT` 后运行 `cargo test --manifest-path src-tauri/Cargo.toml --lib 真实序时账科目汇总导出借贷列 -- --ignored --nocapture`。
+
 ## 2026-09-26：月/日分列账型的日期识别与 LLM 复核对齐 TBJE 公共引擎
 
 - 裸「月」「日」两列（纯数字、无年份、无完整日期列）的账型此前死路一条：date 角色的冲突词（年/月/期间）让脚本建议永远映射不上日期，页面持续提示「尚未映射：记账日期」。现在 `suggest_mapping`（看账与正负数凭证标记全部入口共用）接入公共 `pair_month_day_date_columns` 配对，并新增脚本级兜底 `month_day_date_fallback`：全表没有任何完整日期列、且恰有一列取值全为纯月份的「月」列时，直接把月＋日组成 date；多个月份列（歧义）、样例不足 5 行不猜，完整日期列在场时完整日期优先。

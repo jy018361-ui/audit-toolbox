@@ -708,6 +708,7 @@ describe("TbjeCheckPage", () => {
       expect(jobStart).toHaveBeenCalledWith("tbje_check.export_batch", expect.objectContaining({
         groups: [
           {
+            accountMatchPolicy: "tbjeIntegrity",
             label: "1",
             tbSource: {
               inputPath: "C:/samples/01TB.xlsx",

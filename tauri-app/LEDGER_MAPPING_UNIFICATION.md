@@ -1,5 +1,11 @@
 # 账表映射统一方案
 
+## 2026-09-27：TBJE 完整性核对单独恢复原科目匹配
+
+- TBJE 完整性使用专用 `AccountMatchPolicy::for_tbje_integrity`，恢复两侧同码均多名称且名称交集达到六成才使用复合键的旧规则；否则按编码核对。严格缺码名称回退与辅助验证规则保留。
+- 此条仅覆盖完整性核对，取代 2026-09-25 强制名称入键规则对该工具的影响；其他业务工具继续使用 `from_sides` 与完整身份复核目录，不改变第二步展示和去重。
+- 回归见 `TBJE_CHECK.md` 同日条目。
+
 ## 2026-09-26：复合日期能力补齐看账/正负数凭证标记通道
 
 - 看账与正负数凭证标记的 LLM 复核走的是 `kanzhang.llm_mapping` 旧通道，此前硬编码 `ReviewDatePolicy::Strict`，绕开公共复核日期纪律：模型建议的月/日组成列被 date 冲突词丢弃、漏提时也无兜底，源表只有裸「月」「日」列时「记账日期」永远映射不上（公共 `review_date_policy` 与其测试早已期望这两个工具按 TbjeComposite 执行）。该通道现改用 `review_date_policy(Some("kanzhang"))`，提示词附 `REVIEW_JE_TBJE_COMPOSITE_DATE`，漏提兜底 `supplement_tbje_required_je_changes` 从只补 `changes` 扩展为同构补 `fills`（看账通道的输出结构）。

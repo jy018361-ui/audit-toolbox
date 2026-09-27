@@ -1562,37 +1562,42 @@ fn pivot_rows(
     })
 }
 
+/// 借贷分列保留红字；金额+方向按已识别净额还原。无方向的单金额不猜。
+fn ledger_summary_sides(row: &[String], headers: &[String], mapping: &LedgerMapping, net: f64) -> Option<(f64, f64)> {
+    let number = |name: &Option<String>| name.as_deref().and_then(|n| header_index(headers, n)).map(|i| parse_number(row.get(i).map(String::as_str).unwrap_or("")));
+    if let (Some(dr), Some(cr)) = (number(&mapping.debit), number(&mapping.credit)) {
+        // 公共符号识别可能把贷方原列认定为已带负号，统一输出贷方发生额口径。
+        let credit = if (dr - cr - net).abs() < 0.000001 { cr } else { dr - net };
+        return Some((dr, credit));
+    }
+    let direction = mapping.direction.as_deref().and_then(|n| header_index(headers, n)).and_then(|i| row.get(i)).map(|s| s.trim()).unwrap_or("");
+    if ledger_mapping::is_credit_direction(direction) { return Some((0.0, -net)); }
+    if direction.contains('借') || direction.to_lowercase().contains("debit") || matches!(direction.to_lowercase().as_str(), "d" | "dr" | "s" | "+") { return Some((net, 0.0)); }
+    None
+}
+
 fn ledger_summary_from_amounts(
     rows: &[Vec<String>],
     account_indexes: &[usize],
     amounts: &[f64],
+    headers: &[String],
+    mapping: &LedgerMapping,
 ) -> Result<PivotResult, AppError> {
-    let mut columns = vec![Column::new(
-        "account".into(),
-        rows.iter()
-            .map(|row| joined_account(row, account_indexes))
-            .collect::<Vec<_>>(),
-    )];
-    columns.push(Column::new("amount".into(), amounts.to_vec()));
-    let frame = DataFrame::new(rows.len(), columns).map_err(polars_error)?;
-    let grouped = frame
-        .lazy()
-        .group_by([col("account")])
-        .agg([
-            col("amount").sum().alias("netAmount"),
-            len().alias("lineCount"),
-        ])
-        .collect()
-        .map_err(polars_error)?;
-    let mut output: Vec<Vec<String>> = Vec::new();
-    for index in 0..grouped.height() {
-        let row = grouped.get_row(index).map_err(polars_error)?;
-        output.push(row.0.iter().map(any_to_string).collect());
+    let mut grouped: BTreeMap<String, (f64, f64, f64, usize, bool)> = BTreeMap::new();
+    for (row, net) in rows.iter().zip(amounts) {
+        let entry = grouped.entry(joined_account(row, account_indexes)).or_default();
+        entry.2 += net;
+        entry.3 += 1;
+        if let Some((dr, cr)) = ledger_summary_sides(row, headers, mapping, *net) {
+            entry.0 += dr; entry.1 += cr;
+        } else { entry.4 = true; }
     }
-    output.sort_by(|a, b| a.first().cmp(&b.first()));
     Ok(PivotResult {
-        headers: vec!["科目名称".into(), "净额".into(), "行数".into()],
-        rows: output,
+        headers: vec!["科目名称".into(), "借方金额".into(), "贷方金额".into(), "净额".into(), "行数".into()],
+        rows: grouped.into_iter().map(|(account, (dr, cr, net, count, unknown))| vec![account,
+            if unknown { String::new() } else { format_number(dr) },
+            if unknown { String::new() } else { format_number(cr) },
+            format_number(net), count.to_string()]).collect(),
         row_field_count: 1,
     })
 }
@@ -2006,7 +2011,7 @@ fn analyze_ledger(
     // 月/日组成列没有年份时的报告期年份：先从源文件名取；取不到就按
     // 占位年 1900 让「月＋日」仍然算日期（月份桶只标月份，不亮占位年份）。
     let fallback_year = year_from_filename(&table.path);
-    let summary = ledger_summary_from_amounts(rows, &account_indexes, &amounts.net)?;
+    let summary = ledger_summary_from_amounts(rows, &account_indexes, &amounts.net, &table.headers, mapping)?;
     let key_label = voucher_key_label(&table.headers, &id_indexes);
     let voucher_pivot = build_voucher_pivot_rust(
         rows,
@@ -10367,6 +10372,45 @@ mod tests {
     }
 
     #[test]
+    fn 科目汇总借贷保留红字且无方向不猜() {
+        let headers = vec!["科目".into(), "借".into(), "贷".into()];
+        let mapping = LedgerMapping { debit: Some("借".into()), credit: Some("贷".into()), ..Default::default() };
+        let rows = vec![vec!["A".into(), "100".into(), "0".into()], vec!["A".into(), "0".into(), "80".into()], vec!["A".into(), "0".into(), "-10".into()]];
+        let summary = ledger_summary_from_amounts(&rows, &[0], &[100.0, -80.0, 10.0], &headers, &mapping).unwrap();
+        assert_eq!(summary.rows[0], ["A", "100", "70", "30", "3"]);
+        assert_eq!(ledger_summary_sides(&rows[0], &headers, &LedgerMapping::default(), 100.0), None);
+        assert_eq!(ledger_summary_sides(&vec!["A".into(), "0".into(), "-80".into()], &headers, &mapping, -80.0), Some((0.0, 80.0)));
+        let direction_headers = vec!["方向".into()];
+        let direction_mapping = LedgerMapping { direction: Some("方向".into()), ..Default::default() };
+        assert_eq!(ledger_summary_sides(&vec!["贷".into()], &direction_headers, &direction_mapping, 10.0), Some((0.0, -10.0)));
+    }
+
+    #[test]
+    #[ignore = "需要 KANZHANG_REAL_SAMPLE 指定原始序时账"]
+    fn 真实序时账科目汇总导出借贷列() {
+        let input = std::env::var("KANZHANG_REAL_SAMPLE").unwrap();
+        let output = std::env::var("KANZHANG_REAL_OUTPUT").unwrap();
+        let result = export_kanzhang(json!({"inputPath":input,"sheet":"Sheet2","headerRow":2,"headerDepth":1,
+            "outputPath":output,"mapping":{"id":["年度","期间","凭证号"],"accountName":["会计科目"],"date":["记账日期"],"debit":"借方金额","credit":"贷方金额","summary":"摘要"},
+            "targetBatches":[{"name":"固定资产","accounts":["1601000101-固定资产-房屋及构筑物","1601000102-固定资产-专用设备","1601000103-固定资产-通用设备","1601000105-固定资产-图书档案","1601000106-固定资产-家具用具装具及动植物","1601000107-固定资产-房屋及构筑物-房屋","1601000108-固定资产-房屋及构筑物-其他"]}],
+            "includePivot":true,"includeVoucherTypes":true,"llmAnalysis":true}), &|_,_,_,_|{}, &AtomicBool::new(false)).unwrap();
+        let paths = result["outputPaths"].as_array().unwrap();
+        let suite = paths.iter().filter_map(Value::as_str).find(|p| p.ends_with("_套表.xlsx")).unwrap();
+        let mut wb = open_workbook_auto(suite).unwrap();
+        let range = wb.worksheet_range("科目汇总").unwrap();
+        let header = range.rows().next().unwrap().iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(header, ["科目名称","借方金额","贷方金额","净额","行数"]);
+        for row in range.rows().skip(1) {
+            let dr: f64 = row[1].to_string().parse().unwrap();
+            let cr: f64 = row[2].to_string().parse().unwrap();
+            let net: f64 = row[3].to_string().parse().unwrap();
+            assert!((dr-cr-net).abs()<0.01);
+        }
+        assert!(!wb.sheet_names().contains(&"LLM分析".to_owned()));
+        println!("导出路径：{suite}");
+    }
+
+    #[test]
     fn disk_export_batch_aggregation_keeps_suite_totals() {
         let root = temp_dir("kanzhang-batch-aggregate");
         let input = root.join("ledger.csv");
@@ -10404,9 +10448,9 @@ mod tests {
             .skip(1)
             .map(|row| row.iter().map(ToString::to_string).collect::<Vec<_>>())
             .collect::<Vec<_>>();
-        assert!(rows.iter().any(|row| row == &["收入", "150", "2"]));
-        assert!(rows.iter().any(|row| row == &["银行", "-100", "1"]));
-        assert!(rows.iter().any(|row| row == &["现金", "-50", "1"]));
+        assert!(rows.iter().any(|row| row == &["收入", "150", "0", "150", "2"]));
+        assert!(rows.iter().any(|row| row == &["银行", "0", "100", "-100", "1"]));
+        assert!(rows.iter().any(|row| row == &["现金", "0", "50", "-50", "1"]));
         assert!(workbook.worksheet_range("凭证类型-严格").is_ok());
         assert!(!workbook.sheet_names().contains(&"LLM分析".to_owned()));
         let _ = fs::remove_dir_all(root);

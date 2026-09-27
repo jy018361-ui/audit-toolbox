@@ -308,12 +308,7 @@ fn poll_transcription(
         if cancel.load(Ordering::Relaxed) {
             return Err(cancelled_error());
         }
-        let response = client
-            .post(format!("{BASE}/api/v1/tasks/{task_id}"))
-            .bearer_auth(key)
-            .send()
-            .map_err(network_error)?;
-        let value = read_json_response(response, "查询百炼转写任务失败。")?;
+        let value = query_task(client, key, task_id)?;
         let status = value
             .pointer("/output/task_status")
             .and_then(Value::as_str)
@@ -359,6 +354,53 @@ fn poll_transcription(
     }
 }
 
+fn query_task(
+    client: &reqwest::blocking::Client,
+    key: &str,
+    task_id: &str,
+) -> Result<Value, AppError> {
+    let response = client
+        .post(format!("{BASE}/api/v1/tasks/{task_id}"))
+        .bearer_auth(key)
+        .send()
+        .map_err(network_error)?;
+    read_json_response(response, "查询百炼转写任务失败。")
+}
+
+/// 任务已成功却拿不到结果地址：常见于录音过短/无人声（`results` 为空数组）
+/// 或单文件识别失败（`results[0]` 带 code/message）。要给出说得通的原因，
+/// 不再把“没有返回结果地址”这类排查向文案直接甩给用户。
+fn missing_url_error(task: &Value) -> AppError {
+    let results = task.pointer("/results").and_then(Value::as_array);
+    if results.is_none_or(|rows| rows.is_empty()) {
+        return asr_error(
+            "ASR_EMPTY_TRANSCRIPT",
+            "录音中没有识别到语音内容（录音过短或无人说话），请确认录音有效后再试。",
+            None,
+        );
+    }
+    if let Some(first) = results.and_then(|rows| rows.first()) {
+        let code = first.get("code").and_then(Value::as_str).unwrap_or("");
+        let message = first
+            .pointer("/message")
+            .or_else(|| first.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !code.is_empty() || !message.is_empty() {
+            return asr_error(
+                "ASR_TASK_FAILED",
+                "这段录音未能完成转写。",
+                Some(format!("{code} {message}").trim().to_owned()),
+            );
+        }
+    }
+    asr_error(
+        "ASR_RESULT_MISSING",
+        "百炼任务成功但没有返回结果地址。",
+        Some(task.to_string()),
+    )
+}
+
 /// 转写主入口：上传 → 提交 → 轮询 → 下载结果。
 pub(crate) fn transcribe_file(
     path: &Path,
@@ -372,11 +414,26 @@ pub(crate) fn transcribe_file(
         .map_err(network_error)?;
     let oss_url = upload_audio(&client, &key, path, progress)?;
     let task_id = submit_transcription(&client, &key, &oss_url)?;
-    let task = poll_transcription(&client, &key, &task_id, progress, cancel)?;
-    let transcription_url = task
-        .pointer("/results/0/transcription_url")
-        .and_then(Value::as_str)
-        .ok_or_else(|| asr_error("ASR_RESULT_MISSING", "百炼任务成功但没有返回结果地址。", None))?;
+    let mut task = poll_transcription(&client, &key, &task_id, progress, cancel)?;
+    // 任务标记成功后结果地址偶尔滞后一步：补拉几次再判缺失。
+    let mut retries = 3u8;
+    let transcription_url = loop {
+        if let Some(url) = task
+            .pointer("/results/0/transcription_url")
+            .and_then(Value::as_str)
+        {
+            break url.to_owned();
+        }
+        if retries == 0 {
+            return Err(missing_url_error(&task));
+        }
+        retries -= 1;
+        std::thread::sleep(POLL_INTERVAL);
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled_error());
+        }
+        task = query_task(&client, &key, &task_id)?;
+    };
     let download = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
@@ -516,5 +573,42 @@ mod tests {
         assert_eq!(format_timestamp(59_999), "00:59");
         assert_eq!(format_timestamp(75_000), "01:15");
         assert_eq!(format_timestamp(3_661_000), "61:01");
+    }
+
+    /// 成功任务 + 空 results：短录音/无语音的典型形态，要说人话而不是
+    /// 「没有返回结果地址」。
+    #[test]
+    fn missing_url_error_explains_empty_results() {
+        let task: Value =
+            serde_json::from_str(r#"{"output": {"task_status": "SUCCEEDED"}, "results": []}"#)
+                .unwrap();
+        let error = missing_url_error(&task);
+        assert_eq!(error.code, "ASR_EMPTY_TRANSCRIPT");
+        assert!(error.user_message.contains("录音过短或无人说话"));
+    }
+
+    #[test]
+    fn missing_url_error_surfaces_per_file_failure() {
+        let task: Value = serde_json::from_str(
+            r#"{"output": {"task_status": "SUCCEEDED"}, "results": [
+                {"code": "AUDIO_FILE_INVALID", "message": "audio too short"}
+            ]}"#,
+        )
+        .unwrap();
+        let error = missing_url_error(&task);
+        assert_eq!(error.code, "ASR_TASK_FAILED");
+        let detail = error.detail.clone().unwrap_or_default();
+        assert!(detail.contains("AUDIO_FILE_INVALID"));
+        assert!(detail.contains("audio too short"));
+    }
+
+    #[test]
+    fn missing_url_error_keeps_generic_fallback() {
+        let task: Value = serde_json::from_str(
+            r#"{"output": {"task_status": "SUCCEEDED"}, "results": [{"other": 1}]}"#,
+        )
+        .unwrap();
+        let error = missing_url_error(&task);
+        assert_eq!(error.code, "ASR_RESULT_MISSING");
     }
 }

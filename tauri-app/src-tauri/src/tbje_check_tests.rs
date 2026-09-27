@@ -8,6 +8,25 @@ use serde_json::json;
 use std::sync::atomic::AtomicBool;
 
 #[test]
+fn 完整性独立策略保留旧编码匹配与双侧名称细分() {
+    let identities = |names: &[&str]| names.iter()
+        .map(|name| ("E".to_owned(), "1121.01".to_owned(), (*name).to_owned()))
+        .collect::<Vec<_>>();
+    let tb = identities(&["客户甲", "客户乙"]);
+    let je = identities(&["应收票据 - 银行承兑汇票"]);
+    let old = ledger_mapping::AccountMatchPolicy::for_tbje_integrity(&tb, &je);
+    assert_eq!(old.ambiguous_count(), 0);
+    assert_eq!(old.account_key("E", "1121.01", "客户甲"),
+        old.account_key("E", "1121.01", "应收票据 - 银行承兑汇票"));
+    assert_eq!(ledger_mapping::AccountMatchPolicy::from_sides(&tb, &je).ambiguous_count(), 1);
+    let matched = ledger_mapping::AccountMatchPolicy::for_tbje_integrity(&tb, &identities(&["客户甲", "客户乙"]));
+    assert_eq!(matched.ambiguous_count(), 1);
+    assert_ne!(matched.account_key("E", "1121.01", "客户甲"), matched.account_key("E", "1121.01", "客户乙"));
+    let unmatched = ledger_mapping::AccountMatchPolicy::for_tbje_integrity(&tb, &identities(&["客户丙", "客户丁"]));
+    assert_eq!(unmatched.ambiguous_count(), 0);
+}
+
+#[test]
 fn 主体归集只改写用户勾选的一侧匹配键() {
     let table = FxTable {
         path: std::path::PathBuf::new(),
@@ -149,6 +168,26 @@ fn 三条核对都通过时不报任何差异() {
 }
 
 #[test]
+fn 完整性同码多名对je单名恢复编码勾稽() {
+    let dir = fixture("integrity-code-fallback");
+    std::fs::write(dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n1121.01,客户甲,0,40,0,40\n1121.01,客户乙,0,60,0,60\n2202,应付账款,0,0,100,-100\n").unwrap();
+    std::fs::write(dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n2025-01-01,V1,1121.01,应收票据 - 银行承兑汇票,100,0\n2025-01-01,V1,2202,应付账款,0,100\n").unwrap();
+    let mut request = params(&dir, true);
+    request["accountMatchPolicy"] = json!("tbjeIntegrity");
+    let alignment = fx::check_mapping_alignment(&request).unwrap();
+    assert_eq!(alignment["aligned"], json!(true), "{alignment:#}");
+    let prepared = prepare(&request).unwrap();
+    let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    let items = result["tbVsJe"]["items"].as_array().unwrap().iter()
+        .filter(|item| item["code"] == json!("1121.01")).collect::<Vec<_>>();
+    assert_eq!(items.len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn tb缺少科目编码时按双侧唯一科目名称严格回退() {
     let dir = fixture("validated-name-fallback");
     std::fs::write(
@@ -240,11 +279,11 @@ fn 定长tb修正同时作用于发生额与bspl勾稽() {
 
     let result = run(&params(&dir, true), &AtomicBool::new(false)).unwrap();
     assert_eq!(result["rollforward"]["passed"], json!(true), "{result:#}");
-    // TB 明确映射了五个不同科目名称，JE 只给一个统称；本次口径不再
-    // 按编码静默合并它们，发生额核对应如实列出待匹配差异。
-    assert_eq!(result["tbVsJe"]["passed"], json!(false), "{result:#}");
-    assert_eq!(result["tbVsJe"]["accounts"], json!(7), "{result:#}");
-    assert_eq!(result["tbVsJe"]["mismatched"], json!(6), "{result:#}");
+    // 完整性恢复按编码核对：TB 的五行与 JE 统称归到同一编码，
+    // 不因业务确认目录保留完整名称身份而制造假差异。
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["accounts"], json!(2), "{result:#}");
+    assert_eq!(result["tbVsJe"]["mismatched"], json!(0), "{result:#}");
     assert_eq!(result["equation"]["passed"], json!(true), "{result:#}");
     assert_eq!(result["equation"]["accounts"], json!(6), "{result:#}");
     assert_eq!(
@@ -995,7 +1034,9 @@ fn 真实三三零零科目一零零二零三零零一六精确对上tb() {
 #[test]
 #[ignore = "读取本机TBJEPBC第一组真实样例，按需回归"]
 fn 真实第一组关键同编码汇总不重复累计() {
-    let sample_dir = std::path::PathBuf::from(r"C:\Users\lenovo\Downloads\TBJEPBC");
+    let sample_dir = std::env::var_os("LEDGER_SAMPLES")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Users\lenovo\Downloads\TBJEPBC"));
     let tb_source = json!({"inputPath": sample_dir.join("01科目余额表（TB）.xls")});
     let je_source = json!({"inputPath": sample_dir.join("01序时账 (JE).xlsx")});
     let tb_inspection = fx::call("fx.inspect_tb", json!({"source": tb_source.clone()})).unwrap();
@@ -1008,6 +1049,15 @@ fn 真实第一组关键同编码汇总不重复累计() {
     });
     let prepared = prepare(&value).unwrap();
     let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+    println!("第一组核对：rollforward={} tbVsJe={} equation={}",
+        result["rollforward"]["passed"], result["tbVsJe"]["passed"], result["equation"]["passed"]);
+    for code in ["1121.01", "2241.06.09"] {
+        let items = result["tbVsJe"]["items"].as_array().unwrap().iter()
+            .filter(|item| item["code"] == json!(code)).collect::<Vec<_>>();
+        assert_eq!(items.len(), 1, "{code}: {items:#?}");
+        assert!(items[0]["debitDifference"].as_f64().unwrap().abs() < 0.005, "{items:#?}");
+        assert!(items[0]["creditDifference"].as_f64().unwrap().abs() < 0.005, "{items:#?}");
+    }
     let item = result["tbVsJe"]["items"]
         .as_array()
         .unwrap()

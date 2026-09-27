@@ -70,7 +70,7 @@ describe("余额勾稽结果布局", () => {
     );
     const table = document.querySelector(".loan-rate-table table")!;
     expect(within(table as HTMLElement).getAllByRole("columnheader").map((node) => node.textContent?.trim()).slice(0, 11)).toEqual([
-      "主体", "借款标识", "币种", "期初本金", "本期增加", "本期归还", "推算期末", "台账／TB 期末", "本金差异", "本金勾稽", "利率类型",
+      "主体", "借款标识", "币种", "期初本金", "本期增加", "本期归还", "推算期末", "TB 期末余额", "本金差异", "本金勾稽", "利率类型",
     ]);
     const firstRow = within(table as HTMLElement).getByText("工行流贷").closest("tr")!;
     expect(firstRow.children[8]).toHaveTextContent("10,000.00");
@@ -80,4 +80,11 @@ describe("余额勾稽结果布局", () => {
     expect(secondRow.children[8]).toHaveTextContent("—");
     expect(secondRow.children[9]).toHaveTextContent("未比较");
   });
+});
+
+
+it("台账测算未提供 TB 时不显示未选择科目的 TB 对照", () => {
+  const view = render(<LoanResults rows={[]} editRate={vi.fn()} sourceMode="ledger" />);
+  expect(within(view.container).queryByText("TB 利息支出")).not.toBeInTheDocument();
+  expect(within(view.container).queryByText("差异（测算－TB）")).not.toBeInTheDocument();
 });

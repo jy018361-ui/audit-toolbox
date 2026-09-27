@@ -8649,6 +8649,33 @@ pub(crate) fn tb_dimension_rows(
 }
 
 impl AccountMatchPolicy {
+    /// 完整性核对保留原策略：两侧同码均多名且名称交集达到六成才细分。
+    /// 业务工具的完整身份确认仍使用 from_sides，不能互相改变匹配颗粒度。
+    pub(crate) fn for_tbje_integrity(
+        tb: &[(String, String, String)],
+        je: &[(String, String, String)],
+    ) -> Self {
+        let tb_index = account_name_sets(tb);
+        let je_index = account_name_sets(je);
+        let ambiguous_codes = tb_index
+            .iter()
+            .filter(|(key, names)| {
+                let Some(opposite) = je_index.get(key) else {
+                    return false;
+                };
+                names.len() > 1
+                    && opposite.len() > 1
+                    && names.intersection(opposite).count() * 5
+                        >= names.len().min(opposite.len()) * 3
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        Self {
+            ambiguous_codes,
+            validated_name_keys: validated_account_name_keys(tb, je),
+        }
+    }
+
     /// 每行依次为（主体、科目编码、科目名称）。只要已映射的科目名称列
     /// 在同一主体、同一编码下出现多个值，就使用编码＋名称复合键；JE
     /// 没有对应名称时保留未匹配事实，不能退回编码把不同名称并为一户。

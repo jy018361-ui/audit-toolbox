@@ -1026,6 +1026,15 @@ describe("逐行数据质量归并", () => {
     expect(group).toMatchObject({ severity: "提示", count: 1 });
     expect(group.rows).toEqual([]);
   });
+  it("同一凭证的多条提示只计一张凭证", () => {
+    const [group] = summarizeQuality([
+      { type: "汇率缺失", severity: "隔离", voucherId: "E-2026-01-10-记-1", row: 7 },
+      { type: "汇率缺失", severity: "隔离", voucherId: "E-2026-01-10-记-1", row: 8 },
+      { type: "汇率缺失", severity: "隔离", voucherId: "E-2026-01-11-记-2", row: 9 },
+    ]);
+    expect(group.count).toBe(3);
+    expect(group.voucherIds).toHaveLength(2);
+  });
 });
 
 describe("校验未通过时展开具体原因", () => {

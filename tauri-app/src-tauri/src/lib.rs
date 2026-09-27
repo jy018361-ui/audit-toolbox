@@ -49,7 +49,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -1024,29 +1024,45 @@ fn secret_delete(name: String) -> Result<(), AppError> {
 
 #[tauri::command]
 async fn meeting_record_start(
+    app: tauri::AppHandle,
     meeting: State<'_, Arc<meeting_watch::MeetingState>>,
 ) -> Result<Value, AppError> {
     let meeting = meeting.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let summary = tauri::async_runtime::spawn_blocking(move || {
         let dirs = project_dirs()?;
         meeting.begin_recording(dirs.data_local_dir())
     })
     .await
     .map_err(|_| {
         AppError::new("MEETING_RECORD_FAILED", "会议录音启动异常结束。", true, None)
-    })?
+    })??;
+    // 录音可能从询问小窗或工具页任意入口开始：广播给主窗口，
+    // 全局录音指示胶囊与页面状态都按事件对齐，不再各记各的账。
+    let at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let _ = app.emit(
+        "meeting-event",
+        serde_json::json!({"type": "recording_started", "at": at, "summary": summary}),
+    );
+    Ok(summary)
 }
 
 #[tauri::command]
 async fn meeting_record_stop(
+    app: tauri::AppHandle,
     meeting: State<'_, Arc<meeting_watch::MeetingState>>,
 ) -> Result<Value, AppError> {
     let meeting = meeting.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || meeting.finish_recording())
+    let summary = tauri::async_runtime::spawn_blocking(move || meeting.finish_recording())
         .await
         .map_err(|_| {
             AppError::new("MEETING_RECORD_FAILED", "会议录音停止异常结束。", true, None)
-        })?
+        })??;
+    let at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let _ = app.emit(
+        "meeting-event",
+        serde_json::json!({"type": "recording_stopped", "at": at}),
+    );
+    Ok(summary)
 }
 
 #[tauri::command]

@@ -139,15 +139,12 @@ impl MeetingState {
         self.watch_enabled.store(enabled, Ordering::Relaxed);
     }
 
-    pub(crate) fn start_watcher(&self, app: tauri::AppHandle) {
-        let enabled = self.watch_enabled.clone();
-        let stop = self.watcher_stop.clone();
-        let in_call = self.in_call.clone();
-        let log_found = self.log_found.clone();
+    pub(crate) fn start_watcher(self: &Arc<Self>, app: tauri::AppHandle) {
+        let state = self.clone();
         let handle = thread::Builder::new()
             .name("meeting-watch".into())
             .spawn(move || {
-                watch_loop(&app, &enabled, &stop, &in_call, &log_found);
+                watch_loop(&app, &state);
             });
         if let Ok(handle) = handle {
             *self.watcher_join.lock() = Some(handle);
@@ -204,37 +201,61 @@ fn record_error(code: &str, message: &str, detail: Option<String>) -> AppError {
     AppError::new(code, message, true, detail)
 }
 
-fn watch_loop(
-    app: &tauri::AppHandle,
-    enabled: &AtomicBool,
-    stop: &AtomicBool,
-    in_call: &AtomicBool,
-    log_found: &AtomicBool,
-) {
-    let mut state = CallState::Idle;
+fn watch_loop(app: &tauri::AppHandle, state: &Arc<MeetingState>) {
+    let mut call_state = CallState::Idle;
     // (当前文件, 已读偏移)。Teams 重启或日志滚动会换文件，此时整份新文件
     // 重新推断状态——文件很小，代价可忽略。
     let mut current: Option<(PathBuf, u64)> = None;
     let mut partial = String::new();
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if state.watcher_stop.load(Ordering::Relaxed) {
             break;
         }
-        if enabled.load(Ordering::Relaxed) {
-            poll_once(app, &mut state, &mut current, &mut partial, in_call, log_found);
+        if state.watch_enabled.load(Ordering::Relaxed) {
+            poll_once(app, state, &mut call_state, &mut current, &mut partial);
         }
         thread::sleep(POLL_INTERVAL);
     }
 }
 
+/// 通话结束时的统一收尾：无论录音从哪个入口开始（询问小窗、工具页手动），
+/// 都在检测线程里停录混音，成品信息用 `recording_auto_finished` 事件交给
+/// 前端去跑转写纪要任务。此前只有全局弹窗发起的录音会被前端代停，
+/// 工具页手动开始的录音会议一结束就悬着，用户还得回去手点停止。
+fn auto_finalize_recording(app: &tauri::AppHandle, state: &Arc<MeetingState>) {
+    let active = state.recording.lock().take();
+    let Some(active) = active else { return; };
+    let at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    match crate::meeting_record::finalize(active) {
+        Ok(summary) => {
+            let _ = app.emit(
+                "meeting-event",
+                json!({"type": "recording_auto_finished", "at": at, "summary": summary}),
+            );
+        }
+        Err(error) => {
+            let _ = app.emit(
+                "meeting-event",
+                json!({
+                    "type": "recording_failed",
+                    "at": at,
+                    "message": error.user_message,
+                    "detail": error.detail,
+                }),
+            );
+        }
+    }
+}
+
 fn poll_once(
     app: &tauri::AppHandle,
-    state: &mut CallState,
+    state: &Arc<MeetingState>,
+    call_state: &mut CallState,
     current: &mut Option<(PathBuf, u64)>,
     partial: &mut String,
-    in_call: &AtomicBool,
-    log_found: &AtomicBool,
 ) {
+    let in_call = &state.in_call;
+    let log_found = &state.log_found;
     let Some(dir) = teams_log_dir() else {
         log_found.store(false, Ordering::Relaxed);
         return;
@@ -278,19 +299,30 @@ fn poll_once(
         lines.pop()
     };
     if rolled {
-        // 首见/滚动：整份内容只用来推断现状，正在会中才提示一次。
-        *state = infer_initial_state(partial);
-        if *state == CallState::InCall && !in_call.swap(true, Ordering::Relaxed) {
-            emit_event(app, "call_started");
-        } else {
-            in_call.store(*state == CallState::InCall, Ordering::Relaxed);
+        // 首见/滚动：整份内容只用来推断现状；状态翻转照样出事件——
+        // 尤其是会中换文件（Teams 重启/日志滚动）推断回空闲时，
+        // 不能把通话结束吞掉，录音还得照常收尾。
+        let was_in_call = in_call.load(Ordering::Relaxed);
+        *call_state = infer_initial_state(partial);
+        let now_in_call = *call_state == CallState::InCall;
+        match (was_in_call, now_in_call) {
+            (false, true) => emit_event(app, "call_started"),
+            (true, false) => {
+                emit_event(app, "call_ended");
+                auto_finalize_recording(app, state);
+            }
+            _ => {}
         }
+        in_call.store(now_in_call, Ordering::Relaxed);
     } else {
         for line in lines {
-            if let Some(event) = advance(state, line) {
+            if let Some(event) = advance(call_state, line) {
                 let started = event == CallEvent::Started;
                 in_call.store(started, Ordering::Relaxed);
                 emit_event(app, if started { "call_started" } else { "call_ended" });
+                if !started {
+                    auto_finalize_recording(app, state);
+                }
             }
         }
     }

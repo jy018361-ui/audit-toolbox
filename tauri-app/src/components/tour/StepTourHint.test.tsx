@@ -104,7 +104,7 @@ describe("StepTourHint", () => {
         <StepTourHint steps={depositSteps} current={1} />
       </ToolTourProvider>,
     );
-    expect(screen.getByText(/活期有内置利率/)).toBeInTheDocument();
+    expect(screen.getByText(/市场中枢暂估值/)).toBeInTheDocument();
   });
 
   it("剧本里没有对应 key 时落到通用提示", () => {
@@ -143,7 +143,7 @@ describe("StepTourHint", () => {
         <StepTourHint steps={depositSteps} current={1} />
       </ToolTourProvider>,
     );
-    expect(screen.getByText(/活期有内置利率/)).toBeInTheDocument();
+    expect(screen.getByText(/市场中枢暂估值/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "关闭本步提示" }));
     // 再切回 source：该步未写提示，整张卡不出现，也不回退通用文案。
     rerender(

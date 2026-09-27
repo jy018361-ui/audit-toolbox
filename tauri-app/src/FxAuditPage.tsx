@@ -3602,6 +3602,8 @@ export function summarizeQuality(items: Array<Record<string, unknown>>) {
       count: number;
       detail: string;
       rows: number[];
+      voucherIds: string[];
+      unlinkedCount: number;
     }
   >();
   for (const item of items) {
@@ -3614,11 +3616,16 @@ export function summarizeQuality(items: Array<Record<string, unknown>>) {
       count: 0,
       detail: "",
       rows: [],
+      voucherIds: [],
+      unlinkedCount: 0,
     };
     group.count += 1;
     if (!group.detail && item.detail) group.detail = String(item.detail);
     const row = Number(item.row ?? item.sourceRow ?? NaN);
     if (Number.isFinite(row) && group.rows.length < 5) group.rows.push(row);
+    const voucherId = String(item.voucherId ?? "").trim();
+    if (voucherId && !group.voucherIds.includes(voucherId)) group.voucherIds.push(voucherId);
+    if (!voucherId) group.unlinkedCount += 1;
     groups.set(key, group);
   }
   return [...groups.values()].sort(
@@ -3702,11 +3709,13 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     }).format(Number(value ?? 0));
-  const isolated = groups
-    .filter((g) => g.severity === "隔离" || g.severity === "阻断")
-    .reduce((sum, g) => sum + g.count, 0);
+  const isolatedGroups = groups.filter((g) => g.severity === "隔离" || g.severity === "阻断");
+  const isolatedVouchers = new Set(isolatedGroups.flatMap((g) => g.voucherIds)).size;
+  const isolatedRecords = isolatedGroups
+    .reduce((sum, g) => sum + g.unlinkedCount, 0);
   const headline = [
-    isolated ? `${isolated} 行未计入测算` : "",
+    isolatedVouchers ? `${isolatedVouchers} 张凭证未计入测算` : "",
+    isolatedRecords ? `${isolatedRecords} 条记录未计入测算` : "",
     groups.length ? `${groups.length} 类数据问题` : "",
     warnings.length ? `${warnings.length} 项其他提示` : "",
   ].filter(Boolean).join(" · ") || "已核对 TB 来源";
@@ -3758,7 +3767,11 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
                     <tr key={index}>
                       <td>{group.type}</td>
                       <td><span className={`fx-severity ${group.severity === "隔离" || group.severity === "阻断" ? "blocking" : ""}`}>{fxQualityImpact(group.severity, group.type)}</span></td>
-                      <td>{group.count} 行{group.rows.length ? `（如第 ${group.rows.join("、")} 行）` : ""}</td>
+                      <td>{[
+                        group.voucherIds.length ? `${group.voucherIds.length} 张凭证` : "",
+                        group.unlinkedCount ? `${group.unlinkedCount} 条记录` : "",
+                      ].filter(Boolean).join("、")}
+                        {group.rows.length ? `（源文件如第 ${group.rows.join("、")} 行）` : ""}</td>
                       <td>{fxQualityAction(group.type, group.severity)}</td>
                       <td>{group.detail ? <details className="fx-checks-evidence"><summary>查看</summary><small>{group.detail}</small></details> : "—"}</td>
                     </tr>

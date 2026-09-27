@@ -128,6 +128,10 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     try {
       const stopped = await meetingRecordStop();
       refreshStatus();
+      // 空录体检的疑点先亮出来：转写大概率没有内容，让用户知道原因和出路。
+      if (stopped.warnings.length) {
+        setError(stopped.warnings.join("；"));
+      }
       await startGenerate({ audioPath: stopped.audioPath });
     } catch (e) {
       setError(errorText(e));

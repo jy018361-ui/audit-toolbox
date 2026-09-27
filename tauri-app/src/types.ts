@@ -58,9 +58,21 @@ export const TaskRestoreSchema = z.object({
 export type TaskRestore = z.infer<typeof TaskRestoreSchema>;
 
 /** 会议纪要助手：Rust 侧 meeting-event 事件载荷（Teams 通话开始/结束）。 */
+/** 会议检测/录音事件（meeting-event）。
+ * summary 在 recording_started 时是启动摘要、recording_auto_finished 时是
+ * 停录成品信息（含 audioPath），字段不统一故整体宽松，用的时候按需收窄。 */
 export const MeetingEventSchema = z.object({
-  type: z.enum(["call_started", "call_ended"]),
+  type: z.enum([
+    "call_started",
+    "call_ended",
+    "recording_started",
+    "recording_stopped",
+    "recording_auto_finished",
+    "recording_failed",
+  ]),
   at: z.string(),
+  summary: z.record(z.string(), z.unknown()).optional(),
+  message: z.string().optional(),
 });
 export type MeetingEvent = z.infer<typeof MeetingEventSchema>;
 

@@ -164,11 +164,17 @@ pub(crate) fn finalize(active: Arc<ActiveRecording>) -> Result<Value, AppError> 
     let duration_sec = frames / SAMPLE_RATE as u64;
     let size_bytes = fs::metadata(&mix_path).map(|meta| meta.len()).unwrap_or(0);
     let tracks = active.tracks.lock();
-    let warnings: Vec<String> = tracks
+    let mut warnings: Vec<String> = tracks
         .iter()
         .filter(|track| !track.ok)
         .filter_map(|track| track.error.clone())
         .collect();
+    // 停录即体检：设备没选对（如 Teams 用耳机、系统默认是扬声器）时两轨
+    // 都近乎静音，混音里自然没有语音。与其等转写服务报「没有识别到语音
+    // 内容」再让用户猜，不如当场把疑点说出来。
+    if let Some(hint) = silence_hint(&mix_path, duration_sec) {
+        warnings.push(hint);
+    }
     Ok(json!({
         "audioPath": mix_path.to_string_lossy(),
         "recordDir": active.dir.to_string_lossy(),
@@ -177,6 +183,63 @@ pub(crate) fn finalize(active: Arc<ActiveRecording>) -> Result<Value, AppError> 
         "startedAt": active.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "warnings": warnings,
     }))
+}
+
+/// 单秒窗口判「有声」的 RMS 阈值（-42dB ≈ 0.008）：正常说话每秒在
+/// -35dB 上下，环境噪声通常低于 -55dB。
+const LOUD_WINDOW_RMS: f64 = 0.008;
+/// 有声时间占比低于此值（且录音超过 5 秒）判定为「疑似没录到人声」。
+/// 正常会议绝大部分时间有人说话；真机案例里 86 秒录音只有约 9% 时间
+/// 有声（还是挂断提示音），取 15% 既能抓住它又远离正常会议。
+const SPEECH_FRACTION_MIN: f64 = 0.15;
+const SILENCE_CHECK_MIN_SECONDS: u64 = 5;
+
+/// 逐秒统计混音里的有声占比；疑似空录时返回给用户看的提示。
+fn silence_hint(mix_path: &Path, duration_sec: u64) -> Option<String> {
+    if duration_sec <= SILENCE_CHECK_MIN_SECONDS {
+        return None;
+    }
+    let Ok(mut reader) = WavReader::open(mix_path) else {
+        return None;
+    };
+    let rate = reader.spec().sample_rate.max(1) as u64;
+    let mut loud_windows = 0u64;
+    let mut windows = 0u64;
+    let mut sum_sq = 0f64;
+    let mut count = 0u64;
+    let mut push_window = |sum_sq: &mut f64, count: &mut u64, windows: &mut u64, loud: &mut u64| {
+        let rms = (*sum_sq / *count as f64).sqrt();
+        *windows += 1;
+        if rms > LOUD_WINDOW_RMS {
+            *loud += 1;
+        }
+        *sum_sq = 0.0;
+        *count = 0;
+    };
+    for sample in reader.samples::<i16>() {
+        let Ok(value) = sample else { continue };
+        let normalized = value as f32 / 32768.0;
+        sum_sq += (normalized * normalized) as f64;
+        count += 1;
+        if count == rate {
+            push_window(&mut sum_sq, &mut count, &mut windows, &mut loud_windows);
+        }
+    }
+    if count > 0 {
+        push_window(&mut sum_sq, &mut count, &mut windows, &mut loud_windows);
+    }
+    if windows == 0 {
+        return None;
+    }
+    let fraction = loud_windows as f64 / windows as f64;
+    (fraction < SPEECH_FRACTION_MIN).then(|| {
+        format!(
+            "录音里疑似没有录到人声（有声时间仅约 {:.0}%）：录音用的是系统默认扬声器和麦克风，\
+             若会议时佩戴耳机，Teams 可能单独选了耳机设备，导致两轨都没录到声音；\
+             请把耳机设为系统默认设备（或在 Teams 中改用系统默认），或改用扬声器/内置麦克风重新录制。",
+            fraction * 100.0
+        )
+    })
 }
 
 /// 逐样本平均混音两路 16k 单声道 WAV；缺哪一路就用另一路原样。
@@ -370,6 +433,42 @@ mod tests {
             .samples::<i16>()
             .map(|sample| sample.unwrap())
             .collect()
+    }
+
+    /// 空录体检：全程静音的「会议」必须被点名，且提示里要说清设备原因。
+    #[test]
+    fn silence_hint_flags_quiet_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quiet.wav");
+        // 10 秒：9 秒近乎静音 + 1 秒提示音量级的尾巴。
+        let mut samples = vec![30i16; SAMPLE_RATE as usize * 9];
+        samples.extend(vec![8000i16; SAMPLE_RATE as usize]);
+        write_test_wav(&path, &samples);
+        let hint = silence_hint(&path, 10).expect("疑似空录应给出提示");
+        assert!(hint.contains("疑似没有录到人声"));
+        assert!(hint.contains("耳机"));
+    }
+
+    /// 正常会议（大部分时间有人说话）不应误报。
+    #[test]
+    fn silence_hint_passes_normal_speech() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("talk.wav");
+        let loud = vec![6000i16; SAMPLE_RATE as usize * 8];
+        let quiet = vec![40i16; SAMPLE_RATE as usize * 2];
+        let mut samples = quiet.clone();
+        samples.extend_from_slice(&loud);
+        samples.extend_from_slice(&quiet);
+        assert_eq!(silence_hint(&path, 12), None);
+    }
+
+    /// 太短的录音（调试性点击）不做判断。
+    #[test]
+    fn silence_hint_skips_short_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.wav");
+        write_test_wav(&path, &vec![0i16; SAMPLE_RATE as usize * 3]);
+        assert_eq!(silence_hint(&path, 3), None);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ReleaseNotesSchema } from "./updateNotes";
 import { version as appVersion } from "../package.json";
@@ -428,6 +428,22 @@ export async function listenMeetingEvents(
   if (!inTauri()) return () => undefined;
   return listen("meeting-event", (e) =>
     callback(MeetingEventSchema.parse(e.payload)),
+  );
+}
+
+/** 询问小窗把「记/不记」的决定发回主窗口；浏览器预览下静默成功。 */
+export const meetingAskChoice = (accepted: boolean) =>
+  inTauri()
+    ? emit("meeting-ask-choice", { accepted })
+    : Promise.resolve();
+
+/** 主窗口监听询问小窗的决定（「本次不记录」要压制当前这场会）。 */
+export async function listenMeetingAskChoice(
+  callback: (accepted: boolean) => void,
+): Promise<UnlistenFn> {
+  if (!inTauri()) return () => undefined;
+  return listen<{ accepted?: boolean }>("meeting-ask-choice", (e) =>
+    callback(e.payload?.accepted === true),
   );
 }
 // `defaultDirectory` only decides where the dialog opens. An unreachable path

@@ -2306,7 +2306,7 @@ fn check_tb_vs_je(
             .collect::<Vec<_>>()
     };
     let account_policy =
-        ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities);
+        ledger_mapping::AccountMatchPolicy::for_tbje_integrity(&tb_identities, &je_identities);
     let unverified_name_keys = tb_identities
         .iter()
         .chain(&je_identities)

@@ -1625,6 +1625,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       };
     };
     const params: Record<string, unknown> = {
+      accountMatchPolicy: "tbjeIntegrity",
       label: group.label,
       tbSource: source(group.tb),
       tbMapping: mappings[pairingFileKey(group.tb!)] ?? {},

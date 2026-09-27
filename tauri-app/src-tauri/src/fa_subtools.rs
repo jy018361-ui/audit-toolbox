@@ -524,10 +524,7 @@ fn policy_export(
     pause.wait()?;
     save_workbook(&mut wb, &output, &cancel)?;
     fa::check_cancel(&cancel)?;
-    let message = tax_analysis
-        .message
-        .map(|warning| format!("折旧政策对比导出完成；{warning}"))
-        .unwrap_or_else(|| "折旧政策对比导出完成。".into());
+    let message = "折旧政策对比导出完成。";
     progress("completed", 5, 5, &message);
     Ok(json!({
         "engine": "rust-fa",
@@ -539,14 +536,14 @@ fn policy_export(
 
 const POLICY_TAX_HEADERS: [&str; 3] = [
     "税法资产类别（LLM）",
-    "税法最低折旧年限（年）",
+    "税法最低折旧年限（月）",
     "税法年限分析（LLM）",
 ];
 
 const POLICY_TAX_NOTES: [&str; 3] = [
-    "由LLM根据期末资产类别，在工具内置的五类税法最低折旧年限参考口径中选择最匹配类别。",
-    "根据LLM匹配的税法资产类别，从内置税法参考规则自动回填，不由LLM自由生成。",
-    "比较期末计划使用年限与一般税法最低折旧年限。未考虑加速折旧、一次性扣除等特殊政策，结果仅供审计复核。",
+    "同一期末资产类别只识别一次；无法识别或LLM不可用时，默认归入“与生产经营活动有关的器具、工具、家具等”，需人工核对。",
+    "根据税法资产类别从内置规则自动回填月数（年数×12），不由LLM生成。默认归类时为60个月。",
+    "按月比较期末计划使用寿命与一般税法最低折旧年限。未考虑加速折旧、一次性扣除等特殊政策，结果仅供审计复核。",
 ];
 
 struct TaxStandardRule {
@@ -586,14 +583,14 @@ const TAX_STANDARD_RULES: [TaxStandardRule; 5] = [
 pub(crate) struct PolicyTaxAnalysis {
     pub(crate) rows: Vec<Vec<String>>,
     pub(crate) completed: bool,
-    pub(crate) message: Option<String>,
 }
 
-fn blank_policy_tax_analysis(row_count: usize, reason: &str) -> PolicyTaxAnalysis {
+const DEFAULT_TAX_RULE_INDEX: usize = 2;
+
+fn default_policy_tax_analysis(rows: &[Vec<String>]) -> PolicyTaxAnalysis {
     PolicyTaxAnalysis {
-        rows: vec![vec![String::new(), String::new(), String::new()]; row_count],
+        rows: tax_analysis_from_rules(rows, &BTreeMap::new()),
         completed: false,
-        message: Some(format!("LLM税法年限分析未完成：{reason}")),
     }
 }
 
@@ -606,19 +603,14 @@ fn policy_llm_settings(params: &Value) -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
-fn policy_tax_payload(rows: &[Vec<String>], offset: usize) -> Value {
-    let rows = rows
+fn policy_tax_payload(categories: &[String], offset: usize) -> Value {
+    let rows = categories
         .iter()
         .enumerate()
-        .map(|(index, row)| {
-            let months = row
-                .get(3)
-                .and_then(|value| value.parse::<f64>().ok())
-                .unwrap_or(0.0);
+        .map(|(index, category)| {
             json!({
                 "rowId": offset + index,
-                "endingAssetCategory": row.get(1).cloned().unwrap_or_default(),
-                "endingUsefulLifeYears": months / 12.0,
+                "endingAssetCategory": category,
             })
         })
         .collect::<Vec<_>>();
@@ -628,58 +620,54 @@ fn policy_tax_payload(rows: &[Vec<String>], offset: usize) -> Value {
             json!({
                 "ruleId": rule.id,
                 "taxAssetCategory": rule.category,
-                "minimumYears": rule.minimum_years,
             })
         })
         .collect::<Vec<_>>();
     json!({"rows": rows, "allowedTaxRules": rules})
 }
 
-fn tax_analysis_from_response(
-    rows: &[Vec<String>],
+fn collect_tax_rules(
+    categories: &[String],
     offset: usize,
     response: &Value,
-) -> Vec<Vec<String>> {
-    let mut items = BTreeMap::<usize, &Value>::new();
+    rules: &mut BTreeMap<String, String>,
+) {
     if let Some(values) = response.get("items").and_then(Value::as_array) {
         for item in values {
-            if let Some(row_id) = item.get("rowId").and_then(Value::as_u64) {
-                items.insert(row_id as usize, item);
+            if let Some(index) = item.get("rowId").and_then(Value::as_u64)
+                && let Some(category) = (index as usize).checked_sub(offset).and_then(|index| categories.get(index))
+            {
+                let rule_id = item.get("ruleId").and_then(Value::as_str).unwrap_or("");
+                rules.insert(category.clone(), rule_id.to_owned());
             }
         }
     }
+}
+
+fn tax_analysis_from_rules(
+    rows: &[Vec<String>],
+    rules: &BTreeMap<String, String>,
+) -> Vec<Vec<String>> {
     rows.iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let item = items.get(&(offset + index)).copied();
-            let rule_id = item
-                .and_then(|value| value.get("ruleId"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let rule = TAX_STANDARD_RULES.iter().find(|rule| rule.id == rule_id);
+        .map(|row| {
+            let rule_id = row.get(1).and_then(|category| rules.get(category)).map(String::as_str).unwrap_or("");
+            let rule = TAX_STANDARD_RULES.iter().find(|rule| rule.id == rule_id)
+                .unwrap_or(&TAX_STANDARD_RULES[DEFAULT_TAX_RULE_INDEX]);
             let months = row
                 .get(3)
                 .and_then(|value| value.parse::<f64>().ok())
                 .unwrap_or(0.0);
-            let years = months / 12.0;
-            match rule {
-                Some(rule) => {
-                    // The LLM supplies the semantic classification. The minimum and final
-                    // comparison are deterministic so an inconsistent model status cannot
-                    // turn a numerically short life into a false negative.
-                    let status = if years <= 0.0 || years + 1e-9 < rule.minimum_years {
-                        "可能低于税法年限"
-                    } else {
-                        "未见明显异常"
-                    };
-                    vec![
-                        rule.category.to_owned(),
-                        fa::display_number(rule.minimum_years),
-                        status.to_owned(),
-                    ]
-                }
-                None => vec!["待确认".into(), String::new(), "可能低于税法年限".into()],
-            }
+            let minimum_months = rule.minimum_years * 12.0;
+            let status = if months <= 0.0 || months + 1e-9 < minimum_months {
+                "可能低于税法年限"
+            } else {
+                "未见明显异常"
+            };
+            vec![
+                rule.category.to_owned(),
+                fa::display_number(minimum_months),
+                status.to_owned(),
+            ]
         })
         .collect()
 }
@@ -694,7 +682,6 @@ pub(crate) fn build_policy_tax_analysis(
         return Ok(PolicyTaxAnalysis {
             rows: Vec::new(),
             completed: true,
-            message: None,
         });
     }
     let mock = params.get("__policyTaxLlmMock");
@@ -704,11 +691,19 @@ pub(crate) fn build_policy_tax_analysis(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     if !enabled && mock.is_none() {
-        return Ok(blank_policy_tax_analysis(rows.len(), "工具箱LLM未启用"));
+        return Ok(default_policy_tax_analysis(rows));
     }
-    let system = "你是固定资产税法类别映射助手。对payload.rows逐行判断其endingAssetCategory最符合payload.allowedTaxRules中的哪个税法资产类别。只能返回给定ruleId；无法可靠归类时ruleId填unknown。endingUsefulLifeYears已由工具从统一月数除以12得到。status只能是未见明显异常或可能低于税法年限。返回严格JSON：{items:[{rowId,ruleId,status}]}。不得新增类别、最低年限或法规。";
-    let mut analyzed = Vec::with_capacity(rows.len());
-    for (batch_index, batch) in rows.chunks(100).enumerate() {
+    let system = "你是固定资产税法类别映射助手。对payload.rows逐项判断endingAssetCategory最符合payload.allowedTaxRules中的哪个税法资产类别。只能返回给定ruleId；无法可靠归类时ruleId填unknown。返回严格JSON：{items:[{rowId,ruleId}]}。不得新增类别、最低年限或法规。";
+    let mut categories = Vec::<String>::new();
+    for row in rows {
+        if let Some(category) = row.get(1)
+            && !categories.contains(category)
+        {
+            categories.push(category.clone());
+        }
+    }
+    let mut rules = BTreeMap::<String, String>::new();
+    for (batch_index, batch) in categories.chunks(100).enumerate() {
         pause.wait()?;
         fa::check_cancel(cancel)?;
         let offset = batch_index * 100;
@@ -722,19 +717,15 @@ pub(crate) fn build_policy_tax_analysis(
             {
                 Some(value) => value,
                 None => {
-                    return Ok(blank_policy_tax_analysis(
-                        rows.len(),
-                        "模型调用失败或未返回有效JSON",
-                    ));
+                    return Ok(default_policy_tax_analysis(rows));
                 }
             }
         };
-        analyzed.extend(tax_analysis_from_response(batch, offset, &response));
+        collect_tax_rules(batch, offset, &response, &mut rules);
     }
     Ok(PolicyTaxAnalysis {
-        rows: analyzed,
+        rows: tax_analysis_from_rules(rows, &rules),
         completed: true,
-        message: None,
     })
 }
 
@@ -1656,6 +1647,7 @@ mod tests {
         });
         let value = run_job_quiet("fa.policy_export", params.clone()).unwrap();
         assert_eq!(value["taxAnalysisCompleted"], json!(true));
+        assert_eq!(value["message"], "折旧政策对比导出完成。");
         let output = dir.join("折旧政策对比.xlsx");
         assert!(output.is_file());
         // 工作簿固定两页：折旧政策对比 + 税法最低折旧年限参考。
@@ -1700,10 +1692,18 @@ mod tests {
         for expected in POLICY_TAX_HEADERS {
             assert!(policy_text.contains(expected), "政策对比缺少：{expected}");
         }
+        let mut policy_book = calamine::open_workbook_auto(&output).unwrap();
+        let policy_cells = calamine::Reader::worksheet_range(&mut policy_book, "折旧政策对比").unwrap();
+        let tax_months = policy_cells.rows().skip(2)
+            .filter_map(|row| row.get(12).map(ToString::to_string))
+            .collect::<Vec<_>>();
+        assert!(tax_months.iter().any(|value| value == "120"));
+        assert!(tax_months.iter().any(|value| value == "36"));
+        assert!(tax_months.iter().any(|value| value == "48"));
         assert!(policy_text.contains("可能低于税法年限"));
         assert!(zip_entry(&output, "xl/styles.xml").contains("FFE4DFEC"));
         let comments = zip_entry(&output, "xl/comments1.xml");
-        assert!(comments.contains("不由LLM自由生成"));
+        assert!(comments.contains("不由LLM生成"));
         assert!(comments.contains("未考虑加速折旧"));
         // 税法参考表：五类固定资产 + 无形资产 + 特殊规定都要在；
         // 政策原文列必须落到条款原文，不能只留条款号。
@@ -1757,37 +1757,72 @@ mod tests {
     }
 
     #[test]
-    fn policy_tax_analysis_sends_years_and_validates_the_two_statuses() {
+    fn policy_tax_analysis_groups_categories_and_compares_months() {
         let rows = vec![
             vec!["机器".into(), "机器设备".into(), "60".into(), "60".into()],
             vec!["机器".into(), "机器设备".into(), "120".into(), "120".into()],
             vec!["其他".into(), "其他设备".into(), "48".into(), "48".into()],
             vec!["电子".into(), "电子设备".into(), "0".into(), "0".into()],
         ];
-        let payload = policy_tax_payload(&rows, 0);
-        assert_eq!(payload["rows"][0]["endingUsefulLifeYears"], json!(5.0));
-        assert_eq!(payload["rows"][1]["endingUsefulLifeYears"], json!(10.0));
+        let categories = vec!["机器设备".into(), "其他设备".into(), "电子设备".into()];
+        let payload = policy_tax_payload(&categories, 0);
+        assert_eq!(payload["rows"].as_array().unwrap().len(), 3);
+        assert_eq!(payload["rows"][0]["endingAssetCategory"], "机器设备");
+        assert!(payload["rows"][0].get("endingUsefulLifeYears").is_none());
 
-        // 模型把 5 年机器误报为无异常、把 10 年机器误报为可能异常；后台均按
-        // 模型选择的税法类别及锁定年限纠正，避免出现数值上的假阴性/假阳性。
         let response = json!({"items": [
-            {"rowId": 0, "ruleId": "production_equipment", "status": "未见明显异常"},
-            {"rowId": 1, "ruleId": "production_equipment", "status": "可能低于税法年限"},
-            {"rowId": 2, "ruleId": "unknown", "status": "未见明显异常"},
-            {"rowId": 3, "ruleId": "electronic", "status": "未见明显异常"}
+            {"rowId": 0, "ruleId": "production_equipment"},
+            {"rowId": 1, "ruleId": "unknown"},
+            {"rowId": 2, "ruleId": "electronic"}
         ]});
-        let analyzed = tax_analysis_from_response(&rows, 0, &response);
+        let mut rules = BTreeMap::new();
+        collect_tax_rules(&categories, 0, &response, &mut rules);
+        let analyzed = tax_analysis_from_rules(&rows, &rules);
         assert_eq!(
             analyzed[0],
             [
                 "飞机、火车、轮船、机器、机械和其他生产设备",
-                "10",
+                "120",
                 "可能低于税法年限"
             ]
         );
         assert_eq!(analyzed[1][2], "未见明显异常");
-        assert_eq!(analyzed[2], ["待确认", "", "可能低于税法年限"]);
+        assert_eq!(analyzed[2], ["与生产经营活动有关的器具、工具、家具等", "60", "可能低于税法年限"]);
         assert_eq!(analyzed[3][2], "可能低于税法年限");
+        assert_eq!(analyzed[3][1], "36");
+    }
+
+    #[test]
+    fn policy_tax_analysis_uses_default_category_when_llm_disabled() {
+        let rows = vec![vec!["其他".into(), "其他设备".into(), "120".into(), "120".into()]];
+        let result = default_policy_tax_analysis(&rows);
+        assert!(!result.completed);
+        assert_eq!(result.rows[0], ["与生产经营活动有关的器具、工具、家具等", "60", "未见明显异常"]);
+    }
+
+    #[test]
+    fn policy_tax_analysis_classifies_each_category_once() {
+        let rows = vec![
+            vec!["机器".into(), "机器设备".into(), "60".into(), "60".into()],
+            vec!["机器".into(), "机器设备".into(), "120".into(), "120".into()],
+            vec!["其他".into(), "其他设备".into(), "48".into(), "48".into()],
+        ];
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = build_policy_tax_analysis(
+            &rows,
+            &json!({"__policyTaxLlmMock":{"items":[
+                {"rowId":0,"ruleId":"production_equipment"},
+                {"rowId":1,"ruleId":"unknown"}
+            ]}}),
+            &cancel,
+            &pause,
+        ).unwrap();
+        assert!(result.completed);
+        assert_eq!(result.rows[0][..2], result.rows[1][..2]);
+        assert_eq!(result.rows[0][2], "可能低于税法年限");
+        assert_eq!(result.rows[1][2], "未见明显异常");
+        assert_eq!(result.rows[2], ["与生产经营活动有关的器具、工具、家具等", "60", "可能低于税法年限"]);
     }
 
     #[test]

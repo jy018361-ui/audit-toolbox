@@ -380,7 +380,7 @@ fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
     let system = if supplement {
         "你是固定资产审计补充清单映射复核助手。只能使用 payload.headers 中的原始列名。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"新增方式\"}，禁止返回字符串。新增清单角色仅 addition_method/addition_date，file_side=file1；处置清单角色仅 disposal_method/disposal_date/disposal_orig/disposal_dep，file_side=file2。action 只能 fill/replace/clear/keep。逐项结合样例复核已有映射：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。"
     } else {
-        "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项结合 samples 核对：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。类别列应为少量重复的分类文本，原值/折旧/残值率应为数值，日期列为日期，寿命为月数。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。"
+        "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项结合 samples 核对：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。类别列应为少量重复的分类文本；若已映射类别列的 samples 多数是 Y110、A12-3 这类短字母数字代码而非类别文字，且 headers 中存在值为类别文字的列（例如 资产类型描述），必须返回 action=replace 指向该列，不得 keep。原值/折旧/残值率应为数值，日期列为日期，寿命为月数。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。"
     };
     let content = request_fa_llm(&settings, system, &payload.to_string())?;
     let parsed = parse_llm_json(&content).ok_or_else(|| {
@@ -535,6 +535,74 @@ fn looks_like_category_text(header: &str) -> bool {
         .any(|token| normalized.contains(&normalize_header(token)))
 }
 
+/// 短英数字代码形态（SAP 风格类别代码）。与旧版 Python 的
+/// `_CATEGORY_CODE_VALUE_PATTERN` 一致：可选字母前缀（≤4）+ 可选分隔符
+/// + 必须含数字 + 末尾允许字母数字/分隔符。覆盖 Y110 / A12-3 / 12345 /
+/// AB-12，拒绝中文与纯字母，长度超过 12 个字符不算短代码。
+fn is_category_code_value(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() > 12 {
+        return false;
+    }
+    let mut index = 0;
+    let mut letters = 0;
+    while index < chars.len() && chars[index].is_ascii_alphabetic() && letters < 4 {
+        index += 1;
+        letters += 1;
+    }
+    if index < chars.len() && matches!(chars[index], '-' | '_' | '.') {
+        index += 1;
+    }
+    if index >= chars.len() || !chars[index].is_ascii_digit() {
+        return false;
+    }
+    while index < chars.len()
+        && chars[index].is_ascii_digit()
+    {
+        index += 1;
+    }
+    chars[index..].iter().all(|ch| {
+        ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/')
+    })
+}
+
+/// 类别列名中的数值字段黑名单（旧版 CATEGORY_NUMERIC_BLACKLIST）：
+/// 列名带这些词的列即使含“类别/类型”也不该当类别列。
+fn is_category_numeric_field(header: &str) -> bool {
+    ["原值", "累计折旧", "成本", "净值", "残值", "减值", "折旧", "金额", "价值"]
+        .iter()
+        .any(|token| header.contains(token))
+}
+
+/// 列的样例值是否多数像短代码（前 8 个非空值中 ≥50% 呈代码形态）。
+/// 列名可能歧义——“资产分类”既可能存中文类型名也可能存 SAP 代码——
+/// 但值形态不会骗人，这是区分“分类代码列”与“类别名称列”的核心信号。
+fn category_values_look_like_codes(table: &Table, column: &str) -> bool {
+    let Some(index) = table
+        .headers
+        .iter()
+        .position(|header| header.trim() == column.trim())
+    else {
+        return false;
+    };
+    let mut total = 0usize;
+    let mut code_like = 0usize;
+    for row in table.rows.iter() {
+        let text = cell(row, index).trim();
+        if text.is_empty() {
+            continue;
+        }
+        total += 1;
+        if is_category_code_value(text) {
+            code_like += 1;
+        }
+        if total >= 8 {
+            break;
+        }
+    }
+    total > 0 && code_like as f64 / total as f64 >= 0.5
+}
+
 /// 收集某列的去重值：只扫前 2000 行、最多 200 个去重值，控制大表开销。
 /// 列不存在于表头时返回 None。
 fn column_value_set(table: &Table, column: &str) -> Option<std::collections::BTreeSet<String>> {
@@ -683,6 +751,53 @@ fn local_category_mismatch_suggestions(
         }
     }
     result
+}
+
+/// 单文件内的“类别列映射到了分类代码列”检测：不依赖两期对照——两期都
+/// 错映到同一个代码列时取值高度重叠，跨期检测看不出异常，这层兜底负责
+/// 拦住。当前类别列样例值多数像短代码（如 Y110）、且本表另有一列列名
+/// 带类别语义（类型/类别/分类/大类）、值为分类文本时，产出 review 建议，
+/// 与跨期检测共用 confidence 0.9 + action review 的兜底分流。
+fn local_category_code_suspects(
+    table: &Table,
+    mapping: Option<&Value>,
+    keys: Option<&Value>,
+    side: &str,
+) -> Vec<Value> {
+    let Some(column) = mapping_column(mapping, "category") else {
+        return Vec::new();
+    };
+    if !category_values_look_like_codes(table, &column) {
+        return Vec::new();
+    }
+    let keys = key_columns(keys);
+    for header in &table.headers {
+        let trimmed = header.trim();
+        if trimmed == column || keys.contains(trimmed) {
+            continue;
+        }
+        if !looks_like_category_text(header) || looks_like_id(header) {
+            continue;
+        }
+        if category_values_look_like_codes(table, header) {
+            continue;
+        }
+        let Some(values) = column_value_set(table, header) else {
+            continue;
+        };
+        if values.is_empty() {
+            continue;
+        }
+        return vec![json!({
+            "role": "category",
+            "file_side": side,
+            "suggested_column": header,
+            "confidence": 0.9,
+            "action": "review",
+            "reason": format!("当前类别列“{column}”的样例值多为 Y110 这类短代码，而“{header}”的值为分类文本，疑似类别应映射到“{header}”。")
+        })];
+    }
+    Vec::new()
 }
 
 pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
@@ -841,7 +956,7 @@ fn main_llm_payload(params: &Value) -> Result<Value, AppError> {
         optional_header(params, "endHeaderRow")?,
         false,
     )?;
-    let suspect_mappings = local_category_mismatch_suggestions(
+    let mut suspect_mappings = local_category_mismatch_suggestions(
         &begin,
         params.get("beginMapping"),
         params.get("beginKeys"),
@@ -849,6 +964,18 @@ fn main_llm_payload(params: &Value) -> Result<Value, AppError> {
         params.get("endMapping"),
         params.get("endKeys"),
     );
+    suspect_mappings.extend(local_category_code_suspects(
+        &begin,
+        params.get("beginMapping"),
+        params.get("beginKeys"),
+        "file1",
+    ));
+    suspect_mappings.extend(local_category_code_suspects(
+        &end,
+        params.get("endMapping"),
+        params.get("endKeys"),
+        "file2",
+    ));
     Ok(json!({
         "file1": main_llm_side_payload(
             &begin,
@@ -1241,13 +1368,6 @@ fn export(
         write_xlsx_with_tax_analysis(&output, &result, &params, &cancel, tax_analysis.as_ref())?;
     }
     let mut export_message = "FA List 导出完成".to_owned();
-    if let Some(warning) = tax_analysis
-        .as_ref()
-        .and_then(|analysis| analysis.message.as_deref())
-    {
-        export_message.push('；');
-        export_message.push_str(warning);
-    }
     if !result.unmatched_addition.is_empty() || !result.unmatched_disposal.is_empty() {
         let path = output
             .parent()
@@ -1804,6 +1924,8 @@ pub(crate) fn suggest_mapping(table: &Table) -> Map<String, Value> {
     for (role, terms) in rules.into_iter().filter(|(r, _)| *r != "unused") {
         let value = if role == "matchKey" {
             pick_match_header(table, terms)
+        } else if role == "category" {
+            pick_category_header(table, terms)
         } else {
             pick_header(h, terms, false)
         };
@@ -1892,6 +2014,40 @@ fn pick_match_header(table: &Table, terms: &[&str]) -> Option<String> {
         })
         .max_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.cmp(&a.1)))
         .map(|(_, _, header)| header)
+}
+
+/// 类别列专用挑选：在词表两轮（先精确、再包含、按列序）匹配的基础上，
+/// 加两道旧版 Python `pick_fa_category_column` 就有的防线——列名命中
+/// 数值字段黑名单的直接跳过；样例值多数像短代码（如 Y110）的列让位，
+/// 继续找下一列。全部候选都被否掉时返回 None，交给 LLM 复核层补位。
+fn pick_category_header(table: &Table, terms: &[&str]) -> Option<String> {
+    let wanted = terms
+        .iter()
+        .map(|v| normalize_header(v))
+        .collect::<Vec<_>>();
+    for exact in [true, false] {
+        for header in &table.headers {
+            if is_category_numeric_field(header) {
+                continue;
+            }
+            let n = normalize_header(header);
+            let matched = wanted.iter().any(|term| {
+                if exact {
+                    n == *term
+                } else {
+                    !term.is_empty() && n.contains(term)
+                }
+            });
+            if !matched {
+                continue;
+            }
+            if category_values_look_like_codes(table, header) {
+                continue;
+            }
+            return Some(header.clone());
+        }
+    }
+    None
 }
 
 fn pick_header(headers: &[String], terms: &[&str], id: bool) -> Option<String> {
@@ -5073,7 +5229,7 @@ fn field_source_for_header(
             }
         }
         "折旧期间" | "折旧政策对比" => {
-            if header.contains("（LLM）") || header == "税法最低折旧年限（年）" {
+            if header.contains("（LLM）") || header == "税法最低折旧年限（月）" {
                 return "LLM辅助/税法参考";
             }
             if header.contains("判断") {
@@ -6828,6 +6984,99 @@ mod tests {
         assert!(suggestions.is_empty());
     }
     #[test]
+    fn 类别代码形态判断与短代码正则一致() {
+        for text in ["Y110", "A12-3", "12345", "AB-12", "0000", "1100003.1"] {
+            assert!(is_category_code_value(text), "{text} 应视为类别代码");
+        }
+        for text in [
+            "房屋及建筑物",
+            "机器设备",
+            "Office Equipment",
+            "ABCDE1",
+            "很长的资产类别名称超过十二个字符",
+        ] {
+            assert!(!is_category_code_value(text), "{text} 不应视为类别代码");
+        }
+    }
+    #[test]
+    fn suggest_mapping类别代码列让位给类别文本列() {
+        // 用户样例 2025固定资产卡片02.xlsx：A列“资产分类”存 Y110 代码，
+        // B列“资产类型描述”才是分类文本；类别不得再选中 A 列。
+        let table = in_memory_table(
+            &[
+                "资产分类",
+                "资产类型描述",
+                "资产编码",
+                "资产编码",
+                "资产描述",
+                "原值(期末)",
+                "累计折旧",
+            ],
+            &[
+                &["Y110", "房屋及建筑物", "0000", "1100000", "冷量台土建安装", "269327.01", "60598.58"],
+                &["Y110", "房屋及建筑物", "0000", "1100001", "实验室土建", "221480.58", "26577.68"],
+                &["Y120", "机器设备", "0000", "1100002", "高速冲床", "36416.64", "4370"],
+            ],
+        );
+        let mapping = suggest_mapping(&table);
+        assert_eq!(mapping["category"].as_str(), Some("资产类型描述"));
+    }
+    #[test]
+    fn suggest_mapping类别文本列不受嗅探影响() {
+        let table = in_memory_table(
+            &["资产编码", "资产类别", "资产名称", "原值", "累计折旧"],
+            &[
+                &["E001", "房屋及建筑物", "冷量台", "100", "10"],
+                &["E002", "机器设备", "冲床", "200", "20"],
+            ],
+        );
+        let mapping = suggest_mapping(&table);
+        assert_eq!(mapping["category"].as_str(), Some("资产类别"));
+        assert_eq!(mapping["matchKey"].as_str(), Some("资产编码"));
+    }
+    #[test]
+    fn 两期同映代码列时单文件值形态预警兜底() {
+        // 两期都把类别映到同一个代码列时取值高度重叠，跨期检测看不出
+        // 异常；单文件内“类别列值像代码+存在文本类别列”必须各自报警，
+        // LLM 漏报时经 suspectMappings 兜底进复核链路。
+        let table = in_memory_table(
+            &["资产编码", "资产分类", "资产类型描述"],
+            &[
+                &["E001", "Y110", "房屋及建筑物"],
+                &["E002", "Y120", "机器设备"],
+                &["E003", "Y130", "运输工具"],
+            ],
+        );
+        let suggestions = local_category_code_suspects(
+            &table,
+            Some(&json!({"category": "资产分类"})),
+            Some(&json!(["资产编码"])),
+            "file2",
+        );
+        assert_eq!(suggestions.len(), 1);
+        let item = &suggestions[0];
+        assert_eq!(item["suggested_column"], "资产类型描述");
+        assert_eq!(item["action"], "review");
+        assert_eq!(item["confidence"], 0.9);
+    }
+    #[test]
+    fn 类别列值正常时单文件值形态预警保持沉默() {
+        let table = in_memory_table(
+            &["资产编码", "资产类别", "资产名称"],
+            &[
+                &["E001", "房屋及建筑物", "冷量台"],
+                &["E002", "机器设备", "冲床"],
+            ],
+        );
+        let suggestions = local_category_code_suspects(
+            &table,
+            Some(&json!({"category": "资产类别"})),
+            None,
+            "file1",
+        );
+        assert!(suggestions.is_empty());
+    }
+    #[test]
     fn finalize_injects_local_suspect_mapping_when_llm_missed_it() {
         let value = finalize_llm_review(
             json!({"suggestions":[],"fieldReviews":[],"matchReview":{"action":"keep"}}),
@@ -7715,7 +7964,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(period_headers.ends_with(&[
             "税法资产类别（LLM）".to_owned(),
-            "税法最低折旧年限（年）".to_owned(),
+            "税法最低折旧年限（月）".to_owned(),
             "税法年限分析（LLM）".to_owned(),
         ]));
         let pivot = wb.worksheet_range("数据透视表").unwrap();
@@ -8065,11 +8314,27 @@ mod tests {
 
     #[test]
     #[ignore = "requires the user's long-asset sample workbook"]
+    #[test]
     fn real_long_asset_sample_selects_the_2024_detail_sheet() {
         let path = std::env::var_os("FA_LONG_ASSET_SAMPLE").expect("FA_LONG_ASSET_SAMPLE");
         let table = load_table(Path::new(&path), None, None, true).unwrap();
         assert_eq!(table.sheet.as_deref(), Some("固定资产明细 241231"));
         assert_eq!(table.rows.len(), 5_449);
+    }
+
+    /// 用户样例 2025固定资产卡片02.xlsx（A列“资产分类”存 Y110 代码）：
+    /// 类别必须让位给“资产类型描述”，资产ID 仍落在唯一率更高的资产编码列。
+    #[test]
+    #[ignore = "requires FA_CATEGORY_CODE_SAMPLE pointing at a real card workbook with a code-shaped 资产分类 column"]
+    fn real_category_code_sample_maps_text_description_column() {
+        let path =
+            std::env::var_os("FA_CATEGORY_CODE_SAMPLE").expect("FA_CATEGORY_CODE_SAMPLE");
+        let table = load_table(Path::new(&path), Some("2512"), None, true).unwrap();
+        let mapping = suggest_mapping(&table);
+        assert_eq!(mapping["category"].as_str(), Some("资产类型描述"));
+        // 两列同名“资产编码”：前缀列（0000/0001）几乎全重复，读取时第二列
+        // 去重为“资产编码.1”，唯一率打分应选中它作为资产ID。
+        assert_eq!(mapping["matchKey"].as_str(), Some("资产编码.1"));
     }
 
     #[test]

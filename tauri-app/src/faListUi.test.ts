@@ -11,6 +11,7 @@ import {
   faReviewReasons,
   faReviewSummary,
   faRolesForSide,
+  faSelectColumnRole,
   isFaMatchDisabled,
   normalizeFaSuggestedMapping,
   planFaLlmChanges,
@@ -764,5 +765,102 @@ describe("预览表头展示同列多角色", () => {
         category: "类别",
       }).map(([, label]) => label),
     ).toEqual(["资产ID", "资产名称"]);
+  });
+});
+
+describe("列头下拉选角色只做加法", () => {
+  const mainFields = ["matchKeys", "category", "name", "originalValue"];
+
+  it("在资产名称列上勾选资产ID，名称保留并得到 ID＋名称双角色", () => {
+    const patch = faSelectColumnRole(
+      { matchKeys: ["资产编号"], name: "资产名称列" },
+      "matchKeys",
+      ["资产编号"],
+      "资产名称列",
+      "matchKeys",
+      mainFields,
+    );
+    expect(patch.mapping.name).toBe("资产名称列");
+    expect(patch.mapping.matchKeys).toEqual(["资产编号", "资产名称列"]);
+    expect(patch.keys).toEqual(["资产编号", "资产名称列"]);
+  });
+
+  it("反向同样成立：在匹配键列上选资产名称，不把它移出匹配键", () => {
+    const patch = faSelectColumnRole(
+      { matchKeys: ["资产编号"], name: "旧名称列" },
+      "matchKeys",
+      ["资产编号"],
+      "资产编号",
+      "name",
+      mainFields,
+    );
+    expect(patch.mapping.matchKeys).toEqual(["资产编号"]);
+    expect(patch.mapping.name).toBe("资产编号");
+    expect(patch.keys).toEqual(["资产编号"]);
+  });
+
+  it("单值角色换列时原列让位，且不影响本列已挂的其他角色", () => {
+    const patch = faSelectColumnRole(
+      { matchKeys: ["资产编号"], category: "类别甲" },
+      "matchKeys",
+      ["资产编号"],
+      "资产编号",
+      "category",
+      mainFields,
+    );
+    expect(patch.mapping.category).toBe("资产编号");
+    expect(patch.mapping.matchKeys).toEqual(["资产编号"]);
+  });
+
+  it("重复勾选资产ID不产生重复匹配键", () => {
+    const patch = faSelectColumnRole(
+      { matchKeys: ["资产编号"] },
+      "matchKeys",
+      ["资产编号"],
+      "资产编号",
+      "matchKeys",
+      mainFields,
+    );
+    expect(patch.mapping.matchKeys).toEqual(["资产编号"]);
+    expect(patch.keys).toEqual(["资产编号"]);
+  });
+
+  it("只有选空值（—）才清空本列全部角色，含匹配键", () => {
+    const patch = faSelectColumnRole(
+      { matchKeys: ["资产编号", "资产名称列"], name: "资产名称列", category: "类别甲" },
+      "matchKeys",
+      ["资产编号", "资产名称列"],
+      "资产名称列",
+      "",
+      mainFields,
+    );
+    expect(patch.mapping.name).toBeUndefined();
+    expect(patch.mapping.matchKeys).toEqual(["资产编号"]);
+    expect(patch.keys).toEqual(["资产编号"]);
+    expect(patch.mapping.category).toBe("类别甲");
+  });
+
+  it("补充清单同样适用：keys 多选加法，— 清空", () => {
+    const supplementFields = ["keys", "method", "date"];
+    const dual = faSelectColumnRole(
+      { keys: ["资产编号"], method: "变动方式列" },
+      "keys",
+      ["资产编号"],
+      "变动方式列",
+      "keys",
+      supplementFields,
+    );
+    expect(dual.mapping.method).toBe("变动方式列");
+    expect(dual.keys).toEqual(["资产编号", "变动方式列"]);
+    const cleared = faSelectColumnRole(
+      dual.mapping,
+      "keys",
+      dual.keys,
+      "变动方式列",
+      "",
+      supplementFields,
+    );
+    expect(cleared.mapping.method).toBeUndefined();
+    expect(cleared.keys).toEqual(["资产编号"]);
   });
 });

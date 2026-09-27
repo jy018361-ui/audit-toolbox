@@ -180,6 +180,49 @@ export function faMappedRolesForColumn<T extends readonly [string, string]>(
       : String(value ?? "") === normalized;
   });
 }
+/// 列头映射下拉选中某角色后的结果。
+///
+/// 选择只做"加法"：把选中角色指到本列（单值角色自动从原列让位），
+/// 本列已承担的其他角色一律保留——在"资产名称"列上再选"资产ID"应得到
+/// ID＋名称双角色，而不是用 ID 顶掉名称。只有选空值（"—"）才清除本列
+/// 的全部角色。multiField 是多列角色字段（主表 matchKeys、补充清单 keys），
+/// 命中该角色的列即匹配键，与 keys 影子状态同步返回。
+export type FaColumnRoleSelection = {
+  mapping: FaMappingLike;
+  keys: string[];
+};
+export function faSelectColumnRole(
+  mapping: FaMappingLike,
+  multiField: string,
+  keys: string[],
+  column: string,
+  role: string,
+  roleFields: readonly string[],
+): FaColumnRoleSelection {
+  const col = column.trim();
+  if (!role) {
+    const next: FaMappingLike = { ...mapping };
+    for (const field of roleFields) {
+      const value = next[field];
+      if (Array.isArray(value)) {
+        next[field] = value.filter((item) => item !== col);
+      } else if (String(value ?? "") === col) {
+        next[field] = undefined;
+      }
+    }
+    const cleared = next[multiField];
+    return {
+      mapping: next,
+      keys: Array.isArray(cleared) ? cleared : keys.filter((item) => item !== col),
+    };
+  }
+  if (role === multiField) {
+    const nextKeys = keys.includes(col) ? keys : [...keys, col];
+    return { mapping: { ...mapping, [multiField]: nextKeys }, keys: nextKeys };
+  }
+  return { mapping: { ...mapping, [role]: col }, keys };
+}
+
 // 选填角色未映射：不拦流程，但要让用户知道少了什么。最典型的是文件2的
 // 「本年折旧」——它不是必填，所以过去完全不提示，用户以为已经映射全了。
 export function faMissingOptionalRoles<T extends readonly [string, string]>(

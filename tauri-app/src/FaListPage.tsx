@@ -19,6 +19,7 @@ import {
   faMissingOptionalRoles,
   faOutputPathAfterSourceSelection,
   faReviewDisplayMessage,
+  faSelectColumnRole,
   faHeaderOption,
   faRolesForSide,
   isFaMatchDisabled,
@@ -1692,13 +1693,14 @@ function FaCardListPage() {
         ...current,
         [key]: isMatchKeys ? arrayValue : scalarValue || undefined,
       }));
-      if (isMatchKeys && arrayValue) setBeginKeys(arrayValue);
+      // 匹配键清空成 [] 时同样要同步影子 state，否则匹配仍按旧键执行。
+      if (isMatchKeys) setBeginKeys(arrayValue ?? []);
     } else {
       setEndMapping((current) => ({
         ...current,
         [key]: isMatchKeys ? arrayValue : scalarValue || undefined,
       }));
-      if (isMatchKeys && arrayValue) setEndKeys(arrayValue);
+      if (isMatchKeys) setEndKeys(arrayValue ?? []);
     }
   };
   // FA 匹配必需的角色：必须完成映射才能进入下一步
@@ -1905,30 +1907,24 @@ function FaCardListPage() {
                   : ""
             }
             onChange={(e) => {
-              const role = e.target.value as keyof FaMapping;
-              // 清除旧映射：先把该列从原角色移除（如果是多选且该角色值恰为此列）
-              for (const [k] of roleOptions) {
-                const v = mapping[k];
-                if (Array.isArray(v) && v.includes(colValue)) {
-                  setMapping(
-                    side,
-                    k,
-                    v.filter((x) => x !== colValue),
-                  );
-                } else if (String(v ?? "") === colValue) {
-                  setMapping(side, k, "");
-                }
-              }
-              // 设新映射
-              if (role) {
-                if (role === "matchKeys") {
-                  const cur = side === "begin" ? beginKeys : endKeys;
-                  if (!cur.includes(colValue)) {
-                    setMapping(side, "matchKeys", [...cur, colValue]);
-                  }
-                } else {
-                  setMapping(side, role, colValue);
-                }
+              // 选择只做加法：本列已有角色一律保留，只有"—"清空全部。
+              // 否则在"资产名称"列勾选"资产ID"会把名称顶掉，必填角色
+              // 凭空变成未映射。
+              const patch = faSelectColumnRole(
+                mapping,
+                "matchKeys",
+                side === "begin" ? beginKeys : endKeys,
+                colValue,
+                e.target.value,
+                roleOptions.map(([key]) => key),
+              );
+              markResultStale();
+              if (side === "begin") {
+                setBeginMapping(patch.mapping as FaMapping);
+                setBeginKeys(patch.keys);
+              } else {
+                setEndMapping(patch.mapping as FaMapping);
+                setEndKeys(patch.keys);
               }
             }}
           >
@@ -1990,46 +1986,56 @@ function FaCardListPage() {
       const occupied = Array.isArray(v) ? v.length > 0 : Boolean(String(v ?? "").trim());
       if (occupied) usedRoles.add(String(field));
     }
+    // 与主表同一套多角色口径：一列可同时承担资产ID和变动方式等角色。
+    const roleTuples = roles.map(
+      ({ field, label }) => [String(field), label] as [string, string],
+    );
     const controls: React.ReactNode[] = [];
     for (const header of inspect.headers) {
       const colValue = header.trim();
-      const mappedRole = roles.find(({ field }) => {
-        const v = config[field];
-        if (Array.isArray(v)) return v.includes(colValue);
-        return String(v ?? "") === colValue;
-      });
+      const mappedRoles = faMappedRolesForColumn(
+        colValue,
+        roleTuples,
+        config as unknown as Record<string, string | string[] | undefined>,
+      );
+      const mappedRole = mappedRoles[0];
+      const multipleValue = `__multiple__:${colValue}`;
       controls.push(
         <label className="dt-header-control" key={header}>
           <select
-            className={mappedRole ? "mapped" : undefined}
-            value={mappedRole ? String(mappedRole.field) : ""}
+            className={mappedRoles.length ? "mapped" : undefined}
+            title={mappedRoles.map(([, label]) => label).join(" + ") || "未映射"}
+            value={
+              mappedRoles.length > 1
+                ? multipleValue
+                : mappedRole
+                  ? mappedRole[0]
+                  : ""
+            }
             onChange={(e) => {
-              const field = e.target.value as keyof FaSupplementConfig;
+              // 与主表同口径：选择只做加法，"—"才清空本列全部角色。
               setter((current) => {
-                const next: FaSupplementConfig = {
-                  ...current,
-                  keys: current.keys ? [...current.keys] : [],
-                };
-                // 清除旧映射（本列在其他角色的占用）
-                for (const { field: f } of roles) {
-                  const v = current[f];
-                  if (Array.isArray(v) && v.includes(colValue)) {
-                    next.keys = v.filter((x) => x !== colValue);
-                  } else if (String(v ?? "") === colValue) {
-                    (next as Record<string, unknown>)[f] = "";
-                  }
-                }
-                if (field === "keys") {
-                  if (!next.keys.includes(colValue))
-                    next.keys = [...next.keys, colValue];
-                } else if (field) {
-                  (next as Record<string, unknown>)[field] = colValue;
-                }
-                return next;
+                const patch = faSelectColumnRole(
+                  current as unknown as Record<string, string | string[] | undefined>,
+                  "keys",
+                  current.keys ?? [],
+                  colValue,
+                  e.target.value,
+                  roles.map(({ field }) => String(field)),
+                );
+                return {
+                  ...patch.mapping,
+                  keys: patch.keys,
+                } as unknown as FaSupplementConfig;
               });
             }}
           >
             <option value="">—</option>
+            {mappedRoles.length > 1 && (
+              <option value={multipleValue} disabled>
+                {mappedRoles.map(([, label]) => `${label}＊`).join(" + ")}
+              </option>
+            )}
             {/* 补充清单的角色全部必填（缺失会拦截导出），统一标注“＊”。 */}
             {roles.map(({ field, label }) => {
               const taken = usedRoles.has(String(field));

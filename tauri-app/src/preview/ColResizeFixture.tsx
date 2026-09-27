@@ -21,6 +21,10 @@ const previewRows = [
 
 function ForeignColgroupTable() {
   const resize = useTableColumnResize<HTMLDivElement>({ storageKey: "fixture.colgroup" });
+  const cellStyle: React.CSSProperties = {
+    border: "1px solid var(--border)",
+    padding: "8px 12px",
+  };
   return (
     <div ref={resize.ref} style={{ overflowX: "auto", maxWidth: "100%" }}>
       <table className="demo-colgroup-table" style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -32,24 +36,24 @@ function ForeignColgroupTable() {
         </colgroup>
         <thead>
           <tr>
-            <th>组</th>
-            <th>滚动核实</th>
-            <th>账表核对</th>
-            <th>操作</th>
+            <th style={{ ...cellStyle, background: "var(--surface-muted)" }}>组</th>
+            <th style={{ ...cellStyle, background: "var(--surface-muted)" }}>滚动核实</th>
+            <th style={{ ...cellStyle, background: "var(--surface-muted)" }}>账表核对</th>
+            <th style={{ ...cellStyle, background: "var(--surface-muted)" }}>操作</th>
           </tr>
         </thead>
         <tbody>
           <tr>
-            <td>货币资金</td>
-            <td>通过：期初+发生-期末勾稽一致</td>
-            <td>通过：TB 与 JE 双方金额一致</td>
-            <td>查看明细</td>
+            <td style={cellStyle}>货币资金</td>
+            <td style={cellStyle}>通过：期初+发生-期末勾稽一致</td>
+            <td style={cellStyle}>通过：TB 与 JE 双方金额一致</td>
+            <td style={cellStyle}>查看明细</td>
           </tr>
           <tr>
-            <td>预付账款</td>
-            <td>差异 0.84：存在未勾稽的辅助明细行</td>
-            <td>通过</td>
-            <td>查看明细</td>
+            <td style={cellStyle}>预付账款</td>
+            <td style={cellStyle}>差异 0.84：存在未勾稽的辅助明细行</td>
+            <td style={cellStyle}>通过</td>
+            <td style={cellStyle}>查看明细</td>
           </tr>
         </tbody>
       </table>
@@ -59,13 +63,25 @@ function ForeignColgroupTable() {
 
 function StickyHeaderTable() {
   const resize = useTableColumnResize<HTMLDivElement>({ storageKey: "fixture.sticky" });
+  const cellStyle: React.CSSProperties = {
+    border: "1px solid var(--border)",
+    padding: "8px 12px",
+  };
   return (
     <div ref={resize.ref} style={{ maxHeight: 220, overflow: "auto" }}>
       <table className="demo-sticky-table" style={{ borderCollapse: "collapse" }}>
         <thead>
           <tr>
             {["凭证日期", "凭证号", "摘要", "金额", "对方科目"].map((label) => (
-              <th key={label} style={{ position: "sticky", top: 0 }}>
+              <th
+                key={label}
+                style={{
+                  position: "sticky",
+                  top: 0,
+                  ...cellStyle,
+                  background: "var(--surface-muted)",
+                }}
+              >
                 {label}
               </th>
             ))}
@@ -74,11 +90,11 @@ function StickyHeaderTable() {
         <tbody>
           {Array.from({ length: 14 }, (_, row) => (
             <tr key={row}>
-              <td>2026-0{Math.floor(row / 10) + 1}-{String((row % 28) + 1).padStart(2, "0")}</td>
-              <td>记-{String(row + 1).padStart(4, "0")}</td>
-              <td>支付华东供应商集群设备采购尾款（合同编号 HZ-2026-{String(row + 1).padStart(3, "0")}）</td>
-              <td>{((row + 1) * 12500.5).toFixed(2)}</td>
-              <td>2202 应付账款—设备采购</td>
+              <td style={cellStyle}>2026-0{Math.floor(row / 10) + 1}-{String((row % 28) + 1).padStart(2, "0")}</td>
+              <td style={cellStyle}>记-{String(row + 1).padStart(4, "0")}</td>
+              <td style={cellStyle}>支付华东供应商集群设备采购尾款（合同编号 HZ-2026-{String(row + 1).padStart(3, "0")}）</td>
+              <td style={cellStyle}>{((row + 1) * 12500.5).toFixed(2)}</td>
+              <td style={cellStyle}>2202 应付账款—设备采购</td>
             </tr>
           ))}
         </tbody>

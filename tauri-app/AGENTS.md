@@ -75,7 +75,9 @@ Tauri capability 只有 `core:default`，前端无任何直接文件权限。所
 - 本机数据目录 `%LOCALAPPDATA%\AuditToolbox\AuditToolbox\data`（SQLite：settings / migrations / task_history /
   audipick_projects 等，见 `storage.rs`）。
 - 编译期内嵌（改动必须重编 Rust）：`assets/roll-forward/subjects_config.json`、`assets/wp/FY27+WP服务单.xlsx.b64`、
-  `public/tool-catalog.json`。
+  `public/tool-catalog.json`、`assets/fx/safe_mid_rates.csv`（外管局人民币中间价内置牌价表，
+  发版前用 `scripts/fetch_fx_rates_asset.py` 联网重抓向尾部延伸；`fx.rs` 的 `obtain_rates`
+  对覆盖期内间优先用它，超期区间自动回落官网在线抓取）。
 - TS / 看账走 Polars，缓存目录写稳定 Parquet 缓存（键含规范路径+大小+mtime）；缓存损坏直接删了重读。
 
 ## 版本与发布

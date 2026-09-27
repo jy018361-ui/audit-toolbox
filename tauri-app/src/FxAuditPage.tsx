@@ -874,10 +874,17 @@ export function fxResolveAccountRoles(
   );
 }
 
-export function fxReportStart(balanceSheetDate: string) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(balanceSheetDate)
-    ? `${balanceSheetDate.slice(0, 4)}-01-01`
-    : "";
+export function fxReportStart(
+  balanceSheetDate: string,
+  earliestDataYear?: number,
+) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(balanceSheetDate)) return "";
+  const year = Number(balanceSheetDate.slice(0, 4));
+  const effective =
+    typeof earliestDataYear === "number" && earliestDataYear < year
+      ? earliestDataYear
+      : year;
+  return `${effective}-01-01`;
 }
 export function fxDropTargetAt(
   x: number,
@@ -1147,6 +1154,12 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   // 历史上还有「仅已实现 / 仅未实现」两个单边模式，2026-09 按需求移除。
   const mode: Mode = "combined";
   const [reportEnd, setReportEnd] = useState(defaultBalanceSheetDate());
+  // JE/TB 各自识别出的最早数据年度：跨年账套的报告期起点要回溯到最早年度，
+  // 否则早年凭证会因汇率区间不足被隔离（区间覆盖由 Rust 内置牌价表兜底）。
+  const [earliestDataYears, setEarliestDataYears] = useState<{
+    je?: number;
+    tb?: number;
+  }>({});
   const [je, setJe] = useState<Inspection>();
   const [tb, setTb] = useState<Inspection>();
   const [jeMapping, setJeMapping] = useState<Record<string, string | string[]>>(
@@ -1715,6 +1728,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     setCurrencyTouched({});
     setTbCurrencyConfirmed(false);
     setReportEnd("");
+    setEarliestDataYears({});
     setBusy(true);
     setError("");
     setSourceStatus("正在识别文件类型、表头和字段…");
@@ -1790,6 +1804,10 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       setReportEnd(response.suggestedBalanceSheetDate);
     else if (response.dataYears?.length === 1)
       setReportEnd(`${response.dataYears[0]}-12-31`);
+    if (response.dataYears?.length) {
+      const earliest = Math.min(...response.dataYears);
+      setEarliestDataYears((current) => ({ ...current, [kind]: earliest }));
+    }
     reviews.clearReview(kind);
     if (match && stash?.accountRoles) {
       setAccountRoles(stash.accountRoles);
@@ -2094,8 +2112,18 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
 
   // 本次测算该注入哪份汇率快照：导入的自定义汇率优先（区间须覆盖当前
   // 报告期），否则复用上一次测算结果带回的官方快照，都没有就现抓官方。
+  function currentReportStart(): string {
+    const years = [earliestDataYears.je, earliestDataYears.tb].filter(
+      (year): year is number => typeof year === "number",
+    );
+    return fxReportStart(
+      reportEnd,
+      years.length ? Math.min(...years) : undefined,
+    );
+  }
+
   function ratesForPayload(): Record<string, unknown> | undefined {
-    const start = fxReportStart(reportEnd);
+    const start = currentReportStart();
     const custom = customRates?.snapshot as
       | { startDate?: unknown; endDate?: unknown }
       | undefined;
@@ -2127,7 +2155,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
           [fixedEntity]:
             entityCurrencies[fixedEntity] ?? defaultFunctionalCurrency,
         };
-    const start = fxReportStart(reportEnd);
+    const start = currentReportStart();
     const reusableSnapshot = ratesForPayload();
     const cachedTranslations = (result?.accountTranslations ?? {}) as Record<
       string,
@@ -2323,7 +2351,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     setRatesStage("exporting");
     try {
       ratesJobId.current = await jobStart("fx.export_rates", {
-        reportStart: fxReportStart(reportEnd),
+        reportStart: currentReportStart(),
         reportEnd,
         outputPath: path,
         ...(ratesForPayload() ? { rateSnapshot: ratesForPayload() } : {}),
@@ -2346,7 +2374,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     try {
       const response = (await engineCall("fx.import_rates", {
         inputPath: picked,
-        reportStart: fxReportStart(reportEnd),
+        reportStart: currentReportStart(),
         reportEnd,
       })) as {
         rateSnapshot?: Record<string, unknown>;
@@ -2482,6 +2510,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   setCompletedStage(undefined);
                   setActiveStage(undefined);
                   setReportEnd("");
+                  setEarliestDataYears({});
                   setSourceStatus("");
                 }}
               />

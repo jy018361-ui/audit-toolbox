@@ -746,8 +746,16 @@ describe("fx audit upload and mapping parity", () => {
     expect(fallback).toBe("7 张未纳入测算");
   });
 
-  it("derives the audit year start from the balance sheet date", () =>
-    expect(fxReportStart("2024-12-31")).toBe("2024-01-01"));
+  it("derives the audit year start from the balance sheet date", () => {
+    expect(fxReportStart("2024-12-31")).toBe("2024-01-01");
+    // 跨年账套：报告期起点回溯到 JE/TB 里最早的年度，早年凭证才有牌价。
+    expect(fxReportStart("2026-08-31", 2023)).toBe("2023-01-01");
+    // 数据年度不早于表日年度时维持原行为。
+    expect(fxReportStart("2024-12-31", 2025)).toBe("2024-01-01");
+    expect(fxReportStart("2024-12-31", 2024)).toBe("2024-01-01");
+    expect(fxReportStart("2024-12-31", undefined)).toBe("2024-01-01");
+    expect(fxReportStart("bad-date", 2023)).toBe("");
+  });
   it("一键复核用一次联合请求同时复核 JE 与 TB", async () => {
     const started: Array<{ method: string; params: Record<string, unknown> }> =
       [];

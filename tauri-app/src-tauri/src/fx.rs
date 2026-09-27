@@ -30,6 +30,16 @@ use std::{
 
 const SAFE_URL: &str = "https://www.safe.gov.cn/AppStructured/hlw/RMBQuery.do";
 const RATE_SOURCE: &str = "国家外汇管理局人民币汇率中间价查询（数据由中国外汇交易中心公布）";
+/// 内置牌价表：`scripts/fetch_fx_rates_asset.py` 从外管局官网抓取固化，一行
+/// 一个发布日、25 个币种列，数值为官网原始口径（前 10 个币种=每 100 外币兑
+/// 人民币，其余=每 100 人民币兑外币；`-` 为当日未发布，如 2023 年度的 MOP）。
+/// 历史中间价一经发布不再变动，资产只需在发版前重跑脚本向尾部延伸。
+const SAFE_RATES_ASSET: &str = include_str!("../../assets/fx/safe_mid_rates.csv");
+/// 在线抓取与内置牌价表共用的币种顺序；资产 CSV 的列序与之严格一致。
+const SAFE_CURRENCIES: [&str; 25] = [
+    "USD", "EUR", "JPY", "HKD", "GBP", "AUD", "NZD", "SGD", "CHF", "CAD", "MOP", "MYR", "RUB",
+    "ZAR", "KRW", "AED", "SAR", "HUF", "PLN", "DKK", "SEK", "NOK", "TRY", "MXN", "THB",
+];
 /// 测算口径或结果契约改变时必须更新，避免跨 worker 磁盘缓存恢复旧算法结果。
 /// 2026-09-25：币种唯一来源改为 TB 币种列、原币端点选填改倒算、退役按序时账
 /// 推断科目币种的估算路线（含 tbGranularityBlocked 输出）。
@@ -8578,6 +8588,11 @@ fn obtain_rates(params: &Value) -> Result<RateSnapshot, AppError> {
         .get("reportEnd")
         .and_then(Value::as_str)
         .ok_or_else(|| error("REPORT_DATE_REQUIRED", "请填写报告期结束日。", None))?;
+    // 内置牌价表优先：覆盖期间内离线可用。命中时也不落盘缓存——表随程序
+    // 分发且历史牌价不变，落盘只会在资产更新后留下对不上的冗余文件。
+    if let Some(snapshot) = embedded_rates_snapshot(start, end) {
+        return Ok(snapshot);
+    }
     let path = rate_cache_dir()?.join(format!("{}.json", rate_cache_key(start, end)));
     if path.is_file() {
         return serde_json::from_slice(&fs::read(&path).map_err(|e| {
@@ -8686,24 +8701,40 @@ fn fetch_safe_rates(start: &str, end: &str) -> Result<RateSnapshot, AppError> {
             None,
         ));
     }
-    let currencies = [
-        "USD", "EUR", "JPY", "HKD", "GBP", "AUD", "NZD", "SGD", "CHF", "CAD", "MOP", "MYR", "RUB",
-        "ZAR", "KRW", "AED", "SAR", "HUF", "PLN", "DKK", "SEK", "NOK", "TRY", "MXN", "THB",
-    ];
-    let mut rates = Vec::new();
     // 牌价点从报告期前推35天开始逐日生成：报告期从月中开始时，上月末
     // （月初牌价的取数点）也必须是一个可精确命中的 requested 点。
-    for requested in date_points(start_date - Duration::days(35), end_date) {
-        for (i, currency) in currencies.iter().enumerate() {
-            if let Some((published, values)) = raw
-                .iter()
-                .filter(|(date, _)| *date <= requested)
-                .max_by_key(|x| x.0)
-            {
-                if let Some(Some(value)) = values.get(i) {
-                    // First ten SAFE columns are CNY per 100 foreign units.
-                    // Remaining columns are foreign units per 100 CNY.
-                    let cny_per_unit = if i < 10 {
+    let rates = daily_rate_points(&raw, start_date - Duration::days(35), end_date);
+    Ok(RateSnapshot {
+        source: RATE_SOURCE.into(),
+        source_url: SAFE_URL.into(),
+        fetched_at: Utc::now().to_rfc3339(),
+        response_hash,
+        start_date: start.into(),
+        end_date: end.into(),
+        rates,
+        missing: vec![],
+    })
+}
+
+/// 把「发布日牌价」扩成「逐日牌价点」：非发布日沿用最近一次已发布的牌价
+/// （绝不使用未来牌价），并逐日补 CNY=1 锚点供交叉汇率折算。在线抓取与
+/// 内置牌价表共用此构造，保证两条路径的快照语义完全一致。
+fn daily_rate_points(
+    publications: &[(NaiveDate, Vec<Option<f64>>)],
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Vec<RatePoint> {
+    let mut rates = Vec::new();
+    for requested in date_points(start, end) {
+        if let Some((published, values)) = publications
+            .iter()
+            .filter(|(date, _)| *date <= requested)
+            .max_by_key(|entry| entry.0)
+        {
+            for (index, currency) in SAFE_CURRENCIES.iter().enumerate() {
+                if let Some(Some(value)) = values.get(index) {
+                    // 官网前 10 列为每 100 外币兑人民币，其余为每 100 人民币兑外币。
+                    let cny_per_unit = if index < 10 {
                         *value / 100.0
                     } else {
                         100.0 / *value
@@ -8724,13 +8755,84 @@ fn fetch_safe_rates(start: &str, end: &str) -> Result<RateSnapshot, AppError> {
             cny_per_unit: 1.0,
         });
     }
-    Ok(RateSnapshot {
-        source: RATE_SOURCE.into(),
+    rates
+}
+
+/// 内置牌价表的发布日序列（已排序去重）。单元格解析与 `parse_safe_html`
+/// 同口径：`-`、空串等按"当日未发布"记 None，不另设解析规则。
+fn embedded_publications() -> &'static [(NaiveDate, Vec<Option<f64>>)] {
+    static EMBEDDED: OnceLock<Vec<(NaiveDate, Vec<Option<f64>>)>> = OnceLock::new();
+    EMBEDDED.get_or_init(|| {
+        let mut rows: Vec<(NaiveDate, Vec<Option<f64>>)> = SAFE_RATES_ASSET
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let mut cells = line.split(',');
+                let date = cells.next().and_then(|cell| parse_date(cell.trim()))?;
+                let values = cells
+                    .take(SAFE_CURRENCIES.len())
+                    .map(|cell| strict_number(cell).ok().flatten())
+                    .collect();
+                Some((date, values))
+            })
+            .collect();
+        rows.sort_by_key(|(date, _)| *date);
+        rows.dedup_by_key(|(date, _)| *date);
+        rows
+    })
+}
+
+/// 内置牌价表能否覆盖给定区间：要求资产最后一个发布日不早于区间终点
+/// （未来牌价本就不存在，超出部分仍由在线侧按官方口径抓取），资产首个
+/// 发布日不晚于起点后一周——边界余量与 `month_opening_rate` 自身的 7 天
+/// 回看窗对齐，纯粹用于吸收"起点恰逢周末/节假日"的口径差。
+fn embedded_covers(start: NaiveDate, end: NaiveDate) -> bool {
+    let publications = embedded_publications();
+    let Some((first, _)) = publications.first() else {
+        return false;
+    };
+    let Some((last, _)) = publications.last() else {
+        return false;
+    };
+    start <= end && *first <= start + Duration::days(6) && end <= *last
+}
+
+/// 用内置牌价表构造官方快照；区间不被覆盖时返回 None（调用方回落到在线
+/// 抓取）。内容指纹与导入侧同构（逐点拼接后哈希）——同内容即同身份，
+/// 预览缓存与汇率索引都能正确复用；`start_date`/`end_date` 记录参数原文，
+/// 与在线快照的字段语义保持一致。
+fn embedded_rates_snapshot(start_param: &str, end_param: &str) -> Option<RateSnapshot> {
+    let start_date = parse_date(start_param)?;
+    let end_date = parse_date(end_param)?;
+    let lookback = start_date - Duration::days(35);
+    if !embedded_covers(lookback, end_date) {
+        return None;
+    }
+    let publications = embedded_publications();
+    let effective_start = lookback.max(publications.first().map(|(date, _)| *date)?);
+    let rates = daily_rate_points(publications, effective_start, end_date);
+    let mut digest = Sha256::new();
+    for point in &rates {
+        digest.update(format!(
+            "{}|{}|{:.10}\n",
+            point.requested_date, point.currency, point.cny_per_unit
+        ));
+    }
+    let span = |edge: Option<&(NaiveDate, Vec<Option<f64>>)>| {
+        edge.map(|(date, _)| date.format("%Y-%m-%d").to_string())
+            .unwrap_or_default()
+    };
+    Some(RateSnapshot {
+        source: format!(
+            "程序内置牌价表（国家外汇管理局人民币汇率中间价，{}~{}，随程序打包；超期区间自动回落在线抓取）",
+            span(publications.first()),
+            span(publications.last()),
+        ),
         source_url: SAFE_URL.into(),
         fetched_at: Utc::now().to_rfc3339(),
-        response_hash,
-        start_date: start.into(),
-        end_date: end.into(),
+        response_hash: hex::encode(digest.finalize()),
+        start_date: start_param.into(),
+        end_date: end_param.into(),
         rates,
         missing: vec![],
     })
@@ -17366,6 +17468,113 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             preview_cache_key_with_rate_hash(&base, "hash-a"),
             preview_cache_key(&official)
         );
+    }
+
+    #[test]
+    fn 内置牌价表结构完整且数值钉住官网() {
+        let publications = embedded_publications();
+        assert!(
+            publications.len() > 800,
+            "内置牌价表发布日数量异常：{}",
+            publications.len()
+        );
+        let first = publications.first().unwrap().0;
+        let last = publications.last().unwrap().0;
+        assert!(first <= NaiveDate::from_ymd_opt(2022, 11, 28).unwrap());
+        assert!(last >= NaiveDate::from_ymd_opt(2026, 8, 31).unwrap());
+        for window in publications.windows(2) {
+            assert!(window[0].0 < window[1].0, "内置牌价表日期必须严格递增");
+        }
+        for (date, values) in publications {
+            assert_eq!(values.len(), SAFE_CURRENCIES.len(), "{date} 币种列数不符");
+        }
+        // 抽三个发布日钉住官网原始数值，防止资产文件被无意识改动。
+        let pinned: [(&str, &str, f64); 3] = [
+            ("2022-11-28", "USD", 716.17),
+            ("2024-09-30", "HKD", 90.179),
+            ("2026-08-31", "EUR", 783.44),
+        ];
+        for (date, currency, expected) in pinned {
+            let row = publications
+                .iter()
+                .find(|(day, _)| day.format("%Y-%m-%d").to_string() == date)
+                .unwrap_or_else(|| panic!("{date} 不在内置牌价表中"));
+            let index = SAFE_CURRENCIES.iter().position(|c| *c == currency).unwrap();
+            let value = row.1[index].unwrap_or_else(|| panic!("{date} {currency} 缺值"));
+            assert!(
+                (value - expected).abs() < 1e-9,
+                "{date} {currency}={value} 与钉住值 {expected} 不符"
+            );
+        }
+    }
+
+    #[test]
+    fn 内置快照非发布日沿用前次发布且支持交叉汇率() {
+        let snapshot =
+            embedded_rates_snapshot("2026-08-28", "2026-08-31").expect("区间在内置表覆盖内");
+        let point_of = |requested: &str, currency: &str| {
+            snapshot
+                .rates
+                .iter()
+                .find(|point| {
+                    point.requested_date == requested && point.currency == currency
+                })
+                .unwrap_or_else(|| panic!("{requested} {currency} 无牌价点"))
+        };
+        // 2026-08-29/30 为周末非发布日：必须沿用 08-28（周五）的发布价，
+        // 绝不用未来牌价；08-31（周一）命中当日发布价。
+        assert_eq!(point_of("2026-08-29", "USD").published_date, "2026-08-28");
+        assert_eq!(point_of("2026-08-30", "USD").published_date, "2026-08-28");
+        assert_eq!(point_of("2026-08-31", "USD").published_date, "2026-08-31");
+        assert!(point_of("2026-08-30", "CNY").cny_per_unit == 1.0);
+        // 官网口径换算：USD 678.28 / HKD 86.51（每100单位）→ 交叉汇率。
+        let (cross, published) = rate(
+            &snapshot,
+            NaiveDate::from_ymd_opt(2026, 8, 31).unwrap(),
+            "USD",
+            "HKD",
+        )
+        .expect("内置快照必须能套算 USD/HKD 交叉汇率");
+        let expected = (678.28 / 100.0) / (86.51 / 100.0);
+        assert!((cross - expected).abs() < 1e-9);
+        assert_eq!(published, "2026-08-31");
+    }
+
+    #[test]
+    fn 内置覆盖边界判定() {
+        let d = |y: i32, m: u32, day: u32| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        assert!(embedded_covers(d(2022, 12, 1), d(2026, 8, 31)));
+        // 终点超出资产最后一个发布日：不覆盖（回落在线抓取）。
+        assert!(!embedded_covers(d(2026, 1, 1), d(2026, 9, 1)));
+        // 起点远早于资产首个发布日（差一周以上）：不覆盖。
+        assert!(!embedded_covers(d(2021, 12, 1), d(2022, 12, 31)));
+        // 起点恰逢资产首个发布日前一个周日（2022-11-27）：一周余量内覆盖。
+        assert!(embedded_covers(d(2022, 11, 27), d(2023, 12, 31)));
+        assert!(!embedded_covers(d(2026, 9, 1), d(2026, 8, 31)));
+    }
+
+    #[test]
+    fn 内置快照支撑跨年度测算无需联网() {
+        // 2023-01-01~2026-08-31 共 1339 天，远超在线抓取 366 天上限：
+        // 内置路径必须可用（本测试环境无网络，命中在线会直接失败）。
+        let params = json!({"reportStart": "2023-01-01", "reportEnd": "2026-08-31"});
+        let snapshot = obtain_rates(&params).expect("跨年度区间必须命中内置牌价表");
+        assert!(snapshot.source.contains("内置"));
+        assert_eq!(snapshot.start_date, "2023-01-01");
+        assert_eq!(snapshot.end_date, "2026-08-31");
+        // 2023 年中的凭证日也能命中牌价——跨年 JE 不再因区间缺口被隔离。
+        let (usd_cny, published) = rate(
+            &snapshot,
+            NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
+            "USD",
+            "CNY",
+        )
+        .expect("2023-06-15 USD 必须有牌价");
+        assert!((6.0..8.5).contains(&usd_cny));
+        assert!(published.as_str() <= "2023-06-15");
+        // 内容指纹确定性：同区间重复构造得到同一快照身份。
+        let again = obtain_rates(&params).unwrap();
+        assert_eq!(again.response_hash, snapshot.response_hash);
     }
 
     #[test]

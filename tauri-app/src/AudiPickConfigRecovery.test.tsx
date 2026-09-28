@@ -1,0 +1,116 @@
+// @vitest-environment jsdom
+import "@testing-library/jest-dom/vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { AudiPickLegacyConfig } from "./AudiPickLegacyAuxiliary";
+const api = vi.hoisted(() => ({ settingsGet: vi.fn(), settingsSet: vi.fn(), secretSet: vi.fn(), audipickOcrTest: vi.fn(), audipickLlmTest: vi.fn() }));
+vi.mock("./api", () => api);
+const status = { ocr: { engine: "baidu", ready: true }, credentials: { baiduApiKey: true, baiduSecretKey: true, llmApiKey: false } };
+beforeEach(() => {
+  vi.resetAllMocks();
+  api.settingsGet.mockResolvedValue({ llm: { enabled: true, model: "keep" }, ocr: { engine: "baidu", custom: "keep" } });
+  api.settingsSet.mockResolvedValue(undefined);
+  api.secretSet.mockResolvedValue(undefined);
+  api.audipickOcrTest.mockResolvedValue({ message: "测试成功", elapsedMs: 20 });
+  api.audipickLlmTest.mockResolvedValue({ message: "AI测试成功", elapsedMs: 20 });
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ fillRect: vi.fn(), fillText: vi.fn() } as any);
+  vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/png;base64,dGVzdA==");
+});
+it("默认继承工具箱只读配置，进入不测试、不写配置，保存不会覆盖全局模型", async () => {
+  await open();
+  fireEvent.click(screen.getByText("AI模型"));
+  expect(screen.getByLabelText("模型来源")).toHaveValue("inherit");
+  expect(screen.getByText(/模型：keep/)).toBeInTheDocument();
+  expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
+  expect(api.audipickLlmTest).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByText("保存设置"));
+  await screen.findByText(/配置已保存，AudiPick 继承/);
+  expect(api.settingsSet).toHaveBeenCalledWith({ audipickLlm: expect.objectContaining({ mode: "inherit" }) });
+  expect(api.secretSet).not.toHaveBeenCalled();
+});
+it("专用配置独立保存并测试；错误不切换来源，切回继承不发送专用草稿密钥", async () => {
+  await open();
+  fireEvent.click(screen.getByText("AI模型"));
+  fireEvent.change(screen.getByLabelText("模型来源"), { target: { value: "dedicated" } });
+  fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://dedicated.example/v1" } });
+  fireEvent.change(screen.getByLabelText("模型名称"), { target: { value: "dedicated-model" } });
+  fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "dedicated-draft" } });
+  fireEvent.click(screen.getByText("检测可用性"));
+  await screen.findByText(/AI测试成功/);
+  expect(api.audipickLlmTest).toHaveBeenCalledWith(expect.objectContaining({ mode: "dedicated", model: "dedicated-model" }), "dedicated-draft");
+  expect(api.settingsSet).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByText("保存设置"));
+  await screen.findByText(/仅 AudiPick 使用专用模型/);
+  expect(api.secretSet).toHaveBeenCalledWith("audipick_llm_api_key", "dedicated-draft");
+  expect(api.settingsSet).toHaveBeenCalledWith({ audipickLlm: expect.objectContaining({ mode: "dedicated", model: "dedicated-model" }) });
+  expect(screen.getByLabelText("API Key")).toHaveValue("dedicated-draft");
+  api.audipickLlmTest.mockRejectedValueOnce(new Error("专用模型鉴权失败，未切换模型"));
+  fireEvent.click(screen.getByText("检测可用性"));
+  await screen.findByText("专用模型鉴权失败，未切换模型");
+  expect(screen.getByLabelText("模型来源")).toHaveValue("dedicated");
+  fireEvent.change(screen.getByLabelText("模型来源"), { target: { value: "inherit" } });
+  fireEvent.click(screen.getByText("检测可用性"));
+  await screen.findByText(/AI测试成功/);
+  expect(api.audipickLlmTest).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "inherit" }), "");
+});
+it("重入专用配置恢复非密钥字段，Dify 密钥保存到专用凭据而非全局", async () => {
+  api.settingsGet.mockResolvedValue({ llm: { enabled: false }, audipickLlm: { mode: "dedicated", enabled: true, api_type: "dify_chat", base_url: "https://dify.example/v1", model: "app", auth_mode: "raw", thinking_enabled: true }, ocr: { engine: "baidu" } });
+  await open();
+  fireEvent.click(screen.getByText("AI模型"));
+  expect(screen.getByLabelText("模型来源")).toHaveValue("dedicated");
+  expect(screen.getByLabelText("启用 AI 模型")).toBeChecked();
+  expect(screen.getByLabelText("鉴权方式")).toHaveValue("raw");
+  expect(screen.getByLabelText("启用思考模式")).toBeChecked();
+  expect(screen.getByLabelText("API Key")).toHaveValue("");
+  fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "dify-draft" } });
+  fireEvent.click(screen.getByText("保存设置"));
+  await screen.findByText(/仅 AudiPick 使用专用模型/);
+  expect(api.secretSet).toHaveBeenCalledWith("audipick_dify_api_key", "dify-draft");
+});
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+async function open() {
+  render(<AudiPickLegacyConfig status={status} onSaved={vi.fn()} />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "保存设置" })).toBeEnabled());
+}
+it("保存 OCR 后保留本次输入，空值不删密钥且不写 AI 设置", async () => {
+  await open();
+  fireEvent.change(screen.getByLabelText("百度 API Key"), { target: { value: "test-key" } });
+  fireEvent.change(screen.getByLabelText("百度 Secret Key"), { target: { value: "test-secret" } });
+  fireEvent.click(screen.getByText("保存设置"));
+  await screen.findByText(/本次输入已保留/);
+  expect(screen.getByLabelText("百度 API Key")).toHaveValue("test-key");
+  expect(screen.getByLabelText("百度 Secret Key")).toHaveValue("test-secret");
+  expect(api.settingsSet).toHaveBeenCalledWith({ ocr: { engine: "baidu", custom: "keep" } });
+  expect(api.secretSet).toHaveBeenCalledTimes(2);
+  cleanup(); api.secretSet.mockClear();
+  await open();
+  expect(screen.getByText(/API Key：•••••• 已保存/)).toBeInTheDocument();
+  expect(screen.getByLabelText("百度 API Key")).toHaveValue("");
+  fireEvent.click(screen.getByText("保存设置"));
+  await screen.findByText(/本次输入已保留/);
+  expect(api.secretSet).not.toHaveBeenCalled();
+});
+it("保存失败不清空输入、不冒报成功", async () => {
+  await open();
+  api.secretSet.mockRejectedValue(new Error("凭据保存失败"));
+  fireEvent.change(screen.getByLabelText("百度 API Key"), { target: { value: "draft" } });
+  fireEvent.click(screen.getByText("保存设置"));
+  await screen.findByText("凭据保存失败");
+  expect(screen.getByLabelText("百度 API Key")).toHaveValue("draft");
+  expect(api.settingsSet).not.toHaveBeenCalled();
+  expect(screen.queryByText(/配置已保存，与/)).not.toBeInTheDocument();
+});
+it("测试使用草稿密钥和内置图片，不保存草稿；修改后撤销旧测试结论", async () => {
+  await open();
+  fireEvent.change(screen.getByLabelText("百度 API Key"), { target: { value: "draft" } });
+  fireEvent.click(screen.getByText("测试 OCR 连接"));
+  expect(await screen.findByRole("status")).toHaveTextContent("测试成功");
+  expect(api.audipickOcrTest).toHaveBeenCalledWith("baidu", "dGVzdA==", "draft", "");
+  expect(api.secretSet).not.toHaveBeenCalled();
+  expect(api.settingsSet).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("百度 API Key"), { target: { value: "changed" } });
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  api.audipickOcrTest.mockRejectedValue(new Error("鉴权失败"));
+  fireEvent.click(screen.getByText("测试 OCR 连接"));
+  await screen.findByText("鉴权失败");
+});

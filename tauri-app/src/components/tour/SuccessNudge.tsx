@@ -5,6 +5,7 @@ import { openOutput } from "@/api";
 import type { JobEvent } from "@/types";
 import { loadTourState } from "./tourState";
 import "./success-nudge.css";
+import { isAudiPickOperationJob } from "../../audipickOperation";
 
 type SuccessNudgeProps = {
   /** App 收集到的全部任务事件（含已结束的，这里只关心 completed 的那些）。 */
@@ -39,7 +40,7 @@ export function SuccessNudge({
       .reverse()
       .find(
         (job) =>
-          job.phase === "completed" && !celebratedIds.current.has(job.jobId),
+          job.phase === "completed" && !isAudiPickOperationJob(job.jobId) && !celebratedIds.current.has(job.jobId),
       );
     if (!next) return;
     celebratedIds.current.add(next.jobId);

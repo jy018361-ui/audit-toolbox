@@ -1,0 +1,179 @@
+.audipick-operation-panel {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 248px;
+  z-index: 150;
+  border: 1px solid var(--border);
+  border-width: 1px 0 0;
+  background: color-mix(in srgb, var(--card) 96%, transparent);
+  color: var(--foreground);
+  box-shadow: 0 -4px 18px color-mix(in srgb, var(--foreground) 9%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+/* Reserve the dock at the end of the shell so the last page content can
+   always scroll above it instead of ending behind a floating notice. */
+body:has(.audipick-operation-panel) .app-shell {
+  padding-bottom: 58px;
+  scroll-padding-bottom: 68px;
+}
+body:has(.audipick-operation-raised) .app-shell {
+  padding-bottom: 126px;
+  scroll-padding-bottom: 136px;
+}
+body:has(.app-shell.audipick-focus-mode) .audipick-operation-panel {
+  left: 224px;
+}
+body:has(.app-shell.sidebar-collapsed) .audipick-operation-panel {
+  left: 72px;
+}
+body:has(.app-shell.sidebar-collapsed.audipick-focus-mode)
+  .audipick-operation-panel {
+  left: 224px;
+}
+
+.audipick-operation-raised {
+  bottom: 68px;
+}
+.audipick-operation-compact {
+  min-height: 58px;
+  padding: 9px clamp(12px, 2vw, 24px);
+}
+.audipick-operation-expanded {
+  max-height: min(480px, calc(100dvh - 96px));
+  overflow: auto;
+  padding: 12px clamp(12px, 2vw, 24px);
+}
+.audipick-operation-heading,
+.audipick-operation-heading-actions,
+.audipick-operation-actions,
+.audipick-operation-footer {
+  display: flex;
+  align-items: center;
+}
+.audipick-operation-heading {
+  width: min(100%, 1280px);
+  margin: 0 auto;
+  gap: 16px;
+}
+.audipick-operation-summary-copy {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+.audipick-operation-summary-line {
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.audipick-operation-heading-actions {
+  flex: 0 0 auto;
+  gap: 6px;
+}
+.audipick-operation-compact .audipick-operation-summary-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+.audipick-operation-compact .audipick-operation-summary-copy > strong {
+  flex: 0 0 auto;
+  font-size: 13px;
+}
+.audipick-operation-compact .audipick-operation-summary-line {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.audipick-operation-summary-message {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.audipick-operation-expanded .audipick-operation-summary-line {
+  display: flex;
+  margin-top: 4px;
+}
+.audipick-operation-expanded .audipick-operation-summary-message {
+  overflow-wrap: anywhere;
+}
+.audipick-operation-panel p {
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.audipick-operation-details {
+  display: grid;
+  width: min(100%, 1280px);
+  margin: 12px auto 0;
+  gap: 12px;
+}
+.audipick-operation-details section {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.audipick-operation-details progress {
+  width: 100%;
+}
+.audipick-operation-actions {
+  gap: 8px;
+  margin-top: 8px;
+}
+.audipick-operation-footer {
+  width: min(100%, 1280px);
+  justify-content: flex-end;
+  margin: 8px auto 0;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+@media (max-width: 1179px) {
+  .audipick-operation-panel {
+    left: 72px;
+  }
+  body:has(.app-shell.audipick-focus-mode) .audipick-operation-panel {
+    left: 224px;
+  }
+}
+
+@media (max-width: 780px) {
+  body:has(.app-shell.audipick-focus-mode) .audipick-operation-panel,
+  body:has(.app-shell.sidebar-collapsed.audipick-focus-mode)
+    .audipick-operation-panel {
+    left: 72px;
+  }
+}
+
+@media (max-width: 720px) {
+  .audipick-operation-panel {
+    left: 72px;
+  }
+  body:has(.app-shell.audipick-focus-mode) .audipick-operation-panel,
+  body:has(.app-shell.sidebar-collapsed.audipick-focus-mode)
+    .audipick-operation-panel {
+    left: 72px;
+  }
+  .audipick-operation-heading {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .audipick-operation-summary-copy {
+    flex-basis: calc(100% - 12px);
+  }
+  .audipick-operation-heading-actions {
+    width: 100%;
+    overflow-x: auto;
+    padding-bottom: 1px;
+  }
+  .audipick-operation-compact .audipick-operation-summary-message {
+    display: none;
+  }
+  body:has(.audipick-operation-panel) .app-shell {
+    padding-bottom: 100px;
+    scroll-padding-bottom: 110px;
+  }
+  body:has(.audipick-operation-raised) .app-shell {
+    padding-bottom: 168px;
+    scroll-padding-bottom: 178px;
+  }
+}

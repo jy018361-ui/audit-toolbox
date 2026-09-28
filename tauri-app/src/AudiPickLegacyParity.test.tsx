@@ -29,6 +29,7 @@ import {
   type AudiPickLegacyContractView,
 } from "./AudiPickLegacyContract";
 import { AudiPickLegacyShell } from "./AudiPickLegacyShell";
+import { filterCovenantRows, filterCovenantScope, type CovenantScopeFilter, type ProcedureFilter } from "./audipickCovenant";
 import {
   AudiPickLegacyLoanAudit,
   buildAudiPickLoanAuditModel,
@@ -160,6 +161,67 @@ afterEach(() => {
 });
 
 describe("AudiPick 1.4.6 界面回归", () => {
+  it("契约结果只显示明确后果和规范分类，不显示待核实诊断行", () => {
+    const base = contractProps({ view: "workpaper" });
+    const onExportCurrent = vi.fn();
+    const onExportFiltered = vi.fn();
+    const onProcedureLevelChange = vi.fn();
+    const rows = [
+      { id: "one", covenant_scope: "repayment", covenant_category: "财务指标及资本金", title: "财务指标及资本金", excerpt: "资产负债率不得超过70%。", breach_consequence: "贷款人有权要求提前还款。", pages: "1" },
+      { id: "two", covenant_scope: "supplementary", covenant_category: "担保及融资限制", title: "对外担保限制", excerpt: "未经贷款人书面同意不得新增对外担保。", breach_consequence: "违反后计收违约金。", pages: "2" },
+      { id: "warning", covenant_scope: "unresolved", title: "待补页码", excerpt: "专款专用。", breach_consequence: "关联后果待核实。", pages: "" },
+    ];
+    function Harness() {
+      const [level, setLevel] = useState<ProcedureFilter>("all");
+      const [scope, setScope] = useState<CovenantScopeFilter>("repayment");
+      const [selected, setSelected] = useState("one");
+      const scoped = filterCovenantScope(rows, scope);
+      const filtered = filterCovenantRows(scoped, level, false);
+      return <AudiPickLegacyContract {...base} fileFlow={{ ...base.fileFlow, onExportCurrent }} workpaper={{ ...base.workpaper, ruleId: "loan_covenant", rules: [{ id: "loan_covenant", name: "限制性契约" }], totalCount: 2, selectedRowId: selected, columns: [{ key: "covenant_category", label: "分类" }, { key: "title", label: "标题摘要", editable: true }, { key: "excerpt", label: "原文摘录", editable: true, long: true }, { key: "breach_consequence", label: "违反约定的后果", editable: true, long: true }, { key: "pages", label: "页码", editable: true }], rows: filtered.map((values) => ({ id: values.id, values })), covenantScopeFilter: scope, covenantScopeCounts: { repayment: 1, supplementary: 1 }, onCovenantScopeChange: setScope, procedureFilter: level, onProcedureFilterChange: setLevel, onSelectRow: setSelected, onProcedureLevelChange, onExportFiltered }} />;
+    }
+    render(<Harness />);
+    expect(screen.getByText("1 / 2 条结果")).toBeInTheDocument();
+    expect(screen.getAllByText("财务指标及资本金")).not.toHaveLength(0);
+    expect(screen.queryByText("对外担保限制")).not.toBeInTheDocument();
+    expect(screen.queryByText("待补页码")).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /关联待核实/ })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("筛选契约结果范围"), { target: { value: "supplementary" } });
+    expect(screen.getAllByText("对外担保限制")).not.toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "导出当前底稿" }));
+    expect(onExportCurrent).toHaveBeenCalledOnce();
+    fireEvent.change(screen.getByLabelText("筛选程序建议等级"), { target: { value: "1" } });
+    expect(screen.getByText("1 / 2 条结果")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "导出筛选结果（1条）" }));
+    expect(onExportFiltered).toHaveBeenCalledOnce();
+    fireEvent.change(screen.getByLabelText("调整程序建议等级"), { target: { value: "2" } });
+    expect(onProcedureLevelChange).toHaveBeenCalledWith("two", "2");
+  });
+
+  it("未关联诊断同时显示原始失败记录数和归并后的问题组数", () => {
+    const base = contractProps({ view: "workpaper" });
+    render(<AudiPickLegacyContract {...base} workpaper={{
+      ...base.workpaper,
+      ruleId: "loan_covenant",
+      rules: [{ id: "loan_covenant", name: "限制性契约" }],
+      rows: [],
+      totalCount: 0,
+      covenantDiagnostics: [
+        { id: "a", clause: "第二十三条第（二）项第8目", reason: "义务证据仅为标题", evidence: "证据A", rejected: "", count: 5 },
+        { id: "b", clause: "第二十一条第（六）项", reason: "后果落在其他条款", evidence: "证据B", rejected: "", count: 2 },
+      ],
+    }} />);
+    expect(screen.getByText("关联未完成：7 条失败记录，归并为 2 组待核实")).toBeInTheDocument();
+    expect(screen.getByText(/第二十三条第（二）项第8目：义务证据仅为标题（重复 5 条）/)).toBeInTheDocument();
+    expect(screen.getByText(/不是已发生的违约/)).toBeInTheDocument();
+  });
+
+  it("非限制性契约底稿不出现新增分级控件", () => {
+    render(<AudiPickLegacyContract {...contractProps({ view: "workpaper" })} />);
+    expect(screen.queryByLabelText("筛选程序建议等级")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("调整程序建议等级")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("借款金额100万元")).toBeInTheDocument();
+  });
+
   it("工作台按便携版字段顺序打开弹窗，项目名和客户名均必填后提交", async () => {
     const onCreateProject = vi.fn();
     render(
@@ -290,6 +352,72 @@ describe("AudiPick 1.4.6 界面回归", () => {
     expect(onBatchExtract).toHaveBeenCalledWith(["doc-1"]);
   });
 
+  it("项目页按文件名自然排序并按显示顺序批量提取", () => {
+    const onBatchExtract = vi.fn();
+    render(
+      <AudiPickLegacyProjectPage
+        project={{ id: "project-1", name: "批量合同审阅" }}
+        documents={[
+          { id: "doc-10", name: "C10合同.pdf", textLength: 800, resultCount: 0, ruleId: "loan" },
+          { id: "doc-2", name: "C2合同.pdf", textLength: 800, resultCount: 0, ruleId: "loan" },
+          { id: "doc-1", name: "C1合同.pdf", textLength: 800, resultCount: 0, ruleId: "loan" },
+        ]}
+        rules={[{ id: "loan", name: "借款合同" }]}
+        actions={projectActions({ onBatchExtract })}
+      />,
+    );
+
+    expect(
+      screen
+        .getAllByRole("button", { name: /^C\d+合同\.pdf$/ })
+        .map((button) => button.textContent),
+    ).toEqual(["C1合同.pdf", "C2合同.pdf", "C10合同.pdf"]);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选待提取" }));
+    const start = screen
+      .getAllByRole("button", { name: "开始提取" })
+      .find((button) => button.classList.contains("alp-button-primary"));
+    fireEvent.click(start!);
+    expect(onBatchExtract).toHaveBeenCalledWith(["doc-1", "doc-2", "doc-10"]);
+  });
+  it("关联子项按名称自然排序且 AI 建议资料只显示一次", () => {
+    render(
+      <AudiPickLegacyProjectPage
+        project={{ id: "project-1", name: "关联合同审阅" }}
+        documents={[
+          { id: "anchor", name: "C1主合同.pdf", textLength: 800, ruleId: "loan" },
+          { id: "child-10", name: "C10补充协议.pdf", textLength: 500, ruleId: "loan" },
+          { id: "suggested", name: "C3补充资料.pdf", textLength: 500, ruleId: "loan" },
+          { id: "child-2", name: "C2补充协议.pdf", textLength: 500, ruleId: "loan" },
+        ]}
+        rules={[{ id: "loan", name: "借款合同" }]}
+        relationGroups={[{
+          id: "group-1",
+          anchorFileId: "anchor",
+          members: [
+            { fileId: "child-10", role: "补充协议/变更" },
+            { fileId: "child-2", role: "补充协议/变更" },
+          ],
+        }]}
+        associationSuggestions={[{
+          fileId: "suggested",
+          anchorFileId: "anchor",
+          anchorName: "C1主合同.pdf",
+          role: "其他支持资料",
+          reason: "文件名与主合同编号一致",
+        }]}
+        actions={projectActions()}
+      />,
+    );
+
+    expect(screen.getAllByRole("button", { name: "C3补充资料.pdf" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: /已关联 2 份/ }));
+    expect(
+      Array.from(document.querySelectorAll(".alp-child-name .alp-truncate")).map(
+        (element) => element.textContent,
+      ),
+    ).toEqual(["C2补充协议.pdf", "C10补充协议.pdf"]);
+  });
   it("模板库支持分类、搜索并回传模板选中", async () => {
     const onSelectRule = vi.fn();
     const onTabChange = vi.fn();
@@ -366,6 +494,7 @@ describe("AudiPick 1.4.6 界面回归", () => {
 
   it("侧栏处理工作日志只打开抽屉，不触发页面导航", () => {
     const onNavigate = vi.fn();
+    const onBackToToolbox = vi.fn();
     const onToggleLog = vi.fn();
     render(
       <AudiPickLegacyShell
@@ -373,10 +502,9 @@ describe("AudiPick 1.4.6 界面回归", () => {
         configReady
         logCount={2}
         logOpen={false}
-        themeLabel="经典蓝"
         onNavigate={onNavigate}
+        onBackToToolbox={onBackToToolbox}
         onToggleLog={onToggleLog}
-        onOpenTheme={vi.fn()}
         logDrawer={<div>处理日志内容</div>}
       >
         <div>当前工作台</div>
@@ -386,6 +514,13 @@ describe("AudiPick 1.4.6 界面回归", () => {
     fireEvent.click(screen.getByRole("button", { name: /处理工作日志/ }));
     expect(onToggleLog).toHaveBeenCalledTimes(1);
     expect(onNavigate).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "返回工具箱" }));
+    expect(onBackToToolbox).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: /主题设置/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /新手引导/ })).not.toBeInTheDocument();
+    expect(screen.getByText("AI 已配置")).toBeInTheDocument();
+    expect(screen.getByText("项目与审阅数据仅存本地")).toBeInTheDocument();
   });
 
   it("借款审计中心按主合同形成债项并提供三种视图", () => {

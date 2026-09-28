@@ -1,10 +1,13 @@
 import {
+  type CSSProperties,
   useRef,
+  useState,
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import "./AudiPickLegacyContract.css";
+import { covenantProcedure, PROCEDURE_LEVELS, PROCEDURE_NOTICE, PROCEDURE_OVERRIDE_KEY, COVENANT_INTERNAL_FIELDS, COVENANT_WORKPAPER_SCOPES, isFormalCovenantRow, type CovenantDiagnostic, type CovenantScopeFilter, type ProcedureFilter } from "./audipickCovenant";
 
 export type AudiPickLegacyContractView = "detail" | "workpaper";
 
@@ -36,6 +39,7 @@ export type AudiPickLegacyFileFlow = {
   ruleId: string;
   rules: AudiPickLegacyRuleOption[];
   ruleName: string;
+  ruleVersion?: string;
   detectedLabel?: string;
   detectedConfidence?: "high" | "medium" | "low";
   detectedReason?: string;
@@ -57,6 +61,8 @@ export type AudiPickLegacyFileFlow = {
 export type AudiPickLegacyWorkpaper = {
   ruleId: string;
   rules: AudiPickLegacyRuleOption[];
+  usedRuleName?: string;
+  usedRuleVersion?: string;
   versions: AudiPickLegacyResultVersion[];
   versionId: string;
   filterText: string;
@@ -64,6 +70,18 @@ export type AudiPickLegacyWorkpaper = {
   rows: AudiPickLegacyResultRow[];
   selectedRowId?: string;
   extra?: ReactNode;
+  totalCount?: number;
+  procedureFilter?: ProcedureFilter;
+  procedureReviewOnly?: boolean;
+  covenantScopeFilter?: CovenantScopeFilter;
+  covenantScopeCounts?: Partial<Record<CovenantScopeFilter, number>>;
+  covenantDiagnostics?: CovenantDiagnostic[];
+  pendingCases?: AudiPickLegacyResultRow[];
+  onCovenantScopeChange?: (value: CovenantScopeFilter) => void;
+  onProcedureFilterChange?: (value: ProcedureFilter) => void;
+  onProcedureReviewChange?: (value: boolean) => void;
+  onProcedureLevelChange?: (rowId: string, value: string) => void;
+  onExportFiltered?: () => void;
   onRuleChange: (ruleId: string) => void;
   onVersionChange: (versionId: string) => void;
   onFilterChange: (value: string) => void;
@@ -101,6 +119,7 @@ export type AudiPickLegacyContractProps = {
   onContractTextChange?: (value: string) => void;
   onSaveContractText?: () => void;
   onCopyContractText?: () => void;
+  onManageCaseLibrary?: () => void;
 };
 
 function valueText(value: unknown): string {
@@ -194,7 +213,7 @@ function FileFlowCard({
             <div>
               <h3>模板确认</h3>
               <p>
-                AI 判断：<strong>{flow.detectedLabel || flow.ruleName}</strong>
+                AI 建议：<strong>{flow.detectedLabel || flow.ruleName}</strong>
                 {` · 置信度：`}
                 <span
                   className={`aplc-confidence ${flow.detectedConfidence ?? "low"}`}
@@ -214,7 +233,7 @@ function FileFlowCard({
             )}
           </div>
           <div className="aplc-inline-actions">
-            <span>{flow.ruleConfirmed ? "已使用模板" : "当前模板"}</span>
+            <span>{flow.ruleConfirmed ? "实际使用模板" : "当前模板"}</span>
             <select
               aria-label="当前文件模板"
               value={flow.ruleId}
@@ -237,7 +256,7 @@ function FileFlowCard({
                 确认模板
               </button>
             ) : (
-              <span className="aplc-confirmed">模板已确认</span>
+              <span className="aplc-confirmed">已确认用于提取</span>
             )}
           </div>
         </div>
@@ -249,7 +268,7 @@ function FileFlowCard({
           <div>
             <h3>字段选择与提取</h3>
             <p>
-              模板：<strong>{flow.ruleName}</strong>
+              模板：<strong>{flow.ruleName}</strong>{flow.ruleVersion ? ` · v${flow.ruleVersion}` : ""}
               。开始前会让你勾选本次要提取的字段。
             </p>
           </div>
@@ -447,9 +466,19 @@ function ContractDetail(props: AudiPickLegacyContractProps) {
 
 function WorkpaperView(props: AudiPickLegacyContractProps) {
   const { workpaper } = props;
+  const financialOnly = workpaper.ruleId === "loan_covenant" && workpaper.columns.some(column => ["财务指标", "财务契约类型"].includes(column.label));
+  const covenant = workpaper.ruleId === "loan_covenant" && !financialOnly;
+  const displayedRows = covenant
+    ? workpaper.rows.filter((row) => isFormalCovenantRow(row.values))
+    : workpaper.rows;
+  const detailColumns = covenant
+    ? workpaper.columns.filter((column) => column.key !== "procedure_level" && !COVENANT_INTERNAL_FIELDS.has(column.key) && !column.key.startsWith("_covenant"))
+    : workpaper.columns;
+  const listColumns = covenant ? workpaper.columns.filter((column) => ["covenant_category", "title"].includes(column.key)) : workpaper.columns;
   const selected =
-    workpaper.rows.find((row) => row.id === workpaper.selectedRowId) ??
-    workpaper.rows[0];
+    displayedRows.find((row) => row.id === workpaper.selectedRowId) ??
+    displayedRows[0];
+  const advice = covenant && selected ? covenantProcedure(selected.values) : undefined;
   return (
     <div className="aplc-page-stack">
       <header className="aplc-contract-header">
@@ -509,18 +538,24 @@ function WorkpaperView(props: AudiPickLegacyContractProps) {
             </select>
           </label>
           <span className="aplc-result-count">
-            {workpaper.rows.length} 条结果
+            {displayedRows.length} / {workpaper.totalCount ?? displayedRows.length} 条结果
           </span>
-          {workpaper.versions.length > 1 && (
+          {workpaper.usedRuleName && (
+            <span className="aplc-version-count">
+              实际提取：{workpaper.usedRuleName}
+              {workpaper.usedRuleVersion ? ` v${workpaper.usedRuleVersion}` : ""}
+            </span>
+          )}          {workpaper.versions.length > 1 && (
             <span className="aplc-version-count">
               共 {workpaper.versions.length} 套底稿
             </span>
           )}
           <div className="aplc-control-actions">
+            {financialOnly && <button type="button" className="aplc-button outline" onClick={props.onManageCaseLibrary}>案例库管理</button>}
             <button
               type="button"
               className="aplc-button outline"
-              disabled={!workpaper.rows.length || props.busy}
+              disabled={!(workpaper.totalCount ?? displayedRows.length) || props.busy}
               onClick={props.fileFlow.onExportCurrent}
             >
               导出当前底稿
@@ -528,7 +563,7 @@ function WorkpaperView(props: AudiPickLegacyContractProps) {
             <button
               type="button"
               className="aplc-button outline"
-              disabled={!workpaper.rows.length || props.busy}
+              disabled={!(workpaper.totalCount ?? displayedRows.length) || props.busy}
               onClick={props.fileFlow.onExportAll}
             >
               导出全部底稿
@@ -538,44 +573,85 @@ function WorkpaperView(props: AudiPickLegacyContractProps) {
         <label className="aplc-filter">
           <input
             type="search"
+            aria-label="筛选条款关键词"
             value={workpaper.filterText}
             placeholder="筛选：输入关键词定位条款…"
             onChange={(event) => workpaper.onFilterChange(event.target.value)}
           />
-          <span>{workpaper.rows.length} 条</span>
+          <span>{displayedRows.length} 条</span>
         </label>
+        {financialOnly && <p>按案例库摘录 C01—C05 广义财务契约；仅呈现合同约定，不判断实际履约或流动负债分类。</p>}
+        {covenant && (
+          <div className="aplc-procedure-controls">
+            <label>结果范围
+              <select aria-label="筛选契约结果范围" value={workpaper.covenantScopeFilter ?? "repayment"} onChange={(event) => workpaper.onCovenantScopeChange?.(event.target.value as CovenantScopeFilter)}>
+                {Object.entries(COVENANT_WORKPAPER_SCOPES).map(([scope, label]) => <option key={scope} value={scope}>{label}（{workpaper.covenantScopeCounts?.[scope as CovenantScopeFilter] ?? 0}）</option>)}
+                <option value="all">全部记录</option>
+              </select>
+            </label>
+            <label>程序建议等级
+              <select aria-label="筛选程序建议等级" value={workpaper.procedureFilter ?? "all"} onChange={(event) => workpaper.onProcedureFilterChange?.(event.target.value as ProcedureFilter)}>
+                <option value="all">全部等级</option>
+                {Object.entries(PROCEDURE_LEVELS).map(([level, label]) => <option key={level} value={level}>{label}</option>)}
+              </select>
+            </label>
+            <button type="button" className="aplc-button outline" disabled={props.busy || !displayedRows.length} onClick={workpaper.onExportFiltered}>导出筛选结果（{displayedRows.length}条）</button>
+            <p>{PROCEDURE_NOTICE} 默认查看还款影响；补充后果可切换查看。未完成关联的事项在下方列出原因，不作为正式底稿导出。</p>
+          </div>
+        )}
       </section>
 
-      {workpaper.rows.length === 0 ? (
+      {!!workpaper.pendingCases?.length && <section className="aplc-card" aria-label="待新增案例">
+        <h3>待新增案例（{workpaper.pendingCases.length}）</h3>
+        <p>以下客观限制尚未匹配当前案例库，请人工确认后补充 Excel 案例、导入启用并重新提取；本区域不计入正式结果或导出。</p>
+        {workpaper.pendingCases.map((item) => <details key={item.id}>
+          <summary>{valueText(item.values.title) || "待确认的财务契约"}</summary>
+          <p>{valueText(item.values._covenant_review_reason)}</p>
+          <pre style={{ whiteSpace: "pre-wrap" }}>{valueText(item.values.excerpt)}</pre>
+          <p>{valueText(item.values.source_reference)}</p>
+        </details>)}
+      </section>}
+      {covenant && !!workpaper.covenantDiagnostics?.length && <section className="aplc-card error-box" aria-label="契约关联未完成">
+        <h3>关联未完成：{workpaper.covenantDiagnostics.reduce((sum, item) => sum + item.count, 0)} 条失败记录，归并为 {workpaper.covenantDiagnostics.length} 组待核实</h3>
+        <p>同一条款在分段检查或重试中可能产生多条记录；这里已按“来源条款＋失败原因”合并。它们不是已发生的违约，也不代表存在同等数量的独立契约。</p>
+        {workpaper.covenantDiagnostics.map((item) => <details key={item.id}>
+          <summary>{item.clause}：{item.reason}{item.count > 1 ? `（重复 ${item.count} 条）` : ""}</summary>
+          {item.evidence && <pre style={{ whiteSpace: "pre-wrap" }}>{item.evidence}</pre>}
+          {item.rejected && <pre style={{ whiteSpace: "pre-wrap" }}>校验详情：{item.rejected}</pre>}
+        </details>)}
+      </section>}
+      {displayedRows.length === 0 ? (
         <div className="aplc-empty">
-          当前模板和版本暂无底稿结果。请返回合同详情完成提取。
+          {(workpaper.totalCount ?? 0) > 0 ? "没有符合当前筛选的条款，请调整筛选条件。" : "当前模板和版本暂无底稿结果。请返回合同详情完成提取。"}
         </div>
       ) : (
         <div className="aplc-work-grid">
           <section className="aplc-card aplc-result-list">
-            <header>条目列表</header>
+            <header>条目列表{covenant ? " · 按程序建议排序" : ""}</header>
             <div className="aplc-table-scroll">
               <table>
                 <thead>
                   <tr>
-                    {workpaper.columns.map((column) => (
+                    {listColumns.map((column) => (
                       <th key={column.key}>{column.label}</th>
                     ))}
+                    {covenant && <th>程序建议</th>}
                     <th>复核状态</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {workpaper.rows.map((row) => (
+                  {displayedRows.map((row) => (
                     <tr
                       key={row.id}
                       className={row.id === selected?.id ? "selected" : ""}
                       onClick={() => workpaper.onSelectRow(row.id)}
                     >
-                      {workpaper.columns.map((column) => (
+                      {listColumns.map((column) => (
                         <td key={column.key}>
                           {valueText(row.values[column.key]) || "—"}
                         </td>
                       ))}
+                      {covenant && <td><span className={`aplc-procedure-level level-${covenantProcedure(row.values).level}`}>{PROCEDURE_LEVELS[covenantProcedure(row.values).level]}</span></td>}
                       <td>
                         <button
                           type="button"
@@ -606,8 +682,17 @@ function WorkpaperView(props: AudiPickLegacyContractProps) {
                     <strong>{selected.reviewed ? "已复核" : "待复核"}</strong>
                   </div>
                 </header>
+                {advice && <section className="aplc-procedure-detail" aria-label="程序建议">
+                  <label>程序建议等级
+                    <select aria-label="调整程序建议等级" disabled={props.busy || !workpaper.onProcedureLevelChange} value={String(selected.values[PROCEDURE_OVERRIDE_KEY] ?? "auto")} onChange={(event) => workpaper.onProcedureLevelChange?.(selected.id, event.target.value)}>
+                      <option value="auto">自动建议：{PROCEDURE_LEVELS[advice.suggestedLevel]}</option>
+                      {Object.entries(PROCEDURE_LEVELS).map(([level, label]) => <option key={level} value={level}>{label}</option>)}
+                    </select>
+                  </label>
+                  <small>调整后自动保存，不代表已经执行核查。</small>
+                </section>}
                 <div className="aplc-result-fields">
-                  {workpaper.columns.map((column) => (
+                  {detailColumns.map((column) => (
                     <label key={column.key}>
                       <span>{column.label}</span>
                       <textarea
@@ -659,7 +744,7 @@ function WorkpaperView(props: AudiPickLegacyContractProps) {
               </>
             ) : (
               <div className="aplc-empty compact">
-                从左侧选择一个条目查看详情。
+                从左侧选择一个条目查看完整约定与后果。
               </div>
             )}
           </section>
@@ -718,7 +803,7 @@ function SplitPane({
     <div className="aplc-split" ref={paneRef}>
       <section
         className="aplc-preview"
-        style={{ width: `${width}%` }}
+        style={{ "--aplc-preview-width": `${width}%` } as CSSProperties}
         aria-label="PDF 预览"
       >
         {props.preview ?? (

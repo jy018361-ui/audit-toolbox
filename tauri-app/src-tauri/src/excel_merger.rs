@@ -708,7 +708,9 @@ pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
     "kanzhang.export",
     "kanzhang.mark_inspect",
     "kanzhang.mark_export",
+    "audipick.extract",
     "audipick.batch_extract",
+    "audipick.ocr_page",
     "fa.match",
     "fa.preview",
     "fa.export",
@@ -882,7 +884,11 @@ pub fn worker_main() -> i32 {
             None,
         ));
     };
-    let running_message = if request.method == "file_list.export" {
+    let running_message = if request.method == "audipick.ocr_page" {
+        "正在识别合同扫描页…"
+    } else if request.method == "audipick.extract" {
+        "正在提取合同条款…"
+    } else if request.method == "file_list.export" {
         "正在生成文件夹超链接清单…"
     } else if request.method == "wp.generate" {
         "Rust WP 服务单引擎正在生成…"
@@ -924,6 +930,10 @@ pub fn worker_main() -> i32 {
         crate::file_list::scan_job(request.params, &progress, cancel, &pause)
     } else if request.method == "excel_merger.merge" {
         merge(request.params, &progress, cancel, &pause)
+    } else if request.method == "audipick.ocr_page" {
+        crate::audipick::run_ocr_page(request.params, &progress, cancel, Path::new(&request.pause_path))
+    } else if request.method == "audipick.extract" {
+        crate::audipick::run_extract(request.params, &progress, cancel, Path::new(&request.pause_path))
     } else if request.method == "audipick.batch_extract" {
         crate::audipick::run_batch(
             request.params,

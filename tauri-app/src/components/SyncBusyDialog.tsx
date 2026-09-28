@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { onSyncBusyChange, type SyncBusyEntry } from "@/api";
+import { isAudiPickBusyManaged, subscribeAudiPickOperations } from "../audipickOperation";
 
 /** 短于这个时间的调用不弹窗：快操作弹一下就关只会闪。 */
 const SHOW_DELAY_MS = 1000;
@@ -89,7 +90,9 @@ export function SyncBusyDialog({
         setVisible(fixtureEntries.length > 0);
         return;
       }
-      return onSyncBusyChange((next) => {
+      let latest: SyncBusyEntry[] = [];
+      const refresh = () => {
+        const next = latest.filter((entry) => !isAudiPickBusyManaged(entry.method));
         const wasIdle = entriesRef.current.length === 0;
         entriesRef.current = next;
         setEntries(next);
@@ -118,7 +121,10 @@ export function SyncBusyDialog({
           setVisible(false);
           dismissedRef.current = null;
         }
-      });
+      };
+      const offBusy = onSyncBusyChange((next) => { latest = next; refresh(); });
+      const offOperation = subscribeAudiPickOperations(refresh);
+      return () => { offBusy(); offOperation(); };
     },
     [fixtureEntries],
   );

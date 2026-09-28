@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   audipickPdfBytes,
   engineCall,
@@ -31,7 +32,6 @@ import {
 } from "./AudiPickLegacyShell";
 import {
   AudiPickLegacyConfig,
-  AudiPickLegacyGuide,
   AudiPickLegacyHome,
 } from "./AudiPickLegacyAuxiliary";
 import {
@@ -42,12 +42,33 @@ import {
 } from "./AudiPickLegacyDashboard";
 import { AudiPickLegacyProject } from "./AudiPickLegacyProject";
 import { AudiPickLegacyContract } from "./AudiPickLegacyContract";
+import { AudiPickAssociationDialog, type AssociationMember } from "./AudiPickAssociationDialog";
+import {
+  applyHighConfidenceAssociations,
+  associationRoleForDocument,
+  buildAssociationSuggestions,
+  type AudiPickAssociationDocument,
+  type AudiPickAssociationMember,
+} from "./audipickAssociations";
+import { PDF_OCR_LAYOUT_VERSION, pdfOcrRegions, preparePdfText, recognizePdfPage } from "./audipickPdfPreparation";
+import type { AudiPickConfigStatus } from "./AudiPickLegacyAuxiliary";
+import { covenantDiagnosticGroups, covenantExportRows, covenantUserView, filterCovenantScope, covenantScope, COVENANT_WORKPAPER_SCOPES, isFormalCovenantRow, FINANCIAL_METRIC_LABELS as COVENANT_LABELS, filterCovenantRows, procedureOverride, PROCEDURE_OVERRIDE_KEY, type CovenantScopeFilter, type ProcedureFilter } from "./audipickCovenant";
+import { FINANCIAL_METRICS_VERSION as COVENANT_EXTRACTION_VERSION, extractFinancialMetrics as extractCovenantEvidence, type CovenantDocument } from "./audipickCovenantExtraction";
+import { COVENANT_LABELS as LEGACY_COVENANT_LABELS } from "./audipickCovenant";
+import { loadCaseLibraryState } from "./audipickCaseLibrary";
+import CovenantCaseLibraryManager from "./CovenantCaseLibraryManager";
+import {
+  AudiPickFieldSelectionDialog,
+  type AudiPickFieldSelectionGroup,
+  type AudiPickFieldSelectionResult,
+} from "./AudiPickFieldSelectionDialog";
+import { beginAudiPickOperation, type AudiPickOperationHandle } from "./audipickOperation";
+import { runAudiPickExtractJob } from "./audipickExtractJob";
+import { documentsByRequestedOrder } from "./audipickDocumentOrder";
 import {
   AudiPickLegacyLoanAudit,
   buildAudiPickLoanAuditModel,
 } from "./AudiPickLegacyLoanAudit";
-import { AudiPickLegacyTour } from "./AudiPickLegacyTour";
-import { setSavedTheme } from "./theme";
 import {
   AudiPickLegacyTemplates,
   type AudiPickLegacyTemplateTab,
@@ -87,18 +108,38 @@ export function AudiPickResultStatus({ hasResult, missingCount }: { hasResult: b
 type AudiPickRelation = {
   id: string;
   anchorFileId: string;
-  members: Array<{ fileId: string; role: string }>;
+  members: AudiPickAssociationMember[];
 };
 type AudiPickResult = Record<string, unknown> & {
   id?: string;
   contractId?: string;
   ruleId?: string;
+  ruleName?: string;
+  ruleVersion?: string;
   reviewed?: boolean;
   /// Field set and timestamp of the extraction that produced this row; both are
   /// written on save and decide which rows the panel still shows.
   fieldSetId?: string;
   extractAt?: string;
   extractRunId?: string;
+};
+type AudiPickExtractionSnapshot = {
+  ruleId: string;
+  ruleName: string;
+  ruleVersion: string;
+  fieldKeys: string[];
+  fieldSetId: string;
+};
+type AudiPickExtractionRequest = {
+  projectId: string;
+  documentId: string;
+  snapshot: AudiPickExtractionSnapshot;
+  text: string;
+  openWorkpaperOnComplete?: boolean;
+};
+type AudiPickFieldDialogRequest = {
+  mode: "single" | "batch";
+  documentIds: string[];
 };
 type AudiPickProjectData = {
   project: {
@@ -113,6 +154,8 @@ type AudiPickProjectData = {
     loanReportDate?: string;
     defaultRuleId?: string;
     relationGroups?: AudiPickRelation[];
+    dismissedAssociations?: string[];
+    fieldPrefs?: Record<string, string[]>;
   };
   contracts?: AudiPickContractMeta[];
   results?: AudiPickResult[];
@@ -120,6 +163,7 @@ type AudiPickProjectData = {
 type AudiPickContractMeta = {
   id: string;
   ruleId?: string;
+  ruleSource?: "user" | "ai";
   ruleConfirmed?: boolean;
   detectedRuleId?: string;
   detectedConfidence?: "high" | "medium" | "low" | string;
@@ -128,6 +172,7 @@ type AudiPickContractMeta = {
   ocrPending?: boolean;
   ocrCompletedPages?: number;
   ocrTotalPages?: number;
+  ocrLayoutVersion?: string;
 };
 type AudiPickDocument = {
   id: string;
@@ -158,6 +203,7 @@ const RESULT_SYSTEM_KEYS = new Set([
   "id",
   "contractId",
   "ruleId",
+  "ruleName",
   "ruleVersion",
   "fieldKeys",
   "fieldSetId",
@@ -226,7 +272,10 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
 }
 
 function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
+  const navigate = useNavigate();
   const [projects, setProjects] = useState<AudiPickProjectData[]>([]);
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
   const [selectedId, setSelectedId] = useState("");
 
   // 历史记录「继续任务」：AudiPick 的项目/文档/字段全部由引擎与规则库派生，
@@ -244,13 +293,20 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   );
   const [defaultRuleId, setDefaultRuleId] = useState("loan_covenant");
   const [busy, setBusy] = useState(false);
+  const preparingRef = useRef(false);
+  const importingRef = useRef(false);
+  const [preparationStatus, setPreparationStatus] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState<unknown>();
+  const selectedDocumentRef = useRef("");
   const [selectedDocument, setSelectedDocument] = useState("");
+  selectedDocumentRef.current = selectedDocument;
   const [pdfText, setPdfText] = useState("");
   const [ruleId, setRuleId] = useState("loan_covenant");
   const [selectedFieldKeys, setSelectedFieldKeys] = useState<string[]>([]);
   const [associationTarget, setAssociationTarget] = useState("");
+  const [associationAnchor, setAssociationAnchor] = useState("");
+  const [associationSuggestion, setAssociationSuggestion] = useState<AssociationMember>();
   const [associationRole, setAssociationRole] = useState("补充协议/变更");
   const [customRuleName, setCustomRuleName] = useState("");
   const [editingCustomRuleId, setEditingCustomRuleId] = useState("");
@@ -266,18 +322,30 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   const [documentTextLengths, setDocumentTextLengths] = useState<
     Record<string, number>
   >({});
+  const [associationDocumentTexts, setAssociationDocumentTexts] = useState<
+    Record<string, string>
+  >({});
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
-  const [pendingExtractDocumentId, setPendingExtractDocumentId] = useState("");
+  const extractingDocumentIdsRef = useRef(new Set<string>());
+  const [extractingDocumentIds, setExtractingDocumentIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [fieldDialogRequest, setFieldDialogRequest] =
+    useState<AudiPickFieldDialogRequest>();
+  const [fieldDialogSubmitting, setFieldDialogSubmitting] = useState(false);
   const [customRulePrompt, setCustomRulePrompt] = useState("");
   const [ruleRevision, setRuleRevision] = useState(0);
   const [suggestedRule, setSuggestedRule] = useState<ClassifiedDocument>();
   const extractCache = useRef(
     new Map<string, Array<{ parsed?: { items?: unknown[] } }>>(),
   );
+  const covenantCache = useRef(
+    new Map<string, Awaited<ReturnType<typeof extractCovenantEvidence>>>(),
+  );
   const batchRulePlans = useRef(
     new Map<
       string,
-      { ruleId: string; fieldKeys: string[]; fieldSetId: string }
+      { projectId: string; ruleId: string; ruleName: string; ruleVersion: string; fieldKeys: string[]; fieldSetId: string }
     >(),
   );
   const revenueFacts = useRef(
@@ -299,8 +367,18 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     "detail",
   );
   const [workpaperFilter, setWorkpaperFilter] = useState("");
+  const [procedureFilter, setProcedureFilter] = useState<ProcedureFilter>("all");
+  const [procedureReviewOnly, setProcedureReviewOnly] = useState(false);
+  const [covenantScopeFilter, setCovenantScopeFilter] = useState<CovenantScopeFilter>("repayment");
+  useEffect(() => {
+    setProcedureFilter("all");
+    setCovenantScopeFilter("repayment");
+    setProcedureReviewOnly(false);
+    setWorkpaperFilter("");
+    setSelectedWorkRowId("");
+  }, [selectedDocument, ruleId, selectedResultRunId]);
   const [selectedWorkRowId, setSelectedWorkRowId] = useState("");
-  const [previewOpen, setPreviewOpen] = useState(true);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [previewWidthPercent, setPreviewWidthPercent] = useState(() => {
     try {
       const saved = Number(localStorage.getItem("ap_split_ratio"));
@@ -311,16 +389,15 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   });
   const [editingResult, setEditingResult] = useState<AudiPickResult>();
   const [editingResultJson, setEditingResultJson] = useState("");
-  const [configStatus, setConfigStatus] = useState<{
-    llm?: { ready: boolean };
-    ocr?: { ready: boolean; engine: string };
-  }>({});
+  const [configStatus, setConfigStatus] = useState<AudiPickConfigStatus>({});
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const ruleInteractionRevisionRef = useRef(new Map<string, number>());
+  const classificationRequestRef = useRef(new Map<string, number>());
+  const contractMetaSaveQueueRef = useRef(new Map<string, Promise<void>>());
   // 顶层视图：工作台 / 提取模板库 / 处理工作日志
   const [viewMode, setViewMode] = useState<AudiPickLegacyPage>("home");
   const [logOpen, setLogOpen] = useState(false);
-  const [themePickerOpen, setThemePickerOpen] = useState(false);
-  const [themeRevision, setThemeRevision] = useState(0);
-  const [tourOpen, setTourOpen] = useState(false);
   const [loanAuditOpen, setLoanAuditOpen] = useState(false);
   useEffect(() => {
     try {
@@ -329,6 +406,11 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       /* The splitter still works when browser storage is unavailable. */
     }
   }, [previewWidthPercent]);
+  useEffect(() => {
+    setPreviewOpen(false);
+    setPdfSearch("");
+    setPdfMatches([]);
+  }, [selectedDocument]);
   // 处理工作日志（参考旧版 workLog：记录每步处理操作）
   type WorkLogEntry = {
     id: number;
@@ -407,7 +489,109 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   const fields = window.RuleEngine?.getFieldsForRule(ruleId) ?? [];
   const activeFieldKeys = selectedFieldKeys;
   const activeFieldSetId = `${ruleId}:${[...activeFieldKeys].sort().join("|")}`;
+  function fieldKeysForRule(targetRuleId: string, projectId = selectedId) {
+    const available = window.RuleEngine?.getFieldsForRule(targetRuleId) ?? [];
+    if (targetRuleId === "revenue_workpaper") {
+      return available.map((field) => field.key);
+    }
+    const known = new Set(available.map((field) => field.key));
+    const preferred = projectsRef.current.find(
+      (item) => item.project.id === projectId,
+    )?.project.fieldPrefs?.[targetRuleId];
+    const selected = (preferred?.length
+      ? preferred.filter((key) => known.has(key))
+      : available.map((field) => field.key));
+    const pageKey = window.RuleEngine?.pageKeyForRule?.(targetRuleId);
+    if (pageKey && known.has(pageKey) && !selected.includes(pageKey)) {
+      selected.unshift(pageKey);
+    }
+    return selected;
+  }
+  function extractionSnapshot(
+    targetRuleId: string,
+    fieldKeys = activeFieldKeys,
+  ): AudiPickExtractionSnapshot {
+    const normalizedFields = [...fieldKeys].sort();
+    const targetRule = rules.find((rule) => rule.id === targetRuleId);
+    return {
+      ruleId: targetRuleId,
+      ruleName: targetRule?.name ?? targetRuleId,
+      ruleVersion: targetRule?.version ?? "1.0",
+      fieldKeys,
+      fieldSetId: `${targetRuleId}:${normalizedFields.join("|")}`,
+    };
+  }
+  function contractMetaFor(projectId: string, documentId: string): AudiPickContractMeta {
+    return (
+      projectsRef.current
+        .find((item) => item.project.id === projectId)
+        ?.contracts?.find((item) => item.id === documentId) ?? { id: documentId }
+    );
+  }
+  function templateIsUserLocked(meta: AudiPickContractMeta) {
+    return Boolean(meta.ruleConfirmed || meta.ruleSource === "user");
+  }
+  function bumpRuleInteraction(documentId: string) {
+    const next = (ruleInteractionRevisionRef.current.get(documentId) ?? 0) + 1;
+    ruleInteractionRevisionRef.current.set(documentId, next);
+    return next;
+  }
   const selected = projects.find((value) => value.project.id === selectedId);
+  const associationDocuments = useMemo<AudiPickAssociationDocument[]>(
+    () => documents.map((document) => {
+      const meta = selected?.contracts?.find((item) => item.id === document.id);
+      const targetRuleId = meta?.detectedRuleId ?? meta?.ruleId;
+      return {
+        id: document.id,
+        name: document.name,
+        text: associationDocumentTexts[document.id] ?? "",
+        detectedLabel: meta?.detectedLabel,
+        detectedRuleId: meta?.detectedRuleId,
+        ruleId: meta?.ruleId,
+        ruleName: rules.find((candidate) => candidate.id === targetRuleId)?.name,
+      };
+    }),
+    [associationDocumentTexts, documents, rules, selected?.contracts],
+  );
+  const detectedAssociationSuggestions = useMemo(
+    () => buildAssociationSuggestions(
+      associationDocuments,
+      selected?.project.relationGroups ?? [],
+      selected?.project.dismissedAssociations ?? [],
+    ),
+    [associationDocuments, selected?.project.dismissedAssociations, selected?.project.relationGroups],
+  );
+  const pendingAssociationSuggestions = useMemo(
+    () => detectedAssociationSuggestions.filter((suggestion) => suggestion.confidence === "medium"),
+    [detectedAssociationSuggestions],
+  );
+  useEffect(() => {
+    const highConfidence = detectedAssociationSuggestions.filter(
+      (suggestion) => suggestion.confidence === "high",
+    );
+    if (!selectedId || !highConfidence.length) return;
+    const target = projectsRef.current.find((item) => item.project.id === selectedId);
+    if (!target) return;
+    const previousGroups = target.project.relationGroups ?? [];
+    const relationGroups = applyHighConfidenceAssociations(previousGroups, highConfidence);
+    if (JSON.stringify(relationGroups) === JSON.stringify(previousGroups)) return;
+    const saved: AudiPickProjectData = {
+      ...target,
+      project: {
+        ...target.project,
+        relationGroups,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+    void engineCall("audipick.project_save", saved)
+      .then(() => {
+        projectsRef.current = projectsRef.current.map((item) =>
+          item.project.id === selectedId ? saved : item,
+        );
+        setProjects(projectsRef.current);
+      })
+      .catch((cause) => setError(errorText(cause)));
+  }, [detectedAssociationSuggestions, selectedId]);
   const documentResults = (selected?.results ?? []).filter(
     (row) => row.contractId === selectedDocument && row.ruleId === ruleId,
   );
@@ -434,7 +618,16 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   ).sort((left, right) => right.extractAt.localeCompare(left.extractAt));
   const activeResultRun =
     resultRuns.find((run) => run.id === selectedResultRunId) ?? resultRuns[0];
-  const visibleFieldSetId =
+  const activeResultSample = activeResultRun?.rows[0];
+  const legacyCovenantResult = ruleId === "loan_covenant" && !!activeResultSample && activeResultSample._financial_metrics_only !== true;
+  const activeResultRuleId = String(activeResultSample?.ruleId ?? ruleId);
+  const activeResultRule = rules.find((rule) => rule.id === activeResultRuleId);
+  const activeResultRuleName =
+    activeResultSample?.ruleName ??
+    activeResultRule?.name ??
+    activeResultRuleId;
+  const activeResultRuleVersion =
+    activeResultSample?.ruleVersion ?? activeResultRule?.version;  const visibleFieldSetId =
     latestFieldSetId(activeResultRun?.rows ?? documentResults) ?? activeFieldSetId;
   const matchedResults = (activeResultRun?.rows ?? []).filter(
     (row) => !row.fieldSetId || row.fieldSetId === visibleFieldSetId,
@@ -449,7 +642,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       ? ((window.RevenueWorkpaper as any).visibleItems(
           matchedResults,
         ) as AudiPickResult[])
-      : matchedResults;
+      : ruleId === "loan_covenant"
+        ? (legacyCovenantResult ? matchedResults : matchedResults.filter(row => row._financial_metrics_only === true && isFormalCovenantRow(row)))
+        : matchedResults;
   const batchDocuments = Array.isArray(
     (batchJob?.result as { documents?: unknown })?.documents,
   )
@@ -512,58 +707,53 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     if (!selectedId) {
       setDocuments([]);
       setDocumentTextLengths({});
+      setAssociationDocumentTexts({});
       setSelectedDocumentIds([]);
       return;
     }
+    let active = true;
+    setAssociationDocumentTexts({});
     void engineCall("audipick.documents", { projectId: selectedId })
       .then(async (value) => {
+        if (!active) return;
         const nextDocuments = (value as { documents: AudiPickDocument[] }).documents;
         setDocuments(nextDocuments);
-        const lengths = await Promise.all(
+        const contents = await Promise.all(
           nextDocuments.map(async (document) => {
             const stored = (await engineCall("audipick.document_text", {
               documentId: document.id,
             })) as { text?: string };
-            return [document.id, stored.text?.length ?? 0] as const;
+            return [document.id, stored.text ?? ""] as const;
           }),
         );
-        setDocumentTextLengths(Object.fromEntries(lengths));
+        if (active) {
+          setDocumentTextLengths(Object.fromEntries(contents.map(([id, text]) => [id, text.length])));
+          setAssociationDocumentTexts(Object.fromEntries(contents));
+        }
       })
-      .catch((e) => setError(errorText(e)));
+      .catch((e) => { if (active) setError(errorText(e)); });
+    return () => { active = false; };
   }, [selectedId]);
   useEffect(() => {
-    setSelectedFieldKeys(
-      (window.RuleEngine?.getFieldsForRule(ruleId) ?? []).map(
-        (field) => field.key,
-      ),
-    );
-  }, [ruleId, ruleRevision]);
+    setSelectedFieldKeys(fieldKeysForRule(ruleId));
+  }, [ruleId, ruleRevision, selectedId]);
   useEffect(() => {
     setSelectedResultRunId("latest");
     setEditingResult(undefined);
     setEditingResultJson("");
   }, [selectedDocument, ruleId]);
   useEffect(() => {
-    if (
-      !pendingExtractDocumentId ||
-      selectedDocument !== pendingExtractDocumentId ||
-      !pdfText.trim() ||
-      busy
-    )
-      return;
-    setPendingExtractDocumentId("");
-    void extract().catch((cause) => {
-      setError(errorText(cause));
-    });
-  }, [pendingExtractDocumentId, selectedDocument, pdfText, busy]);
-  useEffect(() => {
     let off = () => {};
     void listenJobEvents((event) => {
       if (event.toolId !== "audipick") return;
+      if (!batchRulePlans.current.has(event.jobId)) return;
       setBatchJob(event);
       if (event.result) setResult(event.result);
-      if (event.phase === "completed" && event.result && selected) {
+      if (event.phase === "completed" && event.result) {
         const plan = batchRulePlans.current.get(event.jobId) ?? {
+          projectId: selectedId,
+          ruleName: rules.find((rule) => rule.id === ruleId)?.name ?? ruleId,
+          ruleVersion: rules.find((rule) => rule.id === ruleId)?.version ?? "1.0",
           ruleId,
           fieldKeys: activeFieldKeys,
           fieldSetId: activeFieldSetId,
@@ -588,6 +778,8 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                   id: `r_${Date.now().toString(36)}_${document.id}_${index}`,
                   contractId: document.id,
                   ruleId: plan.ruleId,
+                  ruleName: plan.ruleName,
+                  ruleVersion: plan.ruleVersion,
                   fieldKeys: plan.fieldKeys,
                   fieldSetId: plan.fieldSetId,
                   extractAt: completedAt,
@@ -598,7 +790,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         });
         setProjects((current) => {
           const target = current.find(
-            (project) => project.project.id === selectedId,
+            (project) => project.project.id === plan.projectId,
           );
           if (!target) return current;
           const saved = {
@@ -613,7 +805,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             setError(errorText(saveError)),
           );
           return current.map((project) =>
-            project.project.id === selectedId ? saved : project,
+            project.project.id === plan.projectId ? saved : project,
           );
         });
         batchRulePlans.current.delete(event.jobId);
@@ -742,30 +934,69 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       id: documentId,
     };
   }
+  async function saveContractRuleSelection(
+    documentId: string,
+    targetRuleId: string,
+    confirmed: boolean,
+    projectId = selectedId,
+  ) {
+    bumpRuleInteraction(documentId);
+    await saveContractMeta(
+      documentId,
+      { ruleId: targetRuleId, ruleConfirmed: confirmed, ruleSource: "user" },
+      projectId,
+    );
+    if (
+      projectId === selectedIdRef.current &&
+      documentId === selectedDocumentRef.current
+    ) {
+      setRuleId(targetRuleId);
+    }
+  }
   async function saveContractMeta(
     documentId: string,
     patch: Partial<AudiPickContractMeta>,
+    projectId = selectedId,
   ) {
-    if (!selected) return;
-    const existing = selected.contracts ?? [];
-    const current = existing.find((item) => item.id === documentId) ?? {
-      id: documentId,
-    };
-    const contracts = [
-      ...existing.filter((item) => item.id !== documentId),
-      { ...current, ...patch, id: documentId },
-    ];
-    const saved: AudiPickProjectData = {
-      ...selected,
-      project: { ...selected.project, updatedAt: new Date().toISOString() },
-      contracts,
-    };
-    await engineCall("audipick.project_save", saved);
-    setProjects((items) =>
-      items.map((item) =>
-        item.project.id === selected.project.id ? saved : item,
-      ),
-    );
+    const queueKey = `${projectId}:${documentId}`;
+    const previous =
+      contractMetaSaveQueueRef.current.get(queueKey) ?? Promise.resolve();
+    const task = previous.catch(() => undefined).then(async () => {
+      const target = projectsRef.current.find(
+        (item) => item.project.id === projectId,
+      );
+      if (!target) throw new Error("项目已不存在，未保存识别进度。");
+      const existing = target.contracts ?? [];
+      const current = existing.find((item) => item.id === documentId) ?? {
+        id: documentId,
+      };
+      const contracts = [
+        ...existing.filter((item) => item.id !== documentId),
+        { ...current, ...patch, id: documentId },
+      ];
+      const saved: AudiPickProjectData = {
+        ...target,
+        project: { ...target.project, updatedAt: new Date().toISOString() },
+        contracts,
+      };
+      await engineCall("audipick.project_save", saved);
+      projectsRef.current = projectsRef.current.map((item) =>
+        item.project.id === projectId ? saved : item,
+      );
+      setProjects((items) =>
+        items.map((item) =>
+          item.project.id === projectId ? saved : item,
+        ),
+      );
+    });
+    contractMetaSaveQueueRef.current.set(queueKey, task);
+    try {
+      await task;
+    } finally {
+      if (contractMetaSaveQueueRef.current.get(queueKey) === task) {
+        contractMetaSaveQueueRef.current.delete(queueKey);
+      }
+    }
   }
   async function removeAssociation(anchorId: string, fileId: string) {
     if (!selected) return;
@@ -794,6 +1025,28 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       ),
     );
   }
+  async function dismissAssociation(fileId: string, anchorId: string) {
+    const target = projectsRef.current.find((item) => item.project.id === selectedId);
+    if (!target) return;
+    const pair = `${anchorId}>${fileId}`;
+    const dismissedAssociations = [...new Set([
+      ...(target.project.dismissedAssociations ?? []),
+      pair,
+    ])];
+    const saved: AudiPickProjectData = {
+      ...target,
+      project: {
+        ...target.project,
+        dismissedAssociations,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+    await engineCall("audipick.project_save", saved);
+    projectsRef.current = projectsRef.current.map((item) =>
+      item.project.id === selectedId ? saved : item,
+    );
+    setProjects(projectsRef.current);
+  }
   async function exportBackup() {
     const outputPath = await pickPath(
       "save",
@@ -818,112 +1071,47 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
+  async function importPaths(paths: string[]) {
+    const projectId = selectedId;
+    if (!projectId || !paths.length || importingRef.current || preparingRef.current) return;
+    importingRef.current = true;
+    setBusy(true); setError(""); setPreparationStatus("正在导入合同…");
+    const imported: Array<{ id: string; name: string }> = [];
+    const failures: string[] = [];
+    try {
+      for (const path of paths) {
+        try {
+          if (/\.pdf$/i.test(path)) {
+            imported.push(await engineCall("audipick.document_import", { projectId, path }) as AudiPickDocument);
+          } else {
+            const folder = await engineCall("audipick.document_import_folder", { projectId, path }) as {
+              documents?: AudiPickDocument[]; failures?: Array<{ path: string; error: string }>;
+            };
+            imported.push(...folder.documents ?? []);
+            failures.push(...(folder.failures ?? []).map((item) => item.error));
+          }
+        } catch (cause) { failures.push(errorText(cause)); }
+      }
+      const value = await engineCall("audipick.documents", { projectId }) as { documents: AudiPickDocument[] };
+      if (selectedIdRef.current === projectId) setDocuments(value.documents);
+      setProjectDocumentCounts((current) => ({ ...current, [projectId]: value.documents.length }));
+      const unique = [...new Map(imported.map((item) => [item.id, item])).values()];
+      addLog(`${unique.length} 份 PDF`, "导入", "文件已导入，开始读取文字及扫描页", "done");
+      await prepareDocuments(unique, projectId);
+      if (failures.length) setError(`部分文件导入失败：${failures.join("；")}`);
+    } catch (cause) { setError(errorText(cause)); }
+    finally { importingRef.current = false; setBusy(false); }
+  }
   async function importPdfs() {
-    if (!selectedId) {
-      setError("请先选择项目。");
-      return;
-    }
+    if (!selectedId) { setError("请先选择项目。"); return; }
     const paths = await pickPath("files", "导入合同 PDF", ["pdf"]);
-    if (!Array.isArray(paths)) return;
-    setBusy(true);
-    setError("");
-    try {
-      for (const path of paths) {
-        await engineCall("audipick.document_import", {
-          projectId: selectedId,
-          path,
-        });
-        addLog(path.split(/[\\/]/).pop() ?? path, "导入", "PDF 文件已导入", "done");
-      }
-      const value = (await engineCall("audipick.documents", {
-        projectId: selectedId,
-      })) as { documents: AudiPickDocument[] };
-      setDocuments(value.documents);
-      setResult(value);
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(false);
-    }
+    if (Array.isArray(paths)) await importPaths(paths);
   }
-  async function importDroppedPaths(paths: string[]) {
-    if (!selectedId || !paths.length) return;
-    setBusy(true);
-    setError("");
-    try {
-      let importedCount = 0;
-      let skippedCount = 0;
-      for (const path of paths) {
-        if (/\.pdf$/i.test(path)) {
-          await engineCall("audipick.document_import", {
-            projectId: selectedId,
-            path,
-          });
-          importedCount += 1;
-        } else {
-          const imported = (await engineCall(
-            "audipick.document_import_folder",
-            { projectId: selectedId, path },
-          )) as { imported?: number; skipped?: number };
-          importedCount += imported.imported ?? 0;
-          skippedCount += imported.skipped ?? 0;
-        }
-      }
-      const value = (await engineCall("audipick.documents", {
-        projectId: selectedId,
-      })) as { documents: AudiPickDocument[] };
-      setDocuments(value.documents);
-      setProjectDocumentCounts((current) => ({
-        ...current,
-        [selectedId]: value.documents.length,
-      }));
-      addLog(
-        `${paths.length} 个拖放项目`,
-        "拖放导入",
-        `已导入 ${importedCount} 份 PDF${skippedCount ? `，跳过 ${skippedCount} 份` : ""}`,
-        "done",
-      );
-      setResult({ imported: importedCount, skipped: skippedCount });
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(false);
-    }
-  }
+  async function importDroppedPaths(paths: string[]) { await importPaths(paths); }
   async function importPdfFolder() {
-    if (!selectedId) {
-      setError("请先选择项目。");
-      return;
-    }
+    if (!selectedId) { setError("请先选择项目。"); return; }
     const path = await pickPath("folder", "选择包含合同 PDF 的文件夹");
-    if (typeof path !== "string") return;
-    setBusy(true);
-    setError("");
-    try {
-      const imported = (await engineCall("audipick.document_import_folder", {
-        projectId: selectedId,
-        path,
-      })) as { imported?: number; skipped?: number };
-      const value = (await engineCall("audipick.documents", {
-        projectId: selectedId,
-      })) as { documents: AudiPickDocument[] };
-      setDocuments(value.documents);
-      setProjectDocumentCounts((current) => ({
-        ...current,
-        [selectedId]: value.documents.length,
-      }));
-      addLog(
-        path.split(/[\\/]/).pop() ?? path,
-        "文件夹导入",
-        `已导入 ${imported.imported ?? 0} 份 PDF${imported.skipped ? `，跳过 ${imported.skipped} 份` : ""}`,
-        "done",
-      );
-      setResult(imported);
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(false);
-    }
+    if (typeof path === "string") await importPaths([path]);
   }
   async function deleteDocument(documentId: string) {
     const document = documents.find((item) => item.id === documentId);
@@ -982,171 +1170,247 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
-  async function openDocument(id: string, startPage = 1) {
+  async function loadPdf(id: string) {
     const pdfjs = window.pdfjsLib;
-    if (!pdfjs) {
-      setError("PDF.js 本地组件未加载。");
-      return;
-    }
-    setBusy(true);
-    setError("");
-    setSelectedDocument(id);
-    setPdfText("");
+    if (!pdfjs) throw new Error("PDF.js 本地组件未加载。");
+    pdfjs.GlobalWorkerOptions.workerSrc = "/audipick-pdfjs/legacy/build/pdf.worker.min.js";
+    return pdfjs.getDocument({
+      data: new Uint8Array(await audipickPdfBytes(id)),
+      cMapUrl: "/audipick-pdfjs/cmaps/", cMapPacked: true,
+      standardFontDataUrl: "/audipick-pdfjs/standard_fonts/",
+    }).promise;
+  }
+  async function readDocumentText(id: string, projectId: string, pdf: any, fileName: string, operation?: AudiPickOperationHandle) {
+    // Refresh saved configuration at operation time, not from an old render closure.
+    const status = await engineCall("audipick.config_status", {}) as AudiPickConfigStatus;
+    setConfigStatus(status);
+    const stored = await engineCall("audipick.document_text", { documentId: id }) as { text?: string };
+    const reuseCachedOcr = contractMetaFor(projectId, id).ocrLayoutVersion === PDF_OCR_LAYOUT_VERSION;
+    const prepared = await preparePdfText(pdf, stored.text ?? "", {
+      operation,
+      ocrReady: Boolean(status.ocr?.ready),
+      reuseCachedOcr,
+      save: async (text) => {
+        await engineCall("audipick.document_text_save", { documentId: id, text });
+        if (selectedIdRef.current === projectId) setDocumentTextLengths((current) => ({ ...current, [id]: text.length }));
+      },
+      progress: async (completed, total) => {
+        operation?.update(`${fileName}：已保存 ${completed}/${total} 页`, completed, total);
+        setPreparationStatus(`${fileName}：已保存 ${completed}/${total} 页，正在读取文字/识别扫描页或异常文字层…`);
+        await saveContractMeta(id, { ocrPending: true, ocrCompletedPages: completed, ocrTotalPages: total }, projectId);
+      },
+      recognize: async (page, number) => {
+        // Render OCR input above screen-preview resolution so small Chinese
+        // glyphs and comparison signs survive rasterization.
+        const viewport = page.getViewport({ scale: 2.5 });
+        const image = document.createElement("canvas");
+        image.width = viewport.width; image.height = viewport.height;
+        try {
+          const imageContext = image.getContext("2d");
+          if (!imageContext) throw new Error("无法创建 PDF OCR 画布。");
+          await page.render({ canvasContext: imageContext, viewport }).promise;
+          const regions = pdfOcrRegions(image.width, image.height);
+          const recognized: string[] = [];
+          for (let index = 0; index < regions.length; index++) {
+            await operation?.checkpoint();
+            const region = regions[index];
+            let target = image;
+            if (region.label !== "full") {
+              target = document.createElement("canvas");
+              target.width = region.width; target.height = region.height;
+              const targetContext = target.getContext("2d");
+              if (!targetContext) throw new Error("无法创建双页 PDF OCR 分页画布。");
+              targetContext.drawImage(image, region.x, region.y, region.width, region.height, 0, 0, region.width, region.height);
+            }
+            try {
+              const text = await recognizePdfPage({ documentId: id, page: number, totalPages: pdf.numPages,
+                pageRegion: region.label, regionIndex: index + 1, regionCount: regions.length,
+                imageBase64: target.toDataURL("image/jpeg", 0.86).split(",")[1] }, operation);
+              if (text.trim()) recognized.push(text.trim());
+            } finally {
+              if (target !== image) { target.width = 0; target.height = 0; }
+            }
+          }
+          return recognized.join("\n");
+        } finally { image.width = 0; image.height = 0; }
+      },
+    });
+    await saveContractMeta(id, { isScanned: prepared.scanned, ocrPending: prepared.missing.length > 0,
+      ocrCompletedPages: pdf.numPages - prepared.missing.length, ocrTotalPages: pdf.numPages,
+      ocrLayoutVersion: prepared.missing.length ? undefined : PDF_OCR_LAYOUT_VERSION }, projectId);
+    return prepared;
+  }
+  async function prepareDocuments(items: Array<{ id: string; name: string }>, projectId: string) {
+    if (preparingRef.current || !items.length) return;
+    preparingRef.current = true; setBusy(true); setError("");
+    const operation = beginAudiPickOperation("合同文字读取 / OCR", true);
+    let completed = 0;
+    const preparedTexts: Record<string, string> = {};
     try {
-      pdfjs.GlobalWorkerOptions.workerSrc =
-        "/audipick-pdfjs/legacy/build/pdf.worker.min.js";
-      const bytes = await audipickPdfBytes(id);
-      const pdf = await pdfjs.getDocument({
-        data: new Uint8Array(bytes),
-        cMapUrl: "/audipick-pdfjs/cmaps/",
-        cMapPacked: true,
-        standardFontDataUrl: "/audipick-pdfjs/standard_fonts/",
-      }).promise;
-      setPdfDocument(pdf);
-      setPdfPages(pdf.numPages);
-      setPdfPage(1);
-      addLog(
-        documents.find((d) => d.id === id)?.name ?? "文档",
-        "打开",
-        `已加载 PDF，共 ${pdf.numPages} 页`,
-        "done",
-      );
+      // Mark every accepted file before processing so interrupted batches can be resumed.
+      for (const item of items) await saveContractMeta(item.id, { ocrPending: true }, projectId);
+      for (const item of items) {
+        await operation.checkpoint();
+        setPreparationStatus(`正在处理 ${item.name}（${completed + 1}/${items.length}）…`);
+        const pdf = await loadPdf(item.id);
+        try {
+          const prepared = await readDocumentText(item.id, projectId, pdf, item.name, operation);
+          if (prepared.missing.length) throw new Error(`${item.name} 第 ${prepared.missing.join("、")} 页需要 OCR。请完成 OCR 配置后在合同列表点击“继续识别”。`);
+          void suggestRule(item.id, prepared.text, projectId, item.name);
+          preparedTexts[item.id] = prepared.text;
+          completed++;
+          addLog(item.name, "文字识别", `已保存 ${pdf.numPages} 页，其中 OCR ${prepared.ocrPages} 页，复用 ${prepared.resumedPages} 页`, "done");
+        } finally { await pdf.destroy?.(); }
+      }
+      setPreparationStatus(`已完成 ${completed} 份合同的文字读取/识别，可选择模板开始提取。`);
+      operation.finish("completed", `已保存 ${completed} 份合同的文字，可开始提取。`);
+    } catch (cause) {
+      const message = errorText(cause);
+      operation.finish(/取消|停止/.test(message) ? "cancelled" : "failed", message);
+      setError(message); setPreparationStatus(`已完成 ${completed}/${items.length} 份；其余保留为待继续识别。`);
+      addLog("合同识别", "文字识别", message, "error");
+    } finally {
+      if (selectedIdRef.current === projectId && Object.keys(preparedTexts).length) {
+        setAssociationDocumentTexts((current) => ({ ...current, ...preparedTexts }));
+      }
+      preparingRef.current = false; setBusy(false);
+    }
+  }
+  async function openDocument(id: string) {
+    if (preparingRef.current) return;
+    preparingRef.current = true;
+    setBusy(true); setError(""); setSelectedDocument(id); setPdfText("");
+    selectedDocumentRef.current = id;
+    const projectId = selectedId;
+    const existingPdf = pdfDocument;
+    setPdfDocument(undefined);
+    setPdfPages(0);
+    if (existingPdf) await existingPdf.destroy?.();
+    let pdf: any;
+    let operation: AudiPickOperationHandle | undefined;
+    try {
       const stored = (await engineCall("audipick.document_text", {
         documentId: id,
       })) as { text?: string };
-      const savedPages = parseSavedPdfPages(stored.text ?? "");
-      const pageTexts = new Map<number, string>();
-      let ocrPages = 0;
-      let resumedPages = 0;
-      const unreadablePages: number[] = [];
-      for (let number = 1; number <= pdf.numPages; number++) {
-        const page = await pdf.getPage(number);
-        const content = await page.getTextContent();
-        let pageText = content.items
-          .map((item: { str?: string }) => item.str ?? "")
-          .join(" ");
-        const cachedText = savedPages.get(number)?.trim() ?? "";
-        if (
-          pageText.trim().length < 60 &&
-          cachedText.length >= 60 &&
-          !cachedText.includes("需要先配置 OCR")
-        ) {
-          pageText = cachedText;
-          resumedPages += 1;
-        } else if (pageText.trim().length < 60 && configStatus.ocr?.ready) {
-          await saveContractMeta(id, {
-            ocrPending: true,
-            ocrCompletedPages: number - 1,
-            ocrTotalPages: pdf.numPages,
-          });
-          const viewport = page.getViewport({ scale: 1.5 });
-          const image = document.createElement("canvas");
-          image.width = viewport.width;
-          image.height = viewport.height;
-          await page.render({
-            canvasContext: image.getContext("2d"),
-            viewport,
-          }).promise;
-          const ocr = (await engineCall("audipick.ocr", {
-            documentId: id,
-            page: number,
-            imageBase64: image.toDataURL("image/jpeg", 0.78).split(",")[1],
-          })) as { text: string };
-          pageText = ocr.text;
-          ocrPages += 1;
-          savedPages.set(number, pageText);
-          await engineCall("audipick.document_text_save", {
-            documentId: id,
-            text: serializePdfPages(savedPages),
-          });
-          await saveContractMeta(id, {
-            ocrPending: number < pdf.numPages,
-            ocrCompletedPages: number,
-            ocrTotalPages: pdf.numPages,
-          });
-        } else if (pageText.trim().length < 60) {
-          unreadablePages.push(number);
-          pageText = "【本页文字层过少，需要先配置 OCR 后识别】";
-        }
-        pageTexts.set(number, pageText);
-      }
-      const text = serializePdfPages(pageTexts);
-      if (!unreadablePages.length) {
-        await engineCall("audipick.document_text_save", {
+      if (
+        stored.text?.trim() &&
+        !contractMetaFor(projectId, id).ocrPending
+      ) {
+        if (selectedIdRef.current !== projectId) return;
+        setPdfText(stored.text);
+        setOcrRequiredPages([]);
+        setResult({
           documentId: id,
-          text,
+          textLength: stored.text.length,
+          source: "saved",
         });
-      }
-      await renderPdfPage(
-        pdf,
-        Math.min(pdf.numPages, Math.max(1, startPage)),
-        "",
-        pdfScale,
-        pdfRotation,
-      );
-      setPdfText(text);
-      setDocumentTextLengths((current) => ({ ...current, [id]: text.length }));
-      setOcrRequiredPages(unreadablePages);
-      const isScanned = ocrPages > 0 || resumedPages > 0;
-      await saveContractMeta(id, {
-        isScanned,
-        ocrPending: false,
-        ocrCompletedPages: pdf.numPages,
-        ocrTotalPages: pdf.numPages,
-      });
-      setResult({
-        documentId: id,
-        pages: pdf.numPages,
-        textLength: text.length,
-        ocrPages,
-        resumedPages,
-        scanned: isScanned,
-      });
-      if (unreadablePages.length) {
-        setError(
-          `第 ${unreadablePages.join("、")} 页需要 OCR，但当前 OCR 未就绪。请到工具箱设置完成配置后重新读取文档。`,
+        setAssociationDocumentTexts((current) => ({
+          ...current,
+          [id]: stored.text ?? "",
+        }));
+        void suggestRule(
+          id,
+          stored.text,
+          projectId,
+          documents.find((item) => item.id === id)?.name,
         );
-      } else {
-        void suggestRule(id, text);
+        return;
       }
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(false);
+      operation = beginAudiPickOperation("读取合同文字", true);
+      pdf = await loadPdf(id);
+      const prepared = await readDocumentText(id, projectId, pdf, documents.find((item) => item.id === id)?.name ?? id, operation);
+      if (selectedIdRef.current !== projectId) { await pdf.destroy?.(); return; }
+      setPdfText(prepared.text); setOcrRequiredPages(prepared.missing);
+      setResult({ documentId: id, pages: pdf.numPages, textLength: prepared.text.length, ocrPages: prepared.ocrPages });
+      if (prepared.missing.length) { setError(`第 ${prepared.missing.join("、")} 页需要 OCR，请配置后继续识别。`); operation.finish("failed", "部分页面需要 OCR，请配置后继续识别。"); }
+      else {
+        operation.finish("completed", "合同文字已保存。");
+        void suggestRule(id, prepared.text, projectId, documents.find((item) => item.id === id)?.name);
+        if (selectedIdRef.current === projectId) {
+          setAssociationDocumentTexts((current) => ({ ...current, [id]: prepared.text }));
+        }
+      }
+      await pdf.destroy?.();
+      pdf = undefined;
+    } catch (cause) {
+      await pdf?.destroy?.();
+      const message = errorText(cause);
+      operation?.finish(/取消|停止/.test(message) ? "cancelled" : "failed", message);
+      setError(message);
     }
+    finally { preparingRef.current = false; setBusy(false); }
   }
   /// Legacy classified every upload and asked the user to confirm the template.
   /// Without it the picker stays on 借款·限制性契约 for every document, and a
   /// wrong template silently produces meaningless extractions.
-  async function suggestRule(documentId: string, text: string) {
+  async function suggestRule(
+    documentId: string,
+    text: string,
+    projectId = selectedId,
+    documentName?: string,
+  ) {
     if (!configStatus?.llm?.ready || !text.trim()) return;
+    const initialMeta = contractMetaFor(projectId, documentId);
+    // A user-selected template is already authoritative.  Even when the user
+    // has not pressed "confirm" yet, a late classifier result must not replace
+    // the selection they made moments earlier.
+    if (templateIsUserLocked(initialMeta)) return;
     const catalog = rules.map((rule) => ({
       id: rule.id,
       name: rule.name,
       docKind: (rule as { docKind?: string }).docKind,
     }));
     if (!catalog.length) return;
-    const name = documents.find((item) => item.id === documentId)?.name ?? "";
+    const name = documentName ?? documents.find((item) => item.id === documentId)?.name ?? "";
+    const requestId = (classificationRequestRef.current.get(documentId) ?? 0) + 1;
+    classificationRequestRef.current.set(documentId, requestId);
+    const interactionRevision =
+      ruleInteractionRevisionRef.current.get(documentId) ?? 0;
     try {
       const value = (await engineCall("audipick.classify", {
         documentId,
         prompt: buildClassifyPrompt(catalog),
         text: classifySample(name, text),
       })) as { parsed?: unknown };
+      if (classificationRequestRef.current.get(documentId) !== requestId) return;
       const picked = pickClassifiedRule(
         value.parsed,
         catalog.map((rule) => rule.id),
-        ruleId,
+        initialMeta.ruleId ?? selected?.project.defaultRuleId ?? ruleId,
       );
-      await saveContractMeta(documentId, {
-        ruleId: picked.ruleId,
+      const latestMeta = contractMetaFor(projectId, documentId);
+      const interactionChanged =
+        (ruleInteractionRevisionRef.current.get(documentId) ?? 0) !==
+        interactionRevision;
+      // Re-check after the await: the classifier may finish after the user
+      // selects/confirms a template.  In that case persist only the AI
+      // suggestion metadata; the user's ruleId and confirmation stay intact.
+      const preserveUserChoice =
+        interactionChanged || templateIsUserLocked(latestMeta);
+      const patch: Partial<AudiPickContractMeta> = {
         detectedRuleId: picked.ruleId,
         detectedConfidence: picked.confidence,
         detectedLabel: picked.docLabel,
-        ruleConfirmed: picked.confidence === "high",
-      });
-      setRuleId(picked.ruleId);
-      setSuggestedRule(picked.ruleId === ruleId ? undefined : picked);
+      };
+      if (!preserveUserChoice) {
+        patch.ruleId = picked.ruleId;
+        patch.ruleSource = "ai";
+        patch.ruleConfirmed = false;
+      }
+      await saveContractMeta(documentId, patch, projectId);
+      const effectiveRuleId = preserveUserChoice
+        ? latestMeta.ruleId
+        : picked.ruleId;
+      if (
+        !preserveUserChoice &&
+        projectId === selectedIdRef.current &&
+        selectedDocumentRef.current === documentId
+      ) {
+        setRuleId(picked.ruleId);
+      }
+      if (selectedDocumentRef.current === documentId) {
+        setSuggestedRule(picked.ruleId === effectiveRuleId ? undefined : picked);
+      }
     } catch {
       // Classification is advisory; a failure must never block extraction.
       setSuggestedRule(undefined);
@@ -1200,6 +1464,48 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     }
     setPdfPage(number);
   }
+  async function openPdfPreview(
+    documentId = selectedDocumentRef.current,
+    startPage = pdfPage,
+  ) {
+    if (!documentId) return;
+    setError("");
+    let document =
+      documentId === selectedDocumentRef.current ? pdfDocument : undefined;
+    try {
+      if (!document) {
+        document = await loadPdf(documentId);
+        if (selectedDocumentRef.current !== documentId) {
+          await document.destroy?.();
+          return;
+        }
+        setPdfDocument(document);
+        setPdfPages(document.numPages);
+      }
+      const page = Math.min(
+        Math.max(1, Number(startPage) || 1),
+        Math.max(1, document.numPages),
+      );
+      setPreviewOpen(true);
+      // SplitPane mounts the canvas only after previewOpen changes.
+      window.setTimeout(() => {
+        void renderPdfPage(document, page, pdfSearch, pdfScale, pdfRotation);
+      }, 0);
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  }
+  function closeDocument(returnToWorkbench = false) {
+    const document = pdfDocument;
+    setPreviewOpen(false);
+    setPdfDocument(undefined);
+    setPdfPages(0);
+    setPdfMatches([]);
+    setSelectedDocument("");
+    selectedDocumentRef.current = "";
+    if (returnToWorkbench) setSelectedId("");
+    void document?.destroy?.();
+  }
   async function searchPdf() {
     if (!pdfDocument || !pdfSearch.trim()) {
       setPdfMatches([]);
@@ -1239,19 +1545,25 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     // With a document bundle the evidence often sits in a supplement, not the
     // contract on screen.  Jumping to that page of whatever happens to be open
     // shows an unrelated page and looks like the model invented the citation.
-    const owner = matchEvidenceDocument(
-      String(row.source_documents ?? row.sourceDocuments ?? ""),
-      documents.map((item) => ({ id: item.id, name: item.name })),
-    );
+    const directOwner = String(row.source_document_id ?? "");
+    const owner = documents.some((item) => item.id === directOwner)
+      ? directOwner
+      : matchEvidenceDocument(
+          String(row.source_documents ?? row.sourceDocuments ?? ""),
+          documents.map((item) => ({ id: item.id, name: item.name })),
+        );
     if (owner && owner !== selectedDocument) {
-      await openDocument(owner, Math.max(1, Number(match[0])));
+      await openDocument(owner);
+      // Let the selected-document reset render before explicitly opening the
+      // preview requested by the evidence link.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      await openPdfPreview(owner, Math.max(1, Number(match[0])));
       return;
     }
-    if (pdfDocument)
-      await renderPdfPage(
-        pdfDocument,
-        Math.min(pdfPages, Math.max(1, Number(match[0]))),
-      );
+    await openPdfPreview(
+      selectedDocument,
+      Math.max(1, Number(match[0])),
+    );
   }
   async function runOcr() {
     if (!canvasRef.current || !selectedDocument) {
@@ -1480,24 +1792,30 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     setEditingCustomRuleId("");
     setRuleRevision((value) => value + 1);
   }
-  /// Persist one extraction run's items against the current contract/template.
-  async function saveExtractedItems(items: Array<Record<string, unknown>>) {
-    if (!selected) return;
+  /// Persist one extraction run's items against the immutable launch snapshot.
+  async function saveExtractedItemsFor(
+    projectId: string,
+    documentId: string,
+    snapshot: AudiPickExtractionSnapshot,
+    items: Array<Record<string, unknown>>,
+  ) {
+    const project = projectsRef.current.find((item) => item.project.id === projectId);
+    if (!project) throw new Error("保存提取结果时找不到当前项目，请刷新后重试。");
     const extractAt = new Date().toISOString();
     const extractRunId = `run_${Date.now().toString(36)}`;
     const saved = {
-      ...selected,
+      ...project,
       results: [
-        ...(selected.results ?? []),
+        ...(project.results ?? []),
         ...items.map((item, index) => ({
           ...item,
           id: `r_${extractRunId}_${index}`,
-          contractId: selectedDocument,
-          ruleId,
-          ruleVersion:
-            rules.find((rule) => rule.id === ruleId)?.version ?? "1.0",
-          fieldKeys: activeFieldKeys,
-          fieldSetId: activeFieldSetId,
+          contractId: documentId,
+          ruleId: snapshot.ruleId,
+          ruleName: snapshot.ruleName,
+          ruleVersion: snapshot.ruleVersion,
+          fieldKeys: snapshot.fieldKeys,
+          fieldSetId: snapshot.fieldSetId,
           extractAt,
           extractRunId,
           reviewed: false,
@@ -1505,14 +1823,19 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       ],
     };
     await engineCall("audipick.project_save", saved);
-    setProjects((current) =>
-      current.map((project) =>
-        project.project.id === selectedId ? saved : project,
-      ),
-    );
-    setSelectedResultRunId(extractRunId);
+    projectsRef.current = projectsRef.current.map((item) => item.project.id === projectId ? saved : item);
+    setProjects(projectsRef.current);
+    if (documentId === selectedDocument && documentId === selectedDocumentRef.current) {
+      setSelectedResultRunId(extractRunId);
+    }
   }
-
+  async function saveExtractedItems(
+    items: Array<Record<string, unknown>>,
+    snapshot = extractionSnapshot(ruleId),
+  ) {
+    if (!selected) return;
+    await saveExtractedItemsFor(selected.project.id, selectedDocument, snapshot, items);
+  }
   /// Two-pass extraction for the revenue workpaper.
   ///
   /// The workpaper asks dozens of questions across a bundle of documents (the
@@ -1527,6 +1850,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     prompt: string,
     bundle: Array<{ name: string; text: string }>,
     context: string,
+    operation: AudiPickOperationHandle,
+    snapshot: AudiPickExtractionSnapshot,
+    target: { projectId: string; documentId: string },
   ) {
     const rules = window.RevenueWorkpaper as any;
     const questions = (rules?.questions ?? []) as Array<{
@@ -1536,29 +1862,31 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       question: string;
     }>;
     if (!questions.length) {
-      setError("收入底稿问题矩阵未加载。");
-      setBusy(false);
-      return;
+      throw new Error("收入底稿问题矩阵未加载。");
     }
     const cacheKey = extractionCacheKey(
-      selectedDocument,
-      ruleId,
-      activeFieldSetId,
+      target.documentId,
+      snapshot.ruleId,
+      snapshot.fieldSetId,
       context,
     );
     const cached = extractCache.current.get(cacheKey);
     const askOnce = (batchPrompt: string, text: string) =>
       withRetry(
         () =>
-          engineCall("audipick.extract", {
-            documentId: selectedDocument,
-            ruleId,
+          runAudiPickExtractJob<Record<string, unknown>>({
+            documentId: target.documentId,
+            ruleId: snapshot.ruleId,
+            ruleName: snapshot.ruleName,
+            ruleVersion: snapshot.ruleVersion,
+            fieldKeys: snapshot.fieldKeys,
+            fieldSetId: snapshot.fieldSetId,
             prompt: batchPrompt,
             text,
-          }) as Promise<{ parsed?: Record<string, unknown> }>,
+          }, operation) as Promise<{ parsed?: Record<string, unknown> }>,
         3,
         2_000,
-        (remaining) => setError(`调用失败，正在重试…还剩 ${remaining} 次`),
+        (remaining) => operation.update(`调用失败，正在重试…还剩 ${remaining} 次`),
       );
 
     let responses: Array<{ parsed?: Record<string, unknown> }>;
@@ -1569,7 +1897,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       // Pass 1 — objective facts per document.
       for (const [index, document] of bundle.entries()) {
         for (const chunk of splitContractText(document.text)) {
-          setError(
+          operation.update(
             `正在提取资料事实：${document.name}（${index + 1}/${bundle.length}）…`,
           );
           const value = await askOnce(revenueFactPrompt(), chunk);
@@ -1590,7 +1918,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       for (const [index, batch] of batches.entries()) {
         const batchPrompt = buildRevenueBatchPrompt(prompt, batch, facts);
         for (const chunk of splitContractText(context)) {
-          setError(`正在作答底稿问题：第 ${index + 1}/${batches.length} 批…`);
+          operation.update(`正在作答底稿问题：第 ${index + 1}/${batches.length} 批…`);
           responses.push(await askOnce(batchPrompt, chunk));
         }
       }
@@ -1668,7 +1996,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             ) as RevenueTargetQuestion[])
           : [];
       if (!targets.length) return current;
-      setError(`已锁定 ${targets.length} 项履约义务，正在逐项判断收入确认时段/时点…`);
+      operation.update(`已锁定 ${targets.length} 项履约义务，正在逐项判断收入确认时段/时点…`);
       const answered = await answerGroup(targets);
       // The generic 5.1 row is superseded by the per-obligation answers.
       const kept = current.filter(
@@ -1703,7 +2031,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       const groups = groupRevenueDetailQuestions(targets);
       const collected: Array<Record<string, unknown>> = [];
       for (const [index, group] of groups.entries()) {
-        setError(
+        operation.update(
           `正在按底稿跳转回答附表第 ${round + 1} 轮：${index + 1}/${groups.length}（本轮共 ${targets.length} 个问题）…`,
         );
         collected.push(...(await answerGroup(group)));
@@ -1725,7 +2053,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             ) as RevenueTargetQuestion[])
           : [];
       if (!targets.length) return normalized;
-      setError("检测到同类履约义务答案不一致，正在按相同指标统一复核…");
+      operation.update("检测到同类履约义务答案不一致，正在按相同指标统一复核…");
       const reviewed: Array<Record<string, unknown>> = [];
       for (const group of groupRevenueDetailQuestions(targets))
         reviewed.push(...(await answerGroup(group)));
@@ -1744,7 +2072,13 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     items = await reviewPoConsistency(items);
     const withFacts = withSharedFacts(normalize(items));
     setError("");
-    await saveExtractedItems(withFacts);
+    await operation.checkpoint();
+    await saveExtractedItemsFor(
+      target.projectId,
+      target.documentId,
+      snapshot,
+      withFacts,
+    );
     setResult({
       items: withFacts.length,
       questions: questions.length,
@@ -1753,37 +2087,65 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       // rounds, so surface them instead of leaving the count unexplained.
       followUpItems: Math.max(0, withFacts.length - mainAnswers),
     });
-    setBusy(false);
   }
 
-  async function extract() {
-    if (!selectedDocument || !pdfText.trim()) {
+  async function extract(request?: AudiPickExtractionRequest) {
+    if (busy && !request) return;
+    const targetProjectId = request?.projectId ?? selected?.project.id ?? "";
+    const targetDocumentId = request?.documentId ?? selectedDocument;
+    const sourceText = request?.text ?? pdfText;
+    const targetProject = projectsRef.current.find(
+      (item) => item.project.id === targetProjectId,
+    );
+    const targetDocument = documents.find(
+      (item) => item.id === targetDocumentId,
+    );
+    if (!targetProjectId || !targetProject || !targetDocumentId) {
+      setError("找不到待提取的合同，请返回项目后重试。");
+      return;
+    }
+    if (extractingDocumentIdsRef.current.has(targetDocumentId)) return;
+    if (contractMetaFor(targetProjectId, targetDocumentId).ocrPending) {
+      setError("合同文字识别尚未完成，请先继续 OCR 后再提取。"); return;
+    }
+    if (!sourceText.trim()) {
       setError("请先读取 PDF 文字或识别扫描页面。");
       return;
     }
-    const prompt = `${window.RuleEngine?.getRulePrompt(ruleId) ?? ""}\n\n本次仅返回这些字段：${activeFieldKeys.join(", ")}`;
-    setBusy(true);
+    const snapshot = request?.snapshot ?? extractionSnapshot(ruleId);
+    const prompt = `${window.RuleEngine?.getRulePrompt(snapshot.ruleId) ?? ""}
+
+本次仅返回这些字段：${snapshot.fieldKeys.join(", ")}`;
+    extractingDocumentIdsRef.current.add(targetDocumentId);
+    setExtractingDocumentIds(new Set(extractingDocumentIdsRef.current));
     setError("");
+    const operation = beginAudiPickOperation(
+      `${targetDocument?.name ?? "合同"} · 条款提取`,
+      true,
+    );
     try {
-      let context = pdfText;
-      const bundle: Array<{ name: string; text: string }> = [
+      let context = sourceText;
+      const bundle: CovenantDocument[] = [
         {
-          name:
-            documents.find((item) => item.id === selectedDocument)?.name ??
-            "主合同",
-          text: pdfText,
+          id: targetDocumentId,
+          name: targetDocument?.name ?? "主合同",
+          text: sourceText,
         },
       ];
-      const group = selected?.project.relationGroups?.find(
-        (value) => value.anchorFileId === selectedDocument,
+      const group = targetProject.project.relationGroups?.find(
+        (value) => value.anchorFileId === targetDocumentId,
       );
       for (const member of group?.members ?? []) {
+        await operation.checkpoint();
+        if (contractMetaFor(targetProjectId, member.fileId).ocrPending) throw new Error("关联资料尚未完成文字识别，请先继续 OCR 后再提取。");
         const value = (await engineCall("audipick.document_text", {
           documentId: member.fileId,
         })) as { text: string };
+        if (!value.text?.trim()) throw new Error("关联资料没有可用文字，请先在合同列表读取文字 / OCR。");
         if (value.text) {
           context += `\n\n---关联资料：${member.role}---\n${value.text}`;
           bundle.push({
+            id: member.fileId,
             name:
               documents.find((item) => item.id === member.fileId)?.name ??
               member.role,
@@ -1791,8 +2153,70 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           });
         }
       }
-      if (ruleId === "revenue_workpaper") {
-        await extractRevenueWorkpaper(prompt, bundle, context);
+      if (snapshot.ruleId === "revenue_workpaper") {
+        await extractRevenueWorkpaper(prompt, bundle, context, operation, snapshot, {
+          projectId: targetProjectId,
+          documentId: targetDocumentId,
+        });
+        operation.finish("completed", "底稿提取完成并已保存。");
+        return;
+      }
+      if (snapshot.ruleId === "loan_covenant") {
+        const { active: caseVersion } = await loadCaseLibraryState();
+        const covenantCacheKey = extractionCacheKey(
+          targetDocumentId,
+          snapshot.ruleId,
+          snapshot.fieldSetId,
+          `${COVENANT_EXTRACTION_VERSION}\u0000${caseVersion.hash}\u0000${bundle.map((document) => `${document.id}\u0000${document.text}`).join("\u0001")}`,
+        );
+        let outcome = covenantCache.current.get(covenantCacheKey);
+        if (outcome) {
+          operation.update("合同文字和提取版本未变化，正在复用本次会话已核验结果…");
+        } else {
+          outcome = await extractCovenantEvidence({
+            caseLibrary: caseVersion.library,
+            documents: bundle,
+            extract: ({ prompt: stagePrompt, text }) =>
+              withRetry(
+                () => runAudiPickExtractJob<{ parsed?: unknown; finish_reason?: string }>({
+                  documentId: targetDocumentId,
+                  ruleId: snapshot.ruleId,
+                  ruleName: snapshot.ruleName,
+                  ruleVersion: snapshot.ruleVersion,
+                  fieldKeys: snapshot.fieldKeys,
+                  fieldSetId: snapshot.fieldSetId,
+                  prompt: stagePrompt,
+                  text,
+                }, operation),
+                3,
+                2_000,
+                (remaining) => operation.update(`调用失败，正在重试，还剩 ${remaining} 次…`),
+              ),
+            onProgress: (message) => operation.update(message),
+          });
+          covenantCache.current.set(covenantCacheKey, outcome);
+        }
+        await operation.checkpoint();
+        await saveExtractedItemsFor(
+          targetProjectId,
+          targetDocumentId,
+          snapshot,
+          outcome.items,
+        );
+        const repaymentItems = filterCovenantScope(outcome.items, "repayment").length;
+        const supplementaryItems = filterCovenantScope(outcome.items, "supplementary").length;
+        const diagnostic = outcome.unresolvedCount ? `（原始失败记录 ${outcome.unresolvedRecordCount} 条，原因见底稿诊断）` : "";
+        const pendingCount = outcome.items.filter(row => row._covenant_pending_case === true).length;
+        const message = `已保存财务契约 ${repaymentItems} 项${pendingCount ? `，待新增案例 ${pendingCount} 项` : ""}。${diagnostic}`;
+        setResult({ items: outcome.items.length, repaymentItems, supplementaryItems, unresolvedItems: outcome.unresolvedCount });
+        addLog(bundle[0].name, "契约关联提取", message, outcome.unresolvedCount ? "warn" : "done");
+        operation.finish(outcome.unresolvedCount ? "failed" : "completed", message);
+        if (
+          (request?.openWorkpaperOnComplete ?? !request) &&
+          selectedDocumentRef.current === targetDocumentId
+        ) {
+          setContractView("workpaper");
+        }
         return;
       }
       // A long contract sent as one request either overflows the model's
@@ -1804,9 +2228,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       // costs another full round of tokens and, because the model is not
       // deterministic, returns slightly different text each time.
       const cacheKey = extractionCacheKey(
-        selectedDocument,
-        ruleId,
-        activeFieldSetId,
+        targetDocumentId,
+        snapshot.ruleId,
+        snapshot.fieldSetId,
         context,
       );
       const cached = extractCache.current.get(cacheKey);
@@ -1817,25 +2241,28 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           for (const [index, chunk] of chunks.entries()) {
             const label =
               chunks.length > 1 ? `第 ${index + 1}/${chunks.length} 段` : "";
-            if (label) setError(`合同较长，正在分段提取：${label}…`);
+            if (label) operation.update(`合同较长，正在分段提取：${label}…`);
             collected.push(
               await withRetry(
                 () =>
-                  engineCall("audipick.extract", {
-                    documentId: selectedDocument,
-                    ruleId,
-                    prompt,
-                    text: chunk,
-                  }) as Promise<{
+                  runAudiPickExtractJob<{
                     parsed?: { items?: unknown[] };
                     content: string;
-                  }>,
+                  }>({
+                    documentId: targetDocumentId,
+                    ruleId: snapshot.ruleId,
+                    ruleName: snapshot.ruleName,
+                    ruleVersion: snapshot.ruleVersion,
+                    fieldKeys: snapshot.fieldKeys,
+                    fieldSetId: snapshot.fieldSetId,
+                    prompt,
+                    text: chunk,
+                  }, operation),
                 3,
                 2_000,
-                (remaining) =>
-                  setError(
-                    `调用失败，正在重试${label ? `（${label}）` : ""}…还剩 ${remaining} 次`,
-                  ),
+                (remaining) => operation.update(
+                  `调用失败，正在重试${label ? `（${label}）` : ""}…还剩 ${remaining} 次`,
+                ),
               ),
             );
           }
@@ -1852,43 +2279,70 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         );
       items = items.map((item) =>
         Object.fromEntries(
-          Object.entries(item).filter(([key]) => activeFieldKeys.includes(key)),
+          Object.entries(item).filter(([key]) => snapshot.fieldKeys.includes(key)),
         ),
       );
-      await saveExtractedItems(items);
+      await operation.checkpoint();
+      await saveExtractedItemsFor(
+        targetProjectId,
+        targetDocumentId,
+        snapshot,
+        items,
+      );
       setResult({ items: items.length, chunks: chunks.length });
+      operation.finish("completed", `提取完成并保存 ${items.length} 条。`);
       addLog(
-        documents.find((d) => d.id === selectedDocument)?.name ?? "文档",
+        targetDocument?.name ?? "文档",
         "AI 提取",
         `提取 ${items.length} 条，分 ${chunks.length} 段处理`,
         "done",
       );
     } catch (e) {
+      const message = errorText(e);
+      const cancelled =
+        (e instanceof Error && e.name === "AudiPickExtractCancelled") ||
+        /取消|停止|终止/.test(message);
+      operation.finish(cancelled ? "cancelled" : "failed", message);
       addLog(
-        documents.find((d) => d.id === selectedDocument)?.name ?? "文档",
+        targetDocument?.name ?? "文档",
         "AI 提取",
-        "提取失败",
-        "error",
+        cancelled ? "提取已终止" : "提取失败",
+        cancelled ? "warn" : "error",
       );
-      setError(errorText(e));
+      if (!cancelled) setError(message);
     } finally {
-      setBusy(false);
+      extractingDocumentIdsRef.current.delete(targetDocumentId);
+      setExtractingDocumentIds(new Set(extractingDocumentIdsRef.current));
     }
   }
   async function deepReview() {
+    if (getContractMeta(selectedDocument).ocrPending) {
+      setError("合同文字识别尚未完成，请先继续 OCR 后再复核。"); return;
+    }
     if (ruleId !== "revenue_workpaper" || !currentResults.length || !pdfText) {
       setError("深度复核仅适用于已有结果的收入合同审阅底稿。");
       return;
     }
+    const snapshot = extractionSnapshot(ruleId);
     setBusy(true);
+    const operation = beginAudiPickOperation("收入底稿深度复核", true);
     try {
-      const prompt = `${window.RuleEngine?.getRulePrompt(ruleId) ?? ""}\n\n请对现有回答进行第二轮深度复核，消除重复和冲突，保留证据页码，只返回完整JSON。`;
-      const value = (await engineCall("audipick.extract", {
-        documentId: selectedDocument,
-        ruleId,
-        prompt,
-        text: `${pdfText}\n\n---现有底稿回答---\n${JSON.stringify(currentResults)}`,
-      })) as { parsed?: { items?: unknown[] } };
+      const prompt = `${window.RuleEngine?.getRulePrompt(snapshot.ruleId) ?? ""}\n\n请对现有回答进行第二轮深度复核，消除重复和冲突，保留证据页码，只返回完整JSON。`;
+      const value = await runAudiPickExtractJob<{
+        parsed?: { items?: unknown[] };
+      }>(
+        {
+          documentId: selectedDocument,
+          ruleId: snapshot.ruleId,
+          ruleName: snapshot.ruleName,
+          ruleVersion: snapshot.ruleVersion,
+          fieldKeys: snapshot.fieldKeys,
+          fieldSetId: snapshot.fieldSetId,
+          prompt,
+          text: `${pdfText}\n\n---现有底稿回答---\n${JSON.stringify(currentResults)}`,
+        },
+        operation,
+      );
       let items = (
         Array.isArray(value.parsed?.items) ? value.parsed.items : []
       ).filter((item): item is Record<string, unknown> =>
@@ -1911,6 +2365,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           items,
         );
       if (selected) {
+        await operation.checkpoint();
         const extractAt = new Date().toISOString();
         const extractRunId = `run_deep_${Date.now().toString(36)}`;
         const saved = {
@@ -1921,9 +2376,11 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               ...item,
               id: `r_${extractRunId}_${index}`,
               contractId: selectedDocument,
-              ruleId,
-              fieldKeys: activeFieldKeys,
-              fieldSetId: activeFieldSetId,
+              ruleId: snapshot.ruleId,
+              ruleName: snapshot.ruleName,
+              ruleVersion: snapshot.ruleVersion,
+              fieldKeys: snapshot.fieldKeys,
+              fieldSetId: snapshot.fieldSetId,
               extractAt,
               extractRunId,
               deepReviewed: true,
@@ -1940,19 +2397,71 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         setSelectedResultRunId(extractRunId);
         setResult({ deepReview: true, rows: items.length });
       }
+      operation.finish("completed", `深度复核完成，已保存 ${items.length} 条。`);
     } catch (e) {
-      setError(errorText(e));
+      const message = errorText(e);
+      const cancelled =
+        (e instanceof Error && e.name === "AudiPickExtractCancelled") ||
+        /取消|停止|终止/.test(message);
+      operation.finish(cancelled ? "cancelled" : "failed", message);
+      if (!cancelled) setError(message);
     } finally {
       setBusy(false);
     }
-  }
-  async function startBatch(documentIds = documents.map((document) => document.id)) {
-    const targetDocuments = documents.filter((document) =>
-      documentIds.includes(document.id),
-    );
-    if (!targetDocuments.length) {
+  }  async function startBatch(
+    documentIds = documents.map((document) => document.id),
+    fieldKeysByRuleId?: Record<string, string[]>,
+    skipExistingMatchingFieldSet = false,
+  ) {
+    const requestedDocuments = documentsByRequestedOrder(documents, documentIds);
+    if (!requestedDocuments.length) {
       setError("项目中没有可提取的 PDF。");
       return;
+    }
+    const projectAtLaunch = selected;
+    const projectId = selectedId;
+    // Capture every file's rule, version and field list before any await.  The
+    // worker/job may outlive the current UI selection; its results must still
+    // be attributable to the template that was active when extraction started.
+    let launchPlans = requestedDocuments.map((document) => {
+      const meta = getContractMeta(document.id);
+      const targetRuleId =
+        meta.ruleId ?? projectAtLaunch?.project.defaultRuleId ?? ruleId;
+      return {
+        document,
+        snapshot: extractionSnapshot(
+          targetRuleId,
+          fieldKeysByRuleId?.[targetRuleId] ?? fieldKeysForRule(targetRuleId),
+        ),
+      };
+    });
+    if (skipExistingMatchingFieldSet) {
+      launchPlans = launchPlans.filter(({ document, snapshot }) =>
+        !(projectAtLaunch?.results ?? []).some(
+          (row) =>
+            row.contractId === document.id &&
+            row.ruleId === snapshot.ruleId &&
+            row.fieldSetId === snapshot.fieldSetId,
+        ),
+      );
+    }
+    if (!launchPlans.length) {
+      setError("所选文件均已有相同模板和字段组合的底稿。");
+      return;
+    }
+    const targetDocuments = launchPlans.map((item) => item.document);
+    const groups = new Map<
+      string,
+      { snapshot: AudiPickExtractionSnapshot; documents: AudiPickDocument[] }
+    >();
+    for (const item of launchPlans) {
+      const current = groups.get(item.snapshot.ruleId);
+      if (current) current.documents.push(item.document);
+      else
+        groups.set(item.snapshot.ruleId, {
+          snapshot: item.snapshot,
+          documents: [item.document],
+        });
     }
     setError("");
     try {
@@ -1961,7 +2470,12 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           const value = (await engineCall("audipick.document_text", {
             documentId: document.id,
           })) as { text?: string };
-          return { document, ready: Boolean(value.text?.trim()) };
+          return {
+            document,
+            ready:
+              Boolean(value.text?.trim()) &&
+              !getContractMeta(document.id).ocrPending,
+          };
         }),
       );
       const missing = textStates.filter((item) => !item.ready);
@@ -1974,62 +2488,395 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         );
         return;
       }
-      const groups = new Map<string, AudiPickDocument[]>();
-      for (const document of targetDocuments) {
-        const documentRuleId =
-          getContractMeta(document.id).ruleId ??
-          selected?.project.defaultRuleId ??
-          ruleId;
-        groups.set(documentRuleId, [
-          ...(groups.get(documentRuleId) ?? []),
-          document,
-        ]);
-      }
-      for (const [groupRuleId, groupDocuments] of groups) {
-        const groupFieldKeys = (
-          window.RuleEngine?.getFieldsForRule(groupRuleId) ?? []
-        ).map((field) => field.key);
-        const groupFieldSetId = `${groupRuleId}:${[...groupFieldKeys]
-          .sort()
-          .join("|")}`;
-        const prompt = `${window.RuleEngine?.getRulePrompt(groupRuleId) ?? ""}\n\n本次仅返回这些字段：${groupFieldKeys.join(", ")}`;
-        const jobId = await jobStart("audipick.batch_extract", {
-          ruleId: groupRuleId,
-          fieldSetId: groupFieldSetId,
-          fieldKeys: groupFieldKeys,
-          prompt,
-          documents: groupDocuments.map((document) => ({
-            id: document.id,
-            name: document.name,
-          })),
-        });
-        batchRulePlans.current.set(jobId, {
-          ruleId: groupRuleId,
-          fieldKeys: groupFieldKeys,
-          fieldSetId: groupFieldSetId,
-        });
-        addLog(
-          `${groupDocuments.length} 份文档`,
-          "批量提取",
-          `按「${rules.find((candidate) => candidate.id === groupRuleId)?.name ?? groupRuleId}」模板启动`,
-          "info",
+      for (const group of groups.values()) {
+        const groupDocuments = group.documents;
+        const snapshot = group.snapshot;
+        const prompt = `${window.RuleEngine?.getRulePrompt(snapshot.ruleId) ?? ""}\n\n本次仅返回这些字段：${snapshot.fieldKeys.join(", ")}`;
+        if (snapshot.ruleId === "loan_covenant") {
+          const { active: caseVersion } = await loadCaseLibraryState();
+          if (!projectAtLaunch) {
+            throw new Error("批量提取时找不到当前项目，请刷新后重试。");
+          }
+          const operation = beginAudiPickOperation("批量限制性契约提取", true);
+          const relations = projectAtLaunch.project.relationGroups ?? [];
+          const relatedMembers = new Set(
+            relations.flatMap((relation) =>
+              relation.members.map((member) => member.fileId),
+            ),
+          );
+          const anchors = groupDocuments.filter(
+            (document) => !relatedMembers.has(document.id),
+          );
+          if (!anchors.length) {
+            operation.finish(
+              "failed",
+              "所选文件都是关联资料，请同时选择其主合同后再提取。",
+            );
+            throw new Error("所选文件都是关联资料，请同时选择其主合同后再提取。");
+          }
+          anchors.forEach((document) =>
+            extractingDocumentIdsRef.current.add(document.id),
+          );
+          setExtractingDocumentIds(new Set(extractingDocumentIdsRef.current));
+          let completed = 0;
+          try {
+            for (const anchor of anchors) {
+              await operation.checkpoint();
+              operation.update(
+                `正在准备 ${anchor.name} 的合同组…`,
+                completed,
+                anchors.length,
+              );
+              const anchorText = textStates.find(
+                (item) => item.document.id === anchor.id,
+              );
+              if (!anchorText?.ready)
+                throw new Error(`${anchor.name} 尚未生成完整文字层。`);
+              const source = (await engineCall("audipick.document_text", {
+                documentId: anchor.id,
+              })) as { text?: string };
+              if (!source.text?.trim())
+                throw new Error(`${anchor.name} 没有可用文字。`);
+              const bundle: CovenantDocument[] = [
+                { id: anchor.id, name: anchor.name, text: source.text },
+              ];
+              const relation = relations.find(
+                (item) => item.anchorFileId === anchor.id,
+              );
+              for (const member of relation?.members ?? []) {
+                const document = documents.find(
+                  (item) => item.id === member.fileId,
+                );
+                if (!document) continue;
+                if (getContractMeta(document.id).ocrPending) {
+                  throw new Error(
+                    `${document.name} 尚未完成文字识别，请先继续 OCR。`,
+                  );
+                }
+                const linked = (await engineCall("audipick.document_text", {
+                  documentId: document.id,
+                })) as { text?: string };
+                if (!linked.text?.trim()) {
+                  throw new Error(
+                    `${document.name} 没有可用文字，请先读取文字 / OCR。`,
+                  );
+                }
+                bundle.push({
+                  id: document.id,
+                  name: document.name,
+                  text: linked.text,
+                });
+              }
+              const covenantCacheKey = extractionCacheKey(
+                anchor.id,
+                snapshot.ruleId,
+                snapshot.fieldSetId,
+                `${COVENANT_EXTRACTION_VERSION}\u0000${caseVersion.hash}\u0000${bundle.map((document) => `${document.id}\u0000${document.text}`).join("\u0001")}`,
+              );
+              let outcome = covenantCache.current.get(covenantCacheKey);
+              if (outcome) {
+                operation.update(`${anchor.name}：文字和提取版本未变化，复用本次会话已核验结果…`, completed, anchors.length);
+              } else {
+                outcome = await extractCovenantEvidence({
+                  caseLibrary: caseVersion.library,
+                  documents: bundle,
+                  extract: ({ prompt: stagePrompt, text }) =>
+                    withRetry(
+                      () =>
+                        runAudiPickExtractJob<{
+                          parsed?: unknown;
+                          finish_reason?: string;
+                        }>({
+                          documentId: anchor.id,
+                          ruleId: snapshot.ruleId,
+                          ruleName: snapshot.ruleName,
+                          ruleVersion: snapshot.ruleVersion,
+                          fieldKeys: snapshot.fieldKeys,
+                          fieldSetId: snapshot.fieldSetId,
+                          prompt: stagePrompt,
+                          text,
+                        }, operation),
+                      3,
+                      2_000,
+                      (remaining) =>
+                        operation.update(
+                          `${anchor.name} 调用失败，正在重试，还剩 ${remaining} 次…`,
+                          completed,
+                          anchors.length,
+                        ),
+                    ),
+                  onProgress: (message) =>
+                    operation.update(
+                      `${anchor.name}：${message}`,
+                      completed,
+                      anchors.length,
+                    ),
+                });
+                covenantCache.current.set(covenantCacheKey, outcome);
+              }
+              await operation.checkpoint();
+              await saveExtractedItemsFor(
+                projectAtLaunch.project.id,
+                anchor.id,
+                snapshot,
+                outcome.items,
+              );
+              completed += 1;
+              const repaymentItems = filterCovenantScope(
+                outcome.items,
+                "repayment",
+              ).length;
+              const supplementaryItems = filterCovenantScope(
+                outcome.items,
+                "supplementary",
+              ).length;
+              addLog(
+                anchor.name,
+                "批量契约关联提取",
+                `已保存财务契约 ${repaymentItems} 项，待新增案例 ${outcome.items.filter(row => row._covenant_pending_case === true).length} 项${outcome.unresolvedCount ? `（原始失败记录 ${outcome.unresolvedRecordCount} 条，原因见底稿诊断）` : ""}`,
+                outcome.unresolvedCount ? "warn" : "done",
+              );
+              if (outcome.unresolvedCount) throw new Error(`${anchor.name} 已保存可核实结果，但有 ${outcome.unresolvedCount} 组关联未完成（原始失败记录 ${outcome.unresolvedRecordCount} 条），请查看底稿诊断。`);
+              operation.update(
+                `${anchor.name} 已保存。`,
+                completed,
+                anchors.length,
+              );
+            }
+            operation.finish(
+              "completed",
+              `批量提取完成，已保存 ${completed} 个合同组。`,
+            );
+          } catch (error) {
+            const message = errorText(error);
+            const cancelled =
+              (error instanceof Error &&
+                error.name === "AudiPickExtractCancelled") ||
+              /取消|停止|终止/.test(message);
+            operation.finish(
+              cancelled ? "cancelled" : "failed",
+              cancelled
+                ? `批量提取已终止，已保存 ${completed} 个合同组。`
+                : completed
+                ? `已保存前 ${completed} 个合同组；当前合同组失败：${message}`
+                : `批量提取失败：${message}`,
+            );
+            throw error;
+          } finally {
+            anchors.forEach((document) =>
+              extractingDocumentIdsRef.current.delete(document.id),
+            );
+            setExtractingDocumentIds(new Set(extractingDocumentIdsRef.current));
+          }
+          continue;
+        }
+        const operation = beginAudiPickOperation(
+          `批量提取 · ${snapshot.ruleName}`,
+          true,
         );
-        setBatchJob({
-          jobId,
-          toolId: "audipick",
-          phase: "queued",
-          current: 0,
-          total: groupDocuments.length,
-          message:
-            groups.size > 1
-              ? `已按单文件模板拆分为 ${groups.size} 个批次`
-              : "批量任务已进入队列",
-          severity: "info",
-          outputPaths: [],
-        });
+        groupDocuments.forEach((document) =>
+          extractingDocumentIdsRef.current.add(document.id),
+        );
+        setExtractingDocumentIds(new Set(extractingDocumentIdsRef.current));
+        let completed = 0;
+        let failed = 0;
+        let cancelled = false;
+        try {
+          for (let offset = 0; offset < groupDocuments.length; offset += 3) {
+            await operation.checkpoint();
+            const batch = groupDocuments.slice(offset, offset + 3);
+            operation.update(
+              `正在提取 ${batch.map((document) => document.name).join("、")}`,
+              completed,
+              groupDocuments.length,
+            );
+            const settled = await Promise.allSettled(
+              batch.map(async (document) => {
+                const stored = (await engineCall("audipick.document_text", {
+                  documentId: document.id,
+                })) as { text?: string };
+                if (!stored.text?.trim()) {
+                  throw new Error(`${document.name} 没有可用文字。`);
+                }
+                const value = await withRetry(
+                  () =>
+                    runAudiPickExtractJob<{
+                      parsed?: { items?: unknown[] };
+                    }>(
+                      {
+                        documentId: document.id,
+                        ruleId: snapshot.ruleId,
+                        ruleName: snapshot.ruleName,
+                        ruleVersion: snapshot.ruleVersion,
+                        fieldKeys: snapshot.fieldKeys,
+                        fieldSetId: snapshot.fieldSetId,
+                        prompt,
+                        text: stored.text,
+                      },
+                      operation,
+                    ),
+                  3,
+                  2_000,
+                  (remaining) =>
+                    operation.update(
+                      `${document.name} 调用失败，正在重试，还剩 ${remaining} 次…`,
+                      completed,
+                      groupDocuments.length,
+                    ),
+                );
+                const items = (Array.isArray(value.parsed?.items)
+                  ? value.parsed.items
+                  : [])
+                  .filter(
+                    (item): item is Record<string, unknown> =>
+                      Boolean(item && typeof item === "object"),
+                  )
+                  .map((item) =>
+                    Object.fromEntries(
+                      Object.entries(item).filter(([key]) =>
+                        snapshot.fieldKeys.includes(key),
+                      ),
+                    ),
+                  );
+                return { document, items };
+              }),
+            );
+            for (const outcome of settled) {
+              if (outcome.status === "fulfilled") {
+                await saveExtractedItemsFor(
+                  projectAtLaunch?.project.id ?? projectId,
+                  outcome.value.document.id,
+                  snapshot,
+                  outcome.value.items,
+                );
+                completed += 1;
+                addLog(
+                  outcome.value.document.name,
+                  "批量提取",
+                  `已保存 ${outcome.value.items.length} 条`,
+                  "done",
+                );
+              } else {
+                const message = errorText(outcome.reason);
+                if (
+                  (outcome.reason instanceof Error &&
+                    outcome.reason.name === "AudiPickExtractCancelled") ||
+                  /取消|停止|终止/.test(message)
+                ) {
+                  cancelled = true;
+                } else {
+                  failed += 1;
+                  addLog("批量合同", "批量提取", message, "error");
+                }
+              }
+            }
+            operation.update(
+              `已保存 ${completed} 份${failed ? `，${failed} 份失败` : ""}`,
+              completed + failed,
+              groupDocuments.length,
+            );
+            if (cancelled) break;
+          }
+          operation.finish(
+            cancelled ? "cancelled" : failed ? "failed" : "completed",
+            cancelled
+              ? `批量提取已终止，已保存 ${completed} 份。`
+              : `批量提取结束，已保存 ${completed} 份${failed ? `，${failed} 份失败` : ""}。`,
+          );
+        } catch (cause) {
+          const message = errorText(cause);
+          const stopped =
+            (cause instanceof Error &&
+              cause.name === "AudiPickExtractCancelled") ||
+            /取消|停止|终止/.test(message);
+          operation.finish(
+            stopped ? "cancelled" : "failed",
+            stopped
+              ? `批量提取已终止，已保存 ${completed} 份。`
+              : `批量提取失败：${message}`,
+          );
+          if (!stopped) throw cause;
+        } finally {
+          groupDocuments.forEach((document) =>
+            extractingDocumentIdsRef.current.delete(document.id),
+          );
+          setExtractingDocumentIds(new Set(extractingDocumentIdsRef.current));
+        }
       }
     } catch (e) {
-      setError(errorText(e));
+      const message = errorText(e);
+      if (!/取消|停止|终止/.test(message)) setError(message);
+    }
+  }
+  async function saveFieldPreferences(
+    fieldKeysByRuleId: Record<string, string[]>,
+  ) {
+    const target = projectsRef.current.find(
+      (item) => item.project.id === selectedId,
+    );
+    if (!target) throw new Error("当前项目已不存在，请刷新后重试。");
+    const saved: AudiPickProjectData = {
+      ...target,
+      project: {
+        ...target.project,
+        fieldPrefs: {
+          ...(target.project.fieldPrefs ?? {}),
+          ...fieldKeysByRuleId,
+        },
+        updatedAt: new Date().toISOString(),
+      },
+    };
+    await engineCall("audipick.project_save", saved);
+    projectsRef.current = projectsRef.current.map((item) =>
+      item.project.id === selectedId ? saved : item,
+    );
+    setProjects(projectsRef.current);
+  }
+  async function confirmFieldSelection(
+    selection: AudiPickFieldSelectionResult,
+  ) {
+    const request = fieldDialogRequest;
+    if (!request || !selected) return;
+    setFieldDialogSubmitting(true);
+    try {
+      await saveFieldPreferences(selection.fieldKeysByRuleId);
+      if (selection.fieldKeysByRuleId[ruleId]) {
+        setSelectedFieldKeys(selection.fieldKeysByRuleId[ruleId]);
+      }
+      setFieldDialogRequest(undefined);
+      if (request.mode === "batch") {
+        void startBatch(
+          request.documentIds,
+          selection.fieldKeysByRuleId,
+          selection.skipExistingMatchingFieldSet,
+        );
+        return;
+      }
+      const documentId = request.documentIds[0];
+      const targetMeta = getContractMeta(documentId);
+      const targetRuleId =
+        targetMeta.ruleId ?? selected.project.defaultRuleId ?? ruleId;
+      const stored = (await engineCall("audipick.document_text", {
+        documentId,
+      })) as { text?: string };
+      if (!stored.text?.trim()) {
+        throw new Error("当前合同没有可用文字，请先完成文字读取或 OCR。");
+      }
+      void extract({
+        projectId: selected.project.id,
+        documentId,
+        snapshot: extractionSnapshot(
+          targetRuleId,
+          selection.fieldKeysByRuleId[targetRuleId] ??
+            fieldKeysForRule(targetRuleId),
+        ),
+        text: stored.text,
+        openWorkpaperOnComplete: false,
+      });
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setFieldDialogSubmitting(false);
     }
   }
   async function toggleReviewed(id: string) {
@@ -2066,6 +2913,33 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     if (!latest) return;
     await engineCall("audipick.project_save", latest);
     setResult({ resultSaved: true });
+  }
+  async function saveProcedureLevel(rowId: string, value: string) {
+    if (!selected || busy) return;
+    const level = procedureOverride(value);
+    if (value !== "auto" && level === undefined) return;
+    const projectId = selected.project.id;
+    const saved = {
+      ...selected,
+      results: (selected.results ?? []).map((row) => {
+        if (String(row.id) !== rowId || row.ruleId !== "loan_covenant") return row;
+        const next: AudiPickResult = { ...row, reviewed: false };
+        if (level === undefined) delete next[PROCEDURE_OVERRIDE_KEY];
+        else next[PROCEDURE_OVERRIDE_KEY] = level;
+        return next;
+      }),
+    };
+    setBusy(true);
+    setError("");
+    try {
+      await engineCall("audipick.project_save", saved);
+      setProjects((current) => current.map((project) => project.project.id === projectId ? saved : project));
+      setResult({ procedureLevelSaved: true });
+    } catch (error) {
+      setError(errorText(error));
+    } finally {
+      setBusy(false);
+    }
   }
   async function copyResultRow(rowId: string) {
     const row = currentResults.find((item) => String(item.id) === rowId);
@@ -2134,10 +3008,15 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
-  async function exportResults() {
-    const rows = currentResults;
+  async function exportResults(filtered = false) {
+    const rows = ruleId === "loan_covenant"
+      ? (filtered ? workpaperRows : filterCovenantScope(currentResults, covenantScopeFilter))
+        .filter((row) => ["repayment", "supplementary"].includes(covenantScope(row)))
+      : currentResults;
     if (!rows.length) {
-      setError("当前合同和模板还没有提取结果。");
+      setError(ruleId === "loan_covenant"
+        ? "限制性契约暂无可导出的已核实结果；无明确后果的记录仅保留在待核实，不进入正式底稿。"
+        : "当前合同和模板还没有提取结果。");
       return;
     }
     const typeLabel =
@@ -2156,7 +3035,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         fileName: documents.find((item) => item.id === selectedDocument)?.name,
         projectName: selected?.project.name,
         clientName: selected?.project.client,
-        typeLabel,
+        typeLabel: filtered ? `${typeLabel}_筛选结果` : typeLabel,
       }),
     );
     if (typeof output !== "string") return;
@@ -2181,11 +3060,13 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               rows,
             ) as Array<Record<string, unknown>>)
           : undefined;
+      const covenantRows = ruleId === "loan_covenant" ? covenantExportRows(rows, (row) => documents.find((document) => document.id === row.contractId)?.name ?? String(row.contractId ?? "")) : undefined;
+      const exportRows = covenantRows ?? checklist ?? rows;
       setResult(
         await engineCall("audipick.export", {
           ruleId,
-          results: checklist ?? rows,
-          columns: checklist?.length ? Object.keys(checklist[0]) : undefined,
+          results: exportRows,
+          columns: covenantRows ? [...new Set(covenantRows.flatMap((row) => Object.keys(row)))] : checklist?.length ? Object.keys(checklist[0]) : undefined,
           outputPath: output,
         }),
       );
@@ -2199,7 +3080,10 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     if (!selected) return;
     const source = latestRowsByDocumentAndRule(
       (selected.results ?? []).filter(
-        (row) => scope === "project" || row.contractId === selectedDocument,
+        (row) =>
+          (scope === "project" || row.contractId === selectedDocument) &&
+          (row.ruleId !== "loan_covenant" ||
+            isFormalCovenantRow(row)),
       ),
     );
     if (!source.length) {
@@ -2212,16 +3096,18 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       grouped.set(key, [...(grouped.get(key) ?? []), row]);
     }
     const sheets = [...grouped.entries()].map(([sheetRuleId, rows]) => {
-      const exportedRows = rows.map((row) => ({
+      const exportedRows = sheetRuleId === "loan_covenant" ? covenantExportRows(rows, (row) => documents.find((document) => document.id === row.contractId)?.name ?? String(row.contractId ?? "")) : rows.map((row) => ({
         文件名称:
           documents.find((document) => document.id === row.contractId)?.name ??
           String(row.contractId ?? ""),
         ...editableResult(row),
       }));
-      const columns = [
-        "文件名称",
-        ...new Set(exportedRows.flatMap((row) => Object.keys(row))),
-      ].filter((key, index, all) => all.indexOf(key) === index);
+      const columns = sheetRuleId === "loan_covenant"
+        ? Object.values(rows.every(row => row._financial_metrics_only === true) ? COVENANT_LABELS : LEGACY_COVENANT_LABELS)
+        : [
+            "文件名称",
+            ...new Set(exportedRows.flatMap((row) => Object.keys(row))),
+          ].filter((key, index, all) => all.indexOf(key) === index);
       return {
         name:
           rules.find((candidate) => candidate.id === sheetRuleId)?.shortName ??
@@ -2490,6 +3376,43 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       }
     | undefined;
   const ruleOptions = rules.map((item) => ({ id: item.id, name: item.name }));
+  const fieldDialogGroups: AudiPickFieldSelectionGroup[] = (() => {
+    if (!fieldDialogRequest || !selected) return [];
+    const grouped = new Map<string, string[]>();
+    for (const documentId of fieldDialogRequest.documentIds) {
+      const meta = getContractMeta(documentId);
+      const targetRuleId =
+        meta.ruleId ?? selected.project.defaultRuleId ?? ruleId;
+      const names = grouped.get(targetRuleId) ?? [];
+      names.push(
+        documents.find((document) => document.id === documentId)?.name ??
+          documentId,
+      );
+      grouped.set(targetRuleId, names);
+    }
+    return [...grouped.entries()].map(([targetRuleId, documentNames]) => {
+      const targetRule = rules.find((item) => item.id === targetRuleId);
+      const pageKey = window.RuleEngine?.pageKeyForRule?.(targetRuleId);
+      return {
+        ruleId: targetRuleId,
+        ruleName: targetRule?.name ?? targetRuleId,
+        ruleVersion: targetRule?.version,
+        fields: (window.RuleEngine?.getFieldsForRule(targetRuleId) ?? []).map(
+          (field) => ({
+            ...field,
+            required: Boolean(pageKey && field.key === pageKey),
+          }),
+        ),
+        selectedFieldKeys: fieldKeysForRule(targetRuleId),
+        documentNames,
+        allFieldsRequired: targetRuleId === "revenue_workpaper",
+        description:
+          targetRuleId === "revenue_workpaper"
+            ? "收入底稿字段相互关联，本模板固定保留全部字段。"
+            : "页码字段强制保留，其他字段可按本次需要勾选。",
+      };
+    });
+  })();
   const dashboardProjects: LegacyDashboardProject[] = projects.map((item) => {
     const fileCount = projectDocumentCounts[item.project.id] ?? 0;
     const extractedIds = new Set((item.results ?? []).map((row) => String(row.contractId ?? "")));
@@ -2539,6 +3462,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       group.members.map((member) => [member.fileId, member.role] as const),
     ),
   );
+  const inferredAssociationRoles = new Map(
+    associationDocuments.map((document) => [document.id, associationRoleForDocument(document)] as const),
+  );
   const legacyProjectDocuments = documents.map((document) => {
     const meta = getContractMeta(document.id);
     const rows = selected?.results?.filter((row) => row.contractId === document.id) ?? [];
@@ -2547,6 +3473,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       name: document.name,
       textLength: documentTextLengths[document.id] ?? 0,
       isScanned: meta.isScanned,
+      ocrPending: meta.ocrPending,
       status: document.status,
       resultCount: rows.length,
       appliedRuleCount: new Set(rows.map((row) => String(row.ruleId ?? ""))).size,
@@ -2555,7 +3482,8 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       detectedRuleId: meta.detectedRuleId,
       detectedConfidence: meta.detectedConfidence,
       detectedLabel: meta.detectedLabel,
-      associationRole: relationMemberRoles.get(document.id) ?? null,
+      associationRole: relationMemberRoles.get(document.id) ?? inferredAssociationRoles.get(document.id) ?? null,
+      extracting: extractingDocumentIds.has(document.id),
     };
   });
   const pendingOcrMetas = (selected?.contracts ?? []).filter(
@@ -2576,27 +3504,27 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   const activeDocument = documents.find((document) => document.id === selectedDocument);
   const activeMeta = selectedDocument ? getContractMeta(selectedDocument) : undefined;
   const activeDocumentAllRows = selected?.results?.filter((row) => row.contractId === selectedDocument) ?? [];
-  const workpaperRows = currentResults.filter((row) => {
+  const keywordRows = currentResults.filter((row) => {
     const query = workpaperFilter.trim().toLocaleLowerCase("zh-CN");
-    return !query || JSON.stringify(editableResult(row)).toLocaleLowerCase("zh-CN").includes(query);
+    const content = editableResult(row);
+    return !query || JSON.stringify(content).toLocaleLowerCase("zh-CN").includes(query);
   });
-  const currentTheme = document.documentElement.dataset.theme ?? "classic-dark";
+  const workpaperRows = ruleId === "loan_covenant"
+    ? (legacyCovenantResult
+      ? filterCovenantRows(filterCovenantScope(keywordRows, covenantScopeFilter), procedureFilter, procedureReviewOnly)
+      : keywordRows.filter(row => row._financial_metrics_only === true))
+    : keywordRows;
+  const covenantScopeCounts = Object.fromEntries(
+    Object.keys(COVENANT_WORKPAPER_SCOPES).map((scope) => [
+      scope,
+      filterCovenantScope(currentResults, scope as CovenantScopeFilter).length,
+    ]),
+  );
   const ocrDisplayLabel = configStatus.ocr?.engine === "baidu"
     ? "百度OCR"
     : configStatus.ocr?.engine === "local"
       ? "本机OCR"
       : "AI视觉";
-  void themeRevision;
-  const themeNames: Record<string, string> = {
-    "green-dark": "深绿",
-    "classic-dark": "黄黑",
-    "yellow-light": "黄白",
-    "blue-white": "蓝白",
-    "red-white": "红白",
-    "purple-light": "紫白",
-    "gray-light": "灰白",
-    "dark-blue": "深蓝",
-  };
   const logDrawer = (
     <div className="ap-legacy-log-panel">
       <div className="section-title"><h3>处理工作日志</h3><button className="secondary" onClick={() => setLogOpen(false)}>关闭</button></div>
@@ -2607,21 +3535,6 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     </div>
   );
 
-  if (viewMode === "home") {
-    return (
-      <AudiPickLegacyHome
-        onStart={() => {
-          setViewMode("workbench");
-          try {
-            if (!localStorage.getItem("ap_tour_done")) setTourOpen(true);
-          } catch {
-            setTourOpen(true);
-          }
-        }}
-        onConfig={() => setViewMode("config")}
-      />
-    );
-  }
   const useParityShell = true as boolean;
   if (useParityShell) return (
     <AudiPickLegacyShell
@@ -2629,16 +3542,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       configReady={Boolean(configStatus.llm?.ready)}
       logCount={workLog.length}
       logOpen={logOpen}
-      themeLabel={themeNames[currentTheme] ?? currentTheme}
       onNavigate={(page) => {
-        if (page === "guide") {
-          setViewMode("workbench");
-          setSelectedId("");
-          setSelectedDocument("");
-          setLoanAuditOpen(false);
-          setTourOpen(true);
-          return;
-        }
         setViewMode(page);
         setLoanAuditOpen(false);
         if (page !== "workbench") {
@@ -2646,10 +3550,16 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           setSelectedDocument("");
         }
       }}
+      onBackToToolbox={() => navigate("/")}
       onToggleLog={() => setLogOpen((open) => !open)}
-      onOpenTheme={() => setThemePickerOpen(true)}
       logDrawer={logDrawer}
     >
+      {viewMode === "home" && (
+        <AudiPickLegacyHome
+          onStart={() => setViewMode("workbench")}
+          onConfig={() => setViewMode("config")}
+        />
+      )}
       {viewMode === "workbench" && !selectedId && (
         <AudiPickLegacyDashboard
           projects={dashboardProjects}
@@ -2688,7 +3598,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             reportDate={
               selected.project.loanReportDate ?? selected.project.date ?? ""
             }
-            busy={busy}
+            busy={busy || extractingDocumentIds.has(selectedDocument)}
             actions={{
               onBack: () => setLoanAuditOpen(false),
               onReportDateChange: updateLoanReportDate,
@@ -2711,22 +3621,25 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             documents={legacyProjectDocuments}
             rules={ruleOptions}
             relationGroups={selected.project.relationGroups ?? []}
+            associationSuggestions={pendingAssociationSuggestions}
             selectedDocumentIds={selectedDocumentIds}
             busy={busy}
             ocrLabel={ocrDisplayLabel}
             ocrTask={legacyOcrTask}
+            uploadStatus={preparationStatus}
             showLoanAudit={(selected.results ?? []).some(
               (row) => row.ruleId === "loan_general",
             )}
             onSelectionChange={setSelectedDocumentIds}
             actions={{
               onBack: () => { setSelectedId(""); setSelectedDocument(""); },
-              onBatchExtract: (ids) => startBatch(ids),
+              onBatchExtract: (ids) =>
+                setFieldDialogRequest({ mode: "batch", documentIds: ids }),
               onOpenLoanAudit: () => setLoanAuditOpen(true),
               onExportProject: () => exportProjectResults("project"),
               onPickPdfs: importPdfs,
               onPickFolder: importPdfFolder,
-              onResumeOcr: (id) => openDocument(id),
+              onResumeOcr: (id) => prepareDocuments([{ id, name: documents.find((item) => item.id === id)?.name ?? id }], selectedId),
               onDiscardOcr: async (id) => {
                 await engineCall("audipick.document_text_save", {
                   documentId: id,
@@ -2740,13 +3653,24 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               },
               onOpenDocument: async (id) => { const meta = getContractMeta(id); setRuleId(meta.ruleId ?? selected.project.defaultRuleId ?? "loan_covenant"); setContractView("detail"); await openDocument(id); },
               onDeleteDocument: deleteDocument,
-              onRuleChange: async (id, nextRuleId) => { await saveContractMeta(id, { ruleId: nextRuleId, ruleConfirmed: false }); },
-              onConfirmRule: async (id, nextRuleId) => { await saveContractMeta(id, { ruleId: nextRuleId, ruleConfirmed: true }); },
-              onExtractDocument: async (id) => { const meta = getContractMeta(id); setRuleId(meta.ruleId ?? selected.project.defaultRuleId ?? "loan_covenant"); setPendingExtractDocumentId(id); setContractView("detail"); await openDocument(id); },
+              onRuleChange: async (id, nextRuleId) => { await saveContractRuleSelection(id, nextRuleId, false); },
+              onConfirmRule: async (id, nextRuleId) => { await saveContractRuleSelection(id, nextRuleId, true); },
+              onExtractDocument: (id) =>
+                setFieldDialogRequest({ mode: "single", documentIds: [id] }),
               onViewWorkpaper: async (id, nextRuleId) => { setRuleId(nextRuleId ?? getContractMeta(id).ruleId ?? selected.project.defaultRuleId ?? "loan_covenant"); setContractView("workpaper"); await openDocument(id); },
-              onManageAssociation: async (id) => { setSelectedDocument(id); setAssociationTarget(documents.find((item) => item.id !== id)?.id ?? ""); },
+              onManageAssociation: async (id) => { setAssociationSuggestion(undefined); setAssociationAnchor(id); },
               onRemoveAssociation: removeAssociation,
-              onConfirmAssociation: async (fileId, anchorId, suggestion) => { setSelectedDocument(anchorId); setAssociationTarget(fileId); setAssociationRole(suggestion.role); },
+              onConfirmAssociation: async (fileId, anchorId, suggestion) => {
+                setAssociationSuggestion({
+                  fileId,
+                  role: suggestion.role,
+                  source: "ai-confirmed",
+                  confidence: suggestion.confidence,
+                  reason: suggestion.reason,
+                });
+                setAssociationAnchor(anchorId);
+              },
+              onDismissAssociation: dismissAssociation,
             }}
           />
         </>
@@ -2904,6 +3828,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               ruleId,
               rules: ruleOptions,
               ruleName: selectedRule?.name ?? ruleId,
+              ruleVersion: selectedRule?.version ?? "1.0",
               detectedLabel: activeMeta?.detectedLabel ?? suggestedRule?.docLabel,
               detectedConfidence: (activeMeta?.detectedConfidence ?? suggestedRule?.confidence) as "high" | "medium" | "low" | undefined,
               detectedReason: suggestedRule?.reason,
@@ -2912,22 +3837,54 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               versionCount: resultRuns.length,
               appliedRuleCount: new Set(activeDocumentAllRows.map((row) => String(row.ruleId ?? ""))).size,
               associationSummary: relationMemberRoles.has(selectedDocument) ? `已作为${relationMemberRoles.get(selectedDocument)}关联` : undefined,
-              extractDisabled: !pdfText.trim() || !configStatus.llm?.ready,
-              onRuleChange: (nextRuleId) => { setRuleId(nextRuleId); void saveContractMeta(selectedDocument, { ruleId: nextRuleId, ruleConfirmed: false }); },
-              onConfirmRule: (nextRuleId) => void saveContractMeta(selectedDocument, { ruleId: nextRuleId, ruleConfirmed: true }),
-              onManageAssociation: () => setAssociationTarget(documents.find((item) => item.id !== selectedDocument)?.id ?? ""),
-              onExtract: () => void extract(),
+              extractDisabled: !pdfText.trim() || !configStatus.llm?.ready || Boolean(activeMeta?.ocrPending),
+              onRuleChange: (nextRuleId) => { setRuleId(nextRuleId); void saveContractRuleSelection(selectedDocument, nextRuleId, false); },
+              onConfirmRule: (nextRuleId) => void saveContractRuleSelection(selectedDocument, nextRuleId, true),
+              onManageAssociation: () => { setAssociationSuggestion(undefined); setAssociationAnchor(selectedDocument); },
+              onExtract: () =>
+                setFieldDialogRequest({
+                  mode: "single",
+                  documentIds: [selectedDocument],
+                }),
               onExportCurrent: () => void exportResults(),
               onExportAll: () => void exportProjectResults("document"),
             }}
             workpaper={{
               ruleId,
               rules: ruleOptions,
+              usedRuleName: activeResultRuleName,
+              usedRuleVersion: activeResultRuleVersion,
               versions: resultRuns.map((run, index) => ({ id: run.id, label: `${index === 0 ? "最新 · " : ""}${run.extractAt ? new Date(run.extractAt).toLocaleString() : `版本 ${resultRuns.length - index}`}`, count: run.rows.length })),
               versionId: activeResultRun?.id ?? "latest",
               filterText: workpaperFilter,
-              columns: fields.map((field) => ({ key: field.key, label: field.label, editable: true, long: /原文|摘要|提示|说明/.test(field.label) })),
-              rows: workpaperRows.map((row) => ({ id: String(row.id), reviewed: Boolean(row.reviewed), values: editableResult(row) })),
+              totalCount: legacyCovenantResult
+                ? currentResults.filter(row => ["repayment", "supplementary"].includes(covenantScope(row))).length
+                : currentResults.length,
+              procedureFilter,
+              procedureReviewOnly,
+              covenantScopeFilter,
+              covenantScopeCounts,
+              covenantDiagnostics: ruleId === "loan_covenant" ? covenantDiagnosticGroups(matchedResults) : [],
+              pendingCases: ruleId === "loan_covenant" ? matchedResults.filter(row => row._covenant_pending_case === true).map(row => ({ id: String(row.id), values: covenantUserView(row) })) : [],
+              onCovenantScopeChange: setCovenantScopeFilter,
+              onProcedureFilterChange: setProcedureFilter,
+              onProcedureReviewChange: setProcedureReviewOnly,
+              onProcedureLevelChange: (rowId, value) => void saveProcedureLevel(rowId, value),
+              onExportFiltered: () => void exportResults(true),
+              columns: (ruleId === "loan_covenant"
+                ? Object.entries(legacyCovenantResult ? LEGACY_COVENANT_LABELS : COVENANT_LABELS).map(([key, label]) => ({ key, label }))
+                : fields
+              ).map((field) => ({
+                key: field.key,
+                label: field.label,
+                editable: ruleId !== "loan_covenant" || !["procedure_level", "consequence_display", "audit_procedure"].includes(field.key),
+                long: /原文|摘要|提示|说明|后果|审计程序/.test(field.label),
+              })),
+              rows: workpaperRows.map((row) => ({
+                id: String(row.id),
+                reviewed: Boolean(row.reviewed),
+                values: ruleId === "loan_covenant" ? covenantUserView(editableResult(row)) : editableResult(row),
+              })),
               selectedRowId: selectedWorkRowId,
               extra:
                 revenueMissingTasks.length > 0 ? (
@@ -2965,10 +3922,14 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               onToggleReviewed: (rowId) => void toggleReviewed(rowId),
               onOpenEvidence: (rowId) => { const row = currentResults.find((item) => String(item.id) === rowId); if (row) void jumpEvidence(row); },
             }}
-            onBackWorkbench={() => { setSelectedDocument(""); setSelectedId(""); }}
-            onBackProject={() => setSelectedDocument("")}
+            onBackWorkbench={() => closeDocument(true)}
+            onManageCaseLibrary={() => setViewMode("config")}
+            onBackProject={() => closeDocument()}
             onViewChange={setContractView}
-            onTogglePreview={() => setPreviewOpen((open) => !open)}
+            onTogglePreview={() => {
+              if (previewOpen) setPreviewOpen(false);
+              else void openPdfPreview();
+            }}
             onPreviewWidthChange={setPreviewWidthPercent}
             onContractTextChange={setPdfText}
             onSaveContractText={() => void saveText()}
@@ -2988,22 +3949,32 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           actions={{ onCreateRule: createLegacyRule, onCopyRule: copyLegacyRule, onSavePrompt: saveLegacyRulePrompt, onDeleteRule: deleteLegacyRule, onSelectRule: setRuleId, onTabChange: (tab) => setTemplateTab(tab === "custom" ? "mine" : tab), onSearchChange: setTemplateSearch, onEditRule: (id) => setEditingCustomRuleId(id ?? "") }}
         />
       )}
-      {viewMode === "config" && <AudiPickLegacyConfig status={configStatus} onSaved={() => void refreshConfigStatus()} />}
-      {viewMode === "guide" && <AudiPickLegacyGuide onClose={() => setViewMode("workbench")} />}
-      {associationTarget && selectedDocument && <div className="ap-legacy-theme-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setAssociationTarget(""); }}><section className="ap-legacy-theme-modal"><div className="section-title"><h3>管理关联资料</h3><button className="secondary" onClick={() => setAssociationTarget("")}>关闭</button></div><p className="hint">主文件：{documents.find((item) => item.id === selectedDocument)?.name}</p><label className="field"><span>关联文件</span><select value={associationTarget} onChange={(event) => setAssociationTarget(event.target.value)}>{documents.filter((item) => item.id !== selectedDocument).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label className="field"><span>资料角色</span><select value={associationRole} onChange={(event) => setAssociationRole(event.target.value)}><option value="补充协议/变更">补充协议/变更</option><option value="订单/结算单">订单/结算单</option><option value="验收/签收资料">验收/签收资料</option><option value="发票/回款资料">发票/回款资料</option><option value="其他支持资料">其他支持资料</option></select></label><div className="actions"><button className="primary" disabled={busy} onClick={() => void saveAssociation().then(() => setAssociationTarget(""))}>保存关联</button></div></section></div>}
-      {themePickerOpen && <div className="ap-legacy-theme-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setThemePickerOpen(false); }}><section className="ap-legacy-theme-modal"><div className="section-title"><h3>主题设置</h3><button className="secondary" onClick={() => setThemePickerOpen(false)}>关闭</button></div><p className="hint">颜色与工具箱保持同步，AudiPick 页面布局不变。</p><div className="ap-legacy-theme-grid">{Object.entries(themeNames).map(([id, label]) => <button key={id} className={currentTheme === id ? "primary" : "secondary"} onClick={() => { setSavedTheme(id); setThemeRevision((value) => value + 1); }}>{label}</button>)}</div></section></div>}
-      <AudiPickLegacyTour
-        open={tourOpen}
-        onRequestClose={(reason) => {
-          setTourOpen(false);
-          if (reason === "complete" || reason === "skip") {
-            try {
-              localStorage.setItem("ap_tour_done", "1");
-            } catch {
-              /* Browser storage can be disabled without blocking the tour. */
-            }
-          }
+      {viewMode === "config" && <><AudiPickLegacyConfig status={configStatus} onSaved={() => void refreshConfigStatus()} /><CovenantCaseLibraryManager /></>}
+      {associationAnchor && selected && <AudiPickAssociationDialog key={associationAnchor}
+        anchorId={associationAnchor} documents={documents} groups={selected.project.relationGroups ?? []}
+        suggestion={associationSuggestion} onClose={() => setAssociationAnchor("")}
+        onSave={async (members) => {
+          const target = projectsRef.current.find((item) => item.project.id === selectedId);
+          if (!target) throw new Error("项目已不存在。");
+          const previous = target.project.relationGroups ?? [];
+          const existing = previous.find((group) => group.anchorFileId === associationAnchor);
+          const groups = previous.filter((group) => group.anchorFileId !== associationAnchor);
+          if (members.length) groups.push({ id: existing?.id ?? `g_${Date.now().toString(36)}`, anchorFileId: associationAnchor, members });
+          const linkedPairs = new Set(members.map((member) => `${associationAnchor}>${member.fileId}`));
+          const dismissedAssociations = (target.project.dismissedAssociations ?? []).filter((pair) => !linkedPairs.has(pair));
+          const saved = { ...target, project: { ...target.project, relationGroups: groups, dismissedAssociations, updatedAt: new Date().toISOString() } };
+          await engineCall("audipick.project_save", saved);
+          projectsRef.current = projectsRef.current.map((item) => item.project.id === selectedId ? saved : item);
+          setProjects(projectsRef.current);
         }}
+      />}
+      <AudiPickFieldSelectionDialog
+        open={Boolean(fieldDialogRequest)}
+        mode={fieldDialogRequest?.mode ?? "single"}
+        groups={fieldDialogGroups}
+        submitting={fieldDialogSubmitting}
+        onClose={() => setFieldDialogRequest(undefined)}
+        onConfirm={(selection) => void confirmFieldSelection(selection)}
       />
     </AudiPickLegacyShell>
   );
@@ -3186,7 +4157,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               onClick={() => void importPdfs()}
             >
               选择 PDF
-            </button>
+            </Button>
             <button
               className="secondary"
               disabled={!selectedId || busy}
@@ -3200,7 +4171,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               onClick={() => void remove()}
             >
               删除项目
-            </Button>
+            </button>
           </div>
           {documents.map((value) => (
             <div className="task-row" key={value.id}>
@@ -3409,7 +4380,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               onClick={() => void exportResults()}
             >
               导出底稿
-            </button>
+            </Button>
             <button
               className="secondary"
               disabled={busy || !selectedDocument}
@@ -3874,7 +4845,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                   onClick={() => void saveCustomRule()}
                 >
                   {editingCustomRuleId ? "保存修改" : "保存自定义模板"}
-                </button>
+                </Button>
                 {editingCustomRuleId && (
                   <button className="secondary" onClick={() => {
                     setEditingCustomRuleId("");
@@ -3901,7 +4872,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               </button>
               <button className="secondary" onClick={clearLog}>
                 清空日志
-              </Button>
+              </button>
             </div>
           </div>
           {workLog.length === 0 ? (
@@ -3933,7 +4904,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           <section className="form-card">
             <span className="ap-guide-step">2</span>
             <h2>读取文字并选择模板</h2>
-            <p>点击“读取/预览”。普通 PDF 直接读取文字层；扫描页自动 OCR，并在每页完成后保存进度。</p>
+            <p>点击“读取/预览”。正常文字层直接读取；扫描页或明显乱码的文字层会逐页自动 OCR，并在每页完成后保存进度。</p>
           </section>
           <section className="form-card">
             <span className="ap-guide-step">3</span>

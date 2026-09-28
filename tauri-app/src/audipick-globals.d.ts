@@ -23,6 +23,7 @@ declare global {
         prompt?: string;
       }>;
       getFieldsForRule: (id: string) => Array<{ key: string; label: string }>;
+      pageKeyForRule?: (id: string) => string | null;
       getRulePrompt: (id: string) => string;
       getCustomRules: () => Array<Record<string, unknown>>;
       setCustomRules: (rules: Array<Record<string, unknown>>) => void;

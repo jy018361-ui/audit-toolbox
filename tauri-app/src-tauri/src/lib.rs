@@ -1,5 +1,6 @@
 mod audipick;
 mod confirmation;
+mod covenant_cases;
 mod deposit_interest;
 #[cfg(windows)]
 mod excel_com;
@@ -478,6 +479,8 @@ async fn engine_call(
 /// `file_list.scan` 与 `tbje_check.*` 都这么栽过。测试里有一致性断言。
 fn is_direct_job_method(method: &str) -> bool {
     method == "wp.generate"
+        || method == "audipick.extract"
+        || method == "audipick.ocr_page"
         || method == "confirmation.process"
         // 扫描与导出共用同一条任务通道，两者都必须登记；此前只登记了
         // export，前端拖放文件夹自动扫描时命中兜底报"未找到对应的 Rust
@@ -510,12 +513,16 @@ async fn job_start(
     // 只是该条历史记录没有恢复按钮。
     let user_params = params.clone();
     let job_id = job_start_inner(excel_merger, &storage, &method, params).await?;
-    let _ = storage.record_job_params(
-        &job_id,
-        excel_merger::tool_id(&method),
-        &method,
-        &user_params,
-    );
+    if !matches!(method.as_str(), "audipick.ocr_page" | "audipick.extract") {
+        // OCR images and contract extraction text are transient, sensitive task
+        // inputs. Neither belongs in resumable job history.
+        let _ = storage.record_job_params(
+            &job_id,
+            excel_merger::tool_id(&method),
+            &method,
+            &user_params,
+        );
+    }
     Ok(job_id)
 }
 
@@ -552,7 +559,9 @@ async fn job_start_inner(
         }
         return excel_merger.start(method, params);
     }
-    if method.starts_with("kanzhang.")
+    if method == "audipick.extract"
+        || method == "audipick.ocr_page"
+        || method.starts_with("kanzhang.")
         || method.starts_with("fx.")
         || method.starts_with("loan.")
         || method.starts_with("deposit.")
@@ -759,6 +768,22 @@ fn llm_test(settings: Value, api_key: Option<String>) -> Result<Value, AppError>
 }
 
 #[tauri::command]
+async fn audipick_ocr_test(storage: State<'_, Storage>, engine: String, image_base64: String,
+    api_key: Option<String>, secret_key: Option<String>) -> Result<Value, AppError> {
+    let settings = storage.settings_get()?;
+    tauri::async_runtime::spawn_blocking(move || audipick::test_ocr_connection(
+        settings, &engine, &image_base64, api_key.as_deref(), secret_key.as_deref()
+    )).await.map_err(|_| AppError::new("OCR_TEST_FAILED", "OCR 测试任务未完成。", true, None))?
+}
+
+#[tauri::command]
+async fn audipick_llm_test(storage: State<'_, Storage>, profile: Option<Value>, api_key: Option<String>) -> Result<Value, AppError> {
+    let settings = storage.settings_get()?;
+    tauri::async_runtime::spawn_blocking(move || audipick::test_audipick_llm_connection(&settings, profile.as_ref(), api_key.as_deref()))
+        .await.map_err(|_| AppError::new("LLM_TEST_FAILED", "AI 连接测试未完成。", true, None))?
+}
+
+#[tauri::command]
 fn history_get(storage: State<'_, Storage>) -> Result<Value, AppError> {
     storage.history_get()
 }
@@ -847,6 +872,7 @@ fn secret_set(name: String, value: String) -> Result<(), AppError> {
     if !matches!(
         name.as_str(),
         "llm_api_key" | "dify_api_key" | "baidu_ocr_key" | "baidu_ocr_secret"
+            | "audipick_llm_api_key" | "audipick_dify_api_key"
     ) {
         return Err(AppError::new(
             "SECRET_NAME_DENIED",
@@ -1221,6 +1247,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_bootstrap,
+            covenant_cases::covenant_case_workbook,
             update_release_notes,
             tool_catalog,
             engine_call,
@@ -1232,6 +1259,8 @@ pub fn run() {
             settings_set,
             telemetry_track,
             llm_test,
+            audipick_ocr_test,
+            audipick_llm_test,
             history_get,
             history_clear,
             history_restore,

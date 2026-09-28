@@ -66,6 +66,20 @@ body .app-shell {
   justify-self: center;
 }
 
+/* AudiPick 专注模式：它仍在工具箱主窗口内，但只保留 AudiPick 自己的
+   产品导航。主侧栏/窄栏不会挂载，这里同步清除网格预留和内容宽度上限。 */
+body .app-shell.audipick-focus-mode {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.app-shell.audipick-focus-mode > .main {
+  grid-column: 1;
+  justify-self: stretch;
+  max-width: none;
+  padding-inline: 0;
+  padding-bottom: 0;
+}
+
 .app-shell .brand h1 {
   margin-top: 0;
   font-size: var(--fs-xl);
@@ -456,6 +470,10 @@ body .history-card-content {
     padding-inline: var(--sp-5);
   }
 
+  .app-shell.audipick-focus-mode > .main {
+    padding-inline: 0;
+  }
+
   .app-shell > .sidebar {
     z-index: 42;
     width: min(280px, calc(100vw - var(--sp-4)));
@@ -513,6 +531,10 @@ body .history-card-content {
    抽屉几何与窄屏媒体查询里的同一套保持一致。 */
 body .app-shell.sidebar-collapsed {
   grid-template-columns: 72px minmax(0, 1fr);
+}
+
+body .app-shell.sidebar-collapsed.audipick-focus-mode {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .app-shell.sidebar-collapsed > .sidebar {

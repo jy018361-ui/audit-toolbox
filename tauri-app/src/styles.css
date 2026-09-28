@@ -2498,44 +2498,11 @@ summary:focus-visible {
 }
 
 /* AudiPick 顶层视图导航（工作台/模板库/日志） */
-.audipick-window-shell {
-  min-height: 100vh;
-  background: var(--surface-page);
-}
-.audipick-window-dragbar {
-  position: fixed;
-  z-index: 790;
-  top: 0;
-  right: 50%;
-  left: 224px;
-  height: 34px;
-}
-.audipick-window-titlebar {
-  height: 42px;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding: 0 150px 0 var(--sp-4);
-  background: var(--surface);
-  border-bottom: 1px solid var(--border-soft);
-  color: var(--ink-strong);
-  user-select: none;
-}
-.audipick-window-titlebar span {
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
-}
-.audipick-window-main {
-  min-width: 0;
-}
 .ap-product-shell {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
   min-height: calc(100vh - 42px);
   margin: calc(-1 * var(--sp-6)) calc(-1 * var(--sp-6)) calc(-1 * var(--sp-7));
-}
-.audipick-window-main .ap-product-shell {
-  margin: 0;
 }
 .ap-product-sidebar {
   position: sticky;
@@ -2548,9 +2515,6 @@ summary:focus-visible {
   background: var(--brand-deep);
   color: var(--on-brand-deep, var(--ink-inverse));
   --scrollbar-track: var(--brand-deep);
-}
-.audipick-window-main .ap-product-sidebar {
-  min-height: calc(100vh - 42px);
 }
 .ap-product-brand {
   display: flex;

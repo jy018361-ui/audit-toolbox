@@ -30,6 +30,82 @@ pub fn call(method: &str, params: Value, settings: Value) -> Result<Value, AppEr
     }
 }
 
+pub fn test_ocr_connection(mut settings: Value, engine: &str, image: &str,
+    api_key: Option<&str>, secret_key: Option<&str>) -> Result<Value, AppError> {
+    if image.is_empty() || image.len() > 200_000 {
+        return Err(error("OCR_TEST_IMAGE_INVALID", "OCR 测试图片无效。", None));
+    }
+    let start = std::time::Instant::now();
+    settings["ocr"] = json!({"engine": engine});
+    let value = if engine == "baidu" {
+        let ak = api_key.filter(|v| !v.trim().is_empty()).map(str::to_owned)
+            .or_else(|| secret("baidu_ocr_key"))
+            .ok_or_else(|| error("OCR_KEY_MISSING", "请填写百度 API Key。", None))?;
+        let sk = secret_key.filter(|v| !v.trim().is_empty()).map(str::to_owned)
+            .or_else(|| secret("baidu_ocr_secret"))
+            .ok_or_else(|| error("OCR_KEY_MISSING", "请填写百度 Secret Key。", None))?;
+        baidu_ocr_with_keys(image, &ak, &sk)
+    } else {
+        ocr(&json!({"imageBase64": image}), &settings)
+    }.map_err(|mut failure| {
+        // Test credentials and access tokens must never appear in diagnostics.
+        failure.detail = None;
+        failure
+    })?;
+    let recognized = value.get("text").and_then(Value::as_str).unwrap_or("").split_whitespace().collect::<String>();
+    if !recognized.contains("12345") {
+        return Err(error("OCR_TEST_EMPTY", "服务已响应，但未正确识别测试图片中的数字，请检查模型或 OCR 服务。", None));
+    }
+    Ok(json!({"message": "OCR 连接及测试图片识别成功。", "elapsedMs": start.elapsed().as_millis()}))
+}
+
+pub fn run_ocr_page(params: Value, progress: &dyn Fn(&str, usize, usize, &str),
+    cancel: Arc<AtomicBool>, pause_path: &Path) -> Result<Value, AppError> {
+    while pause_path.exists() && !cancel.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(150));
+    }
+    if cancel.load(Ordering::Relaxed) { return Err(error("JOB_CANCELLED", "识别已取消，已完成页保留。", None)); }
+    let page = params.get("page").and_then(Value::as_u64).unwrap_or(1) as usize;
+    let total = params.get("totalPages").and_then(Value::as_u64).unwrap_or(page as u64) as usize;
+    progress("ocr", page.saturating_sub(1), total, &format!("正在识别第 {page} / {total} 页"));
+    let value = ocr(&params, &params["__settings"])?;
+    while pause_path.exists() && !cancel.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(150));
+    }
+    if cancel.load(Ordering::Relaxed) { return Err(error("JOB_CANCELLED", "识别已取消，已完成页保留。", None)); }
+    Ok(value)
+}
+
+/// Run one model request in the cancellable worker process.
+///
+/// AudiPick's multi-stage extractors issue several independent model calls.
+/// Keeping each call in the shared job runner makes the existing pause/stop
+/// controls real: pause gates the next stage, and stop can terminate a model
+/// request that is currently blocked on the remote service.
+pub fn run_extract(
+    params: Value,
+    progress: &dyn Fn(&str, usize, usize, &str),
+    cancel: Arc<AtomicBool>,
+    pause_path: &Path,
+) -> Result<Value, AppError> {
+    while pause_path.exists() && !cancel.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(150));
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(error("JOB_CANCELLED", "提取已终止。", None));
+    }
+    progress("extract", 0, 1, "正在提取合同条款…");
+    let value = llm_text(&params, &params["__settings"])?;
+    while pause_path.exists() && !cancel.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(150));
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(error("JOB_CANCELLED", "提取已终止。", None));
+    }
+    progress("extract", 1, 1, "本阶段提取完成");
+    Ok(value)
+}
+
 pub fn run_batch(
     params: Value,
     progress: &dyn Fn(&str, usize, usize, &str),
@@ -37,6 +113,7 @@ pub fn run_batch(
     pause_path: &Path,
 ) -> Result<Value, AppError> {
     let settings = params.get("__settings").cloned().unwrap_or(json!({}));
+    let llm = require_audipick_llm(&settings)?;
     let prompt = params
         .get("prompt")
         .and_then(Value::as_str)
@@ -47,7 +124,17 @@ pub fn run_batch(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    let documents = params
+    let rule_name = params
+        .get("ruleName")
+        .and_then(Value::as_str)
+        .unwrap_or(&rule_id)
+        .to_owned();
+    let rule_version = params
+        .get("ruleVersion")
+        .and_then(Value::as_str)
+        .unwrap_or("1.0")
+        .to_owned();
+    let field_keys = params.get("fieldKeys").cloned().unwrap_or(json!([]));    let documents = params
         .get("documents")
         .and_then(Value::as_array)
         .cloned()
@@ -68,7 +155,7 @@ pub fn run_batch(
             let queue = queue.clone();
             let sender = sender.clone();
             let cancel = cancel.clone();
-            let settings = settings.clone();
+            let llm = llm.clone();
             let prompt = prompt.clone();
             let pause = pause.clone();
             scope.spawn(move || loop {
@@ -82,7 +169,7 @@ pub fn run_batch(
                 let name = document.get("name").and_then(Value::as_str).unwrap_or(&id).to_owned();
                 let path = document.get("textPath").and_then(Value::as_str).unwrap_or("");
                 let result = match fs::read_to_string(path) {
-                    Ok(text) if !text.trim().is_empty() => match request_llm(&settings["llm"], &prompt, &text, None) {
+                    Ok(text) if !text.trim().is_empty() => match request_llm(&llm, &prompt, &text, None) {
                         Ok(content) => json!({"id":id,"name":name,"ok":true,"content":content,"parsed":parse_json_content(&content)}),
                         Err(err) => json!({"id":id,"name":name,"ok":false,"error":{"code":err.code,"userMessage":err.user_message}}),
                     },
@@ -110,7 +197,7 @@ pub fn run_batch(
             return Err(error("JOB_CANCELLED", "任务已取消。", None));
         }
         Ok(
-            json!({"ruleId":rule_id,"documents":completed,"completed":completed.len(),"total":total,"outputPaths":[]}),
+            json!({"ruleId":rule_id,"ruleName":rule_name,"ruleVersion":rule_version,"fieldKeys":field_keys,"documents":completed,"completed":completed.len(),"total":total,"outputPaths":[]}),
         )
     })
 }
@@ -419,39 +506,61 @@ fn safe_sheet_name(value: &str) -> String {
     }
 }
 
+/// Select one profile before any request. A broken dedicated profile never falls back.
+fn audipick_llm_config(settings: &Value) -> Value {
+    let dedicated = settings["audipickLlm"]["mode"] == "dedicated";
+    let mut llm = settings.get(if dedicated { "audipickLlm" } else { "llm" })
+        .filter(|value| value.is_object()).cloned().unwrap_or(json!({}));
+    let dify = llm["api_type"] == "dify_chat";
+    llm["__credentialName"] = json!(match (dedicated, dify) {
+        (true, true) => "audipick_dify_api_key", (true, false) => "audipick_llm_api_key",
+        (false, true) => "dify_api_key", (false, false) => "llm_api_key",
+    });
+    llm["__source"] = json!(if dedicated { "dedicated" } else { "toolbox" });
+    llm
+}
+
+fn require_audipick_llm(settings: &Value) -> Result<Value, AppError> {
+    let llm = audipick_llm_config(settings);
+    if !llm["enabled"].as_bool().unwrap_or(false) {
+        return Err(error("LLM_DISABLED", if llm["__source"] == "dedicated" {
+            "AudiPick 专用 AI 模型尚未启用，请在 AudiPick 配置中启用。"
+        } else { "当前继承的工具箱 AI 模型尚未启用，请配置模型或选择 AudiPick 专用模型。" }, None));
+    }
+    Ok(llm)
+}
+
 fn config_status(settings: &Value) -> Result<Value, AppError> {
-    let llm = settings.get("llm").cloned().unwrap_or(json!({}));
+    let llm = audipick_llm_config(settings);
     let ocr = settings.get("ocr").cloned().unwrap_or(json!({}));
     let api_type = llm
         .get("api_type")
         .and_then(Value::as_str)
         .unwrap_or("openai");
-    let llm_secret = secret(if api_type == "dify_chat" {
-        "dify_api_key"
-    } else {
-        "llm_api_key"
-    });
+    let llm_secret = secret(llm["__credentialName"].as_str().unwrap());
+    let llm_ready = llm["enabled"].as_bool().unwrap_or(false) && llm_secret.is_some()
+        && llm["base_url"].as_str().is_some_and(|url| url.starts_with("http://") || url.starts_with("https://"))
+        && (api_type == "dify_chat" || llm["model"].as_str().is_some_and(|model| !model.trim().is_empty()));
     let ocr_engine = ocr.get("engine").and_then(Value::as_str).unwrap_or("ai");
     let ocr_ready = match ocr_engine {
-        "ai" => llm_secret.is_some(),
+        "ai" => llm_ready && api_type != "dify_chat",
         "baidu" => secret("baidu_ocr_key").is_some() && secret("baidu_ocr_secret").is_some(),
         "local" => local_ocr_ready(),
         _ => false,
     };
     Ok(json!({
-        "llm": {"ready": llm.get("enabled").and_then(Value::as_bool).unwrap_or(false) && llm_secret.is_some(),
+        "llm": {"ready": llm_ready, "source": llm["__source"],
                 "apiType": api_type, "model": llm.get("model").cloned().unwrap_or(Value::Null)},
-        "ocr": {"ready": ocr_ready, "engine": ocr_engine}
+        "ocr": {"ready": ocr_ready, "engine": ocr_engine},
+        "credentials": {"baiduApiKey": secret("baidu_ocr_key").is_some(),
+            "baiduSecretKey": secret("baidu_ocr_secret").is_some(), "llmApiKey": llm_secret.is_some(),
+            "audipickOpenaiKey": secret("audipick_llm_api_key").is_some(),
+            "audipickDifyKey": secret("audipick_dify_api_key").is_some()}
     }))
 }
 
 fn llm_text(params: &Value, settings: &Value) -> Result<Value, AppError> {
-    let llm = settings
-        .get("llm")
-        .ok_or_else(|| error("LLM_NOT_CONFIGURED", "请先在工具箱设置中配置 LLM。", None))?;
-    if !llm.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
-        return Err(error("LLM_DISABLED", "工具箱中的 LLM 尚未启用。", None));
-    }
+    let llm = require_audipick_llm(settings)?;
     let prompt = params.get("prompt").and_then(Value::as_str).unwrap_or("");
     let text = params.get("text").and_then(Value::as_str).unwrap_or("");
     if prompt.is_empty() || text.is_empty() {
@@ -461,7 +570,7 @@ fn llm_text(params: &Value, settings: &Value) -> Result<Value, AppError> {
             None,
         ));
     }
-    let content = request_llm(llm, prompt, text, None)?;
+    let content = request_llm(&llm, prompt, text, None)?;
     let parsed = parse_json_content(&content);
     Ok(json!({"content": content, "parsed": parsed}))
 }
@@ -1505,11 +1614,12 @@ fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
             None,
         ));
     }
-    let llm = settings
-        .get("llm")
-        .ok_or_else(|| error("LLM_NOT_CONFIGURED", "AI 视觉需要先配置工具箱 LLM。", None))?;
+    let llm = require_audipick_llm(settings)?;
+    if llm["api_type"] == "dify_chat" {
+        return Err(error("OCR_MODEL_UNSUPPORTED", "当前 Dify Chat 接口不支持页面图片。请选择支持图片的 OpenAI 兼容模型，或使用百度/本机 OCR。", None));
+    }
     let content = request_llm(
-        llm,
+        &llm,
         "请逐字识别图片中的中文和数字，只返回识别文字，不要解释。",
         "",
         Some(image),
@@ -1577,7 +1687,27 @@ fn request_llm(
     text: &str,
     image: Option<&str>,
 ) -> Result<String, AppError> {
-    request_llm_with_key(config, prompt, text, image, None)
+    request_llm_with_key(config, prompt, text, image, None).map_err(|mut failure| {
+        if config["__source"] == "dedicated" {
+            failure.user_message = format!("AudiPick 专用模型：{} 未切换到工具箱模型。", failure.user_message);
+        }
+        failure
+    })
+}
+
+pub(crate) fn test_audipick_llm_connection(settings: &Value, draft: Option<&Value>, api_key: Option<&str>) -> Result<Value, AppError> {
+    let mut effective = settings.clone();
+    if let Some(draft) = draft { effective["audipickLlm"] = draft.clone(); }
+    let llm = require_audipick_llm(&effective)?;
+    // An inherit test must never use a dedicated draft key.
+    let key = if llm["__source"] == "dedicated" { api_key } else { None };
+    test_llm_connection(&llm, key).map_err(|mut failure| {
+        failure.detail = None;
+        if llm["__source"] == "dedicated" {
+            failure.user_message = format!("AudiPick 专用模型：{} 未切换到工具箱模型。", failure.user_message);
+        }
+        failure
+    })
 }
 
 pub(crate) fn test_llm_connection(
@@ -1643,7 +1773,7 @@ fn request_llm_with_key(
     if api_type == "dify_chat" {
         let key = api_key
             .map(str::to_owned)
-            .or_else(|| secret("dify_api_key"))
+            .or_else(|| secret(config["__credentialName"].as_str().unwrap_or("dify_api_key")))
             .ok_or_else(|| error("LLM_KEY_MISSING", "未找到 Dify API Key。", None))?;
         let url = if base.ends_with("/chat-messages") {
             base.to_string()
@@ -1661,7 +1791,7 @@ fn request_llm_with_key(
     }
     let key = api_key
         .map(str::to_owned)
-        .or_else(|| secret("llm_api_key"))
+        .or_else(|| secret(config["__credentialName"].as_str().unwrap_or("llm_api_key")))
         .ok_or_else(|| error("LLM_KEY_MISSING", "未找到 LLM API Key。", None))?;
     let url = if base.ends_with("/chat/completions") {
         base.to_string()
@@ -1750,6 +1880,10 @@ fn baidu_ocr(image: &str) -> Result<Value, AppError> {
         .ok_or_else(|| error("OCR_KEY_MISSING", "未找到百度 OCR API Key。", None))?;
     let sk = secret("baidu_ocr_secret")
         .ok_or_else(|| error("OCR_KEY_MISSING", "未找到百度 OCR Secret Key。", None))?;
+    baidu_ocr_with_keys(image, &ak, &sk)
+}
+
+fn baidu_ocr_with_keys(image: &str, ak: &str, sk: &str) -> Result<Value, AppError> {
     let client = Client::builder()
         .timeout(Duration::from_secs(90))
         .build()
@@ -1758,8 +1892,8 @@ fn baidu_ocr(image: &str) -> Result<Value, AppError> {
         .post("https://aip.baidubce.com/oauth/2.0/token")
         .query(&[
             ("grant_type", "client_credentials"),
-            ("client_id", ak.as_str()),
-            ("client_secret", sk.as_str()),
+            ("client_id", ak),
+            ("client_secret", sk),
         ])
         .send()
         .map_err(network_error)?
@@ -1907,6 +2041,80 @@ fn error(code: &str, message: &str, detail: Option<String>) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn audipick_profile_priority_and_credentials_are_isolated() {
+        let settings = json!({"llm":{"enabled":false,"model":"global","api_type":"openai"},
+            "audipickLlm":{"mode":"dedicated","enabled":true,"model":"private","api_type":"dify_chat"}});
+        let selected = require_audipick_llm(&settings).unwrap();
+        assert_eq!(selected["model"], "private");
+        assert_eq!(selected["__credentialName"], "audipick_dify_api_key");
+        assert_eq!(settings["llm"]["model"], "global");
+        let inherited = audipick_llm_config(&json!({"llm":{"enabled":true,"model":"global"},"audipickLlm":{"mode":"inherit","model":"old-private"}}));
+        assert_eq!(inherited["model"], "global");
+        assert_eq!(inherited["__credentialName"], "llm_api_key");
+        assert_eq!(audipick_llm_config(&json!({}))["__source"], "toolbox");
+    }
+
+    #[test]
+    fn dedicated_disabled_never_falls_back_and_ai_ocr_uses_same_profile() {
+        let settings = json!({"llm":{"enabled":true,"model":"global"},"audipickLlm":{"mode":"dedicated","enabled":false}});
+        assert!(require_audipick_llm(&settings).unwrap_err().user_message.contains("AudiPick 专用"));
+        let failure = call("audipick.extract", json!({"prompt":"p","text":"t"}), settings.clone()).unwrap_err();
+        assert_eq!(failure.code, "LLM_DISABLED");
+        assert_eq!(test_audipick_llm_connection(&settings, None, None).unwrap_err().code, "LLM_DISABLED");
+        assert_eq!(ocr(&json!({"imageBase64":"synthetic"}), &settings).unwrap_err().code, "LLM_DISABLED");
+        let dify = json!({"llm":{"enabled":false},"audipickLlm":{"mode":"dedicated","enabled":true,"api_type":"dify_chat"}});
+        assert_eq!(ocr(&json!({"imageBase64":"synthetic"}), &dify).unwrap_err().code, "OCR_MODEL_UNSUPPORTED");
+    }
+
+    #[test]
+    fn dedicated_invalid_test_reports_profile_without_network_or_fallback() {
+        let settings = json!({"llm":{"enabled":true,"base_url":"https://global.example"}});
+        let draft = json!({"mode":"dedicated","enabled":true,"base_url":"invalid-url"});
+        let failure = test_audipick_llm_connection(&settings, Some(&draft), Some("synthetic")).unwrap_err();
+        assert_eq!(failure.code, "LLM_URL_INVALID");
+        assert!(failure.user_message.contains("未切换到工具箱"));
+        assert!(failure.detail.is_none());
+    }
+    #[test]
+    fn ocr_test_rejects_invalid_images_without_network() {
+        for image in [String::new(), "a".repeat(200_001)] {
+            let failure = test_ocr_connection(json!({}), "baidu", &image, None, None).unwrap_err();
+            assert_eq!(failure.code, "OCR_TEST_IMAGE_INVALID");
+        }
+    }
+
+    #[test]
+    fn ocr_page_worker_obeys_cancellation_before_network() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let failure = run_ocr_page(json!({}), &|_, _, _, _| panic!("cancelled job must not progress"),
+            cancel, Path::new("unused-ocr-test.pause")).unwrap_err();
+        assert_eq!(failure.code, "JOB_CANCELLED");
+    }
+
+    #[test]
+    fn extract_worker_obeys_cancellation_before_network() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let failure = run_extract(
+            json!({"prompt":"p","text":"t","__settings":{}}),
+            &|_, _, _, _| panic!("cancelled job must not progress"),
+            cancel,
+            Path::new("unused-extract-test.pause"),
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "JOB_CANCELLED");
+        assert_eq!(failure.user_message, "提取已终止。");
+    }
+
+    #[test]
+    fn ocr_page_worker_reports_page_and_rejects_missing_image() {
+        let progress = Mutex::new(Vec::new());
+        let failure = run_ocr_page(json!({"page": 3, "totalPages": 80}),
+            &|_, current, total, _| progress.lock().unwrap().push((current, total)),
+            Arc::new(AtomicBool::new(false)), Path::new("unused-ocr-test.pause")).unwrap_err();
+        assert_eq!(failure.code, "OCR_IMAGE_REQUIRED");
+        assert_eq!(*progress.lock().unwrap(), vec![(2, 80)]);
+    }
     #[test]
     fn bundle_sheet_names_are_excel_safe() {
         assert_eq!(safe_sheet_name("借款/合同:*?[]"), "借款 合同");
@@ -2284,7 +2492,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let result = run_batch(
             json!({
-                "__settings":{"llm":{"enabled":false}},
+                "__settings":{"llm":{"enabled":true}},
                 "prompt":"【字段定义】\npage: 页码",
                 "ruleId":"loan_covenant",
                 "documents":[{"id":"d1","name":"missing.pdf","textPath":"Z:/definitely-missing-audipick.txt"}]

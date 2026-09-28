@@ -5,6 +5,24 @@
   --alla-border: var(--border, #292e38);
   --alla-text: var(--text, #f4f5f7);
   --alla-muted: var(--text-muted, #7d8491);
+  --alla-input-bg: var(--input-bg, #08090c);
+  --alla-accent-contrast: var(--accent-contrast, #191300);
+  --alla-secondary: var(--text-secondary, #b4b9c3);
+  --alla-secondary-strong: var(--text-secondary, #c0c4cd);
+  --alla-blue: #85b8ff;
+  --alla-green: #54d7a4;
+  --alla-red: #ff8585;
+  --alla-amber: #efc36d;
+  --alla-green-strong: #67dcb0;
+  --alla-green-line: #3fc890;
+  --alla-blue-strong: #8fc0ff;
+  --alla-blue-line: #579cff;
+  --alla-amber-line: #e2ad49;
+  --alla-red-line: #ef6262;
+  --alla-amber-bar: #d9aa4e;
+  --alla-red-bar: #ee6565;
+  --alla-red-strong: #ff7373;
+  --alla-green-flat: #57d5a4;
   color: var(--alla-text);
   display: grid;
   gap: 20px;
@@ -67,7 +85,7 @@
   min-height: 38px;
   border: 1px solid var(--alla-border);
   border-radius: 8px;
-  background: var(--input-bg, #08090c);
+  background: var(--alla-input-bg);
   color: var(--alla-text);
   padding: 7px 11px;
   color-scheme: dark;
@@ -77,7 +95,7 @@
   border: 1px solid color-mix(in srgb, var(--alla-accent), transparent 38%);
   border-radius: 8px;
   background: var(--alla-accent);
-  color: var(--accent-contrast, #191300);
+  color: var(--alla-accent-contrast);
   font-weight: 650;
   padding: 7px 16px;
   cursor: pointer;
@@ -144,16 +162,16 @@
   color: var(--alla-text);
 }
 .alla-stat strong.is-blue {
-  color: #85b8ff;
+  color: var(--alla-blue);
 }
 .alla-stat strong.is-green {
-  color: #54d7a4;
+  color: var(--alla-green);
 }
 .alla-stat strong.is-red {
-  color: #ff8585;
+  color: var(--alla-red);
 }
 .alla-stat strong.is-amber {
-  color: #efc36d;
+  color: var(--alla-amber);
 }
 .alla-caption {
   margin: 0;
@@ -190,7 +208,7 @@
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  color: var(--text-secondary, #b4b9c3);
+  color: var(--alla-secondary);
   font-size: 14px;
 }
 .alla-currency strong {
@@ -219,31 +237,31 @@
   background: color-mix(in srgb, var(--alla-border), transparent 55%);
 }
 .alla-badge.is-green {
-  color: #67dcb0;
-  border-color: color-mix(in srgb, #3fc890, transparent 62%);
-  background: color-mix(in srgb, #3fc890, transparent 90%);
+  color: var(--alla-green-strong);
+  border-color: color-mix(in srgb, var(--alla-green-line), transparent 62%);
+  background: color-mix(in srgb, var(--alla-green-line), transparent 90%);
 }
 .alla-badge.is-blue {
-  color: #8fc0ff;
-  border-color: color-mix(in srgb, #579cff, transparent 62%);
-  background: color-mix(in srgb, #579cff, transparent 90%);
+  color: var(--alla-blue-strong);
+  border-color: color-mix(in srgb, var(--alla-blue-line), transparent 62%);
+  background: color-mix(in srgb, var(--alla-blue-line), transparent 90%);
 }
 .alla-badge.is-amber {
-  color: #efc36d;
-  border-color: color-mix(in srgb, #e2ad49, transparent 62%);
-  background: color-mix(in srgb, #e2ad49, transparent 90%);
+  color: var(--alla-amber);
+  border-color: color-mix(in srgb, var(--alla-amber-line), transparent 62%);
+  background: color-mix(in srgb, var(--alla-amber-line), transparent 90%);
 }
 .alla-badge.is-red {
-  color: #ff8585;
-  border-color: color-mix(in srgb, #ef6262, transparent 62%);
-  background: color-mix(in srgb, #ef6262, transparent 90%);
+  color: var(--alla-red);
+  border-color: color-mix(in srgb, var(--alla-red-line), transparent 62%);
+  background: color-mix(in srgb, var(--alla-red-line), transparent 90%);
 }
 .alla-risk {
   padding: 3px 0 3px 12px;
-  border-left: 2px solid #d9aa4e;
+  border-left: 2px solid var(--alla-amber-bar);
 }
 .alla-risk.is-high {
-  border-left-color: #ee6565;
+  border-left-color: var(--alla-red-bar);
 }
 .alla-risk > div {
   display: flex;
@@ -266,18 +284,18 @@
 .alla-validations li {
   display: flex;
   gap: 8px;
-  color: var(--text-secondary, #b4b9c3);
+  color: var(--alla-secondary);
   font-size: 14px;
 }
 .alla-validations li.is-warning > span,
 .alla-pending {
-  color: #efc36d;
+  color: var(--alla-amber);
 }
 .alla-validations li.is-error > span {
-  color: #ff7373;
+  color: var(--alla-red-strong);
 }
 .alla-validations li.is-ok {
-  color: #57d5a4;
+  color: var(--alla-green-flat);
 }
 .alla-empty {
   padding: 34px;
@@ -346,7 +364,7 @@
 }
 .alla-field p {
   margin: 4px 0 0;
-  color: var(--text-secondary, #c0c4cd);
+  color: var(--alla-secondary-strong);
   font-size: 14px;
   line-height: 1.55;
   overflow-wrap: anywhere;
@@ -380,7 +398,7 @@
   flex-wrap: wrap;
   gap: 8px 20px;
   margin-top: 11px;
-  color: var(--text-secondary, #c0c4cd);
+  color: var(--alla-secondary-strong);
   font-size: 14px;
 }
 .alla-plan {
@@ -388,7 +406,7 @@
 }
 .alla-plan summary {
   padding: 13px 16px;
-  color: var(--text-secondary, #b4b9c3);
+  color: var(--alla-secondary);
   font-size: 14px;
   cursor: pointer;
 }
@@ -417,7 +435,7 @@
   white-space: nowrap;
 }
 .alla-table-wrap td {
-  color: var(--text-secondary, #c0c4cd);
+  color: var(--alla-secondary-strong);
 }
 .alla-table-wrap .is-number {
   text-align: right;
@@ -427,7 +445,7 @@
   font-weight: 650;
 }
 .alla-table-wrap .is-uncertain {
-  color: #efc36d;
+  color: var(--alla-amber);
 }
 .alla-matrix {
   padding: 15px 16px;

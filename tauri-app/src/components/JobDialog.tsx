@@ -16,6 +16,8 @@ import {
 } from "@/components/ui/dialog";
 import { jobCancel, jobPause } from "@/api";
 import type { JobEvent } from "@/types";
+import { isAudiPickOperationJob, useAudiPickOperations } from "../audipickOperation";
+import { AudiPickOperationPanel } from "./AudiPickOperationPanel";
 
 /** 结束态的三个 phase 由 Rust 侧统一约定（excel_merger.rs）。 */
 const FINISHED = ["completed", "failed", "cancelled"];
@@ -147,7 +149,8 @@ export function JobDialogProvider({
   const [minimized, setMinimized] = useState(false);
   const minimizedButtonRef = useRef<HTMLButtonElement>(null);
   const [paused, setPaused] = useState<Record<string, boolean>>({});
-  const running = jobs.filter(isJobRunning);
+  useAudiPickOperations();
+  const running = jobs.filter((job) => isJobRunning(job) && !isAudiPickOperationJob(job.jobId));
   const runningIds = running.map((job) => job.jobId).join("|");
 
   // 任务跑完就把最小化和暂停记录归零：下一个任务应当重新弹出来，
@@ -207,6 +210,7 @@ export function JobDialogProvider({
       }}
     >
       {children}
+      <AudiPickOperationPanel raised={running.length > 0} />
       <Dialog open={open}>
         <DialogContent
           showCloseButton={false}

@@ -875,7 +875,63 @@ fn roll_lead(
             dst.get_cell_mut((*col, row)).set_blank();
         }
     }
+    if cfg.sheet_name == "K.00 Lead Sheet"
+        && cfg
+            .total_row_keywords
+            .iter()
+            .any(|keyword| normalize(keyword) == "净值")
+    {
+        suppress_redundant_fixed_asset_net_value_row(dst);
+    }
     Ok(copied)
+}
+
+fn suppress_redundant_fixed_asset_net_value_row(sheet: &mut Worksheet) -> bool {
+    let (max_col, max_row) = sheet.get_highest_column_and_row();
+    let scan_col = max_col.min(12);
+    let net_value_rows = (1..=max_row)
+        .filter(|row| {
+            (1..=scan_col).any(|col| {
+                sheet
+                    .get_cell((col, *row))
+                    .is_some_and(|cell| normalize(&cell.get_value()) == "净值")
+            })
+        })
+        .collect::<Vec<_>>();
+    if net_value_rows.len() != 2 || net_value_rows[1] != net_value_rows[0] + 1 {
+        return false;
+    }
+
+    let row_profile = |row: u32| {
+        (1..=max_col).fold((0usize, 0usize), |(formulas, populated), col| {
+            let Some(cell) = sheet.get_cell((col, row)) else {
+                return (formulas, populated);
+            };
+            (
+                formulas + usize::from(!cell.get_formula().trim().is_empty()),
+                populated + usize::from(!cell.get_value().trim().is_empty()),
+            )
+        })
+    };
+    let redundant_row = net_value_rows[0];
+    let canonical_row = net_value_rows[1];
+    let (redundant_formulas, redundant_populated) = row_profile(redundant_row);
+    let (canonical_formulas, canonical_populated) = row_profile(canonical_row);
+    if redundant_formulas != 0
+        || canonical_formulas == 0
+        || canonical_formulas + canonical_populated
+            <= redundant_formulas + redundant_populated
+    {
+        return false;
+    }
+
+    for col in 1..=max_col {
+        sheet.get_cell_mut((col, redundant_row)).set_blank();
+    }
+    sheet
+        .get_row_dimension_mut(&redundant_row)
+        .set_hidden(true);
+    true
 }
 
 fn find_structural_lead_header(sheet: &Worksheet, cfg: &LeadConfig, max_row: u32) -> Option<u32> {
@@ -4172,6 +4228,71 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[test]
+    fn fixed_asset_lead_suppresses_the_redundant_net_value_row() {
+        let mut source = umya_spreadsheet::new_file();
+        source
+            .get_sheet_by_name_mut("Sheet1")
+            .unwrap()
+            .set_name("K.00 Lead Sheet");
+        let src = source.get_sheet_by_name_mut("K.00 Lead Sheet").unwrap();
+        src.get_cell_mut((2, 6)).set_value("期末审定数");
+        src.get_cell_mut((2, 7)).set_value("原值");
+        src.get_cell_mut((9, 7)).set_value_number(868_153.82);
+        src.get_cell_mut((2, 8)).set_value("累计折旧");
+        src.get_cell_mut((9, 8)).set_value_number(824_746.13);
+        src.get_cell_mut((2, 9)).set_value("减值准备");
+        src.get_cell_mut((9, 9)).set_value_number(0.0);
+        // The legacy workbook has a value at this position but no total-row
+        // descriptor, so row-number rolling writes it into the target's
+        // redundant first "净值" row.
+        src.get_cell_mut((9, 10)).set_value_number(43_407.69);
+        src.get_cell_mut((2, 11)).set_value("净值");
+
+        let mut target = umya_spreadsheet::new_file();
+        target
+            .get_sheet_by_name_mut("Sheet1")
+            .unwrap()
+            .set_name("K.00 Lead Sheet");
+        let dst = target.get_sheet_by_name_mut("K.00 Lead Sheet").unwrap();
+        dst.get_cell_mut((2, 6)).set_value("期末审定数");
+        dst.get_cell_mut((2, 7)).set_value("原值");
+        dst.get_cell_mut((2, 8)).set_value("累计折旧");
+        dst.get_cell_mut((2, 9)).set_value("减值准备");
+        dst.get_cell_mut((2, 10)).set_value("净值");
+        dst.get_cell_mut((2, 11)).set_value("净值");
+        dst.get_cell_mut((7, 11)).set_formula("SUM(D11:F11)");
+        dst.get_cell_mut((10, 11)).set_value_number(43_407.69);
+        dst.get_cell_mut((11, 11)).set_formula("G11-J11");
+
+        let cfg = LeadConfig {
+            sheet_name: "K.00 Lead Sheet".into(),
+            header_search_text: "期末审定数".into(),
+            closing_col: 9,
+            opening_col: 10,
+            match_existing_rows_only: false,
+            total_row_keywords: vec!["净值".into()],
+            clear_current_period_cols: vec![],
+        };
+        let mut warnings = vec![];
+        assert_eq!(
+            roll_lead(&source, &mut target, &cfg, &mut warnings).unwrap(),
+            4
+        );
+
+        let sheet = target.get_sheet_by_name("K.00 Lead Sheet").unwrap();
+        assert!(sheet.get_row_dimension(&10).is_some_and(|row| row.hidden()));
+        assert_eq!(sheet.get_cell((2, 10)).unwrap().get_value(), "");
+        assert_eq!(sheet.get_cell((10, 10)).unwrap().get_value(), "");
+        assert_eq!(sheet.get_cell((2, 11)).unwrap().get_value(), "净值");
+        assert_eq!(
+            sheet.get_cell((7, 11)).unwrap().get_formula(),
+            "SUM(D11:F11)"
+        );
+        assert_eq!(sheet.get_cell((11, 11)).unwrap().get_formula(), "G11-J11");
+    }
+
     #[test]
     fn generic_lead_uses_configured_columns_when_legacy_header_text_is_corrupt() {
         let mut source = umya_spreadsheet::new_file();

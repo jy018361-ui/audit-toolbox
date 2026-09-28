@@ -7,6 +7,8 @@
   --ap-tour-text: var(--ink, #ffffff);
   --ap-tour-muted: var(--text-muted, #d1d5db);
   --ap-tour-faint: var(--muted-soft, #9ca3af);
+  --ap-tour-scrim: rgb(0 0 0 / 0.8);
+  --ap-tour-pop-shadow: 0 10px 30px rgb(0 0 0 / 0.55);
   position: fixed;
   inset: 0;
   z-index: 99997;
@@ -20,7 +22,7 @@
   border: 1px solid color-mix(in srgb, var(--ap-tour-accent) 76%, transparent);
   border-radius: 8px;
   box-shadow:
-    0 0 0 9999px rgb(0 0 0 / 80%),
+    0 0 0 9999px var(--ap-tour-scrim),
     0 0 0 3px color-mix(in srgb, var(--ap-tour-accent) 24%, transparent);
   transition:
     top 0.4s cubic-bezier(0.4, 0, 0.2, 1),
@@ -34,7 +36,7 @@
   position: fixed;
   inset: 0;
   z-index: 99998;
-  background: rgb(0 0 0 / 80%);
+  background: var(--ap-tour-scrim);
 }
 
 .ap-legacy-tour__tooltip {
@@ -47,7 +49,7 @@
   background: var(--ap-tour-surface);
   border: 1px solid var(--ap-tour-border);
   border-radius: 12px;
-  box-shadow: 0 10px 30px rgb(0 0 0 / 55%);
+  box-shadow: var(--ap-tour-pop-shadow);
   transition:
     top 0.4s cubic-bezier(0.4, 0, 0.2, 1),
     left 0.4s cubic-bezier(0.4, 0, 0.2, 1);
@@ -114,7 +116,7 @@
 .ap-legacy-tour__next {
   color: var(--ap-tour-on-accent);
   background: var(--ap-tour-accent);
-  font-weight: 700 !important;
+  font-weight: 700;
   transition:
     background 0.18s ease,
     transform 0.18s ease;

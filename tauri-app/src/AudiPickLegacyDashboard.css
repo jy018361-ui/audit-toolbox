@@ -21,6 +21,10 @@
   --ap146-danger-soft: var(--danger-bg, #7f1d1d);
   --ap146-info: var(--brand-link, #93c5fd);
   --ap146-info-soft: color-mix(in srgb, var(--brand, #1e3a8a) 22%, transparent);
+  --ap146-card-shadow: 0 12px 28px rgb(0 0 0 / 0.28);
+  --ap146-scrim: rgb(0 0 0 / 0.7);
+  --ap146-modal-shadow: 0 25px 50px rgb(0 0 0 / 0.45);
+  --ap146-modal-surface: var(--surface-sunken, #111827);
   color: var(--ap146-text-soft);
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
@@ -429,7 +433,7 @@
   border: 1px solid var(--ap146-border);
   border-radius: 8px;
   background: var(--ap146-raised);
-  box-shadow: 0 12px 28px rgb(0 0 0 / 28%);
+  box-shadow: var(--ap146-card-shadow);
 }
 
 .ap146-row-actions details button {
@@ -463,18 +467,18 @@
   align-items: center;
   justify-content: center;
   padding: 16px;
-  background: rgb(0 0 0 / 70%);
+  background: var(--ap146-scrim);
 }
 
 .ap146-new-project-modal {
   width: 100%;
   max-width: 384px;
   padding: 20px;
-  border: 1px solid var(--border, #4b5563);
+  border: 1px solid var(--ap146-border);
   border-radius: 12px;
-  background: var(--surface-sunken, #111827);
-  box-shadow: 0 25px 50px rgb(0 0 0 / 45%);
-  color: var(--ink, #f7f7f7);
+  background: var(--ap146-modal-surface);
+  box-shadow: var(--ap146-modal-shadow);
+  color: var(--ap146-text);
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
     Arial, sans-serif;
@@ -482,7 +486,7 @@
 
 .ap146-new-project-modal h3 {
   margin: 0 0 12px;
-  color: var(--ink, #f7f7f7);
+  color: var(--ap146-text);
   font-size: 16px;
   font-weight: 600;
 }
@@ -495,7 +499,7 @@
 .ap146-new-project-modal label > span {
   display: block;
   margin-bottom: 4px;
-  color: var(--text-muted, #c5cbd3);
+  color: var(--ap146-muted);
   font-size: 12px;
 }
 
@@ -508,7 +512,7 @@
 
 .ap146-modal-error {
   margin: -2px 0 0;
-  color: var(--danger-fg, #fca5a5);
+  color: var(--ap146-danger);
   font-size: 12px;
 }
 
@@ -524,13 +528,13 @@
 }
 
 .ap146-cancel-button {
-  border: 1px solid var(--border, #4b5563);
+  border: 1px solid var(--ap146-border);
   background: transparent;
-  color: var(--text-muted, #c5cbd3);
+  color: var(--ap146-muted);
 }
 
 .ap146-cancel-button:hover:not(:disabled) {
-  background: var(--surface-muted, #333333);
+  background: var(--ap146-control-hover);
 }
 
 @media (max-width: 1120px) {

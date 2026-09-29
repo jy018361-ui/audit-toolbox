@@ -33,6 +33,10 @@ pub(crate) struct Table {
     pub(crate) header_row: usize,
     pub(crate) headers: Vec<String>,
     pub(crate) rows: Vec<Vec<String>>,
+    /// 表内数据行的真实总数。整表读取时等于 `rows.len()`；前缀读取时是
+    /// Excel 声明的规模（可能略大于去空后的实际行数）。界面展示行数、以及
+    /// “是否只拿了前缀”的判定（`rows.len() < row_count`）都以它为准。
+    pub(crate) row_count: usize,
 }
 
 // 只缓存最近一次 inspect 的两张表，复核复用读取结果；worker 导出仍重新读源文件。
@@ -51,6 +55,21 @@ fn review_table(params: &Value, side: &str) -> Result<Arc<Table>, AppError> {
     load_review_table(&path, sheet, header, false)
 }
 
+/// 交互场景的表读取：优先前缀结构表（选表、表头、样例秒级可得），走不通
+/// （非 xlsx、结构不认识）再退回整表读取。合并/导出 worker 不走这里，
+/// 它们本就要全量数据。
+fn load_interactive_table(
+    path: &Path,
+    sheet: Option<&str>,
+    header: Option<usize>,
+    choose_best: bool,
+) -> Result<Table, AppError> {
+    match crate::fa_sheet_pick::load_prefix_table(path, sheet, header, choose_best) {
+        Some(table) => Ok(table),
+        None => load_table(path, sheet, header, choose_best),
+    }
+}
+
 pub(crate) fn load_review_table(
     path: &Path,
     sheet: Option<&str>,
@@ -65,7 +84,7 @@ pub(crate) fn load_review_table(
         }
     }
     let before = review_table_key(path, None, 0);
-    let table = Arc::new(load_table(path, sheet, header, choose_best)?);
+    let table = Arc::new(load_interactive_table(path, sheet, header, choose_best)?);
     let after = review_table_key(path, None, 0);
     if before.is_some() && before == after {
         if let Some(key) = review_table_key(path, table.sheet.as_deref(), table.header_row) {
@@ -166,29 +185,30 @@ fn inspect(params: Value) -> Result<Value, AppError> {
     let begin_path = required_path(&params, "beginPath")?;
     let end_path = required_path(&params, "endPath")?;
     let fingerprints = [review_table_key(&begin_path, None, 0), review_table_key(&end_path, None, 0)];
-    let begin = Arc::new(load_table(
+    let load_started = std::time::Instant::now();
+    let mut begin = Arc::new(load_interactive_table(
         &begin_path,
         params.get("beginSheet").and_then(Value::as_str),
         optional_header(&params, "beginHeaderRow")?,
         true,
     )?);
-    let end = Arc::new(load_table(
+    let mut end = Arc::new(load_interactive_table(
         &end_path,
         params.get("endSheet").and_then(Value::as_str),
         optional_header(&params, "endHeaderRow")?,
         true,
     )?);
-    let tables = [&begin, &end].into_iter().zip(fingerprints).filter_map(|(table, before)| {
-        // 读取过程中源文件被改动时，不把可能跨版本的读取结果加入缓存。
-        let before = before?;
-        let after = review_table_key(&table.path, None, 0)?;
-        if before != after { return None; }
-        review_table_key(&table.path, table.sheet.as_deref(), table.header_row)
-            .map(|key| (key, Arc::clone(table)))
-    }).collect();
-    if let Ok(mut cache) = REVIEW_TABLES.get_or_init(|| Mutex::new(Vec::new())).lock() {
-        *cache = tables;
-    }
+    eprintln!(
+        "FA inspect 读取 {:.1}s：期初 {}（{}/{} 行），期末 {}（{}/{} 行）",
+        load_started.elapsed().as_secs_f64(),
+        begin.sheet.clone().unwrap_or_default(),
+        begin.rows.len(),
+        begin.row_count,
+        end.sheet.clone().unwrap_or_default(),
+        end.rows.len(),
+        end.row_count,
+    );
+    let verify_started = std::time::Instant::now();
     let mut bm = suggest_mapping(&begin);
     let mut em = suggest_mapping(&end);
     // 本年折旧、新增方式和新增日期都是期末（file2）属性。
@@ -202,7 +222,66 @@ fn inspect(params: Value) -> Result<Value, AppError> {
     // 建议键逐位预碰撞校验：错配静默纠正到同值列，双侧无据可依时撤掉该配对。
     let mut begin_keys = mapping_match_keys(&bm);
     let mut end_keys = mapping_match_keys(&em);
-    let key_pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys);
+    // 组合键成员（名称/公司列）按本侧条件独立加入，两侧可能不等长——例如
+    // 期初多主体、期末单主体时只有期初会补公司列。逐位配对要求成员序列
+    // 一致，单侧悬空的尾部成员只会挂出恒为未命中的徽章，直接撤掉；首键
+    // （主编号）承载选列建议，永不裁剪。
+    align_key_members(&mut begin_keys, &mut end_keys);
+    let suggested_begin_keys = begin_keys.clone();
+    let suggested_end_keys = end_keys.clone();
+    let mut key_pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys);
+    // 前缀快验只信“全部直接命中且未动一键”的结论——命中即真。出现未命中、
+    // 纠正或撤键都意味着需要全量数据复核：退回整表重跑同一套判键逻辑
+    // （与整表实现的口径逐字一致），并让后续手工调键/复核也用上整表。
+    let prefix_only = begin.rows.len() < begin.row_count || end.rows.len() < end.row_count;
+    if prefix_only
+        && (begin_keys != suggested_begin_keys
+            || end_keys != suggested_end_keys
+            || key_pairing
+                .iter()
+                .any(|item| item.get("hit").and_then(Value::as_bool) != Some(true)))
+    {
+        eprintln!(
+            "FA inspect 前缀键校验存疑（{:.1}s），退整表重验",
+            verify_started.elapsed().as_secs_f64()
+        );
+        let reload_started = std::time::Instant::now();
+        let begin_full = Arc::new(load_table(
+            &begin.path,
+            begin.sheet.as_deref(),
+            Some(begin.header_row),
+            false,
+        )?);
+        let end_full = Arc::new(load_table(
+            &end.path,
+            end.sheet.as_deref(),
+            Some(end.header_row),
+            false,
+        )?);
+        let mut retry_begin = suggested_begin_keys;
+        let mut retry_end = suggested_end_keys;
+        key_pairing =
+            repair_suggested_key_pairing(&begin_full, &end_full, &mut retry_begin, &mut retry_end);
+        begin_keys = retry_begin;
+        end_keys = retry_end;
+        begin = begin_full;
+        end = end_full;
+        eprintln!(
+            "FA inspect 整表重读+重验 {:.1}s",
+            reload_started.elapsed().as_secs_f64()
+        );
+    }
+    let tables = [&begin, &end].into_iter().zip(fingerprints).filter_map(|(table, before)| {
+        // 读取过程中源文件被改动时，不把可能跨版本的读取结果加入缓存。
+        let before = before?;
+        let after = review_table_key(&table.path, None, 0)?;
+        if before != after { return None; }
+        review_table_key(&table.path, table.sheet.as_deref(), table.header_row)
+            .map(|key| (key, Arc::clone(table)))
+    }).collect();
+    if let Ok(mut cache) = REVIEW_TABLES.get_or_init(|| Mutex::new(Vec::new())).lock() {
+        *cache = tables;
+    }
     bm.insert(
         "matchKeys".into(),
         Value::Array(begin_keys.into_iter().map(Value::String).collect()),
@@ -234,9 +313,7 @@ fn fa_key_check(params: Value) -> Result<Value, AppError> {
             begin.headers.iter().position(|h| h == &begin_keys[i]),
             end.headers.iter().position(|h| h == &end_keys[i]),
         ) {
-            (Some(bi), Some(ei)) => first_join_sample(&begin, bi)
-                .map(|sample| column_contains(&end, ei, &sample))
-                .unwrap_or(false),
+            (Some(bi), Some(ei)) => key_columns_intersect(&begin, bi, &end, ei),
             _ => false,
         };
         pairing.push(json!({"begin": begin_keys[i].clone(), "end": end_keys[i].clone(), "hit": hit}));
@@ -270,12 +347,28 @@ fn extend_composite_key(mapping: &mut Map<String, Value>, peer: &Map<String, Val
     {
         keys.push(Value::String(name.into()));
     }
-    for header in &table.headers {
-        if is_company_id_header(header) && !keys.contains(&Value::String(header.clone())) {
+    for (index, header) in table.headers.iter().enumerate() {
+        // 公司列作为组合键成员只在多主体（值有变化）时有意义；单主体文件
+        // 的恒定公司列进键只会挂必绿的命中徽章，误导复核。
+        if is_company_id_header(header)
+            && !keys.contains(&Value::String(header.clone()))
+            && !column_is_constant(table, index)
+        {
             keys.push(Value::String(header.clone()));
         }
     }
     mapping.insert("matchKeys".into(), Value::Array(keys));
+}
+
+/// 两侧建议键按较短一侧对齐：从较长一侧尾部撤掉多余成员（保留至少
+/// 首键）。组合键成员只有两侧成对出现才有逐位配对的意义。
+fn align_key_members(begin_keys: &mut Vec<String>, end_keys: &mut Vec<String>) {
+    while begin_keys.len() > end_keys.len() && begin_keys.len() > 1 {
+        begin_keys.pop();
+    }
+    while end_keys.len() > begin_keys.len() && end_keys.len() > 1 {
+        end_keys.pop();
+    }
 }
 
 fn is_company_id_header(header: &str) -> bool {
@@ -316,9 +409,103 @@ fn column_contains(table: &Table, index: usize, sample: &str) -> bool {
         .any(|value| value == sample)
 }
 
+/// 键列对应的证据：两侧列的归一值域存在任一方向的交集即算命中（证明这
+/// 两列能连上）。先查已读行；需要补深时优先抽取行数较少的一侧，把整列
+/// 扫描的代价压到低的一侧——首扫结果会进值域缓存，后续调键复验免扫。
+fn key_columns_intersect(begin: &Table, b_index: usize, end: &Table, e_index: usize) -> bool {
+    let begin_sample = first_join_sample(begin, b_index);
+    let end_sample = first_join_sample(end, e_index);
+    if let Some(sample) = begin_sample.as_deref() {
+        if column_contains(end, e_index, sample) {
+            return true;
+        }
+    }
+    if let Some(sample) = end_sample.as_deref() {
+        if column_contains(begin, b_index, sample) {
+            return true;
+        }
+    }
+    let deep = |table: &Table, index: usize, sample: Option<&str>| -> bool {
+        sample
+            .and_then(|value| crate::fa_sheet_pick::xlsx_column_contains(table, index, value))
+            .unwrap_or(false)
+    };
+    if begin.row_count <= end.row_count {
+        deep(begin, b_index, end_sample.as_deref())
+            || deep(end, e_index, begin_sample.as_deref())
+    } else {
+        deep(end, e_index, begin_sample.as_deref())
+            || deep(begin, b_index, end_sample.as_deref())
+    }
+}
+
+/// 序数列（值≈行号 1..N）识别：序数列完全唯一、完全覆盖，在键列打分里
+/// 形似完美 ID，但两表的序数列天然互含，成员校验对它形同虚设——既不能
+/// 建议为键，也不能当纠正候选。
+fn looks_like_serial_column(table: &Table, index: usize) -> bool {
+    let mut values: Vec<&str> = Vec::new();
+    for row in &table.rows {
+        let value = cell(row, index).trim();
+        if !value.is_empty() {
+            values.push(value);
+            if values.len() >= 30 {
+                break;
+            }
+        }
+    }
+    if values.len() < 8 {
+        return false;
+    }
+    let numbers: Vec<Option<f64>> = values.iter().map(|v| parse_serial_number(v)).collect();
+    let Some(first) = numbers[0] else {
+        return false;
+    };
+    if first.fract() != 0.0 {
+        return false;
+    }
+    // 与「首个值＋位置偏移」重合的占比高即视为行号列，容忍少量跳号与空行。
+    let mut hits = 0usize;
+    for (position, maybe) in numbers.iter().enumerate() {
+        if let Some(number) = maybe {
+            if (number - (first + position as f64)).abs() < 0.5 {
+                hits += 1;
+            }
+        }
+    }
+    hits * 10 >= numbers.len() * 8
+}
+
+fn parse_serial_number(value: &str) -> Option<f64> {
+    let cleaned: String = value
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != ',')
+        .collect();
+    cleaned.parse::<f64>().ok().filter(|number| number.is_finite())
+}
+
+/// 恒定列识别：非空值只有一种（如单主体文件的「公司」代码列）。恒定键
+/// 不筛行，只会挂着必绿的命中徽章误导复核。
+fn column_is_constant(table: &Table, index: usize) -> bool {
+    let mut distinct: HashSet<&str> = HashSet::new();
+    let mut seen = 0usize;
+    for row in &table.rows {
+        let value = cell(row, index).trim();
+        if value.is_empty() {
+            continue;
+        }
+        distinct.insert(value);
+        seen += 1;
+        if seen >= 30 {
+            break;
+        }
+    }
+    seen >= 8 && distinct.len() == 1
+}
+
 /// 全表找归一值集合包含样本的列：候选多于一个时优先 `is_forbidden_id`
 /// 为假的列，再取最靠左。已被本侧其他键位占用的列不参与候选，避免纠正后
-/// 出现重复键列导致连接键永远对不上。
+/// 出现重复键列导致连接键永远对不上。序数列与恒定列一律不当候选——
+/// 序数列几乎包含一切整数，恒定列不筛行，纠正到它们等于没纠。
 fn find_column_containing(
     table: &Table,
     sample: &str,
@@ -329,7 +516,11 @@ fn find_column_containing(
     }
     for forbidden_pass in [false, true] {
         for (index, header) in table.headers.iter().enumerate() {
-            if excluded.contains(&index) || is_forbidden_id(header) != forbidden_pass {
+            if excluded.contains(&index)
+                || is_forbidden_id(header) != forbidden_pass
+                || looks_like_serial_column(table, index)
+                || column_is_constant(table, index)
+            {
                 continue;
             }
             if column_contains(table, index, sample) {
@@ -387,7 +578,7 @@ fn repair_suggested_key_pairing(
         }
         let mut hit = false;
         if let Some(sample) = begin_sample.as_deref() {
-            if column_contains(end, e_index, sample) {
+            if key_columns_intersect(begin, b_index, end, e_index) {
                 hit = true;
             } else if let Some(fixed) = find_column_containing(
                 end,
@@ -449,12 +640,37 @@ fn supplement_inspect(params: Value) -> Result<Value, AppError> {
         .and_then(Value::as_str)
         .filter(|path| !path.trim().is_empty())
         .map(|path| {
-            load_table(
-                Path::new(path),
+            let path = PathBuf::from(path);
+            let mut reference = load_interactive_table(
+                &path,
                 params.get("referenceSheet").and_then(Value::as_str),
                 optional_header(&params, "referenceHeaderRow")?,
                 false,
-            )
+            )?;
+            // 键推断要拿参照表键列的全量值做成员证明：前缀表上定向抽列补深，
+            // 补不动（非 xlsx 等）就退整表，证明口径不变。
+            if reference.rows.len() < reference.row_count {
+                let indexes: Vec<usize> = references
+                    .iter()
+                    .filter_map(|key| {
+                        reference.headers.iter().position(|header| header == key)
+                    })
+                    .collect();
+                if !indexes.is_empty() {
+                    match crate::fa_sheet_pick::deep_patch_columns(&reference, &indexes) {
+                        Some(patched) => reference = patched,
+                        None => {
+                            reference = load_table(
+                                &reference.path,
+                                reference.sheet.as_deref(),
+                                Some(reference.header_row),
+                                false,
+                            )?;
+                        }
+                    }
+                }
+            }
+            Ok(reference)
         })
         .transpose()?;
     let exact_sample_match = reference_table.is_some() && !references.is_empty();
@@ -2081,7 +2297,7 @@ fn apply_supplements(
 
 fn load_supplement(config: &Value) -> Result<Table, AppError> {
     let path = required_path(config, "path")?;
-    load_table(
+    load_interactive_table(
         &path,
         config.get("sheet").and_then(Value::as_str),
         optional_header(config, "headerRow")?,
@@ -2090,7 +2306,7 @@ fn load_supplement(config: &Value) -> Result<Table, AppError> {
 }
 
 pub(crate) fn table_inspection(table: &Table) -> Value {
-    json!({"path":table.path.to_string_lossy(),"kind":if table.sheets.is_empty(){"text"}else{"excel"},"sheets":table.sheets,"selectedSheet":table.sheet,"displayName":match &table.sheet{Some(s)=>format!("{} & {}",table.path.file_name().unwrap_or_default().to_string_lossy(),s),None=>table.path.file_name().unwrap_or_default().to_string_lossy().into_owned()},"detectedHeaderRow":table.header_row,"headerMode":"auto","headers":table.headers,"preview":table.rows.iter().take(12).collect::<Vec<_>>(),"dimensions":{"rows":table.rows.len(),"columns":table.headers.len()}})
+    json!({"path":table.path.to_string_lossy(),"kind":if table.sheets.is_empty(){"text"}else{"excel"},"sheets":table.sheets,"selectedSheet":table.sheet,"displayName":match &table.sheet{Some(s)=>format!("{} & {}",table.path.file_name().unwrap_or_default().to_string_lossy(),s),None=>table.path.file_name().unwrap_or_default().to_string_lossy().into_owned()},"detectedHeaderRow":table.header_row,"headerMode":"auto","headers":table.headers,"preview":table.rows.iter().take(12).collect::<Vec<_>>(),"dimensions":{"rows":table.row_count.max(table.rows.len()),"columns":table.headers.len()}})
 }
 
 pub(crate) fn suggest_mapping(table: &Table) -> Map<String, Value> {
@@ -2134,6 +2350,7 @@ pub(crate) fn suggest_mapping(table: &Table) -> Map<String, Value> {
                 "固定资产名称",
                 "资产名称",
                 "资产描述",
+                "资产说明",
                 "设备名称",
                 "description",
                 "assetname",
@@ -2307,6 +2524,11 @@ fn pick_match_header(table: &Table, terms: &[&str]) -> Option<String> {
         .iter()
         .enumerate()
         .filter(|(_, header)| !is_forbidden_id(header))
+        .filter(|&(index, _)| {
+            // 序数列与恒定列在值形态打分里一个形似完美 ID、一个挂必绿徽章，
+            // 都不具键资格：先于打分排除，让真正的卡片编号露头。
+            !looks_like_serial_column(table, index) && !column_is_constant(table, index)
+        })
         .filter_map(|(index, header)| {
             let raw_normalized = normalize_header(header);
             let normalized = raw_normalized
@@ -2412,7 +2634,7 @@ fn is_forbidden_id(v: &str) -> bool {
     if is_company_id_header(v) { return false; }
     [
         "公司", "分类", "类别", "大类", "描述", "名称", "原值", "折旧", "净值", "金额", "日期",
-        "时间", "年限", "寿命",
+        "时间", "年限", "寿命", "序号", "行号",
     ]
     .iter()
     .any(|x| v.contains(x))
@@ -2438,6 +2660,7 @@ fn looks_like_name(v: &str) -> bool {
         "名称",
         "资产描述",
         "描述",
+        "说明",
         "assetname",
         "description",
     ]
@@ -2554,7 +2777,26 @@ pub(crate) fn load_table(
         }
     }
     let (judgement, sheet, matrix) = best.unwrap();
-    let hi = judgement.header_row;
+    Ok(finalize_table(
+        path,
+        Some(sheet),
+        sheets,
+        judgement.header_row,
+        matrix,
+        0,
+    ))
+}
+
+/// 整表与前缀两条读取路径共用的收尾：按标题行与多层表头切数据、去全空
+/// 行、按表头宽度对齐。`row_count` 传 0 表示 `rows` 已是全量（用行数本身）。
+pub(crate) fn finalize_table(
+    path: &Path,
+    sheet: Option<String>,
+    sheets: Vec<String>,
+    hi: usize,
+    matrix: Vec<Vec<String>>,
+    row_count: usize,
+) -> Table {
     let depth = asset_header_depth(&matrix, hi);
     let headers = asset_headers(&matrix, hi);
     let width = headers.len();
@@ -2567,15 +2809,16 @@ pub(crate) fn load_table(
             r.truncate(width);
             r
         })
-        .collect();
-    Ok(Table {
+        .collect::<Vec<_>>();
+    Table {
         path: path.into(),
-        sheet: Some(sheet),
+        sheet,
         sheets,
         header_row: hi + 1,
         headers,
+        row_count: row_count.max(rows.len()),
         rows,
-    })
+    }
 }
 
 fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
@@ -2583,27 +2826,7 @@ fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
     let hi = header
         .map(|v| v.saturating_sub(1))
         .unwrap_or_else(|| detect_header(&matrix));
-    let depth = asset_header_depth(&matrix, hi);
-    let headers = asset_headers(&matrix, hi);
-    let width = headers.len();
-    let rows = matrix
-        .into_iter()
-        .skip(hi + depth)
-        .filter(|r| r.iter().any(|v| !v.trim().is_empty()))
-        .map(|mut r| {
-            r.resize(width, String::new());
-            r.truncate(width);
-            r
-        })
-        .collect();
-    Ok(Table {
-        path: path.into(),
-        sheet: None,
-        sheets: vec![],
-        header_row: hi + 1,
-        headers,
-        rows,
-    })
+    Ok(finalize_table(path, None, vec![], hi, matrix, 0))
 }
 
 pub(crate) fn detect_header(rows: &[Vec<String>]) -> usize {
@@ -2622,7 +2845,7 @@ fn asset_header_hit(value: &str) -> bool {
     ["编号", "编码", "名称", "类别", "原值", "折旧", "寿命", "日期"]
         .iter().any(|word| value.contains(word))
 }
-fn asset_header_depth(rows: &[Vec<String>], start: usize) -> usize {
+pub(crate) fn asset_header_depth(rows: &[Vec<String>], start: usize) -> usize {
     crate::header_detection::depth(rows, start, asset_header_hit)
 }
 pub(crate) fn asset_headers(rows: &[Vec<String>], start: usize) -> Vec<String> {
@@ -6749,6 +6972,7 @@ mod tests {
                 .iter()
                 .map(|row| row.iter().map(|value| (*value).to_owned()).collect())
                 .collect(),
+            row_count: rows.len(),
         }
     }
 
@@ -6954,6 +7178,94 @@ mod tests {
         assert_eq!(value["enabled"], true);
     }
 
+    /// 跑法：cargo test --manifest-path src-tauri/Cargo.toml --lib live_fa_read_bench -- --ignored --nocapture
+    ///
+    /// 用 Downloads 里的两份真实大表实测读取成本：新交互路径（前缀表＋定向抽列）
+    /// 对照旧整表解析（读全部可见 Sheet 并逐格转字符串），另测 worker 侧胜出表
+    /// 的单表整读，回答"第一步是否秒开、剩余成本花在哪"。
+    #[test]
+    #[ignore = "需要本机 Downloads 里的两份真实 FA 清单"]
+    fn live_fa_read_bench() {
+        let dir = std::path::PathBuf::from(r"C:\Users\lenovo\Downloads");
+        let begin_path = dir.join("科技FA存量清单-202412.xlsx");
+        let end_path = dir.join("2025年12月FA资产清单 (2).xlsx");
+        assert!(begin_path.is_file(), "找不到 {}", begin_path.display());
+        assert!(end_path.is_file(), "找不到 {}", end_path.display());
+        let params = json!({
+            "beginPath": begin_path.to_string_lossy(),
+            "endPath": end_path.to_string_lossy(),
+        });
+        let sheet_of = |value: &Value, side: &str| {
+            value[side]["selectedSheet"]
+                .as_str()
+                .unwrap_or("?")
+                .to_owned()
+        };
+        let started = std::time::Instant::now();
+        let first = inspect(params.clone()).expect("inspect 第一次");
+        println!(
+            "[bench] inspect 冷读（选表＋建议＋键碰撞）{:.2}s → 期初 {} / 期末 {}",
+            started.elapsed().as_secs_f64(),
+            sheet_of(&first, "begin"),
+            sheet_of(&first, "end"),
+        );
+        let started = std::time::Instant::now();
+        let second = inspect(params.clone()).expect("inspect 第二次");
+        println!(
+            "[bench] inspect 记事命中重读 {:.2}s",
+            started.elapsed().as_secs_f64(),
+        );
+        // worker（匹配/导出）今天仍要整表读胜出的那张表，量一下单表成本。
+        for (label, side, path) in [
+            ("期初", "begin", &begin_path),
+            ("期末", "end", &end_path),
+        ] {
+            let sheet = second[side]["selectedSheet"].as_str().unwrap_or("?").to_owned();
+            let header = second[side]["detectedHeaderRow"]
+                .as_u64()
+                .map(|v| v as usize);
+            let started = std::time::Instant::now();
+            let table = load_table(path, Some(sheet.as_str()), header, false).expect("整表读取");
+            println!(
+                "[bench] worker 整读 {}（{}，{} 行）{:.2}s",
+                label,
+                sheet,
+                table.rows.len(),
+                started.elapsed().as_secs_f64(),
+            );
+        }
+        // 旧版行为复刻：每份工作簿全部可见 Sheet 整读并逐格转字符串。
+        for path in [&begin_path, &end_path] {
+            let mut book = calamine::open_workbook_auto(path).expect("打开工作簿");
+            let visible: Vec<String> = book
+                .sheets_metadata()
+                .iter()
+                .filter(|sheet| sheet.visible == calamine::SheetVisible::Visible)
+                .map(|sheet| sheet.name.clone())
+                .collect();
+            let started = std::time::Instant::now();
+            let mut cells = 0usize;
+            for name in &visible {
+                let Ok(range) = calamine::Reader::worksheet_range(&mut book, name) else {
+                    continue;
+                };
+                for row in range.rows() {
+                    for cell in row {
+                        let _ = data_string(cell);
+                        cells += 1;
+                    }
+                }
+            }
+            println!(
+                "[bench] 旧路径全部可见 Sheet 整读 {}：{:.2}s（{} 表 / {} 格）",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                started.elapsed().as_secs_f64(),
+                visible.len(),
+                cells,
+            );
+        }
+    }
+
     #[test]
     fn match_key_falls_back_to_legacy_tiers_beyond_the_term_list() {
         let table = |headers: &[&str]| Table {
@@ -6963,13 +7275,20 @@ mod tests {
             header_row: 1,
             headers: headers.iter().map(|v| (*v).to_owned()).collect(),
             rows: vec![],
+            row_count: 0,
         };
         let terms: &[&str] = &["固定资产编号", "卡片编号", "coding"];
 
-        // 词表里没有"资产序号"，但它含资产语境 + 号，旧版给 700 分能选中。
+        // "资产卡号"不在词表里，但含资产语境 + 号，旧版兜底层能选中。
         assert_eq!(
-            pick_match_header(&table(&["资产类别", "资产序号", "原值"]), terms).as_deref(),
-            Some("资产序号")
+            pick_match_header(&table(&["资产类别", "资产卡号", "原值"]), terms).as_deref(),
+            Some("资产卡号")
+        );
+        // 序号类列名自 2026-09-29 起列入禁列：值≈行号的列天然互含，键校验
+        // 对它形同虚设（实测期末清单把序号纠正成 ID 的教训）。
+        assert_eq!(
+            pick_match_header(&table(&["资产类别", "资产序号", "原值"]), terms),
+            None
         );
         // 单独含"编号"也是候选。
         assert_eq!(
@@ -6985,7 +7304,7 @@ mod tests {
         assert!(pick_match_header(&table(&["资产分类编号"]), terms).is_none());
         // 词表命中仍然压过兜底。
         assert_eq!(
-            pick_match_header(&table(&["资产序号", "固定资产编号"]), terms).as_deref(),
+            pick_match_header(&table(&["资产卡号", "固定资产编号"]), terms).as_deref(),
             Some("固定资产编号")
         );
     }
@@ -7014,6 +7333,7 @@ mod tests {
             path: "test.csv".into(), sheet: None, sheets: vec![], header_row: 1,
             headers: vec!["公司名称".into(), "卡片编号".into(), "资产名称".into()],
             rows: (0..5).map(|index| vec!["测试公司".into(), format!("A{index}"), "长名称".repeat(100)]).collect(),
+            row_count: 5,
         };
         let mapping = suggest_mapping(&table);
         assert!(!mapping.contains_key("companyName"));
@@ -7040,8 +7360,137 @@ mod tests {
         assert!(looks_like_id("公司名称"));
         assert!(looks_like_id("企业名称"));
         let table = Table { path: begin, sheet: None, sheets: vec![], header_row: 1,
-            headers: vec!["公司名称".into()], rows: vec![vec!["甲公司".into()]] };
+            headers: vec!["公司名称".into()], rows: vec![vec!["甲公司".into()]], row_count: 1 };
         assert_eq!(suggest_mapping(&table)["matchKey"], "公司名称");
+    }
+
+    #[test]
+    fn serial_and_constant_columns_lose_key_candidacy() {
+        let serial: Vec<String> = (1..=10).map(|i| i.to_string()).collect();
+        let ids: Vec<String> = (0..10).map(|i| format!("FA{i:05}")).collect();
+        let names: Vec<String> = (0..10).map(|i| format!("服务器{i}")).collect();
+        let rows: Vec<Vec<&str>> = (0..10)
+            .map(|i| {
+                vec![
+                    serial[i].as_str(),
+                    "000000",
+                    ids[i].as_str(),
+                    names[i].as_str(),
+                ]
+            })
+            .collect();
+        let slices: Vec<&[&str]> = rows.iter().map(|row| row.as_slice()).collect();
+        let table = in_memory_table(&["序号", "公司", "FA编号", "资产名称"], &slices);
+        // 建议主键落在真正的卡片编号上：序号（值形态满分但天然互含）与
+        // 恒定公司列（必绿徽章）都不再参与键竞争。
+        assert_eq!(suggest_mapping(&table)["matchKey"], "FA编号");
+        let mut mapping = suggest_mapping(&table);
+        let peer = Map::new();
+        extend_composite_key(&mut mapping, &peer, &table);
+        let keys = mapping_match_keys(&mapping);
+        assert!(!keys.contains(&"公司".to_string()), "恒定公司列不应进组合键：{keys:?}");
+        assert!(!keys.contains(&"序号".to_string()), "序号列不应进组合键：{keys:?}");
+        assert!(is_forbidden_id("序号"));
+        assert!(is_forbidden_id("行号"));
+    }
+
+    #[test]
+    fn key_repair_never_corrects_onto_serial_or_constant_columns() {
+        // 期末表里序号列与资产编号列都包含期初样本"5"：纠正必须落在资产
+        // 编号上，序数列（几乎包含一切整数）与恒定列（不筛行）没有候选资格。
+        let serial: Vec<String> = (1..=10).map(|i| i.to_string()).collect();
+        let ids: Vec<String> = (0..10)
+            .map(|i| if i == 4 { "5".to_owned() } else { format!("FA{i:05}") })
+            .collect();
+        let rows: Vec<Vec<&str>> = (0..10)
+            .map(|i| vec![serial[i].as_str(), "000000", ids[i].as_str()])
+            .collect();
+        let slices: Vec<&[&str]> = rows.iter().map(|row| row.as_slice()).collect();
+        let end = in_memory_table(&["序号", "公司", "资产编号"], &slices);
+        let sample = normalize_join_key("5");
+        let found = find_column_containing(&end, &sample, &BTreeSet::new());
+        assert_eq!(
+            found.map(|index| end.headers[index].as_str()),
+            Some("资产编号")
+        );
+    }
+
+    #[test]
+    fn key_alignment_trims_dangling_composite_members() {
+        // 期初多主体、期末单主体时只有期初会补公司键；多出的尾部成员
+        // 悬在单侧只会挂恒为未命中的徽章，必须撤掉，首键永不裁剪。
+        let mut begin = vec!["FA编号".to_owned(), "公司".to_owned()];
+        let mut end = vec!["资产编码".to_owned()];
+        align_key_members(&mut begin, &mut end);
+        assert_eq!(begin, vec!["FA编号".to_owned()]);
+        assert_eq!(end, vec!["资产编码".to_owned()]);
+
+        let mut longer = vec!["FA编号".to_owned(), "资产说明".to_owned(), "公司".to_owned()];
+        let mut shorter = vec!["资产编码".to_owned()];
+        align_key_members(&mut longer, &mut shorter);
+        assert_eq!(longer, vec!["FA编号".to_owned()]);
+
+        // 另一侧完全没有键时也保留首键：它承载"哪列是编号"的选列建议。
+        let mut only = vec!["FA编号".to_owned(), "公司".to_owned()];
+        let mut none = Vec::new();
+        align_key_members(&mut only, &mut none);
+        assert_eq!(only.len(), 1);
+        assert!(none.is_empty());
+    }
+
+    /// 跑法（真机验收，需本地样例）：
+    /// FA_LIVE_INSPECT="期初.xlsx,期末.xlsx" cargo test --manifest-path
+    /// src-tauri/Cargo.toml --lib live_inspect_avoids -- --ignored --nocapture
+    #[test]
+    #[ignore = "requires FA_LIVE_INSPECT pointing at two real card workbooks"]
+    fn live_inspect_avoids_degenerate_keys() {
+        let pair = std::env::var("FA_LIVE_INSPECT").expect("FA_LIVE_INSPECT=期初,期末");
+        let (begin, end) = pair
+            .split_once(',')
+            .expect("FA_LIVE_INSPECT should be \"begin,end\"");
+        let started = std::time::Instant::now();
+        let inspected = inspect(json!({"beginPath":begin,"endPath":end})).unwrap();
+        println!("inspect 耗时 {:.1}s", started.elapsed().as_secs_f64());
+        println!(
+            "完整建议映射：{}",
+            serde_json::to_string_pretty(&inspected["suggestedMapping"]).unwrap()
+        );
+        println!(
+            "键配对（含纠正/撤键结论）：{}",
+            serde_json::to_string(&inspected["keyPairing"]).unwrap()
+        );
+        for side in ["begin", "end"] {
+            let keys = inspected["suggestedMapping"][side]["matchKeys"].clone();
+            for key in keys.as_array().into_iter().flatten() {
+                let header = key.as_str().unwrap_or_default();
+                assert!(
+                    !header.contains("序号") && !header.contains("行号"),
+                    "{side} 的建议键落在序号类列上：{header}"
+                );
+            }
+        }
+        // 用建议键模拟界面徽章：第一次命中检查（可能触发补深）与第二次（应走缓存）分开计时。
+        let begin_keys = inspected["suggestedMapping"]["begin"]["matchKeys"].clone();
+        let end_keys = inspected["suggestedMapping"]["end"]["matchKeys"].clone();
+        let begin_sheet = inspected["begin"]["selectedSheet"].clone();
+        let end_sheet = inspected["end"]["selectedSheet"].clone();
+        for round in 1..=2 {
+            let started = std::time::Instant::now();
+            let checked = fa_key_check(json!({
+                "beginPath": begin,
+                "beginSheet": begin_sheet,
+                "endPath": end,
+                "endSheet": end_sheet,
+                "beginKeys": begin_keys,
+                "endKeys": end_keys,
+            }))
+            .unwrap();
+            println!(
+                "第{round}次 key_check {:.1}s：{}",
+                started.elapsed().as_secs_f64(),
+                serde_json::to_string(&checked["keyPairing"]).unwrap()
+            );
+        }
     }
 
     #[test]

@@ -13,6 +13,7 @@ mod excel_merger;
 mod fa;
 mod fa_sheet_pick;
 mod fa_subtools;
+mod fa_table_cache;
 mod fa_tbje;
 mod file_list;
 mod fuzzy_match;

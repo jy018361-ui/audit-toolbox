@@ -246,13 +246,13 @@ fn inspect(params: Value) -> Result<Value, AppError> {
             verify_started.elapsed().as_secs_f64()
         );
         let reload_started = std::time::Instant::now();
-        let begin_full = Arc::new(load_table(
+        let begin_full = Arc::new(crate::fa_table_cache::load_table_cached(
             &begin.path,
             begin.sheet.as_deref(),
             Some(begin.header_row),
             false,
         )?);
-        let end_full = Arc::new(load_table(
+        let end_full = Arc::new(crate::fa_table_cache::load_table_cached(
             &end.path,
             end.sheet.as_deref(),
             Some(end.header_row),
@@ -660,7 +660,7 @@ fn supplement_inspect(params: Value) -> Result<Value, AppError> {
                     match crate::fa_sheet_pick::deep_patch_columns(&reference, &indexes) {
                         Some(patched) => reference = patched,
                         None => {
-                            reference = load_table(
+                            reference = crate::fa_table_cache::load_table_cached(
                                 &reference.path,
                                 reference.sheet.as_deref(),
                                 Some(reference.header_row),
@@ -1963,7 +1963,7 @@ pub(crate) fn merge(
         ));
     }
     progress("load", 0, 4, "正在读取期初固定资产清单");
-    let begin = load_table(
+    let begin = crate::fa_table_cache::load_table_cached(
         &begin_path,
         params.get("beginSheet").and_then(Value::as_str),
         optional_header(params, "beginHeaderRow")?,
@@ -1971,7 +1971,7 @@ pub(crate) fn merge(
     )?;
     check_cancel(cancel)?;
     progress("load", 1, 4, "正在读取期末固定资产清单");
-    let end = load_table(
+    let end = crate::fa_table_cache::load_table_cached(
         &end_path,
         params.get("endSheet").and_then(Value::as_str),
         optional_header(params, "endHeaderRow")?,
@@ -2297,7 +2297,10 @@ fn apply_supplements(
 
 fn load_supplement(config: &Value) -> Result<Table, AppError> {
     let path = required_path(config, "path")?;
-    load_interactive_table(
+    // 补充清单在合并/导出 worker 里要全量行（未匹配行上报、逐行分组），不能走
+    // 交互前缀表（只有前 200 行）；整表读取接入稳定磁盘缓存，同文件二次读取
+    // 直接命中 Parquet，语义与 load_table 完全一致。
+    crate::fa_table_cache::load_table_cached(
         &path,
         config.get("sheet").and_then(Value::as_str),
         optional_header(config, "headerRow")?,
@@ -7215,7 +7218,8 @@ mod tests {
             "[bench] inspect 记事命中重读 {:.2}s",
             started.elapsed().as_secs_f64(),
         );
-        // worker（匹配/导出）今天仍要整表读胜出的那张表，量一下单表成本。
+        // worker（匹配/导出）的整表读取已接入稳定磁盘缓存：第一次整读落缓存，
+        // 同文件再读一次直接命中 Parquet，量一下两段的耗时。
         for (label, side, path) in [
             ("期初", "begin", &begin_path),
             ("期末", "end", &end_path),
@@ -7225,7 +7229,13 @@ mod tests {
                 .as_u64()
                 .map(|v| v as usize);
             let started = std::time::Instant::now();
-            let table = load_table(path, Some(sheet.as_str()), header, false).expect("整表读取");
+            let table = crate::fa_table_cache::load_table_cached(
+                path,
+                Some(sheet.as_str()),
+                header,
+                false,
+            )
+            .expect("整表读取");
             println!(
                 "[bench] worker 整读 {}（{}，{} 行）{:.2}s",
                 label,
@@ -7233,9 +7243,28 @@ mod tests {
                 table.rows.len(),
                 started.elapsed().as_secs_f64(),
             );
+            let started = std::time::Instant::now();
+            let again = crate::fa_table_cache::load_table_cached(
+                path,
+                Some(sheet.as_str()),
+                header,
+                false,
+            )
+            .expect("缓存整读");
+            println!(
+                "[bench] worker 缓存命中 {}（{}，{} 行）{:.2}s",
+                label,
+                sheet,
+                again.rows.len(),
+                started.elapsed().as_secs_f64(),
+            );
+            assert_eq!(table.rows.len(), again.rows.len());
+            assert_eq!(table.headers, again.headers);
         }
-        // 旧版行为复刻：每份工作簿全部可见 Sheet 整读并逐格转字符串。
-        for path in [&begin_path, &end_path] {
+        // 旧版行为复刻：每份工作簿全部可见 Sheet 整读并逐格转字符串。默认跳过
+        // （FA_BENCH_OLD=1 时才跑），便于二次运行对照缓存命中后的读取成本。
+        if std::env::var("FA_BENCH_OLD").as_deref() == Ok("1") {
+            for path in [&begin_path, &end_path] {
             let mut book = calamine::open_workbook_auto(path).expect("打开工作簿");
             let visible: Vec<String> = book
                 .sheets_metadata()
@@ -7263,6 +7292,7 @@ mod tests {
                 visible.len(),
                 cells,
             );
+            }
         }
     }
 

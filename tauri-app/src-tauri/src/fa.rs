@@ -112,6 +112,7 @@ pub(crate) struct MergeResult {
 pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
     match method {
         "fa.inspect" => inspect(params),
+        "fa.key_check" => fa_key_check(params),
         "fa.supplement_inspect" => supplement_inspect(params),
         "fa.review" => llm_review(params, false),
         "fa.supplement_review" => llm_review(params, true),
@@ -198,10 +199,55 @@ fn inspect(params: Value) -> Result<Value, AppError> {
     }
     extend_composite_key(&mut bm, &em, &begin);
     extend_composite_key(&mut em, &bm, &end);
+    // 建议键逐位预碰撞校验：错配静默纠正到同值列，双侧无据可依时撤掉该配对。
+    let mut begin_keys = mapping_match_keys(&bm);
+    let mut end_keys = mapping_match_keys(&em);
+    let key_pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys);
+    bm.insert(
+        "matchKeys".into(),
+        Value::Array(begin_keys.into_iter().map(Value::String).collect()),
+    );
+    em.insert(
+        "matchKeys".into(),
+        Value::Array(end_keys.into_iter().map(Value::String).collect()),
+    );
     Ok(json!({
         "begin": table_inspection(&begin), "end": table_inspection(&end),
-        "suggestedMapping":{"begin":bm,"end":em}, "engine":"rust-fa"
+        "suggestedMapping":{"begin":bm,"end":em},
+        "keyPairing": key_pairing,
+        "engine":"rust-fa"
     }))
+}
+
+/// 手工键位的只读预检：按 `normalize_join_key` 归一、按 inspect 预碰撞的
+/// 成员判定逐位算 hit。不做任何纠正、不写缓存结论；键数不一致时按较短的
+/// 一侧配对，多出的键位单侧呈现且恒为未命中。
+fn fa_key_check(params: Value) -> Result<Value, AppError> {
+    let begin = review_table(&params, "begin")?;
+    let end = review_table(&params, "end")?;
+    let begin_keys = strings(params.get("beginKeys"));
+    let end_keys = strings(params.get("endKeys"));
+    let paired = begin_keys.len().min(end_keys.len());
+    let mut pairing = Vec::new();
+    for i in 0..paired {
+        let hit = match (
+            begin.headers.iter().position(|h| h == &begin_keys[i]),
+            end.headers.iter().position(|h| h == &end_keys[i]),
+        ) {
+            (Some(bi), Some(ei)) => first_join_sample(&begin, bi)
+                .map(|sample| column_contains(&end, ei, &sample))
+                .unwrap_or(false),
+            _ => false,
+        };
+        pairing.push(json!({"begin": begin_keys[i].clone(), "end": end_keys[i].clone(), "hit": hit}));
+    }
+    for column in &begin_keys[paired..] {
+        pairing.push(json!({"begin": column.clone(), "end": "", "hit": false}));
+    }
+    for column in &end_keys[paired..] {
+        pairing.push(json!({"begin": "", "end": column.clone(), "hit": false}));
+    }
+    Ok(json!({"keyPairing": pairing}))
 }
 
 fn extend_composite_key(mapping: &mut Map<String, Value>, peer: &Map<String, Value>, table: &Table) {
@@ -234,6 +280,153 @@ fn extend_composite_key(mapping: &mut Map<String, Value>, peer: &Map<String, Val
 
 fn is_company_id_header(header: &str) -> bool {
     matches!(normalize_header(header).as_str(), "公司名称" | "公司名" | "企业名称" | "单位名称" | "主体名称" | "法人名称" | "公司" | "companyname" | "entityname" | "legalentity" | "company")
+}
+
+fn mapping_match_keys(mapping: &Map<String, Value>) -> Vec<String> {
+    mapping
+        .get("matchKeys")
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 列内第一个非空单元格的归一值（按 `normalize_join_key` 口径）。
+fn first_join_sample(table: &Table, index: usize) -> Option<String> {
+    table
+        .rows
+        .iter()
+        .map(|row| normalize_join_key(cell(row, index)))
+        .find(|value| !value.is_empty())
+}
+
+/// 样本是否落在该列的归一值集合里（流式扫描，命中即停）。
+fn column_contains(table: &Table, index: usize, sample: &str) -> bool {
+    if sample.is_empty() {
+        return false;
+    }
+    table
+        .rows
+        .iter()
+        .map(|row| normalize_join_key(cell(row, index)))
+        .any(|value| value == sample)
+}
+
+/// 全表找归一值集合包含样本的列：候选多于一个时优先 `is_forbidden_id`
+/// 为假的列，再取最靠左。已被本侧其他键位占用的列不参与候选，避免纠正后
+/// 出现重复键列导致连接键永远对不上。
+fn find_column_containing(
+    table: &Table,
+    sample: &str,
+    excluded: &BTreeSet<usize>,
+) -> Option<usize> {
+    if sample.is_empty() {
+        return None;
+    }
+    for forbidden_pass in [false, true] {
+        for (index, header) in table.headers.iter().enumerate() {
+            if excluded.contains(&index) || is_forbidden_id(header) != forbidden_pass {
+                continue;
+            }
+            if column_contains(table, index, sample) {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+/// 除 `skip` 外当前仍生效的键列在本表的列下标（已撤掉的键位不再占用列）。
+fn occupied_key_indices(
+    table: &Table,
+    keys: &[String],
+    skip: usize,
+    dropped: &[bool],
+) -> BTreeSet<usize> {
+    keys.iter()
+        .enumerate()
+        .filter(|(i, _)| *i != skip && (*i >= dropped.len() || !dropped[*i]))
+        .filter_map(|(_, key)| table.headers.iter().position(|h| h == key))
+        .collect()
+}
+
+/// 建议键逐位预碰撞校验与静默纠正：取 begin 第 i 键列首个非空归一样本在
+/// end 第 i 键列查成员；未命中先在 end 全表找同值列纠正期末建议，再反向
+/// 纠正期初建议；两侧都找不到就同时撤掉该键位。只作用于 inspect 新算出
+/// 的建议键，不触碰用户映射。返回纠正后的逐位配对状态（被撤掉的不出现）。
+fn repair_suggested_key_pairing(
+    begin: &Table,
+    end: &Table,
+    begin_keys: &mut Vec<String>,
+    end_keys: &mut Vec<String>,
+) -> Vec<Value> {
+    let paired = begin_keys.len().min(end_keys.len());
+    let mut dropped = vec![false; paired];
+    let mut pairing = Vec::new();
+    for i in 0..paired {
+        let b_index = begin.headers.iter().position(|h| h == &begin_keys[i]);
+        let e_index = end.headers.iter().position(|h| h == &end_keys[i]);
+        let (b_index, e_index) = match (b_index, e_index) {
+            (Some(b), Some(e)) => (b, e),
+            // 建议键来自本表 suggest_mapping，正常必然存在；防御性维持原状。
+            _ => {
+                pairing.push(json!({"begin": begin_keys[i].clone(), "end": end_keys[i].clone(), "hit": true}));
+                continue;
+            }
+        };
+        let begin_sample = first_join_sample(begin, b_index);
+        let end_sample = first_join_sample(end, e_index);
+        if begin_sample.is_none() && end_sample.is_none() {
+            // 两侧键列都没有任何非空值：没有数据证据推翻表头层面的建议，维持原状。
+            pairing.push(json!({"begin": begin_keys[i].clone(), "end": end_keys[i].clone(), "hit": true}));
+            continue;
+        }
+        let mut hit = false;
+        if let Some(sample) = begin_sample.as_deref() {
+            if column_contains(end, e_index, sample) {
+                hit = true;
+            } else if let Some(fixed) = find_column_containing(
+                end,
+                sample,
+                &occupied_key_indices(end, end_keys, i, &dropped),
+            ) {
+                end_keys[i] = end.headers[fixed].clone();
+                hit = true;
+            }
+        }
+        if !hit {
+            if let Some(sample) = end_sample.as_deref() {
+                if let Some(fixed) = find_column_containing(
+                    begin,
+                    sample,
+                    &occupied_key_indices(begin, begin_keys, i, &dropped),
+                ) {
+                    begin_keys[i] = begin.headers[fixed].clone();
+                    hit = true;
+                }
+            }
+        }
+        if hit {
+            pairing.push(json!({"begin": begin_keys[i].clone(), "end": end_keys[i].clone(), "hit": true}));
+        } else {
+            dropped[i] = true;
+        }
+    }
+    // 两侧同步移除被撤掉的键位；超出配对长度的多出键位保持原状。
+    let keep_alive = |keys: &[String]| {
+        keys.iter()
+            .enumerate()
+            .filter(|(i, _)| *i >= paired || !dropped[*i])
+            .map(|(_, key)| key.clone())
+            .collect::<Vec<_>>()
+    };
+    *begin_keys = keep_alive(begin_keys);
+    *end_keys = keep_alive(end_keys);
+    pairing
 }
 
 fn supplement_inspect(params: Value) -> Result<Value, AppError> {
@@ -444,9 +637,9 @@ fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
         main_llm_payload(&params)?
     };
     let system = if supplement {
-        "你是固定资产审计补充清单映射复核助手。只能使用 payload.headers 中的原始列名。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"新增方式\"}，禁止返回字符串。新增清单角色仅 addition_method/addition_date，file_side=file1；处置清单角色仅 disposal_method/disposal_date/disposal_orig/disposal_dep，file_side=file2。action 只能 fill/replace/clear/keep。逐项结合样例复核已有映射：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。"
+        "你是固定资产审计补充清单映射复核助手。只能使用 payload.headers 中的原始列名。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"新增方式\"}，禁止返回字符串。新增清单角色仅 addition_method/addition_date，file_side=file1；处置清单角色仅 disposal_method/disposal_date/disposal_orig/disposal_dep，file_side=file2。action 只能 fill/replace/clear/keep。逐项结合样例复核已有映射：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。新增与处置各角色（新增方式/新增日期/处置方式/处置日期/处置原值/处置折旧）仅在 headers 中存在唯一可信候选列时才输出补齐建议；存在多个竞争候选时不输出建议、保持未映射，不得强行猜一个。"
     } else {
-        "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项结合 samples 核对：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。类别列应为少量重复的分类文本；若已映射类别列的 samples 多数是 Y110、A12-3 这类短字母数字代码而非类别文字，且 headers 中存在值为类别文字的列（例如 资产类型描述），必须返回 action=replace 指向该列，不得 keep。原值/折旧/残值率应为数值，日期列为日期，寿命为月数。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。"
+        "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项结合 samples 核对：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。类别列应为少量重复的分类文本；若已映射类别列的 samples 多数是 Y110、A12-3 这类短字母数字代码而非类别文字，且 headers 中存在值为类别文字的列（例如 资产类型描述），必须返回 action=replace 指向该列，不得 keep。原值/折旧/残值率应为数值，日期列为日期，寿命为月数。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。可选角色（开始使用日期/使用寿命/残值率/本年折旧/新增方式/新增日期）仅在 headers 中存在唯一可信候选列时才输出补齐建议；存在多个竞争候选时不输出建议、保持未映射，不得强行猜一个。"
     };
     // 全量检查，只输出调整项，避免几十条 keep 和重复建议拖慢生成。
     let key_instruction = if supplement { "" } else { "公司名称、企业名称、单位名称等表头自动识别为现有资产ID角色，不是独立字段角色，不需要重复编号等前置条件。不得因为含公司或名称就排除这些 ID 列。资产ID可多列，保留其他已有ID列；需要补充公司名称 ID 列时在 matchReview 中返回两侧对应的 suggested_file1_columns/suggested_file2_columns。" };
@@ -1591,17 +1784,21 @@ pub(crate) fn merge(
     // Match pandas' stable outer-join order: keep the first occurrence order
     // from file1, then append keys which only occur in file2.  Sorting keys
     // here made duplicate-card displays jump around between the old and new UI.
-    let mut keys = ordered_group_keys(&begin, &bi, remove_spaces, case_sensitive);
-    let mut seen = keys.iter().cloned().collect::<HashSet<_>>();
-    for key in ordered_group_keys(&end, &ei, remove_spaces, case_sensitive) {
+    // 连接键做预检同款归一；每个键同时携带展示形态，匹配列仍显示原值。
+    let mut keys = ordered_display_keys(&begin, &bi, remove_spaces, case_sensitive);
+    let mut seen = keys
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect::<HashSet<_>>();
+    for (key, display) in ordered_display_keys(&end, &ei, remove_spaces, case_sensitive) {
         if seen.insert(key.clone()) {
-            keys.push(key);
+            keys.push((key, display));
         }
     }
     let mut rows = Vec::new();
     let mut duplicate_values = 0;
     let mut duplicate_rows = 0;
-    for (key_index, key) in keys.into_iter().enumerate() {
+    for (key_index, (key, display)) in keys.into_iter().enumerate() {
         if key_index % 1024 == 0 {
             check_cancel(cancel)?;
         }
@@ -1639,7 +1836,7 @@ pub(crate) fn merge(
                 match_value: if key.starts_with("__BLANK__") {
                     String::new()
                 } else {
-                    key.replace("|||", " | ")
+                    display.replace("|||", " | ")
                 },
                 extra: BTreeMap::new(),
             });
@@ -1984,6 +2181,7 @@ pub(crate) fn suggest_mapping(table: &Table) -> Map<String, Value> {
                 "使用寿命(月)",
                 "预计使用期间数",
                 "使用年限",
+                "折旧年限",
                 "计划使用年",
                 "预计使用年限",
                 "usefullife",
@@ -2247,7 +2445,7 @@ fn looks_like_name(v: &str) -> bool {
     .any(|x| normalize_header(v).contains(&normalize_header(x)))
 }
 
-fn sheet_name_affinity(path: &Path, sheet: &str) -> i32 {
+pub(crate) fn sheet_name_affinity(path: &Path, sheet: &str) -> i32 {
     let normalized = normalize_header(sheet);
     let mut score = if matches!(
         normalized.as_str(),
@@ -2331,11 +2529,14 @@ pub(crate) fn load_table(
     {
         vec![sheet.to_owned()]
     } else if choose_best {
-        sheets.clone()
+        // 自动选表先走记事结论与前缀轻量打分（见 fa_sheet_pick），避免把每张
+        // 可见表整表读一遍；候选最终仍进入下方同一套整表读取与判分循环。
+        crate::fa_sheet_pick::auto_sheet_candidates(path, &sheets, header)
     } else {
         vec![sheets[0].clone()]
     };
-    let mut best: Option<(i32, String, usize, Vec<Vec<String>>)> = None;
+    let mut best: Option<(crate::fa_sheet_pick::AutoSheetJudgement, String, Vec<Vec<String>>)> =
+        None;
     for (pos, sheet) in candidates.iter().enumerate() {
         let range = workbook
             .worksheet_range(sheet)
@@ -2344,53 +2545,16 @@ pub(crate) fn load_table(
             .rows()
             .map(|r| r.iter().map(data_string).collect::<Vec<_>>())
             .collect::<Vec<_>>();
-        let hi = header
-            .map(|v| v.saturating_sub(1))
-            .unwrap_or_else(|| detect_header(&matrix));
-        let headers = asset_headers(&matrix, hi);
-        let mapping = suggest_mapping(&Table {
-            path: path.into(),
-            sheet: Some(sheet.clone()),
-            sheets: vec![],
-            header_row: hi + 1,
-            headers: headers.clone(),
-            rows: vec![],
-        });
-        let mapped = mapping.values().filter(|v| v.is_string()).count() as i32;
-        let core = [
-            "matchKey",
-            "category",
-            "name",
-            "originalValue",
-            "depreciation",
-        ]
-        .iter()
-        .filter(|k| mapping.get(**k).is_some_and(Value::is_string))
-        .count() as i32;
-        let penalty = if ["合计", "汇总", "summary", "pivot"]
-            .iter()
-            .any(|t| sheet.to_lowercase().contains(t))
-        {
-            5
-        } else {
-            0
-        };
-        let score = mapped * 2
-            + core * 4
-            + if mapping.get("matchKey").is_some_and(Value::is_string) {
-                6
-            } else {
-                0
-            }
-            - penalty
-            + sheet_name_affinity(path, sheet)
-            - pos as i32;
-        let take = best.as_ref().is_none_or(|b| score > b.0);
+        let judgement = crate::fa_sheet_pick::auto_sheet_judge(path, sheet, pos, &matrix, header);
+        let take = best
+            .as_ref()
+            .is_none_or(|(current, _, _)| judgement.score > current.score);
         if take {
-            best = Some((score, sheet.clone(), hi, matrix));
+            best = Some((judgement, sheet.clone(), matrix));
         }
     }
-    let (_, sheet, hi, matrix) = best.unwrap();
+    let (judgement, sheet, matrix) = best.unwrap();
+    let hi = judgement.header_row;
     let depth = asset_header_depth(&matrix, hi);
     let headers = asset_headers(&matrix, hi);
     let width = headers.len();
@@ -2442,7 +2606,7 @@ fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
     })
 }
 
-fn detect_header(rows: &[Vec<String>]) -> usize {
+pub(crate) fn detect_header(rows: &[Vec<String>]) -> usize {
     crate::header_detection::layout(rows, 20, |r| {
             let nonempty = r.iter().filter(|v| !v.trim().is_empty()).count();
             let keywords = r
@@ -2461,7 +2625,7 @@ fn asset_header_hit(value: &str) -> bool {
 fn asset_header_depth(rows: &[Vec<String>], start: usize) -> usize {
     crate::header_detection::depth(rows, start, asset_header_hit)
 }
-fn asset_headers(rows: &[Vec<String>], start: usize) -> Vec<String> {
+pub(crate) fn asset_headers(rows: &[Vec<String>], start: usize) -> Vec<String> {
     let depth = asset_header_depth(rows, start);
     if depth == 2 {
         let width = rows[start].len().max(rows[start + 1].len());
@@ -2521,23 +2685,40 @@ fn grouped_rows(
     }
     groups
 }
-fn ordered_group_keys(
+/// 连接键的展示形态（旧版口径，未做连接归一）：供 `match_value` 展示，
+/// 与分组用的连接键并行携带，保证“文本001009”与“数字1009”能连接的
+/// 同时展示列仍是原值。
+fn legacy_row_key(
+    row: &[String],
+    indexes: &[usize],
+    remove_spaces: bool,
+    case_sensitive: bool,
+) -> String {
+    indexes
+        .iter()
+        .map(|i| legacy_normalize_key(cell(row, *i), remove_spaces, case_sensitive))
+        .collect::<Vec<_>>()
+        .join("|||")
+}
+/// 两侧连接键的稳定顺序，同时携带每个键的展示形态（取首次出现行）。
+fn ordered_display_keys(
     table: &Table,
     indexes: &[usize],
     remove_spaces: bool,
     case_sensitive: bool,
-) -> Vec<String> {
+) -> Vec<(String, String)> {
     let mut keys = Vec::new();
     let mut seen = HashSet::new();
     let mut blank = 0;
     for row in &table.rows {
         let mut key = row_key(row, indexes, remove_spaces, case_sensitive);
+        let display = legacy_row_key(row, indexes, remove_spaces, case_sensitive);
         if key.replace("|||", "").is_empty() {
             blank += 1;
             key = format!("__BLANK__{blank:012}");
         }
         if seen.insert(key.clone()) {
-            keys.push(key);
+            keys.push((key, display));
         }
     }
     keys
@@ -2549,7 +2730,32 @@ fn row_key(row: &[String], indexes: &[usize], remove_spaces: bool, case_sensitiv
         .collect::<Vec<_>>()
         .join("|||")
 }
-fn normalize_key(value: &str, remove_spaces: bool, case_sensitive: bool) -> String {
+/// 资产ID预碰撞校验与正式合并共用的唯一归一口径：去首尾空白（含全角空格）、
+/// 去前导单引号，能解析为数字的输出规范数字串（"001009"→"1009"、
+/// "1009.0"→"1009"、"-0"→"0"），ASCII 字母转小写；其余原样返回。
+/// 只用于连接比较，导出展示仍用原始单元格文本。
+pub(crate) fn normalize_join_key(value: &str) -> String {
+    let trimmed = value.trim().trim_start_matches('\'');
+    let trimmed = trimmed.trim();
+    if let Ok(n) = trimmed.parse::<f64>() {
+        if n.is_finite() {
+            if n == 0.0 {
+                return "0".into();
+            }
+            if n.fract() == 0.0 && n.abs() < 1e18 {
+                return format!("{}", n as i128);
+            }
+            return format!("{n}");
+        }
+    }
+    trimmed
+        .chars()
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+/// 展示口径的键段归一（旧版行为）：trim、全角空格转半角、日期 ISO 化、
+/// 可选去空格/大小写、整数尾巴“.0”剥离。`match_value` 等展示文本用它。
+fn legacy_normalize_key(value: &str, remove_spaces: bool, case_sensitive: bool) -> String {
     let mut v = value.trim().replace('\u{3000}', " ");
     if let Some(date) = normalized_date_component(&v) {
         return date;
@@ -2564,6 +2770,12 @@ fn normalize_key(value: &str, remove_spaces: bool, case_sensitive: bool) -> Stri
         v = stripped.into();
     }
     v
+}
+/// 参与连接比较的键值在展示口径之上再统一预检同款归一（数字文本去前导
+/// 零/去尾零、前导单引号、ASCII 小写），让“文本001009”与“数字1009”在
+/// 预检和正式合并里都配上；分组、连接与辅助表对账都用这个键。
+fn normalize_key(value: &str, remove_spaces: bool, case_sensitive: bool) -> String {
+    normalize_join_key(&legacy_normalize_key(value, remove_spaces, case_sensitive))
 }
 
 fn normalized_date_component(value: &str) -> Option<String> {
@@ -6432,7 +6644,7 @@ pub(crate) fn check_cancel(cancel: &AtomicBool) -> Result<(), AppError> {
         Ok(())
     }
 }
-fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppError {
+pub(crate) fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppError {
     AppError::new(code, message, false, detail)
 }
 pub(crate) fn io_error(e: std::io::Error) -> AppError {
@@ -7035,6 +7247,181 @@ mod tests {
         assert_eq!(result["enabled"], false);
         assert_eq!(result["passed"], true);
         assert!(result["message"].as_str().unwrap().contains("未启用"));
+    }
+    #[test]
+    fn suggest_mapping把折旧年限年列认给寿命角色() {
+        let table = in_memory_table(
+            &["卡片编号", "折旧年限(年)", "原值"],
+            &[&["A1", "5", "100"], &["A2", "10", "200"]],
+        );
+        let mapping = suggest_mapping(&table);
+        assert_eq!(mapping["life"], json!("折旧年限(年)"));
+        // 含“(年)”的列头沿用既有年换月规则，无需额外处理。
+        assert_eq!(life_scale_for_column("折旧年限(年)", &[5.0, 10.0]), 12.0);
+    }
+    #[test]
+    fn 归一化连接键统一数字引号与大小写口径() {
+        assert_eq!(normalize_join_key("001009"), "1009");
+        assert_eq!(normalize_join_key(" 1009 "), "1009");
+        assert_eq!(normalize_join_key("1009.0"), "1009");
+        assert_eq!(normalize_join_key("-0"), "0");
+        assert_eq!(normalize_join_key("'001009"), "1009");
+        // 含空格的中文文本只做首尾修剪，内部空格保留。
+        assert_eq!(normalize_join_key(" 设备 甲 "), "设备 甲");
+        assert_eq!(normalize_join_key("A-1"), "a-1");
+        // 正式合并的键构造路径与预检共用同一口径。
+        assert_eq!(normalize_key("001009", false, true), "1009");
+        assert_eq!(normalize_key("'001009", false, true), "1009");
+        assert_eq!(normalize_key("1009.0", false, true), "1009");
+        assert_eq!(normalize_key("2025-06-12", false, true), "2025-06-12");
+    }
+    #[test]
+    fn 建议键正向纠正把期末键列换成含样本的列() {
+        let begin = in_memory_table(
+            &["资产编号", "资产名称"],
+            &[&["1009", "甲设备"], &["1010", "乙设备"]],
+        );
+        // 期末“资产编码”列实际放的是类别文本，真实ID在“卡片号”列。
+        let end = in_memory_table(
+            &["卡片号", "资产编码", "资产名称"],
+            &[&["1009", "电子设备", "甲设备"], &["1010", "电子设备", "乙设备"]],
+        );
+        let mut begin_keys = vec!["资产编号".into()];
+        let mut end_keys = vec!["资产编码".into()];
+        let pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys);
+        assert_eq!(end_keys, vec!["卡片号".to_string()]);
+        assert_eq!(begin_keys, vec!["资产编号".to_string()]);
+        assert_eq!(
+            pairing,
+            vec![json!({"begin": "资产编号", "end": "卡片号", "hit": true})]
+        );
+    }
+    #[test]
+    fn 建议键纠正跳过禁列并取最靠左的非禁列() {
+        let begin = in_memory_table(&["资产编号"], &[&["1009"]]);
+        // “类别备注”含“类别”是禁列且同样含样本；两个非禁候选里取更靠左的“标识前”。
+        let end = in_memory_table(
+            &["备注", "类别备注", "标识前", "标识后"],
+            &[&["甲乙", "1009", "1009", "1009"]],
+        );
+        let mut begin_keys = vec!["资产编号".into()];
+        let mut end_keys = vec!["备注".into()];
+        repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys);
+        assert_eq!(end_keys, vec!["标识前".to_string()]);
+    }
+    #[test]
+    fn 建议键反向纠正改期初键列() {
+        let begin = in_memory_table(
+            &["资产编号", "旧资产编号"],
+            &[&["甲类别", "1009"]],
+        );
+        let end = in_memory_table(&["资产编码"], &[&["1009"]]);
+        let mut begin_keys = vec!["资产编号".into()];
+        let mut end_keys = vec!["资产编码".into()];
+        let pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys);
+        assert_eq!(begin_keys, vec!["旧资产编号".to_string()]);
+        assert_eq!(end_keys, vec!["资产编码".to_string()]);
+        assert_eq!(
+            pairing,
+            vec![json!({"begin": "旧资产编号", "end": "资产编码", "hit": true})]
+        );
+    }
+    #[test]
+    fn 双侧都找不到时配对被同步撤掉() {
+        let begin = in_memory_table(&["资产编号", "资产名称"], &[&["AAA", "甲"]]);
+        let end = in_memory_table(&["资产编码", "资产名称"], &[&["ZZZ", "甲"]]);
+        let mut begin_keys = vec!["资产编号".into(), "资产名称".into()];
+        let mut end_keys = vec!["资产编码".into(), "资产名称".into()];
+        let pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys);
+        // 第0位两侧互相找不到：撤；第1位样本一致：留。
+        assert_eq!(begin_keys, vec!["资产名称".to_string()]);
+        assert_eq!(end_keys, vec!["资产名称".to_string()]);
+        assert_eq!(
+            pairing,
+            vec![json!({"begin": "资产名称", "end": "资产名称", "hit": true})]
+        );
+    }
+    #[test]
+    fn inspect返回纠正后的逐位配对状态() {
+        let dir = tempfile::tempdir().unwrap();
+        let begin = dir.path().join("begin.csv");
+        let end = dir.path().join("end.csv");
+        fs::write(&begin, "资产编号,资产名称\n1009,甲\n1010,乙\n").unwrap();
+        fs::write(&end, "旧编号,资产编码,资产名称\n1009,1,甲\n1010,2,乙\n").unwrap();
+        let inspected = inspect(json!({"beginPath": begin, "endPath": end})).unwrap();
+        // 词表先选中“资产编码”，预碰撞发现样本在“旧编号”列后静默纠正。
+        assert_eq!(
+            inspected["suggestedMapping"]["end"]["matchKeys"],
+            json!(["旧编号", "资产名称"])
+        );
+        assert_eq!(
+            inspected["keyPairing"],
+            json!([
+                {"begin": "资产编号", "end": "旧编号", "hit": true},
+                {"begin": "资产名称", "end": "资产名称", "hit": true}
+            ])
+        );
+    }
+    #[test]
+    fn 键预检对手工错配只报告不纠正() {
+        let dir = tempfile::tempdir().unwrap();
+        let begin = dir.path().join("begin.csv");
+        let end = dir.path().join("end.csv");
+        fs::write(&begin, "资产编号,资产名称\n1009,甲\n").unwrap();
+        fs::write(&end, "资产编码,资产名称\n1009,甲\n").unwrap();
+        let matched = fa_key_check(json!({
+            "beginPath": begin, "endPath": end,
+            "beginKeys": ["资产编号"], "endKeys": ["资产编码"]
+        }))
+        .unwrap();
+        assert_eq!(
+            matched["keyPairing"],
+            json!([{"begin": "资产编号", "end": "资产编码", "hit": true}])
+        );
+        let mismatched = fa_key_check(json!({
+            "beginPath": begin, "endPath": end,
+            "beginKeys": ["资产名称"], "endKeys": ["资产编码"]
+        }))
+        .unwrap();
+        assert_eq!(
+            mismatched["keyPairing"],
+            json!([{"begin": "资产名称", "end": "资产编码", "hit": false}])
+        );
+        // 数量不一致按较短一侧配对，多出的键位单侧呈现且恒为未命中。
+        let ragged = fa_key_check(json!({
+            "beginPath": begin, "endPath": end,
+            "beginKeys": ["资产编号", "资产名称"], "endKeys": ["资产编码"]
+        }))
+        .unwrap();
+        assert_eq!(
+            ragged["keyPairing"],
+            json!([
+                {"begin": "资产编号", "end": "资产编码", "hit": true},
+                {"begin": "资产名称", "end": "", "hit": false}
+            ])
+        );
+    }
+    #[test]
+    fn 归一化连接让文本前导零编号与数字编号配上() {
+        let dir = tempfile::tempdir().unwrap();
+        let begin = dir.path().join("begin.csv");
+        let end = dir.path().join("end.csv");
+        fs::write(&begin, "卡片编号,原值\n001009,100\n").unwrap();
+        fs::write(&end, "卡片编号,原值\n1009,120\n").unwrap();
+        let p = json!({
+            "beginPath": begin, "endPath": end,
+            "beginKeys": ["卡片编号"], "endKeys": ["卡片编号"],
+            "balanceSheetDate": "2025-12-31",
+            "outputPath": dir.path().join("FA_List.xlsx"),
+            "beginMapping": {"originalValue": "原值"},
+            "endMapping": {"originalValue": "原值"},
+        });
+        let result = merge(&p, &|_, _, _, _| {}, &AtomicBool::new(false)).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].source, "两文件都有");
+        // 连接比较已归一，导出展示列仍是原始文本。
+        assert_eq!(result.rows[0].begin.as_ref().unwrap()[0], "001009");
+        assert_eq!(result.rows[0].end.as_ref().unwrap()[0], "1009");
     }
     #[test]
     fn rerun_review_recovers_a_manually_unmapped_start_date() {

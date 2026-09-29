@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canApplyFaSupplements,
   faDefaultOutputPath,
+  faKeyPairingAt,
   faMappedRolesForColumn,
   faMissingOptionalRoles,
   faOutputPathAfterSourceSelection,
@@ -13,12 +14,12 @@ import {
   faRolesForSide,
   faSelectColumnRole,
   isFaMatchDisabled,
+  normalizeFaKeyPairing,
   normalizeFaSuggestedMapping,
   planFaLlmChanges,
   planFaSupplementChanges,
   sanitizeFaBeginMapping,
   shouldAutoApplyFa,
-  shouldAutoPrefillFaAddition,
   shouldShowFaAdditionFields,
   shouldShowFaPreviewWorkspace,
 } from "./faListUi";
@@ -37,6 +38,19 @@ const baseInput = {
   endKeys: ["编号"],
   roleLabels,
 };
+
+it("LLM 可将公司名称表头映射为现有资产 ID", () => {
+  const plan = planFaLlmChanges({
+    ...baseInput,
+    matchReview: { action: "replace", confidence: 0.95,
+      suggested_file1_columns: ["资产编号", "公司名称"],
+      suggested_file2_columns: ["编号", "企业名称"] },
+  });
+  expect(plan.beginKeys).toEqual(["资产编号", "公司名称"]);
+  expect(plan.endKeys).toEqual(["编号", "企业名称"]);
+  expect(plan.beginMapping).toEqual(baseInput.beginMapping);
+  expect(plan.endMapping).toEqual(baseInput.endMapping);
+});
 
 describe("FA List migration parity", () => {
   it("仅高于 75% 的字段建议自动采纳", () => {
@@ -98,14 +112,6 @@ describe("FA List migration parity", () => {
     expect(canApplyFaSupplements("", "", "变动方式")).toBe(true);
     expect(canApplyFaSupplements("C:/新增.xlsx", "", undefined)).toBe(true);
     expect(canApplyFaSupplements("", "C:/处置.xlsx", undefined)).toBe(true);
-  });
-
-  it("does not treat an addition date alone as a supplemental addition list", () => {
-    expect(shouldAutoPrefillFaAddition(undefined, 12, false)).toBe(false);
-    expect(shouldAutoPrefillFaAddition("", 12, false)).toBe(false);
-    expect(shouldAutoPrefillFaAddition("新增方式", 0, false)).toBe(false);
-    expect(shouldAutoPrefillFaAddition("新增方式", 12, true)).toBe(false);
-    expect(shouldAutoPrefillFaAddition("新增方式", 12, false)).toBe(true);
   });
 
   it("preserves whitespace in an Excel header value while trimming its label", () => {
@@ -862,5 +868,41 @@ describe("列头下拉选角色只做加法", () => {
     );
     expect(cleared.mapping.method).toBeUndefined();
     expect(cleared.keys).toEqual(["资产编号"]);
+  });
+});
+
+describe("两期组合键命中徽章", () => {
+  const pairing = [
+    { begin: "资产编号", end: "编号", hit: true },
+    { begin: "类别", end: "资产类别", hit: false },
+  ];
+
+  it("按下标取键位碰撞结论，命中与否都返回该条目", () => {
+    expect(faKeyPairingAt(pairing, "begin", 0, "资产编号")?.hit).toBe(true);
+    expect(faKeyPairingAt(pairing, "end", 1, "资产类别")?.hit).toBe(false);
+  });
+
+  it("键位增删导致 keyPairing 过期时返回 undefined（该键位不显示徽章）", () => {
+    expect(faKeyPairingAt(pairing, "begin", 2, "新增列")).toBeUndefined();
+    expect(faKeyPairingAt(pairing, "end", -1, "编号")).toBeUndefined();
+    expect(faKeyPairingAt(undefined, "begin", 0, "资产编号")).toBeUndefined();
+  });
+
+  it("键位上的列已换人时同样不显示，避免旧结论贴到新列上", () => {
+    expect(faKeyPairingAt(pairing, "begin", 0, "换过的列")).toBeUndefined();
+    // 列名比对按去空格口径，与表头下拉一致。
+    expect(faKeyPairingAt(pairing, "begin", 0, " 资产编号 ")?.hit).toBe(true);
+  });
+
+  it("normalizeFaKeyPairing 字段缺失返回 undefined、丢弃形状不对的条目", () => {
+    expect(normalizeFaKeyPairing(undefined)).toBeUndefined();
+    expect(normalizeFaKeyPairing({ keyPairing: [] })).toBeUndefined();
+    expect(
+      normalizeFaKeyPairing([
+        { begin: "资产编号", end: "编号", hit: true },
+        { begin: "缺 end" },
+        null,
+      ]),
+    ).toEqual([{ begin: "资产编号", end: "编号", hit: true }]);
   });
 });

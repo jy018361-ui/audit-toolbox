@@ -9,15 +9,17 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { displayFileName } from "@/fileDisplay";
 import { faDropSlotAtPosition, type FaDropSlot } from "./faDropTarget";
 import {
+  type FaKeyPairing,
   type FaMappingChange,
   type FaPendingSuggestion,
   type FaSupplementChange,
   canApplyFaSupplements,
   faDefaultOutputName,
   faDefaultOutputPath,
+  faKeyPairingAt,
   faMappedRolesForColumn,
-  faMissingOptionalRoles,
   faOutputPathAfterSourceSelection,
+  normalizeFaKeyPairing,
   faReviewDisplayMessage,
   faSelectColumnRole,
   faHeaderOption,
@@ -90,6 +92,8 @@ type FaInspectResult = {
   begin: FaInspectSide;
   end: FaInspectSide;
   suggestedMapping: { begin: FaMapping; end: FaMapping };
+  /// 两期组合键逐位碰撞结论（Rust 侧 fa.inspect 顶层附带；旧版 EXE 无此字段）。
+  keyPairing?: FaKeyPairing[];
 };
 function isFaInspectResult(value: unknown): value is FaInspectResult {
   if (!value || typeof value !== "object") return false;
@@ -205,6 +209,8 @@ type FaListDraft = {
   disposal: FaSupplementConfig;
   additionInspect?: FaSupplementInspect;
   disposalInspect?: FaSupplementInspect;
+  /// 两期组合键命中徽章数据：换工具页再回来时不重读文件也能继续显示。
+  keyPairing?: FaKeyPairing[];
   result?: unknown;
   matchStats?: FaMatchStats;
   resultStale?: boolean;
@@ -355,6 +361,10 @@ function FaCardListPage() {
   );
   const [beginKeys, setBeginKeys] = useState<string[]>(draft?.beginKeys ?? []);
   const [endKeys, setEndKeys] = useState<string[]>(draft?.endKeys ?? []);
+  // 两期组合键逐位命中结论（fa.inspect 返回、改键后由 fa.key_check 刷新）。
+  const [keyPairing, setKeyPairing] = useState<FaKeyPairing[] | undefined>(
+    draft?.keyPairing,
+  );
   const [beginMapping, setBeginMapping] = useState<FaMapping>(
     sanitizeFaBeginMapping(draft?.beginMapping ?? empty) as FaMapping,
   );
@@ -403,6 +413,9 @@ function FaCardListPage() {
   >([]);
   const [llmBypassed, setLlmBypassed] = useState(false);
   const llmReviewGeneration = useRef(0);
+  // 命中徽章的代数守卫：文件重读/移除时递增，丢弃迟到的 fa.key_check
+  // 旧结果，防止把新文件的徽章刷回上一对文件的结论（用法同 llmReviewGeneration）。
+  const keyPairingGeneration = useRef(0);
   const [supplementLlmBusy, setSupplementLlmBusy] = useState(false);
   const [supplementLlmReview, setSupplementLlmReview] = useState<FaLlmReview>();
   const [supplementLlmBypassed, setSupplementLlmBypassed] = useState(false);
@@ -487,6 +500,10 @@ function FaCardListPage() {
     setBeginHeaderRow(p.beginHeaderRow != null ? String(p.beginHeaderRow) : "");
     setEndHeaderRow(p.endHeaderRow != null ? String(p.endHeaderRow) : "");
     setInspection(restoredInspection);
+    // 快照里没有 keyPairing：先清空徽章，恢复触发的重新读取（或改键后的
+    // fa.key_check 防抖刷新）会带回新结论。
+    keyPairingGeneration.current += 1;
+    setKeyPairing(undefined);
     setBeginKeys(Array.isArray(p.beginKeys) ? p.beginKeys : []);
     setEndKeys(Array.isArray(p.endKeys) ? p.endKeys : []);
     setBeginMapping(
@@ -678,11 +695,53 @@ function FaCardListPage() {
       disposal,
       additionInspect,
       disposalInspect,
+      keyPairing,
       result,
       matchStats,
       resultStale,
     };
   });
+  // —— 手工调整匹配键后的命中徽章刷新 ——
+  // 键数组（或文件）变化后防抖 500ms 调 fa.key_check 重算两期组合键逐位
+  // 碰撞结论：该命令无副作用、不做纠正，只回填显示数据，绝不反向改写
+  // 用户选的键。失败静默（保留旧徽章、不弹错误框）；两侧文件未齐时跳过。
+  // 依赖只挂文件与键数组：Sheet/标题行改动走重新读取，inspect 返回里
+  // 自带新的 keyPairing，不必跟随标题行输入框的每次击键。
+  useEffect(() => {
+    if (!beginPath || !endPath) return;
+    if (!beginKeys.length && !endKeys.length) return;
+    const timer = window.setTimeout(() => {
+      const generation = ++keyPairingGeneration.current;
+      void engineCall(
+        "fa.key_check",
+        {
+          beginPath,
+          endPath,
+          beginSheet: beginSheet || undefined,
+          endSheet: endSheet || undefined,
+          beginHeaderRow: beginHeaderRow.trim()
+            ? Number(beginHeaderRow)
+            : undefined,
+          endHeaderRow: endHeaderRow.trim() ? Number(endHeaderRow) : undefined,
+          beginKeys,
+          endKeys,
+        },
+        "资产ID 命中检查",
+      )
+        .then((value) => {
+          // 代数不匹配说明期间文件已重读或键又改过，丢弃过期结果。
+          if (generation !== keyPairingGeneration.current) return;
+          const pairing = normalizeFaKeyPairing(
+            (value as { keyPairing?: unknown }).keyPairing,
+          );
+          if (pairing) setKeyPairing(pairing);
+        })
+        .catch(() => {
+          // 静默失败：保留旧徽章；旧版 EXE 尚无 fa.key_check 时也只是不刷新。
+        });
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [beginPath, endPath, beginKeys, endKeys]);
   // 默认落点与旧版一致（期末文件旁的 FA_List_<时间戳>.xlsx），但要在导出前就
   // 显示出来：用户看得见文件会写到哪里，不想要再点「选择」改。
   useEffect(() => {
@@ -778,6 +837,9 @@ function FaCardListPage() {
       setEndHeaderRow("");
     }
     setInspection(undefined);
+    // 换了文件，旧键位的命中结论一并作废；重新读取后会带回新 keyPairing。
+    keyPairingGeneration.current += 1;
+    setKeyPairing(undefined);
     setRestoreStatus("");
     if (faStats) setResultStale(true);
     else {
@@ -831,6 +893,8 @@ function FaCardListPage() {
     llmReviewGeneration.current += 1;
     supplementReviewGeneration.current += 1;
     setInspection(undefined);
+    keyPairingGeneration.current += 1;
+    setKeyPairing(undefined);
     setBeginKeys([]);
     setEndKeys([]);
     setBeginMapping({});
@@ -894,6 +958,11 @@ function FaCardListPage() {
         `期初 ${displayFileName(bPath)} ＋ 期末 ${displayFileName(ePath)}`,
       )) as FaInspectResult;
       setInspection(value);
+      // fa.inspect 顶层附带两期组合键逐位碰撞结果；同时递增代数，丢弃
+      // 改键后尚在途中的 fa.key_check 旧结果。旧版 EXE 没有该字段时
+      // 徽章不显示，等用户调整键位后由 fa.key_check 防抖补上。
+      keyPairingGeneration.current += 1;
+      setKeyPairing(normalizeFaKeyPairing(value.keyPairing));
       setLlmBypassed(false);
       setBeginSheet(value.begin.selectedSheet ?? beginSheet);
       setEndSheet(value.end.selectedSheet ?? endSheet);
@@ -1690,16 +1759,6 @@ function FaCardListPage() {
   // 判定清单复用 faListUi 的 FA_FILE2_ONLY_MAPPING_KEYS，不另写一份。
   const rolesForSide = (side: "begin" | "end"): [keyof FaMapping, string][] =>
     faRolesForSide(side, visibleMappingRoles);
-  const missingOptionalRoles = (side: "begin" | "end"): string[] =>
-    faMissingOptionalRoles(
-      side,
-      visibleMappingRoles,
-      REQUIRED_ROLES.map(([key]) => key),
-      (side === "begin" ? beginMapping : endMapping) as Record<
-        string,
-        string | string[] | undefined
-      >,
-    );
   const multi = (event: ChangeEvent<HTMLSelectElement>) =>
     Array.from(event.target.selectedOptions).map((option) => option.value);
   // 单侧字段映射列表（参考看账 kz-map）：第一行「资产ID」多选，
@@ -1820,6 +1879,7 @@ function FaCardListPage() {
     }
     const controls: React.ReactNode[] = [];
     const mappedFlags: boolean[] = [];
+    const keys = side === "begin" ? beginKeys : endKeys;
     for (const header of inspect.headers) {
       const colValue = header.trim();
       // 同一列可以同时承担资产ID、资产名称等多个角色。原先用 find
@@ -1831,6 +1891,16 @@ function FaCardListPage() {
       );
       const mappedRole = mappedRoles[0];
       const multipleValue = `__multiple__:${colValue}`;
+      // 资产ID（匹配键）列：按该列在组合键中的下标取两期碰撞结论，
+      // 在列头下拉旁显示命中/未命中小徽章。键位刚增删导致 keyPairing
+      // 过期、或该键位上的列已换人时不显示徽章，等 fa.key_check 刷新。
+      const keyIndex = keys.findIndex((item) => item.trim() === colValue);
+      const pairingEntry = faKeyPairingAt(
+        keyPairing,
+        side,
+        keyIndex,
+        keyIndex >= 0 ? keys[keyIndex] : undefined,
+      );
       mappedFlags.push(mappedRoles.length > 0);
       controls.push(
         <label className="dt-header-control" key={header}>
@@ -1856,7 +1926,7 @@ function FaCardListPage() {
               const patch = faSelectColumnRole(
                 mapping,
                 "matchKeys",
-                side === "begin" ? beginKeys : endKeys,
+                keys,
                 colValue,
                 e.target.value,
                 roleOptions.map(([key]) => key),
@@ -1895,6 +1965,18 @@ function FaCardListPage() {
               );
             })}
           </select>
+          {pairingEntry && (
+            <Badge
+              variant={pairingEntry.hit ? "success" : "warning"}
+              title={`组合键第 ${keyIndex + 1} 位：期初「${pairingEntry.begin}」与期末「${pairingEntry.end}」${
+                pairingEntry.hit
+                  ? "两期数据能对上"
+                  : "两期数据对不上，请核对两侧是否为同一口径的列"
+              }`}
+            >
+              {pairingEntry.hit ? "已命中" : "未命中"}
+            </Badge>
+          )}
         </label>,
       );
     }
@@ -2021,15 +2103,12 @@ function FaCardListPage() {
         supplement.setter,
       );
     }
-    // 每个文件预览标题旁的"未映射"提示。分两档：
-    // 必填缺失是红的、会拦住流程；选填缺失是黄的、只是告知，留空照样能合并。
+    // 每个文件预览标题旁的"未映射"提示：只提示必填缺失（红色、会拦住
+    // 流程）；选填缺失不再单独提示，留空照样能合并。
     let missingHint: string | undefined;
-    let optionalHint: string | undefined;
     if (mapping && side) {
       const m = missingRoles(side);
       if (m.length) missingHint = `尚未映射：${m.join("、")}`;
-      const optional = missingOptionalRoles(side);
-      if (optional.length) optionalHint = `选填未映射：${optional.join("、")}`;
     } else if (supplement) {
       const req = supplementRoleOptions(supplement.kind);
       const missing = req.filter(({ field }) => {
@@ -2053,14 +2132,6 @@ function FaCardListPage() {
             </strong>
             {missingHint && (
               <span className="fa-caption-missing">{missingHint}</span>
-            )}
-            {optionalHint && (
-              <span
-                className="fa-caption-optional"
-                title="选填字段，留空不影响合并，只是对应的计算或分类不会生成。"
-              >
-                {optionalHint}
-              </span>
             )}
           </div>
         }

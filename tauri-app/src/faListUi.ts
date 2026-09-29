@@ -227,6 +227,45 @@ export function faMissingOptionalRoles<T extends readonly [string, string]>(
     })
     .map(([, label]) => label);
 }
+// —— 两期组合键逐位命中结论（fa.inspect / fa.key_check 的 keyPairing）——
+// begin/end 是两侧资产ID组合键按下标配对的列名，hit 表示该位键值在
+// 两期清单里真实碰上（至少有一条资产能按这组键对号入座）。
+export type FaKeyPairing = { begin: string; end: string; hit: boolean };
+
+/// 把 Rust 返回的 keyPairing 顶层字段整理成可信数组：字段缺失返回
+/// undefined（旧版 EXE），数组里形状不对的条目直接丢弃，避免半成品
+/// 数据渲染出错误的命中徽章。
+export function normalizeFaKeyPairing(
+  value: unknown,
+): FaKeyPairing[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const entries: FaKeyPairing[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const entry = item as Record<string, unknown>;
+    if (typeof entry.begin !== "string" || typeof entry.end !== "string") continue;
+    entries.push({ begin: entry.begin, end: entry.end, hit: entry.hit === true });
+  }
+  return entries;
+}
+
+/// 组合键第 index 位（按下标与对方文件配对）的碰撞结论。
+/// 键位没有对应数据——刚增删键位导致 keyPairing 过期、或该键位上的
+/// 列已被换掉——返回 undefined，界面不渲染徽章，等 fa.key_check 刷新
+/// 后自然出现；列名比对做 trim，与表头下拉按去空格列名占用的口径一致。
+export function faKeyPairingAt(
+  pairing: readonly FaKeyPairing[] | undefined,
+  side: FaSide,
+  index: number,
+  key: string | undefined,
+): FaKeyPairing | undefined {
+  if (!pairing || index < 0 || index >= pairing.length) return undefined;
+  if (key === undefined) return undefined;
+  const entry = pairing[index];
+  const column = side === "begin" ? entry.begin : entry.end;
+  return column.trim() === key.trim() ? entry : undefined;
+}
+
 export const FA_LOW_CONFIDENCE = 0.7;
 // 仅高于 75% 才自动改；明确低于可见门槛的结果直接隐藏。
 export const FA_AUTO_APPLY_MIN = AUTO_ACCEPT_LLM_CONFIDENCE;

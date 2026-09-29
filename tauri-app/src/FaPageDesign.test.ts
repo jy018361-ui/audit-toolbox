@@ -97,4 +97,24 @@ describe("固定资产与凭证页视觉契约", () => {
     expect(page).not.toContain("返回上一步");
     expect(policy).not.toContain("返回上一步");
   });
+
+  it("FA 去掉选填未映射提示，资产ID键位显示两期命中徽章", () => {
+    const page = source("FaListPage");
+    // 黄色「选填未映射」提示整体移除：不再计算、不再渲染；
+    // 必填缺失的红色「尚未映射」提示保留。
+    expect(page).not.toContain("选填未映射");
+    expect(page).not.toContain("fa-caption-optional");
+    expect(page).not.toContain("faMissingOptionalRoles");
+    expect(page).toContain("尚未映射");
+    // 组合键逐位命中徽章：已命中走成功色、未命中走警示色，
+    // 键位过期（刚增删键）时不出徽章。
+    expect(page).toContain('"已命中"');
+    expect(page).toContain('"未命中"');
+    expect(page).toContain("faKeyPairingAt(");
+    // 读取文件时存下 fa.inspect 附带的 keyPairing；手工调整键后防抖调
+    // fa.key_check 只刷新显示，绝不反向改写用户选的键。
+    expect(page).toContain("normalizeFaKeyPairing(value.keyPairing)");
+    expect(page).toContain('"fa.key_check"');
+    expect(page).toContain("keyPairingGeneration");
+  });
 });

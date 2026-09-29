@@ -32,13 +32,17 @@ describe("固定资产与凭证页视觉契约", () => {
     expect(page).not.toContain("和序时账使用同一入口，可一次拖入两个文件");
   });
 
-  it("FA 两期清单明确任务动作、三步编号与待重算门禁", () => {
+  it("FA 两期清单人工修改后可继续，导出按当前映射重算", () => {
     const page = source("FaListPage");
     expect(page).toContain('"开始匹配"');
     expect(page).toContain('"2. 补充清单（可选）"');
     expect(page).not.toContain('<h3>2. 本期变动清单（可选）</h3>');
     expect(page).toContain('<h3>3. 输出</h3>');
-    expect(page).toContain('disabled={!inspection || resultStale}');
+    expect(page).not.toContain('disabled={!inspection || resultStale}');
+    expect(page).not.toContain('disabled: !faStats || resultStale');
+    expect(page).not.toContain('method === "fa.export" && resultStale');
+    expect(page).toContain('导出时将按当前输入和映射重新计算');
+    expect(page).not.toContain('["companyName", "公司名称"]');
     expect(page).not.toContain('autoApply: false');
     expect(page).toContain('__restoreSnapshot');
     expect(page).toContain('期初 ${displayFileName(bPath)} ＋ 期末 ${displayFileName(ePath)}');
@@ -55,6 +59,17 @@ describe("固定资产与凭证页视觉契约", () => {
     expect(page).toContain('`${kind.toUpperCase()} ${fileName(item.path)}`');
     expect(page).toContain('method === "fa.tbje_export" && resultStale');
     expect(page).toContain("只看有差异");
+  });
+
+  it("FA 匹配完成后由用户选择补充或导出，不自动预填期末为新增清单", () => {
+    const page = source("FaListPage");
+    expect(page).not.toContain("shouldAutoPrefillFaAddition");
+    expect(page).not.toContain("supplementAutoHandled");
+    expect(page).not.toContain("prefilledAddition");
+    expect(page).toContain("有，进入补充清单");
+    expect(page).toContain("没有，直接导出");
+    expect(page).toContain("onClick={() => setStep(2)}");
+    expect(page).toContain("onClick={() => setStep(3)}");
   });
 
   it("FA TB+JE 只在确认第一步时验证辅助字段，且科目清单只重读 TB", () => {

@@ -26,7 +26,6 @@ import {
   planFaLlmChanges,
   planFaSupplementChanges,
   sanitizeFaBeginMapping,
-  shouldAutoPrefillFaAddition,
   shouldShowFaAdditionFields,
   shouldShowFaPreviewWorkspace,
 } from "./faListUi";
@@ -209,7 +208,6 @@ type FaListDraft = {
   result?: unknown;
   matchStats?: FaMatchStats;
   resultStale?: boolean;
-  supplementAutoHandled: boolean;
 };
 
 type FaMatchStats = {
@@ -390,9 +388,6 @@ function FaCardListPage() {
   const [disposalInspect, setDisposalInspect] = useState<
     FaSupplementInspect | undefined
   >(draft?.disposalInspect);
-  const [supplementAutoHandled, setSupplementAutoHandled] = useState(
-    draft?.supplementAutoHandled ?? false,
-  );
   const [busy, setBusy] = useState(false);
   const [inspectStatus, setInspectStatus] = useState("");
   const [restoreStatus, setRestoreStatus] = useState("");
@@ -514,7 +509,6 @@ function FaCardListPage() {
     setDisposal(supplementConfigOf(p.disposalSupplement));
     setAdditionInspect(undefined);
     setDisposalInspect(undefined);
-    setSupplementAutoHandled(false);
     if (typeof p.outputPath === "string" && p.outputPath) {
       setOutputPath(p.outputPath);
       setOutputPathTouched(true);
@@ -635,8 +629,7 @@ function FaCardListPage() {
   };
   const [result, setResult] = useState<unknown>(draft?.result);
   const [resultStale, setResultStale] = useState(draft?.resultStale ?? false);
-  // Export results intentionally contain no preview statistics. Keep the last
-  // successful merge statistics separately so exporting does not lock step 2.
+  // 历史导出结果可能不含统计；新导出会返回重算后的匹配统计。
   const [matchStats, setMatchStats] = useState<FaMatchStats | undefined>(
     draft?.matchStats ?? faMatchStatsFromResult(draft?.result),
   );
@@ -688,7 +681,6 @@ function FaCardListPage() {
       result,
       matchStats,
       resultStale,
-      supplementAutoHandled,
     };
   });
   // 默认落点与旧版一致（期末文件旁的 FA_List_<时间戳>.xlsx），但要在导出前就
@@ -737,51 +729,6 @@ function FaCardListPage() {
     disposalInspect,
   ]);
   const faStats = faMatchStatsFromResult(result) ?? matchStats;
-  useEffect(() => {
-    if (
-      faStats &&
-      shouldAutoPrefillFaAddition(
-        endMapping.additionMethod,
-        Number(faStats.endOnly || 0),
-        supplementAutoHandled,
-      )
-    ) {
-      setSupplementAutoHandled(true);
-      if (!addition.path && inspection) {
-        const prefilledAddition: FaSupplementConfig = {
-          path: endPath,
-          sheet: endSheet || inspection.end.selectedSheet || "",
-          headerRow:
-            endHeaderRow || String(inspection.end.detectedHeaderRow ?? ""),
-          keys: [...endKeys],
-          matchKeysVerified: true,
-          method: endMapping.additionMethod ?? "",
-          date: endMapping.additionDate ?? "",
-          originalValue: "",
-          depreciation: "",
-        };
-        setAddition(prefilledAddition);
-        setAdditionInspect({
-          ...inspection.end,
-          suggestedMapping: endMapping,
-        });
-        setSupplementLlmBypassed(false);
-      }
-      setStep(2);
-    }
-  }, [
-    faStats,
-    supplementAutoHandled,
-    endMapping.additionMethod,
-    addition.path,
-    inspection,
-    endPath,
-    endSheet,
-    endHeaderRow,
-    endKeys,
-    endMapping,
-    disposal,
-  ]);
   // 把选中的路径应用到期初/期末（点击选择与拖拽上传共用）。
   async function applyPath(side: "begin" | "end", value: string) {
     const previousSource = side === "begin" ? beginPath : endPath;
@@ -839,7 +786,6 @@ function FaCardListPage() {
       setResultStale(false);
     }
     setStep(1);
-    setSupplementAutoHandled(false);
     // 与补充清单一致：选完文件自动解析。主文件需要两个都选好才解析。
     if (nextBegin && nextEnd) {
       void inspect({
@@ -908,7 +854,6 @@ function FaCardListPage() {
     setOutputPathTouched(false);
     setJob(undefined);
     setError("");
-    setSupplementAutoHandled(false);
     setStep(1);
   }
   async function inspect(overrides?: {
@@ -949,7 +894,6 @@ function FaCardListPage() {
         `期初 ${displayFileName(bPath)} ＋ 期末 ${displayFileName(ePath)}`,
       )) as FaInspectResult;
       setInspection(value);
-      setSupplementAutoHandled(false);
       setLlmBypassed(false);
       setBeginSheet(value.begin.selectedSheet ?? beginSheet);
       setEndSheet(value.end.selectedSheet ?? endSheet);
@@ -1420,7 +1364,6 @@ function FaCardListPage() {
     setSupplementLlmChanges([]);
     setSupplementLlmPending([]);
     setError("");
-    setSupplementAutoHandled(true);
     if (kind === "addition") {
       setAddition(emptyFaSupplement());
       setAdditionInspect(undefined);
@@ -1597,20 +1540,20 @@ function FaCardListPage() {
       setError("请填写资产负债表日，折旧测算与跨期新增分析都以它为截止。");
       return;
     }
-    if (method === "fa.export" && resultStale) {
-      setError("输入或映射已变化，请先重新开始匹配，再导出最新底稿。");
-      setStep(1);
-      return;
-    }
-    if (method === "fa.match" && llmBusy) {
+    // 导出 worker 会按当前输入和映射重新 merge，无需人工先重复匹配。
+    if (llmBusy) {
       // LLM is advisory. Freeze the currently visible deterministic mapping
       // instead of letting a late response race with the merge payload.
       llmReviewGeneration.current += 1;
       setLlmBusy(false);
       setLlmBypassed(true);
     }
+    if (method === "fa.export" && supplementLlmBusy) {
+      supplementReviewGeneration.current += 1;
+      setSupplementLlmBusy(false);
+      setSupplementLlmBypassed(true);
+    }
     if (method === "fa.match") {
-      setSupplementAutoHandled(false);
       setMatchStats(undefined);
     }
     // 输出框里已经显示了这次会写到哪，所以不再弹保存对话框。默认落点是算出来的，
@@ -2243,6 +2186,9 @@ function FaCardListPage() {
         </div>
       );
     }
+    if (Array.isArray(value.outputPaths) && value.outputPaths.length > 0) {
+      return <ResultView value={result} />;
+    }
     if (value.stats && typeof value.stats === "object") {
       const stats = value.stats as {
         rows?: number;
@@ -2368,9 +2314,9 @@ function FaCardListPage() {
           {
             key: "2",
             label: "补充清单",
-            disabled: !faStats || resultStale,
+            disabled: !faStats || !inspection,
           },
-          { key: "3", label: "导出", disabled: !faStats || resultStale },
+          { key: "3", label: "导出", disabled: !faStats || !inspection },
         ]}
         current={step - 1}
         onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3)}
@@ -2593,7 +2539,7 @@ function FaCardListPage() {
                     >
                       停止
                     </Button>
-                  ) : !faStats || resultStale ? (
+                  ) : !faStats ? (
                     <Button
                       variant="default"
                       disabled={
@@ -2793,7 +2739,7 @@ function FaCardListPage() {
                     )}
                     {resultStale && (
                       <div className="warning-box">
-                        输入或映射已变化，上述为上一次结果；请重新开始匹配。
+                        上述统计为上一次匹配结果。可继续下一步，导出时将按当前输入和映射重新计算。
                       </div>
                     )}
                     <span>核对完成后，再选择是否补充新增或处置清单。</span>
@@ -2865,7 +2811,6 @@ function FaCardListPage() {
                       setDisposalInspect(undefined);
                       setSupplementLlmReview(undefined);
                       setSupplementLlmBypassed(false);
-                      setSupplementAutoHandled(true);
                       setError("");
                       setStep(3);
                     }}
@@ -3053,7 +2998,7 @@ function FaCardListPage() {
                   ) : (
                     <Button
                       variant="default"
-                      disabled={!inspection || resultStale}
+                      disabled={!inspection || missingRoles("begin").length > 0 || missingRoles("end").length > 0}
                       onClick={() => void start("fa.export")}
                     >
                       生成 FA List 底稿

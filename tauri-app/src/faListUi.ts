@@ -8,21 +8,6 @@ export function shouldShowFaAdditionFields(additionMethod?: string): boolean {
   return Boolean(additionMethod?.trim());
 }
 
-export function shouldAutoPrefillFaAddition(
-  additionMethod: string | undefined,
-  endOnlyRows: number,
-  alreadyHandled: boolean,
-): boolean {
-  // A date-like column alone is not proof that the ending file is an addition
-  // list. The legacy prefill is only safe once the addition-method mapping is
-  // explicit and the merge actually contains ending-only rows.
-  return (
-    !alreadyHandled &&
-    endOnlyRows > 0 &&
-    shouldShowFaAdditionFields(additionMethod)
-  );
-}
-
 /// Whether 步骤2 的「应用补充映射并继续」可以点。
 ///
 /// A supplement does not have to be a separate workbook.  When file2 itself

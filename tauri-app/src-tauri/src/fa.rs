@@ -6,7 +6,7 @@
 use calamine::{Data, Reader, open_workbook_auto};
 use chrono::{Datelike, Local, Months, NaiveDate};
 use reqwest::blocking::Client;
-use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
+use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook};
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -14,10 +14,10 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use crate::AppError;
@@ -33,6 +33,50 @@ pub(crate) struct Table {
     pub(crate) header_row: usize,
     pub(crate) headers: Vec<String>,
     pub(crate) rows: Vec<Vec<String>>,
+}
+
+// 只缓存最近一次 inspect 的两张表，复核复用读取结果；worker 导出仍重新读源文件。
+type ReviewTableKey = (PathBuf, u64, SystemTime, Option<String>, usize);
+static REVIEW_TABLES: OnceLock<Mutex<Vec<(ReviewTableKey, Arc<Table>)>>> = OnceLock::new();
+
+fn review_table_key(path: &Path, sheet: Option<&str>, header: usize) -> Option<ReviewTableKey> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((fs::canonicalize(path).ok()?, metadata.len(), metadata.modified().ok()?, sheet.map(str::to_owned), header))
+}
+
+fn review_table(params: &Value, side: &str) -> Result<Arc<Table>, AppError> {
+    let path = required_path(params, &format!("{side}Path"))?;
+    let sheet = params.get(format!("{side}Sheet")).and_then(Value::as_str).filter(|sheet| !sheet.is_empty());
+    let header = optional_header(params, &format!("{side}HeaderRow"))?;
+    load_review_table(&path, sheet, header, false)
+}
+
+pub(crate) fn load_review_table(
+    path: &Path,
+    sheet: Option<&str>,
+    header: Option<usize>,
+    choose_best: bool,
+) -> Result<Arc<Table>, AppError> {
+    let sheet = sheet.filter(|sheet| !sheet.is_empty());
+    if let Some(key) = header.and_then(|row| review_table_key(path, sheet, row)) {
+        if let Some(table) = REVIEW_TABLES.get_or_init(|| Mutex::new(Vec::new()))
+            .lock().ok().and_then(|cache| cache.iter().find(|(cached, _)| *cached == key).map(|(_, table)| Arc::clone(table))) {
+            return Ok(table);
+        }
+    }
+    let before = review_table_key(path, None, 0);
+    let table = Arc::new(load_table(path, sheet, header, choose_best)?);
+    let after = review_table_key(path, None, 0);
+    if before.is_some() && before == after {
+        if let Some(key) = review_table_key(path, table.sheet.as_deref(), table.header_row) {
+            if let Ok(mut cache) = REVIEW_TABLES.get_or_init(|| Mutex::new(Vec::new())).lock() {
+                cache.retain(|(old, _)| old != &key);
+                cache.push((key, Arc::clone(&table)));
+                if cache.len() > 2 { cache.remove(0); }
+            }
+        }
+    }
+    Ok(table)
 }
 
 #[derive(Clone, Debug)]
@@ -120,18 +164,30 @@ pub(crate) fn run_job(
 fn inspect(params: Value) -> Result<Value, AppError> {
     let begin_path = required_path(&params, "beginPath")?;
     let end_path = required_path(&params, "endPath")?;
-    let begin = load_table(
+    let fingerprints = [review_table_key(&begin_path, None, 0), review_table_key(&end_path, None, 0)];
+    let begin = Arc::new(load_table(
         &begin_path,
         params.get("beginSheet").and_then(Value::as_str),
         optional_header(&params, "beginHeaderRow")?,
         true,
-    )?;
-    let end = load_table(
+    )?);
+    let end = Arc::new(load_table(
         &end_path,
         params.get("endSheet").and_then(Value::as_str),
         optional_header(&params, "endHeaderRow")?,
         true,
-    )?;
+    )?);
+    let tables = [&begin, &end].into_iter().zip(fingerprints).filter_map(|(table, before)| {
+        // 读取过程中源文件被改动时，不把可能跨版本的读取结果加入缓存。
+        let before = before?;
+        let after = review_table_key(&table.path, None, 0)?;
+        if before != after { return None; }
+        review_table_key(&table.path, table.sheet.as_deref(), table.header_row)
+            .map(|key| (key, Arc::clone(table)))
+    }).collect();
+    if let Ok(mut cache) = REVIEW_TABLES.get_or_init(|| Mutex::new(Vec::new())).lock() {
+        *cache = tables;
+    }
     let mut bm = suggest_mapping(&begin);
     let mut em = suggest_mapping(&end);
     // 本年折旧、新增方式和新增日期都是期末（file2）属性。
@@ -140,15 +196,15 @@ fn inspect(params: Value) -> Result<Value, AppError> {
     for role in ["currentYearDep", "additionMethod", "additionDate"] {
         bm.insert(role.into(), Value::Null);
     }
-    extend_composite_key(&mut bm, &em);
-    extend_composite_key(&mut em, &bm);
+    extend_composite_key(&mut bm, &em, &begin);
+    extend_composite_key(&mut em, &bm, &end);
     Ok(json!({
         "begin": table_inspection(&begin), "end": table_inspection(&end),
         "suggestedMapping":{"begin":bm,"end":em}, "engine":"rust-fa"
     }))
 }
 
-fn extend_composite_key(mapping: &mut Map<String, Value>, peer: &Map<String, Value>) {
+fn extend_composite_key(mapping: &mut Map<String, Value>, peer: &Map<String, Value>, table: &Table) {
     let key = mapping
         .get("matchKey")
         .and_then(Value::as_str)
@@ -168,12 +224,21 @@ fn extend_composite_key(mapping: &mut Map<String, Value>, peer: &Map<String, Val
     {
         keys.push(Value::String(name.into()));
     }
+    for header in &table.headers {
+        if is_company_id_header(header) && !keys.contains(&Value::String(header.clone())) {
+            keys.push(Value::String(header.clone()));
+        }
+    }
     mapping.insert("matchKeys".into(), Value::Array(keys));
+}
+
+fn is_company_id_header(header: &str) -> bool {
+    matches!(normalize_header(header).as_str(), "公司名称" | "公司名" | "企业名称" | "单位名称" | "主体名称" | "法人名称" | "公司" | "companyname" | "entityname" | "legalentity" | "company")
 }
 
 fn supplement_inspect(params: Value) -> Result<Value, AppError> {
     let path = required_path(&params, "path")?;
-    let table = load_table(
+    let table = load_review_table(
         &path,
         params.get("sheet").and_then(Value::as_str),
         optional_header(&params, "headerRow")?,
@@ -356,6 +421,7 @@ fn infer_supplement_keys_by_samples(
 }
 
 fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
+    let review_started = std::time::Instant::now();
     let settings = params
         .get("__settings")
         .and_then(|value| value.get("llm"))
@@ -382,7 +448,13 @@ fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
     } else {
         "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项结合 samples 核对：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。类别列应为少量重复的分类文本；若已映射类别列的 samples 多数是 Y110、A12-3 这类短字母数字代码而非类别文字，且 headers 中存在值为类别文字的列（例如 资产类型描述），必须返回 action=replace 指向该列，不得 keep。原值/折旧/残值率应为数值，日期列为日期，寿命为月数。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。"
     };
-    let content = request_fa_llm(&settings, system, &payload.to_string())?;
+    // 全量检查，只输出调整项，避免几十条 keep 和重复建议拖慢生成。
+    let key_instruction = if supplement { "" } else { "公司名称、企业名称、单位名称等表头自动识别为现有资产ID角色，不是独立字段角色，不需要重复编号等前置条件。不得因为含公司或名称就排除这些 ID 列。资产ID可多列，保留其他已有ID列；需要补充公司名称 ID 列时在 matchReview 中返回两侧对应的 suggested_file1_columns/suggested_file2_columns。" };
+    let compact_system = format!("{system}\n{key_instruction}{FA_DATE_REVIEW_INSTRUCTION}逐项检查后只输出需要调整的项目；相容的 keep 项、没有可信候选的未映射项不逐条输出。同一调整仅放在 suggestions 或 fieldReviews 中一次。reason 最多一句话。匹配键无需调整时 matchReview 只返回 {{\"action\":\"keep\"}}。");
+    let started = std::time::Instant::now();
+    let text = payload.to_string();
+    let content = request_fa_llm(&settings, &compact_system, &text)?;
+    eprintln!("FA LLM 复核：输入 {} 字节，输出 {} 字节，请求 {:.1} 秒，总计 {:.1} 秒", text.len(), content.len(), started.elapsed().as_secs_f64(), review_started.elapsed().as_secs_f64());
     let parsed = parse_llm_json(&content).ok_or_else(|| {
         error(
             "LLM_RESPONSE_INVALID",
@@ -474,7 +546,10 @@ fn finalize_llm_review(parsed: Value, payload: Value, supplement: bool) -> Value
         .get("action")
         .and_then(Value::as_str)
         .unwrap_or("keep");
-    let message = if auto.is_empty() && reviews.is_empty() && match_action == "keep" {
+    let rejected_dates = reviews.iter().any(|item| item.get("rejectedByDateValidation").and_then(Value::as_bool) == Some(true));
+    let message = if rejected_dates {
+        "LLM 复核完成：已忽略与日期取值不符的建议，当前映射未因此改动；请人工确认真实日期列。"
+    } else if auto.is_empty() && reviews.is_empty() && match_action == "keep" {
         if supplement {
             "补充清单 LLM 复核完成：现有脚本映射无需补充，匹配键已复核。"
         } else {
@@ -800,6 +875,25 @@ fn local_category_code_suspects(
     Vec::new()
 }
 
+pub(crate) const FA_DATE_REVIEW_INSTRUCTION: &str = "日期角色 date/addition_date/disposal_date 的建议必须由样例中的真实年月日或合理 Excel 日期序列值支持。已购、NEW、新建、购入、外购、是否新增、取得方式、资产状态均不是日期；这些状态或方式列不得映射任何日期角色。新增方式 addition_method 与新增日期 addition_date 是独立角色，不得为了补齐未映射字段强行找列；没有可信日期列时保持新增日期未映射。";
+
+fn llm_date_column_is_compatible(payload: &Value, side: &str, column: &str) -> bool {
+    let Some(values) = payload.get(side).and_then(|table| table.get("samples"))
+        .and_then(|samples| samples.get(column)).and_then(Value::as_array) else { return false; };
+    let values = values.iter().filter_map(Value::as_str).map(str::trim)
+        .filter(|value| !value.is_empty() && !matches!(value.to_ascii_lowercase().as_str(), "-" | "/" | "n/a" | "na" | "null" | "无" | "未填写" | "不适用"))
+        .collect::<Vec<_>>();
+    let valid = values.iter().filter(|value| {
+        // parse_fa_date 可将任意小数字解释为序列值；角色复核不能把年限、标志或年份当日期。
+        if let Ok(serial) = value.parse::<f64>() {
+            let compact_date = value.len() == 8 && NaiveDate::parse_from_str(value, "%Y%m%d").is_ok();
+            if !compact_date && !(10_000.0..=80_000.0).contains(&serial) { return false; }
+        }
+        parse_fa_date(value).is_some_and(|date| (1900..=2100).contains(&date.year()))
+    }).count();
+    !values.is_empty() && valid * 5 >= values.len() * 4
+}
+
 pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
     let Some(object) = item.as_object_mut() else {
         return;
@@ -834,6 +928,23 @@ pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
                 object.insert("action".into(), json!("review"));
                 object.remove("suggested_column");
             }
+        }
+    }
+    if matches!(object.get("role").and_then(Value::as_str), Some("date" | "addition_date" | "disposal_date")) {
+        let mut targets = Vec::new();
+        if let (Some(side), Some(column)) = (object.get("file_side").and_then(Value::as_str), object.get("suggested_column").and_then(Value::as_str)) {
+            targets.push((side, column));
+        }
+        if let Some(mapping) = object.get("suggested_mapping").and_then(Value::as_object) {
+            targets.extend(mapping.iter().filter_map(|(side, column)| Some((side.as_str(), column.as_str()?))));
+        }
+        if targets.iter().any(|(side, column)| !llm_date_column_is_compatible(payload, side, column)) {
+            object.remove("suggested_column");
+            object.remove("suggested_mapping");
+            object.insert("confidence".into(), json!(0.0));
+            object.insert("action".into(), json!("review"));
+            object.insert("rejectedByDateValidation".into(), json!(true));
+            object.insert("reason".into(), json!("已忽略日期映射建议：该列样例不是可信日期，请保持未映射或人工选择真实日期列。"));
         }
     }
 }
@@ -944,18 +1055,8 @@ fn resolve_payload_header(payload: &Value, side: &str, candidate: &str) -> Optio
 }
 
 fn main_llm_payload(params: &Value) -> Result<Value, AppError> {
-    let begin = load_table(
-        &required_path(params, "beginPath")?,
-        params.get("beginSheet").and_then(Value::as_str),
-        optional_header(params, "beginHeaderRow")?,
-        false,
-    )?;
-    let end = load_table(
-        &required_path(params, "endPath")?,
-        params.get("endSheet").and_then(Value::as_str),
-        optional_header(params, "endHeaderRow")?,
-        false,
-    )?;
+    let begin = review_table(params, "begin")?;
+    let end = review_table(params, "end")?;
     let mut suspect_mappings = local_category_mismatch_suggestions(
         &begin,
         params.get("beginMapping"),
@@ -1033,7 +1134,7 @@ fn main_llm_side_payload(
     }
     json!({
         "headers": table.headers,
-        "samples": sample_columns(table),
+        "samples": review_sample_columns(table),
         "mapping": mapping,
         "keys": keys,
         "unmappedRoles": unmapped_roles,
@@ -1044,8 +1145,9 @@ fn supplement_llm_payload(params: &Value) -> Result<Value, AppError> {
     let mut payload = Map::new();
     for (name, label) in [("addition", "file1"), ("disposal", "file2")] {
         if let Some(config) = params.get(name).filter(|v| v.get("path").is_some()) {
-            let table = load_supplement(config)?;
-            payload.insert(label.into(),json!({"headers":table.headers,"samples":sample_columns(&table),"mapping":config,"keys":config.get("keys")}));
+            let path = required_path(config, "path")?;
+            let table = load_review_table(&path, config.get("sheet").and_then(Value::as_str), optional_header(config, "headerRow")?, false)?;
+            payload.insert(label.into(),json!({"headers":table.headers,"samples":review_sample_columns(&table),"mapping":config,"keys":config.get("keys")}));
         }
     }
     payload.insert(
@@ -1073,7 +1175,35 @@ pub(crate) fn sample_columns(table: &Table) -> Value {
     Value::Object(map)
 }
 
+pub(crate) fn review_sample_columns(table: &Table) -> Value {
+    let mut samples = sample_columns(table);
+    if let Some(columns) = samples.as_object_mut() {
+        for values in columns.values_mut() {
+            if let Some(values) = values.as_array_mut() {
+                let mut seen = HashSet::new();
+                values.retain(|value| seen.insert(value.clone()));
+                values.truncate(3);
+                for value in values {
+                    if let Some(text) = value.as_str() {
+                        *value = Value::String(text.chars().take(120).collect());
+                    }
+                }
+            }
+        }
+    }
+    samples
+}
+
 pub(crate) fn request_fa_llm(config: &Value, prompt: &str, text: &str) -> Result<String, AppError> {
+    let started = std::time::Instant::now();
+    let result = request_fa_llm_inner(config, prompt, text);
+    eprintln!("FA LLM 调用：提示词 {} 字节，文本 {} 字节，输出 {} 字节，耗时 {:.1} 秒，状态 {}",
+        prompt.len(), text.len(), result.as_ref().map(|content| content.len()).unwrap_or(0),
+        started.elapsed().as_secs_f64(), result.as_ref().map(|_| "成功").unwrap_or_else(|error| error.code.as_str()));
+    result
+}
+
+fn request_fa_llm_inner(config: &Value, prompt: &str, text: &str) -> Result<String, AppError> {
     let api_type = config
         .get("apiType")
         .or_else(|| config.get("api_type"))
@@ -1288,14 +1418,6 @@ fn preview(
     pause.wait()?;
     check_cancel(&cancel)?;
     progress("preview", 4, 4, "匹配预览完成");
-    let counts = result.rows.iter().fold([0usize; 3], |mut acc, row| {
-        match row.source {
-            "两文件都有" => acc[0] += 1,
-            "仅文件1" => acc[1] += 1,
-            _ => acc[2] += 1,
-        }
-        acc
-    });
     // 明细前 N 行对核对没有帮助：审计员要看的是期初→期末的增减变动是否
     // 对得上，所以预览直接给变动汇总（与导出的固定资产变动汇总表同一份
     // 行定义，数值为数字，由前端按千分位渲染）。
@@ -1309,11 +1431,23 @@ fn preview(
         .collect::<Vec<_>>();
     Ok(json!({
         "engine":"rust-fa", "message":format!("完全外连接完成，共 {} 行。", result.rows.len()),
-        "stats":{"rows":result.rows.len(),"both":counts[0],"beginOnly":counts[1],"endOnly":counts[2],
-            "duplicates":{"hasDuplicates":result.duplicate_values>0,"duplicateValueCount":result.duplicate_values,"duplicateRowCount":result.duplicate_rows},
-            "unmatchedAddition":result.unmatched_addition.len(),"unmatchedDisposal":result.unmatched_disposal.len()},
+        "stats": match_statistics(&result),
         "summary":{"columns":categories,"rows":summary_rows}
     }))
+}
+
+fn match_statistics(result: &MergeResult) -> Value {
+    let counts = result.rows.iter().fold([0usize; 3], |mut acc, row| {
+        match row.source {
+            "两文件都有" => acc[0] += 1,
+            "仅文件1" => acc[1] += 1,
+            _ => acc[2] += 1,
+        }
+        acc
+    });
+    json!({"rows":result.rows.len(),"both":counts[0],"beginOnly":counts[1],"endOnly":counts[2],
+        "duplicates":{"hasDuplicates":result.duplicate_values>0,"duplicateValueCount":result.duplicate_values,"duplicateRowCount":result.duplicate_rows},
+        "unmatchedAddition":result.unmatched_addition.len(),"unmatchedDisposal":result.unmatched_disposal.len()})
 }
 
 fn export(
@@ -1388,6 +1522,7 @@ fn export(
     Ok(
         json!({"engine":"rust-fa","message":"完全外连接完成。","exportMessage":export_message,
         "taxAnalysisCompleted":tax_analysis.as_ref().is_some_and(|analysis| analysis.completed),
+        "stats":match_statistics(&result),
         "rows":result.rows.len(),"columns":result_columns(&result,true).len(),"outputPaths":[output.to_string_lossy()]}),
     )
 }
@@ -1991,7 +2126,8 @@ fn pick_match_header(table: &Table, terms: &[&str]) -> Option<String> {
                         .position(|term| !term.is_empty() && normalized.contains(term))
                         .map(|p| 700.0 - p as f64)
                 })
-                .or_else(|| fallback_id_score(&normalized))?;
+                .or_else(|| fallback_id_score(&normalized))
+                .or_else(|| is_company_id_header(header).then_some(100.0))?;
             let values = table
                 .rows
                 .iter()
@@ -2075,6 +2211,7 @@ fn pick_header(headers: &[String], terms: &[&str], id: bool) -> Option<String> {
     None
 }
 fn is_forbidden_id(v: &str) -> bool {
+    if is_company_id_header(v) { return false; }
     [
         "公司", "分类", "类别", "大类", "描述", "名称", "原值", "折旧", "净值", "金额", "日期",
         "时间", "年限", "寿命",
@@ -2083,7 +2220,7 @@ fn is_forbidden_id(v: &str) -> bool {
     .any(|x| v.contains(x))
 }
 fn looks_like_id(v: &str) -> bool {
-    !is_forbidden_id(v)
+    is_company_id_header(v) || (!is_forbidden_id(v)
         && [
             "编号",
             "编码",
@@ -2094,7 +2231,7 @@ fn looks_like_id(v: &str) -> bool {
             "coding",
         ]
         .iter()
-        .any(|x| normalize_header(v).contains(&normalize_header(x)))
+        .any(|x| normalize_header(v).contains(&normalize_header(x))))
 }
 fn looks_like_name(v: &str) -> bool {
     [
@@ -2999,7 +3136,8 @@ fn write_summary_sheet(
                 ws.write_formula_with_format(
                     (r + 2) as u32,
                     2,
-                    format!("=SUM(D{excel_row}:{last_category_col}{excel_row})").as_str(),
+                    Formula::new(format!("=SUM(D{excel_row}:{last_category_col}{excel_row})"))
+                        .set_result(value),
                     &money_format,
                 )
                 .map_err(xlsx_error)?;
@@ -3283,11 +3421,11 @@ fn build_summary_lines(
                 "未标注处置方式",
             );
             let share = -original_change / methods.len() as f64;
-            let allocated_dep = if begin_original.abs() > f64::EPSILON {
+            let allocated_dep = extra_number(row, "处置折旧_辅助_文件1").unwrap_or_else(|| if begin_original.abs() > f64::EPSILON {
                 begin_dep.abs() * ((-original_change) / begin_original.abs()).min(1.0)
             } else {
                 begin_dep.abs()
-            };
+            });
             let dep_share = allocated_dep / methods.len() as f64;
             for method in methods {
                 if !disposal_method_order.contains(&method) {
@@ -3308,14 +3446,8 @@ fn build_summary_lines(
     }
     let add_methods = add_method_order;
     let disposal_methods = disposal_method_order;
-    // Legacy only splits depreciation disposal rows that carry an explicit
-    // method.  An unlabelled disposal remains in the catch-all non-disposal
-    // line, even though its original-value reduction is still shown separately.
-    let dep_methods = disposal_methods
-        .iter()
-        .filter(|method| method.as_str() != "未标注处置方式")
-        .cloned()
-        .collect::<Vec<_>>();
+    // 原值减少已证明资产发生减少，处置方式未填不能把对应折旧藏进非处置变动。
+    let dep_methods = disposal_methods.clone();
     let has_non_disposal_dep = categories.iter().any(|c| {
         let m = &movements[c];
         let disposed = dep_methods
@@ -3524,7 +3656,7 @@ fn write_business_sheets(
 ) -> Result<(), AppError> {
     // Column order and names follow the legacy sheet: 本年折旧 sits before 净值,
     // and the flag column is 已提足折旧 (not 是否已提足折旧).
-    let fa_headers = [
+    let fa_headers = vec![
         "资产类别",
         "固定资产编号",
         "固定资产名称",
@@ -4113,11 +4245,12 @@ fn mapped_life(result: &MergeResult, row: &JoinedRow, params: &Value, side: u8, 
 }
 
 pub(crate) fn parse_fa_date(value: &str) -> Option<NaiveDate> {
-    let text = value
+    let raw = value
         .trim()
         .split([' ', 'T'])
         .next()
-        .unwrap_or("")
+        .unwrap_or("");
+    let text = raw
         .replace(['年', '月'], "-")
         .replace('日', "")
         .replace('.', "-");
@@ -4126,7 +4259,7 @@ pub(crate) fn parse_fa_date(value: &str) -> Option<NaiveDate> {
             return Some(date);
         }
     }
-    if let Ok(serial) = text.parse::<f64>() {
+    if let Ok(serial) = raw.parse::<f64>() {
         return NaiveDate::from_ymd_opt(1899, 12, 30)?
             .checked_add_signed(chrono::Duration::days(serial as i64));
     }
@@ -5100,10 +5233,24 @@ pub(crate) fn write_string_sheet_labelled(
                 // shows the formula instead of the figure and, worse, leaves the
                 // reader unable to see that the total really is the column.
                 _ if value.starts_with('=') && value.len() > 1 => {
+                    let mut formula = Formula::new(value);
+                    // 这两列的确定性结果已知；保留公式也保存正确数值，预览或手动计算模式不会显示假零。
+                    if name == "处置清单_BKD" {
+                        let excel_row = r + 3;
+                        let opening_dep = row.get(7).map(|value| number(value)).unwrap_or(0.0);
+                        if c == 14 && value == &format!("=H{excel_row}") {
+                            formula = formula.set_result(opening_dep.to_string());
+                        } else if c == 8 && value == &format!("=O{excel_row}-H{excel_row}") {
+                            let disposal_dep = row.get(14).map(|value| {
+                                if value == &format!("=H{excel_row}") { opening_dep } else { number(value) }
+                            }).unwrap_or(0.0);
+                            formula = formula.set_result((disposal_dep - opening_dep).to_string());
+                        }
+                    }
                     ws.write_formula_with_format(
                         (r + 2) as u32,
                         c as u16,
-                        value.as_str(),
+                        formula,
                         &number_format,
                     )
                     .map_err(xlsx_error)?;
@@ -6635,6 +6782,154 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let pause = PauseCheckpoint::unpaused(cancel.clone());
         preview(params, &|_, _, _, _| {}, cancel, &pause)
+    }
+
+    #[test]
+    fn review_cache_key_tracks_source_sheet_and_header_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("源.csv");
+        fs::write(&path, "编号\nA1\n").unwrap();
+        let key = review_table_key(&path, Some("明细"), 1).unwrap();
+        assert_ne!(Some(key.clone()), review_table_key(&path, Some("另一页"), 1));
+        assert_ne!(Some(key.clone()), review_table_key(&path, Some("明细"), 2));
+        fs::write(&path, "编号\nA1\nA2\n").unwrap();
+        assert_ne!(Some(key), review_table_key(&path, Some("明细"), 1));
+    }
+
+    #[test]
+    fn review_samples_are_compact_without_a_separate_company_role() {
+        let table = Table {
+            path: "test.csv".into(), sheet: None, sheets: vec![], header_row: 1,
+            headers: vec!["公司名称".into(), "卡片编号".into(), "资产名称".into()],
+            rows: (0..5).map(|index| vec!["测试公司".into(), format!("A{index}"), "长名称".repeat(100)]).collect(),
+        };
+        let mapping = suggest_mapping(&table);
+        assert!(!mapping.contains_key("companyName"));
+        assert_eq!(mapping["matchKey"], "卡片编号");
+        let payload = main_llm_side_payload(&table, Some(&json!({})), None, false);
+        assert_eq!(payload["samples"]["公司名称"], json!(["测试公司"]));
+        assert_eq!(payload["samples"]["卡片编号"].as_array().unwrap().len(), 3);
+        assert_eq!(payload["samples"]["资产名称"][0].as_str().unwrap().chars().count(), 120);
+        assert!(!payload["unmappedRoles"].as_array().unwrap().contains(&json!("company_name")));
+    }
+
+    #[test]
+    fn company_headers_map_directly_to_existing_id_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let begin = dir.path().join("begin.csv");
+        let end = dir.path().join("end.csv");
+        fs::write(&begin, "卡片编号,公司名称,资产名称\nA1,甲公司,服务器\nA2,甲公司,终端\n").unwrap();
+        fs::write(&end, "资产编号,企业名称,资产名称\nA1,甲公司,服务器\nA2,甲公司,终端\n").unwrap();
+        let p = json!({"beginPath":begin,"endPath":end});
+        let inspected = inspect(p).unwrap();
+        assert_eq!(inspected["suggestedMapping"]["begin"]["matchKeys"], json!(["卡片编号", "资产名称", "公司名称"]));
+        assert_eq!(inspected["suggestedMapping"]["end"]["matchKeys"], json!(["资产编号", "资产名称", "企业名称"]));
+        // 不检查编号是否重复或公司数量；只按表头标识 ID 角色。
+        assert!(looks_like_id("公司名称"));
+        assert!(looks_like_id("企业名称"));
+        let table = Table { path: begin, sheet: None, sheets: vec![], header_row: 1,
+            headers: vec!["公司名称".into()], rows: vec![vec!["甲公司".into()]] };
+        assert_eq!(suggest_mapping(&table)["matchKey"], "公司名称");
+    }
+
+    #[test]
+    fn summary_keeps_unlabelled_disposal_depreciation_and_cached_totals() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = params(dir.path());
+        for supplied_dep in [None, Some(22.0), Some(0.0)] {
+            let mut result = merge(&p, &|_,_,_,_| {}, &AtomicBool::new(false)).unwrap();
+            if let Some(dep) = supplied_dep {
+                let row = result.rows.iter_mut().find(|row| row.match_value == "A2").unwrap();
+                row.extra.insert("处置折旧_辅助_文件1".into(), Cell::Number(dep));
+            }
+            let expected_disposal = supplied_dep.unwrap_or(30.0);
+            let (_, rows, _) = build_extended_summary(&result, &p);
+            let disposed = rows.iter().find(|row| row[0] == "累计折旧" && row[1] == "——其中-未标注处置方式");
+            assert_eq!(disposed.map(|row| number(&row[2])).unwrap_or(0.0), expected_disposal);
+            let non_disposal = rows.iter().find(|row| row[1] == "——其中-非处置变动（含计提折旧）").unwrap();
+            assert_eq!(number(&non_disposal[2]) + expected_disposal, 2.0);
+            let path = dir.path().join("summary.xlsx");
+            write_xlsx(&path, &result, &p, &AtomicBool::new(false)).unwrap();
+            let mut workbook = open_workbook_auto(&path).unwrap();
+            let summary = workbook.worksheet_range("固定资产变动汇总表").unwrap();
+            let opening = summary.rows().find(|row| data_string(&row[1]).ends_with("begin.csv累计折旧")).unwrap();
+            assert_eq!(data_string(&opening[2]), "50", "合计活公式也保存正确的年初折旧结果");
+            let disposal = workbook.worksheet_range("处置清单_BKD").unwrap();
+            let row = disposal.rows().nth(2).unwrap();
+            assert_eq!(number(&data_string(&row[14])), expected_disposal);
+            assert_eq!(number(&data_string(&row[8])), expected_disposal - 30.0);
+            let formulas = workbook.worksheet_formula("处置清单_BKD").unwrap();
+            assert_eq!(formulas.get_value((2, 8)).unwrap(), "O3-H3");
+        }
+    }
+
+    #[test]
+    fn date_review_rejects_purchase_status_even_at_full_confidence() {
+        for (role, side) in [("addition_date", "file2"), ("addition_date", "file1"), ("date", "file2"), ("disposal_date", "file2")] {
+            let payload = json!({side: {"headers":["已购"], "samples":{"已购":["NEW 新建", "NEW 新建", "购入"]}}});
+            for mut item in [
+                json!({"role":role,"file_side":side,"suggested_column":"已购","action":"fill","confidence":1.0}),
+                json!({"role":role,"suggested_mapping":{side:"已购"},"action":"replace","confidence":1.0}),
+            ] {
+                sanitize_llm_review_item(&mut item, &payload);
+                assert_eq!(item["confidence"], 0.0);
+                assert!(item.get("suggested_column").is_none());
+                assert!(item.get("suggested_mapping").is_none());
+            }
+            let reviewed = finalize_llm_review(
+                json!({"suggestions":[{"role":role,"file_side":side,"suggested_column":"已购","action":"fill","confidence":1.0}]}),
+                payload,
+                side == "file1" || role == "disposal_date",
+            );
+            assert_eq!(reviewed["autoApplied"], json!([]));
+            assert!(reviewed["message"].as_str().unwrap().contains("已忽略"));
+        }
+    }
+
+    #[test]
+    fn date_review_accepts_dates_and_excel_serials_but_not_flags_or_years() {
+        let payload = json!({"file2":{"headers":["新增日期"], "samples":{"新增日期":["2025-01-02", "45659.0", "20250103"]}}});
+        let mut item = json!({"role":"addition_date","file_side":"file2","suggested_column":"新增日期","action":"fill","confidence":0.95});
+        sanitize_llm_review_item(&mut item, &payload);
+        assert_eq!(item["suggested_column"], "新增日期");
+        assert_eq!(item["confidence"], 0.95);
+        for values in [json!(["0", "1"]), json!(["2024", "2025"]), json!([])] {
+            let payload = json!({"file2":{"samples":{"新增日期":values}}});
+            assert!(!llm_date_column_is_compatible(&payload, "file2", "新增日期"));
+        }
+    }
+
+    #[test]
+    fn review_table_reloads_after_source_or_header_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("资产.csv");
+        fs::write(&path, "编号,名称\nA1,甲\n").unwrap();
+        let old = load_review_table(&path, None, Some(1), false).unwrap();
+        assert_eq!(old.rows.len(), 1);
+        fs::write(&path, "编号,名称\nA1,甲\nA2,乙\n").unwrap();
+        let new = load_review_table(&path, None, Some(1), false).unwrap();
+        assert_eq!(new.rows.len(), 2);
+        assert_eq!(old.rows.len(), 1);
+        let changed_header = load_review_table(&path, None, Some(2), false).unwrap();
+        assert_eq!(changed_header.headers[0], "A1");
+    }
+
+    #[test]
+    fn export_remerges_with_manually_changed_mapping_and_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = params(dir.path());
+        let old = test_preview(p.clone()).unwrap();
+        assert_eq!(old["stats"]["both"], 1);
+        p["beginKeys"] = json!(["资产名称"]);
+        p["endKeys"] = json!(["资产名称"]);
+        p["endMapping"]["originalValue"] = json!("累计折旧");
+        let output = test_export(p).unwrap();
+        assert!(output["outputPaths"].as_array().is_some_and(|paths| !paths.is_empty()));
+        let mut workbook = open_workbook_auto(dir.path().join("FA_List.xlsx")).unwrap();
+        let range = workbook.worksheet_range("FA List").unwrap();
+        let row = range.rows().find(|row| row.get(2).is_some_and(|value| data_string(value) == "甲")).unwrap();
+        assert_eq!(data_string(&row[1]), "甲", "使用新的匹配键");
+        assert_eq!(data_string(&row[6]), "40", "使用人工修改后的原值映射");
     }
 
     fn test_export(params: Value) -> Result<Value, AppError> {

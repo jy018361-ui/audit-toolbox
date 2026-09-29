@@ -1,5 +1,28 @@
 # FA List Rust 迁移覆盖矩阵
 
+## 2026-09-28：公司名称表头识别与处置折旧汇总
+
+- 已实现：公司名称／企业名称／单位名称等表头直接自动映射为现有资产 ID 角色，不检查重复编号或公司数量；LLM 提示词同步此识别口径。独立 companyName 角色、额外输出列和擅加的跨公司重复编号判断已按用户更正撤回。
+- 已实现：累计折旧段也列示“——其中-未标注处置方式”，不再因处置方式未填而把处置折旧隐藏到非处置变动；与处置明细一样，补充清单折旧优先，显式零不回退分摊。合计 SUM 活公式及处置明细中的年初折旧引用、当年折旧差额公式保存正确缓存结果，未重算也能看到已知金额。
+- 已保留：资产编号在主键挑选中优先；现有编号、名称 ID 列不因公司名称识别而被替换，人工可修改 ID 映射。汇总分类、重分类与期初期末余额的计算不变。
+- 未保留：旧版仅拆分已标注处置方式的累计折旧明细，以及上述公式默认零缓存的行为；本次未修改用户提供的原导出文件。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib fa::`（`company_headers_map_directly_to_existing_id_role`、`summary_keeps_unlabelled_disposal_depreciation_and_cached_totals`）、`npx vitest run src/faListUi.test.ts src/FaPageDesign.test.ts`。
+
+## 2026-09-28：日期角色值校验与复核缓存补齐
+
+- 已实现：LLM 的 date／addition_date／disposal_date 建议在真实表头校验后，再验证样例值；至少八成有效样例须为完整日期或合理 Excel 日期序列值。NEW 新建／购入等状态、0／1 标志、单独年份、全空样例不得自动映为日期；失败建议移除目标列并降为零置信度，不更改用户映射。提示词明确新增方式和新增日期独立、没有可信日期列时保持未映射。
+- 已实现：折旧测算及主工具补充清单复核复用最近两张读取表的缓存，并共用去重限长样例；日期卫生校验由主清单／补充／折旧测算共同调用。
+- 已保留：真实年月日、紧凑日期及合理 Excel 日期序列值；可选日期缺失不阻断流程；最终导出仍读取源文件。未把状态字段或仅年月字段强行补成发生日期，也不凭规则推断缺失日期。
+- 未保留：匹配完成后自动把期末文件预填为新增补充清单并跳第二步，现由用户主动选择。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib fa::`、`cargo test --manifest-path src-tauri/Cargo.toml --lib fa_subtools::`、`npx vitest run src/faListUi.test.ts src/FaPageDesign.test.ts`。
+
+## 2026-09-28：复核耗时与人工映射继续流程
+
+- 已实现：主清单复核复用最近 inspect 的两张完整表，规范路径／大小／修改时间／Sheet／标题行不一致时回退读取；缓存仅两张、只在当前进程内保存，导出仍重新读取并合并。主清单样例去重后最多三条、每条最多 120 字；模型全量检查但只返回需要调整的项，避免 keep 明细和重复建议。
+- 已保留：匹配键由用户确认；类别错配本地检测仍用完整表，不存在的模型建议仍需校验；导出使用当前输入重新 merge。
+- 未保留：主清单人工改映射后的硬性“重新匹配才可继续／导出”门禁；旧统计仅供对照，最终导出会重算。未承诺远端请求固定低于 20 秒。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib fa::`、`npx vitest run src/faListUi.test.ts src/FaPageDesign.test.ts`；真实接口测试 `--lib live_fa_review -- --ignored --nocapture`。
+
 ## 2026-09-27：税法类别兜底与最低年限月数
 
 - 已实现：折旧政策对比及 FA List「折旧期间」的税法类别按期末资产类别去重后交给 LLM，同名类别只识别一次，模型不接收该行使用寿命；未知、不合法或缺失的规则 ID，以及 LLM 未启用／调用失败时，统一暂列“与生产经营活动有关的器具、工具、家具等”。表头批注说明默认归类需人工核对；导出完成消息不再报告默认归类数量或 LLM 不可用时的暂列情况。
@@ -63,11 +86,11 @@
 | 使用寿命单元格解析 | `parse_life_cell` 复刻旧版 `parse_life_months_value`：`60`、`60期`、`60月`、`60个月`、`60月份`、`60期数`、`60months` 均解析为 60（金蝶导出普遍带「期」后缀）。此前只走 `f64::parse`，带单位的整列读成 0，`使用寿命(月)` 与 `提足折旧时间` 全表留空、折旧测算公式全部除零失效、且因 `0<=12` 把整本清单拖进 `≤12月卡片明细` | `life_cells_may_carry_their_unit_inline`、`life_with_a_period_unit_keeps_the_depreciation_block_alive` |
 | 年→月换算判定 | `life_scale_for_column` 复刻旧版 `_life_unit_decision`：**按列判一次**（列名含「月」→月；列名含年限类关键词→×12；否则看整列数值——最大值 >70 或出现 36/48/60/120/240 判月；其余仅当全为整数、全部落在常见年限 {3,4,5,6,8,10,15,20,25} 且不含 12/18/24 时才 ×12）。此前是逐行 `值<=50 即视为年`，会把真实的 12 个月工装模具列乘成 144 | `life_cells_may_carry_their_unit_inline` |
 | `≤12月卡片明细` 收录条件 | 寿命须能解析且 `0 < 寿命 <= 12`，空寿命是「未知」不是「短」；旧版 `_build_short_life_cards_df` 亦要求 `notna()` | `life_with_a_period_unit_keeps_the_depreciation_block_alive` |
-| 补充清单的作用范围 | 补充清单只作为 `新增方式/新增时间`（及处置侧对应字段）的取值来源，**不作为收录条件**。界面在文件2 自带新增方式时会把文件2 自身预填成新增补充清单，若以「命中补充清单」判定入表，整本清单都会进 `新增清单_BKD`（本样例 1021 行 vs 应有 418 行） | `addition_sheet_lists_only_cards_whose_original_value_grew` |
+| 补充清单的作用范围 | 补充清单只作为 `新增方式/新增时间`（及处置侧对应字段）的取值来源，**不作为收录条件**。此前界面曾预填整份期末表，2026-09-28 已移除；用户手工选择整份期末表作补充时，也不能按「命中补充清单」把整本都收入 `新增清单_BKD` | `addition_sheet_lists_only_cards_whose_original_value_grew` |
 | 透视表/折旧期间的「信息来源」行 | 这两页的列名是「源列名_工作簿标签」，不含「期末」二字，因此按文件2 的工作簿标签判定期初/期末。此前一律标成「期初」，在底稿上等于对数据来源的错误声明 | `export_contains_contract_sheets` |
 | 行序 | `合并数据` / `FA List` / `新增清单` / `处置清单` 均按旧版合并键字典序稳定排序，`仅文件2` 的卡片因此紧邻同编号的期初卡片，而不是整块追加在末尾 | `fa_list_follows_legacy_merged_key_order_through_export`、`legacy_presentation_contract` |
 | 空结果表述 | `≤12月卡片明细` 无命中时输出单列「提示」+「经检查，期末FA LIST中未发现任何≤12月的资产卡片」，不留空表格 | `legacy_presentation_contract` |
-| 变动汇总表合计列 | 「合计」列写 `=SUM(D{r}:{末列}{r})` 活公式而非固化数值，便于复核时改动分类列即时重算 | `legacy_presentation_contract` |
+| 变动汇总表合计列 | 「合计」列写 `=SUM(D{r}:{末列}{r})` 活公式并保存正确缓存结果，便于复核时改动分类列即时重算；未重新计算也能看到导出时的正确余额 | `legacy_presentation_contract`、`summary_keeps_unlabelled_disposal_depreciation_and_cached_totals` |
 | 大表折旧公式 | 行数超过 `DEPRECIATION_FORMULA_ROW_LIMIT`(20000) 时只写前 `DEPRECIATION_FORMULA_SAMPLE_ROWS`(10) 行公式模板，并在公式块下方给出「导出提速」提示。**阈值已由旧版的 5000 上调**：旧值受限于 Python 生成公式字符串的速度，Rust 写满 1.2 万行仅多耗 10% 时间；保留上限是因为剩余成本在 Excel 侧——两个月份列是 700~900 字符的 EDATE/DATEVALUE 嵌套，1.2 万行即约 10.4 万个公式、FA List 页 30 MB，超大清单会让工作簿无法打开 | `depreciation_formula_block_is_capped_on_large_sheets` |
 | 折旧测算块的可计算性 | 折旧测算块共 8 列，按 `append_depreciation_formulas` 的块内偏移定位（FA List 自身 12 列，块落在 N..U；处置清单列数不同，块整体右移，因此代码里不出现硬编码列字母）。**六个金额列——月折旧额、测算的当年折旧、测算的累计折旧、账面本年折旧、差异_本年折旧、差异_累计折旧——统一套千分位不带小数的 `#,##0`**（仅改显示格式，单元格仍保留公式的完整值）；两个月份列不套金额格式。**月折旧额在原值/寿命缺失、除零等任何算不出来的情形下落 `0` 而不是旧版的空字符串**——空字符串在 Excel 里是文本，会让用户在导出件上自己写的求和/乘算返回 `#VALUE!` 或静默跳过整行。超限大表的「导出提速」提示也从月折旧额列挪到公式块右侧一列，保证该列不混入文本。连带影响：月折旧额恒为数值后，测算的当年/累计折旧里 `LEN(...)=0` 的空值保护不再触发，这两列（以及由它们相减得到的两个差异列）也随之恒为数值。超过行数上限、本就没写公式的那些行仍留空白（空白在 Excel 里可参与运算，不是文本），这是大表提速的既定行为。**仅通过合成回归，尚未用真实脱敏底稿验证** | `depreciation_block_money_columns_are_numeric_thousands` |
 | 金额精度 | `round_money` 用于变动汇总表、透视表、折旧期间：1.5 万行浮点累加会留下 `3015186049.229984` 与 `1.1e-05` 量级的残差行，在审计底稿上会被读成真实余额；FA List/处置的测算列公式补 `ROUND(...,2)` | 汇总与透视相关测试 |

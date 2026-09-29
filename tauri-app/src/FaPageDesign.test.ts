@@ -117,4 +117,24 @@ describe("固定资产与凭证页视觉契约", () => {
     expect(page).toContain('"fa.key_check"');
     expect(page).toContain("keyPairingGeneration");
   });
+
+  it("FA 多 Sheet 工作簿不自动复核，等用户确认 Sheet 后手动发起", () => {
+    const page = source("FaListPage");
+    // 复核按钮是手动主入口：还没有复核结果时显示「读表并复核」，
+    // 已有结果后恢复「LLM 重新复核」。
+    expect(page).toContain("读表并复核");
+    expect(page).toContain('"LLM 重新复核"');
+    // 多 Sheet 暂停提示出现在复核按钮/复核面板附近，含两侧具体张数。
+    expect(page).toContain("multiSheetReviewPending");
+    expect(page).toContain("期初 {beginSheetTotal} 张、期末 {endSheetTotal} 张");
+    expect(page).toContain("确认两侧 Sheet");
+    // 自动复核三重门槛：非历史草稿恢复、非 preserveMappings 重读、
+    // 两侧可见 Sheet 均 ≤1 张（判定收在 faListUi 的纯函数里单测覆盖）。
+    expect(page).toContain("!match &&");
+    expect(page).toContain("!overrides?.preserveMappings &&");
+    expect(page).toContain("shouldAutoReviewFaInspection(");
+    // Sheet/标题行变更后旧复核作废：reinspectMain 先清空复核状态再重读，
+    // 不拿 A 表的复核结论误导 B 表。
+    expect(page).toContain("A 表的复核结论不能拿来背书 B 表");
+  });
 });

@@ -20,6 +20,7 @@ import {
   planFaSupplementChanges,
   sanitizeFaBeginMapping,
   shouldAutoApplyFa,
+  shouldAutoReviewFaInspection,
   shouldShowFaAdditionFields,
   shouldShowFaPreviewWorkspace,
 } from "./faListUi";
@@ -69,6 +70,18 @@ describe("FA List migration parity", () => {
     expect(isFaMatchDisabled(true, false)).toBe(false);
     expect(isFaMatchDisabled(false, false)).toBe(true);
     expect(isFaMatchDisabled(true, true)).toBe(true);
+  });
+
+  it("两侧可见 Sheet 均 ≤1 张时保持 inspect 后自动 LLM 复核", () => {
+    expect(shouldAutoReviewFaInspection(0, 0)).toBe(true);
+    expect(shouldAutoReviewFaInspection(1, 1)).toBe(true);
+    expect(shouldAutoReviewFaInspection(1, 0)).toBe(true);
+  });
+
+  it("任一侧可见 Sheet 多于 1 张时不自动复核，等用户确认后手动发起", () => {
+    expect(shouldAutoReviewFaInspection(2, 1)).toBe(false);
+    expect(shouldAutoReviewFaInspection(1, 2)).toBe(false);
+    expect(shouldAutoReviewFaInspection(3, 5)).toBe(false);
   });
 
   it("clears a prior sample's save target when either source workbook changes", () => {

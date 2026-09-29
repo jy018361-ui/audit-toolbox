@@ -28,6 +28,7 @@ import {
   planFaLlmChanges,
   planFaSupplementChanges,
   sanitizeFaBeginMapping,
+  shouldAutoReviewFaInspection,
   shouldShowFaAdditionFields,
   shouldShowFaPreviewWorkspace,
 } from "./faListUi";
@@ -1069,7 +1070,18 @@ function FaCardListPage() {
       // inspection。首次读取仍在结果区显示文件结构摘要。
       if (!overrides?.preserveMappings) setResult(value);
       if (overrides?.preserveMappings) markResultStale();
-      if (!match)
+      // 自动复核三重门槛：非历史草稿恢复（match）、非 preserveMappings
+      // 重读、两侧可见 Sheet 均 ≤1 张（判定收在 faListUi
+      // 的 shouldAutoReviewFaInspection）。多 Sheet 工作簿自动选表可能
+      // 选错，停下来等用户确认 Sheet 后手动点「读表并复核」。
+      if (
+        !match &&
+        !overrides?.preserveMappings &&
+        shouldAutoReviewFaInspection(
+          value.begin.sheets.length,
+          value.end.sheets.length,
+        )
+      )
         void reviewLlm({
           beginPath: bPath,
           endPath: ePath,
@@ -1126,6 +1138,15 @@ function FaCardListPage() {
       }
     }
     markResultStale();
+    // Sheet/标题行一换，复核对象就变了：A 表的复核结论不能拿来背书 B 表。
+    // 递增代数丢弃在途的复核结果并清空复核状态，由用户确认新表后手动
+    // 重新发起（preserveMappings 重读本身也不再自动复核）。
+    llmReviewGeneration.current += 1;
+    setLlmBusy(false);
+    setLlmReview(undefined);
+    setLlmChanges([]);
+    setLlmPending([]);
+    setLlmBypassed(false);
     const nextBeginSheet = side === "begin" ? (next.sheet ?? beginSheet) : beginSheet;
     const nextEndSheet = side === "end" ? (next.sheet ?? endSheet) : endSheet;
     const nextBeginHeader =
@@ -2377,6 +2398,19 @@ function FaCardListPage() {
     (!disposalInspect.sheets.length ||
       (disposal.sheet && disposalInspect.selectedSheet === disposal.sheet)),
   );
+  // —— 多 Sheet 暂停提示 ——
+  // 任一侧可见 Sheet 多于 1 张且尚未复核时，inspect 不再自动送 LLM，
+  // 改为提示用户先确认两侧 Sheet，再手动点「读表并复核」发起；复核开始
+  // （llmBusy）或已有结论（llmReview）后提示不再显示。
+  const beginSheetTotal = inspection?.begin.sheets.length ?? 0;
+  const endSheetTotal = inspection?.end.sheets.length ?? 0;
+  const multiSheetReviewPending = Boolean(
+    inspection &&
+      !llmReview &&
+      !llmBusy &&
+      !llmBypassed &&
+      (beginSheetTotal > 1 || endSheetTotal > 1),
+  );
   return (
     <>
       <StepIndicator
@@ -2592,7 +2626,7 @@ function FaCardListPage() {
                     disabled={busy}
                     onClick={() => void rereadMain()}
                   >
-                    {busy ? "正在读取表格…" : "读取表格 + LLM 复核"}
+                    {busy ? "正在读取表格…" : "重新读取表格"}
                   </Button>
                   <Button
                     variant="secondary"
@@ -2600,7 +2634,11 @@ function FaCardListPage() {
                     disabled={!inspection || busy || llmBusy}
                     onClick={() => void reviewLlm()}
                   >
-                    {llmBusy ? "LLM 正在复核…" : "LLM 重新复核"}
+                    {llmBusy
+                      ? "LLM 正在复核…"
+                      : llmReview
+                        ? "LLM 重新复核"
+                        : "读表并复核"}
                   </Button>
                   {busy && job ? (
                     <Button
@@ -2637,6 +2675,12 @@ function FaCardListPage() {
                     </>
                   )}
                 </div>
+                {multiSheetReviewPending && (
+                  <p className="hint" role="status">
+                    检测到多张工作表（期初 {beginSheetTotal} 张、期末 {endSheetTotal} 张），自动选表可能选错；请确认两侧 Sheet
+                    与标题行无误后，点击「读表并复核」发起 LLM 复核。
+                  </p>
+                )}
                 {inspection && (
                   <>
                     {(llmBusy || llmReview) && (

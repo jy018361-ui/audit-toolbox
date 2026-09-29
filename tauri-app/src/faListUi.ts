@@ -36,6 +36,18 @@ export function isFaMatchDisabled(
   return !hasInspection || businessJobBusy;
 }
 
+/// 主清单读取完成后是否自动发起 LLM 复核。
+///
+/// 两侧工作簿的可见 Sheet 都 ≤1 张时没什么可选错，保持自动复核；任一侧
+/// 多 Sheet 时自动选表可能选错（把封面/汇总页当明细），应停下来等用户
+/// 确认两侧 Sheet 后手动点「读表并复核」。
+export function shouldAutoReviewFaInspection(
+  beginSheetCount: number,
+  endSheetCount: number,
+): boolean {
+  return beginSheetCount <= 1 && endSheetCount <= 1;
+}
+
 export function faOutputPathAfterSourceSelection(
   currentOutputPath: string,
   previousSourcePath: string,

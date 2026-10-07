@@ -1,5 +1,48 @@
 # 账表映射统一方案
 
+## 2026-10-07：汇兑辅助联动回归映射阶段自动验证
+
+- 汇兑损益的辅助核算联动验证不再等第一步「下一步」：TB 映射了辅助字段且 TB/JE 齐备时，映射阶段即按联动键后台自动验证一次，非 verified 结论当场撤掉 TB 辅助映射（沿用公共 `dropUnlinkedTbAuxiliary`），与存款／借款同口径。此条调整 2026-09-23「辅助验证回归映射阶段，业务确认页不再隐式扫 JE」中汇兑的时机约定；该条其余约定（TB 未映射辅助零扫描、计划指纹复用、计算侧兜底重验）不变，FA TBJE 与 TBJE 完整性核对维持原时机。
+- 「下一步」门禁复用同键结论；同键并发去重（后台与门禁同时到达只发一次请求），新键发起后旧键迟到结果按代号丢弃，不覆盖新状态。后台验证失败静默、由门禁兜底报错。回归：`npx vitest run src/FxAuditPage.test.ts src/FxAuditPageUi.test.tsx`。
+
+## 2026-10-07：单一期末方向的 TB 本期发生额提升
+
+- TB 只有期末方向列、期初净额没有方向时，本期借贷发生额提升前先按整表统一的贷方符号口径，用公共 `balance_sign_from_equation` 逐行核对期初余额的正负号；原始余额幅值不吻合的行仍计为不平，不放宽至少三行与 95% 的提升门槛。期内由借转贷的科目可得到与期末不同的期初方向，不把方向列整列共享。
+- 只在期初或期末单侧有有效方向且另一侧为净额时推断；两侧已有方向、余额借贷分列、无有效方向锚点均沿用原判定。整表贷方口径仍由公共 TB 投票决定，不逐行切换借加贷／借减贷。汇兑、存款、借款共用 `fx::promote_period_movement_rows`。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 单一期末方向含期间转向时本期发生额仍可提升`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 本期发生额`。
+
+## 2026-10-06：辅助维度键值域静默校验泛化接入；锚点命中率统计字段停发
+
+- 前一轮已把主体值域静默校验泛化为 `ledger_mapping::reconcile_key_domains(role, …)`（`reconcile_entity_domains` 成为其薄包装），汇兑（fx.rs）、存款（deposit_interest.rs）、借款（loan_interest.rs）在启用各自辅助维度键（`auxiliary`／`loanId`）处均按同一口径接线：代码/名称错配静默换列或摘键退主体＋科目，不产生用户提示。补记于此，公共引擎本体与判定行为见 TBJE_CHECK.md 2026-09-29「可选键值域处理全部转为后台静默规则」条目。
+- 按用户决策撤除辅助核算联动的展示统计：`ledger.auxiliary_link` 及 TBJE／存款汇总里对外 JSON 的 `anchorHits`／`anchorTotal`／`coverage` 三个字段全链路停发（前端已先行撤除消费）。此条更新下方 2026-09-13「辅助核算联动（锚点反查）」条目中「返回 status／column／anchorHits／anchorTotal／coverage／competingColumns／warnings」的旧表述，现返回 status／column／competingColumns／warnings（groups 明细含 entity／account／status／column／tbColumn 等）。
+- 锚点命中计数仍保留在公共 `AuxiliaryLinkVerdict` 内部，继续驱动 `verified`／`partialCoverage`／`ambiguous` 状态与整组降级判定及其提示文案；`auxiliary_link_verdict` 纯判定逻辑与锚点覆盖率择优口径（2026-09-16 条目）不变。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib`（1033 通过／0 失败），分模块过滤命令见 TBJE_CHECK.md 2026-10-06 条目。
+
+## 2026-09-29：本期发生额勾稽保留空白单边行
+
+- 汇兑、存款、借款共用的 TB 本期发生额提升逻辑，在借贷分列某侧空白时将该侧视为零，仍让整行参与期初＋发生额＝期末的校验；无法解析的非空值不放行。金蝶真实余额表因此从16/17有效行提升到25/26，通过原有95%门槛；勾稽不符的356,000仍在后续余额滚动门槛呈现。对应回归见 `cargo test --manifest-path src-tauri/Cargo.toml --lib 本期发生额`。
+
+## 2026-09-29：本期发生额提升复用公共贷方符号判定
+
+- 修复本期发生额提升固定按借减贷校验的问题：对有效行使用公共 TB 符号投票，整张表统一按借减贷或借加贷勾稽，再决定是否提升到本年累计角色。上实城开样例含正数贷方冲回与负数贷方，现按借加贷处理。
+- 影响入口：汇兑损益、存款利息、借款利息；TBJE 完整性核对复用 fx.inspect_tb，FA TB＋JE 复用存款／汇兑识别，均受同一修复覆盖。没有修改已经折算为标准借贷侧金额的计算公式。
+- 保留边界：已有任一累计列不覆盖；少于三条有效行不提升；三至九条全部勾稽，十条以上至少 95%；公式逐表判定，不逐行择优，未通过的本期列仍不冒充累计列。
+- 原始件只读验收：设置 PERIOD_PROMOTION_SAMPLE 为上实城开 TB 路径后运行 cargo test --manifest-path src-tauri/Cargo.toml --lib 本期发生额真实上实城开各入口验收 -- --ignored；分别断言汇兑、存款、借款返回累计借贷映射。
+- 本次验证同时修正 TBJE 主体值域采样的临时数组借用生命周期编译错误，仅复制列索引，业务判定不变。
+- 回归：cargo test --manifest-path src-tauri/Cargo.toml --lib 本期发生额（带符号与红字混合、既有借减贷、行数与通过率门槛、混合口径拒绝、各工具实际 Excel 导入入口）。
+
+## 2026-09-29：映射完整性提示使用公共状态
+
+- 公共 MappingPanel 接收 formComplete；形态不完整或工具必填项未补齐时使用黄色提示，不沿用绿色成功胶囊。汇兑、存款、借款、FA、TBJE、看账调用方同步传入形态完整性。此状态只表示字段方案适配，不代替数据方向与勾稽校验。
+- 汇兑形态展示按完整借贷分列优先、净额次之的实际金额取数方案判断，冗余角色不使前后校验矛盾；公共借贷符号内核不变。
+- JE六种分录金额角色明确排除“余额／餘額／balance”列；TB余额角色保持原有识别。金蝶实际序时账中的余额列曾被原币／本位币短别名误命中，现同时约束脚本识别与公共复核。
+
+## 2026-09-28：LLM 复核输出精简
+
+- 公共 TB／JE 单表与联合复核，以及看账／正负数凭证标记仍要求每个已有角色返回带原始列名的 roleReviews，继续检查复核覆盖完整性。仅限制 keep 的理由为简短样例依据、其他调整为一句关键依据，避免重复输出表头、样例及规则；未取消 keep 记录或把缺失记录推定为已复核。
+- 共用请求记录输入／输出字节数、耗时及状态码，日志不包含正文、密钥或请求地址。账表复核仍从前端已读取的最多八行样例构造请求，不额外重读完整 Excel；批量 TBJE 既有两组并发不变。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib audipick::`、`npx vitest run src/components/LedgerReviewAll.test.tsx src/ledgerMappingLabels.test.ts`。
+
 ## 2026-09-27：TBJE 完整性核对单独恢复原科目匹配
 
 - TBJE 完整性使用专用 `AccountMatchPolicy::for_tbje_integrity`，恢复两侧同码均多名称且名称交集达到六成才使用复合键的旧规则；否则按编码核对。严格缺码名称回退与辅助验证规则保留。

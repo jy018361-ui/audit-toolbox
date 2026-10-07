@@ -60,6 +60,7 @@ const inspect = (kind: "tb" | "je") => ({
   headerDepth: 1,
   entities: inspectionEntities,
   accounts: kind === "tb" ? ["1002 银行存款"] : ["1002 银行存款"],
+  accountRoleSuggestions: { "1002 银行存款": "cash" },
   suggestedMapping:
     kind === "tb"
       ? {
@@ -122,9 +123,6 @@ beforeEach(() => {
         tbAuxMapped: false,
         status: "unmapped",
         column: null,
-        anchorHits: 0,
-        anchorTotal: 0,
-        coverage: 0,
         competingColumns: [],
         warnings: [],
       };
@@ -140,6 +138,27 @@ beforeEach(() => {
     if (method === "fx.inspect_je") return inspect("je");
     throw new Error(`unexpected ${method}`);
   });
+});
+
+it("JE 金额映射不完整时第一步显示黄色并阻止继续", async () => {
+  const original = mock.engineCall.getMockImplementation()!;
+  mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
+    if (method === "fx.inspect_je") {
+      const value = inspect("je");
+      const mapping = { ...value.suggestedMapping };
+      delete mapping.foreignAmount;
+      return { ...value, suggestedMapping: mapping };
+    }
+    return original(method, params);
+  });
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  const note = await screen.findByText("汇兑必填字段待补齐");
+  expect(note).toHaveClass("mapping-form-note-incomplete");
+  expect(screen.getByText(/尚未映射：.*原币/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "下一步：测算与底稿" })).not.toBeInTheDocument());
+  expect(mock.jobStart).not.toHaveBeenCalled();
 });
 
 it.each([
@@ -183,8 +202,11 @@ it.each([
       message,
       severity: phase === "failed" ? "error" : phase === "completed" ? "success" : "warning",
       outputPaths: [],
+      ...(phase === "completed" ? {} : { result: { error: { userMessage: message } } }),
     });
   });
+  expect(screen.queryByText("测算结果可供复核")).not.toBeInTheDocument();
+  expect(screen.queryByText("汇兑损益测算结果")).not.toBeInTheDocument();
   expect((await screen.findAllByText(new RegExp(message))).length).toBeGreaterThan(0);
 });
 
@@ -254,7 +276,7 @@ it("客户隐含汇率和重复的未实现模块不在预览界面展示", asyn
   expect(screen.queryByText("7.700000")).not.toBeInTheDocument();
 });
 
-it("上传就绪不扫描JE，第一步下一步才生成并复用辅助计划", async () => {
+it("上传就绪即后台自动验证辅助计划，下一步与往返切步直接复用", async () => {
   inspectionAuxiliary = true;
   render(<FxAuditPage tool={tool} />);
   await uploadBothSources();
@@ -262,16 +284,17 @@ it("上传就绪不扫描JE，第一步下一步才生成并复用辅助计划",
     mock.engineCall.mock.calls.filter(
       ([method]) => method === "ledger.auxiliary_link",
     ).length;
-  expect(auxiliaryCalls()).toBe(0);
-
-  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
-  await screen.findByRole("button", { name: "下一步：测算与底稿" });
-  expect(auxiliaryCalls()).toBe(1);
+  // 映射阶段（未点「下一步」）就自动跑一次联动验证：与存款／借款同口径。
+  await waitFor(() => expect(auxiliaryCalls()).toBeGreaterThanOrEqual(1));
   expect(
     mock.engineCall.mock.calls.some(
       ([method]) => method === "fx.validate_currency_mapping",
     ),
   ).toBe(false);
+
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  await screen.findByRole("button", { name: "下一步：测算与底稿" });
+  expect(auxiliaryCalls()).toBe(1);
 
   // 底部「返回」再「下一步」：同一来源/映射计划直接复用。
   fireEvent.click(screen.getByRole("button", { name: "返回上传与识别" }));
@@ -285,6 +308,46 @@ it("上传就绪不扫描JE，第一步下一步才生成并复用辅助计划",
   fireEvent.click(screen.getByRole("button", { name: "2 TB科目类型确认" }));
   await screen.findByRole("button", { name: "下一步：测算与底稿" });
   expect(auxiliaryCalls()).toBe(1);
+});
+
+it("映射阶段联动验证不过时当场撤掉TB辅助映射", async () => {
+  inspectionAuxiliary = true;
+  const original = mock.engineCall.getMockImplementation()!;
+  mock.engineCall.mockImplementation(async (method: string) => {
+    if (method === "ledger.auxiliary_link")
+      return {
+        tbAuxMapped: true,
+        status: "noMatch",
+        column: null,
+        competingColumns: [],
+        warnings: ["TB 已映射辅助核算，但 JE 无对应列，勾稽将按主体＋科目进行。"],
+      };
+    return original(method);
+  });
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  await waitFor(() =>
+    expect(
+      mock.engineCall.mock.calls.filter(
+        ([method]) => method === "ledger.auxiliary_link",
+      ).length,
+    ).toBe(1),
+  );
+  // 撤销落在正式测算参数上：TB 辅助映射与辅助计划都不再进入任务。
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  fireEvent.click(await screen.findByRole("button", { name: "下一步：测算与底稿" }));
+  fireEvent.change(await screen.findByLabelText("资产负债表日"), { target: { value: "20251231" } });
+  fireEvent.click(await screen.findByRole("button", { name: "测算预览" }));
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenCalledWith("fx.preview", expect.anything()),
+  );
+  const payload = mock.jobStart.mock.calls.find(
+    ([method]) => method === "fx.preview",
+  )![1] as Record<string, unknown>;
+  expect(
+    (payload.tbMapping as Record<string, unknown>).auxiliary,
+  ).toBeUndefined();
+  expect(payload.auxiliaryPlan).toBeUndefined();
 });
 
 it("TB 未映射辅助字段时第一步下一步不调用辅助验证", async () => {
@@ -321,6 +384,10 @@ it("多主体账套第二步出现主体列，单主体不出现", async () => {
   await screen.findByRole("button", { name: "下一步：测算与底稿" });
   const singleHead = document.querySelector(".fx-accounts-head") as HTMLElement;
   expect(singleHead).toBeTruthy();
+  const roleSelect = document.querySelector(".fx-accounts label select") as HTMLSelectElement;
+  expect(roleSelect.value).toBe("cash");
+  expect(within(roleSelect).getByRole("option", { name: "货币性资产—货币资金" })).toBeInTheDocument();
+  expect(within(roleSelect).getByRole("option", { name: "货币性资产—非货币资金" })).toBeInTheDocument();
   expect(within(singleHead).queryByText("主体")).not.toBeInTheDocument();
   expect(document.querySelector(".fx-entity-cell")).toBeNull();
 });
@@ -448,4 +515,34 @@ it("导出汇率走任务通道并回报文件位置", async () => {
   expect(await screen.findByText(/汇率已导出/)).toBeVisible();
   // 汇率导出的完成事件不得混进测算结果状态。
   expect(screen.queryByText("Excel底稿已生成；测算预览结果已保留在下方。")).not.toBeInTheDocument();
+});
+
+/** 回归（单边上传）：只传 JE 时 TB 槽位不能只剩一句提示——空态卡片
+ *  必须带「补充上传 TB」按钮，点完另一侧立即补齐；反向同理。 */
+it("只上传单边文件时空槽提供补充上传按钮并可直接补齐", async () => {
+  mock.pickPath
+    .mockResolvedValueOnce(["je.xlsx"])
+    .mockResolvedValueOnce("tb.xlsx");
+  mock.engineCall.mockImplementation(async (method: string) => {
+    if (method === "ledger.forms") return [];
+    if (method === "ledger.review_pair_mapping")
+      return { tbChanges: [], jeChanges: [] };
+    if (method === "ledger.check_mapping_alignment")
+      return { errors: [], warnings: [], fix: null };
+    if (method === "fx.classify_source") return classify("je");
+    if (method === "fx.inspect_je") return inspect("je");
+    if (method === "fx.inspect_tb") return inspect("tb");
+    throw new Error(`unexpected ${method}`);
+  });
+
+  render(<FxAuditPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "重新选择 JE、TB 文件" }));
+  expect(await screen.findByText("已识别：JE 凭证明细")).toBeVisible();
+  // TB 空槽：有“还需要 TB”的空态说明，也有可点的补充按钮。
+  expect(screen.getByText("还需要 TB")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "补充上传 TB" }));
+  expect(await screen.findByText("已识别：TB 科目余额表")).toBeVisible();
+  expect(
+    screen.queryByRole("button", { name: "补充上传 TB" }),
+  ).not.toBeInTheDocument();
 });

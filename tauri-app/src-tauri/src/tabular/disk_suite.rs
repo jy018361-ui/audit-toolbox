@@ -1711,8 +1711,12 @@ pub(super) fn write_suite(
             .query_map([], |r| {
                 Ok(vec![
                     r.get(0)?,
-                    r.get::<_, Option<f64>>(3)?.map(format_number).unwrap_or_default(),
-                    r.get::<_, Option<f64>>(4)?.map(format_number).unwrap_or_default(),
+                    r.get::<_, Option<f64>>(3)?
+                        .map(format_number)
+                        .unwrap_or_default(),
+                    r.get::<_, Option<f64>>(4)?
+                        .map(format_number)
+                        .unwrap_or_default(),
                     format_number(r.get(1)?),
                     r.get::<_, i64>(2)?.to_string(),
                 ])
@@ -1721,7 +1725,13 @@ pub(super) fn write_suite(
             .collect::<Result<Vec<_>, _>>()
             .map_err(db_error)?;
         PivotResult {
-            headers: vec!["科目名称".into(), "借方金额".into(), "贷方金额".into(), "净额".into(), "行数".into()],
+            headers: vec![
+                "科目名称".into(),
+                "借方金额".into(),
+                "贷方金额".into(),
+                "净额".into(),
+                "行数".into(),
+            ],
             rows,
             row_field_count: 1,
         }
@@ -2053,8 +2063,14 @@ pub(super) fn write_suite(
                 index,
                 &[
                     row.get(0).map_err(db_error)?,
-                    row.get::<_, Option<f64>>(3).map_err(db_error)?.map(format_number).unwrap_or_default(),
-                    row.get::<_, Option<f64>>(4).map_err(db_error)?.map(format_number).unwrap_or_default(),
+                    row.get::<_, Option<f64>>(3)
+                        .map_err(db_error)?
+                        .map(format_number)
+                        .unwrap_or_default(),
+                    row.get::<_, Option<f64>>(4)
+                        .map_err(db_error)?
+                        .map(format_number)
+                        .unwrap_or_default(),
                     format_number(row.get(1).map_err(db_error)?),
                     row.get::<_, i64>(2).map_err(db_error)?.to_string(),
                 ],

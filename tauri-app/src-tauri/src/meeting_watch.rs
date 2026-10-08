@@ -71,9 +71,7 @@ fn infer_initial_state(contents: &str) -> CallState {
 }
 
 fn log_dir_under(local_app_data: &Path) -> PathBuf {
-    local_app_data.join(
-        r"Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\Logs",
-    )
+    local_app_data.join(r"Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\Logs")
 }
 
 /// 新版 Teams 日志目录是否存在（不存在只说明没装新版 Teams，不算错误）。
@@ -95,10 +93,7 @@ fn newest_slimcore_log(dir: &Path) -> Option<PathBuf> {
             .metadata()
             .and_then(|meta| meta.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        if best
-            .as_ref()
-            .is_none_or(|(time, _)| modified >= *time)
-        {
+        if best.as_ref().is_none_or(|(time, _)| modified >= *time) {
             best = Some((modified, entry.path()));
         }
     }
@@ -176,13 +171,14 @@ impl MeetingState {
         })
     }
 
-    pub(crate) fn begin_recording(
-        &self,
-        data_dir: &Path,
-    ) -> Result<Value, AppError> {
+    pub(crate) fn begin_recording(&self, data_dir: &Path) -> Result<Value, AppError> {
         let mut guard = self.recording.lock();
         if guard.is_some() {
-            return Err(record_error("MEETING_RECORD_BUSY", "已有会议录音正在进行。", None));
+            return Err(record_error(
+                "MEETING_RECORD_BUSY",
+                "已有会议录音正在进行。",
+                None,
+            ));
         }
         let active = Arc::new(crate::meeting_record::start(data_dir)?);
         let summary = crate::meeting_record::recording_summary(&active);
@@ -191,11 +187,9 @@ impl MeetingState {
     }
 
     pub(crate) fn finish_recording(&self) -> Result<Value, AppError> {
-        let active = self
-            .recording
-            .lock()
-            .take()
-            .ok_or_else(|| record_error("MEETING_RECORD_NONE", "当前没有进行中的会议录音。", None))?;
+        let active = self.recording.lock().take().ok_or_else(|| {
+            record_error("MEETING_RECORD_NONE", "当前没有进行中的会议录音。", None)
+        })?;
         crate::meeting_record::finalize(active)
     }
 }
@@ -227,7 +221,9 @@ fn watch_loop(app: &tauri::AppHandle, state: &Arc<MeetingState>) {
 /// 工具页手动开始的录音会议一结束就悬着，用户还得回去手点停止。
 fn auto_finalize_recording(app: &tauri::AppHandle, state: &Arc<MeetingState>) {
     let active = state.recording.lock().take();
-    let Some(active) = active else { return; };
+    let Some(active) = active else {
+        return;
+    };
     let at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     match crate::meeting_record::finalize(active) {
         Ok(summary) => {
@@ -268,14 +264,22 @@ fn poll_once(
         return;
     };
     let rolled = current.as_ref().is_none_or(|(path, _)| *path != file);
-    let mut offset = if rolled { 0 } else { current.as_ref().map(|(_, off)| *off).unwrap_or(0) };
+    let mut offset = if rolled {
+        0
+    } else {
+        current.as_ref().map(|(_, off)| *off).unwrap_or(0)
+    };
     let length = fs::metadata(&file).map(|meta| meta.len()).unwrap_or(0);
     if length < offset {
         // 文件被截断（日志清理），从头再来。
         partial.clear();
         offset = 0;
     }
-    let cap = if rolled { INITIAL_SCAN_CAP } else { MAX_READ_PER_POLL };
+    let cap = if rolled {
+        INITIAL_SCAN_CAP
+    } else {
+        MAX_READ_PER_POLL
+    };
     if length <= offset && !rolled {
         if let Some(entry) = current.as_mut() {
             entry.1 = offset;
@@ -322,7 +326,14 @@ fn poll_once(
             if let Some(event) = advance(call_state, line) {
                 let started = event == CallEvent::Started;
                 in_call.store(started, Ordering::Relaxed);
-                emit_event(app, if started { "call_started" } else { "call_ended" });
+                emit_event(
+                    app,
+                    if started {
+                        "call_started"
+                    } else {
+                        "call_ended"
+                    },
+                );
                 if !started {
                     auto_finalize_recording(app, state);
                 }
@@ -376,7 +387,10 @@ mod tests {
 
     #[test]
     fn infer_state_detects_ongoing_meeting() {
-        assert_eq!(infer_initial_state(&format!("{NOISE_LINE}\n{START_LINE}\n")), CallState::InCall);
+        assert_eq!(
+            infer_initial_state(&format!("{NOISE_LINE}\n{START_LINE}\n")),
+            CallState::InCall
+        );
         assert_eq!(
             infer_initial_state(&format!("{START_LINE}\n{NOISE_LINE}\n{END_LINE}\n")),
             CallState::Idle
@@ -387,8 +401,9 @@ mod tests {
     #[test]
     fn log_dir_points_at_new_teams_package() {
         let dir = log_dir_under(Path::new(r"C:\Users\demo\AppData\Local"));
-        assert!(dir
-            .to_string_lossy()
-            .contains(r"Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\Logs"));
+        assert!(
+            dir.to_string_lossy()
+                .contains(r"Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\Logs")
+        );
     }
 }

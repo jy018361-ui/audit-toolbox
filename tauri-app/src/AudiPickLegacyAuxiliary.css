@@ -1,4 +1,9 @@
 .apl-page { color: var(--apl-text, var(--ink-strong)); }
+.apl-config-card { min-width: 0; margin-inline: 0; }
+.apl-model-source, .apl-inherited-model { margin-top: 16px; overflow-wrap: anywhere; }
+.apl-inherited-model { padding: 16px; border: 1px solid var(--apl-border); border-radius: 8px; background: var(--apl-panel-2); }
+.apl-inherited-model p { margin: 8px 0 0; }
+.apl-config-row, .apl-config-save { flex-wrap: wrap; overflow-wrap: anywhere; }
 .apl-config-page {
   --apl-ok: #68d294;
   --apl-bad: #f38f88;

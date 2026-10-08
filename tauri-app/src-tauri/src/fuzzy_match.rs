@@ -2249,22 +2249,36 @@ fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
         )
     };
     let (header_index, inferred_depth) = crate::header_detection::layout(
-        &all, 30, |r| r.iter().filter(|v| header_cell_hit(v)).count() as f64,
-        header_cell_hit, (spec.header_row > 0).then(|| spec.header_row - 1),
+        &all,
+        30,
+        |r| r.iter().filter(|v| header_cell_hit(v)).count() as f64,
+        header_cell_hit,
+        (spec.header_row > 0).then(|| spec.header_row - 1),
     );
     let header_index = if spec.header_row == 0 && spec.header_depth == 1 {
         detect_header(&all) - 1
-    } else { header_index };
+    } else {
+        header_index
+    };
     let header_row = header_index + 1;
     if header_row == 0 || header_row > all.len() {
         return Err(error("HEADER_ROW_INVALID", "标题行超出数据范围。", None));
     }
     let width = all.iter().map(Vec::len).max().unwrap_or(0);
-    let depth = if spec.header_depth == 0 { inferred_depth } else { spec.header_depth.clamp(1, 2) };
-    let mut headers = if depth > 1 {
-        crate::fx::merge_headers(&all[header_index..(header_index + depth).min(all.len())], width)
+    let depth = if spec.header_depth == 0 {
+        inferred_depth
     } else {
-        (0..width).map(|i| all[header_index].get(i).cloned().unwrap_or_default()).collect()
+        spec.header_depth.clamp(1, 2)
+    };
+    let mut headers = if depth > 1 {
+        crate::fx::merge_headers(
+            &all[header_index..(header_index + depth).min(all.len())],
+            width,
+        )
+    } else {
+        (0..width)
+            .map(|i| all[header_index].get(i).cloned().unwrap_or_default())
+            .collect()
     };
     for (i, h) in headers.iter_mut().enumerate() {
         if h.trim().is_empty() {
@@ -2369,7 +2383,10 @@ mod tests {
     fn 通用表头模糊匹配双层不混入正文() {
         let path = std::env::temp_dir().join(format!("fuzzy-header-{}.csv", uuid::Uuid::new_v4()));
         std::fs::write(&path, "客户清单,客户清单,客户清单,客户清单\n客户信息,,交易金额,\n编号,名称,金额,数量\n001,客户甲,100,10\n").unwrap();
-        let spec: super::SourceSpec = serde_json::from_value(serde_json::json!({"inputPath":path,"headerRow":0,"headerDepth":0})).unwrap();
+        let spec: super::SourceSpec = serde_json::from_value(
+            serde_json::json!({"inputPath":path,"headerRow":0,"headerDepth":0}),
+        )
+        .unwrap();
         let table = super::load_table(&spec).unwrap();
         assert_eq!((table.header_row, table.header_depth), (2, 2));
         assert_eq!(table.headers[1], "客户信息-名称");

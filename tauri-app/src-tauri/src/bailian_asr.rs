@@ -104,7 +104,11 @@ pub(crate) fn test_connection(api_key: Option<&str>) -> Result<Value, AppError> 
             Some(e.to_string()),
         )
     })?;
-    if parsed.pointer("/data/upload_host").and_then(Value::as_str).is_none() {
+    if parsed
+        .pointer("/data/upload_host")
+        .and_then(Value::as_str)
+        .is_none()
+    {
         return Err(asr_error(
             "ASR_RESPONSE_INVALID",
             "百炼返回内容缺少上传凭证。",
@@ -160,20 +164,15 @@ fn get_policy(client: &reqwest::blocking::Client, key: &str) -> Result<UploadPol
         upload_dir: pick("upload_dir").ok_or_else(|| {
             asr_error("ASR_POLICY_INVALID", "百炼上传凭证缺少 upload_dir。", None)
         })?,
-        oss_access_key_id: pick("oss_access_key_id").ok_or_else(|| {
-            asr_error("ASR_POLICY_INVALID", "百炼上传凭证缺少访问标识。", None)
-        })?,
-        policy: pick("policy").ok_or_else(|| {
-            asr_error("ASR_POLICY_INVALID", "百炼上传凭证缺少 policy。", None)
-        })?,
-        signature: pick("signature").ok_or_else(|| {
-            asr_error("ASR_POLICY_INVALID", "百炼上传凭证缺少签名。", None)
-        })?,
+        oss_access_key_id: pick("oss_access_key_id")
+            .ok_or_else(|| asr_error("ASR_POLICY_INVALID", "百炼上传凭证缺少访问标识。", None))?,
+        policy: pick("policy")
+            .ok_or_else(|| asr_error("ASR_POLICY_INVALID", "百炼上传凭证缺少 policy。", None))?,
+        signature: pick("signature")
+            .ok_or_else(|| asr_error("ASR_POLICY_INVALID", "百炼上传凭证缺少签名。", None))?,
         object_acl: pick("x_oss_object_acl").unwrap_or_else(|| "private".into()),
         forbid_overwrite: pick("x_oss_forbid_overwrite").unwrap_or_else(|| "true".into()),
-        max_file_size_mb: data
-            .get("max_file_size_mb")
-            .and_then(Value::as_u64),
+        max_file_size_mb: data.get("max_file_size_mb").and_then(Value::as_u64),
     })
 }
 
@@ -200,7 +199,11 @@ fn read_json_response(
         } else {
             "ASR_REQUEST_FAILED"
         };
-        return Err(asr_error(code, label, Some(format!("HTTP {status}：{detail}"))));
+        return Err(asr_error(
+            code,
+            label,
+            Some(format!("HTTP {status}：{detail}")),
+        ));
     }
     serde_json::from_str(&body).map_err(|e| {
         asr_error(
@@ -218,9 +221,15 @@ fn upload_audio(
     progress: Progress,
 ) -> Result<String, AppError> {
     let policy = get_policy(client, key)?;
-    let size = std::fs::metadata(path).map(|meta| meta.len()).map_err(|e| {
-        asr_error("ASR_FILE_MISSING", "找不到要转写的录音文件。", Some(e.to_string()))
-    })?;
+    let size = std::fs::metadata(path)
+        .map(|meta| meta.len())
+        .map_err(|e| {
+            asr_error(
+                "ASR_FILE_MISSING",
+                "找不到要转写的录音文件。",
+                Some(e.to_string()),
+            )
+        })?;
     if size > MAX_UPLOAD_BYTES
         || policy
             .max_file_size_mb
@@ -251,7 +260,13 @@ fn upload_audio(
         .text("key", object_key.clone())
         .text("success_action_status", "200")
         .file("file", path)
-        .map_err(|e| asr_error("ASR_UPLOAD_FAILED", "读取录音文件失败。", Some(e.to_string())))?;
+        .map_err(|e| {
+            asr_error(
+                "ASR_UPLOAD_FAILED",
+                "读取录音文件失败。",
+                Some(e.to_string()),
+            )
+        })?;
     progress("running", 0, 4, "正在上传录音到百炼临时存储…");
     let response = client
         .post(&policy.upload_host)

@@ -17,6 +17,8 @@ import {
 import { jobCancel, jobPause } from "@/api";
 import { errorText, isJobGone } from "@/lib/errors";
 import type { JobEvent } from "@/types";
+import { isAudiPickOperationJob, useAudiPickOperations } from "../audipickOperation";
+import { AudiPickOperationPanel } from "./AudiPickOperationPanel";
 import { jobStatusText } from "./JobProgress";
 import "./JobDialog.css";
 
@@ -180,11 +182,14 @@ export function JobDialogProvider({
   const [minimized, setMinimized] = useState(false);
   const minimizedButtonRef = useRef<HTMLButtonElement>(null);
   const [paused, setPaused] = useState<Record<string, boolean>>({});
+  useAudiPickOperations();
   const [pending, setPending] = useState<Record<string, "pause" | "stop">>({});
   const pendingIds = useRef(new Set<string>());
   const [stopRequested, setStopRequested] = useState<Record<string, boolean>>({});
   const [operationErrors, setOperationErrors] = useState<Record<string, string>>({});
-  const running = jobs.filter((job) => isJobRunning(job) && !job.background);
+  const running = jobs.filter(
+    (job) => isJobRunning(job) && !job.background && !isAudiPickOperationJob(job.jobId),
+  );
   const runningIds = running.map((job) => job.jobId).join("|");
 
   // 任务跑完就把最小化和暂停记录归零：下一个任务应当重新弹出来，
@@ -276,6 +281,7 @@ export function JobDialogProvider({
       }}
     >
       {children}
+      <AudiPickOperationPanel raised={running.length > 0} />
       <Dialog open={open}>
         <DialogContent
           showCloseButton={false}

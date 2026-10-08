@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   audipickExportName,
   buildRevenueBatchPrompt,
@@ -216,6 +216,16 @@ describe("withRetry", () => {
         noSleep,
       ),
     ).rejects.toThrow("down");
+  });
+
+  it("does not retry or sleep after the user terminates extraction", async () => {
+    const cancelled = new Error("提取已终止。");
+    cancelled.name = "AudiPickExtractCancelled";
+    const run = vi.fn(async () => { throw cancelled; });
+    const sleep = vi.fn(async () => undefined);
+    await expect(withRetry(run, 3, 2_000, undefined, sleep)).rejects.toBe(cancelled);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
   });
 });
 

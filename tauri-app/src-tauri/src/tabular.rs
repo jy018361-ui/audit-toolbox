@@ -1563,16 +1563,42 @@ fn pivot_rows(
 }
 
 /// 借贷分列保留红字；金额+方向按已识别净额还原。无方向的单金额不猜。
-fn ledger_summary_sides(row: &[String], headers: &[String], mapping: &LedgerMapping, net: f64) -> Option<(f64, f64)> {
-    let number = |name: &Option<String>| name.as_deref().and_then(|n| header_index(headers, n)).map(|i| parse_number(row.get(i).map(String::as_str).unwrap_or("")));
+fn ledger_summary_sides(
+    row: &[String],
+    headers: &[String],
+    mapping: &LedgerMapping,
+    net: f64,
+) -> Option<(f64, f64)> {
+    let number = |name: &Option<String>| {
+        name.as_deref()
+            .and_then(|n| header_index(headers, n))
+            .map(|i| parse_number(row.get(i).map(String::as_str).unwrap_or("")))
+    };
     if let (Some(dr), Some(cr)) = (number(&mapping.debit), number(&mapping.credit)) {
         // 公共符号识别可能把贷方原列认定为已带负号，统一输出贷方发生额口径。
-        let credit = if (dr - cr - net).abs() < 0.000001 { cr } else { dr - net };
+        let credit = if (dr - cr - net).abs() < 0.000001 {
+            cr
+        } else {
+            dr - net
+        };
         return Some((dr, credit));
     }
-    let direction = mapping.direction.as_deref().and_then(|n| header_index(headers, n)).and_then(|i| row.get(i)).map(|s| s.trim()).unwrap_or("");
-    if ledger_mapping::is_credit_direction(direction) { return Some((0.0, -net)); }
-    if direction.contains('借') || direction.to_lowercase().contains("debit") || matches!(direction.to_lowercase().as_str(), "d" | "dr" | "s" | "+") { return Some((net, 0.0)); }
+    let direction = mapping
+        .direction
+        .as_deref()
+        .and_then(|n| header_index(headers, n))
+        .and_then(|i| row.get(i))
+        .map(|s| s.trim())
+        .unwrap_or("");
+    if ledger_mapping::is_credit_direction(direction) {
+        return Some((0.0, -net));
+    }
+    if direction.contains('借')
+        || direction.to_lowercase().contains("debit")
+        || matches!(direction.to_lowercase().as_str(), "d" | "dr" | "s" | "+")
+    {
+        return Some((net, 0.0));
+    }
     None
 }
 
@@ -1585,19 +1611,46 @@ fn ledger_summary_from_amounts(
 ) -> Result<PivotResult, AppError> {
     let mut grouped: BTreeMap<String, (f64, f64, f64, usize, bool)> = BTreeMap::new();
     for (row, net) in rows.iter().zip(amounts) {
-        let entry = grouped.entry(joined_account(row, account_indexes)).or_default();
+        let entry = grouped
+            .entry(joined_account(row, account_indexes))
+            .or_default();
         entry.2 += net;
         entry.3 += 1;
         if let Some((dr, cr)) = ledger_summary_sides(row, headers, mapping, *net) {
-            entry.0 += dr; entry.1 += cr;
-        } else { entry.4 = true; }
+            entry.0 += dr;
+            entry.1 += cr;
+        } else {
+            entry.4 = true;
+        }
     }
     Ok(PivotResult {
-        headers: vec!["科目名称".into(), "借方金额".into(), "贷方金额".into(), "净额".into(), "行数".into()],
-        rows: grouped.into_iter().map(|(account, (dr, cr, net, count, unknown))| vec![account,
-            if unknown { String::new() } else { format_number(dr) },
-            if unknown { String::new() } else { format_number(cr) },
-            format_number(net), count.to_string()]).collect(),
+        headers: vec![
+            "科目名称".into(),
+            "借方金额".into(),
+            "贷方金额".into(),
+            "净额".into(),
+            "行数".into(),
+        ],
+        rows: grouped
+            .into_iter()
+            .map(|(account, (dr, cr, net, count, unknown))| {
+                vec![
+                    account,
+                    if unknown {
+                        String::new()
+                    } else {
+                        format_number(dr)
+                    },
+                    if unknown {
+                        String::new()
+                    } else {
+                        format_number(cr)
+                    },
+                    format_number(net),
+                    count.to_string(),
+                ]
+            })
+            .collect(),
         row_field_count: 1,
     })
 }
@@ -2011,7 +2064,13 @@ fn analyze_ledger(
     // 月/日组成列没有年份时的报告期年份：先从源文件名取；取不到就按
     // 占位年 1900 让「月＋日」仍然算日期（月份桶只标月份，不亮占位年份）。
     let fallback_year = year_from_filename(&table.path);
-    let summary = ledger_summary_from_amounts(rows, &account_indexes, &amounts.net, &table.headers, mapping)?;
+    let summary = ledger_summary_from_amounts(
+        rows,
+        &account_indexes,
+        &amounts.net,
+        &table.headers,
+        mapping,
+    )?;
     let key_label = voucher_key_label(&table.headers, &id_indexes);
     let voucher_pivot = build_voucher_pivot_rust(
         rows,
@@ -2362,8 +2421,7 @@ fn ledger_month_bucket(
     if date_indexes.is_empty() {
         return None;
     }
-    if let Some(date) =
-        ledger_mapping::parse_mapped_date(headers, row, date_indexes, fallback_year)
+    if let Some(date) = ledger_mapping::parse_mapped_date(headers, row, date_indexes, fallback_year)
     {
         return Some(date.format("%Y-%m").to_string());
     }
@@ -7108,8 +7166,18 @@ mod tests {
             sheet.write_string(0, col, "记账凭证明细查询").unwrap();
         }
         for (col, header) in [
-            "年度", "期间", "记账日期", "凭证号", "行号", "预制凭证号", "业务类型", "业务单号",
-            "摘要", "借方金额", "贷方金额", "会计科目",
+            "年度",
+            "期间",
+            "记账日期",
+            "凭证号",
+            "行号",
+            "预制凭证号",
+            "业务类型",
+            "业务单号",
+            "摘要",
+            "借方金额",
+            "贷方金额",
+            "会计科目",
         ]
         .iter()
         .enumerate()
@@ -7117,7 +7185,9 @@ mod tests {
             sheet.write_string(1, col as u16, *header).unwrap();
         }
         for col in 12..36 {
-            sheet.write_string(1, col, format!("辅助字段{col}")).unwrap();
+            sheet
+                .write_string(1, col, format!("辅助字段{col}"))
+                .unwrap();
         }
         sheet.write_string(2, 2, "2026-01-04").unwrap();
         sheet.write_string(2, 3, "0000000001").unwrap();
@@ -8514,18 +8584,11 @@ mod tests {
         assert_eq!(mapping.date, vec!["月".to_owned(), "日".to_owned()]);
 
         // 完整日期列在场时不受兜底影响，仍是单列完整日期。
-        let full_headers: Vec<String> = [
-            "月",
-            "日",
-            "记账日期",
-            "凭证号",
-            "科目名称",
-            "借方",
-            "贷方",
-        ]
-        .iter()
-        .map(|value| value.to_string())
-        .collect();
+        let full_headers: Vec<String> =
+            ["月", "日", "记账日期", "凭证号", "科目名称", "借方", "贷方"]
+                .iter()
+                .map(|value| value.to_string())
+                .collect();
         let full_rows: Vec<Vec<String>> = (1..=20)
             .map(|index| {
                 vec![
@@ -10374,15 +10437,47 @@ mod tests {
     #[test]
     fn 科目汇总借贷保留红字且无方向不猜() {
         let headers = vec!["科目".into(), "借".into(), "贷".into()];
-        let mapping = LedgerMapping { debit: Some("借".into()), credit: Some("贷".into()), ..Default::default() };
-        let rows = vec![vec!["A".into(), "100".into(), "0".into()], vec!["A".into(), "0".into(), "80".into()], vec!["A".into(), "0".into(), "-10".into()]];
-        let summary = ledger_summary_from_amounts(&rows, &[0], &[100.0, -80.0, 10.0], &headers, &mapping).unwrap();
+        let mapping = LedgerMapping {
+            debit: Some("借".into()),
+            credit: Some("贷".into()),
+            ..Default::default()
+        };
+        let rows = vec![
+            vec!["A".into(), "100".into(), "0".into()],
+            vec!["A".into(), "0".into(), "80".into()],
+            vec!["A".into(), "0".into(), "-10".into()],
+        ];
+        let summary =
+            ledger_summary_from_amounts(&rows, &[0], &[100.0, -80.0, 10.0], &headers, &mapping)
+                .unwrap();
         assert_eq!(summary.rows[0], ["A", "100", "70", "30", "3"]);
-        assert_eq!(ledger_summary_sides(&rows[0], &headers, &LedgerMapping::default(), 100.0), None);
-        assert_eq!(ledger_summary_sides(&vec!["A".into(), "0".into(), "-80".into()], &headers, &mapping, -80.0), Some((0.0, 80.0)));
+        assert_eq!(
+            ledger_summary_sides(&rows[0], &headers, &LedgerMapping::default(), 100.0),
+            None
+        );
+        assert_eq!(
+            ledger_summary_sides(
+                &vec!["A".into(), "0".into(), "-80".into()],
+                &headers,
+                &mapping,
+                -80.0
+            ),
+            Some((0.0, 80.0))
+        );
         let direction_headers = vec!["方向".into()];
-        let direction_mapping = LedgerMapping { direction: Some("方向".into()), ..Default::default() };
-        assert_eq!(ledger_summary_sides(&vec!["贷".into()], &direction_headers, &direction_mapping, 10.0), Some((0.0, -10.0)));
+        let direction_mapping = LedgerMapping {
+            direction: Some("方向".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ledger_summary_sides(
+                &vec!["贷".into()],
+                &direction_headers,
+                &direction_mapping,
+                10.0
+            ),
+            Some((0.0, -10.0))
+        );
     }
 
     #[test]
@@ -10395,16 +10490,26 @@ mod tests {
             "targetBatches":[{"name":"固定资产","accounts":["1601000101-固定资产-房屋及构筑物","1601000102-固定资产-专用设备","1601000103-固定资产-通用设备","1601000105-固定资产-图书档案","1601000106-固定资产-家具用具装具及动植物","1601000107-固定资产-房屋及构筑物-房屋","1601000108-固定资产-房屋及构筑物-其他"]}],
             "includePivot":true,"includeVoucherTypes":true,"llmAnalysis":true}), &|_,_,_,_|{}, &AtomicBool::new(false)).unwrap();
         let paths = result["outputPaths"].as_array().unwrap();
-        let suite = paths.iter().filter_map(Value::as_str).find(|p| p.ends_with("_套表.xlsx")).unwrap();
+        let suite = paths
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|p| p.ends_with("_套表.xlsx"))
+            .unwrap();
         let mut wb = open_workbook_auto(suite).unwrap();
         let range = wb.worksheet_range("科目汇总").unwrap();
-        let header = range.rows().next().unwrap().iter().map(ToString::to_string).collect::<Vec<_>>();
-        assert_eq!(header, ["科目名称","借方金额","贷方金额","净额","行数"]);
+        let header = range
+            .rows()
+            .next()
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(header, ["科目名称", "借方金额", "贷方金额", "净额", "行数"]);
         for row in range.rows().skip(1) {
             let dr: f64 = row[1].to_string().parse().unwrap();
             let cr: f64 = row[2].to_string().parse().unwrap();
             let net: f64 = row[3].to_string().parse().unwrap();
-            assert!((dr-cr-net).abs()<0.01);
+            assert!((dr - cr - net).abs() < 0.01);
         }
         assert!(!wb.sheet_names().contains(&"LLM分析".to_owned()));
         println!("导出路径：{suite}");
@@ -10448,9 +10553,18 @@ mod tests {
             .skip(1)
             .map(|row| row.iter().map(ToString::to_string).collect::<Vec<_>>())
             .collect::<Vec<_>>();
-        assert!(rows.iter().any(|row| row == &["收入", "150", "0", "150", "2"]));
-        assert!(rows.iter().any(|row| row == &["银行", "0", "100", "-100", "1"]));
-        assert!(rows.iter().any(|row| row == &["现金", "0", "50", "-50", "1"]));
+        assert!(
+            rows.iter()
+                .any(|row| row == &["收入", "150", "0", "150", "2"])
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row == &["银行", "0", "100", "-100", "1"])
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row == &["现金", "0", "50", "-50", "1"])
+        );
         assert!(workbook.worksheet_range("凭证类型-严格").is_ok());
         assert!(!workbook.sheet_names().contains(&"LLM分析".to_owned()));
         let _ = fs::remove_dir_all(root);

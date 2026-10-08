@@ -712,7 +712,9 @@ pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
     "kanzhang.export",
     "kanzhang.mark_inspect",
     "kanzhang.mark_export",
+    "audipick.extract",
     "audipick.batch_extract",
+    "audipick.ocr_page",
     "fa.match",
     "fa.preview",
     "fa.export",
@@ -890,7 +892,11 @@ pub fn worker_main() -> i32 {
             None,
         ));
     };
-    let running_message = if request.method == "file_list.export" {
+    let running_message = if request.method == "audipick.ocr_page" {
+        "正在识别合同扫描页…"
+    } else if request.method == "audipick.extract" {
+        "正在提取合同条款…"
+    } else if request.method == "file_list.export" {
         "正在生成文件夹超链接清单…"
     } else if request.method == "wp.generate" {
         "Rust WP 服务单引擎正在生成…"
@@ -934,6 +940,20 @@ pub fn worker_main() -> i32 {
         crate::file_list::scan_job(request.params, &progress, cancel, &pause)
     } else if request.method == "excel_merger.merge" {
         merge(request.params, &progress, cancel, &pause)
+    } else if request.method == "audipick.ocr_page" {
+        crate::audipick::run_ocr_page(
+            request.params,
+            &progress,
+            cancel,
+            Path::new(&request.pause_path),
+        )
+    } else if request.method == "audipick.extract" {
+        crate::audipick::run_extract(
+            request.params,
+            &progress,
+            cancel,
+            Path::new(&request.pause_path),
+        )
     } else if request.method == "audipick.batch_extract" {
         crate::audipick::run_batch(
             request.params,
@@ -1561,11 +1581,22 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
                 .collect()
         })
         .unwrap_or_default();
-    if !matches!(sheet_action.as_str(), "default" | "match_selected" | "merge_all") {
-        return Err(error("MERGER_SHEET_ACTION_INVALID", "Sheet 范围不正确。", None));
+    if !matches!(
+        sheet_action.as_str(),
+        "default" | "match_selected" | "merge_all"
+    ) {
+        return Err(error(
+            "MERGER_SHEET_ACTION_INVALID",
+            "Sheet 范围不正确。",
+            None,
+        ));
     }
     if sheet_action == "match_selected" && target_sheets.is_empty() {
-        return Err(error("MERGER_SHEETS_REQUIRED", "请至少选择一个 Sheet。", None));
+        return Err(error(
+            "MERGER_SHEETS_REQUIRED",
+            "请至少选择一个 Sheet。",
+            None,
+        ));
     }
     let probe = MergeParams {
         input_paths: Vec::new(),
@@ -1623,7 +1654,10 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
         let headers = flattened_headers(&rows, &detection);
         (rows, headers, detection)
     };
-    if template_headers.iter().all(|header| header.trim().is_empty()) {
+    if template_headers
+        .iter()
+        .all(|header| header.trim().is_empty())
+    {
         return Err(error(
             "HEADER_TEMPLATE_UNREADABLE",
             "无法识别模板文件的表头，请换一个模板或检查文件内容。",
@@ -1674,7 +1708,7 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
                     "WORKBOOK_READ_FAILED",
                     &format!("无法读取工作簿：{err}"),
                     Some(path.display().to_string()),
-                ))
+                ));
             }
         };
         let names = target_sheet_names(&workbook.sheet_names(), &probe);
@@ -1822,9 +1856,7 @@ fn flattened_headers(
     let Some(detection) = detection else {
         return Vec::new();
     };
-    let as_strings = |row: &[Cell]| -> Vec<String> {
-        row.iter().map(Cell::display).collect()
-    };
+    let as_strings = |row: &[Cell]| -> Vec<String> { row.iter().map(Cell::display).collect() };
     if detection.header_rows_count >= 2 {
         let first = rows
             .get(detection.header_row)
@@ -1958,7 +1990,12 @@ fn write_vertical_xlsx_stream(
             let assignment_pos = matched
                 .as_ref()
                 .and_then(|layout| layout.assignment_position(path, "CSV"));
-            let skip = require_assignment(&matched, path, "CSV", assignment.map(|a| a.header_row + a.header_rows_count))?;
+            let skip = require_assignment(
+                &matched,
+                path,
+                "CSV",
+                assignment.map(|a| a.header_row + a.header_rows_count),
+            )?;
             let mut count = 0usize;
             let mut reorder_buffer = Vec::new();
             // 预览确认后文件可能被改动：跳过表头前的行时顺手收集当前表头，
@@ -2040,7 +2077,9 @@ fn write_vertical_xlsx_stream(
                 include_sheet_column: include_sheet,
                 rows: Vec::new(),
             };
-            let assignment = matched.as_ref().and_then(|layout| layout.assignment(path, &name));
+            let assignment = matched
+                .as_ref()
+                .and_then(|layout| layout.assignment(path, &name));
             let assignment_pos = matched
                 .as_ref()
                 .and_then(|layout| layout.assignment_position(path, &name));
@@ -2161,10 +2200,7 @@ fn verify_current_headers(
             current_rows.get(1).map(Vec::as_slice).unwrap_or(&[]),
         )
     } else {
-        current_rows
-            .first()
-            .cloned()
-            .unwrap_or_default()
+        current_rows.first().cloned().unwrap_or_default()
     };
     let same = flattened.len() == assignment.headers.len()
         && flattened
@@ -2296,7 +2332,11 @@ fn build_matched_layout(
             };
             // 与模板列同名（用户手动移入未匹配区的场景）加标记后缀，既不
             // 撞模板列名，也保证数据有自己的落位。
-            if plan.template_headers.iter().any(|header| header == &candidate) {
+            if plan
+                .template_headers
+                .iter()
+                .any(|header| header == &candidate)
+            {
                 candidate = format!("{candidate}(独立)");
             }
             let slot = match by_name.get(&candidate) {
@@ -2373,9 +2413,17 @@ fn write_matched_header(
         .write_string_with_format(row as u32, 1, "来源Sheet", &format)
         .map_err(xlsx_error)?;
     let mut col = 2usize;
-    for header in layout.template_headers.iter().chain(layout.independent.iter()) {
+    for header in layout
+        .template_headers
+        .iter()
+        .chain(layout.independent.iter())
+    {
         if col >= EXCEL_MAX_COLS {
-            return Err(error("EXCEL_COLUMN_LIMIT", "合并结果超过 Excel 最大列数。", None));
+            return Err(error(
+                "EXCEL_COLUMN_LIMIT",
+                "合并结果超过 Excel 最大列数。",
+                None,
+            ));
         }
         worksheet
             .write_string_with_format(row as u32, col as u16, header, &format)
@@ -2422,7 +2470,11 @@ fn write_matched_vertical_row(
         .unwrap_or(0);
     for value in values.iter().take(end) {
         if col >= EXCEL_MAX_COLS {
-            return Err(error("EXCEL_COLUMN_LIMIT", "合并结果超过 Excel 最大列数。", None));
+            return Err(error(
+                "EXCEL_COLUMN_LIMIT",
+                "合并结果超过 Excel 最大列数。",
+                None,
+            ));
         }
         write_cell(worksheet, *out_row, col, value)?;
         col += 1;
@@ -2437,7 +2489,14 @@ fn write_match_log_sheet(workbook: &mut Workbook, layout: &MatchedLayout) -> Res
     let sheet = workbook.add_worksheet();
     sheet.set_name("匹配日志").map_err(xlsx_error)?;
     let format = Format::new().set_bold();
-    let headers = ["文件", "Sheet", "原表头", "处理方式", "匹配依据", "表头识别"];
+    let headers = [
+        "文件",
+        "Sheet",
+        "原表头",
+        "处理方式",
+        "匹配依据",
+        "表头识别",
+    ];
     for (col, header) in headers.iter().enumerate() {
         sheet
             .write_string_with_format(0, col as u16, *header, &format)
@@ -2472,12 +2531,24 @@ fn write_match_log_sheet(workbook: &mut Workbook, layout: &MatchedLayout) -> Res
             } else {
                 String::new()
             };
-            sheet.write_string(row as u32, 0, file_name(Path::new(&assignment.path))).map_err(xlsx_error)?;
-            sheet.write_string(row as u32, 1, &assignment.sheet).map_err(xlsx_error)?;
-            sheet.write_string(row as u32, 2, &header).map_err(xlsx_error)?;
-            sheet.write_string(row as u32, 3, &action).map_err(xlsx_error)?;
-            sheet.write_string(row as u32, 4, &basis).map_err(xlsx_error)?;
-            sheet.write_string(row as u32, 5, &detection).map_err(xlsx_error)?;
+            sheet
+                .write_string(row as u32, 0, file_name(Path::new(&assignment.path)))
+                .map_err(xlsx_error)?;
+            sheet
+                .write_string(row as u32, 1, &assignment.sheet)
+                .map_err(xlsx_error)?;
+            sheet
+                .write_string(row as u32, 2, &header)
+                .map_err(xlsx_error)?;
+            sheet
+                .write_string(row as u32, 3, &action)
+                .map_err(xlsx_error)?;
+            sheet
+                .write_string(row as u32, 4, &basis)
+                .map_err(xlsx_error)?;
+            sheet
+                .write_string(row as u32, 5, &detection)
+                .map_err(xlsx_error)?;
             row += 1;
         }
     }
@@ -2612,7 +2683,9 @@ fn write_vertical_csv_stream(
         };
         if is_text(path) {
             let source = text_source(path, params);
-            let assignment = matched.as_ref().and_then(|layout| layout.assignment(path, "CSV"));
+            let assignment = matched
+                .as_ref()
+                .and_then(|layout| layout.assignment(path, "CSV"));
             let skip = matched.as_ref().and_then(|layout| {
                 layout
                     .assignment(path, "CSV")
@@ -2636,9 +2709,9 @@ fn write_vertical_csv_stream(
                 Ok((sheets, issues)) => {
                     warnings.extend(issues);
                     for source in &sheets {
-                        let assignment = matched
-                            .as_ref()
-                            .and_then(|layout| layout.assignment(&source.file_path, &source.sheet_name));
+                        let assignment = matched.as_ref().and_then(|layout| {
+                            layout.assignment(&source.file_path, &source.sheet_name)
+                        });
                         let skip = matched.as_ref().and_then(|layout| {
                             layout
                                 .assignment(&source.file_path, &source.sheet_name)
@@ -3153,7 +3226,11 @@ fn import_aliases(path: &Path) -> Result<Value, AppError> {
     })?;
     let rows: Vec<Vec<String>> = range
         .rows()
-        .map(|row| row.iter().map(|cell| cell.to_string().trim().to_string()).collect())
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.to_string().trim().to_string())
+                .collect()
+        })
         .collect();
     let pairs = parse_alias_pairs(&rows);
     if !pairs.is_empty() {
@@ -3230,24 +3307,20 @@ fn write_alias_sidecar(output: &Path) -> Result<Option<PathBuf>, AppError> {
     }
     let mut workbook = Workbook::new();
     let mut sheet = new_constant_sheet(&mut workbook, 1)?;
-    sheet
-        .write_string(0, 0, "源列名")
-        .map_err(xlsx_error)?;
-    sheet
-        .write_string(0, 1, "目标列名")
-        .map_err(xlsx_error)?;
+    sheet.write_string(0, 0, "源列名").map_err(xlsx_error)?;
+    sheet.write_string(0, 1, "目标列名").map_err(xlsx_error)?;
     for (index, (source, target)) in aliases.iter().enumerate() {
         let row = (index + 1) as u32;
-        sheet
-            .write_string(row, 0, source)
-            .map_err(xlsx_error)?;
-        sheet
-            .write_string(row, 1, target)
-            .map_err(xlsx_error)?;
+        sheet.write_string(row, 0, source).map_err(xlsx_error)?;
+        sheet.write_string(row, 1, target).map_err(xlsx_error)?;
     }
-    workbook
-        .save(&path)
-        .map_err(|err| error("XLSX_WRITE_FAILED", "对照表随行文件写入失败。", Some(err.to_string())))?;
+    workbook.save(&path).map_err(|err| {
+        error(
+            "XLSX_WRITE_FAILED",
+            "对照表随行文件写入失败。",
+            Some(err.to_string()),
+        )
+    })?;
     Ok(Some(path))
 }
 
@@ -3557,7 +3630,12 @@ mod tests {
             .worksheet_range(sheet)
             .unwrap()
             .rows()
-            .map(|row| row.iter().map(Cell::from_excel).map(|cell| cell.display()).collect())
+            .map(|row| {
+                row.iter()
+                    .map(Cell::from_excel)
+                    .map(|cell| cell.display())
+                    .collect()
+            })
             .collect()
     }
 
@@ -3567,16 +3645,24 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let template = root.join("A.xlsx");
         let other = root.join("B.xlsx");
-        sample_book(&template, "Sheet1", &[
-            &["日期", "凭证号", "金额"],
-            &["2026-01-01", "记-001", "100.00"],
-        ]);
+        sample_book(
+            &template,
+            "Sheet1",
+            &[
+                &["日期", "凭证号", "金额"],
+                &["2026-01-01", "记-001", "100.00"],
+            ],
+        );
         // B 的表头乱序且前面有标题行；第 0 行标题必须被跳过而不是混进数据。
-        sample_book(&other, "Sheet1", &[
-            &["XX公司2026年度明细账"],
-            &["凭证号", "金额", "日期"],
-            &["记-101", "300.00", "2026-02-01"],
-        ]);
+        sample_book(
+            &other,
+            "Sheet1",
+            &[
+                &["XX公司2026年度明细账"],
+                &["凭证号", "金额", "日期"],
+                &["记-101", "300.00", "2026-02-01"],
+            ],
+        );
         let output = root.join("matched.xlsx");
         let mut params = base_params(&[template.clone(), other.clone()], &output);
         params["headerMatching"] = json!({
@@ -3605,7 +3691,17 @@ mod tests {
         assert_eq!(rows[2][3], "记-101");
         assert_eq!(rows[2][4], "300.00");
         let log = read_merged_sheet(&output, "匹配日志");
-        assert_eq!(log[0], vec!["文件", "Sheet", "原表头", "处理方式", "匹配依据", "表头识别"]);
+        assert_eq!(
+            log[0],
+            vec![
+                "文件",
+                "Sheet",
+                "原表头",
+                "处理方式",
+                "匹配依据",
+                "表头识别"
+            ]
+        );
         assert_eq!(log.len(), 7, "表头 + 两个文件各 3 列");
         let _ = fs::remove_dir_all(root);
     }
@@ -3616,14 +3712,19 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let template = root.join("A.xlsx");
         let other = root.join("B.xlsx");
-        sample_book(&template, "Sheet1", &[
-            &["日期", "金额"],
-            &["2026-01-01", "100.00"],
-        ]);
-        sample_book(&other, "Sheet1", &[
-            &["日期", "备注", "临时列", "金额"],
-            &["2026-02-01", "银行回单", "垃圾值", "300.00"],
-        ]);
+        sample_book(
+            &template,
+            "Sheet1",
+            &[&["日期", "金额"], &["2026-01-01", "100.00"]],
+        );
+        sample_book(
+            &other,
+            "Sheet1",
+            &[
+                &["日期", "备注", "临时列", "金额"],
+                &["2026-02-01", "银行回单", "垃圾值", "300.00"],
+            ],
+        );
         for extension in ["xlsx", "csv"] {
             let output = root.join(format!("independent.{extension}"));
             let mut params = base_params(&[template.clone(), other.clone()], &output);
@@ -3656,14 +3757,21 @@ mod tests {
             } else {
                 read_merged_sheet(&output, "Merged")
             };
-            assert_eq!(rows[0], vec!["来源文件", "来源Sheet", "日期", "金额", "备注"]);
+            assert_eq!(
+                rows[0],
+                vec!["来源文件", "来源Sheet", "日期", "金额", "备注"]
+            );
             assert_eq!(rows[2][4], "银行回单", "未匹配列保留为独立列");
             assert!(
-                !rows.iter().any(|row| row.iter().any(|cell| cell == "垃圾值")),
+                !rows
+                    .iter()
+                    .any(|row| row.iter().any(|cell| cell == "垃圾值")),
                 "丢弃列的数据不能出现在结果里"
             );
             assert!(
-                !rows.iter().any(|row| row.iter().any(|cell| cell == "临时列")),
+                !rows
+                    .iter()
+                    .any(|row| row.iter().any(|cell| cell == "临时列")),
                 "丢弃列本身也不该出现在表头"
             );
         }
@@ -3676,14 +3784,19 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let template = root.join("A.xlsx");
         let other = root.join("B.xlsx");
-        sample_book(&template, "Sheet1", &[
-            &["日期", "金额"],
-            &["2026-01-01", "100.00"],
-        ]);
-        sample_book(&other, "Sheet1", &[
-            &["日期", "备注", "附注", "金额"],
-            &["2026-02-01", "银行回单", "补充说明", "300.00"],
-        ]);
+        sample_book(
+            &template,
+            "Sheet1",
+            &[&["日期", "金额"], &["2026-01-01", "100.00"]],
+        );
+        sample_book(
+            &other,
+            "Sheet1",
+            &[
+                &["日期", "备注", "附注", "金额"],
+                &["2026-02-01", "银行回单", "补充说明", "300.00"],
+            ],
+        );
         let output = root.join("independent-order.xlsx");
         let mut params = base_params(&[template.clone(), other.clone()], &output);
         params["headerMatching"] = json!({
@@ -3738,7 +3851,11 @@ mod tests {
             vec!["记账日期".into(), "日期".into()],
             vec!["本月合计".into(), "金额".into()],
         ];
-        assert_eq!(parse_alias_pairs(&without_header).len(), 2, "无表头时首行即数据");
+        assert_eq!(
+            parse_alias_pairs(&without_header).len(),
+            2,
+            "无表头时首行即数据"
+        );
         let single_column = vec![vec!["只有一列".into()]];
         assert!(parse_alias_pairs(&single_column).is_empty());
         assert!(parse_alias_pairs(&[]).is_empty());
@@ -3770,10 +3887,18 @@ mod tests {
         let worksheet = workbook.add_worksheet();
         worksheet.set_name("Sheet1").unwrap();
         let header_format = Format::new().set_bold();
-        worksheet.write_string_with_format(0, 0, "日期", &header_format).unwrap();
-        worksheet.merge_range(0, 1, 0, 2, "金额", &header_format).unwrap();
-        worksheet.write_string_with_format(1, 1, "借方", &header_format).unwrap();
-        worksheet.write_string_with_format(1, 2, "贷方", &header_format).unwrap();
+        worksheet
+            .write_string_with_format(0, 0, "日期", &header_format)
+            .unwrap();
+        worksheet
+            .merge_range(0, 1, 0, 2, "金额", &header_format)
+            .unwrap();
+        worksheet
+            .write_string_with_format(1, 1, "借方", &header_format)
+            .unwrap();
+        worksheet
+            .write_string_with_format(1, 2, "贷方", &header_format)
+            .unwrap();
         worksheet.write_string(2, 0, "2026-01-01").unwrap();
         worksheet.write_number(2, 1, 100.0).unwrap();
         worksheet.write_number(2, 2, 50.0).unwrap();
@@ -3785,8 +3910,15 @@ mod tests {
             json!({"inputPaths": [template.to_string_lossy()], "sheetAction": "default"}),
         )
         .unwrap();
-        assert_eq!(preview["template"]["headers"], json!(flat), "两层表头拍平成单层");
-        assert_eq!(preview["template"]["detection"]["headerRowsCount"], json!(2));
+        assert_eq!(
+            preview["template"]["headers"],
+            json!(flat),
+            "两层表头拍平成单层"
+        );
+        assert_eq!(
+            preview["template"]["detection"]["headerRowsCount"],
+            json!(2)
+        );
         let output = root.join("two-layer.xlsx");
         let mut params = base_params(&[template.clone()], &output);
         params["headerMatching"] = json!({
@@ -3798,7 +3930,10 @@ mod tests {
         });
         test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
         let rows = read_merged_sheet(&output, "Merged");
-        assert_eq!(rows[0], vec!["来源文件", "来源Sheet", "日期", "金额-借方", "金额-贷方"]);
+        assert_eq!(
+            rows[0],
+            vec!["来源文件", "来源Sheet", "日期", "金额-借方", "金额-贷方"]
+        );
         assert_eq!(rows[1][3], "100");
         assert_eq!(rows[1][4], "50");
         let _ = fs::remove_dir_all(root);
@@ -3812,14 +3947,19 @@ mod tests {
         let other = root.join("B.xlsx");
         // A 有两个同名「金额」：一个并入模板，另一个进未匹配区；
         // B 的「日期」被手动移入未匹配区（与模板列同名）——独立列数据都不能丢。
-        sample_book(&template, "Sheet1", &[
-            &["日期", "金额", "金额"],
-            &["2026-01-01", "100.00", "200.00"],
-        ]);
-        sample_book(&other, "Sheet1", &[
-            &["金额", "日期"],
-            &["300.00", "2026-02-01"],
-        ]);
+        sample_book(
+            &template,
+            "Sheet1",
+            &[
+                &["日期", "金额", "金额"],
+                &["2026-01-01", "100.00", "200.00"],
+            ],
+        );
+        sample_book(
+            &other,
+            "Sheet1",
+            &[&["金额", "日期"], &["300.00", "2026-02-01"]],
+        );
         let output = root.join("independent.xlsx");
         let mut params = base_params(&[template.clone(), other.clone()], &output);
         params["headerMatching"] = json!({
@@ -3847,7 +3987,12 @@ mod tests {
         assert_eq!(
             rows[0],
             vec![
-                "来源文件", "来源Sheet", "日期", "金额", "金额(独立)", "日期(独立)"
+                "来源文件",
+                "来源Sheet",
+                "日期",
+                "金额",
+                "金额(独立)",
+                "日期(独立)"
             ],
             "独立列：A 的第二个「金额」撞模板名加标记，B 被移入未匹配区的「日期」同"
         );
@@ -3866,14 +4011,12 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let template = root.join("A.xlsx");
         let other = root.join("B.xlsx");
-        sample_book(&template, "Sheet1", &[
-            &["日期"],
-            &["2026-01-01"],
-        ]);
-        sample_book(&other, "Sheet1", &[
-            &["日期", "备注"],
-            &["2026-02-01", "B备注"],
-        ]);
+        sample_book(&template, "Sheet1", &[&["日期"], &["2026-01-01"]]);
+        sample_book(
+            &other,
+            "Sheet1",
+            &[&["日期", "备注"], &["2026-02-01", "B备注"]],
+        );
         let output = root.join("shared.xlsx");
         let mut params = base_params(&[template.clone(), other.clone()], &output);
         params["headerMatching"] = json!({
@@ -3900,10 +4043,11 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let input = root.join("A.xlsx");
         // 文件当前表头是「日期/金额」：模拟预览确认后用户删了「凭证号」、加了「金额」。
-        sample_book(&input, "Sheet1", &[
-            &["日期", "金额"],
-            &["2026-01-01", "100.00"],
-        ]);
+        sample_book(
+            &input,
+            "Sheet1",
+            &[&["日期", "金额"], &["2026-01-01", "100.00"]],
+        );
         let output = root.join("stale.xlsx");
         let mut params = base_params(&[input.clone()], &output);
         // 快照与实际不符：模拟预览确认后用户删了「凭证号」列、加了「金额」列。
@@ -3926,29 +4070,62 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let template = root.join("A.xlsx");
         let other = root.join("B.xlsx");
-        sample_book(&template, "Sheet1", &[
-            &["日期", "凭证号", "借方金额"],
-            &["2026-01-01", "记-001", "100.00"],
-        ]);
-        sample_book(&other, "Sheet1", &[
-            &["XX公司明细账"],
-            &["记账日期", "单据编号", "贷方金额"],
-            &["2026-02-01", "D-101", "300.00"],
-        ]);
+        sample_book(
+            &template,
+            "Sheet1",
+            &[
+                &["日期", "凭证号", "借方金额"],
+                &["2026-01-01", "记-001", "100.00"],
+            ],
+        );
+        sample_book(
+            &other,
+            "Sheet1",
+            &[
+                &["XX公司明细账"],
+                &["记账日期", "单据编号", "贷方金额"],
+                &["2026-02-01", "D-101", "300.00"],
+            ],
+        );
         let preview = call(
             "excel_merger.match_preview",
             json!({"inputPaths": [template.to_string_lossy(), other.to_string_lossy()], "sheetAction": "default"}),
         )
         .unwrap();
-        assert_eq!(preview["template"]["headers"], json!(["日期", "凭证号", "借方金额"]));
+        assert_eq!(
+            preview["template"]["headers"],
+            json!(["日期", "凭证号", "借方金额"])
+        );
         assert_eq!(preview["template"]["external"], json!(false));
         let other_row = &preview["rows"][1];
-        assert_eq!(other_row["detection"]["headerRow"], json!(1), "B 的表头在第二行");
-        assert_eq!(other_row["headers"], json!(["记账日期", "单据编号", "贷方金额"]));
-        assert_eq!(other_row["matches"][0]["target"], json!(0), "记账日期 → 日期（别名）");
-        assert_eq!(other_row["matches"][1]["target"], json!(1), "单据编号 → 凭证号（别名）");
-        assert_eq!(other_row["matches"][2]["target"], json!(null), "贷方金额与借方金额对立，不能匹配");
-        assert_eq!(other_row["preview"][0][0], "2026-02-01", "预览数据从表头之后取");
+        assert_eq!(
+            other_row["detection"]["headerRow"],
+            json!(1),
+            "B 的表头在第二行"
+        );
+        assert_eq!(
+            other_row["headers"],
+            json!(["记账日期", "单据编号", "贷方金额"])
+        );
+        assert_eq!(
+            other_row["matches"][0]["target"],
+            json!(0),
+            "记账日期 → 日期（别名）"
+        );
+        assert_eq!(
+            other_row["matches"][1]["target"],
+            json!(1),
+            "单据编号 → 凭证号（别名）"
+        );
+        assert_eq!(
+            other_row["matches"][2]["target"],
+            json!(null),
+            "贷方金额与借方金额对立，不能匹配"
+        );
+        assert_eq!(
+            other_row["preview"][0][0], "2026-02-01",
+            "预览数据从表头之后取"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

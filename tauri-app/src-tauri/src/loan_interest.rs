@@ -203,8 +203,12 @@ fn prepare_rates(params: &Value) -> Result<Value, AppError> {
     if params.get("mode").and_then(Value::as_str) == Some("ledger") {
         let rows = calculate_ledger(params)?;
         let mut keys = std::collections::HashSet::new();
-        if rows.iter().any(|r|!keys.insert(r.row_key.clone())) {
-            return Err(error("LOAN_ID_DUPLICATED", "同一主体内借款标识重复，请先补充唯一借款标识。", None));
+        if rows.iter().any(|r| !keys.insert(r.row_key.clone())) {
+            return Err(error(
+                "LOAN_ID_DUPLICATED",
+                "同一主体内借款标识重复，请先补充唯一借款标识。",
+                None,
+            ));
         }
         return Ok(json!({"rows": ledger_confirmation_defaults(&rows, params)?}));
     }
@@ -292,7 +296,9 @@ fn prepare_rates(params: &Value) -> Result<Value, AppError> {
         .into_iter()
         .flatten()
         .filter_map(|item| {
-            if item.get("role").is_some() { return None; }
+            if item.get("role").is_some() {
+                return None;
+            }
             Some((
                 (
                     item.get("entity")?.as_str()?.to_owned(),
@@ -496,13 +502,19 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
         };
         let auxiliary = {
             let loan_id = role_text(&tb, row, &tm, "tb", "loanId");
-            if loan_id.trim().is_empty() { role_text(&tb, row, &tm, "tb", "auxiliary") }
-            else { loan_id }
+            if loan_id.trim().is_empty() {
+                role_text(&tb, row, &tm, "tb", "auxiliary")
+            } else {
+                loan_id
+            }
         };
         if let Some(existing) = grouped.get_mut(&identity) {
             existing.opening += opening;
             existing.closing += closing;
-            let entry = existing.by_entity.entry(entity.clone()).or_insert((0.0, 0.0));
+            let entry = existing
+                .by_entity
+                .entry(entity.clone())
+                .or_insert((0.0, 0.0));
             entry.0 += opening;
             entry.1 += closing;
             if existing.name.trim().is_empty() && !name.trim().is_empty() {
@@ -514,7 +526,9 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
             existing.row_indexes.push(row_index);
             existing.classification_contexts.insert(classification.contexts[row_index].clone());
             if !auxiliary.trim().is_empty() {
-                existing.review_auxiliaries.insert((entity.clone(), auxiliary));
+                existing
+                    .review_auxiliaries
+                    .insert((entity.clone(), auxiliary));
             }
         } else {
             order.push(identity.clone());
@@ -532,8 +546,11 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
                     row_indexes: vec![row_index],
                     classification_contexts: BTreeSet::from([classification.contexts[row_index].clone()]),
                     by_entity: BTreeMap::from([(entity.clone(), (opening, closing))]),
-                    review_auxiliaries: if auxiliary.trim().is_empty() { BTreeSet::new() }
-                        else { BTreeSet::from([(entity, auxiliary)]) },
+                    review_auxiliaries: if auxiliary.trim().is_empty() {
+                        BTreeSet::new()
+                    } else {
+                        BTreeSet::from([(entity, auxiliary)])
+                    },
                 },
             );
         }
@@ -1420,7 +1437,10 @@ fn booked_interest_expense(params: &Value) -> Result<BookedInterestExpense, AppE
         let entity = role_text(&tb, row, &mapping, "tb", "entity");
         let auxiliary = role_text(&tb, row, &mapping, "tb", "loanId");
         if account_review_role(&review_roles, &entity, &key, &name, &currency, &auxiliary)
-            .is_some_and(|role| role != "interest_expense") { continue; }
+            .is_some_and(|role| role != "interest_expense")
+        {
+            continue;
+        }
         let direction = expense_account_direction(&account, &catalog);
         let (amount, basis) = interest_expense_occurrence(
             &tb, row, &mapping, convention, direction,
@@ -3729,15 +3749,26 @@ struct AccountReviewRole {
 fn ambiguous_fold_names(folds: &[LoanFold]) -> std::collections::HashSet<(String, String, String)> {
     let mut names = HashMap::<(String, String, String), BTreeSet<String>>::new();
     for fold in folds {
-        names.entry((fold.entity.clone(), norm(&fold.code), fold.currency.clone()))
-            .or_default().insert(norm(&fold.name));
+        names
+            .entry((fold.entity.clone(), norm(&fold.code), fold.currency.clone()))
+            .or_default()
+            .insert(norm(&fold.name));
     }
-    names.into_iter().filter_map(|(key, values)| (values.len() > 1).then_some(key)).collect()
+    names
+        .into_iter()
+        .filter_map(|(key, values)| (values.len() > 1).then_some(key))
+        .collect()
 }
 
-fn fold_row_account_key(fold: &LoanFold,
-    ambiguous: &std::collections::HashSet<(String, String, String)>) -> String {
-    let base = if fold.code.trim().is_empty() { &fold.account } else { &fold.code };
+fn fold_row_account_key(
+    fold: &LoanFold,
+    ambiguous: &std::collections::HashSet<(String, String, String)>,
+) -> String {
+    let base = if fold.code.trim().is_empty() {
+        &fold.account
+    } else {
+        &fold.code
+    };
     if ambiguous.contains(&(fold.entity.clone(), norm(&fold.code), fold.currency.clone())) {
         format!("{base}\u{1e}{}", norm(&fold.name))
     } else {
@@ -3753,7 +3784,9 @@ fn account_review_roles(params: &Value) -> AccountReviewRoles {
     let rows: Vec<AccountReviewRole> = params.get("loanReviewSelections").and_then(Value::as_array)
         .into_iter().flatten().filter_map(|item| {
             let role = item.get("role")?.as_str()?;
-            if !matches!(role, "loan" | "interest_expense" | "skip") { return None; }
+            if !matches!(role, "loan" | "interest_expense" | "skip") {
+                return None;
+            }
             Some(AccountReviewRole {
                 entity: norm(item.get("entity").and_then(Value::as_str).unwrap_or("")),
                 account: norm(item.get("account")?.as_str()?),
@@ -3828,8 +3861,15 @@ fn fold_loan_rows(
             entity_scope,
         );
         let name = role_text(tb, row, tm, "tb", "accountName");
-        let detail_key = format!("{}\u{1e}{}", norm(&name),
-            if !raw_id.trim().is_empty() { norm(&raw_id) } else { String::new() });
+        let detail_key = format!(
+            "{}\u{1e}{}",
+            norm(&name),
+            if !raw_id.trim().is_empty() {
+                norm(&raw_id)
+            } else {
+                String::new()
+            }
+        );
         let currency = if split_by_currency {
             // 2026-09-25 用户定案（与存款同口径）：币种列的显式标注是分户
             // 依据——标了币种（含人民币）自成桶，只有空白/认不出才归
@@ -3838,10 +3878,22 @@ fn fold_loan_rows(
         } else {
             String::new()
         };
-        if account_review_role(review_roles, &entity,
-            &if code.is_empty() { norm(&account) } else { norm(&code) },
-            &name, &role_text(tb, row, tm, "tb", "currency"), &raw_id)
-            .is_some_and(|role| role != "loan") { continue; }
+        if account_review_role(
+            review_roles,
+            &entity,
+            &if code.is_empty() {
+                norm(&account)
+            } else {
+                norm(&code)
+            },
+            &name,
+            &role_text(tb, row, tm, "tb", "currency"),
+            &raw_id,
+        )
+        .is_some_and(|role| role != "loan")
+        {
+            continue;
+        }
         let key = (
             entity.clone(),
             if code.is_empty() {
@@ -4061,7 +4113,9 @@ fn calculate_tb_impl(
         .into_iter()
         .flatten()
         .filter_map(|item| {
-            if item.get("role").is_some() { return None; }
+            if item.get("role").is_some() {
+                return None;
+            }
             Some((
                 (
                     item.get("entity")?.as_str()?.to_owned(),
@@ -4667,67 +4721,179 @@ fn ledger_confirmation_defaults(rows: &[LoanRow], params: &Value) -> Result<Vec<
 }
 
 fn apply_ledger_confirmation(rows: &mut [LoanRow], params: &Value) -> Result<(), AppError> {
-    let Some(all) = params.get("ledgerInformation").and_then(Value::as_object) else { return Ok(()); };
-    if params.get("mode").and_then(Value::as_str) != Some("ledger") { return Ok(()); }
+    let Some(all) = params.get("ledgerInformation").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    if params.get("mode").and_then(Value::as_str) != Some("ledger") {
+        return Ok(());
+    }
     let start = date(params, "reportStart")?;
     let end = date(params, "reportEnd")?;
     for r in rows {
-        let v = all.get(&r.row_key).ok_or_else(||error("LOAN_INFORMATION_REQUIRED", "请先确认完整台账信息。", Some(r.loan_id.clone())))?;
+        let v = all.get(&r.row_key).ok_or_else(|| {
+            error(
+                "LOAN_INFORMATION_REQUIRED",
+                "请先确认完整台账信息。",
+                Some(r.loan_id.clone()),
+            )
+        })?;
         let amount = |key: &str| -> Result<f64, AppError> {
-            v.get(key).and_then(Value::as_f64).filter(|a|a.is_finite() && *a >= 0.0)
-                .ok_or_else(||error("LOAN_INFORMATION_INVALID", "借款金额未填写或不是有效的非负数。", Some(format!("{} {key}",r.loan_id))))
+            v.get(key)
+                .and_then(Value::as_f64)
+                .filter(|a| a.is_finite() && *a >= 0.0)
+                .ok_or_else(|| {
+                    error(
+                        "LOAN_INFORMATION_INVALID",
+                        "借款金额未填写或不是有效的非负数。",
+                        Some(format!("{} {key}", r.loan_id)),
+                    )
+                })
         };
         let opening = amount("opening")?;
         let added = amount("added")?;
         let reduced = amount("reduced")?;
         let closing = if v.get("closing").is_none_or(Value::is_null) {0.0} else {amount("closing")?};
         let mut events = vec![];
-        for (key, sign, expected) in [("additions",1.0,added),("repayments",-1.0,reduced)] {
-            let items = v.get(key).and_then(Value::as_array).ok_or_else(||error("LOAN_INFORMATION_INVALID", "请补齐新增与还款明细。", Some(r.loan_id.clone())))?;
+        for (key, sign, expected) in [("additions", 1.0, added), ("repayments", -1.0, reduced)] {
+            let items = v.get(key).and_then(Value::as_array).ok_or_else(|| {
+                error(
+                    "LOAN_INFORMATION_INVALID",
+                    "请补齐新增与还款明细。",
+                    Some(r.loan_id.clone()),
+                )
+            })?;
             let mut sum = 0.0;
             for item in items {
                 if item.get("amount").is_none_or(Value::is_null) && item.get("date").and_then(Value::as_str).is_none_or(|s|s.is_empty()) { continue; }
                 let d = item.get("date").and_then(Value::as_str).and_then(parse_date)
                     .filter(|d| *d >= start && *d <= end)
-                    .ok_or_else(||error("LOAN_EVENT_DATE_INVALID", "新增或还款日期须填写且在报告期内。", Some(r.loan_id.clone())))?;
-                let a = item.get("amount").and_then(Value::as_f64).filter(|a|a.is_finite() && *a > 0.0)
-                    .ok_or_else(||error("LOAN_INFORMATION_INVALID", "新增或还款金额必须大于零。", Some(r.loan_id.clone())))?;
+                    .ok_or_else(|| {
+                        error(
+                            "LOAN_EVENT_DATE_INVALID",
+                            "新增或还款日期须填写且在报告期内。",
+                            Some(r.loan_id.clone()),
+                        )
+                    })?;
+                let a = item
+                    .get("amount")
+                    .and_then(Value::as_f64)
+                    .filter(|a| a.is_finite() && *a > 0.0)
+                    .ok_or_else(|| {
+                        error(
+                            "LOAN_INFORMATION_INVALID",
+                            "新增或还款金额必须大于零。",
+                            Some(r.loan_id.clone()),
+                        )
+                    })?;
                 sum += a;
-                events.push((d,a*sign));
+                events.push((d, a * sign));
             }
-            if (sum-expected).abs() >= 0.005 { return Err(error("LOAN_EVENT_TOTAL_MISMATCH", "明细合计与本期新增或减少金额不一致。", Some(r.loan_id.clone()))); }
+            if (sum - expected).abs() >= 0.005 {
+                return Err(error(
+                    "LOAN_EVENT_TOTAL_MISMATCH",
+                    "明细合计与本期新增或减少金额不一致。",
+                    Some(r.loan_id.clone()),
+                ));
+            }
         }
-        if (opening+added-reduced-closing).abs() >= 0.005 {
-            return Err(error("LOAN_BALANCE_MISMATCH", "年初余额＋新增－减少与期末余额不一致。", Some(r.loan_id.clone())));
+        if (opening + added - reduced - closing).abs() >= 0.005 {
+            return Err(error(
+                "LOAN_BALANCE_MISMATCH",
+                "年初余额＋新增－减少与期末余额不一致。",
+                Some(r.loan_id.clone()),
+            ));
         }
-        events.sort_by_key(|e|e.0);
+        events.sort_by_key(|e| e.0);
         let mut balance = opening;
         let mut i = 0;
         while i < events.len() {
             let d = events[i].0;
-            while i < events.len() && events[i].0 == d { balance += events[i].1; i += 1; }
-            if balance < -0.005 { return Err(error("LOAN_NEGATIVE_PRINCIPAL", "还款后本金为负，请检查日期和金额。", Some(r.loan_id.clone()))); }
+            while i < events.len() && events[i].0 == d {
+                balance += events[i].1;
+                i += 1;
+            }
+            if balance < -0.005 {
+                return Err(error(
+                    "LOAN_NEGATIVE_PRINCIPAL",
+                    "还款后本金为负，请检查日期和金额。",
+                    Some(r.loan_id.clone()),
+                ));
+            }
         }
         r.opening_principal = opening;
         r.additions = added;
         r.reductions = reduced;
         r.closing_principal = closing;
         r.events = events;
-        for (key, target) in [("fixedRate", &mut r.fixed_rate), ("benchmarkRate", &mut r.benchmark_rate)] {
+        for (key, target) in [
+            ("fixedRate", &mut r.fixed_rate),
+            ("benchmarkRate", &mut r.benchmark_rate),
+        ] {
             if let Some(value) = v.get(key) {
-                *target = if value.is_null() { None } else { Some(value.as_f64().filter(|a|a.is_finite() && *a >= 0.0)
-                    .ok_or_else(||error("LOAN_RATE_INVALID", "利率必须为有效的非负数。", Some(r.loan_id.clone())))?) };
+                *target = if value.is_null() {
+                    None
+                } else {
+                    Some(
+                        value
+                            .as_f64()
+                            .filter(|a| a.is_finite() && *a >= 0.0)
+                            .ok_or_else(|| {
+                                error(
+                                    "LOAN_RATE_INVALID",
+                                    "利率必须为有效的非负数。",
+                                    Some(r.loan_id.clone()),
+                                )
+                            })?,
+                    )
+                };
             }
         }
-        r.rate_type = v.get("rateType").and_then(Value::as_str).filter(|s|*s=="fixed" || *s=="floating")
-            .ok_or_else(||error("LOAN_RATE_INVALID", "请选择固定或浮动利率。", Some(r.loan_id.clone())))?.into();
-        r.spread_bps = Some(v.get("spreadBps").and_then(Value::as_f64).filter(|a|a.is_finite())
-            .ok_or_else(||error("LOAN_RATE_INVALID", "请填写有效加减点。", Some(r.loan_id.clone())))?);
-        let rate = if r.rate_type == "floating" { r.benchmark_rate } else { r.fixed_rate };
-        if rate.is_none() { return Err(error("LOAN_RATE_INVALID", "请填写执行利率或基准利率。", Some(r.loan_id.clone()))); }
+        r.rate_type = v
+            .get("rateType")
+            .and_then(Value::as_str)
+            .filter(|s| *s == "fixed" || *s == "floating")
+            .ok_or_else(|| {
+                error(
+                    "LOAN_RATE_INVALID",
+                    "请选择固定或浮动利率。",
+                    Some(r.loan_id.clone()),
+                )
+            })?
+            .into();
+        r.spread_bps = Some(
+            v.get("spreadBps")
+                .and_then(Value::as_f64)
+                .filter(|a| a.is_finite())
+                .ok_or_else(|| {
+                    error(
+                        "LOAN_RATE_INVALID",
+                        "请填写有效加减点。",
+                        Some(r.loan_id.clone()),
+                    )
+                })?,
+        );
+        let rate = if r.rate_type == "floating" {
+            r.benchmark_rate
+        } else {
+            r.fixed_rate
+        };
+        if rate.is_none() {
+            return Err(error(
+                "LOAN_RATE_INVALID",
+                "请填写执行利率或基准利率。",
+                Some(r.loan_id.clone()),
+            ));
+        }
         r.match_status = "已匹配".into();
-        let source_basis = r.match_basis.split('；').next().unwrap_or("客户借款台账").to_owned();
-        r.match_basis = format!("{source_basis}；按用户确认的台账金额及新增/还款日期分段计息（合同日期默认值可编辑，原始台账字段单独保留）");
+        let source_basis = r
+            .match_basis
+            .split('；')
+            .next()
+            .unwrap_or("客户借款台账")
+            .to_owned();
+        r.match_basis = format!(
+            "{source_basis}；按用户确认的台账金额及新增/还款日期分段计息（合同日期默认值可编辑，原始台账字段单独保留）"
+        );
     }
     Ok(())
 }
@@ -4743,7 +4909,13 @@ fn calculate_interest(rows: &mut [LoanRow], params: &Value) -> Result<(), AppErr
         ));
     }
     apply_ledger_confirmation(rows, params)?;
-    if params.get("ledgerInformation").and_then(Value::as_object).is_some() { apply_overrides(rows, params); }
+    if params
+        .get("ledgerInformation")
+        .and_then(Value::as_object)
+        .is_some()
+    {
+        apply_overrides(rows, params);
+    }
     let days = (end - start).num_days() + 1;
     for row in rows {
         // 浮动利率：基准利率已列示时按“基准+点数”推算；
@@ -4811,7 +4983,12 @@ fn calculate_interest(rows: &mut [LoanRow], params: &Value) -> Result<(), AppErr
         //     - 年内到期：视同到期结清，本金=期初/合同金额计至到期日
         //     - 存续：本金=合同金额-累计已还（已还视同期初前发生）
         // 天数：算头不算尾——止于年中到期日当天不计息，止于报告期末当天计息（全年365天）。
-        if let Some(cs) = row.contract_start.filter(|_| params.get("ledgerInformation").and_then(Value::as_object).is_none()) {
+        if let Some(cs) = row.contract_start.filter(|_| {
+            params
+                .get("ledgerInformation")
+                .and_then(Value::as_object)
+                .is_none()
+        }) {
             let ce = row.contract_end.unwrap_or(end);
             let settled = row.contract_end.map(|c| c <= end).unwrap_or(false);
             let from = cs.max(start);
@@ -5029,7 +5206,11 @@ fn export_with_booked(rows: &[LoanRow], params: &Value, booked: &BookedInterestE
     };
     // TB＋JE 模式下期初/期末金额的来源就是 TB 科目余额表，列名如实标注来源，
     // 复核者才能把 E 列与手里的 TB 对上（台账模式则保持「台账」字样）。
-    let opening_header = if tb_mode { "期初本金（TB）" } else { "期初本金" };
+    let opening_header = if tb_mode {
+        "期初本金（TB）"
+    } else {
+        "期初本金"
+    };
     let closing_header = if tb_mode {
         "期末余额（TB）"
     } else {
@@ -5304,7 +5485,10 @@ fn export_with_booked(rows: &[LoanRow], params: &Value, booked: &BookedInterestE
             .map(|detail| {
                 format!(
                     "{} {}：{}",
-                    detail.get("accountCode").and_then(Value::as_str).unwrap_or(""),
+                    detail
+                        .get("accountCode")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
                     detail.get("account").and_then(Value::as_str).unwrap_or(""),
                     detail.get("basis").and_then(Value::as_str).unwrap_or(""),
                 )
@@ -5328,13 +5512,16 @@ fn export_with_booked(rows: &[LoanRow], params: &Value, booked: &BookedInterestE
     ws.write_formula_with_format(
         calc_row,
         1,
-        Formula::new(format!("=P{total_excel_row}"))
-            .set_result(calculated_total.to_string()),
+        Formula::new(format!("=P{total_excel_row}")).set_result(calculated_total.to_string()),
         &amount,
     )
     .map_err(xlsx)?;
-    ws.write_string(calc_row, 2, "本金×利率×计息天数÷365；计息过程见「计息分段明细」")
-        .map_err(xlsx)?;
+    ws.write_string(
+        calc_row,
+        2,
+        "本金×利率×计息天数÷365；计息过程见「计息分段明细」",
+    )
+    .map_err(xlsx)?;
     ws.write_string(booked_row, 0, "账面利息支出（TB 利息科目）")
         .map_err(xlsx)?;
     if booked.selected {
@@ -5344,7 +5531,8 @@ fn export_with_booked(rows: &[LoanRow], params: &Value, booked: &BookedInterestE
         ws.write_blank(booked_row, 1, &amount).map_err(xlsx)?;
     }
     ws.write_string(booked_row, 2, &basis_text).map_err(xlsx)?;
-    ws.write_string(diff_row, 0, "差异（测算－账面）").map_err(xlsx)?;
+    ws.write_string(diff_row, 0, "差异（测算－账面）")
+        .map_err(xlsx)?;
     ws.write_formula_with_format(
         diff_row,
         1,
@@ -5361,7 +5549,8 @@ fn export_with_booked(rows: &[LoanRow], params: &Value, booked: &BookedInterestE
         &amount,
     )
     .map_err(xlsx)?;
-    ws.write_string(diff_row, 2, "差异为正表示测算大于账面").map_err(xlsx)?;
+    ws.write_string(diff_row, 2, "差异为正表示测算大于账面")
+        .map_err(xlsx)?;
     ws.write_string(
         (n + 9) as u32,
         0,
@@ -5379,8 +5568,7 @@ fn export_with_booked(rows: &[LoanRow], params: &Value, booked: &BookedInterestE
             _ => "",
         };
         if !label.is_empty() {
-            ws.write_string((n + 10) as u32, 0, label)
-                .map_err(xlsx)?;
+            ws.write_string((n + 10) as u32, 0, label).map_err(xlsx)?;
         }
     }
     ws.set_column_width(currency_col, 12).map_err(xlsx)?;
@@ -5881,22 +6069,36 @@ fn load_ledger_table(spec: &SourceSpec) -> Result<Table, AppError> {
         )
     };
     let (header_index, inferred_depth) = crate::header_detection::layout(
-        &all, 30, |r| r.iter().filter(|v| header_cell_hit(v)).count() as f64,
-        header_cell_hit, (spec.header_row > 0).then(|| spec.header_row - 1),
+        &all,
+        30,
+        |r| r.iter().filter(|v| header_cell_hit(v)).count() as f64,
+        header_cell_hit,
+        (spec.header_row > 0).then(|| spec.header_row - 1),
     );
     let header_index = if spec.header_row == 0 && spec.header_depth == 1 {
         detect_header(&all) - 1
-    } else { header_index };
+    } else {
+        header_index
+    };
     let header_row = header_index + 1;
     if header_row == 0 || header_row > all.len() {
         return Err(error("HEADER_ROW_INVALID", "标题行超出数据范围。", None));
     }
     let width = all.iter().map(Vec::len).max().unwrap_or(0);
-    let depth = if spec.header_depth == 0 { inferred_depth } else { spec.header_depth.clamp(1, 2) };
-    let mut headers = if depth > 1 {
-        crate::fx::merge_headers(&all[header_index..(header_index + depth).min(all.len())], width)
+    let depth = if spec.header_depth == 0 {
+        inferred_depth
     } else {
-        (0..width).map(|i| all[header_index].get(i).cloned().unwrap_or_default()).collect()
+        spec.header_depth.clamp(1, 2)
+    };
+    let mut headers = if depth > 1 {
+        crate::fx::merge_headers(
+            &all[header_index..(header_index + depth).min(all.len())],
+            width,
+        )
+    } else {
+        (0..width)
+            .map(|i| all[header_index].get(i).cloned().unwrap_or_default())
+            .collect()
     };
     for (i, h) in headers.iter_mut().enumerate() {
         if h.trim().is_empty() {
@@ -7198,12 +7400,18 @@ mod tests {
     fn 通用表头借款台账双层并保留手动单层() {
         let path = std::env::temp_dir().join(format!("loan-header-{}.csv", uuid::Uuid::new_v4()));
         std::fs::write(&path, "借款登记簿,借款登记簿,借款登记簿,借款登记簿\n借款信息,,金额信息,\n银行,编号,本金,利率\n某银行,001,100,3.5\n").unwrap();
-        let spec: super::SourceSpec = serde_json::from_value(serde_json::json!({"inputPath":path,"headerRow":0,"headerDepth":0})).unwrap();
+        let spec: super::SourceSpec = serde_json::from_value(
+            serde_json::json!({"inputPath":path,"headerRow":0,"headerDepth":0}),
+        )
+        .unwrap();
         let table = super::load_ledger_table(&spec).unwrap();
         assert_eq!((table.header_row, table.header_depth), (2, 2));
         assert_eq!(table.headers[2], "金额信息-本金");
         assert_eq!(table.rows.len(), 1);
-        let manual: super::SourceSpec = serde_json::from_value(serde_json::json!({"inputPath":path,"headerRow":3,"headerDepth":1})).unwrap();
+        let manual: super::SourceSpec = serde_json::from_value(
+            serde_json::json!({"inputPath":path,"headerRow":3,"headerDepth":1}),
+        )
+        .unwrap();
         let table = super::load_ledger_table(&manual).unwrap();
         assert_eq!(table.headers[2], "本金");
         assert_eq!(table.rows.len(), 1);
@@ -7873,8 +8081,24 @@ mod tests {
             (
                 "TB",
                 vec![
-                    vec!["编码", "科目", "借款", "期初贷", "期末贷", "本年借方", "本年贷方"],
-                    vec!["2001", "短期借款", "工行贷款", "1000000", "1100000", "0", "0"],
+                    vec![
+                        "编码",
+                        "科目",
+                        "借款",
+                        "期初贷",
+                        "期末贷",
+                        "本年借方",
+                        "本年贷方",
+                    ],
+                    vec![
+                        "2001",
+                        "短期借款",
+                        "工行贷款",
+                        "1000000",
+                        "1100000",
+                        "0",
+                        "0",
+                    ],
                     vec!["6603", "财务费用-利息支出", "", "0", "0", "30000", "0"],
                 ],
             ),
@@ -7954,20 +8178,18 @@ mod tests {
             (diff_cached - (total - 30_000.0)).abs() < 0.01,
             "差异缓存应＝测算－账面：{diff_cached}"
         );
-        let diff_formula = formulas
-            .get_value(((n + 7) as u32, 1))
-            .unwrap()
-            .clone();
+        let diff_formula = formulas.get_value(((n + 7) as u32, 1)).unwrap().clone();
         assert!(
-            diff_formula.contains(&format!("B{}", n + 7)) && diff_formula.contains(&format!("B{}", n + 6)),
+            diff_formula.contains(&format!("B{}", n + 7))
+                && diff_formula.contains(&format!("B{}", n + 6)),
             "差异应是引用测算/账面两格的活公式：{diff_formula}"
         );
         // 账面行的说明带科目与发生额口径。
-        let basis = values
-            .get_value(((n + 6) as u32, 2))
-            .unwrap()
-            .to_string();
-        assert!(basis.contains("6603") && basis.contains("借方减贷方"), "{basis}");
+        let basis = values.get_value(((n + 6) as u32, 2)).unwrap().to_string();
+        assert!(
+            basis.contains("6603") && basis.contains("借方减贷方"),
+            "{basis}"
+        );
         let _ = std::fs::remove_file(&out);
     }
 
@@ -8154,8 +8376,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "{result:#?}");
         assert_eq!(rows[0]["openingPrincipal"], 0.0);
         assert_eq!(
-            rows[0]["matchBasis"],
-            "利率行由 TB 轻量生成；本金变动、勾稽与利息在第三步测算",
+            rows[0]["matchBasis"], "利率行由 TB 轻量生成；本金变动、勾稽与利息在第三步测算",
             "利率行依据说明保持原样，不追加期初口径说明：{rows:#?}"
         );
     }
@@ -8502,7 +8723,10 @@ mod tests {
                     file, header_row, expect_row
                 ));
             }
-            let suggested = inspected["suggestedMapping"].as_object().cloned().unwrap_or_default();
+            let suggested = inspected["suggestedMapping"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
             for (role, col) in spec["expectSuggested"].as_object().unwrap() {
                 if suggested.get(role).and_then(Value::as_str) != Some(col.as_str().unwrap()) {
                     failures.push(format!(
@@ -8588,7 +8812,11 @@ mod tests {
     fn 诊断_合成台账差异明细() {
         // 日期取数探针：直接看 endDate 角色在两份文件里读出的文本与解析结果
         for (probe, sheet, header_row) in [
-            ("04-南岭矿业集团有限公司-借款情况表.xlsx", "借款台账", 1usize),
+            (
+                "04-南岭矿业集团有限公司-借款情况表.xlsx",
+                "借款台账",
+                1usize,
+            ),
             ("05-恒信工贸有限公司-银行借款台账.xlsx", "", 1),
         ] {
             let spec = SourceSpec {
@@ -8604,12 +8832,18 @@ mod tests {
             let idx = table.headers.iter().position(|h| h == "到期日").unwrap();
             println!("PROBE {} 到期日列下标 {}", probe, idx);
             for row in table.rows.iter().take(3) {
-                println!("  cell={:?} parsed={:?}", row.get(idx), parse_date(row.get(idx).map_or("", |v| v)));
+                println!(
+                    "  cell={:?} parsed={:?}",
+                    row.get(idx),
+                    parse_date(row.get(idx).map_or("", |v| v))
+                );
             }
         }
         // 内部字段探针：起止日/期末/还款方式在 calculate 之后、计息之前的实际值
-        for probe in ["06-中晟机械制造股份有限公司-短期借款明细.xlsx",
-                      "14-中兴电气股份有限公司-借款合同台账.xlsx"] {
+        for probe in [
+            "06-中晟机械制造股份有限公司-短期借款明细.xlsx",
+            "14-中兴电气股份有限公司-借款合同台账.xlsx",
+        ] {
             let answers: Value = serde_json::from_str(
                 &std::fs::read_to_string(synthetic_ledger_set_dir().join("标准答案.json")).unwrap(),
             )
@@ -8631,17 +8865,21 @@ mod tests {
             for r in rows.iter().take(4) {
                 println!(
                     "  {} cs={:?} ce={:?} open={} close={} repaid={} method={:?}",
-                    r.loan_id, r.contract_start, r.contract_end,
-                    r.contract_opening, r.closing_principal, r.repaid, r.repayment_method
+                    r.loan_id,
+                    r.contract_start,
+                    r.contract_end,
+                    r.contract_opening,
+                    r.closing_principal,
+                    r.repaid,
+                    r.repayment_method
                 );
             }
         }
 
         let dir = synthetic_ledger_set_dir();
-        let answers: Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("标准答案.json")).unwrap(),
-        )
-        .unwrap();
+        let answers: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("标准答案.json")).unwrap())
+                .unwrap();
         for spec in answers["files"].as_array().unwrap() {
             let file = spec["file"].as_str().unwrap();
             let sheet = spec["sheet"].as_str().unwrap_or("");
@@ -8656,7 +8894,12 @@ mod tests {
                 }
             };
             let rows = result["rows"].as_array().unwrap();
-            println!("===== {} 共 {} 行（预期 {}）", file, rows.len(), spec["expectLoanCount"]);
+            println!(
+                "===== {} 共 {} 行（预期 {}）",
+                file,
+                rows.len(),
+                spec["expectLoanCount"]
+            );
             for r in rows.iter().take(2) {
                 println!(
                     "  row {} | open={:?} close={:?} | basis: {}",
@@ -8681,10 +8924,7 @@ mod tests {
                     shown += 1;
                     println!("  -- {} 利息 {:.2} 预期 {:.2}", id, got, want);
                     if let Some(r) = hit {
-                        println!(
-                            "     basis: {}",
-                            r["matchBasis"].as_str().unwrap_or("")
-                        );
+                        println!("     basis: {}", r["matchBasis"].as_str().unwrap_or(""));
                         println!(
                             "     rateType={} fixed={:?} bench={:?} bps={:?} eff={:?} days={:?} open={:?} close={:?}",
                             r["rateType"],
@@ -9659,7 +9899,10 @@ mod tests {
             ["乙", "2001", "银行借款", "CNY", "200"],
             ["甲", "2001", "股东借款", "CNY", "300"],
             ["甲", "2001", "银行借款", "USD", "400"],
-        ].iter().enumerate() {
+        ]
+        .iter()
+        .enumerate()
+        {
             for (c, value) in row.iter().enumerate() {
                 sheet.write_string(r as u32, c as u16, *value).unwrap();
             }
@@ -9670,13 +9913,28 @@ mod tests {
             "source": {"inputPath": path, "sheet": "TB", "headerRow": 1, "headerDepth": 1},
             "mapping": {"entity": "主体", "accountCode": "编码", "accountName": "科目",
                 "currency": "币种", "closingFunctionalCredit": "期末贷"}
-        }})).unwrap();
+        }}))
+        .unwrap();
         let accounts = out["accounts"].as_array().unwrap();
         assert_eq!(accounts.len(), 3, "{out:#?}");
-        assert_eq!(accounts.iter().find(|item| item["name"] == "银行借款" && item["currency"] == "CNY")
-            .unwrap()["byEntity"].as_array().unwrap().len(), 2);
-        assert_eq!(accounts.iter().map(|item| item["identity"].as_str().unwrap())
-            .collect::<std::collections::HashSet<_>>().len(), 3);
+        assert_eq!(
+            accounts
+                .iter()
+                .find(|item| item["name"] == "银行借款" && item["currency"] == "CNY")
+                .unwrap()["byEntity"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            accounts
+                .iter()
+                .map(|item| item["identity"].as_str().unwrap())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -10952,8 +11210,8 @@ mod loan_real_ledger_mapping_tests {
 
 #[cfg(test)]
 mod ledger_information_tests {
-    use super::*;
     use super::tests::SyntheticLedger;
+    use super::*;
     #[test]
     fn 确认明细拆分新增还款逐日计息且不重复汇总() {
         let fixture = SyntheticLedger::new(&[["4", "", "", ""]]);
@@ -10964,16 +11222,22 @@ mod ledger_information_tests {
             "rateType":"fixed","spreadBps":0.0,"fixedRate":0.04,
             "additions":[{"date":"2025-04-01","amount":5000000.0},{"date":"2025-05-01","amount":5000000.0}],
             "repayments":[{"date":"2025-06-01","amount":2000000.0}]}});
-        calculate_interest(&mut rows,&params).unwrap();
-        let expected = (5000000.0*30.0 + 10000000.0*31.0 + 8000000.0*214.0)*0.04/365.0;
-        assert!((rows[0].calculated_interest-expected).abs()<0.001);
-        assert_eq!(rows[0].additions,10000000.0);
-        assert_eq!(rows[0].match_status,"已匹配");
+        calculate_interest(&mut rows, &params).unwrap();
+        let expected = (5000000.0 * 30.0 + 10000000.0 * 31.0 + 8000000.0 * 214.0) * 0.04 / 365.0;
+        assert!((rows[0].calculated_interest - expected).abs() < 0.001);
+        assert_eq!(rows[0].additions, 10000000.0);
+        assert_eq!(rows[0].match_status, "已匹配");
         params["ledgerInformation"][&key]["additions"][0]["amount"] = json!(6000000.0);
-        assert_eq!(calculate_interest(&mut rows,&params).unwrap_err().code,"LOAN_EVENT_TOTAL_MISMATCH");
+        assert_eq!(
+            calculate_interest(&mut rows, &params).unwrap_err().code,
+            "LOAN_EVENT_TOTAL_MISMATCH"
+        );
         params["ledgerInformation"][&key]["additions"][0]["amount"] = json!(5000000.0);
         params["ledgerInformation"][&key]["repayments"][0]["date"] = json!("2026-03-31");
-        assert_eq!(calculate_interest(&mut rows,&params).unwrap_err().code,"LOAN_EVENT_DATE_INVALID");
+        assert_eq!(
+            calculate_interest(&mut rows, &params).unwrap_err().code,
+            "LOAN_EVENT_DATE_INVALID"
+        );
     }
     #[test]
     fn 华源01样例默认还款限定截止日并保留空白期末() {
@@ -10990,8 +11254,8 @@ mod ledger_information_tests {
         assert_eq!(partial["repayments"][0]["date"],"2025-12-31");
         let blank = rows.iter().find(|r|r["loanId"]=="HG-2023-025").unwrap();
         assert!(blank["closing"].is_null());
-        assert_eq!(blank["repayments"][0]["date"],"2025-09-07");
-        assert_eq!(blank["reduced"],6295000.0);
+        assert_eq!(blank["repayments"][0]["date"], "2025-09-07");
+        assert_eq!(blank["reduced"], 6295000.0);
     }
     #[test]
     fn 确认默认完整清单与无期末列按四栏推算() {

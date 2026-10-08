@@ -2983,8 +2983,10 @@ fn share_single_tb_direction_when_reconciled(
     let mut shared = mapping.clone();
     shared.insert(missing.into(), direction.clone());
     let shared_score = tb_direction_rollforward_score(headers, rows, &shared, present);
-    if let (Some((baseline_eligible, baseline_passed, _)), Some((shared_eligible, shared_passed, used_period))) =
-        (baseline, shared_score)
+    if let (
+        Some((baseline_eligible, baseline_passed, _)),
+        Some((shared_eligible, shared_passed, used_period)),
+    ) = (baseline, shared_score)
         && baseline_eligible >= 3
         && shared_eligible == baseline_eligible
         && shared_passed > baseline_passed
@@ -4705,9 +4707,15 @@ fn tb_leaf_analysis(
         })
         .collect::<Vec<_>>();
     let name_indexes = indexes("accountName");
-    let names = rows.iter().map(|row| joined(row, &name_indexes)).collect::<Vec<_>>();
+    let names = rows
+        .iter()
+        .map(|row| joined(row, &name_indexes))
+        .collect::<Vec<_>>();
     let auxiliary_indexes = indexes("auxiliary");
-    let auxiliaries = rows.iter().map(|row| joined(row, &auxiliary_indexes)).collect::<Vec<_>>();
+    let auxiliaries = rows
+        .iter()
+        .map(|row| joined(row, &auxiliary_indexes))
+        .collect::<Vec<_>>();
     // 有些 ERP 的上级科目编码并不是下级编码的字面前缀（真实 03 号样例：
     // 一级 `5302` 对应二级 `5301020000`），但表内另有可靠的「级次」列。
     // 级次仅作为父子结构证据，仍须所有语义金额完整勾稽才会排除汇总行。
@@ -4852,8 +4860,14 @@ fn tb_leaf_analysis(
                     .iter()
                     .map(|index| currencies[*index].clone())
                     .collect::<Vec<_>>();
-                let compact_names = kept.iter().map(|index| names[*index].clone()).collect::<Vec<_>>();
-                let compact_auxiliaries = kept.iter().map(|index| auxiliaries[*index].clone()).collect::<Vec<_>>();
+                let compact_names = kept
+                    .iter()
+                    .map(|index| names[*index].clone())
+                    .collect::<Vec<_>>();
+                let compact_auxiliaries = kept
+                    .iter()
+                    .map(|index| auxiliaries[*index].clone())
+                    .collect::<Vec<_>>();
                 let compact_levels = kept.iter().map(|index| levels[*index]).collect::<Vec<_>>();
                 let compact_values = values
                     .iter()
@@ -5017,16 +5031,34 @@ fn filter_zero_catalog_parents(
 ) {
     let indexes = |role: &str| column_of(role).iter().filter_map(|name| header_index(headers, name)).collect::<Vec<_>>();
     let mut code_indexes = indexes("accountCode");
-    if code_indexes.is_empty() { code_indexes = indexes("account"); code_indexes.truncate(1); }
+    if code_indexes.is_empty() {
+        code_indexes = indexes("account");
+        code_indexes.truncate(1);
+    }
     let mut values = rollup_value_columns(headers, rows, column_of);
     if values.is_empty() {
         // 单侧余额列不足以作父子金额勾稽，仍足以确认父项本身为零。
-        for role in ["openingFunctionalDebit", "openingFunctionalCredit", "openingFunctionalAmount",
-            "closingFunctionalDebit", "closingFunctionalCredit", "closingFunctionalAmount",
-            "ytdFunctionalDebit", "ytdFunctionalCredit", "ytdFunctionalAmount"] {
+        for role in [
+            "openingFunctionalDebit",
+            "openingFunctionalCredit",
+            "openingFunctionalAmount",
+            "closingFunctionalDebit",
+            "closingFunctionalCredit",
+            "closingFunctionalAmount",
+            "ytdFunctionalDebit",
+            "ytdFunctionalCredit",
+            "ytdFunctionalAmount",
+        ] {
             for position in indexes(role) {
-                values.push(rows.iter().map(|row| row.get(position)
-                    .and_then(|value| parse_amount(value).ok().flatten()).unwrap_or(0.0)).collect());
+                values.push(
+                    rows.iter()
+                        .map(|row| {
+                            row.get(position)
+                                .and_then(|value| parse_amount(value).ok().flatten())
+                                .unwrap_or(0.0)
+                        })
+                        .collect(),
+                );
             }
         }
     }
@@ -5340,12 +5372,11 @@ fn mark_rollup_by_sum_reference(
                     (levels.get(anchor).copied().flatten(), levels.get(cursor).copied().flatten()),
                     (Some(parent), Some(child)) if child > parent
                 );
-                let code_hierarchy = !anchor_code.is_empty() && !cursor_code.is_empty()
+                let code_hierarchy = !anchor_code.is_empty()
+                    && !cursor_code.is_empty()
                     && (is_ancestor_code(anchor_code, cursor_code)
                         || is_ancestor_code(cursor_code, anchor_code));
-                if currencies[cursor] != currencies[anchor]
-                    && !code_hierarchy && !explicit_child
-                {
+                if currencies[cursor] != currencies[anchor] && !code_hierarchy && !explicit_child {
                     break;
                 }
                 if !anchor_code.is_empty()
@@ -5387,25 +5418,34 @@ fn mark_rollup_by_sum_reference(
                     && !member_codes.is_empty()
                     && member_codes.iter().all(|code| *code == anchor_code);
                 let same_group_neighbor = |index: usize| {
-                    identities[index] == identities[anchor] && currencies[index] == currencies[anchor]
+                    identities[index] == identities[anchor]
+                        && currencies[index] == currencies[anchor]
                 };
-                let interior_anchor = anchor > 0 && anchor + 1 < len
-                    && same_group_neighbor(anchor - 1) && same_group_neighbor(anchor + 1);
+                let interior_anchor = anchor > 0
+                    && anchor + 1 < len
+                    && same_group_neighbor(anchor - 1)
+                    && same_group_neighbor(anchor + 1);
                 if same_code && interior_anchor {
                     continue;
                 }
                 // 定长平级表里“员工生育保险-B 200 = C 50 + D 150”只是
                 // 偶然凑数。同编码名称若只差末尾序号/后缀，视为并列项目。
                 let anchor_name = names[anchor].chars().collect::<Vec<_>>();
-                let peer_labels = same_code && members.iter().any(|index| names[*index] != names[anchor])
-                    && !anchor_name.is_empty() && members.iter().all(|index| {
-                    let child = names[*index].chars().collect::<Vec<_>>();
-                    let common = anchor_name.iter().zip(&child).take_while(|(a, b)| a == b).count();
-                    !child.is_empty()
-                        && anchor_name.len().abs_diff(child.len()) <= 1
-                        && common >= anchor_name.len().min(child.len()).saturating_sub(1)
-                        && common >= 2
-                });
+                let peer_labels = same_code
+                    && members.iter().any(|index| names[*index] != names[anchor])
+                    && !anchor_name.is_empty()
+                    && members.iter().all(|index| {
+                        let child = names[*index].chars().collect::<Vec<_>>();
+                        let common = anchor_name
+                            .iter()
+                            .zip(&child)
+                            .take_while(|(a, b)| a == b)
+                            .count();
+                        !child.is_empty()
+                            && anchor_name.len().abs_diff(child.len()) <= 1
+                            && common >= anchor_name.len().min(child.len()).saturating_sub(1)
+                            && common >= 2
+                    });
                 if peer_labels {
                     continue;
                 }
@@ -5483,17 +5523,26 @@ fn mark_rollup_by_sum_reference(
         // 剔除汇总行；身份没有区分的重复维度沿用保留汇总行的计算口径。
         // 不同编码必须保留层级更深的一侧。反向扫描时 anchor 可能是子科目、
         // members 里反而是父科目，旧逻辑固定删除 anchor 会把终级科目删掉。
-        if candidate.same_code && candidate.members.iter().any(|index| original_rollup[*index]) {
+        if candidate.same_code
+            && candidate
+                .members
+                .iter()
+                .any(|index| original_rollup[*index])
+        {
             continue;
         }
         let distinct_identity_children = candidate.same_code
             && candidate.members.len() >= 2
-            && candidate.members.iter().all(|index| !original_rollup[*index])
+            && candidate
+                .members
+                .iter()
+                .all(|index| !original_rollup[*index])
             && candidate.members.iter().any(|index| {
                 names[*index] != names[candidate.anchor]
                     || auxiliaries[*index] != auxiliaries[candidate.anchor]
             });
-        let keep_anchor = !distinct_identity_children && !anchor_code.is_empty()
+        let keep_anchor = !distinct_identity_children
+            && !anchor_code.is_empty()
             && (coded_members.is_empty()
                 || coded_members
                     .iter()
@@ -6378,7 +6427,9 @@ pub(crate) fn month_day_date_fallback(
         };
         let mut seen = 0usize;
         for row in rows.iter().take(200) {
-            let Some(value) = row.get(index) else { continue };
+            let Some(value) = row.get(index) else {
+                continue;
+            };
             let text = value.trim();
             if text.is_empty() {
                 continue;
@@ -6392,10 +6443,7 @@ pub(crate) fn month_day_date_fallback(
     };
     let candidates: Vec<&String> = headers.iter().filter(|h| month_shaped(h)).collect();
     if let [single] = candidates.as_slice() {
-        mapping.insert(
-            "date".into(),
-            Value::String(single.trim().to_owned()),
-        );
+        mapping.insert("date".into(), Value::String(single.trim().to_owned()));
         pair_month_day_date_columns(headers, rows, mapping);
     }
 }
@@ -14349,21 +14397,64 @@ mod tests {
 
     #[test]
     fn 跨币种父子仅用本位币勾稽且平行币种不互删() {
-        let headers = ["科目编码", "科目名称", "币种", "期初本位币", "借方本位币",
-            "贷方本位币", "期末本位币", "期初原币", "期末原币"]
-            .into_iter().map(String::from).collect::<Vec<_>>();
+        let headers = [
+            "科目编码",
+            "科目名称",
+            "币种",
+            "期初本位币",
+            "借方本位币",
+            "贷方本位币",
+            "期末本位币",
+            "期初原币",
+            "期末原币",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
         let rows = [
             ["1122", "应收账款", "", "300", "50", "10", "340", "", ""],
-            ["1122.01", "国内客户", "CNY", "100", "10", "0", "110", "", ""],
-            ["1122.02", "美元客户", "USD", "200", "40", "10", "230", "30", "35"],
+            [
+                "1122.01",
+                "国内客户",
+                "CNY",
+                "100",
+                "10",
+                "0",
+                "110",
+                "",
+                "",
+            ],
+            [
+                "1122.02",
+                "美元客户",
+                "USD",
+                "200",
+                "40",
+                "10",
+                "230",
+                "30",
+                "35",
+            ],
             ["2202", "应付账款", "", "90", "0", "10", "100", "", ""],
             ["2202.01", "国内供应商", "CNY", "40", "0", "4", "44", "", ""],
-            ["2202.02", "美元供应商", "USD", "50", "0", "6", "56", "7", "8"],
+            [
+                "2202.02",
+                "美元供应商",
+                "USD",
+                "50",
+                "0",
+                "6",
+                "56",
+                "7",
+                "8",
+            ],
             // 同编码平行币种行即使本位币金额巧合相等，也不是父子。
             ["1002.01", "银行户", "CNY", "25", "0", "0", "25", "", ""],
             ["1002.01", "银行户", "USD", "25", "0", "0", "25", "4", "4"],
-        ].into_iter().map(|row| row.into_iter().map(String::from).collect::<Vec<_>>())
-            .collect::<Vec<_>>();
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
         let columns = |role: &str| match role {
             "accountCode" => vec!["科目编码".into()],
             "accountName" => vec!["科目名称".into()],
@@ -14381,8 +14472,10 @@ mod tests {
         assert_eq!(tb_catalog_leaf_mask(&headers, &rows, &columns), expected);
         let mut unmatched = rows.clone();
         unmatched[0][3] = "301".into();
-        assert!(tb_leaf_mask(&headers, &unmatched, &columns)[0],
-            "父项本位币不等于下级时必须保留");
+        assert!(
+            tb_leaf_mask(&headers, &unmatched, &columns)[0],
+            "父项本位币不等于下级时必须保留"
+        );
     }
 
     #[test]
@@ -14394,7 +14487,8 @@ mod tests {
             sheet: "科目余额表".into(),
             header_row: 3,
             header_depth: 1,
-        }).expect("读取用友 TB 样例");
+        })
+        .expect("读取用友 TB 样例");
         let columns = |role: &str| match role {
             "accountCode" => vec!["科目编码".into()],
             "accountName" => vec!["科目名称".into()],
@@ -14410,12 +14504,18 @@ mod tests {
         };
         let keep = tb_catalog_leaf_mask(&table.headers, &table.rows, &columns);
         let code_index = header_index(&table.headers, "科目编码").unwrap();
-        let kept = table.rows.iter().zip(keep).filter_map(|(row, keep)|
-            keep.then(|| row[code_index].as_str())).collect::<Vec<_>>();
+        let kept = table
+            .rows
+            .iter()
+            .zip(keep)
+            .filter_map(|(row, keep)| keep.then(|| row[code_index].as_str()))
+            .collect::<Vec<_>>();
         for parent in ["1002", "1122", "2202"] {
             assert!(!kept.contains(&parent), "{parent} 是跨币种汇总科目");
         }
-        for child in ["1002.03", "1122.01", "1122.02", "1122.03", "2202.01", "2202.02", "2202.03"] {
+        for child in [
+            "1002.03", "1122.01", "1122.02", "1122.03", "2202.01", "2202.02", "2202.03",
+        ] {
             assert!(kept.contains(&child), "{child} 是应保留的末级科目");
         }
     }
@@ -14429,13 +14529,20 @@ mod tests {
         let je = vec![("甲".into(), "1002".into(), "银行存款".into())];
         let policy = AccountMatchPolicy::from_sides(&tb, &je);
         assert_eq!(policy.ambiguous_count(), 1);
-        assert_ne!(policy.account_key("甲", "1002", ""), policy.account_key("甲", "1002", "银行存款"));
+        assert_ne!(
+            policy.account_key("甲", "1002", ""),
+            policy.account_key("甲", "1002", "银行存款")
+        );
     }
 
     #[test]
     fn 同编码不同科目名称的汇总经金额勾稽后保留各明细() {
         let rows = vec![
-            行("6711.03", "处置固定资产净损失", ["3678.44", "585.47", "0", "4263.91"]),
+            行(
+                "6711.03",
+                "处置固定资产净损失",
+                ["3678.44", "585.47", "0", "4263.91"],
+            ),
             行("6711.03", "总部", ["0", "585.47", "0", "585.47"]),
             行("6711.03", "制造部", ["1837.25", "0", "0", "1837.25"]),
             行("6711.03", "销售部", ["239.32", "0", "0", "239.32"]),
@@ -14450,13 +14557,26 @@ mod tests {
 
     #[test]
     fn 同编码同名称但辅助值不同的汇总保留辅助明细() {
-        let headers = ["科目编码", "科目名称", "辅助", "期初余额", "本年借方", "本年贷方", "期末余额"]
-            .into_iter().map(String::from).collect::<Vec<_>>();
+        let headers = [
+            "科目编码",
+            "科目名称",
+            "辅助",
+            "期初余额",
+            "本年借方",
+            "本年贷方",
+            "期末余额",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
         let rows = [
             ["1002", "银行存款", "", "100", "0", "0", "100"],
             ["1002", "银行存款", "甲银行", "40", "0", "0", "40"],
             ["1002", "银行存款", "乙银行", "60", "0", "0", "60"],
-        ].into_iter().map(|row| row.into_iter().map(String::from).collect::<Vec<_>>()).collect::<Vec<_>>();
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
         let columns = |role: &str| match role {
             "accountCode" => vec!["科目编码".into()],
             "accountName" => vec!["科目名称".into()],
@@ -14467,7 +14587,10 @@ mod tests {
             "closingFunctionalAmount" => vec!["期末余额".into()],
             _ => vec![],
         };
-        assert_eq!(tb_leaf_mask(&headers, &rows, &columns), vec![false, true, true]);
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &columns),
+            vec![false, true, true]
+        );
     }
 
     #[test]

@@ -395,6 +395,13 @@ export async function withRetry<T>(
     try {
       return await run();
     } catch (error) {
+      if (
+        error instanceof Error &&
+        (error.name === "AudiPickExtractCancelled" ||
+          /取消|停止|终止/.test(error.message))
+      ) {
+        throw error;
+      }
       lastError = error;
       if (attempt === attempts - 1) break;
       onRetry?.(attempts - attempt - 1, error);

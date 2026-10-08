@@ -10,7 +10,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router-dom";
+import { createMemoryRouter, Link, MemoryRouter, RouterProvider } from "react-router-dom";
 import { useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -52,6 +52,15 @@ vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn().mockResolvedValue("test"),
 }));
 vi.mock("./theme", () => ({ setSavedTheme: vi.fn() }));
+vi.mock("./AudiPickPage", () => ({
+  AudiPickPage: () => (
+    <section data-testid="audipick-main-window-page">
+      AudiPick 主窗口页面
+      <Link to="/tools/audipick">再次打开 AudiPick</Link>
+      <Link to="/">返回工具箱</Link>
+    </section>
+  ),
+}));
 beforeEach(() => {
   vi.clearAllMocks();
   vi.stubGlobal("scrollTo", vi.fn());
@@ -371,6 +380,76 @@ it("marks preview tools as trials in the sidebar without disabling them", async 
   expect(
     sidebar.getByRole("link", { name: /汇兑损益测算/ }),
   ).not.toHaveAttribute("title");
+});
+
+it("opens AudiPick in focus mode without leaving clickable toolbox navigation underneath", async () => {
+  render(
+    <MemoryRouter initialEntries={["/"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  await screen.findByRole("heading", { name: "今天要处理什么？" });
+  const sidebar = within(
+    document.querySelector("aside.sidebar")! as HTMLElement,
+  );
+  const link = sidebar.getByRole("link", {
+    name: /AudiPick 智能合同审阅/,
+  });
+  expect(link).toHaveAttribute("href", "/tools/audipick");
+
+  fireEvent.click(link);
+  expect(await screen.findByTestId("audipick-main-window-page")).toBeVisible();
+  expect(document.querySelector("aside.sidebar")).not.toBeInTheDocument();
+  expect(screen.queryByRole("navigation", { name: "紧凑导航" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "打开工具导航" })).not.toBeInTheDocument();
+  expect(document.querySelector(".sidebar-drawer-backdrop")).not.toBeInTheDocument();
+  expect(document.querySelector(".app-shell")).toHaveClass("audipick-focus-mode");
+  expect(document.querySelector(".app-shell")).toHaveAttribute(
+    "data-layout-mode",
+    "audipick-focus",
+  );
+  expect(document.querySelector("[data-tool-page='audipick']")).not.toHaveAttribute(
+    "hidden",
+  );
+
+  fireEvent.click(screen.getByRole("link", { name: "再次打开 AudiPick" }));
+  await waitFor(() =>
+    expect(screen.getAllByTestId("audipick-main-window-page")).toHaveLength(1),
+  );
+
+  fireEvent.click(screen.getByRole("link", { name: "返回工具箱" }));
+  await screen.findByRole("heading", { name: "今天要处理什么？" });
+  expect(document.querySelector("aside.sidebar")).toBeVisible();
+  expect(screen.getByRole("navigation", { name: "紧凑导航" })).toBeInTheDocument();
+  expect(document.querySelector(".app-shell")).not.toHaveClass(
+    "audipick-focus-mode",
+  );
+  expect(document.querySelector(".app-shell")).toHaveAttribute(
+    "data-layout-mode",
+    "toolbox",
+  );
+  const retainedAudiPickPage = document.querySelector(
+    "[data-tool-page='audipick']",
+  );
+  expect(retainedAudiPickPage).toHaveAttribute("hidden");
+  expect(retainedAudiPickPage).toHaveAttribute("inert");
+  expect(screen.getAllByTestId("audipick-main-window-page")).toHaveLength(1);
+});
+
+it("redirects the legacy AudiPick window hash to the main-window tool route", async () => {
+  render(
+    <MemoryRouter initialEntries={["/audipick-window"]}>
+      <App />
+    </MemoryRouter>,
+  );
+
+  expect(await screen.findByTestId("audipick-main-window-page")).toBeVisible();
+  expect(document.querySelector("aside.sidebar")).not.toBeInTheDocument();
+  expect(screen.queryByRole("navigation", { name: "紧凑导航" })).not.toBeInTheDocument();
+  expect(document.querySelector(".app-shell")).toHaveClass("audipick-focus-mode");
+  expect(document.querySelector("[data-tool-page='audipick']")).not.toHaveAttribute(
+    "hidden",
+  );
 });
 
 it("groups settings into two columns on a single page, preserves draft, and saves via the existing APIs", async () => {

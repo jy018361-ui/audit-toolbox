@@ -61,7 +61,11 @@ impl Storage {
         let mut map = serde_json::Map::new();
         for row in rows {
             let (k, v) = row.map_err(db_error)?;
-            map.insert(k, serde_json::from_str(&v).unwrap_or(Value::Null));
+            let mut value = serde_json::from_str(&v).unwrap_or(Value::Null);
+            if k == "audipickLlm" {
+                strip_secrets(&mut value);
+            }
+            map.insert(k, value);
         }
         Ok(Value::Object(map))
     }
@@ -76,7 +80,11 @@ impl Storage {
         };
         let mut conn = self.conn.lock();
         let tx = conn.transaction().map_err(db_error)?;
-        for (k, v) in map {
+        for (k, mut v) in map {
+            // AudiPick profiles use the existing credential store, never SQLite secrets.
+            if k == "audipickLlm" {
+                strip_secrets(&mut v);
+            }
             tx.execute("INSERT INTO settings(key,value_json,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",params![k,v.to_string(),Utc::now().to_rfc3339()]).map_err(db_error)?;
         }
         tx.commit().map_err(db_error)
@@ -1345,6 +1353,39 @@ mod tests {
             value.pointer("/custom/url").and_then(Value::as_str),
             Some("https://example.com")
         );
+    }
+
+    #[test]
+    fn audipick_profile_roundtrip_preserves_toolbox_and_never_stores_secrets() {
+        let root = test_root();
+        let storage = Storage::new(&root).unwrap();
+        storage
+            .settings_set(json!({"llm":{"enabled":false,"model":"global"}}))
+            .unwrap();
+        storage.settings_set(json!({"audipickLlm":{"mode":"dedicated","enabled":true,"model":"private",
+            "apiKey":"synthetic-secret","api_key":"synthetic-secret","nested":{"token":"synthetic-secret"}}})).unwrap();
+        let value = storage.settings_get().unwrap();
+        assert_eq!(value["llm"]["model"], "global");
+        assert_eq!(value["llm"]["enabled"], false);
+        assert_eq!(value["audipickLlm"]["model"], "private");
+        let stored: String = storage
+            .conn
+            .lock()
+            .query_row(
+                "SELECT value_json FROM settings WHERE key='audipickLlm'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains("synthetic-secret"));
+        drop(storage);
+        let reopened = Storage::new(&root).unwrap();
+        assert_eq!(
+            reopened.settings_get().unwrap()["audipickLlm"]["mode"],
+            "dedicated"
+        );
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

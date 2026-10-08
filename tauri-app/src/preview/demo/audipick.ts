@@ -173,13 +173,18 @@ const DEMO_LOAN_TEXT = `---PDF第1页---
 借款期限：12个月，自2026年3月18日起至2027年3月17日止。
 ---PDF第3页---
 第4.2条 财务指标约束
-借款期间，借款人合并报表口径的资产负债率不得超过70%；借款人连续两个会计季度超过前述标准的，贷款人有权要求借款人追加合法有效的担保，并有权停止发放尚未提取的借款。
+借款期间，借款人合并报表口径的资产负债率不得超过70%。
+本项指标按连续两个会计季度考核。
 ---PDF第5页---
-第9.1条 借款用途
-本合同项下借款专款用于借款人日常生产经营流动资金周转，不得用于固定资产投资、股权投资，不得流入证券市场、房地产市场或用于民间借贷。
+第8.3条 财务行为限制
+未经贷款人事先书面同意，借款人不得向股东分配利润。
+借款人对外担保余额不得超过最近一期经审计净资产的30%。
 ---PDF第6页---
-第12.1条 信息披露与报备
-借款人发生重大诉讼、仲裁、行政处罚或其他影响偿债能力的重大事项时，应于五个工作日内书面通知贷款人并提交相关材料。`;
+第10.2条 碳配额储备要求
+借款人的碳排放配额储备不得低于年度核定配额的20%。
+---PDF第7页---
+第12.1条 借款用途与信息报送
+本合同项下借款专款用于借款人日常生产经营流动资金周转。借款人应按季度向贷款人报送财务报表。`;
 
 const DEMO_PROC_TEXT = `---PDF第2页---
 第4.2条 价格与调价机制
@@ -211,19 +216,14 @@ const textByDocument = new Map<string, string>([
 // ---------------------------------------------------------------------------
 // 预置提取结果：字段键与真实模板提示词的【字段定义】一致。
 // 借款·限制性契约（loan_covenant）/ 采购合同（procurement）各预置若干条，
-// 其中 1 条低置信度「待复核」项（页码【页码未知】、review_status 需人工复核），
-// 用于检查结果面板的复核按钮与警示布局。
+// 财务契约预置 3 条正式结果和 1 条“待新增案例”，用于检查四列表格与隔离展示。
 // ---------------------------------------------------------------------------
 
 const LOAN_FIELD_KEYS = [
-  "clause_ref",
-  "pages",
   "covenant_category",
-  "contract_classification",
-  "is_financial",
-  "title",
+  "trigger_standard",
   "excerpt",
-  "auditor_summary",
+  "source_reference",
 ];
 
 const PROC_FIELD_KEYS = [
@@ -250,37 +250,16 @@ const LOAN_SEED_ROWS: DemoResultRow[] = [
     extractAt: "2026-09-01T01:24:00.000Z",
     clause_ref: "第4.2条",
     pages: "【第3页】",
-    covenant_category: "财务类",
-    contract_classification: "指标类",
-    is_financial: "是",
-    title: "资产负债率不得超过70%",
+    covenant_category: "财务报表指标",
+    trigger_standard: "借款人合并报表口径的资产负债率不得超过70%；连续两个会计季度超过即触发",
     excerpt:
-      "借款期间，借款人合并报表口径的资产负债率不得超过70%；连续两个会计季度超过的，贷款人有权要求追加担保并停止发放尚未提取的借款。",
-    auditor_summary:
-      "实质性测试宜使用经审定财务数据，而非未审管理层报表；限制内容为资产负债率上限70%，违约将触发追加担保、停发未提取借款。",
+      "借款期间，借款人合并报表口径的资产负债率不得超过70%。\n本项指标按连续两个会计季度考核。",
+    source_documents: "华远集团流动资金借款合同.pdf",
+    source_reference: "具体约定：文件：华远集团流动资金借款合同.pdf；页码：【第3页】；条款：第4.2条",
+    covenant_scope: "repayment",
+    _financial_metrics_only: true,
     reviewed: true,
   },
-  {
-    id: "r_demo_loan_2",
-    contractId: DOC_LOAN,
-    ruleId: "loan_covenant",
-    ruleVersion: "1.0",
-    fieldKeys: [...LOAN_FIELD_KEYS],
-    fieldSetId: LOAN_FIELD_SET,
-    extractAt: "2026-09-01T01:24:00.000Z",
-    clause_ref: "第9.1条",
-    pages: "【第5页】",
-    covenant_category: "直接违约条款_用途与资金",
-    contract_classification: "非指标类",
-    is_financial: "否",
-    title: "借款专款专用禁止流入楼市股市",
-    excerpt:
-      "本合同项下借款专款用于借款人日常生产经营流动资金周转，不得用于固定资产投资、股权投资，不得流入证券市场、房地产市场或用于民间借贷。",
-    auditor_summary:
-      "需结合付款审批与资金流向判断用途违约风险；擅改用途将构成直接违约，贷款人可宣布借款提前到期。",
-    reviewed: true,
-  },
-  // 低置信度「待复核」样例：条款号与页码无法对应，提示复核后再纳入底稿。
   {
     id: "r_demo_loan_3",
     contractId: DOC_LOAN,
@@ -289,18 +268,38 @@ const LOAN_SEED_ROWS: DemoResultRow[] = [
     fieldKeys: [...LOAN_FIELD_KEYS],
     fieldSetId: LOAN_FIELD_SET,
     extractAt: "2026-09-01T01:24:00.000Z",
-    clause_ref: "",
-    pages: "【页码未知】",
-    covenant_category: "其他保护类",
-    contract_classification: "非指标类",
-    is_financial: "否",
-    title: "重大事项报备（原文位置待核实）",
-    excerpt:
-      "借款人发生重大诉讼、仲裁、行政处罚或其他影响偿债能力的重大事项时，应于五个工作日内书面通知贷款人并提交相关材料。",
-    auditor_summary:
-      "偏通知报备型条款，把握较低：未能定位条款号与页码，请人工核对原文后再纳入底稿。",
+    clause_ref: "第8.3条",
+    pages: "【第5页】",
+    covenant_category: "财务行为与交易限制",
+    trigger_standard: "对外担保余额不得超过最近一期经审计净资产的30%",
+    excerpt: "借款人对外担保余额不得超过最近一期经审计净资产的30%。",
+    source_documents: "华远集团流动资金借款合同.pdf",
+    source_reference: "具体约定：文件：华远集团流动资金借款合同.pdf；页码：【第5页】；条款：第8.3条",
+    covenant_scope: "repayment",
+    _financial_metrics_only: true,
+    reviewed: true,
+  },
+  // 案例库尚未覆盖的新型客观约定：只进入“待新增案例”，不混入四列正式结果。
+  {
+    id: "r_demo_loan_4",
+    contractId: DOC_LOAN,
+    ruleId: "loan_covenant",
+    ruleVersion: "1.0",
+    fieldKeys: [...LOAN_FIELD_KEYS],
+    fieldSetId: LOAN_FIELD_SET,
+    extractAt: "2026-09-01T01:24:00.000Z",
+    clause_ref: "第10.2条",
+    pages: "【第6页】",
+    covenant_category: "待新增案例",
+    trigger_standard: "碳排放配额储备不得低于年度核定配额的20%",
+    excerpt: "借款人的碳排放配额储备不得低于年度核定配额的20%。",
+    source_documents: "华远集团流动资金借款合同.pdf",
+    source_reference: "具体约定：文件：华远集团流动资金借款合同.pdf；页码：【第6页】；条款：第10.2条",
+    covenant_scope: "supporting",
+    _financial_metrics_only: true,
+    _covenant_pending_case: true,
     review_status: "需人工复核",
-    confidence: "低",
+    confidence: "中",
     reviewed: false,
   },
 ];
@@ -385,43 +384,26 @@ let importedSeq = 0;
 // 提取回放：两套演示模板（模板名 + 字段清单）+ 通用字段值库
 // ---------------------------------------------------------------------------
 
-// 演示模板一：借款·限制性契约（loan_covenant），字段含条款编号、页码、契约分类等。
+// 演示模板一：借款·财务契约（loan_covenant），正式结果固定为四列。
 const LOAN_DEMO_ITEMS: Array<Dict> = [
   {
-    clause_ref: "第4.2条",
-    pages: "【第3页】",
-    covenant_category: "财务类",
-    contract_classification: "指标类",
-    is_financial: "是",
-    title: "资产负债率不得超过70%",
+    covenant_category: "财务报表指标",
+    trigger_standard: "借款人合并报表口径的资产负债率不得超过70%；连续两个会计季度超过即触发",
     excerpt:
-      "借款期间，借款人合并报表口径的资产负债率不得超过70%；连续两个会计季度超过的，贷款人有权要求追加担保并停止发放尚未提取的借款。",
-    auditor_summary:
-      "实质性测试宜使用经审定财务数据，而非未审管理层报表；违约将触发追加担保、停发未提取借款。",
+      "借款期间，借款人合并报表口径的资产负债率不得超过70%。\n本项指标按连续两个会计季度考核。",
+    source_reference: "具体约定：文件：华远集团流动资金借款合同.pdf；页码：【第3页】；条款：第4.2条",
   },
   {
-    clause_ref: "第9.1条",
-    pages: "【第5页】",
-    covenant_category: "直接违约条款_用途与资金",
-    contract_classification: "非指标类",
-    is_financial: "否",
-    title: "借款专款专用禁止流入楼市股市",
-    excerpt:
-      "本合同项下借款专款用于借款人日常生产经营流动资金周转，不得用于固定资产投资、股权投资，不得流入证券市场、房地产市场或用于民间借贷。",
-    auditor_summary:
-      "需结合付款审批与资金流向判断用途违约风险；擅改用途将构成直接违约，借款提前到期。",
+    covenant_category: "财务行为与交易限制",
+    trigger_standard: "对外担保余额不得超过最近一期经审计净资产的30%",
+    excerpt: "借款人对外担保余额不得超过最近一期经审计净资产的30%。",
+    source_reference: "具体约定：文件：华远集团流动资金借款合同.pdf；页码：【第5页】；条款：第8.3条",
   },
-  // 低置信度「待复核」项：无法定位条款号与页码。
   {
-    clause_ref: "",
-    pages: "【页码未知】",
-    covenant_category: "其他保护类",
-    contract_classification: "非指标类",
-    is_financial: "否",
-    title: "重大事项报备（原文位置待核实）",
-    excerpt:
-      "借款人发生重大诉讼、仲裁、行政处罚或其他影响偿债能力的重大事项时，应于五个工作日内书面通知贷款人并提交相关材料。",
-    auditor_summary: "偏通知报备型条款，把握较低，请人工核对原文页码后再纳入底稿。",
+    covenant_category: "待新增案例",
+    trigger_standard: "碳排放配额储备不得低于年度核定配额的20%",
+    excerpt: "借款人的碳排放配额储备不得低于年度核定配额的20%。",
+    source_reference: "具体约定：文件：华远集团流动资金借款合同.pdf；页码：【第6页】；条款：第10.2条",
   },
 ];
 
@@ -644,6 +626,44 @@ function classifyDocument(params: Dict): unknown {
   return { content: JSON.stringify(parsed), parsed };
 }
 
+function financialCovenantResponse(text: string): unknown {
+  const lines = text.split(/\r?\n/).flatMap((line) => {
+    const match = line.match(/^\[L(\d+)\](.*)$/);
+    return match ? [{ number: Number(match[1]), text: match[2] }] : [];
+  });
+  const find = (pattern: RegExp) => lines.find((line) => pattern.test(line.text));
+  const items: Dict[] = [];
+  const ratio = find(/资产负债率不得超过70%/);
+  if (ratio) {
+    const period = lines.find((line) => line.number === ratio.number + 1 && /连续两个会计季度/.test(line.text));
+    items.push({
+      title: "资产负债率不得超过70%",
+      evidence: [{
+        line_start: ratio.number,
+        line_end: period?.number ?? ratio.number,
+        role: "obligation",
+      }],
+    });
+  }
+  const dividend = find(/不得向股东分配利润/);
+  if (dividend) items.push({
+    title: "未经同意不得向股东分配利润",
+    evidence: [{ line_start: dividend.number, line_end: dividend.number, role: "obligation" }],
+  });
+  const guarantee = find(/对外担保余额不得超过/);
+  if (guarantee) items.push({
+    title: "对外担保余额上限",
+    evidence: [{ line_start: guarantee.number, line_end: guarantee.number, role: "obligation" }],
+  });
+  const carbon = find(/碳排放配额储备不得低于/);
+  if (carbon) items.push({
+    title: "碳排放配额储备下限",
+    evidence: [{ line_start: carbon.number, line_end: carbon.number, role: "obligation" }],
+  });
+  const parsed = { coverage_complete: true, items };
+  return { content: JSON.stringify(parsed), parsed };
+}
+
 // ---------------------------------------------------------------------------
 // handlers（同步 engineCall 回放）
 // ---------------------------------------------------------------------------
@@ -759,6 +779,9 @@ export const handlers: Record<string, (params: Dict) => unknown> = {
       return { content: JSON.stringify(parsed), parsed };
     }
     const ruleId = asString(params.ruleId);
+    if (ruleId === "loan_covenant" && prompt.includes("本轮启用案例库版本")) {
+      return financialCovenantResponse(asString(params.text));
+    }
     const keys = requestedKeysFromPrompt(prompt);
     const items = itemsForRequest(ruleId, keys);
     const parsed = { items };

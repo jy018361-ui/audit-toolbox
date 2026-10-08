@@ -314,6 +314,16 @@ def smoke_test_desktop(target: Path) -> None:
             if not source.is_file():
                 raise RuntimeError(f"缺少打包验收样例：{source}")
             shutil.copy2(source, wp_root / name)
+        # Match wp_generate_entrypoint_preserves_navigation_and_layout_contract:
+        # the current WP engine requires a separate 我的订单 workbook.
+        # This deterministic fixture has the required headers and an unmatched
+        # zero-hours order; it does not alter the checked-in business samples.
+        with zipfile.ZipFile(wp_root / "FY27 我的订单.xlsx", "w", zipfile.ZIP_DEFLATED) as orders:
+            orders.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
+            orders.writestr("_rels/.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+            orders.writestr("xl/workbook.xml", '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="业务" sheetId="1" r:id="rId1"/></sheets></workbook>')
+            orders.writestr("xl/_rels/workbook.xml.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
+            orders.writestr("xl/worksheets/sheet1.xml", '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>订单编号</t></is></c><c r="B1" t="inlineStr"><is><t>CIHours</t></is></c><c r="C1" t="inlineStr"><is><t>AIHours</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>UNMATCHED</t></is></c><c r="B2"><v>0</v></c><c r="C2"><v>0</v></c></row></sheetData></worksheet>')
         wp_output = wp_root / "WP发布包验收.xlsx"
         wp_request = {
             "jobId": "release-wp-smoke", "method": "wp.generate",

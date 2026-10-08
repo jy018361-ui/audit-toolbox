@@ -1134,14 +1134,17 @@ fn detail_tier_for<'a>(
     // 前端按确认行键（JSON 数组）写的存款类型同样认账。币种是行键的组成
     // 部分，但引擎行的币种经过归并（如空币种标成「本位币合并」），与前端
     // 原文可能不同，故币种再带一层空串回退。
-    if let Some(tier) = overrides.and_then(|values| {
-        let mut keys = Vec::new();
-        for tagged in [currency, ""] {
-            keys.extend(review_row_key_variants(entity, account, auxiliary, tagged));
-        }
-        keys.iter().find_map(|key| values.get(key)).and_then(Value::as_str)
-    })
-    .filter(|tier| find_tier(tier).is_some())
+    if let Some(tier) = overrides
+        .and_then(|values| {
+            let mut keys = Vec::new();
+            for tagged in [currency, ""] {
+                keys.extend(review_row_key_variants(entity, account, auxiliary, tagged));
+            }
+            keys.iter()
+                .find_map(|key| values.get(key))
+                .and_then(Value::as_str)
+        })
+        .filter(|tier| find_tier(tier).is_some())
     {
         return (tier, "用户在科目分类中指定存款类型".into());
     }
@@ -2213,7 +2216,12 @@ fn distinct_entity_accounts(
 /// 科目确认表行键（JSON 数组）的候选梯子：主体与辅助各带空串回退，
 /// 与前端 `depositAccountReviewRows` 的行键同构。角色、存款类型、逐户
 /// 利率三类按行键写的覆盖都走这张梯子命中，不把行键硬翻译成明细复合键。
-fn review_row_key_variants(entity: &str, account: &str, auxiliary: &str, currency: &str) -> Vec<String> {
+fn review_row_key_variants(
+    entity: &str,
+    account: &str,
+    auxiliary: &str,
+    currency: &str,
+) -> Vec<String> {
     let mut keys = Vec::with_capacity(4);
     for scope in [entity, ""] {
         for aux in [auxiliary, ""] {
@@ -2225,8 +2233,13 @@ fn review_row_key_variants(entity: &str, account: &str, auxiliary: &str, currenc
     keys
 }
 
-fn confirmed_review_role<'a>(params: &'a Value, entity: &str, account: &str,
-    auxiliary: &str, currency: &str) -> Option<&'a str> {
+fn confirmed_review_role<'a>(
+    params: &'a Value,
+    entity: &str,
+    account: &str,
+    auxiliary: &str,
+    currency: &str,
+) -> Option<&'a str> {
     let roles = params.get("accountReviewRoles")?.as_object()?;
     for key in review_row_key_variants(entity, account, auxiliary, currency) {
         if let Some(role) = roles.get(&key).and_then(Value::as_str) {
@@ -2245,7 +2258,11 @@ pub(crate) fn distinct_review_accounts(
     let analysis = ledger_mapping::tb_catalog_classification_analysis(&table.headers, &table.rows, &|role| {
         match mapping.get(role) {
             Some(Value::String(value)) => vec![value.clone()],
-            Some(Value::Array(values)) => values.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+            Some(Value::Array(values)) => values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
             _ => vec![],
         }
     });
@@ -2870,20 +2887,26 @@ fn fold_tb_accounts(
                 .cloned()
                 .unwrap_or_default();
         }
-        let confirmed_role = confirmed_review_role(params, &candidate.entity, &candidate.account,
-            &candidate.auxiliary, &candidate.currency);
+        let confirmed_role = confirmed_review_role(
+            params,
+            &candidate.entity,
+            &candidate.account,
+            &candidate.auxiliary,
+            &candidate.currency,
+        );
         let detail_key = format!(
             "{}\u{1f}{}\u{1f}{}",
             group.0,
             group.1,
             ledger_mapping::anchor_norm(&candidate.auxiliary)
         );
-        if let Some(role) = confirmed_role.or_else(|| params
-            .get("accountDetailRoleOverrides")
-            .and_then(Value::as_object)
-            .and_then(|values| values.get(&detail_key))
-            .and_then(Value::as_str))
-        {
+        if let Some(role) = confirmed_role.or_else(|| {
+            params
+                .get("accountDetailRoleOverrides")
+                .and_then(Value::as_object)
+                .and_then(|values| values.get(&detail_key))
+                .and_then(Value::as_str)
+        }) {
             candidate.role = role.to_owned();
         }
         if !is_deposit_role(&candidate.role)
@@ -2985,7 +3008,12 @@ fn fold_tb_accounts(
             ledger_mapping::anchor_norm(&auxiliary)
         );
         let (tier, matched_by) = detail_tier_for(
-            &key.0, &account_text, &auxiliary, &currency, &detail_key, params,
+            &key.0,
+            &account_text,
+            &auxiliary,
+            &currency,
+            &detail_key,
+            params,
         );
         detail_keys.insert(row_key.clone(), detail_key.clone());
         let meta = find_tier(tier);
@@ -8011,7 +8039,10 @@ mod tests {
         assert_eq!(row["tbClosingBalance"], json!(200.0));
         assert_eq!(row["status"], "两点法推算");
         assert!(
-            row["note"].as_str().unwrap_or("").contains("已按 0 参与全年平均计算"),
+            row["note"]
+                .as_str()
+                .unwrap_or("")
+                .contains("已按 0 参与全年平均计算"),
             "底稿注释应说明按 0 而非倒推：{row:#?}"
         );
 
@@ -8030,7 +8061,10 @@ mod tests {
         let row = &no_je["rows"][0];
         assert_eq!(row["openingBalance"], json!(0.0), "{row:#?}");
         assert!(
-            row["note"].as_str().unwrap_or("").contains("已按 0 参与全年平均计算"),
+            row["note"]
+                .as_str()
+                .unwrap_or("")
+                .contains("已按 0 参与全年平均计算"),
             "{row:#?}"
         );
     }
@@ -8239,10 +8273,7 @@ mod tests {
         assert_eq!(agreement["defaultRate"], json!(0.0080));
         let term_1y = find("term_1y");
         assert_eq!(term_1y["defaultRate"], json!(0.0120));
-        assert!(
-            term_1y["defaultRate"].as_f64().unwrap()
-                > term_1y["listedRate"].as_f64().unwrap()
-        );
+        assert!(term_1y["defaultRate"].as_f64().unwrap() > term_1y["listedRate"].as_f64().unwrap());
         for key in ["demand", "margin"] {
             let tier = find(key);
             assert_eq!(tier["defaultRate"], tier["listedRate"]);
@@ -8491,9 +8522,8 @@ mod tests {
                 "[\"甲\",\"100201 银行存款\",\"工行户\",\"\"]": "term_3m"
             }
         });
-        let (tier, reason) = detail_tier_for(
-            "甲", "100201 银行存款", "工行户", "本位币合并", "", &params,
-        );
+        let (tier, reason) =
+            detail_tier_for("甲", "100201 银行存款", "工行户", "本位币合并", "", &params);
         assert_eq!(tier, "term_3m");
         assert_eq!(reason, "用户在科目分类中指定存款类型");
     }
@@ -9272,18 +9302,31 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("deposit-review-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tb.xlsx");
-        write_fixture(&path, &[
-            vec!["主体", "科目编码", "科目名称", "币种", "期初余额", "期末余额"],
-            vec!["甲公司", "1002", "银行存款", "CNY", "40", "50"],
-            vec!["乙公司", "1002", "银行存款", "CNY", "60", "70"],
-        ]);
+        write_fixture(
+            &path,
+            &[
+                vec![
+                    "主体",
+                    "科目编码",
+                    "科目名称",
+                    "币种",
+                    "期初余额",
+                    "期末余额",
+                ],
+                vec!["甲公司", "1002", "银行存款", "CNY", "40", "50"],
+                vec!["乙公司", "1002", "银行存款", "CNY", "60", "70"],
+            ],
+        );
         let inspected = inspect(&json!({
             "source": {"inputPath": path.to_string_lossy()},
             "mapping": {"entity":"主体", "accountCode":"科目编码", "accountName":"科目名称", "currency":"币种", "openingFunctionalAmount":"期初余额", "closingFunctionalAmount":"期末余额"}
         }), "tb").unwrap();
         let identities = inspected["reviewAccounts"].as_array().unwrap();
         assert_eq!(identities.len(), 2);
-        let subjects = identities.iter().map(|row| row["entity"].as_str().unwrap()).collect::<BTreeSet<_>>();
+        let subjects = identities
+            .iter()
+            .map(|row| row["entity"].as_str().unwrap())
+            .collect::<BTreeSet<_>>();
         assert_eq!(subjects, BTreeSet::from(["甲公司", "乙公司"]));
     }
 
@@ -9654,11 +9697,7 @@ mod tests {
         write_fixture(
             &tb_path,
             &[
-                vec![
-                    "科目编码",
-                    "本期借方发生额",
-                    "本期贷方发生额",
-                ],
+                vec!["科目编码", "本期借方发生额", "本期贷方发生额"],
                 vec!["1002", "1000", "0"],
             ],
         );
@@ -10613,9 +10652,7 @@ mod tests {
             "账面利息收入科目明细应列示借贷发生额与期末余额"
         );
         assert!(
-            text.contains("市场中枢暂估利率")
-                && text.contains("暂估")
-                && text.contains("确认"),
+            text.contains("市场中枢暂估利率") && text.contains("暂估") && text.contains("确认"),
             "档位表缺少标准档位默认暂估政策说明"
         );
         assert!(

@@ -7,6 +7,7 @@ mod audipick;
 mod bailian_asr;
 mod bailian_plan_asr;
 mod confirmation;
+mod covenant_cases;
 mod deposit_interest;
 #[cfg(windows)]
 mod excel_com;
@@ -21,10 +22,10 @@ mod fa_tbje;
 mod file_list;
 mod fuzzy_match;
 mod fx;
+mod header_detection;
 #[cfg(test)]
 mod ledger_engine_parity_tests;
 mod ledger_mapping;
-mod header_detection;
 mod loan_interest;
 mod lpr;
 mod meeting_minutes;
@@ -555,6 +556,8 @@ async fn engine_call(
 /// `file_list.scan` 与 `tbje_check.*` 都这么栽过。测试里有一致性断言。
 fn is_direct_job_method(method: &str) -> bool {
     method == "wp.generate"
+        || method == "audipick.extract"
+        || method == "audipick.ocr_page"
         || method == "confirmation.process"
         // 扫描与导出共用同一条任务通道，两者都必须登记；此前只登记了
         // export，前端拖放文件夹自动扫描时命中兜底报"未找到对应的 Rust
@@ -599,8 +602,10 @@ async fn job_start(
         object.remove("__restoreSnapshot");
     }
     let job_id = job_start_inner(excel_merger, &storage, &method, worker_params).await?;
-    // 读取补齐是上传子步骤，没有可恢复的测算现场，不写成可继续的测算历史。
-    if method != "loan.inspect_full" {
+    // 上传读取与敏感 OCR/合同抽取均不写入可恢复任务历史。
+    if method != "loan.inspect_full"
+        && !matches!(method.as_str(), "audipick.ocr_page" | "audipick.extract")
+    {
         let _ = storage.record_job_params(
             &job_id,
             excel_merger::tool_id(&method),
@@ -644,7 +649,9 @@ async fn job_start_inner(
         }
         return excel_merger.start(method, params);
     }
-    if method.starts_with("kanzhang.")
+    if method == "audipick.extract"
+        || method == "audipick.ocr_page"
+        || method.starts_with("kanzhang.")
         || method.starts_with("fx.")
         || method.starts_with("loan.")
         || method.starts_with("deposit.")
@@ -852,6 +859,42 @@ fn llm_test(settings: Value, api_key: Option<String>) -> Result<Value, AppError>
 }
 
 #[tauri::command]
+async fn audipick_ocr_test(
+    storage: State<'_, Storage>,
+    engine: String,
+    image_base64: String,
+    api_key: Option<String>,
+    secret_key: Option<String>,
+) -> Result<Value, AppError> {
+    let settings = storage.settings_get()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        audipick::test_ocr_connection(
+            settings,
+            &engine,
+            &image_base64,
+            api_key.as_deref(),
+            secret_key.as_deref(),
+        )
+    })
+    .await
+    .map_err(|_| AppError::new("OCR_TEST_FAILED", "OCR 测试任务未完成。", true, None))?
+}
+
+#[tauri::command]
+async fn audipick_llm_test(
+    storage: State<'_, Storage>,
+    profile: Option<Value>,
+    api_key: Option<String>,
+) -> Result<Value, AppError> {
+    let settings = storage.settings_get()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        audipick::test_audipick_llm_connection(&settings, profile.as_ref(), api_key.as_deref())
+    })
+    .await
+    .map_err(|_| AppError::new("LLM_TEST_FAILED", "AI 连接测试未完成。", true, None))?
+}
+
+#[tauri::command]
 fn history_get(storage: State<'_, Storage>) -> Result<Value, AppError> {
     storage.history_get()
 }
@@ -993,6 +1036,8 @@ fn secret_set(name: String, value: String) -> Result<(), AppError> {
             | "baidu_ocr_secret"
             | "bailian_asr_key"
             | "bailian_plan_asr_key"
+            | "audipick_llm_api_key"
+            | "audipick_dify_api_key"
     ) {
         return Err(AppError::new(
             "SECRET_NAME_DENIED",
@@ -1058,7 +1103,12 @@ async fn meeting_record_start(
     })
     .await
     .map_err(|_| {
-        AppError::new("MEETING_RECORD_FAILED", "会议录音启动异常结束。", true, None)
+        AppError::new(
+            "MEETING_RECORD_FAILED",
+            "会议录音启动异常结束。",
+            true,
+            None,
+        )
     })??;
     // 录音可能从询问小窗或工具页任意入口开始：广播给主窗口，
     // 全局录音指示胶囊与页面状态都按事件对齐，不再各记各的账。
@@ -1079,7 +1129,12 @@ async fn meeting_record_stop(
     let summary = tauri::async_runtime::spawn_blocking(move || meeting.finish_recording())
         .await
         .map_err(|_| {
-            AppError::new("MEETING_RECORD_FAILED", "会议录音停止异常结束。", true, None)
+            AppError::new(
+                "MEETING_RECORD_FAILED",
+                "会议录音停止异常结束。",
+                true,
+                None,
+            )
         })??;
     let at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let _ = app.emit(
@@ -1095,10 +1150,7 @@ fn meeting_status(meeting: State<'_, Arc<meeting_watch::MeetingState>>) -> Value
 }
 
 #[tauri::command]
-fn meeting_detect_set_enabled(
-    meeting: State<'_, Arc<meeting_watch::MeetingState>>,
-    enabled: bool,
-) {
+fn meeting_detect_set_enabled(meeting: State<'_, Arc<meeting_watch::MeetingState>>, enabled: bool) {
     meeting.set_watch_enabled(enabled);
 }
 
@@ -1259,10 +1311,12 @@ fn pick_path(
                         allowed.0.lock().insert(path.clone());
                     }
                     Some(match requested {
-                        "files" => json!(paths
-                            .iter()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .collect::<Vec<_>>()),
+                        "files" => json!(
+                            paths
+                                .iter()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .collect::<Vec<_>>()
+                        ),
                         _ => json!(paths[0].to_string_lossy().to_string()),
                     })
                 });
@@ -1281,18 +1335,24 @@ fn pick_path(
                     allowed.0.lock().insert(path.clone());
                 }
                 let value = match kind.as_str() {
-                    "files" => json!(paths
-                        .iter()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .collect::<Vec<_>>()),
-                    "folder" => json!(std::env::var("AUDITTOOLBOX_DEV_AUTO_PICK_DIR")
-                        .unwrap_or_else(|_| paths[0].to_string_lossy().to_string())),
-                    "save" => json!(std::env::var("AUDITTOOLBOX_DEV_AUTO_PICK_DIR")
-                        .map(|dir| PathBuf::from(dir)
-                            .join(default_name.as_deref().unwrap_or("审计导出.xlsx"))
-                            .to_string_lossy()
-                            .to_string())
-                        .unwrap_or_else(|_| paths[0].to_string_lossy().to_string())),
+                    "files" => json!(
+                        paths
+                            .iter()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .collect::<Vec<_>>()
+                    ),
+                    "folder" => json!(
+                        std::env::var("AUDITTOOLBOX_DEV_AUTO_PICK_DIR")
+                            .unwrap_or_else(|_| paths[0].to_string_lossy().to_string())
+                    ),
+                    "save" => json!(
+                        std::env::var("AUDITTOOLBOX_DEV_AUTO_PICK_DIR")
+                            .map(|dir| PathBuf::from(dir)
+                                .join(default_name.as_deref().unwrap_or("审计导出.xlsx"))
+                                .to_string_lossy()
+                                .to_string())
+                            .unwrap_or_else(|_| paths[0].to_string_lossy().to_string())
+                    ),
                     _ => json!(paths[0].to_string_lossy().to_string()),
                 };
                 return Ok(value);
@@ -1819,6 +1879,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_bootstrap,
+            covenant_cases::covenant_case_workbook,
             update_release_notes,
             tool_catalog,
             engine_call,
@@ -1830,6 +1891,8 @@ pub fn run() {
             settings_set,
             telemetry_track,
             llm_test,
+            audipick_ocr_test,
+            audipick_llm_test,
             history_get,
             history_clear,
             history_restore,
@@ -2085,7 +2148,10 @@ mod tests {
             "fx.export",
             "fx.export_rates",
         ] {
-            assert!(is_direct_job_method(method), "{method} 未登记 is_direct_job_method");
+            assert!(
+                is_direct_job_method(method),
+                "{method} 未登记 is_direct_job_method"
+            );
             assert!(
                 excel_merger::SUPPORTED_JOB_METHODS.contains(&method),
                 "{method} 未登记 SUPPORTED_JOB_METHODS，点下去会报「未找到 Rust 表格任务方法。」"

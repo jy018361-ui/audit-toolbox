@@ -1,0 +1,214 @@
+.ap-field-dialog {
+  width: min(720px, calc(100vw - 32px));
+  max-width: 720px;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
+  gap: var(--sp-3);
+  overflow: hidden;
+}
+
+.ap-field-dialog__heading {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.ap-field-dialog__toolbar,
+.ap-field-dialog__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.ap-field-dialog__toolbar > span {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.ap-field-dialog__groups {
+  display: grid;
+  min-height: 0;
+  max-height: 52vh;
+  gap: var(--sp-3);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: var(--sp-1);
+}
+
+.ap-field-group {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+}
+
+.ap-field-group__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-muted);
+}
+
+.ap-field-group__header h3,
+.ap-field-group__header p,
+.ap-field-group__description,
+.ap-field-group__documents,
+.ap-field-group__empty,
+.ap-field-dialog__empty,
+.ap-field-dialog__warning {
+  margin: 0;
+}
+
+.ap-field-group__header h3 {
+  color: var(--ink-strong);
+  font-size: var(--fs-sm);
+}
+
+.ap-field-group__header p,
+.ap-field-group__header > span,
+.ap-field-group__description,
+.ap-field-group__documents,
+.ap-field-group__empty,
+.ap-field-dialog__empty {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.ap-field-group__header > span {
+  flex: 0 0 auto;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+}
+
+.ap-field-group__description,
+.ap-field-group__documents {
+  padding: var(--sp-2) var(--sp-3) 0;
+  line-height: 1.5;
+}
+
+.ap-field-group__documents {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ap-field-group__fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  padding: var(--sp-2);
+}
+
+.ap-field-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.ap-field-option:hover {
+  background: var(--surface-muted);
+}
+
+.ap-field-option:has(input:disabled) {
+  cursor: default;
+}
+
+.ap-field-option input,
+.ap-field-dialog__skip input {
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--brand);
+}
+
+.ap-field-option > span,
+.ap-field-dialog__skip > span {
+  min-width: 0;
+}
+
+.ap-field-option strong,
+.ap-field-option small,
+.ap-field-dialog__skip strong,
+.ap-field-dialog__skip small {
+  display: block;
+}
+
+.ap-field-option strong,
+.ap-field-dialog__skip strong {
+  color: var(--ink-strong);
+  font-size: var(--fs-xs);
+  font-style: normal;
+}
+
+.ap-field-option small,
+.ap-field-dialog__skip small {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.ap-field-option em {
+  display: inline-block;
+  margin-left: var(--sp-1);
+  padding: 1px 5px;
+  border-radius: var(--r-pill);
+  color: var(--brand-link);
+  background: color-mix(in srgb, var(--brand-accent) 16%, transparent);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.ap-field-group__empty,
+.ap-field-dialog__empty {
+  grid-column: 1 / -1;
+  padding: var(--sp-4);
+  text-align: center;
+}
+
+.ap-field-dialog__skip {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-muted);
+  cursor: pointer;
+}
+
+.ap-field-dialog__warning {
+  color: var(--warning-fg);
+  font-size: var(--fs-xs);
+}
+
+.ap-field-dialog__footer {
+  justify-content: flex-end;
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border-soft);
+}
+
+@media (max-width: 640px) {
+  .ap-field-group__fields {
+    grid-template-columns: 1fr;
+  }
+
+  .ap-field-dialog__toolbar > span {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+
+  .ap-field-dialog__footer > button {
+    flex: 1;
+  }
+}

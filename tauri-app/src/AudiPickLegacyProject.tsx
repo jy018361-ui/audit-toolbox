@@ -40,6 +40,7 @@ export type AudiPickLegacyProjectDocument = {
   name: string;
   textLength?: number;
   isScanned?: boolean;
+  ocrPending?: boolean;
   status?: string;
   resultCount?: number;
   appliedRuleCount?: number;
@@ -51,6 +52,7 @@ export type AudiPickLegacyProjectDocument = {
   associationRole?: string | null;
   associationNeedsRefresh?: boolean;
   revenueNeedsRefresh?: boolean;
+  extracting?: boolean;
 };
 
 export type AudiPickLegacyProjectModel = {
@@ -115,6 +117,23 @@ export type AudiPickLegacyProjectProps = {
   onSelectionChange?: (documentIds: string[]) => void;
 };
 
+const documentNameCollator = new Intl.Collator("zh-CN", {
+  numeric: true,
+  sensitivity: "base",
+});
+
+function naturallySortedDocuments(
+  documents: AudiPickLegacyProjectDocument[],
+): AudiPickLegacyProjectDocument[] {
+  return documents
+    .map((document, index) => ({ document, index }))
+    .sort(
+      (left, right) =>
+        documentNameCollator.compare(left.document.name, right.document.name) ||
+        left.index - right.index,
+    )
+    .map(({ document }) => document);
+}
 function Chevron({ down = false }: { down?: boolean }) {
   return (
     <svg
@@ -178,7 +197,7 @@ function LegacyDocumentMeta({
   return (
     <div className="alp-file-meta">
       <div className="alp-file-badges">
-        {document.isScanned ? (
+        {document.extracting ? <span className="alp-badge is-blue">正在提取…</span> : document.ocrPending ? <span className="alp-badge is-neutral">文字识别未完成</span> : document.isScanned ? (
           resultCount > 0 ? (
             <span className="alp-badge is-success">已提取{resultCount}条/{appliedRuleCount}模板</span>
           ) : (
@@ -189,12 +208,17 @@ function LegacyDocumentMeta({
             {textLength}字{resultCount > 0 ? ` | 已提${resultCount}条` : ""}
           </span>
         ) : (
-          <span className="alp-badge is-neutral">处理中</span>
+          <span className="alp-badge is-neutral">待读取文字</span>
+        )}
+        {document.ruleConfirmed && (
+          <span className="alp-badge is-success">
+            模板：{rules.find((rule) => rule.id === ruleId)?.name ?? ruleId} · 已确认
+          </span>
         )}
         {(document.detectedRuleId || document.detectedLabel) && (
           <span className={`alp-ai-label confidence-${document.detectedConfidence ?? "low"}`}>
-            AI:{document.detectedLabel ?? rules.find((rule) => rule.id === ruleId)?.name ?? "未识别"}
-            ({confidenceText(document.detectedConfidence)})·{document.ruleConfirmed ? "已确认" : "待确认"}
+            AI建议：{document.detectedLabel ?? rules.find((rule) => rule.id === ruleId)?.name ?? "未识别"}
+            ({confidenceText(document.detectedConfidence)}){document.ruleConfirmed ? "" : "·待确认"}
           </span>
         )}
         {(document.associationNeedsRefresh || document.revenueNeedsRefresh) && (
@@ -225,14 +249,19 @@ function LegacyDocumentMeta({
             确认模板
           </button>
         )}
-        {textLength > 0 && (
+        {(textLength === 0 || document.ocrPending) && actions.onResumeOcr && <button type="button" className="alp-link-button is-accent" disabled={disabled} onClick={() => void actions.onResumeOcr?.(document.id)}>读取文字 / OCR</button>}
+        {textLength > 0 && !document.ocrPending && (
           <button
             type="button"
             className={`alp-link-button${resultCount > 0 ? "" : " is-accent"}`}
-            disabled={disabled}
+            disabled={disabled || document.extracting}
             onClick={() => void actions.onExtractDocument(document.id)}
           >
-            {resultCount > 0 ? "重新提取" : "开始提取"}
+            {document.extracting
+              ? "提取中…"
+              : resultCount > 0
+                ? "重新选择字段并提取"
+                : "选择字段并提取"}
           </button>
         )}
         {resultCount > 0 && (
@@ -271,7 +300,7 @@ function DocumentCheckbox({
   disabled?: boolean;
   onChange: (selected: boolean) => void;
 }) {
-  const canExtract = (document.textLength ?? 0) > 0 && (document.resultCount ?? 0) === 0;
+  const canExtract = !document.ocrPending && (document.textLength ?? 0) > 0 && (document.resultCount ?? 0) === 0;
   return (
     <input
       className="alp-checkbox"
@@ -456,9 +485,17 @@ export function AudiPickLegacyProject({
 
   const selection = onSelectionChange ? selectedDocumentIds : localSelection;
   const selectedIds = useMemo(() => new Set(selection), [selection]);
-  const documentMap = useMemo(
-    () => new Map(documents.map((document) => [document.id, document])),
+  const orderedDocuments = useMemo(
+    () => naturallySortedDocuments(documents),
     [documents],
+  );
+  const documentMap = useMemo(
+    () => new Map(orderedDocuments.map((document) => [document.id, document])),
+    [orderedDocuments],
+  );
+  const documentOrder = useMemo(
+    () => new Map(orderedDocuments.map((document, index) => [document.id, index])),
+    [orderedDocuments],
   );
   const groupMap = useMemo(
     () => new Map(relationGroups.map((group) => [group.anchorFileId, group])),
@@ -472,16 +509,16 @@ export function AudiPickLegacyProject({
     () => new Map(associationSuggestions.map((suggestion) => [suggestion.fileId, suggestion])),
     [associationSuggestions],
   );
-  const rootDocuments = documents.filter((document) => !memberIds.has(document.id));
-  const contractGroups = rootDocuments.filter(
-    (document) => !document.associationRole || groupMap.has(document.id),
-  );
+  const rootDocuments = orderedDocuments.filter((document) => !memberIds.has(document.id));
   const suggestedDocuments = rootDocuments.filter((document) => suggestionMap.has(document.id));
+  const contractGroups = rootDocuments.filter(
+    (document) => !suggestionMap.has(document.id) && (!document.associationRole || groupMap.has(document.id)),
+  );
   const unassignedDocuments = rootDocuments.filter(
     (document) => Boolean(document.associationRole) && !suggestionMap.has(document.id) && !groupMap.has(document.id),
   );
-  const extractableIds = documents
-    .filter((document) => (document.textLength ?? 0) > 0 && (document.resultCount ?? 0) === 0)
+  const extractableIds = orderedDocuments
+    .filter((document) => !document.ocrPending && (document.textLength ?? 0) > 0 && (document.resultCount ?? 0) === 0)
     .map((document) => document.id);
   const pendingCount = extractableIds.length;
   const confirmedCount = documents.filter((document) => document.ruleConfirmed).length;
@@ -520,11 +557,16 @@ export function AudiPickLegacyProject({
 
   const renderDocumentCard = (document: AudiPickLegacyProjectDocument) => {
     const group = groupMap.get(document.id);
+    const members = [...(group?.members ?? [])].sort(
+      (left, right) =>
+        (documentOrder.get(left.fileId) ?? Number.MAX_SAFE_INTEGER) -
+        (documentOrder.get(right.fileId) ?? Number.MAX_SAFE_INTEGER),
+    );
     return (
       <DocumentCard
         key={document.id}
         document={document}
-        members={group?.members ?? []}
+        members={members}
         documentMap={documentMap}
         rules={rules}
         selectedIds={selectedIds}
@@ -551,7 +593,13 @@ export function AudiPickLegacyProject({
             type="button"
             className="alp-button alp-button-primary"
             disabled={busy || selectedIds.size === 0}
-            onClick={() => void actions.onBatchExtract([...selectedIds])}
+            onClick={() =>
+              void actions.onBatchExtract(
+                orderedDocuments
+                  .filter((document) => selectedIds.has(document.id))
+                  .map((document) => document.id),
+              )
+            }
           >
             开始提取
           </button>

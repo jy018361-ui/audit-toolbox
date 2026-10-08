@@ -639,7 +639,9 @@ fn collect_tax_rules(
     if let Some(values) = response.get("items").and_then(Value::as_array) {
         for item in values {
             if let Some(index) = item.get("rowId").and_then(Value::as_u64)
-                && let Some(category) = (index as usize).checked_sub(offset).and_then(|index| categories.get(index))
+                && let Some(category) = (index as usize)
+                    .checked_sub(offset)
+                    .and_then(|index| categories.get(index))
             {
                 let rule_id = item.get("ruleId").and_then(Value::as_str).unwrap_or("");
                 rules.insert(category.clone(), rule_id.to_owned());
@@ -654,8 +656,14 @@ fn tax_analysis_from_rules(
 ) -> Vec<Vec<String>> {
     rows.iter()
         .map(|row| {
-            let rule_id = row.get(1).and_then(|category| rules.get(category)).map(String::as_str).unwrap_or("");
-            let rule = TAX_STANDARD_RULES.iter().find(|rule| rule.id == rule_id)
+            let rule_id = row
+                .get(1)
+                .and_then(|category| rules.get(category))
+                .map(String::as_str)
+                .unwrap_or("");
+            let rule = TAX_STANDARD_RULES
+                .iter()
+                .find(|rule| rule.id == rule_id)
                 .unwrap_or(&TAX_STANDARD_RULES[DEFAULT_TAX_RULE_INDEX]);
             let months = row
                 .get(3)
@@ -1697,8 +1705,11 @@ mod tests {
             assert!(policy_text.contains(expected), "政策对比缺少：{expected}");
         }
         let mut policy_book = calamine::open_workbook_auto(&output).unwrap();
-        let policy_cells = calamine::Reader::worksheet_range(&mut policy_book, "折旧政策对比").unwrap();
-        let tax_months = policy_cells.rows().skip(2)
+        let policy_cells =
+            calamine::Reader::worksheet_range(&mut policy_book, "折旧政策对比").unwrap();
+        let tax_months = policy_cells
+            .rows()
+            .skip(2)
             .filter_map(|row| row.get(12).map(ToString::to_string))
             .collect::<Vec<_>>();
         assert!(tax_months.iter().any(|value| value == "120"));
@@ -1791,17 +1802,36 @@ mod tests {
             ]
         );
         assert_eq!(analyzed[1][2], "未见明显异常");
-        assert_eq!(analyzed[2], ["与生产经营活动有关的器具、工具、家具等", "60", "可能低于税法年限"]);
+        assert_eq!(
+            analyzed[2],
+            [
+                "与生产经营活动有关的器具、工具、家具等",
+                "60",
+                "可能低于税法年限"
+            ]
+        );
         assert_eq!(analyzed[3][2], "可能低于税法年限");
         assert_eq!(analyzed[3][1], "36");
     }
 
     #[test]
     fn policy_tax_analysis_uses_default_category_when_llm_disabled() {
-        let rows = vec![vec!["其他".into(), "其他设备".into(), "120".into(), "120".into()]];
+        let rows = vec![vec![
+            "其他".into(),
+            "其他设备".into(),
+            "120".into(),
+            "120".into(),
+        ]];
         let result = default_policy_tax_analysis(&rows);
         assert!(!result.completed);
-        assert_eq!(result.rows[0], ["与生产经营活动有关的器具、工具、家具等", "60", "未见明显异常"]);
+        assert_eq!(
+            result.rows[0],
+            [
+                "与生产经营活动有关的器具、工具、家具等",
+                "60",
+                "未见明显异常"
+            ]
+        );
     }
 
     #[test]
@@ -1821,12 +1851,20 @@ mod tests {
             ]}}),
             &cancel,
             &pause,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.completed);
         assert_eq!(result.rows[0][..2], result.rows[1][..2]);
         assert_eq!(result.rows[0][2], "可能低于税法年限");
         assert_eq!(result.rows[1][2], "未见明显异常");
-        assert_eq!(result.rows[2], ["与生产经营活动有关的器具、工具、家具等", "60", "可能低于税法年限"]);
+        assert_eq!(
+            result.rows[2],
+            [
+                "与生产经营活动有关的器具、工具、家具等",
+                "60",
+                "可能低于税法年限"
+            ]
+        );
     }
 
     #[test]

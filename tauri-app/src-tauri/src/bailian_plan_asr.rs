@@ -115,15 +115,27 @@ fn wav_bytes(spec: hound::WavSpec, samples: &[i16]) -> Result<Vec<u8>, AppError>
     let mut buffer = Cursor::new(Vec::new());
     {
         let mut writer = hound::WavWriter::new(&mut buffer, spec).map_err(|error| {
-            plan_error("PLAN_ASR_WRITE_FAILED", "生成转写音频分段失败。", Some(error.to_string()))
+            plan_error(
+                "PLAN_ASR_WRITE_FAILED",
+                "生成转写音频分段失败。",
+                Some(error.to_string()),
+            )
         })?;
         for &sample in samples {
             writer.write_sample(sample).map_err(|error| {
-                plan_error("PLAN_ASR_WRITE_FAILED", "生成转写音频分段失败。", Some(error.to_string()))
+                plan_error(
+                    "PLAN_ASR_WRITE_FAILED",
+                    "生成转写音频分段失败。",
+                    Some(error.to_string()),
+                )
             })?;
         }
         writer.finalize().map_err(|error| {
-            plan_error("PLAN_ASR_WRITE_FAILED", "生成转写音频分段失败。", Some(error.to_string()))
+            plan_error(
+                "PLAN_ASR_WRITE_FAILED",
+                "生成转写音频分段失败。",
+                Some(error.to_string()),
+            )
         })?;
     }
     Ok(buffer.into_inner())
@@ -160,22 +172,27 @@ fn wav_chunks_with(
     let mut pending: Vec<i16> = Vec::with_capacity(samples_per_chunk);
     let mut written: u64 = 0;
     let mut chunk_first_sample: u64 = 0;
-    let mut flush = |pending: &mut Vec<i16>, chunk_first_sample: u64, written: u64| -> Result<(), AppError> {
-        if pending.is_empty() {
-            return Ok(());
-        }
-        let bytes = wav_bytes(spec, pending)?;
-        chunks.push(PlanChunk {
-            b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-            begin_ms: (chunk_first_sample as f64 * ms_per_frame) as i64,
-            end_ms: (written as f64 * ms_per_frame) as i64,
-        });
-        pending.clear();
-        Ok(())
-    };
+    let mut flush =
+        |pending: &mut Vec<i16>, chunk_first_sample: u64, written: u64| -> Result<(), AppError> {
+            if pending.is_empty() {
+                return Ok(());
+            }
+            let bytes = wav_bytes(spec, pending)?;
+            chunks.push(PlanChunk {
+                b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                begin_ms: (chunk_first_sample as f64 * ms_per_frame) as i64,
+                end_ms: (written as f64 * ms_per_frame) as i64,
+            });
+            pending.clear();
+            Ok(())
+        };
     for sample in reader.samples::<i16>() {
         let sample = sample.map_err(|error| {
-            plan_error("PLAN_ASR_READ_FAILED", "读取录音样本失败。", Some(error.to_string()))
+            plan_error(
+                "PLAN_ASR_READ_FAILED",
+                "读取录音样本失败。",
+                Some(error.to_string()),
+            )
         })?;
         pending.push(sample);
         written += 1;
@@ -197,21 +214,37 @@ fn runtime() -> Result<tokio::runtime::Runtime, AppError> {
         .enable_all()
         .build()
         .map_err(|error| {
-            plan_error("PLAN_ASR_RUNTIME_FAILED", "转写任务初始化失败。", Some(error.to_string()))
+            plan_error(
+                "PLAN_ASR_RUNTIME_FAILED",
+                "转写任务初始化失败。",
+                Some(error.to_string()),
+            )
         })
 }
 
 /// 实时协议鉴权：浏览器式 WebSocket 无法带自定义头，服务端只认
 /// Authorization 头，必须手工构造 upgrade 请求。
-fn build_request(url: &str, key: &str) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, AppError> {
+fn build_request(
+    url: &str,
+    key: &str,
+) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, AppError> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut request = url.into_client_request().map_err(|error| {
-        plan_error("PLAN_ASR_URL_INVALID", "套餐转写地址无法解析。", Some(error.to_string()))
+        plan_error(
+            "PLAN_ASR_URL_INVALID",
+            "套餐转写地址无法解析。",
+            Some(error.to_string()),
+        )
     })?;
-    let header_value = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&format!(
-        "Bearer {key}"
-    ))
-    .map_err(|error| plan_error("PLAN_ASR_URL_INVALID", "套餐密钥包含非法字符。", Some(error.to_string())))?;
+    let header_value =
+        tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&format!("Bearer {key}"))
+            .map_err(|error| {
+                plan_error(
+                    "PLAN_ASR_URL_INVALID",
+                    "套餐密钥包含非法字符。",
+                    Some(error.to_string()),
+                )
+            })?;
     request.headers_mut().insert("Authorization", header_value);
     Ok(request)
 }
@@ -350,7 +383,11 @@ pub(crate) fn transcribe_file(
     let url = ws_url(&config.base_url, &config.model)?;
     let (_spec, chunks) = wav_chunks(path)?;
     if chunks.is_empty() {
-        return Err(plan_error("ASR_EMPTY_TRANSCRIPT", "录音文件里没有音频数据。", None));
+        return Err(plan_error(
+            "ASR_EMPTY_TRANSCRIPT",
+            "录音文件里没有音频数据。",
+            None,
+        ));
     }
     let runtime = runtime()?;
     let total = chunks.len();
@@ -569,8 +606,18 @@ mod tests {
     #[test]
     fn plain_transcript_has_no_speaker_labels() {
         let sentences = vec![
-            Sentence { text: "第一段话".into(), speaker_id: 0, begin_ms: 0, end_ms: 1000 },
-            Sentence { text: "第二段话".into(), speaker_id: 0, begin_ms: 65_000, end_ms: 66_000 },
+            Sentence {
+                text: "第一段话".into(),
+                speaker_id: 0,
+                begin_ms: 0,
+                end_ms: 1000,
+            },
+            Sentence {
+                text: "第二段话".into(),
+                speaker_id: 0,
+                begin_ms: 65_000,
+                end_ms: 66_000,
+            },
         ];
         let text = transcript_text_plain(&sentences);
         assert_eq!(text, "[00:00] 第一段话\n[01:05] 第二段话\n");
@@ -583,8 +630,8 @@ mod tests {
     #[test]
     #[ignore = "在线探针：需环境变量 AUDIT_TOOLBOX_PLAN_ASR_KEY，可选 AUDIT_TOOLBOX_PLAN_ASR_WAV"]
     fn 在线探针_套餐通道整段转写() {
-        let key = std::env::var("AUDIT_TOOLBOX_PLAN_ASR_KEY")
-            .expect("缺 AUDIT_TOOLBOX_PLAN_ASR_KEY");
+        let key =
+            std::env::var("AUDIT_TOOLBOX_PLAN_ASR_KEY").expect("缺 AUDIT_TOOLBOX_PLAN_ASR_KEY");
         let path = match std::env::var("AUDIT_TOOLBOX_PLAN_ASR_WAV") {
             Ok(wav) => std::path::PathBuf::from(wav),
             Err(_) => {
@@ -599,9 +646,8 @@ mod tests {
                 };
                 let mut writer = hound::WavWriter::create(&path, spec).unwrap();
                 for i in 0..16_000 {
-                    let value =
-                        ((i as f32 / 16_000.0 * 440.0 * std::f32::consts::PI * 2.0).sin() * 6000.0)
-                            as i16;
+                    let value = ((i as f32 / 16_000.0 * 440.0 * std::f32::consts::PI * 2.0).sin()
+                        * 6000.0) as i16;
                     writer.write_sample(value).unwrap();
                 }
                 writer.finalize().unwrap();
@@ -613,11 +659,19 @@ mod tests {
         assert_eq!(chunks.len(), 1, "样音应短于一个分段");
         let url = ws_url(DEFAULT_BASE_URL, DEFAULT_MODEL).unwrap();
         let runtime = runtime().unwrap();
-        let transcript =
-            transcribe_chunk(&runtime, &url, key.trim(), &chunks[0].b64, &AtomicBool::new(false))
-                .unwrap();
+        let transcript = transcribe_chunk(
+            &runtime,
+            &url,
+            key.trim(),
+            &chunks[0].b64,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         if has_speech {
-            assert!(!transcript.is_empty(), "含人声样音应转写出文字，实际：{transcript:?}");
+            assert!(
+                !transcript.is_empty(),
+                "含人声样音应转写出文字，实际：{transcript:?}"
+            );
         }
         println!("套餐通道在线探针转写结果：{transcript:?}");
     }

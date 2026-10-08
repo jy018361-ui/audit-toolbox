@@ -75,7 +75,10 @@ pub(crate) fn detect_header_with_merges(
     }
     let mut best = (0usize, 0.0_f64);
     let mut second = f64::MIN;
-    let has_fields = rows.iter().take(scan).any(|row| !crate::header_detection::is_title(row));
+    let has_fields = rows
+        .iter()
+        .take(scan)
+        .any(|row| !crate::header_detection::is_title(row));
     for i in 0..scan {
         if has_fields && crate::header_detection::is_title(&rows[i]) {
             continue;
@@ -95,15 +98,10 @@ pub(crate) fn detect_header_with_merges(
     let merge_parent_layer = best.0 > 0
         && rows
             .get(best.0 - 1)
-            .is_some_and(|row| {
-                !crate::header_detection::is_title(row)
-            })
+            .is_some_and(|row| !crate::header_detection::is_title(row))
         && merges.iter().any(|&(r1, c1, r2, c2)| {
             let width = (c2 - c1 + 1) as usize;
-            r1 == r2
-                && r1 as usize + 1 == best.0
-                && c2 > c1
-                && width < sheet_width
+            r1 == r2 && r1 as usize + 1 == best.0 && c2 > c1 && width < sheet_width
         });
     let (header_row, two_layer) = if merge_parent_layer {
         (best.0 - 1, true)
@@ -132,8 +130,8 @@ fn looks_like_second_header_layer(row: &[String], next: Option<&[String]>) -> bo
     if non_empty.len() < 2 {
         return false;
     }
-    let text_ratio = non_empty.iter().filter(|v| !parses_as_amount(v)).count() as f64
-        / non_empty.len() as f64;
+    let text_ratio =
+        non_empty.iter().filter(|v| !parses_as_amount(v)).count() as f64 / non_empty.len() as f64;
     if text_ratio < 0.8 {
         return false;
     }
@@ -188,23 +186,113 @@ pub(crate) fn flatten_two_layer(first: &[String], second: &[String]) -> Vec<Stri
 /// 审计底稿常用字段的同义写法分组。同一组内的写法视为同一字段；
 /// 组间互不相认（「借方金额」组绝不吸收裸「金额」，那交给相似度层给黄）。
 const ALIAS_GROUPS: &[&[&str]] = &[
-    &["日期", "记账日期", "制单日期", "凭证日期", "发生日期", "业务日期", "交易日期", "记账时间", "date", "postingdate", "voucherdate"],
-    &["凭证号", "凭证编号", "凭证号码", "凭证字号", "记账号", "记账凭证号", "单据编号", "单据号", "单号", "voucherno", "vouchernumber", "voucherid"],
-    &["摘要", "凭证摘要", "摘要说明", "摘要描述", "事由", "说明", "description"],
-    &["科目编码", "科目代码", "科目编号", "科目号", "accountcode", "accountno"],
-    &["科目名称", "科目描述", "科目", "accountname", "accountdescription"],
-    &["借方金额", "借方发生额", "借方本位币金额", "借方", "debit", "debitamount"],
-    &["贷方金额", "贷方发生额", "贷方本位币金额", "贷方", "credit", "creditamount"],
+    &[
+        "日期",
+        "记账日期",
+        "制单日期",
+        "凭证日期",
+        "发生日期",
+        "业务日期",
+        "交易日期",
+        "记账时间",
+        "date",
+        "postingdate",
+        "voucherdate",
+    ],
+    &[
+        "凭证号",
+        "凭证编号",
+        "凭证号码",
+        "凭证字号",
+        "记账号",
+        "记账凭证号",
+        "单据编号",
+        "单据号",
+        "单号",
+        "voucherno",
+        "vouchernumber",
+        "voucherid",
+    ],
+    &[
+        "摘要",
+        "凭证摘要",
+        "摘要说明",
+        "摘要描述",
+        "事由",
+        "说明",
+        "description",
+    ],
+    &[
+        "科目编码",
+        "科目代码",
+        "科目编号",
+        "科目号",
+        "accountcode",
+        "accountno",
+    ],
+    &[
+        "科目名称",
+        "科目描述",
+        "科目",
+        "accountname",
+        "accountdescription",
+    ],
+    &[
+        "借方金额",
+        "借方发生额",
+        "借方本位币金额",
+        "借方",
+        "debit",
+        "debitamount",
+    ],
+    &[
+        "贷方金额",
+        "贷方发生额",
+        "贷方本位币金额",
+        "贷方",
+        "credit",
+        "creditamount",
+    ],
     &["余额", "科目余额", "账面余额", "balance", "balanceamount"],
-    &["金额", "发生额", "本币金额", "本位币金额", "amount", "金额本位币"],
+    &[
+        "金额",
+        "发生额",
+        "本币金额",
+        "本位币金额",
+        "amount",
+        "金额本位币",
+    ],
     &["数量", "qty", "quantity", "数目"],
     &["单价", "unitprice", "price"],
     &["币种", "货币", "货币种类", "currency"],
     &["汇率", "exchangeRate", "折算汇率", "折算率"],
-    &["期初余额", "期初金额", "期初数", "年初余额", "openingbalance"],
-    &["期末余额", "期末金额", "期末数", "年末余额", "closingbalance"],
+    &[
+        "期初余额",
+        "期初金额",
+        "期初数",
+        "年初余额",
+        "openingbalance",
+    ],
+    &[
+        "期末余额",
+        "期末金额",
+        "期末数",
+        "年末余额",
+        "closingbalance",
+    ],
     &["部门", "部门名称", "成本中心", "department", "costcenter"],
-    &["往来单位", "单位名称", "对方单位", "交易对手", "客商", "客商名称", "counterparty", "supplier", "customer", "vendor"],
+    &[
+        "往来单位",
+        "单位名称",
+        "对方单位",
+        "交易对手",
+        "客商",
+        "客商名称",
+        "counterparty",
+        "supplier",
+        "customer",
+        "vendor",
+    ],
     &["制单人", "制单", "录入人", "创建人", "preparedby", "maker"],
     &["审核人", "复核人", "审核", "approvedby", "checker"],
 ];
@@ -244,9 +332,11 @@ fn conflicts(template: &str, header: &str) -> bool {
 }
 
 fn alias_group_of(normalized: &str) -> Option<usize> {
-    ALIAS_GROUPS
-        .iter()
-        .position(|group| group.iter().any(|alias| normalize_header(alias) == normalized))
+    ALIAS_GROUPS.iter().position(|group| {
+        group
+            .iter()
+            .any(|alias| normalize_header(alias) == normalized)
+    })
 }
 
 /// 单对匹配强度与依据。`None` = 不建议。
@@ -394,7 +484,11 @@ fn lcs_length(a: &[char], b: &[char]) -> usize {
     let mut cur: Vec<usize> = vec![0; b.len() + 1];
     for ca in a {
         for (j, cb) in b.iter().enumerate() {
-            cur[j + 1] = if ca == cb { prev[j] + 1 } else { prev[j + 1].max(cur[j]) };
+            cur[j + 1] = if ca == cb {
+                prev[j] + 1
+            } else {
+                prev[j + 1].max(cur[j])
+            };
         }
         std::mem::swap(&mut prev, &mut cur);
     }
@@ -512,10 +606,12 @@ fn save_aliases_to(path: &std::path::Path, pairs: &[(String, String)]) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let value = json!(existing
-        .iter()
-        .map(|(source, target)| json!({"source": source, "target": target}))
-        .collect::<Vec<_>>());
+    let value = json!(
+        existing
+            .iter()
+            .map(|(source, target)| json!({"source": source, "target": target}))
+            .collect::<Vec<_>>()
+    );
     let _ = std::fs::write(path, value.to_string());
 }
 
@@ -527,10 +623,12 @@ fn delete_alias_at(path: &std::path::Path, source: &str, target: &str) -> Vec<(S
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let value = json!(existing
-            .iter()
-            .map(|(s, t)| json!({"source": s, "target": t}))
-            .collect::<Vec<_>>());
+        let value = json!(
+            existing
+                .iter()
+                .map(|(s, t)| json!({"source": s, "target": t}))
+                .collect::<Vec<_>>()
+        );
         let _ = std::fs::write(path, value.to_string());
     }
     existing
@@ -624,9 +722,25 @@ mod tests {
 
     #[test]
     fn 通用表头合并工具排除重复标题() {
-        let sheet = vec![vec!["记账凭证明细查询".into(); 6],
-            vec!["日期".into(), "凭证号".into(), "科目编码".into(), "摘要".into(), "借方金额".into(), "贷方金额".into()],
-            vec!["2026-01-04".into(), "001".into(), "1001".into(), "收款".into(), "100".into(), "0".into()]];
+        let sheet = vec![
+            vec!["记账凭证明细查询".into(); 6],
+            vec![
+                "日期".into(),
+                "凭证号".into(),
+                "科目编码".into(),
+                "摘要".into(),
+                "借方金额".into(),
+                "贷方金额".into(),
+            ],
+            vec![
+                "2026-01-04".into(),
+                "001".into(),
+                "1001".into(),
+                "收款".into(),
+                "100".into(),
+                "0".into(),
+            ],
+        ];
         let detected = detect_header_with_merges(&sheet, &[(0, 0, 0, 5)]).unwrap();
         assert_eq!((detected.header_row, detected.header_rows_count), (1, 1));
     }
@@ -680,7 +794,14 @@ mod tests {
         let flat = flatten_two_layer(&sheet[1], &sheet[2]);
         assert_eq!(
             flat,
-            vec!["日期", "凭证号", "金额-借方", "金额-贷方", "金额-合计", "余额"]
+            vec![
+                "日期",
+                "凭证号",
+                "金额-借方",
+                "金额-贷方",
+                "金额-合计",
+                "余额"
+            ]
         );
     }
 

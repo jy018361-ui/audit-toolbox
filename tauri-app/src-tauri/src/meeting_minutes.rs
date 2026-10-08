@@ -76,10 +76,13 @@ fn detail_param(params: &Value) -> &'static str {
     }
 }
 
-fn generate(params: &Value, progress: Progress, cancel: &Arc<AtomicBool>) -> Result<Value, AppError> {
-    let audio_path = string_param(params, "audioPath").ok_or_else(|| {
-        job_error("MEETING_PARAM_MISSING", "缺少录音文件路径。", None)
-    })?;
+fn generate(
+    params: &Value,
+    progress: Progress,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Value, AppError> {
+    let audio_path = string_param(params, "audioPath")
+        .ok_or_else(|| job_error("MEETING_PARAM_MISSING", "缺少录音文件路径。", None))?;
     let audio_path = PathBuf::from(&audio_path);
     if !audio_path.is_file() {
         return Err(job_error(
@@ -92,7 +95,9 @@ fn generate(params: &Value, progress: Progress, cancel: &Arc<AtomicBool>) -> Res
     // 套餐通道（token_plan）：密钥只能访问套餐端点，走 realtime 协议刷套餐
     // 额度；通用通道维持 paraformer 文件转写。套餐转写不区分说话人，
     // speakers=0，转写稿与纪要提示词都按无说话人分支处理。
-    let transcription = if settings.pointer("/meeting/asr_channel").and_then(Value::as_str)
+    let transcription = if settings
+        .pointer("/meeting/asr_channel")
+        .and_then(Value::as_str)
         == Some("token_plan")
     {
         let config = bailian_plan_asr::PlanAsrConfig::from_settings(&settings);
@@ -113,18 +118,27 @@ fn generate(params: &Value, progress: Progress, cancel: &Arc<AtomicBool>) -> Res
     let output_dir = output_dir_for(&audio_path, &stamp);
     let transcript_path = output_dir.join(format!("转写稿-{stamp}.txt"));
     fs::create_dir_all(&output_dir).map_err(|e| {
-        job_error("MEETING_OUTPUT_DIR_FAILED", "无法创建纪要输出目录。", Some(e.to_string()))
+        job_error(
+            "MEETING_OUTPUT_DIR_FAILED",
+            "无法创建纪要输出目录。",
+            Some(e.to_string()),
+        )
     })?;
     fs::write(&transcript_path, &transcript).map_err(|e| {
-        job_error("MEETING_TRANSCRIPT_WRITE_FAILED", "转写稿写入失败。", Some(e.to_string()))
+        job_error(
+            "MEETING_TRANSCRIPT_WRITE_FAILED",
+            "转写稿写入失败。",
+            Some(e.to_string()),
+        )
     })?;
     progress("running", 2, 4, "转写完成，正在生成会议纪要…");
     let detail = detail_param(params);
     let participants = participants_param(params);
-    let (minutes, minutes_error) = match summarize_with_llm(params, detail, &participants, &title, &transcript) {
-        Ok(markdown) => (Some(markdown), None),
-        Err(error) => (None, Some(error)),
-    };
+    let (minutes, minutes_error) =
+        match summarize_with_llm(params, detail, &participants, &title, &transcript) {
+            Ok(markdown) => (Some(markdown), None),
+            Err(error) => (None, Some(error)),
+        };
     finish_output(
         &output_dir,
         &stamp,
@@ -138,10 +152,13 @@ fn generate(params: &Value, progress: Progress, cancel: &Arc<AtomicBool>) -> Res
     )
 }
 
-fn summarize(params: &Value, progress: Progress, cancel: &Arc<AtomicBool>) -> Result<Value, AppError> {
-    let transcript_path = string_param(params, "transcriptPath").ok_or_else(|| {
-        job_error("MEETING_PARAM_MISSING", "缺少转写稿路径。", None)
-    })?;
+fn summarize(
+    params: &Value,
+    progress: Progress,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Value, AppError> {
+    let transcript_path = string_param(params, "transcriptPath")
+        .ok_or_else(|| job_error("MEETING_PARAM_MISSING", "缺少转写稿路径。", None))?;
     let transcript_path = PathBuf::from(&transcript_path);
     let transcript = fs::read_to_string(&transcript_path).map_err(|e| {
         job_error(
@@ -159,10 +176,11 @@ fn summarize(params: &Value, progress: Progress, cancel: &Arc<AtomicBool>) -> Re
     let detail = detail_param(params);
     let participants = participants_param(params);
     progress("running", 0, 2, "正在根据转写稿生成会议纪要…");
-    let (minutes, minutes_error) = match summarize_with_llm(params, detail, &participants, &title, &transcript) {
-        Ok(markdown) => (Some(markdown), None),
-        Err(error) => (None, Some(error)),
-    };
+    let (minutes, minutes_error) =
+        match summarize_with_llm(params, detail, &participants, &title, &transcript) {
+            Ok(markdown) => (Some(markdown), None),
+            Err(error) => (None, Some(error)),
+        };
     finish_output(
         &output_dir,
         &stamp,
@@ -177,10 +195,7 @@ fn summarize(params: &Value, progress: Progress, cancel: &Arc<AtomicBool>) -> Re
 }
 
 fn default_title() -> String {
-    format!(
-        "会议纪要 {}",
-        chrono::Local::now().format("%Y-%m-%d %H:%M")
-    )
+    format!("会议纪要 {}", chrono::Local::now().format("%Y-%m-%d %H:%M"))
 }
 
 fn output_stamp() -> String {
@@ -212,30 +227,38 @@ fn output_dir_for(source: &Path, stamp: &str) -> PathBuf {
 /// 公共 LLM 请求器对 DeepSeek 会按该词切换 JSON 输出模式，纪要需要 Markdown。
 /// `has_speakers=false` 对应套餐转写通道：转写稿没有说话人标签，
 /// 提示词改为禁止虚构发言人，不得沿用「说话人N」相关规则。
-fn build_minutes_prompt(detail: &str, participants: &[String], title: &str, has_speakers: bool) -> String {
+fn build_minutes_prompt(
+    detail: &str,
+    participants: &[String],
+    title: &str,
+    has_speakers: bool,
+) -> String {
     let detail_rules = match detail {
-        "brief" => "本纪要为简要档：只输出「三、会议结论」和「四、待办事项」两个栏目，其余栏目省略。",
-        "detailed" => "本纪要为详细档：「二、讨论要点」按议题分小节详细展开，归纳各方发言立场与理由，可引用关键原话。",
+        "brief" => {
+            "本纪要为简要档：只输出「三、会议结论」和「四、待办事项」两个栏目，其余栏目省略。"
+        }
+        "detailed" => {
+            "本纪要为详细档：「二、讨论要点」按议题分小节详细展开，归纳各方发言立场与理由，可引用关键原话。"
+        }
         _ => "本纪要为标准档：「二、讨论要点」按议题归纳，每个议题 2-5 条要点。",
     };
     let participant_rules = match (has_speakers, participants.is_empty()) {
-        (true, true) => {
-            "转写稿中的说话人以「说话人1、说话人2」标注，请原样保留。".to_string()
-        }
+        (true, true) => "转写稿中的说话人以「说话人1、说话人2」标注，请原样保留。".to_string(),
         (true, false) => {
             format!(
-            "本次会议的参会人名单：{}。请结合发言内容把「说话人N」对应到名单中的真实姓名；确实无法判断的保留原标签，不得张冠李戴。",
-            participants.join("、")
-        )
+                "本次会议的参会人名单：{}。请结合发言内容把「说话人N」对应到名单中的真实姓名；确实无法判断的保留原标签，不得张冠李戴。",
+                participants.join("、")
+            )
         }
         (false, false) => {
             format!(
-            "本次会议的参会人名单：{}。转写稿没有区分说话人，名单仅供「会议信息」栏目使用，不要把发言归属到具体个人。",
-            participants.join("、")
-        )
+                "本次会议的参会人名单：{}。转写稿没有区分说话人，名单仅供「会议信息」栏目使用，不要把发言归属到具体个人。",
+                participants.join("、")
+            )
         }
         (false, true) => {
-            "本转写稿没有区分说话人；请用「与会人员提出」等中性表述归纳发言，不得虚构发言人。".to_string()
+            "本转写稿没有区分说话人；请用「与会人员提出」等中性表述归纳发言，不得虚构发言人。"
+                .to_string()
         }
     };
     format!(
@@ -263,7 +286,10 @@ fn summarize_with_llm(
     title: &str,
     transcript: &str,
 ) -> Result<String, String> {
-    let llm = params.pointer("/__settings/llm").cloned().unwrap_or(Value::Null);
+    let llm = params
+        .pointer("/__settings/llm")
+        .cloned()
+        .unwrap_or(Value::Null);
     if llm.get("enabled").and_then(Value::as_bool) != Some(true) {
         return Err("未启用统一 LLM 配置，请到设置页开启后再生成纪要。".into());
     }
@@ -312,7 +338,11 @@ fn finish_output(
         Some(markdown) => {
             let path = output_dir.join(format!("会议纪要-{stamp}.md"));
             fs::write(&path, markdown).map_err(|e| {
-                job_error("MEETING_MINUTES_WRITE_FAILED", "会议纪要写入失败。", Some(e.to_string()))
+                job_error(
+                    "MEETING_MINUTES_WRITE_FAILED",
+                    "会议纪要写入失败。",
+                    Some(e.to_string()),
+                )
             })?;
             Some(path)
         }
@@ -344,7 +374,8 @@ mod tests {
     #[test]
     fn prompt_contains_fixed_sections_and_never_triggers_llm_json_mode() {
         for detail in ["brief", "standard", "detailed"] {
-            let prompt = build_minutes_prompt(detail, &["张三".into(), "李四".into()], "测试会议", true);
+            let prompt =
+                build_minutes_prompt(detail, &["张三".into(), "李四".into()], "测试会议", true);
             assert!(prompt.contains("## 一、会议信息"));
             assert!(prompt.contains("## 二、讨论要点"));
             assert!(prompt.contains("## 三、会议结论"));
@@ -365,7 +396,8 @@ mod tests {
         let no_participants = build_minutes_prompt("standard", &[], "测试会议", false);
         assert!(no_participants.contains("不得虚构发言人"));
         assert!(!no_participants.contains("原样保留"));
-        let with_participants = build_minutes_prompt("standard", &["张三".into()], "测试会议", false);
+        let with_participants =
+            build_minutes_prompt("standard", &["张三".into()], "测试会议", false);
         assert!(with_participants.contains("名单仅供「会议信息」栏目使用"));
         assert!(with_participants.contains("不要把发言归属到具体个人"));
     }
@@ -383,7 +415,10 @@ mod tests {
     #[test]
     fn detail_level_defaults_to_standard() {
         assert_eq!(detail_param(&json!({"detailLevel": "brief"})), "brief");
-        assert_eq!(detail_param(&json!({"detailLevel": "detailed"})), "detailed");
+        assert_eq!(
+            detail_param(&json!({"detailLevel": "detailed"})),
+            "detailed"
+        );
         assert_eq!(detail_param(&json!({})), "standard");
         assert_eq!(detail_param(&json!({"detailLevel": "别的"})), "standard");
     }

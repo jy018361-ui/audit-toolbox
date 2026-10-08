@@ -924,12 +924,17 @@ fn append_unmatched_account_warnings(
     let confirmed = tb_accounts
         .iter()
         .filter(|tb| !tb.code.is_empty() && find_assignment(assignments, tb).is_some())
-        .map(|tb| ((
-            tb.entity.clone(),
-            ledger_mapping::normalize_account_code(&tb.code),
-            norm(&tb.auxiliary),
-            tb.currency.trim().to_ascii_uppercase(),
-        ), tb))
+        .map(|tb| {
+            (
+                (
+                    tb.entity.clone(),
+                    ledger_mapping::normalize_account_code(&tb.code),
+                    norm(&tb.auxiliary),
+                    tb.currency.trim().to_ascii_uppercase(),
+                ),
+                tb,
+            )
+        })
         .collect::<HashMap<_, _>>();
     for je in je_accounts {
         if je.code.is_empty() || find_assignment(assignments, je).is_some() {
@@ -3418,8 +3423,12 @@ fn assignment_index_from_identities(
                 .is_none_or(|entity| entity.trim() == id.entity || only_default_entity)
                 && (norm(&a.account) == norm(&id.display)
                     || norm(&a.account) == norm(&id.legacy_display))
-                && a.auxiliary.as_ref().is_none_or(|value| norm(value) == norm(&id.auxiliary))
-                && a.currency.as_ref().is_none_or(|value| value.trim().eq_ignore_ascii_case(id.currency.trim()))
+                && a.auxiliary
+                    .as_ref()
+                    .is_none_or(|value| norm(value) == norm(&id.auxiliary))
+                && a.currency
+                    .as_ref()
+                    .is_none_or(|value| value.trim().eq_ignore_ascii_case(id.currency.trim()))
         }) {
             let name_key = (id.entity.clone(), ledger_mapping::normalize_name(&id.name));
             if id.code.is_empty() && !valid_names.contains(&name_key) {
@@ -3433,10 +3442,17 @@ fn assignment_index_from_identities(
                 ));
             }
             let exact_key = assignment_identity(id);
-            if out.exact.get(&exact_key).is_some_and(|old| old != &assigned) {
+            if out
+                .exact
+                .get(&exact_key)
+                .is_some_and(|old| old != &assigned)
+            {
                 return Err(error(
                     "FA_TBJE_ACCOUNT_ASSIGNMENT_CONFLICT",
-                    format!("主体 {} 的科目 {} 存在冲突分类，请逐项复核。", id.entity, id.display),
+                    format!(
+                        "主体 {} 的科目 {} 存在冲突分类，请逐项复核。",
+                        id.entity, id.display
+                    ),
                     None,
                 ));
             }
@@ -3456,9 +3472,18 @@ fn assignment_index_from_identities(
                 }
             }
             if valid_names.contains(&name_key) {
-                let key = (name_key.0, name_key.1, norm(&id.auxiliary), id.currency.trim().to_ascii_uppercase());
+                let key = (
+                    name_key.0,
+                    name_key.1,
+                    norm(&id.auxiliary),
+                    id.currency.trim().to_ascii_uppercase(),
+                );
                 if out.names.get(&key).is_some_and(|old| old != &assigned) {
-                    return Err(error("FA_TBJE_ACCOUNT_ASSIGNMENT_CONFLICT", format!("主体 {} 的科目名称 {} 存在冲突分类。", id.entity, id.name), None));
+                    return Err(error(
+                        "FA_TBJE_ACCOUNT_ASSIGNMENT_CONFLICT",
+                        format!("主体 {} 的科目名称 {} 存在冲突分类。", id.entity, id.name),
+                        None,
+                    ));
                 }
                 out.names.insert(key, assigned.clone());
             }
@@ -3471,9 +3496,17 @@ fn assignment_index_from_identities(
         if id.code.is_empty() {
             continue;
         }
-        variants.entry((id.entity.clone(), ledger_mapping::normalize_account_code(&id.code)))
+        variants
+            .entry((
+                id.entity.clone(),
+                ledger_mapping::normalize_account_code(&id.code),
+            ))
             .or_default()
-            .insert((ledger_mapping::normalize_name(&id.name), norm(&id.auxiliary), id.currency.trim().to_ascii_uppercase()));
+            .insert((
+                ledger_mapping::normalize_name(&id.name),
+                norm(&id.auxiliary),
+                id.currency.trim().to_ascii_uppercase(),
+            ));
     }
     for (key, identities) in variants {
         if identities.len() > 1 {
@@ -3487,11 +3520,13 @@ fn assignment_index_from_identities(
     let parent_names = tb_ids
         .iter()
         .filter(|id| !id.code.is_empty())
-        .map(|id| (
-            id.entity.clone(),
-            ledger_mapping::normalize_account_code(&id.code),
-            ledger_mapping::normalize_name(&id.name),
-        ))
+        .map(|id| {
+            (
+                id.entity.clone(),
+                ledger_mapping::normalize_account_code(&id.code),
+                ledger_mapping::normalize_name(&id.name),
+            )
+        })
         .collect::<HashSet<_>>();
     let mut tb_by_code = HashMap::<(String, String, String, String), Vec<&AccountIdentity>>::new();
     for tb in tb_ids {
@@ -3523,7 +3558,9 @@ fn assignment_index_from_identities(
             norm(&je.auxiliary),
             je.currency.trim().to_ascii_uppercase(),
         );
-        let Some(matches) = tb_by_code.get(&lookup) else { continue };
+        let Some(matches) = tb_by_code.get(&lookup) else {
+            continue;
+        };
         for tb in matches {
             let tb_key = assignment_identity(tb);
             if tb_key == je_key || verified_account_path_alias(tb, je, &parent_names) {
@@ -3534,7 +3571,9 @@ fn assignment_index_from_identities(
     let mut reverse_count = HashMap::<(String, String, String, String, String), usize>::new();
     for tb_keys in candidates.values() {
         if tb_keys.len() == 1 {
-            *reverse_count.entry(tb_keys.iter().next().unwrap().clone()).or_default() += 1;
+            *reverse_count
+                .entry(tb_keys.iter().next().unwrap().clone())
+                .or_default() += 1;
         }
     }
     for (je_key, tb_keys) in candidates {
@@ -3596,15 +3635,21 @@ fn assignment_identity(id: &AccountIdentity) -> (String, String, String, String,
 }
 
 fn find_assignment<'a>(map: &'a AssignmentIndex, id: &AccountIdentity) -> Option<&'a Assigned> {
-    map.exact.get(&assignment_identity(id)).or_else(|| map.codes
-        .get(&(
-            id.entity.clone(),
-            ledger_mapping::normalize_account_code(&id.code),
-        ))
-        .or_else(|| {
-            map.names
-                .get(&(id.entity.clone(), ledger_mapping::normalize_name(&id.name), norm(&id.auxiliary), id.currency.trim().to_ascii_uppercase()))
-        }))
+    map.exact.get(&assignment_identity(id)).or_else(|| {
+        map.codes
+            .get(&(
+                id.entity.clone(),
+                ledger_mapping::normalize_account_code(&id.code),
+            ))
+            .or_else(|| {
+                map.names.get(&(
+                    id.entity.clone(),
+                    ledger_mapping::normalize_name(&id.name),
+                    norm(&id.auxiliary),
+                    id.currency.trim().to_ascii_uppercase(),
+                ))
+            })
+    })
 }
 fn category_of(a: &Assigned) -> String {
     if a.category.trim().is_empty() {
@@ -3826,32 +3871,41 @@ mod tests {
             "样例应构成名称回退/歧义形态：{policy:?}"
         );
         let tb_headers: Vec<String> = [
-            "科目编码", "科目名称", "辅助核算", "期初余额", "本年借方", "本年贷方", "期末余额",
+            "科目编码",
+            "科目名称",
+            "辅助核算",
+            "期初余额",
+            "本年借方",
+            "本年贷方",
+            "期末余额",
         ]
         .iter()
         .map(|text| text.to_string())
         .collect();
-        let je_headers: Vec<String> =
-            ["日期", "凭证号", "科目名称", "辅助", "借方", "贷方"]
-                .iter()
-                .map(|text| text.to_string())
-                .collect();
+        let je_headers: Vec<String> = ["日期", "凭证号", "科目名称", "辅助", "借方", "贷方"]
+            .iter()
+            .map(|text| text.to_string())
+            .collect();
         // 真实策略：守卫触发，计划让位于重扫。
-        assert!(crate::fx::verified_auxiliary_columns_from_plan_headers(
-            &params,
-            &tb_headers,
-            &je_headers,
-            &policy
-        )
-        .is_none());
+        assert!(
+            crate::fx::verified_auxiliary_columns_from_plan_headers(
+                &params,
+                &tb_headers,
+                &je_headers,
+                &policy
+            )
+            .is_none()
+        );
         // 占位策略（旧行为）：守卫永不触发，名称回退形态下计划被误复用。
-        assert!(crate::fx::verified_auxiliary_columns_from_plan_headers(
-            &params,
-            &tb_headers,
-            &je_headers,
-            &ledger_mapping::AccountMatchPolicy::default()
-        )
-        .is_some());
+        assert!(
+            crate::fx::verified_auxiliary_columns_from_plan_headers(
+                &params,
+                &tb_headers,
+                &je_headers,
+                &ledger_mapping::AccountMatchPolicy::default()
+            )
+            .is_some()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4012,32 +4066,49 @@ mod tests {
         });
         let tb_mapping = serde_json::from_value::<Map<String, Value>>(tb_map.clone()).unwrap();
         let identities = account_identities(&tb, &tb_mapping, &json!({}), EntitySide::Tb, false);
-        let assignments = identities.iter().filter(|id| {
-            id.code.starts_with("1601.") || id.code == "1602"
-        }).map(|id| json!({
-            "account":id.display,
-            "role":if id.code == "1602" { "depreciation" } else { "cost" },
-            "category":if id.code == "1602" { "固定资产" } else { id.name.as_str() }
-        })).collect::<Vec<_>>();
+        let assignments = identities
+            .iter()
+            .filter(|id| id.code.starts_with("1601.") || id.code == "1602")
+            .map(|id| {
+                json!({
+                    "account":id.display,
+                    "role":if id.code == "1602" { "depreciation" } else { "cost" },
+                    "category":if id.code == "1602" { "固定资产" } else { id.name.as_str() }
+                })
+            })
+            .collect::<Vec<_>>();
         let params = json!({
             "tbSource":tb_spec, "jeSource":je_spec,
             "tbMapping":tb_map, "jeMapping":je_map,
             "accountAssignments":assignments
         });
         let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
-        let cost = analysis.totals.values().fold(CategoryTotals::default(), |mut sum, row| {
-            sum.opening_cost += row.opening_cost;
-            sum.closing_cost += row.closing_cost;
-            sum.additions += row.additions;
-            sum.disposals += row.disposals;
-            sum.reclass_cost += row.reclass_cost;
-            sum
-        });
+        let cost = analysis
+            .totals
+            .values()
+            .fold(CategoryTotals::default(), |mut sum, row| {
+                sum.opening_cost += row.opening_cost;
+                sum.closing_cost += row.closing_cost;
+                sum.additions += row.additions;
+                sum.disposals += row.disposals;
+                sum.reclass_cost += row.reclass_cost;
+                sum
+            });
         assert!((cost.opening_cost - 51_131_540.85).abs() < 0.01);
         assert!((cost.closing_cost - 54_123_314.66).abs() < 0.01);
         assert!((cost.additions - cost.disposals + cost.reclass_cost - 2_991_773.81).abs() < 0.01);
-        assert!((cost.opening_cost + cost.additions - cost.disposals + cost.reclass_cost - cost.closing_cost).abs() < 0.01);
-        assert!(!analysis.warnings.iter().any(|warning| warning.contains("1601") && warning.contains("未匹配")));
+        assert!(
+            (cost.opening_cost + cost.additions - cost.disposals + cost.reclass_cost
+                - cost.closing_cost)
+                .abs()
+                < 0.01
+        );
+        assert!(
+            !analysis
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("1601") && warning.contains("未匹配"))
+        );
     }
 
     /// 本机真实样例回归入口：汇兑损益测试资料（科目余额表.xls ＋ 序时账-1.xlsx）。
@@ -4793,10 +4864,9 @@ mod tests {
             "A,1601,固定资产,0,0,0,0\nA,1601.001,机器设备,1000,500,200,1300",
         );
         std::fs::write(&tb, tb_text).unwrap();
-        let je_text = std::fs::read_to_string(&je).unwrap().replace(
-            ",1601,机器设备,",
-            ",1601.001,固定资产_机器设备,",
-        );
+        let je_text = std::fs::read_to_string(&je)
+            .unwrap()
+            .replace(",1601,机器设备,", ",1601.001,固定资产_机器设备,");
         std::fs::write(&je, je_text).unwrap();
         params["accountAssignments"][0]["account"] = json!("1601.001 机器设备");
         let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
@@ -4805,8 +4875,16 @@ mod tests {
         assert_eq!(totals.closing_cost, 1300.0);
         assert_eq!(totals.additions, 500.0);
         assert_eq!(totals.disposals, 200.0);
-        assert!((totals.opening_cost + totals.additions - totals.disposals - totals.closing_cost).abs() < 0.005);
-        assert!(!analysis.warnings.iter().any(|warning| warning.contains("未匹配")));
+        assert!(
+            (totals.opening_cost + totals.additions - totals.disposals - totals.closing_cost).abs()
+                < 0.005
+        );
+        assert!(
+            !analysis
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("未匹配"))
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -4820,16 +4898,20 @@ mod tests {
             "A,1601,固定资产,0,0,0,0\nA,1601.001,机器设备,1000,500,200,1300",
         );
         std::fs::write(&tb, tb_text).unwrap();
-        let je_text = std::fs::read_to_string(&je).unwrap().replace(
-            ",1601,机器设备,",
-            ",1601.001,无形资产_机器设备,",
-        );
+        let je_text = std::fs::read_to_string(&je)
+            .unwrap()
+            .replace(",1601,机器设备,", ",1601.001,无形资产_机器设备,");
         std::fs::write(&je, je_text).unwrap();
         params["accountAssignments"][0]["account"] = json!("1601.001 机器设备");
         let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
         assert_eq!(analysis.additions.len(), 0);
         assert_eq!(analysis.disposals.len(), 0);
-        assert!(analysis.warnings.iter().any(|warning| warning.contains("未匹配")));
+        assert!(
+            analysis
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("未匹配"))
+        );
 
         // 两种 JE 名称均可拆出同一叶名时，一对多也不能猜测。
         let tb_text = std::fs::read_to_string(&tb).unwrap().replace(
@@ -4847,7 +4929,12 @@ mod tests {
         std::fs::write(&je, je_text).unwrap();
         let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
         assert_eq!(analysis.additions.len(), 0);
-        assert!(analysis.warnings.iter().any(|warning| warning.contains("未匹配")));
+        assert!(
+            analysis
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("未匹配"))
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

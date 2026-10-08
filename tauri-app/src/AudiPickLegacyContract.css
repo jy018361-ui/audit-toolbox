@@ -10,6 +10,22 @@
   box-sizing: border-box;
 }
 
+.aplc-procedure-controls { display: flex; align-items: end; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-3); }
+.aplc-procedure-controls label, .aplc-procedure-detail label { display: grid; gap: var(--sp-1); min-width: 0; }
+.aplc-procedure-controls .aplc-procedure-check { display: flex; align-items: center; }
+.aplc-procedure-controls select, .aplc-procedure-detail select { max-width: 100%; min-height: 36px; border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--ink); background: var(--surface); }
+.aplc-procedure-controls p { flex-basis: 100%; margin: 0; font-size: var(--fs-xs); color: var(--text-muted); }
+.aplc-procedure-level { font-size: var(--fs-xs); }
+.aplc-procedure-level.level-1 { color: var(--brand-link); font-weight: 700; }
+.aplc-procedure-level.level-3 { color: var(--text-muted); }
+.aplc-procedure-detail { padding: var(--sp-3); border-bottom: 1px solid var(--border); background: var(--surface-muted); }
+.aplc-procedure-detail small { display: block; margin-top: var(--sp-2); color: var(--text-muted); }
+.aplc-procedure-detail dt { font-weight: 650; margin-top: var(--sp-3); }
+.aplc-procedure-detail dd { margin: var(--sp-1) 0 0; white-space: pre-line; overflow-wrap: anywhere; line-height: 1.6; }
+.aplc-procedure-warning { margin-top: var(--sp-3); color: var(--warning-fg); }
+.aplc-procedure-warning ul { padding-left: var(--sp-5); margin: var(--sp-1) 0; }
+.aplc-summary-toggle { margin: var(--sp-2); }
+
 .aplc-view-switch {
   display: flex;
   gap: var(--sp-1);

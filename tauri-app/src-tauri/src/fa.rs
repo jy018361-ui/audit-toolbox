@@ -1053,22 +1053,30 @@ fn is_category_code_value(text: &str) -> bool {
     if index >= chars.len() || !chars[index].is_ascii_digit() {
         return false;
     }
-    while index < chars.len()
-        && chars[index].is_ascii_digit()
-    {
+    while index < chars.len() && chars[index].is_ascii_digit() {
         index += 1;
     }
-    chars[index..].iter().all(|ch| {
-        ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/')
-    })
+    chars[index..]
+        .iter()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
 }
 
 /// 类别列名中的数值字段黑名单（旧版 CATEGORY_NUMERIC_BLACKLIST）：
 /// 列名带这些词的列即使含“类别/类型”也不该当类别列。
 fn is_category_numeric_field(header: &str) -> bool {
-    ["原值", "累计折旧", "成本", "净值", "残值", "减值", "折旧", "金额", "价值"]
-        .iter()
-        .any(|token| header.contains(token))
+    [
+        "原值",
+        "累计折旧",
+        "成本",
+        "净值",
+        "残值",
+        "减值",
+        "折旧",
+        "金额",
+        "价值",
+    ]
+    .iter()
+    .any(|token| header.contains(token))
 }
 
 /// 列的样例值是否多数像短代码（前 8 个非空值中 ≥50% 呈代码形态）。
@@ -2888,20 +2896,25 @@ fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
 }
 
 pub(crate) fn detect_header(rows: &[Vec<String>]) -> usize {
-    crate::header_detection::layout(rows, 20, |r| {
+    crate::header_detection::layout(
+        rows,
+        20,
+        |r| {
             let nonempty = r.iter().filter(|v| !v.trim().is_empty()).count();
-            let keywords = r
-                .iter()
-                .filter(|v| {
-                    asset_header_hit(v)
-                })
-                .count();
+            let keywords = r.iter().filter(|v| asset_header_hit(v)).count();
             (nonempty + keywords * 4) as f64
-        }, asset_header_hit, None).0
+        },
+        asset_header_hit,
+        None,
+    )
+    .0
 }
 fn asset_header_hit(value: &str) -> bool {
-    ["编号", "编码", "名称", "类别", "原值", "折旧", "寿命", "日期"]
-        .iter().any(|word| value.contains(word))
+    [
+        "编号", "编码", "名称", "类别", "原值", "折旧", "寿命", "日期",
+    ]
+    .iter()
+    .any(|word| value.contains(word))
 }
 pub(crate) fn asset_header_depth(rows: &[Vec<String>], start: usize) -> usize {
     crate::header_detection::depth(rows, start, asset_header_hit)
@@ -2911,7 +2924,9 @@ pub(crate) fn asset_headers(rows: &[Vec<String>], start: usize) -> Vec<String> {
     if depth == 2 {
         let width = rows[start].len().max(rows[start + 1].len());
         unique_headers(crate::fx::merge_headers(&rows[start..start + depth], width))
-    } else { unique_headers(rows.get(start).cloned().unwrap_or_default()) }
+    } else {
+        unique_headers(rows.get(start).cloned().unwrap_or_default())
+    }
 }
 fn unique_headers(row: Vec<String>) -> Vec<String> {
     let mut counts = HashMap::new();
@@ -8256,9 +8271,33 @@ mod tests {
                 "累计折旧",
             ],
             &[
-                &["Y110", "房屋及建筑物", "0000", "1100000", "冷量台土建安装", "269327.01", "60598.58"],
-                &["Y110", "房屋及建筑物", "0000", "1100001", "实验室土建", "221480.58", "26577.68"],
-                &["Y120", "机器设备", "0000", "1100002", "高速冲床", "36416.64", "4370"],
+                &[
+                    "Y110",
+                    "房屋及建筑物",
+                    "0000",
+                    "1100000",
+                    "冷量台土建安装",
+                    "269327.01",
+                    "60598.58",
+                ],
+                &[
+                    "Y110",
+                    "房屋及建筑物",
+                    "0000",
+                    "1100001",
+                    "实验室土建",
+                    "221480.58",
+                    "26577.68",
+                ],
+                &[
+                    "Y120",
+                    "机器设备",
+                    "0000",
+                    "1100002",
+                    "高速冲床",
+                    "36416.64",
+                    "4370",
+                ],
             ],
         );
         let mapping = suggest_mapping(&table);
@@ -9570,8 +9609,7 @@ mod tests {
     #[test]
     #[ignore = "requires FA_CATEGORY_CODE_SAMPLE pointing at a real card workbook with a code-shaped 资产分类 column"]
     fn real_category_code_sample_maps_text_description_column() {
-        let path =
-            std::env::var_os("FA_CATEGORY_CODE_SAMPLE").expect("FA_CATEGORY_CODE_SAMPLE");
+        let path = std::env::var_os("FA_CATEGORY_CODE_SAMPLE").expect("FA_CATEGORY_CODE_SAMPLE");
         let table = load_table(Path::new(&path), Some("2512"), None, true).unwrap();
         let mapping = suggest_mapping(&table);
         assert_eq!(mapping["category"].as_str(), Some("资产类型描述"));

@@ -15,15 +15,15 @@
   var META = {
     loan_covenant: {
       id: 'loan_covenant',
-      name: '借款·限制性契约',
-      shortName: '限制性契约',
+      name: '借款·财务契约',
+      shortName: '财务契约',
       category: 'loan',
       docKind: 'clause',
-      version: '1.0',
+      version: '4.2',
       readonly: true,
-      description: '窄口径：仅摘录银行借款合同中的限制性契约（covenant）条款，适用于债项 covenant 测试底稿。',
-      useCase: '用于从银行借款合同中识别财务/非财务限制性契约（covenant），支撑债项 covenant 合规测试。',
-      example: { category: '财务比率约束', quote: '资产负债率不得超过65%……', hint: '关注报告期是否触发 breach 及是否取得 waiver' }
+      description: '按案例库摘录有财务指标或量化财务门槛的限制性契约，保留原文与出处。',
+      useCase: '收录财务指标及带金额、比例或财务报表基数门槛的限制；排除期限、提款、还款、利率、资本金、账户归集和无量化门槛事项。',
+      example: { category: 'C01 财务报表指标', quote: '资产负债率不得超过65%……', hint: '四列展示类型、触发标准、合同原文和引用出处' }
     },
     loan_general: {
       id: 'loan_general',

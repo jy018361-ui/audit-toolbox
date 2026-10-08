@@ -480,6 +480,11 @@ export default function App() {
   >(null);
   const activeToolId = matchPath("/tools/:toolId", location.pathname)?.params
     .toolId ?? null;
+  // AudiPick 在主窗口内使用自己的产品导航。专注模式下不挂载工具箱侧栏，
+  // 而不是用页面侧栏覆盖它；这样底层不会留下可点击的窄缝。
+  // 旧入口重定向的首帧也直接进入专注模式，避免侧栏短暂闪现。
+  const audiPickFocusMode =
+    activeToolId === "audipick" || location.pathname === "/audipick-window";
   const tourTool =
     tour?.kind === "tool"
       ? catalog.find((tool) => tool.id === tour.toolId)
@@ -676,10 +681,13 @@ export default function App() {
       <JobCommandNotice />
       <ConfirmDialogHost />
       <MeetingWatch />
-      <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+      <div
+        className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${audiPickFocusMode ? " audipick-focus-mode" : ""}`}
+        data-layout-mode={audiPickFocusMode ? "audipick-focus" : "toolbox"}
+      >
         <a className="skip-navigation" href="#main-content" onClick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus(); }}>跳过导航，进入工作区</a>
         <WindowControls />
-        <aside
+        {!audiPickFocusMode && <aside
           id="app-sidebar"
           className={`sidebar${toolDrawerOpen ? " drawer-open" : ""}`}
           role={toolDrawerOpen ? "dialog" : undefined}
@@ -829,8 +837,8 @@ export default function App() {
             )}
             <span>v{bootstrap?.appVersion ?? "…"}</span>
           </div>
-        </aside>
-        <nav className="sidebar-rail" aria-label="紧凑导航">
+        </aside>}
+        {!audiPickFocusMode && <nav className="sidebar-rail" aria-label="紧凑导航">
           <button
             ref={toolDrawerButton}
             type="button"
@@ -853,8 +861,8 @@ export default function App() {
               {NAV_ICON[item.to]}
             </NavLink>
           ))}
-        </nav>
-        {toolDrawerOpen && (
+        </nav>}
+        {!audiPickFocusMode && toolDrawerOpen && (
           <button
             type="button"
             className="sidebar-drawer-backdrop"
@@ -907,6 +915,11 @@ export default function App() {
                 {/* The visible tool is rendered by PersistentToolPages below so
                   route changes hide it instead of destroying its local state. */}
                 <Route path="/tools/:toolId" element={null} />
+                {/* 兼容旧版书签：AudiPick 已改为工具箱主窗口内页面。 */}
+                <Route
+                  path="/audipick-window"
+                  element={<Navigate to="/tools/audipick" replace />}
+                />
                 <Route
                   path="/history"
                   element={<History catalog={catalog} />}

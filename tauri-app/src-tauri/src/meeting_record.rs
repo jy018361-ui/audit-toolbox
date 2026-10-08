@@ -15,8 +15,8 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        mpsc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     thread,
     time::Duration,
@@ -106,7 +106,11 @@ pub(crate) fn start(data_dir: &Path) -> Result<ActiveRecording, AppError> {
             Ok((label, result)) => {
                 tracks.lock().push(Track {
                     label,
-                    path: dir.join(if label == "system" { "track-system.wav" } else { "track-mic.wav" }),
+                    path: dir.join(if label == "system" {
+                        "track-system.wav"
+                    } else {
+                        "track-mic.wav"
+                    }),
                     ok: result.is_ok(),
                     error: result.err(),
                 });
@@ -160,7 +164,11 @@ pub(crate) fn finalize(active: Arc<ActiveRecording>) -> Result<Value, AppError> 
         let _ = handle.join();
     }
     let mix_path = active.dir.join("audio-mix.wav");
-    let frames = mix_wav_files(&mix_path, &active.dir.join("track-system.wav"), &active.dir.join("track-mic.wav"))?;
+    let frames = mix_wav_files(
+        &mix_path,
+        &active.dir.join("track-system.wav"),
+        &active.dir.join("track-mic.wav"),
+    )?;
     let duration_sec = frames / SAMPLE_RATE as u64;
     let size_bytes = fs::metadata(&mix_path).map(|meta| meta.len()).unwrap_or(0);
     let tracks = active.tracks.lock();
@@ -262,15 +270,15 @@ pub(crate) fn mix_wav_files(output: &Path, first: &Path, second: &Path) -> Resul
         ));
     }
     let mut writer = WavWriter::create(output, spec).map_err(|e| {
-        record_error("MEETING_MIX_FAILED", "无法写入混音文件。", Some(e.to_string()))
+        record_error(
+            "MEETING_MIX_FAILED",
+            "无法写入混音文件。",
+            Some(e.to_string()),
+        )
     })?;
     // 迭代器必须在循环外创建：samples() 每次调用都是从头的新迭代器。
-    let mut samples_a = reader_a
-        .as_mut()
-        .map(|reader| reader.samples::<i16>());
-    let mut samples_b = reader_b
-        .as_mut()
-        .map(|reader| reader.samples::<i16>());
+    let mut samples_a = reader_a.as_mut().map(|reader| reader.samples::<i16>());
+    let mut samples_b = reader_b.as_mut().map(|reader| reader.samples::<i16>());
     let mut frames: u64 = 0;
     loop {
         let sample_a = samples_a
@@ -295,7 +303,11 @@ pub(crate) fn mix_wav_files(output: &Path, first: &Path, second: &Path) -> Resul
 }
 
 fn write_err(error: impl std::fmt::Display) -> AppError {
-    record_error("MEETING_MIX_FAILED", "写入混音文件失败。", Some(error.to_string()))
+    record_error(
+        "MEETING_MIX_FAILED",
+        "写入混音文件失败。",
+        Some(error.to_string()),
+    )
 }
 
 /// 已完成初始化的采集会话：进入轮询循环前创建，就绪信号在此时发回启动方。
@@ -307,7 +319,9 @@ struct PreparedCapture {
 
 fn prepare_capture(device_direction: Direction, path: &Path) -> Result<PreparedCapture, String> {
     let enumerator = DeviceEnumerator::new().map_err(stringify)?;
-    let device = enumerator.get_default_device(&device_direction).map_err(stringify)?;
+    let device = enumerator
+        .get_default_device(&device_direction)
+        .map_err(stringify)?;
     let mut client = device.get_iaudioclient().map_err(stringify)?;
     let format = WaveFormat::new(16, 16, &SampleType::Int, SAMPLE_RATE as usize, 1, None);
     // 回环：Render 设备 + Capture 方向 + 共享模式 = AUDCLNT_STREAMFLAGS_LOOPBACK。
@@ -514,8 +528,12 @@ mod tests {
     fn mix_without_any_track_fails() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("mix.wav");
-        let error = mix_wav_files(&output, &dir.path().join("none-a.wav"), &dir.path().join("none-b.wav"))
-            .unwrap_err();
+        let error = mix_wav_files(
+            &output,
+            &dir.path().join("none-a.wav"),
+            &dir.path().join("none-b.wav"),
+        )
+        .unwrap_err();
         assert_eq!(error.code, "MEETING_MIX_FAILED");
     }
 
@@ -541,7 +559,9 @@ mod tests {
                 let active = Arc::new(recording);
                 match finalize(active) {
                     Ok(result) => println!("收尾成功: {result}"),
-                    Err(error) => println!("收尾失败: code={} detail={:?}", error.code, error.detail),
+                    Err(error) => {
+                        println!("收尾失败: code={} detail={:?}", error.code, error.detail)
+                    }
                 }
                 if let Ok(entries) = fs::read_dir(&record_dir) {
                     for entry in entries.flatten() {

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { DateInput } from "@/components/DateInput";
 import "./AudiPickLegacyDashboard.css";
 
 export type AudiPickLegacyProjectStatus = "active" | "completed";
@@ -303,11 +302,12 @@ export function AudiPickLegacyNewProjectModal({
               ))}
             </select>
           </label>
-          <DateInput
+          <input
             aria-label="项目日期"
             disabled={busy}
+            type="date"
             value={date}
-            onChange={setDate}
+            onChange={(event) => setDate(event.target.value)}
           />
           {(validationError || error) && (
             <p className="ap146-modal-error" role="alert">

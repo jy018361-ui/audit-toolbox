@@ -363,6 +363,16 @@ export const secretSet = (name: string, value: string) =>
   inTauri()
     ? invoke<void>("secret_set", { name, value })
     : Promise.reject(previewUnavailable("保存密钥"));
+export const audipickLlmTest = (profile: Record<string, unknown>, apiKey?: string) =>
+  inTauri()
+    ? invoke<{ message: string; elapsedMs: number }>("audipick_llm_test", { profile, apiKey: apiKey?.trim() || null })
+    : Promise.reject(previewUnavailable("测试 AudiPick AI 连接"));
+export const audipickOcrTest = (engine: string, imageBase64: string, apiKey?: string, secretKey?: string) =>
+  inTauri()
+    ? invoke<{ message: string; elapsedMs: number }>("audipick_ocr_test", {
+        engine, imageBase64, apiKey: apiKey?.trim() || null, secretKey: secretKey?.trim() || null,
+      })
+    : Promise.reject(previewUnavailable("测试 OCR 连接"));
 export const secretDelete = (name: string) =>
   inTauri()
     ? invoke<void>("secret_delete", { name })

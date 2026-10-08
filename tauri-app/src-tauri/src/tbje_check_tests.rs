@@ -9,20 +9,37 @@ use std::sync::atomic::AtomicBool;
 
 #[test]
 fn 完整性独立策略保留旧编码匹配与双侧名称细分() {
-    let identities = |names: &[&str]| names.iter()
-        .map(|name| ("E".to_owned(), "1121.01".to_owned(), (*name).to_owned()))
-        .collect::<Vec<_>>();
+    let identities = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| ("E".to_owned(), "1121.01".to_owned(), (*name).to_owned()))
+            .collect::<Vec<_>>()
+    };
     let tb = identities(&["客户甲", "客户乙"]);
     let je = identities(&["应收票据 - 银行承兑汇票"]);
     let old = ledger_mapping::AccountMatchPolicy::for_tbje_integrity(&tb, &je);
     assert_eq!(old.ambiguous_count(), 0);
-    assert_eq!(old.account_key("E", "1121.01", "客户甲"),
-        old.account_key("E", "1121.01", "应收票据 - 银行承兑汇票"));
-    assert_eq!(ledger_mapping::AccountMatchPolicy::from_sides(&tb, &je).ambiguous_count(), 1);
-    let matched = ledger_mapping::AccountMatchPolicy::for_tbje_integrity(&tb, &identities(&["客户甲", "客户乙"]));
+    assert_eq!(
+        old.account_key("E", "1121.01", "客户甲"),
+        old.account_key("E", "1121.01", "应收票据 - 银行承兑汇票")
+    );
+    assert_eq!(
+        ledger_mapping::AccountMatchPolicy::from_sides(&tb, &je).ambiguous_count(),
+        1
+    );
+    let matched = ledger_mapping::AccountMatchPolicy::for_tbje_integrity(
+        &tb,
+        &identities(&["客户甲", "客户乙"]),
+    );
     assert_eq!(matched.ambiguous_count(), 1);
-    assert_ne!(matched.account_key("E", "1121.01", "客户甲"), matched.account_key("E", "1121.01", "客户乙"));
-    let unmatched = ledger_mapping::AccountMatchPolicy::for_tbje_integrity(&tb, &identities(&["客户丙", "客户丁"]));
+    assert_ne!(
+        matched.account_key("E", "1121.01", "客户甲"),
+        matched.account_key("E", "1121.01", "客户乙")
+    );
+    let unmatched = ledger_mapping::AccountMatchPolicy::for_tbje_integrity(
+        &tb,
+        &identities(&["客户丙", "客户丁"]),
+    );
     assert_eq!(unmatched.ambiguous_count(), 0);
 }
 
@@ -188,8 +205,12 @@ fn 完整性同码多名对je单名恢复编码勾稽() {
     let prepared = prepare(&request).unwrap();
     let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
     assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
-    let items = result["tbVsJe"]["items"].as_array().unwrap().iter()
-        .filter(|item| item["code"] == json!("1121.01")).collect::<Vec<_>>();
+    let items = result["tbVsJe"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["code"] == json!("1121.01"))
+        .collect::<Vec<_>>();
     assert_eq!(items.len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1150,14 +1171,26 @@ fn 真实第一组关键同编码汇总不重复累计() {
     });
     let prepared = prepare(&value).unwrap();
     let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
-    println!("第一组核对：rollforward={} tbVsJe={} equation={}",
-        result["rollforward"]["passed"], result["tbVsJe"]["passed"], result["equation"]["passed"]);
+    println!(
+        "第一组核对：rollforward={} tbVsJe={} equation={}",
+        result["rollforward"]["passed"], result["tbVsJe"]["passed"], result["equation"]["passed"]
+    );
     for code in ["1121.01", "2241.06.09"] {
-        let items = result["tbVsJe"]["items"].as_array().unwrap().iter()
-            .filter(|item| item["code"] == json!(code)).collect::<Vec<_>>();
+        let items = result["tbVsJe"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["code"] == json!(code))
+            .collect::<Vec<_>>();
         assert_eq!(items.len(), 1, "{code}: {items:#?}");
-        assert!(items[0]["debitDifference"].as_f64().unwrap().abs() < 0.005, "{items:#?}");
-        assert!(items[0]["creditDifference"].as_f64().unwrap().abs() < 0.005, "{items:#?}");
+        assert!(
+            items[0]["debitDifference"].as_f64().unwrap().abs() < 0.005,
+            "{items:#?}"
+        );
+        assert!(
+            items[0]["creditDifference"].as_f64().unwrap().abs() < 0.005,
+            "{items:#?}"
+        );
     }
     let item = result["tbVsJe"]["items"]
         .as_array()

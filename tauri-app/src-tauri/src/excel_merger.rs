@@ -641,13 +641,17 @@ impl ExcelMergerService {
         self.finish(&job_id, &cancel_path);
     }
 
-    fn emit(&self, payload: Value) {
+    fn emit(&self, mut payload: Value) {
+        let background = payload.get("jobId").and_then(Value::as_str)
+            .and_then(|id| self.jobs.lock().get(id).map(|(_, _, method, _)| method == "loan.inspect_full"))
+            .unwrap_or(false);
+        if background { payload["background"] = json!(true); }
         if let Some(paths) = payload.get("outputPaths").and_then(Value::as_array) {
             for path in paths.iter().filter_map(Value::as_str) {
                 self.allowed.0.lock().insert(PathBuf::from(path));
             }
         }
-        let _ = self.app.state::<Storage>().record_job_event(&payload);
+        if !background { let _ = self.app.state::<Storage>().record_job_event(&payload); }
         // 使用统计：任务首次到达终态时记一条 job_run（取消/失败都算未成功）。
         // 从 job_starts 里取走时刻天然去重——同一任务重复的终态事件不会重复上报。
         let phase = payload.get("phase").and_then(Value::as_str);
@@ -723,6 +727,7 @@ pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
     "fx.export",
     "fx.export_rates",
     "loan.preview",
+    "loan.inspect_full",
     "loan.export",
     "deposit.preview",
     "deposit.export",

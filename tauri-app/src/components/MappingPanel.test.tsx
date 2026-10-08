@@ -319,6 +319,53 @@ describe("共用字段映射面板", () => {
     );
   });
 
+  it("二选一槽位标注备选字段，对方已映射时灰显并注明已选对方", () => {
+    const alternatesOf = (role: string) =>
+      role === "functionalAmount"
+        ? ["currencyText"]
+        : role === "currencyText"
+          ? ["functionalAmount"]
+          : undefined;
+    const first = panel({
+      groups: [
+        {
+          title: "台账-类型A",
+          roles: ["functionalAmount", "currencyText"],
+          required: ["functionalAmount", "currencyText"],
+        },
+      ],
+      alternatesOf,
+    });
+    const option = first.selects[0].querySelector(
+      'option[value="functionalAmount"]',
+    );
+    expect(option?.textContent).toContain("本位币净额＊（与币种线索文本二选一）");
+    cleanup();
+
+    // 对方已映射：本条灰显、不再标＊，改注「已选对方」；仍可选择。
+    const second = panel({
+      mapping: { functionalAmount: "本位币金额" },
+      alternatesOf,
+      requirementOf: (role: string) =>
+        role === "functionalAmount" ? "required" : undefined,
+    });
+    const spared = second.selects[0].querySelector(
+      'option[value="currencyText"]',
+    );
+    expect(spared?.textContent).toContain(
+      "币种线索文本（与本位币净额二选一，已选本位币净额）",
+    );
+    expect(spared).toHaveClass("dt-role-taken");
+    expect(spared?.textContent).not.toContain("＊");
+    // 已映射的一方照常标＊和（已用）。
+    const taken = second.selects[0].querySelector(
+      'option[value="functionalAmount"]',
+    );
+    expect(taken?.textContent).toContain(
+      "本位币净额＊（与币种线索文本二选一）（已用）",
+    );
+  });
+
   it("toggle 模式下一列可以叠加多个角色，并显示已承担的语义", () => {
     // 汇兑损益的场景：账户币种写在科目名称里（银行存款-中行朝阳支行美元户），
     // 那一列同时是科目名称与币种线索文本。按「一列一角色」会丢掉这个能力。
@@ -353,4 +400,13 @@ describe("共用字段映射面板", () => {
     pick(selects[1], "accountCode");
     expect(onToggle).toHaveBeenCalledWith("科目文本", "accountCode");
   });
+});
+
+
+it("不完整形态或缺少工具必填字段时使用公共警示色", () => {
+  panel({ formNote: "最接近 JE-类型A，还缺贷方", formComplete: false });
+  expect(screen.getByText("最接近 JE-类型A，还缺贷方")).toHaveClass("mapping-form-note-incomplete");
+  cleanup();
+  panel({ formNote: "已识别为 JE-类型A", formComplete: true, missing: ["原币币种"] });
+  expect(screen.getByText("已识别为 JE-类型A")).toHaveClass("mapping-form-note-incomplete");
 });

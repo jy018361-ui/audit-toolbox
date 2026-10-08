@@ -29,6 +29,7 @@ export function LedgerMappingPreview({inspect,mapping,setMap,llmBusy,headerExtra
     groups={formGroups("je",roles,forms,mapping??{})}
     requirementOf={role=>roleRequirement(match,role)}
     formNote={describeForm(match,role=>labelOf.get(role)??role)}
+      formComplete={match?.complete}
     multi={MULTI}
     isLocked={role=>mapping?isSchemeLockedRole(mapping,role as keyof Mapping):false}
     missing={mapping?missingKanzhangRequiredRoles(mapping):[]}

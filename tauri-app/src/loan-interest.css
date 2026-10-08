@@ -670,13 +670,31 @@
   text-overflow: ellipsis;
 }
 
-.loan-information-row { margin-top: 18px; padding: 18px; border: 1px solid var(--border); border-radius: 10px; }
-.loan-information-row h3, .loan-information-events h4 { margin: 0 0 10px; font-weight: 600; }
-.loan-information-row p, .loan-information-card p { margin: 10px 0; color: var(--muted-foreground); }
-.loan-information-amounts { display: grid; grid-template-columns: repeat(4,minmax(140px,1fr)); gap: 14px; margin: 14px 0; }
-.loan-information-row summary { cursor: pointer; padding: 10px 0; }
-.loan-information-event-tables { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 20px; }
-.loan-information-event { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin: 10px 0; }
-.loan-information-event label { flex: 1; min-width: 130px; }
-.loan-information-valid { color: #246b58; margin-top: 12px; }
-@media(max-width:1000px) { .loan-information-amounts { grid-template-columns: repeat(2,minmax(140px,1fr)); } .loan-information-event-tables { grid-template-columns: 1fr; } }
+/* === 台账信息确认（2026-09-28）：一行一笔的紧凑表格 ===
+   旧版每笔借款一张大卡片，四类金额、四项利率、明细各占几行，一条借款
+   的信息散在屏幕各处。改为左右拖动的单行表格：一行一笔，行首「＋」展开
+   新增与还款明细（金额与主行同列，日期位于金额下方）。 */
+.loan-information-card p { margin: 10px 0; color: var(--muted-foreground); }
+.loan-ledger-scroll { overflow: auto; max-height: 68vh; border: 1px solid var(--border); border-radius: 10px; }
+.loan-ledger-table { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; table-layout: fixed; font-size: 13px; }
+.loan-ledger-table > :is(thead,tbody) > tr > :is(th,td) { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; text-align: left; }
+.loan-ledger-table > thead > tr > th { position: sticky; top: 0; z-index: 3; background: var(--card); font-weight: 600; }
+.loan-ledger-table > :is(thead,tbody) > tr > :is(th,td):first-child { position: sticky; left: 0; z-index: 2; background: var(--card); }
+.loan-ledger-table > :is(thead,tbody) > tr > :is(th,td):nth-child(2) { position: sticky; left: 52px; z-index: 2; background: var(--card); box-shadow: 1px 0 0 var(--border); }
+.loan-ledger-table > thead > tr > th:nth-child(-n+2) { z-index: 4; }
+.loan-ledger-table input, .loan-ledger-table .loan-rate-pick { width: 100%; min-width: 0; }
+.loan-ledger-table input[type="number"] { text-align: right; font-variant-numeric: tabular-nums; }
+.loan-ledger-table input[aria-invalid="true"] { border-color: var(--danger-fg); }
+.loan-ledger-toggle { text-align: center; }
+.loan-ledger-expand { width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 7px; background: var(--card); cursor: pointer; }
+.loan-ledger-id { font-weight: 600; }
+.loan-ledger-row.has-errors .loan-ledger-id, .loan-ledger-status.bad, .loan-ledger-error { color: var(--danger-fg); }
+.loan-ledger-status { display: block; border: 0; background: none; padding: 4px 0; font-size: 12px; text-align: left; white-space: normal; cursor: pointer; }
+.loan-ledger-status.ok { color: var(--success-fg); }
+.loan-ledger-reasons { display: block; font-weight: normal; line-height: 1.5; margin-top: 3px; }
+.loan-ledger-error { display: block; white-space: normal; font-size: 12px; margin-top: 5px; }
+.loan-ledger-basis { display: block; font-size: 11px; color: var(--muted-foreground); margin-top: 4px; }
+.loan-ledger-event-cell { display: grid; gap: 8px; }
+.loan-ledger-event-cell label { display: grid; gap: 4px; color: var(--muted-foreground); }
+.loan-ledger-details-row > td, .loan-ledger-detail-total > td { background: color-mix(in srgb, var(--border) 12%, var(--card)); }
+.loan-ledger-detail-total { font-variant-numeric: tabular-nums; font-weight: 600; }

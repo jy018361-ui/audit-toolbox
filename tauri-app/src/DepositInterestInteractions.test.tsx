@@ -780,7 +780,7 @@ describe("导航步骤切换不重复验证", () => {
         if (method === "deposit.inspect_tb" || method === "deposit.inspect_je")
           return inspection;
         if (method === "ledger.auxiliary_link")
-          return { tbAuxMapped: true, status: "ok", column: null, anchorHits: 0, anchorTotal: 0, coverage: 1, competingColumns: [], warnings: [], groups: [] };
+          return { tbAuxMapped: true, status: "ok", column: null, competingColumns: [], warnings: [], groups: [] };
         if (method === "ledger.currency_link")
           return { status: "ok", required: false, verified: true, affectedGroupCount: 0, missingCurrencies: [] };
         throw new Error(`unexpected ${method}: ${JSON.stringify(params ?? "")}`);

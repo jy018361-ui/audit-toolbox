@@ -118,33 +118,66 @@
   font-size: var(--fs-sm);
 }
 
-/* ===== 会议询问小窗（独立置顶窗口，不进 App 壳） ===== */
+/* ===== 会议询问小窗（无边框透明置顶窗口，不进 App 壳） ===== */
+
+/* 透明窗口：body 底色必须让位，窗口四周留出的边距用于透出卡片投影。 */
+body.meeting-ask-body {
+  background: transparent;
+}
 
 .meeting-ask-window {
   min-height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--sp-5);
-  background: var(--background);
+  padding: var(--sp-4);
+  background: transparent;
 }
 
 .meeting-ask-window-card {
   display: grid;
   gap: var(--sp-3);
   width: 100%;
-  max-width: 400px;
-  padding: var(--sp-5);
+  padding: var(--sp-4) var(--sp-5) var(--sp-5);
   background: var(--card);
   border: 1px solid var(--border-soft);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-overlay);
 }
 
-.meeting-ask-window-card h1 {
+.meeting-ask-window-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  /* 无边框窗口的拖拽把手：标题区整条可拖。 */
+  cursor: default;
+}
+
+.meeting-ask-window-head h1 {
   margin: 0;
   font-size: var(--fs-lg);
   font-weight: 600;
+}
+
+.meeting-ask-window-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.meeting-ask-window-close:hover {
+  background: var(--surface-muted);
+  color: var(--fg);
 }
 
 .meeting-ask-window-card p {

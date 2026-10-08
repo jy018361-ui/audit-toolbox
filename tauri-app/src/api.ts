@@ -80,6 +80,30 @@ export type SyncBusyEntry = { id: number; method: string; detail?: string };
 
 const syncBusyListeners = new Set<(entries: SyncBusyEntry[]) => void>();
 let syncBusySeq = 0;
+// 停止等待只结束前端 Promise；同一来源再次上传时复用仍在运行的只读识别，
+// 避免旧 Rust 调用和新调用同时解析大账表、互相抢 CPU。
+const sharedLedgerReads = new Map<string, Promise<unknown>>();
+const SHARED_LEDGER_METHODS = new Set([
+  "deposit.classify_source", "deposit.inspect_tb", "deposit.inspect_je",
+  "fx.classify_source", "fx.inspect_tb", "fx.inspect_je",
+  "loan.inspect", "loan.tb_accounts",
+]);
+
+function invokeEngine(method: string, params: Record<string, unknown>): Promise<unknown> {
+  if (!SHARED_LEDGER_METHODS.has(method)) {
+    return invoke<unknown>("engine_call", { method, params });
+  }
+  const key = JSON.stringify([method, params]);
+  const active = sharedLedgerReads.get(key);
+  if (active) return active;
+  const pending = invoke<unknown>("engine_call", { method, params });
+  sharedLedgerReads.set(key, pending);
+  void pending.then(
+    () => { if (sharedLedgerReads.get(key) === pending) sharedLedgerReads.delete(key); },
+    () => { if (sharedLedgerReads.get(key) === pending) sharedLedgerReads.delete(key); },
+  );
+  return pending;
+}
 // abort 只掐断前端的「等待」：Rust 侧一口气跑完的处理无法安全击杀，会自行
 // 收尾，但结果按终止要求丢弃（engineCall 的 promise 在 abort 时即拒绝）。
 const syncBusyActive = new Map<
@@ -165,7 +189,7 @@ export async function engineCall(
       },
     });
     notifySyncBusy();
-    invoke<unknown>("engine_call", { method, params }).then(
+    invokeEngine(method, params).then(
       (value) => settle("fulfill", value),
       (error) => settle("reject", undefined, error),
     );

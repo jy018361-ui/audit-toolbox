@@ -1,6 +1,7 @@
 import { LoanLedgerConfirmation, ledgerInformationErrors, type LedgerInformation } from "./LoanLedgerConfirmation";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { JobEvent, ToolManifest } from "./types";
+import { LoanInspectionSchema, useLoanInspectionCompletion } from "./useLoanInspectionCompletion";
 import { useTaskRestore } from "./restore";
 import {
   engineCall,
@@ -99,8 +100,10 @@ type Inspection = {
   entityAccounts?: Array<{ entity: string; account: string }>;
   suggestedMapping: LoanMapping;
   // TB/JE 专有：数据年度与由它推出的建议表日，识别后自动预填资产负债表日。
-  dataYears?: string[];
-  suggestedBalanceSheetDate?: string;
+  dataYears?: Array<string | number>;
+  suggestedBalanceSheetDate?: string | null;
+  sampledPreview?: boolean;
+  metadataComplete?: boolean;
   // 台账专有：角色清单与四型定义由引擎随识别结果下发（唯一定义在 Rust）。
   roles?: LoanRole[];
   forms?: LoanForm[];
@@ -254,6 +257,7 @@ type TbAccount = {
   name: string;
   currency?: string;
   account: string;
+  parentAccountName?: string;
   opening: number;
   closing: number;
   /** TB 损益发生额；null 表示源表没有可用发生额列。 */
@@ -265,6 +269,7 @@ type TbAccount = {
     opening: number;
     closing: number;
     occurrence?: number | null;
+    parentAccountName?: string;
   }>;
   reviewAuxiliaries?: Array<{ entity: string; auxiliary: string }>;
   /** 仅用于初始化科目角色，不在界面展示内部判断过程。 */
@@ -317,7 +322,9 @@ export function loanAccountReviewRows(
         ? detailsOf(group).map((detail) => ({
             ...account,
             reviewKey: reviewKey(group.entity, identity, detail.key),
-            entity: group.entity,
+          entity: group.entity,
+          ...(account.byEntity?.find((item) => item.entity === group.entity)?.parentAccountName
+            ? { parentAccountName: account.byEntity.find((item) => item.entity === group.entity)!.parentAccountName } : {}),
             auxiliary: detail.display,
             auxiliaryKey: detail.key,
           }))
@@ -346,6 +353,7 @@ export function loanAccountReviewRows(
         );
         return {
           ...account,
+          ...(amounts?.parentAccountName ? { parentAccountName: amounts.parentAccountName } : {}),
           opening: amounts?.opening ?? account.opening,
           closing: amounts?.closing ?? account.closing,
           occurrence: amounts ? (amounts.occurrence ?? account.occurrence) : account.occurrence,
@@ -560,6 +568,41 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     rateLedger: empty(),
   });
   const [reportEnd, setReportEnd] = useState(defaultBalanceSheetDate());
+  const [busy, setBusy] = useState(false);
+  const restoreGeneration = useRef(0);
+  const sampledJe = mode === "tb" && sources.je.inspection?.sampledPreview === true;
+  const metadataReady = !sampledJe;
+  const completionKey = sampledJe && !busy ? JSON.stringify([
+    restoreGeneration.current, sources.je.path, sources.je.inspection?.sheet,
+    sources.je.inspection?.headerRow, sources.je.inspection?.headerDepth,
+  ]) : "";
+  const completionGeneration = restoreGeneration.current;
+  const completionKeyRef = useRef(completionKey);
+  completionKeyRef.current = completionKey;
+  const baselineJe = sources.je;
+  const baselineReportEnd = reportEnd;
+  const completion = useLoanInspectionCompletion(completionKey, {
+    kind: "je", source: {
+      inputPath: sources.je.path, sheet: sources.je.inspection?.sheet,
+      headerRow: sources.je.inspection?.headerRow, headerDepth: sources.je.inspection?.headerDepth,
+    },
+  }, (value) => {
+    if (completionGeneration !== restoreGeneration.current || completionKeyRef.current !== completionKey) return;
+    const full = value as Inspection;
+    setSources((current) => {
+      if (current.je.path !== baselineJe.path || current.je.inspection !== baselineJe.inspection) return current;
+      // 只有尚未被用户改动的建议映射才跟随全量识别更新（删除映射也算编辑）。
+      const mapping = { ...current.je.mapping };
+      for (const role of new Set([...Object.keys(baselineJe.mapping), ...Object.keys(full.suggestedMapping)])) {
+        if (JSON.stringify(current.je.mapping[role]) === JSON.stringify(baselineJe.mapping[role])) {
+          if (full.suggestedMapping[role] === undefined) delete mapping[role];
+          else mapping[role] = full.suggestedMapping[role];
+        }
+      }
+      return { ...current, je: { ...current.je, inspection: full, mapping } };
+    });
+    if (full.suggestedBalanceSheetDate) setReportEnd((current) => current === baselineReportEnd ? full.suggestedBalanceSheetDate! : current);
+  });
   /** 本位币（TB 模式）：美元等外币本位币主体需显式指定——余额表本位币行
    *  币种常留空、序时账逐行标币种，币种桶按本位币归一后凭证才能按科目归集。
    *  缺省空串 = 人民币口径（空白/人民币都算本位币，与旧行为一致）。 */
@@ -599,7 +642,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   >("");
   const [currencyFallbackPrompt, setCurrencyFallbackPrompt] =
     useState<CurrencyLinkResult | null>(null);
-  const [busy, setBusy] = useState(false);
   // 运行中的按钮归属（UI 审计 P3-3）：只有被点击的按钮进 loading 文案，
   // 另一个按钮保持普通禁用；任务终态由 busy 归零统一收回。
   const [activeRun, setActiveRun] = useState<"loan.preview" | "loan.export">();
@@ -649,6 +691,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   // 借款明细联动验证（公共锚点反查，角色＝loanId、纯锚点口径）：
   // 与计算侧同一套判定，用户在映射页就能看到 JE 有没有对应的借款明细列。
   const [auxLink, setAuxLink] = useState<AuxiliaryLinkResult | null>(null);
+  const [auxCheck, setAuxCheck] = useState<{ key: string | null; status: "pending" | "completed" | "failed" }>({ key: null, status: "pending" });
+  const [auxRetry, setAuxRetry] = useState(0);
   const entityScope = useEntityScopeConfirmation({
     tbEntities: ledgerEntityKeyEnabled(sources.tb.mapping, sources.je.mapping)
       ? (sources.tb.inspection?.entities ?? []) : [],
@@ -656,9 +700,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       ? (sources.je.inspection?.entities ?? []) : [],
     onInvalidate: () => invalidateResults(),
   });
-  // 触发键只认「数据源＋两侧辅助核算明细映射」：其余角色的映射调整不重验，
-  // 与汇兑损益、存款利息同一口径（锚点反查本身仍按完整映射计算）。
-  const auxLinkKey = sources.tb.path && sources.je.path
+  const auxCheckRequired = mode === "tb" && ledgerHasMappedRole(sources.tb.mapping, "auxiliary");
+  // 验证结论跟随来源、映射和主体范围；输入改变时旧结论不能放行下一步。
+  const auxLinkKey = auxCheckRequired && metadataReady && sources.tb.inspection && sources.je.inspection
     ? JSON.stringify({
         tb: [
           sources.tb.path,
@@ -674,8 +718,16 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           sources.je.inspection?.headerDepth ?? 1,
           sources.je.mapping.auxiliary ?? null,
         ],
+        tbMapping: sources.tb.mapping,
+        jeMapping: sources.je.mapping,
+        entityScope: entityScope.selection,
+        generation: restoreGeneration.current,
       })
     : null;
+  const currentAuxLinkKey = useRef(auxLinkKey);
+  currentAuxLinkKey.current = auxLinkKey;
+  const auxiliaryCheckReady = !auxCheckRequired || (auxLinkKey !== null && auxCheck.key === auxLinkKey && auxCheck.status === "completed");
+  const auxCheckFailed = auxCheckRequired && auxCheck.key === auxLinkKey && auxCheck.status === "failed";
   useEffect(() => {
     if (auxLinkKey === null) {
       setAuxLink(null);
@@ -683,6 +735,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     }
     let cancelled = false;
     setAuxLink(null);
+    setAuxCheck({ key: auxLinkKey, status: "pending" });
+    const selected = selectedLoanAccounts();
     void verifyAuxiliaryLink({
       tbSource: {
         inputPath: sources.tb.path,
@@ -700,11 +754,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       jeMapping: sources.je.mapping,
       auxRole: "auxiliary",
       anchorOnly: true,
-      selectedAccounts: selectedLoanAccounts(),
+      // 第一步尚未选科目：空数组会被后端解释为“排除全部科目”，不能传入。
+      ...(selected.length ? { selectedAccounts: selected } : {}),
       entityScope: entityScope.selection,
     }).then((result) => {
-      if (cancelled) return;
+      if (cancelled || currentAuxLinkKey.current !== auxLinkKey) return;
       setAuxLink(result);
+      setAuxCheck({ key: auxLinkKey, status: result ? "completed" : "failed" });
       setSources((current) => {
         const mapping = dropUnlinkedTbAuxiliary(current.tb.mapping, result);
         return mapping === current.tb.mapping
@@ -716,7 +772,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auxLinkKey]);
+  }, [auxLinkKey, auxRetry]);
   // TB＋JE 模式支持把两个文件整组拖进上传框，与存款利息／FA 一致。
   useEffect(() => {
     const drops = listenPositionedFileDrops(({ paths, x, y }) => {
@@ -767,7 +823,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     setSources((v) => ({ ...v, [kind]: { ...v[kind], ...next } }));
   };
   const activeKinds: Kind[] = mode === "ledger" ? ["ledger"] : ["tb", "je"];
-  const sourcesReady = activeKinds.every((kind) => sources[kind].inspection);
+  const sourcesReady = metadataReady && auxiliaryCheckReady && activeKinds.every((kind) => sources[kind].inspection);
   const mappingsReady =
     sourcesReady &&
     activeKinds.every(
@@ -995,11 +1051,12 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               "loan.inspect",
               {
                 kind: item.kind,
+                ...(item.kind === "je" ? { previewOnly: true } : {}),
                 source: {
                   inputPath: item.path,
                   sheet: item.classification.sheet,
-                  headerRow: 0,
-                  headerDepth: 0,
+                  headerRow: item.classification.confidence >= 0.9 && !item.classification.needsLlm ? item.classification.headerRow : 0,
+                  headerDepth: item.classification.confidence >= 0.9 && !item.classification.needsLlm ? item.classification.headerDepth : 0,
                 },
               },
               `${fileNameOf(item.path)} / ${item.classification.sheet}`,
@@ -1055,6 +1112,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     const current = sources[from];
     const occupied = sources[to];
     if (!current.path || !current.inspection) return;
+    ++restoreGeneration.current;
     setBusy(true);
     setError("");
     setPairStatus(`正在更正为 ${to.toUpperCase()}，并按新类型重新识别…`);
@@ -1071,6 +1129,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
             "loan.inspect",
             {
               kind,
+              ...(kind === "je" ? { previewOnly: true } : {}),
               source: {
                 inputPath: src.path,
                 sheet: src.inspection.sheet,
@@ -1100,6 +1159,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     path = sources[kind].path,
     over?: Partial<Inspection>,
   ): Promise<Inspection | undefined> {
+    if (kind === "je") ++restoreGeneration.current;
     setBusy(true);
     setError("");
     try {
@@ -1109,6 +1169,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         "loan.inspect",
         {
           kind,
+          ...(kind === "je" ? { previewOnly: true } : {}),
           source: {
             inputPath: path,
             sheet,
@@ -1130,6 +1191,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   }
   /** 把识别结果落到对应来源：存档映射顶回建议映射（一次性消费），其余用建议值。 */
   function applyInspection(kind: Kind, path: string, x: Inspection) {
+    x = LoanInspectionSchema.parse(x) as Inspection;
     // 历史恢复后重新识别同一文件：存档映射顶回建议映射，一次性消费；
     // 换文件照旧用建议值。
     const stash = restoredLoanMappings.current[kind];
@@ -1144,7 +1206,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     if (kind === "ledger") { setRateEdits({}); setLedgerInformation({}); setLedgerInformationKey(""); setLedgerConfirmed(false); }
     // TB/JE 识别出数据年度就预填表日：期间起点、LPR 取期和 JE 归集都由它
     // 推导，账套不是本年度时留着默认值会把这三处全部带偏。
-    if (kind === "tb" || kind === "je") {
+    if (!x.sampledPreview && (kind === "tb" || kind === "je")) {
       if (x.suggestedBalanceSheetDate) setReportEnd(x.suggestedBalanceSheetDate);
       else if (x.dataYears?.length === 1)
         setReportEnd(`${x.dataYears[0]}-12-31`);
@@ -1239,7 +1301,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const restoredLoanMappings = useRef<
     Partial<Record<Kind, { path: string; mapping: LoanMapping }>>
   >({});
-  const restoreGeneration = useRef(0);
   useTaskRestore(tool.id, (restore) => {
     const generation = ++restoreGeneration.current;
     type LoanSourceParams = {
@@ -1379,6 +1440,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         try {
           const inspection = (await engineCall("loan.inspect", {
             kind: item.kind,
+            ...(item.kind === "je" ? { previewOnly: true } : {}),
             source: {
               inputPath: item.path,
               sheet: item.source.sheet ?? "",
@@ -1425,6 +1487,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   });
   async function run(method: "loan.preview" | "loan.export") {
     setError("");
+    if (!metadataReady) return setError("请等待完整序时账的年度、主体与科目清单补齐后再测算。");
+    if (!auxiliaryCheckReady) return setError("请先完成 TB 与 JE 的辅助字段校验。");
     if (mode === "ledger" && !ledgerReady) return setError("请先完成台账信息校验并确认金额、利率及发生日期。");
     if (!reportEnd) return setError("请选择资产负债表日。");
     for (const kind of activeKinds) {
@@ -1487,6 +1551,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   // 通过时才重新验证。弹口径选择框（required 且未通过）与请求失败不记忆。
   const currencyLinkCheckRef = useRef<{ key: string; ok: boolean } | null>(null);
   async function enterTbRateStep() {
+    if (!metadataReady) return setError("完整序时账信息仍在补齐，请稍候。");
+    if (!auxiliaryCheckReady) return setError("TB 与 JE 的辅助字段校验尚未完成，请等待或重试。");
     if (mode !== "tb") {
       setStep(1);
       return;
@@ -1652,7 +1718,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     const keyword = accountQuery.trim().toLowerCase();
     if (!keyword) return orderedTbAccounts;
     const own = (account: LoanAccountReviewRow) =>
-      `${account.code} ${account.name} ${account.account} ${account.entity ?? ""} ${account.auxiliary ?? ""}`.toLowerCase();
+      `${account.code} ${account.name} ${account.account} ${account.parentAccountName ?? ""} ${account.entity ?? ""} ${account.auxiliary ?? ""}`.toLowerCase();
     return orderedTbAccounts.filter(
       (account) =>
         own(account).includes(keyword) ||
@@ -1727,7 +1793,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setLedgerInformation(old => Object.fromEntries(list.map(row => [row.rowKey, ledgerInformationKey === "" ? (old[row.rowKey] ?? row) : row])));
       setLedgerInformationKey(ledgerSourceKey);
     }).catch(e => { if (!cancelled) { setError(errorText(e)); setLedgerInformationKey(ledgerSourceKey); } })
-      .finally(() => { if (!cancelled) setRatesBusy(false); });
+      // busy 复位不看 cancelled：then 里设置信息键会立刻提交一轮渲染并跑 cleanup，
+      // 若 finally 仍被 cancelled 拦住，busy 就永远停在「正在读取完整台账信息」。
+      // 本轮已被取代时重复复位无害——新一轮自己会把 busy 再置真。
+      .finally(() => setRatesBusy(false));
     return () => { cancelled = true; };
   }, [mode, step, mappingsReady, ledgerSourceKey, ledgerInformationKey]);
   const ledgerErrors = Object.values(ledgerInformation).flatMap(row => ledgerInformationErrors(row, loanReportStart(reportEnd), reportEnd));
@@ -2083,6 +2152,19 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                   {pairStatus}
                 </p>
               )}
+              {sampledJe && (
+                <div role="status" aria-live="polite">
+                  <p>表头预览已就绪，可先核对字段。完整年度、主体与科目清单补齐后可进入下一步。</p>
+                  {completion.event ? <JobProgress job={completion.event} onCancel={jobCancel} compact /> : !completion.error && <p>正在启动完整读取…</p>}
+                  {completion.error && <><ErrorBox error={completion.error} /><Button variant="secondary" onClick={completion.retry}>重试完整读取</Button></>}
+                </div>
+              )}
+              {mode === "tb" && auxLinkKey !== null && auxCheckRequired && !auxiliaryCheckReady && (
+                <div role="status" aria-live="polite">
+                  {auxCheckFailed ? <ErrorBox error="TB 与 JE 的辅助字段校验未完成，请重试；辅助字段仍待验证，尚不能参与匹配。" /> : <p>正在校验完整 TB 与 JE 的辅助字段，校验结束后可进入下一步。</p>}
+                  {auxCheckFailed && <Button variant="secondary" onClick={() => { setAuxCheck({ key: auxLinkKey, status: "pending" }); setAuxRetry((value) => value + 1); }}>重试辅助字段校验</Button>}
+                </div>
+              )}
               {!activeKinds.some((kind) => sources[kind].path) && (
                 <EmptyState
                   compact
@@ -2350,8 +2432,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                                 {a.entity || (inline ? entityDisplay(inline.entity) : "—")}
                               </td>
                             )}
-                            <td title={ledgerReviewAccountLabel(a.account, a.auxiliary || inline?.auxiliary)}>
-                              {ledgerReviewAccountLabel(a.account, a.auxiliary || inline?.auxiliary)}
+                            <td title={ledgerReviewAccountLabel(a.account, a.auxiliary || inline?.auxiliary, a.parentAccountName)}>
+                              {ledgerReviewAccountLabel(a.account, a.auxiliary || inline?.auxiliary, a.parentAccountName)}
                             </td>
                             {showCurrencyColumn && <td>{a.currency || "—"}</td>}
                             <td>
@@ -2422,8 +2504,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                           ...detailRows.map((detail) => (
                             <tr key={`rate-${loanRowKey(detail)}`} className="is-rate-detail">
                               {showSubject && <td>{entityDisplay(detail.entity)}</td>}
-                              <td title={ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary)}>
-                                {ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary)}
+                              <td title={ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary, a.parentAccountName)}>
+                                {ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary, a.parentAccountName)}
                               </td>
                               {showCurrencyColumn && <td>{detail.currency || "—"}</td>}
                               <td>
@@ -2461,18 +2543,20 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                         key: `account:${account.reviewKey}`,
                         editable: [false, ...(showSubject ? [false] : []), false, ...(showCurrencyColumn ? [false] : []), true, false, false, false, false],
                         values: ["科目", ...(showSubject ? [account.entity ?? ""] : []),
-                          ledgerReviewAccountLabel(account.account, account.auxiliary),
+                          ledgerReviewAccountLabel(account.account, account.auxiliary, account.parentAccountName),
                           ...(showCurrencyColumn ? [account.currency ?? ""] : []),
                           loanReviewRole(account) === "loan" ? "借款科目" : loanReviewRole(account) === "interest_expense" ? "利息支出科目" : "排除",
                           "", "", "", ""],
                       })),
                       ...confirmationRateRows.map((detail): ConfirmationRow => {
                         const edit = resolvedTbRate(detail);
+                        const parent = orderedTbAccounts.find((account) =>
+                          reviewRateDetails.get(account.reviewKey)?.some((row) => loanRowKey(row) === loanRowKey(detail)))?.parentAccountName;
                         return { key: `rate:${loanRowKey(detail)}`,
                           editable: [false, ...(showSubject ? [false] : []), false, ...(showCurrencyColumn ? [false] : []), false, true, true, true, true],
                           values: [
                           "借款明细", ...(showSubject ? [detail.entity ?? ""] : []),
-                          ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary),
+                          ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary, parent),
                           ...(showCurrencyColumn ? [detail.currency ?? ""] : []), "",
                           edit.rateType === "floating" ? "浮动" : "固定",
                           edit.fixedRate == null ? "" : String(edit.fixedRate * 100),
@@ -2923,7 +3007,16 @@ function Mapping({
         requirementOf={
           hit ? (role) => loanRoleRequirement(hit, role) : undefined
         }
+        alternatesOf={
+          hit
+            ? (role) =>
+                hit.form.anyOf.find((slot) => slot.includes(role) && slot.length > 1)?.filter(
+                  (r) => r !== role,
+                )
+            : undefined
+        }
         formNote={formNote}
+        formComplete={hit?.complete}
         missing={loanMissing(kind, source.mapping, x.forms)}
         busy={busy || reviewing}
         maxHeight={360}

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { LoanInterestPage, Results } from "./LoanInterestPage";
 import type { ToolManifest } from "./types";
@@ -85,6 +85,71 @@ beforeEach(() => {
     if (method === "loan.prepare_rates") return mockPreparedRateRows(undefined);
     throw new Error(`unexpected ${method}`);
   });
+});
+
+it.each(["verified", "noMatch", "partialCoverage", "ambiguous", "noAnchors"] as const)("大JE完整读取后必须完成辅助校验；%s 决定TB辅助映射能否保留", async (status) => {
+  const headers = ["科目编码", "科目名称", "日期", "期初余额", "期末余额", "借方", "贷方", "备用日期", "辅助核算"];
+  const suggestedMapping = { accountCode: "科目编码", accountName: "科目名称", date: "日期", opening: "期初余额", closing: "期末余额", debit: "借方", credit: "贷方", auxiliary: "辅助核算" };
+  const inspection = { headers, preview: [["2001", "短期借款", "2026-01-01", "100", "100", "0", "0", "2026-02-01", "A银行"]], rowCount: 2000,
+    sheet: "Sheet1", sheets: ["Sheet1"], headerRow: 3, headerDepth: 1, suggestedMapping };
+  mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
+  mock.jobStart.mockResolvedValue("background-je");
+  const auxiliaryResolvers: Array<(value: unknown) => void> = [];
+  mock.engineCall.mockImplementation(async (method: string, params: { kind?: string; source?: { inputPath?: string } }) => {
+    if (method === "ledger.forms") return [];
+    if (method === "deposit.classify_source") return { kind: params.source?.inputPath === "je.xlsx" ? "je" : "tb",
+      confidence: 0.99, needsLlm: false, scores: { je: params.source?.inputPath === "je.xlsx" ? 10 : 0, tb: params.source?.inputPath === "tb.xlsx" ? 10 : 0 }, ...inspection };
+    if (method === "loan.inspect") return { ...inspection, sampledPreview: params.kind === "je", metadataComplete: params.kind !== "je" };
+    if (method === "ledger.auxiliary_link") return new Promise((resolve) => auxiliaryResolvers.push(resolve));
+    throw new Error(`不应在补齐前调用 ${method}`);
+  });
+  render(<LoanInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "TB＋JE" }));
+  fireEvent.click(screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }));
+  await screen.findByText(/表头预览已就绪/);
+  expect(mock.engineCall.mock.calls.filter(([method]) => method === "ledger.auxiliary_link")).toHaveLength(0);
+  expect(screen.getByRole("button", { name: "下一步：确认科目与利率" })).toBeDisabled();
+  await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith("loan.inspect_full", {
+    kind: "je", source: { inputPath: "je.xlsx", sheet: "Sheet1", headerRow: 3, headerDepth: 1 },
+  }));
+  expect(mock.engineCall).toHaveBeenCalledWith("loan.inspect", {
+    kind: "je", previewOnly: true, source: { inputPath: "je.xlsx", sheet: "Sheet1", headerRow: 3, headerDepth: 1 },
+  }, "je.xlsx / Sheet1");
+  const originalDate = screen.getAllByRole("combobox", { name: "将「日期」映射为字段" }).at(-1)!;
+  const editedDate = screen.getAllByRole("combobox", { name: "将「备用日期」映射为字段" }).at(-1)!;
+  fireEvent.change(originalDate, { target: { value: "" } });
+  fireEvent.change(editedDate, { target: { value: "date" } });
+  act(() => mock.jobEvents.callback?.({ jobId: "background-je", toolId: "loan_interest", phase: "completed", current: 1, total: 1,
+    message: "已补齐", severity: "success", outputPaths: [], result: { ...inspection, sampledPreview: false, metadataComplete: true,
+      dataYears: [2026, 2027], entities: ["后段主体"], entityAccounts: [{ entity: "后段主体", account: "2001 短期借款" }] } }));
+  await screen.findByText(/正在校验完整 TB 与 JE 的辅助字段/);
+  await waitFor(() => expect(auxiliaryResolvers).toHaveLength(1));
+  expect(screen.getByRole("button", { name: "下一步：确认科目与利率" })).toBeDisabled();
+  const checkRequest = mock.engineCall.mock.calls.find(([method]) => method === "ledger.auxiliary_link")![1];
+  expect(checkRequest).not.toHaveProperty("selectedAccounts");
+  await act(async () => auxiliaryResolvers[0](null));
+  await screen.findByText(/辅助字段校验未完成，请重试/);
+  expect(screen.getByRole("button", { name: "下一步：确认科目与利率" })).toBeDisabled();
+  expect(screen.getAllByRole("combobox", { name: "将「辅助核算」映射为字段" })[0]).toHaveAttribute("data-mapped", "true");
+  fireEvent.click(screen.getByRole("button", { name: "重试辅助字段校验" }));
+  await waitFor(() => expect(auxiliaryResolvers).toHaveLength(2));
+  let latest = 1;
+  if (status === "verified") {
+    // 读取中的映射改变，旧请求的“不匹配”不能撤掉当前来源的辅助字段。
+    fireEvent.change(screen.getAllByRole("combobox", { name: "将「借方」映射为字段" }).at(-1)!, { target: { value: "summary" } });
+    await waitFor(() => expect(auxiliaryResolvers).toHaveLength(3));
+    await act(async () => auxiliaryResolvers[1]({ tbAuxMapped: true, status: "noMatch", column: null, competingColumns: [], warnings: [] }));
+    expect(screen.getByRole("button", { name: "下一步：确认科目与利率" })).toBeDisabled();
+    expect(screen.getAllByRole("combobox", { name: "将「辅助核算」映射为字段" })[0]).toHaveAttribute("data-mapped", "true");
+    latest = 2;
+  }
+  await act(async () => auxiliaryResolvers[latest]({ tbAuxMapped: true, status, column: status === "verified" ? "辅助核算" : null, competingColumns: [], warnings: [] }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "下一步：确认科目与利率" })).toBeEnabled());
+  expect(screen.queryByText(/表头预览已就绪/)).toBeNull();
+  expect(editedDate).toHaveAttribute("data-mapped", "true");
+  expect(originalDate).toHaveAttribute("data-mapped", "false");
+  expect(screen.getAllByRole("combobox", { name: "将「辅助核算」映射为字段" })[0]).toHaveAttribute("data-mapped", status === "verified" ? "true" : "false");
+  expect(mock.jobStart).toHaveBeenCalledTimes(1);
 });
 
 it("按资料模式显示空态和可访问的选中状态", () => {
@@ -200,6 +265,7 @@ it("统一上传自动分类出 TB 与 JE 来源卡，并可一键更正类型",
       "loan.inspect",
       {
         kind: "je",
+        previewOnly: true,
         source: {
           inputPath: "tb.xlsx",
           sheet: "余额表",
@@ -640,6 +706,7 @@ it("手填利率后进入第三步不自动测算且未确认不可导出", asyn
   mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
     const p = params as { kind?: string; source?: { inputPath?: string } };
     if (method === "ledger.forms") return [];
+    if (method === "ledger.auxiliary_link") return { tbAuxMapped: true, status: "verified", column: "辅助核算", competingColumns: [], warnings: [] };
     if (method === "ledger.currency_link")
       return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
     if (method === "deposit.classify_source") {
@@ -866,6 +933,7 @@ it("选择本位币后利率明细按新口径自动重算并携带 functionalCu
   mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
     const p = params as { kind?: string; source?: { inputPath?: string } };
     if (method === "ledger.forms") return [];
+    if (method === "ledger.auxiliary_link") return { tbAuxMapped: true, status: "verified", column: "辅助核算", competingColumns: [], warnings: [] };
     if (method === "ledger.currency_link")
       return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
     if (method === "deposit.classify_source") {
@@ -1022,6 +1090,7 @@ it("科目类型改为借款后利率输入立即可编辑（自动重生成）"
   mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
     const p = params as { kind?: string; source?: { inputPath?: string } };
     if (method === "ledger.forms") return [];
+    if (method === "ledger.auxiliary_link") return { tbAuxMapped: true, status: "verified", column: "辅助核算", competingColumns: [], warnings: [] };
     if (method === "ledger.currency_link")
       return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
     if (method === "deposit.classify_source") {
@@ -1164,9 +1233,6 @@ it("同一科目多笔辅助借款各行设置利率，改类型不丢已填利�
       tbAuxMapped: true,
       status: "verified",
       column: "辅助核算",
-      anchorHits: 2,
-      anchorTotal: 2,
-      coverage: 1,
       competingColumns: [],
       warnings: [],
       groups: [{
@@ -1180,9 +1246,6 @@ it("同一科目多笔辅助借款各行设置利率，改类型不丢已填利�
         tbAuxMapped: true,
         status: "verified",
         column: "辅助核算",
-        anchorHits: 2,
-        anchorTotal: 2,
-        coverage: 1,
         competingColumns: [],
         warnings: [],
       }],

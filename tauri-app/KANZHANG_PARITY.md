@@ -1,5 +1,11 @@
 # 看账小工具迁移功能矩阵
 
+## 2026-09-28：字段复核输出精简
+
+- 已实现：看账及正负数凭证标记复核要求简短样例依据，避免重复展开表头与业务规则；共用 LLM 请求记录输入／输出大小、耗时和状态。
+- 已保留：逐角色 roleReviews、完整覆盖检查、列名／值形态／日期组成卫生校验；最多八行输入样例不缩减。未把缺失 keep 记录自动视为复核通过。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib audipick::`、`npx vitest run src/KanzhangParityPage.test.ts src/ledgerMappingLabels.test.ts`。
+
 ## 2026-09-27：科目汇总增加借贷发生额
 
 - 普通与大 CSV 磁盘导出的科目汇总统一为科目名称、借方金额、贷方金额、净额、行数；仍取命中目标的完整凭证。

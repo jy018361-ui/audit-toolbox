@@ -99,33 +99,34 @@ pub(crate) fn load_review_table(
 }
 
 #[derive(Clone, Debug)]
-struct JoinedRow {
-    begin: Option<Vec<String>>,
-    end: Option<Vec<String>>,
-    source: &'static str,
-    match_value: String,
-    extra: BTreeMap<String, Cell>,
+pub(crate) struct JoinedRow {
+    pub(crate) begin: Option<Vec<String>>,
+    pub(crate) end: Option<Vec<String>>,
+    pub(crate) source: &'static str,
+    pub(crate) match_value: String,
+    pub(crate) extra: BTreeMap<String, Cell>,
 }
 
-#[derive(Clone, Debug)]
-enum Cell {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Cell {
     Text(String),
     Number(f64),
 }
 
 /// `fa_subtools` 以不透明引用消费合并结果（折旧政策对比复用折旧期间逻辑），
-/// 字段保持模块私有。
+/// 不直接触字段；`fa_merge_snapshot` 需要逐字段落盘/重建匹配快照，字段对
+/// crate 内开放。
 #[derive(Clone, Debug)]
 pub(crate) struct MergeResult {
-    begin: Table,
-    end: Table,
-    rows: Vec<JoinedRow>,
-    begin_keys: Vec<String>,
-    end_keys: Vec<String>,
-    duplicate_values: usize,
-    duplicate_rows: usize,
-    unmatched_addition: Vec<Vec<String>>,
-    unmatched_disposal: Vec<Vec<String>>,
+    pub(crate) begin: Table,
+    pub(crate) end: Table,
+    pub(crate) rows: Vec<JoinedRow>,
+    pub(crate) begin_keys: Vec<String>,
+    pub(crate) end_keys: Vec<String>,
+    pub(crate) duplicate_values: usize,
+    pub(crate) duplicate_rows: usize,
+    pub(crate) unmatched_addition: Vec<Vec<String>>,
+    pub(crate) unmatched_disposal: Vec<Vec<String>>,
 }
 
 pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
@@ -372,7 +373,12 @@ fn align_key_members(begin_keys: &mut Vec<String>, end_keys: &mut Vec<String>) {
 }
 
 fn is_company_id_header(header: &str) -> bool {
-    matches!(normalize_header(header).as_str(), "公司名称" | "公司名" | "企业名称" | "单位名称" | "主体名称" | "法人名称" | "公司" | "companyname" | "entityname" | "legalentity" | "company")
+    matches!(
+        normalize_header(header).as_str(),
+        "公司名称" | "公司名" | "企业名称" | "单位名称" | "主体名称" | "法人名称" | "公司"
+            | "公司编码" | "公司代码" | "公司id" | "companyname" | "companycode" | "companyid"
+            | "entityname" | "legalentity" | "company"
+    )
 }
 
 fn mapping_match_keys(mapping: &Map<String, Value>) -> Vec<String> {
@@ -486,6 +492,13 @@ fn parse_serial_number(value: &str) -> Option<f64> {
 /// 恒定列识别：非空值只有一种（如单主体文件的「公司」代码列）。恒定键
 /// 不筛行，只会挂着必绿的命中徽章误导复核。
 fn column_is_constant(table: &Table, index: usize) -> bool {
+    // 前缀表只见过开头一段：多主体清单常按主体分段排序，开头清一色
+    // 不代表整列恒定（实测 27 万行期末清单前 197 行全是同一主体，全列
+    // 实有 9 家）。恒定判定只在整表数据上下结论；前缀阶段让公司列照常
+    // 进组合键，由逐位值域校验用真实数据裁决。
+    if table.rows.len() < table.row_count {
+        return false;
+    }
     let mut distinct: HashSet<&str> = HashSet::new();
     let mut seen = 0usize;
     for row in &table.rows {
@@ -1823,7 +1836,12 @@ fn preview(
     pause: &PauseCheckpoint,
 ) -> Result<Value, AppError> {
     pause.wait()?;
+    let merge_started = std::time::Instant::now();
     let result = merge(&params, progress, &cancel)?;
+    let merge_secs = merge_started.elapsed().as_secs_f64();
+    // 匹配结果落快照：导出直接复用这一次的结果，不再重新读表配对
+    // （改了输入/映射要重新点匹配，快照随之刷新）。
+    crate::fa_merge_snapshot::save(&params, &result);
     pause.wait()?;
     check_cancel(&cancel)?;
     progress("preview", 4, 4, "匹配预览完成");
@@ -1839,7 +1857,9 @@ fn preview(
         })
         .collect::<Vec<_>>();
     Ok(json!({
-        "engine":"rust-fa", "message":format!("完全外连接完成，共 {} 行。", result.rows.len()),
+        "engine":"rust-fa", "message":format!(
+            "完全外连接完成，共 {} 行（匹配 {:.1}s，结果已缓存，导出时直接复用）。",
+            result.rows.len(), merge_secs),
         "stats": match_statistics(&result),
         "summary":{"columns":categories,"rows":summary_rows}
     }))
@@ -1881,7 +1901,33 @@ fn export(
             Some(balance_sheet_date),
         ));
     }
-    let result = merge(&params, progress, &cancel)?;
+    // 导出直接复用「开始匹配」那一次的合并快照：改了输入/映射应回第一步
+    // 重新匹配（快照随之刷新）；指纹不一致只提示不重算，保证导出套表与
+    // 第一步统计永远同源。没有可用快照（首次、换了文件对、快照损坏）才
+    // 现场合并兜底。
+    let merge_started = std::time::Instant::now();
+    let (result, params, merge_label) = match crate::fa_merge_snapshot::load(&params) {
+        Some(loaded) => {
+            let hint = if loaded.matches_current {
+                ""
+            } else {
+                "；输入或映射与上次匹配时不一致，建议重新匹配"
+            };
+            progress(
+                "match",
+                2,
+                5,
+                &format!("复用上一次匹配结果，跳过重新合并{hint}"),
+            );
+            (loaded.result, loaded.effective_params, format!("复用上次匹配结果{hint}"))
+        }
+        None => {
+            let result = merge(&params, progress, &cancel)?;
+            crate::fa_merge_snapshot::save(&params, &result);
+            (result, params, "现场合并".to_owned())
+        }
+    };
+    let merge_secs = merge_started.elapsed().as_secs_f64();
     pause.wait()?;
     check_cancel(&cancel)?;
     let output = output_path(&params, &result.end.path)?;
@@ -1890,6 +1936,7 @@ fn export(
         .and_then(|v| v.to_str())
         .map(|v| v.eq_ignore_ascii_case("csv"))
         .unwrap_or(false);
+    let tax_started = std::time::Instant::now();
     let tax_analysis = if is_csv {
         None
     } else {
@@ -1902,7 +1949,9 @@ fn export(
             pause,
         )?)
     };
+    let tax_secs = tax_started.elapsed().as_secs_f64();
     progress("export", 4, 5, "正在生成 FA List、变动清单、汇总与透视表");
+    let write_started = std::time::Instant::now();
     if is_csv {
         pause.wait()?;
         write_csv(&output, &result, strings(params.get("selectedColumns")))?;
@@ -1910,6 +1959,7 @@ fn export(
         pause.wait()?;
         write_xlsx_with_tax_analysis(&output, &result, &params, &cancel, tax_analysis.as_ref())?;
     }
+    let write_secs = write_started.elapsed().as_secs_f64();
     let mut export_message = "FA List 导出完成".to_owned();
     if !result.unmatched_addition.is_empty() || !result.unmatched_disposal.is_empty() {
         let path = output
@@ -1920,6 +1970,11 @@ fn export(
         write_unmatched(&path, &result, &cancel)?;
         export_message.push_str("；已生成未匹配资产变动清单");
     }
+    // 各阶段真实耗时进完成消息，用户看得见时间去向。
+    export_message.push_str(&format!(
+        "（{} {:.1}s｜税法年限分析 {:.1}s｜生成套表 {:.1}s）",
+        merge_label, merge_secs, tax_secs, write_secs
+    ));
     let completion_message = export_message.clone();
     let warnings = correction_warnings(&result, &params);
     if !warnings.is_empty() {
@@ -7468,6 +7523,23 @@ mod tests {
         assert!(none.is_empty());
     }
 
+    #[test]
+    fn prefix_constant_company_column_still_joins_composite_key() {
+        // 期末前缀段清一色同一主体、全列多家主体：前缀阶段不得把公司列
+        // 判成恒定（实测 IT 账套 27 万行、前 197 行全是 000000，全列 9 家）。
+        let rows: Vec<Vec<&str>> = (0..10).map(|_| vec!["FA1", "000000"]).collect();
+        let slices: Vec<&[&str]> = rows.iter().map(|row| row.as_slice()).collect();
+        let mut prefix = in_memory_table(&["资产编码", "公司编码"], &slices);
+        prefix.row_count = 273_924; // rows.len() < row_count 即前缀表
+        assert!(!column_is_constant(&prefix, 1));
+        // 整表数据确为单一主体时照旧判恒定。
+        let full = in_memory_table(&["资产编码", "公司编码"], &slices);
+        assert!(column_is_constant(&full, 1));
+        // 编码形态的公司列头也是公司键成员候选。
+        assert!(is_company_id_header("公司编码"));
+        assert!(is_company_id_header("公司名称"));
+    }
+
     /// 跑法（真机验收，需本地样例）：
     /// FA_LIVE_INSPECT="期初.xlsx,期末.xlsx" cargo test --manifest-path
     /// src-tauri/Cargo.toml --lib live_inspect_avoids -- --ignored --nocapture
@@ -7606,21 +7678,31 @@ mod tests {
     }
 
     #[test]
-    fn export_remerges_with_manually_changed_mapping_and_keys() {
+    fn export_reuses_last_match_until_user_rematches() {
         let dir = tempfile::tempdir().unwrap();
         let mut p = params(dir.path());
         let old = test_preview(p.clone()).unwrap();
         assert_eq!(old["stats"]["both"], 1);
+        // 匹配后改键位/映射但不重新匹配：导出复用上一次匹配结果（与第一
+        // 步展示的统计同源），改动的键与映射不生效。
         p["beginKeys"] = json!(["资产名称"]);
         p["endKeys"] = json!(["资产名称"]);
         p["endMapping"]["originalValue"] = json!("累计折旧");
-        let output = test_export(p).unwrap();
+        let output = test_export(p.clone()).unwrap();
         assert!(output["outputPaths"].as_array().is_some_and(|paths| !paths.is_empty()));
         let mut workbook = open_workbook_auto(dir.path().join("FA_List.xlsx")).unwrap();
         let range = workbook.worksheet_range("FA List").unwrap();
         let row = range.rows().find(|row| row.get(2).is_some_and(|value| data_string(value) == "甲")).unwrap();
-        assert_eq!(data_string(&row[1]), "甲", "使用新的匹配键");
-        assert_eq!(data_string(&row[6]), "40", "使用人工修改后的原值映射");
+        assert_eq!(data_string(&row[1]), "A1", "沿用上一次匹配的键（卡片编号）");
+        assert_eq!(data_string(&row[6]), "100", "沿用上一次匹配的原值映射");
+        // 回第一步重新匹配：快照刷新，导出按新键位/映射生成。
+        test_preview(p.clone()).unwrap();
+        test_export(p).unwrap();
+        let mut workbook = open_workbook_auto(dir.path().join("FA_List.xlsx")).unwrap();
+        let range = workbook.worksheet_range("FA List").unwrap();
+        let row = range.rows().find(|row| row.get(2).is_some_and(|value| data_string(value) == "甲")).unwrap();
+        assert_eq!(data_string(&row[1]), "甲", "重新匹配后使用新的匹配键");
+        assert_eq!(data_string(&row[6]), "40", "重新匹配后使用人工修改后的原值映射");
     }
 
     fn test_export(params: Value) -> Result<Value, AppError> {

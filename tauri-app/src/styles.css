@@ -2550,6 +2550,12 @@ summary:focus-visible {
   color: var(--text-muted);
   background: var(--surface-muted);
 }
+.data-table-table th .dt-header-control select optgroup.dt-group-not-applicable,
+.data-table-table th .dt-header-control select option.dt-option-not-applicable {
+  color: var(--text-muted);
+  background: var(--surface-muted);
+  font-weight: 400;
+}
 
 /* 未映射字段提示 */
 .fa-missing-hint {
@@ -4242,4 +4248,12 @@ input[type="checkbox"].switch-input:disabled {
 .primary:disabled {
   opacity: calc(var(--disabled-opacity) - 0.15);
   box-shadow: none;
+}
+
+/* 不完整的形态不能使用成功色；所有账表工具共用。 */
+.mapping-panel .mapping-form-note.mapping-form-note-incomplete {
+  color: var(--warning-fg);
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+  white-space: normal;
 }

@@ -9,8 +9,10 @@
  * 1. **文件名编号 + 期间**：`04TB` ↔ `04JE`、`06科目余额表_2024.1-3` ↔ `06序时账-2024.1-3`。
  *    实测十套样例全部命中。期间必须参与——06 套一年拆成两段导出，1-3 月的余额表
  *    要对 1-3 月的序时账，不能混。
- * 2. **主体代码**：文件名没编号时，用两边识别出的主体清单取交集。
- * 3. 都对不上就落到「未配对」，由用户自己指。
+ * 2. **文件名主体词**：去掉 TB/JE 类型词、期间、编号与副本序号后，
+ *    比较剩余名称；只有唯一对应时自动配对。
+ * 3. **主体代码**：文件名线索不足时，用两边识别出的主体清单取交集。
+ * 4. 都对不上就落到「未配对」，由用户自己指。
  */
 
 export type LedgerKind = "tb" | "je";
@@ -102,6 +104,57 @@ function sharedEntity(a?: string[], b?: string[]): string | undefined {
   return a.map((v) => v.trim()).find((v) => v && right.has(v));
 }
 
+/** 去掉账表类型等通用词，留下客户／账套名称作为文件名配对证据。 */
+function filenameIdentity(path: string): string {
+  return stem(path)
+    .replace(/(?:20\d{2})\s*[.\-/年]\s*\d{1,2}\s*月?\s*(?:[-~～—–]|至)\s*\d{1,2}\s*月?/g, "")
+    .replace(/(?:20\d{2})\s*[.\-/年]\s*\d{1,2}\s*月?/g, "")
+    .replace(/(?:^|[^\d])\d{1,2}\s*月?\s*(?:[-~～—–]|至)\s*\d{1,2}\s*月/g, "")
+    .replace(/(?<!\d)20\d{2}(?!\d)/g, "")
+    .replace(/^\s*\d{1,4}(?!\d)/, "")
+    .replace(/[（(]\s*\d+\s*[)）]\s*$/, "")
+    .replace(/科目余额表|科余表|余额表|试算平衡表|序时账|明细账|凭证列表|凭证/gi, "")
+    .replace(/(?<![A-Za-z])(?:TB|JE)(?![A-Za-z])/gi, "")
+    .replace(/账套|导出|报表|数据/g, "")
+    .replace(/[^\p{Script=Han}\p{Letter}\p{Number}]/gu, "")
+    .toLocaleLowerCase();
+}
+
+function meaningfulIdentity(value: string): boolean {
+  return [...value].filter((char) => /\p{Script=Han}/u.test(char)).length >= 2 || value.length >= 3;
+}
+
+/** 允许一边多一个短修饰词，但不能靠单字或通用「账表」词误配。 */
+function filenameSimilarity(a: PairingFile, b: PairingFile): number {
+  const left = filenameIdentity(a.path);
+  const right = filenameIdentity(b.path);
+  if (!meaningfulIdentity(left) || !meaningfulIdentity(right)) return 0;
+  if (left === right) return 1;
+  const shorter = left.length <= right.length ? left : right;
+  const longer = left.length > right.length ? left : right;
+  if (shorter.length >= 2 && longer.includes(shorter) && shorter.length / longer.length >= 0.5)
+    return shorter.length / longer.length;
+  return 0;
+}
+
+/** 双侧明示的编号或期间相反时，弱线索不能覆盖这个冲突。 */
+function hasFilenameConflict(tb: PairingFile, je: PairingFile): boolean {
+  const tbNumber = leadingNumber(tb.path);
+  const jeNumber = leadingNumber(je.path);
+  const tbPeriod = periodTag(tb.path);
+  const jePeriod = periodTag(je.path);
+  return Boolean(
+    (tbNumber && jeNumber && tbNumber !== jeNumber) ||
+    (tbPeriod && jePeriod && tbPeriod !== jePeriod),
+  );
+}
+
+function hasPeriodConflict(tb: PairingFile, je: PairingFile): boolean {
+  const tbPeriod = periodTag(tb.path);
+  const jePeriod = periodTag(je.path);
+  return Boolean(tbPeriod && jePeriod && tbPeriod !== jePeriod);
+}
+
 function makeLabel(key: string, period?: string) {
   if (key && period && key !== period) return `${key} · ${period}`;
   return key || period || "未命名";
@@ -168,7 +221,7 @@ export function pairLedgerFiles(files: PairingFile[]): PairedGroup[] {
       const candidatesWithPeriod = sameNumber.filter((je) => periodTag(je.path));
       // 两边文件名都明确写了期间时，期间冲突就是硬冲突；不能因为当前只剩
       // 一个同编号 JE，便把 4-12 月账塞给 1-3 月 TB。
-      matched = samePeriod[0] ??
+      matched = (samePeriod.length === 1 ? samePeriod[0] : undefined) ??
         (!period || candidatesWithPeriod.length === 0
           ? sameNumber.length === 1
             ? sameNumber[0]
@@ -183,14 +236,32 @@ export function pairLedgerFiles(files: PairingFile[]): PairedGroup[] {
       }
     }
     if (!matched) {
-      const byEntity = jes.find(
-        (je) =>
-          !usedJe.has(pairingFileKey(je)) &&
-          sharedEntity(tb.entities, je.entities),
+      // 名称相近也须双向唯一：两套「金蝶」与一份 JE 不应按导入顺序抢占。
+      const available = jes.filter(
+        (je) => !usedJe.has(pairingFileKey(je)) && !hasFilenameConflict(tb, je),
       );
-      if (byEntity) {
-        matched = byEntity;
-        reasons.push(`主体 ${sharedEntity(tb.entities, byEntity.entities)}`);
+      const named = available.filter((je) => filenameSimilarity(tb, je) > 0);
+      if (named.length === 1 && tbs.filter(
+        (other) => !hasFilenameConflict(other, named[0]) && filenameSimilarity(other, named[0]) > 0,
+      ).length === 1) {
+        matched = named[0];
+        reasons.push(`文件名主体词 ${filenameIdentity(tb.path)}`);
+      }
+    }
+    if (!matched) {
+      const byEntity = jes.filter(
+        (je) => !usedJe.has(pairingFileKey(je)) &&
+          !hasPeriodConflict(tb, je) && sharedEntity(tb.entities, je.entities),
+      );
+      if (byEntity.length === 1 && tbs.filter(
+        (other) => !hasPeriodConflict(other, byEntity[0]) &&
+          sharedEntity(other.entities, byEntity[0].entities),
+      ).length === 1) {
+        matched = byEntity[0];
+        reasons.push(`主体 ${sharedEntity(tb.entities, matched.entities)}`);
+        const jeNumber = leadingNumber(matched.path);
+        if (number && jeNumber && number !== jeNumber)
+          reasons.push("文件编号不同，请确认主体是否同一账套");
       }
     }
     if (matched) usedJe.add(pairingFileKey(matched));
@@ -209,7 +280,7 @@ export function pairLedgerFiles(files: PairingFile[]): PairedGroup[] {
       tb,
       je: matched,
       reasons: matched ? reasons : ["没有找到对应的序时账"],
-      needsReview: !matched || Boolean(conflict) || reasons.length === 0,
+      needsReview: !matched || Boolean(conflict) || reasons.some((reason) => reason.startsWith("文件编号不同")) || reasons.length === 0,
     });
   }
 

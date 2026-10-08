@@ -17,6 +17,8 @@ export type MappingGroup = {
   required?: string[];
   optional?: string[];
   status?: "已适配" | "可适配" | "未适配";
+  /** 当前工具不支持以该表型单独完成业务取数；字段仍可供其他适用表型选用。 */
+  notApplicable?: boolean;
 };
 
 export type MappingPanelProps = {
@@ -52,8 +54,18 @@ export type MappingPanelProps = {
    * 下拉里逐项标注。返回 `undefined` 表示与形态无关，不标注。
    */
   requirementOf?: (role: string) => "required" | "optional" | undefined;
+  /**
+   * 「任一即可」槽位（二选一）的备注：返回该角色的替代角色清单。
+   *
+   * 借款台账的起算额是「本金／期初余额任一即可」：两个角色各自标注
+   * 「（与xx二选一）」；对方已映射而自己还没有时，本条灰显并注明
+   * 已选对方——仍然可选，改选口径由形态校验兜底。
+   */
+  alternatesOf?: (role: string) => string[] | undefined;
   /** 形态判定结论，如「已识别为 A 型（起始日＋到期日）」。 */
   formNote?: React.ReactNode;
+  /** 是否完整适配；未完整或仍缺必填项时使用公共黄色提示。 */
+  formComplete?: boolean;
   /** 数据列之后追加的、由调用方逐行渲染控件的列（如逐行利率口径）。 */
   trailingColumns?: {
     key: string;
@@ -117,6 +129,12 @@ export function MappingPanel(props: MappingPanelProps) {
       .map(([role]) => role),
   );
 
+  const labelOf = new Map(roles);
+  // 二选一槽位：对方角色已映射而自己还没有时，本条灰显提示无需重复映射。
+  const alternates = (role: string) => props.alternatesOf?.(role) ?? [];
+  const altSatisfied = (role: string) =>
+    alternates(role).some((r) => asColumns(mapping[r]).length > 0);
+
   const update = (column: string, role: string) => {
     const next: MappingDict = { ...mapping };
     // 先把这一列从原来的角色上摘下来，再挂到新角色上。
@@ -167,10 +185,21 @@ export function MappingPanel(props: MappingPanelProps) {
 
   // 必填／选填的标注跟在标签后面。下拉的 <option> 没法上样式，只能用文字标。
   const mark = (role: string, group?: MappingGroup) => {
-    if (group?.required?.includes(role)) return "＊";
-    if (group?.optional?.includes(role)) return "（选填）";
+    const others = alternates(role);
+    const note = others.length
+      ? `（与${others.map((r) => labelOf.get(r) ?? r).join("／")}二选一${
+          !used.has(role) && altSatisfied(role)
+            ? `，已选${labelOf.get(others[0]) ?? others[0]}`
+            : ""
+        }）`
+      : "";
+    // 对方已映射时不再标＊：这一项已经不需要了。
+    if (!used.has(role) && altSatisfied(role)) return note;
+    if (group?.required?.includes(role)) return `＊${note}`;
+    if (group?.optional?.includes(role)) return `（选填）${note}`;
     const need = props.requirementOf?.(role);
-    return need === "required" ? "＊" : need === "optional" ? "（选填）" : "";
+    const star = need === "required" ? "＊" : need === "optional" ? "（选填）" : "";
+    return `${star}${note}`;
   };
 
   const option = (role: string, label: string, group?: MappingGroup) => {
@@ -178,15 +207,19 @@ export function MappingPanel(props: MappingPanelProps) {
     // 只提示已占用，不拦截继续加列。
     const taken = used.has(role);
     const disabled = locked(role);
+    // 二选一的另一侧已映射：同样灰显，但不写「已用」——语义是「不用映射」。
+    const spared = !taken && altSatisfied(role);
     const suffix = taken ? "（已用）" : disabled ? "（已停用）" : "";
-    const statusClass = group?.status
+    const statusClass = group?.notApplicable
+      ? "dt-option-not-applicable"
+      : group?.status
       ? `dt-option-${group.status === "已适配" ? "adapted" : group.status === "未适配" ? "unavailable" : "available"}`
       : "";
     return (
       <option
         key={role}
         value={role}
-        className={[taken || disabled ? "dt-role-taken" : "", statusClass]
+        className={[taken || disabled || spared ? "dt-role-taken" : "", statusClass]
           .filter(Boolean)
           .join(" ") || undefined}
       >
@@ -198,7 +231,6 @@ export function MappingPanel(props: MappingPanelProps) {
   };
 
   const toggleMode = props.mode === "toggle";
-  const labelOf = new Map(roles);
 
   // toggle 模式：合起来时显示这一列已承担的全部语义，展开后逐项勾选。
   const toggleOption = (
@@ -210,7 +242,9 @@ export function MappingPanel(props: MappingPanelProps) {
     const chosen = held.includes(role);
     const taken = used.has(role) && !chosen;
     const disabled = locked(role);
-    const statusClass = group?.status
+    const statusClass = group?.notApplicable
+      ? "dt-option-not-applicable"
+      : group?.status
       ? `dt-option-${group.status === "已适配" ? "adapted" : group.status === "未适配" ? "unavailable" : "available"}`
       : "";
     return (
@@ -322,7 +356,9 @@ export function MappingPanel(props: MappingPanelProps) {
                   key={group.title}
                   label={`${group.title}${group.status ? ` · ${group.status}` : ""}`}
                   className={
-                    group.status === "未适配"
+                    group.notApplicable
+                      ? "dt-group-not-applicable"
+                      : group.status === "未适配"
                       ? "dt-group-unavailable"
                       : group.status === "已适配"
                         ? "dt-group-adapted"
@@ -363,11 +399,11 @@ export function MappingPanel(props: MappingPanelProps) {
       {(props.formNote || props.requirementOf) && (
         <p className="mapping-meta-row">
           {props.formNote ? (
-            <span className="mapping-form-note">{props.formNote}</span>
+            <span className={`mapping-form-note${props.formComplete === false || (props.missing?.length ?? 0) > 0 ? " mapping-form-note-incomplete" : ""}`}>{props.formNote}</span>
           ) : null}
           {props.requirementOf ? (
             <span className="mapping-requirement-legend">
-              ＊ 为必填字段；（选填）须按当前分组的整组规则补充。
+              ＊ 为必填字段；{props.alternatesOf ? "标注「二选一」的映射其中一个即可；" : ""}（选填）须按当前分组的整组规则补充。
             </span>
           ) : null}
         </p>

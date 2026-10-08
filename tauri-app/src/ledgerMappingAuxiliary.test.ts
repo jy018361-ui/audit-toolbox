@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   dropUnlinkedTbAuxiliary,
+  ledgerReviewAccountLabel,
   type AuxiliaryLinkResult,
 } from "./ledgerMapping";
+
+it("科目展示单行补上级名，已有路径不重复且保留编码和辅助值", () => {
+  expect(ledgerReviewAccountLabel("2001 中国银行", "借款合同A", "短期借款")).toBe("2001 短期借款-中国银行 · 借款合同A");
+  expect(ledgerReviewAccountLabel("1002 银行存款-中国银行", undefined, "银行存款")).toBe("1002 银行存款-中国银行");
+  expect(ledgerReviewAccountLabel("中国银行", undefined, "短期借款")).toBe("短期借款-中国银行");
+  expect(ledgerReviewAccountLabel("Interest Expense", undefined, "财务费用")).toBe("财务费用-Interest Expense");
+  expect(ledgerReviewAccountLabel("2001 中国银行")).toBe("2001 中国银行");
+});
 
 function verdict(
   status: AuxiliaryLinkResult["status"],
@@ -11,9 +20,6 @@ function verdict(
     tbAuxMapped: true,
     status,
     column: ["noMatch", "noAnchors"].includes(status) ? null : "核算维度",
-    anchorHits: ["noMatch", "noAnchors"].includes(status) ? 0 : 1,
-    anchorTotal: 1,
-    coverage: ["noMatch", "noAnchors"].includes(status) ? 0 : 1,
     competingColumns: [],
     warnings: [],
   };

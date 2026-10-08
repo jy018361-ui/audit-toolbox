@@ -16,7 +16,8 @@ export type Bootstrap = z.infer<typeof BootstrapSchema>;
 export const JobEventSchema = z.object({
   jobId: z.string(), toolId: z.string(), phase: z.string(), current: z.number(), total: z.number(),
   message: z.string(), severity: z.enum(["info", "warning", "error", "success"]),
-  outputPaths: z.array(z.string()).default([]), result: z.unknown().optional()
+  outputPaths: z.array(z.string()).default([]), result: z.unknown().optional(),
+  background: z.boolean().optional()
 });
 export type JobEvent = z.infer<typeof JobEventSchema>;
 

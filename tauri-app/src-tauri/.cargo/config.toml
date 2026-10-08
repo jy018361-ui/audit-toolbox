@@ -1,0 +1,4 @@
+# 多会话共用同一编译缓存目录（约定见 ../AGENTS.md 与 ../CLAUDE.md「构建缓存」）
+# 禁止为单个会话另设 CARGO_TARGET_DIR 子目录：缓存成倍叠加，一天可产生上百 GB 废料
+[build]
+target-dir = "target"

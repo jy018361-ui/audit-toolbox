@@ -31,10 +31,10 @@ CURRENCIES = [
     "USD", "EUR", "JPY", "HKD", "GBP", "AUD", "NZD", "SGD", "CHF", "CAD", "MOP", "MYR", "RUB",
     "ZAR", "KRW", "AED", "SAR", "HUF", "PLN", "DKK", "SEK", "NOK", "TRY", "MXN", "THB",
 ]
-# 内置覆盖区间：报告期起点 2023-01-01 前推 35 天 → 2026-08-31。
+# 内置覆盖区间：报告期起点 2023-01-01 前推 35 天 → 2026-10-07。
 # 起点依据：跨年 JE 的月初牌价（上月末重估点）需要报告期首年 1 月前的数据。
 START = date(2022, 11, 27)
-END = date(2026, 8, 31)
+END = date(2026, 10, 7)
 CHUNK_DAYS = 180  # 单次查询远小于官方/程序自身的 366 天上限，留足余量
 OUTPUT = "assets/fx/safe_mid_rates.csv"
 

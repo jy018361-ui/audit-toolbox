@@ -58,6 +58,7 @@ function focusMainWindow() {
 }
 
 /** 询问改用置顶小窗：不再把整个工具箱主窗口拉到用户面前。
+ *  无边框 + 透明底，视觉只剩一张居中卡片；拖拽靠卡片标题区。
  *  小窗创建失败（权限/平台限制）时降级回应用内弹窗。 */
 async function openAskWindow() {
   const existing = await WebviewWindow.getByLabel("meeting-ask");
@@ -69,9 +70,12 @@ async function openAskWindow() {
   const ask = new WebviewWindow("meeting-ask", {
     url: "/#/meeting-ask",
     title: "会议记录询问",
-    width: 480,
-    height: 300,
+    width: 440,
+    height: 260,
     resizable: false,
+    decorations: false,
+    transparent: true,
+    shadow: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     center: true,

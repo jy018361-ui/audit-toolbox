@@ -22,6 +22,7 @@
 use regex::Regex;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook, Worksheet};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,8 +76,23 @@ pub(crate) fn run_job(
         "tbje_check.export" => {
             progress("read", 1, 3, "正在读取科目余额表与序时账…");
             pause.wait()?;
+            // 先查结果快照：与最近一次核对时的输入指纹一致就复用落盘结果，
+            // 跳过 evaluate 的整表重算。prepare_with_control 仍要执行——两张
+            // 直接读表的底稿页（发生额勾稽明细、BS与PL勾稽）需要它，表加载
+            // 走既有磁盘缓存，成本可接受。
+            let reused = load_result_snapshot(&params);
+            if reused.is_some() {
+                progress("read", 1, 3, "复用上一次核对结果，跳过重新计算…");
+            }
             let prepared = prepare_with_control(&params, &cancel, progress)?;
-            let result = evaluate(&prepared, &cancel, true)?;
+            let result = match reused {
+                Some(result) => result,
+                None => {
+                    let result = evaluate(&prepared, &cancel, true)?;
+                    save_result_snapshot(&params, &result);
+                    result
+                }
+            };
             pause.wait()?;
             progress("write", 2, 3, "正在写出核对明细…");
             let path = export(&params, &result, &prepared)?;
@@ -208,6 +224,19 @@ fn scoped_matched_identity(
     (entity, account)
 }
 
+/// 匹配策略固定后，同身份只求一次科目键；不跨来源或任务缓存。
+fn row_match_keys(
+    identities: &[(String, String, String)],
+    policy: &ledger_mapping::AccountMatchPolicy,
+) -> Vec<(String, String)> {
+    let mut distinct = BTreeMap::new();
+    identities.iter().map(|identity| {
+        distinct.entry(identity).or_insert_with(|| {
+            (identity.0.clone(), policy.account_key(&identity.0, &identity.1, &identity.2))
+        }).clone()
+    }).collect()
+}
+
 fn display_name(table: &FxTable, row: &[String], map: &Map<String, Value>) -> String {
     let name = joined(table, row, map, "accountName");
     if name.is_empty() {
@@ -260,6 +289,10 @@ struct PreparedCheck {
     movement_note: Option<String>,
     /// TBJE 公共核对永远保留全部非空行。币种只用于判断列语义，不能成为行过滤条件。
     tb_rows: Vec<bool>,
+    /// 金额校验的末级分析在映射不变时复用；口径仲裁变更后重建。
+    tb_leaf: Vec<bool>,
+    /// 当前来源与最终映射下的原始身份，供核对及导出复用。
+    tb_identities: Vec<(String, String, String)>,
     je_rows: Option<Vec<bool>>,
     entity_scope: ledger_mapping::EntityScope,
     /// 映射阶段已验证的辅助列计划需用原始来源与映射重算指纹。
@@ -611,45 +644,53 @@ fn prepare_with_control(
         if columns(&je_map, "entity").iter().any(|column| {
             ledger_mapping::entity_column_is_measurement_unit(&je.headers, &je.rows, column)
         }) {
+            // 计量单位列误映射为主体：静默摘除即可，不产生任何用户提示。
             je_map.remove("entity");
-            mapping_warnings.push(
-                "JE原主体映射实际为KG、EA、BOX等计量单位，已从主体键中移除，避免拆碎凭证分组。"
-                    .to_owned(),
-            );
         }
         let tb_has_entity = !columns(&tb_map, "entity").is_empty();
         let je_has_entity = !columns(&je_map, "entity").is_empty();
         let entity_key_enabled = ledger_mapping::entity_key_enabled(tb_has_entity, je_has_entity);
         if !entity_key_enabled && (tb_has_entity || je_has_entity) {
-            let (table, label) = if tb_has_entity {
-                (&*tb, "TB")
-            } else {
-                (je, "JE")
-            };
-            let source_mapping = if tb_has_entity { &tb_map } else { &je_map };
-            let entities = indexes(table, source_mapping, "entity")
-                .first()
-                .map(|index| {
-                    table
-                        .rows
-                        .iter()
-                        .filter_map(|row| row.get(*index))
-                        .map(|value| value.trim())
-                        .filter(|value| !value.is_empty())
-                        .collect::<BTreeSet<_>>()
-                })
-                .unwrap_or_default();
             // 只有双侧都有主体字段时才启用主体维度。单侧主体不是筛选条件，
             // 双方统一退回默认主体，避免一侧拆分、另一侧汇总后完全对不上。
+            // 可选键相关口径一律后台静默处理，不产生任何用户提示、不留痕迹。
             tb_map.remove("entity");
             je_map.remove("entity");
             tb_fixed = ledger_mapping::DEFAULT_ENTITY.to_owned();
             je_fixed = ledger_mapping::DEFAULT_ENTITY.to_owned();
-            mapping_warnings.push(format!(
-                "{label}识别到{}个主体，而另一侧没有可用主体字段；双方已统一按“默认主体”匹配，不把单边主体值作为拆分键。",
-                entities.len()
-            ));
         }
+        // 双侧主体值域校验（公共引擎能力，后台静默规则）：代码/名称错配
+        // 自动换同值域列；两侧都找不到替代列时摘除双侧主体，按既有单侧
+        // 口径退默认主体——不产生任何提示。
+        let had_entity = !columns(&tb_map, "entity").is_empty();
+        ledger_mapping::reconcile_entity_domains(
+            &tb.headers,
+            &tb.rows,
+            &mut tb_map,
+            &je.headers,
+            &je.rows,
+            &mut je_map,
+        );
+        if had_entity && columns(&tb_map, "entity").is_empty() {
+            tb_fixed = ledger_mapping::DEFAULT_ENTITY.to_owned();
+            je_fixed = ledger_mapping::DEFAULT_ENTITY.to_owned();
+        }
+        // 辅助维度键值域校验（公共引擎能力，后台静默规则，全程无提示）：
+        // TB/JE 双侧映射的辅助列代码/名称口径错配（值域零交集）时自动换到
+        // 同侧值域对得上的列，两侧都找不到替代列才摘除双侧辅助映射，按
+        // 主体＋科目勾稽的既有降级口径走。必须先于下方发生额勾稽的锚点
+        // 反查：TB 锚点与 JE 偏好列都取换列后的映射，维度值才在同一值
+        // 体系上比对；映射阶段的辅助计划（auxiliaryPlan）按原始映射校验
+        // 指纹，不受此处静默换列影响。
+        ledger_mapping::reconcile_key_domains(
+            "auxiliary",
+            &tb.headers,
+            &tb.rows,
+            &mut tb_map,
+            &je.headers,
+            &je.rows,
+            &mut je_map,
+        );
     }
     let mut je_rows = if let Some(je) = je.as_ref() {
         let je = &*je.table;
@@ -700,8 +741,15 @@ fn prepare_with_control(
             tb.sheet
         ));
     }
-    let tb_rows_to_validate =
-        ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| columns(&tb_map, role));
+    // 记录分析实际请求的角色列；符号判定写入的内部元数据不改变这些输入。
+    // 任一已读角色列变化（包括发生额仲裁）仍必须按最终映射重建。
+    let tb_leaf_mapping = std::cell::RefCell::new(BTreeMap::new());
+    let tb_rows_to_validate = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| {
+        let names = columns(&tb_map, role);
+        tb_leaf_mapping.borrow_mut().insert(role.to_owned(), names.clone());
+        names
+    });
+    let tb_leaf_mapping = tb_leaf_mapping.into_inner();
     validate_amount_columns("TB", "tb", &tb, &tb_map, Some(&tb_rows_to_validate))?;
     if let Some(je) = je.as_ref().filter(|je| je.disk.is_none()) {
         validate_amount_columns("JE", "je", &je.table, &je_map, je_rows.as_deref())?;
@@ -731,6 +779,14 @@ fn prepare_with_control(
     if let Some(warning) = tb_period_warning(&tb) {
         mapping_warnings.push(warning);
     }
+    let tb_leaf = if tb_leaf_mapping.iter().all(|(role, names)| columns(&tb_map, role) == *names) {
+        tb_rows_to_validate
+    } else {
+        ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| columns(&tb_map, role))
+    };
+    let tb_identities = tb.rows.iter()
+        .map(|row| identity_parts(&tb, row, &tb_map, &tb_fixed))
+        .collect();
     Ok(PreparedCheck {
         tb,
         je,
@@ -741,6 +797,8 @@ fn prepare_with_control(
         mapping_warnings,
         movement_note,
         tb_rows,
+        tb_leaf,
+        tb_identities,
         je_rows,
         entity_scope,
         auxiliary_plan_params: params.get("auxiliaryPlan").map(|_| params.clone()),
@@ -814,13 +872,63 @@ fn run_with_progress(
     progress: Progress<'_>,
 ) -> Result<Value, AppError> {
     let prepared = prepare_with_control(params, cancel, progress)?;
-    evaluate(&prepared, cancel, false)
+    // 先按全量科目组装并落一份结果快照（尽力而为），再按 run 口径过滤
+    // items——「刚核对完就导出」的主路径由此免去导出时的整表重算。
+    let mut result = evaluate(&prepared, cancel, true)?;
+    save_result_snapshot(params, &result);
+    trim_items_for_run_mode(&mut result);
+    Ok(result)
 }
 
 fn evaluate(
     prepared: &PreparedCheck,
     cancel: &AtomicBool,
     include_all_accounts: bool,
+) -> Result<Value, AppError> {
+    // items 一律按全量科目组装（导出底稿与结果快照都需要完整行）；run 模式
+    // 的「只留差异项、至多 500 条」旧口径在组装完成后统一过滤，保证返回值
+    // 与引入快照前逐位一致。
+    let mut result = evaluate_with_full_items(prepared, cancel)?;
+    if !include_all_accounts {
+        trim_items_for_run_mode(&mut result);
+    }
+    Ok(result)
+}
+
+/// run 模式（界面展示）的 items 过滤：与旧版 check_tb_vs_je 在
+/// include_all_accounts=false 下的落选规则逐位一致——只保留借贷任一侧
+/// 超容差的科目，按科目键排序的原顺序最多取 500 条。差异判定用 item 里
+/// 已带的金额字段重算，f64 经 JSON 序列化往返不损失精度，结论不变。
+fn trim_items_for_run_mode(result: &mut Value) {
+    let Some(items) = result
+        .pointer_mut("/tbVsJe/items")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let mut kept: Vec<Value> = Vec::new();
+    for item in items.iter() {
+        if kept.len() >= 500 {
+            break;
+        }
+        let number = |key: &str| item.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+        let off = beyond(
+            number("debitDifference"),
+            number("tbDebit").max(number("jeDebit")),
+        ) || beyond(
+            number("creditDifference"),
+            number("tbCredit").max(number("jeCredit")),
+        );
+        if off {
+            kept.push(item.clone());
+        }
+    }
+    *items = kept;
+}
+
+fn evaluate_with_full_items(
+    prepared: &PreparedCheck,
+    cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
     let tb_has_entity = !columns(&prepared.tb_map, "entity").is_empty();
     let je_has_entity = prepared.je.is_some() && !columns(&prepared.je_map, "entity").is_empty();
@@ -835,6 +943,8 @@ fn evaluate(
         &prepared.tb_map,
         &prepared.tb_fixed,
         &prepared.tb_rows,
+        &prepared.tb_leaf,
+        &prepared.tb_identities,
     );
     if cancel.load(Ordering::Relaxed) {
         return Err(error("JOB_CANCELLED", "任务已取消。", None));
@@ -848,11 +958,12 @@ fn evaluate(
             &prepared.je_map,
             &prepared.je_fixed,
             cancel,
-            include_all_accounts,
             &prepared.tb_rows,
             prepared.je_rows.as_deref().unwrap_or(&[]),
             &prepared.entity_scope,
             prepared.auxiliary_plan_params.as_ref(),
+            &prepared.tb_leaf,
+            &prepared.tb_identities,
         )?,
         None => json!({
             "performed": false,
@@ -951,6 +1062,10 @@ fn run_batch(
 ///
 /// 每组仍保留一份独立的三页工作簿，避免十组的同名核对页混在一个文件里难以定位；
 /// 前端只需选择一次目录。单组失败不会抹掉已经成功写出的其他组。
+///
+/// 每组导出前先查「核对结果快照」：输入指纹与最近一次核对一致时直接复用落盘
+/// 结果，跳过 evaluate 整表重算（参见下方结果快照一节）；不一致按现行流程
+/// 重算，并把新结果刷新落盘。
 fn export_batch(
     params: &Value,
     progress: Progress,
@@ -1019,9 +1134,28 @@ fn export_batch(
         let mut export_params = group.clone();
         export_params["outputPath"] = json!(output_path.to_string_lossy());
 
+        // 先查结果快照：与最近一次核对时的输入指纹一致就复用落盘结果，跳过
+        // evaluate（prepare 仍要执行——两张直接读表的底稿页需要它，表加载走
+        // 既有磁盘缓存，成本可接受）。
+        let reused = load_result_snapshot(&export_params);
+        if reused.is_some() {
+            progress(
+                "export",
+                index + 1,
+                total,
+                &format!("复用第 {display_label} 组核对结果，跳过重新计算…"),
+            );
+        }
         let exported =
             prepare_with_control(&export_params, cancel, progress).and_then(|prepared| {
-                let result = evaluate(&prepared, cancel, true)?;
+                let result = match reused {
+                    Some(result) => result,
+                    None => {
+                        let result = evaluate(&prepared, cancel, true)?;
+                        save_result_snapshot(&export_params, &result);
+                        result
+                    }
+                };
                 let path = export(&export_params, &result, &prepared)?;
                 Ok(path)
             });
@@ -1044,6 +1178,144 @@ fn export_batch(
         "outputPaths": output_paths,
         "exports": results,
     }))
+}
+
+// ────────────────────────────── 核对结果快照 ──────────────────────────────
+
+/// 参与核对计算、需计入结果快照指纹的参数字段白名单（思路同 FA 匹配快照的
+/// MERGE_PARAM_FIELDS：把 prepare/evaluate 实际读取的字段列全）。
+/// outputPath / outputDirectory / label / groups 属于导出与展示阶段，核对
+/// 结果不随它们变化，指纹一律不看。
+const CHECK_PARAM_FIELDS: &[&str] = &[
+    "tbSource",
+    "jeSource",
+    "tbMapping",
+    "jeMapping",
+    "tbFixedEntity",
+    "jeFixedEntity",
+    "entityScope",
+    "auxiliaryPlan",
+    // 测试专用开关（强制 JE 走磁盘账本路径），会改变计算路径，一并计入。
+    "__testForceDiskLedger",
+];
+
+fn snapshot_dir() -> Option<PathBuf> {
+    Some(
+        crate::tabular::cache_root()
+            .ok()?
+            .join("tbje-results")
+            .join("v1"),
+    )
+}
+
+/// 文件身份：规范路径＋大小＋修改时间。任一变化都视为另一份输入——与看账
+/// Parquet 缓存、FA 匹配快照的键口径一致。
+fn file_identity(path: &std::path::Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some(format!(
+        "{}|{}|{}",
+        std::fs::canonicalize(path).ok()?.to_string_lossy(),
+        meta.len(),
+        meta.modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs()
+    ))
+}
+
+fn hash_text(text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// 输入指纹＝白名单参数逐字段序列化＋TB/JE 两份源文件的规范路径、大小、
+/// 修改时间。指纹一致即认定「输入与上次核对时相同」，导出直接复用已落盘
+/// 的核对结果；任一项变化指纹即变，自然回落到现行重算并刷新快照。
+fn check_result_fingerprint(params: &Value) -> Option<String> {
+    let mut material = String::new();
+    for field in CHECK_PARAM_FIELDS {
+        match params.get(*field) {
+            Some(value) => {
+                material.push_str(field);
+                material.push('\n');
+                material.push_str(&serde_json::to_string(value).ok()?);
+            }
+            None => {
+                material.push_str(field);
+                material.push_str(":absent");
+            }
+        }
+        material.push('\n');
+    }
+    let tb_path = params
+        .get("tbSource")?
+        .get("inputPath")?
+        .as_str()
+        .map(str::to_owned)?;
+    material.push_str(&file_identity(std::path::Path::new(&tb_path))?);
+    material.push('\n');
+    // 未上传序时账的核对同样有效：jeSource 缺席时用固定占位记入指纹。
+    match params
+        .get("jeSource")
+        .and_then(|source| source.get("inputPath"))
+        .and_then(Value::as_str)
+    {
+        Some(je_path) => {
+            material.push_str(&file_identity(std::path::Path::new(je_path))?);
+        }
+        None => material.push_str("no-je"),
+    }
+    Some(hash_text(&material))
+}
+
+/// 核对完成后把 evaluate 的完整结果落盘：键即指纹，临时文件＋原子替换。
+/// 全程尽力而为——目录建不了、序列化或写盘失败都静默放弃，绝不让核对
+/// 本身报错。
+fn save_result_snapshot(params: &Value, result: &Value) {
+    let Some(dir) = snapshot_dir() else { return };
+    let Some(print) = check_result_fingerprint(params) else { return };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let body = json!({ "fingerprint": print, "result": result });
+    let Ok(text) = serde_json::to_string(&body) else {
+        return;
+    };
+    let final_path = dir.join(format!("{print}.json"));
+    let partial = dir.join(format!("{print}.json.partial"));
+    if std::fs::write(&partial, &text).is_err() {
+        return;
+    }
+    if crate::tabular::replace_file(&partial, &final_path).is_err() {
+        let _ = std::fs::remove_file(&partial);
+        return;
+    }
+    eprintln!(
+        "TBJE 核对结果快照写入（指纹 {}…，{} 字节）",
+        print.get(..8).unwrap_or(""),
+        text.len()
+    );
+}
+
+/// 导出前查结果快照：文件缺失、JSON 损坏、指纹或结果结构对不上都返回
+/// None，由调用方按现行流程重算（并刷新快照）。
+fn load_result_snapshot(params: &Value) -> Option<Value> {
+    let dir = snapshot_dir()?;
+    let print = check_result_fingerprint(params)?;
+    let text = std::fs::read_to_string(dir.join(format!("{print}.json"))).ok()?;
+    let body: Value = serde_json::from_str(&text).ok()?;
+    if body.get("fingerprint")?.as_str()? != print.as_str() {
+        return None;
+    }
+    let result = body.get("result")?.clone();
+    // 最小结构校验：三条核对结论都在才认这份快照可用。
+    for key in ["rollforward", "tbVsJe", "equation"] {
+        result.get(key)?;
+    }
+    eprintln!("TBJE 核对结果快照命中，导出复用（跳过重新计算）");
+    Some(result)
 }
 
 // ────────────────────────────── 导出明细 ──────────────────────────────
@@ -1572,9 +1844,7 @@ struct EquationDetail {
 
 fn equation_details(prepared: &PreparedCheck) -> Vec<EquationDetail> {
     let records = fx::records(&prepared.tb);
-    let leaf = ledger_mapping::tb_leaf_mask(&prepared.tb.headers, &prepared.tb.rows, &|role| {
-        columns(&prepared.tb_map, role)
-    });
+    let leaf = &prepared.tb_leaf;
     let mut details = Vec::new();
     let convention = fx::sign_convention_of(&prepared.tb_map);
     let opening_basis = ledger_mapping::balance_sign_basis_by_row(
@@ -1598,7 +1868,7 @@ fn equation_details(prepared: &PreparedCheck) -> Vec<EquationDetail> {
         if !leaf.get(index).copied().unwrap_or(true) {
             continue;
         }
-        let (_, code) = identity(&prepared.tb, row, &prepared.tb_map, &prepared.tb_fixed);
+        let (_, code, name) = &prepared.tb_identities[index];
         if code.is_empty() {
             continue;
         }
@@ -1606,7 +1876,6 @@ fn equation_details(prepared: &PreparedCheck) -> Vec<EquationDetail> {
             continue;
         };
         let category = ledger_mapping::account_category(&code);
-        let name = display_name(&prepared.tb, row, &prepared.tb_map);
         let source_row = prepared.tb.header_row + prepared.tb.header_depth + index + 1;
         for (period, prefix, basis) in [
             ("年初", "openingFunctional", &opening_basis),
@@ -1949,6 +2218,8 @@ fn check_equation(
     map: &Map<String, Value>,
     fixed: &str,
     functional_rows: &[bool],
+    leaf: &[bool],
+    identities: &[(String, String, String)],
 ) -> Value {
     if columns(map, "accountCode").is_empty() {
         return json!({
@@ -1973,7 +2244,6 @@ fn check_equation(
     // 负债和权益整片翻号、合计差出两倍资产——「业务模块不得各自实现一份」。
     let records = fx::records(tb);
     // 只算末级：父子科目混排时不过滤，父行子行各加一遍，能差出几个亿。
-    let leaf = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| columns(map, role));
 
     let mut opening = BTreeMap::<AccountCategory, f64>::new();
     let mut closing = BTreeMap::<AccountCategory, f64>::new();
@@ -2011,7 +2281,7 @@ fn check_equation(
         if !leaf.get(index).copied().unwrap_or(true) {
             continue;
         }
-        let (_, code) = identity(tb, row, map, fixed);
+        let (_, code, name) = &identities[index];
         if code.is_empty() {
             continue;
         }
@@ -2063,7 +2333,7 @@ fn check_equation(
                 unclassified.push(json!({
                     "sourceRow": tb.header_row + index + 2,
                     "code": code,
-                    "name": display_name(tb, row, map),
+                    "name": name,
                     "opening": open,
                     "closing": close,
                     "openingIncluded": has_opening && open_reliable,
@@ -2077,7 +2347,7 @@ fn check_equation(
                 ambiguous.push(json!({
                     "sourceRow": tb.header_row + index + 2,
                     "code": code,
-                    "name": display_name(tb, row, map),
+                    "name": name,
                     "opening": open,
                     "closing": close,
                     "openingReliable": open_reliable,
@@ -2210,11 +2480,12 @@ fn check_tb_vs_je(
     je_map: &Map<String, Value>,
     je_fixed: &str,
     cancel: &AtomicBool,
-    include_all_accounts: bool,
     functional_rows: &[bool],
     je_rows: &[bool],
     entity_scope: &ledger_mapping::EntityScope,
     auxiliary_plan_params: Option<&Value>,
+    leaf: &[bool],
+    raw_tb_identities: &[(String, String, String)],
 ) -> Result<Value, AppError> {
     let je_table = &*je.table;
     let tb_debit = columns(tb_map, "ytdFunctionalDebit");
@@ -2250,23 +2521,22 @@ fn check_tb_vs_je(
     let mut tb_row_counts = BTreeMap::<(String, String, String), usize>::new();
 
     // TB 侧：只收末级行，汇总行的发生额是下级之和，收进来就翻倍。
-    let leaf = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| columns(tb_map, role));
+    let scoped_tb_identities = raw_tb_identities.iter().map(|(entity, code, name)| {
+        (ledger_mapping::apply_entity_scope(ledger_mapping::EntitySide::Tb, entity, entity_scope),
+            code.clone(), name.clone())
+    }).collect::<Vec<_>>();
+    let scoped_je_identities = if je.disk.is_none() {
+        je_table.rows.iter().map(|row| scoped_identity_parts(
+            je_table, row, je_map, je_fixed, ledger_mapping::EntitySide::Je, entity_scope,
+        )).collect::<Vec<_>>()
+    } else { Vec::new() };
     let tb_identities = tb
         .rows
         .iter()
         .enumerate()
         .filter(|(index, _)| functional_rows.get(*index).copied().unwrap_or(true))
         .filter(|(index, _)| leaf.get(*index).copied().unwrap_or(true))
-        .map(|(_, row)| {
-            scoped_identity_parts(
-                tb,
-                row,
-                tb_map,
-                tb_fixed,
-                ledger_mapping::EntitySide::Tb,
-                entity_scope,
-            )
-        })
+        .map(|(index, _)| scoped_tb_identities[index].clone())
         .filter(|(_, code, name)| !code.is_empty() || !name.is_empty())
         .collect::<Vec<_>>();
     let je_identities = if let Some(disk) = je.disk.as_ref() {
@@ -2292,16 +2562,7 @@ fn check_tb_vs_je(
             .iter()
             .enumerate()
             .filter(|(index, _)| je_rows.get(*index).copied().unwrap_or(true))
-            .map(|(_, row)| {
-                scoped_identity_parts(
-                    je_table,
-                    row,
-                    je_map,
-                    je_fixed,
-                    ledger_mapping::EntitySide::Je,
-                    entity_scope,
-                )
-            })
+            .map(|(index, _)| scoped_je_identities[index].clone())
             .filter(|(_, code, name)| !code.is_empty() || !name.is_empty())
             .collect::<Vec<_>>()
     };
@@ -2328,6 +2589,8 @@ fn check_tb_vs_je(
 
     // 辅助核算联动验证（公共锚点反查）：TB 映射了辅助列时认定 JE 的对应列，
     // 认定成功才把维度并入勾稽键；对不上按主体＋科目静默降级，附提示。
+    let tb_keys = row_match_keys(&scoped_tb_identities, &account_policy);
+    let je_keys = row_match_keys(&scoped_je_identities, &account_policy);
     let tb_aux_mapped = !ledger_mapping::mapped_column_names(tb_map, "auxiliary").is_empty();
     let je_preferred = ledger_mapping::mapped_column_names(je_map, "auxiliary");
     let mut je_unassigned_rows = 0usize;
@@ -2344,14 +2607,7 @@ fn check_tb_vs_je(
             if !functional_rows.get(index).copied().unwrap_or(true) {
                 return None;
             }
-            let (entity, own_code, own_name) = scoped_identity_parts(
-                tb,
-                row,
-                tb_map,
-                tb_fixed,
-                ledger_mapping::EntitySide::Tb,
-                entity_scope,
-            );
+            let (entity, own_code, own_name) = scoped_tb_identities[index].clone();
             if !own_code.is_empty() {
                 last_tb_account.insert(entity.clone(), (own_code.clone(), own_name.clone()));
             }
@@ -2401,24 +2657,18 @@ fn check_tb_vs_je(
                 let entity = group.get("entity")?.as_str()?.to_owned();
                 let account = group.get("account")?.as_str()?.to_owned();
                 let column = group.get("jeColumn")?.as_str()?.to_owned();
-                let anchor_total = group
-                    .get("anchorTotal")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize;
-                let anchor_hits = group
-                    .get("anchorHits")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(anchor_total as u64) as usize;
+                // 锚点命中数只服务已撤除的展示统计字段，这里不再回读；
+                // 计划内的组一律按已验证（verified）重建，行为不变。
                 Some(ledger_mapping::AuxiliaryLinkGroupVerdict {
                     entity,
                     account,
                     verdict: ledger_mapping::AuxiliaryLinkVerdict {
                         column: Some(column),
                         status: "verified",
-                        anchor_total,
-                        anchor_hits,
-                        nonempty_rows: anchor_hits,
-                        total_rows: anchor_hits,
+                        anchor_total: 0,
+                        anchor_hits: 0,
+                        nonempty_rows: 0,
+                        total_rows: 0,
                         competing_columns: Vec::new(),
                     },
                 })
@@ -2429,16 +2679,7 @@ fn check_tb_vs_je(
         let mut je_scan_accumulator =
             ledger_mapping::GroupedAnchorColumnAccumulator::new(je_table.headers.len());
         let mut je_group_totals = BTreeMap::<ledger_mapping::AuxiliaryGroupKey, usize>::new();
-        let mut scan_je_row = |row: &[String]| {
-            let group = scoped_matched_identity(
-                je_table,
-                row,
-                je_map,
-                je_fixed,
-                ledger_mapping::EntitySide::Je,
-                entity_scope,
-                &account_policy,
-            );
+        let mut scan_je_row = |row: &[String], group: (String, String)| {
             let Some(anchors) = anchor_groups.get(&group) else {
                 return;
             };
@@ -2447,13 +2688,16 @@ fn check_tb_vs_je(
         };
         if let Some(disk) = je.disk.as_ref() {
             disk.visit(false, cancel, |row| {
-                scan_je_row(&row.values);
+                scan_je_row(&row.values, scoped_matched_identity(
+                    je_table, &row.values, je_map, je_fixed,
+                    ledger_mapping::EntitySide::Je, entity_scope, &account_policy,
+                ));
                 Ok(())
             })?;
         } else {
             for (index, row) in je_table.rows.iter().enumerate() {
                 if je_rows.get(index).copied().unwrap_or(true) {
-                    scan_je_row(row);
+                    scan_je_row(row, je_keys[index].clone());
                 }
             }
         }
@@ -2514,15 +2758,7 @@ fn check_tb_vs_je(
             let Some(row) = tb.rows.get(dimension.index) else {
                 continue;
             };
-            let entity = scoped_identity_parts(
-                tb,
-                row,
-                tb_map,
-                tb_fixed,
-                ledger_mapping::EntitySide::Tb,
-                entity_scope,
-            )
-            .0;
+            let entity = scoped_tb_identities[dimension.index].0.clone();
             let account = account_policy.account_key(&entity, &dimension.code, &dimension.name);
             if account.is_empty()
                 || verified_groups
@@ -2568,15 +2804,7 @@ fn check_tb_vs_je(
             if !leaf.get(index).copied().unwrap_or(true) {
                 continue;
             }
-            let key = scoped_matched_identity(
-                tb,
-                row,
-                tb_map,
-                tb_fixed,
-                ledger_mapping::EntitySide::Tb,
-                entity_scope,
-                &account_policy,
-            );
+            let key = tb_keys[index].clone();
             if key.1.is_empty() {
                 continue;
             }
@@ -2602,7 +2830,7 @@ fn check_tb_vs_je(
             }
             names
                 .entry(key)
-                .or_insert_with(|| display_name(tb, row, tb_map));
+                .or_insert_with(|| scoped_tb_identities[index].2.clone());
         }
     }
 
@@ -2656,15 +2884,7 @@ fn check_tb_vs_je(
             if !je_rows.get(index).copied().unwrap_or(true) {
                 continue;
             }
-            let key = scoped_matched_identity(
-                je_table,
-                row,
-                je_map,
-                je_fixed,
-                ledger_mapping::EntitySide::Je,
-                entity_scope,
-                &account_policy,
-            );
+            let key = je_keys[index].clone();
             if key.1.is_empty() {
                 continue;
             }
@@ -2696,7 +2916,7 @@ fn check_tb_vs_je(
             entry.credit += credit;
             names
                 .entry(key)
-                .or_insert_with(|| display_name(je_table, row, je_map));
+                .or_insert_with(|| scoped_je_identities[index].2.clone());
         }
     }
 
@@ -2732,34 +2952,35 @@ fn check_tb_vs_je(
         if net_off {
             net_mismatched += 1;
         }
-        if (include_all_accounts || off) && (include_all_accounts || items.len() < 500) {
-            items.push(json!({
-                "entity": key.0,
-                "code": ledger_mapping::account_code_from_match_key(&key.1),
-                "name": names.get(&key).cloned().unwrap_or_default(),
-                // 辅助维度（认定成功时才有值；空串＝未分维度桶）。
-                "auxiliary": aux_display.get(&key.2).cloned().unwrap_or_default(),
-                "presence": match (tb_side.is_some(), je_side.is_some()) {
-                    (true, true) => "both",
-                    (true, false) => "tbOnly",
-                    (false, true) => "jeOnly",
-                    _ => "none",
-                },
-                "tbDebit": t.debit, "jeDebit": j.debit, "debitDifference": debit_diff,
-                "tbCredit": t.credit, "jeCredit": j.credit, "creditDifference": credit_diff,
-                "tbIncludedCurrencies": included_currencies,
-                "tbIncludedRows": included_rows,
-                "tbNet": tb_net, "jeNet": je_net, "netDifference": net_diff,
-                "netPassed": !net_off,
-                "overallVerdict": if net_off {
-                    "不通过"
-                } else if off {
-                    "净额通过，单边发生额有差异"
-                } else {
-                    "通过"
-                },
-            }));
-        }
+        // 全量科目都进 items（导出底稿与结果快照需要完整行）；run 模式
+        // 「只留差异项、至多 500 条」的旧口径由 evaluate 统一过滤执行
+        // （trim_items_for_run_mode）。
+        items.push(json!({
+            "entity": key.0,
+            "code": ledger_mapping::account_code_from_match_key(&key.1),
+            "name": names.get(&key).cloned().unwrap_or_default(),
+            // 辅助维度（认定成功时才有值；空串＝未分维度桶）。
+            "auxiliary": aux_display.get(&key.2).cloned().unwrap_or_default(),
+            "presence": match (tb_side.is_some(), je_side.is_some()) {
+                (true, true) => "both",
+                (true, false) => "tbOnly",
+                (false, true) => "jeOnly",
+                _ => "none",
+            },
+            "tbDebit": t.debit, "jeDebit": j.debit, "debitDifference": debit_diff,
+            "tbCredit": t.credit, "jeCredit": j.credit, "creditDifference": credit_diff,
+            "tbIncludedCurrencies": included_currencies,
+            "tbIncludedRows": included_rows,
+            "tbNet": tb_net, "jeNet": je_net, "netDifference": net_diff,
+            "netPassed": !net_off,
+            "overallVerdict": if net_off {
+                "不通过"
+            } else if off {
+                "净额通过，单边发生额有差异"
+            } else {
+                "通过"
+            },
+        }));
     }
     // 这里只能客观判断差异覆盖面，不能仅凭“80% 科目不一致”推断期间不匹配。
     // 期间结论必须有日期/会计期间字段的直接证据，避免掩盖映射或口径问题。
@@ -2817,7 +3038,6 @@ fn check_tb_vs_je(
             let verdict = &group.verdict;
             json!({"entity": group.entity, "account": group.account,
                 "status": verdict.status, "column": verdict.column,
-                "anchorHits": verdict.anchor_hits, "anchorTotal": verdict.anchor_total,
                 "competingColumns": verdict.competing_columns})
         }).collect::<Vec<_>>();
         let status = if group_verdicts.is_empty() { "noAnchors" }
@@ -2825,14 +3045,11 @@ fn check_tb_vs_je(
             else if group_verdicts.iter().all(|group| group.verdict.status == "noMatch") { "noMatch" }
             else if group_verdicts.iter().any(|group| group.verdict.status == "ambiguous") { "ambiguous" }
             else { "partialCoverage" };
-        let anchor_hits = group_verdicts.iter().map(|group| group.verdict.anchor_hits).sum::<usize>();
-        let anchor_total = group_verdicts.iter().map(|group| group.verdict.anchor_total).sum::<usize>();
+        // 锚点命中率/覆盖率统计字段已按用户决策撤除；各组命中计数仍保留在
+        // verdict 内部，驱动 partialCoverage 等降级判定与提示文案。
         json!({
             "status": status,
             "column": group_verdicts.first().and_then(|group| group.verdict.column.clone()),
-            "anchorHits": anchor_hits,
-            "anchorTotal": anchor_total,
-            "coverage": if anchor_total > 0 { anchor_hits as f64 / anchor_total as f64 } else { 0.0 },
             "competingColumns": group_verdicts.iter().flat_map(|group| group.verdict.competing_columns.clone()).collect::<BTreeSet<_>>(),
             "groups": group_json,
         })

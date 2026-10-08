@@ -278,15 +278,14 @@ fn write_report(
     )?;
     if is_bank {
         let date_index = column(&table.headers, "函证基准日").unwrap();
-        for date in unique_dates_from_rows(&selected, date_index) {
+        let mut by_date = BTreeMap::<String, Vec<Vec<String>>>::new();
+        for row in &selected {
+            if let Some(date) = normalized_date(cell(row, date_index)) {
+                by_date.entry(date).or_default().push(row.clone());
+            }
+        }
+        for (date, subset) in by_date {
             check_cancel_ref(cancel)?;
-            let subset = selected
-                .iter()
-                .filter(|row| {
-                    normalized_date(cell(row, date_index)).as_deref() == Some(date.as_str())
-                })
-                .cloned()
-                .collect::<Vec<_>>();
             for group in ["发函单位名称", "项目名称"] {
                 if column(&table.headers, group).is_none() {
                     continue;

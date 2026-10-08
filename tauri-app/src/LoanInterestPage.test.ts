@@ -19,12 +19,12 @@ describe("借款利息测算", () => {
   it("辅助整组经 JE 验证后才在第二步展开", () => {
     const account = { key: "200101", code: "200101", name: "银行借款", account: "200101 银行借款", opening: 100, closing: 90 };
     expect(loanAccountReviewRows([account], {
-      tbAuxMapped: true, status: "verified", column: "辅助", anchorHits: 1, anchorTotal: 1,
-      coverage: 1, competingColumns: [], warnings: [],
+      tbAuxMapped: true, status: "verified", column: "辅助",
+      competingColumns: [], warnings: [],
       groups: [{ entity: "甲", account: "200101", reviewVerified: true,
         details: [{ key: "a银行", display: "A银行" }], tbAuxMapped: true,
-        status: "verified", column: "辅助", anchorHits: 1, anchorTotal: 1,
-        coverage: 1, competingColumns: [], warnings: [] }],
+        status: "verified", column: "辅助",
+        competingColumns: [], warnings: [] }],
     })).toMatchObject([{ entity: "甲", auxiliary: "A银行" }]);
     expect(loanAccountReviewRows([account], null)).toMatchObject([{ reviewKey: "200101" }]);
   });
@@ -63,12 +63,12 @@ describe("借款利息测算", () => {
       { ...base, identity: "股东", name: "股东借款", account: "2001 股东借款", reviewAuxiliaries: [{ entity: "甲", auxiliary: "股东甲" }] },
     ];
     const link = {
-      tbAuxMapped: true, status: "verified", column: "辅助", anchorHits: 2, anchorTotal: 2,
-      coverage: 1, competingColumns: [], warnings: [], groups: [{
+      tbAuxMapped: true, status: "verified", column: "辅助",
+      competingColumns: [], warnings: [], groups: [{
         entity: "甲", account: "2001", reviewVerified: true,
         details: [{ key: "A银行", display: "A银行" }, { key: "股东甲", display: "股东甲" }],
-        tbAuxMapped: true, status: "verified", column: "辅助", anchorHits: 2,
-        anchorTotal: 2, coverage: 1, competingColumns: [], warnings: [],
+        tbAuxMapped: true, status: "verified", column: "辅助",
+        competingColumns: [], warnings: [],
       }],
     } as Parameters<typeof loanAccountReviewRows>[1];
     const rows = loanAccountReviewRows(accounts, link);

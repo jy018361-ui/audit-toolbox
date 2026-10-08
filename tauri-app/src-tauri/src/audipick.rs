@@ -1140,6 +1140,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
         "tb": tb,
         "je": je,
     });
+    let prompt = format!("{prompt}{REVIEW_CONCISE_OUTPUT}");
     let content = request_llm(llm, &prompt, &payload.to_string(), None)?;
     let mut parsed = parse_json_content(&content);
     if !parsed.is_object() {
@@ -1320,6 +1321,7 @@ fn ledger_mapping_llm_call(
     inject_required_missing_roles(&mut payload, if is_tb { "tb" } else { "je" });
     inject_mapping_review_scope(&mut payload, if is_tb { "tb" } else { "je" });
     let payload = &payload;
+    let prompt = format!("{prompt}{REVIEW_CONCISE_OUTPUT}");
     let content = request_llm(llm, &prompt, &payload.to_string(), None)?;
     let mut value = parse_json_content(&content);
     if !value.is_object() {
@@ -2201,6 +2203,8 @@ pub(crate) fn fx_account_translation_llm_call(
     Ok(output)
 }
 
+const REVIEW_CONCISE_OUTPUT: &str = "\n输出精简规则：mappedRolesToReview 中的每个角色仍须逐项返回 roleReviews，保留原始 currentColumns 和 status。keep 的 reason 只写样例相容的简短依据，最多 20 个字；replace、clear、uncertain 及 change 的理由只写一句关键依据，不重复表头清单、样例行或整段业务规则。不要为尚未映射且没有可信候选的角色额外生成确认记录，也不要重复输出同一调整。";
+
 /// 看账与正负数凭证标记的复核提示词。
 ///
 /// **规则文本不自带**——纪律取自 [`REVIEW_COMMON`] ＋ [`REVIEW_JE`]，与汇兑损益同一份。
@@ -2219,7 +2223,7 @@ fn kanzhang_mapping_prompt() -> String {
          roleReviews:[{{role:string,currentColumns:[string],status:\"keep\"|\"replace\"|\"clear\"|\"uncertain\",reason:string}}]}}。action=clear 时省略 suggestedColumn。\
          方案A＝净额列（可加方向列）；方案B＝借方与贷方两列，二者互斥。\
          mappedRolesToReview 中每个已有角色都必须返回一条 roleReviews；不能用 fills/reviews 为空代替语义复核。unmappedRoles 逐项检查，有相容列就输出 fills；requiredMissingRoles、requiredMissingAny 与 suspectMappings 优先。requiredMissingAny 中每组至少补一个相容角色；摘要是选填，不因缺失而阻拦。\
-         {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{je_instruction}{composite_date}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
+         {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{je_instruction}{composite_date}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}{REVIEW_CONCISE_OUTPUT}"
     )
 }
 
@@ -2336,7 +2340,12 @@ pub(crate) fn request_llm(
     text: &str,
     image: Option<&str>,
 ) -> Result<String, AppError> {
-    request_llm_with_key(config, prompt, text, image, None)
+    let started = std::time::Instant::now();
+    let result = request_llm_with_key(config, prompt, text, image, None);
+    eprintln!("LLM 调用：提示词 {} 字节，文本 {} 字节，含图片 {}，输出 {} 字节，耗时 {:.1} 秒，状态 {}",
+        prompt.len(), text.len(), image.is_some(), result.as_ref().map(|content| content.len()).unwrap_or(0),
+        started.elapsed().as_secs_f64(), result.as_ref().map(|_| "成功").unwrap_or_else(|error| error.code.as_str()));
+    result
 }
 
 pub(crate) fn test_llm_connection(

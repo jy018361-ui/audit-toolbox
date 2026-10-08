@@ -13,6 +13,19 @@ import {
 import { DEFAULT_ENTITY, ledgerEntitiesByAccount } from "./ledgerMapping";
 
 describe("存款第二步主体拆行", () => {
+  it("同码汇总建议只附着在原始主体科目币种身份上", () => {
+    const account = "1999 甲户";
+    const rows = depositAccountReviewRows([account], null, new Map([[account, ["A", "B"]]]), [
+      { entity: "A", account, auxiliary: "", currency: "CNY", suggestedDepositRole: "deposit", parentAccountName: "银行存款" },
+      { entity: "B", account, auxiliary: "", currency: "CNY" },
+    ]);
+    expect(rows.map((row) => [row.key, row.account, row.suggestedRole])).toEqual([
+      [JSON.stringify(["A", account, "", "CNY"]), account, "deposit"],
+      [JSON.stringify(["B", account, "", "CNY"]), account, undefined],
+    ]);
+    expect(rows[0].parentAccountName).toBe("银行存款");
+    expect(rows[1].parentAccountName).toBeUndefined();
+  });
   it("源行按主体、科目名称、有效辅助项和币种保留独立身份", () => {
     const accounts = ["1002 银行存款", "1002 其他存款"];
     const identities = [
@@ -58,13 +71,13 @@ describe("存款第二步主体拆行", () => {
   });
   it("已验证辅助的主体不再补科目兜底行，未验证的主体补兜底", () => {
     const link = {
-      tbAuxMapped: true, status: "verified", column: "账户", anchorHits: 1, anchorTotal: 1,
-      coverage: 1, competingColumns: [], warnings: [],
+      tbAuxMapped: true, status: "verified", column: "账户",
+      competingColumns: [], warnings: [],
       groups: [
         { entity: "2000", account: "100201", reviewVerified: true,
           details: [{ key: "a银行", display: "A银行" }], tbAuxMapped: true,
-          status: "verified", column: "账户", anchorHits: 1, anchorTotal: 1,
-          coverage: 1, competingColumns: [], warnings: [] },
+          status: "verified", column: "账户",
+          competingColumns: [], warnings: [] },
       ],
     } as Parameters<typeof depositAccountReviewRows>[1];
     const rows = depositAccountReviewRows(["100201 银行存款"], link, byAccount);
@@ -99,16 +112,16 @@ describe("存款余额勾稽与利率状态分别显示", () => {
 describe("存款第二步辅助明细", () => {
   it("仅完整验证成功的主体科目组展开", () => {
     const result = depositAccountReviewRows(["100201 银行存款"], {
-      tbAuxMapped: true, status: "partialCoverage", column: "银行账户", anchorHits: 1,
-      anchorTotal: 2, coverage: 0.5, competingColumns: [], warnings: [],
+      tbAuxMapped: true, status: "partialCoverage", column: "银行账户",
+      competingColumns: [], warnings: [],
       groups: [
         { entity: "甲", account: "100201", reviewVerified: true,
           details: [{ key: "a银行", display: "A银行" }], tbAuxMapped: true,
-          status: "verified", column: "银行账户", anchorHits: 1, anchorTotal: 1,
-          coverage: 1, competingColumns: [], warnings: [] },
+          status: "verified", column: "银行账户",
+          competingColumns: [], warnings: [] },
         { entity: "乙", account: "100201", reviewVerified: false, details: [], tbAuxMapped: true,
-          status: "noMatch", column: null, anchorHits: 0, anchorTotal: 1,
-          coverage: 0, competingColumns: [], warnings: [] },
+          status: "noMatch", column: null,
+          competingColumns: [], warnings: [] },
       ],
     });
     expect(result.map((row) => row.auxiliary ?? "末级")).toEqual(["A银行", "末级"]);

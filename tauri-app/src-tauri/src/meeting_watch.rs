@@ -23,7 +23,10 @@ use tauri::Emitter;
 
 use crate::AppError;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// 检测轮询间隔：真机反馈「点结束会议时才弹询问窗」，短测试会里 3 秒轮询
+/// 加上小窗创建就要 4-6 秒，弹出来会已挂断。降到 1 秒把端到端延迟压住，
+/// 日志文件很小，这个频率的增量读没有负担。
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// 首次扫描整份日志的上限：SlimCore 单文件通常在几百 KB 量级。
 const INITIAL_SCAN_CAP: u64 = 32 * 1024 * 1024;
 const MAX_READ_PER_POLL: u64 = 4 * 1024 * 1024;

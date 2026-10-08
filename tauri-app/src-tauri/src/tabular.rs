@@ -5998,7 +5998,7 @@ fn fingerprint(
     Ok(hex::encode(h.finalize()))
 }
 /// 缓存根目录：`%LOCALAPPDATA%/AuditToolbox/AuditToolbox/cache`。
-fn cache_root() -> Result<PathBuf, AppError> {
+pub(crate) fn cache_root() -> Result<PathBuf, AppError> {
     let dirs = ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
         .ok_or_else(|| error("DATA_DIR_UNAVAILABLE", "无法确定缓存目录。", None))?;
     Ok(dirs.cache_dir().to_path_buf())
@@ -6240,7 +6240,7 @@ fn partial_path(output: &Path) -> PathBuf {
         output.extension().and_then(|v| v.to_str()).unwrap_or("tmp")
     ))
 }
-fn replace_file(partial: &Path, output: &Path) -> Result<(), AppError> {
+pub(crate) fn replace_file(partial: &Path, output: &Path) -> Result<(), AppError> {
     if output.exists() {
         fs::remove_file(output).map_err(io_error)?;
     }

@@ -69,8 +69,16 @@ export function ledgerHasMappedRole(
 }
 
 /** 第二步统一在科目列展示有效辅助值；身份键仍分别保留科目和辅助字段。 */
-export function ledgerReviewAccountLabel(account: string, auxiliary?: string | null): string {
-  const name = account.trim();
+export function ledgerReviewAccountLabel(account: string, auxiliary?: string | null, parentAccountName?: string | null): string {
+  let name = account.trim();
+  const parent = parentAccountName?.trim();
+  if (parent) {
+    const match = name.match(/^(\S+?)[\s/:：\\|]+(.+)$/);
+    const hasCode = Boolean(match && looksLikeAccountCode(match[1]));
+    const leaf = hasCode ? match![2].trim() : name;
+    // 显示层补名；源科目串及身份键始终保留原值。
+    if (!leaf.includes(parent)) name = `${hasCode ? `${match![1]} ` : ""}${parent}-${leaf}`;
+  }
   const detail = auxiliary?.trim();
   return detail ? `${name} · ${detail}` : name;
 }
@@ -1559,9 +1567,6 @@ export type AuxiliaryLinkResult = {
   tbAuxMapped: boolean;
   status: AuxiliaryLinkStatus;
   column: string | null;
-  anchorHits: number;
-  anchorTotal: number;
-  coverage: number;
   competingColumns: string[];
   warnings: string[];
   planKey?: string | null;

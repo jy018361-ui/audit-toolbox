@@ -125,6 +125,10 @@ export type Inspection = {
     account: string;
     auxiliary: string;
     currency: string;
+    classificationContext?: string;
+    parentAccountName?: string;
+    suggestedDepositRole?: string;
+    suggestedFxRole?: string;
   }>;
   suggestedMapping: Record<string, string | string[]>;
   /** 引擎随识别结果全量下发的角色标签（`{name,label}`）；缺失时回落本页的标签表。 */
@@ -361,9 +365,11 @@ type DepositAccountReviewRow = {
   auxiliary?: string;
   auxiliaryKey?: string;
   currency?: string;
+  suggestedRole?: string;
+  parentAccountName?: string;
 };
 
-type SourceReviewIdentity = { entity: string; account: string; auxiliary: string; currency: string };
+type SourceReviewIdentity = { entity: string; account: string; auxiliary: string; currency: string; suggestedDepositRole?: string; parentAccountName?: string };
 
 const depositDetailKey = (entity: string, account: string, auxiliary: string) =>
   `${entity}\u001f${account}\u001f${auxiliary}`;
@@ -395,7 +401,8 @@ export function depositAccountReviewRows(
       seen.add(key);
       return [{ key, account: identity.account, entity,
         auxiliary: auxiliary || undefined, auxiliaryKey: auxiliary || undefined,
-        currency: identity.currency }];
+        currency: identity.currency, ...(identity.suggestedDepositRole ? { suggestedRole: identity.suggestedDepositRole } : {}),
+        ...(identity.parentAccountName ? { parentAccountName: identity.parentAccountName } : {}) }];
     });
   }
   const codeCounts = new Map<string, number>();
@@ -907,7 +914,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const reviewRole = (row: DepositAccountReviewRow) =>
     accountDetailRoleOverrides[row.key]
     ?? (row.auxiliaryKey ? accountDetailRoleOverrides[depositDetailKey(row.entity ?? "", depositAccountCode(row.account), row.auxiliaryKey)] : undefined)
-    ?? accountRoles[row.account] ?? "";
+    ?? accountRoleOverrides[row.account] ?? row.suggestedRole ?? accountRoles[row.account] ?? "";
   // 账户级覆盖的键：读写两侧统一走 depositAccountOverrideKey（模块级导出，
   // 回传处理与测试同源），防止写入键与读取键错位。
   const accountOverrideKey = depositAccountOverrideKey;
@@ -920,7 +927,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       reviewAccounts
         .filter((row) =>
           accountMatches(
-            `${row.account} ${row.entity ?? ""} ${row.auxiliary ?? ""}`,
+            `${row.account} ${row.parentAccountName ?? ""} ${row.entity ?? ""} ${row.auxiliary ?? ""}`,
           ),
         )
         .sort((a, b) => Number(activeAccount(b)) - Number(activeAccount(a))),
@@ -2448,8 +2455,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                                     : "—"}
                               </td>
                             )}
-                            <td title={ledgerReviewAccountLabel(row.account, row.auxiliary)}>
-                              {ledgerReviewAccountLabel(row.account, row.auxiliary)}
+                            <td className="deposit-review-account-name" title={ledgerReviewAccountLabel(row.account, row.auxiliary, row.parentAccountName)}>
+                              {ledgerReviewAccountLabel(row.account, row.auxiliary, row.parentAccountName)}
                             </td>
                             {showReviewCurrency && <td>{currency || "—"}</td>}
                             {index === 0 ? (
@@ -2659,7 +2666,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                                 <td>
                                   <span className="deposit-pct">
                                     <NumberInput
-                                      label={`${ledgerReviewAccountLabel(row.account, row.auxiliary)}${currency ? `（${currency}）` : ""}的年利率`}
+                                      label={`${ledgerReviewAccountLabel(row.account, row.auxiliary, row.parentAccountName)}${currency ? `（${currency}）` : ""}的年利率`}
                                       step="0.01"
                                       min="0"
                                       max="20"
@@ -2743,7 +2750,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                       const isRateRow = ["deposit", "other_monetary"].includes(reviewRole(row));
                       return { key: row.key, values: [
                         ...(multiEntity ? [row.entity ?? ""] : []),
-                        ledgerReviewAccountLabel(row.account, row.auxiliary),
+                        ledgerReviewAccountLabel(row.account, row.auxiliary, row.parentAccountName),
                         ...(showReviewCurrency ? [row.currency ?? ""] : []),
                         ROLE_OPTIONS.find(([key]) => key === reviewRole(row))?.[1] ?? "",
                         (tiers?.categories ?? []).find((item) => item.key === tier?.category)?.label ?? "",
@@ -3359,6 +3366,7 @@ function MappingPreview(props: {
       groups={formGroups(props.kind, roles, forms, props.mapping)}
       requirementOf={(role) => roleRequirement(formMatch, role)}
       formNote={describeForm(formMatch, (role) => labels[role] ?? role)}
+      formComplete={formMatch?.complete}
       multi={DEPOSIT_MULTI}
       missing={props.missing}
       banner={props.banner}

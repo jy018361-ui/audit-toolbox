@@ -13,6 +13,25 @@ import {
   unionEntityAccounts,
 } from "./FaTbJePage";
 
+it("同码汇总语义用于FA建议但不改变源行身份或覆盖人工分类", () => {
+  const pairs = faReviewEntityAccounts([
+    { entity: "A", account: "1998 资产甲", currency: "CNY", classificationContext: "固定资产-机器设备" },
+    { entity: "A", account: "1998 资产乙", currency: "CNY", classificationContext: "累计折旧-机器设备" },
+    { entity: "B", account: "1998 资产甲", currency: "CNY" },
+  ]);
+  const assigned = faAssignmentsForEntityAccounts(pairs, []);
+  expect(assigned.map((row) => [row.entity, row.account, row.role, row.category])).toEqual([
+    ["A", "1998 资产甲", "cost", "机器设备"],
+    ["A", "1998 资产乙", "depreciation", "机器设备"],
+    ["B", "1998 资产甲", "excluded", "资产甲"],
+  ]);
+  const manual = { ...assigned[0], role: "excluded" as const, category: "其他" };
+  expect(faAssignmentsForEntityAccounts(pairs, [manual]).find((row) => row.entity === "A" && row.account === manual.account)).toEqual(manual);
+  expect(faAssignmentsForEntityAccounts([
+    { entity: "A", account: "1998 机器设备", classificationContext: "固定资产" },
+  ], [])[0]).toMatchObject({ account: "1998 机器设备", role: "cost", category: "机器设备" });
+});
+
 describe("FA TB+JE account role presets", () => {
   it("suggests roles without creating an independent ledger dictionary", () => {
     expect(suggestFaAccount("1601 固定资产-机器设备")).toEqual({

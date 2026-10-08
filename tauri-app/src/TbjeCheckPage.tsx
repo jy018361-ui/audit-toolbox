@@ -1656,8 +1656,6 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         account: item.account,
         tbColumn: item.tbColumn,
         jeColumn: item.column,
-        anchorHits: item.anchorHits,
-        anchorTotal: item.anchorTotal,
       })),
     };
   }
@@ -2772,6 +2770,7 @@ function LedgerMappingPanel(props: {
       groups={formGroups(props.kind, roles, props.forms, props.mapping)}
       requirementOf={(role) => roleRequirement(match, role)}
       formNote={describeForm(match, (role) => labels[role] ?? role)}
+      formComplete={match?.complete}
       multi={MULTI_COLUMN_ROLES}
       busy={props.disabled}
       resizeKey={props.resizeKey}

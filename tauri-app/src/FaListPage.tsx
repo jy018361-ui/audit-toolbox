@@ -1630,7 +1630,8 @@ function FaCardListPage() {
       setError("请填写资产负债表日，折旧测算与跨期新增分析都以它为截止。");
       return;
     }
-    // 导出 worker 会按当前输入和映射重新 merge，无需人工先重复匹配。
+    // 导出直接复用「开始匹配」那次的结果快照；改过输入/映射时快照指纹
+    // 不一致只提示，需回第一步重新匹配来刷新。
     if (llmBusy) {
       // LLM is advisory. Freeze the currently visible deterministic mapping
       // instead of letting a late response race with the merge payload.
@@ -2854,7 +2855,7 @@ function FaCardListPage() {
                     )}
                     {resultStale && (
                       <div className="warning-box">
-                        上述统计为上一次匹配结果。可继续下一步，导出时将按当前输入和映射重新计算。
+                        上述统计为上一次匹配结果，导出也将基于该次匹配生成套表。输入、映射或补充清单有改动时，请回第一步重新匹配。
                       </div>
                     )}
                     <span>核对完成后，再选择是否补充新增或处置清单。</span>

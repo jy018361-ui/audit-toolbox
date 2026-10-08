@@ -9,6 +9,7 @@ import {
   fxCurrencySourceLabel,
   fxCurrencyDefaultLabel,
   fxFallbackFunctional,
+  fxFormGroups,
   fxAccountCurrencyOverrides,
   fxAccountCurrencyOverridesForRoles,
   fxAccountReviewRows,
@@ -26,6 +27,7 @@ import {
   fxMergeJobResult,
   fxCurrencyRequirement,
   fxMissingRequired,
+  fxEffectiveAmountMapping,
   fxMissingDetails,
   fxJeAmountMappingHint,
   fxPreviewTokenFor,
@@ -41,6 +43,20 @@ import {
 } from "./FxAuditPage";
 
 describe("汇兑损益科目确认表", () => {
+  it("同码汇总分类建议保留逐主体身份且人工逐行分类优先", () => {
+    const account = "1999 甲户";
+    const rows = fxAccountReviewRows([account], null, new Map([[account, ["A", "B"]]]), [
+      { entity: "A", account, auxiliary: "", currency: "CNY", suggestedFxRole: "cash", parentAccountName: "银行存款" },
+      { entity: "B", account, auxiliary: "", currency: "CNY", suggestedFxRole: "non_monetary" },
+    ]);
+    expect(rows.map((row) => [row.key, row.account, row.suggestedRole])).toEqual([
+      [JSON.stringify(["A", account, "", "CNY"]), account, "cash"],
+      [JSON.stringify(["B", account, "", "CNY"]), account, "non_monetary"],
+    ]);
+    const roles = Object.fromEntries(rows.map((row) => [row.key, row.suggestedRole!]));
+    expect(fxConfirmationRows(rows, {}, roles, {}, {}, undefined, undefined, "CNY")[0].values[0]).toBe("1999 银行存款-甲户");
+    expect(fxSortAccountReviewRows(rows, {}, { ...roles, [rows[0].key]: "non_monetary" })).toEqual(rows);
+  });
   it("源行按主体、名称、辅助与币种保留独立复核键", () => {
     const accounts = ["1002 银行存款", "1002 其他存款"];
     const identities = [
@@ -274,9 +290,6 @@ describe("fx audit mode selection", () => {
       tbAuxMapped: true,
       status: "verified",
       column: "辅助核算",
-      anchorHits: 2,
-      anchorTotal: 2,
-      coverage: 1,
       competingColumns: [],
       warnings: [],
       groups: [
@@ -355,9 +368,6 @@ describe("fx audit mode selection", () => {
       tbAuxMapped: true,
       status: "verified",
       column: "辅助核算",
-      anchorHits: 1,
-      anchorTotal: 1,
-      coverage: 1,
       competingColumns: [],
       warnings: [],
       groups: [
@@ -413,6 +423,12 @@ describe("fx audit mode selection", () => {
     expect(
       fxResultTrustStatus({ unrealizedBalanceBasisComplete: false }).tone,
     ).toBe("usable");
+    expect(fxResultTrustStatus({
+      entitySummaries: [
+        { entity: "甲", functionalCurrency: "CNY", auditFxGainLoss: 100, tbFxGainLoss: 100 },
+        { entity: "乙", functionalCurrency: "USD", auditFxGainLoss: 10, tbFxGainLoss: 8 },
+      ],
+    }).tone).toBe("limited");
   });
 });
 describe("fx audit upload and mapping parity", () => {
@@ -921,7 +937,7 @@ describe("fx audit upload and mapping parity", () => {
       { "2602 租赁负债": true },
     );
     expect(resolved).toEqual({
-      "1003 其他货币资金": "monetary_asset",
+      "1003 其他货币资金": "monetary_non_cash_asset",
       "6703 信用减值损失-应收账款": "other_pnl",
       "2602 租赁负债": "non_monetary",
     });
@@ -951,7 +967,6 @@ describe("同一列的多重映射", () => {
   it("不同科目指向不同 JE 列时不回填", () => {
     const result = {
       tbAuxMapped: true, status: "noMatch", column: null,
-      anchorHits: 2, anchorTotal: 2, coverage: 1,
       competingColumns: [], warnings: [],
       groups: [
         { entity: "4800", account: "1002", status: "verified", column: "账户名" },
@@ -1215,4 +1230,70 @@ describe("fxCurrencyRequirement：币种类角色的下拉必填口径", () => {
     expect(fxCurrencyRequirement("je", {}, "realized", "functionalCurrency")).toBe("optional");
     expect(fxCurrencyRequirement("tb", {}, "combined", "summary")).toBeUndefined();
   });
+});
+
+it("汇兑下拉将无原币端点的TB表型标为深灰不适用，缺必填时不显示已适配", () => {
+  const roles: [string, string][] = [
+    ["openingFunctionalAmount", "期初本位币净额"],
+    ["closingFunctionalAmount", "期末本位币净额"],
+    ["openingForeignAmount", "期初原币净额"],
+    ["closingForeignAmount", "期末原币净额"],
+  ];
+  const forms = [
+    { id: "TB1", display: "TB-类型A", label: "本位币净额", required: [["openingFunctionalAmount"], ["closingFunctionalAmount"]], anyOf: [], optional: [] },
+    { id: "TB4", display: "TB-类型D", label: "本位币净额＋原币净额", required: [["openingFunctionalAmount", "openingForeignAmount"], ["closingFunctionalAmount", "closingForeignAmount"]], anyOf: [], optional: [] },
+  ];
+  const groups = fxFormGroups("tb", roles, forms, {
+    openingFunctionalAmount: "期初本位币",
+    closingFunctionalAmount: "期末本位币",
+  }, ["期初原币余额", "期末原币余额"]);
+  const tb1 = groups.find((group) => group.title.startsWith("TB-类型A"));
+  const tb4 = groups.find((group) => group.title.startsWith("TB-类型D"));
+  expect(tb1).toMatchObject({ notApplicable: true, status: "未适配" });
+  expect(tb1?.title).toContain("汇兑不适用");
+  expect(tb4?.status).not.toBe("已适配");
+});
+
+
+describe("货币资金分类确认", () => {
+  it("旧货币性资产选择迁移为最新资金分类，并保留明确的非货币资金选择", () => {
+    const bank = "100102 银行存款";
+    const ar = "1122 应收账款";
+    expect(fxResolveAccountRoles([bank, ar], {}, {
+      [bank]: "cash", [ar]: "monetary_non_cash_asset",
+    }, { [bank]: "monetary_asset", [ar]: "monetary_asset" }, {
+      [bank]: true, [ar]: true,
+    })).toEqual({ [bank]: "cash", [ar]: "monetary_non_cash_asset" });
+    expect(fxResolveAccountRoles([bank], {}, { [bank]: "cash" }, {
+      [bank]: "monetary_non_cash_asset",
+    }, { [bank]: true })).toEqual({ [bank]: "monetary_non_cash_asset" });
+  });
+  it("确认表导出和回传区分两种货币性资产", () => {
+    const rows = [
+      { key: "bank", account: "1002 银行存款", auxiliary: "", entity: "", rawCurrency: "USD" },
+      { key: "ar", account: "1122 应收账款", auxiliary: "", entity: "", rawCurrency: "USD" },
+    ];
+    const roles = { "1002 银行存款": "cash", "1122 应收账款": "monetary_non_cash_asset" };
+    const exported = fxConfirmationRows(rows, roles, {}, {}, {}, undefined, undefined, "CNY");
+    expect(exported[0].values[1]).toBe("货币性资产—货币资金");
+    expect(exported[1].values[1]).toBe("货币性资产—非货币资金");
+    const edited = [{ ...exported[0], values: [exported[0].values[0], "货币性资产—非货币资金", exported[0].values[2]] }];
+    const patches = fxConfirmationImportPatches(edited, rows, exported, roles, {}, undefined, undefined, "CNY");
+    expect(patches.roles["1002 银行存款"]).toBe("monetary_non_cash_asset");
+  });
+});
+
+
+it("完整借贷分列与净额同时映射时校验通过，形态展示使用实际取数方案", () => {
+  const mapping = {
+    date: "日期", id: ["凭证字", "凭证号"], accountCode: "科目", currency: "币种",
+    foreignDebit: "原币借", foreignCredit: "原币贷", foreignAmount: "原币净额",
+    functionalDebit: "借", functionalCredit: "贷", functionalAmount: "净额",
+  };
+  expect(fxMissingRequired("je", mapping, true, "E")).toEqual([]);
+  const effective = fxEffectiveAmountMapping(mapping);
+  expect(effective.foreignAmount).toBeUndefined();
+  expect(effective.functionalAmount).toBeUndefined();
+  expect(mapping.foreignAmount).toBe("原币净额");
+  expect(fxEffectiveAmountMapping({ foreignAmount: "净额", foreignDebit: "借" })).toEqual({ foreignAmount: "净额" });
 });

@@ -1,6 +1,8 @@
 #![recursion_limit = "256"]
 
 mod account_confirmation;
+#[cfg(test)]
+mod account_classification_tests;
 mod audipick;
 mod bailian_asr;
 mod bailian_plan_asr;
@@ -11,6 +13,7 @@ mod excel_com;
 mod excel_header_match;
 mod excel_merger;
 mod fa;
+mod fa_merge_snapshot;
 mod fa_sheet_pick;
 mod fa_subtools;
 mod fa_table_cache;
@@ -370,7 +373,23 @@ async fn engine_call(
     } else if method == "ledger.auxiliary_link" {
         // 辅助核算联动验证（锚点反查认定 JE 辅助列）：映射阶段公共入口，
         // 计算侧（TBJE 完整性／存款）复核同一份公共判定逻辑。
-        fx::auxiliary_link_check(&params)
+        // [临时日志] 现场排查前端黄框：记录成败与错误原文，测完即删。
+        let outcome = fx::auxiliary_link_check(&params);
+        match &outcome {
+            Ok(value) => eprintln!(
+                "[联动验证] 成功 status={}",
+                value.get("status").and_then(Value::as_str).unwrap_or("?")
+            ),
+            Err(e) => eprintln!(
+                "[联动验证] 抛错 code={} userMessage={} diag={:?} tbSource={} jeSource={}",
+                e.code,
+                e.user_message,
+                e.diagnostic_id,
+                params.get("tbSource").map(|v| v.to_string()).unwrap_or_default(),
+                params.get("jeSource").map(|v| v.to_string()).unwrap_or_default()
+            ),
+        }
+        outcome
     } else if method == "ledger.currency_link" {
         // 多币种账户映射阶段验证：只检查用户已映射的 JE 币种列中是否存在
         // TB 外币锚点，不要求整列非空，也不质疑用户选择的列。
@@ -551,7 +570,7 @@ fn is_direct_job_method(method: &str) -> bool {
             method,
             "fx.fetch_rates" | "fx.preview" | "fx.export" | "fx.export_rates"
         )
-        || matches!(method, "loan.preview" | "loan.export")
+        || matches!(method, "loan.preview" | "loan.export" | "loan.inspect_full")
         || matches!(method, "deposit.preview" | "deposit.export")
         || method == "pdf2excel.convert"
         // 两列匹配：跑匹配要落结果库，导出要从结果库读回，都走任务通道。
@@ -580,12 +599,15 @@ async fn job_start(
         object.remove("__restoreSnapshot");
     }
     let job_id = job_start_inner(excel_merger, &storage, &method, worker_params).await?;
-    let _ = storage.record_job_params(
-        &job_id,
-        excel_merger::tool_id(&method),
-        &method,
-        &user_params,
-    );
+    // 读取补齐是上传子步骤，没有可恢复的测算现场，不写成可继续的测算历史。
+    if method != "loan.inspect_full" {
+        let _ = storage.record_job_params(
+            &job_id,
+            excel_merger::tool_id(&method),
+            &method,
+            &user_params,
+        );
+    }
     Ok(job_id)
 }
 

@@ -184,7 +184,7 @@ export function JobDialogProvider({
   const pendingIds = useRef(new Set<string>());
   const [stopRequested, setStopRequested] = useState<Record<string, boolean>>({});
   const [operationErrors, setOperationErrors] = useState<Record<string, string>>({});
-  const running = jobs.filter(isJobRunning);
+  const running = jobs.filter((job) => isJobRunning(job) && !job.background);
   const runningIds = running.map((job) => job.jobId).join("|");
 
   // 任务跑完就把最小化和暂停记录归零：下一个任务应当重新弹出来，

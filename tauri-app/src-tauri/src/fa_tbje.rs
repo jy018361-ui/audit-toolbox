@@ -431,6 +431,7 @@ fn analyze_with_progress(
             cancel,
             &tb,
             &tb_map,
+            &tb_keep,
             &je_spec,
             &je_map,
             entity_key_enabled,
@@ -490,6 +491,7 @@ fn analyze_with_progress(
     let tb_lines = normalize_tb(
         &tb,
         &tb_map,
+        &tb_keep,
         &assignments,
         params,
         entity_key_enabled,
@@ -553,6 +555,7 @@ fn analyze_with_disk_je(
     cancel: &AtomicBool,
     tb: &FxTable,
     tb_map: &Map<String, Value>,
+    tb_keep: &[bool],
     je_spec: &SourceSpec,
     je_map: &Map<String, Value>,
     entity_key_enabled: bool,
@@ -734,6 +737,7 @@ fn analyze_with_disk_je(
     let tb_lines = normalize_tb(
         tb,
         tb_map,
+        tb_keep,
         &assignments,
         params,
         entity_key_enabled,
@@ -1020,14 +1024,12 @@ fn mapped_roles(kind: &str, map: &Map<String, Value>) -> HashSet<&'static str> {
 fn normalize_tb(
     table: &FxTable,
     map: &Map<String, Value>,
+    mask: &[bool],
     assignments: &AssignmentIndex,
     params: &Value,
     entity_key_enabled: bool,
     auxiliary_columns: &BTreeMap<ledger_mapping::AuxiliaryGroupKey, (usize, usize)>,
 ) -> Result<Vec<TbLine>, AppError> {
-    let mask = ledger_mapping::tb_leaf_mask(&table.headers, &table.rows, &|role| {
-        mapped_columns(map, role)
-    });
     let evidence =
         ledger_mapping::detect_tb_sign_convention(&table.headers, &table.rows, &|role| {
             mapped_columns(map, role)

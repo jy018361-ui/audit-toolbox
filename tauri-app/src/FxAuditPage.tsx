@@ -130,7 +130,7 @@ type Inspection = {
   accounts: string[];
   /** 末级科目清单（引擎目录末级掩码下发）；旧任务缺省时回退 accounts。 */
   accountsLeaf?: string[];
-  reviewAccounts?: Array<{ entity: string; account: string; auxiliary: string; currency: string }>;
+  reviewAccounts?: Array<{ entity: string; account: string; auxiliary: string; currency: string; suggestedFxRole?: string; parentAccountName?: string }>;
   /** 账里真实存在的「主体×科目」组合；旧任务/预览模式缺省。 */
   entityAccounts?: Array<{ entity: string; account: string }>;
   suggestedMapping: Record<string, string>;
@@ -273,6 +273,8 @@ type FxAccountReviewRow = {
   entity?: string;
   auxiliary?: string;
   currency?: string;
+  suggestedRole?: string;
+  parentAccountName?: string;
 };
 
 /** 逐辅助户覆盖键：主体␟归一化科目编码␟归一化辅助值，与存款利息同口径。 */
@@ -300,7 +302,7 @@ export function fxAccountReviewRows(
   accounts: string[],
   link: AuxiliaryLinkResult | null,
   entitiesByAccount: Map<string, string[]> | null = null,
-  sourceIdentities?: Array<{ entity: string; account: string; auxiliary: string; currency: string }>,
+  sourceIdentities?: Array<{ entity: string; account: string; auxiliary: string; currency: string; suggestedFxRole?: string; parentAccountName?: string }>,
 ): FxAccountReviewRow[] {
   if (sourceIdentities?.length) {
     const allowed = new Set(accounts);
@@ -315,7 +317,9 @@ export function fxAccountReviewRows(
       if (seen.has(key)) return [];
       seen.add(key);
       return [{ key, account: identity.account, entity,
-        auxiliary: auxiliary || undefined, currency: identity.currency }];
+        auxiliary: auxiliary || undefined, currency: identity.currency,
+        ...(identity.suggestedFxRole ? { suggestedRole: identity.suggestedFxRole } : {}),
+        ...(identity.parentAccountName ? { parentAccountName: identity.parentAccountName } : {}) }];
     });
   }
   const codeCounts = new Map<string, number>();
@@ -442,7 +446,7 @@ export function fxConfirmationRows(
       : (row.auxiliary || row.key.startsWith("[") ? detailCurrencies[row.key] : accountCurrencies[row.account]) ||
         fxAccountCurrencyDetail(row.account, jeCurrencyDetails, tbCurrencyDetails).detected ||
         fallbackFunctional;
-    const subject = row.auxiliary ? `${row.account} · ${row.auxiliary}` : row.account;
+    const subject = ledgerReviewAccountLabel(row.account, row.auxiliary, row.parentAccountName);
     return {
       key: row.key,
       values: withEntity
@@ -1438,9 +1442,14 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     () => fxAccountReviewRows(accounts, auxiliaryLink, entityRowsByAccount, tb?.reviewAccounts),
     [accounts, auxiliaryLink, entityRowsByAccount, tb?.reviewAccounts],
   );
+  const effectiveDetailRoles = useMemo(() => ({
+    ...Object.fromEntries(reviewRows.filter((row) => row.suggestedRole && !accountRolesTouched[row.account])
+      .map((row) => [row.key, row.suggestedRole!])),
+    ...accountDetailRoles,
+  }), [reviewRows, accountRolesTouched, accountDetailRoles]);
   const orderedReviewRows = useMemo(
-    () => fxSortAccountReviewRows(reviewRows, accountRoles, accountDetailRoles),
-    [reviewRows, accountRoles, accountDetailRoles],
+    () => fxSortAccountReviewRows(reviewRows, accountRoles, effectiveDetailRoles),
+    [reviewRows, accountRoles, effectiveDetailRoles],
   );
   const accountMatches = useMemo(
     () => keywordFilterPredicate(accountFilter),
@@ -1451,7 +1460,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       orderedReviewRows.filter((row) =>
         accountMatches(
           fxAccountFilterText(
-            row.auxiliary ? `${row.account} ${row.auxiliary}` : row.account,
+            `${row.account} ${row.parentAccountName ?? ""} ${row.auxiliary ?? ""}`,
             je?.accountCurrencyDetails,
             tb?.accountCurrencyDetails,
           ),
@@ -1493,7 +1502,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     () => fxConfirmationRows(
       orderedReviewRows,
       accountRoles,
-      accountDetailRoles,
+      effectiveDetailRoles,
       accountCurrencies,
       accountDetailCurrencies,
       je?.accountCurrencyDetails,
@@ -1504,7 +1513,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     [
       orderedReviewRows,
       accountRoles,
-      accountDetailRoles,
+      effectiveDetailRoles,
       accountCurrencies,
       accountDetailCurrencies,
       je?.accountCurrencyDetails,
@@ -2296,13 +2305,13 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
         Object.entries(accountDetailRoles).filter(([, role]) => role !== ""),
       ),
       accountReviewRoles: Object.fromEntries(reviewRows.map((row) => [
-        row.key, accountDetailRoles[row.key] ?? accountRoles[row.account] ?? "non_monetary",
+        row.key, effectiveDetailRoles[row.key] ?? accountRoles[row.account] ?? "non_monetary",
       ])),
       accountDetailCurrencyOverrides: fxDetailCurrencyOverridesPayload(
         accountDetailCurrencies,
         reviewRows,
         accountRoles,
-        accountDetailRoles,
+        effectiveDetailRoles,
       ),
       accountReviewCurrencies: Object.fromEntries(reviewRows
         .filter((row) => accountDetailCurrencies[row.key])
@@ -2985,7 +2994,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                       </div>
                       {renderedRows.map((row) => {
                         const account = row.account;
-                        const displayName = ledgerReviewAccountLabel(account, row.auxiliary);
+        const displayName = ledgerReviewAccountLabel(account, row.auxiliary, row.parentAccountName);
                         const detail =
                           tb?.accountRoleDetails?.[account] ??
                           je?.accountRoleDetails?.[account];
@@ -3008,7 +3017,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                         const currencyRisk = jeMultiCurrency && !row.auxiliary;
                         // 逐辅助户手选的角色优先，其余回落科目级分类。
                         const rowRole =
-                          accountDetailRoles[row.key] ??
+                          effectiveDetailRoles[row.key] ??
                           accountRoles[account] ??
                           "non_monetary";
                         // 非货币性项目／其他损益成本不参与外币重估，账户币种
@@ -3028,7 +3037,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                               </span>
                             )}
                             <span
-                              className="fx-account-name"
+                              className="fx-account-name fx-account-name-single-line"
                               title={
                                 detail
                                   ? `${displayName}\n${detail.reason}（置信度 ${Math.round(detail.confidence * 100)}%）`

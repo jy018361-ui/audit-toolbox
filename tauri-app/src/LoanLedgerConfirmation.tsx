@@ -1,9 +1,25 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 
 export type LoanEvent = { date: string; amount: number | null; basis?: string };
+/**
+ * 台账确认界面的统一明细行：新增、还款金额与主行同列，日期在金额下方。
+ *
+ * 用户点一次「＋」加一行，哪一侧需要就填哪一侧，留空的一侧不产生事件——
+ * 引擎要的仍是 additions/repayments 两个数组（见 [`splitDetailRows`]），
+ * 这里只是把两份清单按行号并排成一张可无限加行的表。
+ */
+export type LoanDetailRow = {
+  addDate: string;
+  addAmount: number | null;
+  repayDate: string;
+  repayAmount: number | null;
+  /** 双侧各自保留来源说明（按合同开始日默认／台账提取／人工修改），改过的一侧刷新。 */
+  addBasis?: string;
+  repayBasis?: string;
+};
 export type LedgerInformation = {
   rowKey: string;
   loanId: string;
@@ -16,18 +32,32 @@ export type LedgerInformation = {
   spreadBps: number;
   fixedRate?: number | null;
   benchmarkRate?: number | null;
+  amountSources?: Partial<
+    Record<"opening" | "added" | "reduced" | "closing", "PBC" | "推算">
+  >;
+  originalAmounts?: Partial<
+    Record<"opening" | "added" | "reduced" | "closing", number | null>
+  >;
   originalClosing: number | null;
   contractStart?: string;
   contractEnd?: string;
   additions: LoanEvent[];
   repayments: LoanEvent[];
+  /** 界面明细行的稳定行序：一旦用户编辑过明细就随行保存，避免按行号配对时串行。 */
+  detailRows?: LoanDetailRow[];
 };
-export function ledgerInformationErrors(
+type Issue = {
+  field: "opening" | "added" | "reduced" | "closing" | "rate";
+  message: string;
+};
+export function ledgerInformationIssues(
   row: LedgerInformation,
   start: string,
   end: string,
-): string[] {
-  const errors: string[] = [];
+): Issue[] {
+  const issues: Issue[] = [];
+  const push = (field: Issue["field"], message: string) =>
+    issues.push({ field, message });
   const rate = row.rateType === "fixed" ? row.fixedRate : row.benchmarkRate;
   if (
     rate == null ||
@@ -35,60 +65,160 @@ export function ledgerInformationErrors(
     rate < 0 ||
     !Number.isFinite(row.spreadBps)
   )
-    errors.push("请补充有效的执行利率或基准利率");
-  const amounts = [row.opening, row.added, row.reduced, row.closing];
-  if (amounts.some((a) => a == null || !Number.isFinite(a) || a < 0))
-    errors.push("请补齐四类非负金额，空白不视为零");
-  else if (
-    Math.abs(row.opening! + row.added! - row.reduced! - row.closing!) >= 0.005
-  )
-    errors.push("年初＋新增－减少与期末不一致");
-  for (const [label, items, total] of [
-    ["新增", row.additions, row.added],
-    ["还款", row.repayments, row.reduced],
-  ] as const) {
+    push("rate", "请补充有效的执行利率或基准利率");
+  const fields = ["opening", "added", "reduced", "closing"] as const;
+  for (const field of fields) {
+    const value = row[field];
     if (
-      items.some(
-        (e) =>
-          !/^\d{4}-\d{2}-\d{2}$/.test(e.date) ||
-          !Number.isFinite(Date.parse(e.date)) ||
-          new Date(e.date).toISOString().slice(0, 10) !== e.date ||
-          e.date < start ||
-          e.date > end,
-      )
+      (field !== "closing" && value == null) ||
+      (value != null && (!Number.isFinite(value) || value < 0))
     )
-      errors.push(`${label}日期须填写且在报告期内`);
-    if (
-      items.some(
-        (e) => e.amount == null || !Number.isFinite(e.amount) || e.amount <= 0,
-      )
-    )
-      errors.push(`${label}明细金额须大于零`);
-    if (
-      total != null &&
-      Math.abs(items.reduce((s, e) => s + (e.amount ?? 0), 0) - total) >= 0.005
-    )
-      errors.push(`${label}明细合计与主行金额不一致`);
+      push(field, "请填写有效的非负金额");
   }
-  const changes = new Map<string, number>();
-  for (const [items, sign] of [
-    [row.additions, 1],
-    [row.repayments, -1],
-  ] as const)
-    for (const e of items)
-      changes.set(e.date, (changes.get(e.date) ?? 0) + (e.amount ?? 0) * sign);
-  let balance = row.opening ?? 0;
-  for (const [, change] of [...changes].sort(([a], [b]) =>
-    a.localeCompare(b),
-  )) {
-    balance += change;
-    if (balance < -0.005) {
-      errors.push("还款后本金为负");
-      break;
+  if (
+    !issues.some((i) => fields.includes(i.field as (typeof fields)[number]))
+  ) {
+    const difference =
+      row.opening! + row.added! - row.reduced! - (row.closing ?? 0);
+    if (Math.abs(difference) >= 0.005)
+      push(
+        "closing",
+        `余额不平，差额 ${difference.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      );
+  }
+  for (const [field, label, raw, total] of [
+    ["added", "新增", row.additions, row.added],
+    ["reduced", "还款", row.repayments, row.reduced],
+  ] as const) {
+    const items = raw.filter((e) => e.date !== "" || e.amount != null);
+    for (const [i, e] of items.entries()) {
+      if (!e.date) push(field, `第 ${i + 1} 笔请填写${label}日期`);
+      else if (
+        !/^\d{4}-\d{2}-\d{2}$/.test(e.date) ||
+        !Number.isFinite(Date.parse(e.date)) ||
+        new Date(e.date).toISOString().slice(0, 10) !== e.date
+      )
+        push(field, `第 ${i + 1} 笔${label}日期无效`);
+      else if (e.date > end)
+        push(field, `第 ${i + 1} 笔${label}日期超过测算截止日 ${end}`);
+      else if (e.date < start)
+        push(field, `第 ${i + 1} 笔${label}日期早于报告期开始日 ${start}`);
+      if (e.amount == null || !Number.isFinite(e.amount) || e.amount <= 0)
+        push(field, `第 ${i + 1} 笔请填写大于零的${label}金额`);
+    }
+    const difference =
+      (total ?? 0) - items.reduce((s, e) => s + (e.amount ?? 0), 0);
+    if (total != null && Math.abs(difference) >= 0.005)
+      push(
+        field,
+        `${label}明细${difference > 0 ? "少填" : "多填"} ${Math.abs(difference).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      );
+  }
+  if (!issues.some((i) => i.field === "added" || i.field === "reduced")) {
+    const changes = new Map<string, number>();
+    for (const [items, sign] of [
+      [row.additions, 1],
+      [row.repayments, -1],
+    ] as const)
+      for (const e of items)
+        if (e.date && e.amount != null)
+          changes.set(e.date, (changes.get(e.date) ?? 0) + e.amount * sign);
+    let balance = row.opening ?? 0;
+    for (const [, change] of [...changes].sort(([a], [b]) =>
+      a.localeCompare(b),
+    )) {
+      balance += change;
+      if (balance < -0.005) {
+        push("reduced", "还款后本金为负，请检查日期和金额");
+        break;
+      }
     }
   }
-  return errors;
+  return issues;
 }
+export function ledgerInformationErrors(
+  row: LedgerInformation,
+  start: string,
+  end: string,
+): string[] {
+  return ledgerInformationIssues(row, start, end).map((i) => i.message);
+}
+
+export const blankDetailRow = (): LoanDetailRow => ({
+  addDate: "",
+  addAmount: null,
+  repayDate: "",
+  repayAmount: null,
+});
+
+/** additions/repayments 按行号并排成界面明细行；引擎下发的行没有界面行序时用它。 */
+export const zipDetailRows = (row: LedgerInformation): LoanDetailRow[] => {
+  if (row.detailRows) return row.detailRows;
+  const len = Math.max(row.additions.length, row.repayments.length);
+  return Array.from({ length: len }, (_, i) => ({
+    addDate: row.additions[i]?.date ?? "",
+    addAmount: row.additions[i]?.amount ?? null,
+    addBasis: row.additions[i]?.basis,
+    repayDate: row.repayments[i]?.date ?? "",
+    repayAmount: row.repayments[i]?.amount ?? null,
+    repayBasis: row.repayments[i]?.basis,
+  }));
+};
+
+/** 界面明细行还原成引擎要的两个事件数组：两侧全空的行不产生事件。 */
+export const splitDetailRows = (
+  rows: LoanDetailRow[],
+): Pick<LedgerInformation, "additions" | "repayments"> => ({
+  additions: rows
+    .filter((r) => r.addDate !== "" || r.addAmount != null)
+    .map((r) => ({
+      date: r.addDate,
+      amount: r.addAmount,
+      basis: r.addBasis ?? "人工补充",
+    })),
+  repayments: rows
+    .filter((r) => r.repayDate !== "" || r.repayAmount != null)
+    .map((r) => ({
+      date: r.repayDate,
+      amount: r.repayAmount,
+      basis: r.repayBasis ?? "人工补充",
+    })),
+});
+
+const withDetails = (
+  row: LedgerInformation,
+  details: LoanDetailRow[],
+): LedgerInformation => ({
+  ...row,
+  detailRows: details,
+  ...splitDetailRows(details),
+});
+
+const updateDetail = (
+  row: LedgerInformation,
+  details: LoanDetailRow[],
+  index: number,
+  patch: Partial<LoanDetailRow>,
+  side: "add" | "repay",
+) =>
+  withDetails(
+    row,
+    details.map((r, i) =>
+      i === index
+        ? side === "add"
+          ? { ...r, ...patch, addBasis: "人工修改" }
+          : { ...r, ...patch, repayBasis: "人工修改" }
+        : r,
+    ),
+  );
+
+const PAGE_SIZE = 50;
+const amountFields = [
+  ["opening", "年初余额"],
+  ["added", "本期新增"],
+  ["reduced", "本期减少（还款）"],
+  ["closing", "期末余额"],
+] as const;
 export function LoanLedgerConfirmation({
   rows,
   start,
@@ -104,20 +234,32 @@ export function LoanLedgerConfirmation({
 }) {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
+  const [openKeys, setOpenKeys] = useState<Record<string, boolean>>({});
   const filtered = rows.filter((r) =>
     `${r.entity} ${r.loanId}`.includes(query),
   );
   const current = Math.min(
     page,
-    Math.max(0, Math.ceil(filtered.length / 50) - 1),
+    Math.max(0, Math.ceil(filtered.length / PAGE_SIZE) - 1),
   );
+  const toggle = (row: LedgerInformation) => {
+    if (!openKeys[row.rowKey] && !zipDetailRows(row).length)
+      onEdit(withDetails(row, [blankDetailRow()]));
+    setOpenKeys((v) => ({ ...v, [row.rowKey]: !v[row.rowKey] }));
+  };
+  const sourceTitle = (field: (typeof amountFields)[number][0]) => {
+    const values = new Set(rows.map((r) => r.amountSources?.[field] ?? "推算"));
+    return values.size > 1 ? "PBC／推算" : ([...values][0] ?? "推算");
+  };
   const number = (
     label: string,
-    value: number | null,
+    value: number | null | undefined,
     change: (v: number | null) => void,
+    invalid = false,
   ) => (
     <Input
       aria-label={label}
+      aria-invalid={invalid}
       type="number"
       min="0"
       step="any"
@@ -136,7 +278,7 @@ export function LoanLedgerConfirmation({
       <CardContent>
         <p>
           报告期：{start} 至 {end}
-          。默认新增日期取合同开始日，默认还款日期取到期日，请逐笔复核。拆分明细替代默认事件，不重复计息。
+          。点行首「＋」展开新增与还款明细；金额与主行同列，金额下方填写日期。拆分明细替代默认事件，不重复计息。
         </p>
         <Input
           aria-label="搜索台账借款"
@@ -148,193 +290,373 @@ export function LoanLedgerConfirmation({
           }}
         />
         <p>
-          缺少年初余额或期间发生额时，金额可能按合同和期末余额推算，请核实。共{" "}
-          {rows.length}{" "}
-          笔借款；金额单位与台账取数口径一致。空白金额需补充，不能直接当作零。
+          共 {rows.length} 笔借款。PBC
+          为台账提供，推算为系统补充；默认日期按报告期边界限定，可修改。期末空白按零检查四栏平衡。
         </p>
-        {filtered.slice(current * 50, (current + 1) * 50).map((row) => {
-          const errors = ledgerInformationErrors(row, start, end);
-          const events = (key: "additions" | "repayments", label: string) => (
-            <section className="loan-information-events">
-              <h4>{label}明细</h4>
-              {row[key].map((event, i) => (
-                <div className="loan-information-event" key={i}>
-                  <label>
-                    {label}日期
-                    <Input
-                      aria-label={`${row.loanId}${label}日期${i + 1}`}
-                      type="date"
-                      min={start}
-                      max={end}
-                      disabled={busy}
-                      value={event.date}
-                      onChange={(e) =>
-                        onEdit({
-                          ...row,
-                          [key]: row[key].map((v, j) =>
-                            j === i
-                              ? {
-                                  ...v,
-                                  date: e.target.value,
-                                  basis: "人工修改",
-                                }
-                              : v,
-                          ),
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    {label}金额
-                    {number(
-                      `${row.loanId}${label}金额${i + 1}`,
-                      event.amount,
-                      (v) =>
-                        onEdit({
-                          ...row,
-                          [key]: row[key].map((e, j) =>
-                            j === i
-                              ? { ...e, amount: v, basis: "人工修改" }
-                              : e,
-                          ),
-                        }),
-                    )}
-                  </label>
-                  <span>{event.basis}</span>
-                  <Button
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() =>
-                      onEdit({
-                        ...row,
-                        [key]: row[key].filter((_, j) => j !== i),
-                      })
-                    }
-                  >
-                    删除
-                  </Button>
-                </div>
+        <div className="loan-ledger-scroll">
+          <table className="loan-ledger-table">
+            <colgroup>
+              {Array.from({ length: 14 }, (_, i) => (
+                <col
+                  key={i}
+                  style={{
+                    width:
+                      i === 0
+                        ? 52
+                        : i === 1
+                          ? 250
+                          : i >= 5 && i <= 8
+                            ? 220
+                            : 170,
+                  }}
+                />
               ))}
-              <p>
-                明细合计：
-                {row[key]
-                  .reduce((s, e) => s + (e.amount ?? 0), 0)
-                  .toLocaleString("zh-CN", { minimumFractionDigits: 2 })}
-              </p>
-              <Button
-                variant="secondary"
-                disabled={busy}
-                onClick={() =>
-                  onEdit({
-                    ...row,
-                    [key]: [
-                      ...row[key],
-                      { date: "", amount: null, basis: "人工补充" },
-                    ],
-                  })
-                }
-              >
-                添加{label}明细
-              </Button>
-            </section>
-          );
-          return (
-            <article className="loan-information-row" key={row.rowKey}>
-              <h3>
-                {row.loanId} · {row.entity || "未区分主体"}
-              </h3>
-              <p>
-                合同开始：{row.contractStart || "未提供"}　到期：
-                {row.contractEnd || "未提供"}　台账原始期末：
-                {row.originalClosing == null
-                  ? "未提供"
-                  : row.originalClosing.toLocaleString()}
-              </p>
-              <div className="loan-information-amounts">
-                {(
-                  [
-                    ["opening", "年初余额"],
-                    ["added", "本期新增"],
-                    ["reduced", "本期减少（还款）"],
-                    ["closing", "期末余额"],
-                  ] as const
-                ).map(([key, label]) => (
-                  <label key={key}>
-                    {label}
-                    {number(`${row.loanId}${label}`, row[key], (v) =>
-                      onEdit({ ...row, [key]: v }),
-                    )}
-                  </label>
+            </colgroup>
+            <thead>
+              <tr>
+                <th>明细</th>
+                <th>借款标识／待处理原因</th>
+                <th>主体</th>
+                <th>合同开始</th>
+                <th>到期日</th>
+                {amountFields.map(([field, label]) => (
+                  <th key={field}>
+                    {label}（{sourceTitle(field)}）
+                  </th>
                 ))}
-              </div>
-              <div className="loan-information-amounts">
-                <label>
-                  利率类型
-                  <select
-                    aria-label={`${row.loanId}利率类型`}
-                    className="loan-rate-pick"
-                    value={row.rateType}
-                    disabled={busy}
-                    onChange={(e) =>
-                      onEdit({
-                        ...row,
-                        rateType: e.target.value as "fixed" | "floating",
-                      })
-                    }
-                  >
-                    <option value="fixed">固定</option>
-                    <option value="floating">浮动</option>
-                  </select>
-                </label>
-                <label>
-                  加减点（BP）
-                  <Input
-                    aria-label={`${row.loanId}加减点`}
-                    type="number"
-                    value={row.spreadBps}
-                    disabled={busy}
-                    onChange={(e) =>
-                      onEdit({ ...row, spreadBps: Number(e.target.value) })
-                    }
-                  />
-                </label>
-                <label>
-                  执行利率（小数，3.85% 填 0.0385）
-                  {number(`${row.loanId}执行利率`, row.fixedRate ?? null, (v) =>
-                    onEdit({ ...row, fixedRate: v }),
-                  )}
-                </label>
-                <label>
-                  基准利率（浮动利率使用）
-                  {number(
-                    `${row.loanId}基准利率`,
-                    row.benchmarkRate ?? null,
-                    (v) => onEdit({ ...row, benchmarkRate: v }),
-                  )}
-                </label>
-              </div>
-              <details open={errors.length > 0}>
-                <summary>
-                  新增与还款明细（新增 {row.additions.length} 笔，还款{" "}
-                  {row.repayments.length} 笔）
-                </summary>
-                <div className="loan-information-event-tables">
-                  {events("additions", "新增")}
-                  {events("repayments", "还款")}
-                </div>
-              </details>
-              <div
-                role="status"
-                className={
-                  errors.length ? "loan-warning" : "loan-information-valid"
-                }
-              >
-                {errors.length ? errors.join("；") : "金额与明细校验通过"}
-              </div>
-            </article>
-          );
-        })}
-        {filtered.length > 50 && (
+                <th>利率类型</th>
+                <th>加减点（BP）</th>
+                <th>执行利率</th>
+                <th>基准利率（浮动用）</th>
+                <th>校验</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered
+                .slice(current * PAGE_SIZE, (current + 1) * PAGE_SIZE)
+                .map((row) => {
+                  const issues = ledgerInformationIssues(row, start, end),
+                    open = !!openKeys[row.rowKey],
+                    details = zipDetailRows(row);
+                  const fieldErrors = (field: Issue["field"]) =>
+                    issues.filter((i) => i.field === field);
+                  const messages = (field: Issue["field"]) =>
+                    fieldErrors(field).map((i) => (
+                      <span key={i.message} className="loan-ledger-error">
+                        {i.message}
+                      </span>
+                    ));
+                  const eventCell = (
+                    side: "add" | "repay",
+                    event: LoanDetailRow,
+                    i: number,
+                  ) => {
+                    const added = side === "add",
+                      label = added ? "新增" : "还款",
+                      value = added ? event.addAmount : event.repayAmount,
+                      d = added ? event.addDate : event.repayDate,
+                      basis = added ? event.addBasis : event.repayBasis;
+                    const active = d !== "" || value != null;
+                    const invalidDate =
+                      active &&
+                      (!d ||
+                        !Number.isFinite(Date.parse(d)) ||
+                        d < start ||
+                        d > end);
+                    return (
+                      <div className="loan-ledger-event-cell">
+                        <label>
+                          {label}金额
+                          {number(
+                            `${row.loanId}${label}金额${i + 1}`,
+                            value,
+                            (v) =>
+                              onEdit(
+                                updateDetail(
+                                  row,
+                                  details,
+                                  i,
+                                  { [added ? "addAmount" : "repayAmount"]: v },
+                                  side,
+                                ),
+                              ),
+                            active && (value == null || value <= 0),
+                          )}
+                        </label>
+                        <label>
+                          {label}日期
+                          <Input
+                            aria-label={`${row.loanId}${label}日期${i + 1}`}
+                            aria-invalid={invalidDate}
+                            type="date"
+                            value={d}
+                            min={start}
+                            max={end}
+                            disabled={busy}
+                            onChange={(e) =>
+                              onEdit(
+                                updateDetail(
+                                  row,
+                                  details,
+                                  i,
+                                  {
+                                    [added ? "addDate" : "repayDate"]:
+                                      e.target.value,
+                                  },
+                                  side,
+                                ),
+                              )
+                            }
+                          />
+                        </label>
+                        {basis && (
+                          <span className="loan-ledger-basis">{basis}</span>
+                        )}
+                        {invalidDate && (
+                          <span className="loan-ledger-error">
+                            {!d
+                              ? `请填写${label}日期`
+                              : d > end
+                                ? "日期超过测算截止日"
+                                : d < start
+                                  ? "日期早于报告期开始日"
+                                  : "日期无效"}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  };
+                  return (
+                    <Fragment key={row.rowKey}>
+                      <tr
+                        className={`loan-ledger-row${issues.length ? " has-errors" : ""}`}
+                      >
+                        <td className="loan-ledger-toggle">
+                          <button
+                            type="button"
+                            className="loan-ledger-expand"
+                            aria-expanded={open}
+                            aria-label={`${open ? "收起" : "展开"}${row.loanId}明细`}
+                            disabled={busy}
+                            onClick={() => toggle(row)}
+                          >
+                            {open ? "－" : "＋"}
+                          </button>
+                        </td>
+                        <td className="loan-ledger-id">
+                          {row.loanId}
+                          {issues.length > 0 && (
+                            <button
+                              type="button"
+                              className="loan-ledger-status bad"
+                              aria-label={`${row.loanId}待处理${issues.length}项`}
+                              onClick={() =>
+                                setOpenKeys((v) => ({
+                                  ...v,
+                                  [row.rowKey]: true,
+                                }))
+                              }
+                            >
+                              待处理 {issues.length} 项
+                              <span className="loan-ledger-reasons">
+                                {issues.map((i) => i.message).join("；")}
+                              </span>
+                            </button>
+                          )}
+                        </td>
+                        <td>{row.entity || "未区分主体"}</td>
+                        <td>{row.contractStart || "未提供"}</td>
+                        <td>{row.contractEnd || "未提供"}</td>
+                        {amountFields.map(([field, label]) => (
+                          <td
+                            key={field}
+                            data-amount-field={field}
+                            title={
+                              row.originalAmounts
+                                ? `原始默认值：${row.originalAmounts[field] ?? "空白"}`
+                                : undefined
+                            }
+                          >
+                            {number(
+                              `${row.loanId}${field === "reduced" ? "本期减少" : label}`,
+                              row[field],
+                              (v) => onEdit({ ...row, [field]: v }),
+                              !!fieldErrors(field).length,
+                            )}
+                            {sourceTitle(field) === "PBC／推算" && (
+                              <span className="loan-ledger-basis">
+                                {row.amountSources?.[field] ?? "推算"}
+                              </span>
+                            )}
+                            {row.originalAmounts &&
+                              row[field] !== row.originalAmounts[field] && (
+                                <span className="loan-ledger-basis">
+                                  已修改
+                                </span>
+                              )}
+                            {messages(field)}
+                          </td>
+                        ))}
+                        <td>
+                          <select
+                            aria-label={`${row.loanId}利率类型`}
+                            className="loan-rate-pick"
+                            disabled={busy}
+                            value={row.rateType}
+                            onChange={(e) =>
+                              onEdit({
+                                ...row,
+                                rateType: e.target.value as
+                                  "fixed" | "floating",
+                              })
+                            }
+                          >
+                            <option value="fixed">固定</option>
+                            <option value="floating">浮动</option>
+                          </select>
+                        </td>
+                        <td>
+                          <Input
+                            aria-label={`${row.loanId}加减点`}
+                            type="number"
+                            disabled={busy}
+                            value={row.spreadBps}
+                            onChange={(e) =>
+                              onEdit({
+                                ...row,
+                                spreadBps: Number(e.target.value),
+                              })
+                            }
+                          />
+                        </td>
+                        <td>
+                          {number(
+                            `${row.loanId}执行利率`,
+                            row.fixedRate,
+                            (v) => onEdit({ ...row, fixedRate: v }),
+                            row.rateType === "fixed" &&
+                              !!fieldErrors("rate").length,
+                          )}
+                          {row.rateType === "fixed" && messages("rate")}
+                        </td>
+                        <td>
+                          {number(
+                            `${row.loanId}基准利率`,
+                            row.benchmarkRate,
+                            (v) => onEdit({ ...row, benchmarkRate: v }),
+                            row.rateType === "floating" &&
+                              !!fieldErrors("rate").length,
+                          )}
+                          {row.rateType === "floating" && messages("rate")}
+                        </td>
+                        <td>
+                          <span
+                            className={`loan-ledger-status ${issues.length ? "bad" : "ok"}`}
+                          >
+                            {issues.length ? "待处理" : "通过"}
+                          </span>
+                        </td>
+                      </tr>
+                      {open && (
+                        <>
+                          <tr className="loan-ledger-detail-toolbar">
+                            <td></td>
+                            <td>
+                              <Button
+                                variant="secondary"
+                                disabled={busy}
+                                onClick={() =>
+                                  onEdit(
+                                    withDetails(row, [
+                                      ...details,
+                                      blankDetailRow(),
+                                    ]),
+                                  )
+                                }
+                              >
+                                ＋ 添加明细
+                              </Button>
+                            </td>
+                            <td colSpan={12}>
+                              新增与还款明细：只填需要的一侧，全空行忽略。
+                            </td>
+                          </tr>
+                          {details.map((event, i) => (
+                            <tr className="loan-ledger-details-row" key={i}>
+                              <td></td>
+                              <td>
+                                明细 {i + 1}
+                                <Button
+                                  variant="ghost"
+                                  aria-label={`删除${row.loanId}明细${i + 1}`}
+                                  disabled={busy}
+                                  onClick={() =>
+                                    onEdit(
+                                      withDetails(
+                                        row,
+                                        details.filter((_, j) => j !== i),
+                                      ),
+                                    )
+                                  }
+                                >
+                                  删除
+                                </Button>
+                              </td>
+                              <td></td>
+                              <td></td>
+                              <td></td>
+                              <td></td>
+                              <td data-detail-field="added">
+                                {eventCell("add", event, i)}
+                              </td>
+                              <td data-detail-field="reduced">
+                                {eventCell("repay", event, i)}
+                              </td>
+                              <td></td>
+                              <td></td>
+                              <td></td>
+                              <td></td>
+                              <td></td>
+                              <td></td>
+                            </tr>
+                          ))}
+                          <tr className="loan-ledger-detail-total">
+                            <td></td>
+                            <td>明细合计</td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td>
+                              {details
+                                .reduce((s, e) => s + (e.addAmount ?? 0), 0)
+                                .toLocaleString("zh-CN", {
+                                  minimumFractionDigits: 2,
+                                })}
+                            </td>
+                            <td>
+                              {details
+                                .reduce((s, e) => s + (e.repayAmount ?? 0), 0)
+                                .toLocaleString("zh-CN", {
+                                  minimumFractionDigits: 2,
+                                })}
+                            </td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                          </tr>
+                        </>
+                      )}
+                    </Fragment>
+                  );
+                })}
+            </tbody>
+          </table>
+        </div>
+        {filtered.length > PAGE_SIZE && (
           <div className="fx-actions">
             <Button
               disabled={current === 0}
@@ -343,10 +665,10 @@ export function LoanLedgerConfirmation({
               上一页
             </Button>
             <span>
-              {current + 1} / {Math.ceil(filtered.length / 50)}
+              {current + 1} / {Math.ceil(filtered.length / PAGE_SIZE)}
             </span>
             <Button
-              disabled={(current + 1) * 50 >= filtered.length}
+              disabled={(current + 1) * PAGE_SIZE >= filtered.length}
               onClick={() => setPage(current + 1)}
             >
               下一页

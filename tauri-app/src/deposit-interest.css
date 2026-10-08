@@ -108,6 +108,10 @@
 .deposit-account-list .deposit-review-account {
   min-width: 22rem;
 }
+
+.deposit-account-list .deposit-review-account-name {
+  white-space: nowrap;
+}
 .deposit-account-list .deposit-review-currency-col {
   min-width: 6rem;
 }

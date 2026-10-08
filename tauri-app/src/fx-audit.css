@@ -251,6 +251,14 @@
   gap: 10px;
   margin: 14px 0;
 }
+.fx-rate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-left: auto;
+}
 .fx-review-all {
   display: flex;
   flex-wrap: wrap;
@@ -421,6 +429,36 @@
   grid-template-columns: 145px minmax(0, 1fr);
   gap: 14px;
   align-items: stretch;
+}
+.fx-entity-summary {
+  min-width: 0;
+}
+.fx-entity-summary p {
+  margin: 0 0 10px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.fx-entity-summary .fx-table-scroll {
+  overflow-x: auto;
+}
+.fx-entity-summary table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.fx-entity-summary th,
+.fx-entity-summary td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.fx-entity-summary th:first-child,
+.fx-entity-summary th:nth-child(2),
+.fx-entity-summary td:first-child,
+.fx-entity-summary td:nth-child(2) {
+  text-align: left;
 }
 .fx-step-label {
   display: flex;
@@ -712,8 +750,8 @@
   white-space: nowrap;
   border-bottom: 1px solid var(--border);
 }
-.fx-rollforward-table th:nth-child(-n + 3),
-.fx-rollforward-table td:nth-child(-n + 3) {
+.fx-rollforward-table th:nth-child(-n + 5),
+.fx-rollforward-table td:nth-child(-n + 5) {
   text-align: left;
 }
 .fx-rollforward-table td:nth-child(2) {
@@ -891,7 +929,7 @@
 }
 
 .fx-accounts label {
-  grid-template-columns: minmax(260px, 1fr) 150px minmax(210px, 250px);
+  grid-template-columns: minmax(260px, 1fr) 240px minmax(210px, 250px);
   align-items: start;
   gap: 12px;
   padding: 10px 14px;
@@ -917,7 +955,7 @@
 /* 多主体账套加「主体」列：辅助拆行挂各自主体，末级兜底行主体未知显示 —。 */
 .fx-accounts.has-entity label,
 .fx-accounts.has-entity .fx-accounts-head {
-  grid-template-columns: minmax(140px, 220px) minmax(220px, 1fr) 150px minmax(200px, 240px);
+  grid-template-columns: minmax(140px, 220px) minmax(220px, 1fr) 240px minmax(200px, 240px);
 }
 .fx-entity-cell {
   align-self: start;
@@ -935,7 +973,7 @@
   top: 0;
   z-index: 1;
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) 150px minmax(210px, 250px);
+  grid-template-columns: minmax(260px, 1fr) 240px minmax(210px, 250px);
   gap: 12px;
   padding: 11px 14px;
   border-bottom: 1px solid var(--border);
@@ -975,6 +1013,13 @@
   display: block;
   margin-top: 2px;
   color: var(--warning-fg);
+}
+
+.fx-accounts label > .fx-account-name-single-line {
+  overflow: hidden;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  text-overflow: ellipsis;
 }
 .fx-currency-cell {
   display: grid;

@@ -32,7 +32,7 @@ describe("固定资产与凭证页视觉契约", () => {
     expect(page).not.toContain("和序时账使用同一入口，可一次拖入两个文件");
   });
 
-  it("FA 两期清单人工修改后可继续，导出按当前映射重算", () => {
+  it("FA 两期清单人工修改后可继续，导出复用上次匹配快照", () => {
     const page = source("FaListPage");
     expect(page).toContain('"开始匹配"');
     expect(page).toContain('"2. 补充清单（可选）"');
@@ -41,7 +41,7 @@ describe("固定资产与凭证页视觉契约", () => {
     expect(page).not.toContain('disabled={!inspection || resultStale}');
     expect(page).not.toContain('disabled: !faStats || resultStale');
     expect(page).not.toContain('method === "fa.export" && resultStale');
-    expect(page).toContain('导出时将按当前输入和映射重新计算');
+    expect(page).toContain('导出也将基于该次匹配生成套表');
     expect(page).not.toContain('["companyName", "公司名称"]');
     expect(page).not.toContain('autoApply: false');
     expect(page).toContain('__restoreSnapshot');

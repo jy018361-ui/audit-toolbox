@@ -32,6 +32,13 @@ function job(overrides: Partial<JobEvent> = {}): JobEvent {
 const nameOf = (toolId: string) =>
   toolId === "Excel_Merger" ? "Excel 批量合并" : toolId;
 
+it("后台补齐任务显示页内进度，不弹出阻挡字段编辑的等待窗", () => {
+  const background = job({ background: true });
+  render(<JobDialogProvider jobs={[background]} nameOf={nameOf}><JobProgress job={background} /></JobDialogProvider>);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getByText(background.message)).toBeTruthy();
+});
+
 function renderDialog(jobs: JobEvent[]) {
   return render(
     <JobDialogProvider jobs={jobs} nameOf={nameOf}>

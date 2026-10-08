@@ -100,7 +100,7 @@ pub(crate) fn run_job(
 /// 复用同一套预览与映射 UI。
 fn dep_inspect(params: Value) -> Result<Value, AppError> {
     let path = fa::required_path(&params, "path")?;
-    let table = fa::load_table(
+    let table = fa::load_review_table(
         &path,
         params.get("sheet").and_then(Value::as_str),
         fa::optional_header(&params, "headerRow")?,
@@ -143,7 +143,7 @@ fn dep_review(params: Value) -> Result<Value, AppError> {
         );
     }
     let path = fa::required_path(&params, "path")?;
-    let table = fa::load_table(
+    let table = fa::load_review_table(
         &path,
         params.get("sheet").and_then(Value::as_str),
         fa::optional_header(&params, "headerRow")?,
@@ -152,7 +152,8 @@ fn dep_review(params: Value) -> Result<Value, AppError> {
     let mapping = params.get("mapping").cloned().unwrap_or(json!({}));
     let payload = dep_llm_payload(&table, &mapping);
     let system = "你是固定资产折旧测算字段映射复核助手。只能使用 payload.file2.headers 中的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}]}。suggested_mapping 必须是 JSON 对象，例如 {\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep；file_side 固定为 file2；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因表头规整就宣称全部映射正确。已有映射必须结合 samples 逐项复核：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side=file2，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组。";
-    let content = fa::request_fa_llm(&settings, system, &payload.to_string())?;
+    let system = format!("{system}\n{}逐项检查，但只输出需要调整的项目；相容的 keep 项不逐条输出，没有可信候选的未映射项维持空缺。同一调整只放在 suggestions 或 fieldReviews 中一次，reason 最多一句话。", fa::FA_DATE_REVIEW_INSTRUCTION);
+    let content = fa::request_fa_llm(&settings, &system, &payload.to_string())?;
     let parsed = fa::parse_llm_json(&content).ok_or_else(|| {
         error(
             "LLM_RESPONSE_INVALID",
@@ -185,7 +186,7 @@ fn dep_llm_payload(table: &fa::Table, mapping: &Value) -> Value {
     json!({
         "file2": {
             "headers": table.headers,
-            "samples": fa::sample_columns(table),
+            "samples": fa::review_sample_columns(table),
             "mapping": mapping,
             "unmappedRoles": unmapped_roles,
             "unmappedCandidates": unmapped_candidates,
@@ -287,7 +288,10 @@ fn dep_finalize_review(parsed: Value, payload: Value) -> Value {
             reviews.push(item);
         }
     }
-    let message = if auto.is_empty() && reviews.is_empty() {
+    let rejected_dates = reviews.iter().any(|item| item.get("rejectedByDateValidation").and_then(Value::as_bool) == Some(true));
+    let message = if rejected_dates {
+        "LLM 复核完成：已忽略与日期取值不符的建议，当前映射未因此改动；请人工确认真实日期列。"
+    } else if auto.is_empty() && reviews.is_empty() {
         "LLM 复核完成：现有脚本映射无需补充。"
     } else {
         "折旧测算 LLM 复核完成。"

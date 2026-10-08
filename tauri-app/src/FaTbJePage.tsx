@@ -74,6 +74,7 @@ type AccountRole = "cost" | "depreciation" | "excluded";
 type Assignment = {
   entity?: string;
   account: string;
+  parentAccountName?: string;
   auxiliary?: string;
   currency?: string;
   role: AccountRole;
@@ -391,7 +392,7 @@ export function faAssignmentsForEntities(
 }
 
 /** 账里真实存在的「主体×科目」组合（inspect_* 的 entityAccounts 项）。 */
-export type EntityAccountPair = { entity: string; account: string; auxiliary?: string; currency?: string };
+export type EntityAccountPair = { entity: string; account: string; auxiliary?: string; currency?: string; classificationContext?: string; parentAccountName?: string };
 
 const faAssignmentIdentity = (row: Pick<Assignment, "entity" | "account" | "auxiliary" | "currency">) => {
   const { code, name } = splitFaAccount(row.account);
@@ -418,7 +419,7 @@ export function unionEntityAccounts(
     const key = faAssignmentIdentity({ entity, account, auxiliary: pair.auxiliary, currency: pair.currency });
     if (seen.has(key)) continue;
     seen.add(key);
-    pairs.push({ entity, account, ...(pair.auxiliary ? { auxiliary: pair.auxiliary } : {}), ...(pair.currency ? { currency: pair.currency } : {}) });
+    pairs.push({ entity, account, ...(pair.auxiliary ? { auxiliary: pair.auxiliary } : {}), ...(pair.currency ? { currency: pair.currency } : {}), ...(pair.classificationContext ? { classificationContext: pair.classificationContext } : {}), ...(pair.parentAccountName ? { parentAccountName: pair.parentAccountName } : {}) });
   }
   return pairs;
 }
@@ -449,29 +450,38 @@ export function faAssignmentsForEntityAccounts(
   pairs: EntityAccountPair[],
   current: Assignment[],
 ): Assignment[] {
+  const contextualSuggestions = new Map(pairs.filter((pair) => pair.classificationContext).map((pair) => {
+    const text = `${pair.account} ${pair.classificationContext}`;
+    const category = faCategory(pair.classificationContext!);
+    return [faAssignmentIdentity(pair), {
+      ...suggestFaAccount(text), account: pair.account,
+      category: category === "固定资产" ? suggestFaAccount(pair.account).category : category,
+    }] as const;
+  }));
   const suggested = new Map(
     suggestFaAccounts([...new Set(pairs.map((pair) => pair.account))]).map(
       (item) => [item.account, item],
     ),
   );
-  const orderOf = (account: string) =>
-    ROLE_ORDER[suggested.get(account)?.role ?? "excluded"];
+  const orderOf = (pair: EntityAccountPair) =>
+    ROLE_ORDER[contextualSuggestions.get(faAssignmentIdentity(pair))?.role ?? suggested.get(pair.account)?.role ?? "excluded"];
   return pairs
-    .map(({ entity, account, auxiliary, currency }, index) => ({ entity, account, auxiliary, currency, index }))
+      .map(({ entity, account, auxiliary, currency, parentAccountName }, index) => ({ entity, account, auxiliary, currency, parentAccountName, index }))
     .sort(
-      (a, b) => orderOf(a.account) - orderOf(b.account) || a.index - b.index,
+      (a, b) => orderOf(a) - orderOf(b) || a.index - b.index,
     )
-    .map(({ entity, account, auxiliary, currency }) => {
+      .map(({ entity, account, auxiliary, currency, parentAccountName }) => {
       const previous = current.find(
         (item) => faAssignmentIdentity(item) === faAssignmentIdentity({ entity, account, auxiliary, currency }),
       );
       return previous
-        ? normalizeAssignmentCategory(previous)
+          ? { ...normalizeAssignmentCategory(previous), ...(parentAccountName ? { parentAccountName } : {}) }
         : {
-            ...(suggested.get(account) ?? suggestFaAccount(account)),
+            ...(contextualSuggestions.get(faAssignmentIdentity({ entity, account, auxiliary, currency })) ?? suggested.get(account) ?? suggestFaAccount(account)),
             entity,
             auxiliary,
-            currency,
+              currency,
+              ...(parentAccountName ? { parentAccountName } : {}),
           };
     });
 }
@@ -485,6 +495,7 @@ export type AssignmentView = {
   key: string;
   /** 展示用科目串：优先带名称的写法，否则纯编码写法。 */
   label: string;
+  parentAccountName?: string;
   /** 组内原始科目串的来源侧（TB／JE），空数组表示无从判断（回退口径）。 */
   sources: Kind[];
   /** 组内全部原始科目串——payload 逐条使用，缺一不可。 */
@@ -532,6 +543,7 @@ export function groupAssignmentViews(
       currency: first.row.currency,
       label:
         accounts.find((account) => splitFaAccount(account).name) ?? accounts[0],
+      ...(first.row.parentAccountName ? { parentAccountName: first.row.parentAccountName } : {}),
       sources: (["tb", "je"] as const).filter((kind) => sourceSet.has(kind)),
       accounts,
       index: first.index,
@@ -863,7 +875,7 @@ export function FaTbJePage() {
   const filteredAssignmentViews = useMemo(() => {
     const matches = keywordFilterPredicate(accountQuery);
     return assignmentViews.filter((view) =>
-      matches([view.label, ...view.accounts].join(" ")),
+      matches([view.label, view.parentAccountName ?? "", ...view.accounts].join(" ")),
     );
   }, [assignmentViews, accountQuery]);
   const pageCount = Math.max(
@@ -1255,8 +1267,6 @@ export function FaTbJePage() {
                 account: item.account,
                 tbColumn: item.tbColumn,
                 jeColumn: item.column,
-                anchorHits: item.anchorHits,
-                anchorTotal: item.anchorTotal,
               })),
             }
           : undefined,
@@ -1709,10 +1719,10 @@ export function FaTbJePage() {
                   {pagedViews.map(({ view, index }) => (
                     <tr key={JSON.stringify([view.entity, view.key])}>
                       {showReviewEntity && <td><Badge variant="outline">{view.entity}</Badge></td>}
-                      <td title={[...view.accounts, view.auxiliary].filter(Boolean).join("；")}>
+                      <td title={ledgerReviewAccountLabel(view.label, view.auxiliary, view.parentAccountName)}>
                         <div className="fa-tbje-account-cell">
                           <span className="fa-tbje-account-name">
-                            {ledgerReviewAccountLabel(view.label, view.auxiliary)}
+                            {ledgerReviewAccountLabel(view.label, view.auxiliary, view.parentAccountName)}
                           </span>
                         </div>
                       </td>
@@ -1809,7 +1819,7 @@ export function FaTbJePage() {
                 ]}
                 rows={assignmentViews.map((view) => ({
                   key: JSON.stringify([view.entity, view.key]),
-                  values: [...(showReviewEntity ? [view.entity] : []), ledgerReviewAccountLabel(view.label, view.auxiliary),
+                  values: [...(showReviewEntity ? [view.entity] : []), ledgerReviewAccountLabel(view.label, view.auxiliary, view.parentAccountName),
                     ...(showReviewCurrency ? [view.currency ?? ""] : []),
                     view.role === "cost" ? "固定资产原值" : view.role === "depreciation" ? "累计折旧" : "排除",
                     view.category],
@@ -2485,6 +2495,7 @@ function FaTbJeMappingPanel(props: {
       groups={formGroups(props.kind, roles, forms, props.mapping)}
       requirementOf={(role) => roleRequirement(match, role)}
       formNote={describeForm(match, (role) => labels[role] ?? role)}
+      formComplete={match?.complete}
       multi={MULTI}
       missing={props.missing}
       busy={props.busy}

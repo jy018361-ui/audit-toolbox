@@ -71,7 +71,7 @@ mod tests {
             include_bytes!("../../tests/fixtures/covenant-cases-v1.xlsx").to_vec(),
         )
         .unwrap();
-        assert_eq!(sheets["正例条款"].len(), 43);
+        assert_eq!(sheets["正例条款"].len(), 44);
         assert_eq!(sheets["排除与支持"].len(), 13);
         assert_eq!(sheets["C300回归"].len(), 18);
         assert_eq!(sheets["正例条款"][1][0], "P001");

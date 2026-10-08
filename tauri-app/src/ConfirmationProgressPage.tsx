@@ -531,6 +531,7 @@ export default function ConfirmationProgressPage({
                 <DataTable
                   columns={inspection.headers}
                   rows={inspection.preview}
+                  resizeKey="confirmation.preview"
                   caption={
                     <strong>函证清单前 {inspection.preview.length} 行</strong>
                   }

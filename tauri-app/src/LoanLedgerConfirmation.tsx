@@ -1,7 +1,9 @@
 import { Fragment, useState } from "react";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
+import { LoanLedgerNumberInput, loanLedgerNumber } from "./LoanLedgerNumberInput";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
+import { useTableColumnResize } from "./components/useTableColumnResize";
 
 export type LoanEvent = { date: string; amount: number | null; basis?: string };
 /**
@@ -235,6 +237,8 @@ export function LoanLedgerConfirmation({
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const [openKeys, setOpenKeys] = useState<Record<string, boolean>>({});
+  // 台账确认表 14 列含长标识与金额，接入统一的列宽拖拽（拖动/双击自适应/右键重置）
+  const resize = useTableColumnResize<HTMLDivElement>({ storageKey: "loan.step2-ledger" });
   const filtered = rows.filter((r) =>
     `${r.entity} ${r.loanId}`.includes(query),
   );
@@ -256,18 +260,15 @@ export function LoanLedgerConfirmation({
     value: number | null | undefined,
     change: (v: number | null) => void,
     invalid = false,
+    percent = false,
   ) => (
-    <Input
-      aria-label={label}
-      aria-invalid={invalid}
-      type="number"
-      min="0"
-      step="any"
-      value={value ?? ""}
+    <LoanLedgerNumberInput
+      label={label}
+      invalid={invalid}
+      percent={percent}
+      value={value}
       disabled={busy}
-      onChange={(e) =>
-        change(e.target.value === "" ? null : Number(e.target.value))
-      }
+      onChange={change}
     />
   );
   return (
@@ -293,7 +294,7 @@ export function LoanLedgerConfirmation({
           共 {rows.length} 笔借款。PBC
           为台账提供，推算为系统补充；默认日期按报告期边界限定，可修改。期末空白按零检查四栏平衡。
         </p>
-        <div className="loan-ledger-scroll">
+        <div className="loan-ledger-scroll" ref={resize.ref}>
           <table className="loan-ledger-table">
             <colgroup>
               {Array.from({ length: 14 }, (_, i) => (
@@ -326,8 +327,8 @@ export function LoanLedgerConfirmation({
                 ))}
                 <th>利率类型</th>
                 <th>加减点（BP）</th>
-                <th>执行利率</th>
-                <th>基准利率（浮动用）</th>
+                <th>执行利率（%）</th>
+                <th>基准利率（%，浮动用）</th>
                 <th>校验</th>
               </tr>
             </thead>
@@ -473,7 +474,7 @@ export function LoanLedgerConfirmation({
                             data-amount-field={field}
                             title={
                               row.originalAmounts
-                                ? `原始默认值：${row.originalAmounts[field] ?? "空白"}`
+                                ? `原始默认值：${loanLedgerNumber(row.originalAmounts[field]) || "空白"}`
                                 : undefined
                             }
                           >
@@ -536,6 +537,7 @@ export function LoanLedgerConfirmation({
                             (v) => onEdit({ ...row, fixedRate: v }),
                             row.rateType === "fixed" &&
                               !!fieldErrors("rate").length,
+                            true,
                           )}
                           {row.rateType === "fixed" && messages("rate")}
                         </td>
@@ -546,6 +548,7 @@ export function LoanLedgerConfirmation({
                             (v) => onEdit({ ...row, benchmarkRate: v }),
                             row.rateType === "floating" &&
                               !!fieldErrors("rate").length,
+                            true,
                           )}
                           {row.rateType === "floating" && messages("rate")}
                         </td>

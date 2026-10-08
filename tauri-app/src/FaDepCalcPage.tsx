@@ -722,6 +722,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
               <DataTable
                 columns={inspection.headers}
                 rows={inspection.preview}
+                resizeKey="fa.dep-calc.preview"
                 caption={
                   <div className="fa-table-caption">
                     <strong>

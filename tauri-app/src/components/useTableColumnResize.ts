@@ -28,6 +28,12 @@ import { useCallback, useEffect, useRef } from "react";
 const STORAGE_PREFIX = "audit-toolbox.colwidths.";
 export const TABLE_COLUMN_RESIZE_MIN_WIDTH = 56;
 export const TABLE_COLUMN_RESIZE_MAX_FIT_WIDTH = 720;
+/**
+ * 拖动调整（及记忆恢复）的最大列宽保险丝，防止误拖把列撑到不可用。
+ * 起拖时已超过该宽度的列不强制收回（避免起拖瞬间跳变），
+ * 记忆恢复时超出部分会被压回该宽度，旧版本存下的坏宽度随之自愈。
+ */
+export const TABLE_COLUMN_RESIZE_MAX_WIDTH = 1600;
 /** 双击自适应时在量得的内容宽度上再加的余量（边框、句柄、取整） */
 const AUTO_FIT_SLACK = 10;
 
@@ -36,6 +42,7 @@ export type TableColumnResizeOptions = {
   storageKey: string;
   minWidth?: number;
   maxFitWidth?: number;
+  maxWidth?: number;
 };
 
 export type UseTableColumnResizeResult<T extends HTMLElement> = {
@@ -54,9 +61,9 @@ export function normalizeHeaderLabel(text: string | null): string {
   return (text ?? "").replace(/\s+/g, " ").trim();
 }
 
-export function clampWidth(value: number, min: number): number {
+export function clampWidth(value: number, min: number, max = TABLE_COLUMN_RESIZE_MAX_WIDTH): number {
   if (!Number.isFinite(value)) return min;
-  return Math.max(min, Math.round(value));
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 export function readStoredWidths(storageKey: string, labels: string[]): number[] | null {
@@ -72,7 +79,8 @@ export function readStoredWidths(storageKey: string, labels: string[]): number[]
       if (parsed.labels[i] !== labels[i]) return null;
       if (!Number.isFinite(parsed.widths[i])) return null;
     }
-    return parsed.widths.map((w) => Math.max(0, Math.round(w)));
+    // 旧版本拖拽缺陷可能存下超宽的坏记忆，读回时压回上限，自愈
+    return parsed.widths.map((w) => clampWidth(w, 0));
   } catch {
     return null;
   }
@@ -97,7 +105,7 @@ export function clearStoredWidths(storageKey: string): void {
   }
 }
 
-type ControllerConfig = { storageKey: string; minWidth: number; maxFitWidth: number };
+type ControllerConfig = { storageKey: string; minWidth: number; maxFitWidth: number; maxWidth: number };
 
 type DragState = {
   index: number;
@@ -329,8 +337,9 @@ class TableColumnResizeController {
     if (this.currentWidths) return this.currentWidths.slice();
     const row = this.headerRow();
     if (!row) return [];
+    // 只量现状不钳上限：起拖前把超宽列强行收回会造成跳变
     return Array.from(row.cells).map((cell) =>
-      clampWidth(cell.getBoundingClientRect().width, this.config.minWidth),
+      clampWidth(cell.getBoundingClientRect().width, this.config.minWidth, Number.POSITIVE_INFINITY),
     );
   }
 
@@ -411,10 +420,16 @@ class TableColumnResizeController {
   private onPointerMove(event: PointerEvent): void {
     const drag = this.drag;
     if (!drag) return;
+    // drag.widths 恒为起拖时的基准，宽度 = 基准 + 起点至今的总位移；
+    // 基准随事件滚动会把同一段位移重复叠加，拖几下就失控（旧版缺陷）
     const delta = event.clientX - drag.startX;
     const next = drag.widths.slice();
-    next[drag.index] = clampWidth(next[drag.index] + delta, this.config.minWidth);
-    drag.widths = next;
+    const dragMax = Math.max(this.config.maxWidth, drag.widths[drag.index]);
+    next[drag.index] = clampWidth(
+      drag.widths[drag.index] + delta,
+      this.config.minWidth,
+      dragMax,
+    );
     const table = this.table;
     const cols = this.colElements();
     this.withSelfChange(() => {
@@ -464,6 +479,7 @@ export function useTableColumnResize<T extends HTMLElement = HTMLDivElement>(
       storageKey,
       minWidth: optionsRef.current.minWidth ?? TABLE_COLUMN_RESIZE_MIN_WIDTH,
       maxFitWidth: optionsRef.current.maxFitWidth ?? TABLE_COLUMN_RESIZE_MAX_FIT_WIDTH,
+      maxWidth: optionsRef.current.maxWidth ?? TABLE_COLUMN_RESIZE_MAX_WIDTH,
     });
     controllerRef.current = controller;
     controller.connect();

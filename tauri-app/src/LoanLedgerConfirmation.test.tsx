@@ -105,10 +105,39 @@ describe("台账信息确认", () => {
     });
     expect(edit.mock.lastCall?.[0].opening).toBe(100);
     fireEvent.change(screen.getByLabelText("借款甲执行利率"), {
-      target: { value: "0.05" },
+      target: { value: "5" },
     });
     expect(edit.mock.lastCall?.[0].fixedRate).toBe(0.05);
     expect(screen.queryByLabelText("借款甲新增日期1")).not.toBeInTheDocument();
+  });
+  it("金额显示千位分隔，利率按百分比编辑并保留小数草稿", () => {
+    const edit = vi.fn();
+    render(<Harness initial={{ ...row, fixedRate: 0.044500000000000004 }} onEdit={edit} />);
+    expect(screen.getByRole("columnheader", { name: "执行利率（%）" })).toBeInTheDocument();
+    expect(screen.getByLabelText("借款甲执行利率")).toHaveValue("4.45");
+    const amount = screen.getByLabelText("借款甲本期新增");
+    expect(amount).toHaveValue("10,000,000.00");
+    fireEvent.focus(amount);
+    fireEvent.change(amount, { target: { value: "1,234,567.89" } });
+    expect(edit.mock.lastCall?.[0].added).toBe(1234567.89);
+    fireEvent.blur(amount);
+    expect(amount).toHaveValue("1,234,567.89");
+    const rate = screen.getByLabelText("借款甲执行利率");
+    fireEvent.focus(rate);
+    fireEvent.change(rate, { target: { value: "0." } });
+    expect(rate).toHaveValue("0.");
+    fireEvent.change(rate, { target: { value: "0.05" } });
+    expect(edit.mock.lastCall?.[0].fixedRate).toBe(0.0005);
+    fireEvent.blur(rate);
+    expect(rate).toHaveValue("0.05");
+    fireEvent.click(screen.getByLabelText("展开借款甲明细"));
+    expect(screen.getByLabelText("借款甲新增金额1")).toHaveValue("5,000,000.00");
+  });
+  it("非法期末金额不能被当作空白零值放行", () => {
+    const edit = vi.fn();
+    render(<Harness initial={{...row, opening: 0, added: 2000000, reduced: 2000000, closing: 0}} onEdit={edit} />);
+    fireEvent.change(screen.getByLabelText("借款甲期末余额"), {target:{value:"abc"}});
+    expect(ledgerInformationErrors(edit.mock.lastCall?.[0], "2025-01-01", "2025-12-31")).toContain("请填写有效的非负金额");
   });
   it("行首＋展开明细，既有事件按行并排成四格", () => {
     const edit = vi.fn();
@@ -229,5 +258,30 @@ describe("台账信息确认", () => {
     fireEvent.change(screen.getByLabelText("借款甲还款日期1"), {target:{value:""}});
     expect(screen.getByLabelText("借款甲还款日期1")).toHaveAttribute("aria-invalid","true");
     expect(container.querySelector('[data-amount-field="reduced"]')).toHaveTextContent("第 1 笔请填写还款日期");
+  });
+
+  it("接入列宽拖拽：14 列都有调整句柄，拖动按总位移改写 colgroup", () => {
+    const edit=vi.fn();
+    const {container}=render(<Harness initial={row} onEdit={edit} />);
+    const handles=container.querySelectorAll<HTMLDivElement>(".tcr-handle");
+    expect(handles).toHaveLength(14);
+    const table=container.querySelector("table")!;
+    const headers=Array.from(table.querySelectorAll("thead th"));
+    headers.forEach((th,index)=>{
+      Object.defineProperty(th,"getBoundingClientRect",{
+        configurable:true,
+        value:()=>({width:index===1?250:170,left:0,right:index===1?250:170}),
+      });
+    });
+    handles[1].dispatchEvent(
+      new MouseEvent("pointerdown",{bubbles:true,button:0,clientX:400}),
+    );
+    for(const x of [412,426,440]){
+      window.dispatchEvent(new MouseEvent("pointermove",{clientX:x}));
+    }
+    window.dispatchEvent(new MouseEvent("pointerup",{}));
+    const cols=table.querySelectorAll("colgroup col");
+    expect((cols[1] as HTMLElement).style.width).toBe("290px");
+    expect(table.style.tableLayout).toBe("fixed");
   });
 });

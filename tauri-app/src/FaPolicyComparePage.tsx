@@ -786,6 +786,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
       <DataTable
         columns={headers}
         rows={inspect.preview}
+        resizeKey={`fa.policy-compare.${side}`}
         caption={
           <div className="fa-table-caption">
             <strong>

@@ -913,6 +913,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
               <DataTable
                 columns={headers}
                 rows={preview}
+                resizeKey="ts-manager.preview"
                 caption={
                   <div className="fa-table-caption">
                     <strong>

@@ -69,3 +69,21 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* === UI 审计修复 P2-7（2026-09-24）：无法访问路径的提示降为黄色警示 ===
+   个别子路径打不开是"部分完成"的正常情况，不是错误：底色从 danger 红
+   换成 warning 黄；同时给路径清单恢复缩进和项目符号，避免路径名和
+   「已跳过」说明文字粘连成一句。 */
+.file-list-skipped {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+.file-list-skipped ul {
+  margin: var(--sp-2) 0 0;
+  padding-left: var(--sp-5);
+  list-style: disc;
+}
+.file-list-skipped p {
+  margin: var(--sp-2) 0 0;
+}

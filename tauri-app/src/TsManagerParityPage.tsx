@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
   jobCancel,
@@ -200,11 +201,14 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   const [job, setJob] = useState<JobEvent>();
   const [error, setError] = useState("");
   const [dragHover, setDragHover] = useState(false);
-  const [menu, setMenu] = useState<{ field: string; anchor: DOMRect }>();
+  const [menu, setMenu] = useState<{ field: string; anchor: HTMLElement }>();
   const [valueCache, setValueCache] = useState<
     Record<string, ColumnFilterValues>
   >({});
   const [valuesLoading, setValuesLoading] = useState(false);
+  // 最近一次「加载文件」任务的 jobId：筛选/导出任务也会推送事件，
+  // 只有 jobId 对得上的失败才能判定为加载失败，chip 才随之回退。
+  const loadJobIdRef = useRef("");
 
   useEffect(() => {
     draft = state;
@@ -216,7 +220,21 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
       if (event.toolId !== "ts_manager") return;
       setJob(event);
       setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
-      if (event.phase === "failed") setError(event.message);
+      if (event.phase === "failed") {
+        setError(event.message);
+        // P3-14：失败的是「加载文件」任务本身时，上一次成功读取的表头、
+        // 筛选与预览不再代表文件现状，必须一并清掉——否则顶部 chip 仍按
+        // 旧表头显示绿色「文件已加载」，与红色报错自相矛盾。
+        if (event.jobId && event.jobId === loadJobIdRef.current) {
+          setState((current) => ({
+            ...current,
+            inspect: undefined,
+            selections: {},
+            filtered: undefined,
+            result: undefined,
+          }));
+        }
+      }
       if (event.phase !== "completed" || !event.result) return;
       const payload = event.result as Record<string, unknown>;
       // 读取和筛选预览都带 headers/preview，靠 sheets/defaults 区分：
@@ -377,11 +395,12 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     setError("");
     try {
       // 读取走任务通道才有进度和取消：网络盘上的大工时表原本加载期间界面全无反馈。
-      await jobStart("ts.inspect", {
+      const jobId = await jobStart("ts.inspect", {
         inputPath,
         sheet: sheet || undefined,
         headerRow: Math.max(1, Number(state.headerRow) || 1),
       });
+      loadJobIdRef.current = jobId;
     } catch (caught) {
       setError(messageOf(caught));
       setBusy(false);
@@ -436,7 +455,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     [state.inputPath, state.sheet, state.headerRow],
   );
 
-  function openFilterMenu(field: string, anchor: DOMRect) {
+  function openFilterMenu(field: string, anchor: HTMLElement) {
     setMenu({ field, anchor });
     if (!valueCache[field]) void loadValues(field, "");
   }
@@ -589,6 +608,12 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     });
   const totalRows = state.inspect?.dimensions?.rows ?? 0;
   const shownRows = state.filtered?.rows ?? totalRows;
+  // P3-14：chip 的成功态与加载任务解耦——只有最近一次「加载文件」任务
+  // 以失败收场时才显示红色「加载失败」；筛选/导出任务的失败不影响它。
+  const loadJobFailed =
+    job?.phase === "failed" &&
+    Boolean(job.jobId) &&
+    job.jobId === loadJobIdRef.current;
   return (
     <div className="ts-manager-page">
       <PageHeader
@@ -605,6 +630,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
         current={step - 1}
         onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3)}
       />
+      {job?.phase === "cancelled" && <div className="flex flex-wrap items-center gap-2" role="status"><Badge variant="warning">已取消</Badge><span className="hint">本次任务已停止；文件与筛选设置仍保留，可重新加载或导出。</span></div>}
       <div className="fa-stack">
         <Card>
           <CardHeader>
@@ -615,18 +641,26 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   ? "2. 条件筛选（在预览表头按列勾选）"
                   : "3. 输出与导出"}
             </CardTitle>
-            <Badge
+            {(!headers.length || busy || loadJobFailed) && <Badge
               variant="outline"
               className={
                 busy
                   ? "badge-info"
-                  : headers.length
-                    ? "badge-ready"
-                    : "badge-neutral"
+                  : loadJobFailed
+                    ? "badge-danger"
+                    : headers.length
+                      ? "badge-ready"
+                      : "badge-neutral"
               }
             >
-              {busy ? "处理中" : headers.length ? "文件已加载" : "待加载文件"}
-            </Badge>
+              {busy
+                ? "处理中"
+                : loadJobFailed
+                  ? "加载失败"
+                  : headers.length
+                    ? "文件已加载"
+                    : "待加载文件"}
+            </Badge>}
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
@@ -634,7 +668,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
               !["completed", "failed", "cancelled"].includes(job.phase) && (
                 <JobProgress
                   job={job}
-                  onCancel={(jobId) => void jobCancel(jobId)}
+                  onCancel={(jobId) => jobCancel(jobId)}
                   cancelLabel="取消任务"
                 />
               )}
@@ -819,7 +853,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                       type="button"
                       variant="secondary"
                       size="sm"
-                      onClick={() => void jobCancel(job.jobId)}
+                      onClick={() => void cancelJobWithFeedback(job.jobId)}
                     >
                       取消
                     </Button>
@@ -841,7 +875,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
 
         <Card>
           <CardHeader>
-            <CardTitle>文件预览与任务结果</CardTitle>
+            <CardTitle>数据预览</CardTitle>
           </CardHeader>
           <CardContent>
             {state.inspect && (
@@ -866,7 +900,9 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
             {/* Legacy forced a sheet picker before loading; silently taking the
                 first sheet reads a cover page as if it were the data. */}
             {(state.inspect?.sheets?.length ?? 0) > 1 && (
-              <div className="warning-box">
+              /* P3-6a：这是常规信息提示（当前 Sheet 未必有错），用中性蓝的
+                 info-box，不再借用错误级的红底红框。 */
+              <div className="info-box">
                 该工作簿共有 {state.inspect?.sheets?.length}{" "}
                 个工作表，当前使用「
                 {state.sheet || state.inspect?.selectedSheet}」。
@@ -894,25 +930,32 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                 headerControls={headerControls}
               />
             )}
-            {/* The export already returns these counts; legacy showed them in a
-                completion dialog so the run could be reconciled afterwards. */}
-            {exportSummary.length > 0 && (
-              <StatGrid
-                columns={3}
-                items={exportSummary.map((item) => ({
-                  label: item.label,
-                  value: item.value,
-                }))}
+            {!state.inspect && !job && (
+              <EmptyState
+                compact
+                title="准备工时数据"
+                description="选择 Timesheet 文件并加载后，可核对表头和前 20 行，再按列筛选。"
               />
             )}
-            {outputPaths.length > 0 && (
-              <div className="output-list">
-                <p className="ts-result-overview" role="status">
-                  <Badge variant="outline" className="badge-ready">
-                    导出完成
-                  </Badge>
-                  <span>请打开文件核对筛选范围与汇总结果。</span>
-                </p>
+          </CardContent>
+        </Card>
+        {outputPaths.length > 0 && (
+          <Card className="ts-export-result-card">
+            <CardHeader>
+              <CardTitle>本次导出</CardTitle>
+              <Badge variant="success">已完成</Badge>
+            </CardHeader>
+            <CardContent>
+              {exportSummary.length > 0 && (
+                <StatGrid
+                  columns={4}
+                  items={exportSummary.map((item) => ({
+                    label: item.label,
+                    value: item.value,
+                  }))}
+                />
+              )}
+              <div className="output-list" aria-label="导出文件">
                 {outputPaths.map((path) => (
                   <Button
                     type="button"
@@ -926,16 +969,9 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   </Button>
                 ))}
               </div>
-            )}
-            {!state.inspect && !job && (
-              <EmptyState
-                compact
-                title="准备工时数据"
-                description="选择 Timesheet 文件并加载后，可核对表头和前 20 行，再按列筛选。"
-              />
-            )}
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        )}
       </div>
       {menu && (
         <ColumnFilterMenu

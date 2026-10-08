@@ -1,3 +1,49 @@
+.roll-setup-layout {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.roll-setup-layout > .form-card {
+  min-width: 0;
+}
+
+.roll-company-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+
+.roll-company-metrics > div {
+  min-width: 0;
+  display: grid;
+  gap: var(--sp-1);
+  padding: var(--sp-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+}
+
+.roll-company-metrics > div > span {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.roll-company-metrics > div > strong {
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 1450px) {
+  .roll-setup-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 700px) {
+  .roll-company-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .roll-cra-scroll {
   max-width: 100%;
   overflow-x: auto;
@@ -27,4 +73,20 @@
   .roll-result-row {
     grid-template-columns: 1fr;
   }
+}
+
+/* P1-5（2026-09-24 UI 走查）：右栏底部四个开关（结转 wording / Summary /
+   AI 辅助检查 / AI 修订表述）原先按行内文本流排布，标签相互粘连，
+   「启用 AI 辅助运行前检查与复核」还会在词中间断行。
+   改为每个开关独占一行：开关与标签纵向居中、留出间距，
+   标签禁止词内断行（中文整句不再拆开，过窄时仅在空格/标点处换行）。 */
+.roll-setup-layout .form-card > .check-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+.roll-setup-layout .form-card > .check-row + .check-row {
+  margin-top: var(--sp-2);
 }

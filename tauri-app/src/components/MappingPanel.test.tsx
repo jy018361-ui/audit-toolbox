@@ -67,6 +67,145 @@ describe("共用字段映射面板", () => {
     });
   });
 
+  it("用户手动确认编码名称混写时允许两个科目身份角色共用一列", () => {
+    const mixedHeader = "项目编码、文本/科目编码、文本";
+    const mixedRows = [
+      ["1001/库存现金", "1000"],
+      ["1001010000:库存现金-人民币", "2000"],
+      ["1002/银行存款", "3000"],
+      ["1002101001:银行存款-建设银行", "4000"],
+    ];
+    const { onChange, selects } = panel({
+      headers: [mixedHeader, "本位币金额"],
+      rows: mixedRows,
+      mapping: { accountCode: mixedHeader },
+      multi: new Set(["accountName"]),
+    });
+
+    pick(selects[0], "accountName");
+    expect(onChange).toHaveBeenCalledWith({
+      accountCode: mixedHeader,
+      accountName: [mixedHeader],
+    });
+  });
+
+  it("空格分隔的完整编码名称在所有共用面板中也可双映射", () => {
+    const { onChange, selects } = panel({
+      headers: ["科目"],
+      rows: [
+        ["6701090001 财务费用-汇兑收益"],
+        ["1001010000 库存现金-人民币"],
+        ["1002010000 银行存款"],
+        ["2202010000 应付账款"],
+      ],
+      mapping: { accountCode: "科目" },
+      multi: new Set(["accountName"]),
+    });
+    pick(selects[0], "accountName");
+    expect(onChange).toHaveBeenCalledWith({
+      accountCode: "科目",
+      accountName: ["科目"],
+    });
+  });
+
+  it("借款页的字符串映射也能保存混写列双角色且不产生数组状态", () => {
+    const mixedHeader = "科目";
+    const { onChange, selects } = panel({
+      headers: [mixedHeader],
+      rows: [
+        ["1001/库存现金"],
+        ["1002/银行存款"],
+        ["1003/存放央行"],
+        ["1004/其他货币资金"],
+      ],
+      mapping: { accountCode: mixedHeader },
+      // 借款工具有意不传 multi：页面状态保持 Record<string, string>。
+      multi: new Set<string>(),
+    });
+
+    pick(selects[0], "accountName");
+    expect(onChange).toHaveBeenCalledWith({
+      accountCode: mixedHeader,
+      accountName: mixedHeader,
+    });
+  });
+
+  it("科目双角色例外不扩展到其他字段角色", () => {
+    const mixedHeader = "科目";
+    const mixedRows = [
+      ["1001/库存现金", "1000"],
+      ["1002/银行存款", "2000"],
+      ["1003/存放央行", "3000"],
+      ["1004/其他货币资金", "4000"],
+    ];
+    const first = panel({
+      headers: [mixedHeader, "本位币金额"],
+      rows: mixedRows,
+      mapping: { accountCode: mixedHeader },
+    });
+    pick(first.selects[0], "functionalAmount");
+    expect(first.onChange).toHaveBeenCalledWith({
+      accountCode: undefined,
+      functionalAmount: mixedHeader,
+    });
+    cleanup();
+
+    const second = panel({
+      mapping: { accountCode: "会计科目" },
+      rows: [
+        ["1001010000", "库存现金", "1200"],
+        ["1002010000", "银行存款", "1300"],
+        ["1003010000", "存放央行", "1400"],
+        ["1004010000", "其他货币资金", "1500"],
+      ],
+      multi: new Set(["accountName"]),
+    });
+    pick(second.selects[0], "accountName");
+    expect(second.onChange).toHaveBeenCalledWith({
+      accountCode: "会计科目",
+      accountName: ["会计科目"],
+    });
+  });
+
+  it("预览为空时仍可手动共列，避免大表首屏样本拦住用户确认", () => {
+    const { onChange, selects } = panel({
+      headers: ["科目"], rows: [], mapping: { accountCode: "科目" },
+      multi: new Set(["accountName"]),
+    });
+    pick(selects[0], "accountName");
+    expect(onChange).toHaveBeenCalledWith({ accountCode: "科目", accountName: ["科目"] });
+  });
+
+  it("双角色混写列可在同一下拉中显示并单独取消一个科目角色", () => {
+    const mixedHeader = "科目";
+    const mixedRows = [
+      ["1001/库存现金"],
+      ["1002/银行存款"],
+      ["1003/存放央行"],
+      ["1004/其他货币资金"],
+    ];
+    const { onChange, selects } = panel({
+      headers: [mixedHeader],
+      rows: mixedRows,
+      mapping: {
+        accountCode: mixedHeader,
+        accountName: [mixedHeader],
+      },
+      multi: new Set(["accountName"]),
+    });
+
+    expect(selects[0].querySelector("option")?.textContent).toBe(
+      "科目编码 ＋ 科目名称",
+    );
+    expect(
+      selects[0].querySelector('option[value="accountName"]')?.textContent,
+    ).toContain("再点取消");
+    pick(selects[0], "accountName");
+    expect(onChange).toHaveBeenCalledWith({
+      accountCode: mixedHeader,
+    });
+  });
+
   it("被方案互斥锁定的角色标为已停用", () => {
     const { selects } = panel({
       isLocked: (role: string) => role === "functionalAmount",
@@ -78,6 +217,12 @@ describe("共用字段映射面板", () => {
   it("已被别的角色占用的单列角色标为已用", () => {
     const { selects } = panel({ mapping: { accountCode: "会计科目" } });
     const option = selects[1].querySelector('option[value="accountCode"]');
+    expect(option?.textContent).toContain("已用");
+  });
+
+  it("当前列已挂的角色同样标为已用", () => {
+    const { selects } = panel({ mapping: { accountCode: "会计科目" } });
+    const option = selects[0].querySelector('option[value="accountCode"]');
     expect(option?.textContent).toContain("已用");
   });
 
@@ -107,7 +252,7 @@ describe("共用字段映射面板", () => {
             : undefined,
     });
     expect(screen.getByText(/为必填字段/)).toHaveTextContent(
-      "＊ 为必填字段；（选填）须按当前分组的整组规则补充；（已用）＝已有列挂在该角色上，可多列角色仍可继续加列。",
+      "＊ 为必填字段；（选填）须按当前分组的整组规则补充。",
     );
     expect(
       selects[0].querySelector('option[value="functionalAmount"]'),
@@ -126,7 +271,7 @@ describe("共用字段映射面板", () => {
     );
   });
 
-  it("公共必填在分组内标星，未适配形态整组禁用", () => {
+  it("公共必填在分组内标星，未适配形态仅灰显不禁选", () => {
     const { selects } = panel({
       groups: [
         {
@@ -143,7 +288,13 @@ describe("共用字段映射面板", () => {
       groups[0].querySelector('option[value="accountCode"]'),
     ).toHaveTextContent("科目编码＊");
     expect(groups[1].label).toContain("未适配");
-    expect(groups[1]).toBeDisabled();
+    // 颜色状态类保留，但整组仍可选择——冲突只提示不拦截，
+    // 换形态不必先清空已有映射；缺字段组合由运行前后端校验拦截。
+    expect(groups[1]).toHaveClass("dt-group-unavailable");
+    expect(groups[1]).not.toBeDisabled();
+    expect(
+      groups[1].querySelector('option[value="functionalAmount"]'),
+    ).not.toBeDisabled();
   });
 
   it("已适配分组使用绿色状态类，已选字段控件保持映射态", () => {
@@ -162,6 +313,9 @@ describe("共用字段映射面板", () => {
     expect(selects[1]).toHaveAttribute("data-mapped", "true");
     expect(selects[1].querySelector("optgroup")).toHaveClass(
       "dt-group-adapted",
+    );
+    expect(selects[1].querySelector('option[value="accountName"]')).toHaveClass(
+      "dt-option-adapted",
     );
   });
 

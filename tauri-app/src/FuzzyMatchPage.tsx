@@ -14,6 +14,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
+import { Badge } from "@/components/ui/badge";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
 import { JargonTip } from "@/components/JargonTip";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/EmptyState";
 import { SwitchInput } from "@/components/SwitchInput";
+import { useTableColumnResize } from "@/components/useTableColumnResize";
 import { errorText } from "@/lib/errors";
 import "./fuzzy-match.css";
 
@@ -76,6 +78,8 @@ export type FuzzySummary = {
 export type ScoreBand = "all" | "70-80" | "80-90";
 type RowLevel = "auto" | "suspect" | "unmatched";
 type Inspection = {
+  headerRow?: number;
+  headerDepth?: number;
   headers: string[];
   preview: string[][];
   rowCount: number;
@@ -85,6 +89,7 @@ type Inspection = {
 type SourceState = {
   path: string;
   headerRow: number;
+  headerDepth?: number;
   inspection?: Inspection;
   mapping: MappingDict;
 };
@@ -301,7 +306,7 @@ const formatCount = (value: number) => value.toLocaleString("zh-CN");
 export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   const emptySource = (): SourceState => ({
     path: "",
-    headerRow: 1,
+    headerRow: 0,
     mapping: {},
   });
   const [sources, setSources] = useState<Record<Kind, SourceState>>({
@@ -375,8 +380,8 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   >({});
   useTaskRestore(tool.id, (restore) => {
     const p = restore.params as {
-      sourceA?: { inputPath?: string; headerRow?: number; column?: string };
-      sourceB?: { inputPath?: string; headerRow?: number; column?: string };
+      sourceA?: { inputPath?: string; headerRow?: number; headerDepth?: number; column?: string };
+      sourceB?: { inputPath?: string; headerRow?: number; headerDepth?: number; column?: string };
       matchType?: string;
       autoThreshold?: number;
       suspectThreshold?: number;
@@ -389,6 +394,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         next[kind] = {
           path: src.inputPath,
           headerRow: src.headerRow ?? 1,
+          headerDepth: src.headerDepth ?? 1,
           mapping:
             typeof src.column === "string" && src.column
               ? { column: src.column }
@@ -442,15 +448,22 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
           setJobId(e.jobId);
           setStatusFilter("all");
         }
-        const outputs = [...(e.outputPaths ?? []), ...(r.outputPaths ?? [])];
+        // 事件级与结果级 outputPaths 通常是同一个文件（Rust 两侧都会下发），
+        // 合并时按路径去重，否则导出后渲染两个一模一样的「打开导出文件」。
+        const outputs = [
+          ...new Set([...(e.outputPaths ?? []), ...(r.outputPaths ?? [])]),
+        ];
         if (outputs.length) {
           setExportOutputs(outputs);
           for (const p of outputs) void openOutput(p);
         }
-      } else if (e.phase === "failed" || e.phase === "cancelled") {
+      } else if (e.phase === "failed") {
         setBusy(false);
         const p = e.result as { error?: { userMessage?: string } } | undefined;
         setError(p?.error ? errorText(p.error) : e.message);
+      } else if (e.phase === "cancelled") {
+        setBusy(false);
+        setError("");
       }
     });
     return () => {
@@ -535,7 +548,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     try {
       const x = (await engineCall("fuzzy.inspect", {
         kind,
-        source: { inputPath: path, sheet, headerRow, headerDepth: 1 },
+        source: { inputPath: path, sheet, headerRow, headerDepth: headerRow === 0 ? 0 : current.inspection?.headerDepth ?? current.headerDepth ?? 1 },
       })) as Inspection;
       // 历史恢复后重新读取同一文件：存档的选中列顶回（一次性消费，换文件
       // 照旧清空待选）。
@@ -548,7 +561,8 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         restoredColumns.current[kind] = undefined;
       setSource(kind, {
         path,
-        headerRow,
+        headerRow: x.headerRow ?? headerRow,
+        headerDepth: x.headerDepth ?? 1,
         inspection: x,
         mapping: column ? { column } : {},
       });
@@ -568,7 +582,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     if (typeof picked !== "string") return;
     invalidateMatchResult();
     setSource(kind, { path: picked, inspection: undefined, mapping: {} });
-    await inspect(kind, { path: picked, sheet: "", headerRow: 1 });
+    await inspect(kind, { path: picked, sheet: "", headerRow: 0 });
   }
 
   /** 拖放落地：取第一个表格类文件投给命中的来源卡，非表格文件忽略。 */
@@ -577,7 +591,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     if (!file) return;
     invalidateMatchResult();
     setSource(kind, { path: file, inspection: undefined, mapping: {} });
-    await inspect(kind, { path: file, sheet: "", headerRow: 1 });
+    await inspect(kind, { path: file, sheet: "", headerRow: 0 });
   }
 
   useEffect(() => {
@@ -615,12 +629,14 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
           inputPath: sources.a.path,
           sheet: sources.a.inspection.sheet,
           headerRow: sources.a.headerRow,
+          headerDepth: sources.a.inspection.headerDepth ?? 1,
           column: columnOf(sources.a),
         },
         sourceB: {
           inputPath: sources.b.path,
           sheet: sources.b.inspection.sheet,
           headerRow: sources.b.headerRow,
+          headerDepth: sources.b.inspection.headerDepth ?? 1,
           column: columnOf(sources.b),
         },
         matchType,
@@ -701,7 +717,20 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         detail="对两列公司名称、人名、地址或通用文本做模糊匹配：高相似度自动采纳，疑似项逐条人工确认，确认进度可续作并导出底稿。"
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
+      {job?.phase === "cancelled" && (
+        <div className="flex flex-wrap items-center gap-2" role="status">
+          <Badge variant="warning">已取消</Badge>
+          <span className="hint">本次任务已停止；已选来源和设置仍保留，可重新运行。</span>
+        </div>
+      )}
       {restoreNote && <p className="fa-missing-hint">{restoreNote}</p>}
+      {summary && job?.phase === "completed" && (
+        <div className="flex flex-wrap items-center gap-2" role="status">
+          <Badge variant="success">匹配完成</Badge>
+          <span className="hint">自动 {formatCount(summary.autoCount)} · 待确认 {formatCount(summary.suspectCount)} · 未匹配 {formatCount(summary.unmatchedCount)}</span>
+          <a className="text-sm underline" href="#fuzzy-match-results">查看匹配结果</a>
+        </div>
+      )}
 
       <div className="fuzzy-sources">
         {(["a", "b"] as Kind[]).map((kind) => {
@@ -782,9 +811,10 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                       rows={s.inspection.preview}
                       mapping={s.mapping}
                       roles={[["column", "匹配列"]]}
-                      missing={columnOf(s) ? [] : ["匹配列"]}
+                      missing={[]}
                       busy={busy}
                       maxHeight={260}
+                      resizeKey={`fuzzy.preview.${kind}`}
                       onChange={(next) => setSource(kind, { mapping: next })}
                     />
                   )}
@@ -892,10 +922,10 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                 开始匹配
               </Button>
             </div>
-            {jobKind === "match" && job && (
+            {jobKind === "match" && job && job.phase !== "cancelled" && (
               <JobProgress
                 job={job}
-                onCancel={busy ? (id) => void jobCancel(id) : undefined}
+                onCancel={busy ? (id) => jobCancel(id) : undefined}
               />
             )}
             <p className="fx-hint">
@@ -906,7 +936,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
       </Card>
 
       {summary && (
-        <section className="fuzzy-result">
+        <section className="fuzzy-result scroll-mt-4" id="fuzzy-match-results">
           <div className="fx-result-heading">
             <div>
               <h3>匹配结果</h3>
@@ -944,77 +974,11 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
               },
             )}
           </div>
-          <div className="fuzzy-table">
-            <table>
-              <thead>
-                <tr>
-                  <th>A 原文</th>
-                  <th>匹配对象</th>
-                  <th>状态</th>
-                  <th>总分</th>
-                  <th>理由</th>
-                  <th>确认状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {statusFilter === "invalid" ? (
-                  <tr>
-                    <td colSpan={6} className="fuzzy-empty">
-                      空白等无效值不参与匹配，导出底稿中会单独列示。
-                    </td>
-                  </tr>
-                ) : rows.filter(
-                    (r) =>
-                      statusFilter === "all" || rowLevel(r) === statusFilter,
-                  ).length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="fuzzy-empty">
-                      当前分类下没有明细行。
-                    </td>
-                  </tr>
-                ) : (
-                  rows
-                    .filter(
-                      (r) =>
-                        statusFilter === "all" || rowLevel(r) === statusFilter,
-                    )
-                    .map((r) => {
-                      const best = bestCandidate(r);
-                      const level = rowLevel(r);
-                      const c = confirmMap.get(r.aIndex);
-                      const accepted = r.matches.find(
-                        (m) => m.bIndex === c?.bIndex,
-                      );
-                      const confirmState = !c
-                        ? level === "suspect"
-                          ? "待确认"
-                          : "—"
-                        : c.action === "accept"
-                          ? `已采纳（${accepted?.bValue ?? `B#${c.bIndex}`}）`
-                          : "已拒绝（都不是）";
-                      return (
-                        <tr key={r.aIndex}>
-                          <td title={r.aValue}>{r.aValue}</td>
-                          <td title={best?.bValue}>{best?.bValue ?? "—"}</td>
-                          <td>
-                            <span
-                              className={`fuzzy-level fuzzy-level-${level}`}
-                            >
-                              {ROW_LEVEL_LABEL[level]}
-                            </span>
-                          </td>
-                          <td>{best ? formatScore(best.total) : "—"}</td>
-                          <td title={best?.reasons.join("，")}>
-                            {best?.reasons.join("，") || "—"}
-                          </td>
-                          <td>{confirmState}</td>
-                        </tr>
-                      );
-                    })
-                )}
-              </tbody>
-            </table>
-          </div>
+          <FuzzyResultTable
+            rows={rows}
+            statusFilter={statusFilter}
+            confirmMap={confirmMap}
+          />
         </section>
       )}
 
@@ -1079,10 +1043,10 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
               </Button>
             ))}
           </div>
-          {jobKind === "export" && job && (
+          {jobKind === "export" && job && job.phase !== "cancelled" && (
             <JobProgress
               job={job}
-              onCancel={busy ? (id) => void jobCancel(id) : undefined}
+              onCancel={busy ? (id) => jobCancel(id) : undefined}
             />
           )}
         </CardContent>
@@ -1104,6 +1068,91 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         </div>
       )}
     </main>
+  );
+}
+
+/** 匹配结果明细表：独立成子组件挂列宽调整——匹配结果出现前表格不渲染，
+ *  hook 必须随表格一起挂载才能接管列宽。 */
+function FuzzyResultTable({
+  rows,
+  statusFilter,
+  confirmMap,
+}: {
+  rows: FuzzyResultRow[];
+  statusFilter: RowLevel | "invalid" | "all";
+  confirmMap: Map<number, Confirmation>;
+}) {
+  const resize = useTableColumnResize<HTMLDivElement>({
+    storageKey: "fuzzy.results",
+  });
+  return (
+    <div className="fuzzy-table" ref={resize.ref}>
+      <table>
+        <thead>
+          <tr>
+            <th>A 原文</th>
+            <th>匹配对象</th>
+            <th>状态</th>
+            <th>总分</th>
+            <th>理由</th>
+            <th>确认状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          {statusFilter === "invalid" ? (
+            <tr>
+              <td colSpan={6} className="fuzzy-empty">
+                空白等无效值不参与匹配，导出底稿中会单独列示。
+              </td>
+            </tr>
+          ) : rows.filter(
+              (r) => statusFilter === "all" || rowLevel(r) === statusFilter,
+            ).length === 0 ? (
+            <tr>
+              <td colSpan={6} className="fuzzy-empty">
+                当前分类下没有明细行。
+              </td>
+            </tr>
+          ) : (
+            rows
+              .filter(
+                (r) => statusFilter === "all" || rowLevel(r) === statusFilter,
+              )
+              .map((r) => {
+                const best = bestCandidate(r);
+                const level = rowLevel(r);
+                const c = confirmMap.get(r.aIndex);
+                const accepted = r.matches.find(
+                  (m) => m.bIndex === c?.bIndex,
+                );
+                const confirmState = !c
+                  ? level === "suspect"
+                    ? "待确认"
+                    : "—"
+                  : c.action === "accept"
+                    ? `已采纳（${accepted?.bValue ?? `B#${c.bIndex}`}）`
+                    : "已拒绝（都不是）";
+                return (
+                  <tr key={r.aIndex}>
+                    <td title={r.aValue}>{r.aValue}</td>
+                    <td title={best?.bValue}>{best?.bValue ?? "—"}</td>
+                    <td>
+                      <span className={`fuzzy-level fuzzy-level-${level}`}>
+                        {ROW_LEVEL_LABEL[level]}
+                      </span>
+                    </td>
+                    <td>{best ? formatScore(best.total) : "—"}</td>
+                    <td title={best?.reasons.join("，")}>
+                      {best?.reasons.join("，") || "—"}
+                    </td>
+                    <td>{confirmState}</td>
+                  </tr>
+                );
+              })
+          )}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

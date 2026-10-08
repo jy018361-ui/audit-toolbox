@@ -42,54 +42,8 @@ python build_suite.py
 
 生产栈的启动/打包命令都在 `tauri-app/` 下执行，不要在根目录跑。
 
-## 旧栈架构（做迁移对照时才需要）
-
-### tkinter Hub
-
-`suite_main.py` 在 import tkinter 前调用 `SetProcessDpiAwareness(1)` 锁定 DPI，再启动 `launcher.hub_window.HubWindow`。
-点选工具后 `launcher.runner.launch_tool()` 用 `importlib.util.spec_from_file_location` 直接加载入口文件，
-插入 `sys.path[0]`、`chdir` 进工具根，探测入口签名接受 `root` 还是 `parent`，
-嵌入模式下由 runner 自己建 `tk.Toplevel(parent)` 并应用主题，返回后兜底 `parent.wait_window()`
-（部分子工具建完 UI 就返回，不阻塞会让 Hub 误判已退出），最后 `_purge_tool_modules()` 卸载残留模块。
-
-工具源码查找顺序（`launcher/registry.py`）：开发模式 `vendor/` → `modules/` → `tools/` → `dev_root`；
-冻结模式只看 `sys._MEIPASS` 下的 `modules/` 和 `tools/`。入口名按 `entry` → `entry_dev` → `entry_vendor` 查找。
-
-### `audit_engine/` —— 中间态 JSON Lines 引擎
-
-Tauri 迁移早期曾用它作 Python sidecar（`audit_engine_entry.py` → `serve()`，`--job-worker` 走 `worker.py`），
-按行收发 JSON 请求/事件。**现在生产路径已完全不调用它**（Rust 侧不再有任何 Python 回退），
-但 `audit_engine/handlers.py`（1600 行）是 `tauri-app/*_PARITY.md` 里反复引用的**业务金标**：
-Rust 实现的字段映射、匹配、导出口径都是照着它对齐的。改 Rust 业务逻辑做等价性核对时读这里。
-
-### 构建系统（旧）
-
-`build_suite.py` + `suite.spec` 把 `tools.json`、`tools/`、`modules/` 打进单文件 exe，
-`excludes` 大量科学计算库控体积；`launcher/bundle_anchor.touch_bundle_deps()` 用于让 PyInstaller
-静态分析追踪 pandas/numpy/openpyxl/polars 等运行时依赖。
-`build_suite.py` 顶部有硬编码 `LEGACY_PATHS`（`C:\Users\Administrator\Downloads\...`），只在 `tools/`、`modules/` 都缺该工具时才尝试。
-这套构建只产出旧版 exe，与 `tauri-app/dist/` 的发布物无关。
-
-### LLM 辅助模块（Python 侧，Rust 已重写）
-
-配置在 `%APPDATA%/AuditToolbox/llm_settings.json`（生产栈已改为 SQLite + Windows 凭据管理器）。
-三个模块都是纯 `urllib.request` 调用 OpenAI 兼容 API，不依赖 openai SDK：
-
-- **`launcher/llm_client.py`**（~3150 行）：FA List 字段映射建议、字段复核、匹配键复核、看账映射检测、合并调用、连接测试。
-  两个值得保留的设计——**盲评机制**（先把列名替换成匿名 ID，让模型仅凭数据形态判断字段角色，再与脚本映射比对，避免被列名误导）；
-  **匹配键禁列过滤**（折旧/原值/类别/日期等会变动的业务字段不能当匹配键）。
-- **`launcher/llm_analysis.py`**（~1180 行）：给导出 Excel 追加"LLM分析"Sheet。
-  **规则化优先 + LLM 兜底**——pandas 先算出结构化候选数据，LLM 只负责把它写成自然语言；
-  LLM 不可用时规则化回退仍能独立产出可用文本。原始数据不出本机。
-- **`launcher/llm_settings.py`**：设置弹窗与 JSON 持久化。
 
 ## 关键约定
-
-### 旧子工具入口签名
-
-推荐 `main(root=None)`：`root is None` 时自建 `tk.Tk()` 并 `mainloop()`；嵌入模式下**不要**
-`mainloop()` / `transient()` / `overrideredirect()` / 在传入 root 上 `grab_set()` / 调 `SetProcessDpiAwareness()`
-——这些都会破坏 runner 准备好的 Toplevel 或卡死 Hub。`main(parent=None)` 旧签名仍兼容但不要再用。
 
 ### 接入/调试旧工具的实战经验
 
@@ -102,6 +56,9 @@ Rust 实现的字段映射、匹配、导出口径都是照着它对齐的。改
 
 - 改工具清单要同时看 `tools.json`（旧栈注册表）和 `tauri-app/public/tool-catalog.json`（生产清单），后者是生产唯一来源
 - 生产行为的等价性结论写在 `tauri-app/*_PARITY.md`，不要在这里重复维护
+
+### 优先修改或通过公共引擎实现修复或迭代
+- 如果涉及bug或影响较广的功能修复、迭代，请优先修改或维护影响多数工具的公共代码，譬如TBJE的公共引擎，而非仅仅对当前子工具进行维护；
 
 ## 测试
 

@@ -12,7 +12,7 @@ import type { JobEvent } from "@/types";
  * children 落在读取按钮和进度条之后，供各页面接自己的后续内容。
  */
 const HEADER_ROW_CHOICES = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12];
-export function LedgerSourceCard({inputPath,sheet,knownSheets,headerRow,headerDepth,headerDepthDisabled,detectedHeaderRow,dragHover,busy,job,needsReload,onBrowse,onClear,onSheetChange,onHeaderRowChange,onHeaderDepthChange,onInspect,onCancel,children}:{
+export function LedgerSourceCard({inputPath,sheet,knownSheets,headerRow,headerDepth,headerDepthDisabled,detectedHeaderRow,dragHover,busy,job,needsReload,onBrowse,onClear,onSheetChange,onHeaderRowChange,onHeaderDepthChange,onInspect,onCancel,children,className}:{
   inputPath:string;sheet:string;knownSheets:string[];headerRow:number;
   headerDepth?:number;
   headerDepthDisabled?:boolean;
@@ -23,8 +23,9 @@ export function LedgerSourceCard({inputPath,sheet,knownSheets,headerRow,headerDe
   onHeaderDepthChange?:(value:number)=>void;
   onInspect:()=>void;onCancel?:(jobId:string)=>void;
   children?:ReactNode;
+  className?:string;
 }){
-  return <section className="kz-card">
+  return <section className={`kz-card${className?` ${className}`:""}`}>
     <h2>加载数据</h2>
     <div className="kz-path"><FileDropInput value={inputPath} placeholder="拖放或点击选择凭证文件" onBrowse={onBrowse} onClear={inputPath?onClear:undefined} onDragStateChange={()=>{}} highlight={dragHover}/></div>
     <div className="kz-two">
@@ -32,7 +33,8 @@ export function LedgerSourceCard({inputPath,sheet,knownSheets,headerRow,headerDe
       <label>标题行<select value={String(headerRow)} onChange={e=>onHeaderRowChange(Number(e.target.value))}>
         {HEADER_ROW_CHOICES.map(value=><option key={value} value={String(value)}>{value===0?"自动识别":`第 ${value} 行`}</option>)}
       </select></label>
-      {onHeaderDepthChange&&<label>表头层数<select value={String(headerDepth??1)} disabled={headerDepthDisabled} onChange={e=>onHeaderDepthChange(Number(e.target.value))}>
+      {onHeaderDepthChange&&<label>表头层数<select value={String(headerDepth??0)} disabled={headerDepthDisabled} onChange={e=>onHeaderDepthChange(Number(e.target.value))}>
+        <option value="0">自动识别</option>
         <option value="1">1层</option>
         <option value="2">2层</option>
       </select></label>}

@@ -26,6 +26,18 @@ python scripts/start_tauri_dev.py      # 开发模式
 python scripts/build_tauri_release.py  # 发布打包（--skip-tests / --smoke-only / --legacy-regression 可选）
 ```
 
+Rust 测试迭代经验（2026-09，详见全局 AGENTS.md「Rust 工程经验」）：
+
+* 日常回归跑库测试即可：`cargo test --manifest-path src-tauri/Cargo.toml --lib`——
+  全部业务测试都在 lib 内（735+ 项，约 2 分钟含真实大样本）；`--lib <中文子串>`
+  定向过滤，cargo 的过滤器只认单个子串，不支持正则/多选。
+* `tests/` 下的集成测试（`fx_*_probe`、`mapping_survey`、`fuzzy_roundtrip` 等）是
+  真实数据探针，需要环境变量或外部样例文件、多数 `#[ignore]`，常规回归不跑；
+  且 `cargo build` 通过不代表 `cargo test` 全目标能编过（bin＋集成目标还有第二遍
+  特性组合编译），产物冲突时优先缩小到 `--lib` 验证。
+* 多会话并行时给 cargo 设独立 `CARGO_TARGET_DIR`（首次全量约 10 分钟），并先查
+  残留 cargo 进程再怀疑缓存损坏。
+
 ## 架构
 
 调用链：`React 页面 → src/api.ts → Tauri invoke → src-tauri/src/lib.rs（命令白名单）→ 各业务 .rs`。
@@ -39,7 +51,7 @@ python scripts/build_tauri_release.py  # 发布打包（--skip-tests / --smoke-o
   stdin 一行 JSON 请求、stdout 逐行 JSON 事件；取消/暂停靠 `%TEMP%\AuditToolbox\rust-job-cancel\` 下的
   标记文件协作。**worker 里不能用 Tauri state**，所需设置必须由 `lib.rs` 提前注入 params
   （`__settings` / `__llmOptions`，来自 SQLite Storage + Windows 凭据管理器）。
-- `secret_set` 只接受 `llm_api_key` / `dify_api_key` / `baidu_ocr_key` / `baidu_ocr_secret` 四个名字。
+- `secret_set` 只接受 `llm_api_key` / `dify_api_key` / `baidu_ocr_key` / `baidu_ocr_secret` / `bailian_asr_key` / `bailian_plan_asr_key` 六个名字。
 
 ### 文件系统安全边界
 
@@ -63,7 +75,9 @@ Tauri capability 只有 `core:default`，前端无任何直接文件权限。所
 - 本机数据目录 `%LOCALAPPDATA%\AuditToolbox\AuditToolbox\data`（SQLite：settings / migrations / task_history /
   audipick_projects 等，见 `storage.rs`）。
 - 编译期内嵌（改动必须重编 Rust）：`assets/roll-forward/subjects_config.json`、`assets/wp/FY27+WP服务单.xlsx.b64`、
-  `public/tool-catalog.json`。
+  `public/tool-catalog.json`、`assets/fx/safe_mid_rates.csv`（外管局人民币中间价内置牌价表，
+  发版前用 `scripts/fetch_fx_rates_asset.py` 联网重抓向尾部延伸；`fx.rs` 的 `obtain_rates`
+  对覆盖期内间优先用它，超期区间自动回落官网在线抓取）。
 - TS / 看账走 Polars，缓存目录写稳定 Parquet 缓存（键含规范路径+大小+mtime）；缓存损坏直接删了重读。
 
 ## 版本与发布

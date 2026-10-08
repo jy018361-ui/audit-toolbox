@@ -10,15 +10,16 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { Link, MemoryRouter } from "react-router-dom";
+import { createMemoryRouter, Link, MemoryRouter, RouterProvider } from "react-router-dom";
 import { useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import App, { Settings } from "./App";
+import App, { Field, Settings } from "./App";
 import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import {
   engineCall,
   historyGet,
+  historyRestore,
   settingsGet,
   settingsSet,
   secretSet,
@@ -37,6 +38,7 @@ vi.mock("./api", async (importOriginal) => ({
     .mockResolvedValue({ appVersion: "test", engine: { available: true } }),
   toolCatalog: vi.fn().mockImplementation(async () => catalog),
   historyGet: vi.fn().mockResolvedValue([]),
+  historyRestore: vi.fn(),
   listenJobEvents: vi.fn().mockResolvedValue(() => {}),
   updateReleaseNotes: vi.fn(),
 }));
@@ -61,6 +63,7 @@ vi.mock("./AudiPickPage", () => ({
 }));
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubGlobal("scrollTo", vi.fn());
   vi.mocked(historyGet).mockResolvedValue([]);
   vi.mocked(engineCall).mockResolvedValue({ bytes: 0, files: 0 });
   vi.mocked(check).mockResolvedValue(null);
@@ -72,7 +75,27 @@ beforeEach(() => {
     warnings: [],
   });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+it("uses continuous eight-digit entry for declarative date fields", () => {
+  const onChange = vi.fn();
+  render(
+    <Field
+      field={{ key: "bsDate", label: "资产负债表日", kind: "date", required: true }}
+      value=""
+      onChange={onChange}
+    />,
+  );
+
+  const input = screen.getByLabelText(/^资产负债表日/);
+  expect(input).toHaveAttribute("type", "text");
+  fireEvent.change(input, { target: { value: "20261231" } });
+  expect(input).toHaveValue("2026-12-31");
+  expect(onChange).toHaveBeenLastCalledWith("2026-12-31");
+});
 
 it("presents one product identity and groups every catalog tool once", async () => {
   render(
@@ -97,6 +120,24 @@ it("presents one product identity and groups every catalog tool once", async () 
     catalog.length,
   );
   expect(document.querySelectorAll(".metrics .metric")).toHaveLength(3);
+});
+
+it("returns to the top when navigating away from a long settings page", async () => {
+  const scrollTo = vi.fn();
+  vi.stubGlobal("scrollTo", scrollTo);
+  try {
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("heading", { name: "设置" });
+    fireEvent.click(screen.getAllByRole("link", { name: "工作台" })[0]);
+    await screen.findByRole("heading", { name: "今天要处理什么？" });
+    expect(scrollTo).toHaveBeenCalledWith(0, 0);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 it("发现新版本时侧边栏「设置」显示圆点提示而非文字", async () => {
@@ -199,6 +240,96 @@ it("offers a useful action when history is empty", async () => {
   ).toBeVisible();
 });
 
+it("从 FA TB+JE 历史任务继续时重新读取完整源信息，不因缺失行数白屏", async () => {
+  const params = {
+    tbSource: { inputPath: "C:\\test\\tb.xlsx", sheet: "TB", headerRow: 1, headerDepth: 1 },
+    jeSource: { inputPath: "C:\\test\\je.xlsx", sheet: "JE", headerRow: 1, headerDepth: 1 },
+    tbMapping: { accountCode: "科目编码", openingFunctionalAmount: "期初", closingFunctionalAmount: "期末" },
+    jeMapping: { accountCode: "科目编码", id: "凭证号", date: "日期", functionalAmount: "金额" },
+    accountAssignments: [],
+    reportEnd: "2026-12-31",
+  };
+  vi.mocked(historyGet).mockResolvedValue([{
+    jobId: "fa-history",
+    toolId: "fa_list",
+    method: "fa.tbje_export",
+    params,
+    status: "completed",
+    message: "已生成",
+    outputPaths: [],
+    startedAt: "2026-09-14T08:00:00+08:00",
+    finishedAt: null,
+  }]);
+  vi.mocked(historyRestore).mockResolvedValue({
+    jobId: "fa-history", toolId: "fa_list", params,
+    missingPaths: [], authorizedPathCount: 2, method: "fa.tbje_export",
+  });
+  vi.mocked(engineCall).mockImplementation(async (method) => {
+    if (method.startsWith("deposit.inspect_")) return {
+      headers: ["科目编码", "金额"], sheet: method.endsWith("tb") ? "TB" : "JE",
+      sheets: [method.endsWith("tb") ? "TB" : "JE"], headerRow: 1, headerDepth: 1,
+      rowCount: 8, preview: [["1601", "100"]], entities: [], accounts: ["1601 固定资产"],
+      suggestedMapping: {}, suggestedAccountRoles: {}, mappingCandidates: [],
+      headerDetection: { needsConfirmation: false, candidates: [] }, dataYears: [2026],
+    };
+    return { bytes: 0, files: 0 };
+  });
+  render(<MemoryRouter initialEntries={["/history"]}><App /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole("button", { name: "继续任务" }));
+  expect(
+    await screen.findByRole(
+      "heading",
+      { name: "固定资产 TB＋JE 变动表" },
+      { timeout: 5_000 },
+    ),
+  ).toBeVisible();
+  expect(await screen.findByText("历史任务源文件已重新识别，请复核映射与科目分类后继续。")).toBeVisible();
+  expect(screen.getAllByText("8 行")).toHaveLength(2);
+  expect(engineCall).toHaveBeenCalledWith("deposit.inspect_tb", expect.objectContaining({
+    source: expect.objectContaining({ inputPath: params.tbSource.inputPath }),
+  }), "TB tb.xlsx");
+  expect(engineCall).toHaveBeenCalledWith("deposit.inspect_je", expect.objectContaining({
+    source: expect.objectContaining({ inputPath: params.jeSource.inputPath }),
+  }), "JE je.xlsx");
+});
+
+it("FA TB+JE 源文件未变化时直接恢复识别快照", async () => {
+  const params = {
+    tbSource: { inputPath: "C:\\test\\tb.xlsx", sheet: "TB", headerRow: 1, headerDepth: 1 },
+    jeSource: { inputPath: "C:\\test\\je.xlsx", sheet: "JE", headerRow: 1, headerDepth: 1 },
+    tbMapping: { accountCode: "科目编码", openingFunctionalAmount: "期初", closingFunctionalAmount: "期末" },
+    jeMapping: { accountCode: "科目编码", id: "凭证号", date: "日期", functionalAmount: "金额" },
+    accountAssignments: [],
+  };
+  const inspection = (sheet: string) => ({
+    headers: ["科目编码", "金额"], sheet, sheets: [sheet], headerRow: 1,
+    headerDepth: 1, rowCount: 8, preview: [["1601", "100"]], entities: [],
+    accounts: ["1601 固定资产"], suggestedMapping: {}, suggestedAccountRoles: {},
+    mappingCandidates: [], headerDetection: { needsConfirmation: false, candidates: [] },
+    dataYears: [2026],
+  });
+  vi.mocked(historyGet).mockResolvedValue([{
+    jobId: "fa-snapshot", toolId: "fa_list", method: "fa.tbje_export", params,
+    status: "completed", message: "已生成", outputPaths: [],
+    startedAt: "2026-09-22T08:00:00+08:00", finishedAt: null,
+  }]);
+  vi.mocked(historyRestore).mockResolvedValue({
+    jobId: "fa-snapshot", toolId: "fa_list", params,
+    snapshotStatus: "valid",
+    snapshot: { inspects: { tb: inspection("TB"), je: inspection("JE") } },
+    missingPaths: [], authorizedPathCount: 2, method: "fa.tbje_export",
+  });
+  render(<MemoryRouter initialEntries={["/history"]}><App /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole("button", { name: "继续任务" }));
+  expect(await screen.findByText("已从历史快照恢复 TB/JE 源信息，请复核映射与科目分类后继续。")).toBeVisible();
+  expect(screen.getAllByText("8 行")).toHaveLength(2);
+  expect(
+    vi.mocked(engineCall).mock.calls.some(([method]) =>
+      String(method).startsWith("deposit.inspect_"),
+    ),
+  ).toBe(false);
+});
+
 it.each(["/tasks", "/diagnostics"])(
   "removes obsolete navigation and redirects %s without losing the collapsible FA group",
   async (route) => {
@@ -239,11 +370,11 @@ it("marks preview tools as trials in the sidebar without disabling them", async 
 
   for (const name of ["AudiPick 智能合同审阅", "WP Roll Forward"]) {
     const link = sidebar.getByRole("link", {
-      name: new RegExp(`${name}.*开发中.*结果请复核`),
+      name: new RegExp(`${name}.*即将上线.*即将正式上线`),
     });
     expect(link).toBeVisible();
-    expect(link).toHaveAttribute("title", "开发中功能，使用结果请复核。");
-    expect(within(link).getByText("开发中")).toBeVisible();
+    expect(link).toHaveAttribute("title", "功能完善中，即将正式上线。");
+    expect(within(link).getByText("即将上线")).toBeVisible();
   }
 
   expect(
@@ -426,6 +557,30 @@ it("protects unsaved settings on leave", async () => {
   );
 });
 
+it("protects unsaved settings when browser history navigates backward", async () => {
+  const router = createMemoryRouter([
+    { path: "/history", element: <p>历史页</p> },
+    { path: "/settings", element: <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /> },
+  ], { initialEntries: ["/history", "/settings"], initialIndex: 1 });
+  render(<><RouterProvider router={router} /><ConfirmDialogHost /></>);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  fireEvent.change(screen.getByLabelText("Base URL"), {
+    target: { value: "https://llm.internal" },
+  });
+
+  await act(async () => { await router.navigate(-1); });
+  expect(router.state.location.pathname).toBe("/settings");
+  expect(screen.getByText("设置尚未保存，确定离开并放弃这些修改吗？")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  await waitFor(() => expect(screen.queryByText("设置尚未保存，确定离开并放弃这些修改吗？")).toBeNull());
+  expect(router.state.location.pathname).toBe("/settings");
+
+  await act(async () => { await router.navigate(-1); });
+  fireEvent.click(screen.getByRole("button", { name: "离开" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/history"));
+  expect(screen.getByText("历史页")).toBeVisible();
+});
+
 it("requires confirmation before clearing local cache", async () => {
   vi.mocked(engineCall).mockResolvedValue({
     files: 1,
@@ -559,6 +714,7 @@ it("shows this version's notes when up to date and refreshes on reopening", asyn
   render(<UpdateSettings />);
   fireEvent.click(screen.getByRole("button", { name: "软件更新" }));
   await screen.findByText("本版更新内容");
+  expect(screen.getByText("已是最新")).toBeVisible();
   // 单版本说明不显示版本计数；版本号只保留标题区一处
   expect(screen.queryByText("1 个版本")).not.toBeInTheDocument();
   expect(
@@ -608,6 +764,9 @@ it("does not offer a stale update when a fresh check fails", async () => {
     screen.queryByRole("button", { name: /确认更新到/ }),
   ).not.toBeInTheDocument();
   expect(updateReleaseNotes).not.toHaveBeenCalled();
+  expect(screen.getByText("未确认")).toBeVisible();
+  expect(screen.queryByText("已是最新")).not.toBeInTheDocument();
+  expect(screen.queryByText("可安装")).not.toBeInTheDocument();
 });
 
 it("disables duplicate checks and installation while release notes are loading", async () => {
@@ -639,4 +798,35 @@ it("disables duplicate checks and installation while release notes are loading",
   expect(
     screen.getByRole("button", { name: "确认更新到 v1.0.1" }),
   ).toBeEnabled();
+});
+
+it("语音转写通道可切换为 Token Plan 套餐通道并随保存落库", async () => {
+  render(
+    <MemoryRouter initialEntries={["/settings"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  await screen.findByRole("heading", { name: "设置" });
+  // 默认通用通道：只有通用密钥入口，没有套餐配置格子。
+  expect(screen.getByLabelText("百炼 API 密钥")).toBeInTheDocument();
+  expect(screen.queryByLabelText("套餐地址")).not.toBeInTheDocument();
+  // 切到套餐通道：地址/模型/密钥三格出现，测试按钮换成套餐通道。
+  fireEvent.change(screen.getByLabelText("转写通道"), {
+    target: { value: "token_plan" },
+  });
+  expect(screen.getByLabelText("套餐地址")).toBeInTheDocument();
+  expect(screen.getByLabelText("套餐转写模型")).toBeInTheDocument();
+  expect(screen.getByLabelText(/套餐 API 密钥/)).toBeInTheDocument();
+  expect(screen.queryByLabelText("百炼 API 密钥")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "测试套餐通道" }),
+  ).toBeInTheDocument();
+  // 保存后通道选择写入 meeting 命名空间，供转写任务读取。
+  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+  await waitFor(() => expect(vi.mocked(settingsSet)).toHaveBeenCalled());
+  const payload = vi.mocked(settingsSet).mock.calls[0][0] as {
+    meeting: Record<string, unknown>;
+  };
+  expect(payload.meeting.asr_channel).toBe("token_plan");
+  expect(payload.meeting.plan_model).toBe("qwen-audio-3.0-realtime-plus");
 });

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ComponentType, ReactElement } from "react";
 import {
   matchPath,
@@ -9,6 +9,8 @@ import {
   useLocation,
   useNavigate,
   useParams,
+  useBlocker,
+  UNSAFE_DataRouterContext,
 } from "react-router-dom";
 import "./app-shell.css";
 import {
@@ -23,6 +25,10 @@ import {
   legacyImport,
   listenJobEvents,
   llmTest,
+  meetingAsrTest,
+  meetingAutostartStatus,
+  meetingDetectSetEnabled,
+  meetingSetAutostart,
   pickPath,
   secretSet,
   settingsGet,
@@ -36,6 +42,7 @@ import { Button } from "@/components/ui/button";
 import { errorText } from "@/lib/errors";
 import { useCountUp } from "./lib/useCountUp";
 import { SwitchInput } from "@/components/SwitchInput";
+import { DateInput } from "@/components/DateInput";
 import { demoDataEnabled } from "./preview/demoRegistry";
 import {
   TOOL_DEFINITIONS,
@@ -53,11 +60,15 @@ import { PageHeader } from "@/components/PageHeader";
 import { RestoreBanner } from "@/components/RestoreBanner";
 import { WindowControls } from "@/components/WindowControls";
 import { PersistentToolPages } from "@/components/PersistentToolPages";
+import { markToolPageLive } from "./toolPageActivity";
+import { ToolRecoveryBoundary } from "@/components/ToolRecoveryBoundary";
 import { JobDialogProvider } from "@/components/JobDialog";
+import { JobCommandNotice } from "@/components/JobCommandNotice";
 import { JobProgress } from "@/components/JobProgress";
 import { ConfirmDialogHost, confirmDialog } from "@/components/ConfirmDialog";
 import { displayFileName } from "@/fileDisplay";
 import { SyncBusyDialog } from "@/components/SyncBusyDialog";
+import { MeetingWatch } from "@/components/MeetingWatch";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ResultView } from "@/components/ResultView";
 import { EmptyState } from "@/components/EmptyState";
@@ -78,7 +89,10 @@ import { NewbieModeToggle } from "@/components/tour/NewbieModeToggle";
 import { Sparkles } from "lucide-react";
 import { setSavedTheme } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import {
+  getCurrentWebviewWindow,
+  WebviewWindow,
+} from "@tauri-apps/api/webviewWindow";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
@@ -140,6 +154,11 @@ const FaPolicyComparePage = lazy(() =>
     default: m.FaPolicyComparePage,
   })),
 );
+const MeetingMinutesPage = lazy(() =>
+  import("./MeetingMinutesPage").then((m) => ({
+    default: m.MeetingMinutesPage,
+  })),
+);
 
 const DEDICATED_TOOL_PAGES: Record<
   string,
@@ -163,6 +182,7 @@ const DEDICATED_TOOL_PAGES: Record<
   fuzzy_match: FuzzyMatchPage,
   fa_dep_calc: FaDepCalcPage,
   fa_policy_compare: FaPolicyComparePage,
+  meeting_minutes: MeetingMinutesPage,
 };
 
 const NAV = [
@@ -255,6 +275,7 @@ const TOOL_BADGE: Record<string, string> = {
   deposit_interest: "存",
   fuzzy_match: "模",
   tbje_check: "核",
+  meeting_minutes: "会",
 };
 
 // 侧边栏可折叠子分组：分组头只是展开/收起的开关（不走路由），
@@ -297,7 +318,12 @@ const TOOL_GROUPS = [
   },
   {
     label: "运营工具",
-    ids: ["ts_manager", "confirmation_progress", "wp_service_generator"],
+    ids: [
+      "ts_manager",
+      "confirmation_progress",
+      "wp_service_generator",
+      "meeting_minutes",
+    ],
   },
 ] as const;
 
@@ -305,12 +331,45 @@ function expandedToolIds(ids: readonly string[]) {
   return ids.flatMap((id) => TOOL_SUBGROUPS[id]?.ids ?? [id]);
 }
 
-const DEVELOPMENT_HINT = "开发中功能，使用结果请复核。";
+const TRIAL_HINT = "试用功能，结果请复核。";
+const UPCOMING_HINT = "功能完善中，即将正式上线。";
+
+/** 目录迁移状态 → 侧边栏/工作台卡片角标文案；ready 不加角标。 */
+function toolStatusLabel(status: ToolManifest["migrationStatus"]) {
+  if (status === "preview") return "试用";
+  if (status === "upcoming") return "即将上线";
+  return undefined;
+}
+
+async function openAudiPickWindow(): Promise<void> {
+  const existing = await WebviewWindow.getByLabel("audipick");
+  if (existing) {
+    await existing.show();
+    await existing.setFocus();
+    return;
+  }
+  const popup = new WebviewWindow("audipick", {
+    url: "/#/audipick-window",
+    title: "AudiPick 合同摘录",
+    width: 1480,
+    height: 920,
+    minWidth: 1080,
+    minHeight: 700,
+    center: true,
+    decorations: false,
+    resizable: true,
+    focus: true,
+  });
+  await new Promise<void>((resolve, reject) => {
+    void popup.once("tauri://created", () => resolve());
+    void popup.once("tauri://error", (event) => reject(event.payload));
+  });
+}
 
 /**
  * 侧边栏工具入口统一消费清单里的 migrationStatus。
- * preview 工具仍可进入，但必须在点击前让用户知道它还在开发中；状态不写死
- * 在具体工具名上，后续工具转正只需修改 tool-catalog.json。
+ * preview/upcoming 工具仍可进入，但必须在点击前让用户知道它未到正式版；
+ * 状态不写死在具体工具名上，后续工具转正只需修改 tool-catalog.json。
  */
 function SidebarToolLink({
   tool,
@@ -319,33 +378,49 @@ function SidebarToolLink({
   tool: ToolManifest;
   className?: string;
 }) {
-  const developing = tool.migrationStatus === "preview";
-  const accessibleName = developing
-    ? `${tool.name}，开发中。${DEVELOPMENT_HINT}`
+  const statusLabel = toolStatusLabel(tool.migrationStatus);
+  const statusHint =
+    tool.migrationStatus === "upcoming" ? UPCOMING_HINT : TRIAL_HINT;
+  const accessibleName = statusLabel
+    ? `${tool.name}，${statusLabel}。${statusHint}`
     : undefined;
   return (
     <NavLink
       to={tool.route}
       className={className}
-      title={developing ? DEVELOPMENT_HINT : undefined}
+      title={statusLabel ? statusHint : undefined}
       aria-label={accessibleName}
+      onClick={(event) => {
+        if (tool.id !== "audipick" || !("__TAURI_INTERNALS__" in window))
+          return;
+        event.preventDefault();
+        void openAudiPickWindow().catch((error) => {
+          window.alert(`无法打开 AudiPick 独立窗口：${appErrorText(error)}`);
+        });
+      }}
     >
       <span className="tool-badge">
         {TOOL_BADGE[tool.id] ?? tool.name.slice(0, 1)}
       </span>
       <span className="tool-nav-label">{tool.name}</span>
-      {developing && (
+      {statusLabel && (
         <span className="tool-status-badge" aria-hidden="true">
-          开发中
+          {statusLabel}
         </span>
       )}
     </NavLink>
   );
 }
 
+/// 工具目录的加载三态：ToolPage 据此区分「加载中」「确认不存在」「加载失败」，
+/// 不再让加载态借用「工具不存在」的错误措辞（真机审计 P2-001）。
+type CatalogStatus = "loading" | "ready" | "error";
+
 export default function App() {
   const location = useLocation();
+  const navigate = useNavigate();
   const [catalog, setCatalog] = useState<ToolManifest[]>([]);
+  const [catalogStatus, setCatalogStatus] = useState<CatalogStatus>("loading");
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
   const [jobs, setJobs] = useState<Record<string, JobEvent>>({});
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
@@ -466,9 +541,13 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    if (previousPath.current !== location.pathname && toolDrawerOpen) {
+    const routeChanged = previousPath.current !== location.pathname;
+    if (routeChanged && toolDrawerOpen) {
       window.setTimeout(() => toolDrawerButton.current?.focus(), 0);
     }
+    // Settings and long tool pages share the document scroller. Without a
+    // reset, returning to the workspace can open with its heading cut off.
+    if (routeChanged) window.scrollTo(0, 0);
     previousPath.current = location.pathname;
     setToolDrawerOpen(false);
     // Closing is driven by route changes; including the open flag would close
@@ -551,12 +630,19 @@ export default function App() {
     void Promise.all([toolCatalog(), appBootstrap()])
       .then(([c, b]) => {
         setCatalog(c);
+        setCatalogStatus("ready");
         setBootstrap(b);
       })
-      .catch((error) => setStartupError(appErrorText(error)))
+      .catch((error) => {
+        setCatalogStatus("error");
+        setStartupError(appErrorText(error));
+      })
       .finally(() => setStartupReady(true));
     void listenJobEvents((e) => {
       invalidateHistoryCache();
+      // 任何任务事件都说明该工具页有过真实动作，登记为「有现场」，
+      // 退出 LRU 淘汰、保活到应用退出。
+      markToolPageLive(e.toolId);
       setJobs((v) => ({ ...v, [e.jobId]: e }));
     }).catch(() => undefined);
   }, []);
@@ -592,7 +678,9 @@ export default function App() {
       }
     >
       <SyncBusyDialog />
+      <JobCommandNotice />
       <ConfirmDialogHost />
+      <MeetingWatch />
       <div
         className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${audiPickFocusMode ? " audipick-focus-mode" : ""}`}
         data-layout-mode={audiPickFocusMode ? "audipick-focus" : "toolbox"}
@@ -620,9 +708,6 @@ export default function App() {
             >
               ×
             </button>
-            {/* 风车标走 CSS 蒙版，颜色引用主题变量，换主题自动跟随；
-                完整带文字 logo 不进侧边栏——图里的"E点通"会和下面标题重复 */}
-            <span className="brand-logo" role="img" aria-label="EY E点通" />
             {/* 桌面端折叠开关：折叠成窄图标栏；折叠态下抽屉里同一位置变成"展开固定" */}
             <button
               ref={sidebarCollapseToggle}
@@ -802,6 +887,14 @@ export default function App() {
             <SimplePage
               title="启动失败"
               text={`${startupError} 请刷新后重试。`}
+              action={
+                <Button
+                  variant="secondary"
+                  onClick={() => window.location.reload()}
+                >
+                  重新加载
+                </Button>
+              }
             />
           ) : (
             <>
@@ -850,9 +943,21 @@ export default function App() {
                   )
                   .map((job) => job.toolId)}
                 renderPage={(toolId) => (
-                  <ToolTourProvider toolId={toolId}>
-                    <ToolPage catalog={catalog} toolId={toolId} />
-                  </ToolTourProvider>
+                  <ToolRecoveryBoundary
+                    toolId={toolId}
+                    toolName={
+                      catalog.find((tool) => tool.id === toolId)?.name ?? toolId
+                    }
+                    onBackToHistory={() => navigate("/history")}
+                  >
+                    <ToolTourProvider toolId={toolId}>
+                      <ToolPage
+                        catalog={catalog}
+                        catalogStatus={catalogStatus}
+                        toolId={toolId}
+                      />
+                    </ToolTourProvider>
+                  </ToolRecoveryBoundary>
                 )}
               />
             </>
@@ -905,6 +1010,18 @@ function ToolPageLoading() {
       <div>
         <strong>正在打开工具…</strong>
         <p>首次使用时加载对应模块，之后会直接复用。</p>
+      </div>
+    </div>
+  );
+}
+
+function ToolCatalogLoading() {
+  return (
+    <div className="app-loading" role="status" aria-live="polite">
+      <span className="loading-dot" aria-hidden="true" />
+      <div>
+        <strong>正在加载工具目录…</strong>
+        <p>工具清单就绪后即可打开对应工具。</p>
       </div>
     </div>
   );
@@ -971,6 +1088,7 @@ function Dashboard({
       <DataHandlingNotice
         mode="network-assisted"
         className="dashboard-data-notice"
+        collapsibleDetails
         title="数据处理边界"
         description="多数文件处理在本机完成；启用 AI 或云端 OCR 时，会按你在设置中的配置调用外部服务。"
         details="历史记录只保存任务状态、时间、输出路径和任务输入参数（用于「继续任务」恢复现场），不保存客户表格内容。"
@@ -1023,7 +1141,7 @@ function Dashboard({
               </div>
               <div className="card-grid">
                 {tools.map((tool) => {
-                  const preview = tool.migrationStatus === "preview";
+                  const statusLabel = toolStatusLabel(tool.migrationStatus);
                   return (
                     <NavLink
                       className="tool-card"
@@ -1035,8 +1153,8 @@ function Dashboard({
                           {TOOL_BADGE[tool.id] ?? tool.name.slice(0, 1)}
                         </span>
                         <h3>{tool.name}</h3>
-                        {preview && (
-                          <span className="tool-card-status">开发中</span>
+                        {statusLabel && (
+                          <span className="tool-card-status">{statusLabel}</span>
                         )}
                       </div>
                       <p>{tool.description}</p>
@@ -1073,11 +1191,13 @@ function appErrorText(error: unknown): string {
   return "操作失败，请检查输入后重试。";
 }
 
-function ToolPage({
+export function ToolPage({
   catalog,
+  catalogStatus,
   toolId: explicitToolId,
 }: {
   catalog: ToolManifest[];
+  catalogStatus: CatalogStatus;
   toolId?: string;
 }) {
   const { toolId: routeToolId = "" } = useParams();
@@ -1125,15 +1245,46 @@ function ToolPage({
       void stop.then((fn) => fn());
     };
   }, []);
-  if (!tool || !def)
-    return <SimplePage title="工具不存在" text="工具登记信息尚未加载。" />;
+  if (!tool || !def) {
+    // 目录还没加载完时只能下「加载中」的结论；确认加载完成仍找不到，
+    // 才允许说「工具不存在」，加载失败则单独给出重试入口。
+    if (catalogStatus === "loading") return <ToolCatalogLoading />;
+    if (catalogStatus === "error")
+      return (
+        <SimplePage
+          title="工具目录加载失败"
+          text="工具目录没有加载成功，请重新加载应用再试。"
+          action={
+            <Button variant="secondary" onClick={() => window.location.reload()}>
+              重新加载
+            </Button>
+          }
+        />
+      );
+    return (
+      <SimplePage
+        title="工具不存在"
+        text="工具目录里没有这个工具，可能是链接有误或工具已下线。"
+        action={
+          <NavLink className="primary empty-state-link" to="/">
+            返回工作台
+          </NavLink>
+        }
+      />
+    );
+  }
   const DedicatedPage = DEDICATED_TOOL_PAGES[tool.id];
   if (DedicatedPage)
     return (
       <>
       {tool.migrationStatus === "preview" && (
         <div className="tool-trial-notice" role="note">
-          <strong>开发中</strong><span>{DEVELOPMENT_HINT}</span>
+          <strong>试用</strong><span>{TRIAL_HINT}</span>
+        </div>
+      )}
+      {tool.migrationStatus === "upcoming" && (
+        <div className="tool-trial-notice" role="note">
+          <strong>即将上线</strong><span>{UPCOMING_HINT}</span>
         </div>
       )}
       <Suspense fallback={<ToolPageLoading />}>
@@ -1142,6 +1293,8 @@ function ToolPage({
       </>
     );
   async function run(action: ActionDefinition) {
+    // 执行动作即「有现场」：登记后本页退出 LRU 淘汰，保活到应用退出。
+    markToolPageLive(toolId);
     setError("");
     setResult(undefined);
     setJob(undefined);
@@ -1215,7 +1368,7 @@ function ToolPage({
           {job && (
             <JobProgress
               job={job}
-              onCancel={busy ? (jobId) => void jobCancel(jobId) : undefined}
+              onCancel={busy ? (jobId) => jobCancel(jobId) : undefined}
             />
           )}
           {result ? (
@@ -1235,7 +1388,7 @@ function ToolPage({
   );
 }
 
-function Field({
+export function Field({
   field,
   value,
   onChange,
@@ -1272,10 +1425,18 @@ function Field({
           checked={Boolean(value)}
           onChange={onChange}
         />
+      ) : field.kind === "date" ? (
+        <div className="input-with-button">
+          <DateInput
+            value={text}
+            placeholder={field.placeholder}
+            onChange={onChange}
+          />
+        </div>
       ) : (
         <div className="input-with-button">
           <input
-            type={field.kind === "date" ? "date" : "text"}
+            type="text"
             value={text}
             placeholder={field.placeholder}
             onChange={(e) =>
@@ -1322,12 +1483,13 @@ const HISTORY_STATUS: Record<
 > = {
   completed: { label: "已完成", tone: "ready" },
   success: { label: "已完成", tone: "ready" },
-  failed: { label: "失败", tone: "danger" },
+  failed: { label: "处理失败", tone: "danger" },
   cancelled: { label: "已取消", tone: "preview" },
   canceled: { label: "已取消", tone: "preview" },
   running: { label: "处理中", tone: "preview" },
-  queued: { label: "等待中", tone: "preview" },
+  queued: { label: "排队中", tone: "preview" },
   paused: { label: "已暂停", tone: "preview" },
+  memory_paused: { label: "已暂停", tone: "preview" },
 };
 
 function History({ catalog }: { catalog: ToolManifest[] }) {
@@ -1355,7 +1517,17 @@ function History({ catalog }: { catalog: ToolManifest[] }) {
       // Rust 侧同时把仍存在的原输入路径重新授权，回填后即可直接运行。
       const restore = await historyRestore(row.jobId);
       publishTaskRestore(restore);
-      navigate(tool.route);
+      navigate(tool.route, {
+        state:
+          tool.id === "fa_list"
+            ? {
+                faListRestoreMode:
+                  restore.params.tbSource || restore.params.jeSource
+                    ? "tbje"
+                    : "cards",
+              }
+            : undefined,
+      });
     } catch (reason) {
       setRestoreError(appErrorText(reason));
     } finally {
@@ -1492,6 +1664,27 @@ function settingsSignature(form: Record<string, unknown>, cacheMode: string) {
   return JSON.stringify({ form, cacheMode });
 }
 
+function SettingsNavigationBlocker({ dirty }: { dirty: boolean }) {
+  const blocker = useBlocker(({ currentLocation, nextLocation }) =>
+    dirty && currentLocation.pathname !== nextLocation.pathname,
+  );
+  const confirming = useRef(false);
+  useEffect(() => {
+    if (blocker.state !== "blocked" || confirming.current) return;
+    confirming.current = true;
+    void confirmDialog({
+      title: "放弃未保存的修改？",
+      message: "设置尚未保存，确定离开并放弃这些修改吗？",
+      confirmLabel: "离开",
+      tone: "danger",
+    }).then((leave) => {
+      if (leave) blocker.proceed();
+      else blocker.reset();
+    }).finally(() => { confirming.current = false; });
+  }, [blocker]);
+  return null;
+}
+
 export function Settings({
   availableUpdate,
   onAvailableUpdateChange,
@@ -1513,6 +1706,12 @@ export function Settings({
     ocrEngine: "ai",
     ocrApiKey: "",
     ocrSecret: "",
+    meetingDetectEnabled: true,
+    asrApiKey: "",
+    asrChannel: "paraformer",
+    planBaseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com",
+    planModel: "qwen-audio-3.0-realtime-plus",
+    planApiKey: "",
   });
   const [message, setMessage] = useState("");
   const [testingLlm, setTestingLlm] = useState(false);
@@ -1520,6 +1719,14 @@ export function Settings({
     ok: boolean;
     text: string;
   }>();
+  const [testingAsr, setTestingAsr] = useState(false);
+  const [asrTestResult, setAsrTestResult] = useState<{
+    ok: boolean;
+    text: string;
+  }>();
+  // 开机自启是注册表项、勾选即生效，不进保存条脏检查。
+  const [autostartEnabled, setAutostartEnabled] = useState(false);
+  const [autostartBusy, setAutostartBusy] = useState(false);
   const [backupPath, setBackupPath] = useState("");
   // 本地缓存：大表读一次就存一份 Parquet，之后每步都命中缓存。
   // 它只增不减，所以要给用户一个看得见、清得掉的入口。
@@ -1551,6 +1758,11 @@ export function Settings({
   useEffect(() => {
     void refreshCacheStat();
   }, []);
+  useEffect(() => {
+    void meetingAutostartStatus()
+      .then((value) => setAutostartEnabled(Boolean(value.enabled)))
+      .catch(() => undefined);
+  }, []);
   const [updateStatus, setUpdateStatus] = useState("");
   const [updateOpen, setUpdateOpen] = useState(false);
   const updateTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1566,6 +1778,7 @@ export function Settings({
   const [checkedUpdateVersion, setCheckedUpdateVersion] = useState<string>();
   const updateCheckLock = useRef(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateCheckConfirmed, setUpdateCheckConfirmed] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<{
     downloaded: number;
@@ -1605,6 +1818,7 @@ export function Settings({
     updateCheckLock.current = true;
     setUpdateOpen(true);
     setCheckingUpdate(true);
+    setUpdateCheckConfirmed(false);
     setReleaseNotes(undefined);
     setNotesError("");
     setFallbackNotes("");
@@ -1613,6 +1827,7 @@ export function Settings({
     setUpdateStatus("正在检查 GitHub Release…");
     try {
       const update = await check({ timeout: 15000 });
+      setUpdateCheckConfirmed(true);
       onAvailableUpdateChange(update ?? null);
       setUpdateStatus(
         update
@@ -1699,6 +1914,7 @@ export function Settings({
       .then((value) => {
         const llm = (value.llm ?? {}) as Record<string, unknown>;
         const ocr = (value.ocr ?? {}) as Record<string, unknown>;
+        const meeting = (value.meeting ?? {}) as Record<string, unknown>;
         setForm((x) => {
           const next = {
             ...x,
@@ -1710,6 +1926,11 @@ export function Settings({
             timeout: String(llm.timeout ?? x.timeout),
             thinkingEnabled: Boolean(llm.thinking_enabled),
             ocrEngine: String(ocr.engine ?? x.ocrEngine),
+            meetingDetectEnabled: meeting.detect_enabled !== false,
+            asrChannel:
+              meeting.asr_channel === "token_plan" ? "token_plan" : "paraformer",
+            planBaseUrl: String(meeting.plan_base_url ?? x.planBaseUrl),
+            planModel: String(meeting.plan_model ?? x.planModel),
           };
           const cache = (value.cache ?? {}) as Record<string, unknown>;
           const mode = String(cache.cleanup ?? "weekly");
@@ -1733,6 +1954,7 @@ export function Settings({
   const dirty =
     savedSettingsSignature.current !== undefined &&
     settingsSignature(form, cacheMode) !== savedSettingsSignature.current;
+  const hasDataRouter = useContext(UNSAFE_DataRouterContext) !== null;
   useEffect(() => {
     if (!dirty) return;
     const warnBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -1764,12 +1986,13 @@ export function Settings({
       });
     };
     window.addEventListener("beforeunload", warnBeforeUnload);
-    document.addEventListener("click", confirmLinkNavigation, true);
+    // 正式应用由数据路由统一拦截链接、后退和前进；普通 MemoryRouter 测试保留旧回退。
+    if (!hasDataRouter) document.addEventListener("click", confirmLinkNavigation, true);
     return () => {
       window.removeEventListener("beforeunload", warnBeforeUnload);
-      document.removeEventListener("click", confirmLinkNavigation, true);
+      if (!hasDataRouter) document.removeEventListener("click", confirmLinkNavigation, true);
     };
-  }, [dirty]);
+  }, [dirty, hasDataRouter]);
   const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) =>
     setForm((x) => ({ ...x, [key]: value }));
   const llmSettings = () => ({
@@ -1817,19 +2040,80 @@ export function Settings({
       setTestingLlm(false);
     }
   }
+  async function testAsrConnection() {
+    setAsrTestResult(undefined);
+    setTestingAsr(true);
+    try {
+      const result =
+        form.asrChannel === "token_plan"
+          ? await meetingAsrTest(undefined, {
+              baseUrl: form.planBaseUrl.trim(),
+              model: form.planModel.trim(),
+              apiKey: form.planApiKey.trim() || undefined,
+            })
+          : await meetingAsrTest(form.asrApiKey);
+      setAsrTestResult({
+        ok: true,
+        text: `${result.message} 响应耗时 ${result.elapsedMs} 毫秒。`,
+      });
+    } catch (e) {
+      const value =
+        e && typeof e === "object" ? (e as Record<string, unknown>) : undefined;
+      const userMessage = value?.userMessage ?? value?.message;
+      const detail = typeof value?.detail === "string" ? value.detail : "";
+      const text =
+        typeof userMessage === "string"
+          ? `${userMessage}${detail ? `（${detail}）` : ""}`
+          : e instanceof Error
+            ? e.message
+            : String(e);
+      setAsrTestResult({ ok: false, text });
+    } finally {
+      setTestingAsr(false);
+    }
+  }
+  async function toggleAutostart(checked: boolean) {
+    if (autostartBusy) return;
+    const previous = autostartEnabled;
+    setAutostartEnabled(checked);
+    setAutostartBusy(true);
+    try {
+      await meetingSetAutostart(checked);
+    } catch (e) {
+      setAutostartEnabled(previous);
+      setSaveFailed(true);
+      setMessage(appErrorText(e));
+    } finally {
+      setAutostartBusy(false);
+    }
+  }
   async function save() {
     if (saving) return;
     setSaving(true);
     setSaveFailed(false);
     setMessage("");
     try {
+      // meeting 命名空间合并写：工具页可能已写入 background_resident，
+      // 这里只覆盖 detect_enabled，其余键原样保留。
+      const current = ((await settingsGet().catch(() => ({}))) ??
+        {}) as Record<string, unknown>;
+      const meetingNamespace = {
+        ...((current.meeting as Record<string, unknown> | undefined) ?? {}),
+        detect_enabled: form.meetingDetectEnabled,
+        asr_channel: form.asrChannel,
+        plan_base_url: form.planBaseUrl.trim(),
+        plan_model: form.planModel.trim(),
+      };
       await settingsSet({
         llm: {
           ...llmSettings(),
         },
         ocr: { engine: form.ocrEngine },
         cache: { cleanup: cacheMode },
+        meeting: meetingNamespace,
       });
+      // 检测开关保存后立即生效，不必重启应用。
+      await meetingDetectSetEnabled(form.meetingDetectEnabled);
       if (form.apiKey)
         await secretSet(
           form.apiType === "dify_chat" ? "dify_api_key" : "llm_api_key",
@@ -1837,11 +2121,16 @@ export function Settings({
         );
       if (form.ocrApiKey) await secretSet("baidu_ocr_key", form.ocrApiKey);
       if (form.ocrSecret) await secretSet("baidu_ocr_secret", form.ocrSecret);
+      if (form.asrApiKey) await secretSet("bailian_asr_key", form.asrApiKey);
+      if (form.planApiKey)
+        await secretSet("bailian_plan_asr_key", form.planApiKey);
       const savedForm = {
         ...form,
         apiKey: "",
         ocrApiKey: "",
         ocrSecret: "",
+        asrApiKey: "",
+        planApiKey: "",
       };
       savedSettingsSignature.current = settingsSignature(savedForm, cacheMode);
       setForm(savedForm);
@@ -1855,6 +2144,7 @@ export function Settings({
   }
   return (
     <div className="settings-page">
+      {hasDataRouter && <SettingsNavigationBlocker dirty={dirty} />}
       <PageHeader
         eyebrow="本机配置"
         title="设置"
@@ -1913,9 +2203,11 @@ export function Settings({
                   ? "正在安装"
                   : checkingUpdate
                     ? "正在检查"
-                    : availableUpdate
-                      ? "可安装"
-                      : "已是最新"}
+                    : !updateCheckConfirmed
+                      ? "未确认"
+                      : availableUpdate
+                        ? "可安装"
+                        : "已是最新"}
               </span>
               <Button
                 variant="ghost"
@@ -2182,10 +2474,7 @@ export function Settings({
               >
                 {testingLlm ? "正在测试…" : "测试 LLM 连接"}
               </button>
-              <span>
-                API Key
-                留空时使用已保存的密钥；测试成功后仍需点击页面底部“保存配置”。
-              </span>
+              <span>留空使用已保存密钥；测试成功后仍需保存配置。</span>
             </div>
             {llmTestResult && (
               <div
@@ -2289,6 +2578,112 @@ export function Settings({
               </div>
             </details>
           </section>
+          <section className="list-card">
+            <h2>语音转写（百炼）</h2>
+            <p className="settings-note">
+              供会议纪要助手使用。通用通道：录音上传百炼文件转写，按录音时长计费
+              （新开通通常有免费额度），自动区分说话人；套餐通道：走 Token Plan
+              专属实时接口，转写消耗套餐 token，不区分说话人，仅支持 WAV
+              录音（工具箱自录会议即为 WAV）。纪要整理继续使用上方统一 LLM 配置。
+            </p>
+            <div className="form-grid">
+              <label className="field">
+                <span>转写通道</span>
+                <select
+                  value={form.asrChannel}
+                  onChange={(e) => set("asrChannel", e.target.value)}
+                >
+                  <option value="paraformer">通用通道（区分说话人）</option>
+                  <option value="token_plan">Token Plan 套餐通道</option>
+                </select>
+              </label>
+              <label className="field settings-toggle">
+                <span>会议自动检测</span>
+                <SwitchInput
+                  checked={form.meetingDetectEnabled}
+                  onChange={(checked: boolean) =>
+                    set("meetingDetectEnabled", checked)
+                  }
+                />
+              </label>
+              <label className="field settings-toggle">
+                <span>开机自启（登录后驻留托盘监控）</span>
+                <SwitchInput
+                  checked={autostartEnabled}
+                  disabled={autostartBusy}
+                  onChange={(checked: boolean) => void toggleAutostart(checked)}
+                />
+              </label>
+              {form.asrChannel === "token_plan" ? (
+                <>
+                  <label className="field">
+                    <span>套餐地址</span>
+                    <input
+                      value={form.planBaseUrl}
+                      onChange={(e) => set("planBaseUrl", e.target.value)}
+                      placeholder="https://token-plan.cn-beijing.maas.aliyuncs.com"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>套餐转写模型</span>
+                    <input
+                      value={form.planModel}
+                      onChange={(e) => set("planModel", e.target.value)}
+                      placeholder="qwen-audio-3.0-realtime-plus"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>套餐 API 密钥（sk-sp- 开头）</span>
+                    <input
+                      type="password"
+                      value={form.planApiKey}
+                      onChange={(e) => set("planApiKey", e.target.value)}
+                      placeholder="留空表示不修改"
+                    />
+                  </label>
+                </>
+              ) : (
+                <label className="field">
+                  <span>百炼 API 密钥</span>
+                  <input
+                    type="password"
+                    value={form.asrApiKey}
+                    onChange={(e) => set("asrApiKey", e.target.value)}
+                    placeholder="留空表示不修改"
+                  />
+                </label>
+              )}
+            </div>
+            <p className="settings-note">
+              「开机自启」勾选后立即生效：登录 Windows
+              后工具箱自动在系统托盘启动会议监控，不弹窗口；取消「后台常驻」会同时取消开机自启。
+            </p>
+            <div className="settings-test-row">
+              <button
+                className="secondary"
+                disabled={testingAsr}
+                onClick={() => void testAsrConnection()}
+              >
+                {testingAsr
+                  ? "正在测试…"
+                  : form.asrChannel === "token_plan"
+                    ? "测试套餐通道"
+                    : "测试百炼连接"}
+              </button>
+              <span>
+                {form.asrChannel === "token_plan"
+                  ? "地址与模型按「我的订阅」页面填写；密钥留空使用已保存密钥。"
+                  : "密钥请到阿里云百炼控制台创建；留空使用已保存密钥。"}
+              </span>
+            </div>
+            {asrTestResult && (
+              <div
+                className={`settings-test-result ${asrTestResult.ok ? "success" : "failed"}`}
+              >
+                {asrTestResult.text}
+              </div>
+            )}
+          </section>
         </div>
         <div className="settings-col">
           <section className="list-card">
@@ -2367,13 +2762,18 @@ export function Settings({
             <p>
               缓存读过的科目余额表与序时账，再次打开同一份文件直接命中，不必重新解析。
             </p>
-            <p className="cache-usage">
-              {cacheStat
-                ? `已缓存 ${formatBytes(cacheStat.bytes)}`
-                : cacheStatError
-                  ? "占用读取失败"
-                  : "读取中…"}
-            </p>
+            {cacheStatError ? (
+              <div className="cache-stat-error" role="alert">
+                <span>缓存占用读取失败，请重新读取后再决定是否清理。</span>
+                <Button type="button" variant="outline" size="sm" onClick={() => void refreshCacheStat()}>
+                  重新读取
+                </Button>
+              </div>
+            ) : (
+              <p className="cache-usage">
+                {cacheStat ? `已缓存 ${formatBytes(cacheStat.bytes)}` : "读取中…"}
+              </p>
+            )}
             <label className="field">
               <span>自动清理</span>
               <select
@@ -2400,7 +2800,7 @@ export function Settings({
             </label>
             <div className="actions">
               <button
-                className="secondary"
+                className="secondary danger"
                 disabled={
                   cacheBusy ||
                   ((cacheStat?.bytes ?? 0) === 0 && !clearHistoryWithCache)
@@ -2485,12 +2885,21 @@ export function Settings({
   );
 }
 
-function SimplePage({ title, text }: { title: string; text: string }) {
+function SimplePage({
+  title,
+  text,
+  action,
+}: {
+  title: string;
+  text: string;
+  action?: ReactElement;
+}) {
   return (
     <>
       <PageHeader eyebrow="审计工具箱" title={title} detail={text} />
       <div className="list-card">
         <div className="empty">{text}</div>
+        {action ? <div className="simple-page-action">{action}</div> : null}
       </div>
     </>
   );

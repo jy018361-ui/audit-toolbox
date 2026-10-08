@@ -41,4 +41,13 @@ describe("LedgerSourceCard 标题行", () => {
     renderCard({ headerRow: 4, detectedHeaderRow: 4 });
     expect(screen.queryByText("已自动按第 4 行识别表头。")).toBeNull();
   });
+
+  it("表头层数可自动识别，也可人工覆盖", () => {
+    const onHeaderDepthChange = vi.fn();
+    renderCard({ headerDepth: 0, onHeaderDepthChange });
+    const select = screen.getByLabelText("表头层数") as HTMLSelectElement;
+    expect(select.value).toBe("0");
+    fireEvent.change(select, { target: { value: "2" } });
+    expect(onHeaderDepthChange).toHaveBeenCalledWith(2);
+  });
 });

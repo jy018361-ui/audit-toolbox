@@ -6,6 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { check } from "@tauri-apps/plugin-updater";
 import App from "./App";
 import { historyGet, historyRestore } from "./api";
+import { clearToolPageActivityForTests, toolPageIsLive } from "./toolPageActivity";
 import catalog from "../public/tool-catalog.json";
 
 vi.mock("./api", async (importOriginal) => ({
@@ -51,10 +52,15 @@ const completedRow = (overrides: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubGlobal("scrollTo", vi.fn());
+  clearToolPageActivityForTests();
   vi.mocked(historyGet).mockResolvedValue([]);
   vi.mocked(check).mockResolvedValue(null);
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("history resume", () => {
   it("restores inputs and navigates to the tool page when clicking 继续任务", async () => {
@@ -77,11 +83,18 @@ describe("history resume", () => {
     expect(vi.mocked(historyRestore)).toHaveBeenCalledWith("job-wp-1");
     // 跳到对应工具页（WP 服务单页能安全挂载），并出现全局恢复提示。
     expect(
-      await screen.findByRole("heading", { name: wpTool.name }),
+      // The dedicated page is lazy-loaded; parallel full-suite workers may
+      // take longer than Testing Library's default 1 s to transform it, and
+      // the catalog three-state gate adds one more async tick before the
+      // heading renders.
+      await screen.findByRole("heading", { name: wpTool.name }, { timeout: 15_000 }),
     ).toBeVisible();
     expect(
       screen.getByText("已恢复「FY27 WP服务单生成工具」上次任务的输入。"),
     ).toBeVisible();
+    // 回填走程序赋值不触发 DOM 事件，恢复本身要把该工具页登记为
+    // 「有现场」，否则恢复完的页面仍会被当成空白页淘汰。
+    expect(toolPageIsLive("wp_service_generator")).toBe(true);
   });
 
   it("warns about missing source files after restoring", async () => {

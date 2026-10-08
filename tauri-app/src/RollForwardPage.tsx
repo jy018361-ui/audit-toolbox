@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
+import { markToolPageLive } from "./toolPageActivity";
 import {
   engineCall,
-  jobCancel,
   jobStart,
   listenJobEvents,
   openOutput,
@@ -29,6 +30,7 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
 import { SwitchInput } from "@/components/SwitchInput";
 import { JobProgress } from "@/components/JobProgress";
+import { DateInput } from "@/components/DateInput";
 import { Card } from "@/components/ui/card";
 import "./roll-forward.css";
 type RollSubject = {
@@ -140,6 +142,9 @@ function normalizeRollProjects(value: unknown): RollProject[] {
 }
 
 export function RollForwardPage({ tool }: { tool: ToolManifest }) {
+  // 内存缓存非空说明本页此前有现场：登记后不参与 LRU 淘汰，
+  // 保活到应用退出。
+  if (rollForwardInMemoryCache) markToolPageLive("audit_roll_forward");
   const [subjects, setSubjects] = useState<RollSubject[]>([]);
   const [projects, setProjects] = useState<RollProject[]>([]);
   const [projectIndex, setProjectIndex] = useState(0);
@@ -290,71 +295,97 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
       if (event.toolId !== "audit_roll_forward") return;
       setJob(event);
       if (event.result) setValidation(event.result);
-      setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
-      if (["completed", "failed", "cancelled"].includes(event.phase)) {
-        const target = jobCompanyRef.current;
-        if (target) {
-          const status =
-            event.phase === "completed"
-              ? "已完成"
-              : event.phase === "cancelled"
-                ? "已终止"
-                : "部分失败";
-          setProjects((current) =>
-            current.map((p) =>
-              p.id !== target.projectId
-                ? p
-                : {
-                    ...p,
-                    companies: p.companies.map((c) => {
-                      if (target.companyId && c.id !== target.companyId)
-                        return c;
-                      const root = (event.result ?? {}) as Record<
-                        string,
-                        unknown
-                      >;
-                      const directRows = Array.isArray(root.results)
-                        ? root.results
-                        : [];
-                      const companyRows = Array.isArray(root.companies)
-                        ? (root.companies.find(
-                            (row) =>
-                              String(
-                                (row as Record<string, unknown>).companyName ??
-                                  "",
-                              ) === c.name,
-                          ) as Record<string, unknown> | undefined)
-                        : undefined;
-                      const rows = directRows.length
-                        ? directRows
-                        : Array.isArray(companyRows?.results)
-                          ? companyRows.results
-                          : [];
-                      const generated = rows.filter((row) =>
-                        Boolean((row as Record<string, unknown>).success),
-                      ).length;
-                      const failed = rows.length - generated;
-                      return {
-                        ...c,
-                        status,
-                        generated,
-                        failed,
-                        last_message: rows.length
-                          ? `${generated}/${rows.length}`
-                          : event.message,
-                      };
-                    }),
-                  },
-            ),
-          );
-          if (
-            event.phase === "completed" &&
-            preferencesRef.current.openOutputAfterSuccess &&
-            event.outputPaths[0]
-          ) {
-            void openOutput(event.outputPaths[0]);
-          }
-        }
+      const terminal = ["completed", "failed", "cancelled"].includes(
+        event.phase,
+      );
+      setBusy(!terminal);
+      const target = jobCompanyRef.current;
+      if (!target) return;
+      // 状态卡与任务事件同源刷新：运行期先切到排队中/处理中，终态再回填
+      // 已生成/失败计数，避免横幅与角标已在推进而状态卡停在"未处理/0"。
+      const status = terminal
+        ? event.phase === "completed"
+          ? "已完成"
+          : event.phase === "cancelled"
+            ? "已取消"
+            : "部分失败"
+        : event.phase === "queued"
+          ? "排队中"
+          : "处理中";
+      setProjects((current) =>
+        current.map((p) =>
+          p.id !== target.projectId
+            ? p
+            : {
+                ...p,
+                companies: p.companies.map((c) => {
+                  if (target.companyId && c.id !== target.companyId) return c;
+                  if (!terminal) {
+                    if (c.status === status) return c;
+                    return { ...c, status };
+                  }
+                  const root = (event.result ?? {}) as Record<
+                    string,
+                    unknown
+                  >;
+                  const directRows = Array.isArray(root.results)
+                    ? root.results
+                    : [];
+                  const companyRows = Array.isArray(root.companies)
+                    ? (root.companies.find(
+                        (row) =>
+                          String(
+                            (row as Record<string, unknown>).companyName ?? "",
+                          ) === c.name,
+                      ) as Record<string, unknown> | undefined)
+                    : undefined;
+                  const rows = directRows.length
+                    ? directRows
+                    : Array.isArray(companyRows?.results)
+                      ? companyRows.results
+                      : [];
+                  const generated = rows.filter((row) =>
+                    Boolean((row as Record<string, unknown>).success),
+                  ).length;
+                  const failed = rows.length - generated;
+                  // 整体失败的终态与演示剧本可能没有逐科目 results：只带
+                  // generated/failed 汇总，或只有 error。没有 results 时用
+                  // 汇总回填；连汇总也没有的失败按"全部科目未完成"计，
+                  // 避免状态卡停在 已生成 0 / 失败 0 与横幅自相矛盾。
+                  const summaryGenerated =
+                    typeof root.generated === "number"
+                      ? root.generated
+                      : undefined;
+                  const summaryFailed =
+                    typeof root.failed === "number" ? root.failed : undefined;
+                  const finalGenerated = rows.length
+                    ? generated
+                    : (summaryGenerated ?? 0);
+                  const finalFailed = rows.length
+                    ? failed
+                    : (summaryFailed ??
+                      (event.phase === "failed"
+                        ? Math.max(c.subjects.length - finalGenerated, 0)
+                        : 0));
+                  return {
+                    ...c,
+                    status,
+                    generated: finalGenerated,
+                    failed: finalFailed,
+                    last_message: rows.length
+                      ? `${generated}/${rows.length}`
+                      : event.message,
+                  };
+                }),
+              },
+        ),
+      );
+      if (
+        event.phase === "completed" &&
+        preferencesRef.current.openOutputAfterSuccess &&
+        event.outputPaths[0]
+      ) {
+        void openOutput(event.outputPaths[0]);
       }
     }).then((value) => {
       off = value;
@@ -607,12 +638,26 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
     else pendingRestoreRef.current = restored;
   });
   const params = () => paramsFor(company);
+  /** 上年底稿匹配成功而表日还空着时，按底稿文件名里的年份建议"上年+1 年末"：
+   *  表日决定上年底稿定位与输出命名，手滑填错年整单就结转不了。 */
+  function suggestBsDateFromPrior(result: unknown) {
+    if (!company?.bs_date.trim()) return;
+    const details = Array.isArray((result as { details?: unknown[] }).details)
+      ? ((result as { details: Array<Record<string, unknown>> }).details)
+      : [];
+    const priorName = details
+      .map((row) => String(row.priorPath ?? "").split(/[\\/]/).pop() ?? "")
+      .find((name) => name.trim());
+    const year = priorName ? Number(priorName.match(/(19|20)\d{2}/)?.[0]) : 0;
+    if (year > 1900) updateCompany({ bs_date: `${year + 1}-12-31` });
+  }
   async function validate() {
     if (!company) return;
     setError("");
     try {
       const result = await engineCall("roll_forward.validate", params());
       setValidation(result);
+      suggestBsDateFromPrior(result);
       await saveProjects();
     } catch (e) {
       setError(errorText(e));
@@ -801,12 +846,11 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           detail="项目、公司、科目、CRA 与处理任务统一保存在工具箱中。"
         />
         <Card className="list-card" variant="section">
-          <EmptyState title="还没有年度结转项目" description="先创建项目与公司，再选择上年底稿、输出位置和需要结转的科目。" />
-          <div className="actions">
-            <Button variant="default" onClick={addProject}>
-              新建项目
-            </Button>
-          </div>
+          <EmptyState
+            title="还没有年度结转项目"
+            description="先创建项目与公司，再选择上年底稿、输出位置和需要结转的科目。"
+            action={<Button variant="default" onClick={addProject}>新建项目</Button>}
+          />
         </Card>
       </>
     );
@@ -828,7 +872,14 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
         current={job || validation !== undefined ? 3 : company?.subjects.length && company.prior_path ? 2 : company ? 1 : 0}
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
-      <div className="merger-layout">
+      {job && ["failed", "cancelled"].includes(job.phase) && (
+        <div className="flex flex-wrap items-center gap-2" role={job.phase === "failed" ? "alert" : "status"}>
+          <Badge variant={job.phase === "failed" ? "danger" : "warning"}>{job.phase === "failed" ? "结转失败" : "已取消"}</Badge>
+          <span className="hint">{job.phase === "failed" ? "本次结转未完成，请查看下方结果原因并重试对应科目。" : "本次结转已停止；项目与公司设置仍保留，可重新运行。"}</span>
+          <a className="text-sm underline" href="#roll-forward-results">查看检查与结果</a>
+        </div>
+      )}
+      <div className="merger-layout roll-setup-layout">
         <section className="form-card">
           <div className="section-title">
             <h2>1. 项目与公司</h2>
@@ -939,10 +990,9 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
               </label>
               <label className="field">
                 <span>资产负债表日</span>
-                <input
+                <DateInput
                   value={company.bs_date}
-                  placeholder="例如：2026/12/31 或 20261231"
-                  onChange={(e) => updateCompany({ bs_date: e.target.value })}
+                  onChange={(value) => updateCompany({ bs_date: value })}
                 />
               </label>
               <div className="field-grid">
@@ -1395,7 +1445,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           </div>
         )}
       </section>
-      <section className="result-card merger-progress">
+      <section className="result-card merger-progress scroll-mt-4" id="roll-forward-results">
         <div className="section-title">
           <h2>4. 运行检查与结果</h2>
           <span>{company?.status}</span>
@@ -1446,7 +1496,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           {job && busy && (
             <Button
               variant="destructive"
-              onClick={() => void jobCancel(job.jobId)}
+              onClick={() => void cancelJobWithFeedback(job.jobId)}
             >
               取消任务
             </Button>
@@ -1454,7 +1504,8 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
         </div>
         {job && (
           <>
-            <JobProgress job={job} />
+            {!["failed", "cancelled"].includes(job.phase) && <JobProgress job={job} />}
+            {job.phase === "failed" && job.message && <p className="hint">失败原因：{job.message}</p>}
             {job.outputPaths.map((path) => (
               <Button
                 key={path}

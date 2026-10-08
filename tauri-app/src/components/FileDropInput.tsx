@@ -8,6 +8,11 @@ export type FileDropInputProps = {
   value: string;
   /** 多文件等场景的明确展示文案；不再把组合文案误当成本地路径截取文件名。 */
   displayValue?: ReactNode;
+  /**
+   * 已选文件时仅显示文件信息和清空操作。适合页面已在上方交代上传方式的
+   * 汇总上传栏，避免把“拖放或选择”这类引导语重复展示为文件槽标签。
+   */
+  hideFilledLabel?: boolean;
   disabled?: boolean;
   placeholder?: string;
   /** 点击选择文件 */
@@ -37,6 +42,7 @@ export type FileDropInputProps = {
 export function FileDropInput({
   value,
   displayValue,
+  hideFilledLabel,
   disabled,
   placeholder,
   onBrowse,
@@ -69,10 +75,12 @@ export function FileDropInput({
       onDrop={() => onDragStateChange(false)}
     >
       {value ? (
-        <div className="file-drop-slot filled">
-          <span className="file-drop-slot-label">
-            {placeholder ?? "已选文件"}
-          </span>
+        <div className={cn("file-drop-slot filled", hideFilledLabel && "without-label")}>
+          {!hideFilledLabel && (
+            <span className="file-drop-slot-label">
+              {placeholder ?? "已选文件"}
+            </span>
+          )}
           <button
             type="button"
             className="file-drop-slot-value"

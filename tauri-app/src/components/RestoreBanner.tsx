@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
-import { subscribeTaskRestore } from "../restore";
+import {
+  subscribeTaskRestore,
+  subscribeTaskRestoreFailure,
+  type TaskRestoreFailure,
+} from "../restore";
 import type { TaskRestore, ToolManifest } from "../types";
 
 /**
@@ -9,27 +13,59 @@ import type { TaskRestore, ToolManifest } from "../types";
  */
 export function RestoreBanner({ catalog }: { catalog: ToolManifest[] }) {
   const [notice, setNotice] = useState<TaskRestore | null>(null);
+  const [failure, setFailure] = useState<TaskRestoreFailure | null>(null);
   useEffect(
-    () => subscribeTaskRestore((restore) => setNotice(restore)),
+    () =>
+      subscribeTaskRestore((restore) => {
+        setFailure(null);
+        setNotice(restore);
+      }),
     [],
   );
+  useEffect(() => subscribeTaskRestoreFailure(setFailure), []);
   useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(null), 15_000);
     return () => window.clearTimeout(timer);
   }, [notice]);
+  if (failure) {
+    const failedToolName =
+      catalog.find((tool) => tool.id === failure.restore.toolId)?.name ??
+      "对应工具";
+    return (
+      <div className="restore-notice restore-notice-error" role="alert">
+        <div>
+          <strong>“{failedToolName}”的历史任务未能完整恢复。</strong>
+          <p>
+            {failure.message}{" "}
+            当前应用仍可继续使用，请返回历史记录或重新选择输入。
+          </p>
+        </div>
+        <button type="button" onClick={() => setFailure(null)}>
+          知道了
+        </button>
+      </div>
+    );
+  }
   if (!notice) return null;
   const toolName =
     catalog.find((tool) => tool.id === notice.toolId)?.name ?? "对应工具";
   const missing = notice.missingPaths;
+  const detail = missing.length > 0
+    ? `有 ${missing.length} 个原文件已不存在（如 ${missing[0]}），请重新选择后再运行。`
+    : notice.snapshotStatus === "valid"
+      ? "源文件未变化，已优先使用本机识别快照恢复。"
+      : notice.snapshotStatus === "stale"
+        ? "检测到源文件已有变化，页面将重新识别以避免使用旧数据。"
+        : notice.snapshotStatus === "missing"
+          ? "部分源文件已不存在，识别快照未被使用。"
+          : "文件内容如有变动，请在页面中重新读取后再运行。";
   return (
     <div className="restore-notice" role="status" aria-live="polite">
       <div>
         <strong>已恢复「{toolName}」上次任务的输入。</strong>
         <p>
-          {missing.length > 0
-            ? `有 ${missing.length} 个原文件已不存在（如 ${missing[0]}），请重新选择后再运行。`
-            : "文件内容如有变动，请在页面中重新读取后再运行。"}
+          {detail}
         </p>
       </div>
       <button type="button" onClick={() => setNotice(null)}>

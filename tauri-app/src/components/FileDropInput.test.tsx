@@ -22,4 +22,23 @@ describe("FileDropInput", () => {
       screen.getByRole("button", { name: "重新选择 JE、TB 文件" }),
     ).toHaveTextContent("JE：序时账-1.xlsx / 明细；TB：科目余额表.xls / 余额表");
   });
+
+  it("完成态可隐藏上传引导语，只保留已选来源", () => {
+    render(
+      <FileDropInput
+        value="C:/账套/序时账-1.xlsx"
+        displayValue="JE：序时账-1.xlsx / 明细；TB：科目余额表.xls / 余额表"
+        hideFilledLabel
+        placeholder="拖放或选择 JE、TB 文件（可同时选择）"
+        ariaLabel="重新选择 JE、TB 文件"
+        onBrowse={vi.fn()}
+        onDragStateChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "重新选择 JE、TB 文件" }),
+    ).toBeVisible();
+    expect(screen.queryByText("拖放或选择 JE、TB 文件（可同时选择）")).not.toBeInTheDocument();
+  });
 });

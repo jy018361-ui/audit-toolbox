@@ -18,19 +18,58 @@
 
 .job-progress .job-banner {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: var(--sp-2) var(--sp-3);
   min-width: 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-muted);
+}
+
+.job-progress .job-banner.danger {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
+.job-progress .job-banner.warning {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+
+.job-progress .job-banner.success {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+
+.job-progress .job-banner:is(.danger, .warning, .success) :is(.job-progress-state, .job-pct) {
+  color: inherit;
+}
+
+.job-progress .job-cancel {
+  grid-column: 4;
+  justify-self: end;
 }
 
 .job-progress-message,
+.job-progress-error,
 .result-summary > p,
 .result-summary li,
 .error-box-message {
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.job-progress-error {
+  margin: 0;
+  color: var(--danger-fg);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-label);
 }
 
 .job-progress-copy {
@@ -79,6 +118,17 @@
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+
+/* 失败/取消后残留的结果提示：小字但醒目，防止把上次结果当本次成功产物。 */
+.result-summary .result-stale-note {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--warning-border);
+  border-radius: 6px;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-size: 0.875rem;
 }
 
 .result-output-list {
@@ -147,6 +197,15 @@
 
 .error-box-message {
   flex: 1 1 auto;
+  white-space: pre-line;
+}
+
+.error-box-message--expanded {
+  max-height: min(240px, 36vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: var(--sp-1);
+  scrollbar-gutter: stable;
 }
 
 .error-box-actions {
@@ -175,4 +234,92 @@
   .error-box-actions {
     margin-left: 0;
   }
+}
+
+/* === UI 审计修复 P1-1（2026-09-24）：进度条轨道显式接管 ===
+   原生 <progress> 只设 accent-color 时，WebView2/Chromium 会把"轨道"
+   从 accent 色（#78b7ad）派生加深成深灰，排队 / 0% 时整条深灰实心条
+   看起来像已完成。以下追加规则接管渲染：浅灰轨道（与页面背景有层次、
+   与填充色对比明显，令牌混色、明暗主题自适应）+ 各语气显式填充色。
+   仅追加，不改动上方既有规则。 */
+.job-progress progress {
+  -webkit-appearance: none;
+  appearance: none;
+  overflow: hidden;
+  background-color: color-mix(in srgb, var(--border) 55%, var(--surface-page));
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.job-progress progress::-webkit-progress-bar {
+  background-color: transparent;
+  border-radius: var(--r-pill);
+}
+
+.job-progress progress::-webkit-progress-value {
+  background-color: var(--brand-accent);
+  border-radius: var(--r-pill);
+  transition: width 0.25s ease;
+}
+
+.job-progress progress.progress-tone-warning::-webkit-progress-value { background-color: var(--warning-dot); }
+.job-progress progress.progress-tone-danger::-webkit-progress-value { background-color: var(--danger-fg); }
+.job-progress progress.progress-tone-success::-webkit-progress-value { background-color: var(--success-fg); }
+
+/* 排队态进度不定、无填充：轨道轻微呼吸，明确区分"已排队、尚未开始"。 */
+.job-progress[data-job-state="queued"] progress {
+  animation: job-progress-queued-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes job-progress-queued-pulse {
+  0%,
+  100% {
+    background-color: color-mix(in srgb, var(--border) 55%, var(--surface-page));
+  }
+  50% {
+    background-color: color-mix(in srgb, var(--border) 85%, var(--surface-page));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .job-progress[data-job-state="queued"] progress {
+    animation: none;
+  }
+
+  .job-progress progress::-webkit-progress-value {
+    transition: none;
+  }
+}
+
+/* === UI 审计修复 P2-9（2026-09-24）：右下角任务/同步小条抬高 ===
+   小条默认只离底边 --sp-5，正好压住页面右下角的主操作按钮（如 Excel 合并
+   运行/排队时的「开始合并/停止执行」、文件夹清单进度条上的「取消执行」）。
+   整体抬高约一个按钮带的高度，给底部操作留出可点击通道；同步等待窗的
+   取消反馈小条同步上移，保持原有 24px 间距。用 body 前缀提高优先级，
+   覆盖 styles.css 的同选择器规则而不依赖 CSS 引入顺序。 */
+body .job-dialog-pill,
+body .sync-busy-pill {
+  bottom: calc(max(var(--sp-5), env(safe-area-inset-bottom)) + 56px);
+}
+
+body:has(.job-dialog-pill) .job-command-notice,
+body:has(.sync-busy-pill) .job-command-notice {
+  bottom: calc(max(var(--sp-5), env(safe-area-inset-bottom)) + 120px);
+}
+
+/* === UI 审计修复 P2-2 / P2-3（2026-09-24）：状态词去重与悬浮胶囊统一口径 ===
+   1) 横幅状态词去重后，状态徽标/百分比两列可能缺席，取消按钮不再钉在第 4 列，
+      改为自动跟随排布，避免空列叠加出成倍列距；窄屏（≤560px）的整行换行规则
+      在上方媒体查询中已有定义，这里只对宽屏生效。
+   2) 右下角悬浮胶囊单任务时只有「圆点 + 文本」两个子元素（文本为
+      「工具名 · 状态 百分比」一体），文本撑满剩余空间以保持原有左对齐观感；
+      多任务时仍是文本 + 百分比两端对齐。 */
+@media (min-width: 561px) {
+  .job-progress .job-cancel {
+    grid-column: auto;
+    justify-self: end;
+  }
+}
+
+.job-dialog-pill .job-dialog-pill-text {
+  flex: 1 1 auto;
 }

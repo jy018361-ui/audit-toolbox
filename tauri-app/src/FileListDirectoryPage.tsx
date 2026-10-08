@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   jobCancel,
   jobStart,
@@ -28,6 +29,7 @@ import { confirmDialog } from "@/components/ConfirmDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
+import { useTableColumnResize } from "@/components/useTableColumnResize";
 
 const CACHE_KEY = "audit-toolbox:file-list-directory:v1";
 
@@ -222,6 +224,8 @@ export default function FileListDirectoryPage({
 
   const terminal =
     job && ["completed", "failed", "cancelled"].includes(job.phase);
+  const interrupted = job?.phase === "failed" || job?.phase === "cancelled";
+  const scanInterrupted = interrupted && !scan;
   return (
     <>
       <PageHeader
@@ -237,14 +241,24 @@ export default function FileListDirectoryPage({
         current={step - 1}
         onStepClick={(index) => setStep((index + 1) as 1 | 2)}
       />
+      {interrupted && (
+        job.phase === "cancelled" ? (
+          <div className="flex flex-wrap items-center gap-2" role="status">
+            <Badge variant="warning">已取消</Badge>
+            <span className="hint">本次任务已停止；已选文件夹仍保留，可重新扫描或导出。</span>
+          </div>
+        ) : (
+          <JobProgress job={job} detail="请检查所选文件夹与访问权限后重试。" />
+        )
+      )}
       <div className="fa-stack">
         <Card>
           <CardHeader>
             <CardTitle>
               {step === 1 ? "1. 选择扫描范围" : "2. 确认输出并生成"}
             </CardTitle>
-            <Badge className={scan ? "badge-ready" : "badge-neutral"}>
-              {busy && !scan ? "扫描中" : scan ? "扫描完成" : "待选择"}
+            <Badge className={scan && !interrupted ? "badge-ready" : "badge-neutral"}>
+              {busy && !scan ? "扫描中" : interrupted ? job.phase === "cancelled" ? "已取消" : "处理失败" : scan ? "扫描完成" : "待选择"}
             </Badge>
           </CardHeader>
           <CardContent>
@@ -255,6 +269,9 @@ export default function FileListDirectoryPage({
                   <div title={sourceDir || undefined}>
                     <FileDropInput
                       value={sourceDir}
+                      /* 文件夹回显完整路径：只显示末级名称会和占位文案混在一起，
+                         看起来像没选上。清空按钮由组件自带。 */
+                      displayValue={sourceDir}
                       placeholder="拖放或点击选择要扫描的文件夹"
                       onBrowse={() => void chooseSource()}
                       onClear={sourceDir ? clear : undefined}
@@ -316,7 +333,7 @@ export default function FileListDirectoryPage({
                       type="button"
                       variant="secondary"
                       size="sm"
-                      onClick={() => void jobCancel(activeJobId)}
+                      onClick={() => void cancelJobWithFeedback(activeJobId)}
                     >
                       取消{job?.phase === "scan" || !scan ? "扫描" : "导出"}
                     </Button>
@@ -343,15 +360,13 @@ export default function FileListDirectoryPage({
           <CardContent>
             {!scan ? (
               <EmptyState
-                title="等待扫描文件夹"
-                description="选择文件夹后，这里会显示前 50 个文件及目录层级。"
-                action={
-                  <Button
-                    variant="secondary"
-                    onClick={() => void chooseSource()}
-                  >
-                    选择文件夹
-                  </Button>
+                title={scanInterrupted ? job.phase === "cancelled" ? "扫描已取消" : "扫描失败" : busy ? "正在扫描…" : "等待扫描文件夹"}
+                description={
+                  scanInterrupted
+                    ? "已选文件夹仍保留，可点击上方“重新扫描”再次尝试。"
+                    : busy
+                    ? "扫描完成后，这里会显示前 50 个文件及目录层级。"
+                    : "从上方选择源文件夹后，这里会显示前 50 个文件及目录层级。"
                 }
               />
             ) : scan.fileCount === 0 ? (
@@ -364,40 +379,7 @@ export default function FileListDirectoryPage({
                 <p className="hint">
                   {scan.fileCount} 个文件 · {scan.maxDepth + 1} 级目录列
                 </p>
-                <div className="file-list-table-wrap">
-                  <table className="file-list-table">
-                    <thead>
-                      <tr>
-                        {Array.from(
-                          { length: scan.maxDepth + 1 },
-                          (_, index) => (
-                            <th key={index}>{index + 1}级文件夹</th>
-                          ),
-                        )}
-                        <th>文件名称</th>
-                        <th>相对路径</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {scan.preview.map((row) => (
-                        <tr key={row.fullPath}>
-                          {Array.from(
-                            { length: scan.maxDepth + 1 },
-                            (_, index) => (
-                              <td key={index} title={row.levels[index] ?? ""}>
-                                {row.levels[index] ?? ""}
-                              </td>
-                            ),
-                          )}
-                          <td title={row.name}>{row.name}</td>
-                          <td title={row.relativePath}>
-                            {displayFileName(row.relativePath)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <FileListScanTable scan={scan} />
               </>
             )}
             {scan && scan.fileCount > scan.preview.length && (
@@ -407,11 +389,8 @@ export default function FileListDirectoryPage({
               </p>
             )}
             {!!scan?.skippedPaths?.length && (
-              <div className="warning-box">
-                <strong>
-                  以下 {scan.skippedPaths.length}{" "}
-                  个路径无法访问，已跳过（清单中不含其内容）
-                </strong>
+              <div className="warning-box file-list-skipped">
+                <strong>以下路径无法访问，已跳过：</strong>
                 <ul>
                   {scan.skippedPaths.slice(0, 20).map((path) => (
                     <li key={path} title={path}>
@@ -424,10 +403,10 @@ export default function FileListDirectoryPage({
                 )}
               </div>
             )}
-            {job && (
+            {job && !interrupted && (
               <JobProgress
                 job={job}
-                onCancel={() => void jobCancel(activeJobId)}
+                onCancel={() => jobCancel(activeJobId)}
                 cancelLabel="取消任务"
               />
             )}
@@ -451,5 +430,44 @@ export default function FileListDirectoryPage({
         </Card>
       </div>
     </>
+  );
+}
+
+/** 扫描预览表：独立成子组件挂列宽调整——扫描结果出现前表格不渲染，
+ *  hook 必须随表格一起挂载才能接管列宽。目录层数变化后表头列数
+ *  随之变化，列宽记忆按新表头自动作废。 */
+function FileListScanTable({ scan }: { scan: FileListScan }) {
+  const resize = useTableColumnResize<HTMLDivElement>({
+    storageKey: "file-list.directory",
+  });
+  return (
+    <div className="file-list-table-wrap" ref={resize.ref}>
+      <table className="file-list-table">
+        <thead>
+          <tr>
+            {Array.from({ length: scan.maxDepth + 1 }, (_, index) => (
+              <th key={index}>{index + 1}级文件夹</th>
+            ))}
+            <th>文件名称</th>
+            <th>相对路径</th>
+          </tr>
+        </thead>
+        <tbody>
+          {scan.preview.map((row) => (
+            <tr key={row.fullPath}>
+              {Array.from({ length: scan.maxDepth + 1 }, (_, index) => (
+                <td key={index} title={row.levels[index] ?? ""}>
+                  {row.levels[index] ?? ""}
+                </td>
+              ))}
+              <td title={row.name}>{row.name}</td>
+              <td title={row.relativePath}>
+                {displayFileName(row.relativePath)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

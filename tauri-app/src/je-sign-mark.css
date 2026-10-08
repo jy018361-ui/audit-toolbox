@@ -11,28 +11,84 @@
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+  width: 100%;
+  max-width: 62rem;
+  align-self: start;
+}
+.jm-batches h2 {
+  margin: 0;
+}
+.jm-source-loaded .kz-two {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.jm-source-loaded .kz-actions {
+  margin-top: var(--sp-2);
+}
+.jm-source-loaded .fa-llm-review {
+  margin-block: var(--sp-2);
 }
 .jm-batch-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-2);
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--border);
 }
 .jm-batch-row .kz-tabs {
+  flex: 0 1 auto;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-2);
   margin: 0;
 }
-.jm-batch-name {
+.jm-batch-row .kz-tabs button {
+  padding: var(--sp-2) var(--sp-3);
+  white-space: nowrap;
+}
+.jm-current-batch,
+.jm-rename-row {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  margin-left: auto;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.jm-current-batch-label {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.jm-current-batch strong {
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
+.jm-batches .jm-batch-name {
+  display: grid;
+  gap: var(--sp-1);
+  margin: 0;
+}
+.jm-batch-settings {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+.jm-delete-batch {
+  margin-left: var(--sp-2);
+  color: var(--danger-fg);
+}
+.jm-delete-batch:hover:not(:disabled) {
+  background: var(--danger-bg);
+}
 .jm-batch-name input {
-  width: 12rem;
+  width: min(18rem, 100%);
+}
+.jm-account-block {
+  display: grid;
+  gap: var(--sp-2);
 }
 .jm-account-row {
   display: flex;
@@ -43,31 +99,49 @@
 .jm-account-label {
   font-weight: 600;
 }
-/* 科目选择器长得像下拉框，但点开的是与列头漏斗同一个筛选面板。 */
-.jm-account-picker {
-  display: inline-flex;
+.jm-account-summary {
+  min-width: 0;
+  max-width: 36rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.jm-rule-note {
+  margin: 0;
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.jm-page .dt-header-inputs {
+  display: flex;
   align-items: center;
-  gap: var(--sp-2);
-  min-width: 12rem;
+  gap: var(--sp-1);
+  min-width: 0;
+  margin-bottom: var(--sp-1);
+}
+.jm-page .dt-header-inputs .dt-header-control {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.jm-page .dt-header-inputs .ts-filter-trigger-compact {
+  flex: 0 0 30px;
+  width: 30px;
+  min-width: 30px;
+  height: 28px;
+  margin: 0;
+}
+.jm-page .dt-header-inputs .ts-filter-trigger-compact:focus-visible,
+.jm-account-picker:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+/* 目标科目是当前批次的主操作；未选择时使用共享主按钮样式。 */
+.jm-account-picker {
+  min-width: 11rem;
   justify-content: space-between;
-  border: 1px solid var(--border);
-  background: var(--surface-sunken);
-  color: inherit;
-  padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--r-md);
-  cursor: pointer;
-}
-.jm-account-picker:hover:not(:disabled),
-.jm-account-picker[aria-expanded="true"] {
-  border-color: var(--brand-link);
-}
-.jm-account-picker.active {
-  border-color: var(--brand-link);
-  font-weight: 600;
-}
-.jm-account-picker:disabled {
-  cursor: default;
-  opacity: 0.6;
 }
 .jm-filter-note {
   display: inline-flex;
@@ -75,6 +149,9 @@
   gap: var(--sp-2);
   color: var(--ink-muted);
   font-size: 0.85em;
+}
+.jm-page .kz-summary > div {
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
 }
 /* 面板里提示该科目已在别的批次选过，防止无意重复选。 */
 .ts-filter-value .jm-value-note {
@@ -85,7 +162,7 @@
   white-space: nowrap;
 }
 @media (max-width: 1100px) {
-  .jm-batch-name {
+  .jm-delete-batch {
     margin-left: 0;
   }
 }
@@ -95,12 +172,13 @@
  * 走了兜底、账被筛过或无法判定时整卡转警示底色，提醒用户确认。
  */
 .jm-sign {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
-  padding: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
   background: var(--surface-sunken);
 }
 .jm-sign.warn {
@@ -113,6 +191,22 @@
   flex-wrap: wrap;
   gap: var(--sp-2);
 }
+.jm-source-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.jm-source-footer .jm-sign {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.jm-source-footer > button {
+  flex: 0 0 auto;
+}
+.jm-sign-head .jm-sign-choices {
+  margin-left: 0;
+}
 .jm-sign-title {
   font-weight: 600;
 }
@@ -122,6 +216,9 @@
   margin-left: auto;
 }
 .jm-sign-choices button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
   border: 1px solid var(--control-border);
   border-radius: var(--r-md);
   background: var(--surface);
@@ -137,13 +234,88 @@
 }
 .jm-sign-applied {
   font-weight: 600;
+  margin: 0;
 }
 .jm-sign-basis {
+  grid-column: 1 / -1;
   color: var(--text-muted);
   font-size: 0.85rem;
 }
+.jm-sign-basis summary,
+.jm-export-help summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--brand-link);
+}
+.jm-sign-basis p {
+  margin: var(--sp-1) 0 0;
+}
 .jm-sign-warning {
+  grid-column: 1 / -1;
   color: var(--warning-fg);
   font-size: 0.85rem;
   font-weight: 600;
+}
+.jm-export-help {
+  margin-top: var(--sp-2);
+}
+.jm-export-help .kz-hint {
+  margin-bottom: 0;
+}
+
+.jm-export-options {
+  display: grid;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.jm-export-options > label {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  margin: 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  cursor: pointer;
+}
+.jm-export-options label > span:last-child {
+  display: grid;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.jm-export-options small {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+@media (max-width: 760px) {
+  .jm-source-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .jm-source-footer > button {
+    align-self: flex-end;
+  }
+  .jm-source-loaded .kz-two,
+  .jm-sign {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .jm-sign-basis,
+  .jm-sign-warning {
+    grid-column: 1;
+  }
+  .jm-sign-choices {
+    width: 100%;
+    margin-left: 0;
+  }
+  .jm-sign-choices button {
+    flex: 1 1 0;
+    justify-content: center;
+    min-width: 0;
+    white-space: normal;
+  }
+}
+.jm-page .kz-actions + .kz-result {
+  margin-top: var(--sp-4);
 }

@@ -919,8 +919,7 @@ fn suppress_redundant_fixed_asset_net_value_row(sheet: &mut Worksheet) -> bool {
     let (canonical_formulas, canonical_populated) = row_profile(canonical_row);
     if redundant_formulas != 0
         || canonical_formulas == 0
-        || canonical_formulas + canonical_populated
-            <= redundant_formulas + redundant_populated
+        || canonical_formulas + canonical_populated <= redundant_formulas + redundant_populated
     {
         return false;
     }
@@ -928,9 +927,7 @@ fn suppress_redundant_fixed_asset_net_value_row(sheet: &mut Worksheet) -> bool {
     for col in 1..=max_col {
         sheet.get_cell_mut((col, redundant_row)).set_blank();
     }
-    sheet
-        .get_row_dimension_mut(&redundant_row)
-        .set_hidden(true);
+    sheet.get_row_dimension_mut(&redundant_row).set_hidden(true);
     true
 }
 

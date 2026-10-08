@@ -104,6 +104,13 @@
   --focus-ring: var(--brand-link);
   --disabled-opacity: 0.55;
 
+  /* 应用浮层层级：所有模态层必须盖住窗口控件和非模态浮层。 */
+  --layer-window-controls: 800;
+  --layer-task-pill: 900;
+  --layer-popover: 1000;
+  --layer-dialog-overlay: 1100;
+  --layer-dialog-content: 1101;
+
   /* 卡片不使用投影：浅色投影在白底上会被感知为一圈细边框。 */
   --shadow-card: 0 1px 2px rgb(20 53 58 / 6%);
   /* 数据预览是可滚动、可编辑的工作区，不是普通信息卡片；用克制的阴影
@@ -316,7 +323,7 @@ summary:focus-visible {
   position: fixed;
   top: 0;
   right: 0;
-  z-index: 800;
+  z-index: var(--layer-window-controls);
   display: flex;
 }
 .window-controls button {
@@ -345,6 +352,18 @@ summary:focus-visible {
 .window-controls .window-controls-close:active {
   background: var(--window-close-active);
   color: var(--window-close-fg);
+}
+/* === UI 审计修复（2026-09-25）：真机无边框窗口滚动后，右上角内容会钻进透明的
+   窗口按钮底下（步骤条/页头与按钮互相叠压）。给按钮组加一条自上而下的衬条
+   （页面底色渐变到透明），滚动时按钮区始终与内容可辨；衬条本身不拦点击，
+   pointer-events 下放给按钮自身，拖拽手柄不受影响。仅真机 frameless 生效。 */
+.frameless .window-controls {
+  background: linear-gradient(to bottom, var(--surface-page) 55%, transparent);
+  padding: 0 0 var(--sp-2) var(--sp-3);
+  pointer-events: none;
+}
+.frameless .window-controls button {
+  pointer-events: auto;
 }
 /* 品牌区与页头现在是拖拽手柄（双击=最大化），拖动时选中文字只会闪一下，关掉 */
 .brand,
@@ -520,9 +539,9 @@ summary:focus-visible {
 }
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--sp-3);
-  margin: var(--sp-5) 0;
+  margin: var(--sp-3) 0;
 }
 .metric,
 .tool-card,
@@ -535,7 +554,7 @@ summary:focus-visible {
   box-shadow: var(--shadow-card);
 }
 .metric {
-  padding: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
 }
 .metric span {
   font-size: var(--fs-xs);
@@ -545,7 +564,7 @@ summary:focus-visible {
   display: block;
   font-size: var(--fs-xl);
   line-height: var(--lh-section-title);
-  margin-top: var(--sp-2);
+  margin-top: var(--sp-1);
   color: var(--brand-link);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -664,6 +683,7 @@ summary:focus-visible {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--sp-4);
+  max-width: calc(840px + var(--sp-4));
   /* 与上方整宽字段（如文件选择行）拉开节奏，避免第一行标签紧贴上方控件 */
   margin-top: var(--sp-4);
 }
@@ -782,6 +802,18 @@ summary:focus-visible {
   border-color: var(--focus-ring);
   background: var(--surface-muted);
 }
+/*
+ * 危险动作修饰符（如设置页「立刻清理全部缓存」）：沿用次按钮的描边骨架，
+ * 换成红色描边，与确认弹窗的 danger 基调一致，避免不可逆操作看起来像普通次按钮。
+ */
+.secondary.danger {
+  color: var(--danger-fg);
+  border-color: var(--danger-border);
+}
+.secondary.danger:hover:not(:disabled) {
+  border-color: var(--danger-fg);
+  background: var(--danger-bg);
+}
 .primary,
 .secondary {
   min-height: 40px;
@@ -830,6 +862,13 @@ summary:focus-visible {
   color: var(--text-muted);
   border: 1px dashed var(--border);
   border-radius: var(--r-md);
+}
+/* SimplePage 的可选操作区（如「返回工作台」「重新加载」），
+   跟在提示文案卡下方，居中摆放。 */
+.simple-page-action {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--sp-4);
 }
 .empty-state {
   display: grid;
@@ -934,6 +973,14 @@ summary:focus-visible {
   font-size: var(--fs-xs);
   line-height: 1.5;;
 }
+.data-handling-notice-details summary {
+  width: fit-content;
+  color: var(--brand-link);
+  cursor: pointer;
+}
+.data-handling-notice-details > div {
+  margin-top: var(--sp-1);
+}
 
 .link-button {
   display: block;
@@ -1011,7 +1058,7 @@ summary:focus-visible {
     grid-template-columns: 1fr;
   }
   .metrics {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .fa-preview-stack {
     grid-template-columns: 1fr;
@@ -1343,6 +1390,16 @@ summary:focus-visible {
 }
 .fa-review-item.fa-change .fa-change-diff {
   font-weight: 600;
+}
+.fa-review-item.fa-change em {
+  margin-left: var(--sp-2);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-sm);
+  background: var(--success-dot);
+  color: var(--success-fg);
+  font-size: 0.85em;
+  font-style: normal;
+  white-space: nowrap;
 }
 .fa-review-item.fa-change.attention {
   background: var(--warning-bg);
@@ -1738,6 +1795,17 @@ summary:focus-visible {
   /* 对勾是已完成态的核心信号，不能落在基类的灰色上 */
   color: var(--brand);
 }
+/* 失败态：步骤执行出错（如输入检查失败）时以警示色标记，绝不显示完成对勾 */
+.step-indicator-item.error {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+.step-indicator-item.error .step-indicator-index {
+  background: var(--danger-fg);
+  color: var(--surface);
+  font-weight: var(--fw-strong);
+}
 .step-indicator-item.disabled {
   cursor: not-allowed;
   opacity: var(--disabled-opacity);
@@ -2008,6 +2076,9 @@ summary:focus-visible {
   border-radius: var(--r-md);
   background: var(--surface);
 }
+.file-drop-slot.without-label {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
 .file-drop-slot-label {
   font-size: var(--fs-sm);
   font-weight: 600;
@@ -2088,6 +2159,11 @@ summary:focus-visible {
   border: 1px solid var(--border-soft);
   border-radius: var(--r-lg);
   background: var(--surface-sunken);
+}
+
+/* 文件选择可占满来源卡；普通参数遵循 420px 标准字段宽度，避免为填满卡片被拉长。 */
+.fa-side > .field:not(:first-of-type) {
+  max-width: 420px;
 }
 .fa-side-title {
   margin: 0;
@@ -2265,8 +2341,9 @@ summary:focus-visible {
 }
 .ts-filter-menu {
   position: fixed;
-  z-index: 1000;
-  display: grid;
+  z-index: var(--layer-popover);
+  display: flex;
+  flex-direction: column;
   gap: var(--sp-2);
   padding: var(--sp-3);
   border: 1px solid var(--border);
@@ -2274,6 +2351,8 @@ summary:focus-visible {
   background: var(--surface);
   color: var(--ink);
   box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  overscroll-behavior: contain;
 }
 .ts-filter-menu-title {
   overflow: hidden;
@@ -2306,8 +2385,9 @@ summary:focus-visible {
   font-weight: 600;
 }
 .ts-filter-values {
+  flex: 1 1 auto;
   min-height: 84px;
-  max-height: 176px;
+  max-height: none;
   overflow-y: auto;
   padding: var(--sp-1);
   border: 1px solid var(--border-soft);
@@ -2350,8 +2430,11 @@ summary:focus-visible {
 }
 .ts-filter-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--sp-2);
+  padding-top: var(--sp-1);
+  border-top: 1px solid var(--border-soft);
 }
 .ts-filter-chip {
   display: inline-flex;
@@ -2423,9 +2506,9 @@ summary:focus-visible {
   background: var(--surface-muted);
 }
 
-/* 当前映射已与该形态冲突：整组保留在下拉中供用户理解，
-   但灰化并禁止选择。原生 optgroup 在不同 WebView 的着色有差异，
-   disabled 是行为保证，颜色是辅助提示。 */
+/* 当前映射已与该形态冲突：灰显仅作提示，不禁止选择——用户可直接改选
+   其他形态的字段而不必先清空已有映射，缺字段的组合仍由运行前后端校验
+   拦截。原生 optgroup 在不同 WebView 的着色有差异，文字前缀与颜色共同兜底。 */
 .data-table-table th .dt-header-control select optgroup.dt-group-unavailable {
   color: var(--text-muted);
   background: var(--surface-muted);
@@ -2438,10 +2521,34 @@ summary:focus-visible {
   background: var(--success-bg);
   font-weight: 700;
 }
+.fa-review-item.fa-change.attention em {
+  background: var(--warning-dot);
+  color: var(--warning-fg);
+}
+.llm-review-live-summary {
+  padding: var(--sp-2);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font-weight: 600;
+}
+.data-table-table th .dt-header-control select option.dt-option-adapted {
+  color: var(--success-fg);
+  background: var(--success-bg);
+  font-weight: 700;
+}
 .data-table-table th .dt-header-control select optgroup.dt-group-available {
   color: var(--brand);
   background: var(--surface);
   font-weight: 600;
+}
+.data-table-table th .dt-header-control select option.dt-option-available {
+  color: var(--brand);
+  background: var(--surface);
+}
+.data-table-table th .dt-header-control select option.dt-option-unavailable {
+  color: var(--text-muted);
+  background: var(--surface-muted);
 }
 
 /* 未映射字段提示 */
@@ -2498,11 +2605,44 @@ summary:focus-visible {
 }
 
 /* AudiPick 顶层视图导航（工作台/模板库/日志） */
+.audipick-window-shell {
+  min-height: 100vh;
+  background: var(--surface-page);
+}
+.audipick-window-dragbar {
+  position: fixed;
+  z-index: 790;
+  top: 0;
+  right: 50%;
+  left: 224px;
+  height: 34px;
+}
+.audipick-window-titlebar {
+  height: 42px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 0 150px 0 var(--sp-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--ink-strong);
+  user-select: none;
+}
+.audipick-window-titlebar span {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.audipick-window-main {
+  min-width: 0;
+}
 .ap-product-shell {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
   min-height: calc(100vh - 42px);
   margin: calc(-1 * var(--sp-6)) calc(-1 * var(--sp-6)) calc(-1 * var(--sp-7));
+}
+.audipick-window-main .ap-product-shell {
+  margin: 0;
 }
 .ap-product-sidebar {
   position: sticky;
@@ -2515,6 +2655,9 @@ summary:focus-visible {
   background: var(--brand-deep);
   color: var(--on-brand-deep, var(--ink-inverse));
   --scrollbar-track: var(--brand-deep);
+}
+.audipick-window-main .ap-product-sidebar {
+  min-height: calc(100vh - 42px);
 }
 .ap-product-brand {
   display: flex;
@@ -3516,12 +3659,40 @@ summary:focus-visible {
   justify-content: flex-end;
   padding-top: var(--sp-1);
 }
+.job-dialog-operation-error {
+  margin: var(--sp-2) 0 0;
+  color: var(--danger-fg);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-label);
+  overflow-wrap: anywhere;
+}
+.job-command-notice {
+  position: fixed;
+  right: var(--sp-5);
+  bottom: var(--sp-5);
+  z-index: var(--layer-popover);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  max-width: min(440px, calc(100vw - 2 * var(--sp-4)));
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-md);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  box-shadow: var(--shadow-overlay);
+  overflow-wrap: anywhere;
+}
+body:has(.job-dialog-pill) .job-command-notice,
+body:has(.sync-busy-pill) .job-command-notice {
+  bottom: calc(var(--sp-5) + 64px);
+}
 /* 最小化后的常驻小条。固定在右下角，点击展开回弹窗。 */
 .job-dialog-pill {
   position: fixed;
   right: max(var(--sp-5), env(safe-area-inset-right));
   bottom: max(var(--sp-5), env(safe-area-inset-bottom));
-  z-index: 2147483000;
+  z-index: var(--layer-task-pill);
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -3580,14 +3751,17 @@ summary:focus-visible {
 }
 /* 同步操作等待窗（导入/OCR 这类一口气完成的调用），比任务弹窗更轻 */
 .sync-busy-dialog {
-  width: min(430px, calc(100vw - 48px));
+  width: min(480px, calc(100vw - 48px));
   max-height: calc(100dvh - 2 * var(--sp-4));
   overflow: hidden;
+  padding: 0;
+  gap: 0;
 }
-.sync-busy-body {
+.sync-busy-header {
   display: flex;
   align-items: flex-start;
-  gap: var(--sp-4);
+  gap: var(--sp-3);
+  padding: var(--sp-5) var(--sp-5) var(--sp-4);
 }
 .sync-busy-spinner {
   flex: none;
@@ -3604,22 +3778,119 @@ summary:focus-visible {
     transform: rotate(360deg);
   }
 }
-.sync-busy-text {
+.sync-busy-heading {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.sync-busy-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.sync-busy-count {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 18px;
+}
 .sync-busy-list {
-  margin: var(--sp-1) 0 0;
-  padding-left: var(--sp-4);
-  max-height: min(45dvh, 360px);
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0 var(--sp-5) var(--sp-4);
+  padding: var(--sp-3);
+  max-height: min(38dvh, 300px);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  list-style: none;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-muted);
+}
+.sync-busy-list li {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--sp-3);
+  overflow-wrap: anywhere;
+  color: var(--text);
+  line-height: var(--lh-body);
+}
+.sync-busy-item-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: var(--brand);
+}
+.sync-busy-note {
+  margin: 0;
+  padding: var(--sp-3) var(--sp-5);
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-caption);
 }
 .sync-busy-actions {
   display: flex;
   justify-content: flex-end;
-  margin-top: var(--sp-3);
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-5) var(--sp-4);
+  background: var(--surface);
+}
+/* 同步等待窗最小化后的右下角小条：与任务弹窗小条同款视觉，点击展开回等待窗，
+   全部操作结束后由组件自行收掉。 */
+.sync-busy-pill {
+  position: fixed;
+  right: max(var(--sp-5), env(safe-area-inset-right));
+  bottom: max(var(--sp-5), env(safe-area-inset-bottom));
+  z-index: var(--layer-task-pill);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: min(210px, calc(100vw - 2 * var(--sp-4)));
+  max-width: min(420px, calc(100vw - 2 * var(--sp-4)));
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid color-mix(in srgb, var(--brand) 75%, white);
+  border-radius: var(--r-pill);
+  background: var(--brand);
+  color: white;
+  box-shadow: var(--shadow-overlay);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.sync-busy-pill:hover {
+  border-color: var(--brand-accent);
+}
+.sync-busy-pill:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+.sync-busy-pill .sync-busy-spinner {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border-width: 2px;
+  border-color: color-mix(in srgb, white 40%, transparent);
+  border-top-color: white;
+}
+.sync-busy-pill-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sync-busy-pill-hint {
+  flex: none;
+  opacity: 0.75;
 }
 
 .confirm-dialog {
@@ -3651,7 +3922,8 @@ summary:focus-visible {
   .sync-busy-actions > * {
     min-height: 40px;
   }
-  .job-dialog-pill {
+  .job-dialog-pill,
+  .sync-busy-pill {
     right: var(--sp-3);
     bottom: var(--sp-3);
   }
@@ -3889,4 +4161,85 @@ input[type="checkbox"].switch-input:disabled {
   input[type="checkbox"].switch-input::after {
     transition: none;
   }
+}
+
+/* 辅助核算联动验证三态标注（公共组件 AuxiliaryLinkStatusView）。 */
+.aux-link-status {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--success-fg);
+}
+
+.aux-link-status--warn {
+  color: var(--warning-fg);
+}
+
+/* === UI 审计修复 P1-1（2026-09-24）：任务弹窗进度条轨道显式接管 ===
+   与 task-state.css 中 .job-progress 的修复同源：原生 <progress> 的轨道色
+   会被 WebView2 从 accent 色派生成深灰，0%/排队时看着像已完成。
+   仅追加规则，不改上方既有 accent-color 方案。 */
+.job-dialog-row progress {
+  -webkit-appearance: none;
+  appearance: none;
+  overflow: hidden;
+  background-color: color-mix(in srgb, var(--border) 55%, var(--surface-page));
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.job-dialog-row progress::-webkit-progress-bar {
+  background-color: transparent;
+  border-radius: var(--r-pill);
+}
+
+.job-dialog-row progress::-webkit-progress-value {
+  background-color: var(--brand-accent);
+  border-radius: var(--r-pill);
+  transition: width 0.25s ease;
+}
+
+.job-dialog-row progress.progress-tone-warning::-webkit-progress-value { background-color: var(--warning-dot); }
+.job-dialog-row progress.progress-tone-danger::-webkit-progress-value { background-color: var(--danger-fg); }
+.job-dialog-row progress.progress-tone-success::-webkit-progress-value { background-color: var(--success-fg); }
+
+/* === UI 审计修复 P3-6 / P3-11（2026-09-24）：仅追加，不改上方既有内容 === */
+
+/* P3-6a：常规信息提示盒（首个使用者：TS 管理的多 Sheet 提醒）。
+   与 .warning-box 同构，但换成中性蓝的 info 三件套 token，
+   不再把"数据可能不在这一张"这类普通提示渲染成错误红。 */
+.info-box {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--info-border);
+  border-radius: var(--r-sm);
+  background: var(--info-bg);
+  color: var(--info-fg);
+  font-size: var(--fs-sm);
+}
+
+/* P3-6b：已选文件名要与标签/占位文案拉开层次（对齐看账页 kz-path
+   「占位灰、值深」的读感）：值用正文深色加粗，标签保持中灰。
+   仅作用于 TS 管理页，不动其他页面的文件槽。 */
+.ts-manager-page .file-drop-slot-value {
+  color: var(--ink-strong);
+  font-weight: var(--fw-medium);
+}
+
+/* P3-11：主按钮可用/禁用对比度。
+   可用态此前会在悬停时被冲淡成浅青，明度与禁用灰几乎一样，分不清能不能点；
+   现在默认态向 --brand-deep 压深一档、悬停再深一档（不再变浅），
+   禁用态降透明度并去掉投影。只针对主按钮（default variant 与 .primary），
+   不影响 destructive 危险按钮与 secondary 次按钮。
+   本文件是无 layer 的普通规则，按级联规则可覆盖组件库 utilities 层的背景色。 */
+[data-slot="button"][data-variant="default"]:not(:disabled),
+.primary:not(:disabled) {
+  background: color-mix(in srgb, var(--brand) 78%, var(--brand-deep));
+}
+[data-slot="button"][data-variant="default"]:hover:not(:disabled),
+.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--brand) 55%, var(--brand-deep));
+}
+[data-slot="button"][data-variant="default"]:disabled,
+.primary:disabled {
+  opacity: calc(var(--disabled-opacity) - 0.15);
+  box-shadow: none;
 }

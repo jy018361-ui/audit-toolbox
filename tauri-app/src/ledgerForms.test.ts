@@ -112,14 +112,14 @@ describe("下拉分组", () => {
   it("公共必填单独置顶，每个形态独立显示适配状态", () => {
     const groups = formGroups("tb", TB_ROLES, TB_FORMS, debitCreditMapping);
     expect(groups.map((group) => group.title)).toEqual([
-      "公共必填字段",
+      "科目身份（至少映射一项）",
       "公共选填字段A",
       "TB-类型A（本位币净额）",
       "TB-类型C（本位币借贷分列）",
       "公共选填字段B（勾稽后自动提升）",
     ]);
     expect(groups[0].roles).toEqual(["accountCode", "accountName"]);
-    expect(groups[0].required).toEqual(["accountCode", "accountName"]);
+    expect(groups[0].required).toBeUndefined();
     expect(groups[1].roles).toEqual(["entity", "currency"]);
     expect(groups[2].status).toBe("未适配");
     expect(groups[3].status).toBe("已适配");
@@ -136,9 +136,8 @@ describe("下拉分组", () => {
   it("拿不到型号定义时退回一组平铺，不影响映射", () => {
     expect(formGroups("tb", TB_ROLES, [], {})).toEqual([
       {
-        title: "公共必填字段",
+        title: "科目身份（至少映射一项）",
         roles: ["accountCode", "accountName"],
-        required: ["accountCode", "accountName"],
       },
       {
         title: "公共选填字段A",

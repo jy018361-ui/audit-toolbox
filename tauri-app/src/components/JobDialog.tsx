@@ -15,9 +15,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { jobCancel, jobPause } from "@/api";
+import { errorText, isJobGone } from "@/lib/errors";
 import type { JobEvent } from "@/types";
 import { isAudiPickOperationJob, useAudiPickOperations } from "../audipickOperation";
 import { AudiPickOperationPanel } from "./AudiPickOperationPanel";
+import { jobStatusText } from "./JobProgress";
+import "./JobDialog.css";
 
 /** 结束态的三个 phase 由 Rust 侧统一约定（excel_merger.rs）。 */
 const FINISHED = ["completed", "failed", "cancelled"];
@@ -27,7 +30,7 @@ export function isJobRunning(job: JobEvent): boolean {
 }
 
 type JobDialogApi = {
-  /** 弹窗此刻是否正展示该任务（最小化时为 false）。 */
+  /** 该任务是否由全局弹窗或最小化任务条接管。 */
   owns: (jobId: string) => boolean;
   isPaused: (jobId: string) => boolean;
   togglePause: (jobId: string) => void;
@@ -35,8 +38,8 @@ type JobDialogApi = {
 
 /**
  * 弹窗接管了哪些任务。页面里内联的 JobProgress 据此让位——同一个任务
- * 同时出现在弹窗和页面里会看着像跑了两遍。最小化时弹窗只剩右下角一条，
- * 这时把内联进度还给页面，用户仍能在原处看到细节。
+ * 同时出现在弹窗和页面里会看着像跑了两遍。最小化后仍由右下角任务条
+ * 接管进度，点击任务条即可展开详细进度和暂停／停止操作。
  *
  * 暂停状态也挂在这里：Roll Forward 和 AudiPick 页面自己也有暂停按钮，
  * 两边各记一份迟早对不上（弹窗里暂停了，页面按钮还写着「暂停」）。
@@ -47,7 +50,7 @@ const JobDialogContext = createContext<JobDialogApi>({
   togglePause: () => undefined,
 });
 
-/** 该任务此刻是否由弹窗展示（最小化时为 false）。 */
+/** 该任务此刻是否由全局进度层展示。 */
 export function useJobOwnedByDialog(jobId: string | undefined): boolean {
   const { owns } = useContext(JobDialogContext);
   return jobId ? owns(jobId) : false;
@@ -84,6 +87,17 @@ function toneOf(job: JobEvent): string {
   return "info";
 }
 
+/**
+ * 右下角悬浮胶囊的状态口径（P2-3 / P3-13）：与页内 JobProgress 共用同一映射
+ * （queued=排队中、running=处理中…），排队任务不再被说成“处理中”；
+ * 前端暂停 / 内存暂停是弹窗自己记录的覆盖态，优先于共享映射。
+ */
+function pillStatusText(job: JobEvent, frontendPaused: boolean): string {
+  if (job.phase === "memory_paused") return "内存等待";
+  if (frontendPaused) return "已暂停";
+  return jobStatusText(job);
+}
+
 type JobRowProps = {
   job: JobEvent;
   label: string;
@@ -91,18 +105,35 @@ type JobRowProps = {
   memoryPaused: boolean;
   onTogglePause: () => void;
   onStop: () => void;
+  pending?: "pause" | "stop";
+  stopRequested: boolean;
+  operationError?: string;
 };
 
-function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop }: JobRowProps) {
+function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop, pending, stopRequested, operationError }: JobRowProps) {
+  const [messageExpanded, setMessageExpanded] = useState(false);
   const pct = percent(job);
   const tone = toneOf(job);
+  const longMessage = job.message.length > 100;
   return (
     <section className="job-dialog-row" aria-label={`${label}任务进度`}>
       <div className="job-dialog-row-head">
-        <strong>{label}</strong>
-        <span className="job-pct">{memoryPaused ? "内存等待" : paused ? "已暂停" : job.total > 0 ? `${pct}%` : "处理中"}</span>
+        <strong title={label}>{label}</strong>
+        <span className="job-pct">{memoryPaused ? "内存等待" : paused ? "已暂停" : job.phase === "queued" ? "排队中" : job.total > 0 ? `${pct}%` : "处理中"}</span>
       </div>
-      <p className="job-dialog-message" aria-live="polite" aria-atomic="true">{job.message}</p>
+      <p className={`job-dialog-message ${longMessage && !messageExpanded ? "job-dialog-message--clamped" : ""}`} aria-live="polite" aria-atomic="true">{job.message}</p>
+      {longMessage && (
+        <Button
+          type="button"
+          variant="link"
+          size="xs"
+          className="job-dialog-expand"
+          aria-expanded={messageExpanded}
+          onClick={() => setMessageExpanded((value) => !value)}
+        >
+          {messageExpanded ? "收起消息" : "展开消息"}
+        </Button>
+      )}
       <progress
         className={`progress-tone-${paused ? "warning" : tone}`}
         aria-label={`${label}进度`}
@@ -115,13 +146,15 @@ function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop }: Job
           variant="secondary"
           size="sm"
           onClick={onTogglePause}
+          disabled={Boolean(pending) || stopRequested}
         >
-          {memoryPaused ? "尝试继续" : paused ? "继续" : "暂停"}
+          {pending === "pause" ? "正在发送…" : memoryPaused ? "尝试继续" : paused ? "继续" : "暂停"}
         </Button>
-        <Button type="button" variant="destructive" size="sm" onClick={onStop}>
-          停止
+        <Button type="button" variant="destructive" size="sm" onClick={onStop} disabled={Boolean(pending) || stopRequested}>
+          {pending === "stop" || stopRequested ? "停止中…" : "停止"}
         </Button>
       </div>
+      {operationError && <p className="job-dialog-operation-error" role="alert">{operationError}</p>}
     </section>
   );
 }
@@ -150,6 +183,10 @@ export function JobDialogProvider({
   const minimizedButtonRef = useRef<HTMLButtonElement>(null);
   const [paused, setPaused] = useState<Record<string, boolean>>({});
   useAudiPickOperations();
+  const [pending, setPending] = useState<Record<string, "pause" | "stop">>({});
+  const pendingIds = useRef(new Set<string>());
+  const [stopRequested, setStopRequested] = useState<Record<string, boolean>>({});
+  const [operationErrors, setOperationErrors] = useState<Record<string, string>>({});
   const running = jobs.filter((job) => isJobRunning(job) && !isAudiPickOperationJob(job.jobId));
   const runningIds = running.map((job) => job.jobId).join("|");
 
@@ -159,35 +196,67 @@ export function JobDialogProvider({
     if (runningIds === "") {
       setMinimized(false);
       setPaused((current) => (Object.keys(current).length ? {} : current));
+      setPending({});
+      setStopRequested({});
+      setOperationErrors({});
+      pendingIds.current.clear();
     }
   }, [runningIds]);
 
   const owns = useCallback(
-    (jobId: string) => !minimized && running.some((job) => job.jobId === jobId),
+    (jobId: string) => running.some((job) => job.jobId === jobId),
     // running 每次事件都是新数组，用 id 串做依赖，避免每帧重建导致下游重渲。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [minimized, runningIds],
+    [runningIds],
   );
+
+  const runCommand = async (jobId: string, command: "pause" | "stop", request: () => Promise<boolean>) => {
+    if (pendingIds.current.has(jobId) || stopRequested[jobId]) return false;
+    pendingIds.current.add(jobId);
+    setPending((current) => ({ ...current, [jobId]: command }));
+    setOperationErrors((current) => ({ ...current, [jobId]: "" }));
+    try {
+      const accepted = await request();
+      if (!accepted) throw new Error("任务可能已结束，指令未被接受。请检查任务状态后重试。");
+      return true;
+    } catch (error) {
+      setOperationErrors((current) => ({
+        ...current,
+        [jobId]: isJobGone(error)
+          ? "任务可能已结束，指令未被接受。请检查任务状态后重试。"
+          : `${command === "stop" ? "停止" : "暂停或继续"}失败：${errorText(error)}`,
+      }));
+      return false;
+    } finally {
+      pendingIds.current.delete(jobId);
+      setPending((current) => {
+        const next = { ...current };
+        delete next[jobId];
+        return next;
+      });
+    }
+  };
 
   const togglePause = (jobId: string) => {
     const memoryPaused = running.some(
       (job) => job.jobId === jobId && job.phase === "memory_paused",
     );
     const next = memoryPaused ? false : !paused[jobId];
-    setPaused((current) => ({ ...current, [jobId]: next }));
-    void jobPause(jobId, next).catch(() => {
-      // 任务可能刚好结束；回滚状态，不打断用户。
-      setPaused((current) => ({ ...current, [jobId]: !next }));
+    void runCommand(jobId, "pause", () => jobPause(jobId, next)).then((accepted) => {
+      if (accepted) setPaused((current) => ({ ...current, [jobId]: next }));
     });
   };
 
   const retryAfterMemoryPause = (jobId: string) => {
-    setPaused((current) => ({ ...current, [jobId]: false }));
-    void jobPause(jobId, false).catch(() => undefined);
+    void runCommand(jobId, "pause", () => jobPause(jobId, false)).then((accepted) => {
+      if (accepted) setPaused((current) => ({ ...current, [jobId]: false }));
+    });
   };
 
   const stop = (jobId: string) => {
-    void jobCancel(jobId).catch(() => undefined);
+    void runCommand(jobId, "stop", () => jobCancel(jobId)).then((accepted) => {
+      if (accepted) setStopRequested((current) => ({ ...current, [jobId]: true }));
+    });
   };
 
   const open = running.length > 0 && !minimized;
@@ -224,11 +293,11 @@ export function JobDialogProvider({
           <DialogHeader>
             <DialogTitle>
               {running.length > 1
-                ? `正在处理 ${running.length} 个任务`
-                : "正在处理"}
+                ? `${running.length} 个任务进行中`
+                : first?.phase === "queued" ? "任务排队中" : "正在处理"}
             </DialogTitle>
             <DialogDescription>
-              处理期间可以暂停，稍后从中断处继续；也可以最小化到右下角，先去用别的工具。
+              可最小化继续使用。停止后将请求取消任务。
             </DialogDescription>
           </DialogHeader>
           <div className="job-dialog-rows" role="list" aria-label="进行中的任务">
@@ -243,6 +312,9 @@ export function JobDialogProvider({
                     ? retryAfterMemoryPause(job.jobId)
                     : togglePause(job.jobId)}
                   onStop={() => stop(job.jobId)}
+                  pending={pending[job.jobId]}
+                  stopRequested={Boolean(stopRequested[job.jobId])}
+                  operationError={operationErrors[job.jobId]}
                 />
               </div>
             ))}
@@ -273,13 +345,13 @@ export function JobDialogProvider({
           <span className="job-dialog-pill-text">
             {running.length > 1
               ? `${running.length} 个任务进行中`
-              : `${nameOf(first.toolId)} · 点击展开`}
+              : `${nameOf(first.toolId)} · ${pillStatusText(first, Boolean(paused[first.jobId]))}`}
           </span>
-          <span className="job-pct">
-            {(paused[first.jobId] || first.phase === "memory_paused") && running.length === 1
-              ? first.phase === "memory_paused" ? "内存等待" : "已暂停"
-              : first.total > 0 ? `${percent(first)}%` : "处理中"}
-          </span>
+          {running.length > 1 && (
+            <span className="job-pct">
+              {pillStatusText(first, Boolean(paused[first.jobId]))}
+            </span>
+          )}
         </button>
       )}
     </JobDialogContext.Provider>

@@ -80,6 +80,8 @@ export type MappingPanelProps = {
   onToggle?: (header: string, role: string) => void;
   busy?: boolean;
   maxHeight?: number;
+  /** 列宽调整记忆键：各工具页面传入自己的键，映射预览表即支持拖拽调宽（本机记忆）。 */
+  resizeKey?: string;
 };
 
 const asColumns = (value: string | string[] | undefined): string[] =>
@@ -93,6 +95,13 @@ export function MappingPanel(props: MappingPanelProps) {
   const { headers, rows, mapping, roles, multi, shareable, busy } = props;
   const isMulti = (role: string) => Boolean(multi?.has(role));
   const locked = (role: string) => Boolean(props.isLocked?.(role));
+
+  // 手动映射由用户确认：预览可能只有表头/汇总行，不应用样本阈值阻止
+  // 编码与名称共列。自动识别和 LLM 建议仍在公共引擎按取值验证。
+  const isAccountIdentityRole = (role: string) =>
+    role === "accountCode" || role === "accountName";
+  const accountPair = (first: string, second: string) =>
+    first !== second && isAccountIdentityRole(first) && isAccountIdentityRole(second);
 
   // 某一列当前落在哪个角色上。可共用一列的角色不参与判定——否则币种线索
   // 文本会把科目名称的标记抢走，用户看到的下拉就跟实际映射对不上。
@@ -112,14 +121,47 @@ export function MappingPanel(props: MappingPanelProps) {
     const next: MappingDict = { ...mapping };
     // 先把这一列从原来的角色上摘下来，再挂到新角色上。
     for (const [key] of roles) {
+      // 经样例确认的混写列可同时承担科目编码、科目名称。除此以外仍严格
+      // 一列一角色，包括摘要、辅助核算、币种等都不能借此例外叠加。
+      if (
+        role &&
+        accountPair(role, key)
+      ) {
+        continue;
+      }
       const columns = asColumns(next[key]);
       if (!columns.includes(column)) continue;
       const rest = columns.filter((item) => item !== column);
-      next[key] = isMulti(key) ? rest : rest[0];
+      if (rest.length) next[key] = isMulti(key) ? rest : rest[0];
+      else delete next[key];
     }
     if (role) {
       next[role] = isMulti(role) ? [...asColumns(next[role]), column] : column;
     }
+    props.onChange(next);
+  };
+
+  const rolesOnColumn = (column: string): string[] =>
+    roles
+      .map(([role]) => role)
+      .filter((role) => asColumns(mapping[role]).includes(column));
+
+  // 双角色状态下原生单选框没有可表达的 value，改用摘要占位；点击已勾选
+  // 的科目角色可单独取消，点击其他角色则回到普通的一列一角色。
+  const updateCombinedAccount = (column: string, role: string) => {
+    if (!isAccountIdentityRole(role)) {
+      update(column, role);
+      return;
+    }
+    const held = rolesOnColumn(column);
+    if (!held.includes(role)) {
+      update(column, role);
+      return;
+    }
+    const next: MappingDict = { ...mapping };
+    const rest = asColumns(next[role]).filter((item) => item !== column);
+    if (rest.length) next[role] = isMulti(role) ? rest : rest[0];
+    else delete next[role];
     props.onChange(next);
   };
 
@@ -131,21 +173,22 @@ export function MappingPanel(props: MappingPanelProps) {
     return need === "required" ? "＊" : need === "optional" ? "（选填）" : "";
   };
 
-  const option = (
-    role: string,
-    label: string,
-    current: string,
-    group?: MappingGroup,
-  ) => {
-    // （已用）覆盖所有角色——含可多列角色：提示已挂过，但不拦截继续加列。
-    const taken = used.has(role) && role !== current;
+  const option = (role: string, label: string, group?: MappingGroup) => {
+    // （已用）挂在所有已映射角色上——含当前列自己挂的角色与可多列角色：
+    // 只提示已占用，不拦截继续加列。
+    const taken = used.has(role);
     const disabled = locked(role);
     const suffix = taken ? "（已用）" : disabled ? "（已停用）" : "";
+    const statusClass = group?.status
+      ? `dt-option-${group.status === "已适配" ? "adapted" : group.status === "未适配" ? "unavailable" : "available"}`
+      : "";
     return (
       <option
         key={role}
         value={role}
-        className={taken || disabled ? "dt-role-taken" : undefined}
+        className={[taken || disabled ? "dt-role-taken" : "", statusClass]
+          .filter(Boolean)
+          .join(" ") || undefined}
       >
         {label}
         {mark(role, group)}
@@ -167,11 +210,16 @@ export function MappingPanel(props: MappingPanelProps) {
     const chosen = held.includes(role);
     const taken = used.has(role) && !chosen;
     const disabled = locked(role);
+    const statusClass = group?.status
+      ? `dt-option-${group.status === "已适配" ? "adapted" : group.status === "未适配" ? "unavailable" : "available"}`
+      : "";
     return (
       <option
         key={role}
         value={role}
-        className={taken || disabled ? "dt-role-taken" : undefined}
+        className={[taken || disabled ? "dt-role-taken" : "", statusClass]
+          .filter(Boolean)
+          .join(" ") || undefined}
       >
         {chosen ? `✓ ${label}` : label}
         {mark(role, group)}
@@ -190,18 +238,40 @@ export function MappingPanel(props: MappingPanelProps) {
     const column = header.trim();
     const held = toggleMode ? (props.rolesOf?.(header) ?? []) : [];
     const current = toggleMode ? "" : roleOf(column);
+    const accountHeld = !toggleMode
+      ? rolesOnColumn(column).filter(isAccountIdentityRole)
+      : [];
+    const combinedAccountMapped = accountHeld.length > 1;
     const byRole = labelOf;
-    const summary = held.length
-      ? held.map((role) => labelOf.get(role) ?? role).join(" ＋ ")
+    const summaryRoles = toggleMode ? held : accountHeld;
+    const summary = summaryRoles.length
+      ? summaryRoles.map((role) => labelOf.get(role) ?? role).join(" ＋ ")
       : "— 选择字段";
     const renderOption = toggleMode
       ? (role: string, label: string, group?: MappingGroup) =>
           toggleOption(role, label, held, group)
-      : (role: string, label: string, group?: MappingGroup) =>
-          option(role, label, current, group);
+      : combinedAccountMapped
+        ? (role: string, label: string, group?: MappingGroup) =>
+            isAccountIdentityRole(role) ? (
+              <option
+                key={role}
+                value={role}
+                className={group?.status ? `dt-option-${group.status === "已适配" ? "adapted" : group.status === "未适配" ? "unavailable" : "available"}` : undefined}
+              >
+                {accountHeld.includes(role) ? `✓ ${label}（再点取消）` : label}
+                {mark(role, group)}
+              </option>
+            ) : (
+              option(role, label, group)
+            )
+        : (role: string, label: string, group?: MappingGroup) =>
+            option(role, label, group);
+    const extra = props.headerExtras?.(header);
     return (
-      <label className="dt-header-control" key={header}>
+      <div className={extra ? "dt-header-inputs" : undefined} key={header}>
+      <label className="dt-header-control">
         <select
+          aria-label={`将「${header}」映射为字段`}
           className={
             toggleMode
               ? held.length
@@ -214,31 +284,43 @@ export function MappingPanel(props: MappingPanelProps) {
           disabled={
             busy || (!toggleMode && Boolean(current) && locked(current))
           }
-          value={toggleMode ? "" : current}
+          value={toggleMode || combinedAccountMapped ? "" : current}
           data-mapped={
-            toggleMode ? held.length > 0 : Boolean(current && !locked(current))
+            toggleMode
+              ? held.length > 0
+              : combinedAccountMapped || Boolean(current && !locked(current))
           }
-          title={toggleMode && held.length ? summary : undefined}
+          title={
+            (toggleMode && held.length) || combinedAccountMapped
+              ? summary
+              : undefined
+          }
           onChange={(e) => {
             const role = e.target.value;
             if (toggleMode) {
               if (role) props.onToggle?.(header, role);
+              e.currentTarget.value = "";
+            } else if (combinedAccountMapped) {
+              updateCombinedAccount(column, role);
               e.currentTarget.value = "";
             } else update(column, role);
           }}
         >
           <option
             value=""
-            className={held.length ? "dt-current-mapping" : undefined}
+            className={
+              held.length || combinedAccountMapped
+                ? "dt-current-mapping"
+                : undefined
+            }
           >
-            {toggleMode ? summary : "— 选择字段"}
+            {toggleMode || combinedAccountMapped ? summary : "— 选择字段"}
           </option>
           {props.groups
             ? props.groups.map((group) => (
                 <optgroup
                   key={group.title}
                   label={`${group.title}${group.status ? ` · ${group.status}` : ""}`}
-                  disabled={group.status === "未适配"}
                   className={
                     group.status === "未适配"
                       ? "dt-group-unavailable"
@@ -258,8 +340,9 @@ export function MappingPanel(props: MappingPanelProps) {
               ))
             : roles.map(([role, label]) => renderOption(role, label))}
         </select>
-        {props.headerExtras?.(header)}
       </label>
+      {extra}
+      </div>
     );
   });
 
@@ -284,7 +367,7 @@ export function MappingPanel(props: MappingPanelProps) {
           ) : null}
           {props.requirementOf ? (
             <span className="mapping-requirement-legend">
-              ＊ 为必填字段；（选填）须按当前分组的整组规则补充；（已用）＝已有列挂在该角色上，可多列角色仍可继续加列。
+              ＊ 为必填字段；（选填）须按当前分组的整组规则补充。
             </span>
           ) : null}
         </p>
@@ -299,6 +382,7 @@ export function MappingPanel(props: MappingPanelProps) {
         headerControls={controls}
         trailingColumns={props.trailingColumns}
         maxHeight={props.maxHeight ?? 380}
+        resizeKey={props.resizeKey}
       />
     </section>
   );

@@ -1,11 +1,108 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_LOAN_RATE,
   loanEffectiveRate,
+  loanDisplayNumber,
   loanEquation,
   loanMissing,
+  loanAccountReviewRows,
+  mergeRestoredLoanMapping,
 } from "./LoanInterestPage";
 
 describe("借款利息测算", () => {
+  it("未提供合同利率时预填当前一年期LPR 3.00%", () =>
+    expect(DEFAULT_LOAN_RATE).toBe(0.03));
+  it("正零和负零都只显示0", () => {
+    expect(loanDisplayNumber(0, { minimumFractionDigits: 2 })).toBe("0");
+    expect(loanDisplayNumber(-0, { minimumFractionDigits: 2 })).toBe("0");
+  });
+  it("辅助整组经 JE 验证后才在第二步展开", () => {
+    const account = { key: "200101", code: "200101", name: "银行借款", account: "200101 银行借款", opening: 100, closing: 90 };
+    expect(loanAccountReviewRows([account], {
+      tbAuxMapped: true, status: "verified", column: "辅助", anchorHits: 1, anchorTotal: 1,
+      coverage: 1, competingColumns: [], warnings: [],
+      groups: [{ entity: "甲", account: "200101", reviewVerified: true,
+        details: [{ key: "a银行", display: "A银行" }], tbAuxMapped: true,
+        status: "verified", column: "辅助", anchorHits: 1, anchorTotal: 1,
+        coverage: 1, competingColumns: [], warnings: [] }],
+    })).toMatchObject([{ entity: "甲", auxiliary: "A银行" }]);
+    expect(loanAccountReviewRows([account], null)).toMatchObject([{ reviewKey: "200101" }]);
+  });
+  it("多主体账套按主体拆行，余额取该主体自己的 byEntity 小计", () => {
+    const account = {
+      key: "250101", code: "250101", name: "长期借款", account: "250101 长期借款",
+      opening: 300, closing: 260,
+      byEntity: [
+        { entity: "2000", opening: 100, closing: 60, occurrence: 5 },
+        { entity: "2002", opening: 200, closing: 200 },
+      ],
+    };
+    expect(loanAccountReviewRows([account], null, true)).toEqual([
+      expect.objectContaining({ reviewKey: "2000\u001f250101\u001f", entity: "2000", opening: 100, closing: 60, occurrence: 5 }),
+      expect.objectContaining({ reviewKey: "2002\u001f250101\u001f", entity: "2002", opening: 200, closing: 200 }),
+    ]);
+    // 开关关闭（单主体或主体未成键）时维持一科一行。
+    expect(loanAccountReviewRows([account], null, false)).toEqual([
+      expect.objectContaining({ reviewKey: "250101", opening: 300, closing: 260 }),
+    ]);
+  });
+  it("同编码的不同科目名称和币种保留独立复核键", () => {
+    const base = { key: "2001", code: "2001", opening: 10, closing: 10 };
+    const accounts = [
+      { ...base, identity: '["2001","银行借款","cny"]', name: "银行借款", currency: "CNY", account: "2001 银行借款" },
+      { ...base, identity: '["2001","股东借款","cny"]', name: "股东借款", currency: "CNY", account: "2001 股东借款" },
+    ];
+    const rows = loanAccountReviewRows(accounts, null);
+    expect(new Set(rows.map((row) => row.reviewKey)).size).toBe(2);
+    expect(rows.map((row) => row.name)).toEqual(["银行借款", "股东借款"]);
+  });
+  it("同编码多名称的辅助明细只挂到拥有该辅助值的科目", () => {
+    const base = { key: "2001", code: "2001", currency: "CNY", opening: 10, closing: 10 };
+    const accounts = [
+      { ...base, identity: "银行", name: "银行借款", account: "2001 银行借款", reviewAuxiliaries: [{ entity: "甲", auxiliary: "A银行" }] },
+      { ...base, identity: "股东", name: "股东借款", account: "2001 股东借款", reviewAuxiliaries: [{ entity: "甲", auxiliary: "股东甲" }] },
+    ];
+    const link = {
+      tbAuxMapped: true, status: "verified", column: "辅助", anchorHits: 2, anchorTotal: 2,
+      coverage: 1, competingColumns: [], warnings: [], groups: [{
+        entity: "甲", account: "2001", reviewVerified: true,
+        details: [{ key: "A银行", display: "A银行" }, { key: "股东甲", display: "股东甲" }],
+        tbAuxMapped: true, status: "verified", column: "辅助", anchorHits: 2,
+        anchorTotal: 2, coverage: 1, competingColumns: [], warnings: [],
+      }],
+    } as Parameters<typeof loanAccountReviewRows>[1];
+    const rows = loanAccountReviewRows(accounts, link);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => [row.name, row.auxiliary])).toEqual([
+      ["银行借款", "A银行"], ["股东借款", "股东甲"],
+    ]);
+  });
+  it("恢复旧任务时保留人工映射并补入新版主体建议", () => {
+    expect(
+      mergeRestoredLoanMapping(
+        {
+          entity: "核算组织",
+          accountCode: "科目编码",
+          accountName: "科目名称",
+        },
+        { accountCode: "科目编码", accountName: "科目名称" },
+        ["核算组织", "科目编码", "科目名称"],
+      ),
+    ).toEqual({
+      accountCode: "科目编码",
+      accountName: "科目名称",
+      entity: "核算组织",
+    });
+  });
+  it("恢复任务的人工选择优先且不让新建议复用同一物理列", () => {
+    expect(
+      mergeRestoredLoanMapping(
+        { entity: "核算组织", auxiliary: "核算维度" },
+        { entity: "核算维度" },
+        ["核算组织", "核算维度"],
+      ),
+    ).toEqual({ entity: "核算维度" });
+  });
   it("按基准利率加BP换算浮动利率", () =>
     expect(loanEffectiveRate("floating", 0, 0.035, 75)).toBeCloseTo(0.0425));
   it("未提供基准时显示原执行利率，不将加点当全部利率", () =>
@@ -34,14 +131,19 @@ describe("借款利息测算", () => {
         closingPrincipal: 110,
       }),
     ).toBeNull());
-  // 金标要求 TB 的科目编码与名称都到位，缺名称同样拦。借款明细/辅助核算
-  // 按业务口径是选填：不进必填清单，缺了由引擎在测算入口明确报错。
-  it("不允许TB明细缺少借款识别和本金余额", () =>
+  // 科目编码与名称任一即可。借款明细/辅助核算按业务口径是选填：
+  // 不进必填清单，缺了由引擎在测算入口明确报错。
+  // 期初余额自 2026-09-25 起同样选填（缺失按 0 参与测算并在利率行注明）。
+  it("不允许TB明细缺少借款识别和期末余额", () =>
     expect(loanMissing("tb", { accountCode: "科目编码" })).toEqual([
-      "科目名称",
-      "期初余额",
       "期末余额",
     ]));
+  it("仅映射科目名称同样满足科目身份", () =>
+    expect(loanMissing("tb", {
+      accountName: "科目名称",
+      openingFunctionalAmount: "期初余额",
+      closingFunctionalAmount: "期末余额",
+    })).toEqual([]));
   it("借款明细/辅助核算为选填，缺它不拦映射", () =>
     expect(
       loanMissing("tb", {

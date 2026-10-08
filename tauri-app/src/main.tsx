@@ -1,12 +1,16 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { HashRouter } from "react-router-dom";
+import { createHashRouter, RouterProvider } from "react-router-dom";
 import App from "./App";
+import AudiPickWindow from "./AudiPickWindow";
+import MeetingAskWindow from "./MeetingAskWindow";
 import "./styles.css";
 import "./settings.css";
 import "./merger.css";
 import "./fa-dep-calc.css";
+import "./table-resize.css";
 import { restoreSavedTheme } from "./theme";
+import { ApplicationErrorBoundary } from "./components/ApplicationErrorBoundary";
 
 // Before the first paint, so the window never flashes the default theme.
 restoreSavedTheme();
@@ -18,10 +22,17 @@ if ("__TAURI_INTERNALS__" in window) {
 }
 
 const root = ReactDOM.createRoot(document.getElementById("root")!);
+const appRouter = createHashRouter([{ path: "*", element: <App /> }]);
+// 会议询问小窗（label=meeting-ask）不进 App 壳：没有侧栏/路由/巡游，
+// 只渲染一张居中询问卡片。按启动时的 hash 分流，小窗内不会发生导航。
+const isMeetingAskWindow = window.location.hash.startsWith("#/meeting-ask");
+const askRouter = createHashRouter([{ path: "*", element: <MeetingAskWindow /> }]);
 
 async function renderApp() {
   const params = new URLSearchParams(window.location.search);
-  let content: React.ReactNode = <HashRouter><App /></HashRouter>;
+  let content: React.ReactNode = (
+    <RouterProvider router={isMeetingAskWindow ? askRouter : appRouter} />
+  );
   // 几何验收夹具仅由开发服务器按需加载；生产构建不会把夹具及其
   // 依赖打进主包，也不会改变桌面应用的启动路径。
   if (import.meta.env.DEV && params.has("overlay-fixture")) {
@@ -30,8 +41,18 @@ async function renderApp() {
   } else if (import.meta.env.DEV && params.has("task-state-fixture")) {
     const { TaskStateFixture } = await import("./preview/TaskStateFixture");
     content = <TaskStateFixture />;
+  } else if (import.meta.env.DEV && params.has("fa-pivot-fixture")) {
+    const { FaPivotFixture } = await import("./preview/FaPivotFixture");
+    content = <FaPivotFixture />;
+  } else if (import.meta.env.DEV && params.has("col-resize-fixture")) {
+    const { ColResizeFixture } = await import("./preview/ColResizeFixture");
+    content = <ColResizeFixture />;
   }
-  root.render(<React.StrictMode>{content}</React.StrictMode>);
+  root.render(
+    <React.StrictMode>
+      <ApplicationErrorBoundary>{content}</ApplicationErrorBoundary>
+    </React.StrictMode>,
+  );
 }
 
 void renderApp();

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
-  jobCancel,
   jobStart,
   listenFileDrops,
   listenJobEvents,
@@ -20,6 +20,12 @@ import { BusySpinner } from "@/components/BusySpinner";
 import { SwitchInput } from "@/components/SwitchInput";
 import { EmptyState } from "@/components/EmptyState";
 import { JobProgress } from "@/components/JobProgress";
+import {
+  HeaderMatchGrid,
+  type HeaderMatchPreview,
+  type HeaderMatchingPlanJson,
+} from "@/components/HeaderMatchGrid";
+import "./header-match.css";
 
 type MergerFile = {
   path: string;
@@ -59,9 +65,21 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   const [sheetAction, setSheetAction] = useState("merge_all");
   const [targetSheets, setTargetSheets] = useState<string[]>([]);
   const [addHyperlinks, setAddHyperlinks] = useState(true);
+  // 智能表头匹配恒定开启（纵向合并成一张大表时必经确认页），不再提供开关。
+  const [templatePath, setTemplatePath] = useState("");
+  const [matchPreview, setMatchPreview] = useState<HeaderMatchPreview>();
+  const [showMatch, setShowMatch] = useState(false);
+  const [matchBusy, setMatchBusy] = useState(false);
+  // 合并任务失败后允许一键返回匹配网格：网格常挂载（hidden 而非卸载），
+  // 已有的人工调整全部保留，改完就能重试。
+  const [gridReturnable, setGridReturnable] = useState(false);
+  // 上传过的外部模板在下拉里保持可选，切走也能切回来。
+  const [externalTemplate, setExternalTemplate] = useState("");
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState<JobEvent>();
   const [error, setError] = useState("");
+  // 取消是用户主动叫停的中性结果，与失败分开提示，不进红色错误框。
+  const [notice, setNotice] = useState("");
   const [result, setResult] = useState<unknown>();
   const activeJobId = useRef("");
   const addPaths = (incoming: string[]) =>
@@ -97,11 +115,24 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         // green "处理完成。" directly under the red failure banner.
         if (event.phase === "failed" || event.phase === "cancelled") {
           setResult(undefined);
-          const payload = event.result as
-            { error?: { userMessage?: string } } | undefined;
-          setError(payload?.error ? errorText(payload.error) : event.message);
+          if (event.phase === "cancelled") {
+            // 取消与失败分流：取消不弹红色错误，也不引导回匹配网格
+            //（那是失败后的补救路径）。
+            setError("");
+            setNotice("任务已取消，已合并的部分不会写入输出。");
+            setGridReturnable(false);
+          } else {
+            setNotice("");
+            const payload = event.result as
+              { error?: { userMessage?: string } } | undefined;
+            setError(payload?.error ? errorText(payload.error) : event.message);
+            // 匹配网格还挂着：失败后一键返回调整重试，人工调整不丢。
+            setGridReturnable(true);
+          }
         } else if (event.result) {
           setResult(event.result);
+          setGridReturnable(false);
+          setNotice("");
         }
         setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
       }
@@ -126,7 +157,9 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     pendingTargetSheets.current = null;
     setResult(undefined);
     setJob(undefined);
+    setNotice("");
     activeJobId.current = "";
+    setShowMatch(false);
   }, [paths]);
   useEffect(() => {
     if (!outputDirectoryTouched)
@@ -178,6 +211,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     if (typeof p.addHyperlinks === "boolean")
       setAddHyperlinks(p.addHyperlinks);
     setError("");
+    setNotice("");
     setResult(undefined);
     setJob(undefined);
   });
@@ -248,7 +282,89 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
       setOutputDirectoryTouched(true);
     }
   }
-  async function start() {
+  useEffect(() => {
+    if (!paths.some((path) => path === templatePath)) setTemplatePath(paths[0] ?? "");
+  }, [paths, templatePath]);
+
+  async function startMatchPreview(templateOverride?: string) {
+    if (!paths.length) {
+      setError("请先添加需要合并的文件。");
+      return;
+    }
+    if (sheetAction === "match_selected" && !targetSheets.length) {
+      setError("按名称匹配时请至少选择一个 Sheet。");
+      return;
+    }
+    const template = templateOverride ?? templatePath ?? paths[0];
+    setMatchBusy(true);
+    setError("");
+    try {
+      const value = (await engineCall("excel_merger.match_preview", {
+        inputPaths: paths,
+        templatePath: template || undefined,
+        sheetAction,
+        targetSheets,
+      })) as HeaderMatchPreview;
+      setTemplatePath(value.template.path);
+      setMatchPreview(value);
+      setShowMatch(true);
+      setGridReturnable(false);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setMatchBusy(false);
+    }
+  }
+
+  async function rematchColumns(
+    templateHeaders: string[],
+    headers: string[],
+    hints?: [string, string][],
+  ): Promise<HeaderMatchPreview["rows"][number]["matches"]> {
+    const value = (await engineCall("excel_merger.rematch", {
+      templateHeaders,
+      headers,
+      aliases: (hints ?? []).map(([source, target]) => ({ source, target })),
+    })) as { matches: HeaderMatchPreview["rows"][number]["matches"] };
+    return value.matches ?? [];
+  }
+
+  /** 导入对照表（随合并结果导出的两列 Excel）；返回给匹配网格展示的
+   * 结果文案，用户取消选择时返回 null。导入只入本机记忆，网格里点
+   * 「重新匹配」即按新对照生效，不打断当前的人工调整。 */
+  async function importAliases(): Promise<string | null> {
+    const picked = await pickPath("files", "导入对照表（两列：源列名、目标列名）", [
+      "xlsx",
+      "xls",
+      "xlsm",
+    ]);
+    if (typeof picked !== "string") return null;
+    try {
+      const value = (await engineCall("excel_merger.alias_import", {
+        path: picked,
+      })) as { imported?: number };
+      const count = value.imported ?? 0;
+      return count > 0
+        ? `已导入 ${count} 条对照；点「重新匹配」即可按新对照生效`
+        : "对照表里没有可导入的配对";
+    } catch (e) {
+      return `导入失败：${errorText(e)}`;
+    }
+  }
+
+  async function chooseExternalTemplate() {
+    const picked = await pickPath("files", "选择外部模板文件（只借表头）", [
+      "xlsx",
+      "xls",
+      "xlsm",
+    ]);
+    if (typeof picked === "string") {
+      setExternalTemplate(picked);
+      void startMatchPreview(picked);
+    }
+  }
+
+  async function start(plan?: HeaderMatchingPlanJson) {
     if (!paths.length) {
       setError("请先添加输入文件。");
       return;
@@ -259,6 +375,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     }
     setBusy(true);
     setError("");
+    setNotice("");
     setResult(undefined);
     try {
       const jobId = await jobStart("excel_merger.merge", {
@@ -270,6 +387,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         sheetAction,
         targetSheets,
         addHyperlinks,
+        ...(plan ? { headerMatching: plan } : {}),
       });
       activeJobId.current = jobId;
       setJob({
@@ -304,6 +422,10 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     );
   }
   const currentStep = excelMergerStep(paths.length, files.length, Boolean(job));
+  // 智能表头匹配恒定开启：纵向合并成一张大表时必经匹配确认页。
+  const headerMatchAvailable =
+    outputMode === "one_sheet" && direction === "vertical";
+  const headerMatchActive = headerMatchAvailable;
   const clearFiles = async () => {
     if (!paths.length) return;
     if (
@@ -340,12 +462,12 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           </div>
           <button
             type="button"
-            className="drop-zone"
+            className={`drop-zone${paths.length ? " merger-drop-zone-filled" : ""}`}
             data-tour="tool-upload"
             onClick={() => void chooseFiles()}
           >
-            <strong>拖放文件或文件夹到窗口</strong>
-            <span>支持 XLSX、XLS、XLSM、CSV、TXT，也可点击添加文件</span>
+            <strong>{paths.length ? "继续添加文件或文件夹" : "拖放文件或文件夹到窗口"}</strong>
+            {!paths.length && <span>支持 XLSX、XLS、XLSM、CSV、TXT，也可点击添加文件</span>}
           </button>
           <div className="merger-toolbar">
             <Button variant="secondary" onClick={() => void chooseFiles()}>
@@ -607,15 +729,36 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             文件名自动生成：Excel合并结果_日期_时间.
             {outputMode === "one_workbook" ? "xlsx" : outputFormat}
           </p>
-          {error && <div className="error-box">{error}</div>}
+          {error && job?.phase !== "failed" && <div className="error-box">{error}</div>}
+          {error && gridReturnable && matchPreview && (
+            <div className="merge-grid-return">
+              <span>匹配网格中的人工调整已保留。</span>
+              <Button variant="secondary" size="sm" onClick={() => setShowMatch(true)}>
+                返回匹配网格调整
+              </Button>
+            </div>
+          )}
+          {notice && !error && (
+            <div className="merge-cancel-notice" role="status">
+              {notice}
+            </div>
+          )}
           <div className="actions">
             {busy && job ? (
               <Button
                 variant="secondary"
-                onClick={() => void jobCancel(job.jobId)}
+                onClick={() => void cancelJobWithFeedback(job.jobId)}
               >
                 <BusySpinner />
                 停止执行
+              </Button>
+            ) : headerMatchActive ? (
+              <Button
+                disabled={!paths.length || matchBusy}
+                onClick={() => void startMatchPreview()}
+              >
+                {matchBusy && <BusySpinner />}
+                {matchBusy ? "正在识别表头…" : "智能匹配并预览"}
               </Button>
             ) : (
               <Button disabled={!paths.length} onClick={() => void start()}>
@@ -629,7 +772,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         <h2>进度与结果</h2>
         {job ? (
           <>
-            <JobProgress job={job} />
+            <JobProgress job={job} detail={job.phase === "failed" ? error : undefined} />
             {result && <ResultView value={result} />}
           </>
         ) : result ? (
@@ -654,6 +797,38 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           />
         )}
       </section>
+      {matchPreview && (
+        <div hidden={!showMatch}>
+          <HeaderMatchGrid
+            preview={matchPreview}
+            busy={busy}
+            files={[
+              ...paths.map((path) => ({
+                path,
+                name: path.split(/[\\/]/).pop() ?? path,
+              })),
+              ...(externalTemplate && !paths.includes(externalTemplate)
+                ? [
+                    {
+                      path: externalTemplate,
+                      name: `${externalTemplate.split(/[\\/]/).pop() ?? externalTemplate}（外部）`,
+                    },
+                  ]
+                : []),
+            ]}
+            onTemplateChange={(path) => void startMatchPreview(path)}
+            onExternalTemplate={() => void chooseExternalTemplate()}
+            onImportAliases={importAliases}
+            onRematch={rematchColumns}
+            onCancel={() => setShowMatch(false)}
+            onConfirm={(plan) => {
+              setShowMatch(false);
+              setGridReturnable(false);
+              void start(plan);
+            }}
+          />
+        </div>
+      )}
     </>
   );
 }

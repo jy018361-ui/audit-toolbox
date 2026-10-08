@@ -191,6 +191,8 @@ describe("FuzzyMatchPage", () => {
       ),
     );
     emitJob(doneEvent(matchResult));
+    expect(screen.getByRole("link", { name: "查看匹配结果" })).toHaveAttribute("href", "#fuzzy-match-results");
+    expect(document.getElementById("fuzzy-match-results")).toBeInTheDocument();
     // 总览数字来自 summary：自动 2 / 疑似 1 / 未匹配 1（含 0 的无效值）。
     const pillValue = (label: string) => {
       const cell = screen
@@ -207,6 +209,19 @@ describe("FuzzyMatchPage", () => {
       2,
     );
     expect(screen.getByText("清洗后完全一致")).toBeInTheDocument();
+  });
+
+  it("取消任务使用中性警示状态，不显示红色错误框", async () => {
+    const start = await setupBothSources();
+    fireEvent.click(start);
+    await waitFor(() =>
+      expect(sessionStorage.getItem("fuzzy-match-draft.v1")).toContain("job-1"),
+    );
+    emitJob({ ...doneEvent(undefined), phase: "cancelled", message: "任务已取消", severity: "warning" });
+    expect(screen.getByText(/本次任务已停止/)).toBeInTheDocument();
+    expect(document.querySelector(".error-box")).toBeNull();
+    expect(document.querySelector(".job-progress-error")).toBeNull();
+    expect(screen.getByText("已取消")).toHaveAttribute("data-variant", "warning");
   });
 
   it("疑似确认卡：点候选后置灰、进度 +1、实时保存确认", async () => {

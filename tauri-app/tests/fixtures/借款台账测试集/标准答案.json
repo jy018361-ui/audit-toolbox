@@ -1,0 +1,2684 @@
+{
+  "reportPeriod": {
+    "start": "2025-01-01",
+    "end": "2025-12-31"
+  },
+  "dayCount": "算头不算尾；止于报告期末当天计息；全年按 365 天",
+  "generatedBy": "generate.py（随机种子 20260926，重跑可复现）",
+  "files": [
+    {
+      "file": "01-华源控股集团有限公司-借款明细表.xlsx",
+      "family": "表头布局",
+      "expectForm": "A",
+      "expectHeaderRow": 3,
+      "sheet": "",
+      "expectLoanCount": 15,
+      "loans": [
+        {
+          "id": "HG-2023-011",
+          "currency": "CNY",
+          "interest": 477195.0
+        },
+        {
+          "id": "HG-2023-018",
+          "currency": "CNY",
+          "interest": 360595.0
+        },
+        {
+          "id": "HG-2023-025",
+          "currency": "CNY",
+          "interest": 178217.49
+        },
+        {
+          "id": "HG-2024-002",
+          "currency": "CNY",
+          "interest": 1975000.0
+        },
+        {
+          "id": "HG-2024-007",
+          "currency": "CNY",
+          "interest": 584803.4
+        },
+        {
+          "id": "HG-2024-013",
+          "currency": "CNY",
+          "interest": 1066273.36
+        },
+        {
+          "id": "HG-2024-019",
+          "currency": "CNY",
+          "interest": 711595.89
+        },
+        {
+          "id": "HG-2025-003",
+          "currency": "CNY",
+          "interest": 468308.22
+        },
+        {
+          "id": "HG-2025-006",
+          "currency": "CNY",
+          "interest": 209488.93
+        },
+        {
+          "id": "HG-2025-009",
+          "currency": "CNY",
+          "interest": 213041.1
+        },
+        {
+          "id": "HG-2025-012",
+          "currency": "CNY",
+          "interest": 385643.84
+        },
+        {
+          "id": "HG-2025-015",
+          "currency": "CNY",
+          "interest": 56145.21
+        },
+        {
+          "id": "HG-2025-017",
+          "currency": "CNY",
+          "interest": 15090.41
+        },
+        {
+          "id": "HG-2022-031",
+          "currency": "CNY",
+          "interest": 369164.9
+        },
+        {
+          "id": "合计",
+          "currency": "CNY",
+          "interest": 0.0
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 7070562.75
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "贷款银行",
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "endDate": "到期日",
+        "rate": "年利率（%）",
+        "closingPrincipal": "期末余额",
+        "remark": "备注"
+      },
+      "expectSuggested": {
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "endDate": "到期日",
+        "rate": "年利率（%）"
+      },
+      "notes": "大标题+单位说明占前两行，表头在第 3 行；表尾合计行与制表人行为布局探针。"
+    },
+    {
+      "file": "02-天恒置业有限公司-借款台账.xlsx",
+      "family": "表头布局",
+      "expectForm": "C",
+      "expectHeaderRow": 2,
+      "sheet": "",
+      "expectLoanCount": 16,
+      "loans": [
+        {
+          "id": "TH-ZY-202301",
+          "currency": "CNY",
+          "interest": 1065746.5
+        },
+        {
+          "id": "TH-ZY-202302",
+          "currency": "CNY",
+          "interest": 2541440.0
+        },
+        {
+          "id": "TH-ZY-202303",
+          "currency": "CNY",
+          "interest": 3307535.0
+        },
+        {
+          "id": "TH-ZY-202304",
+          "currency": "CNY",
+          "interest": 2317380.0
+        },
+        {
+          "id": "TH-ZY-202305",
+          "currency": "CNY",
+          "interest": 2844141.0
+        },
+        {
+          "id": "TH-ZY-202306",
+          "currency": "CNY",
+          "interest": 721067.0
+        },
+        {
+          "id": "TH-ZY-202307",
+          "currency": "CNY",
+          "interest": 3432484.0
+        },
+        {
+          "id": "TH-ZY-202308",
+          "currency": "CNY",
+          "interest": 1169000.0
+        },
+        {
+          "id": "TH-ZY-202309",
+          "currency": "CNY",
+          "interest": 719880.0
+        },
+        {
+          "id": "TH-ZY-202310",
+          "currency": "CNY",
+          "interest": 2392434.0
+        },
+        {
+          "id": "TH-ZY-202311",
+          "currency": "CNY",
+          "interest": 1113709.0
+        },
+        {
+          "id": "TH-ZY-202312",
+          "currency": "CNY",
+          "interest": 850500.0
+        },
+        {
+          "id": "TH-ZY-202313",
+          "currency": "CNY",
+          "interest": 1234491.0
+        },
+        {
+          "id": "TH-ZY-202314",
+          "currency": "CNY",
+          "interest": 1092609.0
+        },
+        {
+          "id": "TH-ZY-202315",
+          "currency": "CNY",
+          "interest": 2971410.0
+        },
+        {
+          "id": "TH-ZY-202316",
+          "currency": "CNY",
+          "interest": 464040.0
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 28237866.5
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "放款银行",
+        "openingPrincipal": "期初余额",
+        "drawdownAmount": "本期新增",
+        "repaymentAmount": "本期归还",
+        "closingPrincipal": "期末余额",
+        "rate": "执行利率（%）",
+        "rateType": "利率类型",
+        "benchmarkRate": "定价基准（%）",
+        "spreadBps": "加点（BP）"
+      },
+      "expectSuggested": {
+        "openingPrincipal": "期初余额",
+        "closingPrincipal": "期末余额",
+        "rate": "执行利率（%）"
+      },
+      "notes": "两级合并表头：第 2 行子表头才是列名；C 型无日期列，按(期初+期末)/2平均口径。"
+    },
+    {
+      "file": "03-明州港务股份有限公司-借款台账（多段）.xlsx",
+      "family": "表头布局",
+      "expectForm": "A",
+      "expectHeaderRow": 2,
+      "sheet": "",
+      "expectLoanCount": 30,
+      "loans": [
+        {
+          "id": "MZ-Loan-001",
+          "currency": "CNY",
+          "interest": 941571.0
+        },
+        {
+          "id": "MZ-Loan-002",
+          "currency": "CNY",
+          "interest": 3678666.0
+        },
+        {
+          "id": "MZ-Loan-003",
+          "currency": "CNY",
+          "interest": 8351675.0
+        },
+        {
+          "id": "MZ-Loan-004",
+          "currency": "CNY",
+          "interest": 1262028.0
+        },
+        {
+          "id": "MZ-Loan-005",
+          "currency": "CNY",
+          "interest": 2830348.0
+        },
+        {
+          "id": "MZ-Loan-006",
+          "currency": "CNY",
+          "interest": 7522398.0
+        },
+        {
+          "id": "MZ-Loan-007",
+          "currency": "CNY",
+          "interest": 6750513.0
+        },
+        {
+          "id": "MZ-Loan-008",
+          "currency": "CNY",
+          "interest": 4356016.0
+        },
+        {
+          "id": "MZ-Loan-009",
+          "currency": "CNY",
+          "interest": 1871426.0
+        },
+        {
+          "id": "MZ-Loan-010",
+          "currency": "CNY",
+          "interest": 2224768.0
+        },
+        {
+          "id": "MZ-Loan-011",
+          "currency": "CNY",
+          "interest": 4086256.0
+        },
+        {
+          "id": "MZ-Loan-012",
+          "currency": "CNY",
+          "interest": 8359945.0
+        },
+        {
+          "id": "MZ-ST-001",
+          "currency": "CNY",
+          "interest": 966368.0
+        },
+        {
+          "id": "MZ-ST-002",
+          "currency": "CNY",
+          "interest": 90985.12
+        },
+        {
+          "id": "MZ-ST-003",
+          "currency": "CNY",
+          "interest": 846191.84
+        },
+        {
+          "id": "MZ-ST-004",
+          "currency": "CNY",
+          "interest": 1533789.37
+        },
+        {
+          "id": "MZ-ST-005",
+          "currency": "CNY",
+          "interest": 94881.24
+        },
+        {
+          "id": "MZ-ST-006",
+          "currency": "CNY",
+          "interest": 221769.96
+        },
+        {
+          "id": "MZ-ST-007",
+          "currency": "CNY",
+          "interest": 1183096.5
+        },
+        {
+          "id": "MZ-ST-008",
+          "currency": "CNY",
+          "interest": 1155575.62
+        },
+        {
+          "id": "MZ-DQ-001",
+          "currency": "CNY",
+          "interest": 2676837.0
+        },
+        {
+          "id": "MZ-DQ-002",
+          "currency": "CNY",
+          "interest": 661540.0
+        },
+        {
+          "id": "MZ-DQ-003",
+          "currency": "CNY",
+          "interest": 953644.0
+        },
+        {
+          "id": "MZ-DQ-004",
+          "currency": "CNY",
+          "interest": 2422191.0
+        },
+        {
+          "id": "MZ-DQ-005",
+          "currency": "CNY",
+          "interest": 1696877.0
+        },
+        {
+          "id": "MZ-DQ-006",
+          "currency": "CNY",
+          "interest": 1030140.0
+        },
+        {
+          "id": "MZ-Settled-001",
+          "currency": "CNY",
+          "interest": 657744.0
+        },
+        {
+          "id": "MZ-Settled-002",
+          "currency": "CNY",
+          "interest": 365428.0
+        },
+        {
+          "id": "MZ-Settled-003",
+          "currency": "CNY",
+          "interest": 384344.0
+        },
+        {
+          "id": "MZ-Settled-004",
+          "currency": "CNY",
+          "interest": 1758225.0
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 70935237.65
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "贷款银行",
+        "principal": "借款金额（万元）",
+        "startDate": "起始日",
+        "endDate": "到期日",
+        "rate": "利率（%）"
+      },
+      "expectSuggested": {
+        "principal": "借款金额（万元）",
+        "startDate": "起始日",
+        "endDate": "到期日"
+      },
+      "notes": "四段拼接：段1/4 万元、段2/3 元，多段时金额统一折元；四段均无期末余额列，按现行口径计至年末（到期日不截断，含已结清段，README 测试点 1）。"
+    },
+    {
+      "file": "04-南岭矿业集团有限公司-借款情况表.xlsx",
+      "family": "表头布局",
+      "expectForm": "A",
+      "expectHeaderRow": 1,
+      "sheet": "借款台账",
+      "expectLoanCount": 22,
+      "loans": [
+        {
+          "id": "NL-2024-001",
+          "currency": "CNY",
+          "interest": 908697.5
+        },
+        {
+          "id": "NL-2024-002",
+          "currency": "CNY",
+          "interest": 3002344.5
+        },
+        {
+          "id": "NL-2024-003",
+          "currency": "CNY",
+          "interest": 2109036.5
+        },
+        {
+          "id": "NL-2024-004",
+          "currency": "CNY",
+          "interest": 1132800.0
+        },
+        {
+          "id": "NL-2024-005",
+          "currency": "CNY",
+          "interest": 3347491.5
+        },
+        {
+          "id": "NL-2024-006",
+          "currency": "CNY",
+          "interest": 1946680.0
+        },
+        {
+          "id": "NL-2024-007",
+          "currency": "CNY",
+          "interest": 2122680.0
+        },
+        {
+          "id": "NL-2024-008",
+          "currency": "CNY",
+          "interest": 1475814.0
+        },
+        {
+          "id": "NL-2024-009",
+          "currency": "CNY",
+          "interest": 540176.0
+        },
+        {
+          "id": "NL-2024-010",
+          "currency": "CNY",
+          "interest": 1469985.0
+        },
+        {
+          "id": "NL-2024-011",
+          "currency": "CNY",
+          "interest": 1203177.0
+        },
+        {
+          "id": "NL-2024-012",
+          "currency": "CNY",
+          "interest": 2922890.0
+        },
+        {
+          "id": "NL-2024-013",
+          "currency": "CNY",
+          "interest": 2327287.5
+        },
+        {
+          "id": "NL-2024-014",
+          "currency": "CNY",
+          "interest": 413031.0
+        },
+        {
+          "id": "NL-2025-001",
+          "currency": "CNY",
+          "interest": 1712826.26
+        },
+        {
+          "id": "NL-2025-002",
+          "currency": "CNY",
+          "interest": 1132365.21
+        },
+        {
+          "id": "NL-2025-003",
+          "currency": "CNY",
+          "interest": 2639563.2
+        },
+        {
+          "id": "NL-2025-004",
+          "currency": "CNY",
+          "interest": 789616.5
+        },
+        {
+          "id": "NL-2025-005",
+          "currency": "CNY",
+          "interest": 446476.93
+        },
+        {
+          "id": "NL-2025-006",
+          "currency": "CNY",
+          "interest": 1313726.86
+        },
+        {
+          "id": "NL-2025-007",
+          "currency": "CNY",
+          "interest": 233129.35
+        },
+        {
+          "id": "NL-2025-008",
+          "currency": "CNY",
+          "interest": 1313815.18
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 34503609.99
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "贷款银行",
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "endDate": "到期日",
+        "rate": "年利率（%）"
+      },
+      "expectSuggested": {
+        "principal": "借款金额",
+        "startDate": "起始日"
+      },
+      "notes": "三个 Sheet：封面说明 + 借款台账 + 已结清备查；考选对 Sheet。"
+    },
+    {
+      "file": "05-恒信工贸有限公司-银行借款台账.xlsx",
+      "family": "列名流派",
+      "expectForm": "A",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 26,
+      "loans": [
+        {
+          "id": "HX(GT)001",
+          "currency": "CNY",
+          "interest": 761053.91
+        },
+        {
+          "id": "HX(GT)002",
+          "currency": "CNY",
+          "interest": 933534.56
+        },
+        {
+          "id": "HX(GT)003",
+          "currency": "CNY",
+          "interest": 311855.64
+        },
+        {
+          "id": "HX(GT)004",
+          "currency": "CNY",
+          "interest": 564079.0
+        },
+        {
+          "id": "HX(GT)005",
+          "currency": "CNY",
+          "interest": 269355.58
+        },
+        {
+          "id": "HX(GT)006",
+          "currency": "CNY",
+          "interest": 1658330.79
+        },
+        {
+          "id": "HX(GT)007",
+          "currency": "CNY",
+          "interest": 1306390.93
+        },
+        {
+          "id": "HX(GT)008",
+          "currency": "CNY",
+          "interest": 1395917.0
+        },
+        {
+          "id": "HX(GT)009",
+          "currency": "CNY",
+          "interest": 135165.61
+        },
+        {
+          "id": "HX(GT)010",
+          "currency": "CNY",
+          "interest": 582444.56
+        },
+        {
+          "id": "HX(GT)011",
+          "currency": "CNY",
+          "interest": 196451.5
+        },
+        {
+          "id": "HX(GT)012",
+          "currency": "CNY",
+          "interest": 75820.0
+        },
+        {
+          "id": "HX(GT)013",
+          "currency": "CNY",
+          "interest": 636822.69
+        },
+        {
+          "id": "HX(GT)014",
+          "currency": "CNY",
+          "interest": 1280080.43
+        },
+        {
+          "id": "HX(GT)015",
+          "currency": "CNY",
+          "interest": 1242951.79
+        },
+        {
+          "id": "HX(GT)016",
+          "currency": "CNY",
+          "interest": 1454521.26
+        },
+        {
+          "id": "HX(GT)017",
+          "currency": "CNY",
+          "interest": 80796.58
+        },
+        {
+          "id": "HX(GT)018",
+          "currency": "CNY",
+          "interest": 531644.4
+        },
+        {
+          "id": "HX(GT)019",
+          "currency": "CNY",
+          "interest": 190659.18
+        },
+        {
+          "id": "HX(GT)020",
+          "currency": "CNY",
+          "interest": 445371.45
+        },
+        {
+          "id": "HX(GT)021",
+          "currency": "CNY",
+          "interest": 180009.74
+        },
+        {
+          "id": "HX(GT)022",
+          "currency": "CNY",
+          "interest": 559421.05
+        },
+        {
+          "id": "HX(GT)023",
+          "currency": "CNY",
+          "interest": 748398.62
+        },
+        {
+          "id": "HX(GT)024",
+          "currency": "CNY",
+          "interest": 458046.63
+        },
+        {
+          "id": "HX(GT)025",
+          "currency": "CNY",
+          "interest": 1029581.56
+        },
+        {
+          "id": "HX(GT)026",
+          "currency": "CNY",
+          "interest": 382232.14
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 17410936.6
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "贷款银行",
+        "principal": "放款金额",
+        "startDate": "放款日",
+        "endDate": "到期日",
+        "rate": "执行年利率",
+        "closingPrincipal": "未偿还本金",
+        "repaymentMethod": "还款方式"
+      },
+      "expectSuggested": {
+        "principal": "放款金额",
+        "startDate": "放款日",
+        "rate": "执行年利率",
+        "closingPrincipal": "未偿还本金"
+      },
+      "notes": "客户经理风格列名（放款金额/放款日/执行年利率/未偿还本金）；期末列在账：存续按余额恒定、年内到期部分还款两段（合同额计至到期日、余额续算至年末）、全额结清计至到期日。「分期还本」字样因无累计归还列不触发期中切分（README 测试点 2）。"
+    },
+    {
+      "file": "06-中晟机械制造股份有限公司-短期借款明细.xlsx",
+      "family": "列名流派",
+      "expectForm": "B",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 32,
+      "loans": [
+        {
+          "id": "记-0292",
+          "currency": "CNY",
+          "interest": 1137456.0
+        },
+        {
+          "id": "记-0789",
+          "currency": "CNY",
+          "interest": 645742.55
+        },
+        {
+          "id": "记-0003",
+          "currency": "CNY",
+          "interest": 688792.0
+        },
+        {
+          "id": "记-0215",
+          "currency": "CNY",
+          "interest": 1052400.0
+        },
+        {
+          "id": "记-0479",
+          "currency": "CNY",
+          "interest": 356249.96
+        },
+        {
+          "id": "记-0309",
+          "currency": "CNY",
+          "interest": 358074.5
+        },
+        {
+          "id": "记-0641",
+          "currency": "CNY",
+          "interest": 426280.9
+        },
+        {
+          "id": "记-0021",
+          "currency": "CNY",
+          "interest": 218940.0
+        },
+        {
+          "id": "记-0408",
+          "currency": "CNY",
+          "interest": 960393.0
+        },
+        {
+          "id": "记-0345",
+          "currency": "CNY",
+          "interest": 518709.02
+        },
+        {
+          "id": "记-0613",
+          "currency": "CNY",
+          "interest": 572418.0
+        },
+        {
+          "id": "记-0406",
+          "currency": "CNY",
+          "interest": 340875.0
+        },
+        {
+          "id": "记-0334",
+          "currency": "CNY",
+          "interest": 982107.5
+        },
+        {
+          "id": "记-0466",
+          "currency": "CNY",
+          "interest": 15211.19
+        },
+        {
+          "id": "记-0232",
+          "currency": "CNY",
+          "interest": 437734.0
+        },
+        {
+          "id": "记-0271",
+          "currency": "CNY",
+          "interest": 626304.92
+        },
+        {
+          "id": "记-0077",
+          "currency": "CNY",
+          "interest": 797663.0
+        },
+        {
+          "id": "记-0684",
+          "currency": "CNY",
+          "interest": 451646.0
+        },
+        {
+          "id": "记-0286",
+          "currency": "CNY",
+          "interest": 946731.0
+        },
+        {
+          "id": "记-0122",
+          "currency": "CNY",
+          "interest": 487242.0
+        },
+        {
+          "id": "记-0731",
+          "currency": "CNY",
+          "interest": 147090.64
+        },
+        {
+          "id": "记-0100",
+          "currency": "CNY",
+          "interest": 293488.0
+        },
+        {
+          "id": "记-0553",
+          "currency": "CNY",
+          "interest": 594125.85
+        },
+        {
+          "id": "记-0477",
+          "currency": "CNY",
+          "interest": 1072388.08
+        },
+        {
+          "id": "记-0185",
+          "currency": "CNY",
+          "interest": 390852.5
+        },
+        {
+          "id": "记-0154",
+          "currency": "CNY",
+          "interest": 63916.27
+        },
+        {
+          "id": "记-0563",
+          "currency": "CNY",
+          "interest": 596602.59
+        },
+        {
+          "id": "记-0358",
+          "currency": "CNY",
+          "interest": 924399.0
+        },
+        {
+          "id": "记-0607",
+          "currency": "CNY",
+          "interest": 240426.0
+        },
+        {
+          "id": "记-0381",
+          "currency": "CNY",
+          "interest": 198513.0
+        },
+        {
+          "id": "记-0489",
+          "currency": "CNY",
+          "interest": 248637.0
+        },
+        {
+          "id": "记-0249",
+          "currency": "CNY",
+          "interest": 58635.62
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 16850045.09
+      },
+      "mapping": {
+        "loanId": "凭证号",
+        "lender": "贷款银行",
+        "principal": "借款金额",
+        "startDate": "借款日期",
+        "term": "期限（月）",
+        "rate": "年利率（%）",
+        "remark": "摘要"
+      },
+      "expectSuggested": {
+        "principal": "借款金额",
+        "startDate": "借款日期",
+        "term": "期限（月）",
+        "rate": "年利率（%）"
+      },
+      "notes": "ERP 导出风格：科目/凭证/摘要/经办人等系统列；借款标识取凭证号；期限以月数为主、夹『N个月』文本；借款日期为文本格式。B 型：到期日 = 起始日 + N 月 − 1 天；无期末余额列，计至年末。"
+    },
+    {
+      "file": "07-裕丰农业发展有限公司-贷款台账.csv",
+      "family": "列名流派",
+      "expectForm": "B",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 20,
+      "loans": [
+        {
+          "id": "YF-DK-2025-001",
+          "currency": "CNY",
+          "interest": 504270.0
+        },
+        {
+          "id": "YF-DK-2025-002",
+          "currency": "CNY",
+          "interest": 262941.0
+        },
+        {
+          "id": "YF-DK-2025-003",
+          "currency": "CNY",
+          "interest": 199092.55
+        },
+        {
+          "id": "YF-DK-2025-004",
+          "currency": "CNY",
+          "interest": 440790.0
+        },
+        {
+          "id": "YF-DK-2025-005",
+          "currency": "CNY",
+          "interest": 76145.38
+        },
+        {
+          "id": "YF-DK-2025-006",
+          "currency": "CNY",
+          "interest": 92604.23
+        },
+        {
+          "id": "YF-DK-2025-007",
+          "currency": "CNY",
+          "interest": 311863.5
+        },
+        {
+          "id": "YF-DK-2025-008",
+          "currency": "CNY",
+          "interest": 202612.12
+        },
+        {
+          "id": "YF-DK-2025-009",
+          "currency": "CNY",
+          "interest": 127453.32
+        },
+        {
+          "id": "YF-DK-2025-010",
+          "currency": "CNY",
+          "interest": 80647.35
+        },
+        {
+          "id": "YF-DK-2025-011",
+          "currency": "CNY",
+          "interest": 411121.48
+        },
+        {
+          "id": "YF-DK-2025-012",
+          "currency": "CNY",
+          "interest": 56423.12
+        },
+        {
+          "id": "YF-DK-2025-013",
+          "currency": "CNY",
+          "interest": 262252.5
+        },
+        {
+          "id": "YF-DK-2025-014",
+          "currency": "CNY",
+          "interest": 509120.0
+        },
+        {
+          "id": "YF-DK-2025-015",
+          "currency": "CNY",
+          "interest": 245790.04
+        },
+        {
+          "id": "YF-DK-2025-016",
+          "currency": "CNY",
+          "interest": 106394.79
+        },
+        {
+          "id": "YF-DK-2025-017",
+          "currency": "CNY",
+          "interest": 48341.65
+        },
+        {
+          "id": "YF-DK-2025-018",
+          "currency": "CNY",
+          "interest": 385489.5
+        },
+        {
+          "id": "YF-DK-2025-019",
+          "currency": "CNY",
+          "interest": 688530.0
+        },
+        {
+          "id": "YF-DK-2025-020",
+          "currency": "CNY",
+          "interest": 117610.89
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 5129493.42
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "贷款机构",
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "term": "期限（月）",
+        "rate": "执行利率（%）"
+      },
+      "expectSuggested": {
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "term": "期限（月）",
+        "rate": "执行利率（%）"
+      },
+      "notes": "金蝶系统导出 CSV（GBK 编码、金额千分位文本）；期限混写『12』『12个月』『一年』。"
+    },
+    {
+      "file": "08-瑞泰电子科技有限公司-借款台账.xlsx",
+      "family": "内容写法",
+      "expectForm": "A",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 24,
+      "loans": [
+        {
+          "id": "RT2024-001",
+          "currency": "CNY",
+          "interest": 157099.5
+        },
+        {
+          "id": "RT2024-002",
+          "currency": "CNY",
+          "interest": 285237.0
+        },
+        {
+          "id": "RT2024-003",
+          "currency": "CNY",
+          "interest": 938305.5
+        },
+        {
+          "id": "RT2024-004",
+          "currency": "CNY",
+          "interest": 237372.0
+        },
+        {
+          "id": "RT2024-005",
+          "currency": "CNY",
+          "interest": 64914.0
+        },
+        {
+          "id": "RT2024-006",
+          "currency": "CNY",
+          "interest": 635647.5
+        },
+        {
+          "id": "RT2024-007",
+          "currency": "CNY",
+          "interest": 709479.0
+        },
+        {
+          "id": "RT2024-008",
+          "currency": "CNY",
+          "interest": 591405.0
+        },
+        {
+          "id": "RT2024-009",
+          "currency": "CNY",
+          "interest": 266063.5
+        },
+        {
+          "id": "RT2024-010",
+          "currency": "CNY",
+          "interest": 427392.0
+        },
+        {
+          "id": "RT2024-011",
+          "currency": "CNY",
+          "interest": 371892.5
+        },
+        {
+          "id": "RT2024-012",
+          "currency": "CNY",
+          "interest": 387297.0
+        },
+        {
+          "id": "RT2025-013",
+          "currency": "CNY",
+          "interest": 265800.82
+        },
+        {
+          "id": "RT2025-014",
+          "currency": "CNY",
+          "interest": 98684.48
+        },
+        {
+          "id": "RT2025-015",
+          "currency": "CNY",
+          "interest": 144501.3
+        },
+        {
+          "id": "RT2025-016",
+          "currency": "CNY",
+          "interest": 6821.26
+        },
+        {
+          "id": "RT2025-017",
+          "currency": "CNY",
+          "interest": 191119.43
+        },
+        {
+          "id": "RT2025-018",
+          "currency": "CNY",
+          "interest": 237856.16
+        },
+        {
+          "id": "RT2025-019",
+          "currency": "CNY",
+          "interest": 98494.49
+        },
+        {
+          "id": "RT2025-020",
+          "currency": "CNY",
+          "interest": 36010.56
+        },
+        {
+          "id": "RT2025-021",
+          "currency": "CNY",
+          "interest": 31956.02
+        },
+        {
+          "id": "RT2025-022",
+          "currency": "CNY",
+          "interest": 301526.26
+        },
+        {
+          "id": "RT2025-023",
+          "currency": "CNY",
+          "interest": 947071.92
+        },
+        {
+          "id": "RT2025-024",
+          "currency": "CNY",
+          "interest": 78021.04
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 7509968.24
+      },
+      "mapping": {
+        "loanId": "借款合同号",
+        "lender": "贷款银行",
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "endDate": "到期日",
+        "rate": "利率（%）"
+      },
+      "expectSuggested": {
+        "principal": "借款金额",
+        "startDate": "起始日"
+      },
+      "notes": "同一份表里日期五种写法混排：ISO 文本、斜杠（含无前导零）、中文年月日、Excel 序列号、真日期单元格——五种写法均应正常解析；无期末余额列，计至年末。"
+    },
+    {
+      "file": "09-九州物流股份有限公司-借款清单.xlsx",
+      "family": "内容写法",
+      "expectForm": "A",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 24,
+      "loans": [
+        {
+          "id": "JZ-001",
+          "currency": "CNY",
+          "interest": 186300.0
+        },
+        {
+          "id": "JZ-002",
+          "currency": "CNY",
+          "interest": 677235.0
+        },
+        {
+          "id": "JZ-003",
+          "currency": "CNY",
+          "interest": 1357080.0
+        },
+        {
+          "id": "JZ-004",
+          "currency": "CNY",
+          "interest": 1521675.0
+        },
+        {
+          "id": "JZ-005",
+          "currency": "CNY",
+          "interest": 1259800.0
+        },
+        {
+          "id": "JZ-006",
+          "currency": "CNY",
+          "interest": 444720.0
+        },
+        {
+          "id": "JZ-007",
+          "currency": "CNY",
+          "interest": 147445.0
+        },
+        {
+          "id": "JZ-008",
+          "currency": "CNY",
+          "interest": 129690.0
+        },
+        {
+          "id": "JZ-009",
+          "currency": "CNY",
+          "interest": 1351566.0
+        },
+        {
+          "id": "JZ-010",
+          "currency": "CNY",
+          "interest": 603992.0
+        },
+        {
+          "id": "JZ-011",
+          "currency": "CNY",
+          "interest": 863470.0
+        },
+        {
+          "id": "JZ-012",
+          "currency": "CNY",
+          "interest": 1208895.0
+        },
+        {
+          "id": "JZ-013",
+          "currency": "CNY",
+          "interest": 1435314.0
+        },
+        {
+          "id": "JZ-014",
+          "currency": "CNY",
+          "interest": 1236342.0
+        },
+        {
+          "id": "JZ-015",
+          "currency": "CNY",
+          "interest": 1165220.0
+        },
+        {
+          "id": "JZ-016",
+          "currency": "CNY",
+          "interest": 1099095.0
+        },
+        {
+          "id": "JZ-017",
+          "currency": "CNY",
+          "interest": 374768.0
+        },
+        {
+          "id": "JZ-018",
+          "currency": "CNY",
+          "interest": 1137404.0
+        },
+        {
+          "id": "JZ-019",
+          "currency": "CNY",
+          "interest": 767720.0
+        },
+        {
+          "id": "JZ-020",
+          "currency": "CNY",
+          "interest": 1516437.5
+        },
+        {
+          "id": "JZ-021",
+          "currency": "CNY",
+          "interest": 885454.5
+        },
+        {
+          "id": "JZ-022",
+          "currency": "CNY",
+          "interest": 860008.0
+        },
+        {
+          "id": "JZ-023",
+          "currency": "CNY",
+          "interest": 494160.0
+        },
+        {
+          "id": "JZ-024",
+          "currency": "CNY",
+          "interest": 1140835.0
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 21864626.0
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "贷款银行",
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "endDate": "到期日",
+        "rate": "利率",
+        "rateType": "利率类型",
+        "benchmarkRate": "定价基准（%）",
+        "spreadBps": "加点（BP）"
+      },
+      "expectSuggested": {
+        "principal": "借款金额",
+        "rate": "利率"
+      },
+      "notes": "利率四种写法：数值%（3.45）、文本%（3.60%）、正文 LPR+90BP（内置报价期初 1 年期 3.10%）、定价基准与加点分列。浮动行全部为 1 年期品种且起息早于报告期，基准取值确定；无期末余额列，计至年末。"
+    },
+    {
+      "file": "10-远洋渔业集团有限公司-外币借款台账.xlsx",
+      "family": "内容写法",
+      "expectForm": "A",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 18,
+      "loans": [
+        {
+          "id": "YY-001",
+          "currency": "人民币",
+          "interest": 1516482.0
+        },
+        {
+          "id": "YY-002",
+          "currency": "人民币",
+          "interest": 318102.09
+        },
+        {
+          "id": "YY-003",
+          "currency": "人民币",
+          "interest": 330025.0
+        },
+        {
+          "id": "YY-004",
+          "currency": "人民币",
+          "interest": 1078769.0
+        },
+        {
+          "id": "YY-005",
+          "currency": "人民币",
+          "interest": 62571.62
+        },
+        {
+          "id": "YY-006",
+          "currency": "人民币",
+          "interest": 1289348.01
+        },
+        {
+          "id": "YY-007",
+          "currency": "人民币",
+          "interest": 1577706.0
+        },
+        {
+          "id": "YY-008",
+          "currency": "人民币",
+          "interest": 608982.77
+        },
+        {
+          "id": "YY-009",
+          "currency": "美元",
+          "interest": 54426.0
+        },
+        {
+          "id": "YY-010",
+          "currency": "美元",
+          "interest": 24116.25
+        },
+        {
+          "id": "YY-011",
+          "currency": "美元",
+          "interest": 159610.5
+        },
+        {
+          "id": "YY-012",
+          "currency": "美元",
+          "interest": 170520.0
+        },
+        {
+          "id": "YY-013",
+          "currency": "美元",
+          "interest": 258440.0
+        },
+        {
+          "id": "YY-014",
+          "currency": "美元",
+          "interest": 175280.0
+        },
+        {
+          "id": "YY-015",
+          "currency": "港币",
+          "interest": 83057.59
+        },
+        {
+          "id": "YY-016",
+          "currency": "港币",
+          "interest": 182484.0
+        },
+        {
+          "id": "YY-017",
+          "currency": "港币",
+          "interest": 346307.0
+        },
+        {
+          "id": "YY-018",
+          "currency": "欧元",
+          "interest": 33071.78
+        }
+      ],
+      "totalInterestByCurrency": {
+        "人民币": 6781986.49,
+        "美元": 842392.75,
+        "港币": 611848.59,
+        "欧元": 33071.78
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "贷款银行",
+        "currency": "币种",
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "endDate": "到期日",
+        "rate": "利率（%）"
+      },
+      "expectSuggested": {
+        "principal": "借款金额",
+        "currency": "币种"
+      },
+      "notes": "人民币/美元/港币/欧元四币种混排（币种列中文，答案币种随台账原文），金额为原币、利息按原币逐笔列示、按币种汇总；无期末余额列，计至年末。"
+    },
+    {
+      "file": "11-沧州化工有限公司-长期借款台账.xlsx",
+      "family": "内容写法",
+      "expectForm": "C",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 20,
+      "loans": [
+        {
+          "id": "CZ-001",
+          "currency": "CNY",
+          "interest": 4192536.0
+        },
+        {
+          "id": "CZ-002",
+          "currency": "CNY",
+          "interest": 2613930.0
+        },
+        {
+          "id": "CZ-003",
+          "currency": "CNY",
+          "interest": 9235200.0
+        },
+        {
+          "id": "CZ-004",
+          "currency": "CNY",
+          "interest": 4744150.0
+        },
+        {
+          "id": "CZ-005",
+          "currency": "CNY",
+          "interest": 3837108.0
+        },
+        {
+          "id": "CZ-006",
+          "currency": "CNY",
+          "interest": 6113305.0
+        },
+        {
+          "id": "CZ-007",
+          "currency": "CNY",
+          "interest": 3464997.0
+        },
+        {
+          "id": "CZ-008",
+          "currency": "CNY",
+          "interest": 1648718.0
+        },
+        {
+          "id": "CZ-009",
+          "currency": "CNY",
+          "interest": 8385653.0
+        },
+        {
+          "id": "CZ-010",
+          "currency": "CNY",
+          "interest": 5855080.0
+        },
+        {
+          "id": "CZ-011",
+          "currency": "CNY",
+          "interest": 2702800.0
+        },
+        {
+          "id": "CZ-012",
+          "currency": "CNY",
+          "interest": 1594056.0
+        },
+        {
+          "id": "CZ-013",
+          "currency": "CNY",
+          "interest": 2608713.0
+        },
+        {
+          "id": "CZ-014",
+          "currency": "CNY",
+          "interest": 5628333.0
+        },
+        {
+          "id": "CZ-015",
+          "currency": "CNY",
+          "interest": 4538413.0
+        },
+        {
+          "id": "CZ-016",
+          "currency": "CNY",
+          "interest": 683757.0
+        },
+        {
+          "id": "CZ-017",
+          "currency": "CNY",
+          "interest": 1357569.0
+        },
+        {
+          "id": "CZ-018",
+          "currency": "CNY",
+          "interest": 4363540.0
+        },
+        {
+          "id": "CZ-019",
+          "currency": "CNY",
+          "interest": 2884500.0
+        },
+        {
+          "id": "CZ-020",
+          "currency": "CNY",
+          "interest": 5308065.0
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 81760423.0
+      },
+      "mapping": {
+        "loanId": "借款合同编号",
+        "lender": "金融机构",
+        "startDate": "起息日",
+        "openingPrincipal": "期初余额",
+        "drawdownAmount": "本年新增",
+        "repaymentAmount": "本年归还",
+        "closingPrincipal": "期末余额",
+        "rate": "年利率（%）"
+      },
+      "expectSuggested": {
+        "openingPrincipal": "期初余额",
+        "closingPrincipal": "期末余额",
+        "rate": "年利率（%）"
+      },
+      "notes": "余额变动表形态：无发生日期列，按（期初+期末）/2 平均口径；起息日列仅为形态判定所需。"
+    },
+    {
+      "file": "12-百川水务股份有限公司-借款台账（全量）.xlsx",
+      "family": "内容写法",
+      "expectForm": "A",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 32,
+      "loans": [
+        {
+          "id": "BC-001",
+          "currency": "CNY",
+          "interest": 124859.39
+        },
+        {
+          "id": "BC-002",
+          "currency": "CNY",
+          "interest": 894685.15
+        },
+        {
+          "id": "BC-003",
+          "currency": "CNY",
+          "interest": 381672.0
+        },
+        {
+          "id": "BC-004",
+          "currency": "CNY",
+          "interest": 195030.82
+        },
+        {
+          "id": "BC-005",
+          "currency": "CNY",
+          "interest": 1627020.0
+        },
+        {
+          "id": "BC-006",
+          "currency": "CNY",
+          "interest": 565006.9
+        },
+        {
+          "id": "BC-007",
+          "currency": "CNY",
+          "interest": 1871892.5
+        },
+        {
+          "id": "BC-008",
+          "currency": "CNY",
+          "interest": 349864.0
+        },
+        {
+          "id": "BC-009",
+          "currency": "CNY",
+          "interest": 1314417.27
+        },
+        {
+          "id": "BC-010",
+          "currency": "CNY",
+          "interest": 578453.47
+        },
+        {
+          "id": "BC-011",
+          "currency": "CNY",
+          "interest": 2108880.0
+        },
+        {
+          "id": "BC-012",
+          "currency": "CNY",
+          "interest": 1169190.64
+        },
+        {
+          "id": "BC-013",
+          "currency": "CNY",
+          "interest": 394742.93
+        },
+        {
+          "id": "BC-014",
+          "currency": "CNY",
+          "interest": 359529.3
+        },
+        {
+          "id": "BC-015",
+          "currency": "CNY",
+          "interest": 733945.5
+        },
+        {
+          "id": "BC-016",
+          "currency": "CNY",
+          "interest": 504042.0
+        },
+        {
+          "id": "BC-017",
+          "currency": "CNY",
+          "interest": 158179.0
+        },
+        {
+          "id": "BC-018",
+          "currency": "CNY",
+          "interest": 301521.5
+        },
+        {
+          "id": "BC-019",
+          "currency": "CNY",
+          "interest": 1318149.0
+        },
+        {
+          "id": "BC-020",
+          "currency": "CNY",
+          "interest": 0.0
+        },
+        {
+          "id": "BC-021",
+          "currency": "CNY",
+          "interest": 728244.0
+        },
+        {
+          "id": "BC-022",
+          "currency": "CNY",
+          "interest": 1444257.0
+        },
+        {
+          "id": "BC-023",
+          "currency": "CNY",
+          "interest": 1178377.2
+        },
+        {
+          "id": "BC-024",
+          "currency": "CNY",
+          "interest": 545212.5
+        },
+        {
+          "id": "BC-025",
+          "currency": "CNY",
+          "interest": 2036532.0
+        },
+        {
+          "id": "BC-026",
+          "currency": "CNY",
+          "interest": 2265300.0
+        },
+        {
+          "id": "BC-027",
+          "currency": "CNY",
+          "interest": 1434090.0
+        },
+        {
+          "id": "BC-028",
+          "currency": "CNY",
+          "interest": 1284346.0
+        },
+        {
+          "id": "BC-029",
+          "currency": "CNY",
+          "interest": 1972348.0
+        },
+        {
+          "id": "BC-030",
+          "currency": "CNY",
+          "interest": 922834.16
+        },
+        {
+          "id": "BC-031",
+          "currency": "CNY",
+          "interest": 695097.0
+        },
+        {
+          "id": "BC-032",
+          "currency": "CNY",
+          "interest": 1200965.0
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 30658684.23
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "贷款银行",
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "endDate": "到期日",
+        "rate": "执行利率（%）",
+        "repaymentMethod": "还款方式",
+        "loanStatus": "借款状态",
+        "closingPrincipal": "期末未偿还本金"
+      },
+      "expectSuggested": {
+        "principal": "借款金额",
+        "closingPrincipal": "期末未偿还本金"
+      },
+      "notes": "状态列混排存续/已结清/展期：报告期前结清利息为 0；展期借款到期日为展期后日期、状态单元格有黄色底色（手工维护痕迹）。"
+    },
+    {
+      "file": "13-恒达汽车零部件有限公司-流动资金借款台账.xlsx",
+      "family": "业务形态",
+      "expectForm": "A",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 40,
+      "loans": [
+        {
+          "id": "HD-0001",
+          "currency": "CNY",
+          "interest": 2665260.0
+        },
+        {
+          "id": "HD-0002",
+          "currency": "CNY",
+          "interest": 2376022.0
+        },
+        {
+          "id": "HD-0003",
+          "currency": "CNY",
+          "interest": 281880.0
+        },
+        {
+          "id": "HD-0004",
+          "currency": "CNY",
+          "interest": 1365962.5
+        },
+        {
+          "id": "HD-0005",
+          "currency": "CNY",
+          "interest": 1552080.0
+        },
+        {
+          "id": "HD-0006",
+          "currency": "CNY",
+          "interest": 2087796.0
+        },
+        {
+          "id": "HD-0007",
+          "currency": "CNY",
+          "interest": 716106.0
+        },
+        {
+          "id": "HD-0008",
+          "currency": "CNY",
+          "interest": 1489981.67
+        },
+        {
+          "id": "HD-0009",
+          "currency": "CNY",
+          "interest": 1045792.43
+        },
+        {
+          "id": "HD-0010",
+          "currency": "CNY",
+          "interest": 36565.59
+        },
+        {
+          "id": "HD-0011",
+          "currency": "CNY",
+          "interest": 1180535.38
+        },
+        {
+          "id": "HD-0012",
+          "currency": "CNY",
+          "interest": 320897.0
+        },
+        {
+          "id": "HD-0013",
+          "currency": "CNY",
+          "interest": 240798.0
+        },
+        {
+          "id": "HD-0014",
+          "currency": "CNY",
+          "interest": 926159.69
+        },
+        {
+          "id": "HD-0015",
+          "currency": "CNY",
+          "interest": 868710.0
+        },
+        {
+          "id": "HD-0016",
+          "currency": "CNY",
+          "interest": 535119.54
+        },
+        {
+          "id": "HD-0017",
+          "currency": "CNY",
+          "interest": 251015.86
+        },
+        {
+          "id": "HD-0018",
+          "currency": "CNY",
+          "interest": 1320690.0
+        },
+        {
+          "id": "HD-0019",
+          "currency": "CNY",
+          "interest": 273220.11
+        },
+        {
+          "id": "HD-0020",
+          "currency": "CNY",
+          "interest": 1316000.0
+        },
+        {
+          "id": "HD-0021",
+          "currency": "CNY",
+          "interest": 188004.65
+        },
+        {
+          "id": "HD-0022",
+          "currency": "CNY",
+          "interest": 939144.0
+        },
+        {
+          "id": "HD-0023",
+          "currency": "CNY",
+          "interest": 1037960.0
+        },
+        {
+          "id": "HD-0024",
+          "currency": "CNY",
+          "interest": 1469934.0
+        },
+        {
+          "id": "HD-0025",
+          "currency": "CNY",
+          "interest": 2420902.5
+        },
+        {
+          "id": "HD-0026",
+          "currency": "CNY",
+          "interest": 945180.0
+        },
+        {
+          "id": "HD-0027",
+          "currency": "CNY",
+          "interest": 85186.5
+        },
+        {
+          "id": "HD-0028",
+          "currency": "CNY",
+          "interest": 3449469.0
+        },
+        {
+          "id": "HD-0029",
+          "currency": "CNY",
+          "interest": 776486.5
+        },
+        {
+          "id": "HD-0030",
+          "currency": "CNY",
+          "interest": 120185.0
+        },
+        {
+          "id": "HD-0031",
+          "currency": "CNY",
+          "interest": 1362288.0
+        },
+        {
+          "id": "HD-0032",
+          "currency": "CNY",
+          "interest": 874786.0
+        },
+        {
+          "id": "HD-0033",
+          "currency": "CNY",
+          "interest": 1396044.0
+        },
+        {
+          "id": "HD-0034",
+          "currency": "CNY",
+          "interest": 2374520.0
+        },
+        {
+          "id": "HD-0035",
+          "currency": "CNY",
+          "interest": 2756958.0
+        },
+        {
+          "id": "HD-0036",
+          "currency": "CNY",
+          "interest": 279554.0
+        },
+        {
+          "id": "HD-0037",
+          "currency": "CNY",
+          "interest": 2282114.5
+        },
+        {
+          "id": "HD-0038",
+          "currency": "CNY",
+          "interest": 590476.0
+        },
+        {
+          "id": "HD-0039",
+          "currency": "CNY",
+          "interest": 191411.72
+        },
+        {
+          "id": "HD-0040",
+          "currency": "CNY",
+          "interest": 1475335.01
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 45866531.15
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "贷款银行",
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "endDate": "到期日",
+        "rate": "年利率（%）"
+      },
+      "expectSuggested": {
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "endDate": "到期日"
+      },
+      "notes": "A 型大样本（40 笔）：验证批量与金额零头的稳定性；无期末余额列，计至年末。"
+    },
+    {
+      "file": "14-中兴电气股份有限公司-借款合同台账.xlsx",
+      "family": "业务形态",
+      "expectForm": "B",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 22,
+      "loans": [
+        {
+          "id": "ZX-HT-001",
+          "currency": "CNY",
+          "interest": 543140.03
+        },
+        {
+          "id": "ZX-HT-002",
+          "currency": "CNY",
+          "interest": 1021372.5
+        },
+        {
+          "id": "ZX-HT-003",
+          "currency": "CNY",
+          "interest": 228448.0
+        },
+        {
+          "id": "ZX-HT-004",
+          "currency": "CNY",
+          "interest": 1665727.0
+        },
+        {
+          "id": "ZX-HT-005",
+          "currency": "CNY",
+          "interest": 201341.0
+        },
+        {
+          "id": "ZX-HT-006",
+          "currency": "CNY",
+          "interest": 399464.0
+        },
+        {
+          "id": "ZX-HT-007",
+          "currency": "CNY",
+          "interest": 1818562.5
+        },
+        {
+          "id": "ZX-HT-008",
+          "currency": "CNY",
+          "interest": 596935.0
+        },
+        {
+          "id": "ZX-HT-009",
+          "currency": "CNY",
+          "interest": 1437460.5
+        },
+        {
+          "id": "ZX-HT-010",
+          "currency": "CNY",
+          "interest": 1293870.0
+        },
+        {
+          "id": "ZX-HT-011",
+          "currency": "CNY",
+          "interest": 885587.0
+        },
+        {
+          "id": "ZX-HT-012",
+          "currency": "CNY",
+          "interest": 1097456.0
+        },
+        {
+          "id": "ZX-HT-013",
+          "currency": "CNY",
+          "interest": 991800.0
+        },
+        {
+          "id": "ZX-HT-014",
+          "currency": "CNY",
+          "interest": 1178543.56
+        },
+        {
+          "id": "ZX-HT-015",
+          "currency": "CNY",
+          "interest": 69933.01
+        },
+        {
+          "id": "ZX-HT-016",
+          "currency": "CNY",
+          "interest": 194155.5
+        },
+        {
+          "id": "ZX-HT-017",
+          "currency": "CNY",
+          "interest": 1536948.0
+        },
+        {
+          "id": "ZX-HT-018",
+          "currency": "CNY",
+          "interest": 668736.74
+        },
+        {
+          "id": "ZX-HT-019",
+          "currency": "CNY",
+          "interest": 839496.0
+        },
+        {
+          "id": "ZX-HT-020",
+          "currency": "CNY",
+          "interest": 1392311.51
+        },
+        {
+          "id": "ZX-HT-021",
+          "currency": "CNY",
+          "interest": 1113200.0
+        },
+        {
+          "id": "ZX-HT-022",
+          "currency": "CNY",
+          "interest": 486754.11
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 19661241.96
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "贷款银行",
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "term": "借款期限",
+        "rate": "利率（%）"
+      },
+      "expectSuggested": {
+        "principal": "借款金额",
+        "term": "借款期限"
+      },
+      "notes": "B 型：期限列混写『12』『12个月』『一年』『3年』『17个月（含展期）』，到期日 = 起始日 + N 月 − 1 天；无期末余额列，计至年末。"
+    },
+    {
+      "file": "15-金穗粮油集团有限公司-借款余额变动表.xlsx",
+      "family": "业务形态",
+      "expectForm": "C",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 25,
+      "loans": [
+        {
+          "id": "JS-001",
+          "currency": "CNY",
+          "interest": 3207505.32
+        },
+        {
+          "id": "JS-002",
+          "currency": "CNY",
+          "interest": 2670237.79
+        },
+        {
+          "id": "JS-003",
+          "currency": "CNY",
+          "interest": 1596727.0
+        },
+        {
+          "id": "JS-004",
+          "currency": "CNY",
+          "interest": 2401112.05
+        },
+        {
+          "id": "JS-005",
+          "currency": "CNY",
+          "interest": 3366442.11
+        },
+        {
+          "id": "JS-006",
+          "currency": "CNY",
+          "interest": 1826496.0
+        },
+        {
+          "id": "JS-007",
+          "currency": "CNY",
+          "interest": 2176546.95
+        },
+        {
+          "id": "JS-008",
+          "currency": "CNY",
+          "interest": 2471382.41
+        },
+        {
+          "id": "JS-009",
+          "currency": "CNY",
+          "interest": 250323.0
+        },
+        {
+          "id": "JS-010",
+          "currency": "CNY",
+          "interest": 2067304.66
+        },
+        {
+          "id": "JS-011",
+          "currency": "CNY",
+          "interest": 2532062.55
+        },
+        {
+          "id": "JS-012",
+          "currency": "CNY",
+          "interest": 2429152.0
+        },
+        {
+          "id": "JS-013",
+          "currency": "CNY",
+          "interest": 2999324.49
+        },
+        {
+          "id": "JS-014",
+          "currency": "CNY",
+          "interest": 2945393.51
+        },
+        {
+          "id": "JS-015",
+          "currency": "CNY",
+          "interest": 629889.0
+        },
+        {
+          "id": "JS-016",
+          "currency": "CNY",
+          "interest": 2831056.0
+        },
+        {
+          "id": "JS-017",
+          "currency": "CNY",
+          "interest": 651739.31
+        },
+        {
+          "id": "JS-018",
+          "currency": "CNY",
+          "interest": 2442123.0
+        },
+        {
+          "id": "JS-019",
+          "currency": "CNY",
+          "interest": 621345.96
+        },
+        {
+          "id": "JS-020",
+          "currency": "CNY",
+          "interest": 3766385.75
+        },
+        {
+          "id": "JS-021",
+          "currency": "CNY",
+          "interest": 2971959.0
+        },
+        {
+          "id": "JS-022",
+          "currency": "CNY",
+          "interest": 2522695.77
+        },
+        {
+          "id": "JS-023",
+          "currency": "CNY",
+          "interest": 2055617.81
+        },
+        {
+          "id": "JS-024",
+          "currency": "CNY",
+          "interest": 1180775.0
+        },
+        {
+          "id": "JS-025",
+          "currency": "CNY",
+          "interest": 2407543.23
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 55021139.67
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "金融机构",
+        "startDate": "起息日",
+        "openingPrincipal": "期初余额",
+        "drawdownAmount": "本年新增",
+        "drawdownDate": "新增借款日期",
+        "repaymentAmount": "本年归还",
+        "repaymentDate": "还款日期",
+        "closingPrincipal": "期末余额",
+        "rate": "年利率（%）"
+      },
+      "expectSuggested": {
+        "openingPrincipal": "期初余额",
+        "closingPrincipal": "期末余额"
+      },
+      "notes": "C 型带发生日期：有日期行按逐日加权（期初起算、事件日不含当天），每三行夹一行无日期行按平均口径。"
+    },
+    {
+      "file": "16-汉唐文旅发展有限公司-借款台账.xlsx",
+      "family": "业务形态",
+      "expectForm": "D",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 20,
+      "loans": [
+        {
+          "id": "HT-001",
+          "currency": "CNY",
+          "interest": 36934.3
+        },
+        {
+          "id": "HT-002",
+          "currency": "CNY",
+          "interest": 126273.86
+        },
+        {
+          "id": "HT-003",
+          "currency": "CNY",
+          "interest": 62682.3
+        },
+        {
+          "id": "HT-004",
+          "currency": "CNY",
+          "interest": 583826.13
+        },
+        {
+          "id": "HT-005",
+          "currency": "CNY",
+          "interest": 537494.36
+        },
+        {
+          "id": "HT-006",
+          "currency": "CNY",
+          "interest": 165346.99
+        },
+        {
+          "id": "HT-007",
+          "currency": "CNY",
+          "interest": 885894.17
+        },
+        {
+          "id": "HT-008",
+          "currency": "CNY",
+          "interest": 142476.58
+        },
+        {
+          "id": "HT-009",
+          "currency": "CNY",
+          "interest": 840288.36
+        },
+        {
+          "id": "HT-010",
+          "currency": "CNY",
+          "interest": 400384.33
+        },
+        {
+          "id": "HT-011",
+          "currency": "CNY",
+          "interest": 445472.47
+        },
+        {
+          "id": "HT-012",
+          "currency": "CNY",
+          "interest": 1029562.57
+        },
+        {
+          "id": "HT-013",
+          "currency": "CNY",
+          "interest": 374633.32
+        },
+        {
+          "id": "HT-014",
+          "currency": "CNY",
+          "interest": 604691.61
+        },
+        {
+          "id": "HT-015",
+          "currency": "CNY",
+          "interest": 277842.41
+        },
+        {
+          "id": "HT-016",
+          "currency": "CNY",
+          "interest": 538590.74
+        },
+        {
+          "id": "HT-017",
+          "currency": "CNY",
+          "interest": 469820.75
+        },
+        {
+          "id": "HT-018",
+          "currency": "CNY",
+          "interest": 188839.5
+        },
+        {
+          "id": "HT-019",
+          "currency": "CNY",
+          "interest": 511560.0
+        },
+        {
+          "id": "HT-020",
+          "currency": "CNY",
+          "interest": 385328.25
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 8607943.0
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "贷款银行",
+        "startDate": "起息日",
+        "drawdownAmount": "本年新增",
+        "drawdownDate": "新增借款日期",
+        "repaymentAmount": "累计归还",
+        "repaymentDate": "还款日期",
+        "closingPrincipal": "期末余额",
+        "rate": "年利率（%）"
+      },
+      "expectSuggested": {
+        "closingPrincipal": "期末余额",
+        "rate": "年利率（%）"
+      },
+      "notes": "D 型期末倒推：年内新放款行以「新增借款日期」事件还原逐日加权；期初存续借款行台账未列期初（当前口径按（0+期末）/2 平均，README 测试点 4 记录该疑点）。"
+    },
+    {
+      "file": "17-前湾开发投资有限公司-借款台账.xlsx",
+      "family": "业务形态",
+      "expectForm": "A",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 16,
+      "loans": [
+        {
+          "id": "QW-001",
+          "currency": "CNY",
+          "interest": 2580680.3
+        },
+        {
+          "id": "QW-002",
+          "currency": "CNY",
+          "interest": 2536222.5
+        },
+        {
+          "id": "QW-003",
+          "currency": "CNY",
+          "interest": 3451526.4
+        },
+        {
+          "id": "QW-004",
+          "currency": "CNY",
+          "interest": 1648017.38
+        },
+        {
+          "id": "QW-005",
+          "currency": "CNY",
+          "interest": 2429565.6
+        },
+        {
+          "id": "QW-006",
+          "currency": "CNY",
+          "interest": 3990508.2
+        },
+        {
+          "id": "QW-007",
+          "currency": "CNY",
+          "interest": 4196439.0
+        },
+        {
+          "id": "QW-008",
+          "currency": "CNY",
+          "interest": 5782296.0
+        },
+        {
+          "id": "QW-009",
+          "currency": "CNY",
+          "interest": 5892976.8
+        },
+        {
+          "id": "QW-010",
+          "currency": "CNY",
+          "interest": 1731313.2
+        },
+        {
+          "id": "QW-011",
+          "currency": "CNY",
+          "interest": 4216314.5
+        },
+        {
+          "id": "QW-012",
+          "currency": "CNY",
+          "interest": 882835.2
+        },
+        {
+          "id": "QW-013",
+          "currency": "CNY",
+          "interest": 994269.5
+        },
+        {
+          "id": "QW-014",
+          "currency": "CNY",
+          "interest": 755379.0
+        },
+        {
+          "id": "QW-015",
+          "currency": "CNY",
+          "interest": 4373904.5
+        },
+        {
+          "id": "QW-016",
+          "currency": "CNY",
+          "interest": 3594531.42
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 49056779.5
+      },
+      "mapping": {
+        "loanId": "合同编号",
+        "lender": "贷款银行",
+        "principal": "借款金额",
+        "startDate": "起始日",
+        "endDate": "到期日",
+        "rate": "执行年利率（%）",
+        "openingPrincipal": "期初余额",
+        "drawdownAmount": "本年新增",
+        "repaymentAmount": "本年归还",
+        "closingPrincipal": "期末余额"
+      },
+      "expectSuggested": {
+        "principal": "借款金额",
+        "endDate": "到期日",
+        "closingPrincipal": "期末余额"
+      },
+      "notes": "混合型（实物 04 前湾式）：A 型 + 四栏发生额齐备，四栏转为勾稽校验；勾稽列放活公式但不参与取数。"
+    },
+    {
+      "file": "18-文华教育科技有限公司-借款台账（对照版）.xlsx",
+      "family": "业务形态",
+      "expectForm": "A",
+      "expectHeaderRow": 1,
+      "sheet": "",
+      "expectLoanCount": 30,
+      "loans": [
+        {
+          "id": "JK-2025-001",
+          "currency": "CNY",
+          "interest": 1838542.5
+        },
+        {
+          "id": "JK-2025-002",
+          "currency": "CNY",
+          "interest": 1337390.0
+        },
+        {
+          "id": "JK-2025-003",
+          "currency": "CNY",
+          "interest": 1879452.0
+        },
+        {
+          "id": "JK-2025-004",
+          "currency": "CNY",
+          "interest": 321720.0
+        },
+        {
+          "id": "JK-2025-005",
+          "currency": "CNY",
+          "interest": 113829.7
+        },
+        {
+          "id": "JK-2025-006",
+          "currency": "CNY",
+          "interest": 95812.4
+        },
+        {
+          "id": "JK-2025-007",
+          "currency": "CNY",
+          "interest": 1195483.5
+        },
+        {
+          "id": "JK-2025-008",
+          "currency": "CNY",
+          "interest": 135004.11
+        },
+        {
+          "id": "JK-2025-009",
+          "currency": "CNY",
+          "interest": 808626.0
+        },
+        {
+          "id": "JK-2025-010",
+          "currency": "CNY",
+          "interest": 195752.05
+        },
+        {
+          "id": "JK-2025-011",
+          "currency": "CNY",
+          "interest": 998807.33
+        },
+        {
+          "id": "JK-2025-012",
+          "currency": "CNY",
+          "interest": 1891032.0
+        },
+        {
+          "id": "JK-2025-013",
+          "currency": "CNY",
+          "interest": 85605.81
+        },
+        {
+          "id": "JK-2025-014",
+          "currency": "CNY",
+          "interest": 570921.5
+        },
+        {
+          "id": "JK-2025-015",
+          "currency": "CNY",
+          "interest": 575080.27
+        },
+        {
+          "id": "JK-2025-016",
+          "currency": "CNY",
+          "interest": 758390.0
+        },
+        {
+          "id": "JK-2025-017",
+          "currency": "CNY",
+          "interest": 94286.5
+        },
+        {
+          "id": "JK-2025-018",
+          "currency": "CNY",
+          "interest": 428899.86
+        },
+        {
+          "id": "JK-2025-019",
+          "currency": "CNY",
+          "interest": 1150644.0
+        },
+        {
+          "id": "JK-2025-020",
+          "currency": "CNY",
+          "interest": 1228518.0
+        },
+        {
+          "id": "JK-2025-021",
+          "currency": "CNY",
+          "interest": 120145.66
+        },
+        {
+          "id": "JK-2025-022",
+          "currency": "CNY",
+          "interest": 137011.33
+        },
+        {
+          "id": "JK-2025-023",
+          "currency": "CNY",
+          "interest": 252251.0
+        },
+        {
+          "id": "JK-2025-024",
+          "currency": "CNY",
+          "interest": 1438311.45
+        },
+        {
+          "id": "JK-2025-025",
+          "currency": "CNY",
+          "interest": 381452.05
+        },
+        {
+          "id": "JK-2025-026",
+          "currency": "CNY",
+          "interest": 550570.65
+        },
+        {
+          "id": "JK-2025-027",
+          "currency": "CNY",
+          "interest": 377016.0
+        },
+        {
+          "id": "JK-2025-028",
+          "currency": "CNY",
+          "interest": 351265.0
+        },
+        {
+          "id": "JK-2025-029",
+          "currency": "CNY",
+          "interest": 230658.61
+        },
+        {
+          "id": "JK-2025-030",
+          "currency": "CNY",
+          "interest": 1241544.0
+        }
+      ],
+      "totalInterestByCurrency": {
+        "CNY": 20784023.28
+      },
+      "mapping": {
+        "loanId": "借款标识",
+        "lender": "贷款方",
+        "principal": "借款本金",
+        "startDate": "起始日",
+        "endDate": "到期日",
+        "rate": "利率",
+        "rateType": "利率类型"
+      },
+      "expectSuggested": {
+        "principal": "借款本金",
+        "startDate": "起始日"
+      },
+      "notes": "对照组：完全工整的表（旧演示样例风格），作为其余 17 份『脏』样本的基线。"
+    }
+  ]
+}

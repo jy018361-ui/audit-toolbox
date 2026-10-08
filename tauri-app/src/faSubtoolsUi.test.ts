@@ -68,14 +68,12 @@ describe("FA 子工具角色表与缺失检查", () => {
       "使用寿命",
       "残值率",
     ]);
-    // 期末：完整选填集（含本年折旧/新增方式/新增日期）。
+    // 期末：政策比较实际使用的选填集；新增方式/日期不提示也不进入下拉。
     expect(policyMissingOptionalRoles("end", sparse)).toEqual([
       "开始使用日期",
       "使用寿命",
       "残值率",
       "本年折旧",
-      "新增方式",
-      "新增日期",
     ]);
     const full = {
       ...sparse,
@@ -83,14 +81,12 @@ describe("FA 子工具角色表与缺失检查", () => {
       life: "寿命",
       residualRate: "残值率",
       currentYearDep: "本年折旧",
-      additionMethod: "新增方式",
-      additionDate: "新增日期",
     };
     expect(policyMissingOptionalRoles("end", full)).toEqual([]);
     expect(policyMissingOptionalRoles("begin", full)).toEqual([]);
   });
 
-  it("政策对比角色表与 FA 主工具同构（十个角色、同名同序）", () => {
+  it("政策对比角色表排除不参与比较的新增方式和新增日期", () => {
     expect(POLICY_MAPPING_ROLES).toEqual([
       ["category", "资产类别"],
       ["name", "资产名称"],
@@ -100,8 +96,6 @@ describe("FA 子工具角色表与缺失检查", () => {
       ["life", "使用寿命"],
       ["residualRate", "残值率"],
       ["currentYearDep", "本年折旧"],
-      ["additionMethod", "新增方式"],
-      ["additionDate", "新增日期"],
     ]);
     expect(DEP_MAPPING_ROLES.map(([key]) => key)).toContain("currentYearDep");
   });
@@ -127,7 +121,28 @@ describe("FA 子工具默认输出路径", () => {
 });
 
 describe("折旧测算单文件 LLM 复核规划器", () => {
-  it("高把握建议直接应用并进变更清单，低把握进待定", () => {
+  it("clear 能删除没有可信替代列的错误映射", () => {
+    const plan = planDepLlmChanges({
+      mapping: { life: "资产名称" },
+      fieldReviews: [
+        {
+          role: "life",
+          file_side: "file2",
+          action: "clear",
+          confidence: 0.94,
+          reason: "当前列不是月数且没有可信寿命列",
+        },
+      ],
+    });
+    expect(plan.mapping.life).toBe("资产名称");
+    expect(plan.pending[0]).toMatchObject({
+      current: "资产名称",
+      suggested: "未映射",
+      apply: { key: "life", value: undefined },
+    });
+  });
+
+  it("高把握建议直接应用并进变更清单，低于 60% 的不展示", () => {
     const plan = planDepLlmChanges({
       mapping: { originalValue: "原值", life: "寿命" },
       autoApplied: [
@@ -149,7 +164,7 @@ describe("折旧测算单文件 LLM 复核规划器", () => {
     });
     expect(plan.mapping.residualRate).toBe("残值率");
     expect(plan.changes.map((change) => change.label)).toEqual(["残值率"]);
-    expect(plan.pending.map((item) => item.label)).toEqual(["累计折旧"]);
+    expect(plan.pending).toEqual([]);
   });
 
   it("越权角色（政策外的新增方式等）不会进入映射", () => {

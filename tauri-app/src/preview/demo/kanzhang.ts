@@ -355,8 +355,8 @@ export const handlers: Record<string, (params: Dict) => unknown> = {
 import type { DemoJobEvent } from "../demoRegistry";
 
 const DEMO_EXPORT_PATHS = [
-  "C:\演示数据\看账导出_凭证序时簿_明细_批次1.csv",
-  "C:\演示数据\看账导出_凭证序时簿_套表.xlsx",
+  "C:/演示数据/看账导出_凭证序时簿_明细_批次1.csv",
+  "C:/演示数据/看账导出_凭证序时簿_套表.xlsx",
 ];
 
 export const jobHandlers: Record<string, (params: Dict) => DemoJobEvent[]> = {

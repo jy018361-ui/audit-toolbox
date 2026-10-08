@@ -1,6 +1,6 @@
 /* 新手引导（分步动画提示）。
-   层级约定：遮罩 700 < 窗口控制按钮 800（styles.css .window-controls），
-   保证引导期间最小化 / 关闭窗口仍然可用；高于 shadcn Dialog 的 50。 */
+   层级约定：遮罩 700 < 窗口控制按钮 800；共享模态 Dialog 更高，
+   引导期间的确认框不会被遮罩盖住。 */
 
 .tour-layer {
   position: fixed;

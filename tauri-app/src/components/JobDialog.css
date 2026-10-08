@@ -1,0 +1,19 @@
+.job-dialog .job-dialog-row-head > strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-dialog .job-dialog-message--clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+.job-dialog .job-dialog-expand {
+  width: fit-content;
+  padding: 0;
+  min-height: 28px;
+  margin-top: calc(-1 * var(--sp-1));
+}

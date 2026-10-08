@@ -24,7 +24,7 @@ export const workspaceTourSteps: TourStep[] = [
     id: "sidebar-tools",
     targetSelector: '[data-tour="sidebar-tools"]',
     title: "工具目录",
-    body: "全部工具按「审计工具 / 效率工具 / 运营工具」分组排列，点击工具名称即可打开；带「开发中」标记的工具功能已可使用，仍在继续完善。",
+    body: "全部工具按「审计工具 / 效率工具 / 运营工具」分组排列，点击工具名称即可打开；带「试用」或「即将上线」标记的工具功能已可使用，仍在继续完善。",
   },
   {
     id: "tool-cards",
@@ -33,11 +33,9 @@ export const workspaceTourSteps: TourStep[] = [
     body: "工作台按同样的分组铺开工具卡片，点击任意卡片就能进入对应工具。",
   },
   {
-    id: "recent-tools",
-    targetSelector: '[data-tour="recent-tools"]',
-    optional: true,
-    title: "最近使用",
-    body: "刚用过的工具会出现在这里，方便接着上次的进度继续干。",
+    id: "table-tips",
+    title: "表格小技巧",
+    body: "各工具里的数据表都能像 Excel 一样调列宽：拖动列边界加宽、双击边界自动贴合内容、右键重置整表。调好的列宽会记在本机，下次打开不用再调。",
   },
   {
     id: "nav-history",
@@ -55,7 +53,7 @@ export const workspaceTourSteps: TourStep[] = [
     id: "newbie-toggle",
     targetSelector: '[data-tour="newbie-toggle"]',
     title: "新手模式",
-    body: "侧边栏最底下的这个小开关管着全部分步引导：开启时，首次使用工具会有动画提示；不需要时随手关掉，重启后也保持你的选择。",
+    body: "侧边栏顶部的这个小开关管着全部分步引导：开启时，首次使用工具会有动画提示；不需要时随手关掉，重启后也保持你的选择。",
   },
   {
     id: "done",
@@ -100,16 +98,19 @@ function genericToolTourSteps(tool: ToolManifest): TourStep[] {
 export function buildToolTourSteps(tool: ToolManifest): TourStep[] {
   const script = TOOL_TOUR_SCRIPTS[tool.id];
   if (!script) return genericToolTourSteps(tool);
-  const steps: TourStep[] = [
-    {
+  const steps: TourStep[] = [];
+  // purpose 可省略（如 audipick：用途一目了然，不必再讲一遍），
+  // 省略时导览直接从"要准备什么"讲起。
+  if (script.purpose) {
+    steps.push({
       id: "purpose",
       // 锚定页头：工具名称与说明就在那里，讲"是做什么的"时锁定它，
       // 避免整步只有一张全局居中卡片。
       targetSelector: '[data-tour="page-header"]',
       title: `「${tool.name}」是做什么的`,
       body: script.purpose,
-    },
-  ];
+    });
+  }
   if (script.mode) {
     // 有多种导入/测算模式的工具：进页先讲"选哪个、什么时候用"，
     // 聚光页面上的模式切换区；页面没有该挂点时整步自动跳过。

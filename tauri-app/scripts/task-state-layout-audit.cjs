@@ -7,6 +7,8 @@ const path = require("node:path");
 (async () => {
   const baseUrl = process.env.TASK_STATE_BASE_URL || "http://127.0.0.1:1420";
   const catalog = JSON.parse(fs.readFileSync("public/tool-catalog.json", "utf8"));
+  // 这是共享任务组件的合成夹具，不挂载工具真实页面；AudiPick UI 暂不在本轮范围。
+  const auditedTools = catalog.filter((tool) => tool.id !== "audipick");
   const states = [
     "loading", "queued", "running", "paused", "cancelled",
     "failed", "completed", "partial", "restored", "history_resume",
@@ -22,7 +24,7 @@ const path = require("node:path");
       const context = await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(120000);
-      for (const tool of catalog) {
+      for (const tool of auditedTools) {
         for (const state of states) {
           cases += 1;
           const query = new URLSearchParams({ "task-state-fixture": "1", tool: tool.id, state });
@@ -59,8 +61,9 @@ const path = require("node:path");
           });
           if (issues.length) {
             failures.push({ width, tool: tool.id, state, issues });
-            if (failures.length <= 12)
-              await page.screenshot({ path: path.join(output, `${tool.id}-${state}-${width}.png`), fullPage: true });
+          }
+          if (issues.length || process.env.TASK_STATE_AUDIT_CAPTURE_ALL === "1") {
+            await page.screenshot({ path: path.join(output, `${tool.id}-${state}-${width}.png`), fullPage: true });
           }
         }
       }
@@ -69,9 +72,18 @@ const path = require("node:path");
   } finally {
     await browser.close();
   }
-  const report = { cases, failures };
+  const report = {
+    coverageKind: "shared-synthetic-fixture",
+    actualToolPageEventCases: 0,
+    excludedToolIds: ["audipick"],
+    tools: auditedTools.length,
+    states,
+    widths,
+    cases,
+    failures,
+  };
   fs.writeFileSync(path.join(output, "report.json"), JSON.stringify(report, null, 2));
-  console.log(JSON.stringify({ output, cases, failureCount: failures.length, failures: failures.slice(0, 30) }, null, 2));
+  console.log(JSON.stringify({ output, coverageKind: report.coverageKind, actualToolPageEventCases: 0, cases, failureCount: failures.length, failures: failures.slice(0, 30) }, null, 2));
   if (failures.length) process.exitCode = 1;
 })().catch((error) => {
   console.error(error);

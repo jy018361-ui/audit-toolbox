@@ -5,7 +5,9 @@ use std::io::Cursor;
 use crate::AppError;
 
 #[tauri::command]
-pub fn covenant_case_workbook(bytes: Vec<u8>) -> Result<BTreeMap<String, Vec<Vec<String>>>, AppError> {
+pub fn covenant_case_workbook(
+    bytes: Vec<u8>,
+) -> Result<BTreeMap<String, Vec<Vec<String>>>, AppError> {
     if bytes.len() > 8 * 1024 * 1024 {
         return Err(AppError::new(
             "CASE_LIBRARY_INVALID",

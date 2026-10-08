@@ -11,6 +11,9 @@
   gap: var(--sp-3);
   width: max-content;
   max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: var(--sp-3) calc(var(--sp-4) + 24px) var(--sp-3) var(--sp-4);
   background: var(--surface);
   color: var(--ink);
@@ -49,6 +52,14 @@
   flex-wrap: wrap;
   gap: var(--sp-2);
   margin-left: var(--sp-2);
+}
+
+.success-nudge-error {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--danger-fg);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
 }
 
 .success-nudge-btn {

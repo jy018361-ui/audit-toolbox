@@ -10,7 +10,7 @@ import { describeForm, formGroups, resolveForm, roleRequirement, useLedgerForms 
  */
 const MULTI = new Set(LEDGER_ROLES.map(([key]) => key).filter((key) => isMultiRole(key)));
 
-export function LedgerMappingPreview({inspect,mapping,setMap,llmBusy,headerExtras,maxHeight=380}:{inspect?:Inspect;mapping?:Mapping;setMap?:(key:keyof Mapping,value:string|string[])=>void;llmBusy?:boolean;headerExtras?:(header:string)=>React.ReactNode;maxHeight?:number}){
+export function LedgerMappingPreview({inspect,mapping,setMap,llmBusy,headerExtras,maxHeight=380,resizeKey}:{inspect?:Inspect;mapping?:Mapping;setMap?:(key:keyof Mapping,value:string|string[])=>void;llmBusy?:boolean;headerExtras?:(header:string)=>React.ReactNode;maxHeight?:number;resizeKey?:string}){
   // 序时账三型的判定：下拉分组与必填标记跟着当前命中的型走。
   // hook 必须在提前 return 之前调用。
   const forms=useLedgerForms("je");
@@ -35,6 +35,7 @@ export function LedgerMappingPreview({inspect,mapping,setMap,llmBusy,headerExtra
     busy={llmBusy}
     headerExtras={headerExtras}
     maxHeight={maxHeight}
+    resizeKey={resizeKey}
     onChange={next=>{
       if(!editable||!mapping||!setMap)return;
       // 逐个角色比对差异后回写——setMap 带着方案互斥的副作用，必须走它。

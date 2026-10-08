@@ -8,7 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { cn } from "@/lib/utils";
+import { dedupeRepeatedText } from "@/lib/presentationText";
 
 export type ConfirmDialogOptions = {
   /** 标题，短句说明要确认什么事。 */
@@ -79,6 +79,7 @@ export function ConfirmDialogHost() {
   if (!current) return null;
   const request = current;
   const danger = request.tone === "danger";
+  const message = request.message ? dedupeRepeatedText(request.message) : "";
 
   return (
     <Dialog
@@ -88,21 +89,27 @@ export function ConfirmDialogHost() {
         if (!open) settle(false);
       }}
     >
-      <DialogContent className="confirm-dialog max-w-md">
-        <DialogHeader>
-          <DialogTitle style={{ fontSize: "var(--fs-lg)" }}>
+      <DialogContent className="confirm-dialog flex max-w-md flex-col gap-0 overflow-hidden p-0">
+        <DialogHeader className="confirm-dialog-header shrink-0 px-5 pt-5 pb-3">
+          <DialogTitle
+            className="confirm-dialog-title line-clamp-2"
+            title={request.title}
+            style={{ fontSize: "var(--fs-lg)" }}
+          >
             {request.title}
           </DialogTitle>
-          {request.message ? (
+        </DialogHeader>
+        {message ? (
+          <div className="confirm-dialog-body min-h-0 overflow-y-auto overscroll-contain px-5 pb-4">
             <DialogDescription
               className="confirm-dialog-message whitespace-pre-line text-foreground"
               style={{ fontSize: "var(--fs-md)", fontWeight: 400 }}
             >
-              {request.message}
+              {message}
             </DialogDescription>
-          ) : null}
-        </DialogHeader>
-        <DialogFooter>
+          </div>
+        ) : null}
+        <DialogFooter className="confirm-dialog-footer shrink-0 border-t bg-card px-5 py-4">
           <Button
             type="button"
             variant="secondary"
@@ -112,11 +119,8 @@ export function ConfirmDialogHost() {
           </Button>
           <Button
             type="button"
+            variant={danger ? "destructive" : "default"}
             onClick={() => settle(true)}
-            className={cn(
-              danger &&
-                "border-transparent bg-[var(--danger-fg)] text-white hover:bg-[var(--danger-fg)]/85 focus-visible:border-[var(--danger-fg)] focus-visible:ring-[var(--danger-fg)]/50",
-            )}
           >
             {request.confirmLabel ?? (danger ? "删除" : "确认")}
           </Button>

@@ -120,18 +120,88 @@ describe("工作簿 Sheet 分类", () => {
   });
 
   it("公共扫描入口统一过滤低置信度并保留 LLM 失败时的规则结果", async () => {
-    const call = vi.fn(async (method: string, params: Record<string, unknown>) => {
-      if (method === "tool.classify_llm") throw new Error("offline");
-      const sheet = (params.source as { sheet: string }).sheet;
-      if (!sheet) return classification("TB", ["TB", "说明"], { je: 1, tb: 8 });
-      return classification("说明", ["TB", "说明"], { je: 1, tb: 1 });
-    });
+    const call = vi.fn(
+      async (
+        method: string,
+        params: Record<string, unknown>,
+        _busyDetail?: string,
+      ) => {
+        if (method === "tool.classify_llm") throw new Error("offline");
+        const sheet = (params.source as { sheet: string }).sheet;
+        if (!sheet)
+          return {
+            ...classification("TB", ["TB", "说明"], { je: 4, tb: 5 }),
+            needsLlm: true,
+          };
+        return classification("说明", ["TB", "说明"], { je: 1, tb: 1 });
+      },
+    );
     const result = await scanLedgerUploadSources(call, ["C:/x/账套.xlsx"], {
       llmMethod: "tool.classify_llm",
     });
     expect(result.sources.map((item) => item.classification.sheet)).toEqual(["TB"]);
     expect(result.hiddenSheets).toBe(1);
     expect(result.llmFallbacks).toBe(1);
+    // 等待弹窗明细只留文件名＋Sheet：LLM 复核慢，用户要能看出在复核哪张表。
+    const llmCall = call.mock.calls.find(([m]) => m === "tool.classify_llm");
+    expect(llmCall?.[2]).toBe("账套.xlsx / TB");
+  });
+
+  it("高置信度分类明确不需要 LLM 时跳过类型复核", async () => {
+    const call = vi.fn(async (method: string) => {
+      if (method === "tool.classify_llm")
+        throw new Error("高置信度文件不应调用 LLM");
+      return classification("JE", ["JE"], { je: 12, tb: 3 });
+    });
+    const result = await scanLedgerUploadSources(call, ["C:/x/序时账.xls"], {
+      llmMethod: "tool.classify_llm",
+    });
+    expect(result.sources).toHaveLength(1);
+    expect(result.llmFallbacks).toBe(0);
+    expect(call.mock.calls.map(([method]) => method)).toEqual([
+      "deposit.classify_source",
+    ]);
+  });
+
+  it("多工作簿识别最多并行两份，合并结果仍保持选入顺序", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const releases: Array<() => void> = [];
+    const call = vi.fn(
+      async (_method: string, params: Record<string, unknown>) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        active -= 1;
+        const path = (params.source as { inputPath: string }).inputPath;
+        return classification(path.split("/").pop()!, [path.split("/").pop()!]);
+      },
+    );
+    const started: string[] = [];
+    const running = scanLedgerUploadSources(
+      call,
+      ["C:/x/1.xlsx", "C:/x/2.xlsx", "C:/x/3.xlsx"],
+      { onWorkbookStart: (path) => started.push(path) },
+    );
+
+    await vi.waitFor(() => expect(call).toHaveBeenCalledTimes(2));
+    expect(maxActive).toBe(2);
+    releases.shift()?.();
+    await vi.waitFor(() => expect(call).toHaveBeenCalledTimes(3));
+    expect(maxActive).toBe(2);
+    releases.splice(0).forEach((release) => release());
+
+    const result = await running;
+    expect(started).toEqual([
+      "C:/x/1.xlsx",
+      "C:/x/2.xlsx",
+      "C:/x/3.xlsx",
+    ]);
+    expect(result.sources.map((item) => item.path)).toEqual([
+      "C:/x/1.xlsx",
+      "C:/x/2.xlsx",
+      "C:/x/3.xlsx",
+    ]);
   });
 
   it("公共选对入口在所有工具中统一采用同一工作簿优先", () => {

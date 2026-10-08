@@ -49,6 +49,11 @@ export function StepTourHint({
     if (document.querySelector(".tour-layer")) return;
     const step = steps[current];
     if (!step || step.disabled) return;
+    // 精简提示的工具（suppressGenericHints）只弹针对性文案：
+    // 没写提示的步骤保持安静，不回退到通用兜底。
+    const script = toolId ? TOOL_TOUR_SCRIPTS[toolId] : undefined;
+    const specific = script?.stepHints?.[step.key];
+    if (script?.suppressGenericHints && !specific) return;
     setHint({ index: current, nonce: Date.now() });
   }, [current, steps]);
 

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const ToolManifestSchema = z.object({
   id: z.string(), name: z.string(), description: z.string(), route: z.string(),
-  version: z.string(), capabilities: z.array(z.string()), migrationStatus: z.enum(["ready", "preview", "legacy"])
+  version: z.string(), capabilities: z.array(z.string()), migrationStatus: z.enum(["ready", "preview", "legacy", "upcoming"])
 });
 export type ToolManifest = z.infer<typeof ToolManifestSchema>;
 
@@ -47,8 +47,60 @@ export const TaskRestoreSchema = z.object({
   jobId: z.string(),
   toolId: z.string(),
   params: z.record(z.string(), z.unknown()).default({}),
+  snapshot: z.unknown().nullable().optional(),
+  snapshotStatus: z
+    .enum(["valid", "none", "missing", "stale", "incompatible"])
+    .optional(),
   missingPaths: z.array(z.string()).default([]),
   authorizedPathCount: z.number().default(0),
   method: z.string().default(""),
 });
 export type TaskRestore = z.infer<typeof TaskRestoreSchema>;
+
+/** 会议纪要助手：Rust 侧 meeting-event 事件载荷（Teams 通话开始/结束）。 */
+/** 会议检测/录音事件（meeting-event）。
+ * summary 在 recording_started 时是启动摘要、recording_auto_finished 时是
+ * 停录成品信息（含 audioPath），字段不统一故整体宽松，用的时候按需收窄。 */
+export const MeetingEventSchema = z.object({
+  type: z.enum([
+    "call_started",
+    "call_ended",
+    "recording_started",
+    "recording_stopped",
+    "recording_auto_finished",
+    "recording_failed",
+  ]),
+  at: z.string(),
+  summary: z.record(z.string(), z.unknown()).optional(),
+  message: z.string().optional(),
+});
+export type MeetingEvent = z.infer<typeof MeetingEventSchema>;
+
+/** 会议检测与录音的当前状态（meeting_status 命令返回）。 */
+export const MeetingStatusSchema = z.object({
+  watchEnabled: z.boolean(),
+  resident: z.boolean(),
+  inCall: z.boolean(),
+  logFound: z.boolean(),
+  recording: z.boolean(),
+});
+export type MeetingStatus = z.infer<typeof MeetingStatusSchema>;
+
+export const MeetingRecordStartSchema = z.object({
+  startedAt: z.string(),
+  recordDir: z.string(),
+  systemOk: z.boolean(),
+  micOk: z.boolean(),
+  warnings: z.array(z.string()).default([]),
+});
+export type MeetingRecordStart = z.infer<typeof MeetingRecordStartSchema>;
+
+export const MeetingRecordStopSchema = z.object({
+  audioPath: z.string(),
+  recordDir: z.string(),
+  durationSec: z.number(),
+  sizeBytes: z.number(),
+  startedAt: z.string(),
+  warnings: z.array(z.string()).default([]),
+});
+export type MeetingRecordStop = z.infer<typeof MeetingRecordStopSchema>;

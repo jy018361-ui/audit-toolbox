@@ -9,8 +9,8 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
-use zip::{ZipWriter, write::SimpleFileOptions};
 use walkdir::WalkDir;
+use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::AppError;
 
@@ -30,7 +30,7 @@ impl Storage {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
           CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS migrations(source TEXT PRIMARY KEY,completed_at TEXT NOT NULL,report_json TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS task_history(job_id TEXT PRIMARY KEY,tool_id TEXT NOT NULL,status TEXT NOT NULL,summary_json TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,message TEXT,output_paths_json TEXT NOT NULL DEFAULT '[]',params_json TEXT NOT NULL DEFAULT '{}',method TEXT NOT NULL DEFAULT '');
+          CREATE TABLE IF NOT EXISTS task_history(job_id TEXT PRIMARY KEY,tool_id TEXT NOT NULL,status TEXT NOT NULL,summary_json TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,message TEXT,output_paths_json TEXT NOT NULL DEFAULT '[]',params_json TEXT NOT NULL DEFAULT '{}',method TEXT NOT NULL DEFAULT '',snapshot_json TEXT NOT NULL DEFAULT '{}');
           CREATE TABLE IF NOT EXISTS audipick_projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,data_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS audipick_documents(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,data_json TEXT NOT NULL,FOREIGN KEY(project_id) REFERENCES audipick_projects(id));
           CREATE TABLE IF NOT EXISTS fuzzy_match_results(job_id TEXT NOT NULL,a_index INTEGER NOT NULL,a_value TEXT NOT NULL,level TEXT NOT NULL,match_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(job_id,a_index));
@@ -62,7 +62,9 @@ impl Storage {
         for row in rows {
             let (k, v) = row.map_err(db_error)?;
             let mut value = serde_json::from_str(&v).unwrap_or(Value::Null);
-            if k == "audipickLlm" { strip_secrets(&mut value); }
+            if k == "audipickLlm" {
+                strip_secrets(&mut value);
+            }
             map.insert(k, value);
         }
         Ok(Value::Object(map))
@@ -80,7 +82,9 @@ impl Storage {
         let tx = conn.transaction().map_err(db_error)?;
         for (k, mut v) in map {
             // AudiPick profiles use the existing credential store, never SQLite secrets.
-            if k == "audipickLlm" { strip_secrets(&mut v); }
+            if k == "audipickLlm" {
+                strip_secrets(&mut v);
+            }
             tx.execute("INSERT INTO settings(key,value_json,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",params![k,v.to_string(),Utc::now().to_rfc3339()]).map_err(db_error)?;
         }
         tx.commit().map_err(db_error)
@@ -137,6 +141,9 @@ impl Storage {
     /// 把大块内联数据塞进了 params（历史上没有这种工具，防御性兜底），
     /// 这类任务直接放弃存档，历史页不显示恢复按钮。
     const JOB_PARAMS_ARCHIVE_LIMIT: usize = 64 * 1024;
+    /// 识别快照只保存表头、预览、科目清单等页面恢复数据，不保存完整表格。
+    /// 单独限额，超限时仍保留正常参数，只放弃快照。
+    const JOB_SNAPSHOT_ARCHIVE_LIMIT: usize = 256 * 1024;
 
     /// job_start 时存档用户原始参数（lib.rs 注入 `__settings`/`__llmOptions`
     /// 等之前克隆的版本），供历史记录「继续任务」还原现场。任务事件随后
@@ -150,22 +157,31 @@ impl Storage {
         method: &str,
         params: &Value,
     ) -> Result<(), AppError> {
-        let archived = if params.to_string().len() > Self::JOB_PARAMS_ARCHIVE_LIMIT {
+        let mut normal_params = params.clone();
+        let snapshot = normal_params
+            .as_object_mut()
+            .and_then(|map| map.remove("__restoreSnapshot"))
+            .and_then(build_restore_snapshot)
+            .filter(|value| value.to_string().len() <= Self::JOB_SNAPSHOT_ARCHIVE_LIMIT)
+            .unwrap_or_else(|| json!({}));
+        let archived = if normal_params.to_string().len() > Self::JOB_PARAMS_ARCHIVE_LIMIT {
             json!({})
         } else {
-            params.clone()
+            normal_params
         };
         self.conn.lock().execute(
-            "INSERT INTO task_history(job_id,tool_id,status,summary_json,started_at,message,output_paths_json,params_json,method)
-             VALUES(?1,?2,'queued','{}',?3,NULL,'[]',?4,?5)
+            "INSERT INTO task_history(job_id,tool_id,status,summary_json,started_at,message,output_paths_json,params_json,method,snapshot_json)
+             VALUES(?1,?2,'queued','{}',?3,NULL,'[]',?4,?5,?6)
              ON CONFLICT(job_id)DO UPDATE SET
-               tool_id=excluded.tool_id,params_json=excluded.params_json,method=excluded.method",
+               tool_id=excluded.tool_id,params_json=excluded.params_json,method=excluded.method,
+               snapshot_json=excluded.snapshot_json",
             params![
                 job_id,
                 tool_id,
                 Utc::now().to_rfc3339(),
                 archived.to_string(),
-                method
+                method,
+                snapshot.to_string()
             ],
         ).map_err(db_error)?;
         Ok(())
@@ -177,13 +193,14 @@ impl Storage {
         let conn = self.conn.lock();
         let row = conn
             .query_row(
-                "SELECT tool_id,params_json,method FROM task_history WHERE job_id=?1",
+                "SELECT tool_id,params_json,method,snapshot_json FROM task_history WHERE job_id=?1",
                 params![job_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
@@ -196,7 +213,7 @@ impl Storage {
                 )
             })?;
         drop(conn);
-        let (tool, params_text, method) = row;
+        let (tool, params_text, method, snapshot_text) = row;
         let params = serde_json::from_str::<Value>(&params_text)
             .ok()
             .filter(|v| v.is_object())
@@ -209,7 +226,11 @@ impl Storage {
                 Some(job_id.to_owned()),
             ));
         }
-        Ok(json!({"toolId": tool, "params": params, "method": method}))
+        let snapshot = serde_json::from_str::<Value>(&snapshot_text)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        Ok(json!({"toolId": tool, "params": params, "method": method, "snapshot": snapshot}))
     }
     pub fn history_get(&self) -> Result<Value, AppError> {
         let conn = self.conn.lock();
@@ -290,6 +311,20 @@ impl Storage {
         if !has_method {
             conn.execute(
                 "ALTER TABLE task_history ADD COLUMN method TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(db_error)?;
+        }
+        let has_snapshot: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_history') WHERE name='snapshot_json')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if !has_snapshot {
+            conn.execute(
+                "ALTER TABLE task_history ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'",
                 [],
             )
             .map_err(db_error)?;
@@ -1217,6 +1252,48 @@ impl Storage {
         Ok(())
     }
 }
+
+/// 把前端提供的轻量识别数据包装成带源文件指纹的持久快照。前端只声明
+/// `sources` 与 `data`，文件大小和修改时间由可信的 Rust 侧在任务启动时读取。
+fn build_restore_snapshot(raw: Value) -> Option<Value> {
+    let object = raw.as_object()?;
+    if object.get("version").and_then(Value::as_u64)? != 1 {
+        return None;
+    }
+    let data = object.get("data")?.clone();
+    let source_paths = object.get("sources")?.as_array()?;
+    if source_paths.is_empty() {
+        return None;
+    }
+    let mut fingerprints = Vec::with_capacity(source_paths.len());
+    for value in source_paths {
+        let path_text = value.as_str()?.trim();
+        if path_text.is_empty() {
+            return None;
+        }
+        let metadata = fs::metadata(Path::new(path_text)).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let modified_ms = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis() as u64;
+        fingerprints.push(json!({
+            "path": path_text,
+            "size": metadata.len(),
+            "modifiedMs": modified_ms,
+        }));
+    }
+    Some(json!({
+        "version": 1,
+        "sources": fingerprints,
+        "data": data,
+    }))
+}
+
 fn db_error<E: std::fmt::Display>(e: E) -> AppError {
     AppError::new(
         "STORAGE_ERROR",
@@ -1282,18 +1359,31 @@ mod tests {
     fn audipick_profile_roundtrip_preserves_toolbox_and_never_stores_secrets() {
         let root = test_root();
         let storage = Storage::new(&root).unwrap();
-        storage.settings_set(json!({"llm":{"enabled":false,"model":"global"}})).unwrap();
+        storage
+            .settings_set(json!({"llm":{"enabled":false,"model":"global"}}))
+            .unwrap();
         storage.settings_set(json!({"audipickLlm":{"mode":"dedicated","enabled":true,"model":"private",
             "apiKey":"synthetic-secret","api_key":"synthetic-secret","nested":{"token":"synthetic-secret"}}})).unwrap();
         let value = storage.settings_get().unwrap();
         assert_eq!(value["llm"]["model"], "global");
         assert_eq!(value["llm"]["enabled"], false);
         assert_eq!(value["audipickLlm"]["model"], "private");
-        let stored: String = storage.conn.lock().query_row("SELECT value_json FROM settings WHERE key='audipickLlm'", [], |row| row.get(0)).unwrap();
+        let stored: String = storage
+            .conn
+            .lock()
+            .query_row(
+                "SELECT value_json FROM settings WHERE key='audipickLlm'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(!stored.contains("synthetic-secret"));
         drop(storage);
         let reopened = Storage::new(&root).unwrap();
-        assert_eq!(reopened.settings_get().unwrap()["audipickLlm"]["mode"], "dedicated");
+        assert_eq!(
+            reopened.settings_get().unwrap()["audipickLlm"]["mode"],
+            "dedicated"
+        );
         drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }
@@ -1421,6 +1511,60 @@ mod tests {
             storage.history_params("job-big").unwrap_err().code,
             "HISTORY_PARAMS_EMPTY"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn restore_snapshot_is_separate_bounded_and_fingerprinted() {
+        let root = test_root();
+        let source = root.join("tb.csv");
+        fs::write(&source, "科目,期末\n1001,1\n").unwrap();
+        let storage = Storage::new(&root).unwrap();
+        storage
+            .record_job_params(
+                "job-snapshot",
+                "fa_list",
+                "fa.tbje_export",
+                &json!({
+                    "tbSource":{"inputPath":source},
+                    "__restoreSnapshot":{
+                        "version":1,
+                        "sources":[source],
+                        "data":{"tb":{"headers":["科目","期末"],"rowCount":1}}
+                    }
+                }),
+            )
+            .unwrap();
+
+        // 历史列表仍只带轻量参数，不把快照乘以 200 条一起反序列化。
+        let history = storage.history_get().unwrap();
+        assert!(history[0]["params"].get("__restoreSnapshot").is_none());
+        let restored = storage.history_params("job-snapshot").unwrap();
+        assert_eq!(restored["snapshot"]["version"], 1);
+        assert_eq!(restored["snapshot"]["data"]["tb"]["rowCount"], 1);
+        assert_eq!(
+            restored["snapshot"]["sources"][0]["size"],
+            fs::metadata(&source).unwrap().len()
+        );
+
+        storage
+            .record_job_params(
+                "job-large-snapshot",
+                "fa_list",
+                "fa.tbje_export",
+                &json!({
+                    "tbSource":{"inputPath":source},
+                    "__restoreSnapshot":{
+                        "version":1,
+                        "sources":[source],
+                        "data":{"blob":"x".repeat(Storage::JOB_SNAPSHOT_ARCHIVE_LIMIT + 1)}
+                    }
+                }),
+            )
+            .unwrap();
+        let restored = storage.history_params("job-large-snapshot").unwrap();
+        assert!(restored["params"]["tbSource"].is_object());
+        assert_eq!(restored["snapshot"], json!({}));
         let _ = fs::remove_dir_all(root);
     }
 

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
+import { ListFilter } from "lucide-react";
 
 /** 引擎用这个字面量表示"该列为空"，勾选它等价于筛选空值行。 */
 export const BLANK_TOKEN = "<空白>";
@@ -36,9 +37,10 @@ export function ColumnFilterMenu({
   valueNote,
   searchPlaceholder,
   splitCode,
+  defaultSelectAll = true,
 }: {
   field: string;
-  anchor: DOMRect;
+  anchor: HTMLElement;
   loading: boolean;
   data?: ColumnFilterValues;
   selected: string[];
@@ -51,14 +53,42 @@ export function ColumnFilterMenu({
   searchPlaceholder?: string;
   /** 科目面板专用：把「编码-名称」拼接串拆成两段展示；其余列不拆。 */
   splitCode?: boolean;
+  /**
+   * 首次载入时是否把全部取值视为已选。普通列筛选以“全选”等价于“不筛选”；
+   * 目标科目选择以空数组表示“尚未选择”，必须关闭此行为，避免搜索后把隐藏的
+   * 全量科目连同当前结果一起提交。
+   */
+  defaultSelectAll?: boolean;
 }) {
   const [keyword, setKeyword] = useState(data?.keyword ?? "");
   const [checked, setChecked] = useState<Set<string>>(() => new Set(selected));
   const panel = useRef<HTMLDivElement>(null);
-  const initialized = useRef(selected.length > 0);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const initialized = useRef(selected.length > 0 || !defaultSelectAll);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const closeAndRestoreFocus = () => {
+    onCloseRef.current();
+    if (anchor.isConnected) anchor.focus();
+  };
+  const closeAndRestoreFocusRef = useRef(closeAndRestoreFocus);
+  closeAndRestoreFocusRef.current = closeAndRestoreFocus;
+  const [position, setPosition] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    maxHeight: number;
+  }>();
 
-  // 无筛选时 Excel 默认显示「全选」。首次取值异步返回后补齐勾选；若结果被截断，
-  // 则不能把眼前这一批冒充整列全选，否则直接应用会意外只保留前 VALUE_LIMIT 项。
+  // 普通列无筛选时 Excel 默认显示「全选」。首次取值异步返回后补齐勾选；若结果
+  // 被截断，则不能把眼前这一批冒充整列全选。目标科目面板会关闭 defaultSelectAll，
+  // 因为空数组在那里表示“尚未选择”，不是“选择整列”。
+  useEffect(() => {
+    // Portal 初次挂载后让浏览器完成当前点击/焦点事件，再移入菜单。
+    const frame = window.requestAnimationFrame(() => searchInput.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
   useEffect(() => {
     if (initialized.current || !data || data.truncated) return;
     initialized.current = true;
@@ -70,18 +100,69 @@ export function ColumnFilterMenu({
       const target = event.target as HTMLElement | null;
       // 点触发按钮时不在这里关：让按钮自己的 onClick 决定开还是合。
       if (target?.closest("[data-ts-filter-trigger]")) return;
-      if (!panel.current?.contains(target as Node)) onClose();
+      if (!panel.current?.contains(target as Node)) onCloseRef.current();
     }
     function keyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") {
+        // 上层确认框拥有当前键盘交互；先关闭确认框，勿连带关闭底下的筛选。
+        if (document.querySelector('[data-slot="dialog-content"][data-state="open"]')) return;
+        event.preventDefault();
+        closeAndRestoreFocusRef.current();
+      }
     }
+    // 页面切换时按钮可能仍留在隐藏的路由树中。Portal 必须主动关闭，
+    // 否则会盖住下一页并继续拦截键盘/指针事件。
+    const closeOnNavigation = () => onCloseRef.current();
     window.addEventListener("pointerdown", pointerDown, true);
     window.addEventListener("keydown", keyDown);
+    window.addEventListener("hashchange", closeOnNavigation);
+    window.addEventListener("popstate", closeOnNavigation);
     return () => {
       window.removeEventListener("pointerdown", pointerDown, true);
       window.removeEventListener("keydown", keyDown);
+      window.removeEventListener("hashchange", closeOnNavigation);
+      window.removeEventListener("popstate", closeOnNavigation);
     };
-  }, [onClose]);
+  }, []);
+
+  // 触发器可能位于横向预览表或长页面里。始终读取它的当前视口坐标，
+  // 页面/表格滚动后即时重排；弹层放不下时翻到上方，操作按钮仍留在视口内。
+  useLayoutEffect(() => {
+    const place = () => {
+      if (!anchor.isConnected) {
+        onCloseRef.current();
+        return;
+      }
+      const edge = 8;
+      const gap = 6;
+      const rect = anchor.getBoundingClientRect();
+      const width = Math.min(360, Math.max(240, window.innerWidth - edge * 2));
+      const maxHeight = Math.max(220, window.innerHeight - edge * 2);
+      const height = Math.min(panel.current?.scrollHeight ?? 420, maxHeight);
+      const below = window.innerHeight - rect.bottom - edge - gap;
+      const above = rect.top - edge - gap;
+      const top = below >= Math.min(height, 320) || below >= above
+        ? rect.bottom + gap
+        : rect.top - height - gap;
+      const preferredLeft = rect.left + rect.width / 2 - width / 2;
+      setPosition({
+        left: Math.min(Math.max(preferredLeft, edge), window.innerWidth - width - edge),
+        top: Math.min(Math.max(top, edge), window.innerHeight - height - edge),
+        width,
+        maxHeight,
+      });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(place);
+    if (panel.current) observer?.observe(panel.current);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+      observer?.disconnect();
+    };
+  }, [anchor, data?.values.length, data?.truncated, loading]);
 
   const values = data?.values ?? [];
   // 本批取值里已勾中的数量决定"（全选）"的三态；用户勾过、但不在本批里的值
@@ -89,14 +170,8 @@ export function ColumnFilterMenu({
   const visibleChecked = values.filter((value) => checked.has(value));
   const allChecked = values.length > 0 && visibleChecked.length === values.length;
   const someChecked = visibleChecked.length > 0 && !allChecked;
-  const hiddenChecked = [...checked].filter((value) => !values.includes(value));
-
-  const width = 268;
-  const left = Math.min(
-    Math.max(8, anchor.left),
-    Math.max(8, window.innerWidth - width - 8),
-  );
-  const top = Math.min(anchor.bottom + 4, Math.max(8, window.innerHeight - 340));
+  const visibleValues = new Set(values);
+  const hiddenChecked = [...checked].filter((value) => !visibleValues.has(value));
 
   function toggle(value: string) {
     setChecked((current) => {
@@ -111,8 +186,15 @@ export function ColumnFilterMenu({
     <div
       ref={panel}
       className="ts-filter-menu"
-      style={{ left, top, width }}
+      style={{
+        left: position?.left ?? 0,
+        top: position?.top ?? 0,
+        width: position?.width ?? 360,
+        maxHeight: position?.maxHeight,
+        visibility: position ? "visible" : "hidden",
+      }}
       role="dialog"
+      aria-modal="false"
       aria-label={`筛选 ${field}`}
     >
       <div className="ts-filter-menu-title" title={field}>
@@ -120,8 +202,12 @@ export function ColumnFilterMenu({
       </div>
       <div className="ts-filter-menu-search">
         <input
+          ref={searchInput}
           value={keyword}
-          placeholder={searchPlaceholder ?? "搜索取值，回车重新读取"}
+          placeholder={searchPlaceholder ?? "搜索取值，回车重新读取…"}
+          aria-label={`搜索${field}`}
+          name={`column-filter-${field}`}
+          autoComplete="off"
           onChange={(event) => setKeyword(event.target.value)}
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
@@ -136,7 +222,7 @@ export function ColumnFilterMenu({
           disabled={loading}
           onClick={() => onSearch(keyword)}
         >
-          {loading ? "读取中" : "读取"}
+          {loading ? "读取中…" : "读取"}
         </Button>
       </div>
       <label className="ts-filter-all">
@@ -217,16 +303,19 @@ export function ColumnFilterMenu({
         >
           清除
         </Button>
-        <Button type="button" variant="secondary" size="sm" onClick={onClose}>
+        <Button type="button" variant="secondary" size="sm" onClick={closeAndRestoreFocus}>
           取消
         </Button>
         <Button
           type="button"
           variant="default"
           size="sm"
-          onClick={() => onApply([...checked])}
+          onClick={() => {
+            onApply([...checked]);
+            if (anchor.isConnected) anchor.focus();
+          }}
         >
-          应用
+          确认选择
         </Button>
       </div>
     </div>,
@@ -240,6 +329,11 @@ export function ColumnFilterMenu({
  * 不会被误拆。拆不开返回 undefined。
  */
 function splitAccountCode(value: string): { code: string; name: string } | undefined {
+  // Oracle 等分段编码中的连字符不是「编码－名称」分界。
+  const spaced = /^([0-9A-Za-z][0-9A-Za-z._-]*)\s+(.+)$/.exec(value.trim());
+  if (spaced && /\d/.test(spaced[1]))
+    return { code: spaced[1], name: spaced[2].trim() };
+  if (/^[0-9A-Za-z._-]+$/.test(value.trim())) return undefined;
   const dash = value.indexOf("-");
   if (dash <= 0 || dash === value.length - 1) return undefined;
   const code = value.slice(0, dash).trim();
@@ -249,14 +343,14 @@ function splitAccountCode(value: string): { code: string; name: string } | undef
 }
 
 /** 预览表头里的漏斗按钮：已筛选的显示勾中个数，再次点击收起面板。 */
-export function ColumnFilterTrigger({field,chosen,expanded,onToggle}:{
-  field:string;chosen:string[];expanded:boolean;onToggle:(anchor:DOMRect|undefined)=>void;
+export function ColumnFilterTrigger({field,chosen,expanded,onToggle,compact=false}:{
+  field:string;chosen:string[];expanded:boolean;onToggle:(anchor:HTMLElement|undefined)=>void;compact?:boolean;
 }){
   return (
     <button
       type="button"
       data-ts-filter-trigger=""
-      className={`ts-filter-trigger${chosen.length ? " active" : ""}`}
+      className={`ts-filter-trigger${chosen.length ? " active" : ""}${compact ? " ts-filter-trigger-compact" : ""}`}
       aria-label={`筛选 ${field}${chosen.length ? `，已选 ${chosen.length} 项` : ""}`}
       aria-expanded={expanded}
       title={
@@ -269,10 +363,10 @@ export function ColumnFilterTrigger({field,chosen,expanded,onToggle}:{
           onToggle(undefined);
           return;
         }
-        onToggle(event.currentTarget.getBoundingClientRect());
+        onToggle(event.currentTarget);
       }}
     >
-      <span className="ts-filter-icon">▼</span>
+      {compact ? <ListFilter size={16} aria-hidden="true" /> : <span className="ts-filter-icon">▼</span>}
       {chosen.length > 0 && (
         <span className="ts-filter-badge">{chosen.length}</span>
       )}

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { telemetryTrack } from "../api";
+import { liveToolPageIds, markToolPageLive } from "../toolPageActivity";
 
 export function toolIdFromPathname(pathname: string): string | undefined {
   const match = /^\/tools\/([^/]+)\/?$/.exec(pathname);
@@ -25,7 +26,9 @@ type PersistentToolPagesProps = {
  * Tool pages own sizeable upload, mapping and job state. Replacing the child of
  * `/tools/:toolId` immediately destroyed that state. Retaining every page,
  * however, accumulated large tables and listeners for the whole app lifetime.
- * The active page, two recent hidden pages, and pages with running jobs survive.
+ * Pages the user has actually worked in (see toolPageActivity) never evict —
+ * they stay mounted until the app exits; only never-touched blank pages are
+ * capped by `maxHiddenPages`, plus pages with running jobs.
  */
 export function PersistentToolPages({
   renderPage,
@@ -49,6 +52,7 @@ export function PersistentToolPages({
         activeToolId,
         keepAlive,
         maxHiddenPages,
+        liveToolPageIds(),
       );
       return arraysEqual(current, next) ? current : next;
     });
@@ -60,6 +64,7 @@ export function PersistentToolPages({
       activeToolId,
       keepAlive,
       maxHiddenPages,
+      liveToolPageIds(),
     );
   }, [activeToolId, keepAlive, maxHiddenPages, visitedToolIds]);
 
@@ -84,6 +89,9 @@ export function PersistentToolPages({
     <>
       {mountedToolIds.map((toolId) => {
         const active = toolId === activeToolId;
+        // 「有现场」信号：用户在本页点击、输入或拖入文件即登记；登记后
+        // 该页退出 LRU 淘汰，保活到应用退出（见 toolPageActivity.ts）。
+        // 隐藏页带 inert，不会误发事件；active 页任何交互都算现场。
         return (
           <div
             key={toolId}
@@ -96,6 +104,9 @@ export function PersistentToolPages({
             hidden={!active}
             aria-hidden={active ? undefined : true}
             inert={!active}
+            onClick={() => markToolPageLive(toolId)}
+            onChange={() => markToolPageLive(toolId)}
+            onDragEnter={() => markToolPageLive(toolId)}
           >
             {renderPage(toolId)}
           </div>
@@ -110,6 +121,7 @@ export function retainedToolIds(
   activeToolId: string | undefined,
   keepAlive: ReadonlySet<string>,
   maxHiddenPages: number,
+  liveToolPages: ReadonlySet<string> = new Set(),
 ): string[] {
   const next = [...new Set(current)];
   if (activeToolId) {
@@ -117,13 +129,21 @@ export function retainedToolIds(
     if (previous >= 0) next.splice(previous, 1);
     next.push(activeToolId);
   }
-  const limit = Math.max(0, maxHiddenPages) + (activeToolId ? 1 : 0);
-  for (let index = 0; next.length > limit && index < next.length;) {
+  // 受保护页（当前页 / 运行中任务 / 有现场）不淘汰、也不占名额；
+  // `maxHiddenPages` 只约束从未动过的空白页。
+  const isProtected = (toolId: string) =>
+    toolId === activeToolId ||
+    keepAlive.has(toolId) ||
+    liveToolPages.has(toolId);
+  let blankPages = next.filter((toolId) => !isProtected(toolId)).length;
+  const limit = Math.max(0, maxHiddenPages);
+  for (let index = 0; index < next.length && blankPages > limit;) {
     const toolId = next[index];
-    if (toolId === activeToolId || keepAlive.has(toolId)) {
+    if (isProtected(toolId)) {
       index += 1;
     } else {
       next.splice(index, 1);
+      blankPages -= 1;
     }
   }
   return next;

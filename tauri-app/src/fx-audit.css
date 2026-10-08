@@ -118,12 +118,24 @@
   color: var(--muted-foreground);
   font-size: 13px;
 }
+/* 导入口径生效时状态行承载「恢复官方汇率」链接按钮，与正文留一点间距。 */
+.fx-rate-note .fx-link-button {
+  margin-left: 6px;
+}
 .fx-source-meta {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(9rem, 1fr) 5.5rem 6rem;
   align-items: end;
   gap: 10px;
+  /* Sheet 给足可读空间即可；大屏不随卡片继续拉长。窄卡片仍按剩余宽度收缩。 */
+  max-width: calc(31.5rem + 20px);
   margin-top: 12px;
+}
+.fx-source-meta > * {
+  min-width: 0;
+}
+.fx-source-meta > span {
+  grid-column: 1 / -1;
 }
 .fx-source-meta label,
 .fx-run-grid label {
@@ -141,8 +153,15 @@
   padding: 6px 9px;
   border: 1px solid var(--control-border);
   border-radius: 8px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
+}
+.fx-source-meta label input,
+.fx-source-meta label select {
+  width: 100%;
+}
+.fx-source-meta > .fx-warning {
+  grid-column: 1 / -1;
 }
 .fx-warning {
   color: var(--warning-fg);
@@ -180,7 +199,7 @@
   padding: 4px 6px;
   border: 1px solid var(--control-border);
   border-radius: 6px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
   font-size: 11px;
 }
@@ -226,18 +245,30 @@
 }
 .fx-actions {
   display: flex;
+  /* 测算三键 + 汇率导出/导入 + 提示icon，窄窗口放不下时整钮换行。 */
+  flex-wrap: wrap;
+  align-items: center;
   gap: 10px;
   margin: 14px 0;
 }
 .fx-review-all {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  /* 状态说明占左、复核按钮收右：操作按钮落在行尾是向导页的统一动线。 */
   justify-content: space-between;
   gap: 20px;
   padding: 18px 20px;
   border: 1px solid color-mix(in srgb, var(--primary) 32%, var(--border));
   border-radius: 12px;
   background: color-mix(in srgb, var(--primary) 6%, var(--card));
+}
+.fx-review-all > div:first-child {
+  flex: 0 1 38rem;
+  min-width: min(100%, 18rem);
+}
+.fx-review-all > button {
+  flex: 0 0 auto;
 }
 .fx-review-all h2 {
   margin: 0 0 5px;
@@ -266,6 +297,14 @@
   background: var(--warning-bg);
   color: var(--warning-fg);
 }
+.fx-source-empty .fx-side-upload {
+  align-self: flex-start;
+  margin-top: 12px;
+}
+.fx-review-states span.attention {
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
 .ledger-review-compact {
   display: grid;
   gap: 8px;
@@ -288,6 +327,17 @@
   color: var(--foreground);
   font-size: 13px;
 }
+.ledger-review-change.applied,
+.ledger-review-change.pending {
+  padding: 8px 10px;
+  border: 1px solid var(--success-dot);
+  border-radius: 8px;
+  background: var(--success-bg);
+}
+.ledger-review-change.pending {
+  border-color: var(--warning-dot);
+  background: var(--warning-bg);
+}
 .ledger-review-change em {
   padding: 2px 7px;
   border-radius: 999px;
@@ -297,8 +347,8 @@
   font-style: normal;
 }
 .ledger-review-change.pending em {
-  background: var(--muted);
-  color: var(--muted-foreground);
+  background: var(--warning-dot);
+  color: var(--warning-fg);
 }
 .ledger-review-change button {
   appearance: none;
@@ -365,13 +415,6 @@
 }
 .fx-result-status.limited strong {
   color: var(--warning-fg);
-}
-.fx-result-status.blocked {
-  border-color: var(--danger-border);
-  background: var(--danger-bg);
-}
-.fx-result-status.blocked strong {
-  color: var(--danger-fg);
 }
 .fx-bridge-step {
   display: grid;
@@ -481,7 +524,6 @@
   .fx-run-grid {
     grid-template-columns: 1fr 1fr;
   }
-  .fx-review-all,
   .fx-result-heading {
     align-items: flex-start;
     flex-direction: column;
@@ -492,156 +534,12 @@
   .fx-operator {
     padding: 2px 0;
   }
-  .fx-review-all > button {
-    width: 100%;
-  }
 }
 /* JE/TB upload cards stay side-by-side; their full-width previews stack below. */
 .fx-preview-stack {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 20px;
-}
-.fx-classification-review {
-  display: grid;
-  gap: 12px;
-  margin-top: 18px;
-  padding: 18px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--card);
-}
-.fx-classification-review h4,
-.fx-classification-review p {
-  margin: 0;
-}
-.fx-classification-review p {
-  margin-top: 5px;
-  color: var(--muted-foreground);
-  font-size: 13px;
-}
-.fx-classification-list {
-  display: grid;
-  gap: 8px;
-  max-height: 360px;
-  overflow: auto;
-}
-.fx-classification-list label {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 190px;
-  gap: 16px;
-  align-items: center;
-  padding: 10px 0;
-  border-top: 1px solid var(--border);
-}
-.fx-classification-list label > span {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-.fx-classification-list b,
-.fx-classification-list small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.fx-classification-list small {
-  color: var(--muted-foreground);
-}
-.fx-classification-list select {
-  min-height: 36px;
-  padding: 6px 9px;
-  border: 1px solid var(--control-border);
-  border-radius: 8px;
-  background: var(--background);
-  color: var(--foreground);
-}
-.fx-classification-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-.fx-classification-heading > button {
-  flex: 0 0 auto;
-}
-.fx-pattern-names {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin: 5px 0;
-}
-.fx-pattern-side {
-  display: grid;
-  gap: 5px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--muted);
-}
-.fx-pattern-side > strong {
-  font-size: 12px;
-}
-.fx-pattern-side > div {
-  display: grid;
-  gap: 6px;
-}
-.fx-pattern-side span {
-  display: grid;
-  grid-template-columns: minmax(70px, 0.35fr) minmax(0, 1fr) minmax(0, 1fr);
-  gap: 8px;
-  align-items: start;
-}
-.fx-pattern-side span b,
-.fx-pattern-side span small {
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-.fx-pattern-side span small {
-  font-size: 11px;
-}
-.fx-unrealized-module {
-  display: grid;
-  gap: 12px;
-  padding: 18px;
-  border: 1px solid color-mix(in srgb, var(--primary) 36%, var(--border));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--primary) 5%, var(--card));
-}
-.fx-unrealized-module h4,
-.fx-unrealized-module p {
-  margin: 0;
-}
-.fx-unrealized-module p {
-  margin-top: 5px;
-  color: var(--muted-foreground);
-  font-size: 13px;
-}
-.fx-unrealized-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-}
-@media (max-width: 900px) {
-  .fx-unrealized-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-@media (max-width: 720px) {
-  .fx-classification-heading {
-    flex-direction: column;
-  }
-  .fx-classification-heading > button {
-    width: 100%;
-  }
-  .fx-classification-list label,
-  .fx-pattern-names,
-  .fx-unrealized-metrics {
-    grid-template-columns: 1fr;
-  }
-  .fx-classification-list select {
-    width: 100%;
-  }
 }
 .fx-source-status {
   display: inline-flex;
@@ -708,6 +606,14 @@
   color: var(--muted-foreground);
   font-size: 13px;
   line-height: 1.6;
+}
+.fx-stage-note summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--brand-link);
+}
+.fx-stage-note p {
+  margin: var(--sp-2) 0 0;
 }
 .fx-export-stage {
   display: flex;
@@ -825,10 +731,11 @@
 }
 
 /* TB 粒度不足：外币敞口是「科目×币种」粒度，TB 只给到科目粒度时无法测算。
-   用户能做的动作很具体——换一份余额表，所以这条要比普通提示更显眼。 */
+   只作提示不阻断——科目本来就没有外币余额时属正常情况，同余额滚动失配
+   一样用黄色提示，不用红色错误。 */
 .fx-granularity-notice {
-  border: 1px solid var(--danger-border);
-  background: var(--danger-bg);
+  border: 1px solid var(--warning-border);
+  background: var(--warning-bg);
   border-radius: 8px;
   padding: 12px 14px;
   margin-bottom: 12px;
@@ -877,7 +784,7 @@
 .fx-granularity-table thead th {
   position: sticky;
   top: 0;
-  background: var(--danger-bg);
+  background: var(--warning-bg);
   white-space: nowrap;
 }
 .fx-granularity-table td:last-child {
@@ -886,6 +793,19 @@
 }
 
 /* 检查与勾稽：默认折叠，用户想追到「哪一步没通过」时展开。 */
+.fx-prominent-warnings {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-bg);
+  color: var(--foreground);
+  line-height: 1.6;
+}
+.fx-prominent-warnings ul {
+  margin: 6px 0 0;
+  padding-left: 1.25rem;
+}
 .fx-checks {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -970,23 +890,40 @@
   color: var(--destructive);
 }
 
-/* 凭证分类复核分两段：等你定分类 / 已定分类但算不出金额。 */
-.fx-classification-section {
-  margin-top: 16px;
-}
-.fx-classification-section h5 {
-  margin: 0 0 4px;
-  font-size: 14px;
-}
-.fx-classification-section > p {
-  margin: 0 0 10px;
-  font-size: 13px;
-  color: var(--muted-foreground);
-  line-height: 1.7;
-}
-
 .fx-accounts label {
-  grid-template-columns: minmax(120px, 1fr) 150px 148px;
+  grid-template-columns: minmax(260px, 1fr) 150px minmax(210px, 250px);
+  align-items: start;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--card);
+}
+.fx-accounts label:last-of-type {
+  border-bottom: 0;
+}
+.fx-accounts label:hover {
+  background: color-mix(in srgb, var(--primary) 4%, var(--card));
+}
+.fx-accounts.fx-list {
+  gap: 0;
+  margin-top: var(--sp-3);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+}
+/* 多主体账套加「主体」列：辅助拆行挂各自主体，末级兜底行主体未知显示 —。 */
+.fx-accounts.has-entity label,
+.fx-accounts.has-entity .fx-accounts-head {
+  grid-template-columns: minmax(140px, 220px) minmax(220px, 1fr) 150px minmax(200px, 240px);
+}
+.fx-entity-cell {
+  align-self: start;
+  padding-top: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .fx-accounts select.fx-currency-override {
   border-color: var(--primary);
@@ -998,26 +935,74 @@
   top: 0;
   z-index: 1;
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) 150px 148px;
+  grid-template-columns: minmax(260px, 1fr) 150px minmax(210px, 250px);
   gap: 12px;
-  padding: 1px 0 6px;
+  padding: 11px 14px;
   border-bottom: 1px solid var(--border);
-  background: var(--card);
+  background: var(--muted);
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+.fx-checks-evidence > summary {
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.fx-checks-evidence[open] > small {
+  display: block;
+  margin-top: 6px;
+  max-width: 56ch;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.fx-checks-quality td:nth-child(4) {
+  min-width: 160px;
+}
+.fx-accounts-head > span:last-child {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.fx-accounts label > .fx-account-name {
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.fx-account-name-missing {
+  display: block;
+  margin-top: 2px;
+  color: var(--warning-fg);
+}
+.fx-currency-cell {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  overflow: visible;
+  white-space: normal;
+}
+.fx-currency-cell select {
+  width: 100%;
+  min-width: 0;
+}
+.fx-currency-risk-label {
+  line-height: 1.35;
+  white-space: normal;
+}
+.fx-currency-risk-label {
+  color: var(--danger-fg);
+  font-weight: 600;
 }
 /* 「按本位币」「未识别」都表示没认出账户币种，描边标出来，便于滚一遍就扫到。 */
 .fx-accounts select.fx-currency-unknown {
   border-color: var(--warning-border);
 }
-.fx-accounts-more {
-  margin: 0 0 10px;
-}
-.fx-accounts-more summary {
-  cursor: pointer;
-}
-.fx-accounts-more p {
-  margin: 6px 0 0;
+/* 非货币性项目／其他损益成本科目不参与外币重估，账户币种固定 N/A。 */
+.fx-currency-na {
+  color: var(--muted-foreground);
+  padding: 6px 4px;
 }
 
 .fx-accounts select.fx-currency-risky {
@@ -1040,7 +1025,7 @@
   padding: 6px 10px;
   border: 1px solid var(--control-border);
   border-radius: 8px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
 }
 .fx-list-filter input:focus-visible {
@@ -1135,11 +1120,25 @@
   line-height: 1.7;
 }
 
-/* 三步导引下的步骤切换按钮：与 FA TBJE 的步骤按钮同一形态。 */
+/* 三步导引下的步骤切换按钮：与 FA TBJE 的步骤按钮同一形态。
+   主按钮（下一步）收在行尾——向导页的操作动线统一靠右，
+   「返回」紧挨在其左侧；提示语留在行首不挤占按钮区。 */
 .fx-step-actions {
   display: flex;
   gap: 10px;
   margin: 16px 0 4px;
+  justify-content: flex-end;
+}
+.fx-step-actions > .fx-hint {
+  margin-right: auto;
+}
+.fx-step-actions-sticky {
+  position: sticky;
+  bottom: 0;
+  z-index: var(--layer-sticky, 2);
+  padding: var(--sp-3);
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface);
 }
 /* 提示语里的「回到上一步」：是按钮，但读起来该像正文里的链接。 */
 .fx-link-button {

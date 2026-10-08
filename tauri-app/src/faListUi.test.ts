@@ -7,14 +7,17 @@ import {
   faOutputPathAfterSourceSelection,
   faHeaderOption,
   faReviewNarrative,
+  faReviewDisplayMessage,
   faReviewReasons,
   faReviewSummary,
   faRolesForSide,
+  faSelectColumnRole,
   isFaMatchDisabled,
   normalizeFaSuggestedMapping,
   planFaLlmChanges,
   planFaSupplementChanges,
   sanitizeFaBeginMapping,
+  shouldAutoApplyFa,
   shouldAutoPrefillFaAddition,
   shouldShowFaAdditionFields,
   shouldShowFaPreviewWorkspace,
@@ -36,6 +39,12 @@ const baseInput = {
 };
 
 describe("FA List migration parity", () => {
+  it("仅高于 75% 的字段建议自动采纳", () => {
+    expect(shouldAutoApplyFa(0.75)).toBe(false);
+    expect(shouldAutoApplyFa(0.751)).toBe(true);
+    expect(shouldAutoApplyFa(undefined)).toBe(false);
+  });
+
   it("hides the optional addition group when addition method is unmapped", () => {
     expect(shouldShowFaAdditionFields(undefined)).toBe(false);
     expect(shouldShowFaAdditionFields(" ")).toBe(false);
@@ -139,6 +148,49 @@ describe("FA List migration parity", () => {
 });
 
 describe("FA LLM 复核先改后核", () => {
+  it("两期清单可配置为只给建议，高置信度也不静默改映射", () => {
+    const plan = planFaLlmChanges({
+      ...baseInput,
+      autoApply: false,
+      autoApplied: [
+        {
+          role: "original_value",
+          file_side: "file1",
+          suggested_column: "期初原值",
+          confidence: 0.98,
+        },
+      ],
+    });
+    expect(plan.beginMapping.originalValue).toBe("期末原值");
+    expect(plan.changes).toEqual([]);
+    expect(plan.pending[0]).toMatchObject({
+      id: "begin.originalValue",
+      suggested: "期初原值",
+    });
+  });
+
+  it("clear 能删除确定错误且无替代列的已有映射", () => {
+    const plan = planFaLlmChanges({
+      ...baseInput,
+      fieldReviews: [
+        {
+          role: "category",
+          file_side: "file1",
+          action: "clear",
+          confidence: 0.96,
+          reason: "当前列是编码且没有可信类别列",
+        },
+      ],
+    });
+    expect(plan.beginMapping.category).toBe("类别");
+    expect(plan.pending[0]).toMatchObject({
+      id: "begin.category",
+      current: "类别",
+      suggested: "未映射",
+      apply: { kind: "mapping", side: "begin", key: "category", value: undefined },
+    });
+  });
+
   it("重新复核能把已取消的开始使用日期映射补回对应文件", () => {
     const plan = planFaLlmChanges({
       ...baseInput,
@@ -182,7 +234,7 @@ describe("FA LLM 复核先改后核", () => {
         { role: "addition_date", file_side: "file1", suggested_column: "资本化日期" },
       ],
       fieldReviews: [
-        { role: "current_year_dep", suggested_mapping: { file1: "本年折旧", file2: "本年至今折旧" } },
+        { role: "current_year_dep", suggested_mapping: { file1: "本年折旧", file2: "本年至今折旧" }, confidence: 0.95 },
       ],
     });
     expect(plan.beginMapping.currentYearDep).toBeUndefined();
@@ -191,6 +243,57 @@ describe("FA LLM 复核先改后核", () => {
     expect(plan.endMapping.currentYearDep).toBe("本年至今折旧");
     expect(plan.changes.map((item) => item.id)).toEqual(["end.currentYearDep"]);
     expect(plan.pending).toEqual([]);
+  });
+  it("政策对比只展示并应用下拉框提供的角色", () => {
+    const plan = planFaLlmChanges({
+      ...baseInput,
+      roleLabels: { currentYearDep: "本年折旧", originalValue: "原值" },
+      allowedRoleKeys: ["currentYearDep", "originalValue"],
+      autoApplied: [
+        { role: "current_year_dep", file_side: "file2", suggested_column: "本年至今折旧", confidence: 0.95 },
+        { role: "addition_method", file_side: "file2", suggested_column: "资产来源", confidence: 0.95 },
+      ],
+      fieldReviews: [
+        { role: "addition_date", file_side: "file2", suggested_mapping: { file2: "资本化日期" }, confidence: 0.65 },
+      ],
+    });
+    expect(plan.changes.map(({ label }) => label)).toEqual(["期末 本年折旧"]);
+    expect(plan.pending).toEqual([]);
+    expect(plan.endMapping.currentYearDep).toBe("本年至今折旧");
+    expect(plan.endMapping.additionMethod).toBeUndefined();
+    expect(plan.endMapping.additionDate).toBeUndefined();
+  });
+  it("LLM 建议只在命中真实表头后生效，并使用下拉框的原始列名", () => {
+    const plan = planFaLlmChanges({
+      ...baseInput,
+      roleLabels: { currentYearDep: "本年折旧", life: "使用寿命" },
+      allowedRoleKeys: ["currentYearDep", "life"],
+      headersBySide: { end: ["本年至今折旧（会计准", "资产使用年限"] },
+      autoApplied: [
+        { role: "current_year_dep", file_side: "file2", suggested_column: "本年至今折旧(会计准", confidence: 0.95 },
+        { role: "life", file_side: "file2", suggested_column: "不存在的寿命列", confidence: 0.95 },
+      ],
+    });
+    expect(plan.changes).toHaveLength(1);
+    expect(plan.changes[0]).toMatchObject({ label: "期末 本年折旧", after: "本年至今折旧（会计准" });
+    expect(plan.endMapping.currentYearDep).toBe("本年至今折旧（会计准");
+    expect(plan.endMapping.life).toBeUndefined();
+    expect(faMappedRolesForColumn("本年至今折旧（会计准", [["currentYearDep", "本年折旧"]], plan.endMapping))
+      .toEqual([["currentYearDep", "本年折旧"]]);
+  });
+  it("FA 匹配工具的新增字段建议使用下拉框中文名称", () => {
+    const plan = planFaLlmChanges({
+      ...baseInput,
+      roleLabels: { ...roleLabels, additionMethod: "新增方式", additionDate: "新增日期" },
+      autoApplied: [
+        { role: "addition_method", file_side: "file2", suggested_column: "资产来源", confidence: 0.95 },
+      ],
+      fieldReviews: [
+        { role: "addition_date", file_side: "file2", suggested_mapping: { file2: "资本化日期" }, confidence: 0.65 },
+      ],
+    });
+    expect(plan.changes[0].label).toBe("期末 新增方式");
+    expect(plan.pending[0].label).toBe("期末 新增日期");
   });
   it("覆盖已有映射时留下改前改后和撤销所需的原值", () => {
     const plan = planFaLlmChanges({
@@ -262,7 +365,7 @@ describe("FA LLM 复核先改后核", () => {
     expect(plan.beginMapping.originalValue).toBe("期末原值");
   });
 
-  it("把握 60% 到 70% 之间照改，但标为需重点核对", () => {
+  it("把握 65% 的建议留待确认", () => {
     const plan = planFaLlmChanges({
       ...baseInput,
       fieldReviews: [
@@ -273,12 +376,12 @@ describe("FA LLM 复核先改后核", () => {
         },
       ],
     });
-    expect(plan.beginMapping.category).toBe("资产分类");
-    expect(plan.changes[0].attention).toBe(true);
-    expect(plan.pending).toEqual([]);
+    expect(plan.beginMapping.category).toBe("类别");
+    expect(plan.changes).toEqual([]);
+    expect(plan.pending[0]).toMatchObject({ confidence: 0.65, suggested: "资产分类" });
   });
 
-  it("把握不足 60% 的一律不改，交回用户采纳", () => {
+  it("把握不足 60% 的一律不改且不展示", () => {
     const plan = planFaLlmChanges({
       ...baseInput,
       fieldReviews: [
@@ -293,25 +396,10 @@ describe("FA LLM 复核先改后核", () => {
     // 映射保持原样
     expect(plan.beginMapping.category).toBe("类别");
     expect(plan.changes).toEqual([]);
-    expect(plan.pending).toEqual([
-      {
-        id: "begin.category",
-        label: "期初 资产类别",
-        current: "类别",
-        suggested: "资产分类",
-        reason: "两列都像类别",
-        confidence: 0.45,
-        apply: {
-          kind: "mapping",
-          side: "begin",
-          key: "category",
-          value: "资产分类",
-        },
-      },
-    ]);
+    expect(plan.pending).toEqual([]);
   });
 
-  it("把握不足的匹配键建议也不自动改", () => {
+  it("把握不足的匹配键建议不自动改也不展示", () => {
     const plan = planFaLlmChanges({
       ...baseInput,
       matchReview: {
@@ -324,14 +412,7 @@ describe("FA LLM 复核先改后核", () => {
     expect(plan.beginKeys).toEqual(["资产编号"]);
     expect(plan.endKeys).toEqual(["编号"]);
     expect(plan.changes).toEqual([]);
-    expect(plan.pending[0]).toMatchObject({
-      id: "matchKeys",
-      apply: {
-        kind: "matchKeys",
-        begin: ["资产编号", "名称"],
-        end: ["编号", "名称"],
-      },
-    });
+    expect(plan.pending).toEqual([]);
   });
 
   it("匹配键改动会整组记录，撤销可还原两侧", () => {
@@ -404,10 +485,10 @@ describe("FA LLM 复核先改后核", () => {
       "LLM 复核完成：已自动调整 2 项，不合适可逐条撤销。",
     );
     expect(faReviewSummary(2, 1)).toBe(
-      "LLM 复核完成：已自动调整 2 项，不合适可逐条撤销；另有 1 项把握不足 60%，未改动，请确认是否采纳。",
+      "LLM 复核完成：已自动调整 2 项，不合适可逐条撤销；另有 1 项未自动采纳，请确认是否采纳。",
     );
     expect(faReviewSummary(0, 1)).toBe(
-      "LLM 复核完成：另有 1 项把握不足 60%，未改动，请确认是否采纳。",
+      "LLM 复核完成：另有 1 项未自动采纳，请确认是否采纳。",
     );
     expect(faReviewSummary(0)).toBe(
       "LLM 复核完成：现有映射与 LLM 判断一致，未做改动。",
@@ -419,11 +500,23 @@ describe("FA LLM 复核先改后核", () => {
       ),
     ).toBe("LLM 复核完成：现有脚本映射无需补充，匹配键已复核。");
     expect(faReviewNarrative("LLM 映射复核完成。", 2, 1)).toBe(
-      "LLM 复核完成：已自动调整 2 项，不合适可逐条撤销；另有 1 项把握不足 60%，未改动，请确认是否采纳。",
+      "LLM 复核完成：已自动调整 2 项，不合适可逐条撤销；另有 1 项未自动采纳，请确认是否采纳。",
     );
     expect(faReviewNarrative("LLM 映射复核完成。", 0)).toBe(
       "LLM 复核完成：现有映射与 LLM 判断一致，未做改动。",
     );
+    expect(
+      faReviewDisplayMessage(
+        { enabled: true, message: "原值列样例均为金额，日期格式正确。" },
+        0,
+      ),
+    ).toBe("LLM 复核完成：现有映射与 LLM 判断一致，未做改动。");
+    expect(
+      faReviewDisplayMessage(
+        { enabled: true, failed: true, message: "模型服务超时。" },
+        0,
+      ),
+    ).toBe("模型服务超时。");
     expect(
       faReviewReasons(
         [{ reason: "原值列样例均为金额" }],
@@ -446,6 +539,27 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
     },
   });
 
+  it("补充清单也可配置为只给建议，不自动改写", () => {
+    const plan = planFaSupplementChanges({
+      ...supplement(),
+      autoApply: false,
+      autoApplied: [
+        {
+          role: "addition_date",
+          file_side: "file1",
+          suggested_column: "入账日期",
+          confidence: 0.99,
+        },
+      ],
+    });
+    expect(plan.addition.date).toBe("");
+    expect(plan.changes).toEqual([]);
+    expect(plan.pending[0]).toMatchObject({
+      id: "addition.date",
+      suggested: "入账日期",
+    });
+  });
+
   it("按角色前缀落到新增或处置清单，并记录改前改后", () => {
     const plan = planFaSupplementChanges({
       ...supplement(),
@@ -461,14 +575,14 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
         {
           role: "disposal_orig",
           suggested_mapping: { file2: "处置原值" },
-          // 正好压线，仍然自动改
+          // 低于自动采纳门槛，留待确认
           confidence: 0.6,
           reason: "该列才是处置原值",
         },
       ],
     });
     expect(plan.addition.date).toBe("入账日期");
-    expect(plan.disposal.originalValue).toBe("处置原值");
+    expect(plan.disposal.originalValue).toBe("原值");
     const dateChange = plan.changes.find((item) => item.id === "addition.date");
     expect(dateChange).toMatchObject({
       label: "新增清单 变动日期",
@@ -476,21 +590,11 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
       after: "入账日期",
       attention: false,
     });
-    const origChange = plan.changes.find(
-      (item) => item.id === "disposal.originalValue",
-    );
-    expect(origChange).toMatchObject({
-      before: "原值",
-      after: "处置原值",
-      // 把握 60% 低于阈值，需要重点核对
-      attention: true,
-      restore: {
-        kind: "supplement",
-        target: "disposal",
-        key: "originalValue",
-        value: "原值",
-      },
-    });
+    expect(plan.pending).toContainEqual(expect.objectContaining({
+      id: "disposal.originalValue",
+      confidence: 0.6,
+      suggested: "处置原值",
+    }));
   });
 
   it("两张清单的匹配键各自独立记录", () => {
@@ -498,6 +602,7 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
       ...supplement(),
       matchReview: {
         action: "replace",
+        confidence: 0.95,
         suggested_file1_columns: ["资产编号", "名称"],
         suggested_file2_columns: ["编号"],
         reasons: ["与第一步口径一致"],
@@ -536,7 +641,7 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
     expect(plan.pending.some((item) => item.id === "addition.keys")).toBe(false);
   });
 
-  it("把握不足的补充清单建议交回用户采纳", () => {
+  it("把握不足的补充清单建议不展示", () => {
     const plan = planFaSupplementChanges({
       ...supplement(),
       fieldReviews: [
@@ -556,14 +661,10 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
     expect(plan.disposal.depreciation).toBe("");
     expect(plan.addition.keys).toEqual(["资产编号"]);
     expect(plan.changes).toEqual([]);
-    expect(plan.pending.map((item) => item.id)).toEqual([
-      "disposal.depreciation",
-      "addition.keys",
-      "disposal.keys",
-    ]);
+    expect(plan.pending).toEqual([]);
   });
 
-  it("同一低把握字段由两路复核返回时只提示一次", () => {
+  it("同一低把握字段由两路复核返回时仍不展示", () => {
     const duplicate = {
       role: "disposal_date",
       suggested_mapping: { file2: "入账开始日期" },
@@ -575,8 +676,7 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
       autoApplied: [duplicate],
       fieldReviews: [duplicate],
     });
-    expect(plan.pending).toHaveLength(1);
-    expect(plan.pending[0].id).toBe("disposal.date");
+    expect(plan.pending).toEqual([]);
   });
 
   it("建议与现状一致或没有建议时不产生变更", () => {
@@ -665,5 +765,102 @@ describe("预览表头展示同列多角色", () => {
         category: "类别",
       }).map(([, label]) => label),
     ).toEqual(["资产ID", "资产名称"]);
+  });
+});
+
+describe("列头下拉选角色只做加法", () => {
+  const mainFields = ["matchKeys", "category", "name", "originalValue"];
+
+  it("在资产名称列上勾选资产ID，名称保留并得到 ID＋名称双角色", () => {
+    const patch = faSelectColumnRole(
+      { matchKeys: ["资产编号"], name: "资产名称列" },
+      "matchKeys",
+      ["资产编号"],
+      "资产名称列",
+      "matchKeys",
+      mainFields,
+    );
+    expect(patch.mapping.name).toBe("资产名称列");
+    expect(patch.mapping.matchKeys).toEqual(["资产编号", "资产名称列"]);
+    expect(patch.keys).toEqual(["资产编号", "资产名称列"]);
+  });
+
+  it("反向同样成立：在匹配键列上选资产名称，不把它移出匹配键", () => {
+    const patch = faSelectColumnRole(
+      { matchKeys: ["资产编号"], name: "旧名称列" },
+      "matchKeys",
+      ["资产编号"],
+      "资产编号",
+      "name",
+      mainFields,
+    );
+    expect(patch.mapping.matchKeys).toEqual(["资产编号"]);
+    expect(patch.mapping.name).toBe("资产编号");
+    expect(patch.keys).toEqual(["资产编号"]);
+  });
+
+  it("单值角色换列时原列让位，且不影响本列已挂的其他角色", () => {
+    const patch = faSelectColumnRole(
+      { matchKeys: ["资产编号"], category: "类别甲" },
+      "matchKeys",
+      ["资产编号"],
+      "资产编号",
+      "category",
+      mainFields,
+    );
+    expect(patch.mapping.category).toBe("资产编号");
+    expect(patch.mapping.matchKeys).toEqual(["资产编号"]);
+  });
+
+  it("重复勾选资产ID不产生重复匹配键", () => {
+    const patch = faSelectColumnRole(
+      { matchKeys: ["资产编号"] },
+      "matchKeys",
+      ["资产编号"],
+      "资产编号",
+      "matchKeys",
+      mainFields,
+    );
+    expect(patch.mapping.matchKeys).toEqual(["资产编号"]);
+    expect(patch.keys).toEqual(["资产编号"]);
+  });
+
+  it("只有选空值（—）才清空本列全部角色，含匹配键", () => {
+    const patch = faSelectColumnRole(
+      { matchKeys: ["资产编号", "资产名称列"], name: "资产名称列", category: "类别甲" },
+      "matchKeys",
+      ["资产编号", "资产名称列"],
+      "资产名称列",
+      "",
+      mainFields,
+    );
+    expect(patch.mapping.name).toBeUndefined();
+    expect(patch.mapping.matchKeys).toEqual(["资产编号"]);
+    expect(patch.keys).toEqual(["资产编号"]);
+    expect(patch.mapping.category).toBe("类别甲");
+  });
+
+  it("补充清单同样适用：keys 多选加法，— 清空", () => {
+    const supplementFields = ["keys", "method", "date"];
+    const dual = faSelectColumnRole(
+      { keys: ["资产编号"], method: "变动方式列" },
+      "keys",
+      ["资产编号"],
+      "变动方式列",
+      "keys",
+      supplementFields,
+    );
+    expect(dual.mapping.method).toBe("变动方式列");
+    expect(dual.keys).toEqual(["资产编号", "变动方式列"]);
+    const cleared = faSelectColumnRole(
+      dual.mapping,
+      "keys",
+      dual.keys,
+      "变动方式列",
+      "",
+      supplementFields,
+    );
+    expect(cleared.mapping.method).toBeUndefined();
+    expect(cleared.keys).toEqual(["资产编号"]);
   });
 });

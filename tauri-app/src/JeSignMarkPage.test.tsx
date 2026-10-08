@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JeSignMarkPage } from "./JeSignMarkPage";
 import type { ToolManifest } from "./types";
@@ -38,8 +38,8 @@ function seedLoadedDraft() {
         preview: [["V1", "应付账款", "100"]],
         dimensions: { rows: 1, columns: 3 },
       },
-      // 金标要求日期、凭证号、科目编码、科目名称、摘要齐备，缺一项流程就会被拦。
-      mapping: { id: ["凭证号"], accountCode: "科目编码", accountName: ["科目"], date: "日期", summary: "摘要", functionalAmount: "金额" },
+      // 科目名称单独即可满足身份；摘要是选填，不应阻拦工具进入已加载状态。
+      mapping: { id: ["凭证号"], accountName: ["科目"], date: "日期", functionalAmount: "金额" },
       batches: [{ name: "批次1", accounts: [] }],
       activeBatch: 0,
       columnFilters: {},
@@ -50,6 +50,14 @@ function seedLoadedDraft() {
 }
 
 describe("JeSignMarkPage", () => {
+  it("取消后页首提供独立警示徽标和重试方向", async () => {
+    const { listenJobEvents } = await import("./api");
+    const { container } = render(<JeSignMarkPage tool={tool} />);
+    const callback = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+    act(() => callback?.({ toolId: "je_sign_mark", jobId: "cancel-test", phase: "cancelled", current: 1, total: 2, message: "任务已取消", severity: "info", outputPaths: [] }));
+    expect(screen.getByText("已取消")).toHaveAttribute("data-variant", "warning");
+    expect(container.querySelector('[data-variant="warning"]')?.closest('[role="status"]')).toHaveTextContent("可重新读取或导出");
+  });
   afterEach(() => {
     // vitest 未开全局 cleanup，不手动卸载的话上一条用例的 DOM 会留到下一条。
     cleanup();
@@ -58,7 +66,10 @@ describe("JeSignMarkPage", () => {
 
   it("shows only the loading card before a file is read", () => {
     render(<JeSignMarkPage tool={tool} />);
-    expect(screen.getByText("正负数凭证标记")).toBeInTheDocument();
+    // 面包屑与标题已统一为侧栏名「正负数凭证标记」，同文案出现两处，按标题角色断言。
+    expect(
+      screen.getByRole("heading", { level: 1, name: "正负数凭证标记" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("拖放或点击选择凭证文件")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "读取并自动映射" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "新增批次" })).not.toBeInTheDocument();
@@ -72,21 +83,38 @@ describe("JeSignMarkPage", () => {
 
     expect(screen.getByRole("button", { name: "读取并自动映射" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新增批次" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "删除批次" })).toBeInTheDocument();
-    expect(screen.getByText("点击选择目标科目")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "清空批次" })).toBeInTheDocument();
+    expect(screen.getByText("选择目标科目")).toBeInTheDocument();
     expect(screen.getByText("标记与导出")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "标记并导出" })).toBeInTheDocument();
+    expect(screen.getByText("导出文件格式与列说明")).toBeInTheDocument();
+    expect(screen.getByText("请先在上方选择至少一个目标科目。")).toBeInTheDocument();
+    expect(screen.queryByText("标记结果")).not.toBeInTheDocument();
 
     // 看账的三步走在这里不该出现，尤其是被剪掉的「科目筛选」独立步骤。
     expect(screen.queryByText("科目筛选")).not.toBeInTheDocument();
     expect(screen.queryByText("透视与导出")).not.toBeInTheDocument();
   });
 
-  // 损益结转整块已从本工具剪除：既没有开关，也不该有任何相关文案。
-  it("has no profit-transfer switch or wording", () => {
+  it("keeps batch naming out of the default view and opens inline rename on demand", () => {
     seedLoadedDraft();
     render(<JeSignMarkPage tool={tool} />);
-    expect(screen.queryByText(/损益结转/)).not.toBeInTheDocument();
+
+    expect(screen.queryByRole("textbox", { name: "批次名称" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重命名" }));
+    const input = screen.getByRole("textbox", { name: "批次名称" });
+    expect(input).toHaveFocus();
+    fireEvent.change(input, { target: { value: "费用复核" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
+    expect(screen.getByRole("button", { name: "费用复核 · 0 个科目" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "批次名称" })).not.toBeInTheDocument();
+  });
+
+  it("offers profit-transfer marking in the export card", () => {
+    seedLoadedDraft();
+    render(<JeSignMarkPage tool={tool} />);
+    expect(screen.getByText("标记损益结转凭证")).toBeInTheDocument();
+    expect(screen.getByText(/不参与正负数配对/)).toBeInTheDocument();
   });
 
   // 金额符号口径卡片：自动检测的结论与依据要亮出来，筛过的账要黄牌提醒，
@@ -108,6 +136,7 @@ describe("JeSignMarkPage", () => {
         totalVouchers: 36,
         balancedVouchers: 36,
         unbalancedVouchers: 0,
+        oneSidedVouchers: 36,
         filtered: true,
         keySuspect: false,
       },
@@ -120,12 +149,35 @@ describe("JeSignMarkPage", () => {
     // 不能让人误以为是字段映射出了问题。
     expect(screen.getByText(/按科目筛选后导出/)).toBeInTheDocument();
     expect(screen.getByText(/这不是映射问题/)).toBeInTheDocument();
-    // 三档选择切换到「已带符号」，导出参数要带上 signConvention。
-    fireEvent.click(screen.getByRole("button", { name: "已带符号（借正贷负）" }));
+    // 全部凭证均为单边时才显示两个人工口径；选择后要进入导出参数。
+    fireEvent.click(screen.getByRole("button", { name: "已带符号" }));
     fireEvent.click(screen.getByRole("button", { name: "标记并导出" }));
     await waitFor(() => expect(jobStart).toHaveBeenCalled());
     const params = vi.mocked(jobStart).mock.calls[0]?.[1] as Record<string, unknown>;
     expect(params.signConvention).toBe("signed");
+    expect(params.markLossTransfer).toBe(true);
+  });
+
+  it("hides manual sign choices when the file contains balanced vouchers", async () => {
+    seedLoadedDraft();
+    const { engineCall } = await import("./api");
+    vi.mocked(engineCall).mockResolvedValue({
+      signConvention: {
+        scheme: "B",
+        detected: "unsigned",
+        basis: "12 张凭证均可按借贷分列配平。",
+        totalVouchers: 12,
+        balancedVouchers: 12,
+        unbalancedVouchers: 0,
+        oneSidedVouchers: 0,
+        filtered: false,
+        keySuspect: false,
+      },
+    });
+    render(<JeSignMarkPage tool={tool} />);
+    await waitFor(() => expect(screen.getByText(/12 张凭证均可/)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "借贷符号一样" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "已带符号" })).not.toBeInTheDocument();
   });
 
   it("omits the selector when a single amount column leaves no ambiguity", async () => {
@@ -139,6 +191,7 @@ describe("JeSignMarkPage", () => {
         totalVouchers: 1,
         balancedVouchers: 0,
         unbalancedVouchers: 0,
+        oneSidedVouchers: 1,
         filtered: false,
         keySuspect: false,
       },
@@ -170,7 +223,7 @@ describe("JeSignMarkPage", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "筛选 金额" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("点击选择目标科目"));
+    fireEvent.click(screen.getByText("选择目标科目"));
     await waitFor(() =>
       expect(screen.getByText("6602050001")).toBeInTheDocument(),
     );
@@ -178,5 +231,24 @@ describe("JeSignMarkPage", () => {
     expect(screen.getByText("管理费用-办公费")).toBeInTheDocument();
     expect(screen.getByTitle("1122 应收账款")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("搜索科目编码或名称")).toBeInTheDocument();
+    expect(
+      (screen.getByRole("checkbox", { name: "（全选）" }) as HTMLInputElement)
+        .checked,
+    ).toBe(false);
+  });
+
+  it("任务失败后保留错误反馈，不留下空结果卡", async () => {
+    seedLoadedDraft();
+    const { listenJobEvents } = await import("./api");
+    let emit: ((event: never) => void) | undefined;
+    vi.mocked(listenJobEvents).mockImplementationOnce(async (callback) => {
+      emit = callback as (event: never) => void;
+      return () => undefined;
+    });
+    render(<JeSignMarkPage tool={tool} />);
+    await waitFor(() => expect(emit).toBeDefined());
+    act(() => emit?.({ toolId: "je_sign_mark", jobId: "job-1", phase: "failed", message: "文件无法读取" } as never));
+    expect(screen.getByText("文件无法读取")).toBeInTheDocument();
+    expect(screen.queryByText("标记结果")).not.toBeInTheDocument();
   });
 });

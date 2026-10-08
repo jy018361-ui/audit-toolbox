@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
   jobCancel,
@@ -13,12 +14,15 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "./kanzhang-parity.css";
 import "./je-sign-mark.css";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JargonTip } from "@/components/JargonTip";
+import { SwitchInput } from "@/components/SwitchInput";
+import { CircleMinus, Equal, Search } from "lucide-react";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { JobProgress } from "@/components/JobProgress";
 import { LedgerSourceCard } from "@/components/LedgerSourceCard";
 import { LedgerLlmReview } from "@/components/LedgerLlmReview";
@@ -81,6 +85,8 @@ type JeMarkDraft = {
   outputTouched: boolean;
   /** 金额符号口径：auto=自动检测，unsigned=借贷符号一样，signed=已带符号。 */
   signChoice: "auto" | "unsigned" | "signed";
+  /** 是否识别损益结转凭证并从正负数配对中排除。 */
+  markLossTransfer: boolean;
 };
 
 /** 后端 `kanzhang.mark_sign_report` 返回的口径检测报告。 */
@@ -91,6 +97,7 @@ type SignReport = {
   totalVouchers: number;
   balancedVouchers: number;
   unbalancedVouchers: number;
+  oneSidedVouchers: number;
   filtered: boolean;
   keySuspect: boolean;
 };
@@ -100,7 +107,7 @@ const EMPTY: JeMarkDraft = {
   sheet: "",
   knownSheets: [],
   headerRow: 0,
-  headerDepth: 1,
+  headerDepth: 0,
   mapping: EMPTY_MAPPING,
   batches: [newBatch(0)],
   activeBatch: 0,
@@ -108,6 +115,7 @@ const EMPTY: JeMarkDraft = {
   outputPath: "",
   outputTouched: false,
   signChoice: "auto",
+  markLossTransfer: true,
 };
 const CACHE = "audit-toolbox.je-sign-mark.draft.v2";
 const loadDraft = (): JeMarkDraft => {
@@ -131,7 +139,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   const [job, setJob] = useState<JobEvent>();
   const [result, setResult] = useState<unknown>();
   const [dragHover, setDragHover] = useState(false);
-  const [menu, setMenu] = useState<{ field: string; anchor: DOMRect }>();
+  const [menu, setMenu] = useState<{ field: string; anchor: HTMLElement }>();
   const [valueCache, setValueCache] = useState<
     Record<string, ColumnFilterValues>
   >({});
@@ -140,6 +148,9 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   const [signLoading, setSignLoading] = useState(false);
   const [signError, setSignError] = useState("");
   const signGeneration = useRef(0);
+  const [renamingBatch, setRenamingBatch] = useState(false);
+  const [batchNameDraft, setBatchNameDraft] = useState("");
+  const batchNameInputRef = useRef<HTMLInputElement>(null);
 
   const patch = (value: Partial<JeMarkDraft>) =>
     setDraft((current) => ({ ...current, ...value }));
@@ -149,11 +160,25 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   const showReview =
     llmBusy ||
     llmFailed ||
-    Boolean(llmStatus) ||
     changes.length > 0 ||
     pending.length > 0;
   const ready = Boolean(draft.inspect) && missingRequired.length === 0;
   const validBatches = validJeMarkBatches(draft.batches);
+
+  useEffect(() => {
+    if (renamingBatch) batchNameInputRef.current?.focus();
+  }, [renamingBatch, draft.activeBatch]);
+
+  function saveBatchName() {
+    const name = batchNameDraft.trim();
+    if (!name) return;
+    patch({
+      batches: draft.batches.map((value, index) =>
+        index === draft.activeBatch ? { ...value, name } : value,
+      ),
+    });
+    setRenamingBatch(false);
+  }
 
   function clearAll() {
     llmGeneration.current += 1;
@@ -217,6 +242,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       targetBatches?: JeMarkDraft["batches"];
       columnFilters?: JeMarkDraft["columnFilters"];
       signConvention?: string;
+      markLossTransfer?: boolean;
       outputPath?: string;
     };
     if (typeof p.inputPath !== "string" || !p.inputPath) return;
@@ -257,6 +283,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         p.signConvention === "signed" || p.signConvention === "unsigned"
           ? p.signConvention
           : "auto",
+      markLossTransfer: p.markLossTransfer ?? true,
     });
     setResult(undefined);
     setJob(undefined);
@@ -339,6 +366,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       knownSheets: [],
       sheet: "",
       headerRow: 0,
+      headerDepth: 0,
       mapping: EMPTY_MAPPING,
       batches: clearAccountsOnMappingChange(draft.batches),
       columnFilters: {},
@@ -497,6 +525,19 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       });
   }, [signKey, draft.inspect]);
 
+  // 手动口径只服务于“所有凭证均为单边”的文件；一旦重新映射后检测到
+  // 完整凭证，立即回到自动检测，避免隐藏的旧选择继续影响导出。
+  const allVouchersOneSided = Boolean(
+    signReport &&
+      signReport.totalVouchers > 0 &&
+      signReport.oneSidedVouchers === signReport.totalVouchers,
+  );
+  useEffect(() => {
+    if (signReport && !allVouchersOneSided && draft.signChoice !== "auto") {
+      patch({ signChoice: "auto" });
+    }
+  }, [allVouchersOneSided, signReport, draft.signChoice]);
+
   function skipReview() {
     llmGeneration.current += 1;
     setLlmBusy(false);
@@ -547,10 +588,14 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   };
   const acceptPending = (item: Review) => {
     const before = draft.mapping[item.role];
-    const after = isMultiRole(item.role)
-      ? [item.suggestedColumn.trim()]
-      : item.suggestedColumn.trim();
-    setMap(item.role, after);
+    const after = item.action === "clear"
+      ? isMultiRole(item.role) ? [] : ""
+      : isMultiRole(item.role)
+        ? [item.suggestedColumn!.trim()]
+        : item.suggestedColumn!.trim();
+    if (item.action === "clear")
+      patch({ mapping: { ...draft.mapping, [item.role]: undefined } });
+    else setMap(item.role, after);
     setChanges((values) => [
       ...values,
       {
@@ -621,7 +666,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
-  function openMenu(field: string, anchor: DOMRect) {
+  function openMenu(field: string, anchor: HTMLElement) {
     setMenu({ field, anchor });
     if (!valueCache[field]) void loadValues(field, "");
   }
@@ -692,6 +737,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         columnFilters: activeColumnFilters(draft.columnFilters),
         signConvention:
           draft.signChoice === "auto" ? undefined : draft.signChoice,
+        markLossTransfer: draft.markLossTransfer,
         outputPath: target || undefined,
       });
       setJob({
@@ -720,7 +766,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     signed: "已带符号（借正贷负）",
   };
   const signAllowsChoice =
-    signReport?.scheme === "A" || signReport?.scheme === "B";
+    allVouchersOneSided &&
+    (signReport?.scheme === "A" || signReport?.scheme === "B");
   const signApplied =
     draft.signChoice === "auto"
       ? signReport?.detected === "signed"
@@ -744,13 +791,15 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   return (
     <div className="kz-page jm-page">
       <PageHeader
-        eyebrow="凭证对冲标记"
+        eyebrow="正负数凭证标记"
         title={tool.name}
         detail="加载凭证、确认字段映射，在预览表头按列筛选并按批次选定目标科目，导出带正负数智能匹配标记的完整凭证明细。"
       />
       {error && <ErrorBox error={error} onDismiss={() => setError("")} />}
+      {job?.phase === "cancelled" && <div className="flex flex-wrap items-center gap-2" role="status"><Badge variant="warning">已取消</Badge><span className="hint">本次任务已停止；文件与批次设置仍保留，可重新读取或导出。</span></div>}
 
       <LedgerSourceCard
+        className={draft.inspect ? "jm-source-loaded" : undefined}
         inputPath={draft.inputPath}
         sheet={draft.sheet}
         knownSheets={draft.knownSheets}
@@ -763,11 +812,11 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         needsReload={!draft.inspect && draft.knownSheets.length > 0}
         onBrowse={chooseInput}
         onClear={clearAll}
-        onSheetChange={(value) => invalidate({ sheet: value, headerRow: 0 })}
+        onSheetChange={(value) => invalidate({ sheet: value, headerRow: 0, headerDepth: 0 })}
         onHeaderRowChange={(value) => invalidate({ headerRow: value })}
         onHeaderDepthChange={(value) => invalidate({ headerDepth: value })}
         onInspect={inspect}
-        onCancel={(jobId) => void jobCancel(jobId)}
+        onCancel={(jobId) => jobCancel(jobId)}
       >
         {draft.inspect && (
           <>
@@ -791,14 +840,14 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             )}
             {scheme && (
               <p className="kz-hint">
-                金额口径已按方案{scheme}成立，方案{scheme === "A" ? "B" : "A"}
-                的字段已停用；如需切换，先清空当前方案的字段。
+                金额方案{scheme}已生效；切换前请先清空当前方案的字段。
                 <JargonTip
                   term="金额方案"
                   text="金额记在一列并配借贷方向列（方案A），或分借方、贷方两列（方案B），二选一即可。"
                 />
               </p>
             )}
+            <div className="jm-source-footer">
             {(signReport || signError || signLoading) && (
               <div className={`jm-sign${signWarnings.length ? " warn" : ""}`}>
                 <div className="jm-sign-head">
@@ -809,20 +858,26 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                       role="group"
                       aria-label="金额符号口径选择"
                     >
-                      {(["auto", "unsigned", "signed"] as const).map(
-                        (value) => (
-                          <button
-                            key={value}
-                            type="button"
-                            className={
-                              draft.signChoice === value ? "active" : ""
-                            }
-                            onClick={() => patch({ signChoice: value })}
-                          >
-                            {signLabels[value]}
-                          </button>
-                        ),
-                      )}
+                      <button
+                        type="button"
+                        className={draft.signChoice === "unsigned" ? "active" : ""}
+                        aria-pressed={draft.signChoice === "unsigned"}
+                        title="适用于借方、贷方金额都以正数记录，借贷方向由分列或方向字段区分的单边凭证文件。再次点击可恢复自动检测。"
+                        onClick={() => patch({ signChoice: draft.signChoice === "unsigned" ? "auto" : "unsigned" })}
+                      >
+                        <Equal size={16} aria-hidden="true" />
+                        借贷符号一样
+                      </button>
+                      <button
+                        type="button"
+                        className={draft.signChoice === "signed" ? "active" : ""}
+                        aria-pressed={draft.signChoice === "signed"}
+                        title="适用于金额本身已表达方向（借方为正、贷方为负）的单边凭证文件。再次点击可恢复自动检测。"
+                        onClick={() => patch({ signChoice: draft.signChoice === "signed" ? "auto" : "signed" })}
+                      >
+                        <CircleMinus size={16} aria-hidden="true" />
+                        已带符号
+                      </button>
                     </span>
                   )}
                 </div>
@@ -834,7 +889,10 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                       : signApplied}
                 </p>
                 {!signLoading && !signError && signReport && (
-                  <p className="jm-sign-basis">依据：{signReport.basis}</p>
+                  <details className="jm-sign-basis">
+                    <summary>查看判定依据</summary>
+                    <p>{signReport.basis}</p>
+                  </details>
                 )}
                 {signWarnings.map((text) => (
                   <p key={text} className="jm-sign-warning">
@@ -843,105 +901,161 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                 ))}
               </div>
             )}
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={busy || llmBusy}
+                onClick={() => void reviewMapping()}
+                aria-label="重新进行 LLM 复核"
+              >
+                {llmBusy ? "复核中…" : "复核映射"}
+              </Button>
+            </div>
             {missingRequired.length > 0 && (
               <p className="fa-missing-hint">
                 尚未映射：{missingRequired.join("、")}
                 （请在各列顶部的下拉框中选择对应字段）
               </p>
             )}
-            <div className="kz-actions">
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={busy || llmBusy}
-                onClick={() => void reviewMapping()}
-              >
-                {llmBusy ? "LLM 正在复核…" : "重新进行 LLM 复核"}
-              </Button>
-            </div>
           </>
         )}
       </LedgerSourceCard>
 
       {draft.inspect && (
         <section className="kz-card jm-batches">
+          <h2>批次与目标科目</h2>
           <div className="jm-batch-row">
-            <div className="kz-tabs">
+            <div className="kz-tabs" aria-label="标记批次">
               {draft.batches.map((value, index) => (
                 <button
+                  type="button"
                   key={`${value.name}-${index}`}
                   className={index === draft.activeBatch ? "active" : ""}
-                  onClick={() => patch({ activeBatch: index })}
+                  aria-pressed={index === draft.activeBatch}
+                  onClick={() => {
+                    setRenamingBatch(false);
+                    patch({ activeBatch: index });
+                  }}
                 >
-                  {value.name} ({value.accounts.length})
+                  {value.name} · {value.accounts.length} 个科目
                 </button>
               ))}
             </div>
             <Button
+              type="button"
               variant="secondary"
               size="sm"
+              aria-label="新增批次"
               onClick={() => {
                 const next = addBatch(draft.batches);
                 patch(next);
+                setBatchNameDraft(next.batches[next.activeBatch].name);
+                setRenamingBatch(true);
               }}
             >
-              新增批次
+              ＋ 新增批次
             </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() =>
-                patch(removeBatch(draft.batches, draft.activeBatch))
-              }
-            >
-              删除批次
-            </Button>
-            <label className="jm-batch-name">
-              批次名称
-              <Input
-                value={batch.name}
-                onChange={(e) =>
-                  patch({
-                    batches: draft.batches.map((value, index) =>
-                      index === draft.activeBatch
-                        ? { ...value, name: e.target.value }
-                        : value,
-                    ),
-                  })
-                }
-              />
-            </label>
           </div>
-          <div className="jm-account-row">
-            <span className="jm-account-label">
-              {accountFilterTitle(draft.mapping)}
-            </span>
-            <button
+          <div className="jm-batch-settings">
+            {renamingBatch ? (
+              <div className="jm-rename-row">
+                <label className="jm-batch-name">
+                  批次名称
+                  <Input
+                    ref={batchNameInputRef}
+                    value={batchNameDraft}
+                    onChange={(event) => setBatchNameDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") saveBatchName();
+                      if (event.key === "Escape") setRenamingBatch(false);
+                    }}
+                    aria-invalid={!batchNameDraft.trim() || undefined}
+                  />
+                </label>
+                <Button type="button" size="sm" onClick={saveBatchName} disabled={!batchNameDraft.trim()}>
+                  保存名称
+                </Button>
+                <Button type="button" variant="ghost" size="sm" onClick={() => setRenamingBatch(false)}>
+                  取消
+                </Button>
+              </div>
+            ) : (
+              <div className="jm-current-batch">
+                <span className="jm-current-batch-label">当前批次</span>
+                <strong title={batch.name}>{batch.name}</strong>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setBatchNameDraft(batch.name);
+                    setRenamingBatch(true);
+                  }}
+                >
+                  重命名
+                </Button>
+              </div>
+            )}
+            <Button
               type="button"
-              data-ts-filter-trigger=""
-              className={`jm-account-picker${batch.accounts.length ? " active" : ""}`}
-              disabled={llmBusy || missingRequired.length > 0}
-              aria-expanded={menu?.field === ACCOUNT_MENU}
-              onClick={(event) => {
-                if (menu?.field === ACCOUNT_MENU) {
-                  setMenu(undefined);
-                  return;
+              variant="ghost"
+              size="sm"
+              className="jm-delete-batch"
+              onClick={async () => {
+                const onlyBatch = draft.batches.length === 1;
+                const accepted = await confirmDialog({
+                  title: onlyBatch ? `清空「${batch.name}」？` : `删除「${batch.name}」？`,
+                  message: onlyBatch
+                    ? `这会清空当前批次已选的 ${batch.accounts.length} 个目标科目，不会删除原始文件。`
+                    : `这会移除当前批次及其已选的 ${batch.accounts.length} 个目标科目，不会删除原始文件。`,
+                  confirmLabel: onlyBatch ? "清空批次" : "删除批次",
+                  tone: "danger",
+                });
+                if (accepted) {
+                  setRenamingBatch(false);
+                  patch(removeBatch(draft.batches, draft.activeBatch));
                 }
-                openMenu(
-                  ACCOUNT_MENU,
-                  event.currentTarget.getBoundingClientRect(),
-                );
               }}
+              disabled={draft.batches.length === 1 && batch.accounts.length === 0}
             >
-              {llmBusy
-                ? "正在确定科目字段…"
-                : batch.accounts.length
-                  ? `已选 ${batch.accounts.length} 个`
-                  : "点击选择目标科目"}
-              <span className="ts-filter-icon">▼</span>
-            </button>
+              {draft.batches.length === 1 ? "清空批次" : "删除批次"}
+            </Button>
+          </div>
+          <div className="jm-account-block">
+            <span className="jm-account-label">目标科目</span>
+            <div className="jm-account-row">
+              <Button
+                type="button"
+                variant={batch.accounts.length ? "outline" : "default"}
+                data-ts-filter-trigger=""
+                className="jm-account-picker"
+                disabled={llmBusy || missingRequired.length > 0}
+                aria-expanded={menu?.field === ACCOUNT_MENU}
+                onClick={(event) => {
+                  if (menu?.field === ACCOUNT_MENU) {
+                    setMenu(undefined);
+                    return;
+                  }
+                  openMenu(ACCOUNT_MENU, event.currentTarget);
+                }}
+              >
+                {llmBusy
+                  ? "正在确定科目字段…"
+                  : batch.accounts.length
+                    ? "修改目标科目"
+                    : "选择目标科目"}
+                <Search size={16} aria-hidden="true" />
+              </Button>
+              <span className="jm-account-summary" title={batch.accounts.join("、")}>
+                {batch.accounts.length
+                  ? `已选 ${batch.accounts.length} 个：${batch.accounts.slice(0, 2).join("、")}${batch.accounts.length > 2 ? "…" : ""}`
+                  : missingRequired.length > 0
+                    ? "请先完成预览表中的科目字段映射"
+                    : "尚未选择"}
+              </span>
+            </div>
             {filterCount > 0 && (
-              <span className="jm-filter-note">
+              <div className="jm-filter-note">
                 另有 {filterCount} 列设了筛选条件，对所有批次一致生效
                 <Button
                   variant="secondary"
@@ -950,13 +1064,11 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                 >
                   清除列筛选
                 </Button>
-              </span>
+              </div>
             )}
           </div>
-          <p className="kz-note">
-            <b>目标科目</b>决定哪些行打标记，按批次各选一套；<b>其他列的漏斗</b>
-            是数据过滤，按凭证生效——
-            凭证里只要有一行命中，整张凭证保留，标记只落在目标科目行上。
+          <p className="kz-note jm-rule-note">
+            标记只应用于所选科目行；表头筛选对整张凭证生效。
           </p>
         </section>
       )}
@@ -976,6 +1088,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               field={header}
               chosen={chosen}
               expanded={menu?.field === header}
+              compact
               onToggle={(anchor) => {
                 if (!anchor) {
                   setMenu(undefined);
@@ -991,6 +1104,19 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       {draft.inspect && (
         <section className="kz-card">
           <h2>标记与导出</h2>
+          <div className="jm-export-options">
+            <label>
+              <SwitchInput
+                checked={draft.markLossTransfer}
+                onChange={(value) => patch({ markLossTransfer: value })}
+                ariaLabel="标记损益结转凭证"
+              />
+              <span>
+                <b>标记损益结转凭证</b>
+                <small>命中本年利润或未分配利润的整张凭证会标记为“损益结转”，并不参与正负数配对。</small>
+              </span>
+            </label>
+          </div>
           <label>
             输出文件
             <div className="kz-path">
@@ -1010,20 +1136,29 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               )}
             </div>
           </label>
-          <p className="kz-hint">
+          <details className="jm-export-help">
+            <summary>导出文件格式与列说明</summary>
+            <p className="kz-hint">
             {draft.outputTouched
               ? "已指定保存位置，导出会以这个文件名为基准。"
               : "默认保存到凭证文件所在目录，文件名为「正负数标记_源文件名[_工作表]_<时间戳>.csv」（导出时按当前时间生成）。"}
             每个批次单独出一个文件，选 .csv 出 CSV、选 .xlsx
             出工作簿；明细最前面是
-            【辅助_绝对值】【辅助_符号】【智能匹配状态】三列，后接原始列。
-          </p>
+            {draft.markLossTransfer ? "【损益结转】" : ""}
+            【辅助_绝对值】【辅助_符号】【智能匹配状态】列，后接原始列。
+            </p>
+          </details>
+          {!validBatches.length && (
+            <p className="fa-missing-hint" role="status">
+              请先在上方选择至少一个目标科目。
+            </p>
+          )}
           <div className="kz-actions">
             {busy && job ? (
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={() => void jobCancel(job.jobId)}
+                onClick={() => void cancelJobWithFeedback(job.jobId)}
               >
                 停止
               </Button>
@@ -1037,11 +1172,6 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               </Button>
             )}
           </div>
-          {!validBatches.length && (
-            <p className="fa-missing-hint">
-              还没有为任何批次选择目标科目，导出前请先选。
-            </p>
-          )}
           <Result job={job} result={result} />
         </section>
       )}
@@ -1065,6 +1195,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             isAccountMenu(menu.field) ? "搜索科目编码或名称" : undefined
           }
           splitCode={isAccountMenu(menu.field)}
+          defaultSelectAll={!isAccountMenu(menu.field)}
           valueNote={
             isAccountMenu(menu.field)
               ? (value) => {
@@ -1110,6 +1241,9 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
         })
       : undefined;
   const showProgress = shouldShowKanzhangJobProgress(job?.phase);
+  // 读取文件也会产生 job/result，但只有标记导出才有值得展示的结果。
+  // 失败或取消后上方已显示任务反馈，这里不再留下空白结果卡。
+  if (!showProgress && !paths.length && !batches.length && !sign?.applied) return null;
   return (
     <Card variant="workspace" className="kz-result">
       <CardHeader>
@@ -1119,7 +1253,7 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
         {job && showProgress && (
           <JobProgress
             job={job}
-            onCancel={(jobId) => void jobCancel(jobId)}
+            onCancel={(jobId) => jobCancel(jobId)}
             cancelLabel="取消任务"
           />
         )}
@@ -1130,6 +1264,7 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
                 key={path}
                 variant="secondary"
                 size="sm"
+                title={path}
                 onClick={() => void openOutput(path)}
               >
                 <span>打开：</span>
@@ -1147,6 +1282,7 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
                 <span>直接匹配 {String(item.matchedPairs ?? 0)} 对</span>
                 <span>跨凭证匹配 {String(item.crossMatchedPairs ?? 0)} 对</span>
                 <span>未匹配 {String(item.unmatchedRows ?? 0)} 行</span>
+                <span>损益结转 {String(item.lossTransferVouchers ?? 0)} 笔</span>
               </div>
             ))}
           </div>
@@ -1161,7 +1297,6 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
             {sign.basis ? `。依据：${sign.basis}` : ""}
           </p>
         )}
-        {!result && !showProgress && <EmptyState compact title="等待标记结果" description="选好目标科目后点「标记并导出」。" />}
       </CardContent>
     </Card>
   );

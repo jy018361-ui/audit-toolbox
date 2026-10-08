@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { markToolPageLive } from "./toolPageActivity";
 import {
   engineCall,
   jobCancel,
@@ -15,17 +16,19 @@ import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
+import { defaultBalanceSheetDate } from "@/dateDefaults";
 import { FileInput } from "@/components/FileInput";
 import { FileDropInput } from "@/components/FileDropInput";
 import { displayFileName } from "@/fileDisplay";
 import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { DateInput, isValidIsoDate } from "@/components/DateInput";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { LlmReview } from "@/components/LlmReview";
 import { useJobEvents } from "@/hooks/useJobEvents";
-import { faMappedRolesForColumn } from "./faListUi";
+import { faMappedRolesForColumn, faReviewDisplayMessage } from "./faListUi";
 import {
   DEP_MAPPING_ROLES,
   depMissingOptionalRoles,
@@ -76,6 +79,9 @@ let faDepDraftCache: DepDraft | undefined;
 /// 交互均复制 FA 主工具；导出为单页"折旧测算"Excel（活公式，可审计）。
 export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
   const draft = faDepDraftCache;
+  // 草稿缓存非空说明本页此前有现场：登记后不参与 LRU 淘汰，
+  // 保活到应用退出。
+  if (draft) markToolPageLive("fa_dep_calc");
   const [step, setStep] = useState(draft?.step ?? 0);
   const [path, setPath] = useState(draft?.path ?? "");
   const [sheet, setSheet] = useState(draft?.sheet ?? "");
@@ -85,7 +91,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
   );
   const [mapping, setMapping] = useState<DepMapping>(draft?.mapping ?? {});
   const [balanceSheetDate, setBalanceSheetDate] = useState(
-    draft?.balanceSheetDate ?? "2025-12-31",
+    draft?.balanceSheetDate ?? defaultBalanceSheetDate(),
   );
   const [outputPath, setOutputPath] = useState(draft?.outputPath ?? "");
   const [outputPathTouched, setOutputPathTouched] = useState(
@@ -104,7 +110,6 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
     toolId: "fa_dep_calc",
     onEvent: (event) => {
       setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
-      if (event.phase === "failed") setError(event.message);
     },
   });
   // 单槽拖放：落点必须命中上传框（Fx 页模式：api 层已把物理像素换算成 CSS 像素）。
@@ -389,8 +394,13 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       setError("请先选择并读取期末清单。");
       return;
     }
-    if (depMissingRoles(mapping).length) {
-      setError("还有必填字段未映射，请在预览表头下拉中补全。");
+    const unmapped = depMissingRoles(mapping);
+    if (unmapped.length) {
+      setError(`尚未映射：${unmapped.join("、")}。请在预览表头下拉中补全。`);
+      return;
+    }
+    if (!isValidIsoDate(balanceSheetDate)) {
+      setError("请输入有效的资产负债表日（格式 YYYY-MM-DD）。");
       return;
     }
     let target = outputPath;
@@ -438,7 +448,29 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
+  async function cancelExport(jobId: string) {
+    try {
+      const accepted = await jobCancel(jobId);
+      if (!accepted) throw new Error("任务可能已结束，取消指令未被接受。");
+      setJob((current) =>
+        current?.jobId === jobId
+          ? {
+              ...current,
+              phase: "cancelling",
+              message: "正在取消任务…",
+              severity: "warning",
+            }
+          : current,
+      );
+      return true;
+    } catch (e) {
+      setError(errorText(e));
+      return false;
+    }
+  }
+
   const missing = depMissingRoles(mapping);
+  const validBalanceSheetDate = isValidIsoDate(balanceSheetDate);
   const activeStep = !inspection ? 0 : step === 2 && missing.length ? 1 : step;
   const optionalMissing = inspection ? depMissingOptionalRoles(mapping) : [];
   // 每列顶部的角色映射下拉（复制 FA 主工具的列头映射交互）。
@@ -466,8 +498,8 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
             >
               <option value="">—</option>
               {DEP_MAPPING_ROLES.map(([key, label]) => {
-                const taken =
-                  usedRoles.has(key) && !mapped.some(([k]) => k === key);
+                // 已映射的角色统一标注（已用），含当前列自己挂的角色。
+                const taken = usedRoles.has(key);
                 return (
                   <option
                     key={key}
@@ -514,10 +546,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       {job && job.phase !== "completed" && (
         <JobProgress
           job={job}
-          onCancel={(jobId) => {
-            void jobCancel(jobId);
-            setBusy(false);
-          }}
+          onCancel={(jobId) => cancelExport(jobId)}
           cancelLabel="取消任务"
         />
       )}
@@ -538,68 +567,26 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
               </Badge>
             </CardHeader>
             <CardContent>
-              <div className="dep-source-grid">
-                <Field label="期末清单" required className="dep-upload-field">
-                  <div ref={uploadDropRef}>
-                    <FileDropInput
-                      value={path}
-                      placeholder="拖放或点击选择期末固定资产清单"
-                      onBrowse={() => void chooseFile()}
-                      onDragStateChange={setDragHover}
-                      highlight={dragHover}
-                      disabled={busy}
-                      onClear={
-                        path && !busy
-                          ? () => applyPathRef.current("")
-                          : undefined
-                      }
-                    />
-                  </div>
-                  <small className="dep-field-note">
-                    支持 Excel、CSV 与文本清单；选择后会立即读取。
-                  </small>
-                </Field>
-                <div className="dep-source-options">
-                  <Field label="工作表 Sheet">
-                    {inspection?.sheets.length ? (
-                      <select
-                        value={sheet}
-                        disabled={busy}
-                        onChange={(e) => {
-                          setSheet(e.target.value);
-                          setHeaderRow("");
-                          void inspect({
-                            sheet: e.target.value,
-                            headerRow: "",
-                          });
-                        }}
-                      >
-                        {inspection.sheets.map((value) => (
-                          <option key={value}>{value}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <Input
-                        value={sheet}
-                        placeholder="自动选择"
-                        disabled={busy}
-                        onChange={(e) => setSheet(e.target.value)}
-                      />
-                    )}
-                  </Field>
-                  <Field label="标题行">
-                    <Input
-                      value={headerRow}
-                      placeholder="自动识别"
-                      disabled={busy}
-                      onChange={(e) => setHeaderRow(e.target.value)}
-                      onBlur={() => {
-                        if (path && inspection) void inspect();
-                      }}
-                    />
-                  </Field>
+              <Field label="期末清单" required className="dep-upload-field">
+                <div ref={uploadDropRef}>
+                  <FileDropInput
+                    value={path}
+                    placeholder="拖放或点击选择期末固定资产清单"
+                    onBrowse={() => void chooseFile()}
+                    onDragStateChange={setDragHover}
+                    highlight={dragHover}
+                    disabled={busy}
+                    onClear={
+                      path && !busy
+                        ? () => applyPathRef.current("")
+                        : undefined
+                    }
+                  />
                 </div>
-              </div>
+                <small className="dep-field-note">
+                  支持 Excel、CSV 与文本清单；选择后会立即读取。
+                </small>
+              </Field>
               <div className="actions dep-source-actions">
                 {inspection && (
                   <Button
@@ -651,7 +638,13 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                   enabled={llmReview?.enabled}
                   failed={llmReview?.failed}
                   message={
-                    llmReview && !llmBusy ? llmReview.message : undefined
+                    llmReview && !llmBusy
+                      ? faReviewDisplayMessage(
+                          llmReview,
+                          llmChanges.length,
+                          llmPending.length,
+                        )
+                      : undefined
                   }
                   detail={llmReview?.detail}
                   changes={llmChanges}
@@ -683,6 +676,49 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                 />
               )}
 
+              {/* 与借款等账表工具一致：Sheet/标题行跟随映射预览，上传时不出现。 */}
+              <div className="mapping-panel-toolbar dep-map-toolbar">
+                <label>
+                  Sheet
+                  {inspection.sheets.length ? (
+                    <select
+                      value={sheet}
+                      disabled={busy}
+                      onChange={(e) => {
+                        setSheet(e.target.value);
+                        setHeaderRow("");
+                        void inspect({
+                          sheet: e.target.value,
+                          headerRow: "",
+                        });
+                      }}
+                    >
+                      {inspection.sheets.map((value) => (
+                        <option key={value}>{value}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <Input
+                      value={sheet}
+                      placeholder="自动选择"
+                      disabled={busy}
+                      onChange={(e) => setSheet(e.target.value)}
+                    />
+                  )}
+                </label>
+                <label>
+                  标题行
+                  <Input
+                    value={headerRow}
+                    placeholder="自动识别"
+                    disabled={busy}
+                    onChange={(e) => setHeaderRow(e.target.value)}
+                    onBlur={() => {
+                      if (path && inspection) void inspect();
+                    }}
+                  />
+                </label>
+              </div>
               <DataTable
                 columns={inspection.headers}
                 rows={inspection.preview}
@@ -742,11 +778,17 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
             <CardContent>
               <div className="dep-export-grid">
                 <Field label="资产负债表日" required>
-                  <Input
-                    type="date"
+                  <DateInput
                     value={balanceSheetDate}
-                    onChange={(e) => setBalanceSheetDate(e.target.value)}
+                    onChange={setBalanceSheetDate}
+                    aria-label="资产负债表日"
+                    required
                   />
+                  {!validBalanceSheetDate && (
+                    <span className="dep-date-error">
+                      请输入有效日期，例如 2025-12-31。
+                    </span>
+                  )}
                 </Field>
                 <Field label="输出文件">
                   <FileInput
@@ -767,11 +809,25 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                     clearLabel="恢复默认"
                   />
                 </Field>
-                <div className="dep-export-action">
+              </div>
+              <div className="dep-export-footer">
+                <p className="dep-output-note">
+                  {outputPathTouched
+                    ? "已使用自定义保存位置。"
+                    : "默认保存到清单所在目录，并按导出时间自动命名。"}
+                </p>
+                <div className="dep-export-actions">
+                  <Button
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => setStep(1)}
+                  >
+                    返回核对映射
+                  </Button>
                   {busy && job ? (
                     <Button
                       variant="secondary"
-                      onClick={() => void jobCancel(job.jobId)}
+                      onClick={() => void cancelExport(job.jobId)}
                     >
                       停止任务
                     </Button>
@@ -782,6 +838,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                         busy ||
                         llmBusy ||
                         !inspection ||
+                        !validBalanceSheetDate ||
                         Boolean(missing.length)
                       }
                       onClick={() => void startExport()}
@@ -791,18 +848,6 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                   )}
                 </div>
               </div>
-              <Button
-                variant="secondary"
-                disabled={busy}
-                onClick={() => setStep(1)}
-              >
-                返回核对映射
-              </Button>
-              <p className="dep-output-note">
-                {outputPathTouched
-                  ? "已使用自定义保存位置。"
-                  : "默认保存到清单所在目录，并按导出时间自动命名。"}
-              </p>
               {!!outputPaths.length && (
                 <div className="fa-result-summary dep-result-summary">
                   <strong>折旧测算表已生成</strong>
@@ -810,6 +855,8 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                     <Button
                       key={output}
                       variant="default"
+                      className="fa-output-button"
+                      title={output}
                       onClick={() => void openOutput(output)}
                     >
                       打开结果：{displayFileName(output)}

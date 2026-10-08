@@ -1,24 +1,36 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ReleaseNotesSchema } from "./updateNotes";
 import { version as appVersion } from "../package.json";
 import { demoDataEnabled, demoJobLookup, demoLookup, demoPath,
-  cancelDemoJob, emitDemoJobEvent, isDemoJobCancelled, subscribeDemoJobs } from "./preview/demoRegistry";
+  cancelDemoJob, demoReplayJobs, injectDemoJobEvent, registerDemoReplayJob,
+  resumeDemoReplayJob, setDemoAutoPlayback, subscribeDemoJobs } from "./preview/demoRegistry";
 import "./preview/layoutAudit";
 import {
   BootstrapSchema,
   HistoryRowSchema,
   JobEventSchema,
+  MeetingEventSchema,
+  MeetingRecordStartSchema,
+  MeetingRecordStopSchema,
+  MeetingStatusSchema,
   TaskRestoreSchema,
   ToolManifestSchema,
   type HistoryRow,
   type JobEvent,
+  type MeetingEvent,
+  type MeetingRecordStart,
+  type MeetingRecordStop,
+  type MeetingStatus,
   type TaskRestore,
 } from "./types";
 
 const inTauri = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+/** 页面据此区分桌面应用与浏览器预览（后者无本机能力，需明确降级提示）。 */
+export const runningInDesktopApp = inTauri;
 
 // Browser preview is a first-class UI review surface. Keep non-sensitive
 // settings in memory so pages that persist draft UI state do not call Tauri's
@@ -64,14 +76,23 @@ export async function toolCatalog() {
 // engine_call 类操作（导入文档、OCR 识别、读取大表）没有事件流可听，各页面
 // 只能在按钮上转圈，用户不知道要等多久、甚至以为卡死。这里把进行中的调用
 // 集中广播出去，App 层统一弹「正在处理」等待窗（见 SyncBusyDialog）。
-export type SyncBusyEntry = { id: number; method: string };
+export type SyncBusyEntry = { id: number; method: string; detail?: string };
 
 const syncBusyListeners = new Set<(entries: SyncBusyEntry[]) => void>();
 let syncBusySeq = 0;
-const syncBusyActive = new Map<number, string>();
+// abort 只掐断前端的「等待」：Rust 侧一口气跑完的处理无法安全击杀，会自行
+// 收尾，但结果按终止要求丢弃（engineCall 的 promise 在 abort 时即拒绝）。
+const syncBusyActive = new Map<
+  number,
+  { method: string; detail?: string; abort: (reason: Error) => void }
+>();
 
 function syncBusySnapshot(): SyncBusyEntry[] {
-  return [...syncBusyActive].map(([id, method]) => ({ id, method }));
+  return [...syncBusyActive].map(([id, item]) => ({
+    id,
+    method: item.method,
+    detail: item.detail,
+  }));
 }
 
 function notifySyncBusy() {
@@ -87,29 +108,84 @@ export function onSyncBusyChange(
   return () => syncBusyListeners.delete(listener);
 }
 
+/** 停止等待的统一话术：页面 catch 到的就是这一句。 */
+export const SYNC_BUSY_ABORTED_MESSAGE =
+  "已停止等待：界面已恢复，后台处理会自行收尾，但结果不再应用到页面。";
+
+/**
+ * 终止当前全部同步调用的等待：等待窗立即关闭、页面的调用立刻收到失败，
+ * 后台处理则自行结束后被静默丢弃。返回终止条数（0 = 已经没有在等的）。
+ */
+export function syncBusyAbortAll(): number {
+  const pending = [...syncBusyActive.keys()];
+  for (const id of pending) {
+    const item = syncBusyActive.get(id);
+    syncBusyActive.delete(id);
+    item?.abort(new Error(SYNC_BUSY_ABORTED_MESSAGE));
+  }
+  if (pending.length > 0) notifySyncBusy();
+  return pending.length;
+}
+
 export async function engineCall(
   method: string,
   params: Record<string, unknown>,
-) {
+  /** 给等待弹窗看的一句话明细（文件名、组名），让用户知道在处理哪份数据。 */
+  detail?: string,
+): Promise<unknown> {
   if (!inTauri()) {
     // 演示数据通道：仅浏览器预览 + localStorage 开关打开时生效，
     // 用仓库内固定样例回放引擎返回，让"有数据之后"的布局可被随时检查。
     const handler = demoLookup(method);
     if (handler) return structuredClone(handler(params));
-    throw new Error("浏览器预览模式不能处理本地文件，请使用 Tauri 应用。 ");
+    throw previewUnavailable("处理本地文件");
   }
   const id = ++syncBusySeq;
-  syncBusyActive.set(id, method);
-  notifySyncBusy();
-  try {
-    return await invoke<unknown>("engine_call", { method, params });
-  } finally {
-    syncBusyActive.delete(id);
+  return new Promise((resolve, reject) => {
+    let aborted = false;
+    const settle = (
+      outcome: "fulfill" | "reject",
+      value?: unknown,
+      error?: unknown,
+    ) => {
+      // abort 已把等待交还给页面（promise 已拒绝、登记已清），迟到的
+      // 成功/失败一律吞掉，免得页面在终止后又被旧结果刷新。
+      if (aborted) return;
+      syncBusyActive.delete(id);
+      notifySyncBusy();
+      if (outcome === "fulfill") resolve(value);
+      else reject(error);
+    };
+    syncBusyActive.set(id, {
+      method,
+      ...(detail ? { detail } : {}),
+      abort: (reason) => {
+        aborted = true;
+        reject(reason);
+      },
+    });
     notifySyncBusy();
-  }
+    invoke<unknown>("engine_call", { method, params }).then(
+      (value) => settle("fulfill", value),
+      (error) => settle("reject", undefined, error),
+    );
+  });
 }
 
 let demoJobSeq = 0;
+
+// Browser-only audit seam. It uses the same event listeners as real job events,
+// but is never installed in Tauri (including its development window).
+if (typeof window !== "undefined" && !inTauri()) {
+  Object.assign(window, {
+    __demoTaskReplay: {
+      setAutoPlayback: setDemoAutoPlayback,
+      jobs: demoReplayJobs,
+      inject: injectDemoJobEvent,
+      resume: resumeDemoReplayJob,
+    },
+  });
+}
 
 // 演示任务的 toolId：与 Rust 侧（excel_merger.rs 的 tool_id()）同一套
 // 「方法前缀 → 工具 id」映射。页面按 toolId 过滤事件（如 Excel_Merger、
@@ -132,6 +208,7 @@ const DEMO_JOB_TOOL_ID_RULES: Array<[prefix: string, toolId: string]> = [
   ["loan.", "loan_interest"],
   ["pdf2excel.", "pdf_to_excel"],
   ["fuzzy.", "fuzzy_match"],
+  ["meeting.", "meeting_minutes"],
 ];
 
 const demoJobToolId = (method: string): string =>
@@ -151,12 +228,7 @@ export async function jobStart(
     const jobId = `demo-job-${++demoJobSeq}`;
     const toolId = demoJobToolId(method);
     const events = planner(params);
-    events.forEach((event, index) => {
-      window.setTimeout(() => {
-        if (isDemoJobCancelled(jobId)) return;
-        emitDemoJobEvent({ ...event, jobId, toolId });
-      }, 260 * (index + 1));
-    });
+    registerDemoReplayJob(jobId, method, toolId, events);
     return Promise.resolve(jobId);
   }
   return invoke<string>("job_start", { method, params });
@@ -289,6 +361,101 @@ export const legacyImport = (path: string) =>
   inTauri()
     ? invoke("legacy_import", { path })
     : Promise.reject(previewUnavailable("导入迁移备份"));
+
+// ===== 会议纪要助手 =====
+
+export const meetingStatus = () =>
+  inTauri()
+    ? invoke<MeetingStatus>("meeting_status").then((value) =>
+        MeetingStatusSchema.parse(value),
+      )
+    : Promise.resolve<MeetingStatus>({
+        watchEnabled: true,
+        resident: false,
+        inCall: false,
+        logFound: true,
+        recording: false,
+      });
+
+export const meetingDetectSetEnabled = (enabled: boolean) =>
+  inTauri()
+    ? invoke<void>("meeting_detect_set_enabled", { enabled })
+    : Promise.resolve();
+
+/** 后台常驻：开＝关窗缩到托盘继续监控；关＝关窗即退出。落库并即时生效。 */
+export const meetingSetResident = (enabled: boolean) =>
+  inTauri()
+    ? invoke<void>("meeting_set_resident", { enabled })
+    : Promise.resolve();
+
+/** 开机自启（注册表 Run 项，勾选即写入、立即生效）。 */
+export const meetingAutostartStatus = () =>
+  inTauri()
+    ? invoke<{ enabled: boolean }>("meeting_autostart_status")
+    : Promise.resolve({ enabled: false });
+
+export const meetingSetAutostart = (enabled: boolean) =>
+  inTauri()
+    ? invoke<{ enabled: boolean }>("meeting_set_autostart", { enabled })
+    : Promise.resolve({ enabled });
+
+export const meetingRecordStart = () =>
+  inTauri()
+    ? invoke<MeetingRecordStart>("meeting_record_start").then((value) =>
+        MeetingRecordStartSchema.parse(value),
+      )
+    : Promise.reject(previewUnavailable("开始会议录音"));
+
+export const meetingRecordStop = () =>
+  inTauri()
+    ? invoke<MeetingRecordStop>("meeting_record_stop").then((value) =>
+        MeetingRecordStopSchema.parse(value),
+      )
+    : Promise.reject(previewUnavailable("停止会议录音"));
+
+/** 语音转写连接测试：传 plan 走套餐通道（realtime 连接测试），
+ *  否则按通用通道验证 paraformer 上传凭证密钥。 */
+export const meetingAsrTest = (
+  apiKey?: string,
+  plan?: { baseUrl: string; model: string; apiKey?: string },
+) =>
+  inTauri()
+    ? invoke<{ ok: boolean; message: string; elapsedMs: number }>(
+        "meeting_asr_test",
+        plan
+          ? {
+              planBaseUrl: plan.baseUrl,
+              planModel: plan.model,
+              planApiKey: plan.apiKey?.trim() || null,
+            }
+          : { apiKey: apiKey?.trim() || null },
+      )
+    : Promise.reject(previewUnavailable("测试百炼语音转写连接"));
+
+export async function listenMeetingEvents(
+  callback: (event: MeetingEvent) => void,
+): Promise<UnlistenFn> {
+  if (!inTauri()) return () => undefined;
+  return listen("meeting-event", (e) =>
+    callback(MeetingEventSchema.parse(e.payload)),
+  );
+}
+
+/** 询问小窗把「记/不记」的决定发回主窗口；浏览器预览下静默成功。 */
+export const meetingAskChoice = (accepted: boolean) =>
+  inTauri()
+    ? emit("meeting-ask-choice", { accepted })
+    : Promise.resolve();
+
+/** 主窗口监听询问小窗的决定（「本次不记录」要压制当前这场会）。 */
+export async function listenMeetingAskChoice(
+  callback: (accepted: boolean) => void,
+): Promise<UnlistenFn> {
+  if (!inTauri()) return () => undefined;
+  return listen<{ accepted?: boolean }>("meeting-ask-choice", (e) =>
+    callback(e.payload?.accepted === true),
+  );
+}
 // `defaultDirectory` only decides where the dialog opens. An unreachable path
 // (typically a corporate UNC share reached from outside the intranet) is not an
 // error: the system dialog silently falls back to its own default folder.
@@ -301,6 +468,20 @@ export const pickPath = (
 ) => {
   if (!inTauri()) {
     if (demoDataEnabled()) {
+      // 文件类型必须与当前选择器一致。回函页会把选择结果直接列为 PDF；
+      // 返回通用 xlsx 样例会让演示界面出现“PDF 列表里是 Excel”的假数据。
+      if ((kind === "file" || kind === "files") &&
+        extensions.some((extension) => extension.toLowerCase().replace(/^\./, "") === "pdf")) {
+        const pdfs = [
+          demoPath("回函PDF\\工商银行询证函回函.pdf"),
+          demoPath("回函PDF\\建设银行询证函回函.pdf"),
+          demoPath("回函PDF\\华信客户回函扫描件.pdf"),
+        ];
+        return Promise.resolve(kind === "files" ? pdfs : pdfs[0]);
+      }
+      if (kind === "folder" && title.includes("回函 PDF")) {
+        return Promise.resolve(demoPath("回函PDF"));
+      }
       return Promise.resolve(
         kind === "files" ? [demoPath("样例文件.xlsx")] : demoPath("样例文件"),
       );

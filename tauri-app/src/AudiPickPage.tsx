@@ -22,6 +22,7 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { DateInput } from "@/components/DateInput";
 import { EmptyState } from "@/components/EmptyState";
 import { JobProgress } from "@/components/JobProgress";
 import "./audipick.css";
@@ -4101,7 +4102,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                 <div className="form-grid">
                   <label className="field"><span>项目名称</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
                   <label className="field"><span>客户名称</span><input value={client} onChange={(event) => setClient(event.target.value)} /></label>
-                  <label className="field"><span>项目日期</span><input type="date" value={projectDate} onChange={(event) => setProjectDate(event.target.value)} /></label>
+                  <label className="field"><span>项目日期</span><DateInput value={projectDate} onChange={setProjectDate} /></label>
                   <label className="field"><span>默认提取模板</span><select value={defaultRuleId} onChange={(event) => setDefaultRuleId(event.target.value)}>{rules.map((rule) => <option key={rule.id} value={rule.id}>{rule.name}</option>)}</select></label>
                 </div>
                 <div className="actions"><button className="primary" disabled={busy} onClick={() => void create()}>创建并进入项目</button></div>
@@ -4549,7 +4550,15 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             />
           )}{" "}
           {result ? (
-            <ResultView value={result} />
+            <ResultView
+              value={result}
+              // 批量任务失败/取消时旧结果不会清空（失败事件也可能携带
+              // 部分产物），必须标注以免被当成成功产物（P1 缺陷修复）。
+              stale={Boolean(
+                batchJob &&
+                  ["failed", "cancelled"].includes(batchJob.phase),
+              )}
+            />
           ) : (
             <EmptyState compact title={selectedDocument ? "尚无处理结果" : "请先选择合同"} description={selectedDocument ? "读取合同文字，选择模板后开始提取；完成后请对照原文核对。" : "在合同列表中选择“读取/预览”，即可查看原文并继续处理。"} />
           )}

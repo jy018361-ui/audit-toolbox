@@ -8,6 +8,7 @@ export type DataHandlingNoticeProps = {
   title: string;
   description: ReactNode;
   details?: ReactNode;
+  collapsibleDetails?: boolean;
   className?: string;
 };
 
@@ -22,6 +23,7 @@ export function DataHandlingNotice({
   title,
   description,
   details,
+  collapsibleDetails = false,
   className,
 }: DataHandlingNoticeProps) {
   const Icon =
@@ -41,7 +43,12 @@ export function DataHandlingNotice({
       <div className="data-handling-notice-copy">
         <strong>{title}</strong>
         <p>{description}</p>
-        {details ? (
+        {details && collapsibleDetails ? (
+          <details className="data-handling-notice-details">
+            <summary>了解详情</summary>
+            <div>{details}</div>
+          </details>
+        ) : details ? (
           <div className="data-handling-notice-details">{details}</div>
         ) : null}
       </div>

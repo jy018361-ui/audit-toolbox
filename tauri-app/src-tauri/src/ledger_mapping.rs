@@ -1,6 +1,6 @@
 //! TB（科目余额表）与 JE（序时账）的统一映射内核。
 //!
-//! 五个工具——汇兑损益、存款利息、借款利息、看账、正负数凭证标记——此前各有一套
+//! 汇兑损益、存款利息、借款利息、看账、正负数凭证标记、TBJE 与 FA 勾稽此前各有一套
 //! 表头识别与映射校验，同样的缺陷要修四遍。本模块把三件事收敛成唯一实现：
 //!
 //! 1. **角色词汇表**：每个业务字段的标准名、别名库、冲突词库（[`je_roles`] / [`tb_roles`]）；
@@ -10,7 +10,289 @@
 //! 设计依据与实测样例见 `LEDGER_MAPPING_UNIFICATION.md`。
 
 use chrono::{NaiveDate, NaiveDateTime};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+/// 没有启用双侧主体键时，以及已映射主体列中的空值，统一使用这一稳定键。
+pub(crate) const DEFAULT_ENTITY: &str = "默认主体";
+
+/// 主体是条件性匹配键：只有 TB、JE 双侧都映射了主体列才启用。
+/// 单侧映射时双方都退回默认主体，不能把单边主体当成筛选条件。
+pub(crate) fn entity_key_enabled(tb_has_entity: bool, je_has_entity: bool) -> bool {
+    tb_has_entity && je_has_entity
+}
+
+/// 生成跨工具统一的有效主体键。启用主体维度后，空白主体仍归入默认主体，
+/// 不作为通配符；未启用时忽略单侧原值，双方使用同一个默认键。
+pub(crate) fn effective_entity(raw: &str, enabled: bool) -> String {
+    let value = raw.trim();
+    if enabled && !value.is_empty() {
+        value.to_owned()
+    } else {
+        DEFAULT_ENTITY.to_owned()
+    }
+}
+
+/// 主体归集只接受用户显式选择。`strict` 完全保留原主体，`aggregate` 仅应用
+/// `mappings` 中列出的源主体；候选检测本身永远不会改写账表。
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum EntityScopeMode {
+    #[default]
+    Strict,
+    Aggregate,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum EntitySide {
+    Tb,
+    Je,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntityMapping {
+    pub(crate) side: EntitySide,
+    pub(crate) source: String,
+    pub(crate) target: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntityScope {
+    #[serde(default)]
+    pub(crate) mode: EntityScopeMode,
+    #[serde(default)]
+    pub(crate) mappings: Vec<EntityMapping>,
+}
+
+/// 业务层从已标准化账表行聚合出的主体摘要。净额与绝对额都保留：净额便于
+/// 判断总体影响，绝对额不会被借贷相抵掩盖规模。
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntitySummary {
+    pub(crate) entity: String,
+    pub(crate) row_count: usize,
+    pub(crate) amount: f64,
+    pub(crate) absolute_amount: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntityAggregationCandidate {
+    pub(crate) source_side: EntitySide,
+    pub(crate) source_entity: String,
+    pub(crate) target_entity: String,
+    pub(crate) row_count: usize,
+    pub(crate) amount: f64,
+    pub(crate) absolute_amount: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntityAggregationSuggestions {
+    pub(crate) anchors: Vec<String>,
+    pub(crate) candidates: Vec<EntityAggregationCandidate>,
+}
+
+pub(crate) fn entity_without_leading_code(value: &str) -> &str {
+    let trimmed = value.trim();
+    // ERP 常导出“公司代码 公司名称”。只有前段是至少 3 位纯数字、后段确实
+    // 含文字且由空白明确分隔时才剥代码；避免误伤“3M 公司”等合法名称。
+    trimmed
+        .split_once(char::is_whitespace)
+        .filter(|(prefix, suffix)| {
+            prefix.len() >= 3
+                && prefix.chars().all(|ch| ch.is_ascii_digit())
+                && suffix.chars().any(char::is_alphabetic)
+        })
+        .map(|(_, suffix)| suffix.trim())
+        .unwrap_or(trimmed)
+}
+
+pub(crate) fn normalized_entity_name(value: &str) -> String {
+    normalize_name(entity_without_leading_code(value))
+}
+
+fn merge_entity_summaries(rows: &[EntitySummary]) -> BTreeMap<String, EntitySummary> {
+    let mut merged = BTreeMap::<String, EntitySummary>::new();
+    for row in rows {
+        let key = normalized_entity_name(&row.entity);
+        if key.is_empty() {
+            continue;
+        }
+        let entry = merged.entry(key).or_insert_with(|| EntitySummary {
+            entity: row.entity.trim().to_owned(),
+            ..EntitySummary::default()
+        });
+        entry.row_count += row.row_count;
+        entry.amount += row.amount;
+        entry.absolute_amount += row.absolute_amount;
+    }
+    merged
+}
+
+/// 从 TB、JE 双方都精确出现的标准化主体名称建立锚点，再寻找以锚点为前缀、
+/// 且名称更长的疑似下级主体。前缀表达式完全由锚点动态转义生成，不维护
+/// “分公司/管理处”等易漏、易误判的后缀词表。一个名称命中多个锚点时取最长锚点。
+pub(crate) fn suggest_entity_aggregations(
+    tb: &[EntitySummary],
+    je: &[EntitySummary],
+) -> EntityAggregationSuggestions {
+    let tb = merge_entity_summaries(tb);
+    let je = merge_entity_summaries(je);
+    let anchors = tb
+        .keys()
+        .filter(|key| je.contains_key(*key))
+        .filter_map(|key| {
+            tb.get(key).map(|summary| {
+                (
+                    key.clone(),
+                    entity_without_leading_code(&summary.entity).to_owned(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let patterns = anchors
+        .iter()
+        .filter_map(|(key, display)| {
+            Regex::new(&format!(r"^{}.+$", regex::escape(key)))
+                .ok()
+                .map(|pattern| (key, display, pattern))
+        })
+        .collect::<Vec<_>>();
+
+    let mut candidates = Vec::new();
+    for (side, summaries) in [(EntitySide::Tb, &tb), (EntitySide::Je, &je)] {
+        for (key, summary) in summaries {
+            if anchors.iter().any(|(anchor, _)| anchor == key) {
+                continue;
+            }
+            let target = patterns
+                .iter()
+                .filter(|(_, _, pattern)| pattern.is_match(key))
+                .max_by_key(|(anchor, _, _)| anchor.chars().count())
+                .map(|(_, display, _)| (*display).clone());
+            if let Some(target_entity) = target {
+                candidates.push(EntityAggregationCandidate {
+                    source_side: side,
+                    source_entity: summary.entity.clone(),
+                    target_entity,
+                    row_count: summary.row_count,
+                    amount: summary.amount,
+                    absolute_amount: summary.absolute_amount,
+                });
+            }
+        }
+    }
+    candidates.sort_by(|left, right| {
+        left.source_side
+            .cmp(&right.source_side)
+            .then_with(|| left.source_entity.cmp(&right.source_entity))
+    });
+    EntityAggregationSuggestions {
+        anchors: anchors.into_iter().map(|(_, display)| display).collect(),
+        candidates,
+    }
+}
+
+/// 应用用户确认的主体归集。未选择、模式为 strict、侧别不同或源主体不同，
+/// 都严格返回原值；不会做候选推断、模糊匹配或映射链式传递。
+pub(crate) fn apply_entity_scope(side: EntitySide, entity: &str, scope: &EntityScope) -> String {
+    // 前置公司代码只是来源系统的展示口径，不是主体名称的一部分。这个标准化
+    // 与是否选择归集无关：strict 仍应让“10008529 公司名”和“公司名”精确对上。
+    let canonical = entity_without_leading_code(entity).trim();
+    if scope.mode != EntityScopeMode::Aggregate {
+        return canonical.to_owned();
+    }
+    let source = normalized_entity_name(entity);
+    scope
+        .mappings
+        .iter()
+        .find(|mapping| mapping.side == side && normalized_entity_name(&mapping.source) == source)
+        .map(|mapping| {
+            entity_without_leading_code(&mapping.target)
+                .trim()
+                .to_owned()
+        })
+        .unwrap_or_else(|| canonical.to_owned())
+}
+
+fn entity_summaries_from_value(
+    params: &Value,
+    field: &str,
+) -> Result<Vec<EntitySummary>, crate::AppError> {
+    let values = params.get(field).and_then(Value::as_array).ok_or_else(|| {
+        crate::AppError::new(
+            "INVALID_PARAMS",
+            format!("缺少 {field} 主体摘要数组。"),
+            false,
+            None,
+        )
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            if let Some(entity) = value.as_str() {
+                return Ok(EntitySummary {
+                    entity: entity.to_owned(),
+                    row_count: 1,
+                    ..EntitySummary::default()
+                });
+            }
+            let object = value.as_object().ok_or_else(|| {
+                crate::AppError::new(
+                    "INVALID_PARAMS",
+                    format!("{field} 的每项必须是主体名称或主体摘要。"),
+                    false,
+                    None,
+                )
+            })?;
+            let entity = object
+                .get("entity")
+                .and_then(Value::as_str)
+                .filter(|entity| !entity.trim().is_empty())
+                .ok_or_else(|| {
+                    crate::AppError::new(
+                        "INVALID_PARAMS",
+                        format!("{field} 的主体摘要缺少 entity。"),
+                        false,
+                        None,
+                    )
+                })?;
+            let amount = object.get("amount").and_then(Value::as_f64).unwrap_or(0.0);
+            Ok(EntitySummary {
+                entity: entity.to_owned(),
+                row_count: object.get("rowCount").and_then(Value::as_u64).unwrap_or(0) as usize,
+                amount,
+                absolute_amount: object
+                    .get("absoluteAmount")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_else(|| amount.abs()),
+            })
+        })
+        .collect()
+}
+
+/// `engine_call` 的轻量同步入口。业务页面可直接传双方去重名称，也可传已经
+/// 聚合好的行数/金额摘要；文件读取仍留在各业务 inspect 阶段，避免公共入口
+/// 重复解压大工作簿。
+pub(crate) fn entity_scope_suggestions_call(params: &Value) -> Result<Value, crate::AppError> {
+    let tb = entity_summaries_from_value(params, "tbEntities")?;
+    let je = entity_summaries_from_value(params, "jeEntities")?;
+    serde_json::to_value(suggest_entity_aggregations(&tb, &je)).map_err(|error| {
+        crate::AppError::new(
+            "SERIALIZE_FAILED",
+            "主体归集候选生成失败。",
+            true,
+            Some(error.to_string()),
+        )
+    })
+}
 
 /// TB与JE跨表对齐的公共结论。这是账表引擎能力，不属于汇兑损益业务。
 #[derive(Clone, Debug, PartialEq)]
@@ -241,6 +523,14 @@ const AUX: &[&str] = &[
     "輔助核算",
     "辅助項",
     "辅助项",
+    "核算维度",
+    "核算維度",
+    "核算维度编码",
+    "核算維度編碼",
+    "核算维度代码",
+    "核算維度代碼",
+    "核算维度名称",
+    "核算維度名稱",
     "往来单位",
     "往來單位",
     "客户",
@@ -313,6 +603,8 @@ static JE_ROLES: &[Role] = &[
             "公司名称",
             "单位名称",
             "核算主体",
+            "核算组织",
+            "核算组织名称",
             "主体",
             "公司",
             "单位",
@@ -355,8 +647,13 @@ static JE_ROLES: &[Role] = &[
             "凭证日期",
             "憑證日期",
             "业务日期",
+            "年月",
+            "生效日期",
+            "有效日期",
             "gldate",
             "postingdate",
+            // ERP 同时给生效日期与录入日期时，凭证所属期间取生效日期。
+            "effectivedate",
             "entrydate",
             "budat",
         ],
@@ -371,9 +668,15 @@ static JE_ROLES: &[Role] = &[
             "凭证号数",
             // 07 号样例把日期与凭证号拼成了一列「唯一码」，整列就是凭证键。
             "唯一码",
+            "唯一识别码",
+            "凭证唯一识别码",
+            "唯一凭证号",
             "唯一碼",
             "凭证编号",
+            "glreference",
             "憑證編號",
+            "会计凭证",
+            "會計憑證",
             "凭证字",
             "憑證字",
             "凭证字号",
@@ -386,6 +689,7 @@ static JE_ROLES: &[Role] = &[
             "jebatch",
             "je批名",
             "jename",
+            "je number",
             "belnr",
         ],
         &[
@@ -393,6 +697,8 @@ static JE_ROLES: &[Role] = &[
             "行號",
             "行项目",
             "行項目",
+            "凭证行",
+            "憑證行",
             "分录号",
             "分錄號",
             "line",
@@ -412,6 +718,7 @@ static JE_ROLES: &[Role] = &[
             "凭证类型",
             "憑證類型",
             "凭证类别",
+            "doctype",
             "憑證類別",
             "单据类型",
             "category",
@@ -430,7 +737,12 @@ static JE_ROLES: &[Role] = &[
             "科目代码",
             "科目代碼",
             "科目号",
+            // 神火 NC 系导出的编码列头是简体「科目编号」。
+            "科目编号",
             "科目編號",
+            // SAP 总账余额导出常把 G/L Account 简写成「帐号」。
+            "帐号",
+            "账号",
             "账户",
             "帳戶",
             "account",
@@ -446,7 +758,17 @@ static JE_ROLES: &[Role] = &[
         &[
             "科目名称",
             "科目名稱",
+            "一级科目",
+            "二级科目",
+            "三级科目",
+            "四级科目",
+            "五级科目",
+            // 「二级费用科目」不再算科目名称：3300/4800 家族里它 99% 装的是
+            // 管理／研发／销售这类费用属性维度词（黄金裁决 4:1 反对挂名称，
+            // 连 4800 家族自己的另两份都判辅助核算或不映射）。
             "科目描述",
+            "帐号描述",
+            "账号描述",
             "科目文本",
             "科目全名",
             "账户名称",
@@ -460,7 +782,8 @@ static JE_ROLES: &[Role] = &[
         NOT_NAME,
     ),
     // 「文本」是 SAP（SGTXT 行项目文本）与 AX/D365 对摘要的叫法；
-    // 「抬头」冲突词挡住「凭证抬头文本」——那是单据号不是行摘要。
+    // 「凭证行文本」也是 SAP 的标准行摘要。下方仍用「凭证」挡住泛化误判，
+    // `explicit_line_summary_header` 只为这些明确的行文本别名开窄例外。
     r(
         "summary",
         "摘要",
@@ -472,9 +795,18 @@ static JE_ROLES: &[Role] = &[
             "备注",
             "備註",
             "文本",
+            "凭证行文本",
+            "凭证摘要",
+            "憑證行文本",
+            "分录文本",
+            "分錄文本",
+            "行项目文本",
+            "行項目文本",
             "entry item",
             "line description",
             "sgtxt",
+            "description",
+            "text",
         ],
         &["科目", "account", "凭证", "憑證", "抬头", "抬頭"],
     ),
@@ -488,11 +820,18 @@ static JE_ROLES: &[Role] = &[
             "幣別",
             "货币",
             "貨幣",
+            // 国内 ERP 常把交易币种代码列直接命名为“外币/原币”；金额列
+            // 仍由 NOT_LOCAL 的借贷、金额、余额冲突词挡住。
+            "外币",
+            "外幣",
+            "原币",
+            "原幣",
             "货币代码",
             "貨幣代碼",
             "原币币种",
             "交易币种",
             "凭证货币",
+            "documentcurrencycode",
             "currency",
             "currencycode",
             "entercurrency",
@@ -519,6 +858,8 @@ static JE_ROLES: &[Role] = &[
             // 没有这个别名时它会因「含货币」反而去抢 currency 的位置。
             "总账货币",
             "總賬貨幣",
+            "LC1货币",
+            "LC1幣種",
             "companycodecurrency",
             "ledgercurrency",
             "functionalcurrency",
@@ -536,6 +877,8 @@ static JE_ROLES: &[Role] = &[
             // 04 号样例的 SAP 列叫「借贷标志」，取值是 S／H。
             "借贷标志",
             "借貸標誌",
+            "借/贷标识",
+            "借/貸標識",
             "借贷",
             "借貸",
             "drcr",
@@ -566,17 +909,23 @@ static JE_ROLES: &[Role] = &[
             "本位币金额",
             "本位幣金額",
             "本币金额",
+            "公司代码货币金额",
+            "公司代碼貨幣金額",
             "本位币",
+            "entitycurrencyamount",
+            "entitycurrencyamt",
             "本位幣",
             "借正贷负",
+            "发生额",
             "借正貸負",
             "金额",
             "金額",
             "companycodecurrencyvalue",
             "functionalamount",
+            "accountedamount",
         ],
         &[
-            "原币", "原幣", "外币", "外幣", "借方", "贷方", "貸方", "debit", "credit",
+            "原币", "原幣", "外币", "外幣", "entered", "借方", "贷方", "貸方", "debit", "credit",
         ],
     ),
     r(
@@ -591,8 +940,11 @@ static JE_ROLES: &[Role] = &[
             "借方",
             "debits",
             "debit",
+            "accounteddebit",
         ],
-        &["原币", "原幣", "外币", "外幣", "贷", "貸", "credit"],
+        &[
+            "原币", "原幣", "外币", "外幣", "entered", "贷", "貸", "credit",
+        ],
     ),
     r(
         "functionalCredit",
@@ -607,8 +959,9 @@ static JE_ROLES: &[Role] = &[
             "貸方",
             "credits",
             "credit",
+            "accountedcredit",
         ],
-        &["原币", "原幣", "外币", "外幣", "借", "debit"],
+        &["原币", "原幣", "外币", "外幣", "entered", "借", "debit"],
     ),
     r(
         "foreignAmount",
@@ -617,21 +970,29 @@ static JE_ROLES: &[Role] = &[
             "原币金额",
             "原幣金額",
             "外币金额",
+            "外币",
+            "外幣",
+            "原币",
+            "原幣",
+            "documentamount",
             "外幣金額",
             "凭证金额",
             "憑證金額",
             // SAP 中文导出把凭证货币下的金额叫「凭证货币金额」——「凭证金额」
             // 不是它的子串（中间隔着「货币」二字），04 PBC 就因此漏了原币净额。
             "凭证货币金额",
+            "currencyamt",
             "憑證貨幣金額",
             "原币",
             "原幣",
             "documentcurrencyvalue",
             "foreignamount",
+            "enteredamount",
         ],
         &[
             "本位币",
             "本位幣",
+            "accounted",
             "借方",
             "贷方",
             "貸方",
@@ -646,11 +1007,14 @@ static JE_ROLES: &[Role] = &[
             "原币借方",
             "原幣借方",
             "外币借方",
+            "documentdebitamount",
+            "借方原币",
             "货币借方金额",
             "貨幣借方金額",
             "enterdebits",
+            "entereddebit",
         ],
-        &["本位币", "本位幣", "贷", "貸"],
+        &["本位币", "本位幣", "accounted", "贷", "貸"],
     ),
     r(
         "foreignCredit",
@@ -659,11 +1023,14 @@ static JE_ROLES: &[Role] = &[
             "原币贷方",
             "原幣貸方",
             "外币贷方",
+            "documentcreditamount",
+            "贷方原币",
             "货币贷方金额",
             "貨幣貸方金額",
             "entercredits",
+            "enteredcredit",
         ],
-        &["本位币", "本位幣", "借"],
+        &["本位币", "本位幣", "accounted", "借"],
     ),
     // 辅助核算此前不在标准表里，汇兑损益靠一行 `role == "auxiliary"` 特判把它
     // 当多列角色用。TB-4800 的类型表把「辅助信息」列为账表的正式组成部分，
@@ -689,9 +1056,12 @@ static TB_ROLES: &[Role] = &[
         "公司/核算主体",
         &[
             "公司代码",
+            "businessunit",
             "公司代碼",
             "公司名称",
             "核算主体",
+            "核算组织",
+            "核算组织名称",
             "主体",
             "company",
             "companycode",
@@ -708,8 +1078,13 @@ static TB_ROLES: &[Role] = &[
             "科目代码",
             "科目代碼",
             "科目号",
+            // 神火 NC 系导出的编码列头是简体「科目编号」。
+            "科目编号",
             "科目編號",
             "科目段组合",
+            // SAP 总账余额导出常把 G/L Account 简写成「帐号」。
+            "帐号",
+            "账号",
             // 04／05 号样例的明细编码列就叫裸的一个「科目」，旁边另有
             // 「科目级别」放一级编码。分数比 `科目编码`（四字）低，同表里
             // 有更具体的写法时抢不过它；`抵销科目` 这类对手方列由 NOT_CODE 挡住。
@@ -728,11 +1103,15 @@ static TB_ROLES: &[Role] = &[
         &[
             "科目名称",
             "科目名稱",
+            // 「二级费用科目」是费用属性维度而非科目名称层级列（3300/4800
+            // 家族黄金裁决 4:1 反对挂名称），不列别名。
             "科目名称一级",
             "科目名称二级",
             "科目名称三级",
             "科目全称",
             "科目描述",
+            "帐号描述",
+            "账号描述",
             "科目文本",
             "账户名称",
             "帳戶名稱",
@@ -754,6 +1133,10 @@ static TB_ROLES: &[Role] = &[
             "幣別",
             "货币",
             "貨幣",
+            "外币",
+            "外幣",
+            "原币",
+            "原幣",
             "原币币种",
             "交易币种",
             "currency",
@@ -791,6 +1174,8 @@ static TB_ROLES: &[Role] = &[
             "记账本位币",
             "总账货币",
             "總賬貨幣",
+            "LC1货币",
+            "LC1幣種",
             "functionalcurrency",
             "ledgercurrency",
         ],
@@ -799,7 +1184,14 @@ static TB_ROLES: &[Role] = &[
     r(
         "openingDirection",
         "期初方向",
-        &["期初方向", "年初方向", "期初余额方向", "openingdrcr"],
+        &[
+            "期初方向",
+            "年初方向",
+            "借/贷",
+            "借贷",
+            "期初余额方向",
+            "openingdrcr",
+        ],
         &["期末", "本期", "本年"],
     ),
     r(
@@ -808,6 +1200,8 @@ static TB_ROLES: &[Role] = &[
         &[
             "期末方向",
             "年末方向",
+            "借/贷",
+            "借贷",
             "期末余额方向",
             "方向",
             "closingdrcr",
@@ -830,6 +1224,9 @@ static TB_ROLES: &[Role] = &[
             // 既有别名一个都对不上。裸的「期初」分数最低，同表里有更具体的
             // 写法时抢不过它；`期初余额方向`、`期初借方` 由冲突词挡住。
             "期初",
+            "(FP)-LC1",
+            // 2000&2002 公司 TB 的 SAP 英文短表头。
+            "Begin Amt.",
             "beginbalance",
             "beginningbalance",
             "openingbalance",
@@ -876,6 +1273,7 @@ static TB_ROLES: &[Role] = &[
             "期初原币余额",
             "期初原幣餘額",
             "期初外币余额",
+            "documentbeginningbalance",
             "期初余额原币",
             "期初餘額原幣",
             "期初原币",
@@ -906,6 +1304,8 @@ static TB_ROLES: &[Role] = &[
             // 02 号样例的期末列写作「累计余额」，配一个「累计余额方向」列。
             "累计余额",
             "累計餘額",
+            "累计差额-LC1",
+            "累計差額-LC1",
             "期末金额",
             "期末金額",
             "年末余额",
@@ -928,6 +1328,8 @@ static TB_ROLES: &[Role] = &[
             "期末余额借方",
             "期末借方余额",
             "期末借方",
+            "当前余额借方余额",
+            "借方余额当前余额",
             "年末余额借方",
             "年末借方",
             "closingdr",
@@ -943,6 +1345,8 @@ static TB_ROLES: &[Role] = &[
             "期末余额贷方",
             "期末贷方余额",
             "期末贷方",
+            "当前余额贷方余额",
+            "贷方余额当前余额",
             "年末余额贷方",
             "年末贷方",
             "closingcr",
@@ -957,6 +1361,7 @@ static TB_ROLES: &[Role] = &[
             "期末原币余额",
             "期末原幣餘額",
             "期末外币余额",
+            "documentendingbalance",
             "期末余额原币",
             "期末餘額原幣",
             "期末原币",
@@ -987,6 +1392,8 @@ static TB_ROLES: &[Role] = &[
             "本年累计借方",
             "本年累计借方发生额",
             "本年借方发生额",
+            "借方累计发生额",
+            "累计借方发生额",
             "累计借方",
             // 08／09 号样例的词序是反的：「借方累计」「贷方累计」。
             "借方累计",
@@ -995,6 +1402,7 @@ static TB_ROLES: &[Role] = &[
             "借方发生",
             "借方發生",
             "借方金额",
+            "Debit Amount",
             "ytddebit",
             "ytddr",
             "perioddr",
@@ -1012,6 +1420,8 @@ static TB_ROLES: &[Role] = &[
             "本年累计贷方",
             "本年累计贷方发生额",
             "本年贷方发生额",
+            "贷方累计发生额",
+            "累计贷方发生额",
             "累计贷方",
             "贷方累计",
             "貸方累計",
@@ -1019,6 +1429,7 @@ static TB_ROLES: &[Role] = &[
             "贷方发生",
             "貸方發生",
             "贷方金额",
+            "Credit Amount",
             "ytdcredit",
             "ytdcr",
             "periodcr",
@@ -1034,6 +1445,8 @@ static TB_ROLES: &[Role] = &[
         &[
             "本年原币累计借方发生额",
             "本年累计原币借方",
+            "本年累计借方原币",
+            "本年借方原币累计",
             "借方发生原币",
             "借方發生原幣",
             "原币借方发生额",
@@ -1047,6 +1460,8 @@ static TB_ROLES: &[Role] = &[
         &[
             "本年原币累计贷方发生额",
             "本年累计原币贷方",
+            "本年累计贷方原币",
+            "本年贷方原币累计",
             "贷方发生原币",
             "貸方發生原幣",
             "原币贷方发生额",
@@ -1080,7 +1495,10 @@ static TB_ROLES: &[Role] = &[
             "本期本位币借方发生额",
             "本期借方",
             "本月借方",
+            "借方余额-LC1",
+            "借方餘額-LC1",
             "mtddebit",
+            "functionaldebitactivityamount",
         ],
         &[
             "贷", "貸", "原币", "原幣", "外币", "期初", "期末", "本年", "累计", "credit",
@@ -1107,6 +1525,7 @@ static TB_ROLES: &[Role] = &[
             "年月",
             "period",
             "fiscalperiod",
+            "fiscalrange",
         ],
         &["金额", "余额", "amount", "balance"],
     ),
@@ -1119,7 +1538,10 @@ static TB_ROLES: &[Role] = &[
             "本期本位币贷方发生额",
             "本期贷方",
             "本月贷方",
+            "贷方余额-LC1",
+            "貸方餘額-LC1",
             "mtdcredit",
+            "functionalcreditactivityamount",
         ],
         &[
             "借", "原币", "原幣", "外币", "期初", "期末", "本年", "累计", "debit",
@@ -1606,6 +2028,356 @@ pub(crate) fn forward_fill_columns_skipping(
     filled
 }
 
+/// JE 科目身份感知的向下填充：一行只要有任一科目身份列（编码或名称）
+/// 非空，就是一个新的科目上下文。该行其他空白科目列不得沿用上一科目，且
+/// 必须清除旧上下文；只有科目身份列**全部**为空的续行才允许继承。
+/// 凭证号、日期等非科目列仍按普通合并单元格规则填充。
+pub(crate) fn forward_fill_ledger_identity_columns_skipping(
+    headers: &[String],
+    rows: &mut [Vec<String>],
+    columns: &[String],
+    account_columns: &[String],
+    keep: &[bool],
+) -> usize {
+    let indexes = columns
+        .iter()
+        .filter_map(|column| header_index(headers, column))
+        .collect::<HashSet<_>>();
+    let accounts = account_columns
+        .iter()
+        .filter_map(|column| header_index(headers, column))
+        .collect::<HashSet<_>>();
+    let mut last_values = HashMap::<usize, String>::new();
+    let mut filled = 0usize;
+    for (row_index, row) in rows.iter_mut().enumerate() {
+        if !keep.get(row_index).copied().unwrap_or(true) {
+            continue;
+        }
+        let new_account = accounts.iter().any(|index| {
+            row.get(*index)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        if new_account {
+            for index in &accounts {
+                if row.get(*index).is_none_or(|value| value.trim().is_empty()) {
+                    last_values.remove(index);
+                }
+            }
+        }
+        for index in &indexes {
+            let current = row.get(*index).map(|value| value.trim()).unwrap_or("");
+            if current.is_empty() {
+                if new_account && accounts.contains(index) {
+                    continue;
+                }
+                if let (Some(previous), Some(cell)) = (last_values.get(index), row.get_mut(*index))
+                {
+                    *cell = previous.clone();
+                    filled += 1;
+                }
+            } else {
+                last_values.insert(*index, current.to_owned());
+            }
+        }
+    }
+    filled
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SectionedLedgerRow {
+    Opening,
+    Total,
+    Other,
+}
+
+#[derive(Debug)]
+struct SectionedLedgerPlan {
+    keep: Vec<bool>,
+    summary_indexes: HashSet<usize>,
+    id_indexes: Vec<usize>,
+    account_indexes: Vec<usize>,
+    amount_indexes: HashSet<usize>,
+}
+
+fn role_indexes(
+    headers: &[String],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+    roles: &[&str],
+) -> Vec<usize> {
+    let mut indexes = roles
+        .iter()
+        .flat_map(|role| column_of(role))
+        .filter_map(|name| header_index(headers, &name))
+        .collect::<Vec<_>>();
+    indexes.sort_unstable();
+    indexes.dedup();
+    indexes
+}
+
+fn sectioned_row_kind(
+    row: &[String],
+    summary_indexes: &HashSet<usize>,
+    id_indexes: &[usize],
+) -> SectionedLedgerRow {
+    if id_indexes.iter().any(|index| {
+        row.get(*index)
+            .is_some_and(|value| !value.trim().is_empty())
+    }) {
+        return SectionedLedgerRow::Other;
+    }
+    let label = summary_indexes
+        .iter()
+        .filter_map(|index| row.get(*index))
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .unwrap_or("");
+    match label {
+        "期初余额" => SectionedLedgerRow::Opening,
+        "本月合计" | "本年累计" => SectionedLedgerRow::Total,
+        _ => SectionedLedgerRow::Other,
+    }
+}
+
+/// 识别“科目写在期初余额行、真实分录只写凭证号和金额”的分段 JE。
+/// 只有实际观察到锚点后的正文缺少科目时才启用，普通平铺 JE 不受影响。
+fn sectioned_ledger_plan(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Option<SectionedLedgerPlan> {
+    let mut summary_indexes = role_indexes(headers, column_of, &["summary"])
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let id_indexes = role_indexes(headers, column_of, &["id"]);
+    // 摘要不是所有工具的必填映射。结构标签本身足够明确，因此也从实际取值
+    // 发现所在列；这样任一公共 JE 消费方都能识别分段账，不依赖页面是否展示摘要。
+    for row in rows {
+        if id_indexes.iter().any(|index| {
+            row.get(*index)
+                .is_some_and(|value| !value.trim().is_empty())
+        }) {
+            continue;
+        }
+        for (index, value) in row.iter().enumerate() {
+            if matches!(value.trim(), "期初余额" | "本月合计" | "本年累计") {
+                summary_indexes.insert(index);
+            }
+        }
+    }
+    let account_code_indexes = role_indexes(headers, column_of, &["accountCode"]);
+    let account_indexes = role_indexes(
+        headers,
+        column_of,
+        &["accountCode", "accountName", "account"],
+    );
+    let amount_indexes = role_indexes(headers, column_of, JE_AMOUNT_ROLES)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    if summary_indexes.is_empty()
+        || id_indexes.is_empty()
+        || account_indexes.is_empty()
+        || amount_indexes.is_empty()
+    {
+        return None;
+    }
+
+    let mut active_anchor = false;
+    let mut observed_missing_account_detail = false;
+    let mut keep = vec![false; rows.len()];
+    for (index, row) in rows.iter().enumerate() {
+        let kind = sectioned_row_kind(row, &summary_indexes, &id_indexes);
+        match kind {
+            SectionedLedgerRow::Opening => {
+                active_anchor = account_indexes.iter().any(|position| {
+                    row.get(*position)
+                        .is_some_and(|value| !value.trim().is_empty())
+                });
+                continue;
+            }
+            SectionedLedgerRow::Total => continue,
+            SectionedLedgerRow::Other => {}
+        }
+        let has_id = id_indexes.iter().any(|position| {
+            row.get(*position)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        let has_amount = amount_indexes.iter().any(|position| {
+            row.get(*position)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        if active_anchor && has_id && has_amount {
+            keep[index] = true;
+            let required_identity = if account_code_indexes.is_empty() {
+                &account_indexes
+            } else {
+                &account_code_indexes
+            };
+            if required_identity.iter().all(|position| {
+                row.get(*position)
+                    .is_none_or(|value| value.trim().is_empty())
+            }) {
+                observed_missing_account_detail = true;
+            }
+        }
+    }
+    observed_missing_account_detail.then_some(SectionedLedgerPlan {
+        keep,
+        summary_indexes,
+        id_indexes,
+        account_indexes,
+        amount_indexes,
+    })
+}
+
+pub(crate) fn is_sectioned_ledger(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> bool {
+    sectioned_ledger_plan(headers, rows, column_of).is_some()
+}
+
+fn sectioned_non_fill_amount_indexes(
+    headers: &[String],
+    mapped_amount_indexes: &HashSet<usize>,
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> HashSet<usize> {
+    let direction_indexes = role_indexes(headers, column_of, &["direction"])
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let mut indexes = mapped_amount_indexes.clone();
+    for (index, header) in headers.iter().enumerate() {
+        if direction_indexes.contains(&index) {
+            continue;
+        }
+        let normalized = normalize_header(header);
+        let amount_named = normalized.contains("金额")
+            || normalized.contains("金額")
+            || normalized.contains("amount");
+        let debit_credit_named = (normalized.contains("借方")
+            || normalized.contains("贷方")
+            || normalized.contains("貸方")
+            || normalized.contains("debit")
+            || normalized.contains("credit"))
+            && !normalized.contains("方向")
+            && !normalized.contains("标志")
+            && !normalized.contains("標誌")
+            && !normalized.contains("标识")
+            && !normalized.contains("標識");
+        if amount_named || debit_credit_named {
+            indexes.insert(index);
+        }
+    }
+    indexes
+}
+
+pub(crate) struct SectionedLedgerStream {
+    summary_indexes: HashSet<usize>,
+    id_indexes: Vec<usize>,
+    account_indexes: Vec<usize>,
+    amount_indexes: HashSet<usize>,
+    no_fill: HashSet<usize>,
+    context: Vec<Option<String>>,
+    active_anchor: bool,
+}
+
+impl SectionedLedgerStream {
+    /// 先用有界样本确认确属分段 JE，再创建可用于大 CSV 顺序扫描的状态机。
+    pub(crate) fn detect(
+        headers: &[String],
+        sample_rows: &[Vec<String>],
+        column_of: &dyn Fn(&str) -> Vec<String>,
+    ) -> Option<Self> {
+        let plan = sectioned_ledger_plan(headers, sample_rows, column_of)?;
+        let no_fill = sectioned_non_fill_amount_indexes(headers, &plan.amount_indexes, column_of);
+        Some(Self {
+            summary_indexes: plan.summary_indexes,
+            id_indexes: plan.id_indexes,
+            account_indexes: plan.account_indexes,
+            amount_indexes: plan.amount_indexes,
+            no_fill,
+            context: vec![None; headers.len()],
+            active_anchor: false,
+        })
+    }
+
+    /// 返回 `true` 时该行是已补全的真实凭证明细；结构行及游离行返回 `false`。
+    pub(crate) fn normalize(&mut self, row: &mut Vec<String>) -> bool {
+        let width = self.context.len();
+        row.resize(width, String::new());
+        match sectioned_row_kind(row, &self.summary_indexes, &self.id_indexes) {
+            SectionedLedgerRow::Opening => {
+                self.context.fill(None);
+                self.active_anchor = self.account_indexes.iter().any(|position| {
+                    row.get(*position)
+                        .is_some_and(|value| !value.trim().is_empty())
+                });
+                for column in 0..width {
+                    if self.no_fill.contains(&column) || self.summary_indexes.contains(&column) {
+                        continue;
+                    }
+                    let value = row[column].trim();
+                    if !value.is_empty() {
+                        self.context[column] = Some(value.to_owned());
+                    }
+                }
+                return false;
+            }
+            SectionedLedgerRow::Total => return false,
+            SectionedLedgerRow::Other => {}
+        }
+        let has_id = self.id_indexes.iter().any(|position| {
+            row.get(*position)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        let has_amount = self.amount_indexes.iter().any(|position| {
+            row.get(*position)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        if !self.active_anchor || !has_id || !has_amount {
+            return false;
+        }
+        for column in 0..width {
+            if self.no_fill.contains(&column) {
+                continue;
+            }
+            let value = row[column].trim();
+            if value.is_empty() {
+                if let Some(previous) = self.context[column].as_ref() {
+                    row[column] = previous.clone();
+                }
+            } else {
+                self.context[column] = Some(value.to_owned());
+                row[column] = value.to_owned();
+            }
+        }
+        true
+    }
+}
+
+/// 将分段 JE 正规化为每行自包含的凭证明细。
+///
+/// “期初余额”行重置并提供上下文但不进入正文；“本月合计”“本年累计”直接
+/// 删除；真实分录补齐除借方、贷方和金额类列之外的全部空字段。返回 `true`
+/// 表示识别并应用了分段规则，`false` 表示调用方应继续沿用普通平铺 JE 逻辑。
+pub(crate) fn normalize_sectioned_ledger_rows(
+    headers: &[String],
+    rows: &mut Vec<Vec<String>>,
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> bool {
+    let Some(mut normalizer) = SectionedLedgerStream::detect(headers, rows, column_of) else {
+        return false;
+    };
+    let mut normalized = Vec::new();
+    for mut row in std::mem::take(rows) {
+        if normalizer.normalize(&mut row) {
+            normalized.push(row);
+        }
+    }
+    *rows = normalized;
+    true
+}
+
 // ────────────────────────────── 表头归一化与匹配 ──────────────────────────────
 
 /// 表头归一化：去掉空白与各类分隔符，转小写。与 `fx::normalize_header` 行为一致。
@@ -1639,6 +2411,21 @@ pub(crate) fn segment_exact(header: &str, alias: &str) -> bool {
     !target.is_empty() && header_segments(header).iter().any(|s| *s == target)
 }
 
+fn explicit_line_summary_header(header: &str) -> bool {
+    let n = normalize_header(header);
+    matches!(
+        n.as_str(),
+        "凭证行文本"
+            | "憑證行文本"
+            | "分录文本"
+            | "分錄文本"
+            | "行项目文本"
+            | "行項目文本"
+            | "凭证摘要"
+            | "憑證摘要"
+    ) || n.contains("摘要")
+}
+
 /// 该角色是否受集团货币口径排除约束。
 ///
 /// 角色名有两种写法：`functionalAmount` 小写开头，`ytdFunctionalCredit` 驼峰中段。
@@ -1654,34 +2441,45 @@ fn excludes_group_currency(role: &Role) -> bool {
 ///
 /// **取最长命中**：`借方金额` 必须落到 `functionalDebit`（别名 `借方金额`，4 字）
 /// 而不是被 `functionalAmount` 的别名 `金额`（2 字）抢走。
+/// 这些 ERP 标题在真实导出中既可能装编码，也可能装名称——两可表头。
+/// alias_score 有意不给它们打分，定性交给 [`refine_account_identity_by_data`]
+/// 按数据形态冷启动裁决。
+const TWO_WAY_ACCOUNT_HEADERS: &[&str] = &[
+    "会计科目",
+    "會計科目",
+    "总账科目",
+    "總賬科目",
+    "总帐科目",
+    "總帳科目",
+    "账户",
+    "帳戶",
+];
+
+fn two_way_account_header(header: &str) -> bool {
+    header_segments(header)
+        .iter()
+        .any(|segment| TWO_WAY_ACCOUNT_HEADERS.contains(&segment.as_str()))
+}
+
 pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
     let n = normalize_header(header);
     if n.is_empty() {
         return None;
     }
-    // 这些 ERP 标题在真实导出中既可能装编码，也可能装名称。公共 Coding
-    // 不凭标题定性，交给 LLM 结合 sampleRows 或用户人工选择。
-    if matches!(role.name, "accountCode" | "accountName")
-        && header_segments(header).iter().any(|segment| {
-            matches!(
-                segment.as_str(),
-                "会计科目"
-                    | "會計科目"
-                    | "总账科目"
-                    | "總賬科目"
-                    | "总帐科目"
-                    | "總帳科目"
-                    | "账户"
-                    | "帳戶"
-            )
-        })
-    {
+    if matches!(role.name, "accountCode" | "accountName") && two_way_account_header(header) {
         return None;
     }
     if role
         .conflicts
         .iter()
         .any(|c| n.contains(&normalize_header(c)))
+        && !(role.name == "summary" && explicit_line_summary_header(header))
+        // 「借正贷负」本身就是净额语义（奥扬余额表的期初/期末带符号列），
+        // 不能因表头含「借/贷」被净额角色的冲突词整体排除。
+        && !(n.contains("借正贷负") && role.name.ends_with("Amount"))
+        // 「年月」式期间列（08/09 号金蝶导出）整列就是记账期间日期，
+        // 不能因含「年/月」单字被 date 的冲突词排除。
+        && !(role.name == "date" && n == "年月")
     {
         return None;
     }
@@ -1712,7 +2510,293 @@ pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
             best = Some(score);
         }
     }
+    // 日期语义优先于表头长度/列顺序：中文“生效日期”和“记账日期”
+    // 长度相同；仅靠最长别名无法保证前者被选中。只对完整标题或
+    // 双语标题中的完整分段加权，不让“非生效日期”等包含词误抢。
+    // 两级优先：生效/有效日期最高；过账/记帐日期次之——SAP 导出里
+    // 「凭证日期」是单据日期，「记帐日期/过帐日期」才是入账日，
+    // 黄金裁决（04JE、03序时账）都取入账日。
+    if role.name == "date" {
+        let hit = |list: &[&str]| {
+            list.iter()
+                .any(|preferred| n == *preferred || segment_exact(header, preferred))
+        };
+        const TIER_TOP: &[&str] = &["effectivedate", "生效日期", "有效日期"];
+        const TIER_POSTING: &[&str] = &[
+            "postingdate",
+            "过账日期",
+            "過賬日期",
+            "过帐日期",
+            "過帳日期",
+            "记账日期",
+            "記賬日期",
+            "记帐日期",
+            "記帳日期",
+        ];
+        if hit(TIER_TOP) {
+            best = best.map(|score| score + 1.0);
+        } else if hit(TIER_POSTING) {
+            best = best.map(|score| score + 0.5);
+        } else if hit(&["date", "日期"]) {
+            // 裸「日期」是中文导出的正牌记账日期；「长别名优先」的通则会
+            // 让它反输给「业务日期」（2.04 > 2.02）。抬 0.3：折算到各工具
+            // 的数据密度加成后仍稳赢长别名，但不越生效/过账两级加成
+            // （用友 01 号样例黄金裁决取「日期」）。
+            best = best.map(|score| score + 0.3);
+        }
+    }
+    // 「本币/本位币」是最直接的本位币命名；「总账货币」虽是四字别名，
+    // 在 SAP 导出里常与「本币」并列且语义等价——黄金裁决取「本币」，
+    // 给精确短名加层让它稳赢。
+    if role.name == "functionalCurrency" && matches!(n.as_str(), "本币" | "本位币") {
+        best = best.map(|score| score + 0.5);
+    }
+    // 裸「金额」是本位币净额的正牌命名；「长别名优先」会让它反输给同时
+    // 存在的「借正贷负」列（2.04 > 2.02）。07 序时账黄金裁决取「金额」、
+    // 「借正贷负」留空；只有裸列的奥扬样例不受影响（无竞争列）。
+    if role.name == "functionalAmount" && matches!(n.as_str(), "金额" | "金額") {
+        best = best.map(|score| score + 0.1);
+    }
     best
+}
+
+/// 成型映射里的方向列按位置定归属，汇兑损益/TBJE 与存款利息/FA List 的
+/// 映射组装共用：
+///
+/// 1. 两列方向（openingDirection/closingDirection）：冲突消解按角色名
+///    字母序让 closing 先挑列，可能把前柱分给期末。余额表一律期初在前、
+///    期末在后（2-2026.08、北重精工等样例），事后换回来。
+/// 2. 单一方向列：按它与期初/期末余额列的远近判归——紧邻期初余额的是
+///    期初方向（北重精工、泓源化工等 R4 裁决），置于表尾靠近期末余额的
+///    是期末方向（陇能建设、澄宇结算中心等裁决）。余额列缺失时不改判。
+pub(crate) fn align_tb_direction_pair(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &mut serde_json::Map<String, Value>,
+) {
+    let col = |mapping: &serde_json::Map<String, Value>, role: &str| {
+        mapping
+            .get(role)
+            .and_then(Value::as_str)
+            .and_then(|c| headers.iter().position(|h| h == c))
+    };
+    if let (Some(op), Some(cl)) = (
+        col(mapping, "openingDirection"),
+        col(mapping, "closingDirection"),
+    ) && op > cl
+    {
+        let a = mapping.get("openingDirection").cloned();
+        let b = mapping.get("closingDirection").cloned();
+        if let (Some(a), Some(b)) = (a, b) {
+            mapping.insert("openingDirection".into(), b);
+            mapping.insert("closingDirection".into(), a);
+        }
+    }
+    if mapping.contains_key("openingDirection") ^ mapping.contains_key("closingDirection") {
+        let (have, index) = if let Some(i) = col(mapping, "openingDirection") {
+            ("openingDirection", i)
+        } else {
+            (
+                "closingDirection",
+                col(mapping, "closingDirection").expect("上方互斥已保证其一存在"),
+            )
+        };
+        if let (Some(op_bal), Some(cl_bal)) = (
+            col(mapping, "openingFunctionalAmount"),
+            col(mapping, "closingFunctionalAmount"),
+        ) {
+            let target = if index.abs_diff(op_bal) < index.abs_diff(cl_bal) {
+                "openingDirection"
+            } else {
+                "closingDirection"
+            };
+            if target != have
+                && let Some(value) = mapping.get(have).cloned()
+            {
+                mapping.remove(have);
+                mapping.insert(target.into(), value);
+            }
+        }
+    }
+
+    share_single_tb_direction_when_reconciled(headers, rows, mapping);
+}
+
+/// 余额表只给一列方向时，列的位置只能说明它最像哪个时点，不能证明另一个
+/// 时点不受它控制。用整表勾稽比较两个列级假设：维持单时点方向，或让同一列
+/// 同时控制期初与期末。只有至少三条有鉴别力的行参与，且共享假设严格胜出时
+/// 才补齐另一角色；不逐行选符号，避免把真实差异“猜平”。
+fn share_single_tb_direction_when_reconciled(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &mut serde_json::Map<String, Value>,
+) {
+    if rows.is_empty()
+        || !(mapping.contains_key("openingDirection") ^ mapping.contains_key("closingDirection"))
+    {
+        return;
+    }
+    // 借贷分列已经自行表达方向，不走单列方向裁决。
+    if [
+        "openingFunctionalDebit",
+        "openingFunctionalCredit",
+        "closingFunctionalDebit",
+        "closingFunctionalCredit",
+        "openingForeignDebit",
+        "openingForeignCredit",
+        "closingForeignDebit",
+        "closingForeignCredit",
+    ]
+    .iter()
+    .any(|role| mapping.contains_key(*role))
+    {
+        return;
+    }
+    let (present, missing) = if mapping.contains_key("openingDirection") {
+        ("openingDirection", "closingDirection")
+    } else {
+        ("closingDirection", "openingDirection")
+    };
+    let Some(direction) = mapping.get(present).cloned() else {
+        return;
+    };
+    let baseline = tb_direction_rollforward_score(headers, rows, mapping, present);
+    let mut shared = mapping.clone();
+    shared.insert(missing.into(), direction.clone());
+    let shared_score = tb_direction_rollforward_score(headers, rows, &shared, present);
+    if let (
+        Some((baseline_eligible, baseline_passed, _)),
+        Some((shared_eligible, shared_passed, used_period)),
+    ) = (baseline, shared_score)
+        && baseline_eligible >= 3
+        && shared_eligible == baseline_eligible
+        && shared_passed > baseline_passed
+        && (!used_period
+            || if shared_eligible < 10 {
+                shared_passed == shared_eligible
+            } else {
+                shared_passed * 100 >= shared_eligible * 95
+            })
+    {
+        mapping.insert(missing.into(), direction);
+    }
+}
+
+/// 返回（有鉴别力行数，勾稽通过行数）。方向为空、期初为零的行不投票。
+fn tb_direction_rollforward_score(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &serde_json::Map<String, Value>,
+    direction_role: &str,
+) -> Option<(usize, usize, bool)> {
+    let columns = |role: &str| -> Vec<String> {
+        match mapping.get(role) {
+            Some(Value::String(column)) => vec![column.clone()],
+            Some(Value::Array(values)) => values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let index_of = |role: &str| {
+        columns(role)
+            .into_iter()
+            .find_map(|column| header_index(headers, &column))
+    };
+    let direction_index = index_of(direction_role)?;
+    // 映射建议阶段尚未把已通过勾稽的「本期发生」提升为 YTD。
+    // 单一方向列若只等提升后才共享，会形成循环：缺期末方向使提升失败，
+    // 未提升又使共享无发生额可投票。先用同一套期初至期末等式检验本期列；
+    // 如果本期不是完整报告期间，等式不会通过，也就不会错误共享方向。
+    let (unit, movement) = ["Functional", "Foreign"].into_iter().find_map(|unit| {
+        if index_of(&format!("opening{unit}Amount")).is_none()
+            || index_of(&format!("closing{unit}Amount")).is_none()
+        {
+            return None;
+        }
+        ["ytd", "period"].into_iter().find_map(|movement| {
+            (index_of(&format!("{movement}{unit}Debit")).is_some()
+                && index_of(&format!("{movement}{unit}Credit")).is_some())
+            .then_some((unit, movement))
+        })
+    })?;
+    let opening_prefix = format!("opening{unit}");
+    let closing_prefix = format!("closing{unit}");
+    let opening_index = index_of(&format!("{opening_prefix}Amount"))?;
+    let closing_index = index_of(&format!("{closing_prefix}Amount"))?;
+    let debit_index = index_of(&format!("{movement}{unit}Debit"))?;
+    let credit_index = index_of(&format!("{movement}{unit}Credit"))?;
+    let convention = detect_tb_sign_convention(headers, rows, &columns)
+        .convention
+        .unwrap_or(SignConvention::Unsigned);
+    let opening_self_signed = balance_self_signed(headers, rows, &columns, &opening_prefix);
+    let closing_self_signed = balance_self_signed(headers, rows, &columns, &closing_prefix);
+    let opening_direction = index_of("openingDirection");
+    let closing_direction = index_of("closingDirection");
+    let number = |row: &[String], index: usize| {
+        parse_amount(row.get(index).map(String::as_str).unwrap_or(""))
+            .ok()
+            .flatten()
+            .unwrap_or(0.0)
+    };
+    let mut eligible = 0usize;
+    let mut passed = 0usize;
+    for row in rows {
+        let direction = row
+            .get(direction_index)
+            .map(String::as_str)
+            .unwrap_or("")
+            .trim();
+        let opening_raw = number(row, opening_index);
+        if direction.is_empty() || opening_raw.abs() <= 0.005 {
+            continue;
+        }
+        let opening = signed_balance(
+            &AmountInputs {
+                amount: Some(opening_raw),
+                direction: opening_direction
+                    .and_then(|index| row.get(index))
+                    .map(ToOwned::to_owned),
+                ..Default::default()
+            },
+            convention,
+            opening_self_signed,
+        );
+        let closing = signed_balance(
+            &AmountInputs {
+                amount: Some(number(row, closing_index)),
+                direction: closing_direction
+                    .and_then(|index| row.get(index))
+                    .map(ToOwned::to_owned),
+                ..Default::default()
+            },
+            convention,
+            closing_self_signed,
+        );
+        let movement = signed_amount(
+            &AmountInputs {
+                debit: Some(number(row, debit_index)),
+                credit: Some(number(row, credit_index)),
+                ..Default::default()
+            },
+            convention,
+        );
+        eligible += 1;
+        if holds(
+            &BalanceRow {
+                opening,
+                debit: movement,
+                credit: 0.0,
+                closing,
+            },
+            -1.0,
+        ) {
+            passed += 1;
+        }
+    }
+    Some((eligible, passed, movement == "period"))
 }
 
 /// 期初与期末的方向列常常**列名完全一样**（都叫「方向 Dr/Cr」），光看名字分不出。
@@ -1917,19 +3001,19 @@ impl Tool {
     /// 分列二选一」由形态槽（[`resolve_form`]）把关，平铺列表表达不了这种或然。
     pub(crate) fn required(self, kind: &str) -> &'static [&'static str] {
         match (self, kind) {
-            (Tool::FxAudit, "je") => &["date", "id", "accountCode", "currency"],
-            (Tool::FxAudit, _) => &["accountCode"],
-            (Tool::DepositInterest, "je") => &["date", "accountCode"],
-            (Tool::DepositInterest, _) => &["accountCode"],
-            (Tool::LoanInterest, "je") => &["date", "accountCode"],
-            (Tool::LoanInterest, _) => &["accountCode"],
-            (Tool::Ledger, "je") => &["id", "accountCode"],
-            (Tool::Ledger, _) => &["accountCode"],
+            (Tool::FxAudit, "je") => &["date", "id", "currency"],
+            (Tool::FxAudit, _) => &[],
+            (Tool::DepositInterest, "je") => &["date"],
+            (Tool::DepositInterest, _) => &[],
+            (Tool::LoanInterest, "je") => &["date"],
+            (Tool::LoanInterest, _) => &[],
+            (Tool::Ledger, "je") => &["id"],
+            (Tool::Ledger, _) => &[],
             // 固定资产底稿自己的必填：TB 要科目＋期初＋期末，JE 要凭证号＋日期＋
             // 科目＋金额方案——除科目（金标身份槽）与凭证号／日期外，余额与金额
             // 方案都交给形态槽，与 fa_tbje 原 `validate_required` 的口径一致。
-            (Tool::FaTbje, "je") => &["date", "id", "accountCode"],
-            (Tool::FaTbje, _) => &["accountCode"],
+            (Tool::FaTbje, "je") => &["date", "id"],
+            (Tool::FaTbje, _) => &[],
         }
     }
 
@@ -1940,7 +3024,7 @@ impl Tool {
     }
 }
 
-/// 金标（`TB-4800.xlsx` 的 `je种类` / `tb种类` 两张表）要求的身份字段。
+/// 公共账表身份字段。
 ///
 /// 与形态无关——同一张表的所有型号要求同一组身份字段，所以不放进 [`Form`]。
 /// `entity` 是可选：金标 2026-08-24 修订时把它从 required 降为可选，
@@ -1950,11 +3034,7 @@ pub(crate) fn identity_required(kind: &str) -> &'static [&'static str] {
     if kind == "loan" {
         return &[];
     }
-    if kind == "je" {
-        &["date", "id", "accountCode", "accountName", "summary"]
-    } else {
-        &["accountCode", "accountName"]
-    }
+    if kind == "je" { &["date", "id"] } else { &[] }
 }
 
 /// 一条缺失的必填项，带上**是谁在要求**。
@@ -1974,6 +3054,19 @@ pub(crate) struct MissingRole {
 /// 同一个角色被两边都要求时只报一条，且标为金标——它是更底层的要求。
 pub(crate) fn missing_required(tool: Tool, kind: &str, mapped: &HashSet<&str>) -> Vec<MissingRole> {
     let mut out: Vec<MissingRole> = Vec::new();
+    // 科目身份是公共「任一」槽：编码与名称任一到位即可。编码存在时下游
+    // 匹配策略仍优先编码；缺编码时才启用既有的双侧名称验证。摘要是可选
+    // 信息，不进入运行门槛。
+    if matches!(kind, "tb" | "je")
+        && !mapped.contains("accountCode")
+        && !mapped.contains("accountName")
+    {
+        out.push(MissingRole {
+            role: "accountIdentity",
+            label: "科目编码／科目名称（任一）",
+            from_gold: true,
+        });
+    }
     let mut push = |role: &'static str, from_gold: bool| {
         if mapped.contains(role) || out.iter().any(|m| m.role == role) {
             return;
@@ -2102,10 +3195,20 @@ pub(crate) fn signed_balance(
     convention: SignConvention,
     self_signed: bool,
 ) -> f64 {
-    if !self_signed || v.debit.is_some() || v.credit.is_some() {
+    if v.debit.is_some() || v.credit.is_some() {
         return signed_amount(v, convention);
     }
-    v.amount.unwrap_or(0.0)
+    if self_signed {
+        return v.amount.unwrap_or(0.0);
+    }
+    // `self_signed = false` 已经是余额列级证据：这一列是“绝对值＋方向”，
+    // 它的方向不能再被全表发生额投票得到的 `Signed` 口径覆盖。否则
+    // TB 发生额已带符号、余额却仍是正数配“贷”方向时，负债余额会被
+    // 误读为借方正数，滚动勾稽刚好差两倍。
+    if v.direction.as_deref().is_some_and(|d| !d.trim().is_empty()) {
+        return signed_amount(v, SignConvention::Unsigned);
+    }
+    signed_amount(v, convention)
 }
 
 /// 按借贷**两侧**拆开的取数：`(借方, 贷方)`，各自保留正负。
@@ -2209,6 +3312,274 @@ pub(crate) fn balance_self_signed(
     credit_rows > 0 && negative_rows * 2 > credit_rows
 }
 
+/// 「绝对值＋单一方向列」版式下，缺失方向一侧的余额符号按勾稽等式逐行向
+/// 对侧借（借正贷负口径）。这是纯数学层：`target_raw` 是缺方向一侧的原始
+/// 净额，`anchor_signed` 是对侧已折算的有符号余额，`(debit, credit)` 是本年
+/// 累计借贷两侧。
+///
+/// 仅当等式在容差内成立才返回 `Some(推断值)`：期初侧解 `anchor − 借 + 贷`，
+/// 期末侧解 `anchor + 借 − 贷`，幅值对不上原始净额说明**哪个符号都凑不平**，
+/// 返回 None 让调用方维持原值——真差异必须照常报出来，不许硬翻吞掉。
+/// 容差与 TB 自身勾稽同口径（0.01 元下限＋1e-8 相对）。
+pub(crate) fn balance_sign_from_equation(
+    target_raw: f64,
+    anchor_signed: f64,
+    movement: Option<(f64, f64)>,
+    target_is_opening: bool,
+) -> Option<f64> {
+    let (debit, credit) = movement?;
+    let candidate = if target_is_opening {
+        anchor_signed - debit + credit
+    } else {
+        anchor_signed + debit - credit
+    };
+    let tolerance = 0.01_f64.max(candidate.abs().max(target_raw.abs()) * 1e-8);
+    ((candidate - target_raw).abs() <= tolerance || (candidate + target_raw).abs() <= tolerance)
+        .then_some(candidate)
+}
+
+/// [`balance_sign_from_equation`] 的逐行组装层。`index_of` 把角色标准名解析成
+/// 列下标（表头查找职责由调用方按自己的表结构提供）；`prefix` 用全前缀
+/// （`openingFunctional`／`closingFunctional`）；`sibling_self_signed` 是对侧
+/// 余额列「整列自带符号」的整表判定结果——锚点侧自带符号时方向列是冗余
+/// 标注，折算必须忽略它，这个标志只能整列判，不能塞进逐行闭包里猜。
+///
+/// 四个读 TB 的工具（汇兑损益/TBJE、借款、存款、FA）的余额取数与
+/// [`balance_sign_basis_by_row`] 的证据判定共用本函数，数学只有这一份。
+/// 触发条件（用户定案：**只有「单侧有方向」的形态才适用逐行逻辑**）：
+/// 1. **本侧没有方向列**（列级，不是行级留空）——两侧各有方向列的形态
+///    （06 号 Oracle 两列同名方向）信息本就完整，个别行留空属数据质量问题，
+///    应照实报出而不是猜；
+/// 2. **对侧有方向列且本行方向值有效**（行级锚点）；
+/// 3. 本侧是净额形态、本年累计发生额已映射（借贷分列或净额均可），
+///    否则无从列方程。
+/// 全然没有方向列的净额带符号形态（TB1）两头都不满足第 2 条，同样不猜。
+pub(crate) fn infer_balance_sign_from_sibling(
+    row: &[String],
+    index_of: &dyn Fn(&str) -> Option<usize>,
+    prefix: &str,
+    convention: SignConvention,
+    sibling_self_signed: bool,
+) -> Option<f64> {
+    if index_of(&format!("{prefix}Debit")).is_some()
+        || index_of(&format!("{prefix}Credit")).is_some()
+    {
+        return None;
+    }
+    let cell =
+        |role: &str| -> Option<String> { index_of(role).and_then(|index| row.get(index)).cloned() };
+    let number = |role: &str| -> Option<f64> {
+        index_of(role)
+            .and_then(|index| row.get(index))
+            .and_then(|raw| parse_amount(raw).ok().flatten())
+    };
+    let target_raw = number(&format!("{prefix}Amount"))?;
+    let base = prefix
+        .strip_suffix("Functional")
+        .or_else(|| prefix.strip_suffix("Foreign"))
+        .unwrap_or(prefix);
+    let (sibling_prefix, sibling_base, scope) = if let Some(scope) = prefix.strip_prefix("opening")
+    {
+        (format!("closing{scope}"), "closing".to_owned(), scope)
+    } else if let Some(scope) = prefix.strip_prefix("closing") {
+        (format!("opening{scope}"), "opening".to_owned(), scope)
+    } else {
+        return None;
+    };
+    // 只有「单侧有方向」才猜：本侧不得有方向列，对侧必须有方向列。
+    // 共享方向列（整表共享后两角色指同一列）算双侧，同样不猜。
+    if index_of(&format!("{base}Direction"))
+        .or_else(|| index_of("direction"))
+        .or_else(|| index_of(&format!("{prefix}Direction")))
+        .is_some()
+    {
+        return None;
+    }
+    let sibling_direction = cell(&format!("{sibling_base}Direction"))
+        .or_else(|| cell("direction"))
+        .or_else(|| cell(&format!("{sibling_prefix}Direction")))
+        .filter(|value| direction_is_known(value.trim()))?;
+    let sibling_inputs = AmountInputs {
+        amount: number(&format!("{sibling_prefix}Amount")),
+        debit: number(&format!("{sibling_prefix}Debit")),
+        credit: number(&format!("{sibling_prefix}Credit")),
+        direction: Some(sibling_direction),
+    };
+    if sibling_inputs.amount.is_none()
+        && (sibling_inputs.debit.is_none() || sibling_inputs.credit.is_none())
+    {
+        return None;
+    }
+    let anchor = signed_balance(&sibling_inputs, convention, sibling_self_signed);
+    let movement_split = index_of(&format!("ytd{scope}Debit")).is_some()
+        && index_of(&format!("ytd{scope}Credit")).is_some();
+    if !movement_split && index_of(&format!("ytd{scope}Amount")).is_none() {
+        return None;
+    }
+    let movement_inputs = AmountInputs {
+        amount: number(&format!("ytd{scope}Amount")),
+        debit: number(&format!("ytd{scope}Debit")),
+        credit: number(&format!("ytd{scope}Credit")),
+        direction: None,
+    };
+    let movement = side_amounts(&movement_inputs, convention);
+    balance_sign_from_equation(
+        target_raw,
+        anchor,
+        Some(movement),
+        prefix.starts_with("opening"),
+    )
+}
+
+/// 余额净额是否有足够证据折成「借正贷负」。折算值和证据必须分开：
+/// `fx::ensure_sign_convention` 为兼容旧调用会在 TB 投票不足时缓存 `unsigned`，
+/// 那个默认值不能用来证明单列全正余额的借贷方向可靠。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BalanceSignBasis {
+    /// 借、贷余额分列，列本身已经表达方向。
+    DebitCreditColumns,
+    /// 净额列经整列证据确认自带借正贷负符号。
+    SignedAmount,
+    /// 净额列本身不带可靠符号，本行由有效方向值表达借贷。
+    DirectionColumn,
+    /// 本行没有方向值，符号由勾稽等式向对侧借得（「绝对值＋单一方向列」版式，
+    /// 见 [`infer_balance_sign_from_sibling`]）。等式成立即采纳，可靠。
+    EquationInferred,
+    /// 非零净额既没有可靠列级符号，也没有本行方向。
+    Ambiguous,
+}
+
+impl BalanceSignBasis {
+    pub(crate) fn is_reliable(self) -> bool {
+        !matches!(self, Self::Ambiguous)
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::DebitCreditColumns => "debitCreditColumns",
+            Self::SignedAmount => "signedAmount",
+            Self::DirectionColumn => "directionColumn",
+            Self::EquationInferred => "equationInferred",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+}
+
+/// 返回一个余额时点每行的借贷方向证据。
+///
+/// 可靠性按「时点＋行」判定：借贷分列恒可靠；净额列若由贷方负数多数或正负
+/// 并存证明整列自带符号，所有行可靠；否则只接受本行明确的借／贷方向。零余额
+/// 无论方向如何都不影响合计，也视为可靠。单列全正且方向为空绝不默认成借方。
+///
+/// 「绝对值＋单一方向列」版式下，缺方向一侧的方向证据由勾稽等式向对侧逐行
+/// 借得（[`infer_balance_sign_from_sibling`]）——等式成立记
+/// [`BalanceSignBasis::EquationInferred`]，仍视为可靠；凑不平的行维持
+/// Ambiguous，照常进入第三态而非假差异。
+pub(crate) fn balance_sign_basis_by_row(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+    prefix: &str,
+    convention: SignConvention,
+) -> Vec<BalanceSignBasis> {
+    let index_of = |role: &str| -> Option<usize> {
+        column_of(role)
+            .into_iter()
+            .find_map(|name| header_index(headers, &name))
+    };
+    if index_of(&format!("{prefix}Debit")).is_some()
+        && index_of(&format!("{prefix}Credit")).is_some()
+    {
+        return vec![BalanceSignBasis::DebitCreditColumns; rows.len()];
+    }
+    let Some(amount_index) = index_of(&format!("{prefix}Amount")) else {
+        return vec![BalanceSignBasis::Ambiguous; rows.len()];
+    };
+    let base = prefix
+        .strip_suffix("Functional")
+        .or_else(|| prefix.strip_suffix("Foreign"))
+        .unwrap_or(prefix);
+    let direction_index = index_of(&format!("{base}Direction"))
+        .or_else(|| index_of("direction"))
+        .or_else(|| index_of(&format!("{prefix}Direction")));
+
+    let (mut positive, mut negative) = (0usize, 0usize);
+    for row in rows {
+        let value = row
+            .get(amount_index)
+            .and_then(|raw| parse_amount(raw).ok().flatten())
+            .unwrap_or(0.0);
+        positive += usize::from(value > 0.0);
+        negative += usize::from(value < 0.0);
+    }
+    // 有方向列时，正负并存也可能只是“绝对值＋方向”中的少量异常余额，不能据此
+    // 推翻方向列（08 号真实样例正是这种形态）。只有没有任何方向列、只能依赖
+    // 金额自身时，正负并存才足以证明该净额列自带借正贷负符号。
+    let column_self_signed = balance_self_signed(headers, rows, column_of, prefix)
+        || (direction_index.is_none() && positive > 0 && negative > 0);
+    if column_self_signed {
+        return vec![BalanceSignBasis::SignedAmount; rows.len()];
+    }
+    // 对侧整列自带符号与否只能整表判一次；锚点自带符号时其方向列是冗余标注。
+    let sibling_prefix = if let Some(scope) = prefix.strip_prefix("opening") {
+        format!("closing{scope}")
+    } else if let Some(scope) = prefix.strip_prefix("closing") {
+        format!("opening{scope}")
+    } else {
+        prefix.to_owned()
+    };
+    let sibling_self_signed = if sibling_prefix == prefix {
+        false
+    } else {
+        balance_self_signed(headers, rows, column_of, &sibling_prefix)
+    };
+
+    rows.iter()
+        .map(|row| {
+            let amount = row
+                .get(amount_index)
+                .and_then(|raw| parse_amount(raw).ok().flatten())
+                .unwrap_or(0.0);
+            if amount.abs() <= f64::EPSILON {
+                return BalanceSignBasis::SignedAmount;
+            }
+            let direction = direction_index
+                .and_then(|index| row.get(index))
+                .map(|value| value.trim())
+                .unwrap_or("");
+            if direction_is_known(direction) {
+                return BalanceSignBasis::DirectionColumn;
+            }
+            if infer_balance_sign_from_sibling(
+                row,
+                &index_of,
+                prefix,
+                convention,
+                sibling_self_signed,
+            )
+            .is_some()
+            {
+                return BalanceSignBasis::EquationInferred;
+            }
+            BalanceSignBasis::Ambiguous
+        })
+        .collect()
+}
+
+fn direction_is_known(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if is_credit_direction(trimmed) {
+        return true;
+    }
+    let lower = trimmed.to_lowercase();
+    trimmed.contains('借')
+        || lower.contains("debit")
+        || matches!(lower.as_str(), "d" | "dr" | "s" | "j" | "+")
+}
+
 /// 负债类科目的余额惯例是贷方为正（借款本金、应付账款）。
 /// 业务层拿到有符号净额后用它翻个面，不必各自记住符号。
 pub(crate) fn credit_positive(signed: f64) -> f64 {
@@ -2220,22 +3591,30 @@ pub(crate) fn credit_positive(signed: f64) -> f64 {
 /// 行上手工指定的角色，靠**编码前缀继承**落到末级行：找编码是本科目严格
 /// 前缀的最近上级，取最长前缀（最具体的上级优先）。
 ///
-/// 仅限**纯数字编码**参与：科目首词是普通文本时，`starts_with` 的偶然前缀
-/// （「利息」不是「利息收入」的上级）会误继承。也只应在自动识别给不出结论
-/// 时调用——自动有结论的科目不该被上级的指定覆盖。
+/// 仅限**数字编码（允许 `.`/`-` 分段，如 "6603.02"）**参与：科目首词是普通
+/// 文本时，`starts_with` 的偶然前缀（「利息」不是「利息收入」的上级）会误
+/// 继承；分段符是编码体系的组成部分，参与前缀比对与公共末级掩码同口径。
+/// 也只应在自动识别给不出结论时调用——自动有结论的科目不该被上级的指定
+/// 覆盖。
 pub(crate) fn inherited_role_by_code_prefix<'a>(
     code: &str,
     roles: impl Iterator<Item = (&'a str, &'a str)>,
     key_of: impl Fn(&str) -> &str,
 ) -> Option<String> {
-    if code.is_empty() || !code.chars().all(|c| c.is_ascii_digit()) {
+    let code_shape = |value: &str| {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+    };
+    if !code_shape(code) {
         return None;
     }
     roles
         .filter_map(|(candidate, role)| {
             let parent = key_of(candidate);
             let usable = !parent.is_empty()
-                && parent.chars().all(|c| c.is_ascii_digit())
+                && code_shape(parent)
                 && parent.len() < code.len()
                 && code.starts_with(parent);
             (usable && !role.is_empty() && role != "unassigned").then_some((parent, role))
@@ -2358,7 +3737,7 @@ const IDENTITY_ROLES: &[&str] = &["id", "accountCode", "accountName", "account",
 /// Excel 公式残值。03 号样例的科目名称列是用户自建的 VLOOKUP，
 /// 数据行里也会出现 `#N/A`；10 号样例草稿区最后一行是 `#REF!`。
 /// 这些格子有内容但没信息，判身份时必须当空看。
-fn is_formula_error(value: &str) -> bool {
+pub(crate) fn is_formula_error(value: &str) -> bool {
     matches!(
         value.trim(),
         "#N/A" | "#REF!" | "#VALUE!" | "#DIV/0!" | "#NAME?" | "#NULL!" | "#NUM!" | "#SPILL!"
@@ -2446,11 +3825,10 @@ impl LedgerBodyRule {
             name.extend(legacy.iter().skip(1).copied());
         }
         let je_amounts = indexes(JE_AMOUNT_ROLES);
-        // 业务行协议只有 JE 三类必要角色都已映射时才启用——TB 也共用这套判定，
-        // 不能拿 JE 的协议去截余额表。是否属于 JE 只看映射列：科目编码、科目名称
-        // 和至少一个可解析金额三项齐备才纳入；凭证号、备注、任意其他列有值都
-        // 不能把残留行放进正文。
-        let boundary = !code.is_empty() && !name.is_empty() && !je_amounts.is_empty();
+        // JE 正文只要求“可用科目身份＋可解析金额”。有可靠编码时科目名称可以
+        // 为空（2002 JE 的「科目描述」整列为空）；反之只有名称时也允许进入，
+        // 后续跨表策略再判断名称能否安全配对。不能用空名称把真实分录整片删掉。
+        let boundary = (!code.is_empty() || !name.is_empty()) && !je_amounts.is_empty();
         LedgerBodyRule {
             identity,
             amount,
@@ -2467,11 +3845,29 @@ impl LedgerBodyRule {
             return true;
         }
         if self.boundary {
-            return self.has_field(row, &self.code)
-                && self.has_field(row, &self.name)
+            return (self.has_field(row, &self.code) || self.has_field(row, &self.name))
                 && self.has_parseable_je_amount(row);
         }
         self.has_identity(row) || !self.has_amount(row)
+    }
+
+    /// 空白分隔后表尾协议区的重开条件。编码与名称两列**实际有值**时要求同时
+    /// 出现在行内；某一列整表无值（2002 类 JE 的科目描述整列为空）时不再强求
+    /// 该列——否则表体中一次偶发空行就会把后面名称空白的真分录整片砍掉。
+    /// 金额始终必须可解析，草稿行靠它挡在正文外。
+    fn strict_reopen_gate(&self, rows: &[Vec<String>]) -> impl Fn(&[String]) -> bool + '_ {
+        let code_alive = rows.iter().any(|row| self.has_field(row, &self.code));
+        let name_alive = rows.iter().any(|row| self.has_field(row, &self.name));
+        move |row: &[String]| {
+            let identity = if code_alive && name_alive {
+                self.has_field(row, &self.code) && self.has_field(row, &self.name)
+            } else if code_alive {
+                self.has_field(row, &self.code)
+            } else {
+                self.has_field(row, &self.name)
+            };
+            identity && self.has_parseable_je_amount(row)
+        }
     }
 
     /// 合计标签不是身份。各家把「合计」写在哪一列全凭喜好——10 号样例写在日期列，
@@ -2526,6 +3922,14 @@ pub(crate) fn analyze_ledger_rows(
     rows: &[Vec<String>],
     column_of: &dyn Fn(&str) -> Vec<String>,
 ) -> LedgerRowAnalysis {
+    // 分段 JE 必须先以“期初余额锚点＋凭证号＋金额”识别正文。若先套普通
+    // “每行必须自带科目”协议，真实分录会整片被删，只剩金额为零的期初行。
+    if let Some(plan) = sectioned_ledger_plan(headers, rows, column_of) {
+        return LedgerRowAnalysis {
+            keep: plan.keep,
+            invalid_account_code_rows: Vec::new(),
+        };
+    }
     let rule = LedgerBodyRule::new(headers, column_of);
     // 身份列都没映射就无从判断，一行不删。
     if rule.identity.is_empty() {
@@ -2534,10 +3938,24 @@ pub(crate) fn analyze_ledger_rows(
             invalid_account_code_rows: Vec::new(),
         };
     }
-    let mut keep = rows
-        .iter()
-        .map(|row| rule.is_body(row))
-        .collect::<Vec<bool>>();
+    let mut keep = Vec::with_capacity(rows.len());
+    let mut strict_body = false;
+    let strict_reopen = rule.strict_reopen_gate(rows);
+    for row in rows {
+        if row.iter().all(|value| value.trim().is_empty()) {
+            strict_body = true;
+            keep.push(false);
+            continue;
+        }
+        if strict_body && rule.boundary {
+            // 空白分隔符之后不能让表尾草稿靠一个像科目编码的值重新混入正文；
+            // 编码/名称/金额按「列实际有值」的重开门槛判定。进入该区段后
+            // 持续应用同一协议。
+            keep.push(strict_reopen(row));
+        } else {
+            keep.push(rule.is_body(row));
+        }
+    }
     // 表尾噪声：倒着扫到第一个有身份的行就停手。
     for index in (0..rows.len()).rev() {
         if rule.has_identity(&rows[index]) {
@@ -2580,6 +3998,280 @@ pub(crate) fn ledger_junk_mask(
     analyze_ledger_rows(headers, rows, column_of).keep
 }
 
+/// 金额等字段门禁专用的正文掩码。它复用正式清洗的结构判断，但会救回“身份
+/// 合法、只是金额坏掉”的业务行，让金额门禁仍能报错；明确合计、表尾协议区、
+/// 科目编码整体错位的行则继续剔除。这样公共校验既不会被噪音阻断，也不会把
+/// 真业务行的 `待补`、`RMB` 等坏金额静默吞掉。
+pub(crate) fn ledger_validation_mask(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<bool> {
+    let mut keep = analyze_ledger_rows(headers, rows, column_of).keep;
+    let rule = LedgerBodyRule::new(headers, column_of);
+    if rule.identity.is_empty() {
+        return keep;
+    }
+    let mut after_blank_separator = false;
+    for (index, row) in rows.iter().enumerate() {
+        if row.iter().all(|value| value.trim().is_empty()) {
+            after_blank_separator = true;
+            continue;
+        }
+        if keep.get(index).copied().unwrap_or(false) || after_blank_separator {
+            continue;
+        }
+        if row.iter().any(|value| {
+            let value = value.trim();
+            is_rollup_label(value) || is_report_footer_value(value)
+        }) || !rule.has_identity(row)
+        {
+            continue;
+        }
+        let nonempty_codes = rule
+            .code
+            .iter()
+            .filter_map(|column| row.get(*column))
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if !nonempty_codes.is_empty()
+            && nonempty_codes.iter().all(|raw| {
+                let code = account_code_of(raw);
+                is_formula_error(raw) || !looks_like_account_code(&code)
+            })
+        {
+            continue;
+        }
+        keep[index] = true;
+    }
+    keep
+}
+
+/// 身份字段向下填充的参与掩码：正文行照常参与；被 [`analyze_ledger_rows`]
+/// 剔除的行里，只有「带身份」且不在表尾协议区的行允许参与填充收发——
+/// 真实账的合并单元格分录（凭证号在、科目空）靠它补齐身份。
+///
+/// 表尾协议区只认**整行空白分隔**。10 号样例合计行下面的人手草稿把金额
+/// 错位写进了科目编码列（`2556.54`）、说明写在摘要/凭证号列，旧口径
+/// 「有文字就恢复」会把它救回正文，填充再补齐名称与编码，凭空造出净差
+/// 5.5 亿的幻影科目。**不能把「合计/小计」行也当分隔符**：合计行出现在
+/// 表体中间、其后跟着待填充续行的形态真实存在（见 fx 回归
+/// `噪声行不参与向下填充`），合计行之后的表尾裁剪由调用方按需执行
+/// （TBJE 用 [`ledger_post_fill_body_mask`]）。协议区内只有通过
+/// [`LedgerBodyRule::strict_reopen_gate`]（编码/名称按列实际有值放宽）
+/// 的行才可重新参与，与正文重开规则保持同一口径。
+pub(crate) fn ledger_fill_mask(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<bool> {
+    let mut mask = analyze_ledger_rows(headers, rows, column_of).keep;
+    let rule = LedgerBodyRule::new(headers, column_of);
+    if rule.identity.is_empty() {
+        return mask;
+    }
+    let strict_reopen = rule.strict_reopen_gate(rows);
+    let mut strict_region = false;
+    for (index, row) in rows.iter().enumerate() {
+        if row.iter().all(|value| value.trim().is_empty()) {
+            strict_region = true;
+            continue;
+        }
+        if mask.get(index).copied().unwrap_or(false) || !rule.has_identity(row) {
+            continue;
+        }
+        if strict_region && rule.boundary && !strict_reopen(row) {
+            continue;
+        }
+        mask[index] = true;
+    }
+    mask
+}
+
+/// TBJE 填充后的 JE 正文行掩码：默认整表保留——合并单元格补齐身份的行、
+/// 名称整列空白的 SAP 导出、表体中偶发空行后的真分录都照常进入；只把
+/// 「合计/小计」屏障之后仍未通过重开门槛的表尾行剔除。序时账的合计行是
+/// 整本账的终点，其后只应是页脚或人手草稿。
+pub(crate) fn ledger_post_fill_body_mask(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<bool> {
+    let rule = LedgerBodyRule::new(headers, column_of);
+    if rule.identity.is_empty() {
+        return vec![true; rows.len()];
+    }
+    let reopen = rule.strict_reopen_gate(rows);
+    let mut mask = vec![true; rows.len()];
+    let mut after_barrier = false;
+    for (index, row) in rows.iter().enumerate() {
+        if row.iter().any(|value| is_rollup_label(value.trim())) {
+            after_barrier = true;
+            continue;
+        }
+        if after_barrier && !reopen(row) {
+            mask[index] = false;
+        }
+    }
+    mask
+}
+
+/// 流水级导出上的凭证/流水特征表头（按整段精确匹配，避免子串误命中）。
+const POSTING_VOUCHER_HEADERS: &[&str] = &[
+    "凭证号",
+    "凭证编号",
+    "凭单号",
+    "凭证字",
+    "凭证日期",
+    "记账日期",
+    "记帐日期",
+    "过账日期",
+    "过帐日期",
+    "单据号",
+    "单据日期",
+    "分录号",
+    "流水号",
+    "voucher",
+    "voucherno",
+    "voucherid",
+    "voucherdate",
+    "documentno",
+    "documentnumber",
+    "documentdate",
+    "docno",
+    "docdate",
+    "postingdate",
+    "journal",
+    "journalno",
+    "journaldate",
+];
+
+/// 流水级导出上的期间特征表头。年度/财年/期间列意味着行是按期间切片的，
+/// 不是传统「一科目一行」的期末余额表。
+const POSTING_PERIOD_HEADERS: &[&str] = &[
+    "年度",
+    "年份",
+    "财年",
+    "会计年度",
+    "年月",
+    "期间",
+    "会计期间",
+    "月份",
+    "会计月份",
+    "year",
+    "fiscalyear",
+    "fiscalperiod",
+    "period",
+    "periodid",
+    "month",
+];
+
+/// 已映射角色与金额语义之外仍算「辅助维度列」的数量阈值。SAP 等系统的
+/// 流水级导出带着公司、子项、项目、销售部门、产品、款项性质、供应商、
+/// 客户、银行、WBS 等十几列维度；传统余额表的客户／供应商／部门撑不满
+/// 这个数。
+const POSTING_DIMENSION_COLUMN_MIN: usize = 6;
+
+/// 判定 TB 是否为「流水级导出」：SAP 等系统按期间逐笔（或多维切片）列示的
+/// 余额明细。这类表**每一行都是真实流水，不存在汇总行**——同科目相邻行的
+/// 金额完全可能巧合满足「某行＝若干行之和」，金额勾稽会把真实流水当明细
+/// 剔掉（实测 2000&2002 合并 TB：594 行被误删、BS/PL 假性不平 91.7 万、
+/// 单科目贷方少 46 万）。
+///
+/// 四个条件**全部满足**才认定——误判的代价是关掉真汇总表的折叠（静默算重），
+/// 漏判的代价只是退回既有折叠行为，宁可漏判：
+///
+/// 1. 映射了主体列：流水级导出必带公司/主体维度；
+/// 2. 存在凭证级（凭证号/记账日期/过账日期…）或期间级（年度/财年/期间/月份…）
+///    特征列，按表头整段精确匹配；
+/// 3. 已映射角色与金额列之外还有 ≥ [`POSTING_DIMENSION_COLUMN_MIN`] 列辅助维度；
+/// 4. 表内没有整格「合计/小计」标签行——有汇总标签说明表里真有汇总结构。
+pub(crate) fn tb_is_posting_level_export(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> bool {
+    if column_of("entity").is_empty() {
+        return false;
+    }
+    let header_of = |name: &str| headers.iter().position(|header| header == name);
+    let mapped: std::collections::BTreeSet<&String> = tb_roles()
+        .iter()
+        .flat_map(|role| column_of(role.name))
+        .filter_map(|name| header_of(&name))
+        .map(|index| &headers[index])
+        .collect();
+    let mut has_posting_column = false;
+    let mut dimensions = 0usize;
+    for header in headers {
+        if mapped.contains(header) {
+            continue;
+        }
+        let normalized = normalize_header(header);
+        if POSTING_VOUCHER_HEADERS
+            .iter()
+            .any(|alias| segment_exact(header, alias))
+            || POSTING_PERIOD_HEADERS
+                .iter()
+                .any(|alias| segment_exact(header, alias))
+        {
+            has_posting_column = true;
+            continue;
+        }
+        // 金额/数量语义的列不算维度：`Begin Amt.`→`beginamt`、`Period Movement`
+        // →`periodmovement` 都要被挡在维度计数之外。
+        let amount_like = [
+            "金额",
+            "金額",
+            "余额",
+            "餘額",
+            "发生",
+            "發生",
+            "借方",
+            "贷方",
+            "貸方",
+            "差异",
+            "差異",
+            "数量",
+            "amount",
+            "amt",
+            "balance",
+            "debit",
+            "credit",
+            "value",
+            "movement",
+            "difference",
+            "qty",
+            "quantity",
+        ]
+        .iter()
+        .any(|keyword| normalized.contains(keyword));
+        if !amount_like {
+            dimensions += 1;
+        }
+    }
+    if !has_posting_column || dimensions < POSTING_DIMENSION_COLUMN_MIN {
+        return false;
+    }
+    // 整格「合计/小计」标签行存在即否决：表里真有汇总结构，折叠必须保留。
+    let label_indexes: Vec<usize> = {
+        let mut names = column_of("accountCode");
+        names.extend(column_of("accountName"));
+        names.extend(column_of("account"));
+        names
+            .into_iter()
+            .filter_map(|name| headers.iter().position(|header| *header == name))
+            .collect()
+    };
+    !rows.iter().any(|row| {
+        label_indexes
+            .iter()
+            .filter_map(|index| row.get(*index))
+            .any(|value| is_rollup_label(value))
+    })
+}
+
 /// 标记 TB 中应当计入的明细行。返回值与 `rows` 一一对应：`true` 表示该行要算。
 ///
 /// 汇总行有三条互补的识别路径，缺一条就会有一类样例静默算重：
@@ -2587,7 +4279,7 @@ pub(crate) fn ledger_junk_mask(
 /// 1. **编码层级**：同一主体内 `1002` 与 `10020001` 并存时形成父子候选，
 ///    但只有期初、期末、借方、贷方的语义金额都可靠勾稽才排除父项。
 /// 2. **合计标签**：科目编码列或名称列整格写着「合计」「损益小计」。
-/// 3. **金额勾稽**：某行在**所有**已映射金额列上都等于相邻连续若干行之和。
+/// 3. **金额勾稽**：某行在已映射的本位币金额列上都等于相邻连续若干行之和。
 ///    这条覆盖前两条都够不着的形态——父行与辅助核算明细行**编码完全相同**
 ///    （`1121.01` 既是银行承兑汇票汇总行，也是它下面每个客户的明细行）、
 ///    父子编码分列写、小计行编码列留空。
@@ -2595,6 +4287,15 @@ pub(crate) fn ledger_junk_mask(
 /// 勾稽成立时，同编码的汇总／辅助明细保留汇总行；核算维度明细没有编码时
 /// 同样保留有编码的父行；反过来小计行没有编码而明细行有，就删小计行。
 /// 同一编码因币种拆成多行时按币种隔离，互不构成汇总关系。
+///
+/// **固定长度优先**：若全表正常数据行的非空科目编码长度完全一致，
+/// 说明该 TB 倾向使用定长末级编码；同编码单行相等及仅末尾序号不同的
+/// 平级名称不能靠金额巧合折叠。多条名称不同的明细在本位币金额列完整
+/// 勾稽且名称形态不是平级序列时，仍可剔除汇总行。没有科目编码的行
+/// 直接排除；明确的合计标签和噪声行仍会剔除。
+///
+/// **例外**：流水级导出（[`tb_is_posting_level_export`]）逐笔列示、没有汇总行，
+/// 金额勾稽在该类表上整段跳过，避免把巧合凑数的真实流水当明细剔除。
 ///
 /// 所有读取 TB 的工具都必须调用这里，业务模块不得各自实现一份“末级科目”规则。
 pub(crate) fn tb_leaf_mask(
@@ -2651,6 +4352,16 @@ pub(crate) fn tb_leaf_mask(
             )
         })
         .collect::<Vec<_>>();
+    let name_indexes = indexes("accountName");
+    let names = rows
+        .iter()
+        .map(|row| joined(row, &name_indexes))
+        .collect::<Vec<_>>();
+    let auxiliary_indexes = indexes("auxiliary");
+    let auxiliaries = rows
+        .iter()
+        .map(|row| joined(row, &auxiliary_indexes))
+        .collect::<Vec<_>>();
     // 有些 ERP 的上级科目编码并不是下级编码的字面前缀（真实 03 号样例：
     // 一级 `5302` 对应二级 `5301020000`），但表内另有可靠的「级次」列。
     // 级次仅作为父子结构证据，仍须所有语义金额完整勾稽才会排除汇总行。
@@ -2698,12 +4409,38 @@ pub(crate) fn tb_leaf_mask(
         }
     }
 
-    // ③ 金额勾稽。余额必须先折成借正贷负的净额再比较，发生额仍按借、贷
+    // 定长科目表先于同编码金额勾稽。例如 10 位科目按成本中心拆行时，
+    // 200 恰好等于相邻的 50 + 150 可能只是数值巧合，需结合名称形态保护。
+    // 空编码行不参与长度判定，不能推翻“全部已填编码均为定长”的事实；
+    // 一旦定长模式成立，下一步会把这些缺少匹配键的行统一排除。
+    let account_code_lengths = identities
+        .iter()
+        .enumerate()
+        .filter(|(index, (_, code))| !rollup[*index] && !code.is_empty())
+        .map(|(_, (_, code))| code.chars().count())
+        .collect::<BTreeSet<_>>();
+    let fixed_width_leaf_table = account_code_lengths.len() == 1;
+    if fixed_width_leaf_table {
+        // 平级末级表的匹配键就是科目编码。空编码行既无法参与科目匹配，也不能
+        // 依靠名称或金额猜测归属；统一在公共入口排除，避免各业务工具口径分叉。
+        for (index, (_, code)) in identities.iter().enumerate() {
+            if code.is_empty() {
+                rollup[index] = true;
+            }
+        }
+    }
+
+    // ③ 父子金额勾稽只使用本位币。不同币种的原币金额不能相加，
+    // 也不能用来否决本位币完整证明的父子关系。余额先折成借正贷负的净额，发生额仍按借、贷
     // 两侧分别比较。01 号样例的父行把期初 150 借 / 50 贷净额列成 100 借，
     // 辅助核算明细却保留两侧毛额；逐原始列比较会漏掉这层汇总并把发生额算重。
-    if amount_indexes.len() >= 2 {
+    //
+    // 流水级导出（[`tb_is_posting_level_export`]）整表都是真实流水、没有汇总行，
+    // 「某行＝相邻若干行之和」只是金额巧合，照常折叠会删掉真金白银。此时跳过
+    // 金额勾稽与多轮折叠；合计标签与噪声行剔除不受影响。
+    if amount_indexes.len() >= 2 && !tb_is_posting_level_export(headers, rows, column_of) {
         let values = rollup_value_columns(headers, rows, column_of);
-        // 同一科目按币种拆成多行时，各行之间是**平行**关系，不是父子。02 号样例
+        // 同一编码按币种拆成多行时，各行之间是**平行**关系，不是父子。02 号样例
         // 有一批科目的 CNY 行与 USD 行四个金额列数值完全相同（只有方向列一个
         // 记贷一个记借），光比金额会把 CNY 行判成 USD 行的汇总。
         //
@@ -2725,7 +4462,24 @@ pub(crate) fn tb_leaf_mask(
             // 任何金额丢失。存款利息等只需末级科目的工具依赖这条：
             // `6603` 零值汇总行不进测算，`66030101` 末级行仍保留。
             mark_zero_value_parents(&identities, &currencies, &levels, &values, &mut rollup);
-            mark_rollup_by_sum(&identities, &currencies, &levels, &values, &mut rollup);
+            // 多主体 TB 常按“科目优先、主体次之”排列：A/2501、B/2501、
+            // A/250102、B/250102。相邻扫描会在主体变化处停下，因而看不到
+            // 同一主体的父子科目。先按主体＋科目编码聚合，再用明确的
+            // 编码祖先关系做一次非连续勾稽；只有全部本位币语义金额列都相等才剔除
+            // 父项，避免业务工具各自补一层去重。
+            if !fixed_width_leaf_table {
+                mark_non_contiguous_code_rollups(&identities, &values, &mut rollup);
+            }
+            mark_rollup_by_sum(
+                &identities,
+                &names,
+                &auxiliaries,
+                &currencies,
+                &levels,
+                &values,
+                &mut rollup,
+                fixed_width_leaf_table,
+            );
             // 真实TB常有多层结构：辅助明细先汇成末级科目，末级科目再汇成上级。
             // 第一轮先锁住同编码的局部关系；随后仅拿仍保留的行再勾稽，由内向外
             // 折叠。每轮都映射回原始行号，源数据和导出行号不变。
@@ -2746,6 +4500,14 @@ pub(crate) fn tb_leaf_mask(
                     .iter()
                     .map(|index| currencies[*index].clone())
                     .collect::<Vec<_>>();
+                let compact_names = kept
+                    .iter()
+                    .map(|index| names[*index].clone())
+                    .collect::<Vec<_>>();
+                let compact_auxiliaries = kept
+                    .iter()
+                    .map(|index| auxiliaries[*index].clone())
+                    .collect::<Vec<_>>();
                 let compact_levels = kept.iter().map(|index| levels[*index]).collect::<Vec<_>>();
                 let compact_values = values
                     .iter()
@@ -2754,10 +4516,13 @@ pub(crate) fn tb_leaf_mask(
                 let mut compact_rollup = vec![false; kept.len()];
                 mark_rollup_by_sum(
                     &compact_identities,
+                    &compact_names,
+                    &compact_auxiliaries,
                     &compact_currencies,
                     &compact_levels,
                     &compact_values,
                     &mut compact_rollup,
+                    fixed_width_leaf_table,
                 );
                 let removed = compact_rollup.iter().filter(|value| **value).count();
                 if removed == 0 {
@@ -2769,10 +4534,210 @@ pub(crate) fn tb_leaf_mask(
                     }
                 }
             }
+
+            // 同科目的主体／辅助明细折叠后，再做一次非连续科目树勾稽。
+            // 多层 ERP TB 会同时列示“2001 父科目主体汇总”、
+            // “200101 子科目主体汇总”和“200101 辅助明细”。首轮判断时
+            // 子科目汇总与辅助明细尚未折叠，两者相加会使父子金额假性不等。
+            // 此处只对当前仍保留的行复用同一强证据规则：主体、
+            // 最近直接子编码以及全部本位币语义金额都勾稽才删父项。不等时保持旧结果。
+            let kept = rollup
+                .iter()
+                .enumerate()
+                .filter_map(|(index, excluded)| (!*excluded).then_some(index))
+                .collect::<Vec<_>>();
+            if kept.len() >= 2 {
+                let compact_identities = kept
+                    .iter()
+                    .map(|index| identities[*index].clone())
+                    .collect::<Vec<_>>();
+                let compact_values = values
+                    .iter()
+                    .map(|column| kept.iter().map(|index| column[*index]).collect::<Vec<_>>())
+                    .collect::<Vec<_>>();
+                let mut compact_rollup = vec![false; kept.len()];
+                mark_non_contiguous_code_rollups(
+                    &compact_identities,
+                    &compact_values,
+                    &mut compact_rollup,
+                );
+                for (compact_index, excluded) in compact_rollup.into_iter().enumerate() {
+                    if excluded {
+                        rollup[kept[compact_index]] = true;
+                    }
+                }
+            }
         }
     }
 
     rollup.iter().map(|v| !v).collect()
+}
+
+/// 生成“科目确认/筛选目录”使用的严格末级掩码。
+///
+/// 科目确认目录以计算的金额勾稽掩码为基础；全零父项即使
+/// 未与下级相等也可安全隐藏。非零父项不能仅因编码更长就隐藏。
+pub(crate) fn tb_catalog_leaf_mask(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<bool> {
+    let mut keep = tb_leaf_mask(headers, rows, column_of);
+    let indexes = |role: &str| {
+        column_of(role)
+            .iter()
+            .filter_map(|name| header_index(headers, name))
+            .collect::<Vec<_>>()
+    };
+    let mut code_indexes = indexes("accountCode");
+    if code_indexes.is_empty() {
+        code_indexes = indexes("account");
+        code_indexes.truncate(1);
+    }
+    let mut values = rollup_value_columns(headers, rows, column_of);
+    if values.is_empty() {
+        // 单侧余额列不足以作父子金额勾稽，仍足以确认父项本身为零。
+        for role in [
+            "openingFunctionalDebit",
+            "openingFunctionalCredit",
+            "openingFunctionalAmount",
+            "closingFunctionalDebit",
+            "closingFunctionalCredit",
+            "closingFunctionalAmount",
+            "ytdFunctionalDebit",
+            "ytdFunctionalCredit",
+            "ytdFunctionalAmount",
+        ] {
+            for position in indexes(role) {
+                values.push(
+                    rows.iter()
+                        .map(|row| {
+                            row.get(position)
+                                .and_then(|value| parse_amount(value).ok().flatten())
+                                .unwrap_or(0.0)
+                        })
+                        .collect(),
+                );
+            }
+        }
+    }
+    if code_indexes.is_empty() || values.is_empty() {
+        return keep;
+    }
+    let entity_indexes = indexes("entity");
+    let joined = |row: &[String], positions: &[usize]| {
+        positions
+            .iter()
+            .filter_map(|index| row.get(*index))
+            .map(|value| value.trim())
+            .collect::<Vec<_>>()
+            .join("\u{1f}")
+    };
+    let identities = rows
+        .iter()
+        .map(|row| {
+            (
+                joined(row, &entity_indexes),
+                account_code_of(&joined(row, &code_indexes)),
+            )
+        })
+        .collect::<Vec<_>>();
+    for index in 0..rows.len() {
+        if !keep[index]
+            || identities[index].1.is_empty()
+            || !values.iter().all(|column| column[index].abs() <= 0.005)
+        {
+            continue;
+        }
+        if identities.iter().enumerate().any(|(other, child)| {
+            other != index
+                && keep[other]
+                && child.0 == identities[index].0
+                && is_ancestor_code(&identities[index].1, &child.1)
+        }) {
+            keep[index] = false;
+        }
+    }
+    keep
+}
+
+/// 按主体和科目编码聚合后识别非连续父子科目。父子可跨币种，
+/// 金额仅用本位币比较；同编码的平行币种行不在此处折叠。
+///
+/// 这里只接受编码前缀提供的强层级证据；同编码辅助明细、空编码维度行以及仅靠
+/// 级次才能判断的结构仍交给相邻勾稽处理。对一个父编码，只汇总当前表内最靠近
+/// 它的直接子编码，避免同时把中间层和孙级重复相加。
+fn mark_non_contiguous_code_rollups(
+    identities: &[(String, String)],
+    values: &[Vec<f64>],
+    rollup: &mut [bool],
+) {
+    type GroupKey = String;
+    let mut partitions = BTreeMap::<GroupKey, BTreeMap<String, Vec<usize>>>::new();
+    for index in 0..rollup.len() {
+        if rollup[index] || identities[index].1.is_empty() {
+            continue;
+        }
+        partitions
+            .entry(identities[index].0.clone())
+            .or_default()
+            .entry(identities[index].1.clone())
+            .or_default()
+            .push(index);
+    }
+
+    let original_rollup = rollup.to_vec();
+    for codes in partitions.values() {
+        for (parent, parent_rows) in codes {
+            if parent_rows.iter().any(|index| original_rollup[*index]) {
+                continue;
+            }
+            let descendants = codes
+                .keys()
+                .filter(|code| is_ancestor_code(parent, code))
+                .collect::<Vec<_>>();
+            if descendants.is_empty() {
+                continue;
+            }
+            let direct_children = descendants
+                .iter()
+                .copied()
+                .filter(|candidate| {
+                    !descendants.iter().any(|middle| {
+                        *middle != *candidate
+                            && is_ancestor_code(parent, middle)
+                            && is_ancestor_code(middle, candidate)
+                    })
+                })
+                .collect::<Vec<_>>();
+            if direct_children.is_empty() {
+                continue;
+            }
+
+            let matched = values.iter().all(|column| {
+                let parent_total = parent_rows.iter().map(|index| column[*index]).sum::<f64>();
+                let child_total = direct_children
+                    .iter()
+                    .flat_map(|code| codes.get(*code).into_iter().flatten())
+                    .map(|index| column[*index])
+                    .sum::<f64>();
+                amounts_equal(parent_total, child_total)
+            });
+            let parent_is_zero = values.iter().all(|column| {
+                parent_rows
+                    .iter()
+                    .map(|index| column[*index])
+                    .sum::<f64>()
+                    .abs()
+                    <= 0.005
+            });
+            if matched && !parent_is_zero {
+                for index in parent_rows {
+                    rollup[*index] = true;
+                }
+            }
+        }
+    }
 }
 
 fn mark_zero_value_parents(
@@ -2791,9 +4756,7 @@ fn mark_zero_value_parents(
         }
         let parent_code = &identities[anchor].1;
         for cursor in (anchor + 1)..rollup.len().min(anchor + 1 + ROLLUP_SCAN_LIMIT) {
-            if identities[cursor].0 != identities[anchor].0
-                || currencies[cursor] != currencies[anchor]
-            {
+            if identities[cursor].0 != identities[anchor].0 {
                 break;
             }
             let child_code = &identities[cursor].1;
@@ -2802,6 +4765,9 @@ fn mark_zero_value_parents(
                 (levels[anchor], levels[cursor]),
                 (Some(parent), Some(child)) if child > parent
             );
+            if currencies[cursor] != currencies[anchor] && !by_code && !by_level {
+                break;
+            }
             if by_code || by_level {
                 rollup[anchor] = true;
                 break;
@@ -2813,8 +4779,9 @@ fn mark_zero_value_parents(
     }
 }
 
-/// 把 TB 的金额形态规范成汇总勾稽需要的业务口径：期初／期末余额各一列净额，
-/// 本年／本期发生额各保留借贷两列。这里直接复用公共符号与余额方向内核，避免
+/// 把 TB 的本位币金额规范成汇总勾稽需要的业务口径：期初／期末余额各一列净额，
+/// 本年／本期发生额各保留借贷两列。原币金额不参与父子判断，避免跨币种求和。
+/// 这里直接复用公共符号与余额方向内核，避免
 /// 汇总识别再维护一套“贷方到底加还是减”的猜测。
 fn rollup_value_columns(
     headers: &[String],
@@ -2843,12 +4810,7 @@ fn rollup_value_columns(
     };
 
     let mut values = Vec::<Vec<f64>>::new();
-    for prefix in [
-        "openingFunctional",
-        "openingForeign",
-        "closingFunctional",
-        "closingForeign",
-    ] {
+    for prefix in ["openingFunctional", "closingFunctional"] {
         let debit = index_of(&format!("{prefix}Debit"));
         let credit = index_of(&format!("{prefix}Credit"));
         let amount = index_of(&format!("{prefix}Amount"));
@@ -2886,7 +4848,7 @@ fn rollup_value_columns(
         }
     }
 
-    for prefix in ["ytdFunctional", "ytdForeign", "periodFunctional"] {
+    for prefix in ["ytdFunctional", "periodFunctional"] {
         let debit = index_of(&format!("{prefix}Debit"));
         let credit = index_of(&format!("{prefix}Credit"));
         let amount = index_of(&format!("{prefix}Amount"));
@@ -2925,10 +4887,13 @@ fn rollup_value_columns(
 /// 也可能写在下方（一组明细行跟一条小计行），实测样例两种都有。
 fn mark_rollup_by_sum(
     identities: &[(String, String)],
+    names: &[String],
+    auxiliaries: &[String],
     currencies: &[String],
     levels: &[Option<u32>],
     values: &[Vec<f64>],
     rollup: &mut [bool],
+    preserve_same_code_rows: bool,
 ) {
     let len = rollup.len();
     // 该行在所有金额列上是否全为零。全零行不能当汇总锚点，否则空行会和
@@ -2960,12 +4925,12 @@ fn mark_rollup_by_sum(
                 }) else {
                     break;
                 };
-                // 跨主体或跨币种就不再是同一组。已经带“小计/合计”标签的行仍可
+                // 跨主体就不再是同一组；跨币种仅允许有明确编码或级次父子关系。
+                // 同编码的多币种行仍是平级，不能靠本位币数值巧合互相折叠。
+                // 已经带“小计/合计”标签的行仍可
                 // 作为上层汇总的成员：真实TB会同时列“科目总计、方向小计、辅助
                 // 明细”，若在方向小计处直接截断，三行金额本可完整勾稽却会被漏掉。
-                if identities[cursor].0 != identities[anchor].0
-                    || currencies[cursor] != currencies[anchor]
-                {
+                if identities[cursor].0 != identities[anchor].0 {
                     break;
                 }
                 let anchor_code = &identities[anchor].1;
@@ -2974,6 +4939,13 @@ fn mark_rollup_by_sum(
                     (levels.get(anchor).copied().flatten(), levels.get(cursor).copied().flatten()),
                     (Some(parent), Some(child)) if child > parent
                 );
+                let code_hierarchy = !anchor_code.is_empty()
+                    && !cursor_code.is_empty()
+                    && (is_ancestor_code(anchor_code, cursor_code)
+                        || is_ancestor_code(cursor_code, anchor_code));
+                if currencies[cursor] != currencies[anchor] && !code_hierarchy && !explicit_child {
+                    break;
+                }
                 if !anchor_code.is_empty()
                     && !cursor_code.is_empty()
                     && cursor_code != anchor_code
@@ -3012,6 +4984,43 @@ fn mark_rollup_by_sum(
                 let same_code = !anchor_code.is_empty()
                     && !member_codes.is_empty()
                     && member_codes.iter().all(|code| *code == anchor_code);
+                let same_group_neighbor = |index: usize| {
+                    identities[index] == identities[anchor]
+                        && currencies[index] == currencies[anchor]
+                };
+                let interior_anchor = anchor > 0
+                    && anchor + 1 < len
+                    && same_group_neighbor(anchor - 1)
+                    && same_group_neighbor(anchor + 1);
+                if same_code && interior_anchor {
+                    continue;
+                }
+                // 定长平级表里“员工生育保险-B 200 = C 50 + D 150”只是
+                // 偶然凑数。同编码名称若只差末尾序号/后缀，视为并列项目。
+                let anchor_name = names[anchor].chars().collect::<Vec<_>>();
+                let peer_labels = same_code
+                    && members.iter().any(|index| names[*index] != names[anchor])
+                    && !anchor_name.is_empty()
+                    && members.iter().all(|index| {
+                        let child = names[*index].chars().collect::<Vec<_>>();
+                        let common = anchor_name
+                            .iter()
+                            .zip(&child)
+                            .take_while(|(a, b)| a == b)
+                            .count();
+                        !child.is_empty()
+                            && anchor_name.len().abs_diff(child.len()) <= 1
+                            && common >= anchor_name.len().min(child.len()).saturating_sub(1)
+                            && common >= 2
+                    });
+                if peer_labels {
+                    continue;
+                }
+                // 定长编码下，单条同额仍可能只是并列明细；多条成员完整
+                // 勾稽则足以确认同编码汇总结构（例如 6711.03 按部门列示）。
+                if preserve_same_code_rows && same_code && taken == 1 {
+                    continue;
+                }
                 let hierarchy = !anchor_code.is_empty()
                     && !member_codes.is_empty()
                     && member_codes.iter().all(|code| {
@@ -3077,14 +5086,40 @@ fn mark_rollup_by_sum(
             .iter()
             .filter(|index| !identities[**index].1.is_empty())
             .collect::<Vec<_>>();
-        // 同编码的辅助核算组优先保留父／汇总行；无编码的核算维度同理。
-        // 小计行无编码或父子编码不同，则保留可用于按科目核对的明细。
-        let keep_anchor = !anchor_code.is_empty()
+        // 同编码且名称或已映射辅助值不同的多条明细，应留下各明细、
+        // 剔除汇总行；身份没有区分的重复维度沿用保留汇总行的计算口径。
+        // 不同编码必须保留层级更深的一侧。反向扫描时 anchor 可能是子科目、
+        // members 里反而是父科目，旧逻辑固定删除 anchor 会把终级科目删掉。
+        if candidate.same_code
+            && candidate
+                .members
+                .iter()
+                .any(|index| original_rollup[*index])
+        {
+            continue;
+        }
+        let distinct_identity_children = candidate.same_code
+            && candidate.members.len() >= 2
+            && candidate
+                .members
+                .iter()
+                .all(|index| !original_rollup[*index])
+            && candidate.members.iter().any(|index| {
+                names[*index] != names[candidate.anchor]
+                    || auxiliaries[*index] != auxiliaries[candidate.anchor]
+            });
+        let keep_anchor = !distinct_identity_children
+            && !anchor_code.is_empty()
             && (coded_members.is_empty()
                 || coded_members
                     .iter()
                     .all(|index| identities[**index].1 == *anchor_code));
-        if keep_anchor {
+        let members_are_ancestors = !anchor_code.is_empty()
+            && !coded_members.is_empty()
+            && coded_members
+                .iter()
+                .all(|index| is_ancestor_code(&identities[**index].1, anchor_code));
+        if keep_anchor || members_are_ancestors {
             for index in candidate.members {
                 rollup[index] = true;
             }
@@ -3172,6 +5207,10 @@ pub(crate) fn role_rejects_header(kind: &str, role: &str, header: &str) -> bool 
     role.conflicts
         .iter()
         .any(|c| n.contains(&normalize_header(c)))
+        && !(role.name == "summary" && explicit_line_summary_header(header))
+        // 与 alias_score 同口径：「借正贷负」是净额语义，不因含「借/贷」
+        // 被净额角色的冲突词排除；「年月」是期间式日期列。
+        && !(n.contains("借正贷负") && role.name.ends_with("Amount"))
 }
 
 // ────────────────────────────── 取值解析 ──────────────────────────────
@@ -3214,6 +5253,11 @@ pub(crate) fn mapped_amount_parse_issues(
     rows: &[Vec<String>],
     column_of: &dyn Fn(&str) -> Vec<String>,
 ) -> Vec<AmountParseIssue> {
+    // 金额门禁与后续识别/测算必须天然消费同一份正文行。把过滤收进公共
+    // 入口，调用方即使忘记另算 keep mask，小计、页脚、整体错位的破损行也
+    // 不会先于正式清洗把整份账表拦死。若调用方只提供金额角色、无法建立
+    // 身份规则，ledger_junk_mask 会保守地保留全部行，行为与旧版一致。
+    let body_mask = ledger_validation_mask(headers, rows, column_of);
     let mut issues = Vec::new();
     let mut visited = HashSet::<(&'static str, usize)>::new();
     for definition in roles(kind)
@@ -3228,6 +5272,9 @@ pub(crate) fn mapped_amount_parse_issues(
                 continue;
             }
             for (row_index, row) in rows.iter().enumerate() {
+                if !body_mask.get(row_index).copied().unwrap_or(false) {
+                    continue;
+                }
                 let raw = row.get(index).map(String::as_str).unwrap_or("");
                 let trimmed = raw.trim();
                 if trimmed.is_empty() || matches!(trimmed, "-" | "—" | "–") {
@@ -3487,6 +5534,227 @@ pub(crate) fn parse_date(raw: &str) -> Option<NaiveDate> {
         }
     }
     None
+}
+
+/// 从映射到 `date` 的一个或多个物理列还原记账日期。
+///
+/// 完整日期列始终优先；没有完整日期时，支持 ERP 双层表头常见的
+/// “年-月”＋“年-日”，以及独立年／月／日列。源表不重复写年份时由调用方
+/// 传入报告期年份。字段识别、LLM 建议和实际取数必须共用这一个入口，避免
+/// 页面允许多列映射、业务模块却仍只读第一列。
+/// 「年/月/日」双层表头合并后只剩「月」「日」两列（源表不写年份，年份只
+/// 在标题行「期间: 2025.01-20」里）的账型：date 仅建议到月份列时只有月
+/// 精度，而且单列纯月份依赖报告期年份兜底。发现同表的日列（列名含「日」
+/// 不含「月」、取值真是 1-31 的日号）时，把它一并挂进 date，取数端
+/// [`parse_mapped_date`] 的多列模式即可组装出带日号的完整日期。
+/// 已是多列映射（人工或 LLM 配好）时不动。
+pub(crate) fn pair_month_day_date_columns(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &mut serde_json::Map<String, Value>,
+) {
+    let Some(Value::String(month_column)) = mapping.get("date") else {
+        return;
+    };
+    let month_column = month_column.trim().to_owned();
+    let month_normalized = normalize_header(&month_column);
+    if month_normalized.is_empty() || !month_normalized.contains('月') {
+        return;
+    }
+    let day_like = |value: &str| -> bool {
+        let text = value.trim().trim_end_matches('日');
+        !text.is_empty()
+            && text.len() <= 2
+            && text.chars().all(|c| c.is_ascii_digit())
+            && matches!(text.parse::<u8>(), Ok(day) if (1..=31).contains(&day))
+    };
+    let candidate = headers.iter().find(|header| {
+        let normalized = normalize_header(header);
+        header.trim() != month_column
+            && normalized.contains('日')
+            && !normalized.contains('月')
+            && {
+                // 取值形态必须真是日号，防止「打印日期」这类完整日期列被误挂。
+                let index = header_index(headers, header);
+                let sample: Vec<&str> = rows
+                    .iter()
+                    .take(200)
+                    .filter_map(|row| index.and_then(|i| row.get(i)).map(String::as_str))
+                    .collect();
+                let non_empty: Vec<&str> = sample
+                    .iter()
+                    .copied()
+                    .filter(|value| !value.trim().is_empty())
+                    .collect();
+                non_empty.len() >= 5
+                    && non_empty.iter().filter(|value| day_like(value)).count() * 10
+                        >= non_empty.len() * 9
+            }
+    });
+    if let Some(day_column) = candidate {
+        mapping.insert(
+            "date".into(),
+            Value::Array(vec![
+                Value::String(month_column),
+                Value::String(day_column.trim().to_owned()),
+            ]),
+        );
+    }
+}
+
+/// 是否已经存在真正的完整日期候选。LLM 复核的组成列豁免与脚本级
+/// 月/日兜底都以它为闸：只有整张样例找不到完整日期时才放开组成列，
+/// 确保「完整日期优先」不仅写在提示词里，也由代码强制执行。
+pub(crate) fn full_date_column_exists(headers: &[String], rows: &[Vec<String>]) -> bool {
+    headers.iter().enumerate().any(|(index, header)| {
+        let normalized = normalize_header(header);
+        if !(normalized.contains("日期")
+            || normalized.contains("date")
+            || normalized.contains("过账日")
+            || normalized.contains("記賬日"))
+        {
+            return false;
+        }
+        let mut seen = 0;
+        for row in rows {
+            let text = row.get(index).map(String::as_str).unwrap_or("").trim();
+            if text.is_empty() {
+                continue;
+            }
+            // 年月能被 parse_date 按 1 日收下，但它仍是月度粒度，不算完整日期。
+            if parse_month(text).is_some() || parse_date(text).is_none() {
+                return false;
+            }
+            seen += 1;
+        }
+        seen > 0
+    })
+}
+
+/// 脚本级兜底：date 连建议都没有（裸「月」「日」分列连冲突词都过不去）
+/// 且全表没有任何完整日期列时，把唯一取值全是纯月份的「月」列直接指为
+/// date，再让 [`pair_month_day_date_columns`] 把同表的「日」列挂进来。
+/// 供没有 LLM 也要能开跑的看账／正负数凭证标记使用；多个月份列（歧义）
+/// 或样例不足时不动，留给 LLM 复核或人工确认。
+pub(crate) fn month_day_date_fallback(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &mut serde_json::Map<String, Value>,
+) {
+    let has_date = mapping.get("date").is_some_and(|value| match value {
+        Value::String(one) => !one.trim().is_empty(),
+        Value::Array(all) => !all.is_empty(),
+        _ => false,
+    });
+    if has_date || full_date_column_exists(headers, rows) {
+        return;
+    }
+    let month_shaped = |header: &str| -> bool {
+        let normalized = normalize_header(header);
+        if !(normalized.contains('月') || normalized.contains("month")) {
+            return false;
+        }
+        let Some(index) = header_index(headers, header) else {
+            return false;
+        };
+        let mut seen = 0usize;
+        for row in rows.iter().take(200) {
+            let Some(value) = row.get(index) else {
+                continue;
+            };
+            let text = value.trim();
+            if text.is_empty() {
+                continue;
+            }
+            if parse_month(text).is_none() {
+                return false;
+            }
+            seen += 1;
+        }
+        seen >= 5
+    };
+    let candidates: Vec<&String> = headers.iter().filter(|h| month_shaped(h)).collect();
+    if let [single] = candidates.as_slice() {
+        mapping.insert("date".into(), Value::String(single.trim().to_owned()));
+        pair_month_day_date_columns(headers, rows, mapping);
+    }
+}
+
+pub(crate) fn parse_mapped_date(
+    headers: &[String],
+    row: &[String],
+    indexes: &[usize],
+    fallback_year: Option<i32>,
+) -> Option<NaiveDate> {
+    if indexes.is_empty() {
+        return None;
+    }
+    if indexes.len() == 1 {
+        let value = row.get(indexes[0]).map(String::as_str).unwrap_or("");
+        if let Some(date) = parse_date(value) {
+            return Some(date);
+        }
+        // 用友式「年/月/日」双层表头里源表常不写年份（09 号样例整本序时账
+        // 的年份只在标题行「期间: 2025.01-20」），date 只映射到月份列时值
+        // 是纯月份数字。列名含「月」且取值确实是月份时，按调用方给的
+        // 报告期年份组装当月 1 日——与多列模式的同款兜底，否则整本账的
+        // 行都会在日期环节被静默跳过，误报成科目匹配失败。
+        let header = normalize_header(
+            headers
+                .get(indexes[0])
+                .map(String::as_str)
+                .unwrap_or_default(),
+        );
+        if (header.contains('月') || header.contains("month"))
+            && let Some((source_year, month)) = parse_month(value.trim())
+            && let Some(year) = source_year.or(fallback_year)
+        {
+            return NaiveDate::from_ymd_opt(year, month, 1);
+        }
+        return None;
+    }
+
+    // 多列映射里若仍有真正的完整日期，不能让组成列覆盖它。
+    for index in indexes {
+        let value = row.get(*index)?.trim();
+        if parse_month(value).is_none() {
+            if let Some(date) = parse_date(value) {
+                return Some(date);
+            }
+        }
+    }
+
+    let mut year = fallback_year;
+    let mut month = None;
+    let mut day = None;
+    for index in indexes {
+        let header = normalize_header(headers.get(*index).map(String::as_str).unwrap_or(""));
+        let value = row.get(*index).map(String::as_str).unwrap_or("").trim();
+        if value.is_empty() {
+            continue;
+        }
+        let month_header = header.contains('月') || header.contains("month");
+        let day_header = header.contains('日') || header.contains("day");
+        let year_header = header.contains('年') || header.contains("year");
+        if month_header {
+            if let Some((source_year, source_month)) = parse_month(value) {
+                year = source_year.or(year);
+                month = Some(source_month);
+            }
+        } else if day_header {
+            day = value
+                .parse::<u32>()
+                .ok()
+                .filter(|value| (1..=31).contains(value));
+        } else if year_header {
+            year = value
+                .parse::<i32>()
+                .ok()
+                .filter(|value| (1900..=2100).contains(value))
+                .or(year);
+        }
+    }
+    NaiveDate::from_ymd_opt(year?, month?, day.unwrap_or(1))
 }
 
 /// 月度取值：供「序时账只有月份列」的兜底口径使用。
@@ -3874,11 +6142,79 @@ pub(crate) fn recheck_cumulative(
 /// 列名分不出来的角色（目前是本年累计与本期发生）。
 ///
 /// 能拿到数据行时一律用这个；只有表头时才退回 [`suggest_roles`]。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RoleSuggestions {
+    primary: BTreeMap<usize, &'static str>,
+    additional: Vec<(usize, &'static str)>,
+}
+
+impl RoleSuggestions {
+    fn with_combined_account_pair(
+        primary: BTreeMap<usize, &'static str>,
+        rows: &[Vec<String>],
+    ) -> Self {
+        let has_code = primary.values().any(|role| *role == "accountCode");
+        let has_name = primary.values().any(|role| *role == "accountName");
+        let additional = if has_code != has_name {
+            primary
+                .iter()
+                .find_map(|(index, role)| {
+                    let counterpart = match *role {
+                        "accountCode" if !has_name => "accountName",
+                        "accountName" if !has_code => "accountCode",
+                        _ => return None,
+                    };
+                    is_combined_account_column(
+                        rows.iter().filter_map(|row| row.get(*index)).cloned(),
+                    )
+                    .then_some((*index, counterpart))
+                })
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self {
+            primary,
+            additional,
+        }
+    }
+
+    pub(crate) fn get(&self, index: &usize) -> Option<&&'static str> {
+        self.primary.get(index)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&usize, &&'static str)> {
+        self.primary
+            .iter()
+            .chain(self.additional.iter().map(|(index, role)| (index, role)))
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &&'static str> {
+        self.primary
+            .values()
+            .chain(self.additional.iter().map(|(_, role)| role))
+    }
+}
+
+impl IntoIterator for RoleSuggestions {
+    type Item = (usize, &'static str);
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.primary
+            .into_iter()
+            .chain(self.additional)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
+
 pub(crate) fn suggest_roles_with_data(
     kind: &str,
     headers: &[String],
     rows: &[Vec<String>],
-) -> BTreeMap<usize, &'static str> {
+) -> RoleSuggestions {
     let mut out = suggest_roles(kind, headers);
     // 「单位」既可能指公司，也可能指物料计量单位。若取值明显是 KG／EA／BOX，
     // 就撤销主体建议，避免它进入凭证键后拆散同一张凭证的借贷两边。
@@ -3896,7 +6232,96 @@ pub(crate) fn suggest_roles_with_data(
     align_opening_period_scope(kind, headers, &mut out);
     fill_combined_account_column(rows, &mut out, headers.len());
     refine_account_identity_by_data(kind, headers, rows, &mut out);
-    out
+    // 「外币/原币」裸列头的双语义仲裁：装币种代码时归 currency（别名层已认），
+    // 装金额数字时是原币净额——神火 NC 系序时账（选样/君屹/国贸/JE-2023）
+    // 都用「外币」给原币金额列命名。币种角色已有归属时，别让它两侧落空。
+    if kind == "je" && !out.values().any(|r| *r == "foreignAmount") {
+        for (index, header) in headers.iter().enumerate() {
+            if out.contains_key(&index) {
+                continue;
+            }
+            let n = normalize_header(header);
+            if !matches!(n.as_str(), "外币" | "外幣" | "原币" | "原幣") {
+                continue;
+            }
+            let amounts = rows
+                .iter()
+                .filter_map(|row| row.get(index).map(String::as_str));
+            if matches!(
+                classify_currency_column(amounts),
+                CurrencyColumn::Unusable { .. }
+            ) {
+                out.insert(index, "foreignAmount");
+                break;
+            }
+        }
+    }
+    // 同名双语义的另一面：currency 已经落在「外币/原币」裸列头上、
+    // 而取值其实是金额数字时，把这笔错认改判给原币净额。
+    if kind == "je" && !out.values().any(|r| *r == "foreignAmount") {
+        if let Some(index) = out
+            .iter()
+            .find_map(|(index, role)| (*role == "currency").then_some(*index))
+        {
+            let n = headers
+                .get(index)
+                .map(|h| normalize_header(h))
+                .unwrap_or_default();
+            if matches!(n.as_str(), "外币" | "外幣" | "原币" | "原幣") {
+                let amounts = rows
+                    .iter()
+                    .filter_map(|row| row.get(index).map(String::as_str));
+                if matches!(
+                    classify_currency_column(amounts),
+                    CurrencyColumn::Unusable { .. }
+                ) {
+                    out.remove(&index);
+                    out.insert(index, "foreignAmount");
+                }
+            }
+        }
+    }
+    // 数据形态修正只能处理金额与科目身份，不应让确定性的主体表头失效。
+    // 把精确别名作为最终保护层：例如“核算组织/核算组织名称”无论旁边还有
+    // 多少辅助列，都必须落到 entity；裸“单位”仍须通过取值排除计量单位。
+    if matches!(kind, "tb" | "je") {
+        if let Some(role) = role_of(kind, "entity") {
+            let candidate = headers
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !column_is_measurement_unit(headers, rows, *index))
+                .filter_map(|(index, header)| {
+                    let normalized = normalize_header(header);
+                    role.aliases
+                        .iter()
+                        .filter(|alias| normalize_header(alias) == normalized)
+                        .map(|alias| normalize_header(alias).len())
+                        .max()
+                        .map(|score| (index, score))
+                })
+                .max_by_key(|(index, score)| (*score, std::cmp::Reverse(*index)))
+                .map(|(index, _)| index);
+            if let Some(candidate) = candidate {
+                out.retain(|index, mapped_role| *mapped_role != "entity" || *index == candidate);
+                out.insert(candidate, "entity");
+            }
+        }
+    }
+    // 全空列不进建议（2026-09-18 裁决：不考虑抽样误伤，直接执行）：
+    // 导出工件列（3300 家族的「二级费用科目」）即使别名精确命中也是空壳，
+    // 挂上只会触发界面空值告警。判据与日期/金额形态判断同源——都基于
+    // 本次读入的行（大文件即抽样行）；完全没有数据行的表无从判断，
+    // 维持按列名的建议。
+    if !rows.is_empty() {
+        out.retain(|index, _| {
+            rows.iter()
+                .any(|row| row.get(*index).is_some_and(|v| !v.trim().is_empty()))
+        });
+    }
+    // 物理列通常仍是一列一角色。唯一例外是取值本身可稳定拆成
+    // 「科目编码＋科目名称」的列：两个科目身份角色必须同时下发，才能让
+    // TB 混写列与 JE 分列在标准化后按相同科目身份匹配。
+    RoleSuggestions::with_combined_account_pair(out, rows)
 }
 
 /// 科目身份列的数据形态。表头「会计科目」在不同 ERP 导出里既可能放编码，
@@ -4012,10 +6437,32 @@ fn refine_account_identity_by_data(
     rows: &[Vec<String>],
     out: &mut BTreeMap<usize, &'static str>,
 ) {
-    if kind != "je" || rows.is_empty() {
+    if !matches!(kind, "je" | "tb") || rows.is_empty() {
         return;
     }
-    let code_role = role_of(kind, "accountCode").expect("JE 科目编码角色存在");
+    // 冷启动：两可表头（总账科目/会计科目/账户…）被 alias_score 有意排除，
+    // 别名层永远不会给出科目身份。当编码或名称角色缺位时，按数据形态
+    // （数字串→编码、文本→名称、混合→编码，供复合拆分）就地补位，否则
+    // TB 与无其他编码列的 JE 会整体没有 accountCode。
+    let mut has_code = out.values().any(|role| *role == "accountCode");
+    let mut has_name = out.values().any(|role| *role == "accountName");
+    for (index, header) in headers.iter().enumerate() {
+        if out.contains_key(&index) || !two_way_account_header(header) {
+            continue;
+        }
+        match account_shape_at(rows, index) {
+            AccountColumnShape::Code | AccountColumnShape::Combined if !has_code => {
+                out.insert(index, "accountCode");
+                has_code = true;
+            }
+            AccountColumnShape::Name if !has_name => {
+                out.insert(index, "accountName");
+                has_name = true;
+            }
+            _ => {}
+        }
+    }
+    let code_role = role_of(kind, "accountCode").expect("账表都有科目编码角色");
     let current_code = out
         .iter()
         .find_map(|(index, role)| (*role == "accountCode").then_some(*index));
@@ -5388,7 +7835,7 @@ pub(crate) fn account_name_of(value: &str) -> String {
         .unwrap_or_else(|| value.trim().to_owned())
 }
 
-/// 会计要素类别。按《企业会计准则——会计科目和主要账务处理》的编码首位划分。
+/// 会计要素类别。按国标科目首位及已验证的 SAP 损益编码划分。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum AccountCategory {
     /// 1 资产
@@ -5401,7 +7848,7 @@ pub(crate) enum AccountCategory {
     Equity,
     /// 5 成本
     Cost,
-    /// 6 损益
+    /// 6、以及 SAP 风格的 7/8 损益
     ProfitLoss,
 }
 
@@ -5420,8 +7867,9 @@ impl AccountCategory {
 
 /// 按科目编码首位判会计要素。认不出返回 `None`——**绝不猜**。
 ///
-/// 会计恒等式核对全靠这个分类，认错一个大类，结论就是错的。自定义科目表、
-/// 字母开头的编码都归到「认不出」，由调用方决定是跳过整条检查还是列出来给用户看。
+/// 1～6 遵循国标科目编码；7、8 是已验证的 SAP 风格账套中常见的费用／税费段，
+/// 统一归入损益。其他自定义科目表、字母开头的编码都归到「认不出」，由调用方
+/// 决定是跳过整条检查还是列出来给用户看。
 ///
 /// 编码先经 [`normalize_account_code`] 去掉前导零：SAP 那类补零到定长的编码
 /// （`0000943100`）首位是 0，不去零一个都认不出来。
@@ -5432,7 +7880,7 @@ pub(crate) fn account_category(code: &str) -> Option<AccountCategory> {
         '3' => Some(AccountCategory::Shared),
         '4' => Some(AccountCategory::Equity),
         '5' => Some(AccountCategory::Cost),
-        '6' => Some(AccountCategory::ProfitLoss),
+        '6' | '7' | '8' => Some(AccountCategory::ProfitLoss),
         _ => None,
     }
 }
@@ -5460,26 +7908,17 @@ pub(crate) fn normalize_account_code(value: &str) -> String {
 
 /// TB/JE 共用的科目匹配策略。
 ///
-/// 普通科目以「主体＋归一化科目编码」为键；只有同一主体下同一编码在**两张表里
-/// 都**对应多个不同名称、光靠编码无法跨表配对、且两侧名称能真正配上时，才把
-/// 规范化名称追加到键中。这里判断的是「一个编码对应几个不同名称」，不是一张
-/// 序时账里同一编码出现了多少行——后者只是正常的多笔分录，不能误判成编码不唯一。
-///
-/// 匹配键按三层退让，任何情况都不因名称问题拦截：
-/// 1. 编码能唯一确定科目（至多一侧拆分）→ 按编码。仅一侧把编码拆成多个名称
-///    （带辅助核算的余额表按部门／往来拆行、名称列填辅助维度）不算歧义：另一侧
-///    在编码层已聚合，本侧多行汇总回编码即为该科目全量，名称退回展示文本
-///    （实测 TBJEPBC 01 号：TB 侧 167 个共有编码拆多行、JE 侧名称全部唯一）。
-/// 2. 两侧都拆且名称对得上（交集按六成口径衡量）→ 编码＋名称复合键逐名配对。
-/// 3. 两侧都拆但两套名称对不上（不是同一套词汇）→ 复合只会制造互不相认的
-///    孤儿键，退回按编码汇总。
+/// 普通科目以「主体＋归一化科目编码」为键；TB 已映射的科目名称
+/// 在同一主体、同一编码下出现多个值时，追加规范化名称。JE 侧名称
+/// 对不上就明确保留未匹配，不能退回编码把不同科目名称合并。
+/// 一张序时账里同一编码的多笔同名分录仍属同一科目。
 ///
 /// 编码在统计歧义前先走 [`normalize_account_code`]，所以 `0000943100` 与
 /// `943100` 被视为同一个编码。名称只在确有编码歧义时参与匹配；普通情况下
 /// TB 的标准科目名与 JE 的账户全称即使写法不同，也不会把同一科目拆开。
-/// 按（主体大写、归一化编码）收集一张表内见过的归一化名称集合。编码或
-/// 名称为空的行不参与：它们既不能建键，也不能证明编码对应了几个名称。
-/// `AccountMatchPolicy` 的三层匹配判定与口径预检的拆分统计共用这一份口径。
+/// 按（主体大写、归一化编码）收集一张表内见过的归一化名称集合。
+/// 已映射名称的空值也占一个身份位；编码为空的行无法进入编码集合。
+/// `AccountMatchPolicy` 的拆分判定与口径预检的名称统计共用这一份口径。
 pub(crate) fn account_name_sets(
     rows: &[(String, String, String)],
 ) -> HashMap<(String, String), HashSet<String>> {
@@ -5487,7 +7926,7 @@ pub(crate) fn account_name_sets(
     for (entity, raw_code, raw_name) in rows {
         let code = normalize_account_code(&account_code_of(raw_code));
         let name = normalize_name(&account_name_of(raw_name));
-        if code.is_empty() || name.is_empty() {
+        if code.is_empty() {
             continue;
         }
         index
@@ -5501,13 +7940,793 @@ pub(crate) fn account_name_sets(
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AccountMatchPolicy {
     ambiguous_codes: HashSet<(String, String)>,
+    /// 编码缺失时，经 TB/JE 双侧共同验证、可以安全退回名称的
+    /// （规范化主体，规范化名称）。命中的名称必须让两侧都改用名称键。
+    validated_name_keys: HashSet<(String, String)>,
+}
+
+const ACCOUNT_NAME_KEY_PREFIX: char = '\u{1d}';
+
+/// 一张凭证是否含损益结转的权益承接科目。调用方应以“整张凭证”为范围
+/// 使用：只要任一分录命中，本凭证内的损益科目行都是结转行，不能拿来判断
+/// 本期真实收入/费用发生方向。
+pub(crate) fn is_profit_transfer_account(account: &str) -> bool {
+    let normalized = normalize_name(account);
+    [
+        "本年利润",
+        "本年利潤",
+        "本年损益",
+        "本年損益",
+        "未分配利润",
+        "未分配利潤",
+        "incomesummary",
+        "plclosing",
+        "retainedearnings",
+    ]
+    .iter()
+    .any(|term| normalized.contains(term))
+}
+
+// ---------------------------------------------------------------------------
+// 辅助核算锚点反查（公共）
+// ---------------------------------------------------------------------------
+
+/// 辅助核算锚点值的归一化：剥掉空白与连字符类分隔符后转小写。
+/// `L-1`、`l_1`、`L1` 视为同一维度值——分隔符写法差异不应把
+/// “列存在”误判成“找不到对应列”。借款工具列定位的既有口径原样收编。
+pub(crate) fn anchor_norm(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && !['-', '_', '/', '—'].contains(c))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// 一列的锚点扫描结果：命中的**去重后**锚点集合与非空单元格数。
+/// 锚点去重、不数行——同一维度出现一百次也只证明“这一列里有它”。
+/// `hit_anchors` 保留命中集合本体，供多列辅助（编码＋名称）时挑键列。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AnchorColumnScan {
+    pub header: String,
+    pub hit_anchors: HashSet<String>,
+    pub nonempty_rows: usize,
+}
+
+impl AnchorColumnScan {
+    pub(crate) fn anchor_hits(&self) -> usize {
+        self.hit_anchors.len()
+    }
+}
+
+/// 锚点反查结论。`status` 对应调用方的处置：
+/// - `verified`：认定成功，辅助核算进匹配键；
+/// - `partialCoverage`：列只覆盖部分锚点，不进键，整组回退主体＋科目；
+/// - `noMatch`／`noAnchors`／`ambiguous`：降级按主体＋科目，`noMatch` 附提示。
+#[derive(Clone, Debug)]
+pub(crate) struct AuxiliaryLinkVerdict {
+    pub column: Option<String>,
+    pub status: &'static str,
+    pub anchor_total: usize,
+    pub anchor_hits: usize,
+    pub nonempty_rows: usize,
+    pub total_rows: usize,
+    pub competing_columns: Vec<String>,
+}
+
+impl AuxiliaryLinkVerdict {
+    /// 是否把辅助核算并入匹配键。
+    pub(crate) fn dimension_keys(&self) -> bool {
+        self.status == "verified"
+    }
+}
+
+/// 辅助核算验证的最小业务范围：（有效主体，科目键）。
+/// 主体是否有效由调用工具先按双侧主体规则折算；这里不读取、
+/// 也不推断报告期间。
+pub(crate) type AuxiliaryGroupKey = (String, String);
+
+#[derive(Clone, Debug)]
+pub(crate) struct AuxiliaryLinkGroupVerdict {
+    pub entity: String,
+    pub account: String,
+    pub verdict: AuxiliaryLinkVerdict,
+}
+
+/// 纯判定：给定各列扫描结果与锚点集合出结论，不碰 IO。
+///
+/// - `preferred`（用户/LLM 已映射的辅助列）只验证该列，对不上直接
+///   `noMatch`，不悄悄换列——用户表达了明确意图，降级要带着提示；
+/// - 无 `preferred` 时以去重后的 TB 锚点覆盖率选唯一最高 JE 列；
+///   最高分并列仍视为歧义，覆盖不全仍不启用辅助键。
+pub(crate) fn auxiliary_link_verdict(
+    anchors: &HashSet<String>,
+    columns: Vec<AnchorColumnScan>,
+    total_rows: usize,
+    preferred: Option<&str>,
+) -> AuxiliaryLinkVerdict {
+    let anchor_total = anchors.len();
+    let base = AuxiliaryLinkVerdict {
+        column: None,
+        status: "noAnchors",
+        anchor_total,
+        anchor_hits: 0,
+        nonempty_rows: 0,
+        total_rows,
+        competing_columns: Vec::new(),
+    };
+    if anchors.is_empty() {
+        return base;
+    }
+    let from_scan = |scan: &AnchorColumnScan| AuxiliaryLinkVerdict {
+        column: Some(scan.header.clone()),
+        status: if scan.anchor_hits() >= anchor_total {
+            "verified"
+        } else {
+            "partialCoverage"
+        },
+        anchor_hits: scan.anchor_hits(),
+        nonempty_rows: scan.nonempty_rows,
+        competing_columns: Vec::new(),
+        ..base.clone()
+    };
+    if let Some(name) = preferred {
+        return match columns.iter().find(|scan| scan.header == name) {
+            Some(scan) if scan.anchor_hits() > 0 => from_scan(scan),
+            _ => AuxiliaryLinkVerdict {
+                status: "noMatch",
+                ..base
+            },
+        };
+    }
+    let best_hits = columns
+        .iter()
+        .map(AnchorColumnScan::anchor_hits)
+        .max()
+        .unwrap_or(0);
+    if best_hits == 0 {
+        return AuxiliaryLinkVerdict {
+            status: "noMatch",
+            ..base
+        };
+    }
+    let best: Vec<&AnchorColumnScan> = columns
+        .iter()
+        .filter(|scan| scan.anchor_hits() == best_hits)
+        .collect();
+    match best.as_slice() {
+        [only] => from_scan(only),
+        many => AuxiliaryLinkVerdict {
+            status: "ambiguous",
+            competing_columns: many.iter().map(|scan| scan.header.clone()).collect(),
+            ..base
+        },
+    }
+}
+
+/// 磁盘／内存两用的逐列累加器：`feed` 一行累一行，`finish` 出扫描结果。
+/// 大序时账走单遍流式，内存表循环喂同一接口，扫描口径只有一份。
+pub(crate) struct AnchorColumnAccumulator {
+    per_column: Vec<(HashSet<String>, usize)>,
+}
+
+/// 按（有效主体，科目）隔离的 JE 锚点扫描器。同一个辅助值
+/// 可以合法地出现在不同科目，不能用全表命中替代本组命中。
+pub(crate) struct GroupedAnchorColumnAccumulator {
+    column_count: usize,
+    per_group: BTreeMap<AuxiliaryGroupKey, Vec<(HashSet<String>, usize)>>,
+}
+
+impl GroupedAnchorColumnAccumulator {
+    pub(crate) fn new(column_count: usize) -> Self {
+        Self {
+            column_count,
+            per_group: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn feed(
+        &mut self,
+        group: AuxiliaryGroupKey,
+        row: &[String],
+        anchors: &HashSet<String>,
+    ) {
+        let columns = self
+            .per_group
+            .entry(group)
+            .or_insert_with(|| vec![(HashSet::new(), 0); self.column_count]);
+        for (column, value) in row.iter().enumerate().take(self.column_count) {
+            if value.trim().is_empty() {
+                continue;
+            }
+            columns[column].1 += 1;
+            let normalized = anchor_norm(value);
+            if anchors.contains(&normalized) {
+                columns[column].0.insert(normalized);
+            }
+        }
+    }
+
+    pub(crate) fn finish(
+        self,
+        headers: &[String],
+    ) -> BTreeMap<AuxiliaryGroupKey, Vec<AnchorColumnScan>> {
+        self.per_group
+            .into_iter()
+            .map(|(group, columns)| {
+                let scans = columns
+                    .into_iter()
+                    .zip(headers)
+                    .map(|((hit_anchors, nonempty_rows), header)| AnchorColumnScan {
+                        header: header.clone(),
+                        hit_anchors,
+                        nonempty_rows,
+                    })
+                    .collect();
+                (group, scans)
+            })
+            .collect()
+    }
+}
+
+/// 每个主体＋科目独立出结论。未在 JE 出现的 TB 组也会返回
+/// `noMatch`；不允许一个组的命中使另一组误进辅助键。
+pub(crate) fn auxiliary_link_group_verdicts(
+    anchors: &BTreeMap<AuxiliaryGroupKey, HashSet<String>>,
+    scans: BTreeMap<AuxiliaryGroupKey, Vec<AnchorColumnScan>>,
+    totals: &BTreeMap<AuxiliaryGroupKey, usize>,
+    preferred: Option<&str>,
+) -> Vec<AuxiliaryLinkGroupVerdict> {
+    anchors
+        .iter()
+        .map(
+            |((entity, account), group_anchors)| AuxiliaryLinkGroupVerdict {
+                entity: entity.clone(),
+                account: account.clone(),
+                verdict: auxiliary_link_verdict(
+                    group_anchors,
+                    scans
+                        .get(&(entity.clone(), account.clone()))
+                        .cloned()
+                        .unwrap_or_default(),
+                    totals
+                        .get(&(entity.clone(), account.clone()))
+                        .copied()
+                        .unwrap_or(0),
+                    preferred,
+                ),
+            },
+        )
+        .collect()
+}
+
+/// 从逐组结论生成唯一的计算计划。任何未完全验证的组均不出现在
+/// 计划中，调用方据此整组回退主体＋科目。TB 多列辅助只选与已验证
+/// JE 列命中交集最多的一列，不把编码与名称拼成另一种值体系。
+pub(crate) fn auxiliary_verified_columns(
+    groups: &[AuxiliaryLinkGroupVerdict],
+    tb_scans: &BTreeMap<AuxiliaryGroupKey, Vec<AnchorColumnScan>>,
+    je_scans: &BTreeMap<AuxiliaryGroupKey, Vec<AnchorColumnScan>>,
+    tb_headers: &[String],
+    je_headers: &[String],
+    tb_mapping: &serde_json::Map<String, Value>,
+    role: &str,
+) -> BTreeMap<AuxiliaryGroupKey, (usize, usize)> {
+    let tb_columns = mapped_column_names(tb_mapping, role);
+    groups
+        .iter()
+        .filter(|group| group.verdict.dimension_keys())
+        .filter_map(|group| {
+            let key = (group.entity.clone(), group.account.clone());
+            let je_name = group.verdict.column.as_deref()?;
+            let je_index = header_index(je_headers, je_name)?;
+            let je_hits = &je_scans
+                .get(&key)?
+                .iter()
+                .find(|scan| scan.header == je_name)?
+                .hit_anchors;
+            let tb_index = tb_scans
+                .get(&key)?
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| {
+                    tb_headers
+                        .get(*index)
+                        .is_some_and(|name| tb_columns.contains(name))
+                })
+                .filter(|(_, scan)| {
+                    !scan.hit_anchors.is_empty() && scan.hit_anchors.is_subset(je_hits)
+                })
+                .map(|(index, scan)| (index, scan.hit_anchors.intersection(je_hits).count()))
+                .max_by_key(|(_, hits)| *hits)
+                .filter(|(_, hits)| *hits > 0)?
+                .0;
+            Some((key, (tb_index, je_index)))
+        })
+        .collect()
+}
+
+/// 编码／名称是同一辅助维度的可选表示，而不是需要 JE 同时具备的
+/// 两套键。分别验证 TB 每个已映射列，以完整覆盖且锚点最多的列为准；
+/// 没有完整覆盖时保留最大命中结论用于提示，但绝不启用计算键。
+/// JE 只映射一列时尊重该列；映射多列时在这些列中按锚点覆盖择优，
+/// 未映射时在全部 JE 列中择优。
+pub(crate) fn auxiliary_link_group_verdicts_by_tb_columns(
+    anchors: &BTreeMap<AuxiliaryGroupKey, HashSet<String>>,
+    tb_scans: &BTreeMap<AuxiliaryGroupKey, Vec<AnchorColumnScan>>,
+    je_scans: &BTreeMap<AuxiliaryGroupKey, Vec<AnchorColumnScan>>,
+    totals: &BTreeMap<AuxiliaryGroupKey, usize>,
+    tb_mapping: &serde_json::Map<String, Value>,
+    role: &str,
+    preferred_columns: &[String],
+) -> Vec<AuxiliaryLinkGroupVerdict> {
+    let columns = mapped_column_names(tb_mapping, role);
+    let mut groups = anchors
+        .iter()
+        .map(|(key, union)| {
+            let je_columns = je_scans.get(key).cloned().unwrap_or_default();
+            let je_candidates = if preferred_columns.len() > 1 {
+                je_columns
+                    .into_iter()
+                    .filter(|scan| preferred_columns.contains(&scan.header))
+                    .collect::<Vec<_>>()
+            } else {
+                je_columns
+            };
+            let preferred = if preferred_columns.len() == 1 {
+                preferred_columns.first().map(String::as_str)
+            } else {
+                None
+            };
+            let tb_candidates = tb_scans
+                .get(key)
+                .into_iter()
+                .flatten()
+                .filter(|scan| columns.contains(&scan.header) && !scan.hit_anchors.is_empty())
+                .map(|scan| {
+                    let matched_je_columns = je_candidates
+                        .iter()
+                        .map(|candidate| AnchorColumnScan {
+                            header: candidate.header.clone(),
+                            hit_anchors: candidate
+                                .hit_anchors
+                                .intersection(&scan.hit_anchors)
+                                .cloned()
+                                .collect(),
+                            nonempty_rows: candidate.nonempty_rows,
+                        })
+                        .collect();
+                    auxiliary_link_verdict(
+                        &scan.hit_anchors,
+                        matched_je_columns,
+                        totals.get(key).copied().unwrap_or_default(),
+                        preferred,
+                    )
+                })
+                .collect::<Vec<_>>();
+            // 同一个主体＋科目的不同 TB 辅助字段，不能各自指向不同 JE 列。
+            // 即使每列各自覆盖完整，也不能任取一列冒充整组的统一匹配键。
+            let matched_columns = tb_candidates
+                .iter()
+                .filter(|verdict| verdict.dimension_keys())
+                .filter_map(|verdict| verdict.column.as_deref())
+                .collect::<HashSet<_>>();
+            let verdict = if matched_columns.len() > 1 {
+                AuxiliaryLinkVerdict {
+                    column: None,
+                    status: "noMatch",
+                    anchor_total: union.len(),
+                    anchor_hits: 0,
+                    nonempty_rows: 0,
+                    total_rows: totals.get(key).copied().unwrap_or_default(),
+                    competing_columns: matched_columns.into_iter().map(str::to_owned).collect(),
+                }
+            } else {
+                tb_candidates
+                    .into_iter()
+                    .max_by_key(|verdict| {
+                        (
+                            verdict.dimension_keys(),
+                            verdict.anchor_hits,
+                            verdict.anchor_total,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        auxiliary_link_verdict(
+                            union,
+                            je_candidates,
+                            totals.get(key).copied().unwrap_or_default(),
+                            preferred,
+                        )
+                    })
+            };
+            AuxiliaryLinkGroupVerdict {
+                entity: key.0.clone(),
+                account: key.1.clone(),
+                verdict,
+            }
+        })
+        .collect::<Vec<_>>();
+    // 同一本配对账里若不同科目认定不同 JE 列，整体视为未匹配；
+    // 不将多列并入辅助字段，也不在计算时按科目切换列。
+    let matched_columns = groups
+        .iter()
+        .filter(|group| group.verdict.dimension_keys())
+        .filter_map(|group| group.verdict.column.as_deref())
+        .collect::<HashSet<_>>();
+    if matched_columns.len() > 1 {
+        let competing = matched_columns
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for group in &mut groups {
+            group.verdict.status = "noMatch";
+            group.verdict.column = None;
+            group.verdict.competing_columns = competing.clone();
+        }
+    }
+    groups
+}
+
+impl AnchorColumnAccumulator {
+    pub(crate) fn new(column_count: usize) -> Self {
+        Self {
+            per_column: vec![(HashSet::new(), 0); column_count],
+        }
+    }
+
+    pub(crate) fn feed(&mut self, row: &[String], anchors: &HashSet<String>) {
+        for (column, value) in row.iter().enumerate() {
+            if value.trim().is_empty() {
+                continue;
+            }
+            let Some((hits, nonempty)) = self.per_column.get_mut(column) else {
+                continue;
+            };
+            *nonempty += 1;
+            let normalized = anchor_norm(value);
+            if anchors.contains(&normalized) {
+                hits.insert(normalized);
+            }
+        }
+    }
+
+    pub(crate) fn finish(self, headers: &[String]) -> Vec<AnchorColumnScan> {
+        self.per_column
+            .into_iter()
+            .zip(headers)
+            .map(|((hits, nonempty), header)| AnchorColumnScan {
+                header: header.clone(),
+                hit_anchors: hits,
+                nonempty_rows: nonempty,
+            })
+            .collect()
+    }
+}
+
+/// 映射角色解析出的列名清单（单列字符串与多列数组两种形态都收）。
+pub(crate) fn mapped_column_names(
+    mapping: &serde_json::Map<String, Value>,
+    role: &str,
+) -> Vec<String> {
+    match mapping.get(role) {
+        Some(Value::String(name)) => vec![name.clone()],
+        Some(Value::Array(names)) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// TB 侧锚点提取：`role` 指定维度角色（通用工具 `auxiliary`、借款工具
+/// `loanId`）。锚点＝维度列有值且当期有发生额的行的维度值——**不挂任何
+/// 末级/编码过滤**：SAP 形态的维度明细行科目编码为空、会被末级掩码剔除，
+/// 但维度值恰恰只存在于这些行上。发生额取四类发生列任一非零；发生额列
+/// 未映射时不设门槛——无从判定休眠，宁多认不错杀。
+pub(crate) fn tb_auxiliary_anchors(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &serde_json::Map<String, Value>,
+    role: &str,
+) -> HashSet<String> {
+    let mut anchors = HashSet::new();
+    for (_, values) in tb_dimension_column_anchors(headers, rows, mapping, role) {
+        anchors.extend(values);
+    }
+    anchors
+}
+
+/// TB 锚点按（有效主体，科目）分组。`group_of` 由调用工具
+/// 用已确认的主体范围与科目匹配策略生成；返回 `None` 的行
+/// 不在本次已选范围内。发生额门槛与全局锚点接口完全相同：
+/// 映射了本期／本年发生额时只收非零行；没有任何发生额映射时，
+/// 收范围内全部非空辅助值。不接收报告期间参数。
+pub(crate) fn tb_auxiliary_anchor_groups<F>(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &serde_json::Map<String, Value>,
+    role: &str,
+    mut group_of: F,
+) -> BTreeMap<AuxiliaryGroupKey, HashSet<String>>
+where
+    F: FnMut(usize, &[String]) -> Option<AuxiliaryGroupKey>,
+{
+    let auxiliary_indexes: Vec<usize> = mapped_column_names(mapping, role)
+        .iter()
+        .filter_map(|name| header_index(headers, name))
+        .collect();
+    if auxiliary_indexes.is_empty() {
+        return BTreeMap::new();
+    }
+    let occurrence_indexes: Vec<usize> = [
+        "ytdFunctionalCredit",
+        "ytdFunctionalDebit",
+        "periodFunctionalCredit",
+        "periodFunctionalDebit",
+    ]
+    .iter()
+    .flat_map(|occurrence| mapped_column_names(mapping, occurrence))
+    .filter_map(|name| header_index(headers, &name))
+    .collect();
+    let mut groups = BTreeMap::<AuxiliaryGroupKey, HashSet<String>>::new();
+    for (index, row) in rows.iter().enumerate() {
+        // 身份上下文必须观察所有行。父行可能没有发生额，活跃的
+        // 空编码子行仍须继承它，不能把 active gate 放在回调之前。
+        let Some(group) = group_of(index, row) else {
+            continue;
+        };
+        let active = occurrence_indexes.is_empty()
+            || occurrence_indexes.iter().any(|column| {
+                row.get(*column)
+                    .and_then(|value| parse_amount_lenient(value))
+                    .is_some_and(|amount| amount.abs() > 0.005)
+            });
+        if !active {
+            continue;
+        }
+        let entry = groups.entry(group).or_default();
+        for column in &auxiliary_indexes {
+            let normalized = row
+                .get(*column)
+                .map(|value| anchor_norm(value))
+                .unwrap_or_default();
+            if !normalized.is_empty() {
+                entry.insert(normalized);
+            }
+        }
+    }
+    groups.retain(|_, values| !values.is_empty());
+    groups
+}
+
+/// 逐个维度列的锚点集合（列有值且当期有发生额）。供多列辅助（编码＋名称）
+/// 时挑与 JE 认定列重叠最大的键列。
+pub(crate) fn tb_dimension_column_anchors(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &serde_json::Map<String, Value>,
+    role: &str,
+) -> Vec<(usize, HashSet<String>)> {
+    let auxiliary_indexes: Vec<usize> = mapped_column_names(mapping, role)
+        .iter()
+        .filter_map(|name| header_index(headers, name))
+        .collect();
+    if auxiliary_indexes.is_empty() {
+        return Vec::new();
+    }
+    let occurrence_indexes: Vec<usize> = [
+        "ytdFunctionalCredit",
+        "ytdFunctionalDebit",
+        "periodFunctionalCredit",
+        "periodFunctionalDebit",
+    ]
+    .iter()
+    .flat_map(|occurrence| mapped_column_names(mapping, occurrence))
+    .filter_map(|name| header_index(headers, &name))
+    .collect();
+    let mut per_column = auxiliary_indexes
+        .into_iter()
+        .map(|index| (index, HashSet::new()))
+        .collect::<Vec<_>>();
+    for row in rows {
+        let active = occurrence_indexes.is_empty()
+            || occurrence_indexes.iter().any(|index| {
+                row.get(*index)
+                    .and_then(|value| parse_amount_lenient(value))
+                    .is_some_and(|amount| amount.abs() > 0.005)
+            });
+        if !active {
+            continue;
+        }
+        for (index, values) in per_column.iter_mut() {
+            if let Some(value) = row.get(*index) {
+                let normalized = anchor_norm(value);
+                if !normalized.is_empty() {
+                    values.insert(normalized);
+                }
+            }
+        }
+    }
+    per_column
+}
+
+/// TB 的「维度视图」行：把维度拆行还原成可按键的明细。
+///
+/// SAP 形态（06 号样例）：父行带科目编码、维度列为空、金额＝明细之和；
+/// 维度明细行科目编码留空、维度列有值。金额汇总视图（`tb_leaf_mask`）
+/// 保留父行剔明细；本视图反其道——**明细行继承父行科目，父行让位给明细**
+/// （父行金额是明细之和，同计会翻倍）。同编码形态（父行与明细行编码相同）
+/// 同样父行让位。没有维度拆行的科目保持原样（维度值为空串）。
+pub(crate) struct TbDimensionRow {
+    /// 原始行号：金额、币种等按它回读。
+    pub index: usize,
+    /// 归一化科目编码（子行继承父行）。
+    pub code: String,
+    /// 科目名（子行继承父行，显示口径）。
+    pub name: String,
+    /// 归一化维度值；空＝该科目无维度拆行。
+    pub aux: String,
+    /// 维度原始文本（去首尾空白），供展示。
+    pub aux_display: String,
+}
+
+pub(crate) fn tb_dimension_rows(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &serde_json::Map<String, Value>,
+    role: &str,
+    selected_column: Option<usize>,
+) -> Vec<TbDimensionRow> {
+    let mut auxiliary_indexes: Vec<usize> = mapped_column_names(mapping, role)
+        .iter()
+        .filter_map(|name| header_index(headers, name))
+        .collect();
+    if let Some(column) = selected_column {
+        // 键列已按“与 JE 认定列锚点交集最大”选出——只用它取维度值，
+        // 编码＋名称双列形态下另一列的值不进键（值体系不同永不对上）。
+        auxiliary_indexes.retain(|index| *index == column);
+    }
+    let code_index = mapped_column_names(mapping, "accountCode")
+        .first()
+        .and_then(|name| header_index(headers, name));
+    let name_index = mapped_column_names(mapping, "accountName")
+        .first()
+        .and_then(|name| header_index(headers, name));
+    let entity_index = mapped_column_names(mapping, "entity")
+        .first()
+        .and_then(|name| header_index(headers, name));
+    let currency_index = mapped_column_names(mapping, "currency")
+        .first()
+        .and_then(|name| header_index(headers, name));
+    let mut children = Vec::<TbDimensionRow>::new();
+    if auxiliary_indexes.is_empty() || code_index.is_none() {
+        return children;
+    }
+    let code_index = code_index.expect("上方已判空");
+    let raw_of = |row: &[String], index: Option<usize>| -> String {
+        index
+            .and_then(|i| row.get(i))
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_default()
+    };
+    // 先扫一遍收集明细行并标记“被明细取代的父行”，再按原顺序输出独立行＋明细行。
+    let mut parent: Option<(usize, String, String, String)> = None;
+    let mut parent_children = BTreeMap::<usize, Vec<usize>>::new();
+    let mut emitted = HashSet::<usize>::new();
+    for (index, row) in rows.iter().enumerate() {
+        let aux_display = auxiliary_indexes
+            .iter()
+            .filter_map(|column| row.get(*column))
+            .map(|value| value.trim())
+            .find(|value| !value.is_empty())
+            .unwrap_or("")
+            .to_owned();
+        let aux = anchor_norm(&aux_display);
+        let own_code = normalize_account_code(&account_code_of(&raw_of(row, Some(code_index))));
+        let entity = raw_of(row, entity_index).to_uppercase();
+        if !aux.is_empty() {
+            // 维度明细行：编码为空时继承最近的同主体父行；找不到父行则无法
+            // 归属科目，跳过（不猜）。
+            let (code, name) = if own_code.is_empty() {
+                match parent.as_ref() {
+                    Some((_, parent_entity, code, name))
+                        if parent_entity.is_empty()
+                            || entity.is_empty()
+                            || *parent_entity == entity =>
+                    {
+                        (code.clone(), name.clone())
+                    }
+                    _ => (String::new(), String::new()),
+                }
+            } else {
+                (
+                    own_code.clone(),
+                    raw_of(row, name_index)
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_owned(),
+                )
+            };
+            if code.is_empty() {
+                continue;
+            }
+            if let Some((parent_index, parent_entity, parent_code, _)) = parent.as_ref() {
+                let same_entity =
+                    entity.is_empty() || parent_entity.is_empty() || entity == *parent_entity;
+                let parent_currency = raw_of(&rows[*parent_index], currency_index).to_uppercase();
+                let currency = raw_of(row, currency_index).to_uppercase();
+                let same_currency = currency == parent_currency;
+                if same_entity && same_currency && (own_code.is_empty() || own_code == *parent_code)
+                {
+                    parent_children
+                        .entry(*parent_index)
+                        .or_default()
+                        .push(index);
+                }
+            }
+            emitted.insert(index);
+            children.push(TbDimensionRow {
+                index,
+                code,
+                name,
+                aux,
+                aux_display,
+            });
+            continue;
+        }
+        // 无维度值且带编码：独立科目行，同时是后续明细行的父行候选。
+        if !own_code.is_empty() {
+            let name = raw_of(row, name_index);
+            parent = Some((index, entity, own_code, name));
+        }
+    }
+    // 空辅助父行只有在公共本位币金额语义列全部证明“父＝子项之和”
+    // 时才是汇总行。仅凭其下有辅助值不足以删除：它也可能是真实
+    // 的“未分辅助”余额。
+    let value_columns = rollup_value_columns(headers, rows, &|mapped_role| {
+        mapped_column_names(mapping, mapped_role)
+    });
+    let absorbed = parent_children
+        .into_iter()
+        .filter_map(|(parent_index, child_indexes)| {
+            (!value_columns.is_empty()
+                && value_columns.iter().all(|values| {
+                    let parent = values.get(parent_index).copied().unwrap_or(0.0);
+                    let children = child_indexes
+                        .iter()
+                        .map(|index| values.get(*index).copied().unwrap_or(0.0))
+                        .sum::<f64>();
+                    (parent - children).abs() <= 0.005
+                }))
+            .then_some(parent_index)
+        })
+        .collect::<HashSet<_>>();
+    let mut out = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        if absorbed.contains(&index) || emitted.contains(&index) {
+            continue;
+        }
+        let own_code = normalize_account_code(&account_code_of(&raw_of(row, Some(code_index))));
+        if own_code.is_empty() {
+            continue;
+        }
+        out.push(TbDimensionRow {
+            index,
+            code: own_code,
+            name: raw_of(row, name_index),
+            aux: String::new(),
+            aux_display: String::new(),
+        });
+    }
+    out.extend(children);
+    out
 }
 
 impl AccountMatchPolicy {
-    /// 每行依次为（主体、科目编码、科目名称）。歧义要求同一编码在两侧**都**
-    /// 对应多个名称，且两侧名称集合的交集达到六成（与口径预检的复合配对
-    /// 比例同一把尺）：配不上的名称拆行按编码汇总，不再纠缠名称。
-    pub(crate) fn from_sides(
+    /// 完整性核对保留原策略：两侧同码均多名且名称交集达到六成才细分。
+    /// 业务工具的完整身份确认仍使用 from_sides，不能互相改变匹配颗粒度。
+    pub(crate) fn for_tbje_integrity(
         tb: &[(String, String, String)],
         je: &[(String, String, String)],
     ) -> Self {
@@ -5519,15 +8738,37 @@ impl AccountMatchPolicy {
                 let Some(opposite) = je_index.get(key) else {
                     return false;
                 };
-                if names.len() <= 1 || opposite.len() <= 1 {
-                    return false;
-                }
-                let paired = names.intersection(opposite).count();
-                paired * 5 >= names.len().min(opposite.len()) * 3
+                names.len() > 1
+                    && opposite.len() > 1
+                    && names.intersection(opposite).count() * 5
+                        >= names.len().min(opposite.len()) * 3
             })
             .map(|(key, _)| key.clone())
             .collect();
-        Self { ambiguous_codes }
+        Self {
+            ambiguous_codes,
+            validated_name_keys: validated_account_name_keys(tb, je),
+        }
+    }
+
+    /// 每行依次为（主体、科目编码、科目名称）。只要已映射的科目名称列
+    /// 在同一主体、同一编码下出现多个值，就使用编码＋名称复合键；JE
+    /// 没有对应名称时保留未匹配事实，不能退回编码把不同名称并为一户。
+    pub(crate) fn from_sides(
+        tb: &[(String, String, String)],
+        je: &[(String, String, String)],
+    ) -> Self {
+        let tb_index = account_name_sets(tb);
+        let ambiguous_codes = tb_index
+            .iter()
+            .filter(|(_, names)| names.len() > 1)
+            .map(|(key, _)| key.clone())
+            .collect();
+        let validated_name_keys = validated_account_name_keys(tb, je);
+        Self {
+            ambiguous_codes,
+            validated_name_keys,
+        }
     }
 
     pub(crate) fn is_ambiguous(&self, entity: &str, raw_code: &str) -> bool {
@@ -5542,8 +8783,12 @@ impl AccountMatchPolicy {
     pub(crate) fn account_key(&self, entity: &str, raw_code: &str, raw_name: &str) -> String {
         let code = normalize_account_code(&account_code_of(raw_code));
         let name = normalize_name(&account_name_of(raw_name));
+        let name_key = (entity.trim().to_uppercase(), name.clone());
+        if !name.is_empty() && self.validated_name_keys.contains(&name_key) {
+            return format!("{ACCOUNT_NAME_KEY_PREFIX}{name}");
+        }
         if code.is_empty() {
-            return name;
+            return String::new();
         }
         if self.is_ambiguous(entity, &code) && !name.is_empty() {
             format!("{code}\u{1f}{name}")
@@ -5554,6 +8799,26 @@ impl AccountMatchPolicy {
 
     pub(crate) fn ambiguous_count(&self) -> usize {
         self.ambiguous_codes.len()
+    }
+
+    pub(crate) fn name_fallback_count(&self) -> usize {
+        self.validated_name_keys.len()
+    }
+
+    pub(crate) fn is_validated_name(&self, entity: &str, raw_name: &str) -> bool {
+        self.validated_name_keys.contains(&(
+            entity.trim().to_uppercase(),
+            normalize_name(&account_name_of(raw_name)),
+        ))
+    }
+}
+
+/// 内部名称回退键不冒充科目编码；导出和界面仍把编码留空。
+pub(crate) fn account_code_from_match_key(key: &str) -> &str {
+    if key.starts_with(ACCOUNT_NAME_KEY_PREFIX) {
+        ""
+    } else {
+        key.split('\u{1f}').next().unwrap_or(key)
     }
 }
 
@@ -5570,7 +8835,7 @@ pub(crate) fn validated_account_name_keys(
             let name = normalize_name(name);
             if !name.is_empty() {
                 index
-                    .entry((entity.trim().to_owned(), name))
+                    .entry((entity.trim().to_uppercase(), name))
                     .or_default()
                     .insert(code.trim().to_owned());
             }
@@ -6287,6 +9552,36 @@ mod tests {
     }
 
     #[test]
+    fn 损益结转承接科目兼容简繁英文() {
+        for account in [
+            "4103 本年利润",
+            "4103 本年利潤",
+            "本年损益",
+            "本年損益",
+            "未分配利润",
+            "未分配利潤",
+            "Income Summary",
+            "P&L Closing",
+            "Retained Earnings",
+        ] {
+            assert!(
+                is_profit_transfer_account(account),
+                "未识别损益结转承接科目: {account}"
+            );
+        }
+        for account in [
+            "主营业务收入",
+            "Profit and Loss Expense",
+            "Earnings per Share",
+        ] {
+            assert!(
+                !is_profit_transfer_account(account),
+                "普通损益科目不应被误判: {account}"
+            );
+        }
+    }
+
+    #[test]
     fn 公共科目匹配仅在编码真实一对多时追加名称() {
         let tb = vec![
             ("A".into(), "943100".into(), "现金".into()),
@@ -6338,11 +9633,39 @@ mod tests {
     }
 
     #[test]
-    fn 仅一侧把编码拆成多个名称不算歧义() {
-        // 带辅助核算的余额表形态：TB 把 2241.02 按往来拆成两行（名称列填
-        // 辅助维度），JE 同码名称唯一。编码在 JE 侧已唯一可配对，TB 拆行
-        // 汇总回编码即是该科目全量，不进复合匹配——否则两侧名称根本不是
-        // 同一套词汇，整组账套会被「名称无法消歧」拦下。
+    fn 缺失编码仅对双侧唯一同名科目启用名称回退() {
+        let tb = vec![
+            ("A".into(), "".into(), "库存现金".into()),
+            ("A".into(), "".into(), "应付账款".into()),
+        ];
+        let je = vec![
+            ("A".into(), "1001".into(), "库存现金".into()),
+            ("A".into(), "2202".into(), "应付账款".into()),
+        ];
+        let policy = AccountMatchPolicy::from_sides(&tb, &je);
+        assert_eq!(policy.name_fallback_count(), 2);
+        assert_eq!(
+            policy.account_key("A", "", "库存现金"),
+            policy.account_key("A", "1001", "库存现金")
+        );
+        assert_eq!(
+            account_code_from_match_key(&policy.account_key("A", "", "库存现金")),
+            ""
+        );
+
+        let ambiguous_je = vec![
+            ("A".into(), "1001".into(), "库存现金".into()),
+            ("A".into(), "1002".into(), "库存现金".into()),
+        ];
+        let rejected = AccountMatchPolicy::from_sides(&tb[..1], &ambiguous_je);
+        assert_eq!(rejected.name_fallback_count(), 0);
+        assert!(rejected.account_key("A", "", "库存现金").is_empty());
+    }
+
+    #[test]
+    fn tb同编码不同名称即使je单名也不回退编码() {
+        // 用户映射的科目名称就是科目名称。JE 缺少对应名称时应留下
+        // 未匹配事实，不能假设该列是辅助核算而压回编码汇总。
         let tb = vec![
             ("E".into(), "2241.02".into(), "荀海波".into()),
             ("E".into(), "2241.02".into(), "王强".into()),
@@ -6352,19 +9675,15 @@ mod tests {
             ("E".into(), "2241.02".into(), "其他应付款-个人往来".into()),
         ];
         let policy = AccountMatchPolicy::from_sides(&tb, &je);
-        assert_eq!(policy.ambiguous_count(), 0);
-        assert_eq!(
+        assert_eq!(policy.ambiguous_count(), 1);
+        assert_ne!(
             policy.account_key("E", "2241.02", "荀海波"),
             policy.account_key("E", "2241.02", "其他应付款-个人往来")
         );
     }
 
     #[test]
-    fn 两侧都拆时按名称交集六成决定复合或编码() {
-        // 1002：两侧名称完全一致 → 复合键逐名配对。
-        // 1003：两侧名称毫无交集 → 复合只会制造孤儿键，退回编码。
-        // 1004：交集 1/3 不足六成 → 同样退回编码。
-        // 1005：交集 2/3 达到六成 → 复合键逐名配对。
+    fn tb同码多名始终使用复合键() {
         let split = |tb_names: &[&str], je_names: &[&str]| {
             let tb = tb_names
                 .iter()
@@ -6377,10 +9696,10 @@ mod tests {
             AccountMatchPolicy::from_sides(&tb, &je).ambiguous_count()
         };
         assert_eq!(split(&["工行", "建行"], &["工行", "建行"]), 1);
-        assert_eq!(split(&["工行", "建行"], &["招行", "浦行"]), 0);
+        assert_eq!(split(&["工行", "建行"], &["招行", "浦行"]), 1);
         assert_eq!(
             split(&["工行", "建行", "招商"], &["工行", "浦行", "兴业"]),
-            0
+            1
         );
         assert_eq!(
             split(&["工行", "建行", "招商"], &["工行", "建行", "兴业"]),
@@ -6521,11 +9840,151 @@ mod tests {
     }
 
     #[test]
+    fn 凭证行不会被建议为凭证识别字段() {
+        let headers = vec!["会计凭证".to_owned(), "会计凭证行".to_owned()];
+        let mapping = suggest_roles("je", &headers);
+        assert_eq!(mapping.get(&0), Some(&"id"));
+        assert_ne!(mapping.get(&1), Some(&"id"));
+    }
+
+    #[test]
+    fn sap序时账凭证行文本胜过功能范围文本与抬头文本() {
+        // 04/05 号 SAP 导出的真实列集合：凭证行文本是行摘要，功能范围文本
+        // 是辅助维度描述，抬头文本是凭证头备注——只有前者该归摘要。
+        let headers: Vec<String> = [
+            "输入日期",
+            "记帐日期",
+            "凭证编号",
+            "总帐科目",
+            "科目名称",
+            "凭证行文本",
+            "抬头文本",
+            "功能范围文本",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let got = suggest_roles("je", &headers);
+        assert_eq!(
+            got.iter().find(|(_, r)| **r == "summary").map(|(i, _)| *i),
+            Some(5),
+            "凭证行文本应独占摘要：{got:?}"
+        );
+    }
+
+    #[test]
+    fn 两可表头按数据形态冷启动补科目编码() {
+        // TB：总账科目列装的是编码，别名层有意放空，须由数据形态补位
+        // （形态判定要求 ≥4 个非空样本且占比过半，样本按真实行数给足）。
+        let headers = vec!["总账科目".to_owned(), "总账科目名称".to_owned()];
+        let rows: Vec<Vec<String>> = (1..=6)
+            .map(|i| vec![format!("100{i}"), format!("科目名称{i}")])
+            .collect();
+        let mapping = suggest_roles_with_data("tb", &headers, &rows);
+        assert_eq!(mapping.get(&0), Some(&"accountCode"));
+        assert_eq!(mapping.get(&1), Some(&"accountName"));
+
+        // JE：总帐科目（帐/账混写）同样补位。
+        let je_headers = vec!["过帐日期".to_owned(), "总帐科目".to_owned()];
+        let je_rows: Vec<Vec<String>> = (1..=5)
+            .map(|i| vec![format!("2025-01-0{i}"), format!("220{i}")])
+            .collect();
+        let je_mapping = suggest_roles_with_data("je", &je_headers, &je_rows);
+        assert_eq!(je_mapping.get(&1), Some(&"accountCode"));
+
+        // 两可表头装名称时归科目名称，不抢编码角色。
+        let name_headers = vec!["会计科目".to_owned()];
+        let name_rows: Vec<Vec<String>> =
+            (1..=5).map(|i| vec![format!("银行存款-账户{i}")]).collect();
+        let name_mapping = suggest_roles_with_data("je", &name_headers, &name_rows);
+        assert_eq!(name_mapping.get(&0), Some(&"accountName"));
+    }
+
+    #[test]
+    fn je_number是凭证键而je_line_number不是() {
+        // 真实 JE 导出同时包含两列：前者跨分录重复，后者只是凭证内的行序号。
+        let headers = vec!["JE Number".to_owned(), "JE Line Number".to_owned()];
+        let mapping = suggest_roles("je", &headers);
+        assert_eq!(mapping.get(&0), Some(&"id"));
+        assert_ne!(mapping.get(&1), Some(&"id"));
+
+        let rows = vec![vec!["01-银行凭证-1".to_owned(), "1".to_owned()]];
+        let with_data = suggest_roles_with_data("je", &headers, &rows);
+        assert_eq!(with_data.get(&0), Some(&"id"));
+        assert_ne!(with_data.get(&1), Some(&"id"));
+    }
+
+    #[test]
+    fn je生效日期与录入日期并存时优先生效日期() {
+        // 真实 JE 的 2025-12 生效分录可能在 2026-01 才录入，不能按录入日截掉。
+        for headers in [
+            vec!["Effective Date".to_owned(), "Entry Date".to_owned()],
+            vec!["Entry Date".to_owned(), "Effective Date".to_owned()],
+            vec!["生效日期".to_owned(), "记账日期".to_owned()],
+            vec!["记账日期".to_owned(), "有效日期".to_owned()],
+        ] {
+            let effective = headers
+                .iter()
+                .position(|h| matches!(h.as_str(), "Effective Date" | "生效日期" | "有效日期"))
+                .unwrap();
+            let entry = 1 - effective;
+            let mapping = suggest_roles("je", &headers);
+            assert_eq!(mapping.get(&effective), Some(&"date"));
+            assert_ne!(mapping.get(&entry), Some(&"date"));
+
+            let rows = vec![
+                headers
+                    .iter()
+                    .map(|h| {
+                        if matches!(h.as_str(), "Effective Date" | "生效日期" | "有效日期")
+                        {
+                            "2025-12-21"
+                        } else {
+                            "2026-01-05"
+                        }
+                    })
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+            ];
+            let with_data = suggest_roles_with_data("je", &headers, &rows);
+            assert_eq!(with_data.get(&effective), Some(&"date"));
+            assert_ne!(with_data.get(&entry), Some(&"date"));
+        }
+        assert_eq!(
+            suggest_roles("je", &["Entry Date".to_owned()]).get(&0),
+            Some(&"date")
+        );
+    }
+
+    #[test]
     fn 取最长命中而非首个命中() {
         let m = suggest_roles("je", &["借方金额".into(), "贷方金额".into(), "金额".into()]);
         assert_eq!(m.get(&0), Some(&"functionalDebit"));
         assert_eq!(m.get(&1), Some(&"functionalCredit"));
         assert_eq!(m.get(&2), Some(&"functionalAmount"));
+    }
+
+    #[test]
+    fn oracle_entered与accounted金额不得对调() {
+        let headers = [
+            "Entered Debit".into(),
+            "Entered Credit".into(),
+            "Accounted Debit".into(),
+            "Accounted Credit".into(),
+        ];
+        let mapping = suggest_roles("je", &headers);
+        assert_eq!(mapping.get(&0), Some(&"foreignDebit"));
+        assert_eq!(mapping.get(&1), Some(&"foreignCredit"));
+        assert_eq!(mapping.get(&2), Some(&"functionalDebit"));
+        assert_eq!(mapping.get(&3), Some(&"functionalCredit"));
+        for (role, header) in [
+            ("foreignDebit", "Accounted Debit"),
+            ("foreignCredit", "Accounted Credit"),
+            ("functionalDebit", "Entered Debit"),
+            ("functionalCredit", "Entered Credit"),
+        ] {
+            assert!(role_rejects_header("je", role, header));
+        }
     }
 
     #[test]
@@ -7020,10 +10479,11 @@ mod tests {
         let missing = missing_required_labels(Tool::FxAudit, "je", &mapped);
         assert!(missing.contains(&"记账日期"), "{missing:?}");
         assert!(missing.contains(&"原币币种"), "{missing:?}");
-        assert!(!missing.contains(&"科目编码"));
-        // 金标身份槽也在并集里：科目名称、摘要、凭证识别字段都要补。
-        assert!(missing.contains(&"科目名称"), "{missing:?}");
-        assert!(missing.contains(&"摘要"), "{missing:?}");
+        assert!(!missing.contains(&"科目编码／科目名称（任一）"));
+        // 编码已经满足科目身份；名称与摘要均为可选，只补凭证识别字段。
+        assert!(missing.contains(&"凭证识别字段"), "{missing:?}");
+        assert!(!missing.contains(&"科目名称"), "{missing:?}");
+        assert!(!missing.contains(&"摘要"), "{missing:?}");
     }
 
     #[test]
@@ -7040,6 +10500,476 @@ mod tests {
         // SAP 常把供应商、客户分成两列，辅助核算必须可多列。
         assert!(role_of("je", "auxiliary").expect("角色存在").multi);
         assert!(!role_of("tb", "loanId").expect("角色存在").multi);
+    }
+
+    #[test]
+    fn 锚点反查唯一命中列认定为已验证() {
+        let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        let anchors = hits(&["l1", "l2"]);
+        let columns = vec![
+            AnchorColumnScan {
+                header: "摘要".into(),
+                hit_anchors: hits(&[]),
+                nonempty_rows: 10,
+            },
+            AnchorColumnScan {
+                header: "合同维度".into(),
+                hit_anchors: hits(&["l1", "l2"]),
+                nonempty_rows: 8,
+            },
+        ];
+        let verdict = auxiliary_link_verdict(&anchors, columns, 10, None);
+        assert_eq!(verdict.status, "verified");
+        assert_eq!(verdict.column.as_deref(), Some("合同维度"));
+        assert!(verdict.dimension_keys());
+    }
+
+    #[test]
+    fn 锚点反查最高命中列唯一时自动认定() {
+        let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        let anchors = hits(&["l1", "l2", "l3"]);
+        let columns = vec![
+            AnchorColumnScan {
+                header: "摘要".into(),
+                hit_anchors: hits(&["l1"]),
+                nonempty_rows: 20,
+            },
+            AnchorColumnScan {
+                header: "辅助核算".into(),
+                hit_anchors: hits(&["l1", "l2", "l3"]),
+                nonempty_rows: 3,
+            },
+        ];
+        let verdict = auxiliary_link_verdict(&anchors, columns, 20, None);
+        assert_eq!(verdict.status, "verified");
+        assert_eq!(verdict.column.as_deref(), Some("辅助核算"));
+        assert_eq!(verdict.anchor_hits, 3);
+        assert!(verdict.dimension_keys());
+    }
+
+    #[test]
+    fn 锚点反查最高命中列仍覆盖不全时不启用辅助键() {
+        let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        let anchors = hits(&["l1", "l2", "l3"]);
+        let columns = vec![
+            AnchorColumnScan {
+                header: "摘要".into(),
+                hit_anchors: hits(&["l1"]),
+                nonempty_rows: 10,
+            },
+            AnchorColumnScan {
+                header: "辅助核算".into(),
+                hit_anchors: hits(&["l1", "l2"]),
+                nonempty_rows: 4,
+            },
+        ];
+        let verdict = auxiliary_link_verdict(&anchors, columns, 10, None);
+        assert_eq!(verdict.status, "partialCoverage");
+        assert_eq!(verdict.column.as_deref(), Some("辅助核算"));
+        assert!(!verdict.dimension_keys());
+    }
+
+    #[test]
+    fn 锚点反查最高命中并列仍视为歧义不认定() {
+        let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        let anchors = hits(&["l1"]);
+        let columns = vec![
+            AnchorColumnScan {
+                header: "部门编码".into(),
+                hit_anchors: hits(&["l1"]),
+                nonempty_rows: 5,
+            },
+            AnchorColumnScan {
+                header: "部门名称".into(),
+                hit_anchors: hits(&["l1"]),
+                nonempty_rows: 5,
+            },
+        ];
+        let verdict = auxiliary_link_verdict(&anchors, columns, 5, None);
+        assert_eq!(verdict.status, "ambiguous");
+        assert!(verdict.column.is_none());
+        assert!(!verdict.dimension_keys());
+        assert_eq!(verdict.competing_columns.len(), 2);
+    }
+
+    #[test]
+    fn 指定列对不上按无匹配降级不换列() {
+        // 用户手选的列验证不过时不许悄悄换列——降级必须带着提示，
+        // 用户才知道自己选的列没生效。
+        let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        let anchors = hits(&["l1"]);
+        let columns = vec![
+            AnchorColumnScan {
+                header: "用户选错的列".into(),
+                hit_anchors: hits(&[]),
+                nonempty_rows: 9,
+            },
+            AnchorColumnScan {
+                header: "真正对应的列".into(),
+                hit_anchors: hits(&["l1"]),
+                nonempty_rows: 3,
+            },
+        ];
+        let verdict = auxiliary_link_verdict(&anchors, columns, 9, Some("用户选错的列"));
+        assert_eq!(verdict.status, "noMatch");
+        assert!(verdict.column.is_none());
+        assert!(!verdict.dimension_keys());
+    }
+
+    #[test]
+    fn 部分锚点未命中为覆盖不全() {
+        let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        let anchors = hits(&["l1", "l2", "l3"]);
+        let columns = vec![AnchorColumnScan {
+            header: "往来辅助".into(),
+            hit_anchors: hits(&["l1", "l2"]),
+            nonempty_rows: 7,
+        }];
+        let verdict = auxiliary_link_verdict(&anchors, columns, 7, None);
+        assert_eq!(verdict.status, "partialCoverage");
+        assert_eq!(verdict.anchor_hits, 2);
+        assert_eq!(verdict.anchor_total, 3);
+        assert!(
+            !verdict.dimension_keys(),
+            "覆盖不全只说明找到了候选列，不能把不完整维度直接并入匹配键"
+        );
+    }
+
+    #[test]
+    fn 多列已映射je辅助核算按锚点最高覆盖列择优() {
+        let key = ("甲".to_owned(), "1002".to_owned());
+        let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        let anchors = BTreeMap::from([(key.clone(), hits(&["a", "b"]))]);
+        let tb_scans = BTreeMap::from([(
+            key.clone(),
+            vec![AnchorColumnScan {
+                header: "TB辅助".into(),
+                hit_anchors: hits(&["a", "b"]),
+                nonempty_rows: 2,
+            }],
+        )]);
+        let je_scans = BTreeMap::from([(
+            key.clone(),
+            vec![
+                AnchorColumnScan {
+                    header: "辅助一".into(),
+                    hit_anchors: hits(&["a"]),
+                    nonempty_rows: 4,
+                },
+                AnchorColumnScan {
+                    header: "辅助二".into(),
+                    hit_anchors: hits(&["a", "b"]),
+                    nonempty_rows: 2,
+                },
+                AnchorColumnScan {
+                    header: "非映射列".into(),
+                    hit_anchors: hits(&["a", "b"]),
+                    nonempty_rows: 2,
+                },
+            ],
+        )]);
+        let tb_mapping = serde_json::json!({"auxiliary": "TB辅助"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let verdicts = auxiliary_link_group_verdicts_by_tb_columns(
+            &anchors,
+            &tb_scans,
+            &je_scans,
+            &BTreeMap::new(),
+            &tb_mapping,
+            "auxiliary",
+            &["辅助一".into(), "辅助二".into()],
+        );
+        assert_eq!(verdicts[0].verdict.status, "verified");
+        assert_eq!(verdicts[0].verdict.column.as_deref(), Some("辅助二"));
+    }
+
+    #[test]
+    fn 不同tb辅助字段不得分别认定不同je列() {
+        let group = ("4800".to_owned(), "1002".to_owned());
+        let anchors = BTreeMap::from([(
+            group.clone(),
+            HashSet::from(["甲".to_owned(), "乙".to_owned()]),
+        )]);
+        let tb_scans = BTreeMap::from([(
+            group.clone(),
+            vec![
+                AnchorColumnScan {
+                    header: "TB字段一".into(),
+                    hit_anchors: HashSet::from(["甲".into()]),
+                    nonempty_rows: 1,
+                },
+                AnchorColumnScan {
+                    header: "TB字段二".into(),
+                    hit_anchors: HashSet::from(["乙".into()]),
+                    nonempty_rows: 1,
+                },
+            ],
+        )]);
+        let je_scans = BTreeMap::from([(
+            group.clone(),
+            vec![
+                AnchorColumnScan {
+                    header: "JE列一".into(),
+                    hit_anchors: HashSet::from(["甲".into()]),
+                    nonempty_rows: 1,
+                },
+                AnchorColumnScan {
+                    header: "JE列二".into(),
+                    hit_anchors: HashSet::from(["乙".into()]),
+                    nonempty_rows: 1,
+                },
+            ],
+        )]);
+        let mapping = serde_json::json!({"auxiliary":["TB字段一","TB字段二"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        let result = auxiliary_link_group_verdicts_by_tb_columns(
+            &anchors,
+            &tb_scans,
+            &je_scans,
+            &BTreeMap::from([(group, 2)]),
+            &mapping,
+            "auxiliary",
+            &[],
+        );
+        assert_eq!(result[0].verdict.status, "noMatch");
+        assert!(result[0].verdict.column.is_none());
+    }
+
+    #[test]
+    fn 不同科目辅助字段命中不同je列时整体不命中() {
+        let first = ("4800".to_owned(), "1002".to_owned());
+        let second = ("4800".to_owned(), "2202".to_owned());
+        let anchors = BTreeMap::from([
+            (first.clone(), HashSet::from(["甲".to_owned()])),
+            (second.clone(), HashSet::from(["乙".to_owned()])),
+        ]);
+        let tb_scans = BTreeMap::from([
+            (
+                first.clone(),
+                vec![AnchorColumnScan {
+                    header: "TB辅助".into(),
+                    hit_anchors: HashSet::from(["甲".into()]),
+                    nonempty_rows: 1,
+                }],
+            ),
+            (
+                second.clone(),
+                vec![AnchorColumnScan {
+                    header: "TB辅助".into(),
+                    hit_anchors: HashSet::from(["乙".into()]),
+                    nonempty_rows: 1,
+                }],
+            ),
+        ]);
+        let je_scans = BTreeMap::from([
+            (
+                first.clone(),
+                vec![
+                    AnchorColumnScan {
+                        header: "JE列一".into(),
+                        hit_anchors: HashSet::from(["甲".into()]),
+                        nonempty_rows: 1,
+                    },
+                    AnchorColumnScan {
+                        header: "JE列二".into(),
+                        hit_anchors: HashSet::new(),
+                        nonempty_rows: 0,
+                    },
+                ],
+            ),
+            (
+                second.clone(),
+                vec![
+                    AnchorColumnScan {
+                        header: "JE列一".into(),
+                        hit_anchors: HashSet::new(),
+                        nonempty_rows: 0,
+                    },
+                    AnchorColumnScan {
+                        header: "JE列二".into(),
+                        hit_anchors: HashSet::from(["乙".into()]),
+                        nonempty_rows: 1,
+                    },
+                ],
+            ),
+        ]);
+        let mapping = serde_json::json!({"auxiliary":"TB辅助"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let groups = auxiliary_link_group_verdicts_by_tb_columns(
+            &anchors,
+            &tb_scans,
+            &je_scans,
+            &BTreeMap::from([(first, 1), (second, 1)]),
+            &mapping,
+            "auxiliary",
+            &[],
+        );
+        assert_eq!(groups.len(), 2);
+        assert!(
+            groups
+                .iter()
+                .all(|group| group.verdict.status == "noMatch" && group.verdict.column.is_none())
+        );
+    }
+
+    #[test]
+    fn 辅助验证按主体科目隔离且覆盖不全整组降级() {
+        let keys = [("甲", "1002"), ("甲", "1003"), ("乙", "1002")];
+        let groups = keys.map(|(entity, account)| (entity.to_owned(), account.to_owned()));
+        let values = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<HashSet<_>>()
+        };
+        let anchors = BTreeMap::from([
+            (groups[0].clone(), values(&["a", "b"])),
+            (groups[1].clone(), values(&["a", "b"])),
+            (groups[2].clone(), values(&["a"])),
+        ]);
+        let headers = vec!["辅助".to_owned()];
+        let mut accumulator = GroupedAnchorColumnAccumulator::new(1);
+        for (group, value) in [
+            (groups[0].clone(), "a"),
+            (groups[0].clone(), "b"),
+            (groups[1].clone(), "a"),
+        ] {
+            accumulator.feed(group.clone(), &[value.to_owned()], &anchors[&group]);
+        }
+        let verdicts = auxiliary_link_group_verdicts(
+            &anchors,
+            accumulator.finish(&headers),
+            &BTreeMap::new(),
+            Some("辅助"),
+        );
+        assert!(
+            verdicts
+                .iter()
+                .find(|group| group.account == "1002" && group.entity == "甲")
+                .unwrap()
+                .verdict
+                .dimension_keys()
+        );
+        assert_eq!(
+            verdicts
+                .iter()
+                .find(|group| group.account == "1003")
+                .unwrap()
+                .verdict
+                .status,
+            "partialCoverage"
+        );
+        assert!(
+            !verdicts
+                .iter()
+                .find(|group| group.account == "1003")
+                .unwrap()
+                .verdict
+                .dimension_keys()
+        );
+        assert_eq!(
+            verdicts
+                .iter()
+                .find(|group| group.entity == "乙")
+                .unwrap()
+                .verdict
+                .status,
+            "noMatch"
+        );
+    }
+
+    #[test]
+    fn 辅助锚点零发生父行仍提供空编码子行上下文() {
+        let headers = vec!["科目".to_owned(), "辅助".to_owned(), "发生".to_owned()];
+        let rows = vec![
+            vec!["1002".to_owned(), "".to_owned(), "0".to_owned()],
+            vec!["".to_owned(), "A".to_owned(), "10".to_owned()],
+            vec!["1003".to_owned(), "B".to_owned(), "0".to_owned()],
+        ];
+        let mapping = serde_json::json!({"auxiliary":"辅助","ytdFunctionalDebit":"发生"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut code = String::new();
+        let groups =
+            tb_auxiliary_anchor_groups(&headers, &rows, &mapping, "auxiliary", |_, row| {
+                if !row[0].is_empty() {
+                    code = row[0].clone();
+                }
+                Some((DEFAULT_ENTITY.to_owned(), code.clone()))
+            });
+        assert_eq!(groups.len(), 1);
+        assert!(groups[&(DEFAULT_ENTITY.to_owned(), "1002".to_owned())].contains("a"));
+    }
+
+    #[test]
+    fn 辅助空白余额不勾稽时保留为真实未分辅助() {
+        let headers = ["科目", "辅助", "期初", "期末", "借方", "贷方"]
+            .map(str::to_owned)
+            .to_vec();
+        let rows = vec![
+            vec!["1002", "", "30", "40", "10", "0"],
+            vec!["1002", "A", "10", "20", "10", "0"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(str::to_owned).collect())
+        .collect::<Vec<Vec<String>>>();
+        let mapping = serde_json::json!({"accountCode":"科目","auxiliary":"辅助","openingFunctionalAmount":"期初","closingFunctionalAmount":"期末","ytdFunctionalDebit":"借方","ytdFunctionalCredit":"贷方"}).as_object().unwrap().clone();
+        let view = tb_dimension_rows(&headers, &rows, &mapping, "auxiliary", None);
+        assert_eq!(
+            view.len(),
+            2,
+            "借方虽相等，期初期末不相等，不能删除空辅助行"
+        );
+        assert!(view.iter().any(|row| row.index == 0 && row.aux.is_empty()));
+    }
+
+    #[test]
+    fn 累加器与锚点归一化口径一致() {
+        // L-1 与 l_1 是同一维度值：分隔符差异不应漏认。
+        let anchors: HashSet<String> = ["l1", "l2"].iter().map(|s| s.to_string()).collect();
+        let headers: Vec<String> = ["合同维度", "摘要"].iter().map(|s| s.to_string()).collect();
+        let mut accumulator = AnchorColumnAccumulator::new(headers.len());
+        accumulator.feed(&["L-1".into(), "收利息".into()], &anchors);
+        accumulator.feed(&["l_2".into(), "付本金".into()], &anchors);
+        accumulator.feed(&["".into(), "空白不算覆盖".into()], &anchors);
+        let scans = accumulator.finish(&headers);
+        assert_eq!(scans[0].anchor_hits(), 2);
+        assert_eq!(scans[0].nonempty_rows, 2);
+        assert_eq!(scans[1].anchor_hits(), 0);
+        assert_eq!(anchor_norm(" L-1 "), "l1");
+    }
+
+    #[test]
+    fn tb锚点提取只取有发生额的行() {
+        let headers: Vec<String> = ["科目编码", "辅助核算", "本期发生借方", "本期发生贷方"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let rows = vec![
+            vec!["1002".into(), " Dormant-A ".into(), "0".into(), "0".into()],
+            vec!["1002".into(), "Active-B".into(), "100".into(), "0".into()],
+            vec!["1002".into(), "Active-C".into(), "0".into(), "50".into()],
+        ];
+        let mapping = serde_json::json!({
+            "accountCode": "科目编码",
+            "auxiliary": "辅助核算",
+            "periodFunctionalDebit": "本期发生借方",
+            "periodFunctionalCredit": "本期发生贷方"
+        });
+        let mapping = mapping.as_object().cloned().unwrap();
+        let anchors = tb_auxiliary_anchors(&headers, &rows, &mapping, "auxiliary");
+        assert!(!anchors.contains("dormanta"), "{anchors:?}");
+        assert!(
+            anchors.contains("activeb") && anchors.contains("activec"),
+            "{anchors:?}"
+        );
     }
 
     #[test]
@@ -7075,6 +11005,23 @@ mod tests {
     }
 
     #[test]
+    fn 核算维度编码与名称共同映射为辅助核算() {
+        let headers: Vec<String> = [
+            "科目编码",
+            "科目名称",
+            "核算维度编码",
+            "核算维度名称",
+            "期末余额-借方",
+        ]
+        .iter()
+        .map(|x| x.to_string())
+        .collect();
+        let got = suggest_roles("tb", &headers);
+        assert_eq!(got.get(&2), Some(&"auxiliary"), "{got:?}");
+        assert_eq!(got.get(&3), Some(&"auxiliary"), "{got:?}");
+    }
+
+    #[test]
     fn 借款明细只认特异写法不与辅助核算打架() {
         // `辅助`、`明细`、`客户` 这类泛词留给辅助核算，否则同一列谁抢到全看分数。
         let headers: Vec<String> = ["科目编码", "辅助核算", "借款合同号"]
@@ -7087,27 +11034,28 @@ mod tests {
     }
 
     #[test]
-    fn 必填是金标身份槽与工具声明的并集() {
-        // 看账只声明了凭证识别字段与科目编码，金标另要求日期、科目名称、摘要。
+    fn 必填是公共身份槽与工具声明的并集() {
+        // 编码已满足公共科目身份；看账另需凭证号，公共层另需日期，摘要可选。
         let mapped: HashSet<&str> = ["id", "accountCode", "functionalAmount"]
             .into_iter()
             .collect();
         let missing = missing_required(Tool::Ledger, "je", &mapped);
         let roles: Vec<&str> = missing.iter().map(|m| m.role).collect();
         assert!(roles.contains(&"date"), "{roles:?}");
-        assert!(roles.contains(&"accountName"), "{roles:?}");
-        assert!(roles.contains(&"summary"), "{roles:?}");
+        assert!(!roles.contains(&"accountIdentity"), "{roles:?}");
+        assert!(!roles.contains(&"accountName"), "{roles:?}");
+        assert!(!roles.contains(&"summary"), "{roles:?}");
         // 已映射的不报，金额形态 JE3 已成立也不报。
         assert!(!roles.contains(&"id"));
         assert!(!roles.contains(&"accountCode"));
         assert!(!roles.contains(&"functionalAmount"));
-        // 每条都要说得清是谁在要求。
+        // 日期要说得清是公共要求。
         assert!(missing.iter().all(|m| !m.label.is_empty()));
         assert!(
             missing
                 .iter()
-                .find(|m| m.role == "summary")
-                .expect("有摘要")
+                .find(|m| m.role == "date")
+                .expect("有日期")
                 .from_gold
         );
     }
@@ -7360,6 +11308,160 @@ mod tests {
     }
 
     #[test]
+    fn tb多主体交错排列仍按主体勾稽非连续父子科目() {
+        let headers = vec![
+            "核算组织".into(),
+            "科目编码".into(),
+            "科目名称".into(),
+            "期初余额".into(),
+            "借方发生额".into(),
+            "贷方发生额".into(),
+            "期末余额".into(),
+        ];
+        let rows = [
+            ["A", "2501", "长期借款", "100", "20", "10", "110"],
+            ["B", "2501", "长期借款", "80", "0", "10", "70"],
+            ["A", "250101", "长期借款甲", "60", "10", "5", "65"],
+            ["B", "250101", "长期借款甲", "30", "0", "5", "25"],
+            ["A", "250102", "长期借款乙", "40", "10", "5", "45"],
+            ["B", "250102", "长期借款乙", "50", "0", "5", "45"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect())
+        .collect::<Vec<Vec<String>>>();
+        let columns = |role: &str| match role {
+            "entity" => vec!["核算组织".into()],
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "openingFunctionalAmount" => vec!["期初余额".into()],
+            "ytdFunctionalDebit" => vec!["借方发生额".into()],
+            "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+            "closingFunctionalAmount" => vec!["期末余额".into()],
+            _ => vec![],
+        };
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &columns),
+            vec![false, false, true, true, true, true]
+        );
+    }
+
+    #[test]
+    fn tb辅助明细先折叠后再排除同额父科目() {
+        let headers = vec![
+            "核算组织".into(),
+            "币别".into(),
+            "科目编码".into(),
+            "科目名称".into(),
+            "核算维度".into(),
+            "期初余额".into(),
+            "借方发生额".into(),
+            "贷方发生额".into(),
+            "期末余额".into(),
+        ];
+        let rows = [
+            ["A", "CNY", "2001", "短期借款", "", "160", "0", "8", "152"],
+            ["B", "CNY", "2001", "短期借款", "", "20", "0", "0", "20"],
+            ["A", "CNY", "200101", "银行借款", "", "160", "0", "8", "152"],
+            [
+                "A",
+                "CNY",
+                "200101",
+                "银行借款",
+                "金融机构:农业银行",
+                "160",
+                "0",
+                "8",
+                "152",
+            ],
+            ["A", "CNY", "1002", "银行存款", "", "30", "0", "0", "30"],
+            [
+                "A",
+                "CNY",
+                "1002",
+                "银行存款",
+                "基本户",
+                "10",
+                "0",
+                "0",
+                "10",
+            ],
+            [
+                "A",
+                "CNY",
+                "1002",
+                "银行存款",
+                "一般户",
+                "20",
+                "0",
+                "0",
+                "20",
+            ],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect())
+        .collect::<Vec<Vec<String>>>();
+        let columns = |role: &str| match role {
+            "entity" => vec!["核算组织".into()],
+            "currency" => vec!["币别".into()],
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "auxiliary" => vec!["核算维度".into()],
+            "openingFunctionalAmount" => vec!["期初余额".into()],
+            "ytdFunctionalDebit" => vec!["借方发生额".into()],
+            "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+            "closingFunctionalAmount" => vec!["期末余额".into()],
+            _ => vec![],
+        };
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &columns),
+            vec![false, true, true, false, false, true, true],
+            "应先保留同编码不同名称的明细、剔除汇总，再排除已被完整覆盖的父科目"
+        );
+    }
+
+    #[test]
+    fn tb辅助折叠后父子金额仍不等时保持父项() {
+        let headers = 余额表表头();
+        let rows = vec![
+            行("2001", "短期借款", ["180", "0", "8", "172"]),
+            行("200101", "银行借款", ["160", "0", "8", "152"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &余额表映射),
+            vec![true, true],
+            "子科目没有完整覆盖父科目时不得删除真实残额"
+        );
+    }
+
+    #[test]
+    fn tb非连续父子任一金额不平即保留父项() {
+        let headers = 余额表表头();
+        let rows = vec![
+            行("2501", "长期借款", ["100", "20", "10", "111"]),
+            行("999", "穿插科目", ["1", "1", "0", "2"]),
+            行("250101", "长期借款甲", ["60", "10", "5", "65"]),
+            行("250102", "长期借款乙", ["40", "10", "5", "45"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &余额表映射),
+            vec![true, true, true, true]
+        );
+    }
+
+    #[test]
+    fn tb反向扫描勾稽时保留终级科目而不是父科目() {
+        let rows = vec![
+            行("1001010000", "库存现金-人民币", ["100", "20", "10", "110"]),
+            行("1001", "库存现金", ["100", "20", "10", "110"]),
+            行("999", "其他科目", ["1", "2", "0", "3"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
+            vec![true, false, true]
+        );
+    }
+
+    #[test]
     fn tb末级规则兼容分段编码和无编码映射() {
         let headers = vec!["科目".into()];
         let rows = vec![
@@ -7420,10 +11522,12 @@ mod tests {
             行("1121.01", "银行承兑汇票", ["100", "300", "50", "350"]),
             行("1121.01", "水晶火碳电子科技", ["60", "200", "30", "230"]),
             行("1121.01", "宁波杭州湾如意", ["40", "100", "20", "120"]),
+            // 真实的层级/辅助核算混排 TB 并非全表定长；这条代表表内其他级次。
+            行("999", "其他科目", ["1", "2", "0", "3"]),
         ];
         assert_eq!(
             tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
-            vec![true, false, false]
+            vec![false, true, true, true]
         );
     }
 
@@ -7448,6 +11552,7 @@ mod tests {
             vec!["5001.01", "生产成本", "100", "0", "1000", "800", "300", "0"],
             vec!["5001.01", "部门A", "150", "0", "600", "300", "450", "0"],
             vec!["5001.01", "部门B", "0", "50", "400", "500", "0", "150"],
+            vec!["999", "其他科目", "1", "0", "2", "0", "3", "0"],
         ]
         .into_iter()
         .map(|row| row.into_iter().map(String::from).collect())
@@ -7465,8 +11570,8 @@ mod tests {
         };
         assert_eq!(
             tb_leaf_mask(&headers, &rows, &columns),
-            vec![true, false, false],
-            "余额净额一致时保留一套汇总金额，不能把汇总和辅助明细一起累计"
+            vec![false, true, true, true],
+            "余额净额一致时只保留各已映射科目名称明细，不能把汇总和明细一起累计"
         );
     }
 
@@ -7492,15 +11597,279 @@ mod tests {
             行("1121.01", "客户B", ["40", "100", "20", "120"]),
             行("1122.09", "应收账款_未开票", ["0", "20", "0", "20"]),
             行("1122.09", "客户C", ["0", "20", "0", "20"]),
+            行("999", "其他科目", ["1", "2", "0", "3"]),
         ];
         assert_eq!(
             tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
-            vec![true, false, false, true, false]
+            vec![false, true, true, true, false, true]
         );
     }
 
     #[test]
-    fn tb方向小计夹在科目总计与辅助明细之间仍能完整勾稽() {
+    fn tb全表科目编码等长时优先按平级末级保留() {
+        // 2025 1-3 月真实 TB 的 8131002884 按成本中心拆成 5 行，编码均为
+        // 10 位。中间的 200 恰好等于相邻 50 + 150，但五行都是业务明细，
+        // 借方发生额应为 700，不得被金额折叠误算成 500。
+        let rows = vec![
+            行("8131002884", "员工生育保险-A", ["0", "150", "0", "150"]),
+            行("8131002884", "员工生育保险-B", ["0", "200", "0", "200"]),
+            行("8131002884", "员工生育保险-C", ["0", "50", "0", "50"]),
+            行("8131002884", "员工生育保险-D", ["0", "150", "0", "150"]),
+            行("8131002884", "员工生育保险-E", ["0", "150", "0", "150"]),
+        ];
+        let mask = tb_leaf_mask(&余额表表头(), &rows, &余额表映射);
+        assert_eq!(mask, vec![true; 5]);
+        let debit = rows
+            .iter()
+            .zip(mask)
+            .filter(|(_, keep)| *keep)
+            .map(|(row, _)| row[3].parse::<f64>().unwrap())
+            .sum::<f64>();
+        assert_eq!(debit, 700.0);
+    }
+
+    #[test]
+    fn tb固定长度平级表的空编码行无条件排除() {
+        // 空编码行的金额故意不与任何有编码行勾稽：过滤依据是缺少匹配键，
+        // 不是“恰好像汇总行”。所有消费 tb_leaf_mask 的工具都应得到同一结果。
+        let rows = vec![
+            行("8131002884", "员工生育保险-A", ["0", "150", "0", "150"]),
+            行("", "无法定位到科目的辅助行", ["0", "37", "0", "37"]),
+            行("2202000000", "应付账款", ["0", "0", "150", "-150"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
+            vec![true, false, true]
+        );
+    }
+
+    /// 2000&2002 合并 TB（SAP 多维流水级导出）的真实表头缩影。
+    fn 流水级余额表表头() -> Vec<String> {
+        [
+            "Company Code",
+            "GL Account",
+            "GL Account Desc.",
+            "Year",
+            "Currency",
+            "Begin Amt.",
+            "Debit Amount",
+            "Credit Amount",
+            "Closing Balance",
+            "Subitem Value",
+            "Sales Division",
+            "Product Category",
+            "Payment Nature",
+            "Supplier",
+            "Customer",
+            "Bank",
+            "WBS Element",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    fn 流水级余额表映射(role: &str) -> Vec<String> {
+        match role {
+            "entity" => vec!["Company Code".into()],
+            "accountCode" => vec!["GL Account".into()],
+            "accountName" => vec!["GL Account Desc.".into()],
+            "currency" => vec!["Currency".into()],
+            "openingFunctionalAmount" => vec!["Begin Amt.".into()],
+            "ytdFunctionalDebit" => vec!["Debit Amount".into()],
+            "ytdFunctionalCredit" => vec!["Credit Amount".into()],
+            "closingFunctionalAmount" => vec!["Closing Balance".into()],
+            _ => vec![],
+        }
+    }
+
+    fn 流水行(code: &str, name: &str, amounts: [&str; 4]) -> Vec<String> {
+        vec![
+            "2002".into(),
+            code.into(),
+            name.into(),
+            "2025".into(),
+            "EUR".into(),
+            amounts[0].into(),
+            amounts[1].into(),
+            amounts[2].into(),
+            amounts[3].into(),
+            "5444".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "200070".into(),
+            String::new(),
+            String::new(),
+        ]
+    }
+
+    #[test]
+    fn 流水级导出按主体期间与维度列识别() {
+        let headers = 流水级余额表表头();
+        let rows = vec![流水行(
+            "1405000000",
+            "Accounts receivable",
+            ["0", "360144", "360144", "0"],
+        )];
+        assert!(tb_is_posting_level_export(
+            &headers,
+            &rows,
+            &流水级余额表映射
+        ));
+
+        // 没映射主体列：条件 1 失败，宁可退回折叠。
+        let no_entity = |role: &str| {
+            if role == "entity" {
+                vec![]
+            } else {
+                流水级余额表映射(role)
+            }
+        };
+        assert!(!tb_is_posting_level_export(&headers, &rows, &no_entity));
+
+        // 没有凭证/期间特征列：只是列多的传统余额表。
+        let headers_without_year: Vec<String> = headers
+            .iter()
+            .filter(|header| *header != "Year")
+            .cloned()
+            .collect();
+        assert!(!tb_is_posting_level_export(
+            &headers_without_year,
+            &rows,
+            &流水级余额表映射
+        ));
+
+        // 表里有整格「合计」标签行：真有汇总结构，不能按流水级跳过折叠。
+        let mut with_total = rows.clone();
+        with_total.push(流水行("9999999999", "合计", ["0", "0", "0", "0"]));
+        assert!(!tb_is_posting_level_export(
+            &headers,
+            &with_total,
+            &流水级余额表映射
+        ));
+    }
+
+    #[test]
+    fn 流水级导出上金额巧合不折叠真实流水() {
+        // 2000&2002 真实样例 1405000000 的缩小版：三笔同科目同客户的真实流水，
+        // 第一行金额恰好等于后两行之和（四个金额列同时成立）。传统表上这是
+        // 「汇总行＋辅助明细」，流水级导出上只是巧合——折叠会删掉 360,144 的
+        // 真实贷方（实测差 460,629.03、BS/PL 假性不平 916,849.94）。
+        let rows = vec![
+            流水行(
+                "1405000000",
+                "EDP Comercial",
+                ["0", "360144", "360144", "0"],
+            ),
+            流水行(
+                "1405000000",
+                "EDP Comercial",
+                ["0", "180072", "180072", "0"],
+            ),
+            流水行(
+                "1405000000",
+                "EDP Comercial",
+                ["0", "180072", "180072", "0"],
+            ),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&流水级余额表表头(), &rows, &流水级余额表映射),
+            vec![true, true, true],
+            "流水级导出的每一行都是真实流水，金额巧合不构成汇总关系"
+        );
+
+        // 同样的金额形态放在传统余额表上仍要折叠——证明差别只在流水级跳过，
+        // 既有末级判定没有被削弱。
+        let traditional = vec![
+            行("1405000000", "应收账款", ["0", "360144", "360144", "0"]),
+            行("1405000000", "客户A", ["0", "180072", "180072", "0"]),
+            行("1405000000", "客户B", ["0", "180072", "180072", "0"]),
+            行("999", "其他科目", ["1", "2", "0", "3"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&余额表表头(), &traditional, &余额表映射),
+            vec![false, true, true, true]
+        );
+    }
+
+    #[test]
+    fn 期间列不足以单独触发流水级跳过() {
+        // 带主体＋期间列但辅助维度不足（传统余额表形态）：判据必须落空，
+        // 金额勾稽照常工作。
+        let headers = vec![
+            "主体".into(),
+            "科目编码".into(),
+            "科目名称".into(),
+            "期间".into(),
+            "期初余额".into(),
+            "借方发生额".into(),
+            "贷方发生额".into(),
+            "期末余额".into(),
+        ];
+        let columns = |role: &str| match role {
+            "entity" => vec!["主体".into()],
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "openingFunctionalAmount" => vec!["期初余额".into()],
+            "ytdFunctionalDebit" => vec!["借方发生额".into()],
+            "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+            "closingFunctionalAmount" => vec!["期末余额".into()],
+            _ => vec![],
+        };
+        let rows = vec![
+            vec!["A".into(), "1121.01".into(), "应收票据".into(), "1".into()],
+            vec!["A".into(), "1121.01".into(), "客户A".into(), "1".into()],
+            vec!["A".into(), "1121.01".into(), "客户B".into(), "1".into()],
+        ];
+        assert!(!tb_is_posting_level_export(&headers, &rows, &columns));
+        let full = |code: &str, name: &str| {
+            vec![
+                "A".into(),
+                code.into(),
+                name.into(),
+                "1".into(),
+                "100".into(),
+                "300".into(),
+                "50".into(),
+                "350".into(),
+            ]
+        };
+        let members = |name: &str| {
+            vec![
+                "A".into(),
+                "1121.01".into(),
+                name.into(),
+                "1".into(),
+                "60".into(),
+                "200".into(),
+                "30".into(),
+                "230".into(),
+            ]
+        };
+        let tied = vec![
+            full("1121.01", "应收票据"),
+            members("客户A"),
+            {
+                let mut row = members("客户B");
+                row[4] = "40".into();
+                row[5] = "100".into();
+                row[6] = "20".into();
+                row[7] = "120".into();
+                row
+            },
+            full("999", "其他科目"),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&headers, &tied, &columns),
+            vec![false, true, true, true],
+            "传统表即便带主体与期间列，仍须按完整金额勾稽识别汇总与明细"
+        );
+    }
+
+    #[test]
+    fn tb固定长度表只剔除明确方向小计不按金额删除明细() {
         let rows = vec![
             行("2241.06.09", "应付账款", ["-100", "100", "50", "-50"]),
             行("2241.06.09", "小计", ["-100", "0", "-50", "-150"]),
@@ -7508,7 +11877,7 @@ mod tests {
         ];
         assert_eq!(
             tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
-            vec![true, false, false]
+            vec![true, false, true]
         );
     }
 
@@ -7837,6 +12206,16 @@ mod tests {
             Some("accountCode"),
             "混合列应当顶上空缺的科目编码：{roles:?}"
         );
+        let roles_on_combined = roles
+            .iter()
+            .filter(|(index, _)| **index == 1)
+            .map(|(_, role)| *role)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            roles_on_combined,
+            HashSet::from(["accountCode", "accountName"]),
+            "混写列只允许科目编码与科目名称双角色：{roles:?}"
+        );
     }
 
     #[test]
@@ -7970,6 +12349,18 @@ mod tests {
             &columns,
             "closingFunctional"
         ));
+        let basis = balance_sign_basis_by_row(
+            &headers,
+            &绝对值,
+            &columns,
+            "closingFunctional",
+            SignConvention::Unsigned,
+        );
+        assert!(
+            basis
+                .iter()
+                .all(|item| *item == BalanceSignBasis::DirectionColumn)
+        );
 
         // 折算结果：自带符号时取原样，否则按方向翻号。
         let 贷方 = |amount: f64| AmountInputs {
@@ -7983,6 +12374,12 @@ mod tests {
         );
         assert_eq!(
             signed_balance(&贷方(100.0), SignConvention::Unsigned, false),
+            -100.0
+        );
+        // 全表发生额即使投票为“已带符号”，也不能覆盖余额列已经
+        // 判定的“绝对值＋方向”口径。
+        assert_eq!(
+            signed_balance(&贷方(100.0), SignConvention::Signed, false),
             -100.0
         );
         // 借贷分列没有方向列可言，`self_signed` 不该改变它的折算。
@@ -8005,6 +12402,305 @@ mod tests {
             },
             "closingFunctional"
         ));
+    }
+
+    /// 「绝对值＋单一方向列」版式：缺方向一侧的符号按勾稽等式逐行向对侧借。
+    /// 03 号样例方向列在表尾（判给期末），01/02/08 在期初旁（判给期初），
+    /// 两侧都要能借；哪个符号都凑不平的行维持原判，真差异照报。
+    #[test]
+    fn 缺方向一侧的余额符号按勾稽等式向对侧借() {
+        // 数学层：期初侧解 anchor − 借 + 贷，期末侧解 anchor + 借 − 贷。
+        assert_eq!(
+            balance_sign_from_equation(4_0000_0000.0, -4_0000_0000.0, Some((0.0, 0.0)), true),
+            Some(-4_0000_0000.0)
+        );
+        assert_eq!(
+            balance_sign_from_equation(
+                1_8000_0000.0,
+                -1_3500_0000.0,
+                Some((4500_0000.0, 0.0)),
+                true
+            ),
+            Some(-1_8000_0000.0)
+        );
+        assert_eq!(
+            balance_sign_from_equation(1_0000_0000.0, -5500_0000.0, Some((4500_0000.0, 0.0)), true),
+            Some(-1_0000_0000.0)
+        );
+        // 哪个符号都凑不平（候选 −1.8 亿，幅值对不上原始 1.35 亿）：不猜。
+        assert_eq!(
+            balance_sign_from_equation(
+                1_3500_0000.0,
+                -1_0000_0000.0,
+                Some((4500_0000.0, 0.0)),
+                true
+            ),
+            None
+        );
+        // 没有发生额列就无从列方程。
+        assert_eq!(balance_sign_from_equation(100.0, -100.0, None, true), None);
+
+        // 03 号摆位：科目编码｜期初余额｜借方发生额｜贷方发生额｜期末余额｜方向。
+        let 尾部方向: Vec<String> = [
+            "科目编码",
+            "期初余额",
+            "借方发生额",
+            "贷方发生额",
+            "期末余额",
+            "方向",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let columns_tail = |role: &str| -> Vec<String> {
+            match role {
+                "openingFunctionalAmount" => vec!["期初余额".into()],
+                "ytdFunctionalDebit" => vec!["借方发生额".into()],
+                "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+                "closingFunctionalAmount" => vec!["期末余额".into()],
+                "closingDirection" => vec!["方向".into()],
+                _ => vec![],
+            }
+        };
+        let index_of_tail = |role: &str| {
+            columns_tail(role)
+                .into_iter()
+                .find_map(|name| 尾部方向.iter().position(|h| *h == name))
+        };
+        // 250101 长期借款：期初 4 亿、无发生、期末 4 亿、方向贷——期初借到 −4 亿。
+        let row_250101 = vec![
+            "250101".into(),
+            "400000000".into(),
+            "0".into(),
+            "0".into(),
+            "400000000".into(),
+            "贷".into(),
+        ];
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_250101,
+                &index_of_tail,
+                "openingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            Some(-400000000.0)
+        );
+        // 期末侧自己有方向列，不猜。
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_250101,
+                &index_of_tail,
+                "closingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            None
+        );
+        // 200101 短期借款：期初 7000 万、借方 7000 万、期末 0——期初借到 −7000 万。
+        let row_200101 = vec![
+            "200101".into(),
+            "70000000".into(),
+            "70000000".into(),
+            "0".into(),
+            "0".into(),
+            "贷".into(),
+        ];
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_200101,
+                &index_of_tail,
+                "openingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            Some(-70000000.0)
+        );
+        // 真差异行（黄金集 03 号 200101 台账口径的 30 万差异在发生额侧）：
+        // 借方按 7030 万列方程凑不平期初的 ±7000 万——不猜，维持原值。
+        let row_diff = vec![
+            "200101".into(),
+            "70000000".into(),
+            "70300000".into(),
+            "0".into(),
+            "0".into(),
+            "贷".into(),
+        ];
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_diff,
+                &index_of_tail,
+                "openingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            None
+        );
+
+        // 01/02/08 号摆位：方向列在期初旁，缺方向的是期末。
+        let 前部方向: Vec<String> = [
+            "科目编码",
+            "科目名称",
+            "方向",
+            "期初余额",
+            "借方发生额",
+            "贷方发生额",
+            "期末余额",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let columns_head = |role: &str| -> Vec<String> {
+            match role {
+                "openingFunctionalAmount" => vec!["期初余额".into()],
+                "ytdFunctionalDebit" => vec!["借方发生额".into()],
+                "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+                "closingFunctionalAmount" => vec!["期末余额".into()],
+                "openingDirection" => vec!["方向".into()],
+                _ => vec![],
+            }
+        };
+        let index_of_head = |role: &str| {
+            columns_head(role)
+                .into_iter()
+                .find_map(|name| 前部方向.iter().position(|h| *h == name))
+        };
+        // 1602 累计折旧：期初 2.38 亿（贷）、贷方 2616 万、期末 2.64 亿——期末借到 −2.64 亿。
+        let row_1602 = vec![
+            "1602".into(),
+            "累计折旧".into(),
+            "贷".into(),
+            "238415600".into(),
+            "0".into(),
+            "26160000".into(),
+            "264575600".into(),
+        ];
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_1602,
+                &index_of_head,
+                "closingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            Some(-264575600.0)
+        );
+
+        // 用户定案：只有「单侧有方向」才适用逐行逻辑。双侧各有方向列
+        // （06 号 Oracle 形态）信息完整，个别行留空照实报出，不猜——
+        // 即便等式本来能凑平。
+        let 双侧方向: Vec<String> = [
+            "科目编码",
+            "期初余额",
+            "期初方向",
+            "借方发生额",
+            "贷方发生额",
+            "期末余额",
+            "期末方向",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let columns_pair = |role: &str| -> Vec<String> {
+            match role {
+                "openingFunctionalAmount" => vec!["期初余额".into()],
+                "openingDirection" => vec!["期初方向".into()],
+                "ytdFunctionalDebit" => vec!["借方发生额".into()],
+                "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+                "closingFunctionalAmount" => vec!["期末余额".into()],
+                "closingDirection" => vec!["期末方向".into()],
+                _ => vec![],
+            }
+        };
+        let index_of_pair = |role: &str| {
+            columns_pair(role)
+                .into_iter()
+                .find_map(|name| 双侧方向.iter().position(|h| *h == name))
+        };
+        let row_pair = vec![
+            "250101".into(),
+            "400000000".into(),
+            "".into(),
+            "0".into(),
+            "0".into(),
+            "400000000".into(),
+            "贷".into(),
+        ];
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_pair,
+                &index_of_pair,
+                "openingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            None
+        );
+        // 共享方向列（整表共享后两个角色指同一列）同样算双侧，不猜。
+        let columns_shared = |role: &str| -> Vec<String> {
+            match role {
+                "openingFunctionalAmount" => vec!["期初余额".into()],
+                "ytdFunctionalDebit" => vec!["借方发生额".into()],
+                "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+                "closingFunctionalAmount" => vec!["期末余额".into()],
+                "openingDirection" | "closingDirection" => vec!["方向".into()],
+                _ => vec![],
+            }
+        };
+        let index_of_shared = |role: &str| {
+            columns_shared(role)
+                .into_iter()
+                .find_map(|name| 尾部方向.iter().position(|h| *h == name))
+        };
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_250101,
+                &index_of_shared,
+                "openingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            None
+        );
+        // 全然没有方向列（TB1 净额带符号形态）：对侧无锚，不猜。
+        let columns_no_dir = |role: &str| -> Vec<String> {
+            match role {
+                "openingFunctionalAmount" => vec!["期初余额".into()],
+                "ytdFunctionalDebit" => vec!["借方发生额".into()],
+                "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+                "closingFunctionalAmount" => vec!["期末余额".into()],
+                _ => vec![],
+            }
+        };
+        let index_of_no_dir = |role: &str| {
+            columns_no_dir(role)
+                .into_iter()
+                .find_map(|name| 尾部方向.iter().position(|h| *h == name))
+        };
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_250101,
+                &index_of_no_dir,
+                "openingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            None
+        );
+
+        // 证据档：缺方向一侧的行记 EquationInferred，仍视为可靠；凑不平的行
+        // 维持 Ambiguous（进入第三态，不造假差异也不吞差异）。
+        let basis_rows = vec![row_250101.clone(), row_200101.clone(), row_diff.clone()];
+        let basis = balance_sign_basis_by_row(
+            &尾部方向,
+            &basis_rows,
+            &columns_tail,
+            "openingFunctional",
+            SignConvention::Unsigned,
+        );
+        assert_eq!(basis[0], BalanceSignBasis::EquationInferred);
+        assert_eq!(basis[1], BalanceSignBasis::EquationInferred);
+        assert_eq!(basis[2], BalanceSignBasis::Ambiguous);
     }
 
     #[test]
@@ -8170,19 +12866,182 @@ mod tests {
         let analysis = analyze_ledger_rows(&headers, &rows, &columns);
         assert_eq!(
             analysis.keep,
-            vec![true, false, false, false, false, true, false]
+            vec![true, true, false, false, false, true, false]
         );
     }
 
     #[test]
-    fn 单个必要映射字段空白时该行不属于业务行() {
+    fn 表尾协议区的带字草稿不得借填充还魂() {
+        // 10 号样例实测形态：合计行与整行空白之后是一块人手测算草稿——
+        // 摘要写「管理费用/累计摊销」、凭证号写「原调整冲回」、金额 2556.54
+        // 错位进了科目编码列。旧填充口径「有文字就恢复」把它们救回正文，
+        // 向下填充再补齐名称与编码，凭空造出净差 5.5 亿的幻影科目。
+        let headers: Vec<String> = [
+            "日期",
+            "凭证号",
+            "摘要",
+            "科目编码",
+            "科目全名",
+            "借方金额",
+            "贷方金额",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let rows = vec![
+            // 真分录。
+            vec![
+                "2024/1/31".into(),
+                "记1".into(),
+                "报销".into(),
+                "6602.14".into(),
+                "管理费用_知识产权".into(),
+                "135".into(),
+                "".into(),
+            ],
+            // 合并单元格的续行：日期在、科目空。分析判噪声，但带身份，
+            // 填充掩码必须放行，否则真实分录会被整片丢掉。
+            vec![
+                "2024/1/31".into(),
+                "".into(),
+                "报销".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "135".into(),
+            ],
+            vec![
+                "合计".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "670".into(),
+                "670".into(),
+            ],
+            vec![
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+            ],
+            // 草稿：金额错位进编码列，摘要带字，编码在、名称空。
+            vec![
+                "".into(),
+                "账面摊销".into(),
+                "管理费用".into(),
+                "2556.54".into(),
+                "".into(),
+                "2556.54".into(),
+                "".into(),
+            ],
+            // 草稿：编码列空、名称列被错位金额占据。
+            vec![
+                "".into(),
+                "".into(),
+                "累计摊销".into(),
+                "".into(),
+                "2556.54".into(),
+                "".into(),
+                "276936736.69".into(),
+            ],
+            // 草稿：只有凭证号列带字与一笔借方金额。
+            vec![
+                "".into(),
+                "原调整冲回".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "-276934180.15".into(),
+                "".into(),
+            ],
+            // 游离数字行与公式残值照旧剔除。
+            vec![
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "432584526.18".into(),
+                "432584526.18".into(),
+            ],
+            vec![
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "#REF!".into(),
+                "".into(),
+            ],
+            // 协议区内三要素齐备的行照常重新开启正文。
+            vec![
+                "2024/12/31".into(),
+                "记2".into(),
+                "结转损益".into(),
+                "6603.02".into(),
+                "财务费用_利息收入".into(),
+                "0".into(),
+                "9471.88".into(),
+            ],
+        ];
+        let columns = |role: &str| match role {
+            "date" => vec!["日期".into()],
+            "id" => vec!["凭证号".into()],
+            "summary" => vec!["摘要".into()],
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目全名".into()],
+            "functionalDebit" => vec!["借方金额".into()],
+            "functionalCredit" => vec!["贷方金额".into()],
+            _ => vec![],
+        };
+
+        let analysis = analyze_ledger_rows(&headers, &rows, &columns);
+        assert_eq!(
+            analysis.keep,
+            vec![
+                true, false, false, false, false, false, false, false, false, true
+            ],
+            "正文协议先判：合并单元格续行与草稿此时都是噪声"
+        );
+        let mask = ledger_fill_mask(&headers, &rows, &columns);
+        assert_eq!(
+            mask,
+            vec![
+                true, true, false, false, false, false, false, false, false, true
+            ],
+            "填充掩码只把带身份的正文续行救回，表尾草稿一律不放行"
+        );
+
+        // 填充执行面：续行收到上一行的科目身份；草稿行不被填充收养。
+        let mut filled = rows.clone();
+        let fill_columns = vec![
+            "日期".to_owned(),
+            "凭证号".to_owned(),
+            "科目编码".to_owned(),
+            "科目全名".to_owned(),
+        ];
+        forward_fill_columns_skipping(&headers, &mut filled, &fill_columns, &mask);
+        assert_eq!(filled[1][3], "6602.14", "续行应继承上一行科目编码");
+        assert_eq!(filled[1][4], "管理费用_知识产权");
+        assert_eq!(filled[4][3], "2556.54", "草稿行自身的错位值不动");
+        assert_eq!(filled[4][4], "", "草稿行不得被填充收养出名称");
+        assert_eq!(filled[5][3], "", "草稿行不得继承编码");
+        assert_eq!(filled[6][3], "");
+    }
+
+    #[test]
+    fn 科目编码可靠时科目名称空白仍属于业务行() {
         let headers: Vec<String> = ["科目编码", "科目名称", "金额", "备注"]
             .into_iter()
             .map(String::from)
             .collect();
         let rows = vec![
             vec!["1001".into(), "库存现金".into(), "10".into(), "".into()],
-            // 科目名称为空；即使其他列有值，也不能成为业务行。
+            // 科目名称为空，但可靠科目编码与金额足以证明它是业务行。
             vec!["1002".into(), "".into(), "20".into(), "".into()],
             vec!["1003".into(), "银行存款".into(), "30".into(), "".into()],
         ];
@@ -8194,7 +13053,309 @@ mod tests {
         };
 
         let analysis = analyze_ledger_rows(&headers, &rows, &columns);
-        assert_eq!(analysis.keep, vec![true, false, true]);
+        assert_eq!(analysis.keep, vec![true, true, true]);
+    }
+
+    #[test]
+    fn sap余额表短列名能映射到本位币口径() {
+        let headers: Vec<String> = [
+            "帐号",
+            "账号描述",
+            "交易货币",
+            "LC1货币",
+            "(FP)-LC1",
+            "累计差额-LC1",
+            "借方余额-LC1",
+            "贷方余额-LC1",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let got = suggest_roles("tb", &headers);
+        assert_eq!(got.get(&0), Some(&"accountCode"), "{got:?}");
+        assert_eq!(got.get(&1), Some(&"accountName"), "{got:?}");
+        assert_eq!(got.get(&2), Some(&"currency"), "{got:?}");
+        assert_eq!(got.get(&3), Some(&"functionalCurrency"), "{got:?}");
+        assert_eq!(got.get(&4), Some(&"openingFunctionalAmount"), "{got:?}");
+        assert_eq!(got.get(&5), Some(&"closingFunctionalAmount"), "{got:?}");
+        assert_eq!(got.get(&6), Some(&"periodFunctionalDebit"), "{got:?}");
+        assert_eq!(got.get(&7), Some(&"periodFunctionalCredit"), "{got:?}");
+    }
+
+    #[test]
+    fn 主体维度仅在双侧都有映射时启用且空值归默认主体() {
+        assert!(entity_key_enabled(true, true));
+        assert!(!entity_key_enabled(true, false));
+        assert!(!entity_key_enabled(false, true));
+        assert!(!entity_key_enabled(false, false));
+        assert_eq!(effective_entity("主体 A", true), "主体 A");
+        assert_eq!(effective_entity("  ", true), DEFAULT_ENTITY);
+        assert_eq!(effective_entity("主体 A", false), DEFAULT_ENTITY);
+    }
+
+    #[test]
+    fn 核算组织在tb和je都确定性映射为主体() {
+        for kind in ["tb", "je"] {
+            for header in ["核算组织", "核算组织名称"] {
+                let suggested = suggest_roles(kind, &[header.to_owned()]);
+                assert_eq!(suggested.get(&0), Some(&"entity"), "{kind}: {suggested:?}");
+                let rows = vec![vec!["10008529 浙江沪杭甬高速公路股份有限公司".to_owned()]];
+                let with_data = suggest_roles_with_data(kind, &[header.to_owned()], &rows);
+                assert_eq!(with_data.get(&0), Some(&"entity"), "{kind}: {with_data:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn 外币与原币裸列名映射交易币种而金额列不误映射() {
+        for kind in ["tb", "je"] {
+            for header in ["外币", "原币"] {
+                let rows = vec![
+                    vec!["CNY".to_owned()],
+                    vec!["USD".to_owned()],
+                    vec!["CNY".to_owned()],
+                    vec!["USD".to_owned()],
+                ];
+                let suggested = suggest_roles_with_data(kind, &[header.to_owned()], &rows);
+                assert_eq!(
+                    suggested.get(&0),
+                    Some(&"currency"),
+                    "{kind}: {suggested:?}"
+                );
+            }
+            let amount = suggest_roles(kind, &["借方/外币".to_owned()]);
+            assert_ne!(amount.get(&0), Some(&"currency"), "{kind}: {amount:?}");
+        }
+    }
+
+    #[test]
+    fn 科目确认目录只额外隐藏零金额父项() {
+        let headers = ["主体", "科目编码", "科目名称", "期末贷方"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let rows = [
+            ["A", "2001", "短期借款", "0"],
+            ["A", "200101", "短期借款_银行借款", "152"],
+            ["A", "200101", "短期借款_银行借款", "20"],
+            ["B", "2001", "短期借款", "0"],
+            ["B", "200101", "短期借款_银行借款", "30"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+        let columns = |role: &str| match role {
+            "entity" => vec!["主体".into()],
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "closingFunctionalCredit" => vec!["期末贷方".into()],
+            _ => vec![],
+        };
+        let calculation = tb_leaf_mask(&headers, &rows, &columns);
+        assert!(
+            calculation[0] && calculation[3],
+            "金额不勾稽时计算掩码须保留父级"
+        );
+        let catalog = tb_catalog_leaf_mask(&headers, &rows, &columns);
+        assert_eq!(catalog, vec![false, true, true, false, true]);
+    }
+
+    #[test]
+    fn 跨币种父子仅用本位币勾稽且平行币种不互删() {
+        let headers = [
+            "科目编码",
+            "科目名称",
+            "币种",
+            "期初本位币",
+            "借方本位币",
+            "贷方本位币",
+            "期末本位币",
+            "期初原币",
+            "期末原币",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+        let rows = [
+            ["1122", "应收账款", "", "300", "50", "10", "340", "", ""],
+            [
+                "1122.01",
+                "国内客户",
+                "CNY",
+                "100",
+                "10",
+                "0",
+                "110",
+                "",
+                "",
+            ],
+            [
+                "1122.02",
+                "美元客户",
+                "USD",
+                "200",
+                "40",
+                "10",
+                "230",
+                "30",
+                "35",
+            ],
+            ["2202", "应付账款", "", "90", "0", "10", "100", "", ""],
+            ["2202.01", "国内供应商", "CNY", "40", "0", "4", "44", "", ""],
+            [
+                "2202.02",
+                "美元供应商",
+                "USD",
+                "50",
+                "0",
+                "6",
+                "56",
+                "7",
+                "8",
+            ],
+            // 同编码平行币种行即使本位币金额巧合相等，也不是父子。
+            ["1002.01", "银行户", "CNY", "25", "0", "0", "25", "", ""],
+            ["1002.01", "银行户", "USD", "25", "0", "0", "25", "4", "4"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+        let columns = |role: &str| match role {
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "currency" => vec!["币种".into()],
+            "openingFunctionalAmount" => vec!["期初本位币".into()],
+            "ytdFunctionalDebit" => vec!["借方本位币".into()],
+            "ytdFunctionalCredit" => vec!["贷方本位币".into()],
+            "closingFunctionalAmount" => vec!["期末本位币".into()],
+            "openingForeignAmount" => vec!["期初原币".into()],
+            "closingForeignAmount" => vec!["期末原币".into()],
+            _ => vec![],
+        };
+        let expected = vec![false, true, true, false, true, true, true, true];
+        assert_eq!(tb_leaf_mask(&headers, &rows, &columns), expected);
+        assert_eq!(tb_catalog_leaf_mask(&headers, &rows, &columns), expected);
+        let mut unmatched = rows.clone();
+        unmatched[0][3] = "301".into();
+        assert!(
+            tb_leaf_mask(&headers, &unmatched, &columns)[0],
+            "父项本位币不等于下级时必须保留"
+        );
+    }
+
+    #[test]
+    fn 用友汇兑样例跨币种总科目不进入确认目录() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/汇率损益测试集/用友/用友_科目余额表.xlsx");
+        let table = crate::fx::load_fx_table(&crate::fx::SourceSpec {
+            input_path: path.to_string_lossy().into_owned(),
+            sheet: "科目余额表".into(),
+            header_row: 3,
+            header_depth: 1,
+        })
+        .expect("读取用友 TB 样例");
+        let columns = |role: &str| match role {
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "currency" => vec!["币种".into()],
+            "direction" => vec!["方向".into()],
+            "openingFunctionalAmount" => vec!["期初余额(本位币)".into()],
+            "ytdFunctionalDebit" => vec!["本期发生借方(本位币)".into()],
+            "ytdFunctionalCredit" => vec!["本期发生贷方(本位币)".into()],
+            "closingFunctionalAmount" => vec!["期末余额(本位币)".into()],
+            "openingForeignAmount" => vec!["期初余额(原币)".into()],
+            "closingForeignAmount" => vec!["期末余额(原币)".into()],
+            _ => vec![],
+        };
+        let keep = tb_catalog_leaf_mask(&table.headers, &table.rows, &columns);
+        let code_index = header_index(&table.headers, "科目编码").unwrap();
+        let kept = table
+            .rows
+            .iter()
+            .zip(keep)
+            .filter_map(|(row, keep)| keep.then(|| row[code_index].as_str()))
+            .collect::<Vec<_>>();
+        for parent in ["1002", "1122", "2202"] {
+            assert!(!kept.contains(&parent), "{parent} 是跨币种汇总科目");
+        }
+        for child in [
+            "1002.03", "1122.01", "1122.02", "1122.03", "2202.01", "2202.02", "2202.03",
+        ] {
+            assert!(kept.contains(&child), "{child} 是应保留的末级科目");
+        }
+    }
+
+    #[test]
+    fn 已映射科目名称的空值与非空值不合并() {
+        let tb = vec![
+            ("甲".into(), "1002".into(), "".into()),
+            ("甲".into(), "1002".into(), "银行存款".into()),
+        ];
+        let je = vec![("甲".into(), "1002".into(), "银行存款".into())];
+        let policy = AccountMatchPolicy::from_sides(&tb, &je);
+        assert_eq!(policy.ambiguous_count(), 1);
+        assert_ne!(
+            policy.account_key("甲", "1002", ""),
+            policy.account_key("甲", "1002", "银行存款")
+        );
+    }
+
+    #[test]
+    fn 同编码不同科目名称的汇总经金额勾稽后保留各明细() {
+        let rows = vec![
+            行(
+                "6711.03",
+                "处置固定资产净损失",
+                ["3678.44", "585.47", "0", "4263.91"],
+            ),
+            行("6711.03", "总部", ["0", "585.47", "0", "585.47"]),
+            行("6711.03", "制造部", ["1837.25", "0", "0", "1837.25"]),
+            行("6711.03", "销售部", ["239.32", "0", "0", "239.32"]),
+            行("6711.03", "管理部", ["669.22", "0", "0", "669.22"]),
+            行("6711.03", "研发部", ["932.65", "0", "0", "932.65"]),
+        ];
+        assert_eq!(
+            tb_catalog_leaf_mask(&余额表表头(), &rows, &余额表映射),
+            vec![false, true, true, true, true, true]
+        );
+    }
+
+    #[test]
+    fn 同编码同名称但辅助值不同的汇总保留辅助明细() {
+        let headers = [
+            "科目编码",
+            "科目名称",
+            "辅助",
+            "期初余额",
+            "本年借方",
+            "本年贷方",
+            "期末余额",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+        let rows = [
+            ["1002", "银行存款", "", "100", "0", "0", "100"],
+            ["1002", "银行存款", "甲银行", "40", "0", "0", "40"],
+            ["1002", "银行存款", "乙银行", "60", "0", "0", "60"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+        let columns = |role: &str| match role {
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "auxiliary" => vec!["辅助".into()],
+            "openingFunctionalAmount" => vec!["期初余额".into()],
+            "ytdFunctionalDebit" => vec!["本年借方".into()],
+            "ytdFunctionalCredit" => vec!["本年贷方".into()],
+            "closingFunctionalAmount" => vec!["期末余额".into()],
+            _ => vec![],
+        };
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &columns),
+            vec![false, true, true]
+        );
     }
 
     #[test]
@@ -8360,6 +13521,16 @@ mod tests {
         ));
         // 认不出的角色名一律不拦。
         assert!(!role_rejects_header("je", "不存在的角色", "随便一列"));
+    }
+
+    #[test]
+    fn sap凭证行文本识别为摘要而凭证抬头文本仍排除() {
+        let headers = vec!["凭证行文本".to_owned(), "凭证抬头文本".to_owned()];
+        let got = suggest_roles("je", &headers);
+        assert_eq!(got.get(&0), Some(&"summary"));
+        assert_eq!(got.get(&1), None);
+        assert!(!role_rejects_header("je", "summary", "凭证行文本"));
+        assert!(role_rejects_header("je", "summary", "凭证抬头文本"));
     }
 
     #[test]
@@ -8536,6 +13707,72 @@ mod tests {
     }
 
     #[test]
+    fn 公共金额校验先剔噪音但保留真实业务坏值() {
+        let headers = vec![
+            "日期".into(),
+            "凭证号".into(),
+            "摘要".into(),
+            "科目编码".into(),
+            "科目名称".into(),
+            "币种".into(),
+            "原币金额".into(),
+            "借方金额".into(),
+            "贷方金额".into(),
+        ];
+        let rows = vec![
+            vec![
+                "2025-01-01".into(),
+                "记-1".into(),
+                "正常业务".into(),
+                "1001".into(),
+                "银行存款".into(),
+                "USD".into(),
+                "待补".into(),
+                "700".into(),
+                "".into(),
+            ],
+            vec![
+                "小计".into(),
+                "".into(),
+                "本页小计".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "RMB".into(),
+                "700".into(),
+                "700".into(),
+            ],
+            vec![
+                "".into(),
+                "2025-01-02".into(),
+                "记-2".into(),
+                "收回货款".into(),
+                "1002".into(),
+                "银行存款".into(),
+                "RMB".into(),
+                "".into(),
+                "700".into(),
+            ],
+        ];
+        let column_of = |role: &str| match role {
+            "date" => vec!["日期".into()],
+            "id" => vec!["凭证号".into()],
+            "summary" => vec!["摘要".into()],
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "currency" => vec!["币种".into()],
+            "foreignAmount" => vec!["原币金额".into()],
+            "functionalDebit" => vec!["借方金额".into()],
+            "functionalCredit" => vec!["贷方金额".into()],
+            _ => Vec::new(),
+        };
+        let issues = mapped_amount_parse_issues("je", &headers, &rows, &column_of);
+        assert_eq!(issues.len(), 1, "小计与整体右移行应由公共入口剔除");
+        assert_eq!(issues[0].row_index, 0, "真实业务坏金额必须继续报错");
+        assert_eq!(issues[0].value, "待补");
+    }
+
+    #[test]
     fn 计量单位不得自动识别为主体() {
         let headers = vec![
             "凭证编号".into(),
@@ -8616,6 +13853,173 @@ mod tests {
     }
 
     #[test]
+    fn 裸日期压过长别名但仍让位过账日期() {
+        // 用友 01 号样例：「日期」与「业务日期」并存，黄金裁决取裸「日期」；
+        // 长别名优先的通则会让「业务日期」(2.04) 反超「日期」(2.02)。
+        let headers = vec!["日期".to_string(), "业务日期".to_string()];
+        let out = suggest_roles("je", &headers);
+        assert_eq!(out.get(&0), Some(&"date"));
+        // 没有裸「日期」竞争时长别名照常取胜，过账/记帐日期仍居最高档。
+        let headers2 = vec!["业务日期".to_string(), "记帐日期".to_string()];
+        let out2 = suggest_roles("je", &headers2);
+        assert_eq!(out2.get(&1), Some(&"date"));
+    }
+
+    #[test]
+    fn 单一方向列按余额远近判归() {
+        let headers: Vec<String> = ["科目", "方向", "期初余额", "期末余额"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut m = serde_json::Map::new();
+        m.insert("closingDirection".into(), Value::String("方向".into()));
+        m.insert(
+            "openingFunctionalAmount".into(),
+            Value::String("期初余额".into()),
+        );
+        m.insert(
+            "closingFunctionalAmount".into(),
+            Value::String("期末余额".into()),
+        );
+        align_tb_direction_pair(&headers, &[], &mut m);
+        // 紧邻期初余额（北重精工等 R4 裁决）。
+        assert_eq!(
+            m.get("openingDirection").and_then(Value::as_str),
+            Some("方向")
+        );
+        assert!(m.get("closingDirection").is_none());
+        // 置于表尾、靠近期末余额的保持期末归属（陇能建设等裁决）。
+        let headers2: Vec<String> = ["科目", "期初余额", "期末余额", "方向"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut m2 = serde_json::Map::new();
+        m2.insert("closingDirection".into(), Value::String("方向".into()));
+        m2.insert(
+            "openingFunctionalAmount".into(),
+            Value::String("期初余额".into()),
+        );
+        m2.insert(
+            "closingFunctionalAmount".into(),
+            Value::String("期末余额".into()),
+        );
+        align_tb_direction_pair(&headers2, &[], &mut m2);
+        assert_eq!(
+            m2.get("closingDirection").and_then(Value::as_str),
+            Some("方向")
+        );
+    }
+
+    #[test]
+    fn 本期发生列可为用友式单一方向列提供共享证据() {
+        let headers = ["方向", "期初余额", "本期借方", "本期贷方", "期末余额"]
+            .map(str::to_owned)
+            .to_vec();
+        let rows = [
+            ["贷", "180000", "300000", "360000", "240000"],
+            ["贷", "300000", "195000", "195000", "300000"],
+            ["贷", "100000", "0", "50000", "150000"],
+        ]
+        .map(|row| row.map(str::to_owned).to_vec())
+        .to_vec();
+        let mut mapping = serde_json::Map::new();
+        for (role, header) in [
+            ("openingDirection", "方向"),
+            ("openingFunctionalAmount", "期初余额"),
+            ("periodFunctionalDebit", "本期借方"),
+            ("periodFunctionalCredit", "本期贷方"),
+            ("closingFunctionalAmount", "期末余额"),
+        ] {
+            mapping.insert(role.into(), Value::String(header.into()));
+        }
+        align_tb_direction_pair(&headers, &rows, &mut mapping);
+        assert_eq!(mapping["closingDirection"], "方向");
+
+        let mut partial_period = mapping.clone();
+        partial_period.remove("closingDirection");
+        let incomplete_rows = rows
+            .iter()
+            .map(|row| {
+                let mut row = row.clone();
+                row[2] = "0".into();
+                row[3] = "0".into();
+                row
+            })
+            .collect::<Vec<_>>();
+        align_tb_direction_pair(&headers, &incomplete_rows, &mut partial_period);
+        assert!(partial_period.get("closingDirection").is_none());
+    }
+
+    #[test]
+    fn 全空列不进建议() {
+        // 层级名称列取值全空（导出工件列）时，别名命中也不得混进
+        // accountName 的多列建议。
+        let headers: Vec<String> = ["科目名称一级", "科目名称二级", "科目代码", "科目名称三级"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let rows = vec![
+            vec![
+                "货币资金".into(),
+                "货币资金-银行存款".into(),
+                "1001".into(),
+                "".into(),
+            ],
+            vec![
+                "应收账款".into(),
+                "应收账款-应收股利".into(),
+                "1101".into(),
+                "".into(),
+            ],
+        ];
+        let out = suggest_roles_with_data("tb", &headers, &rows);
+        let names: Vec<&str> = out
+            .iter()
+            .filter(|(_, role)| **role == "accountName")
+            .map(|(index, _)| headers[*index].as_str())
+            .collect();
+        assert!(names.contains(&"科目名称一级"), "{names:?}");
+        assert!(names.contains(&"科目名称二级"), "{names:?}");
+        assert!(!names.contains(&"科目名称三级"), "{names:?}");
+        // 没有数据行的表无从判空，按列名正常建议。
+        let no_rows: Vec<Vec<String>> = Vec::new();
+        let out2 = suggest_roles_with_data("tb", &headers, &no_rows);
+        assert!(out2.values().any(|role| *role == "accountName"));
+    }
+
+    #[test]
+    fn 二级费用科目是维度词不挂科目名称() {
+        // 3300/4800 家族：「二级费用科目」装的是管理／研发这类费用属性
+        // 维度词，黄金裁决 4:1 反对挂 accountName（借正贷负同理见各专测）。
+        let headers: Vec<String> = ["科目名称一级", "科目名称二级", "科目代码", "二级费用科目"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let rows = vec![
+            vec![
+                "运营费用".into(),
+                "运营费用-工资".into(),
+                "6602".into(),
+                "管理".into(),
+            ],
+            vec![
+                "运营费用".into(),
+                "运营费用-工资".into(),
+                "6602".into(),
+                "研发".into(),
+            ],
+        ];
+        let out = suggest_roles_with_data("tb", &headers, &rows);
+        let names: Vec<&str> = out
+            .iter()
+            .filter(|(_, role)| **role == "accountName")
+            .map(|(index, _)| headers[*index].as_str())
+            .collect();
+        assert!(names.contains(&"科目名称一级") && names.contains(&"科目名称二级"));
+        assert!(!names.contains(&"二级费用科目"), "{names:?}");
+    }
+
+    #[test]
     fn 年月与月份取值解析() {
         // 带年份的年月按当月 1 日进入完整日期解析。
         let jan = NaiveDate::from_ymd_opt(2025, 1, 1).expect("合法日期");
@@ -8645,6 +14049,178 @@ mod tests {
         assert!(parse_month("2025-01-31").is_none());
         assert!(parse_month("一级").is_none());
         assert!(parse_month("").is_none());
+    }
+
+    #[test]
+    fn 多列日期按公共规则结合报告期年份还原() {
+        let headers = vec!["年-月".into(), "年-日".into(), "凭证号".into()];
+        let row = vec!["01".into(), "10".into(), "记-0001".into()];
+        assert_eq!(
+            parse_mapped_date(&headers, &row, &[0, 1], Some(2025)),
+            NaiveDate::from_ymd_opt(2025, 1, 10),
+        );
+
+        let full_headers = vec!["月份".into(), "记账日期".into()];
+        let full_row = vec!["01".into(), "2024-12-31".into()];
+        assert_eq!(
+            parse_mapped_date(&full_headers, &full_row, &[0, 1], Some(2025)),
+            NaiveDate::from_ymd_opt(2024, 12, 31),
+        );
+    }
+
+    /// 09 号样例实案：用友式「年/月/日」双层表头合并后 date 只映射到月份列，
+    /// 值是纯月份数字、整本序时账没有年份列。单列也必须按报告期年份还原，
+    /// 否则调用方整本账的行都被静默跳过、误报成科目不匹配。
+    #[test]
+    fn 单列纯月份按报告期年份还原当月一日() {
+        let headers = vec!["年-月".into(), "凭证号".into()];
+        let row = vec!["01".into(), "记-0001".into()];
+        assert_eq!(
+            parse_mapped_date(&headers, &row, &[0], Some(2025)),
+            NaiveDate::from_ymd_opt(2025, 1, 1),
+        );
+        // 值里自带年份时以值为准。
+        let with_year = vec!["2024-12".into(), "记-0001".into()];
+        assert_eq!(
+            parse_mapped_date(&headers, &with_year, &[0], Some(2025)),
+            NaiveDate::from_ymd_opt(2024, 12, 1),
+        );
+        // 没有报告期年份可兜底时不得凭空造日期。
+        assert_eq!(parse_mapped_date(&headers, &row, &[0], None), None);
+        // 列名不含「月」时纯数字不当作月份——不替调用方猜语义。
+        let plain = vec!["期次".into(), "凭证号".into()];
+        assert_eq!(parse_mapped_date(&plain, &row, &[0], Some(2025)), None);
+        // 完整日期仍然优先，不会被月份兜底改写。
+        let full = vec!["2025-03-08".into(), "记-0001".into()];
+        assert_eq!(
+            parse_mapped_date(&headers, &full, &[0], Some(2024)),
+            NaiveDate::from_ymd_opt(2025, 3, 8),
+        );
+    }
+
+    /// 「月/日分列无年份」的账型，识别建议要把日列一并挂进 date，
+    /// 取数端才有日号精度；完整日期列（如打印日期）不得被误挂。
+    #[test]
+    fn 月日分列配对挂载日列进日期映射() {
+        let headers: Vec<String> = ["年-月", "年-日", "打印日期", "凭证号"]
+            .iter()
+            .map(|value| value.to_string())
+            .collect();
+        let rows: Vec<Vec<String>> = (1..=20)
+            .map(|index| {
+                vec![
+                    format!("{:02}", (index % 12) + 1),
+                    format!("{:02}", (index % 28) + 1),
+                    "2025-01-15".to_owned(),
+                    format!("记-{index:04}"),
+                ]
+            })
+            .collect();
+        let mut mapping = serde_json::Map::new();
+        mapping.insert("date".into(), Value::String("年-月".into()));
+        pair_month_day_date_columns(&headers, &rows, &mut mapping);
+        assert_eq!(
+            mapping.get("date"),
+            Some(&Value::Array(vec![
+                Value::String("年-月".into()),
+                Value::String("年-日".into()),
+            ])),
+            "日列应一并挂进 date；「打印日期」列取值是完整日期，不得被误挂"
+        );
+
+        // 已是多列映射（人工或 LLM 配好）时不动。
+        let mut paired = serde_json::Map::new();
+        paired.insert(
+            "date".into(),
+            Value::Array(vec![
+                Value::String("月份".into()),
+                Value::String("日".into()),
+            ]),
+        );
+        pair_month_day_date_columns(&headers, &rows, &mut paired);
+        assert_eq!(paired.get("date").unwrap().as_array().unwrap().len(), 2);
+
+        // date 未映射或映射到非月份列时不动。
+        let mut none_mapping = serde_json::Map::new();
+        pair_month_day_date_columns(&headers, &rows, &mut none_mapping);
+        assert!(none_mapping.get("date").is_none());
+        let mut other = serde_json::Map::new();
+        other.insert("date".into(), Value::String("打印日期".into()));
+        pair_month_day_date_columns(&headers, &rows, &mut other);
+        assert_eq!(other.get("date"), Some(&Value::String("打印日期".into())));
+    }
+
+    /// 裸「月」「日」分列（无年份、无完整日期列）连 date 冲突词都过不去，
+    /// date 拿不到任何建议；脚本级兜底把唯一月份列指为 date，再由配对挂上
+    /// 日列——看账／正负数凭证标记不开 LLM 也能识别这种账型。
+    #[test]
+    fn 裸月日分列兜底直接组成日期() {
+        let headers: Vec<String> = ["月", "日", "凭证号"]
+            .iter()
+            .map(|value| value.to_string())
+            .collect();
+        let rows: Vec<Vec<String>> = (1..=30)
+            .map(|index| {
+                vec![
+                    format!("{}", (index - 1) % 12 + 1),
+                    format!("{}", (index - 1) % 28 + 1),
+                    format!("记-{index:04}"),
+                ]
+            })
+            .collect();
+        let mut mapping = serde_json::Map::new();
+        month_day_date_fallback(&headers, &rows, &mut mapping);
+        assert_eq!(
+            mapping.get("date"),
+            Some(&Value::Array(vec![
+                Value::String("月".into()),
+                Value::String("日".into()),
+            ])),
+            "裸月/日分列应直接组成 date"
+        );
+
+        // 表里已有完整日期列时完整日期优先，兜底不动。
+        let full_headers: Vec<String> = ["月", "日", "记账日期", "凭证号"]
+            .iter()
+            .map(|value| value.to_string())
+            .collect();
+        let full_rows: Vec<Vec<String>> = (1..=30)
+            .map(|index| {
+                vec![
+                    format!("{}", (index - 1) % 12 + 1),
+                    format!("{}", (index - 1) % 28 + 1),
+                    format!("2025-01-{:02}", (index - 1) % 28 + 1),
+                    format!("记-{index:04}"),
+                ]
+            })
+            .collect();
+        let mut with_full = serde_json::Map::new();
+        month_day_date_fallback(&full_headers, &full_rows, &mut with_full);
+        assert!(with_full.get("date").is_none(), "完整日期列存在时不兜底");
+
+        // 两个月份列（歧义）不猜，交给 LLM 复核或人工。
+        let two_month_headers: Vec<String> = ["月", "会计月份", "日", "凭证号"]
+            .iter()
+            .map(|value| value.to_string())
+            .collect();
+        let two_month_rows: Vec<Vec<String>> = (1..=30)
+            .map(|index| {
+                vec![
+                    format!("{}", (index - 1) % 12 + 1),
+                    format!("{}", (index - 1) % 12 + 1),
+                    format!("{}", (index - 1) % 28 + 1),
+                    format!("记-{index:04}"),
+                ]
+            })
+            .collect();
+        let mut ambiguous = serde_json::Map::new();
+        month_day_date_fallback(&two_month_headers, &two_month_rows, &mut ambiguous);
+        assert!(ambiguous.get("date").is_none(), "多个月份列不猜");
+
+        // 样例不足 5 行时证据不够，不动。
+        let mut thin = serde_json::Map::new();
+        month_day_date_fallback(&headers, &rows[..3], &mut thin);
+        assert!(thin.get("date").is_none(), "样例不足不兜底");
     }
 
     #[test]
@@ -8873,10 +14449,9 @@ mod tests {
             .iter()
             .map(|m| m.role)
             .collect();
-        assert!(missing.contains(&"accountCode"), "{missing:?}");
-        // 补上编码后 TB 不再报缺。
-        let mut tb_full = tb_mapped;
-        tb_full.insert("accountCode");
+        assert!(!missing.contains(&"accountIdentity"), "{missing:?}");
+        // 只有名称已经满足科目身份，TB 不再报缺。
+        let tb_full = tb_mapped;
         assert!(
             missing_required(Tool::FaTbje, "tb", &tb_full).is_empty(),
             "{:?}",
@@ -8889,11 +14464,13 @@ mod tests {
             "id",
             "accountCode",
             "accountName",
-            "summary",
             "functionalDebit",
             "functionalCredit",
         ]);
         assert!(missing_required(Tool::FaTbje, "je", &je_full).is_empty());
+        let mut je_name_only = je_full.clone();
+        je_name_only.remove("accountCode");
+        assert!(missing_required(Tool::FaTbje, "je", &je_name_only).is_empty());
         // 少凭证号要被拦下。
         let mut je_no_voucher = je_full;
         je_no_voucher.remove("id");
@@ -8990,7 +14567,103 @@ mod tests {
             Some(&"auxiliary"),
             "成本中心应归辅助核算"
         );
-        assert_eq!(suggested.get(&2), None, "会计科目不由 Coding 硬判");
-        assert_eq!(suggested.get(&3), None, "总账科目不由 Coding 硬判");
+        // 两可表头不再留白：别名层放空后由数据形态冷启动定性
+        // （名称文本→accountName，数字编码→accountCode），否则整表缺科目身份。
+        assert_eq!(
+            suggested.get(&2),
+            Some(&"accountName"),
+            "会计科目装名称文本，按形态归科目名称"
+        );
+        assert_eq!(
+            suggested.get(&3),
+            Some(&"accountCode"),
+            "总账科目装数字编码，按形态归科目编码"
+        );
+    }
+
+    #[test]
+    fn 主体归集候选以双侧共同主体为锚且多命中取最长() {
+        let summary = |entity: &str, rows, amount: f64| EntitySummary {
+            entity: entity.into(),
+            row_count: rows,
+            amount,
+            absolute_amount: amount.abs() + 10.0,
+        };
+        let tb = vec![
+            summary("集团", 2, 20.0),
+            summary("10008529 集团华东", 3, 30.0),
+            summary("集团华东上海分支", 4, -40.0),
+            summary("孤立主体", 5, 50.0),
+        ];
+        let je = vec![
+            summary("集团", 6, 60.0),
+            summary("集团华东", 7, 70.0),
+            summary("集团华东上海分支销售部", 8, -80.0),
+        ];
+
+        let result = suggest_entity_aggregations(&tb, &je);
+        assert_eq!(result.anchors, vec!["集团", "集团华东"]);
+        let longest = result
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source_entity == "集团华东上海分支")
+            .expect("缺 TB 下级主体候选");
+        assert_eq!(longest.target_entity, "集团华东");
+        assert_eq!(longest.row_count, 4);
+        assert_eq!(longest.amount, -40.0);
+        assert!(
+            !result
+                .candidates
+                .iter()
+                .any(|candidate| candidate.source_entity == "孤立主体"),
+            "不以前后缀词表猜测无锚点主体"
+        );
+    }
+
+    #[test]
+    fn 主体归集只应用aggregate模式下用户明确选择() {
+        let scope = EntityScope {
+            mode: EntityScopeMode::Aggregate,
+            mappings: vec![EntityMapping {
+                side: EntitySide::Je,
+                source: "10008529 集团华东上海分支".into(),
+                target: "集团华东".into(),
+            }],
+        };
+        assert_eq!(
+            apply_entity_scope(EntitySide::Je, "集团华东上海分支", &scope),
+            "集团华东"
+        );
+        assert_eq!(
+            apply_entity_scope(EntitySide::Tb, "集团华东上海分支", &scope),
+            "集团华东上海分支",
+            "不同侧不能误套映射"
+        );
+        assert_eq!(
+            apply_entity_scope(EntitySide::Je, "未选择主体", &scope),
+            "未选择主体"
+        );
+        assert_eq!(
+            apply_entity_scope(EntitySide::Je, "集团华东上海分支", &EntityScope::default()),
+            "集团华东上海分支"
+        );
+        assert_eq!(
+            apply_entity_scope(EntitySide::Tb, "10008529 集团华东", &EntityScope::default()),
+            "集团华东",
+            "严格模式也应消除来源系统附加的前置主体编码"
+        );
+    }
+
+    #[test]
+    fn sap七八开头科目归为损益且仍保留其他编码待确认() {
+        for code in ["700000", "701206", "805100", "0000829000"] {
+            assert_eq!(
+                account_category(code),
+                Some(AccountCategory::ProfitLoss),
+                "{code} 应按 SAP 风格损益编码归类"
+            );
+        }
+        assert_eq!(account_category("A700000"), None);
+        assert_eq!(account_category("900000"), None);
     }
 }

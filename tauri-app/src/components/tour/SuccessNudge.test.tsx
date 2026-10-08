@@ -89,6 +89,19 @@ describe("SuccessNudge", () => {
     expect(openOutput).toHaveBeenCalledWith(path);
   });
 
+  it("打开结果失败时保留提示并告知下一步", async () => {
+    vi.mocked(openOutput).mockRejectedValueOnce(new Error("missing"));
+    renderWithRouter(
+      <SuccessNudge jobs={[completedJob()]} toolNameOf={toolNameOf} autoDismissMs={30} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "打开结果" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("历史记录");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    });
+    expect(screen.getByText("凭证导出已完成")).toBeInTheDocument();
+  });
+
   it("同一任务重复推送 completed 事件不重复触发", () => {
     const { rerender } = renderWithRouter(
       <SuccessNudge jobs={[completedJob()]} toolNameOf={toolNameOf} />,

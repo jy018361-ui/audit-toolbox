@@ -232,7 +232,7 @@ const geometryAudit = () => {
         }, theme);
         const issues = await page.evaluate(geometryAudit);
         results.push({ viewport: viewport.label, theme, route, issues });
-        if (issues.length) {
+        if (issues.length || process.env.STATIC_AUDIT_CAPTURE_ALL === "1") {
           const safeRoute = route === "/" ? "workspace" : route.replaceAll("/", "_");
           await page.screenshot({
             path: path.join(output, `${viewport.label}-${theme}-${safeRoute}.png`),

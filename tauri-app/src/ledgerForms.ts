@@ -206,8 +206,17 @@ export function formGroups(
       roles: publicRequired,
       required: publicRequired,
     });
+  const accountIdentity = ["accountCode", "accountName"].filter((role) =>
+    names.has(role),
+  );
+  if (accountIdentity.length)
+    groups.push({
+      title: "科目身份（至少映射一项）",
+      roles: accountIdentity,
+    });
   const publicOptional = identity.filter(
-    (role) => !publicRequired.includes(role),
+    (role) =>
+      !publicRequired.includes(role) && !accountIdentity.includes(role),
   );
   if (publicOptional.length)
     // A/B 编号区分两个选填性质的组：A 是身份类选填，B 是本期发生额口径。

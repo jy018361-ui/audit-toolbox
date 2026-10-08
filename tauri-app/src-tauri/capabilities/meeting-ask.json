@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "meeting-ask-capability",
+  "description": "会议询问小窗：置顶询问是否记录 Teams 会议，只需回传决定并关闭自身，不触碰其他窗口能力。",
+  "windows": ["meeting-ask"],
+  "platforms": ["windows"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:window:allow-close"
+  ]
+}

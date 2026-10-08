@@ -277,31 +277,54 @@
   font-weight: 600;
 }
 
-/* 科目复核表固定 4 列，列宽按 主体/科目/角色/类别 分配，科目列超长省略。 */
+/* 科目复核表只有必要维度才成列；科目名称与有效辅助值共用一列。 */
 .fa-tbje-account-table.fa-tbje-review-table {
-  table-layout: fixed;
+  table-layout: auto;
+  min-width: 54rem;
 }
 
-.fa-tbje-review-table th:nth-child(1) {
-  width: 14%;
+.fa-tbje-review-table .fa-tbje-review-entity {
+  min-width: 8rem;
 }
 
-.fa-tbje-review-table th:nth-child(2) {
-  width: 42%;
+.fa-tbje-review-table .fa-tbje-review-account {
+  width: 48%;
+  min-width: 21rem;
 }
 
-.fa-tbje-review-table th:nth-child(3) {
-  width: 19%;
+.fa-tbje-review-table .fa-tbje-review-currency {
+  min-width: 6rem;
 }
 
-.fa-tbje-review-table th:nth-child(4) {
-  width: 25%;
+.fa-tbje-review-table .fa-tbje-review-role {
+  min-width: 12rem;
+}
+
+.fa-tbje-review-table .fa-tbje-review-category {
+  min-width: 12rem;
+}
+
+.fa-tbje-review-table th {
+  white-space: nowrap;
 }
 
 .fa-tbje-account-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 科目复核只列 TB 中真实存在的「主体×科目」组合。 */
+.fa-tbje-account-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.fa-tbje-account-cell .fa-tbje-account-name {
+  flex: 1;
+  min-width: 0;
 }
 
 .fa-tbje-account-table td.fa-tbje-empty-table {
@@ -313,6 +336,35 @@
 .fa-tbje-pagination {
   justify-content: space-between;
   font-variant-numeric: tabular-nums;
+}
+
+.fa-tbje-summary-shell {
+  display: grid;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.fa-tbje-summary-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.fa-tbje-summary-toolbar > :first-child {
+  flex: 1 1 280px;
+  max-width: 520px;
+}
+.fa-tbje-confirm-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.fa-tbje-confirm-footer .account-confirmation-actions {
+  margin: 0 0 0 auto;
 }
 
 .fa-tbje-readiness-grid {
@@ -451,7 +503,7 @@
    两张并排、放不下时自动换行;科目列限宽省略,合计行强调。 */
 .fa-tbje-pivot-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 40rem), 1fr));
   gap: var(--sp-4);
 }
 
@@ -466,7 +518,39 @@
   margin: 0;
 }
 
-.fa-tbje-pivot-preview th:not(:first-child) {
+.fa-tbje-account-table.fa-tbje-pivot-preview {
+  min-width: 40rem;
+  table-layout: fixed;
+}
+
+.fa-tbje-pivot-col-entity {
+  width: 16%;
+}
+
+.fa-tbje-pivot-col-account {
+  width: 42%;
+}
+
+.fa-tbje-pivot-col-amount {
+  width: 21%;
+}
+
+.fa-tbje-pivot-preview th:nth-child(n + 3) {
+  text-align: right;
+}
+
+.fa-tbje-pivot-preview th,
+.fa-tbje-pivot-preview td {
+  min-width: 0;
+}
+
+.fa-tbje-pivot-preview td:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fa-tbje-pivot-preview td.fa-tbje-num {
   text-align: right;
 }
 

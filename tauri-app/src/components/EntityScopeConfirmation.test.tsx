@@ -1,0 +1,72 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { EntityScopeConfirmation, useEntityScopeConfirmation } from "./EntityScopeConfirmation";
+import { STRICT_ENTITY_SCOPE } from "@/entityScope";
+
+afterEach(cleanup);
+
+describe("公共主体口径确认", () => {
+  const suggestions = {
+    anchors: ["甲公司"],
+    candidates: [
+      {
+        sourceSide: "tb" as const,
+        sourceEntity: "10008529 乙公司",
+        targetEntity: "乙公司",
+      },
+    ],
+  };
+
+  it("默认全部测算，部分测算只写入人工勾选项", () => {
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <EntityScopeConfirmation
+        suggestions={suggestions}
+        value={STRICT_ENTITY_SCOPE}
+        onChange={onChange}
+      />,
+    );
+
+    expect(
+      (screen.getByRole("radio", { name: /全部测算/ }) as HTMLInputElement)
+        .checked,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("radio", { name: /部分测算/ }));
+    expect(onChange).toHaveBeenLastCalledWith({ mode: "aggregate", mappings: [] });
+
+    rerender(
+      <EntityScopeConfirmation
+        suggestions={suggestions}
+        value={{ mode: "aggregate", mappings: [] }}
+        onChange={onChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: /10008529 乙公司/ }));
+    expect(onChange).toHaveBeenLastCalledWith({
+      mode: "aggregate",
+      mappings: [{ side: "tb", source: "10008529 乙公司", target: "乙公司" }],
+    });
+    expect(screen.getByText(/双方已完全匹配主体：甲公司/)).toBeTruthy();
+  });
+
+  it("同一组主体重新挂载时恢复已确认口径，主体集合变化时重置", async () => {
+    const initialSelection = {
+      mode: "aggregate" as const,
+      mappings: [{ side: "tb" as const, source: "乙公司分部", target: "乙公司" }],
+    };
+    const { result, rerender } = renderHook(
+      ({ tbEntities }) =>
+        useEntityScopeConfirmation({
+          tbEntities,
+          jeEntities: ["乙公司"],
+          initialSelection,
+          onInvalidate: () => {},
+        }),
+      { initialProps: { tbEntities: ["乙公司分部"] } },
+    );
+    expect(result.current.selection).toEqual(initialSelection);
+    rerender({ tbEntities: ["丙公司"] });
+    await waitFor(() => expect(result.current.selection).toEqual(STRICT_ENTITY_SCOPE));
+  });
+});

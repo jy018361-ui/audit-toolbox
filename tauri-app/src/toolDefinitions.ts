@@ -19,6 +19,10 @@ export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
     intro: "对两列公司名称/人名/地址/通用文本做模糊匹配核对，高相似度自动采纳、疑似项人工确认后导出底稿。",
     fields: [], actions: [{label:"导出Excel",method:"fuzzy.export",mode:"job",tone:"primary"}]
   },
+  meeting_minutes: {
+    intro: "自动检测 Teams 会议并询问是否记录；录音上传阿里云百炼转写（区分说话人）后由统一大模型整理成结构化纪要，也可导入已有录音补生成。",
+    fields: [], actions: [{label:"生成会议纪要",method:"meeting.generate",mode:"job",tone:"primary"}]
+  },
   fx_audit: {
     intro: "使用官方人民币汇率中间价重算已实现及未实现汇兑损益，并生成可追踪审计底稿。",
     fields: [], actions: [{label:"生成Excel底稿",method:"fx.export",mode:"job",tone:"primary"}]

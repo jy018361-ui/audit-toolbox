@@ -9,6 +9,12 @@ import type { AppError } from "@/types";
  * JSON，能拆开就拼在 userMessage 后面——否则界面只剩一句「校验未通过」，
  * 到底哪一条不通过要靠猜，而后端其实已经把原因写清楚了。
  */
+/** 任务刚结束的瞬间点取消/停止，后端报 JOB_NOT_FOUND——这是预期时序而非
+ *  故障，界面应显示友好话术，而不是“未找到可取消的 Rust 任务”这类开发口径。 */
+export function isJobGone(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === "JOB_NOT_FOUND";
+}
+
 export function errorText(error: unknown): string {
   if (!error) return "操作失败，请检查输入后重试。";
   if (typeof error === "string") return error;

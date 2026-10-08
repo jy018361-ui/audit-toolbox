@@ -18,3 +18,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ts-export-result-card .output-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+}

@@ -1,0 +1,49 @@
+.sync-busy-group {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sync-busy-group-count {
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.sync-busy-group-details {
+  margin-top: var(--sp-1);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.sync-busy-group-details summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--brand-link);
+}
+
+.sync-busy-group-details summary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+.sync-busy-group-details ul {
+  margin: var(--sp-2) 0 0;
+  padding-left: var(--sp-4);
+  list-style: disc;
+}
+
+.sync-busy-list .sync-busy-group-details li {
+  display: list-item;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 后台任务与同步调用可能并发：两条最小化任务条不能占用同一个右下角位置。 */
+body:has(.job-dialog-pill) .sync-busy-pill {
+  bottom: calc(max(var(--sp-5), env(safe-area-inset-bottom)) + 112px);
+}
+
+body:has(.job-dialog-pill):has(.sync-busy-pill) .job-command-notice {
+  bottom: calc(max(var(--sp-5), env(safe-area-inset-bottom)) + 176px);
+}

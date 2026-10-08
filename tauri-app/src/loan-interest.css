@@ -1,6 +1,206 @@
 .loan-page {
   padding-bottom: 40px;
 }
+.loan-confirm-workspace {
+  display: grid;
+  gap: var(--sp-4);
+}
+.loan-confirm-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  width: 100%;
+}
+.loan-confirm-heading > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+.loan-section-kicker {
+  color: var(--primary);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.loan-account-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.loan-account-confirm {
+  max-height: 520px;
+  margin-top: var(--sp-3);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+}
+
+.loan-account-list-toolbar,
+.loan-account-list-pages {
+  display: flex;
+  align-items: end;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 0.75rem 0;
+}
+
+.loan-account-list-toolbar label {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 15rem;
+}
+
+.loan-account-list-pages {
+  align-items: center;
+  justify-content: flex-end;
+}
+.loan-mode-context {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -2px 0 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+.loan-mode-context strong {
+  color: var(--foreground);
+}
+.loan-confirm-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+.loan-confirm-footer .account-confirmation-actions,
+.loan-confirm-footer .loan-account-list-pages {
+  margin: 0;
+}
+.loan-confirm-footer .loan-account-list-pages {
+  margin-left: auto;
+}
+.loan-account-confirm table {
+  width: 100%;
+  min-width: 940px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.loan-account-confirm th,
+.loan-account-confirm td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+.loan-account-confirm th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+}
+.loan-account-confirm tr:last-child td {
+  border-bottom: 0;
+}
+.loan-account-confirm tr.is-loan td {
+  background: var(--success-bg);
+}
+.loan-account-confirm tr.is-interest-expense td {
+  background: var(--info-bg);
+}
+.loan-account-confirm tr.is-skipped td {
+  color: var(--text-muted);
+}
+.loan-account-confirm select {
+  min-width: 112px;
+  min-height: 36px;
+  padding: 6px 28px 6px 9px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--control-bg);
+  color: var(--foreground);
+}
+/* 合并表（科目确认＋利率设置）：基础列含余额与发生额，主体/辅助核算列按账套有无增减。
+   表格横向滚动，列宽交给浏览器按内容分配，输入框给定最小宽防挤成细缝。 */
+.loan-account-confirm.loan-confirm-table table {
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
+}
+.loan-account-confirm.loan-confirm-table td {
+  white-space: nowrap;
+}
+.loan-account-confirm.loan-confirm-table input {
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  background: var(--control-bg);
+  color: var(--foreground);
+}
+.loan-account-confirm.loan-confirm-table input[type="number"] {
+  width: 112px;
+  min-width: 96px;
+}
+/* 利率与 BP 都是审计人员据实录入；隐藏浏览器的步进箭头，避免误点改数。 */
+.loan-manual-number {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.loan-manual-number::-webkit-inner-spin-button,
+.loan-manual-number::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+}
+/* 借款明细子行：浅底小字行，挂在借款科目行下方逐笔设置利率。 */
+.loan-account-confirm tr.is-rate-detail td {
+  padding-top: 7px;
+  padding-bottom: 7px;
+  background: color-mix(in srgb, var(--success-bg) 50%, var(--card));
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.loan-account-confirm tr.is-rate-detail td.loan-num {
+  color: var(--foreground);
+}
+.loan-detail-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--success-bg);
+  color: var(--success-fg);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.loan-suggestion {
+  display: inline-block;
+  overflow: hidden;
+  max-width: 250px;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.loan-suggestion.is-positive {
+  color: var(--success-fg);
+  font-weight: 600;
+}
+/* 合并卡（科目确认＋利率设置）工具栏：查找科目在左，利率动作按钮靠右。 */
+.loan-account-list-toolbar .loan-paste-actions {
+  justify-content: flex-end;
+  margin-top: 0;
+  margin-left: auto;
+}
 .loan-result-overview {
   display: flex;
   flex-wrap: wrap;
@@ -63,7 +263,7 @@
   padding: 6px 9px;
   border: 1px solid var(--control-border);
   border-radius: 8px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
 }
 .loan-output-row {
@@ -93,10 +293,12 @@
 }
 .loan-rate-confirmation table {
   min-width: 760px;
-  table-layout: fixed;
+  table-layout: auto;
 }
 .loan-rate-table table {
-  min-width: 1200px;
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
 }
 .loan-rate-confirmation th,
 .loan-rate-confirmation td,
@@ -113,15 +315,38 @@
   font-size: 12px;
 }
 .loan-rate-confirmation th:first-child {
-  width: 34%;
+  min-width: 140px;
 }
 .loan-rate-confirmation th:nth-child(2) {
-  width: 20%;
+  min-width: 200px;
 }
 .loan-rate-confirmation th:nth-child(3),
 .loan-rate-confirmation th:nth-child(4) {
-  width: 16%;
+  min-width: 140px;
 }
+
+.loan-currency-policy {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--primary) 6%, var(--card));
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.loan-currency-policy strong {
+  flex: 0 0 auto;
+}
+
+.loan-currency-policy span {
+  color: var(--muted-foreground);
+}
+.loan-rate-confirmation input { width: 110px; min-width: 110px; }
+.loan-rate-confirmation select { min-width: 90px; }
 .loan-rate-confirmation td:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -139,6 +364,56 @@
 .loan-rate-table input {
   width: 96px;
 }
+.loan-rate-table th:first-child,
+.loan-rate-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 110px;
+  min-width: 110px;
+  background: var(--card);
+}
+.loan-rate-table th:nth-child(2),
+.loan-rate-table td:nth-child(2) {
+  position: sticky;
+  left: 110px;
+  z-index: 2;
+  width: 180px;
+  min-width: 180px;
+  background: var(--card);
+}
+.loan-rate-table td:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.loan-rate-table th:first-child,
+.loan-rate-table th:nth-child(2) {
+  z-index: 3;
+  background: var(--muted);
+}
+.loan-rate-table th:nth-child(3),
+.loan-rate-table td:nth-child(3) { min-width: 80px; }
+.loan-rate-table th:nth-child(n + 4):nth-child(-n + 9),
+.loan-rate-table td:nth-child(n + 4):nth-child(-n + 9) { min-width: 130px; }
+.loan-rate-table th:nth-child(10),
+.loan-rate-table td:nth-child(10),
+.loan-rate-table th:nth-child(16),
+.loan-rate-table td:nth-child(16) { min-width: 110px; text-align: center; }
+.loan-rate-table th:nth-child(11),
+.loan-rate-table td:nth-child(11) { min-width: 105px; }
+.loan-rate-table th:nth-child(12),
+.loan-rate-table td:nth-child(12) { min-width: 145px; }
+.loan-rate-table th:nth-child(13),
+.loan-rate-table td:nth-child(13) { min-width: 105px; }
+.loan-rate-table th:nth-child(14),
+.loan-rate-table td:nth-child(14) { min-width: 120px; }
+.loan-rate-table th:nth-child(15),
+.loan-rate-table td:nth-child(15) { min-width: 140px; }
+.loan-rate-table td.loan-principal-difference {
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-weight: 700;
+}
 .loan-rate-pick {
   width: 88px;
 }
@@ -154,6 +429,63 @@
   border-radius: 14px;
   background: var(--card);
 }
+.loan-list-summary {
+  margin-bottom: 10px;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+.loan-rate-input-stack {
+  display: grid;
+  gap: 3px;
+}
+.loan-provisional-rate {
+  color: var(--warning-fg);
+  font-size: 11px;
+  font-weight: 700;
+}
+.loan-rate-acknowledgement {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 12px;
+  padding: 11px 13px;
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-size: var(--fs-sm);
+}
+.loan-rate-acknowledgement input,
+.loan-exception-filter input {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+}
+.loan-result-filters {
+  display: flex;
+  align-items: end;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.loan-result-filters > label:first-child {
+  display: grid;
+  gap: 5px;
+  min-width: min(360px, 100%);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+.loan-exception-filter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+}
+.loan-result-filters > span {
+  min-height: 36px;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  line-height: 36px;
+}
 .loan-bridge-equation {
   display: grid;
   grid-template-columns:
@@ -167,6 +499,22 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+.loan-bridge-equation .fx-bridge-metric strong,
+.loan-result-summary .fx-bridge-metric strong {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+@media (min-width: 901px) and (max-width: 1180px) {
+  .loan-bridge-equation {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .loan-bridge-equation .fx-operator {
+    display: none;
+  }
 }
 .loan-ok,
 .loan-review {
@@ -194,6 +542,10 @@
   }
   .loan-bridge-equation .fx-operator {
     min-height: 24px;
+  }
+  .loan-confirm-heading {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 /* 导出完成反馈：文件名＋打开按钮，完整路径放悬浮提示。 */
@@ -244,30 +596,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 匹配结果表：六列，列宽与逐行确认表（.loan-rate-confirmation 默认）不同。 */
-.loan-rate-match table {
-  min-width: 960px;
-  table-layout: fixed;
-}
-.loan-rate-match th:first-child {
-  width: 22%;
-}
-.loan-rate-match th:nth-child(2) {
-  width: 26%;
-}
-.loan-rate-match th:nth-child(3),
-.loan-rate-match th:nth-child(4),
-.loan-rate-match th:nth-child(5) {
-  width: 14%;
-}
-.loan-rate-match th:last-child {
-  width: 10%;
-}
-.loan-rate-match .loan-match-basis {
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 /* 步骤间门禁说明：下一步被映射卡住时，明说缺什么并给返回入口。 */
 .loan-step-gate {
   display: flex;
@@ -304,3 +632,51 @@
   font-size: 11px;
   line-height: 1.4;
 }
+
+/* === UI 审计修复 P1-7（2026-09-24）：结果明细表金额列可读性 ===
+   症状：相邻金额列渲染成「18,000,000.002,000,000.00」粘连，最右列被
+   视口右缘裁切且看不出可横向滚动。追加以下规则（按后胜原则覆盖上方
+   同名列宽，不改动既有规则）：金额列右对齐 + 等宽数字、最小列宽加大、
+   列间细分隔线兜底、容器横向滚动条高对比提示。 */
+.loan-rate-table {
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 80%, transparent) transparent;
+}
+
+.loan-rate-table::-webkit-scrollbar {
+  height: 12px;
+}
+
+.loan-rate-table::-webkit-scrollbar-thumb {
+  min-width: 56px;
+  background-color: color-mix(in srgb, var(--text-muted) 80%, transparent);
+}
+
+.loan-rate-table th:nth-child(n + 4):nth-child(-n + 9),
+.loan-rate-table td:nth-child(n + 4):nth-child(-n + 9),
+.loan-rate-table th:nth-child(15),
+.loan-rate-table td:nth-child(15) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  min-width: 158px;
+  padding-inline: 12px;
+  box-shadow: inset 1px 0 0 color-mix(in srgb, var(--border) 65%, transparent);
+}
+
+/* === UI 审计修复 P3-4（2026-09-24）：字段映射下拉选中项截断无省略号 ===
+   症状：预览表列头的映射下拉被列宽压窄，选中项（如「到期日（选填）」）
+   被硬裁成「到期日（设」且看不出还有下文。修复：截断时显示省略号；
+   悬浮查看全名由列头下拉的 aria-label/title 提示兜底。 */
+.loan-page .dt-header-control select {
+  text-overflow: ellipsis;
+}
+
+.loan-information-row { margin-top: 18px; padding: 18px; border: 1px solid var(--border); border-radius: 10px; }
+.loan-information-row h3, .loan-information-events h4 { margin: 0 0 10px; font-weight: 600; }
+.loan-information-row p, .loan-information-card p { margin: 10px 0; color: var(--muted-foreground); }
+.loan-information-amounts { display: grid; grid-template-columns: repeat(4,minmax(140px,1fr)); gap: 14px; margin: 14px 0; }
+.loan-information-row summary { cursor: pointer; padding: 10px 0; }
+.loan-information-event-tables { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 20px; }
+.loan-information-event { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin: 10px 0; }
+.loan-information-event label { flex: 1; min-width: 130px; }
+.loan-information-valid { color: #246b58; margin-top: 12px; }
+@media(max-width:1000px) { .loan-information-amounts { grid-template-columns: repeat(2,minmax(140px,1fr)); } .loan-information-event-tables { grid-template-columns: 1fr; } }

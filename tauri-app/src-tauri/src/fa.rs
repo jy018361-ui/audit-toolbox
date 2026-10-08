@@ -378,9 +378,9 @@ fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
         main_llm_payload(&params)?
     };
     let system = if supplement {
-        "你是固定资产审计补充清单映射复核助手。只能使用 payload.headers 中的原始列名。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"新增方式\"}，禁止返回字符串。新增清单角色仅 addition_method/addition_date，file_side=file1；处置清单角色仅 disposal_method/disposal_date/disposal_orig/disposal_dep，file_side=file2。action 只能 fill/review/keep。"
+        "你是固定资产审计补充清单映射复核助手。只能使用 payload.headers 中的原始列名。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"新增方式\"}，禁止返回字符串。新增清单角色仅 addition_method/addition_date，file_side=file1；处置清单角色仅 disposal_method/disposal_date/disposal_orig/disposal_dep，file_side=file2。action 只能 fill/replace/clear/keep。逐项结合样例复核已有映射：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。"
     } else {
-        "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/review/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项核对：不得仅凭列名相似判定无需调整，必须结合 samples 中该列的样例核对数据形态——类别列应为少量重复的分类文本，原值/折旧/残值率应为数值，日期列为日期，寿命为月数；若当前映射列的形态不符且 headers 中另有形态更符合的列，必须返回 action=review 的 fieldReviews 建议。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。"
+        "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项结合 samples 核对：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。类别列应为少量重复的分类文本；若已映射类别列的 samples 多数是 Y110、A12-3 这类短字母数字代码而非类别文字，且 headers 中存在值为类别文字的列（例如 资产类型描述），必须返回 action=replace 指向该列，不得 keep。原值/折旧/残值率应为数值，日期列为日期，寿命为月数。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。"
     };
     let content = request_fa_llm(&settings, system, &payload.to_string())?;
     let parsed = parse_llm_json(&content).ok_or_else(|| {
@@ -535,6 +535,82 @@ fn looks_like_category_text(header: &str) -> bool {
         .any(|token| normalized.contains(&normalize_header(token)))
 }
 
+/// 短英数字代码形态（SAP 风格类别代码）。与旧版 Python 的
+/// `_CATEGORY_CODE_VALUE_PATTERN` 一致：可选字母前缀（≤4）+ 可选分隔符
+/// + 必须含数字 + 末尾允许字母数字/分隔符。覆盖 Y110 / A12-3 / 12345 /
+/// AB-12，拒绝中文与纯字母，长度超过 12 个字符不算短代码。
+fn is_category_code_value(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() > 12 {
+        return false;
+    }
+    let mut index = 0;
+    let mut letters = 0;
+    while index < chars.len() && chars[index].is_ascii_alphabetic() && letters < 4 {
+        index += 1;
+        letters += 1;
+    }
+    if index < chars.len() && matches!(chars[index], '-' | '_' | '.') {
+        index += 1;
+    }
+    if index >= chars.len() || !chars[index].is_ascii_digit() {
+        return false;
+    }
+    while index < chars.len() && chars[index].is_ascii_digit() {
+        index += 1;
+    }
+    chars[index..]
+        .iter()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
+}
+
+/// 类别列名中的数值字段黑名单（旧版 CATEGORY_NUMERIC_BLACKLIST）：
+/// 列名带这些词的列即使含“类别/类型”也不该当类别列。
+fn is_category_numeric_field(header: &str) -> bool {
+    [
+        "原值",
+        "累计折旧",
+        "成本",
+        "净值",
+        "残值",
+        "减值",
+        "折旧",
+        "金额",
+        "价值",
+    ]
+    .iter()
+    .any(|token| header.contains(token))
+}
+
+/// 列的样例值是否多数像短代码（前 8 个非空值中 ≥50% 呈代码形态）。
+/// 列名可能歧义——“资产分类”既可能存中文类型名也可能存 SAP 代码——
+/// 但值形态不会骗人，这是区分“分类代码列”与“类别名称列”的核心信号。
+fn category_values_look_like_codes(table: &Table, column: &str) -> bool {
+    let Some(index) = table
+        .headers
+        .iter()
+        .position(|header| header.trim() == column.trim())
+    else {
+        return false;
+    };
+    let mut total = 0usize;
+    let mut code_like = 0usize;
+    for row in table.rows.iter() {
+        let text = cell(row, index).trim();
+        if text.is_empty() {
+            continue;
+        }
+        total += 1;
+        if is_category_code_value(text) {
+            code_like += 1;
+        }
+        if total >= 8 {
+            break;
+        }
+    }
+    total > 0 && code_like as f64 / total as f64 >= 0.5
+}
+
 /// 收集某列的去重值：只扫前 2000 行、最多 200 个去重值，控制大表开销。
 /// 列不存在于表头时返回 None。
 fn column_value_set(table: &Table, column: &str) -> Option<std::collections::BTreeSet<String>> {
@@ -685,10 +761,62 @@ fn local_category_mismatch_suggestions(
     result
 }
 
+/// 单文件内的“类别列映射到了分类代码列”检测：不依赖两期对照——两期都
+/// 错映到同一个代码列时取值高度重叠，跨期检测看不出异常，这层兜底负责
+/// 拦住。当前类别列样例值多数像短代码（如 Y110）、且本表另有一列列名
+/// 带类别语义（类型/类别/分类/大类）、值为分类文本时，产出 review 建议，
+/// 与跨期检测共用 confidence 0.9 + action review 的兜底分流。
+fn local_category_code_suspects(
+    table: &Table,
+    mapping: Option<&Value>,
+    keys: Option<&Value>,
+    side: &str,
+) -> Vec<Value> {
+    let Some(column) = mapping_column(mapping, "category") else {
+        return Vec::new();
+    };
+    if !category_values_look_like_codes(table, &column) {
+        return Vec::new();
+    }
+    let keys = key_columns(keys);
+    for header in &table.headers {
+        let trimmed = header.trim();
+        if trimmed == column || keys.contains(trimmed) {
+            continue;
+        }
+        if !looks_like_category_text(header) || looks_like_id(header) {
+            continue;
+        }
+        if category_values_look_like_codes(table, header) {
+            continue;
+        }
+        let Some(values) = column_value_set(table, header) else {
+            continue;
+        };
+        if values.is_empty() {
+            continue;
+        }
+        return vec![json!({
+            "role": "category",
+            "file_side": side,
+            "suggested_column": header,
+            "confidence": 0.9,
+            "action": "review",
+            "reason": format!("当前类别列“{column}”的样例值多为 Y110 这类短代码，而“{header}”的值为分类文本，疑似类别应映射到“{header}”。")
+        })];
+    }
+    Vec::new()
+}
+
 pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
     let Some(object) = item.as_object_mut() else {
         return;
     };
+    if object.get("action").and_then(Value::as_str) == Some("clear") {
+        // FA 的本地疑点多数同时携带可信替代列，不能据此自动删映射。
+        // clear 保留下发供人工采纳，但模型无权自行签发自动清除许可。
+        object.insert("autoClearSafe".into(), Value::Bool(false));
+    }
     if let Some(raw) = object.get("suggested_mapping").cloned() {
         object.insert(
             "suggested_mapping".into(),
@@ -705,10 +833,15 @@ pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
         .map(str::to_owned);
     if let (Some(side), Some(column)) = (side, column) {
         let headers = payload_headers(payload, &side);
-        if !headers.is_empty() && resolve_payload_header(payload, &side, &column).is_none() {
-            object.insert("confidence".into(), json!(0.0));
-            object.insert("action".into(), json!("review"));
-            object.remove("suggested_column");
+        if !headers.is_empty() {
+            if let Some(header) = resolve_payload_header(payload, &side, &column) {
+                // 前端下拉框按原始表头精确匹配；不能把规范化后相同的模型写法原样返回。
+                object.insert("suggested_column".into(), Value::String(header));
+            } else {
+                object.insert("confidence".into(), json!(0.0));
+                object.insert("action".into(), json!("review"));
+                object.remove("suggested_column");
+            }
         }
     }
 }
@@ -831,7 +964,7 @@ fn main_llm_payload(params: &Value) -> Result<Value, AppError> {
         optional_header(params, "endHeaderRow")?,
         false,
     )?;
-    let suspect_mappings = local_category_mismatch_suggestions(
+    let mut suspect_mappings = local_category_mismatch_suggestions(
         &begin,
         params.get("beginMapping"),
         params.get("beginKeys"),
@@ -839,6 +972,18 @@ fn main_llm_payload(params: &Value) -> Result<Value, AppError> {
         params.get("endMapping"),
         params.get("endKeys"),
     );
+    suspect_mappings.extend(local_category_code_suspects(
+        &begin,
+        params.get("beginMapping"),
+        params.get("beginKeys"),
+        "file1",
+    ));
+    suspect_mappings.extend(local_category_code_suspects(
+        &end,
+        params.get("endMapping"),
+        params.get("endKeys"),
+        "file2",
+    ));
     Ok(json!({
         "file1": main_llm_side_payload(
             &begin,
@@ -1186,22 +1331,49 @@ fn export(
     pause: &PauseCheckpoint,
 ) -> Result<Value, AppError> {
     pause.wait()?;
+    // 表日是折旧活公式与跨期新增分析的截止口径；缺省兜底 2099 会把累计折旧
+    // 一路算到资产寿命尽头，差异列全是假差异，必须在入口拦下。
+    let balance_sheet_date = params
+        .get("balanceSheetDate")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    if parse_fa_date(&balance_sheet_date).is_none() {
+        return Err(error(
+            "FA_BS_DATE_REQUIRED",
+            "请填写资产负债表日（格式 YYYY-MM-DD）。",
+            Some(balance_sheet_date),
+        ));
+    }
     let result = merge(&params, progress, &cancel)?;
     pause.wait()?;
     check_cancel(&cancel)?;
-    progress("export", 3, 4, "正在生成 FA List、变动清单、汇总与透视表");
     let output = output_path(&params, &result.end.path)?;
-    if output
+    let is_csv = output
         .extension()
         .and_then(|v| v.to_str())
         .map(|v| v.eq_ignore_ascii_case("csv"))
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    let tax_analysis = if is_csv {
+        None
+    } else {
+        progress("analyze", 3, 5, "正在分析税法最低折旧年限");
+        let period_rows = build_depreciation_period(&result, &params);
+        Some(crate::fa_subtools::build_policy_tax_analysis(
+            &period_rows,
+            &params,
+            &cancel,
+            pause,
+        )?)
+    };
+    progress("export", 4, 5, "正在生成 FA List、变动清单、汇总与透视表");
+    if is_csv {
         pause.wait()?;
         write_csv(&output, &result, strings(params.get("selectedColumns")))?;
     } else {
         pause.wait()?;
-        write_xlsx(&output, &result, &params, &cancel)?;
+        write_xlsx_with_tax_analysis(&output, &result, &params, &cancel, tax_analysis.as_ref())?;
     }
     let mut export_message = "FA List 导出完成".to_owned();
     if !result.unmatched_addition.is_empty() || !result.unmatched_disposal.is_empty() {
@@ -1213,15 +1385,17 @@ fn export(
         write_unmatched(&path, &result, &cancel)?;
         export_message.push_str("；已生成未匹配资产变动清单");
     }
+    let completion_message = export_message.clone();
     let warnings = correction_warnings(&result, &params);
     if !warnings.is_empty() {
         export_message.push_str("===CORRECTION_WARNINGS===");
         export_message.push_str(&warnings.join("\n"));
     }
     check_cancel(&cancel)?;
-    progress("completed", 4, 4, "FA List 导出完成");
+    progress("completed", 5, 5, &completion_message);
     Ok(
         json!({"engine":"rust-fa","message":"完全外连接完成。","exportMessage":export_message,
+        "taxAnalysisCompleted":tax_analysis.as_ref().is_some_and(|analysis| analysis.completed),
         "rows":result.rows.len(),"columns":result_columns(&result,true).len(),"outputPaths":[output.to_string_lossy()]}),
     )
 }
@@ -1758,6 +1932,8 @@ pub(crate) fn suggest_mapping(table: &Table) -> Map<String, Value> {
     for (role, terms) in rules.into_iter().filter(|(r, _)| *r != "unused") {
         let value = if role == "matchKey" {
             pick_match_header(table, terms)
+        } else if role == "category" {
+            pick_category_header(table, terms)
         } else {
             pick_header(h, terms, false)
         };
@@ -1846,6 +2022,40 @@ fn pick_match_header(table: &Table, terms: &[&str]) -> Option<String> {
         })
         .max_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.cmp(&a.1)))
         .map(|(_, _, header)| header)
+}
+
+/// 类别列专用挑选：在词表两轮（先精确、再包含、按列序）匹配的基础上，
+/// 加两道旧版 Python `pick_fa_category_column` 就有的防线——列名命中
+/// 数值字段黑名单的直接跳过；样例值多数像短代码（如 Y110）的列让位，
+/// 继续找下一列。全部候选都被否掉时返回 None，交给 LLM 复核层补位。
+fn pick_category_header(table: &Table, terms: &[&str]) -> Option<String> {
+    let wanted = terms
+        .iter()
+        .map(|v| normalize_header(v))
+        .collect::<Vec<_>>();
+    for exact in [true, false] {
+        for header in &table.headers {
+            if is_category_numeric_field(header) {
+                continue;
+            }
+            let n = normalize_header(header);
+            let matched = wanted.iter().any(|term| {
+                if exact {
+                    n == *term
+                } else {
+                    !term.is_empty() && n.contains(term)
+                }
+            });
+            if !matched {
+                continue;
+            }
+            if category_values_look_like_codes(table, header) {
+                continue;
+            }
+            return Some(header.clone());
+        }
+    }
+    None
 }
 
 fn pick_header(headers: &[String], terms: &[&str], id: bool) -> Option<String> {
@@ -2008,7 +2218,7 @@ pub(crate) fn load_table(
         let hi = header
             .map(|v| v.saturating_sub(1))
             .unwrap_or_else(|| detect_header(&matrix));
-        let headers = unique_headers(matrix.get(hi).cloned().unwrap_or_default());
+        let headers = asset_headers(&matrix, hi);
         let mapping = suggest_mapping(&Table {
             path: path.into(),
             sheet: Some(sheet.clone()),
@@ -2052,11 +2262,12 @@ pub(crate) fn load_table(
         }
     }
     let (_, sheet, hi, matrix) = best.unwrap();
-    let headers = unique_headers(matrix.get(hi).cloned().unwrap_or_default());
+    let depth = asset_header_depth(&matrix, hi);
+    let headers = asset_headers(&matrix, hi);
     let width = headers.len();
     let rows = matrix
         .into_iter()
-        .skip(hi + 1)
+        .skip(hi + depth)
         .filter(|r| r.iter().any(|v| !v.trim().is_empty()))
         .map(|mut r| {
             r.resize(width, String::new());
@@ -2079,11 +2290,12 @@ fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
     let hi = header
         .map(|v| v.saturating_sub(1))
         .unwrap_or_else(|| detect_header(&matrix));
-    let headers = unique_headers(matrix.get(hi).cloned().unwrap_or_default());
+    let depth = asset_header_depth(&matrix, hi);
+    let headers = asset_headers(&matrix, hi);
     let width = headers.len();
     let rows = matrix
         .into_iter()
-        .skip(hi + 1)
+        .skip(hi + depth)
         .filter(|r| r.iter().any(|v| !v.trim().is_empty()))
         .map(|mut r| {
             r.resize(width, String::new());
@@ -2102,25 +2314,37 @@ fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
 }
 
 fn detect_header(rows: &[Vec<String>]) -> usize {
-    rows.iter()
-        .take(20)
-        .enumerate()
-        .max_by_key(|(_, r)| {
+    crate::header_detection::layout(
+        rows,
+        20,
+        |r| {
             let nonempty = r.iter().filter(|v| !v.trim().is_empty()).count();
-            let keywords = r
-                .iter()
-                .filter(|v| {
-                    [
-                        "编号", "编码", "名称", "类别", "原值", "折旧", "寿命", "日期",
-                    ]
-                    .iter()
-                    .any(|x| v.contains(x))
-                })
-                .count();
-            nonempty + keywords * 4
-        })
-        .map(|(i, _)| i)
-        .unwrap_or(0)
+            let keywords = r.iter().filter(|v| asset_header_hit(v)).count();
+            (nonempty + keywords * 4) as f64
+        },
+        asset_header_hit,
+        None,
+    )
+    .0
+}
+fn asset_header_hit(value: &str) -> bool {
+    [
+        "编号", "编码", "名称", "类别", "原值", "折旧", "寿命", "日期",
+    ]
+    .iter()
+    .any(|word| value.contains(word))
+}
+fn asset_header_depth(rows: &[Vec<String>], start: usize) -> usize {
+    crate::header_detection::depth(rows, start, asset_header_hit)
+}
+fn asset_headers(rows: &[Vec<String>], start: usize) -> Vec<String> {
+    let depth = asset_header_depth(rows, start);
+    if depth == 2 {
+        let width = rows[start].len().max(rows[start + 1].len());
+        unique_headers(crate::fx::merge_headers(&rows[start..start + depth], width))
+    } else {
+        unique_headers(rows.get(start).cloned().unwrap_or_default())
+    }
 }
 fn unique_headers(row: Vec<String>) -> Vec<String> {
     let mut counts = HashMap::new();
@@ -2272,7 +2496,7 @@ fn key_indexes(table: &Table, keys: &[String]) -> Vec<usize> {
 /// "2024固定资产卡片02.xlsx & Sheet1" — how the legacy exporter labelled which
 /// workbook/sheet a column came from.  Reviewers use it to tell the two periods
 /// apart at a glance, which a bare "期初"/"期末" suffix does not do.
-fn side_label(params: &Value, side: u8) -> String {
+pub(crate) fn side_label(params: &Value, side: u8) -> String {
     let (path_key, sheet_key) = if side == 1 {
         ("beginPath", "beginSheet")
     } else {
@@ -2518,6 +2742,16 @@ fn write_xlsx(
     params: &Value,
     cancel: &AtomicBool,
 ) -> Result<(), AppError> {
+    write_xlsx_with_tax_analysis(path, result, params, cancel, None)
+}
+
+fn write_xlsx_with_tax_analysis(
+    path: &Path,
+    result: &MergeResult,
+    params: &Value,
+    cancel: &AtomicBool,
+    tax_analysis: Option<&crate::fa_subtools::PolicyTaxAnalysis>,
+) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io_error)?;
     }
@@ -2693,7 +2927,19 @@ fn write_xlsx(
     check_cancel(cancel)?;
     write_business_sheets(&mut wb, result, params, &header, cancel)?;
     check_cancel(cancel)?;
-    write_depreciation_period_sheet(&mut wb, result, params, &header, cancel, "折旧期间")?;
+    if let Some(analysis) = tax_analysis {
+        crate::fa_subtools::write_depreciation_period_tax_sheet(
+            &mut wb,
+            result,
+            params,
+            &header,
+            cancel,
+            "折旧期间",
+            &analysis.rows,
+        )?;
+    } else {
+        write_depreciation_period_sheet(&mut wb, result, params, &header, cancel, "折旧期间")?;
+    }
     check_cancel(cancel)?;
     if fa_llm_enabled(params) {
         write_llm_analysis(&mut wb, result, params)?;
@@ -3674,9 +3920,26 @@ pub(crate) fn write_depreciation_period_sheet(
     cancel: &AtomicBool,
     sheet_name: &str,
 ) -> Result<(), AppError> {
+    let headers = depreciation_period_headers(params);
+    let rows = build_depreciation_period(result, params);
+    write_string_sheet_labelled(
+        wb,
+        sheet_name,
+        &headers.iter().map(String::as_str).collect::<Vec<_>>(),
+        &rows,
+        header,
+        None,
+        Some(cancel),
+        Some(&side_label(params, 2)),
+    )
+}
+
+/// Shared header contract for the regular FA sheet and the policy subtool.
+/// The policy exporter appends its three LLM/tax columns to these base columns.
+pub(crate) fn depreciation_period_headers(params: &Value) -> Vec<String> {
     // Legacy titled the paired columns with the mapped source column of each
     // workbook, and spelled the formula out in the last header.
-    let headers = [
+    vec![
         mapped_display_header(params, 1, "category", "期初资产类别"),
         mapped_display_header(params, 2, "category", "期末资产类别"),
         mapped_display_header(params, 1, "life", "期初使用寿命(月)"),
@@ -3688,17 +3951,7 @@ pub(crate) fn write_depreciation_period_sheet(
         "判断结果".to_owned(),
         "影响当年金额".to_owned(),
         "计算过程=年末原值*(1-年末残值率)/年末寿命-年末原值*(1-年初残值率)/年初寿命".to_owned(),
-    ];
-    write_string_sheet_labelled(
-        wb,
-        sheet_name,
-        &headers.iter().map(String::as_str).collect::<Vec<_>>(),
-        &build_depreciation_period(result, params),
-        header,
-        None,
-        Some(cancel),
-        Some(&side_label(params, 2)),
-    )
+    ]
 }
 
 fn write_anomaly_sheet(
@@ -4091,7 +4344,7 @@ struct DepGroup {
     end_residual_amount: f64,
 }
 
-fn build_depreciation_period(result: &MergeResult, params: &Value) -> Vec<Vec<String>> {
+pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) -> Vec<Vec<String>> {
     let begin_life_scale = life_scale(result, params, 1);
     let end_life_scale = life_scale(result, params, 2);
     #[derive(Clone)]
@@ -4991,6 +5244,9 @@ fn field_source_for_header(
             }
         }
         "折旧期间" | "折旧政策对比" => {
+            if header.contains("（LLM）") || header == "税法最低折旧年限（月）" {
+                return "LLM辅助/税法参考";
+            }
             if header.contains("判断") {
                 return "逻辑判断";
             }
@@ -6079,6 +6335,19 @@ fn xlsx_error(e: rust_xlsxwriter::XlsxError) -> AppError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn 通用表头固定资产双层与手动行号读取一致() {
+        let path = std::env::temp_dir().join(format!("asset-header-{}.csv", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "资产清单,资产清单,资产清单,资产清单\n资产信息,,金额,\n编号,名称,原值,折旧\n001,设备甲,100,10\n").unwrap();
+        let auto = super::load_csv(&path, None).unwrap();
+        assert_eq!(auto.header_row, 2);
+        assert_eq!(auto.headers[2], "金额-原值");
+        assert_eq!(auto.rows.len(), 1);
+        let manual = super::load_csv(&path, Some(2)).unwrap();
+        assert_eq!(auto.headers, manual.headers);
+        assert_eq!(auto.rows, manual.rows);
+        std::fs::remove_file(path).unwrap();
+    }
     use super::*;
 
     fn xlsx_entry(path: &Path, entry: &str) -> String {
@@ -6400,6 +6669,7 @@ mod tests {
         json!({"beginPath":begin,"endPath":end,"beginKeys":["卡片编号"],"endKeys":["卡片编号"],
             "beginMapping":{"category":"资产类别","name":"资产名称","originalValue":"原值","depreciation":"累计折旧","life":"使用寿命","residualRate":"残值率","startDate":"入账开始日期"},
             "endMapping":{"category":"资产类别","name":"资产名称","originalValue":"原值","depreciation":"累计折旧","life":"使用寿命","residualRate":"残值","startDate":"入账开始日期"},
+            "balanceSheetDate":"2025-12-31",
             "outputPath":dir.join("FA_List.xlsx")})
     }
     #[test]
@@ -6421,6 +6691,26 @@ mod tests {
         assert_eq!(output["stats"]["both"], 1);
         assert_eq!(output["stats"]["beginOnly"], 1);
         assert_eq!(output["stats"]["endOnly"], 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 表日是折旧活公式与跨期新增分析的截止口径；缺省兜底 2099 会把累计
+    /// 折旧一路算到资产寿命尽头，差异列全是假差异——导出必须在入口拦下。
+    #[test]
+    fn export_without_balance_sheet_date_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("fa-bsdate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut p = params(&dir);
+        if let Some(object) = p.as_object_mut() {
+            object.remove("balanceSheetDate");
+        }
+        let err = test_export(p).unwrap_err();
+        assert_eq!(err.code, "FA_BS_DATE_REQUIRED");
+        let mut invalid = params(&dir);
+        invalid["balanceSheetDate"] = json!("2025-13-01");
+        let err = test_export(invalid).unwrap_err();
+        assert_eq!(err.code, "FA_BS_DATE_REQUIRED");
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
@@ -6574,6 +6864,27 @@ mod tests {
         );
     }
     #[test]
+    fn llm_suggestion_uses_the_exact_source_header_for_ui_mapping() {
+        let value = finalize_llm_review(
+            json!({
+                "suggestions":[{
+                    "role":"current_year_dep",
+                    "file_side":"file2",
+                    "suggested_column":"本年至今折旧(会计准",
+                    "confidence":0.95,
+                    "action":"fill"
+                }],
+                "matchReview":{"action":"keep"}
+            }),
+            json!({"file2":{"headers":["本年至今折旧（会计准"]}}),
+            false,
+        );
+        assert_eq!(
+            value["autoApplied"][0]["suggested_column"],
+            "本年至今折旧（会计准"
+        );
+    }
+    #[test]
     fn llm_string_mapping_is_safely_normalized_instead_of_split_into_characters() {
         let value = finalize_llm_review(
             json!({
@@ -6684,6 +6995,123 @@ mod tests {
             &end,
             Some(&json!({"category": "资产分类"})),
             None,
+        );
+        assert!(suggestions.is_empty());
+    }
+    #[test]
+    fn 类别代码形态判断与短代码正则一致() {
+        for text in ["Y110", "A12-3", "12345", "AB-12", "0000", "1100003.1"] {
+            assert!(is_category_code_value(text), "{text} 应视为类别代码");
+        }
+        for text in [
+            "房屋及建筑物",
+            "机器设备",
+            "Office Equipment",
+            "ABCDE1",
+            "很长的资产类别名称超过十二个字符",
+        ] {
+            assert!(!is_category_code_value(text), "{text} 不应视为类别代码");
+        }
+    }
+    #[test]
+    fn suggest_mapping类别代码列让位给类别文本列() {
+        // 用户样例 2025固定资产卡片02.xlsx：A列“资产分类”存 Y110 代码，
+        // B列“资产类型描述”才是分类文本；类别不得再选中 A 列。
+        let table = in_memory_table(
+            &[
+                "资产分类",
+                "资产类型描述",
+                "资产编码",
+                "资产编码",
+                "资产描述",
+                "原值(期末)",
+                "累计折旧",
+            ],
+            &[
+                &[
+                    "Y110",
+                    "房屋及建筑物",
+                    "0000",
+                    "1100000",
+                    "冷量台土建安装",
+                    "269327.01",
+                    "60598.58",
+                ],
+                &[
+                    "Y110",
+                    "房屋及建筑物",
+                    "0000",
+                    "1100001",
+                    "实验室土建",
+                    "221480.58",
+                    "26577.68",
+                ],
+                &[
+                    "Y120",
+                    "机器设备",
+                    "0000",
+                    "1100002",
+                    "高速冲床",
+                    "36416.64",
+                    "4370",
+                ],
+            ],
+        );
+        let mapping = suggest_mapping(&table);
+        assert_eq!(mapping["category"].as_str(), Some("资产类型描述"));
+    }
+    #[test]
+    fn suggest_mapping类别文本列不受嗅探影响() {
+        let table = in_memory_table(
+            &["资产编码", "资产类别", "资产名称", "原值", "累计折旧"],
+            &[
+                &["E001", "房屋及建筑物", "冷量台", "100", "10"],
+                &["E002", "机器设备", "冲床", "200", "20"],
+            ],
+        );
+        let mapping = suggest_mapping(&table);
+        assert_eq!(mapping["category"].as_str(), Some("资产类别"));
+        assert_eq!(mapping["matchKey"].as_str(), Some("资产编码"));
+    }
+    #[test]
+    fn 两期同映代码列时单文件值形态预警兜底() {
+        // 两期都把类别映到同一个代码列时取值高度重叠，跨期检测看不出
+        // 异常；单文件内“类别列值像代码+存在文本类别列”必须各自报警，
+        // LLM 漏报时经 suspectMappings 兜底进复核链路。
+        let table = in_memory_table(
+            &["资产编码", "资产分类", "资产类型描述"],
+            &[
+                &["E001", "Y110", "房屋及建筑物"],
+                &["E002", "Y120", "机器设备"],
+                &["E003", "Y130", "运输工具"],
+            ],
+        );
+        let suggestions = local_category_code_suspects(
+            &table,
+            Some(&json!({"category": "资产分类"})),
+            Some(&json!(["资产编码"])),
+            "file2",
+        );
+        assert_eq!(suggestions.len(), 1);
+        let item = &suggestions[0];
+        assert_eq!(item["suggested_column"], "资产类型描述");
+        assert_eq!(item["action"], "review");
+        assert_eq!(item["confidence"], 0.9);
+    }
+    #[test]
+    fn 类别列值正常时单文件值形态预警保持沉默() {
+        let table = in_memory_table(
+            &["资产编码", "资产类别", "资产名称"],
+            &[
+                &["E001", "房屋及建筑物", "冷量台"],
+                &["E002", "机器设备", "冲床"],
+            ],
+        );
+        let suggestions = local_category_code_suspects(
+            &table,
+            Some(&json!({"category": "资产类别"})),
+            None,
+            "file1",
         );
         assert!(suggestions.is_empty());
     }
@@ -7535,6 +7963,7 @@ mod tests {
         p["balanceSheetDate"] = json!("2025-12-31");
         p["__settings"] = json!({"llm":{"enabled":true}});
         p["__llmAnalysisMock"] = json!({"title":"模拟 LLM 分析"});
+        p["__policyTaxLlmMock"] = json!({"items":[]});
         p["pivotConfig"] = json!({
             "rows":["资产类别"],
             "columns":["数据来源"],
@@ -7564,6 +7993,19 @@ mod tests {
                 "异常清单",
             ]
         );
+        let period = wb.worksheet_range("折旧期间").unwrap();
+        let period_headers = period
+            .rows()
+            .next()
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(period_headers.ends_with(&[
+            "税法资产类别（LLM）".to_owned(),
+            "税法最低折旧年限（月）".to_owned(),
+            "税法年限分析（LLM）".to_owned(),
+        ]));
         let pivot = wb.worksheet_range("数据透视表").unwrap();
         let pivot_headers = pivot
             .rows()
@@ -7769,8 +8211,18 @@ mod tests {
         p["endMapping"] = json!({"category":"资产类别","originalValue":"原值"});
         p["__settings"] = json!({"llm":{"enabled":false}});
         test_export(p).unwrap();
-        let wb = open_workbook_auto(dir.join("FA_List.xlsx")).unwrap();
+        let mut wb = open_workbook_auto(dir.join("FA_List.xlsx")).unwrap();
         assert!(!wb.sheet_names().contains(&"LLM分析".to_owned()));
+        let period = wb.worksheet_range("折旧期间").unwrap();
+        let headers = period.rows().next().unwrap().to_vec();
+        assert_eq!(
+            headers[headers.len() - 3].to_string(),
+            "税法资产类别（LLM）"
+        );
+        assert_eq!(
+            headers[headers.len() - 1].to_string(),
+            "税法年限分析（LLM）"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -7788,6 +8240,7 @@ mod tests {
             "beginPath":begin,"endPath":end,"beginKeys":["编号"],"endKeys":["编号"],
             "beginMapping":{"name":"名称","originalValue":"原值"},
             "endMapping":{"name":"名称","originalValue":"原值"},
+            "balanceSheetDate":"2025-12-31",
             "outputPath":output,"__settings":{"llm":{"enabled":false}}
         });
         test_export(p).unwrap();
@@ -7900,11 +8353,26 @@ mod tests {
 
     #[test]
     #[ignore = "requires the user's long-asset sample workbook"]
+    #[test]
     fn real_long_asset_sample_selects_the_2024_detail_sheet() {
         let path = std::env::var_os("FA_LONG_ASSET_SAMPLE").expect("FA_LONG_ASSET_SAMPLE");
         let table = load_table(Path::new(&path), None, None, true).unwrap();
         assert_eq!(table.sheet.as_deref(), Some("固定资产明细 241231"));
         assert_eq!(table.rows.len(), 5_449);
+    }
+
+    /// 用户样例 2025固定资产卡片02.xlsx（A列“资产分类”存 Y110 代码）：
+    /// 类别必须让位给“资产类型描述”，资产ID 仍落在唯一率更高的资产编码列。
+    #[test]
+    #[ignore = "requires FA_CATEGORY_CODE_SAMPLE pointing at a real card workbook with a code-shaped 资产分类 column"]
+    fn real_category_code_sample_maps_text_description_column() {
+        let path = std::env::var_os("FA_CATEGORY_CODE_SAMPLE").expect("FA_CATEGORY_CODE_SAMPLE");
+        let table = load_table(Path::new(&path), Some("2512"), None, true).unwrap();
+        let mapping = suggest_mapping(&table);
+        assert_eq!(mapping["category"].as_str(), Some("资产类型描述"));
+        // 两列同名“资产编码”：前缀列（0000/0001）几乎全重复，读取时第二列
+        // 去重为“资产编码.1”，唯一率打分应选中它作为资产ID。
+        assert_eq!(mapping["matchKey"].as_str(), Some("资产编码.1"));
     }
 
     #[test]

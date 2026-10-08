@@ -1,6 +1,15 @@
 .deposit-page {
   padding-bottom: 40px;
 }
+.deposit-page .fx-bridge-equation {
+  align-items: stretch;
+}
+.deposit-page .fx-bridge-equation .fx-bridge-metric {
+  align-content: center;
+}
+.deposit-page .fx-bridge-equation .fx-operator {
+  align-self: center;
+}
 /* 映射未补齐的行内警告做成小警告条：统一警告令牌，不再是橄榄色裸文本。 */
 .deposit-page .fx-warning {
   color: var(--warning-fg);
@@ -56,40 +65,132 @@
   margin: 0 2px;
   color: var(--foreground);
 }
-.deposit-account-list label,
-.deposit-account-head {
-  grid-template-columns: minmax(180px, 1fr) 220px minmax(220px, 300px);
+.deposit-account-list {
+  max-height: 520px;
+  margin-top: var(--sp-3);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
 }
-.deposit-account-head {
+
+.deposit-account-more {
+  display: flex;
+  justify-content: center;
+  padding-top: 12px;
+}
+.deposit-account-list table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.deposit-account-list th,
+.deposit-account-list td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+.deposit-account-list th {
   position: sticky;
   top: 0;
   z-index: 1;
-  display: grid;
-  gap: 12px;
-  padding: 4px 0 6px;
-  border-bottom: 1px solid var(--border);
-  background: var(--card);
+  background: var(--muted);
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: var(--fs-xs);
+}
+.deposit-account-list tr:last-child td {
+  border-bottom: 0;
+}
+.deposit-account-list .deposit-review-account {
+  min-width: 22rem;
+}
+.deposit-account-list .deposit-review-currency-col {
+  min-width: 6rem;
+}
+.deposit-account-list .deposit-account-amount {
+  min-width: 9rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.deposit-account-list .deposit-pct input {
+  width: 84px;
+}
+.deposit-account-list select {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 28px 6px 9px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--control-bg);
+  color: var(--foreground);
 }
 .deposit-account-tier {
   display: flex;
   gap: 6px;
   min-width: 0;
+  width: max-content;
+  max-width: 100%;
 }
 .deposit-account-tier select {
   min-width: 0;
-  flex: 1 1 0;
+  flex: 0 1 148px;
+  width: 148px;
+}
+/* 这些枚举的最长文案由内置利率档位决定。下拉框保持可读的固定宽度，
+   不因表格剩余空间被拉成长条；定期/通知存款出现期限时则让短选项并列。 */
+.deposit-account-list .deposit-account-role {
+  width: 196px;
+  max-width: 100%;
+}
+.deposit-account-list .deposit-account-category {
+  width: 148px;
+  max-width: 100%;
+}
+.deposit-account-list .deposit-account-term {
+  flex-basis: 112px;
+  width: 112px;
 }
 .deposit-account-na {
   color: var(--muted-foreground);
   text-align: center;
 }
-@media (max-width: 900px) {
-  .deposit-account-list label,
-  .deposit-account-head {
-    grid-template-columns: minmax(140px, 1fr) 190px minmax(180px, 240px);
-  }
+/* 多主体账套：仅实际存在多个主体且映射有效时增加主体列。 */
+.deposit-account-list table.deposit-multi-entity th:first-child,
+.deposit-account-list table.deposit-multi-entity td:first-child {
+  min-width: 96px;
+}
+/* 按币种拆出的后续行仍显示完整科目身份。 */
+.deposit-account-sub td {
+  color: var(--muted-foreground);
+}
+.deposit-account-continuation {
+  padding-left: 34px;
+}
+/* 步骤卡头与借款利息第二步同款：主色 kicker 点题，汇总徽章靠右。 */
+.deposit-confirm-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+.deposit-confirm-heading > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+.deposit-section-kicker {
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.deposit-confirm-heading .deposit-account-summary {
+  margin: 0;
 }
 /* 只剩两个参数：日期是短字段，定宽即可；输出文件（输入框＋「选择位置」
    按钮）吃掉剩余宽度——等宽平分会让日期框空出大半，视觉失衡。 */
@@ -115,7 +216,7 @@
   padding: 6px 9px;
   border: 1px solid var(--control-border);
   border-radius: 8px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
 }
 /* 输出文件格子里输入框和"选择位置"按钮并排，按钮不单独占一格，
@@ -161,6 +262,52 @@
 .deposit-rate-head p {
   margin: 0;
 }
+.deposit-result-filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.deposit-result-filters > input {
+  width: min(420px, 100%);
+}
+.deposit-result-filters label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.deposit-result-filters label input {
+  width: 16px;
+  height: 16px;
+}
+.deposit-table td.deposit-empty-filter {
+  padding: 28px;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+.deposit-rate-limit-hint {
+  margin: 0 0 10px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.deposit-validation-warnings {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+.deposit-validation-warnings p {
+  margin: var(--sp-1) 0 0;
+}
+.deposit-validation-warnings ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
 .deposit-rate-head p {
   margin-top: 5px;
   color: var(--muted-foreground);
@@ -173,17 +320,25 @@
   border-radius: 10px;
 }
 .deposit-table > table {
-  width: 100%;
-  min-width: 1420px;
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
   border-collapse: collapse;
+  /* 固定列（前两列）必须涂不透明底色盖住横向滚动的内容；普通单元格若保持
+     透明就会透出页面底色，与固定列的卡片色形成色块割裂。整表统一上底色。 */
+  background: var(--card);
 }
 .deposit-table th,
 .deposit-table td {
   padding: 9px 10px;
   border-bottom: 1px solid var(--border);
-  text-align: right;
-  white-space: nowrap;
+  vertical-align: middle;
+  text-align: left;
+  white-space: normal;
   font-variant-numeric: tabular-nums;
+}
+.deposit-table td {
+  background: var(--deposit-row-bg, var(--card));
 }
 .deposit-table th {
   position: sticky;
@@ -192,18 +347,78 @@
   background: var(--muted);
   font-size: 12px;
 }
-.deposit-table th:nth-child(-n + 4),
-.deposit-table td:nth-child(-n + 4),
-.deposit-table th:nth-child(6),
-.deposit-table td:nth-child(6),
-.deposit-table th:last-child,
-.deposit-table td:last-child {
-  text-align: left;
+.deposit-table > table > thead th:first-child,
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 148px;
+  min-width: 148px;
+  background: var(--deposit-row-bg, var(--card));
+  white-space: nowrap;
 }
-.deposit-table td:nth-child(2) {
-  max-width: 260px;
+.deposit-table > table > thead th:first-child {
+  z-index: 3;
+  background: var(--muted);
+}
+.deposit-table > table > thead th:nth-child(2),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(2) {
+  position: sticky;
+  left: 148px;
+  z-index: 2;
+  width: 312px;
+  min-width: 312px;
+  background: var(--deposit-row-bg, var(--card));
+}
+.deposit-validation-warnings summary {
+  cursor: pointer;
+}
+.deposit-validation-warnings summary small {
+  margin-left: var(--sp-2);
+  font-size: var(--fs-xs);
+}
+.deposit-table .deposit-account-cell strong,
+.deposit-table .deposit-account-cell small {
+  display: block;
+  max-width: 292px;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deposit-table > table > thead th:nth-child(2) {
+  z-index: 3;
+  background: var(--muted);
+}
+.deposit-table > table > thead th:nth-child(3),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(3) {
+  min-width: 150px;
+}
+.deposit-table > table > thead th:nth-child(9),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(9) {
+  width: 150px;
+  min-width: 130px;
+  overflow-wrap: anywhere;
+}
+.deposit-table > table > thead th:nth-child(n + 4):nth-child(-n + 8),
+.deposit-table
+  > table
+  > tbody
+  > tr:not(.deposit-month-row)
+  > td:nth-child(n + 4):nth-child(-n + 8),
+.deposit-table > table > thead th:nth-child(10),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(10) {
+  min-width: 110px;
+  text-align: right;
+  white-space: nowrap;
+}
+.deposit-table > table > thead th:nth-child(11),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(11),
+.deposit-table > table > thead th:nth-child(12),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(12),
+.deposit-table > table > thead th:nth-child(13),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(13) {
+  min-width: 88px;
+  text-align: center;
 }
 .deposit-table select,
 .deposit-table input {
@@ -211,15 +426,62 @@
   padding: 5px 8px;
   border: 1px solid var(--control-border);
   border-radius: 7px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
 }
 .deposit-table input {
   width: 104px;
   text-align: right;
 }
-.deposit-review-row {
-  background: color-mix(in srgb, var(--warning-border) 12%, transparent);
+.deposit-table > table > tbody > .deposit-review-row {
+  --deposit-row-bg: color-mix(in srgb, var(--warning-border) 12%, var(--card));
+}
+.deposit-table > table > tbody > tr > .deposit-difference {
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-weight: 700;
+}
+.deposit-export-done {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--success-border);
+  border-radius: 10px;
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+.deposit-export-done p {
+  flex: 1 1 560px;
+  margin: 0;
+  line-height: 1.55;
+}
+.deposit-account-cell strong,
+.deposit-account-cell small {
+  display: block;
+}
+.deposit-account-cell strong {
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.deposit-account-cell small {
+  margin-top: 3px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.deposit-average-detail {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  white-space: nowrap;
+}
+.deposit-average-detail > span {
+  color: var(--muted-foreground);
+  font-size: 12px;
 }
 .deposit-ok,
 .deposit-warn {
@@ -324,7 +586,7 @@
   padding: 4px 8px;
   border: 1px solid var(--control-border);
   border-radius: 7px;
-  background: var(--background);
+  background: var(--control-bg);
   color: var(--foreground);
   text-align: right;
 }
@@ -431,6 +693,18 @@
   background: var(--warning-bg);
 }
 .deposit-table input.deposit-rate-missing::placeholder {
+  color: var(--warning-fg);
+}
+/* 第三步利率只读展示：利率改在第二步维护，这里仅披露测算采用值。 */
+.deposit-rate-readonly {
+  font-variant-numeric: tabular-nums;
+}
+span.deposit-rate-missing {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--warning-bg);
   color: var(--warning-fg);
 }
 .deposit-missing {
@@ -582,4 +856,74 @@
   margin: 8px 0 0;
   color: var(--muted-foreground);
   font-size: 12px;
+}
+.deposit-notice {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+.deposit-notice h4,
+.deposit-notice p,
+.deposit-notice ul {
+  margin: 0;
+}
+.deposit-notice h4 {
+  font-size: 14px;
+}
+.deposit-notice p,
+.deposit-notice li {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.deposit-notice ul {
+  display: grid;
+  gap: 4px;
+  padding-left: 20px;
+}
+.deposit-currency-mode {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted);
+  font-size: 13px;
+}
+
+/* === UI 审计修复 P1-7（2026-09-24）：结果明细表金额列可读性 ===
+   症状同借款利息结果表：相邻金额列粘连、最右列被视口右缘裁切且无
+   横向滚动提示。追加规则（后胜覆盖，不改既有规则）：金额列最小列宽
+   加大 + 列间细分隔线兜底，容器滚动条高对比提示。选择器沿用上方
+   :not(.deposit-month-row) 结构，不波及展开的按月明细行。 */
+.deposit-table {
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 80%, transparent) transparent;
+}
+
+.deposit-table::-webkit-scrollbar {
+  height: 12px;
+}
+
+.deposit-table::-webkit-scrollbar-thumb {
+  min-width: 56px;
+  background-color: color-mix(in srgb, var(--text-muted) 80%, transparent);
+}
+
+.deposit-table > table > thead th:nth-child(n + 5):nth-child(-n + 8),
+.deposit-table > table > thead th:nth-child(10),
+.deposit-table
+  > table
+  > tbody
+  > tr:not(.deposit-month-row)
+  > td:nth-child(n + 5):nth-child(-n + 8),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(10) {
+  min-width: 130px;
+  box-shadow: inset 1px 0 0 color-mix(in srgb, var(--border) 65%, transparent);
 }

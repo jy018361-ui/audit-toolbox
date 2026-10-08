@@ -28,7 +28,10 @@ describe("ConfirmDialog", () => {
     expect(
       await screen.findByText("该项目下的全部资料会一并删除，且无法恢复。"),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    const destructive = screen.getByRole("button", { name: "删除" });
+    expect(destructive).toHaveAttribute("data-variant", "destructive");
+    expect(destructive.className).not.toContain("bg-[var(--danger-fg)]");
+    fireEvent.click(destructive);
 
     await waitFor(() => expect(result).toBe(true));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -44,7 +47,7 @@ describe("ConfirmDialog", () => {
       result = value;
     });
 
-    expect(await screen.findByRole("button", { name: "确认" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "确认" })).toHaveAttribute("data-variant", "default");
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
 
     await waitFor(() => expect(result).toBe(false));
@@ -72,5 +75,21 @@ describe("ConfirmDialog", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
     await waitFor(() => expect(second).toBe(true));
+  });
+
+  it("长标题限制两行，重复错误合并且正文独立滚动", async () => {
+    render(<ConfirmDialogHost />);
+    void confirmDialog({
+      title: "超长确认标题".repeat(20),
+      message: "无法读取工作簿，请关闭 Excel 后重试。".repeat(8),
+      tone: "danger",
+    });
+
+    const title = await screen.findByRole("heading");
+    expect(title).toHaveClass("line-clamp-2");
+    expect(title).toHaveAttribute("title", "超长确认标题".repeat(20));
+    expect(screen.getByText(/已合并 7 条重复信息/)).toBeInTheDocument();
+    expect(document.querySelector(".confirm-dialog-body")).toHaveClass("overflow-y-auto");
+    expect(document.querySelector(".confirm-dialog-footer")).toHaveClass("shrink-0");
   });
 });

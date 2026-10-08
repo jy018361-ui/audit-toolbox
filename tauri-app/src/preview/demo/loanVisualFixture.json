@@ -1,0 +1,2282 @@
+[
+  {
+    "key": "200101001",
+    "identity": "200101001",
+    "code": "200101001",
+    "name": "短期借款-工商银行园区支行-第1项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "currency": "USD",
+    "account": "200101001-短期借款-工商银行园区支行-第1项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "opening": 2900000,
+    "closing": 2875000,
+    "occurrence": 85000,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 2900000,
+        "closing": 2875000
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101001",
+    "identity": "250101001",
+    "code": "250101001",
+    "name": "长期借款-股东借款(美元)-第1项目",
+    "currency": "CNY",
+    "account": "250101001-长期借款-股东借款(美元)-第1项目",
+    "opening": 2953017,
+    "closing": 2928111,
+    "occurrence": 87160,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 2953017,
+        "closing": 2928111
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301001",
+    "identity": "660301001",
+    "code": "660301001",
+    "name": "财务费用-利息支出-第1项目",
+    "currency": "CNY",
+    "account": "660301001-财务费用-利息支出-第1项目",
+    "opening": 3006034,
+    "closing": 2981222,
+    "occurrence": 89320,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 3006034,
+        "closing": 2981222
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101001",
+    "identity": "100101001",
+    "code": "100101001",
+    "name": "银行存款-中国银行苏州分行(美元户)-第1项目",
+    "currency": "CNY",
+    "account": "100101001-银行存款-中国银行苏州分行(美元户)-第1项目",
+    "opening": 3059051,
+    "closing": 3034333,
+    "occurrence": 91480,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 3059051,
+        "closing": 3034333
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301001",
+    "identity": "112301001",
+    "code": "112301001",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第1项目",
+    "currency": "CNY",
+    "account": "112301001-应收账款-大型工程项目跨区域结算及年度清算往来款-第1项目",
+    "opening": -3112068,
+    "closing": -3136692,
+    "occurrence": 93640,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": -3112068,
+        "closing": -3136692
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401001",
+    "identity": "160401001",
+    "code": "160401001",
+    "name": "固定资产-数据中心服务器及配套网络设备-第1项目",
+    "currency": "CNY",
+    "account": "160401001-固定资产-数据中心服务器及配套网络设备-第1项目",
+    "opening": 3165085,
+    "closing": 3140555,
+    "occurrence": 95800,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 3165085,
+        "closing": 3140555
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101002",
+    "identity": "200101002",
+    "code": "200101002",
+    "name": "短期借款-工商银行园区支行-第2项目",
+    "currency": "CNY",
+    "account": "200101002-短期借款-工商银行园区支行-第2项目",
+    "opening": 3218102,
+    "closing": 3193666,
+    "occurrence": 97960,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 3218102,
+        "closing": 3193666
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101002",
+    "identity": "250101002",
+    "code": "250101002",
+    "name": "长期借款-股东借款(美元)-第2项目",
+    "currency": "CNY",
+    "account": "250101002-长期借款-股东借款(美元)-第2项目",
+    "opening": 3271119,
+    "closing": 3246777,
+    "occurrence": 100120,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 3271119,
+        "closing": 3246777
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301002",
+    "identity": "660301002",
+    "code": "660301002",
+    "name": "财务费用-利息支出-第2项目",
+    "currency": "CNY",
+    "account": "660301002-财务费用-利息支出-第2项目",
+    "opening": 3324136,
+    "closing": 3299888,
+    "occurrence": 102280,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 3324136,
+        "closing": 3299888
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101002",
+    "identity": "100101002",
+    "code": "100101002",
+    "name": "银行存款-中国银行苏州分行(美元户)-第2项目",
+    "currency": "CNY",
+    "account": "100101002-银行存款-中国银行苏州分行(美元户)-第2项目",
+    "opening": 3377153,
+    "closing": 3352999,
+    "occurrence": 104440,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 3377153,
+        "closing": 3352999
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301002",
+    "identity": "112301002",
+    "code": "112301002",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第2项目",
+    "currency": "CNY",
+    "account": "112301002-应收账款-大型工程项目跨区域结算及年度清算往来款-第2项目",
+    "opening": 3430170,
+    "closing": 3406110,
+    "occurrence": 106600,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 3430170,
+        "closing": 3406110
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401002",
+    "identity": "160401002",
+    "code": "160401002",
+    "name": "固定资产-数据中心服务器及配套网络设备-第2项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "currency": "CNY",
+    "account": "160401002-固定资产-数据中心服务器及配套网络设备-第2项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "opening": 3483187,
+    "closing": 3459221,
+    "occurrence": 108760,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 3483187,
+        "closing": 3459221
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101003",
+    "identity": "200101003",
+    "code": "200101003",
+    "name": "短期借款-工商银行园区支行-第3项目",
+    "currency": "CNY",
+    "account": "200101003-短期借款-工商银行园区支行-第3项目",
+    "opening": 3536204,
+    "closing": 3512332,
+    "occurrence": 110920,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 3536204,
+        "closing": 3512332
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101003",
+    "identity": "250101003",
+    "code": "250101003",
+    "name": "长期借款-股东借款(美元)-第3项目",
+    "currency": "CNY",
+    "account": "250101003-长期借款-股东借款(美元)-第3项目",
+    "opening": 3589221,
+    "closing": 3565443,
+    "occurrence": 113080,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 3589221,
+        "closing": 3565443
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301003",
+    "identity": "660301003",
+    "code": "660301003",
+    "name": "财务费用-利息支出-第3项目",
+    "currency": "CNY",
+    "account": "660301003-财务费用-利息支出-第3项目",
+    "opening": 3642238,
+    "closing": 3618554,
+    "occurrence": 115240,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 3642238,
+        "closing": 3618554
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101003",
+    "identity": "100101003",
+    "code": "100101003",
+    "name": "银行存款-中国银行苏州分行(美元户)-第3项目",
+    "currency": "CNY",
+    "account": "100101003-银行存款-中国银行苏州分行(美元户)-第3项目",
+    "opening": 3695255,
+    "closing": 3671665,
+    "occurrence": 117400,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 3695255,
+        "closing": 3671665
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301003",
+    "identity": "112301003",
+    "code": "112301003",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第3项目",
+    "currency": "CNY",
+    "account": "112301003-应收账款-大型工程项目跨区域结算及年度清算往来款-第3项目",
+    "opening": -3748272,
+    "closing": -3771768,
+    "occurrence": 119560,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": -3748272,
+        "closing": -3771768
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401003",
+    "identity": "160401003",
+    "code": "160401003",
+    "name": "固定资产-数据中心服务器及配套网络设备-第3项目",
+    "currency": "USD",
+    "account": "160401003-固定资产-数据中心服务器及配套网络设备-第3项目",
+    "opening": 3801289,
+    "closing": 3777887,
+    "occurrence": 121720,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 3801289,
+        "closing": 3777887
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101004",
+    "identity": "200101004",
+    "code": "200101004",
+    "name": "短期借款-工商银行园区支行-第4项目",
+    "currency": "CNY",
+    "account": "200101004-短期借款-工商银行园区支行-第4项目",
+    "opening": 3854306,
+    "closing": 3830998,
+    "occurrence": 123880,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 3854306,
+        "closing": 3830998
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101004",
+    "identity": "250101004",
+    "code": "250101004",
+    "name": "长期借款-股东借款(美元)-第4项目",
+    "currency": "CNY",
+    "account": "250101004-长期借款-股东借款(美元)-第4项目",
+    "opening": 3907323,
+    "closing": 3884109,
+    "occurrence": 126040,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 3907323,
+        "closing": 3884109
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301004",
+    "identity": "660301004",
+    "code": "660301004",
+    "name": "财务费用-利息支出-第4项目",
+    "currency": "CNY",
+    "account": "660301004-财务费用-利息支出-第4项目",
+    "opening": 3960340,
+    "closing": 3937220,
+    "occurrence": 128200,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 3960340,
+        "closing": 3937220
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101004",
+    "identity": "100101004",
+    "code": "100101004",
+    "name": "银行存款-中国银行苏州分行(美元户)-第4项目",
+    "currency": "CNY",
+    "account": "100101004-银行存款-中国银行苏州分行(美元户)-第4项目",
+    "opening": 4013357,
+    "closing": 3990331,
+    "occurrence": 130360,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 4013357,
+        "closing": 3990331
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301004",
+    "identity": "112301004",
+    "code": "112301004",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第4项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "currency": "CNY",
+    "account": "112301004-应收账款-大型工程项目跨区域结算及年度清算往来款-第4项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "opening": 4066374,
+    "closing": 4043442,
+    "occurrence": 132520,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 4066374,
+        "closing": 4043442
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401004",
+    "identity": "160401004",
+    "code": "160401004",
+    "name": "固定资产-数据中心服务器及配套网络设备-第4项目",
+    "currency": "CNY",
+    "account": "160401004-固定资产-数据中心服务器及配套网络设备-第4项目",
+    "opening": 4119391,
+    "closing": 4096553,
+    "occurrence": 134680,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 4119391,
+        "closing": 4096553
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101005",
+    "identity": "200101005",
+    "code": "200101005",
+    "name": "短期借款-工商银行园区支行-第5项目",
+    "currency": "CNY",
+    "account": "200101005-短期借款-工商银行园区支行-第5项目",
+    "opening": 4172408,
+    "closing": 4149664,
+    "occurrence": 136840,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 4172408,
+        "closing": 4149664
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101005",
+    "identity": "250101005",
+    "code": "250101005",
+    "name": "长期借款-股东借款(美元)-第5项目",
+    "currency": "CNY",
+    "account": "250101005-长期借款-股东借款(美元)-第5项目",
+    "opening": 4225425,
+    "closing": 4202775,
+    "occurrence": 139000,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 4225425,
+        "closing": 4202775
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301005",
+    "identity": "660301005",
+    "code": "660301005",
+    "name": "财务费用-利息支出-第5项目",
+    "currency": "CNY",
+    "account": "660301005-财务费用-利息支出-第5项目",
+    "opening": 4278442,
+    "closing": 4255886,
+    "occurrence": 141160,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 4278442,
+        "closing": 4255886
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101005",
+    "identity": "100101005",
+    "code": "100101005",
+    "name": "银行存款-中国银行苏州分行(美元户)-第5项目",
+    "currency": "CNY",
+    "account": "100101005-银行存款-中国银行苏州分行(美元户)-第5项目",
+    "opening": 4331459,
+    "closing": 4308997,
+    "occurrence": 143320,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 4331459,
+        "closing": 4308997
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301005",
+    "identity": "112301005",
+    "code": "112301005",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第5项目",
+    "currency": "CNY",
+    "account": "112301005-应收账款-大型工程项目跨区域结算及年度清算往来款-第5项目",
+    "opening": -4384476,
+    "closing": -4406844,
+    "occurrence": 145480,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": -4384476,
+        "closing": -4406844
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401005",
+    "identity": "160401005",
+    "code": "160401005",
+    "name": "固定资产-数据中心服务器及配套网络设备-第5项目",
+    "currency": "CNY",
+    "account": "160401005-固定资产-数据中心服务器及配套网络设备-第5项目",
+    "opening": 4437493,
+    "closing": 4415219,
+    "occurrence": 147640,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 4437493,
+        "closing": 4415219
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101006",
+    "identity": "200101006",
+    "code": "200101006",
+    "name": "短期借款-工商银行园区支行-第6项目",
+    "currency": "CNY",
+    "account": "200101006-短期借款-工商银行园区支行-第6项目",
+    "opening": 4490510,
+    "closing": 4468330,
+    "occurrence": 149800,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 4490510,
+        "closing": 4468330
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101006",
+    "identity": "250101006",
+    "code": "250101006",
+    "name": "长期借款-股东借款(美元)-第6项目",
+    "currency": "CNY",
+    "account": "250101006-长期借款-股东借款(美元)-第6项目",
+    "opening": 4543527,
+    "closing": 4521441,
+    "occurrence": 151960,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 4543527,
+        "closing": 4521441
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301006",
+    "identity": "660301006",
+    "code": "660301006",
+    "name": "财务费用-利息支出-第6项目",
+    "currency": "CNY",
+    "account": "660301006-财务费用-利息支出-第6项目",
+    "opening": 4596544,
+    "closing": 4574552,
+    "occurrence": 154120,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 4596544,
+        "closing": 4574552
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101006",
+    "identity": "100101006",
+    "code": "100101006",
+    "name": "银行存款-中国银行苏州分行(美元户)-第6项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "currency": "CNY",
+    "account": "100101006-银行存款-中国银行苏州分行(美元户)-第6项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "opening": 4649561,
+    "closing": 4627663,
+    "occurrence": 156280,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 4649561,
+        "closing": 4627663
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301006",
+    "identity": "112301006",
+    "code": "112301006",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第6项目",
+    "currency": "USD",
+    "account": "112301006-应收账款-大型工程项目跨区域结算及年度清算往来款-第6项目",
+    "opening": 4702578,
+    "closing": 4680774,
+    "occurrence": 158440,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 4702578,
+        "closing": 4680774
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401006",
+    "identity": "160401006",
+    "code": "160401006",
+    "name": "固定资产-数据中心服务器及配套网络设备-第6项目",
+    "currency": "CNY",
+    "account": "160401006-固定资产-数据中心服务器及配套网络设备-第6项目",
+    "opening": 4755595,
+    "closing": 4733885,
+    "occurrence": 160600,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 4755595,
+        "closing": 4733885
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101007",
+    "identity": "200101007",
+    "code": "200101007",
+    "name": "短期借款-工商银行园区支行-第7项目",
+    "currency": "CNY",
+    "account": "200101007-短期借款-工商银行园区支行-第7项目",
+    "opening": 4808612,
+    "closing": 4786996,
+    "occurrence": 162760,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 4808612,
+        "closing": 4786996
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101007",
+    "identity": "250101007",
+    "code": "250101007",
+    "name": "长期借款-股东借款(美元)-第7项目",
+    "currency": "CNY",
+    "account": "250101007-长期借款-股东借款(美元)-第7项目",
+    "opening": 4861629,
+    "closing": 4840107,
+    "occurrence": 164920,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 4861629,
+        "closing": 4840107
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301007",
+    "identity": "660301007",
+    "code": "660301007",
+    "name": "财务费用-利息支出-第7项目",
+    "currency": "CNY",
+    "account": "660301007-财务费用-利息支出-第7项目",
+    "opening": 4914646,
+    "closing": 4893218,
+    "occurrence": 167080,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 4914646,
+        "closing": 4893218
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101007",
+    "identity": "100101007",
+    "code": "100101007",
+    "name": "银行存款-中国银行苏州分行(美元户)-第7项目",
+    "currency": "CNY",
+    "account": "100101007-银行存款-中国银行苏州分行(美元户)-第7项目",
+    "opening": 4967663,
+    "closing": 4946329,
+    "occurrence": 169240,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 4967663,
+        "closing": 4946329
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301007",
+    "identity": "112301007",
+    "code": "112301007",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第7项目",
+    "currency": "CNY",
+    "account": "112301007-应收账款-大型工程项目跨区域结算及年度清算往来款-第7项目",
+    "opening": -5020680,
+    "closing": -5041920,
+    "occurrence": 171400,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": -5020680,
+        "closing": -5041920
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401007",
+    "identity": "160401007",
+    "code": "160401007",
+    "name": "固定资产-数据中心服务器及配套网络设备-第7项目",
+    "currency": "CNY",
+    "account": "160401007-固定资产-数据中心服务器及配套网络设备-第7项目",
+    "opening": 5073697,
+    "closing": 5052551,
+    "occurrence": 173560,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 5073697,
+        "closing": 5052551
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101008",
+    "identity": "200101008",
+    "code": "200101008",
+    "name": "短期借款-工商银行园区支行-第8项目",
+    "currency": "CNY",
+    "account": "200101008-短期借款-工商银行园区支行-第8项目",
+    "opening": 5126714,
+    "closing": 5105662,
+    "occurrence": 175720,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 5126714,
+        "closing": 5105662
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101008",
+    "identity": "250101008",
+    "code": "250101008",
+    "name": "长期借款-股东借款(美元)-第8项目",
+    "currency": "CNY",
+    "account": "250101008-长期借款-股东借款(美元)-第8项目",
+    "opening": 5179731,
+    "closing": 5158773,
+    "occurrence": 177880,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 5179731,
+        "closing": 5158773
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301008",
+    "identity": "660301008",
+    "code": "660301008",
+    "name": "财务费用-利息支出-第8项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "currency": "CNY",
+    "account": "660301008-财务费用-利息支出-第8项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "opening": 5232748,
+    "closing": 5211884,
+    "occurrence": 180040,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 5232748,
+        "closing": 5211884
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101008",
+    "identity": "100101008",
+    "code": "100101008",
+    "name": "银行存款-中国银行苏州分行(美元户)-第8项目",
+    "currency": "CNY",
+    "account": "100101008-银行存款-中国银行苏州分行(美元户)-第8项目",
+    "opening": 5285765,
+    "closing": 5264995,
+    "occurrence": 182200,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 5285765,
+        "closing": 5264995
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301008",
+    "identity": "112301008",
+    "code": "112301008",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第8项目",
+    "currency": "CNY",
+    "account": "112301008-应收账款-大型工程项目跨区域结算及年度清算往来款-第8项目",
+    "opening": 5338782,
+    "closing": 5318106,
+    "occurrence": 184360,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 5338782,
+        "closing": 5318106
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401008",
+    "identity": "160401008",
+    "code": "160401008",
+    "name": "固定资产-数据中心服务器及配套网络设备-第8项目",
+    "currency": "CNY",
+    "account": "160401008-固定资产-数据中心服务器及配套网络设备-第8项目",
+    "opening": 5391799,
+    "closing": 5371217,
+    "occurrence": 186520,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 5391799,
+        "closing": 5371217
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101009",
+    "identity": "200101009",
+    "code": "200101009",
+    "name": "短期借款-工商银行园区支行-第9项目",
+    "currency": "CNY",
+    "account": "200101009-短期借款-工商银行园区支行-第9项目",
+    "opening": 5444816,
+    "closing": 5424328,
+    "occurrence": 188680,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 5444816,
+        "closing": 5424328
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101009",
+    "identity": "250101009",
+    "code": "250101009",
+    "name": "长期借款-股东借款(美元)-第9项目",
+    "currency": "CNY",
+    "account": "250101009-长期借款-股东借款(美元)-第9项目",
+    "opening": 5497833,
+    "closing": 5477439,
+    "occurrence": 190840,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 5497833,
+        "closing": 5477439
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301009",
+    "identity": "660301009",
+    "code": "660301009",
+    "name": "财务费用-利息支出-第9项目",
+    "currency": "CNY",
+    "account": "660301009-财务费用-利息支出-第9项目",
+    "opening": 5550850,
+    "closing": 5530550,
+    "occurrence": 193000,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 5550850,
+        "closing": 5530550
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101009",
+    "identity": "100101009",
+    "code": "100101009",
+    "name": "银行存款-中国银行苏州分行(美元户)-第9项目",
+    "currency": "USD",
+    "account": "100101009-银行存款-中国银行苏州分行(美元户)-第9项目",
+    "opening": 5603867,
+    "closing": 5583661,
+    "occurrence": 195160,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 5603867,
+        "closing": 5583661
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301009",
+    "identity": "112301009",
+    "code": "112301009",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第9项目",
+    "currency": "CNY",
+    "account": "112301009-应收账款-大型工程项目跨区域结算及年度清算往来款-第9项目",
+    "opening": -5656884,
+    "closing": -5676996,
+    "occurrence": 197320,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": -5656884,
+        "closing": -5676996
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401009",
+    "identity": "160401009",
+    "code": "160401009",
+    "name": "固定资产-数据中心服务器及配套网络设备-第9项目",
+    "currency": "CNY",
+    "account": "160401009-固定资产-数据中心服务器及配套网络设备-第9项目",
+    "opening": 5709901,
+    "closing": 5689883,
+    "occurrence": 199480,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 5709901,
+        "closing": 5689883
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101010",
+    "identity": "200101010",
+    "code": "200101010",
+    "name": "短期借款-工商银行园区支行-第10项目",
+    "currency": "CNY",
+    "account": "200101010-短期借款-工商银行园区支行-第10项目",
+    "opening": 5762918,
+    "closing": 5742994,
+    "occurrence": 201640,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 5762918,
+        "closing": 5742994
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101010",
+    "identity": "250101010",
+    "code": "250101010",
+    "name": "长期借款-股东借款(美元)-第10项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "currency": "CNY",
+    "account": "250101010-长期借款-股东借款(美元)-第10项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "opening": 5815935,
+    "closing": 5796105,
+    "occurrence": 203800,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 5815935,
+        "closing": 5796105
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301010",
+    "identity": "660301010",
+    "code": "660301010",
+    "name": "财务费用-利息支出-第10项目",
+    "currency": "CNY",
+    "account": "660301010-财务费用-利息支出-第10项目",
+    "opening": 5868952,
+    "closing": 5849216,
+    "occurrence": 205960,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 5868952,
+        "closing": 5849216
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101010",
+    "identity": "100101010",
+    "code": "100101010",
+    "name": "银行存款-中国银行苏州分行(美元户)-第10项目",
+    "currency": "CNY",
+    "account": "100101010-银行存款-中国银行苏州分行(美元户)-第10项目",
+    "opening": 5921969,
+    "closing": 5902327,
+    "occurrence": 208120,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 5921969,
+        "closing": 5902327
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301010",
+    "identity": "112301010",
+    "code": "112301010",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第10项目",
+    "currency": "CNY",
+    "account": "112301010-应收账款-大型工程项目跨区域结算及年度清算往来款-第10项目",
+    "opening": 5974986,
+    "closing": 5955438,
+    "occurrence": 210280,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 5974986,
+        "closing": 5955438
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401010",
+    "identity": "160401010",
+    "code": "160401010",
+    "name": "固定资产-数据中心服务器及配套网络设备-第10项目",
+    "currency": "CNY",
+    "account": "160401010-固定资产-数据中心服务器及配套网络设备-第10项目",
+    "opening": 6028003,
+    "closing": 6008549,
+    "occurrence": 212440,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 6028003,
+        "closing": 6008549
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101011",
+    "identity": "200101011",
+    "code": "200101011",
+    "name": "短期借款-工商银行园区支行-第11项目",
+    "currency": "CNY",
+    "account": "200101011-短期借款-工商银行园区支行-第11项目",
+    "opening": 6081020,
+    "closing": 6061660,
+    "occurrence": 214600,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 6081020,
+        "closing": 6061660
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101011",
+    "identity": "250101011",
+    "code": "250101011",
+    "name": "长期借款-股东借款(美元)-第11项目",
+    "currency": "CNY",
+    "account": "250101011-长期借款-股东借款(美元)-第11项目",
+    "opening": 6134037,
+    "closing": 6114771,
+    "occurrence": 216760,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 6134037,
+        "closing": 6114771
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301011",
+    "identity": "660301011",
+    "code": "660301011",
+    "name": "财务费用-利息支出-第11项目",
+    "currency": "CNY",
+    "account": "660301011-财务费用-利息支出-第11项目",
+    "opening": 6187054,
+    "closing": 6167882,
+    "occurrence": 218920,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 6187054,
+        "closing": 6167882
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101011",
+    "identity": "100101011",
+    "code": "100101011",
+    "name": "银行存款-中国银行苏州分行(美元户)-第11项目",
+    "currency": "CNY",
+    "account": "100101011-银行存款-中国银行苏州分行(美元户)-第11项目",
+    "opening": 6240071,
+    "closing": 6220993,
+    "occurrence": 221080,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 6240071,
+        "closing": 6220993
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301011",
+    "identity": "112301011",
+    "code": "112301011",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第11项目",
+    "currency": "CNY",
+    "account": "112301011-应收账款-大型工程项目跨区域结算及年度清算往来款-第11项目",
+    "opening": -6293088,
+    "closing": -6312072,
+    "occurrence": 223240,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": -6293088,
+        "closing": -6312072
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401011",
+    "identity": "160401011",
+    "code": "160401011",
+    "name": "固定资产-数据中心服务器及配套网络设备-第11项目",
+    "currency": "CNY",
+    "account": "160401011-固定资产-数据中心服务器及配套网络设备-第11项目",
+    "opening": 6346105,
+    "closing": 6327215,
+    "occurrence": 225400,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 6346105,
+        "closing": 6327215
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101012",
+    "identity": "200101012",
+    "code": "200101012",
+    "name": "短期借款-工商银行园区支行-第12项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "currency": "CNY",
+    "account": "200101012-短期借款-工商银行园区支行-第12项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "opening": 6399122,
+    "closing": 6380326,
+    "occurrence": 227560,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 6399122,
+        "closing": 6380326
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101012",
+    "identity": "250101012",
+    "code": "250101012",
+    "name": "长期借款-股东借款(美元)-第12项目",
+    "currency": "CNY",
+    "account": "250101012-长期借款-股东借款(美元)-第12项目",
+    "opening": 6452139,
+    "closing": 6433437,
+    "occurrence": 229720,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 6452139,
+        "closing": 6433437
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301012",
+    "identity": "660301012",
+    "code": "660301012",
+    "name": "财务费用-利息支出-第12项目",
+    "currency": "USD",
+    "account": "660301012-财务费用-利息支出-第12项目",
+    "opening": 6505156,
+    "closing": 6486548,
+    "occurrence": 231880,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 6505156,
+        "closing": 6486548
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101012",
+    "identity": "100101012",
+    "code": "100101012",
+    "name": "银行存款-中国银行苏州分行(美元户)-第12项目",
+    "currency": "CNY",
+    "account": "100101012-银行存款-中国银行苏州分行(美元户)-第12项目",
+    "opening": 6558173,
+    "closing": 6539659,
+    "occurrence": 234040,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 6558173,
+        "closing": 6539659
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301012",
+    "identity": "112301012",
+    "code": "112301012",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第12项目",
+    "currency": "CNY",
+    "account": "112301012-应收账款-大型工程项目跨区域结算及年度清算往来款-第12项目",
+    "opening": 6611190,
+    "closing": 6592770,
+    "occurrence": 236200,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 6611190,
+        "closing": 6592770
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401012",
+    "identity": "160401012",
+    "code": "160401012",
+    "name": "固定资产-数据中心服务器及配套网络设备-第12项目",
+    "currency": "CNY",
+    "account": "160401012-固定资产-数据中心服务器及配套网络设备-第12项目",
+    "opening": 6664207,
+    "closing": 6645881,
+    "occurrence": 238360,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 6664207,
+        "closing": 6645881
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101013",
+    "identity": "200101013",
+    "code": "200101013",
+    "name": "短期借款-工商银行园区支行-第13项目",
+    "currency": "CNY",
+    "account": "200101013-短期借款-工商银行园区支行-第13项目",
+    "opening": 6717224,
+    "closing": 6698992,
+    "occurrence": 240520,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 6717224,
+        "closing": 6698992
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101013",
+    "identity": "250101013",
+    "code": "250101013",
+    "name": "长期借款-股东借款(美元)-第13项目",
+    "currency": "CNY",
+    "account": "250101013-长期借款-股东借款(美元)-第13项目",
+    "opening": 6770241,
+    "closing": 6752103,
+    "occurrence": 242680,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 6770241,
+        "closing": 6752103
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301013",
+    "identity": "660301013",
+    "code": "660301013",
+    "name": "财务费用-利息支出-第13项目",
+    "currency": "CNY",
+    "account": "660301013-财务费用-利息支出-第13项目",
+    "opening": 6823258,
+    "closing": 6805214,
+    "occurrence": 244840,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 6823258,
+        "closing": 6805214
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101013",
+    "identity": "100101013",
+    "code": "100101013",
+    "name": "银行存款-中国银行苏州分行(美元户)-第13项目",
+    "currency": "CNY",
+    "account": "100101013-银行存款-中国银行苏州分行(美元户)-第13项目",
+    "opening": 6876275,
+    "closing": 6858325,
+    "occurrence": 247000,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 6876275,
+        "closing": 6858325
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301013",
+    "identity": "112301013",
+    "code": "112301013",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第13项目",
+    "currency": "CNY",
+    "account": "112301013-应收账款-大型工程项目跨区域结算及年度清算往来款-第13项目",
+    "opening": -6929292,
+    "closing": -6947148,
+    "occurrence": 249160,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": -6929292,
+        "closing": -6947148
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401013",
+    "identity": "160401013",
+    "code": "160401013",
+    "name": "固定资产-数据中心服务器及配套网络设备-第13项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "currency": "CNY",
+    "account": "160401013-固定资产-数据中心服务器及配套网络设备-第13项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "opening": 6982309,
+    "closing": 6964547,
+    "occurrence": 251320,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 6982309,
+        "closing": 6964547
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101014",
+    "identity": "200101014",
+    "code": "200101014",
+    "name": "短期借款-工商银行园区支行-第14项目",
+    "currency": "CNY",
+    "account": "200101014-短期借款-工商银行园区支行-第14项目",
+    "opening": 7035326,
+    "closing": 7017658,
+    "occurrence": 253480,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 7035326,
+        "closing": 7017658
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101014",
+    "identity": "250101014",
+    "code": "250101014",
+    "name": "长期借款-股东借款(美元)-第14项目",
+    "currency": "CNY",
+    "account": "250101014-长期借款-股东借款(美元)-第14项目",
+    "opening": 7088343,
+    "closing": 7070769,
+    "occurrence": 255640,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 7088343,
+        "closing": 7070769
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301014",
+    "identity": "660301014",
+    "code": "660301014",
+    "name": "财务费用-利息支出-第14项目",
+    "currency": "CNY",
+    "account": "660301014-财务费用-利息支出-第14项目",
+    "opening": 7141360,
+    "closing": 7123880,
+    "occurrence": 257800,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 7141360,
+        "closing": 7123880
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101014",
+    "identity": "100101014",
+    "code": "100101014",
+    "name": "银行存款-中国银行苏州分行(美元户)-第14项目",
+    "currency": "CNY",
+    "account": "100101014-银行存款-中国银行苏州分行(美元户)-第14项目",
+    "opening": 7194377,
+    "closing": 7176991,
+    "occurrence": 259960,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 7194377,
+        "closing": 7176991
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301014",
+    "identity": "112301014",
+    "code": "112301014",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第14项目",
+    "currency": "CNY",
+    "account": "112301014-应收账款-大型工程项目跨区域结算及年度清算往来款-第14项目",
+    "opening": 7247394,
+    "closing": 7230102,
+    "occurrence": 262120,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 7247394,
+        "closing": 7230102
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401014",
+    "identity": "160401014",
+    "code": "160401014",
+    "name": "固定资产-数据中心服务器及配套网络设备-第14项目",
+    "currency": "CNY",
+    "account": "160401014-固定资产-数据中心服务器及配套网络设备-第14项目",
+    "opening": 7300411,
+    "closing": 7283213,
+    "occurrence": 264280,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 7300411,
+        "closing": 7283213
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101015",
+    "identity": "200101015",
+    "code": "200101015",
+    "name": "短期借款-工商银行园区支行-第15项目",
+    "currency": "CNY",
+    "account": "200101015-短期借款-工商银行园区支行-第15项目",
+    "opening": 7353428,
+    "closing": 7336324,
+    "occurrence": 266440,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 7353428,
+        "closing": 7336324
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101015",
+    "identity": "250101015",
+    "code": "250101015",
+    "name": "长期借款-股东借款(美元)-第15项目",
+    "currency": "USD",
+    "account": "250101015-长期借款-股东借款(美元)-第15项目",
+    "opening": 7406445,
+    "closing": 7389435,
+    "occurrence": 268600,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 7406445,
+        "closing": 7389435
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301015",
+    "identity": "660301015",
+    "code": "660301015",
+    "name": "财务费用-利息支出-第15项目",
+    "currency": "CNY",
+    "account": "660301015-财务费用-利息支出-第15项目",
+    "opening": 7459462,
+    "closing": 7442546,
+    "occurrence": 270760,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 7459462,
+        "closing": 7442546
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101015",
+    "identity": "100101015",
+    "code": "100101015",
+    "name": "银行存款-中国银行苏州分行(美元户)-第15项目",
+    "currency": "CNY",
+    "account": "100101015-银行存款-中国银行苏州分行(美元户)-第15项目",
+    "opening": 7512479,
+    "closing": 7495657,
+    "occurrence": 272920,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 7512479,
+        "closing": 7495657
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301015",
+    "identity": "112301015",
+    "code": "112301015",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第15项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "currency": "CNY",
+    "account": "112301015-应收账款-大型工程项目跨区域结算及年度清算往来款-第15项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "opening": -7565496,
+    "closing": -7582224,
+    "occurrence": 275080,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": -7565496,
+        "closing": -7582224
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401015",
+    "identity": "160401015",
+    "code": "160401015",
+    "name": "固定资产-数据中心服务器及配套网络设备-第15项目",
+    "currency": "CNY",
+    "account": "160401015-固定资产-数据中心服务器及配套网络设备-第15项目",
+    "opening": 7618513,
+    "closing": 7601879,
+    "occurrence": 277240,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 7618513,
+        "closing": 7601879
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101016",
+    "identity": "200101016",
+    "code": "200101016",
+    "name": "短期借款-工商银行园区支行-第16项目",
+    "currency": "CNY",
+    "account": "200101016-短期借款-工商银行园区支行-第16项目",
+    "opening": 7671530,
+    "closing": 7654990,
+    "occurrence": 279400,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 7671530,
+        "closing": 7654990
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101016",
+    "identity": "250101016",
+    "code": "250101016",
+    "name": "长期借款-股东借款(美元)-第16项目",
+    "currency": "CNY",
+    "account": "250101016-长期借款-股东借款(美元)-第16项目",
+    "opening": 7724547,
+    "closing": 7708101,
+    "occurrence": 281560,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 7724547,
+        "closing": 7708101
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301016",
+    "identity": "660301016",
+    "code": "660301016",
+    "name": "财务费用-利息支出-第16项目",
+    "currency": "CNY",
+    "account": "660301016-财务费用-利息支出-第16项目",
+    "opening": 7777564,
+    "closing": 7761212,
+    "occurrence": 283720,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 7777564,
+        "closing": 7761212
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101016",
+    "identity": "100101016",
+    "code": "100101016",
+    "name": "银行存款-中国银行苏州分行(美元户)-第16项目",
+    "currency": "CNY",
+    "account": "100101016-银行存款-中国银行苏州分行(美元户)-第16项目",
+    "opening": 7830581,
+    "closing": 7814323,
+    "occurrence": 285880,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 7830581,
+        "closing": 7814323
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301016",
+    "identity": "112301016",
+    "code": "112301016",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第16项目",
+    "currency": "CNY",
+    "account": "112301016-应收账款-大型工程项目跨区域结算及年度清算往来款-第16项目",
+    "opening": 7883598,
+    "closing": 7867434,
+    "occurrence": 288040,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 7883598,
+        "closing": 7867434
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401016",
+    "identity": "160401016",
+    "code": "160401016",
+    "name": "固定资产-数据中心服务器及配套网络设备-第16项目",
+    "currency": "CNY",
+    "account": "160401016-固定资产-数据中心服务器及配套网络设备-第16项目",
+    "opening": 7936615,
+    "closing": 7920545,
+    "occurrence": 290200,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 7936615,
+        "closing": 7920545
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101017",
+    "identity": "200101017",
+    "code": "200101017",
+    "name": "短期借款-工商银行园区支行-第17项目",
+    "currency": "CNY",
+    "account": "200101017-短期借款-工商银行园区支行-第17项目",
+    "opening": 7989632,
+    "closing": 7973656,
+    "occurrence": 292360,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 7989632,
+        "closing": 7973656
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101017",
+    "identity": "250101017",
+    "code": "250101017",
+    "name": "长期借款-股东借款(美元)-第17项目",
+    "currency": "CNY",
+    "account": "250101017-长期借款-股东借款(美元)-第17项目",
+    "opening": 8042649,
+    "closing": 8026767,
+    "occurrence": 294520,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 8042649,
+        "closing": 8026767
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301017",
+    "identity": "660301017",
+    "code": "660301017",
+    "name": "财务费用-利息支出-第17项目",
+    "currency": "CNY",
+    "account": "660301017-财务费用-利息支出-第17项目",
+    "opening": 8095666,
+    "closing": 8079878,
+    "occurrence": 296680,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 8095666,
+        "closing": 8079878
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101017",
+    "identity": "100101017",
+    "code": "100101017",
+    "name": "银行存款-中国银行苏州分行(美元户)-第17项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "currency": "CNY",
+    "account": "100101017-银行存款-中国银行苏州分行(美元户)-第17项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "opening": 8148683,
+    "closing": 8132989,
+    "occurrence": 298840,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 8148683,
+        "closing": 8132989
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301017",
+    "identity": "112301017",
+    "code": "112301017",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第17项目",
+    "currency": "CNY",
+    "account": "112301017-应收账款-大型工程项目跨区域结算及年度清算往来款-第17项目",
+    "opening": -8201700,
+    "closing": -8217300,
+    "occurrence": 301000,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": -8201700,
+        "closing": -8217300
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401017",
+    "identity": "160401017",
+    "code": "160401017",
+    "name": "固定资产-数据中心服务器及配套网络设备-第17项目",
+    "currency": "CNY",
+    "account": "160401017-固定资产-数据中心服务器及配套网络设备-第17项目",
+    "opening": 8254717,
+    "closing": 8239211,
+    "occurrence": 303160,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 8254717,
+        "closing": 8239211
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101018",
+    "identity": "200101018",
+    "code": "200101018",
+    "name": "短期借款-工商银行园区支行-第18项目",
+    "currency": "USD",
+    "account": "200101018-短期借款-工商银行园区支行-第18项目",
+    "opening": 8307734,
+    "closing": 8292322,
+    "occurrence": 305320,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 8307734,
+        "closing": 8292322
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101018",
+    "identity": "250101018",
+    "code": "250101018",
+    "name": "长期借款-股东借款(美元)-第18项目",
+    "currency": "CNY",
+    "account": "250101018-长期借款-股东借款(美元)-第18项目",
+    "opening": 8360751,
+    "closing": 8345433,
+    "occurrence": 307480,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 8360751,
+        "closing": 8345433
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301018",
+    "identity": "660301018",
+    "code": "660301018",
+    "name": "财务费用-利息支出-第18项目",
+    "currency": "CNY",
+    "account": "660301018-财务费用-利息支出-第18项目",
+    "opening": 8413768,
+    "closing": 8398544,
+    "occurrence": 309640,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 8413768,
+        "closing": 8398544
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101018",
+    "identity": "100101018",
+    "code": "100101018",
+    "name": "银行存款-中国银行苏州分行(美元户)-第18项目",
+    "currency": "CNY",
+    "account": "100101018-银行存款-中国银行苏州分行(美元户)-第18项目",
+    "opening": 8466785,
+    "closing": 8451655,
+    "occurrence": 311800,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 8466785,
+        "closing": 8451655
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301018",
+    "identity": "112301018",
+    "code": "112301018",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第18项目",
+    "currency": "CNY",
+    "account": "112301018-应收账款-大型工程项目跨区域结算及年度清算往来款-第18项目",
+    "opening": 8519802,
+    "closing": 8504766,
+    "occurrence": 313960,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 8519802,
+        "closing": 8504766
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401018",
+    "identity": "160401018",
+    "code": "160401018",
+    "name": "固定资产-数据中心服务器及配套网络设备-第18项目",
+    "currency": "CNY",
+    "account": "160401018-固定资产-数据中心服务器及配套网络设备-第18项目",
+    "opening": 8572819,
+    "closing": 8557877,
+    "occurrence": 316120,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 8572819,
+        "closing": 8557877
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101019",
+    "identity": "200101019",
+    "code": "200101019",
+    "name": "短期借款-工商银行园区支行-第19项目",
+    "currency": "CNY",
+    "account": "200101019-短期借款-工商银行园区支行-第19项目",
+    "opening": 8625836,
+    "closing": 8610988,
+    "occurrence": 318280,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 8625836,
+        "closing": 8610988
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101019",
+    "identity": "250101019",
+    "code": "250101019",
+    "name": "长期借款-股东借款(美元)-第19项目",
+    "currency": "CNY",
+    "account": "250101019-长期借款-股东借款(美元)-第19项目",
+    "opening": 8678853,
+    "closing": 8664099,
+    "occurrence": 320440,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 8678853,
+        "closing": 8664099
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301019",
+    "identity": "660301019",
+    "code": "660301019",
+    "name": "财务费用-利息支出-第19项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "currency": "CNY",
+    "account": "660301019-财务费用-利息支出-第19项目-二〇二六年度专项审计调整及跨期重分类明细",
+    "opening": 8731870,
+    "closing": 8717210,
+    "occurrence": 322600,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 8731870,
+        "closing": 8717210
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101019",
+    "identity": "100101019",
+    "code": "100101019",
+    "name": "银行存款-中国银行苏州分行(美元户)-第19项目",
+    "currency": "CNY",
+    "account": "100101019-银行存款-中国银行苏州分行(美元户)-第19项目",
+    "opening": 8784887,
+    "closing": 8770321,
+    "occurrence": 324760,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 8784887,
+        "closing": 8770321
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301019",
+    "identity": "112301019",
+    "code": "112301019",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第19项目",
+    "currency": "CNY",
+    "account": "112301019-应收账款-大型工程项目跨区域结算及年度清算往来款-第19项目",
+    "opening": -8837904,
+    "closing": -8852376,
+    "occurrence": 326920,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": -8837904,
+        "closing": -8852376
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401019",
+    "identity": "160401019",
+    "code": "160401019",
+    "name": "固定资产-数据中心服务器及配套网络设备-第19项目",
+    "currency": "CNY",
+    "account": "160401019-固定资产-数据中心服务器及配套网络设备-第19项目",
+    "opening": 8890921,
+    "closing": 8876543,
+    "occurrence": 329080,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 8890921,
+        "closing": 8876543
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "200101020",
+    "identity": "200101020",
+    "code": "200101020",
+    "name": "短期借款-工商银行园区支行-第20项目",
+    "currency": "CNY",
+    "account": "200101020-短期借款-工商银行园区支行-第20项目",
+    "opening": 8943938,
+    "closing": 8929654,
+    "occurrence": 331240,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 8943938,
+        "closing": 8929654
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "250101020",
+    "identity": "250101020",
+    "code": "250101020",
+    "name": "长期借款-股东借款(美元)-第20项目",
+    "currency": "CNY",
+    "account": "250101020-长期借款-股东借款(美元)-第20项目",
+    "opening": 8996955,
+    "closing": 8982765,
+    "occurrence": 333400,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 8996955,
+        "closing": 8982765
+      }
+    ],
+    "suggestedType": "loan"
+  },
+  {
+    "key": "660301020",
+    "identity": "660301020",
+    "code": "660301020",
+    "name": "财务费用-利息支出-第20项目",
+    "currency": "CNY",
+    "account": "660301020-财务费用-利息支出-第20项目",
+    "opening": 9049972,
+    "closing": 9035876,
+    "occurrence": 335560,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 9049972,
+        "closing": 9035876
+      }
+    ],
+    "suggestedType": "interest_expense"
+  },
+  {
+    "key": "100101020",
+    "identity": "100101020",
+    "code": "100101020",
+    "name": "银行存款-中国银行苏州分行(美元户)-第20项目",
+    "currency": "CNY",
+    "account": "100101020-银行存款-中国银行苏州分行(美元户)-第20项目",
+    "opening": 9102989,
+    "closing": 9088987,
+    "occurrence": 337720,
+    "byEntity": [
+      {
+        "entity": "SLP",
+        "opening": 9102989,
+        "closing": 9088987
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "112301020",
+    "identity": "112301020",
+    "code": "112301020",
+    "name": "应收账款-大型工程项目跨区域结算及年度清算往来款-第20项目",
+    "currency": "CNY",
+    "account": "112301020-应收账款-大型工程项目跨区域结算及年度清算往来款-第20项目",
+    "opening": 9156006,
+    "closing": 9142098,
+    "occurrence": 339880,
+    "byEntity": [
+      {
+        "entity": "HQ",
+        "opening": 9156006,
+        "closing": 9142098
+      }
+    ],
+    "suggestedType": "skip"
+  },
+  {
+    "key": "160401020",
+    "identity": "160401020",
+    "code": "160401020",
+    "name": "固定资产-数据中心服务器及配套网络设备-第20项目",
+    "currency": "USD",
+    "account": "160401020-固定资产-数据中心服务器及配套网络设备-第20项目",
+    "opening": 9209023,
+    "closing": 9195209,
+    "occurrence": 342040,
+    "byEntity": [
+      {
+        "entity": "EAST",
+        "opening": 9209023,
+        "closing": 9195209
+      }
+    ],
+    "suggestedType": "skip"
+  }
+]

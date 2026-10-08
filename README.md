@@ -1,6 +1,6 @@
 # E点通工具箱（审计工具箱）
 
-一个面向审计、财务和数据处理场景的 Windows 桌面工具箱。2.x 基于 **Tauri 2 + React 19/TypeScript 前端 + 全 Rust 原生业务核心**，十七个工具全部由 Rust 执行生产逻辑，发布为单个 EXE。
+一个面向审计、财务和数据处理场景的 Windows 桌面工具箱。2.x 基于 **Tauri 2 + React 19/TypeScript 前端 + 全 Rust 原生业务核心**，十八个工具全部由 Rust 执行生产逻辑，发布为单个 EXE。
 
 > **给各工具负责人和贡献者**：本 README 是本项目的**唯一贡献规范入口**——代码在哪里、加东西要遵守什么、怎么验证、怎么打包发布，都在这里。只使用工具的人下载发布版 EXE 即可，无需关心工程。
 > 各工具的迁移验收矩阵见 `tauri-app/*_PARITY.md`，架构细节见 `tauri-app/CLAUDE.md`，账表映射内核方案见 `tauri-app/LEDGER_MAPPING_UNIFICATION.md`。
@@ -19,6 +19,7 @@
 - **AudiPick 智能合同审阅**（`audipick`）：合同 OCR、条款提取、PDF 定位与收入底稿。
 - **WP Roll Forward**（`audit_roll_forward`）：标准审计底稿跨年度结转与 CRA 信息迁移。
 - **两列模糊匹配**（`fuzzy_match`）：公司名称/人名/地址/通用文本的模糊匹配核对，支持人工确认与底稿导出。
+- **TBJE 完整性核对**（`tbje_check`）：上传科目余额表与序时账，自动核对勾稽关系、发生额一致性与会计恒等式。
 
 **效率工具**
 
@@ -47,9 +48,9 @@ React 页面 → src/api.ts → Tauri invoke → src-tauri/src/lib.rs（命令�
 - **前端**（`tauri-app/src/`）：React + TypeScript 界面，负责表单、预览、进度展示。
 - **后端**（`tauri-app/src-tauri/src/`）：Rust 业务核心，负责所有文件读取、Excel/CSV 处理、计算与导出。
 - **耗时任务**：同一个 EXE 以 worker 进程方式重新拉起自身（`--rust-table-worker` 等），通过 `job-event` 事件流向前端推进度，支持取消/暂停。
-- **浏览器预览模式**：`npm run dev` 直接开浏览器只能看 UI，任何本地文件操作都会提示"预览模式"错误——文件能力必须在 Tauri 里才可用。
+- **浏览器预览模式**：`pnpm dev` 直接开浏览器只能看 UI，任何本地文件操作都会提示"预览模式"错误——文件能力必须在 Tauri 里才可用。
 
-## 代码地图：十七个工具在哪里
+## 代码地图：十八个工具在哪里
 
 所有生产代码都在 **`tauri-app/`** 目录下。
 
@@ -72,6 +73,7 @@ React 页面 → src/api.ts → Tauri invoke → src-tauri/src/lib.rs（命令�
 | Roll Forward（`audit_roll_forward`） | [tauri-app/src/RollForwardPage.tsx](tauri-app/src/RollForwardPage.tsx) · [tauri-app/src/rollForwardUi.ts](tauri-app/src/rollForwardUi.ts) | [tauri-app/src-tauri/src/roll_forward.rs](tauri-app/src-tauri/src/roll_forward.rs) |
 | WP 服务单（`wp_service_generator`） | [tauri-app/src/WpServicePage.tsx](tauri-app/src/WpServicePage.tsx) | [tauri-app/src-tauri/src/wp.rs](tauri-app/src-tauri/src/wp.rs) |
 | 两列模糊匹配（`fuzzy_match`） | [tauri-app/src/FuzzyMatchPage.tsx](tauri-app/src/FuzzyMatchPage.tsx) | [tauri-app/src-tauri/src/fuzzy_match.rs](tauri-app/src-tauri/src/fuzzy_match.rs) |
+| TBJE 完整性核对（`tbje_check`） | [tauri-app/src/TbjeCheckPage.tsx](tauri-app/src/TbjeCheckPage.tsx) | [tauri-app/src-tauri/src/tbje_check.rs](tauri-app/src-tauri/src/tbje_check.rs) |
 
 > 表格里每个路径都是相对**仓库根**的完整路径，在 GitHub 上点击可直接打开对应文件。
 
@@ -88,7 +90,7 @@ React 页面 → src/api.ts → Tauri invoke → src-tauri/src/lib.rs（命令�
 首次准备与日常启动（都在 `tauri-app/` 目录下）：
 
 ```bash
-npm install                                    # 首次安装依赖
+pnpm install                                   # 首次安装依赖
 python scripts/start_tauri_dev.py              # 启动开发版（推荐，自动注入 MSVC 环境）
 # 或双击「启动审计工具箱.bat」
 ```
@@ -96,8 +98,8 @@ python scripts/start_tauri_dev.py              # 启动开发版（推荐，自�
 测试：
 
 ```bash
-npm test                                       # 前端测试（vitest + jsdom）
-npx vitest run src/faListUi.test.ts            # 单个前端测试文件
+pnpm test                                      # 前端测试（vitest + jsdom）
+pnpm exec vitest run src/faListUi.test.ts      # 单个前端测试文件
 cargo test --manifest-path src-tauri/Cargo.toml                # Rust 全量测试
 cargo test --manifest-path src-tauri/Cargo.toml fa::           # 单个模块
 # Excel COM 相关测试默认忽略，需加 -- --ignored
@@ -121,7 +123,7 @@ Windows 上全量 Rust 测试会同时链接 Polars、Excel 与 Tauri 依赖，�
 - **错误一律走 `AppError` 契约**：`code` / `userMessage` / `retryable` / `diagnosticId` 四个字段，前端按这个契约展示。不要在页面里拼裸错误字符串。
 - **跨边界数据用 zod 校验**（`src/types.ts`）。
 - **面向用户的文案一律中文**（错误信息、进度提示、Sheet 名），且不用 `✅`/`❌` 这类装饰性符号——Windows GBK 控制台会报编码错误，内部审计工具也要保持克制风格。
-- **打包必须走 Tauri CLI**（`npm run tauri:build`）。直接 `cargo build --release` 产出的 EXE 会把界面指向开发地址，脱离开发机就是白屏。
+- **打包必须走 Tauri CLI**（`pnpm tauri:build`）。直接 `cargo build --release` 产出的 EXE 会把界面指向开发地址，脱离开发机就是白屏。
 - **数据与内嵌资源**：本机数据在 `%LOCALAPPDATA%\AuditToolbox\AuditToolbox\data`（SQLite）。编译期内嵌的资源（如 `assets/wp/FY27+WP服务单.xlsx.b64` 模板）修改后必须重新编译 Rust 才生效。
 - **LLM 密钥**：配置经 SQLite + Windows 凭据管理器保存，只保存在本机，**不提交到 GitHub**。`secret_set` 只接受 `llm_api_key` / `dify_api_key` / `baidu_ocr_key` / `baidu_ocr_secret` 四个名字，其余拒绝。
 - **不改仓库根目录的旧 Python 栈**（见文末「遗留的旧 Python 栈」）。
@@ -190,7 +192,7 @@ Windows 上全量 Rust 测试会同时链接 Polars、Excel 与 Tauri 依赖，�
 ## 五、提交前自查清单
 
 ```
-[ ] npm test 通过
+[ ] pnpm test 通过
 [ ] cargo test --manifest-path src-tauri/Cargo.toml 通过
 [ ] 新增/改动的 method 已在 lib.rs 分发分支登记，未知 method 仍会报 METHOD_NOT_FOUND
 [ ] 新增工具已加进 tool-catalog.json，并同步改了 Rust 侧的工具数量断言
@@ -225,7 +227,7 @@ Windows 上全量 Rust 测试会同时链接 Polars、Excel 与 Tauri 依赖，�
 - 可安装版本仍由 Tauri updater 的 `latest.json` 判断并验证签名；更新说明由 Rust 只读访问同一仓库的 GitHub Releases，按语义版本汇总 `(当前版本, 目标版本]` 内全部已发布说明。没有可安装新版本时显示当前版本说明。
 - GitHub Release 缺失说明或只有占位文案时，补充整个升级区间的提交标题并标注来源；网络失败、限流、标签不存在、分页上限均明确提示，不视为「没有变更」。无需配置 GitHub Token，也不上传客户文件或本机设置。
 - `.github/workflows/release.yml` 使用 GitHub 自动生成发布说明；发布者仍应提供有意义的 PR/提交标题或人工补充 Release 内容。不会由 LLM 猜测更新了什么，旧版未写的功能说明不能凭空还原。
-- 验证：`npx vitest run src/AppNavigationSettings.test.tsx src/api.test.ts --exclude='**/.claude/**'`；`cargo test --manifest-path src-tauri/Cargo.toml update_notes:: --lib`。只读联网测试另加 `github_live_release_notes -- --ignored`；下载安装需使用签名发布版单独验收。
+- 验证：`pnpm exec vitest run src/AppNavigationSettings.test.tsx src/api.test.ts --exclude='**/.claude/**'`；`cargo test --manifest-path src-tauri/Cargo.toml update_notes:: --lib`。只读联网测试另加 `github_live_release_notes -- --ignored`；下载安装需使用签名发布版单独验收。
 
 一键打包（推荐，已修复可直接使用）：
 

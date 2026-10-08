@@ -4,7 +4,7 @@ use super::*;
 use rusqlite::{Connection, params};
 use std::cell::Cell;
 
-const PREPARED_CACHE_VERSION: u64 = 3;
+const PREPARED_CACHE_VERSION: u64 = 5;
 
 pub(super) fn sql_error(e: rusqlite::Error) -> AppError {
     error(
@@ -74,6 +74,7 @@ pub(super) struct MarkResult {
     pub direct_pairs: usize,
     pub cross_pairs: usize,
     pub unmatched_rows: usize,
+    pub loss_transfer_vouchers: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -191,9 +192,9 @@ fn validate_disk_amount_row(
 
 fn validate_prepared_mapping_required(mapping: &LedgerMapping) -> Result<(), AppError> {
     if mapping.id.is_empty() {
-        if let Some(date) = mapping.date.clone() {
+        if !mapping.date.is_empty() {
             let mut validation = mapping.clone();
-            validation.id.push(date);
+            validation.id.extend(mapping.date.iter().cloned());
             return validate_mapping_required(&validation);
         }
     }
@@ -501,6 +502,7 @@ fn build_prepared(
             .filter_map(|name| header_index(&ledger.table.headers, name))
             .filter(|index| !amount_indexes.contains(index)),
     );
+    let account_set = accounts.iter().copied().collect::<HashSet<_>>();
     let mut previous = HashMap::<usize, String>::new();
     let entity_index = mapping
         .entity
@@ -517,9 +519,8 @@ fn build_prepared(
                     .any(|n| header_index(&ledger.table.headers, n) == Some(*i))
                 || mapping
                     .date
-                    .as_deref()
-                    .and_then(|n| header_index(&ledger.table.headers, n))
-                    == Some(*i)
+                    .iter()
+                    .any(|n| header_index(&ledger.table.headers, n) == Some(*i))
         })
         .collect::<Vec<_>>();
     // 大 CSV 走流式逐行，用引擎的单行正文判定先剔非正文行：表尾小计/手工草稿
@@ -528,18 +529,54 @@ fn build_prepared(
     let body = ledger_mapping::LedgerBodyRule::new(&ledger.table.headers, &|role| {
         ledger_role_columns(mapping, role)
     });
+    let mut sectioned = ledger_mapping::SectionedLedgerStream::detect(
+        &ledger.table.headers,
+        &cache.table.rows,
+        &|role| ledger_role_columns(mapping, role),
+    );
     let mut insert = ledger.db.prepare("INSERT INTO processed(seq,fills,voucher,account,account_norm,candidate,signkey,signkey_noentity,entity,dr,cr,raw,unsigned,hd,hc,pos,neg) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)").map_err(sql_error)?;
     let mut last_progress = Instant::now();
     cache.visit(None, cancel, |mut row, index| {
-        if !body.is_body(&row) {
+        let before_section_fill = sectioned.as_ref().map(|_| row.clone());
+        if let Some(normalizer) = sectioned.as_mut() {
+            if !normalizer.normalize(&mut row) {
+                return Ok(());
+            }
+        } else if !body.is_body(&row) {
             return Ok(());
         }
         // Validate before fill/filter, exactly as the ordinary export path does.
         validate_disk_amount_row(&ledger.table.headers, &row, mapping, header_row + index)?;
-        let mut applied_fills = Vec::<(usize, String)>::new();
+        let mut applied_fills = before_section_fill
+            .as_ref()
+            .map(|before| {
+                row.iter()
+                    .enumerate()
+                    .filter(|(column, value)| {
+                        before
+                            .get(*column)
+                            .is_none_or(|original| original != *value)
+                    })
+                    .map(|(column, value)| (column, value.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let has_account_anchor = accounts
+            .iter()
+            .any(|i| row.get(*i).is_some_and(|value| !value.trim().is_empty()));
+        if has_account_anchor {
+            for i in &accounts {
+                if row.get(*i).is_none_or(|value| value.trim().is_empty()) {
+                    previous.remove(i);
+                }
+            }
+        }
         for &i in &fill {
             let current = row.get(i).map(|s| s.trim()).unwrap_or("");
             if current.is_empty() {
+                if has_account_anchor && account_set.contains(&i) {
+                    continue;
+                }
                 if let (Some(value), Some(cell)) = (previous.get(&i), row.get_mut(i)) {
                     *cell = value.clone();
                     applied_fills.push((i, value.clone()));
@@ -550,7 +587,10 @@ fn build_prepared(
         }
         let present = |i: &usize| row.get(*i).is_some_and(|v| !v.trim().is_empty());
         let has_amount = amount_indexes.iter().any(present);
-        let candidate = has_amount && ids.iter().chain(accounts.iter()).any(|i| !present(i));
+        // 科目编码或名称任一有值即构成完整科目身份；只有凭证键缺失，或全部
+        // 科目身份列都为空，才把金额行列为待剔除候选。与内存路径保持一致。
+        let candidate =
+            has_amount && (ids.iter().any(|i| !present(i)) || accounts.iter().all(|i| !present(i)));
         if mapped.iter().any(present) && (ids.iter().all(present) || has_amount) {
             let (dr, cr, raw, unsigned, hd, hc, pos, neg) = amount_columns.values(&row);
             let sign_key = |indexes: &[usize]| {
@@ -812,10 +852,26 @@ impl DiskLedger {
 
     pub(super) fn mark_selected_offsets(
         &self,
+        mark_loss_transfer: bool,
         cancel: &AtomicBool,
     ) -> Result<MarkResult, AppError> {
         check_cancel(cancel)?;
         let net = self.selected_net_column();
+        self.db
+            .execute_batch(
+                "DROP TABLE IF EXISTS temp.mark_loss;
+             CREATE TEMP TABLE mark_loss(voucher TEXT PRIMARY KEY) WITHOUT ROWID;",
+            )
+            .map_err(sql_error)?;
+        if mark_loss_transfer {
+            self.db
+                .execute_batch(
+                    "INSERT INTO mark_loss
+                 SELECT DISTINCT voucher FROM processed
+                 WHERE account LIKE '%本年利润%' OR account LIKE '%未分配利润%';",
+                )
+                .map_err(sql_error)?;
+        }
         self.db.execute_batch(&format!(
             "DROP TABLE IF EXISTS temp.mark_eligible;
              DROP TABLE IF EXISTS temp.mark_status;
@@ -823,6 +879,7 @@ impl DiskLedger {
                SELECT seq,voucher,account_norm,entity,CAST(ROUND({net}*100.0) AS INTEGER) cents
                FROM processed
                WHERE voucher IN (SELECT voucher FROM selected)
+                 AND voucher NOT IN (SELECT voucher FROM mark_loss)
                  AND account_norm IN (SELECT account FROM targets)
                  AND CAST(ROUND({net}*100.0) AS INTEGER)<>0;
              CREATE UNIQUE INDEX mark_eligible_seq ON mark_eligible(seq);
@@ -831,6 +888,7 @@ impl DiskLedger {
              INSERT INTO mark_status
                SELECT seq,'未匹配' FROM processed
                WHERE voucher IN (SELECT voucher FROM selected)
+                 AND voucher NOT IN (SELECT voucher FROM mark_loss)
                  AND account_norm IN (SELECT account FROM targets);"
         )).map_err(sql_error)?;
         check_cancel(cancel)?;
@@ -914,10 +972,19 @@ impl DiskLedger {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(sql_error)? as usize;
+        let loss_transfer_vouchers = self
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM mark_loss WHERE voucher IN (SELECT voucher FROM selected)",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(sql_error)? as usize;
         Ok(MarkResult {
             direct_pairs,
             cross_pairs,
             unmatched_rows,
+            loss_transfer_vouchers,
         })
     }
 
@@ -925,6 +992,7 @@ impl DiskLedger {
         &self,
         output: &Path,
         headers: &[String],
+        mark_loss_transfer: bool,
         progress: Progress<'_>,
         cancel: &AtomicBool,
     ) -> Result<usize, AppError> {
@@ -934,18 +1002,26 @@ impl DiskLedger {
             let mut file = File::create(&partial).map_err(io_error)?;
             file.write_all(&[0xEF, 0xBB, 0xBF]).map_err(io_error)?;
             let mut writer = csv::WriterBuilder::new().flexible(true).from_writer(file);
-            let output_headers = ["【辅助_绝对值】", "【辅助_符号】", "【智能匹配状态】"]
-                .into_iter()
-                .map(str::to_owned)
-                .chain(headers.iter().cloned())
-                .collect::<Vec<_>>();
+            let mut output_headers = Vec::with_capacity(headers.len() + 4);
+            if mark_loss_transfer {
+                output_headers.push("【损益结转】".to_owned());
+            }
+            output_headers.extend(
+                ["【辅助_绝对值】", "【辅助_符号】", "【智能匹配状态】"]
+                    .into_iter()
+                    .map(str::to_owned),
+            );
+            output_headers.extend(headers.iter().cloned());
             writer.write_record(&output_headers).map_err(csv_error)?;
             let mut statement = self
                 .db
                 .prepare(&format!(
-                    "SELECT r.data,p.fills,p.{},COALESCE(s.status,'') FROM processed p
+                    "SELECT r.data,p.fills,p.{},COALESCE(s.status,''),
+                            CASE WHEN l.voucher IS NULL THEN 0 ELSE 1 END
+                     FROM processed p
              JOIN raw_cache.rows r ON r.rowid=p.seq+1
              LEFT JOIN mark_status s ON s.seq=p.seq
+             LEFT JOIN mark_loss l ON l.voucher=p.voucher
              WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",
                     self.selected_net_column()
                 ))
@@ -963,7 +1039,15 @@ impl DiskLedger {
                 let row = normalized_row(&data, &fills, headers.len())?;
                 let amount: f64 = record.get(2).map_err(sql_error)?;
                 let status: String = record.get(3).map_err(sql_error)?;
-                let mut output_row = Vec::with_capacity(row.len() + 3);
+                let loss: i64 = record.get(4).map_err(sql_error)?;
+                let mut output_row = Vec::with_capacity(row.len() + 4);
+                if mark_loss_transfer {
+                    output_row.push(if loss != 0 {
+                        "损益结转".into()
+                    } else {
+                        String::new()
+                    });
+                }
                 if status.is_empty() {
                     output_row.extend([String::new(), String::new(), String::new()]);
                 } else {
@@ -1698,6 +1782,70 @@ mod tests {
     }
 
     #[test]
+    fn 磁盘路径同样正规化分段明细账() {
+        let root =
+            std::env::temp_dir().join(format!("disk-sectioned-ledger-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("source.csv");
+        fs::write(
+            &input,
+            "凭证号,科目编码,科目名称,摘要,借方,贷方,备注\n\
+             ,1001,库存现金,期初余额,0,0,科目备注\n\
+             V1,,,收款,100,,\n\
+             ,,,本月合计,100,0,\n\
+             ,2202,应付账款,期初余额,0,0,新科目备注\n\
+             V1,,,付款,,100,\n",
+        )
+        .unwrap();
+        let source = SourceParams {
+            input_path: input.to_string_lossy().into_owned(),
+            sheet: None,
+            header_row: 1,
+            header_depth: 1,
+        };
+        let cancel = AtomicBool::new(false);
+        let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel).unwrap();
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()],
+            account_code: Some("科目编码".into()),
+            account_name: vec!["科目名称".into()],
+            summary: Some("摘要".into()),
+            debit: Some("借方".into()),
+            credit: Some("贷方".into()),
+            ..Default::default()
+        };
+        let prepared_path = cache_path(
+            "kanzhang-ledger",
+            &prepared_key(&cache, &mapping, None, 1).unwrap(),
+        )
+        .unwrap()
+        .with_extension("sqlite");
+        let _ = fs::remove_file(&prepared_path);
+        let ledger = prepare(&cache, &mapping, None, 1, &|_, _, _, _| {}, &cancel).unwrap();
+        assert_eq!(ledger.count, 2);
+        let mut rows = Vec::new();
+        ledger
+            .visit_processed(false, &cancel, |row| {
+                rows.push(row.values);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(rows[0][1], "1001");
+        assert_eq!(rows[1][1], "2202");
+        assert_eq!(rows[1][2], "应付账款");
+        assert_eq!(rows[1][3], "付款");
+        assert_eq!(rows[1][4], "", "借方金额不得从上一条明细继承");
+        assert_eq!(rows[1][5], "100");
+        assert_eq!(rows[1][6], "新科目备注");
+        let raw_path = cache.path.clone();
+        drop(ledger);
+        drop(cache);
+        let _ = fs::remove_file(prepared_path);
+        let _ = fs::remove_file(raw_path);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn disk_mark_matches_direct_and_cross_voucher_offsets() {
         let root = std::env::temp_dir().join(format!("disk-mark-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -1734,7 +1882,7 @@ mod tests {
         ledger
             .set_selected_convention(SignConvention::Unsigned)
             .unwrap();
-        let result = ledger.mark_selected_offsets(&cancel).unwrap();
+        let result = ledger.mark_selected_offsets(false, &cancel).unwrap();
         assert_eq!(result.direct_pairs, 1);
         assert_eq!(result.cross_pairs, 1);
         assert_eq!(result.unmatched_rows, 0);
@@ -1802,7 +1950,7 @@ mod tests {
         ledger
             .set_selected_convention(SignConvention::Unsigned)
             .unwrap();
-        let result = ledger.mark_selected_offsets(&cancel).unwrap();
+        let result = ledger.mark_selected_offsets(false, &cancel).unwrap();
         assert_eq!(result.direct_pairs, 0);
         assert_eq!(result.cross_pairs, 0);
         assert_eq!(result.unmatched_rows, 3);

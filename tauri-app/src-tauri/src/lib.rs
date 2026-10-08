@@ -1,9 +1,15 @@
+#![recursion_limit = "256"]
+
+mod account_confirmation;
 mod audipick;
+mod bailian_asr;
+mod bailian_plan_asr;
 mod confirmation;
 mod covenant_cases;
 mod deposit_interest;
 #[cfg(windows)]
 mod excel_com;
+mod excel_header_match;
 mod excel_merger;
 mod fa;
 mod fa_subtools;
@@ -11,11 +17,15 @@ mod fa_tbje;
 mod file_list;
 mod fuzzy_match;
 mod fx;
+mod header_detection;
 #[cfg(test)]
 mod ledger_engine_parity_tests;
 mod ledger_mapping;
 mod loan_interest;
 mod lpr;
+mod meeting_minutes;
+mod meeting_record;
+mod meeting_watch;
 mod pdf_to_excel;
 mod resource_budget;
 mod roll_forward;
@@ -25,9 +35,11 @@ mod tabular;
 mod tbje_check;
 mod telemetry;
 mod update_notes;
+mod window_fit;
 mod wp;
 #[cfg(test)]
 mod xls_input_tests;
+mod xls_sample;
 
 use directories::ProjectDirs;
 use parking_lot::Mutex;
@@ -38,7 +50,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -138,10 +150,44 @@ fn tool_catalog() -> Result<Value, AppError> {
 async fn engine_call(
     _excel_merger: State<'_, ExcelMergerService>,
     storage: State<'_, Storage>,
+    allowed: State<'_, AllowedPaths>,
     method: String,
     mut params: Value,
 ) -> Result<Value, AppError> {
-    if method == "audipick.projects" {
+    if matches!(
+        method.as_str(),
+        "account_confirmation.export" | "account_confirmation.import"
+    ) {
+        let field = if method.ends_with("export") {
+            "outputPath"
+        } else {
+            "inputPath"
+        };
+        let selected = PathBuf::from(params.get(field).and_then(Value::as_str).unwrap_or(""));
+        if !allowed
+            .0
+            .lock()
+            .iter()
+            .any(|path| path_is_permitted(&selected, path))
+        {
+            return Err(AppError::new(
+                "PATH_NOT_AUTHORIZED",
+                "请先选择科目确认表路径。",
+                false,
+                None,
+            ));
+        }
+        tauri::async_runtime::spawn_blocking(move || account_confirmation::call(&method, params))
+            .await
+            .map_err(|e| {
+                AppError::new(
+                    "CONFIRMATION_TASK_FAILED",
+                    "科目确认表处理异常结束。",
+                    true,
+                    Some(e.to_string()),
+                )
+            })?
+    } else if method == "audipick.projects" {
         storage.audipick_projects()
     } else if method == "audipick.backup_export" {
         storage.audipick_backup_export(Path::new(
@@ -320,6 +366,16 @@ async fn engine_call(
         // TB与JE的跨表对齐是公共账表能力。`fx.*` 旧入口仍保留
         // 兼容，新工具必须从 ledger 命名空间调用。
         fx::check_mapping_alignment(&params)
+    } else if method == "ledger.auxiliary_link" {
+        // 辅助核算联动验证（锚点反查认定 JE 辅助列）：映射阶段公共入口，
+        // 计算侧（TBJE 完整性／存款）复核同一份公共判定逻辑。
+        fx::auxiliary_link_check(&params)
+    } else if method == "ledger.currency_link" {
+        // 多币种账户映射阶段验证：只检查用户已映射的 JE 币种列中是否存在
+        // TB 外币锚点，不要求整列非空，也不质疑用户选择的列。
+        fx::currency_link_check(&params)
+    } else if method == "ledger.entity_scope_suggestions" {
+        ledger_mapping::entity_scope_suggestions_call(&params)
     } else if method == "ledger.review_mapping" {
         let settings = storage.settings_get()?;
         let kind = params
@@ -490,7 +546,12 @@ fn is_direct_job_method(method: &str) -> bool {
         || method == "excel_merger.merge"
         || method.starts_with("ts.")
         || method.starts_with("kanzhang.")
-        || matches!(method, "fx.fetch_rates" | "fx.preview" | "fx.export")
+        // 汇率导出与测算同走任务通道：快照未缓存时要在线抓取官方牌价，
+        // 同样需要进度与可取消。
+        || matches!(
+            method,
+            "fx.fetch_rates" | "fx.preview" | "fx.export" | "fx.export_rates"
+        )
         || matches!(method, "loan.preview" | "loan.export")
         || matches!(method, "deposit.preview" | "deposit.export")
         || method == "pdf2excel.convert"
@@ -499,6 +560,9 @@ fn is_direct_job_method(method: &str) -> bool {
         // TBJE 完整性核对：单组、多组、导出三条都走任务通道——序时账动辄
         // 几十万行，读取与汇总都得能报进度、能取消。
         || method.starts_with("tbje_check.")
+        // 会议纪要：转写与纪要生成要上传轮询（有进度、可取消）；
+        // meeting.summarize 从转写稿重出纪要，共享同一条通道。
+        || matches!(method, "meeting.generate" | "meeting.summarize")
 }
 
 #[tauri::command]
@@ -512,7 +576,11 @@ async fn job_start(
     // __dbPath/textPath 之前克隆用户原始参数存档。存档失败不拦任务本身，
     // 只是该条历史记录没有恢复按钮。
     let user_params = params.clone();
-    let job_id = job_start_inner(excel_merger, &storage, &method, params).await?;
+    let mut worker_params = params;
+    if let Some(object) = worker_params.as_object_mut() {
+        object.remove("__restoreSnapshot");
+    }
+    let job_id = job_start_inner(excel_merger, &storage, &method, worker_params).await?;
     if !matches!(method.as_str(), "audipick.ocr_page" | "audipick.extract") {
         // OCR images and contract extraction text are transient, sensitive task
         // inputs. Neither belongs in resumable job history.
@@ -565,6 +633,7 @@ async fn job_start_inner(
         || method.starts_with("fx.")
         || method.starts_with("loan.")
         || method.starts_with("deposit.")
+        || method.starts_with("meeting.")
     {
         if let Value::Object(ref mut map) = params {
             map.insert("__settings".into(), storage.settings_get()?);
@@ -768,19 +837,39 @@ fn llm_test(settings: Value, api_key: Option<String>) -> Result<Value, AppError>
 }
 
 #[tauri::command]
-async fn audipick_ocr_test(storage: State<'_, Storage>, engine: String, image_base64: String,
-    api_key: Option<String>, secret_key: Option<String>) -> Result<Value, AppError> {
+async fn audipick_ocr_test(
+    storage: State<'_, Storage>,
+    engine: String,
+    image_base64: String,
+    api_key: Option<String>,
+    secret_key: Option<String>,
+) -> Result<Value, AppError> {
     let settings = storage.settings_get()?;
-    tauri::async_runtime::spawn_blocking(move || audipick::test_ocr_connection(
-        settings, &engine, &image_base64, api_key.as_deref(), secret_key.as_deref()
-    )).await.map_err(|_| AppError::new("OCR_TEST_FAILED", "OCR 测试任务未完成。", true, None))?
+    tauri::async_runtime::spawn_blocking(move || {
+        audipick::test_ocr_connection(
+            settings,
+            &engine,
+            &image_base64,
+            api_key.as_deref(),
+            secret_key.as_deref(),
+        )
+    })
+    .await
+    .map_err(|_| AppError::new("OCR_TEST_FAILED", "OCR 测试任务未完成。", true, None))?
 }
 
 #[tauri::command]
-async fn audipick_llm_test(storage: State<'_, Storage>, profile: Option<Value>, api_key: Option<String>) -> Result<Value, AppError> {
+async fn audipick_llm_test(
+    storage: State<'_, Storage>,
+    profile: Option<Value>,
+    api_key: Option<String>,
+) -> Result<Value, AppError> {
     let settings = storage.settings_get()?;
-    tauri::async_runtime::spawn_blocking(move || audipick::test_audipick_llm_connection(&settings, profile.as_ref(), api_key.as_deref()))
-        .await.map_err(|_| AppError::new("LLM_TEST_FAILED", "AI 连接测试未完成。", true, None))?
+    tauri::async_runtime::spawn_blocking(move || {
+        audipick::test_audipick_llm_connection(&settings, profile.as_ref(), api_key.as_deref())
+    })
+    .await
+    .map_err(|_| AppError::new("LLM_TEST_FAILED", "AI 连接测试未完成。", true, None))?
 }
 
 #[tauri::command]
@@ -805,6 +894,7 @@ fn history_restore(
 ) -> Result<Value, AppError> {
     let record = storage.history_params(job_id.as_str())?;
     let params = record.get("params").cloned().unwrap_or_else(|| json!({}));
+    let (snapshot, snapshot_status) = validate_restore_snapshot(record.get("snapshot"));
     let mut collected: Vec<String> = Vec::new();
     collect_path_like(&params, &mut collected);
     let mut missing: Vec<String> = Vec::new();
@@ -822,9 +912,56 @@ fn history_restore(
         "jobId": job_id,
         "toolId": record.get("toolId").cloned().unwrap_or_else(|| json!("")),
         "params": params,
+        "snapshot": snapshot,
+        "snapshotStatus": snapshot_status,
         "missingPaths": missing,
         "authorizedPathCount": authorized
     }))
+}
+
+/// 校验任务启动时记录的源文件指纹。只有所有文件仍存在，且大小与修改时间
+/// 完全一致时才把识别快照交给前端；否则前端沿用原来的重新识别流程。
+fn validate_restore_snapshot(raw: Option<&Value>) -> (Value, &'static str) {
+    let Some(object) = raw.and_then(Value::as_object) else {
+        return (Value::Null, "none");
+    };
+    if object.is_empty() {
+        return (Value::Null, "none");
+    }
+    if object.get("version").and_then(Value::as_u64) != Some(1) {
+        return (Value::Null, "incompatible");
+    }
+    let Some(sources) = object.get("sources").and_then(Value::as_array) else {
+        return (Value::Null, "incompatible");
+    };
+    if sources.is_empty() {
+        return (Value::Null, "incompatible");
+    }
+    for source in sources {
+        let Some(source) = source.as_object() else {
+            return (Value::Null, "incompatible");
+        };
+        let Some(path) = source.get("path").and_then(Value::as_str) else {
+            return (Value::Null, "incompatible");
+        };
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return (Value::Null, "missing");
+        };
+        let modified_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_millis() as u64);
+        if source.get("size").and_then(Value::as_u64) != Some(metadata.len())
+            || source.get("modifiedMs").and_then(Value::as_u64) != modified_ms
+        {
+            return (Value::Null, "stale");
+        }
+    }
+    match object.get("data") {
+        Some(data) => (data.clone(), "valid"),
+        None => (Value::Null, "incompatible"),
+    }
 }
 
 /// 递归收集 params 里形如 Windows 绝对路径的字符串（盘符或 UNC 开头）。
@@ -871,8 +1008,14 @@ fn audipick_pdf_bytes(
 fn secret_set(name: String, value: String) -> Result<(), AppError> {
     if !matches!(
         name.as_str(),
-        "llm_api_key" | "dify_api_key" | "baidu_ocr_key" | "baidu_ocr_secret"
-            | "audipick_llm_api_key" | "audipick_dify_api_key"
+        "llm_api_key"
+            | "dify_api_key"
+            | "baidu_ocr_key"
+            | "baidu_ocr_secret"
+            | "bailian_asr_key"
+            | "bailian_plan_asr_key"
+            | "audipick_llm_api_key"
+            | "audipick_dify_api_key"
     ) {
         return Err(AppError::new(
             "SECRET_NAME_DENIED",
@@ -895,6 +1038,23 @@ fn secret_set(name: String, value: String) -> Result<(), AppError> {
 
 #[tauri::command]
 fn secret_delete(name: String) -> Result<(), AppError> {
+    // 与 secret_set 同一份白名单：写入有界，删除不得旁路。
+    if !matches!(
+        name.as_str(),
+        "llm_api_key"
+            | "dify_api_key"
+            | "baidu_ocr_key"
+            | "baidu_ocr_secret"
+            | "bailian_asr_key"
+            | "bailian_plan_asr_key"
+    ) {
+        return Err(AppError::new(
+            "SECRET_NAME_DENIED",
+            "不允许删除该类型的凭据。",
+            false,
+            None,
+        ));
+    }
     keyring::Entry::new("AuditToolbox", &name)
         .and_then(|entry| entry.delete_credential())
         .map_err(|e| {
@@ -905,6 +1065,175 @@ fn secret_delete(name: String) -> Result<(), AppError> {
                 Some(e.to_string()),
             )
         })
+}
+
+// ===== 会议纪要助手：录音控制与百炼连接测试 =====
+
+#[tauri::command]
+async fn meeting_record_start(
+    app: tauri::AppHandle,
+    meeting: State<'_, Arc<meeting_watch::MeetingState>>,
+) -> Result<Value, AppError> {
+    let meeting = meeting.inner().clone();
+    let summary = tauri::async_runtime::spawn_blocking(move || {
+        let dirs = project_dirs()?;
+        meeting.begin_recording(dirs.data_local_dir())
+    })
+    .await
+    .map_err(|_| {
+        AppError::new(
+            "MEETING_RECORD_FAILED",
+            "会议录音启动异常结束。",
+            true,
+            None,
+        )
+    })??;
+    // 录音可能从询问小窗或工具页任意入口开始：广播给主窗口，
+    // 全局录音指示胶囊与页面状态都按事件对齐，不再各记各的账。
+    let at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let _ = app.emit(
+        "meeting-event",
+        serde_json::json!({"type": "recording_started", "at": at, "summary": summary}),
+    );
+    Ok(summary)
+}
+
+#[tauri::command]
+async fn meeting_record_stop(
+    app: tauri::AppHandle,
+    meeting: State<'_, Arc<meeting_watch::MeetingState>>,
+) -> Result<Value, AppError> {
+    let meeting = meeting.inner().clone();
+    let summary = tauri::async_runtime::spawn_blocking(move || meeting.finish_recording())
+        .await
+        .map_err(|_| {
+            AppError::new(
+                "MEETING_RECORD_FAILED",
+                "会议录音停止异常结束。",
+                true,
+                None,
+            )
+        })??;
+    let at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let _ = app.emit(
+        "meeting-event",
+        serde_json::json!({"type": "recording_stopped", "at": at}),
+    );
+    Ok(summary)
+}
+
+#[tauri::command]
+fn meeting_status(meeting: State<'_, Arc<meeting_watch::MeetingState>>) -> Value {
+    meeting.status()
+}
+
+#[tauri::command]
+fn meeting_detect_set_enabled(meeting: State<'_, Arc<meeting_watch::MeetingState>>, enabled: bool) {
+    meeting.set_watch_enabled(enabled);
+}
+
+/// 连接测试按设置页选中的通道分流：给了套餐参数走 realtime 连接测试，
+/// 否则按通用通道验证上传凭证密钥。
+#[tauri::command]
+async fn meeting_asr_test(
+    api_key: Option<String>,
+    plan_base_url: Option<String>,
+    plan_model: Option<String>,
+    plan_api_key: Option<String>,
+) -> Result<Value, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if plan_base_url.is_some() || plan_model.is_some() {
+            let params = bailian_plan_asr::PlanTestParams {
+                base_url: plan_base_url.unwrap_or_default(),
+                model: plan_model.unwrap_or_default(),
+                api_key: plan_api_key,
+            };
+            bailian_plan_asr::test_connection(&params)
+        } else {
+            bailian_asr::test_connection(api_key.as_deref())
+        }
+    })
+    .await
+    .map_err(|_| AppError::new("ASR_TEST_FAILED", "连接测试异常结束。", true, None))?
+}
+
+/// meeting 命名空间内合并写入单个开关，避免页面直写整份设置覆盖其他键。
+fn persist_meeting_flag(storage: &Storage, key: &str, value: bool) -> Result<(), AppError> {
+    let settings = storage.settings_get()?;
+    let mut namespace = settings
+        .get("meeting")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if let Some(object) = namespace.as_object_mut() {
+        object.insert(key.to_owned(), json!(value));
+    }
+    storage.settings_set(json!({ "meeting": namespace }))
+}
+
+#[tauri::command]
+fn meeting_set_resident(
+    app: tauri::AppHandle,
+    storage: State<'_, Storage>,
+    meeting: State<'_, Arc<meeting_watch::MeetingState>>,
+    enabled: bool,
+) -> Result<(), AppError> {
+    meeting.set_resident(enabled);
+    if !enabled {
+        // 常驻关掉后，开机自启只会弹出普通窗口、失去意义，一并撤销。
+        use tauri_plugin_autostart::ManagerExt;
+        let autolaunch = app.autolaunch();
+        if autolaunch.is_enabled().unwrap_or(false) {
+            autolaunch.disable().map_err(|e| {
+                AppError::new(
+                    "AUTOSTART_WRITE_FAILED",
+                    "无法取消开机自启，请到设置页重试。",
+                    true,
+                    Some(e.to_string()),
+                )
+            })?;
+        }
+    }
+    persist_meeting_flag(&storage, "background_resident", enabled)
+}
+
+#[tauri::command]
+fn meeting_autostart_status(app: tauri::AppHandle) -> Result<Value, AppError> {
+    use tauri_plugin_autostart::ManagerExt;
+    Ok(json!({"enabled": app.autolaunch().is_enabled().unwrap_or(false)}))
+}
+
+/// 开机自启（注册表 Run 项）。勾选隐含后台常驻：登录后隐藏到托盘直接开始监控。
+#[tauri::command]
+fn meeting_set_autostart(
+    app: tauri::AppHandle,
+    storage: State<'_, Storage>,
+    meeting: State<'_, Arc<meeting_watch::MeetingState>>,
+    enabled: bool,
+) -> Result<Value, AppError> {
+    use tauri_plugin_autostart::ManagerExt;
+    let autolaunch = app.autolaunch();
+    if enabled {
+        autolaunch.enable().map_err(|e| {
+            AppError::new(
+                "AUTOSTART_WRITE_FAILED",
+                "无法设置开机自启，请重试。",
+                true,
+                Some(e.to_string()),
+            )
+        })?;
+        meeting.set_resident(true);
+        persist_meeting_flag(&storage, "background_resident", true)?;
+    } else {
+        autolaunch.disable().map_err(|e| {
+            AppError::new(
+                "AUTOSTART_WRITE_FAILED",
+                "无法取消开机自启，请重试。",
+                true,
+                Some(e.to_string()),
+            )
+        })?;
+    }
+    Ok(json!({"enabled": enabled}))
 }
 
 #[tauri::command]
@@ -922,6 +1251,92 @@ fn pick_path(
     default_name: Option<String>,
     default_directory: Option<String>,
 ) -> Result<Value, AppError> {
+    // === UI 审计调试开关（2026-09-25）：真机 CDP 审计的自动选文件 ===
+    // 两种用法（未设置环境变量时——生产环境常态——行为与原先分毫不差）：
+    // 1) 文件队列模式：AUDITTOOLBOX_DEV_AUTO_PICK 指向 pick-queue.json
+    //    （{"kind":"files|file|folder|save|any","paths":[...]}）。审计驱动在每次
+    //    拾选前重写该文件；kind 命中（或为 any）即跳过对话框、登记白名单并返回；
+    //    kind 不匹配时落入原生对话框兜底。
+    // 2) 内联模式：值为分号分隔的文件路径，按 kind 返回（可选
+    //    AUDITTOOLBOX_DEV_AUTO_PICK_DIR 指定文件夹/保存目录）。
+    // 两种模式都执行与真实选择完全相同的白名单登记。
+    if let Ok(auto_pick) = std::env::var("AUDITTOOLBOX_DEV_AUTO_PICK") {
+        if auto_pick.ends_with(".json") {
+            let served = std::fs::read_to_string(&auto_pick)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|entry| {
+                    let entry_kind = entry.get("kind").and_then(Value::as_str).unwrap_or("any");
+                    let requested = kind.as_str();
+                    if entry_kind != "any" && entry_kind != requested {
+                        return None;
+                    }
+                    let paths: Vec<PathBuf> = entry
+                        .get("paths")
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(PathBuf::from)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if paths.is_empty() {
+                        return None;
+                    }
+                    for path in &paths {
+                        allowed.0.lock().insert(path.clone());
+                    }
+                    Some(match requested {
+                        "files" => json!(
+                            paths
+                                .iter()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .collect::<Vec<_>>()
+                        ),
+                        _ => json!(paths[0].to_string_lossy().to_string()),
+                    })
+                });
+            if let Some(value) = served {
+                return Ok(value);
+            }
+        } else {
+            let paths: Vec<PathBuf> = auto_pick
+                .split(';')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(PathBuf::from)
+                .collect();
+            if !paths.is_empty() {
+                for path in &paths {
+                    allowed.0.lock().insert(path.clone());
+                }
+                let value = match kind.as_str() {
+                    "files" => json!(
+                        paths
+                            .iter()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .collect::<Vec<_>>()
+                    ),
+                    "folder" => json!(
+                        std::env::var("AUDITTOOLBOX_DEV_AUTO_PICK_DIR")
+                            .unwrap_or_else(|_| paths[0].to_string_lossy().to_string())
+                    ),
+                    "save" => json!(
+                        std::env::var("AUDITTOOLBOX_DEV_AUTO_PICK_DIR")
+                            .map(|dir| PathBuf::from(dir)
+                                .join(default_name.as_deref().unwrap_or("审计导出.xlsx"))
+                                .to_string_lossy()
+                                .to_string())
+                            .unwrap_or_else(|_| paths[0].to_string_lossy().to_string())
+                    ),
+                    _ => json!(paths[0].to_string_lossy().to_string()),
+                };
+                return Ok(value);
+            }
+        }
+    }
     let mut dialog = app.dialog().file().set_title(title);
     if !extensions.is_empty() {
         let filters: Vec<&str> = extensions.iter().map(String::as_str).collect();
@@ -1117,6 +1532,9 @@ pub fn engine_call_for_test(
     if method == "ledger.check_mapping_alignment" {
         return fx::check_mapping_alignment(&params);
     }
+    if method == "ledger.entity_scope_suggestions" {
+        return ledger_mapping::entity_scope_suggestions_call(&params);
+    }
     if method == "ledger.review_mapping" || method == "ledger.review_pair_mapping" {
         let dirs = project_dirs()?;
         let storage = Storage::new(dirs.data_local_dir())?;
@@ -1152,16 +1570,66 @@ pub fn engine_call_for_test(
         }
     }
     if let Some(rest) = method.strip_prefix("deposit.") {
-        if rest == "classify_source" || rest.starts_with("inspect") || rest == "rate_tiers" {
+        if rest == "classify_source"
+            || rest.starts_with("inspect")
+            || rest == "rate_tiers"
+            || rest == "account_currencies"
+        {
             return deposit_interest::call(method, params);
         }
+    }
+    // 借款利息的只读识别类：TB 科目分类预选（借款／利息支出／排除），
+    // 与 fx/deposit 的 inspect 同款只读入口，供调查测试采集工具答案。
+    if let Some(rest) = method.strip_prefix("loan.") {
+        if rest.starts_with("inspect") || rest == "tb_accounts" {
+            return loan_interest::call(method, params);
+        }
+    }
+    // 存款利息的只读测算探针：与 fx.preview_probe 同款，调查测试用它拿
+    // 真实样例定位匹配链路（如「序时账没有任何行匹配货币资金科目」）。
+    if method == "deposit.preview_probe" {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pause = excel_merger::PauseCheckpoint::unpaused(cancel.clone());
+        return deposit_interest::run_job(
+            "deposit.preview",
+            params,
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        );
+    }
+    // Excel 合并·智能表头匹配探针：match_preview 只读识别；merge_probe 按
+    // 调用方给的完整计划真实合并到指定输出，供真实 JE 样例回归。
+    if method == "excel_merger.match_preview" {
+        return excel_merger::call(method, params);
+    }
+    if method == "excel_merger.merge_probe" {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pause = excel_merger::PauseCheckpoint::unpaused(cancel.clone());
+        return excel_merger::merge(params, &|_, _, _, _| {}, cancel, &pause);
     }
     // 看账的只读识别类：不写文件、不动任务，调查测试用它量缓存效果。
     // 余额滚动校验是只读的，调查测试用它拿真实样例定位失配。
     if method == "fx.preview_probe" {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let pause = excel_merger::PauseCheckpoint::unpaused(cancel.clone());
-        return fx::run_job("fx.preview", params, &|_, _, _, _| {}, cancel, &pause);
+        let started = std::time::Instant::now();
+        let previous = std::cell::RefCell::new(String::new());
+        return fx::run_job(
+            "fx.preview",
+            params,
+            &|stage, _, _, message| {
+                if previous.borrow().as_str() != stage {
+                    *previous.borrow_mut() = stage.to_owned();
+                    eprintln!(
+                        "fx.preview_probe +{:.2}s {stage}: {message}",
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+            },
+            cancel,
+            &pause,
+        );
     }
     if method == "fx.export_probe" {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1173,6 +1641,15 @@ pub fn engine_call_for_test(
     }
     if method == "fx.rollforward_check" {
         return fx::rollforward_check_for_test(&params);
+    }
+    if method == "fx.realized_probe" {
+        let started = std::time::Instant::now();
+        return fx::realized_probe_for_test(params, &|stage, _, _, message| {
+            eprintln!(
+                "fx.realized_probe +{:.2}s {stage}: {message}",
+                started.elapsed().as_secs_f64()
+            );
+        });
     }
     if matches!(
         method,
@@ -1210,6 +1687,85 @@ pub fn engine_call_for_test(
     })
 }
 
+/// 高缩放比小屏（如 1920×1200 配 Windows 150% 缩放，可用宽度仅 1280 逻辑像素）
+/// 上，默认 1440×900 的窗口会右/下溢出屏幕，右缘内容既看不到也拖不回来。
+/// 启动时按窗口所在屏幕的可用区域（已扣除任务栏）收缩窗口并居中，保证完整
+/// 可见；屏幕够大时原样保留默认尺寸，只缩不放。屏幕查询失败则跳过，不动窗口。
+fn fit_main_window_to_screen(app: &tauri::App) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let (Ok(Some(monitor)), Ok(inner)) = (window.current_monitor(), window.inner_size()) else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    let work = monitor.work_area();
+    let available = (
+        f64::from(work.size.width) / scale,
+        f64::from(work.size.height) / scale,
+    );
+    let desired = (
+        f64::from(inner.width) / scale,
+        f64::from(inner.height) / scale,
+    );
+    let fitted = window_fit::fit_startup_size(desired, available);
+    if fitted == desired {
+        return;
+    }
+    let fitted_w = (fitted.0 * scale).round() as i32;
+    let fitted_h = (fitted.1 * scale).round() as i32;
+    let x = work.position.x + ((work.size.width as i32 - fitted_w) / 2).max(0);
+    let y = work.position.y + ((work.size.height as i32 - fitted_h) / 2).max(0);
+    let _ = window.set_size(tauri::LogicalSize::new(fitted.0, fitted.1));
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+/// 托盘资源必须被持有，否则图标会被立即回收。
+struct TrayResource(tauri::tray::TrayIcon);
+
+/// 系统托盘：后台常驻时关窗只是隐藏，「显示工具箱／退出」都从这里走。
+/// 退出走 `app.exit(0)`，复用 RunEvent::Exit 里的录音封盘与统计收尾。
+fn install_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::menu::{Menu, MenuItem};
+    let icon = match app.default_window_icon().cloned() {
+        Some(icon) => icon,
+        None => return Ok(()),
+    };
+    let show_item = MenuItem::with_id(app, "tray_show", "显示工具箱", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "tray_quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+    let tray = tauri::tray::TrayIconBuilder::with_id("audit-toolbox-tray")
+        .icon(icon)
+        .tooltip("E点通工具箱（会议纪要监控）")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "tray_quit" => app.exit(0),
+            _ => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        })
+        .build(app)?;
+    app.manage(TrayResource(tray));
+    Ok(())
+}
+
 pub fn run() {
     let dirs = project_dirs().expect("AuditToolbox data directory");
     std::fs::create_dir_all(dirs.data_local_dir()).expect("create data directory");
@@ -1222,6 +1778,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            // 开机自启的启动参数：登录后直接隐藏到托盘监控，不弹窗口。
+            Some(vec!["--hidden"]),
+        ))
         .plugin(tauri_plugin_updater::Builder::new().build());
     // Development previews may run beside the user's installed release. Only
     // production builds enforce the single-instance hand-off.
@@ -1236,6 +1798,23 @@ pub fn run() {
         .manage(storage)
         .manage(allowed)
         .manage(telemetry.clone())
+        // 后台常驻开启时，关闭主窗口只是隐藏到托盘；检测与录音继续。
+        // 常驻关闭则放行关闭，应用照旧退出。
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    return;
+                }
+                let resident = window
+                    .app_handle()
+                    .try_state::<Arc<meeting_watch::MeetingState>>()
+                    .is_some_and(|state| state.resident_enabled());
+                if resident {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(move |app| {
             app.manage(ExcelMergerService::new(
                 app.handle().clone(),
@@ -1243,6 +1822,37 @@ pub fn run() {
             ));
             app.state::<telemetry::Telemetry>()
                 .track("app_start", None, None, None, None);
+            // 会议检测默认开启；设置页存过 meeting.detect_enabled=false 则关闭。
+            // 后台常驻默认关闭：关窗即退出，只有页面开关打开过才缩到托盘。
+            let meeting_settings = app
+                .state::<Storage>()
+                .settings_get()
+                .ok()
+                .and_then(|settings| settings.get("meeting").cloned())
+                .unwrap_or_else(|| json!({}));
+            let meeting_watch_enabled = meeting_settings
+                .get("detect_enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let meeting_resident = meeting_settings
+                .get("background_resident")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let meeting = Arc::new(meeting_watch::MeetingState::new(
+                meeting_watch_enabled,
+                meeting_resident,
+            ));
+            app.manage(meeting.clone());
+            meeting.start_watcher(app.handle().clone());
+            install_tray(app)?;
+            fit_main_window_to_screen(app);
+            // 窗口默认不可见：开机自启带 --hidden 时保持托盘隐藏，其余场景补显示。
+            let start_hidden = std::env::args().any(|arg| arg == "--hidden");
+            if !start_hidden {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1269,7 +1879,15 @@ pub fn run() {
             secret_delete,
             legacy_import,
             pick_path,
-            open_output
+            open_output,
+            meeting_record_start,
+            meeting_record_stop,
+            meeting_status,
+            meeting_detect_set_enabled,
+            meeting_set_resident,
+            meeting_autostart_status,
+            meeting_set_autostart,
+            meeting_asr_test
         ])
         .build(tauri::generate_context!())
         .expect("build Tauri application")
@@ -1279,6 +1897,10 @@ pub fn run() {
                 let telemetry = handle.state::<telemetry::Telemetry>();
                 telemetry.track("app_exit", None, None, None, Some(telemetry.session_ms()));
                 telemetry.shutdown();
+                // 还在录音就必须封盘，否则 WAV 头缺失文件作废。
+                if let Some(meeting) = handle.try_state::<Arc<meeting_watch::MeetingState>>() {
+                    meeting.shutdown();
+                }
             }
         });
 }
@@ -1315,6 +1937,36 @@ mod tests {
         ];
         expected.sort();
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn restore_snapshot_requires_unchanged_source_fingerprint() {
+        let path = std::env::temp_dir().join(format!(
+            "audit-toolbox-snapshot-{}-{}.csv",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&path, "a,b\n1,2\n").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let modified_ms = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let snapshot = json!({
+            "version":1,
+            "sources":[{"path":path,"size":metadata.len(),"modifiedMs":modified_ms}],
+            "data":{"headers":["a","b"]}
+        });
+        let (data, status) = validate_restore_snapshot(Some(&snapshot));
+        assert_eq!(status, "valid");
+        assert_eq!(data["headers"], json!(["a", "b"]));
+
+        std::fs::write(&path, "a,b\n1,222\n").unwrap();
+        let (_, status) = validate_restore_snapshot(Some(&snapshot));
+        assert_eq!(status, "stale");
+        let _ = std::fs::remove_file(path);
     }
 
     /// 前端按型号分组、按型号标必填，全靠这份下发的槽位定义；型号名也必须是
@@ -1371,13 +2023,58 @@ mod tests {
     }
 
     #[test]
+    fn 主体归集候选同步入口已登记且保留摘要() {
+        let value = engine_call_for_test(
+            "ledger.entity_scope_suggestions",
+            json!({
+                "tbEntities": [
+                    {"entity":"10008529 集团", "rowCount":2, "amount":20.0, "absoluteAmount":30.0},
+                    {"entity":"集团华东分支", "rowCount":3, "amount":-10.0, "absoluteAmount":50.0}
+                ],
+                "jeEntities": ["集团"]
+            }),
+        )
+        .expect("公共主体候选入口失败");
+        assert_eq!(value["anchors"], json!(["集团"]));
+        assert_eq!(value["candidates"][0]["sourceSide"], "tb");
+        assert_eq!(value["candidates"][0]["sourceEntity"], "集团华东分支");
+        assert_eq!(value["candidates"][0]["targetEntity"], "集团");
+        assert_eq!(value["candidates"][0]["rowCount"], 3);
+        assert_eq!(value["candidates"][0]["absoluteAmount"], 50.0);
+    }
+
+    #[test]
     fn bundled_catalog_contains_unique_tools() {
         let catalog = tool_catalog().unwrap();
         let rows = catalog.as_array().unwrap();
-        assert_eq!(rows.len(), 18);
+        assert_eq!(rows.len(), 19);
         let ids: HashSet<_> = rows.iter().filter_map(|row| row["id"].as_str()).collect();
-        assert_eq!(ids.len(), 18);
+        assert_eq!(ids.len(), 19);
         assert!(rows.iter().all(|row| row["route"].as_str().is_some()));
+    }
+
+    /// 凭据写入有四名白名单，删除此前可对任意名字调用 keyring——
+    /// 2026-09-25 补齐同一份白名单，防止未来前端接上删除入口后旁路。
+    #[test]
+    fn 凭据删除与写入共用白名单() {
+        let err = secret_delete("arbitrary_secret".into()).unwrap_err();
+        assert_eq!(err.code, "SECRET_NAME_DENIED");
+        assert_eq!(err.user_message, "不允许删除该类型的凭据。");
+    }
+
+    /// 页面直开常驻开关只应合并 meeting 命名空间的单个键，
+    /// 不得把 detect_enabled 等其他会议设置冲掉。
+    #[test]
+    fn 会议常驻开关合并写入不覆盖其他键() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage
+            .settings_set(json!({"meeting": {"detect_enabled": false}}))
+            .unwrap();
+        persist_meeting_flag(&storage, "background_resident", true).unwrap();
+        let meeting = storage.settings_get().unwrap()["meeting"].clone();
+        assert_eq!(meeting["detect_enabled"], false);
+        assert_eq!(meeting["background_resident"], true);
     }
 
     /// 任务通道的方法白名单分散在两处：`excel_merger::SUPPORTED_JOB_METHODS`
@@ -1412,6 +2109,30 @@ mod tests {
             assert!(
                 excel_merger::SUPPORTED_JOB_METHODS.contains(&method),
                 "{method}"
+            );
+        }
+    }
+
+    /// 任务通道有两道门：`is_direct_job_method`（job_start 转发前）与
+    /// `ExcelMergerService::start` 的 `SUPPORTED_JOB_METHODS`（worker 派发前）。
+    /// `任务通道的两份白名单必须一致` 只查 SUPPORTED→is_direct 单向，反向漏登记
+    /// （is_direct 有了、SUPPORTED 没有）当时静默通过，用户点「导出汇率」才报
+    /// 「未找到 Rust 表格任务方法。」——汇兑四条方法双向断言堵住这个方向。
+    #[test]
+    fn 汇兑的四条任务方法都能进两道任务白名单() {
+        for method in [
+            "fx.fetch_rates",
+            "fx.preview",
+            "fx.export",
+            "fx.export_rates",
+        ] {
+            assert!(
+                is_direct_job_method(method),
+                "{method} 未登记 is_direct_job_method"
+            );
+            assert!(
+                excel_merger::SUPPORTED_JOB_METHODS.contains(&method),
+                "{method} 未登记 SUPPORTED_JOB_METHODS，点下去会报「未找到 Rust 表格任务方法。」"
             );
         }
     }

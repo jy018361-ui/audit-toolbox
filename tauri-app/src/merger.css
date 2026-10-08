@@ -46,6 +46,25 @@
   font-size: var(--fs-xs);
   color: var(--text-muted);
 }
+.pdf-drop-zone-filled,
+.merger-drop-zone-filled {
+  min-height: 48px;
+  padding: var(--sp-2) var(--sp-3);
+}
+.pdf-result-callout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+}
+.pdf-result-callout span {
+  color: var(--text-muted);
+}
 .merger-data-notice {
   margin: var(--sp-3) 0 0;
 }
@@ -194,6 +213,15 @@
 }
 .merger-progress {
   margin-top: var(--sp-4);
+}
+.merge-grid-return {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
 }
 .job-banner {
   display: flex;

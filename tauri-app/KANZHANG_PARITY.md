@@ -1,5 +1,69 @@
 # 看账小工具迁移功能矩阵
 
+## 2026-09-27：科目汇总增加借贷发生额
+
+- 普通与大 CSV 磁盘导出的科目汇总统一为科目名称、借方金额、贷方金额、净额、行数；仍取命中目标的完整凭证。
+- 借贷分列逐行累计，红字保留负数；贷方列已带净额负号时按公共符号识别结果转回贷方发生额。金额加方向按分录方向还原；没有可识别方向的单金额不猜，同一科目任一行方向不明则借贷汇总留空，净额和行数继续输出。
+- 字段映射 LLM 维持开启；套表 LLM 分析继续停用。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 科目汇总`；`cargo test --manifest-path src-tauri/Cargo.toml --lib disk_export_batch_aggregation_keeps_suite_totals`；真实输入设置 `KANZHANG_REAL_SAMPLE` 与 `KANZHANG_REAL_OUTPUT` 后运行 `cargo test --manifest-path src-tauri/Cargo.toml --lib 真实序时账科目汇总导出借贷列 -- --ignored --nocapture`。
+
+## 2026-09-26：月/日分列账型的日期识别与 LLM 复核对齐 TBJE 公共引擎
+
+- 裸「月」「日」两列（纯数字、无年份、无完整日期列）的账型此前死路一条：date 角色的冲突词（年/月/期间）让脚本建议永远映射不上日期，页面持续提示「尚未映射：记账日期」。现在 `suggest_mapping`（看账与正负数凭证标记全部入口共用）接入公共 `pair_month_day_date_columns` 配对，并新增脚本级兜底 `month_day_date_fallback`：全表没有任何完整日期列、且恰有一列取值全为纯月份的「月」列时，直接把月＋日组成 date；多个月份列（歧义）、样例不足 5 行不猜，完整日期列在场时完整日期优先。
+- LLM 复核（`kanzhang.llm_mapping`，两页共用）从严格日期策略切到与 TBJE 相同的复合日期策略：提示词附公共复合日期规则；模型建议的月/日组成列在卫生过滤中放行（无完整日期列前提）；模型漏提 date 时按样例兜底补进 fills（月＋日各一条，0.99 置信自动采纳）。此前模型即使建议「月」列也会被冲突词丢弃。
+- 前端采纳复核建议时，date/id 等多列角色由「整组覆盖」改为「追加组成键」：LLM 分两条返回的月、日建议同时保留，与 planLedgerChanges／applyLedgerPendingChange 的既有口径一致；单列角色仍为改指语义。
+- 月份归集（凭证类型 Sheet 与自定义透视「日期自动转月份」）对无年份月/日组成列的口径：先从源文件名取报告期年份（恰一个落在 1990–2100 的 4 位数字段才作数，跨年区间如「2024-2025」不猜），取不到时按占位年 1900 让「月＋日」仍然算日期；月份桶在占位口径下只标「01月」，不亮占位年份，文件名取到年份或取值自带年份时仍标「YYYY-MM」。自定义透视的日期列字段改按整组日期映射还原月份（月/日分列也能出月份列），不再只看单列原始值。
+- 凭证识别键（coding 匹配）行为不变：本就用日期映射列的原始值拼键，月/日分列映射后即可区分凭证。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 裸月日分列兜底直接组成日期`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 看账建议把裸月日分列直接指为日期`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 无年份月日的月份桶按文件名年份或占位年份归集`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 看账复核放行裸月日组成列且漏提时补进fills`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 看账复核提示词带复合日期纪律`；`npx vitest run src/ledgerMappingLabels.test.ts src/KanzhangParityPage.test.ts src/JeSignMarkPage.test.tsx`。
+
+## 2026-09-26：重复合并标题与自动表头层数
+
+- TBJEPBC 的 2026.01–08 序时账第 1 行为跨 36 列的合并报表标题，底层每格都存有同一文字。旧双层判据把 36 个非空格当成分组表头，第 1 行因此胜出；页面又固定使用 1 层，预览得到重复标题列名而丢失全部字段映射。
+- 公共表头识别要求双层上层至少有两个不同的有效分组名；重复标题按单行报表标题跳过。看账／正负数标记的自动模式同时采用识别出的起始行和层数，人工行号或层数仍可单独覆盖。自动结论缓存换为 `auto-header-v2`，同时存行号与层数，旧误判不复用。
+- 该文件的 `会计科目` 为 `编码-名称` 混写，现有公共科目拆分规则仍不以连字符作分隔；此项与表头识别独立，尚未保留自动编码拆分行为。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 重复合并标题不冒充双层表头`、`cargo test --manifest-path src-tauri/Cargo.toml --lib kanzhang_inspect_merges_double_header`、`npx tsc -b`。
+
+## 2026-09-26：审计关注预设的关键词只认科目首段（一级科目）
+
+- 实测 2221010102/2221010142「应交税费-应交增值税-进项税额-专用发票17%/13%：固定资产」凭全称包含「固定资产」误入固定资产批次——尾段「：固定资产」是辅助核算标注，科目本身仍是税金科目。预设名称匹配改为只对首段进行：先剥行首嵌入的编码段与尾部括号备注，再按层级分隔取首段；英文单词内的连字符/斜杠（Short-term Borrowings、A/P）不拆。
+- 编码前缀命中与损益让路口径不变；无独立编码列时同样只按首段名称匹配，「研发费用-…-无形资产摊销」不再进无形资产批次（2026-09-06 记录的「无独立编码列时维持纯名称匹配」全称包含行为废止）。首段不含关键词的科目（如「待处理财产损溢-待处理固定资产损溢」）不再自动进批次，可手工加入。
+- 回归：`npx vitest run src/KanzhangParityPage.test.ts`（新增「辅助核算标注里的关键词不把科目拉进无关预设批次」「英文科目名的连字符与斜杠不拆首段」，更新无编码列用例）。
+
+## 2026-09-26：暂停看账导出套表的 LLM 分析
+
+- 仅暂停导出套表时的 LLM 分析。读取后的 LLM 字段映射复核保持原样，仍可自动运行或手动重试。
+- 普通及大 CSV 磁盘导出均不调用套表分析模型、不生成 `LLM分析` Sheet。旧草稿或旧任务即使传入 `llmAnalysis=true`、全局设置开启 LLM，也按停用处理。
+- `科目汇总` 仍按所选目标科目命中的完整凭证明细逐行分组，金额是借正贷负的净额之和，另计分录行数；暂未增加借方、贷方列。源表借贷分列时可在汇总前分开累计；只有净额列时需依赖方向或已确认的符号口径，不能单凭最终净额还原两边发生额。
+- 回归：`npm run build`；`npx vitest run src/KanzhangParityPage.test.ts`；`cargo test --manifest-path src-tauri/Cargo.toml --lib kanzhang_export_writes_advanced_sheets_and_multiple_batches`；`cargo test --manifest-path src-tauri/Cargo.toml --lib disk_export_batch_aggregation_keeps_suite_totals`。
+
+## 2026-09-23：科目身份任一满足，摘要选填
+
+- 看账与正负数凭证标记统一要求：凭证识别字段、日期、完整金额方案，以及科目编码／科目名称任一。摘要继续用于展示、筛选和导出，但缺失时不阻断。
+- 只有编码或只有名称均可进入科目筛选；两者都缺失时统一提示「科目编码／科目名称（任一）」。
+- TBJE 配对场景的名称唯一回退与辅助验证顺序不在本次改动范围，继续由公共账表引擎处理。
+
+## 2026-09-14 · 下一批次捷径与正负数工具恢复损益结转标记
+
+- 看账目标科目区不再单独创建空批次；选中待选科目后点“加入下一批次”，会直接建立新批次、放入当前选择并切换过去。“加入目标批次”仍用于补充当前批次。
+- 正负数工具新增可关闭的损益结转标记，默认开启：命中本年利润或未分配利润的整张凭证写入【损益结转】，并从直接/跨凭证正负数配对中排除；内存 CSV/XLSX 与大 CSV 流式路径采用同一口径。缺少该参数的旧后端任务维持原行为。
+- 符号人工选项只在整份输入文件所有凭证均为单边时显示；完整凭证可参与配平时使用自动结论，不再展示两个容易误用的覆盖按钮。
+- 回归：`npx vitest run src/JeSignMarkPage.test.tsx src/KanzhangParityPage.test.ts`；`cargo test --manifest-path src-tauri/Cargo.toml --lib je_mark -- --test-threads=1`；`npm run build`。
+
+## 2026-09-14 · 空科目名称不再抹掉有效明细，空目标批次硬拦截
+
+- 2002 公司 `Sheet1` 原始 JE 共 109,055 行；「科目描述」只有标题、数据列全空，但目标编码 `1601020000`／`1601030000`／`1601050000` 在原表有 33 条明细。旧预处理把“映射了空名称列”当成缺少科目身份，再把“会计凭证行”误并入凭证键，109,055 行压成 512 行，目标 0 行。修复后科目编码或名称任一有值即构成科目身份，凭证行号不进凭证键；同源实测预处理保留 109,055 行，33 条目标分录展开为 124 行完整凭证。
+- 新编码出现而名称为空时，名称保持空白并清除旧名称的向下继承上下文；完整读取的表自动映射不会把整列空白的名称当有效科目列（大 CSV 仅取前 50 行预览，不据此断定整列为空）。看账内存与大 CSV 磁盘预处理以及其他 TBJE 工具共用的 JE 填充入口均采用同一身份规则。
+- 某目标批次筛选结果为 0 时，预览／导出报 `KANZHANG_TARGET_NO_MATCH`，不再写出只有标题的 CSV 与 Excel 套表；单搜索框支持编码前缀或名称关键词。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib tabular::tests::`、`npx vitest run src/KanzhangParityPage.test.ts`；真实样例可设置 `KANZHANG_REAL_SAMPLE` 后运行忽略的实测探针。
+
+## 2026-09-12 · 分段明细账先剔结构行，再补全非金额字段
+
+- 针对 SAP 一类按科目分段的明细账：识别到「期初余额」锚点后，以“凭证编号非空＋至少一个已映射金额字段非空”认定正文；「期初余额」先保存上下文再删除，「本月合计」「本年累计」直接删除，新一期初余额会清空旧上下文，避免跨科目串值。
+- 每条保留明细会补齐所有空白字段，唯一例外是借方、贷方和其他金额类列，防止把上一条分录金额带入本行。规则不限于公司、科目编码和科目名称，备注、辅助信息等非金额列同样补齐。
+- 该规则只在实际观察到“期初余额锚点后的正文缺少科目”时启用；普通平铺序时账继续使用原有正文过滤和填充逻辑。金额校验与正文认定复用同一分段计划，因此真实明细中的坏金额仍按源 Excel 行号报错。
+- 实现位于公共账表引擎，并非看账专属；看账只消费公共正规化结果，与 TBJE、汇兑、存款、借款及 FA 勾稽保持一致。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib kanzhang`；真实样例可设置 `KANZHANG_SECTIONED_SAMPLE` 后执行 `cargo test --manifest-path src-tauri/Cargo.toml --lib 分段看账真实样例控制数 -- --ignored --nocapture`，控制结果为 12,265 条正文、目标科目完整凭证 1,228 行、483 个凭证，借贷各 13,061,773.26。
+
 ## 2026-09-09 · 内存拦截收窄到超过 1 GiB 的文本输入
 
 - `.xls/.xlsx/.xlsm/.xlsb` 输入不再进入公共启动等待、运行期自动内存暂停或 Job Object 硬上限；该规则在统一 worker 调度层生效，覆盖所有读取 JE 的工具。

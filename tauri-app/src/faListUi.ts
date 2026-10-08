@@ -1,3 +1,9 @@
+import {
+  AUTO_ACCEPT_LLM_CONFIDENCE,
+  isVisibleLlmReviewConfidence,
+  shouldAutoAcceptLlmReview,
+} from "@/llmReviewConfidence";
+
 export function shouldShowFaAdditionFields(additionMethod?: string): boolean {
   return Boolean(additionMethod?.trim());
 }
@@ -174,6 +180,49 @@ export function faMappedRolesForColumn<T extends readonly [string, string]>(
       : String(value ?? "") === normalized;
   });
 }
+/// 列头映射下拉选中某角色后的结果。
+///
+/// 选择只做"加法"：把选中角色指到本列（单值角色自动从原列让位），
+/// 本列已承担的其他角色一律保留——在"资产名称"列上再选"资产ID"应得到
+/// ID＋名称双角色，而不是用 ID 顶掉名称。只有选空值（"—"）才清除本列
+/// 的全部角色。multiField 是多列角色字段（主表 matchKeys、补充清单 keys），
+/// 命中该角色的列即匹配键，与 keys 影子状态同步返回。
+export type FaColumnRoleSelection = {
+  mapping: FaMappingLike;
+  keys: string[];
+};
+export function faSelectColumnRole(
+  mapping: FaMappingLike,
+  multiField: string,
+  keys: string[],
+  column: string,
+  role: string,
+  roleFields: readonly string[],
+): FaColumnRoleSelection {
+  const col = column.trim();
+  if (!role) {
+    const next: FaMappingLike = { ...mapping };
+    for (const field of roleFields) {
+      const value = next[field];
+      if (Array.isArray(value)) {
+        next[field] = value.filter((item) => item !== col);
+      } else if (String(value ?? "") === col) {
+        next[field] = undefined;
+      }
+    }
+    const cleared = next[multiField];
+    return {
+      mapping: next,
+      keys: Array.isArray(cleared) ? cleared : keys.filter((item) => item !== col),
+    };
+  }
+  if (role === multiField) {
+    const nextKeys = keys.includes(col) ? keys : [...keys, col];
+    return { mapping: { ...mapping, [multiField]: nextKeys }, keys: nextKeys };
+  }
+  return { mapping: { ...mapping, [role]: col }, keys };
+}
+
 // 选填角色未映射：不拦流程，但要让用户知道少了什么。最典型的是文件2的
 // 「本年折旧」——它不是必填，所以过去完全不提示，用户以为已经映射全了。
 export function faMissingOptionalRoles<T extends readonly [string, string]>(
@@ -194,10 +243,10 @@ export function faMissingOptionalRoles<T extends readonly [string, string]>(
     .map(([, label]) => label);
 }
 export const FA_LOW_CONFIDENCE = 0.7;
-// 把握达到门槛才自动改，不到的原样留着，由用户决定是否采纳。
-export const FA_AUTO_APPLY_MIN = 0.6;
+// 仅高于 75% 才自动改；明确低于可见门槛的结果直接隐藏。
+export const FA_AUTO_APPLY_MIN = AUTO_ACCEPT_LLM_CONFIDENCE;
 export const shouldAutoApplyFa = (confidence?: number) =>
-  confidence === undefined || confidence >= FA_AUTO_APPLY_MIN;
+  shouldAutoAcceptLlmReview(confidence);
 export type FaPendingSuggestion = {
   id: string;
   label: string;
@@ -223,6 +272,8 @@ export type FaMappingChange = {
 };
 export type FaLlmSuggestionLike = {
   role: string;
+  action?: string;
+  autoClearSafe?: boolean;
   file_side?: "file1" | "file2";
   suggested_column?: string;
   confidence?: number;
@@ -247,7 +298,12 @@ export type FaLlmPlanInput = {
   autoApplied?: FaLlmSuggestionLike[];
   fieldReviews?: FaLlmSuggestionLike[];
   matchReview?: FaMatchReviewLike;
+  autoApply?: boolean;
   roleLabels: Record<string, string>;
+  /** 子工具只接受自身下拉框提供的字段角色。 */
+  allowedRoleKeys?: readonly string[];
+  /** 复核建议须落到预览表中实际存在的列，才可标记为已生效。 */
+  headersBySide?: Partial<Record<FaSide, readonly string[]>>;
 };
 export type FaLlmPlan = {
   beginMapping: FaMappingLike;
@@ -267,6 +323,8 @@ const faValueText = (value?: string | string[] | boolean): string => {
   return value?.trim() ? value.trim() : "未映射";
 };
 const sideLabel = (side: FaSide) => (side === "begin" ? "期初" : "期末");
+const normalizeFaHeader = (value: string) =>
+  value.replace(/[\s_\-()/（）\[\]【】]/g, "").toLowerCase();
 
 export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
   const mappings: Record<FaSide, FaMappingLike> = {
@@ -278,12 +336,13 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
   const record = (
     side: FaSide,
     key: string,
-    column: string,
+    column: string | undefined,
     item: { confidence?: number; reason?: string },
   ) => {
     const before = mappings[side][key];
     if (faValueText(before) === faValueText(column)) return;
-    mappings[side][key] = column;
+    if (column === undefined) delete mappings[side][key];
+    else mappings[side][key] = column;
     const id = `${side}.${key}`;
     const existing = collected.get(id);
     collected.set(id, {
@@ -310,13 +369,27 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
   const consider = (
     side: FaSide,
     key: string,
-    column: string,
-    item: { confidence?: number; reason?: string },
+    column: string | undefined,
+    item: { confidence?: number; reason?: string; action?: string; autoClearSafe?: boolean },
   ) => {
+    if (!isVisibleLlmReviewConfidence(item.confidence)) return;
     if (side === "begin" && FA_FILE2_ONLY_MAPPING_KEYS.has(key)) return;
+    const headers = input.headersBySide?.[side];
+    if (column !== undefined && headers) {
+      const candidate = column;
+      const exact = headers.find((header) => header.trim() === candidate.trim());
+      column = exact ?? headers.find(
+        (header) => normalizeFaHeader(header) === normalizeFaHeader(candidate),
+      );
+      if (column === undefined) return;
+    }
     const before = mappings[side][key];
     if (faValueText(before) === faValueText(column)) return;
-    if (shouldAutoApplyFa(item.confidence)) {
+    if (
+      input.autoApply !== false &&
+      shouldAutoApplyFa(item.confidence) &&
+      (item.action !== "clear" || item.autoClearSafe === true)
+    ) {
       record(side, key, column, item);
       return;
     }
@@ -336,7 +409,11 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
     ...(input.fieldReviews ?? []),
   ]) {
     const key = FA_LLM_ROLE_MAP[item.role];
-    if (!key) continue;
+    if (!key || (input.allowedRoleKeys && !input.allowedRoleKeys.includes(key))) continue;
+    if (item.action === "clear" && item.file_side) {
+      consider(item.file_side === "file1" ? "begin" : "end", key, undefined, item);
+      continue;
+    }
     // suggestions 用 file_side + suggested_column，fieldReviews 用 suggested_mapping 对象
     if (item.suggested_column?.trim() && item.file_side) {
       consider(
@@ -366,7 +443,12 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
     matchApplicable &&
     (faValueText(beginKeys) !== faValueText(suggestedBegin) ||
       faValueText(endKeys) !== faValueText(suggestedEnd));
-  if (matchChanged && !shouldAutoApplyFa(match?.confidence)) {
+  if (matchChanged && !isVisibleLlmReviewConfidence(match?.confidence)) {
+    // 低于 60% 的匹配键猜测不展示，也不应用。
+  } else if (
+    matchChanged &&
+    (input.autoApply === false || !shouldAutoApplyFa(match?.confidence))
+  ) {
     pending.push({
       id: "matchKeys",
       label: "匹配 ID",
@@ -442,6 +524,7 @@ export type FaSupplementPlanInput = {
   autoApplied?: FaLlmSuggestionLike[];
   fieldReviews?: FaLlmSuggestionLike[];
   matchReview?: FaMatchReviewLike;
+  autoApply?: boolean;
 };
 export type FaSupplementPlan = {
   addition: FaSupplementSideState;
@@ -460,14 +543,16 @@ export function planFaSupplementChanges(
   const collected = new Map<string, FaSupplementChange>();
   const record = (
     role: string,
-    column: string,
+    column: string | undefined,
     item: { confidence?: number; reason?: string },
   ) => {
+    if (!isVisibleLlmReviewConfidence(item.confidence)) return;
     const spec = FA_SUPPLEMENT_ROLES[role];
     if (!spec) return;
     const before = sides[spec.target][spec.key];
     if (faValueText(before) === faValueText(column)) return;
-    sides[spec.target][spec.key] = column;
+    if (column === undefined) delete sides[spec.target][spec.key];
+    else sides[spec.target][spec.key] = column;
     const id = `${spec.target}.${spec.key}`;
     const existing = collected.get(id);
     collected.set(id, {
@@ -493,14 +578,19 @@ export function planFaSupplementChanges(
   const pending: FaPendingSuggestion[] = [];
   const consider = (
     role: string,
-    column: string,
-    item: { confidence?: number; reason?: string },
+    column: string | undefined,
+    item: { confidence?: number; reason?: string; action?: string; autoClearSafe?: boolean },
   ) => {
+    if (!isVisibleLlmReviewConfidence(item.confidence)) return;
     const spec = FA_SUPPLEMENT_ROLES[role];
     if (!spec) return;
     const before = sides[spec.target][spec.key];
     if (faValueText(before) === faValueText(column)) return;
-    if (shouldAutoApplyFa(item.confidence)) {
+    if (
+      input.autoApply !== false &&
+      shouldAutoApplyFa(item.confidence) &&
+      (item.action !== "clear" || item.autoClearSafe === true)
+    ) {
       record(role, column, item);
       return;
     }
@@ -524,6 +614,10 @@ export function planFaSupplementChanges(
     ...(input.autoApplied ?? []),
     ...(input.fieldReviews ?? []),
   ]) {
+    if (item.action === "clear") {
+      consider(item.role, undefined, item);
+      continue;
+    }
     if (item.suggested_column?.trim())
       consider(item.role, item.suggested_column.trim(), item);
     const suggested = normalizeFaSuggestedMapping(item.suggested_mapping);
@@ -548,6 +642,9 @@ export function planFaSupplementChanges(
       const current = sides[target].keys ?? [];
       if (!suggestedKeys.length) continue;
       if (faValueText(current) === faValueText(suggestedKeys)) continue;
+      if (!isVisibleLlmReviewConfidence(match.confidence)) {
+        continue;
+      }
       if (!shouldAutoApplyFa(match.confidence)) {
         pending.push({
           id: `${target}.keys`,
@@ -600,12 +697,29 @@ export function planFaSupplementChanges(
 export function faReviewSummary(applied: number, pending = 0): string {
   const done = applied ? `已自动调整 ${applied} 项，不合适可逐条撤销` : "";
   const ask = pending
-    ? `另有 ${pending} 项把握不足 ${Math.round(FA_AUTO_APPLY_MIN * 100)}%，未改动，请确认是否采纳`
+    ? `另有 ${pending} 项未自动采纳，请确认是否采纳`
     : "";
   if (done && ask) return `LLM 复核完成：${done}；${ask}。`;
   if (done) return `LLM 复核完成：${done}。`;
   if (ask) return `LLM 复核完成：${ask}。`;
   return "LLM 复核完成：现有映射与 LLM 判断一致，未做改动。";
+}
+
+export function faReviewDisplayMessage(
+  review: { enabled?: boolean; failed?: boolean; message?: string },
+  applied: number,
+  pending = 0,
+): string {
+  const original = review.message?.trim() ?? "";
+  if (review.failed || !review.enabled || original.includes("跳过本次 LLM")) {
+    return (
+      original ||
+      (review.enabled
+        ? "LLM 复核失败。"
+        : "LLM 未启用，已保留当前自动映射。")
+    );
+  }
+  return faReviewSummary(applied, pending);
 }
 
 export function faReviewNarrative(

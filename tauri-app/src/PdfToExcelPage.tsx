@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
   jobCancel,
@@ -22,6 +23,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useJobEvents } from "@/hooks/useJobEvents";
 import { EmptyState } from "@/components/EmptyState";
+import { useTableColumnResize } from "@/components/useTableColumnResize";
 import {
   dedupePdfPaths,
   fileStatusLabel,
@@ -33,6 +35,7 @@ import {
   summarizeFileResultsText,
   type PdfConvertResult,
 } from "./pdfToExcelUi";
+import "./pdf-to-excel.css";
 
 export function pdfToExcelStep(
   fileCount: number,
@@ -58,11 +61,12 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
       if (event.phase === "completed" && isPdfConvertResult(event.result)) {
         setResult(event.result);
       }
-      if (event.phase === "failed" || event.phase === "cancelled") {
+      if (event.phase === "failed") {
         const payload = event.result as
           { error?: { userMessage?: string } } | undefined;
         setError(payload?.error ? errorText(payload.error) : event.message);
       }
+      if (event.phase === "cancelled") setError("");
     },
   });
 
@@ -190,7 +194,19 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
         ]}
         current={currentStep}
       />
-      <div className="fa-stack">
+      {summary && (
+        <div className="pdf-result-callout" role="status">
+          <strong>转换完成：成功 {summary.successCount} 份，失败 {summary.failCount} 份</strong>
+          <span>逐份结果与失败原因见下方「进度与结果」。</span>
+        </div>
+      )}
+      {job?.phase === "cancelled" && (
+        <div className="flex flex-wrap items-center gap-2" role="status">
+          <Badge variant="warning">已取消</Badge>
+          <span className="hint">本次转换已停止；文件列表仍保留，可直接重新开始。</span>
+        </div>
+      )}
+      <div className="fa-stack pdf-convert-stack">
         <Card>
           <CardHeader>
             <CardTitle>1. 选择回函 PDF</CardTitle>
@@ -204,16 +220,16 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
             <ErrorBox error={error} onDismiss={() => setError("")} />
             <button
               type="button"
-              className="drop-zone"
+              className={`drop-zone${pdfPaths.length ? " pdf-drop-zone-filled" : ""}`}
               data-tour="tool-upload"
               disabled={busy}
               onClick={() => void chooseFiles()}
             >
-              <strong>拖放回函 PDF 或文件夹到窗口</strong>
-              <span>
+              <strong>{pdfPaths.length ? "继续添加 PDF 或文件夹" : "拖放回函 PDF 或文件夹到窗口"}</strong>
+              {!pdfPaths.length && <span>
                 可一次拖入多份；拖入文件夹会自动找出其中的全部
                 PDF，也可点击选择文件
-              </span>
+              </span>}
             </button>
             <div className="merger-toolbar">
               <Button
@@ -287,9 +303,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                 />
               )}
             </div>
-            <p className="hint">
-              已添加 {pdfPaths.length} 份 PDF；重复拖入的同一份只保留一次。
-            </p>
+            {!pdfPaths.length && <p className="hint">重复拖入的同一份只保留一次。</p>}
           </CardContent>
         </Card>
 
@@ -320,7 +334,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                   type="button"
                   variant="secondary"
                   size="sm"
-                  onClick={() => void jobCancel(job.jobId)}
+                  onClick={() => void cancelJobWithFeedback(job.jobId)}
                 >
                   取消任务
                 </Button>
@@ -346,50 +360,17 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
             <CardTitle>3. 进度与结果</CardTitle>
           </CardHeader>
           <CardContent>
-            {job && job.phase !== "completed" && (
+            {job && job.phase !== "completed" && job.phase !== "cancelled" && (
               <JobProgress
                 job={job}
-                onCancel={(jobId) => void jobCancel(jobId)}
+                onCancel={(jobId) => jobCancel(jobId)}
                 cancelLabel="取消任务"
               />
             )}
             {result && summary ? (
               <>
                 <p className="hint">{summarizeFileResultsText(summary)}</p>
-                <div className="data-table">
-                  <div className="data-table-scroll">
-                    <table className="data-table-table">
-                      <thead>
-                        <tr>
-                          <th>文件名</th>
-                          <th>状态</th>
-                          <th>页数</th>
-                          <th>正文行数</th>
-                          <th>表格数</th>
-                          <th>表格数据行</th>
-                          <th>失败原因</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {result.files.map((row, index) => (
-                          <tr key={`${row.outputPath || row.name}#${index}`}>
-                            <td title={row.name}>{row.name}</td>
-                            <td>
-                              <span className={fileStatusPill(row)}>
-                                {fileStatusLabel(row)}
-                              </span>
-                            </td>
-                            <td>{row.pages}</td>
-                            <td>{row.textRows}</td>
-                            <td>{row.tables}</td>
-                            <td>{row.tableDataRows}</td>
-                            <td title={row.error}>{row.error}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
+                <PdfConvertResultTable files={result.files} />
                 {openTarget && (
                   <div className="actions">
                     <Button
@@ -419,5 +400,53 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
         </Card>
       </div>
     </>
+  );
+}
+
+/** 转换结果表：独立成子组件挂列宽调整——结果未出来时表格不渲染，
+ *  hook 必须随表格一起挂载才能接管列宽。 */
+function PdfConvertResultTable({
+  files,
+}: {
+  files: PdfConvertResult["files"];
+}) {
+  const resize = useTableColumnResize<HTMLDivElement>({
+    storageKey: "pdf-to-excel.preview",
+  });
+  return (
+    <div className="data-table">
+      <div className="data-table-scroll" ref={resize.ref}>
+        <table className="data-table-table">
+          <thead>
+            <tr>
+              <th>文件名</th>
+              <th>状态</th>
+              <th>页数</th>
+              <th>正文行数</th>
+              <th>表格数</th>
+              <th>表格数据行</th>
+              <th>失败原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            {files.map((row, index) => (
+              <tr key={`${row.outputPath || row.name}#${index}`}>
+                <td title={row.name}>{row.name}</td>
+                <td>
+                  <span className={fileStatusPill(row)}>
+                    {fileStatusLabel(row)}
+                  </span>
+                </td>
+                <td>{row.pages}</td>
+                <td>{row.textRows}</td>
+                <td>{row.tables}</td>
+                <td>{row.tableDataRows}</td>
+                <td title={row.error}>{row.error}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }

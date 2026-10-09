@@ -9,6 +9,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { within } from "@testing-library/react";
 import {
   DepositInterestPage,
   depositCatalogMappingKey,
@@ -244,6 +245,43 @@ const STEP3 = /^3\s*测算与底稿/;
 const STEP1 = /^1\s*上传与识别/;
 const goToStep = (label: RegExp) =>
   fireEvent.click(screen.getByRole("button", { name: label }));
+
+it("同码银行先选择JE汇总，再填写统一利率，参数与选择一致", async () => {
+  const original = mock.engineCall.getMockImplementation()!;
+  const groups = [{entity:"默认主体",accountCode:"1002",names:["银行甲","银行乙"],canUseJe:true}];
+  const summaryAccount = "1002 存款科目汇总（明细无法衔接）";
+  mock.pickPath.mockResolvedValue(["fixture-tb.xlsx","fixture-je.xlsx"]);
+  mock.engineCall.mockImplementation(async(method:string, p:Record<string,unknown>) => {
+    if (method === "deposit.classify_source") {
+      const isJe = (p.source as {inputPath:string}).inputPath.endsWith("je.xlsx");
+      return {...inspection, kind:isJe ? "je":"tb", confidence:1, scores:isJe?{tb:1,je:10}:{tb:10,je:1},sheet:isJe?"JE":"TB"};
+    }
+    if (method === "deposit.inspect_je") return {...inspection, sheet:"JE",sheets:["JE"],headers:["科目编码","科目名称","日期","借方","贷方","凭证号"],suggestedMapping:{accountCode:"科目编码",accountName:"科目名称",date:"日期",functionalDebit:"借方",functionalCredit:"贷方",id:"凭证号"}};
+    if (method === "deposit.account_currencies") return {
+      matchingFallbackCandidates:groups,
+      rows:[{key:"汇总-key",entity:"默认主体",account:p.matchingFallbackMode === "accountJe" ? summaryAccount : bank,auxiliary:"",currency:"本位币合并",role:"deposit",openingBalance:300,closingBalance:400}],
+    };
+    if (method === "deposit.matching_fallback") return {matchingFallbackGroups:groups};
+    return original(method,p);
+  });
+  render(<DepositInterestPage tool={tool}/>);
+  fireEvent.click(screen.getByRole("button",{name:"拖放或选择 TB、序时账文件（可同时选择）"}));
+  await screen.findByText("已识别：JE 序时账");
+  await waitFor(()=>expect(screen.getByRole("button",{name:"下一步：科目与利率确认"})).toBeEnabled());
+  fireEvent.click(screen.getByRole("button",{name:"下一步：科目与利率确认"}));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByRole("button",{name:"按所选口径继续"})).toBeDisabled();
+  fireEvent.click(within(dialog).getByRole("radio",{name:/合并同码存款/}));
+  fireEvent.click(within(dialog).getByRole("button",{name:"按所选口径继续"}));
+  const rate = await screen.findByRole("spinbutton",{name:`默认主体 / ${summaryAccount}的统一年利率`});
+  goToStep(STEP3);
+  expect(screen.getByText("请先为存款科目汇总填写统一年利率。")).toBeVisible();
+  expect(mock.jobStart).not.toHaveBeenCalled();
+  fireEvent.change(rate,{target:{value:"3"}});
+  goToStep(STEP3);
+  fireEvent.click(screen.getByRole("button",{name:"测算预览"}));
+  await waitFor(()=>expect(mock.jobStart).toHaveBeenCalledWith("deposit.preview",expect.objectContaining({matchingFallbackMode:"accountJe",matchingFallbackGroups:groups,requireMatchingFallbackChoice:true,rateOverrides:{"汇总-key":{annualRate:0.03}}})));
+});
 
 it("只有科目身份映射变化才需要重建科目目录", () => {
   expect(

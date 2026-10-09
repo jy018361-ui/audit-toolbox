@@ -10,6 +10,7 @@ import {
   splitFaAccount,
   suggestFaAccount,
   suggestFaAccounts,
+  defaultOutput,
   unionEntityAccounts,
 } from "./FaTbJePage";
 
@@ -246,6 +247,46 @@ describe("FA TB+JE account role presets", () => {
     // 名称含「固定资产」但属费用/清理口径的依旧排除。
     expect(suggestFaAccount("6601090401 折旧费-固定资产").role).toBe("excluded");
     expect(suggestFaAccount("16060001 固定资产清理-设备").role).toBe("excluded");
+  });
+
+  it("尾段提及固定资产的税费/损益科目不进表（明确词只认首段）", () => {
+    // 实测样例（2026-10-08 用户反馈）：进项税科目尾段的「-固定资产」是辅助核算
+    // 标注（这笔税产生自购固定资产），营业外收入的「固定资产报废利得」是损益
+    // 修饰——旧的全名包含匹配把它们判成原值，资产类别还被填成科目全名。
+    const rows = suggestFaAccounts([
+      "2221 应交税费",
+      "222101 应交税费-应交增值税",
+      "2221010102 应交税费-应交增值税-进项税额-专用发票17%-固定资产",
+      "2221010142 应交税费-应交增值税-进项税额-专用发票13%：固定资产",
+      "6301 营业外收入",
+      "630102 营业外收入-固定资产报废利得",
+    ]);
+    expect(rows.every((row) => row.role === "excluded")).toBe(true);
+    // 无上级科目行可回查的单科目形态同样排除。
+    expect(
+      suggestFaAccount("2221010102 应交税费-应交增值税-进项税额-专用发票17%-固定资产")
+        .role,
+    ).toBe("excluded");
+    expect(suggestFaAccount("630102 营业外收入-固定资产报废利得").role).toBe("excluded");
+    // 首段口径不误伤：名称以「固定资产」开头的非标准编码照常进表，
+    // 上下文里上级科目名首段写明的也照常（1998 资产甲样例另测）。
+    expect(suggestFaAccount("1501 固定资产-机器设备").role).toBe("cost");
+    expect(suggestFaAccount("99 固定资产-电子设备").role).toBe("cost");
+    expect(
+      suggestFaAccount("1998 资产甲 固定资产-机器设备").role,
+    ).toBe("cost");
+  });
+
+  it("默认输出文件名带日期与时分秒，路径部分原样保留", () => {
+    expect(defaultOutput("D:\\账套\\tb.xlsx", new Date(2026, 9, 8, 9, 5, 3))).toBe(
+      "D:\\账套\\FA_TBJE_20261008_090503.xlsx",
+    );
+    expect(defaultOutput("tb.xlsx", new Date(2026, 9, 8, 21, 42, 5))).toBe(
+      "FA_TBJE_20261008_214205.xlsx",
+    );
+    expect(
+      defaultOutput("/data/账套/tb.xlsx", new Date(2026, 11, 31, 23, 59, 59)),
+    ).toBe("/data/账套/FA_TBJE_20261231_235959.xlsx");
   });
 
   it("固定资产科目排在前面，其余科目垫底", () => {

@@ -152,7 +152,7 @@ fn dep_review(params: Value) -> Result<Value, AppError> {
     let mapping = params.get("mapping").cloned().unwrap_or(json!({}));
     let payload = dep_llm_payload(&table, &mapping);
     let system = "你是固定资产折旧测算字段映射复核助手。只能使用 payload.file2.headers 中的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}]}。suggested_mapping 必须是 JSON 对象，例如 {\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep；file_side 固定为 file2；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因表头规整就宣称全部映射正确。已有映射必须结合 samples 逐项复核：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side=file2，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组。";
-    let system = format!("{system}\n{}逐项检查，但只输出需要调整的项目；相容的 keep 项不逐条输出，没有可信候选的未映射项维持空缺。同一调整只放在 suggestions 或 fieldReviews 中一次，reason 最多一句话。", fa::FA_DATE_REVIEW_INSTRUCTION);
+    let system = format!("{system}\n{}depreciation 表示截至期末的累计折旧余额，供累计折旧差异测算使用，绝不是当月、上月、本年或本期计提额；current_year_dep 表示本年度累计计提额。不得因月度样例金额看起来合理，就把 depreciation 从累计折旧列替换为当月折旧列。逐项检查，但只输出需要调整的项目；相容的 keep 项不逐条输出，没有可信候选的未映射项维持空缺。同一调整只放在 suggestions 或 fieldReviews 中一次，reason 最多一句话。", fa::FA_DATE_REVIEW_INSTRUCTION);
     let content = fa::request_fa_llm(&settings, &system, &payload.to_string())?;
     let parsed = fa::parse_llm_json(&content).ok_or_else(|| {
         error(
@@ -228,6 +228,34 @@ fn dep_review_item_is_applicable(item: &mut Value) -> bool {
     true
 }
 
+/// 累计余额与期间计提额不能互换；只拦截列名明确冲突的建议，不按金额大小猜口径。
+fn dep_sanitize_depreciation_scope(item: &mut Value) {
+    if item.get("role").and_then(Value::as_str) != Some("depreciation") {
+        return;
+    }
+    let incompatible = |column: &str| {
+        let normalized = column.split_whitespace().collect::<String>().to_lowercase();
+        [
+            "当月折旧", "本月折旧", "上月折旧", "月折旧额", "月计提折旧",
+            "本年折旧", "当年折旧", "本期折旧", "当期折旧",
+            "monthlydepreciation", "currentyeardepreciation",
+        ].iter().any(|token| normalized.contains(token))
+    };
+    let rejected = item.get("suggested_column").and_then(Value::as_str)
+        .is_some_and(incompatible)
+        || item.get("suggested_mapping").and_then(Value::as_object)
+            .is_some_and(|mapping| mapping.values().filter_map(Value::as_str).any(incompatible));
+    if rejected {
+        let Some(object) = item.as_object_mut() else { return; };
+        object.remove("suggested_column");
+        object.remove("suggested_mapping");
+        object.insert("confidence".into(), json!(0.0));
+        object.insert("action".into(), json!("review"));
+        object.insert("rejectedByDepreciationScope".into(), json!(true));
+        object.insert("reason".into(), json!("已忽略折旧口径冲突的建议：累计折旧必须取累计余额，不能使用当月或本年计提额；保留当前映射。"));
+    }
+}
+
 /// 单文件版 `finalize_llm_review`：同一套 sanitize → 适用性过滤 → 本地兜底 →
 /// 0.85+fill 自动应用分流；matchReview 固定 keep（单文件没有匹配键），保证
 /// 前端复用主工具的复核 UI 时不走匹配键分支。
@@ -240,6 +268,7 @@ fn dep_finalize_review(parsed: Value, payload: Value) -> Value {
         .into_iter()
         .filter_map(|mut item| {
             fa::sanitize_llm_review_item(&mut item, &payload);
+            dep_sanitize_depreciation_scope(&mut item);
             dep_review_item_is_applicable(&mut item).then_some(item)
         })
         .collect::<Vec<_>>();
@@ -252,6 +281,7 @@ fn dep_finalize_review(parsed: Value, payload: Value) -> Value {
         .into_iter()
         .filter_map(|mut item| {
             fa::sanitize_llm_review_item(&mut item, &payload);
+            dep_sanitize_depreciation_scope(&mut item);
             dep_review_item_is_applicable(&mut item).then_some(item)
         })
         .collect::<Vec<_>>();
@@ -289,7 +319,10 @@ fn dep_finalize_review(parsed: Value, payload: Value) -> Value {
         }
     }
     let rejected_dates = reviews.iter().any(|item| item.get("rejectedByDateValidation").and_then(Value::as_bool) == Some(true));
-    let message = if rejected_dates {
+    let rejected_depreciation = reviews.iter().any(|item| item.get("rejectedByDepreciationScope").and_then(Value::as_bool) == Some(true));
+    let message = if rejected_depreciation {
+        "LLM 复核完成：已忽略折旧口径冲突的建议，累计折旧仍按原映射取数；请核对累计余额列。"
+    } else if rejected_dates {
         "LLM 复核完成：已忽略与日期取值不符的建议，当前映射未因此改动；请人工确认真实日期列。"
     } else if auto.is_empty() && reviews.is_empty() {
         "LLM 复核完成：现有脚本映射无需补充。"
@@ -1525,6 +1558,40 @@ mod tests {
         // matchReview 固定 keep，前端规划器不会进入匹配键分支。
         assert_eq!(value["matchReview"]["action"], json!("keep"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dep_review_rejects_period_amount_as_accumulated_depreciation() {
+        let payload = json!({"file2": {
+            "headers": ["累计折旧", "当月折旧", "本年折旧", "期末累计折旧"],
+            "mapping": {"depreciation": "累计折旧"},
+            "samples": {"累计折旧": ["60598.58"], "当月折旧": ["2019.95"]}
+        }});
+        for column in ["当月折旧", "本年折旧"] {
+            for field in ["suggestions", "fieldReviews"] {
+                for item in [
+                    json!({"role":"depreciation", "file_side":"file2", "suggested_column":column, "confidence":0.99, "action":"replace"}),
+                    json!({"role":"depreciation", "suggested_mapping":{"file2":column}, "confidence":0.99, "action":"replace"}),
+                ] {
+                    let value = dep_finalize_review(json!({field:[item]}), payload.clone());
+                    assert_eq!(value["autoApplied"], json!([]));
+                    let review = &value["fieldReviews"][0];
+                    assert_eq!(review["confidence"], 0.0);
+                    assert_eq!(review["rejectedByDepreciationScope"], true);
+                    assert!(review.get("suggested_column").is_none());
+                    assert!(review.get("suggested_mapping").is_none());
+                    assert!(value["message"].as_str().unwrap().contains("已忽略折旧口径"));
+                    assert_eq!(value["passed"], false);
+                }
+            }
+        }
+        // 真正的累计余额替换、本年计提额的补齐仍可执行。
+        let value = dep_finalize_review(json!({"suggestions":[
+            {"role":"depreciation", "file_side":"file2", "suggested_column":"期末累计折旧", "confidence":0.99, "action":"replace"},
+            {"role":"current_year_dep", "file_side":"file2", "suggested_column":"本年折旧", "confidence":0.99, "action":"fill"}
+        ]}), payload);
+        assert_eq!(value["fieldReviews"][0]["suggested_column"], "期末累计折旧");
+        assert_eq!(value["autoApplied"][0]["suggested_column"], "本年折旧");
     }
 
     #[test]

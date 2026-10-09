@@ -24,6 +24,8 @@ struct Column {
     editable: bool,
     #[serde(default)]
     options: Vec<String>,
+    #[serde(default)]
+    number_format: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -42,6 +44,16 @@ struct Export {
     columns: Vec<Column>,
     rows: Vec<Row>,
     output_path: String,
+    #[serde(default)]
+    document_kind: Option<String>,
+}
+
+fn document_sheet(tool: &str, kind: Option<&str>) -> Result<&'static str, AppError> {
+    match kind {
+        None => Ok(SHEET),
+        Some("loanLedger") if tool == "loan" => Ok("借款台账"),
+        _ => Err(invalid("确认表类型与当前工具不匹配。")),
+    }
 }
 
 fn invalid(message: impl Into<String>) -> AppError {
@@ -63,6 +75,7 @@ pub fn call(method: &str, params: Value) -> Result<Value, AppError> {
 fn export(params: Value) -> Result<Value, AppError> {
     let request: Export = serde_json::from_value(params)
         .map_err(|e| invalid(format!("科目确认表参数不完整：{e}")))?;
+    let sheet_name = document_sheet(&request.tool, request.document_kind.as_deref())?;
     if !matches!(request.tool.as_str(), "deposit" | "fx" | "loan" | "fa_tbje")
         || request.context.is_empty()
         || request.columns.is_empty()
@@ -87,9 +100,10 @@ fn export(params: Value) -> Result<Value, AppError> {
     let header = Format::new()
         .set_bold()
         .set_background_color(Color::RGB(0xE7F4F0));
-    let input = Format::new().set_background_color(Color::RGB(0xFFF0BC));
+    let input = Format::new().set_background_color(Color::RGB(0xFFF0BC)).set_num_format("@");
+    let text = Format::new().set_num_format("@");
     let sheet = workbook.add_worksheet();
-    sheet.set_name(SHEET).map_err(xlsx_error)?;
+    sheet.set_name(sheet_name).map_err(xlsx_error)?;
     sheet.set_column_hidden(0).map_err(xlsx_error)?;
     sheet.write_string(0, 0, "__row_key").map_err(xlsx_error)?;
     for (index, column) in request.columns.iter().enumerate() {
@@ -127,13 +141,27 @@ fn export(params: Value) -> Result<Value, AppError> {
             )
             .map_err(xlsx_error)?;
         for (col, value) in row.values.iter().enumerate() {
-            if request.columns[col].editable && row.editable.get(col).copied().unwrap_or(true) {
+            let editable = request.columns[col].editable && row.editable.get(col).copied().unwrap_or(true);
+            if let Some(number_format) = &request.columns[col].number_format {
+                if !matches!(number_format.as_str(), "#,##0.00" | "0.########") {
+                    return Err(invalid("确认表数字格式不受支持。"));
+                }
+                if !value.is_empty() {
+                    let number = value.parse::<f64>().ok().filter(|v| v.is_finite())
+                        .ok_or_else(|| invalid("确认表金额或利率不是有效数字。"))?;
+                    let mut format = Format::new().set_num_format(number_format);
+                    if editable { format = format.set_background_color(Color::RGB(0xFFF0BC)); }
+                    sheet.write_number_with_format(line, (col + 1) as u16, number, &format).map_err(xlsx_error)?;
+                    continue;
+                }
+            }
+            if editable {
                 sheet
                     .write_string_with_format(line, (col + 1) as u16, value, &input)
                     .map_err(xlsx_error)?;
             } else {
                 sheet
-                    .write_string(line, (col + 1) as u16, value)
+                    .write_string_with_format(line, (col + 1) as u16, value, &text)
                     .map_err(xlsx_error)?;
             }
         }
@@ -145,6 +173,9 @@ fn export(params: Value) -> Result<Value, AppError> {
     meta.write_string(1, 0, &request.tool).map_err(xlsx_error)?;
     meta.write_string(2, 0, context_digest(&request.context))
         .map_err(xlsx_error)?;
+    if let Some(kind) = &request.document_kind {
+        meta.write_string(3, 0, kind).map_err(xlsx_error)?;
+    }
     meta.set_hidden(true);
     workbook
         .save(Path::new(&request.output_path))
@@ -161,6 +192,8 @@ fn import(params: Value) -> Result<Value, AppError> {
         .get("tool")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid("缺少工具标识。"))?;
+    let document_kind = params.get("documentKind").and_then(Value::as_str);
+    let sheet_name = document_sheet(expected_tool, document_kind)?;
     let expected_context = params
         .get("context")
         .and_then(Value::as_str)
@@ -184,12 +217,13 @@ fn import(params: Value) -> Result<Value, AppError> {
             .unwrap_or_default()
     };
     if cell(0) != VERSION || cell(1) != expected_tool || cell(2) != context_digest(expected_context)
+        || cell(3) != document_kind.unwrap_or("")
     {
         return Err(invalid("确认表与当前工具或数据源不匹配，请重新下载。"));
     }
     let sheet = workbook
-        .worksheet_range(SHEET)
-        .map_err(|_| invalid("找不到「科目确认」工作表。"))?;
+        .worksheet_range(sheet_name)
+        .map_err(|_| invalid(format!("找不到「{sheet_name}」工作表。")))?;
     let mut rows = Vec::new();
     let mut seen = HashSet::new();
     for (index, row) in sheet.rows().enumerate().skip(1) {
@@ -239,6 +273,45 @@ fn xlsx_error(error: rust_xlsxwriter::XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loan_ledger_roundtrip_preserves_numeric_values_and_checks_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("借款台账.xlsx").to_string_lossy().to_string();
+        let request = json!({
+            "tool":"loan", "documentKind":"loanLedger", "context":"ledger-source", "outputPath":path,
+            "columns":[
+                {"key":"loanId","title":"借款标识"},
+                {"key":"opening","title":"年初余额","editable":true,"numberFormat":"#,##0.00"},
+                {"key":"rate","title":"执行利率（%）","editable":true},
+                {"key":"closing","title":"期末余额","editable":true,"numberFormat":"#,##0.00"},
+                {"key":"dates","title":"新增日期","editable":true}
+            ],
+            "rows":[
+                {"key":"甲\u{1f}同名借款","values":["同名借款","10000000","4.38","","2025-01-01;2025-06-01"]},
+                {"key":"乙\u{1f}同名借款","values":["同名借款","0","0","0",""]}
+            ]
+        });
+        export(request).unwrap();
+        let mut book = open_workbook_auto(&path).unwrap();
+        let sheet = book.worksheet_range("借款台账").unwrap();
+        assert!(matches!(sheet.get((1, 2)), Some(calamine::Data::Float(v)) if *v == 10000000.0));
+        let params = json!({"tool":"loan","documentKind":"loanLedger","context":"ledger-source","inputPath":path,
+            "keys":["乙\u{1f}同名借款","甲\u{1f}同名借款"]});
+        let result = import(params.clone()).unwrap();
+        assert_eq!(result["rows"][0]["values"][2], "4.38");
+        assert_eq!(result["rows"][0]["values"][3], "");
+        assert_eq!(result["rows"][1]["values"][1], "0");
+        let mut wrong = params.clone();
+        wrong["documentKind"] = Value::Null;
+        assert!(import(wrong).is_err());
+        let mut wrong = params.clone();
+        wrong["context"] = json!("other-ledger");
+        assert!(import(wrong).is_err());
+        let mut wrong = params;
+        wrong["keys"] = json!(["甲\u{1f}同名借款"]);
+        assert!(import(wrong).is_err());
+    }
 
     #[test]
     fn account_confirmation_roundtrip_checks_context_and_keys() {

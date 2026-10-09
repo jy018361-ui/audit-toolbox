@@ -1,5 +1,21 @@
 # 借款利息台账确认口径
 
+## 2026-10-08：同码银行衔接口径选择与分段合计修复
+
+- 新界面请求启用 `requireMatchingFallbackChoice`。同主体同码多名称、无已验证辅助且 JE 名称不能完整分配时，第二步等待用户选择：`accountJe` 合并整码 TB 余额并按 JE 本位币金额和实际日期逐日测算；`tbAverage` 保留 TB 银行明细及各自利率，整组按年初年末平均测算。正常名称匹配和已验证辅助不改口径；按币种两点法已有明确选择时不重复弹窗。
+- 汇总只限同码末级明细全部纳入借款且 JE 有期内有效日期的组，避免未选银行混入汇总或同一 JE 被多家银行重复认领。汇总行使用新行键，原银行利率不自动承认成汇总利率，导出仍须确认利率。来源、映射、主体范围、科目选择、表日或币种口径变化后重新选择；历史任务回到新版确认步骤也重新确认。未启用该机制的历史/API 调用保留旧行为。
+- 选择写入结果、底稿说明与快照参数指纹。正式计算独立检查，未选择或非法值不能绕过前端门禁；磁盘与内存路径同组执行相同选择。
+- `计息分段明细` 的积数和利息合计修正为包含最后一条数据；两列缓存按实际分段累加写入，保留可重算的 SUM 公式。主表逐行 SUMIFS 口径不变。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest::`；`npx vitest run src/LoanMatchingFallbackUi.test.tsx src/LoanInterestPageUi.test.tsx src/components/MatchingFallbackDialog.test.tsx`；`npm run build`。覆盖跨主体隔离、同码只取一次、完整名称不弹窗、部分选择拒绝汇总、两点法不同利率、磁盘等价、单段及末段合计和缓存。
+
+## 2026-10-08：确认台账下载上传与数值展示
+
+- 第二步完整台账模式新增下载／上传当前确认台账，复用 `account_confirmation.export/import` 同步 Rust 通道及既有选择路径白名单。Excel 使用独立“借款台账”工作表，固定身份字段不回写；金额为数值且显示 `#,##0.00`，利率以百分比文本导出（4.38 对应测算小数 0.0438）。利率与事件日期列使用文本格式，避免 Excel 自动转换百分数或日期；回传利率接受末尾百分号。
+- 新增与还款日期、金额分别以分号分隔，按相同顺序逐笔对应，支持增删多笔事件。回传按稳定行键匹配，支持排序、区分同名跨主体借款；借款主行不能增删。错误数据源、报告期或模板种类由 Rust 拒绝，非法数字、日期、笔数及利率类型由前端整批拒绝。未改事件保留来源说明，改动事件标为人工修改；四栏勾稽、明细合计与期内日期仍由原前后端校验拦截测算。
+- 回传修改后撤销复核确认并作废旧测算结果，下一次测算携带更新后的 `ledgerInformation`。空白期末、零利率、负加减点及原始金额追溯保持原口径。TB＋JE 模式继续使用既有科目确认表，不混入台账覆盖。
+- UI 主表及明细金额显示千位分隔和两位小数；执行利率、基准利率按百分比显示与编辑，加减点仍为 BP。格式变化不更改后台计息单位和事件计算逻辑。
+- 验证：`npx vitest run src/LoanLedgerConfirmationActions.test.tsx src/LoanLedgerConfirmation.test.tsx src/LoanInterestPageUi.test.tsx src/AccountConfirmationActions.test.tsx`；`cargo test --manifest-path src-tauri/Cargo.toml --lib account_confirmation::`；`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest::ledger_information_tests`；`npm run build`。
+
 ## 2026-10-08：JE 上传采样预览与完整目录补齐
 
 - 第一阶段还必须完成所需的辅助字段校验。全量读取就绪后自动启动校验，待验证或调用失败时禁止下一步和测算；失败可单独重试，不重新启动完整读取。调用失败保留待验证的选择，不能把它当作已确认辅助维度。

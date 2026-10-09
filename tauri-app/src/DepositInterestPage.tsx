@@ -73,6 +73,7 @@ import {
   CurrencyFallbackDialog,
   type CurrencyFallbackMode,
 } from "@/components/CurrencyFallbackDialog";
+import { MatchingFallbackDialog, type MatchingFallbackMode, type MatchingFallbackGroup } from "@/components/MatchingFallbackDialog";
 
 /** 可多列的角色与统一内核一致；`account` 是历史保存映射的旧槽位。 */
 const DEPOSIT_MULTI = new Set([
@@ -749,6 +750,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     CurrencyFallbackMode | ""
   >("");
   const [currencyDialogOpen, setCurrencyDialogOpen] = useState(false);
+  const [matchingChoice, setMatchingChoice] = useState<{ key: string; mode: MatchingFallbackMode } | null>(null);
+  const [matchingCheck, setMatchingCheck] = useState<{ key: string; groups: MatchingFallbackGroup[] } | null>(null);
+  const [matchingPromptKey, setMatchingPromptKey] = useState<string | null>(null);
+  const [matchingDraft, setMatchingDraft] = useState<MatchingFallbackMode | "">("");
+  const [matchingBusy, setMatchingBusy] = useState(false);
   function resetCurrencyFallback() {
     setCurrencyLink(null);
     setCurrencyFallbackMode("");
@@ -1007,11 +1013,17 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         je: [jePath, je?.sheet ?? "", je?.headerRow ?? 0, je?.headerDepth ?? 0, jeMapping],
         roles: [accountRoles, accountRoleOverrides, accountDetailRoleOverrides],
         currencyFallbackMode,
+        reportEnd,
         entityScope: entityScope.selection,
         auxiliaryPlan: je ? [auxLink?.planKey ?? null, auxLink?.status ?? null] : null,
       })
     : null;
+  const matchingFallbackMode = matchingChoice?.key === accountCurrencyKey ? matchingChoice.mode : "";
+  const matchingGroups = matchingCheck?.key === accountCurrencyKey ? matchingCheck.groups : [];
+  const matchingKeyRef = useRef(accountCurrencyKey);
+  matchingKeyRef.current = accountCurrencyKey;
   useEffect(() => {
+    setMatchingBusy(false);
     if (accountCurrencyKey === null) {
       setAccountCurrencyRows([]);
       return;
@@ -1027,8 +1039,27 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     }
     let cancelled = false;
     void engineCall("deposit.account_currencies", payload())
-      .then((x) => {
+      .then(async (x) => {
         if (cancelled) return;
+        const candidates = (x as { matchingFallbackCandidates?: MatchingFallbackGroup[] }).matchingFallbackCandidates ?? [];
+        let groups = matchingCheck?.key === accountCurrencyKey ? matchingCheck.groups : [];
+        if (candidates.length && matchingCheck?.key !== accountCurrencyKey) {
+          setMatchingBusy(true);
+          const request: Record<string, unknown> = payload();
+          delete request.matchingFallbackMode;
+          delete request.matchingFallbackGroups;
+          const check = await engineCall("deposit.matching_fallback", request, "检查存款明细衔接") as { matchingFallbackGroups: MatchingFallbackGroup[] };
+          if (cancelled || accountCurrencyKey !== matchingKeyRef.current) return;
+          groups = check.matchingFallbackGroups;
+          setMatchingCheck({ key: accountCurrencyKey, groups });
+        }
+        if (groups.length && !matchingFallbackMode) {
+          setMatchingDraft("");
+          setMatchingPromptKey(accountCurrencyKey);
+          setAccountCurrencyRows([]);
+          setValidationWarning("accounts", "请先选择存款明细无法衔接时的测算口径。");
+          return;
+        }
         const list = (x as { rows?: typeof accountCurrencyRows }).rows;
         setAccountCurrencyRows(Array.isArray(list) ? list : []);
         setValidationWarning("accounts");
@@ -1041,12 +1072,12 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             "逐账户币种清单加载失败，暂时无法自动带出逐户利率；可手工填写利率后继续。",
           );
         }
-      });
+      }).finally(() => { if (!cancelled) setMatchingBusy(false); });
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountCurrencyKey, step]);
+  }, [accountCurrencyKey, step, matchingFallbackMode]);
   useEffect(() => {
     resetCurrencyFallback();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1646,6 +1677,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           }
         : {}),
       ...(currencyFallbackMode ? { currencyFallbackMode } : {}),
+      ...(matchingFallbackMode ? { matchingFallbackMode } : {}),
+      matchingFallbackGroups: matchingGroups,
+      requireMatchingFallbackChoice: true,
       entityScope: entityScope.selection,
       ...(outputPath ? { outputPath } : {}),
       __restoreSnapshot: {
@@ -1750,11 +1784,21 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       setError("请先确认至少一个银行存款或其他货币资金科目。");
       return;
     }
+    if (matchingBusy || (matchingGroups.length > 0 && !matchingFallbackMode)) {
+      setError("请先完成存款明细衔接检查并选择测算口径。");
+      return;
+    }
+    if (matchingFallbackMode === "accountJe" && accountCurrencyRows.some(row => row.account.includes("存款科目汇总") && engineRateOf(row.key) === undefined)) {
+      setError("请先为存款科目汇总填写统一年利率。");
+      return;
+    }
     setError("");
     setStep(2);
   }
   async function run(method: "deposit.preview" | "deposit.export") {
     setError("");
+    if (matchingBusy || (matchingGroups.length > 0 && !matchingFallbackMode)) return setError("请先完成存款明细衔接检查并选择测算口径。");
+    if (matchingFallbackMode === "accountJe" && accountCurrencyRows.some(row => row.account.includes("存款科目汇总") && engineRateOf(row.key) === undefined)) return setError("请先为存款科目汇总填写统一年利率。");
     if (!tb) return setError("请先上传并识别 TB 科目余额表。");
     if (!reportEnd) return setError("请选择资产负债表日。");
     const tbMissing = depositMissingDetails("tb", tbMapping, Boolean(jePath));
@@ -2308,6 +2352,17 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       )}
       {step === 1 && (
         <>
+          {matchingGroups.length > 0 && <section className="deposit-currency-mode" role="status">
+            <span>{matchingFallbackMode === "accountJe" ? "明细衔接口径：JE 本位币科目汇总，按月均余额测算" : matchingFallbackMode === "tbAverage" ? "明细衔接口径：保留 TB 明细，按年初年末平均测算" : "请先选择存款明细衔接测算口径"}</span>
+            <Button variant="secondary" onClick={() => {setMatchingDraft(matchingFallbackMode);setMatchingPromptKey(accountCurrencyKey);}}>选择明细衔接口径</Button>
+          </section>}
+          {matchingFallbackMode === "accountJe" && <section className="deposit-currency-mode">
+            <p>所涉银行已合并为科目汇总。请统一填写年利率；原银行明细的利率不用于汇总测算。</p>
+            {accountCurrencyRows.filter(row => row.account.includes("存款科目汇总")).map(row => <label key={row.key}>
+              {row.entity} / {row.account} 统一年利率（%）
+              <input type="number" step="0.0001" aria-label={`${row.entity} / ${row.account}的统一年利率`} value={engineRateOf(row.key) === undefined ? "" : engineRateOf(row.key)! * 100} onChange={event => overrideRow(row.key, {annualRate:depositPercentToRate(event.target.value)})} />
+            </label>)}
+          </section>}
           {currencyFallbackMode && (
             <section className="deposit-currency-mode" role="status">
               <span>
@@ -3007,6 +3062,17 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           </div>
         </>
       )}
+      <MatchingFallbackDialog kind="deposit" open={accountCurrencyKey !== null && matchingPromptKey === accountCurrencyKey}
+        groups={matchingGroups} value={matchingDraft} onChange={setMatchingDraft}
+        onCancel={() => {setMatchingPromptKey(null);setMatchingDraft("");}}
+        onContinue={() => {
+          if (!matchingDraft || !accountCurrencyKey || matchingPromptKey !== accountCurrencyKey) return;
+          setMatchingChoice({key:accountCurrencyKey,mode:matchingDraft});
+          setMatchingPromptKey(null);
+          setResult(undefined);
+          setRows([]);
+          setStep(1);
+        }} />
       <CurrencyFallbackDialog
         open={currencyDialogOpen}
         affectedGroupCount={currencyLink?.affectedGroupCount ?? 0}

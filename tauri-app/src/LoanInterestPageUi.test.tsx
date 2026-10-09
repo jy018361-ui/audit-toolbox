@@ -4,6 +4,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { LoanInterestPage, Results } from "./LoanInterestPage";
 import type { ToolManifest } from "./types";
+import { loanLedgerConfirmationRows } from "./LoanLedgerConfirmationActions";
+import type { LedgerInformation } from "./LoanLedgerConfirmation";
 
 const mock = vi.hoisted(() => ({
   engineCall: vi.fn(),
@@ -1647,17 +1649,64 @@ it("完整台账确认金额日期后测算携带确认明细，编辑后须重�
   const next = await screen.findByRole("button",{name:"下一步：台账信息确认"});
   await waitFor(()=>expect(next).toBeEnabled());
   fireEvent.click(next);
-  expect(await screen.findByLabelText("合同甲年初余额")).toHaveValue(1000000);
+  expect(await screen.findByLabelText("合同甲年初余额")).toHaveValue("1,000,000.00");
   const runStep = screen.getByRole("button",{name:"下一步：测算与底稿"});
   expect(runStep).toBeDisabled();
   const confirm=screen.getByRole("checkbox",{name:/我已复核台账金额/});
   fireEvent.click(confirm);
   expect(runStep).toBeEnabled();
-  fireEvent.change(screen.getByLabelText("合同甲执行利率"),{target:{value:"0.05"}});
+  fireEvent.change(screen.getByLabelText("合同甲执行利率"),{target:{value:"5"}});
   expect(confirm).not.toBeChecked();
   expect(runStep).toBeDisabled();
   fireEvent.click(confirm);
   fireEvent.click(runStep);
   fireEvent.click(screen.getByRole("button",{name:"测算预览"}));
   await waitFor(()=>expect(mock.jobStart).toHaveBeenCalledWith("loan.preview",expect.objectContaining({ledgerInformation:expect.objectContaining({ledger甲:expect.objectContaining({fixedRate:.05,opening:1000000,additions:[]})})})));
+});
+
+it("第二步上传台账更新金额利率和事件，重新确认后测算使用回传信息", async () => {
+  const headers = ["合同号", "本金", "起始日", "到期日", "利率", "期末余额"];
+  const original: LedgerInformation = {rowKey:"ledger甲",loanId:"合同甲",entity:"默认主体",opening:1000000,added:0,reduced:0,closing:1000000,originalClosing:1000000,contractStart:"2024-01-01",contractEnd:"2027-12-31",rateType:"fixed",fixedRate:.04,benchmarkRate:null,spreadBps:0,additions:[],repayments:[]};
+  const uploaded = loanLedgerConfirmationRows([original]);
+  uploaded[0].values[5] = "100,000";
+  uploaded[0].values[7] = "1,100,000";
+  uploaded[0].values[9] = "5";
+  uploaded[0].values[12] = "2025-06-01";
+  uploaded[0].values[13] = "100000";
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  mock.pickPath.mockResolvedValue("ledger.xlsx");
+  mock.engineCall.mockImplementation(async (method: string) => {
+    if (method === "ledger.forms") return [];
+    if (method === "loan.inspect") return {headers,preview:[["合同甲","1000000","2024-01-01","2027-12-31","4","1000000"]],rowCount:1,sheet:"台账",sheets:["台账"],headerRow:1,headerDepth:1,
+      suggestedMapping:{loanId:"合同号",principal:"本金",startDate:"起始日",endDate:"到期日",rate:"利率",closingPrincipal:"期末余额"}};
+    if (method === "loan.prepare_rates") return {rows:[original]};
+    if (method === "account_confirmation.import") return {rows:uploaded};
+    throw new Error(`unexpected ${method}`);
+  });
+  render(<LoanInterestPage tool={tool}/>);
+  fireEvent.click(screen.getByRole("button",{name:"选择完整借款台账文件"}));
+  const next = await screen.findByRole("button",{name:"下一步：台账信息确认"});
+  await waitFor(()=>expect(next).toBeEnabled());
+  fireEvent.click(next);
+  await screen.findByLabelText("合同甲年初余额");
+  fireEvent.change(screen.getByLabelText("资产负债表日"), {target:{value:"2025-12-31"}});
+  const upload = await screen.findByRole("button", {name:"上传台账"});
+  await waitFor(()=>expect(upload).toBeEnabled());
+  expect(screen.getByRole("button", {name:"下载台账"})).toBeEnabled();
+  const confirm = screen.getByRole("checkbox", {name:/我已复核台账金额/});
+  fireEvent.click(confirm);
+  fireEvent.click(upload);
+  await screen.findByText(/已回传 1 行/);
+  expect(confirm).not.toBeChecked();
+  expect(screen.getByLabelText("合同甲本期新增")).toHaveValue("100,000.00");
+  expect(screen.getByLabelText("合同甲执行利率")).toHaveValue("5");
+  fireEvent.click(screen.getByLabelText("展开合同甲明细"));
+  expect(screen.getByLabelText("合同甲新增日期1")).toHaveValue("2025-06-01");
+  fireEvent.click(confirm);
+  fireEvent.click(screen.getByRole("button", {name:"下一步：测算与底稿"}));
+  fireEvent.click(screen.getByRole("button", {name:"测算预览"}));
+  await waitFor(()=>expect(mock.jobStart).toHaveBeenCalledWith("loan.preview",expect.objectContaining({ledgerInformation:{ledger甲:expect.objectContaining({
+    fixedRate:.05,added:100000,closing:1100000,additions:[{date:"2025-06-01",amount:100000,basis:"人工修改"}],
+  })}})));
+  vi.restoreAllMocks();
 });

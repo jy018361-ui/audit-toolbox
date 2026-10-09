@@ -28,7 +28,7 @@ function completedJob(overrides: Partial<JobEvent> = {}): JobEvent {
 }
 
 const toolNameOf = (toolId: string) =>
-  ({ fa_export: "凭证导出" })[toolId] ?? toolId;
+  ({ fa_export: "凭证导出", loan_interest: "借款利息测算" })[toolId] ?? toolId;
 
 /** 显示当前路由路径，用来断言「返回工作台」真的跳回了 "/"。 */
 function LocationProbe() {
@@ -52,6 +52,55 @@ afterEach(() => {
 });
 
 describe("SuccessNudge", () => {
+  it("新手模式下 JE 后台完整读取完成不提示测算完成", () => {
+    saveTourState({ newbieMode: true });
+    renderWithRouter(
+      <SuccessNudge
+        jobs={[completedJob({ toolId: "loan_interest", background: true, outputPaths: [], message: "完整读取已完成" })]}
+        toolNameOf={toolNameOf}
+      />,
+    );
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "返回工作台" })).not.toBeInTheDocument();
+  });
+
+  it("正式测算完成仍提示成功，不被同工具后台读取完成事件覆盖", () => {
+    saveTourState({ newbieMode: true });
+    const calculation = completedJob({ jobId: "loan-calculation", toolId: "loan_interest" });
+    const { rerender } = renderWithRouter(
+      <SuccessNudge jobs={[calculation]} toolNameOf={toolNameOf} />,
+    );
+    expect(screen.getByText("借款利息测算已完成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭完成提示" }));
+    rerender(
+      <MemoryRouter initialEntries={["/tools/loan_interest"]}>
+        <LocationProbe />
+        <SuccessNudge
+          jobs={[
+            calculation,
+            completedJob({ jobId: "loan-reading", toolId: "loan_interest", background: true, outputPaths: [] }),
+          ]}
+          toolNameOf={toolNameOf}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    rerender(
+      <MemoryRouter initialEntries={["/tools/loan_interest"]}>
+        <LocationProbe />
+        <SuccessNudge
+          jobs={[
+            completedJob({ jobId: "loan-calculation-next", toolId: "loan_interest", background: false }),
+            completedJob({ jobId: "loan-reading", toolId: "loan_interest", background: true, outputPaths: [] }),
+          ]}
+          toolNameOf={toolNameOf}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("借款利息测算已完成")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开结果" })).toBeInTheDocument();
+  });
+
   it("初始 jobs 为空不显示；出现 completed 任务后显示卡片和按钮", () => {
     const { rerender } = renderWithRouter(
       <SuccessNudge jobs={[]} toolNameOf={toolNameOf} />,

@@ -1596,6 +1596,7 @@ pub fn engine_call_for_test(
             || rest.starts_with("inspect")
             || rest == "rate_tiers"
             || rest == "account_currencies"
+            || rest == "matching_fallback"
         {
             return deposit_interest::call(method, params);
         }

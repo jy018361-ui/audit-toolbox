@@ -755,6 +755,12 @@ export function faReviewDisplayMessage(
         : "LLM 未启用，已保留当前自动映射。")
     );
   }
+  // 卫生校验拒绝了建议时，不能把“保留原映射”说成“与 LLM 判断一致”。
+  if (original.includes("已忽略")) {
+    return applied || pending
+      ? `${faReviewSummary(applied, pending)} ${original}`
+      : original;
+  }
   return faReviewSummary(applied, pending);
 }
 

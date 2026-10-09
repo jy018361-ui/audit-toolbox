@@ -196,9 +196,8 @@ pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
     }
 }
 
-/// 第二步的轻量利率行准备：只读 TB，不打开 JE，也不做本金变动、
-/// 勾稽、LPR 或利息计算。辅助明细是否可以拆分，完全信任第一步传入的
-/// `auxiliaryLink.groups` 验证计划；未验证的组退回主体＋科目口径。
+/// 第二步只生成利率行，不做本金变动、勾稽、LPR 或利息计算。普通组只读 TB；
+/// 同码异名且无已验证辅助的组额外检查 JE 名称，无法完整衔接时等待口径选择。
 fn prepare_rates(params: &Value) -> Result<Value, AppError> {
     if params.get("mode").and_then(Value::as_str) == Some("ledger") {
         let rows = calculate_ledger(params)?;
@@ -322,6 +321,14 @@ fn prepare_rates(params: &Value) -> Result<Value, AppError> {
                 .unwrap_or(true)
         });
     }
+    let fallback_groups = matching_fallback_groups(&folds, params, entity_key_enabled, &entity_scope)?;
+    let fallback_mode = matching_fallback_mode(params)?;
+    if params["requireMatchingFallbackChoice"].as_bool() == Some(true)
+        && !fallback_groups.is_empty() && fallback_mode.is_none()
+    {
+        return Ok(json!({"rows": [], "matchingFallbackGroups": fallback_groups}));
+    }
+    apply_matching_fallback(&mut folds, &fallback_groups, fallback_mode)?;
     let ambiguous_names = ambiguous_fold_names(&folds);
     let inline_rates = inline_rate_rows(params);
     let rows = folds
@@ -379,7 +386,7 @@ fn prepare_rates(params: &Value) -> Result<Value, AppError> {
             None,
         ));
     }
-    Ok(json!({ "rows": rows }))
+    Ok(json!({ "rows": rows, "matchingFallbackGroups": fallback_groups }))
 }
 
 /// 「确认科目与利率」步骤的科目清单：TB 严格末级科目按选择键聚合后下发，
@@ -1547,6 +1554,7 @@ pub(crate) fn run_job(
         "interestExpenseAccounts": booked_expense.details,
         "mappingWarnings": mapping_warnings,
         "currencyFallbackMode": params.get("currencyFallbackMode").cloned().unwrap_or(Value::Null),
+        "matchingFallbackMode": params.get("matchingFallbackMode").cloned().unwrap_or(Value::Null),
         "entityScopeSelection": params.get("entityScope").cloned().unwrap_or_else(|| json!({"mode":"strict","mappings":[]})),
         "outputPaths": output_paths
     }))
@@ -1578,6 +1586,8 @@ const SNAPSHOT_PARAM_FIELDS: &[&str] = &[
     // 主体范围、多币种口径与本位币
     "entityScope",
     "currencyFallbackMode",
+    "matchingFallbackMode",
+    "requireMatchingFallbackChoice",
     "functionalCurrency",
     // 利率来源（确认行、测算行覆盖、台账逐行口径、合同台账确认信息）
     "rateRows",
@@ -3776,6 +3786,122 @@ fn fold_row_account_key(
     }
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MatchingFallbackGroup {
+    entity: String,
+    account_code: String,
+    names: Vec<String>,
+    can_use_je: bool,
+}
+
+fn matching_fallback_mode(params: &Value) -> Result<Option<&str>, AppError> {
+    match params.get("matchingFallbackMode").and_then(Value::as_str) {
+        None | Some("") => Ok(None),
+        Some(mode @ ("accountJe" | "tbAverage")) => Ok(Some(mode)),
+        Some(other) => Err(error("INVALID_MATCHING_FALLBACK_MODE",
+            "明细衔接测算口径无效，请重新选择。", Some(other.into()))),
+    }
+}
+
+/// 仅对同主体、同码异名且无已验证辅助的组检查 JE。普通第二步仍只读 TB；
+/// 历史调用未启用选择机制时保留旧口径。不能按名称完整分配的整组必须同选同算，
+/// 避免已匹配银行继续取 JE、未匹配银行又重复取科目汇总 JE。
+fn matching_fallback_groups(folds: &[LoanFold], params: &Value,
+    entity_key_enabled: bool, scope: &ledger_mapping::EntityScope,
+) -> Result<Vec<MatchingFallbackGroup>, AppError> {
+    let mode = matching_fallback_mode(params)?;
+    if (params["requireMatchingFallbackChoice"].as_bool() != Some(true) && mode.is_none())
+        || currency_fallback_mode(params)? == Some(CurrencyFallbackMode::TwoPointByCurrency)
+    {
+        return Ok(Vec::new());
+    }
+    let mut candidates = BTreeMap::<LoanScope, BTreeSet<String>>::new();
+    for fold in folds {
+        if !fold.code.is_empty() && fold.raw_id.is_empty() {
+            candidates.entry(fold_scope(fold)).or_default().insert(fold.name.clone());
+        }
+    }
+    // 选择后只剩一家银行也不能直接认领整码 JE；用完整 TB 末级目录检查范围。
+    let (tb, tm, analysis) = tb_source(params, false)?;
+    let mut leaf_counts = HashMap::<LoanScope, usize>::new();
+    for (i, row) in tb.rows.iter().enumerate() {
+        if !analysis.keep[i] { continue; }
+        let key = (scoped_entity(&role_text(&tb, row, &tm, "tb", "entity"),
+            entity_key_enabled, ledger_mapping::EntitySide::Tb, scope),
+            norm(&role_text(&tb, row, &tm, "tb", "accountCode")));
+        if let Some(names) = candidates.get_mut(&key) {
+            names.insert(role_text(&tb, row, &tm, "tb", "accountName"));
+            *leaf_counts.entry(key).or_default() += 1;
+        }
+    }
+    let verified = auxiliary_plan_detail_columns(params).unwrap_or_default();
+    candidates.retain(|key, names| names.len() > 1 && !verified.contains_key(key));
+    if candidates.is_empty() { return Ok(Vec::new()); }
+    let (je, jm) = source(params, "jeSource")?;
+    let year = params["reportEnd"].as_str().and_then(parse_date).map(|date| date.year());
+    let start = params["reportStart"].as_str().and_then(parse_date);
+    let end = params["reportEnd"].as_str().and_then(parse_date);
+    let mut je_names = HashMap::<LoanScope, BTreeSet<String>>::new();
+    for row in &je.rows {
+        let key = (scoped_entity(&role_text(&je, row, &jm, "je", "entity"),
+            entity_key_enabled, ledger_mapping::EntitySide::Je, scope),
+            norm(&role_text(&je, row, &jm, "je", "accountCode")));
+        if !candidates.contains_key(&key) { continue; }
+        let Some(date) = mapped_je_date(&je, row, &jm, year) else { continue };
+        if start.is_some_and(|start| date < start) || end.is_some_and(|end| date > end) { continue; }
+        je_names.entry(key).or_default().insert(norm(&role_text(&je, row, &jm, "je", "accountName")));
+    }
+    // 汇总 JE 必须覆盖整码。该编码有行被排除/改为费用时不能借合并把它带回来。
+    Ok(candidates.into_iter().filter_map(|(key, names)| {
+        let normalized: BTreeSet<_> = names.iter().map(|name| norm(name)).collect();
+        let covered = je_names.get(&key);
+        let selected_count: usize = folds.iter().filter(|f| fold_scope(f) == key).map(|f| f.rows).sum();
+        let complete = leaf_counts.get(&key) == Some(&selected_count);
+        if covered == Some(&normalized) && complete { return None; }
+        Some(MatchingFallbackGroup {
+            entity: key.0.clone(), account_code: key.1.clone(), names: names.into_iter().collect(),
+            can_use_je: covered.is_some() && complete,
+        })
+    }).collect())
+}
+
+fn apply_matching_fallback(folds: &mut Vec<LoanFold>, groups: &[MatchingFallbackGroup],
+    mode: Option<&str>,
+) -> Result<(), AppError> {
+    if mode != Some("accountJe") || groups.is_empty() { return Ok(()); }
+    if groups.iter().any(|group| !group.can_use_je) {
+        return Err(error("MATCHING_FALLBACK_JE_UNAVAILABLE",
+            "所涉科目缺少期内有效日期的 JE，或同码明细未全部选为借款。请补齐资料、确认整码借款范围，或选择 TB 年初年末平均测算。", None));
+    }
+    let keys: std::collections::HashSet<_> = groups.iter()
+        .map(|group| (group.entity.clone(), group.account_code.clone())).collect();
+    let mut output = Vec::<LoanFold>::new();
+    let mut merged = HashMap::<LoanScope, usize>::new();
+    for mut fold in std::mem::take(folds) {
+        let key = fold_scope(&fold);
+        if !keys.contains(&key) { output.push(fold); continue; }
+        if let Some(index) = merged.get(&key) {
+            let target = &mut output[*index];
+            target.rows += fold.rows;
+            target.opening += fold.opening;
+            target.closing += fold.closing;
+            target.ytd_additions += fold.ytd_additions;
+            target.ytd_reductions += fold.ytd_reductions;
+            target.has_ytd_movement |= fold.has_ytd_movement;
+        } else {
+            fold.name = "借款汇总（明细无法衔接）".into();
+            fold.account = format!("{} {}", fold.code, fold.name);
+            fold.raw_id.clear();
+            fold.currency.clear();
+            merged.insert(key, output.len());
+            output.push(fold);
+        }
+    }
+    *folds = output;
+    Ok(())
+}
+
 struct AccountReviewRoles {
     buckets: HashMap<(String, String, String), Vec<AccountReviewRole>>,
 }
@@ -4232,6 +4358,17 @@ fn calculate_tb_impl(
                 .unwrap_or(true)
         });
     }
+    let fallback_groups = matching_fallback_groups(&folds, params, entity_key_enabled, &entity_scope)?;
+    let fallback_mode = matching_fallback_mode(params)?;
+    if params["requireMatchingFallbackChoice"].as_bool() == Some(true)
+        && !fallback_groups.is_empty() && fallback_mode.is_none()
+    {
+        return Err(error("MATCHING_FALLBACK_REQUIRED", "同码借款明细无法与 JE 衔接，请返回科目与利率步骤选择测算口径。", None));
+    }
+    apply_matching_fallback(&mut folds, &fallback_groups, fallback_mode)?;
+    let two_point_scopes: std::collections::HashSet<_> = fallback_groups.iter()
+        .filter(|_| fallback_mode == Some("tbAverage"))
+        .map(|group| (group.entity.clone(), group.account_code.clone())).collect();
     let (disk_aggregates, disk_je_entities) = if disk_je && !two_point_by_currency {
         let (aggregates, entities) = aggregate_large_je_once(
             &folds,
@@ -4332,6 +4469,7 @@ fn calculate_tb_impl(
     }
     let mut out = vec![];
     for fold in &folds {
+        let force_two_point = two_point_by_currency || two_point_scopes.contains(&fold_scope(fold));
         let detail_column = detail_columns.get(&fold_scope(fold));
         // 辅助核算没映射、或该行值为空时，按科目文本自成一笔：科目名称本身就
         // 足以标识借款（每个末级科目一行借款的形态），TB＋JE 测算不因缺辅助
@@ -4369,7 +4507,8 @@ fn calculate_tb_impl(
             .and_then(|all| all.get(&fold.rep))
             .cloned()
             .unwrap_or_default();
-        if !two_point_by_currency {
+        if force_two_point { aggregate = JeLoanAggregate::default(); }
+        if !force_two_point {
             if let (Some((je, jm)), Some(je_convention)) = (memory_je.as_ref(), memory_convention) {
                 let detail_index = detail_column
                     .and_then(|name| je.headers.iter().position(|header| header == name));
@@ -4528,6 +4667,9 @@ fn calculate_tb_impl(
             } else {
                 String::new()
             };
+            let fallback_note = if fallback_mode == Some("accountJe")
+                && fallback_groups.iter().any(|group| group.entity == fold.entity && group.account_code == norm(&fold.code))
+            { format!("{fallback_note}用户选择同码借款本位币汇总，统一利率测算；") } else { fallback_note };
             let merged_note = if fold.rows > 1 {
                 format!("TB 拆 {} 行已合并；", fold.rows)
             } else {
@@ -4537,9 +4679,9 @@ fn calculate_tb_impl(
                 format!(
                     "{fallback_note}{merged_note}TB 本期借贷发生额均为 0 且期初期末一致，无本金变动"
                 )
-            } else if two_point_by_currency {
+            } else if force_two_point {
                 format!(
-                    "{fallback_note}{merged_note}按币种保留 TB 年初、年末余额，不使用 JE 还原逐日变动"
+                    "{fallback_note}{merged_note}用户选择保留 TB 明细，按年初、年末平均余额测算，不使用 JE 还原逐日变动"
                 )
             } else if matched > 0 {
                 format!(
@@ -4587,7 +4729,7 @@ fn calculate_tb_impl(
             principal_days: 0.0,
             rate_basis_date: None,
             lpr_term: String::new(),
-            match_status: if two_point_by_currency {
+            match_status: if force_two_point {
                 "两点法推算".into()
             } else if (matched > 0 && diff.abs() < 0.01) || stable_without_activity {
                 "已匹配".into()
@@ -5571,6 +5713,12 @@ fn export_with_booked(rows: &[LoanRow], params: &Value, booked: &BookedInterestE
             ws.write_string((n + 10) as u32, 0, label).map_err(xlsx)?;
         }
     }
+    if let Some(mode) = matching_fallback_mode(params)? {
+        ws.write_string((n + 11) as u32, 0, match mode {
+            "accountJe" => "明细衔接口径：无法衔接的同码借款合并为本位币汇总，统一确认利率，按 JE 实际日期逐日测算；不代表逐银行精算。",
+            _ => "明细衔接口径：无法衔接的同码借款保留 TB 明细与各自利率，按年初、年末余额平均测算，不使用 JE 日期。",
+        }).map_err(xlsx)?;
+    }
     ws.set_column_width(currency_col, 12).map_err(xlsx)?;
     if !source_columns.is_empty() {
         let last_col = (headers.len() + source_columns.len() - 1) as u16;
@@ -5631,12 +5779,16 @@ fn write_segments_sheet(wb: &mut Workbook, rows: &[LoanRow]) -> Result<(), AppEr
             .map_err(xlsx)?;
     }
     let mut y = 1u32;
+    let mut total_principal_days = 0.0;
+    let mut total_interest = 0.0;
     for (r, row) in rows.iter().enumerate() {
         // 主表第 r 笔在 Excel 的行号（第 1 行是表头），利率引用那一格。
         let main_row = (r + 2).to_string();
         for (i, seg) in row.segments.iter().enumerate() {
             let excel_row = y + 1;
             let days = (seg.to_incl - seg.from).num_days() + 1;
+            total_principal_days += seg.principal * days as f64;
+            total_interest += seg.principal * row.effective_rate * days as f64 / 365.0;
             ws.write_string(y, 0, &row.loan_id).map_err(xlsx)?;
             ws.write_number(y, 1, (i + 1) as f64).map_err(xlsx)?;
             ws.write_date_with_format(y, 2, &seg.from, &date_fmt)
@@ -5683,7 +5835,7 @@ fn write_segments_sheet(wb: &mut Workbook, rows: &[LoanRow]) -> Result<(), AppEr
         }
     }
     if y > 1 {
-        let last = y - 1;
+        let last = y;
         let total = Format::new()
             .set_bold()
             .set_border_top(FormatBorder::Thin)
@@ -5693,8 +5845,8 @@ fn write_segments_sheet(wb: &mut Workbook, rows: &[LoanRow]) -> Result<(), AppEr
         for col in [6u16, 8] {
             let letter = char::from(b'A' + col as u8);
             let cached: f64 = match col {
-                6 => 0.0, // 积数合计由公式现算，缓存值只给查看器显示
-                _ => 0.0,
+                6 => total_principal_days,
+                _ => total_interest,
             };
             ws.write_formula_with_format(
                 y,
@@ -11205,6 +11357,155 @@ mod loan_real_ledger_mapping_tests {
             Some("功能范围文本"),
             "04 JE 的分录文本应映射摘要；不能拿科目名称重复凑摘要: {mapping:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod matching_fallback_tests {
+    use super::*;
+    use calamine::Reader;
+
+    fn fixture(named_je: bool) -> (tests::SyntheticLedger, Value) {
+        let fixture = tests::SyntheticLedger::new(&[]);
+        let path = fixture.dir.join("同码银行.xlsx");
+        let mut book = Workbook::new();
+        let tb = book.add_worksheet();
+        for (r, row) in [
+            vec!["主体", "编码", "名称", "期初贷", "期末贷", "本年借", "本年贷"],
+            vec!["甲公司", "2001", "短期借款", "300", "400", "0", "100"],
+            vec!["甲公司", "2001", "银行甲", "100", "100", "0", "0"],
+            vec!["甲公司", "2001", "银行乙", "200", "300", "0", "100"],
+            vec!["乙公司", "2001", "银行丙", "1000", "1050", "0", "50"],
+        ].iter().enumerate() {
+            for (c, value) in row.iter().enumerate() { tb.write_string(r as u32, c as u16, *value).unwrap(); }
+        }
+        tb.set_name("TB").unwrap();
+        let je = book.add_worksheet();
+        let mut data = vec![
+            vec!["主体", "编码", "名称", "日期", "借方", "贷方"],
+            vec!["甲公司", "2001", if named_je { "银行乙" } else { "短期借款" }, "2025-09-01", "0", "100"],
+            vec!["乙公司", "2001", "短期借款", "2025-06-01", "0", "50"],
+        ];
+        if named_je { data.push(vec!["甲公司", "2001", "银行甲", "2025-09-01", "0", "0"]); }
+        for (r, row) in data.iter().enumerate() {
+            for (c, value) in row.iter().enumerate() { je.write_string(r as u32, c as u16, *value).unwrap(); }
+        }
+        je.set_name("JE").unwrap();
+        book.save(&path).unwrap();
+        let je_csv = fixture.dir.join("je.csv");
+        fs::write(&je_csv, data.iter().map(|row| row.join(",")).collect::<Vec<_>>().join("\n")).unwrap();
+        let params = json!({"mode":"tb", "reportStart":"2025-01-01", "reportEnd":"2025-12-31",
+            "loanAccounts":["2001"], "requireMatchingFallbackChoice":true, "auxiliaryLink":{"groups":[]},
+            "tbSource":{"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},
+                "mapping":{"entity":"主体","accountCode":"编码","accountName":"名称","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷","ytdFunctionalDebit":"本年借","ytdFunctionalCredit":"本年贷"}},
+            "jeSource":{"source":{"inputPath":je_csv,"sheet":"CSV","headerRow":1,"headerDepth":1},
+                "mapping":{"entity":"主体","accountCode":"编码","accountName":"名称","date":"日期","functionalDebit":"借方","functionalCredit":"贷方"}}});
+        (fixture, params)
+    }
+
+    fn rates(params: &mut Value) {
+        let prepared = prepare_rates(params).unwrap();
+        params["rateRows"] = Value::Array(prepared["rows"].as_array().unwrap().iter().map(|row| {
+            json!({"rowKey":row["rowKey"], "entity":row["entity"], "loanId":row["loanId"], "rateType":"fixed", "fixedRate":0.03})
+        }).collect());
+    }
+
+    #[test]
+    fn 同码银行必须选择且汇总je只取一次不串主体() {
+        let (_fixture, mut params) = fixture(false);
+        let prepared = prepare_rates(&params).unwrap();
+        assert_eq!(prepared["rows"], json!([]));
+        assert_eq!(prepared["matchingFallbackGroups"].as_array().unwrap().len(), 1);
+        assert_eq!(prepared["matchingFallbackGroups"][0]["canUseJe"], true);
+        assert_eq!(calculate(&params).err().unwrap().code, "MATCHING_FALLBACK_REQUIRED");
+        params["matchingFallbackMode"] = json!("accountJe");
+        rates(&mut params);
+        let mut rows = calculate(&params).unwrap();
+        calculate_interest(&mut rows, &params).unwrap();
+        assert_eq!(rows.len(), 2);
+        let a = rows.iter().find(|row| row.entity == "甲公司").unwrap();
+        assert_eq!(a.opening_principal, 300.0);
+        assert_eq!(a.closing_principal, 400.0);
+        assert_eq!(a.additions, 100.0);
+        assert_eq!(a.events.len(), 1);
+        assert_eq!(a.match_status, "已匹配");
+        // 独立按 9 月 1 日生效：243 天 × 300 + 122 天 × 400。
+        assert!((a.calculated_interest - (300.0 * 243.0 + 400.0 * 122.0) * 0.03 / 365.0).abs() < 1e-9);
+        let b = rows.iter().find(|row| row.entity == "乙公司").unwrap();
+        assert_eq!(b.opening_principal, 1000.0);
+        assert_eq!(b.additions, 50.0);
+        assert_eq!(b.account_name, "银行丙");
+    }
+
+    #[test]
+    fn 选择tb平均保留银行各自利率且磁盘内存结果相同() {
+        let (_fixture, mut params) = fixture(false);
+        params["matchingFallbackMode"] = json!("tbAverage");
+        rates(&mut params);
+        // 两家银行不同利率，不能被合并或沿用到另一个行键。
+        let bank_a = prepare_rates(&params).unwrap()["rows"].as_array().unwrap().iter()
+            .find(|row| row["accountName"] == "银行甲").unwrap()["rowKey"].clone();
+        for rate in params["rateRows"].as_array_mut().unwrap() {
+            if rate["rowKey"] == bank_a { rate["fixedRate"] = json!(0.04); }
+        }
+        let mut memory = calculate(&params).unwrap();
+        calculate_interest(&mut memory, &params).unwrap();
+        let a: Vec<_> = memory.iter().filter(|row| row.entity == "甲公司").collect();
+        assert_eq!(a.len(), 2);
+        assert!(a.iter().all(|row| row.events.is_empty() && row.match_status == "两点法推算"));
+        assert!((a.iter().map(|row| row.calculated_interest).sum::<f64>() - 11.5).abs() < 1e-9);
+        let mut disk = calculate_tb_impl(&params, &|_,_,_,_| {}, &AtomicBool::new(false), true).unwrap();
+        calculate_interest(&mut disk, &params).unwrap();
+        assert_eq!(serde_json::to_value(memory).unwrap(), serde_json::to_value(disk).unwrap());
+    }
+
+    #[test]
+    fn 名称完整衔接不弹窗且不能汇总未完整选择的同码借款() {
+        let (_fixture, params) = fixture(true);
+        let prepared = prepare_rates(&params).unwrap();
+        assert_eq!(prepared["matchingFallbackGroups"], json!([]));
+        assert_eq!(prepared["rows"].as_array().unwrap().len(), 3);
+        let (_fixture2, mut partial) = fixture(false);
+        // 新增一个同码明细并排除后，汇总 JE 会把它带回，应拒绝。
+        partial["loanReviewSelections"] = json!([{"entity":"甲公司","account":"2001","name":"银行甲","role":"skip"}]);
+        assert_eq!(prepare_rates(&partial).unwrap()["matchingFallbackGroups"][0]["canUseJe"], false);
+        partial["matchingFallbackMode"] = json!("accountJe");
+        assert_eq!(calculate(&partial).err().unwrap().code, "MATCHING_FALLBACK_JE_UNAVAILABLE");
+        partial["matchingFallbackMode"] = json!("tbAverage");
+        let selected = calculate(&partial).unwrap();
+        assert_eq!(selected.iter().filter(|row| row.entity == "甲公司").count(), 1);
+        assert!(selected.iter().filter(|row| row.entity == "甲公司").all(|row| row.events.is_empty()));
+    }
+
+    #[test]
+    fn 分段导出合计包含末行且缓存与明细一致() {
+        let (fixture, mut params) = fixture(false);
+        params["matchingFallbackMode"] = json!("accountJe");
+        rates(&mut params);
+        let mut rows = calculate(&params).unwrap();
+        calculate_interest(&mut rows, &params).unwrap();
+        for list in [rows, vec![LoanRow {loan_id:"单段".into(), opening_principal:100.0,
+            closing_principal:100.0, fixed_rate:Some(0.03), ..LoanRow::default()}]] {
+            let mut list = list;
+            calculate_interest(&mut list, &params).unwrap();
+            let mut wb = Workbook::new();
+            write_segments_sheet(&mut wb, &list).unwrap();
+            let path = fixture.dir.join(format!("分段{}.xlsx", list.len()));
+            wb.save(&path).unwrap();
+            let mut book = calamine::open_workbook_auto(path).unwrap();
+            let cells = book.worksheet_range(SEG_SHEET).unwrap();
+            let formulas = book.worksheet_formula(SEG_SHEET).unwrap();
+            let count: usize = list.iter().map(|row| row.segments.len()).sum();
+            assert!(count > 0);
+            for col in [6u32, 8] {
+                let sum: f64 = (1..=count).map(|row| cells.get_value((row as u32, col)).unwrap().to_string().parse::<f64>().unwrap()).sum();
+                let cached = cells.get_value(((count + 1) as u32, col)).unwrap().to_string().parse::<f64>().unwrap();
+                assert!((sum - cached).abs() < 1e-8);
+                let letter = char::from(b'A' + col as u8);
+                assert_eq!(formulas.get_value(((count + 1) as u32, col)).unwrap(), &format!("SUM({letter}2:{letter}{})", count + 1));
+            }
+        }
+        assert_ne!(snapshot_param_subset(&params), snapshot_param_subset(&json!({"matchingFallbackMode":"tbAverage"})));
     }
 }
 

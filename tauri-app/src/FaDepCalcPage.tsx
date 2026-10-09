@@ -355,6 +355,13 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
   /// 换列即换映射：先把占用该列的旧角色清掉，再赋新角色。
   function setColumnRole(header: string, key: string) {
     const column = header.trim();
+    const affected = new Set([
+      key,
+      ...DEP_MAPPING_ROLES.filter(([role]) => stateRef.current.mapping[role] === column)
+        .map(([role]) => role),
+    ]);
+    setLlmChanges((current) => current.filter((item) => !affected.has(item.restore.key)));
+    setLlmPending((current) => current.filter((item) => !affected.has(item.apply.key)));
     setMapping((current) => {
       const next = { ...current };
       for (const [role] of DEP_MAPPING_ROLES) {
@@ -490,6 +497,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
         return (
           <label className="dt-header-control" key={header}>
             <select
+              aria-label={`将「${header}」映射为字段`}
               className={mapped.length ? "mapped" : undefined}
               disabled={llmBusy}
               title={mapped.map(([, label]) => label).join(" + ") || "未映射"}
@@ -623,7 +631,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
             <CardHeader className="dep-card-header">
               <div>
                 <CardTitle>核对字段映射</CardTitle>
-                <p>在每列表头选择字段角色；必填项齐全后即可生成底稿。</p>
+                <p>表头下拉框选择测算字段，下方保留原始列名；累计折旧应选累计余额列。</p>
               </div>
               <Badge variant={missing.length ? "warning" : "success"}>
                 {missing.length ? `待补 ${missing.length} 项` : "映射完整"}
@@ -648,6 +656,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                   }
                   detail={llmReview?.detail}
                   changes={llmChanges}
+                  summary="已更新表头下拉框对应的来源列，下方原始列名保持不变。"
                   pending={llmPending}
                   onUndo={(change) => undoChange(change as DepMappingChange)}
                   onAccept={(item) =>

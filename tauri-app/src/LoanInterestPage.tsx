@@ -1,4 +1,5 @@
 import { LoanLedgerConfirmation, ledgerInformationErrors, type LedgerInformation } from "./LoanLedgerConfirmation";
+import { LoanLedgerConfirmationActions } from "./LoanLedgerConfirmationActions";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { JobEvent, ToolManifest } from "./types";
 import { LoanInspectionSchema, useLoanInspectionCompletion } from "./useLoanInspectionCompletion";
@@ -30,6 +31,7 @@ import {
   CurrencyFallbackDialog,
   type CurrencyFallbackMode,
 } from "@/components/CurrencyFallbackDialog";
+import { MatchingFallbackDialog, type MatchingFallbackMode, type MatchingFallbackGroup } from "@/components/MatchingFallbackDialog";
 import { DateInput } from "@/components/DateInput";
 import { defaultBalanceSheetDate } from "@/dateDefaults";
 import { PageHeader } from "@/components/PageHeader";
@@ -642,6 +644,12 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   >("");
   const [currencyFallbackPrompt, setCurrencyFallbackPrompt] =
     useState<CurrencyLinkResult | null>(null);
+  const [matchingChoice, setMatchingChoice] = useState<{ key: string; mode: MatchingFallbackMode } | null>(null);
+  const [preparedMatchingGroups, setMatchingGroups] = useState<MatchingFallbackGroup[]>([]);
+  const [matchingGroupKey, setMatchingGroupKey] = useState<string | null>(null);
+  const [matchingPromptKey, setMatchingPromptKey] = useState<string | null>(null);
+  const [matchingDraft, setMatchingDraft] = useState<MatchingFallbackMode | "">("");
+  const prepareRateRequestRef = useRef(0);
   // 运行中的按钮归属（UI 审计 P3-3）：只有被点击的按钮进 loading 文案，
   // 另一个按钮保持普通禁用；任务终态由 busy 归零统一收回。
   const [activeRun, setActiveRun] = useState<"loan.preview" | "loan.export">();
@@ -947,6 +955,11 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [tbAccounts, loanAccountRoles, loanDetailRoles, auxLink, entityScope.selection, functionalCurrency],
   );
+  const matchingInputKey = JSON.stringify([source("tb"), source("je"), loanSelectionKey, reportEnd, currencyFallbackMode]);
+  const matchingGroups = matchingGroupKey === matchingInputKey ? preparedMatchingGroups : [];
+  const matchingFallbackMode = matchingChoice?.key === matchingInputKey ? matchingChoice.mode : "";
+  const matchingInputKeyRef = useRef(matchingInputKey);
+  matchingInputKeyRef.current = matchingInputKey;
   const editTbRate = (row: LoanRow, patch: Partial<PasteRateRow>) => {
     if (rows.length || result) setResultStale(true);
     setRatesConfirmed(false);
@@ -1273,6 +1286,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         mode === "tb" && currencyFallbackMode
           ? currencyFallbackMode
           : undefined,
+      matchingFallbackMode: mode === "tb" && matchingFallbackMode ? matchingFallbackMode : undefined,
+      requireMatchingFallbackChoice: mode === "tb" ? true : undefined,
       functionalCurrency:
         mode === "tb" && functionalCurrency ? functionalCurrency : undefined,
       ...(outputPath ? { outputPath } : {}),
@@ -1524,9 +1539,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setError(errorText(e));
     }
   }
-  /** 第二步只从 TB 生成可编辑的利率行；不启动 job，不读 JE，
-   *  不生成本金变动、勾稽或利息结果。 */
+  /** 普通第二步只读 TB；遇到同码异名才检查 JE 明细能否衔接并要求选择。 */
   async function prepareRates() {
+    const requestId = ++prepareRateRequestRef.current;
+    const inputKey = matchingInputKey;
     setRatesBusy(true);
     setError("");
     try {
@@ -1534,7 +1550,15 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         "loan.prepare_rates",
         payload(),
         "生成借款利率明细",
-      )) as { rows?: LoanRow[] };
+      )) as { rows?: LoanRow[]; matchingFallbackGroups?: MatchingFallbackGroup[] };
+      if (requestId !== prepareRateRequestRef.current || inputKey !== matchingInputKeyRef.current) return;
+      const groups = next.matchingFallbackGroups ?? [];
+      setMatchingGroups(groups);
+      setMatchingGroupKey(inputKey);
+      if (groups.length && !matchingFallbackMode) {
+        setMatchingDraft("");
+        setMatchingPromptKey(inputKey);
+      }
       setRows(next.rows ?? []);
       setResult(undefined);
       setResultStale(false);
@@ -1542,7 +1566,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     } catch (e) {
       setError(errorText(e));
     } finally {
-      setRatesBusy(false);
+      if (requestId === prepareRateRequestRef.current) setRatesBusy(false);
     }
   }
   // 进入第二步的币种衔接验证记忆化：底部「下一步」与步骤条导航共用本入口。
@@ -1645,6 +1669,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       `${normKey(account.identity ?? account.key)}\u001f${normKey(account.entity ?? "")}`;
     const byAccount = new Map<string, LoanRow[]>();
     for (const row of rows) {
+      if (matchingFallbackMode === "accountJe" && row.accountName === "借款汇总（明细无法衔接）") continue;
       const candidates = rateRowAccountKeyCandidates(row);
       const matches = orderedTbAccounts.filter((account) =>
         candidates.some((key) => [account.key, account.code, account.account]
@@ -1701,19 +1726,21 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       orphans.forEach((detail) => claimed.add(loanRowKey(detail)));
     }
     return assignment;
-  }, [rows, orderedTbAccounts, loanAccountRoles, loanDetailRoles]);
+  }, [rows, orderedTbAccounts, loanAccountRoles, loanDetailRoles, matchingFallbackMode]);
+  const summaryRateRows = useMemo(() => matchingFallbackMode === "accountJe"
+    ? rows.filter((row) => row.accountName === "借款汇总（明细无法衔接）") : [], [rows, matchingFallbackMode]);
   const confirmationRateRows = useMemo(() => {
     const seen = new Set<string>();
-    return orderedTbAccounts
+    return [...summaryRateRows, ...orderedTbAccounts
       .filter((account) => loanReviewRole(account) === "loan")
-      .flatMap((account) => reviewRateDetails.get(account.reviewKey) ?? [])
+      .flatMap((account) => reviewRateDetails.get(account.reviewKey) ?? [])]
       .filter((detail) => {
         const key = loanRowKey(detail);
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
       });
-  }, [orderedTbAccounts, reviewRateDetails, loanAccountRoles, loanDetailRoles]);
+  }, [orderedTbAccounts, reviewRateDetails, loanAccountRoles, loanDetailRoles, summaryRateRows]);
   const filteredTbAccounts = useMemo(() => {
     const keyword = accountQuery.trim().toLowerCase();
     if (!keyword) return orderedTbAccounts;
@@ -1810,7 +1837,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     if (
       mode !== "tb" ||
       step !== 1 ||
-      autoRateKey.current === loanSelectionKey ||
+      autoRateKey.current === `${loanSelectionKey}|${matchingInputKey}|${matchingFallbackMode}` ||
       accountsBusy ||
       ratesBusy ||
       busy ||
@@ -1821,7 +1848,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     ) {
       return;
     }
-    autoRateKey.current = loanSelectionKey;
+    autoRateKey.current = `${loanSelectionKey}|${matchingInputKey}|${matchingFallbackMode}`;
     void prepareRates();
   });
   // 表日只在第三步维护（第二步的重复字段已删）：生成过利率表后再改表日，
@@ -1977,6 +2004,28 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           setStep(1);
         }}
       />
+      <MatchingFallbackDialog
+        open={matchingPromptKey === matchingInputKey}
+        groups={matchingGroups}
+        value={matchingDraft}
+        onChange={setMatchingDraft}
+        onCancel={() => { setMatchingPromptKey(null); setMatchingDraft(""); }}
+        onContinue={() => {
+          if (!matchingDraft || matchingPromptKey !== matchingInputKey) return;
+          setMatchingChoice({ key: matchingInputKey, mode: matchingDraft });
+          setMatchingPromptKey(null);
+          // 汇总行是新身份，银行明细利率不能自动认作汇总利率。
+          setRows([]);
+          setResult(undefined);
+          invalidateResults();
+        }}
+      />
+      {mode === "tb" && step !== 0 && matchingGroups.length > 0 && (
+        <div className="loan-mode-context" role="status">
+          <span>{matchingFallbackMode === "accountJe" ? "明细衔接口径：JE 本位币汇总逐日测算（需统一确认利率）" : matchingFallbackMode === "tbAverage" ? "明细衔接口径：TB 明细年初年末平均测算" : "请先选择明细衔接测算口径"}</span>
+          <Button variant="secondary" onClick={() => { setMatchingDraft(matchingFallbackMode); setMatchingPromptKey(matchingInputKey); setStep(1); }}>选择明细衔接口径</Button>
+        </div>
+      )}
 
       {step === 0 && (
         <>
@@ -2292,6 +2341,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               <div className="fx-actions"><Button variant="secondary" disabled={busy || ratesBusy} onClick={() => { invalidateResults(); setLedgerConfirmed(false); setLedgerInformation({}); setLedgerInformationKey(""); }}>恢复台账默认信息</Button><span role="status">{ratesBusy ? "正在读取完整台账信息…" : `${Object.keys(ledgerInformation).length} 笔借款，${Object.values(ledgerInformation).filter(row=>ledgerInformationErrors(row,loanReportStart(reportEnd),reportEnd).length).length} 笔待补充或修正`}</span></div>
               <LoanLedgerConfirmation rows={Object.values(ledgerInformation)} start={loanReportStart(reportEnd)} end={reportEnd} busy={busy || ratesBusy}
                 onEdit={row => { invalidateResults(); setLedgerConfirmed(false); setLedgerInformation(v => ({...v,[row.rowKey]:row})); }} />
+              <LoanLedgerConfirmationActions key={ledgerSourceKey} rows={Object.values(ledgerInformation)} context={ledgerSourceKey}
+                disabled={busy || ratesBusy || ledgerInformationKey !== ledgerSourceKey}
+                onImport={changed => {
+                  invalidateResults();
+                  setLedgerConfirmed(false);
+                  setLedgerInformation(current => ({ ...current, ...Object.fromEntries(changed.map(row => [row.rowKey, row])) }));
+                }} />
               <label className="loan-rate-acknowledgement"><input type="checkbox" checked={ledgerConfirmed} disabled={busy || ratesBusy || !!ledgerErrors.length || !Object.keys(ledgerInformation).length} onChange={e=>setLedgerConfirmed(e.target.checked)} /><span>我已复核台账金额、利率和新增／还款日期，包括按合同日期生成的默认信息。</span></label>
             </>
           ) : (
@@ -2363,6 +2419,28 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       title="等待生成利率明细"
                       description="进入本步骤后按已确认的借款科目自动生成利率明细，并在本表利率列逐笔确认；科目类型改动后也会自动刷新。若因映射缺失未自动生成，请回第一步补齐映射后再进入本步骤。"
                     />
+                  )}
+                  {summaryRateRows.length > 0 && (
+                    <section className="loan-account-confirm">
+                      <h3>借款汇总利率确认</h3>
+                      <p>以下本金合并了同码借款明细，请确认汇总使用的统一利率。</p>
+                      <ResizableTableBox resizeKey="loan.step2-summary-rates">
+                        <table>
+                          <thead><tr>
+                            <th>科目汇总</th><th>期初本金</th><th>期末本金</th>
+                            <th>利率类型</th><th>执行利率（%）</th><th>浮动基准（%）</th><th>加减点（BP）</th>
+                          </tr></thead>
+                          <tbody>{summaryRateRows.map((detail) => (
+                            <tr key={loanRowKey(detail)}>
+                              <td>{detail.entity} · {detail.accountCode} {detail.accountName}</td>
+                              <td className="loan-num">{loanDisplayNumber(detail.openingPrincipal)}</td>
+                              <td className="loan-num">{loanDisplayNumber(detail.closingPrincipal)}</td>
+                              {rateEditCells(detail)}
+                            </tr>
+                          ))}</tbody>
+                        </table>
+                      </ResizableTableBox>
+                    </section>
                   )}
                   <ResizableTableBox
                     resizeKey="loan.step2-accounts"

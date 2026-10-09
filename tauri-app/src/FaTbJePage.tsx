@@ -196,7 +196,7 @@ export function splitFaAccount(account: string): {
  * 1602 整支是累计折旧；1601 整支进表，原值还是折旧再由科目名称定（见 `suggestFaAccounts`）。
  *
  * **非 1601/1602 的数字编码**不再一律排除：自身或按编码前缀回查到的上级科目名
- * **明确**写着「固定资产／累计折旧」时进表（旧制度 1501/1502、自定义编码的账套）。
+ * **首段明确**写着「固定资产／累计折旧」时进表（旧制度 1501/1502、自定义编码的账套）。
  * 宽词（房屋／设备）不参与这一层——名称里带「房屋」的费用或存款科目
  * （`6601090401 折旧费-固定资产-…`、`1002016871 银行存款-汉口银行(房屋积金)`）
  * 只看宽词必然被当成原值捞进来。字母开头的自定义编码（`FA01`）不适用本规则，
@@ -212,12 +212,23 @@ const SAYS_DEPRECIATION =
   /累计折旧|累計折舊|accumulated\s+depreciation|accum\.?\s*dep/i;
 /** 名称一出现就整枝出局（优先于折旧词）：使用权资产与 SAP 技术性清账科目不是固定资产本体。 */
 const SAYS_NOT_IN_SCOPE = /使用权|使用權|清账|清賬|right[-\s]?of[-\s]?use/i;
-/** 名称一出现就不是原值：减值准备、清理清算过渡户、折旧费／摊销／租赁费等费用科目。 */
+/** 名称一出现就不是原值：减值准备、清理清算过渡户、折旧费／摊销／租赁费等费用科目。
+ *  兜底排除：营业外收支、待处理财产损溢整科出局；「报废」与处置/损失同款，
+ *  和「固定资产」前后相邻即判非原值（营业外收入-固定资产报废利得）。 */
 const SAYS_NOT_COST =
-  /减值准备|減值準備|impairment|清理|清算|折旧费|折舊費|摊销|攤銷|租赁费|租賃費|固定资产.*(?:处置|损失)|固定資產.*(?:處置|損失)|(?:处置|损失).*固定资产|(?:處置|損失).*固定資產/i;
-/** 非标准数字编码进表的唯一窄门：名称**明确**写出「固定资产」。
- *  1601/1602 不适用时靠自身或上级科目名匹配（用户定的口径），宽词一律不算。 */
+  /减值准备|減值準備|impairment|清理|清算|折旧费|折舊費|摊销|攤銷|租赁费|租賃費|营业外|營業外|待处理|待處理|固定资产.*(?:处置|损失|报废)|固定資產.*(?:處置|損失|報廢)|(?:处置|损失|报废).*固定资产|(?:處置|損失|報廢).*固定資產/i;
 const SAYS_FA_EXPLICIT = /固定资产|固定資產/i;
+/** 「名称明确写出固定资产」只认首段：科目本体（或上下文附带的上级科目名，
+ *  空格分隔）的首个路径分段。尾段的「固定资产」多为辅助核算标注（进项税
+ *  「：固定资产」，这笔税产生自购固定资产）或损益修饰（营业外收入-固定资产
+ *  报废利得），全名包含会把税费/损益科目误判成原值，资产类别还会被填成
+ *  科目全名。与看账工具「关键词只认首段」同一口径。 */
+function saysFaExplicitAtHead(name: string): boolean {
+  return name.split(/\s+/).some((token) => {
+    const head = token.replace(/^[\s:：\-—/\\|]+/, "").split(/[\s:：\-—/\\|]/)[0] ?? "";
+    return SAYS_FA_EXPLICIT.test(head);
+  });
+}
 const SAYS_FIXED_ASSET =
   /固定资产|固定資產|房屋|建筑物|建築物|机器|機器|机械|機械|设备|設備|运输工具|運輸工具|电子设备|办公设备|fixture|equipment|building|vehicle/i;
 
@@ -279,7 +290,7 @@ function nearestParent(chart: Map<string, string>, code: string): string {
  * 1. **在不在本表口径内**，由「上级科目 → 一级编码 → 名称关键词」决定，上级科目的
  *    结论一路继承给下级。`1604 在建工程`、`1605 使用权资产`、`5301 研发支出`、
  *    `6601 运营费用` 整枝排除。**非 1601/1602 的数字编码**不据此出局：自身或
- *    上级科目名明确写出「固定资产／累计折旧」的照常进表（旧制度 1501/1502、
+ *    上级科目名首段明确写出「固定资产／累计折旧」的照常进表（旧制度 1501/1502、
  *    自定义编码账套）；上级行不存在时以自身名称为准，宽词不算。
  * 2. **在口径内的再分原值还是折旧**，科目名称写了「累计折旧」就是折旧——
  *    SAP 型科目表把累计折旧挂在 1601 底下，只认编码会整片判成原值；
@@ -305,7 +316,7 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
     if ((chart.get(code) ?? "").length < name.length) chart.set(code, name);
   }
   const resolved = new Map<string, AccountRole>();
-  /** 一级根节点的口径判定：1601/1602 走编码；其余数字编码只有名称**明确**
+  /** 一级根节点的口径判定：1601/1602 走编码；其余数字编码只有名称首段**明确**
    *  写出「固定资产／累计折旧」才进表（旧制度 1501/1502、自定义编码账套）；
    *  宽词（房屋／设备）不参与，挡住「银行存款-汉口银行(房屋积金)」式误配。 */
   const rootRole = (code: string, name: string): AccountRole => {
@@ -315,7 +326,7 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
       if (SAYS_NOT_IN_SCOPE.test(name)) return "excluded";
       if (SAYS_DEPRECIATION.test(name)) return "depreciation";
       if (SAYS_NOT_COST.test(name)) return "excluded";
-      return SAYS_FA_EXPLICIT.test(name) ? "cost" : "excluded";
+      return saysFaExplicitAtHead(name) ? "cost" : "excluded";
     }
     return roleFromName(name);
   };
@@ -329,7 +340,7 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
       : rootRole(code, name || code);
     let role = base;
     // 名称修正对整枝生效（含继承为「排除」的枝）：累计折旧提为折旧，
-    // 清理／折旧费／使用权压回排除；被排除的数字编码若自身名称明确写出
+    // 清理／折旧费／使用权压回排除；被排除的数字编码若自身名称首段明确写出
     // 「固定资产」则提为原值——上级名不含语义、子级写明的账套也能进表。
     if (SAYS_NOT_IN_SCOPE.test(name)) role = "excluded";
     else if (SAYS_DEPRECIATION.test(name)) role = "depreciation";
@@ -337,7 +348,7 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
     else if (
       base === "excluded" &&
       /^\d/.test(code) &&
-      SAYS_FA_EXPLICIT.test(name)
+      saysFaExplicitAtHead(name)
     ) {
       role = "cost";
     }
@@ -555,15 +566,13 @@ export function groupAssignmentViews(
   });
 }
 
-function defaultOutput(input: string) {
+/** 默认输出名带时分秒（与看账导出的 `YYYYMMDD_HHMMSS` 同口径）：
+ *  底稿常在同一天反复生成，只到年月日会让第二次生成指向同一文件，容易覆盖上一版。 */
+export function defaultOutput(input: string, now = new Date()) {
   const slash = Math.max(input.lastIndexOf("\\"), input.lastIndexOf("/"));
   const dir = slash >= 0 ? input.slice(0, slash + 1) : "";
-  const now = new Date();
-  const stamp = [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-  ].join("");
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
   return `${dir}FA_TBJE_${stamp}.xlsx`;
 }
 

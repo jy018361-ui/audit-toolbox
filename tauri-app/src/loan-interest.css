@@ -684,6 +684,7 @@
 .loan-ledger-table > thead > tr > th:nth-child(-n+2) { z-index: 4; }
 .loan-ledger-table input, .loan-ledger-table .loan-rate-pick { width: 100%; min-width: 0; }
 .loan-ledger-table input[type="number"] { text-align: right; font-variant-numeric: tabular-nums; }
+.loan-ledger-table .loan-ledger-number { text-align: right; font-variant-numeric: tabular-nums; }
 .loan-ledger-table input[aria-invalid="true"] { border-color: var(--danger-fg); }
 .loan-ledger-toggle { text-align: center; }
 .loan-ledger-expand { width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 7px; background: var(--card); cursor: pointer; }

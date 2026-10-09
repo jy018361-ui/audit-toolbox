@@ -42,7 +42,11 @@ export function SuccessNudge({
       .reverse()
       .find(
         (job) =>
-          job.phase === "completed" && !isAudiPickOperationJob(job.jobId) && !celebratedIds.current.has(job.jobId),
+          job.phase === "completed" &&
+          // 完整读取等后台准备任务结束，不代表整个工具已完成。
+          !job.background &&
+          !isAudiPickOperationJob(job.jobId) &&
+          !celebratedIds.current.has(job.jobId),
       );
     if (!next) return;
     celebratedIds.current.add(next.jobId);

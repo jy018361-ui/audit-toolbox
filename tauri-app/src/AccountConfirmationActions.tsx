@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { z } from "zod";
 import { displayFileName } from "./fileDisplay";
 import { engineCall, openOutput, pickPath } from "./api";
 import { Button } from "./components/ui/button";
@@ -9,6 +10,7 @@ export type ConfirmationColumn = {
   title: string;
   editable?: boolean;
   options?: string[];
+  numberFormat?: string;
 };
 export type ConfirmationRow = { key: string; values: string[]; editable?: boolean[] };
 
@@ -19,6 +21,7 @@ type Props = {
   columns: ConfirmationColumn[];
   rows: ConfirmationRow[];
   disabled?: boolean;
+  documentKind?: "loanLedger";
   onImport: (rows: ConfirmationRow[]) => void;
 };
 
@@ -30,21 +33,30 @@ function errorMessage(error: unknown): string {
 
 /** One workbook per current review list. Import never trusts row order or editable cells blindly. */
 export function AccountConfirmationActions({
-  tool, title, context, columns, rows, disabled, onImport,
+  tool, title, context, columns, rows, disabled, documentKind, onImport,
 }: Props) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [downloadPath, setDownloadPath] = useState("");
+  const name = documentKind === "loanLedger" ? "台账" : "科目确认表";
+  const uploadName = documentKind === "loanLedger" ? "上传台账" : "回传科目确认表";
+  const currentContext = useRef<string | null>(context);
+  currentContext.current = context;
+  useEffect(() => {
+    currentContext.current = context;
+    return () => { currentContext.current = null; };
+  }, [context]);
 
   async function download() {
-    const outputPath = await pickPath("save", "保存科目确认表", ["xlsx"], `${title}科目确认表.xlsx`);
-    if (typeof outputPath !== "string") return;
+    const outputPath = await pickPath("save", `保存${name}`, ["xlsx"], `${title}${name}.xlsx`);
+    if (typeof outputPath !== "string" || currentContext.current !== context) return;
     setBusy(true);
     setNote("");
     setDownloadPath("");
     try {
-      await engineCall("account_confirmation.export", { tool, context, columns, rows, outputPath });
-      setNote(`已下载 ${rows.length} 行科目确认表。`);
+      await engineCall("account_confirmation.export", { tool, context, columns, rows, outputPath, ...(documentKind ? { documentKind } : {}) });
+      if (currentContext.current !== context) return;
+      setNote(`已下载 ${rows.length} 行${name}。`);
       setDownloadPath(outputPath);
     } catch (error) {
       setNote(errorMessage(error));
@@ -54,15 +66,16 @@ export function AccountConfirmationActions({
   }
 
   async function upload() {
-    const inputPath = await pickPath("file", "回传科目确认表", ["xlsx"]);
-    if (typeof inputPath !== "string") return;
+    const inputPath = await pickPath("file", uploadName, ["xlsx"]);
+    if (typeof inputPath !== "string" || currentContext.current !== context) return;
     setBusy(true);
     setNote("");
     setDownloadPath("");
     try {
-      const response = await engineCall("account_confirmation.import", {
-        tool, context, keys: rows.map((row) => row.key), inputPath,
-      }) as { rows: ConfirmationRow[] };
+      const response = z.object({ rows: z.array(z.object({ key: z.string(), values: z.array(z.string()) })) }).parse(await engineCall("account_confirmation.import", {
+        tool, context, keys: rows.map((row) => row.key), inputPath, ...(documentKind ? { documentKind } : {}),
+      }));
+      if (currentContext.current !== context) return;
       const current = new Map(rows.map((row) => [row.key, row]));
       const checked = response.rows.map((row) => {
         const original = current.get(row.key);
@@ -81,7 +94,7 @@ export function AccountConfirmationActions({
         row.values.some((value, index) => value !== current.get(row.key)?.values[index]),
       );
       if (!changed.length) {
-        setNote("确认表没有修改，页面保持原样。");
+        setNote(`${name}没有修改，页面保持原样。`);
         return;
       }
       if (!window.confirm(`将回传 ${changed.length} 行修改到当前页面，继续吗？`)) return;
@@ -97,8 +110,8 @@ export function AccountConfirmationActions({
   return (
     <div className="account-confirmation-actions">
       <div className="account-confirmation-buttons">
-        <Button type="button" variant="secondary" disabled={disabled || busy || !rows.length} onClick={() => void download()}>下载科目确认表</Button>
-        <Button type="button" variant="secondary" disabled={disabled || busy || !rows.length} onClick={() => void upload()}>回传科目确认表</Button>
+        <Button type="button" variant="secondary" disabled={disabled || busy || !rows.length} onClick={() => void download()}>下载{name}</Button>
+        <Button type="button" variant="secondary" disabled={disabled || busy || !rows.length} onClick={() => void upload()}>{uploadName}</Button>
       </div>
       {note && <span role="status">{note}</span>}
       {downloadPath && (

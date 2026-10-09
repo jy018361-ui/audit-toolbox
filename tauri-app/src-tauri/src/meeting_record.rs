@@ -1,6 +1,13 @@
-//! 会议录音：WASAPI 双轨采集（系统回环声 + 麦克风），申请 16 kHz 单声道
+//! 会议录音：双轨采集（会议系统声 + 麦克风），申请 16 kHz 单声道
 //! 16 位格式（共享模式 autoconvert，由 Windows 音频引擎完成格式转换），
 //! 两条轨各自落 WAV，停止时混音出上传转写用的成品。
+//!
+//! 设备选择的教训（真机 2026-09-28 复盘：系统声轨 14 秒后无数据、麦克风
+//! 轨 2.6 小时近乎无声）：不能按「系统默认设备」录——Teams 常单独选用
+//! 耳机播放/收音，默认扬声器没声音可录、默认麦克风离人很远。因此：
+//! - 系统声轨优先按 ms-teams.exe 进程回环采集（Teams 用哪块声卡都能录到），
+//!   找不到 Teams 进程或初始化失败才退回默认设备回环；
+//! - 麦克风轨开录前采样各麦克风设备的音量峰值，优先选「正在收音」的那个。
 //!
 //! `profile.release` 是 `panic = "abort"`：采集线程里任何错误都必须走
 //! `Result` 返回，不允许 panic 带崩整个应用。
@@ -21,7 +28,7 @@ use std::{
     thread,
     time::Duration,
 };
-use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
+use wasapi::{AudioClient, Device, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
 use crate::AppError;
 
@@ -29,13 +36,52 @@ const SAMPLE_RATE: u32 = 16_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// 共享模式缓冲 200ms（单位 100ns）。
 const BUFFER_DURATION_HNS: i64 = 2_000_000;
-const INIT_TIMEOUT: Duration = Duration::from_secs(5);
+const INIT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 麦克风选设备的音量峰值采样：总时长与判定阈值。正常说话峰值在 0.05
+/// 以上，无输入流的设备恒为 0；会刚开始的几秒总有人在说话。
+const MIC_METER_TOTAL: Duration = Duration::from_millis(1500);
+const MIC_METER_STEP: Duration = Duration::from_millis(30);
+const MIC_ACTIVE_PEAK_MIN: f32 = 0.005;
+
+/// 一路采集就绪后回报的来源说明（前端展示与诊断用）。
+#[derive(Debug, Clone)]
+struct CaptureMeta {
+    source: String,
+    /// 采集可用但有疑点（如退回了默认设备），开录即提示用户。
+    caution: Option<String>,
+}
+
+impl CaptureMeta {
+    fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            caution: None,
+        }
+    }
+
+    fn with_caution(mut self, caution: String) -> Self {
+        self.caution = Some(caution);
+        self
+    }
+
+    fn opt_caution(mut self, caution: Option<String>) -> Self {
+        self.caution = caution;
+        self
+    }
+}
 
 struct Track {
     label: &'static str,
     path: PathBuf,
     ok: bool,
     error: Option<String>,
+    /// 实际采用的采集来源（如「Teams 进程音频（PID 123）」「麦克风（xxx）」）。
+    source: Option<String>,
+    /// 采集可用但有疑点（如退回了默认设备），开录即提示用户。
+    caution: Option<String>,
+    /// 初始化成功后的中途失败（设备被拔、进程退出等）：线程仍持有 WAV，
+    /// 只能先记下来，收尾时并进 warnings 告诉用户。
+    late_error: Arc<Mutex<Option<String>>>,
 }
 
 /// 一次进行中的录音会话。
@@ -65,7 +111,7 @@ pub(crate) fn start(data_dir: &Path) -> Result<ActiveRecording, AppError> {
         )
     })?;
     let stop = Arc::new(AtomicBool::new(false));
-    let (ready_tx, ready_rx) = mpsc::channel::<(&'static str, Result<(), String>)>();
+    let (ready_tx, ready_rx) = mpsc::channel::<(&'static str, Result<CaptureMeta, String>)>();
     let mut handles = Vec::new();
     let tracks = Mutex::new(Vec::new());
     for (label, device_direction, file_name) in [
@@ -73,15 +119,18 @@ pub(crate) fn start(data_dir: &Path) -> Result<ActiveRecording, AppError> {
         ("mic", Direction::Capture, "track-mic.wav"),
     ] {
         let path = dir.join(file_name);
+        let track_path = path.clone();
         let stop_flag = stop.clone();
         let sender = ready_tx.clone();
+        let late_error = Arc::new(Mutex::new(None));
+        let late_error_slot = late_error.clone();
         let handle = thread::Builder::new()
             .name(format!("meeting-record-{label}"))
             .spawn(move || {
                 // run_capture 正常返回（无论成败）都会经 ready 通道上报一次；
                 // 这里只兜 panic 没能上报的情况，避免重复消息。
                 if catch_unwind(AssertUnwindSafe(|| {
-                    run_capture(device_direction, &stop_flag, &path, &sender)
+                    run_capture(device_direction, &stop_flag, &path, &sender, &late_error_slot)
                 }))
                 .is_err()
                 {
@@ -98,22 +147,32 @@ pub(crate) fn start(data_dir: &Path) -> Result<ActiveRecording, AppError> {
                 ));
             }
         }
+        tracks.lock().push(Track {
+            label,
+            path: track_path,
+            ok: false,
+            error: None,
+            source: None,
+            caution: None,
+            late_error,
+        });
     }
     drop(ready_tx);
     let mut initialized = Vec::new();
     while initialized.len() < 2 {
         match ready_rx.recv_timeout(INIT_TIMEOUT) {
             Ok((label, result)) => {
-                tracks.lock().push(Track {
-                    label,
-                    path: dir.join(if label == "system" {
-                        "track-system.wav"
-                    } else {
-                        "track-mic.wav"
-                    }),
-                    ok: result.is_ok(),
-                    error: result.err(),
-                });
+                let mut guard = tracks.lock();
+                if let Some(track) = guard.iter_mut().find(|track| track.label == label) {
+                    track.ok = result.is_ok();
+                    match result {
+                        Ok(meta) => {
+                            track.source = Some(meta.source);
+                            track.caution = meta.caution;
+                        }
+                        Err(message) => track.error = Some(message),
+                    }
+                }
                 initialized.push(label);
             }
             Err(_) => break,
@@ -147,13 +206,43 @@ pub(crate) fn start(data_dir: &Path) -> Result<ActiveRecording, AppError> {
 
 pub(crate) fn recording_summary(active: &ActiveRecording) -> Value {
     let tracks = active.tracks.lock();
+    let source_of = |label: &str| {
+        tracks
+            .iter()
+            .find(|t| t.label == label)
+            .and_then(|t| t.source.clone())
+    };
     json!({
         "startedAt": active.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "recordDir": active.dir.to_string_lossy(),
         "systemOk": tracks.iter().any(|t| t.label == "system" && t.ok),
         "micOk": tracks.iter().any(|t| t.label == "mic" && t.ok),
-        "warnings": tracks.iter().filter(|t| !t.ok).filter_map(|t| t.error.clone()).collect::<Vec<_>>(),
+        "systemSource": source_of("system"),
+        "micSource": source_of("mic"),
+        "warnings": warnings_of(&tracks),
     })
+}
+
+/// 一路录音轨的疑点汇总：初始化告警 + 中途失败。
+fn warnings_of(tracks: &[Track]) -> Vec<String> {
+    let mut warnings: Vec<String> = tracks
+        .iter()
+        .filter(|track| !track.ok)
+        .filter_map(|track| track.error.clone())
+        .collect();
+    for track in tracks {
+        if let Some(caution) = &track.caution {
+            warnings.push(caution.clone());
+        }
+        if let Some(late) = track.late_error.lock().clone() {
+            warnings.push(format!(
+                "{}轨中途停止采集：{}",
+                if track.label == "system" { "系统声" } else { "麦克风" },
+                late
+            ));
+        }
+    }
+    warnings
 }
 
 /// 停止录音并混音出成品，返回给前端的结果（audioPath 即混音文件）。
@@ -171,12 +260,7 @@ pub(crate) fn finalize(active: Arc<ActiveRecording>) -> Result<Value, AppError> 
     )?;
     let duration_sec = frames / SAMPLE_RATE as u64;
     let size_bytes = fs::metadata(&mix_path).map(|meta| meta.len()).unwrap_or(0);
-    let tracks = active.tracks.lock();
-    let mut warnings: Vec<String> = tracks
-        .iter()
-        .filter(|track| !track.ok)
-        .filter_map(|track| track.error.clone())
-        .collect();
+    let mut warnings = warnings_of(&active.tracks.lock());
     // 停录即体检：设备没选对（如 Teams 用耳机、系统默认是扬声器）时两轨
     // 都近乎静音，混音里自然没有语音。与其等转写服务报「没有识别到语音
     // 内容」再让用户猜，不如当场把疑点说出来。
@@ -242,9 +326,10 @@ fn silence_hint(mix_path: &Path, duration_sec: u64) -> Option<String> {
     let fraction = loud_windows as f64 / windows as f64;
     (fraction < SPEECH_FRACTION_MIN).then(|| {
         format!(
-            "录音里疑似没有录到人声（有声时间仅约 {:.0}%）：录音用的是系统默认扬声器和麦克风，\
-             若会议时佩戴耳机，Teams 可能单独选了耳机设备，导致两轨都没录到声音；\
-             请把耳机设为系统默认设备（或在 Teams 中改用系统默认），或改用扬声器/内置麦克风重新录制。",
+            "录音里疑似没有录到人声（有声时间仅约 {:.0}%）：系统声已优先按 Teams 进程采集、\
+             麦克风已自动选用正在收音的设备，若仍录不到，可能是会议全程静音，\
+             或 Teams 正通过其他虚拟音频设备收音；请检查 Teams 的设备设置（尽量选「系统默认」），\
+             或改用扬声器外放重新录制。开录时的「录音质量提醒」里若提到退回了默认设备，也请一并查看。",
             fraction * 100.0
         )
     })
@@ -317,17 +402,26 @@ struct PreparedCapture {
     client: wasapi::AudioClient,
 }
 
-fn prepare_capture(device_direction: Direction, path: &Path) -> Result<PreparedCapture, String> {
-    let enumerator = DeviceEnumerator::new().map_err(stringify)?;
-    let device = enumerator
-        .get_default_device(&device_direction)
-        .map_err(stringify)?;
-    let mut client = device.get_iaudioclient().map_err(stringify)?;
-    let format = WaveFormat::new(16, 16, &SampleType::Int, SAMPLE_RATE as usize, 1, None);
-    // 回环：Render 设备 + Capture 方向 + 共享模式 = AUDCLNT_STREAMFLAGS_LOOPBACK。
+fn target_spec() -> WavSpec {
+    WavSpec {
+        channels: 1,
+        sample_rate: SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    }
+}
+
+fn target_format() -> WaveFormat {
+    WaveFormat::new(16, 16, &SampleType::Int, SAMPLE_RATE as usize, 1, None)
+}
+
+/// 用给定的 AudioClient 建采集流（16k 单声道 + WAV 落盘）。
+/// Render 设备 + Capture 方向 + 共享模式 = AUDCLNT_STREAMFLAGS_LOOPBACK；
+/// 进程回环客户端同样按 Capture 方向初始化（激活时已绑定回环语义）。
+fn open_stream(mut client: AudioClient, path: &Path) -> Result<PreparedCapture, String> {
     client
         .initialize_client(
-            &format,
+            &target_format(),
             &Direction::Capture,
             &StreamMode::PollingShared {
                 autoconvert: true,
@@ -338,18 +432,184 @@ fn prepare_capture(device_direction: Direction, path: &Path) -> Result<PreparedC
     let capture = client.get_audiocaptureclient().map_err(stringify)?;
     // WASAPI 初始化后必须显式 Start 才有数据包流动，否则永远读到空。
     client.start_stream().map_err(stringify)?;
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate: SAMPLE_RATE,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
-    };
-    let writer = WavWriter::create(path, spec).map_err(|e| e.to_string())?;
+    let writer = WavWriter::create(path, target_spec()).map_err(|e| e.to_string())?;
     Ok(PreparedCapture {
         capture,
         writer,
         client,
     })
+}
+
+/// 旧方案兜底：系统默认播放设备的回环。Teams 单独选用别的设备时录不到
+/// 会议声音，只作为按进程采集不可用时的退路。
+fn default_render_loopback(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
+    let enumerator = DeviceEnumerator::new().map_err(stringify)?;
+    let device = enumerator
+        .get_default_device(&Direction::Render)
+        .map_err(stringify)?;
+    let name = device
+        .get_friendlyname()
+        .unwrap_or_else(|_| "默认播放设备".into());
+    let client = device.get_iaudioclient().map_err(stringify)?;
+    let prepared = open_stream(client, path)?;
+    Ok((
+        prepared,
+        CaptureMeta::new(format!("系统默认播放设备（{name}）回环")),
+    ))
+}
+
+/// 系统声轨：优先按 ms-teams.exe 进程回环——Teams 把声音播到哪块声卡
+/// 都能录到，这正是真机「录了 14 秒就没数据」的根治手段。
+fn prepare_system(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
+    if let Some(pid) = find_teams_main_pid() {
+        let attempt = AudioClient::new_application_loopback_client(pid, true)
+            .map_err(stringify)
+            .and_then(|client| open_stream(client, path));
+        return match attempt {
+            Ok(prepared) => Ok((
+                prepared,
+                CaptureMeta::new(format!("Teams 进程声音（PID {pid}，含子进程）")),
+            )),
+            Err(error) => {
+                let (prepared, meta) = default_render_loopback(path)?;
+                Ok((prepared, meta.with_caution(format!(
+                    "按 Teams 进程采集失败（{error}），已改用系统默认播放设备。"
+                ))))
+            }
+        };
+    }
+    let (prepared, meta) = default_render_loopback(path)?;
+    Ok((prepared, meta.with_caution("未找到运行中的 Teams，已按系统默认播放设备录制；Teams 没在放声音时此轨会没有内容。".into())))
+}
+
+/// 麦克风轨：自动挑「正在收音」的设备（会议中 Teams 一直占用所选麦克风）。
+fn prepare_mic(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
+    let enumerator = DeviceEnumerator::new().map_err(stringify)?;
+    let default = enumerator
+        .get_default_device(&Direction::Capture)
+        .map_err(stringify)?;
+    let default_name = default
+        .get_friendlyname()
+        .unwrap_or_else(|_| "默认麦克风".into());
+    let picked = pick_active_capture_device(&enumerator, &default_name);
+    let (device, name, caution) = match picked {
+        Some(picked) => picked,
+        None => (default, default_name, None),
+    };
+    let client = device.get_iaudioclient().map_err(stringify)?;
+    let prepared = open_stream(client, path)?;
+    let meta = CaptureMeta::new(format!("麦克风（{name}）")).opt_caution(caution);
+    Ok((prepared, meta))
+}
+
+/// 各麦克风的音量表同时采样一小段时间，找出「正在收音」的那个：
+/// 无输入流的设备峰值恒为 0，会议刚开始总有人在说话。全都无声则返回
+/// None，由调用方退回系统默认（与旧行为一致，不强猜）。
+fn pick_active_capture_device(
+    enumerator: &DeviceEnumerator,
+    default_name: &str,
+) -> Option<(Device, String, Option<String>)> {
+    let collection = enumerator.get_device_collection(&Direction::Capture).ok()?;
+    let count = collection.get_nbr_devices().ok()?;
+    let mut candidates: Vec<(Device, String, wasapi::AudioMeterInformation, f32)> = Vec::new();
+    for idx in 0..count {
+        let Ok(device) = collection.get_device_at_index(idx) else {
+            continue;
+        };
+        let Ok(name) = device.get_friendlyname() else {
+            continue;
+        };
+        let Ok(meter) = device.get_audiometerinformation() else {
+            continue;
+        };
+        candidates.push((device, name, meter, 0.0));
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    let steps = (MIC_METER_TOTAL.as_millis() / MIC_METER_STEP.as_millis()).max(1);
+    for _ in 0..steps {
+        for (_, _, meter, peak) in candidates.iter_mut() {
+            if let Ok(value) = meter.get_peak_value() {
+                *peak = peak.max(value);
+            }
+        }
+        thread::sleep(MIC_METER_STEP);
+    }
+    let mut best_idx: Option<usize> = None;
+    for idx in 0..candidates.len() {
+        let better = best_idx.is_none_or(|best| {
+            candidates[idx]
+                .3
+                .partial_cmp(&candidates[best].3)
+                .is_some_and(|order| order == std::cmp::Ordering::Greater)
+        });
+        if better {
+            best_idx = Some(idx);
+        }
+    }
+    let idx = best_idx?;
+    if candidates[idx].3 < MIC_ACTIVE_PEAK_MIN {
+        return None;
+    }
+    let (device, name, _, _) = candidates.swap_remove(idx);
+    let caution = (name != default_name).then(|| {
+        format!(
+            "检测到麦克风「{name}」正在收音（系统默认是「{default_name}」），已自动改用它录制。"
+        )
+    });
+    Some((device, name, caution))
+}
+
+/// 找 ms-teams.exe 主进程：新版 Teams 开多个同名进程，媒体渲染在子进程
+/// 里，进程回环必须从主进程开始并带上整棵进程树才能全部录到。
+fn find_teams_main_pid() -> Option<u32> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    let mut procs: Vec<(u32, u32, String)> = Vec::new();
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return None;
+        };
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let name_len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&ch| ch == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..name_len]);
+                procs.push((entry.th32ProcessID, entry.th32ParentProcessID, name));
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    pick_teams_main(&procs)
+}
+
+/// 纯函数便于单测：进程表里挑 Teams 主进程——父进程不是 ms-teams.exe 的
+/// 那个（多个则取最小 pid）；全是子进程的异常表里退回任取最小 pid。
+fn pick_teams_main(procs: &[(u32, u32, String)]) -> Option<u32> {
+    let is_teams = |name: &str| name.eq_ignore_ascii_case("ms-teams.exe");
+    let team_pids: std::collections::HashSet<u32> = procs
+        .iter()
+        .filter(|(_, _, name)| is_teams(name))
+        .map(|(pid, _, _)| *pid)
+        .collect();
+    procs
+        .iter()
+        .filter(|(_, ppid, name)| is_teams(name) && !team_pids.contains(ppid))
+        .map(|(pid, _, _)| *pid)
+        .min()
+        .or_else(|| team_pids.into_iter().min())
 }
 
 fn capture_loop(
@@ -384,7 +644,8 @@ fn run_capture(
     device_direction: Direction,
     stop: &AtomicBool,
     path: &Path,
-    ready: &mpsc::Sender<(&'static str, Result<(), String>)>,
+    ready: &mpsc::Sender<(&'static str, Result<CaptureMeta, String>)>,
+    late_error: &Mutex<Option<String>>,
 ) -> Result<(), String> {
     let label: &'static str = match device_direction {
         Direction::Render => "system",
@@ -396,11 +657,19 @@ fn run_capture(
         ready.send((label, Err(message.clone()))).ok();
         return Err(message);
     }
-    // 就绪信号必须在进入采集循环【之前】发回：启动方只等 5 秒，
-    // 放到循环结束后发会让每次开录都超时误报"无法打开设备"。
-    let prepared = match prepare_capture(device_direction, path) {
-        Ok(prepared) => {
-            ready.send((label, Ok(()))).ok();
+    // 就绪信号必须在进入采集循环【之前】发回：麦克风选设备要采样 1.5 秒
+    // 音量表，加上 WASAPI 初始化，整体给到 10 秒（与启动方等待一致）。
+    let attempt = match device_direction {
+        Direction::Render => prepare_system(path),
+        Direction::Capture => prepare_mic(path),
+    };
+    let PreparedCapture {
+        capture,
+        mut writer,
+        client,
+    } = match attempt {
+        Ok((prepared, meta)) => {
+            ready.send((label, Ok(meta))).ok();
             prepared
         }
         Err(message) => {
@@ -408,14 +677,19 @@ fn run_capture(
             return Err(message);
         }
     };
-    let PreparedCapture {
-        capture,
-        mut writer,
-        client,
-    } = prepared;
-    capture_loop(&capture, &mut writer, stop)?;
+    if let Err(message) = capture_loop(&capture, &mut writer, stop) {
+        // 中途失败（设备被拔、Teams 退出等）：尽力封盘并把原因留给收尾时
+        // 汇总成警告——WAV 头不写完文件就损坏，静默丢轨用户无从得知。
+        *late_error.lock() = Some(message.clone());
+        let _ = client.stop_stream();
+        let _ = writer.finalize();
+        return Err(message);
+    }
     let _ = client.stop_stream();
-    writer.finalize().map_err(|e| e.to_string())?;
+    writer.finalize().map_err(|e| {
+        *late_error.lock() = Some(e.to_string());
+        e.to_string()
+    })?;
     Ok(())
 }
 
@@ -460,7 +734,7 @@ mod tests {
         write_test_wav(&path, &samples);
         let hint = silence_hint(&path, 10).expect("疑似空录应给出提示");
         assert!(hint.contains("疑似没有录到人声"));
-        assert!(hint.contains("耳机"));
+        assert!(hint.contains("Teams"));
     }
 
     /// 正常会议（大部分时间有人说话）不应误报。
@@ -543,6 +817,42 @@ mod tests {
         let bytes = [0u8, 0];
         assert_eq!(i16::from_le_bytes(bytes), 0);
         let _ = std::io::sink().write_all(&bytes);
+    }
+
+    fn procs(list: &[(u32, u32, &str)]) -> Vec<(u32, u32, String)> {
+        list.iter()
+            .map(|(pid, ppid, name)| (*pid, *ppid, name.to_string()))
+            .collect()
+    }
+
+    /// 真机 2026-10-09 快照：explorer 下挂一个 Teams 主进程，主进程下再挂
+    /// 两个同名子进程——回环必须选主进程（父进程不是 ms-teams.exe 的那个）。
+    #[test]
+    fn teams_main_pid_prefers_process_tree_root() {
+        let table = procs(&[
+            (1000, 900, "explorer.exe"),
+            (79600, 1000, "ms-teams.exe"),
+            (83148, 79600, "ms-teams.exe"),
+            (85276, 79600, "MS-Teams.exe"),
+        ]);
+        assert_eq!(pick_teams_main(&table), Some(79600));
+    }
+
+    /// 全是子进程（主进程已退出、父 pid 失效）时退回任取一个，不能 None：
+    /// 子进程带 include_tree 依然能录到整棵树的播放。
+    #[test]
+    fn teams_main_pid_falls_back_to_any_teams_process() {
+        let table = procs(&[
+            (83148, 79600, "ms-teams.exe"),
+            (85276, 83148, "ms-teams.exe"),
+        ]);
+        assert_eq!(pick_teams_main(&table), Some(83148));
+    }
+
+    #[test]
+    fn teams_main_pid_none_without_teams() {
+        let table = procs(&[(1000, 900, "explorer.exe"), (2000, 1000, "OUTLOOK.EXE")]);
+        assert_eq!(pick_teams_main(&table), None);
     }
 
     /// 真实设备链路诊断（手动运行）：

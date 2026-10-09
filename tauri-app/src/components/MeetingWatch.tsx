@@ -164,7 +164,14 @@ export function MeetingWatch() {
         // 无论录音从询问小窗还是工具页开始都会被照顾到。
       } else if (event.type === "recording_started") {
         const parsed = pickStartSummary(event.summary);
-        if (parsed) setRecording(parsed);
+        if (parsed) {
+          setRecording(parsed);
+          // 开录即提示设备疑点（如退回默认设备、麦克风换了非默认设备）：
+          // 等会议结束才发现没录到声音就晚了，中途还有机会调整设备。
+          for (const warning of parsed.warnings) {
+            void notifyDesktop("录音质量提醒", warning);
+          }
+        }
       } else if (event.type === "recording_stopped") {
         setRecording(undefined);
       } else if (event.type === "recording_auto_finished") {

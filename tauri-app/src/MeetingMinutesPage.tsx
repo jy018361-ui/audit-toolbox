@@ -111,7 +111,11 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     setRecordBusy(true);
     setError("");
     try {
-      await meetingRecordStart();
+      const started = await meetingRecordStart();
+      // 开录即亮设备疑点（退回默认设备/换了非默认麦克风），会议中还有机会调整。
+      if (started.warnings.length) {
+        setError(started.warnings.join("；"));
+      }
       refreshStatus();
     } catch (e) {
       setError(errorText(e));

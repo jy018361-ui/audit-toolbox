@@ -1,14 +1,22 @@
-//! Teams 会议状态检测：监听新版 Teams 客户端的 SlimCore 通话日志。
+//! Teams 会议状态检测：并发监听新版 Teams 客户端的全部 SlimCore 通话日志。
 //!
 //! 新版 Teams 在通话期间会开启“窗口内容保护”（共享屏幕软件因此录不到 Teams
 //! 窗口），动作会落进 `%LOCALAPPDATA%\Packages\MSTeams_8wekyb3d8bbwe\
 //! LocalCache\Microsoft\MSTeams\Logs\MSTeamsNM_SlimCore_*.log`：
 //! `SetWindowContentProtection success` = 通话开始，`UnregisterCall success`
 //! = 通话结束。检测到状态翻转时向前端发 `meeting-event` 事件。
+//!
+//! 新版 Teams 会同时开多个 ms-teams.exe 进程，各自写一份 SlimCore 日志，
+//! 通话标记只落在其中一份（真机 2026-10-09 复盘：同一分钟创建 .41/.42 两份，
+//! .41 带完整通话标记，.42 全程只有一个遥测进程的错误行）。旧逻辑只盯
+//! “最新修改”的一份日志，选到没标记的那份时整场会议都检测不到，两份日志
+//! 交替被写时还会来回切换、把状态机反复翻转。因此这里对目录下所有
+//! SlimCore 日志各自记读取偏移、增量喂进同一个状态机。
 
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -17,7 +25,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tauri::Emitter;
 
@@ -27,14 +35,19 @@ use crate::AppError;
 /// 加上小窗创建就要 4-6 秒，弹出来会已挂断。降到 1 秒把端到端延迟压住，
 /// 日志文件很小，这个频率的增量读没有负担。
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// 首次扫描整份日志的上限：SlimCore 单文件通常在几百 KB 量级。
+/// 首次扫描单份日志的读取上限：SlimCore 单文件通常在几百 KB 量级。
 const INITIAL_SCAN_CAP: u64 = 32 * 1024 * 1024;
 const MAX_READ_PER_POLL: u64 = 4 * 1024 * 1024;
+/// 启动时只回放「最近仍在写入」的日志：正在进行的通话其日志必然刚写过，
+/// 会照常回放；早已结束的历史通话（文件很久没动）直接跳到文件尾，
+/// 避免启动瞬间回放出一场旧会、闪一下询问窗又关掉。
+const REPLAY_WINDOW: Duration = Duration::from_secs(2 * 60 * 60);
 const START_MARKER: &str = "WindowContentProtectionProvider: SetWindowContentProtection success";
 const END_MARKER: &str = "WindowContentProtectionProvider: UnregisterCall success";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum CallState {
+    #[default]
     Idle,
     InCall,
 }
@@ -61,15 +74,6 @@ pub(crate) fn advance(state: &mut CallState, line: &str) -> Option<CallEvent> {
     None
 }
 
-/// 首次看到一份日志时从头推断当前状态（不回放历史事件）。
-fn infer_initial_state(contents: &str) -> CallState {
-    let mut state = CallState::Idle;
-    for line in contents.lines() {
-        advance(&mut state, line);
-    }
-    state
-}
-
 fn log_dir_under(local_app_data: &Path) -> PathBuf {
     local_app_data.join(r"Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\Logs")
 }
@@ -81,23 +85,135 @@ pub(crate) fn teams_log_dir() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
-fn newest_slimcore_log(dir: &Path) -> Option<PathBuf> {
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(dir).ok()?.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !(name.starts_with("MSTeamsNM_SlimCore_") && name.ends_with(".log")) {
-            continue;
+fn is_slimcore_log(name: &str) -> bool {
+    name.starts_with("MSTeamsNM_SlimCore_") && name.ends_with(".log")
+}
+
+/// 单份日志的读取进度：已读偏移 + 末尾尚未换行的半行。
+#[derive(Default)]
+struct TailState {
+    offset: u64,
+    partial: String,
+}
+
+/// 一轮扫描的结果，交给 watch_loop 决定发不发事件。
+#[derive(Debug, PartialEq, Eq)]
+enum ScanOutcome {
+    /// 首轮扫描：历史标记只推断现状、不回放成事件；`in_call` 为推断结果。
+    FirstScan { in_call: bool },
+    /// 后续增量：新出现的完整标记行翻转出的真实事件。
+    Events(Vec<CallEvent>),
+}
+
+/// 目录下全部 SlimCore 日志的增量读取器。所有文件的行喂进同一台状态机：
+/// 同一场通话的标记只会出现在其中一份日志里，选错主日志就会整场漏检。
+#[derive(Default)]
+struct TailSet {
+    files: HashMap<PathBuf, TailState>,
+    call_state: CallState,
+    first_scan_done: bool,
+}
+
+impl TailSet {
+    /// 读入一份日志的新增字节，把其中完整行的状态翻转记入 `events`
+    /// （首轮扫描时 `events` 传 None，只推进状态不出事件）。
+    fn drain_file(
+        &mut self,
+        path: &Path,
+        meta_len: u64,
+        cap: u64,
+        events: Option<&mut Vec<CallEvent>>,
+    ) {
+        let state = self.files.get_mut(path).expect("tail state exists");
+        if meta_len < state.offset {
+            // 文件被截断（日志清理后重建）：旧偏移作废，从零重读新内容，
+            // 新写入的结束标记才不会被跳过。
+            state.offset = 0;
+            state.partial.clear();
         }
-        let modified = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        if best.as_ref().is_none_or(|(time, _)| modified >= *time) {
-            best = Some((modified, entry.path()));
+        if meta_len <= state.offset {
+            return;
+        }
+        let mut bytes = Vec::new();
+        let read = fs::File::open(path)
+            .and_then(|mut handle| {
+                handle.seek(SeekFrom::Start(state.offset))?;
+                let mut limited = handle.take(cap);
+                limited.read_to_end(&mut bytes)
+            })
+            .unwrap_or(0);
+        if read == 0 {
+            return;
+        }
+        state.offset += read as u64;
+        state.partial.push_str(&String::from_utf8_lossy(&bytes));
+        let mut lines: Vec<&str> = state.partial.split('\n').collect();
+        let trailing = lines.pop();
+        if let Some(events) = events {
+            for line in lines {
+                if let Some(event) = advance(&mut self.call_state, line) {
+                    events.push(event);
+                }
+            }
+        } else {
+            for line in lines {
+                advance(&mut self.call_state, line);
+            }
+        }
+        match trailing {
+            Some(tail) => state.partial = tail.to_string(),
+            None => state.partial.clear(),
         }
     }
-    best.map(|(_, path)| path)
+
+    fn scan(&mut self, dir: &Path) -> ScanOutcome {
+        let mut entries: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
+        for entry in fs::read_dir(dir).ok().into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            if !is_slimcore_log(&name.to_string_lossy()) {
+                continue;
+            }
+            let (len, modified) = match entry.metadata() {
+                Ok(meta) => (
+                    meta.len(),
+                    meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                ),
+                Err(_) => continue,
+            };
+            entries.push((entry.path(), len, modified));
+        }
+        // 已被清理的日志不再跟踪，防止偏移表无限增长。
+        self.files.retain(|path, _| entries.iter().any(|(p, _, _)| p == path));
+        if !self.first_scan_done {
+            let fresh = SystemTime::now()
+                .checked_sub(REPLAY_WINDOW)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            for (path, len, modified) in &entries {
+                let tail = TailState {
+                    offset: if *modified >= fresh { 0 } else { *len },
+                    partial: String::new(),
+                };
+                self.files.insert(path.clone(), tail);
+            }
+            let cap = INITIAL_SCAN_CAP;
+            for (path, len, _) in &entries {
+                self.drain_file(path, *len, cap, None);
+            }
+            self.first_scan_done = true;
+            return ScanOutcome::FirstScan {
+                in_call: self.call_state == CallState::InCall,
+            };
+        }
+        for (path, _, _) in &entries {
+            self.files.entry(path.clone()).or_default();
+        }
+        let cap = MAX_READ_PER_POLL;
+        let mut events = Vec::new();
+        for (path, len, _) in &entries {
+            self.drain_file(path, *len, cap, Some(&mut events));
+        }
+        ScanOutcome::Events(events)
+    }
 }
 
 /// 会议功能的运行时状态：检测开关、当前是否在会、录音会话由 `meeting_record` 侧管理。
@@ -199,17 +315,13 @@ fn record_error(code: &str, message: &str, detail: Option<String>) -> AppError {
 }
 
 fn watch_loop(app: &tauri::AppHandle, state: &Arc<MeetingState>) {
-    let mut call_state = CallState::Idle;
-    // (当前文件, 已读偏移)。Teams 重启或日志滚动会换文件，此时整份新文件
-    // 重新推断状态——文件很小，代价可忽略。
-    let mut current: Option<(PathBuf, u64)> = None;
-    let mut partial = String::new();
+    let mut tails = TailSet::default();
     loop {
         if state.watcher_stop.load(Ordering::Relaxed) {
             break;
         }
         if state.watch_enabled.load(Ordering::Relaxed) {
-            poll_once(app, state, &mut call_state, &mut current, &mut partial);
+            poll_once(app, state, &mut tails);
         }
         thread::sleep(POLL_INTERVAL);
     }
@@ -246,103 +358,30 @@ fn auto_finalize_recording(app: &tauri::AppHandle, state: &Arc<MeetingState>) {
     }
 }
 
-fn poll_once(
-    app: &tauri::AppHandle,
-    state: &Arc<MeetingState>,
-    call_state: &mut CallState,
-    current: &mut Option<(PathBuf, u64)>,
-    partial: &mut String,
-) {
-    let in_call = &state.in_call;
-    let log_found = &state.log_found;
+fn poll_once(app: &tauri::AppHandle, state: &Arc<MeetingState>, tails: &mut TailSet) {
     let Some(dir) = teams_log_dir() else {
-        log_found.store(false, Ordering::Relaxed);
+        state.log_found.store(false, Ordering::Relaxed);
         return;
     };
-    log_found.store(true, Ordering::Relaxed);
-    let Some(file) = newest_slimcore_log(&dir) else {
-        return;
-    };
-    let rolled = current.as_ref().is_none_or(|(path, _)| *path != file);
-    let mut offset = if rolled {
-        0
-    } else {
-        current.as_ref().map(|(_, off)| *off).unwrap_or(0)
-    };
-    let length = fs::metadata(&file).map(|meta| meta.len()).unwrap_or(0);
-    if length < offset {
-        // 文件被截断（日志清理），从头再来。
-        partial.clear();
-        offset = 0;
-    }
-    let cap = if rolled {
-        INITIAL_SCAN_CAP
-    } else {
-        MAX_READ_PER_POLL
-    };
-    if length <= offset && !rolled {
-        if let Some(entry) = current.as_mut() {
-            entry.1 = offset;
-        }
-        return;
-    }
-    let mut bytes = Vec::new();
-    let read = fs::File::open(&file)
-        .and_then(|mut handle| {
-            handle.seek(SeekFrom::Start(offset))?;
-            let mut limited = handle.take(cap);
-            limited.read_to_end(&mut bytes)
-        })
-        .unwrap_or(0);
-    let consumed = offset + read as u64;
-    *current = Some((file, consumed));
-    partial.push_str(&String::from_utf8_lossy(&bytes));
-    let scanned_all = consumed >= length;
-    let mut lines: Vec<&str> = partial.split('\n').collect();
-    let trailing = if scanned_all || bytes.last() == Some(&b'\n') {
-        lines.pop().filter(|tail| !tail.is_empty())
-    } else {
-        // 末尾是半行，留在 partial 下一轮再判。
-        lines.pop()
-    };
-    if rolled {
-        // 首见/滚动：整份内容只用来推断现状；状态翻转照样出事件——
-        // 尤其是会中换文件（Teams 重启/日志滚动）推断回空闲时，
-        // 不能把通话结束吞掉，录音还得照常收尾。
-        let was_in_call = in_call.load(Ordering::Relaxed);
-        *call_state = infer_initial_state(partial);
-        let now_in_call = *call_state == CallState::InCall;
-        match (was_in_call, now_in_call) {
-            (false, true) => emit_event(app, "call_started"),
-            (true, false) => {
-                emit_event(app, "call_ended");
-                auto_finalize_recording(app, state);
+    state.log_found.store(true, Ordering::Relaxed);
+    match tails.scan(&dir) {
+        ScanOutcome::FirstScan { in_call } => {
+            // 启动时正在开会：历史标记推断出「在会」，照常询问，不算回放。
+            if in_call {
+                state.in_call.store(true, Ordering::Relaxed);
+                emit_event(app, "call_started");
             }
-            _ => {}
         }
-        in_call.store(now_in_call, Ordering::Relaxed);
-    } else {
-        for line in lines {
-            if let Some(event) = advance(call_state, line) {
+        ScanOutcome::Events(events) => {
+            for event in events {
                 let started = event == CallEvent::Started;
-                in_call.store(started, Ordering::Relaxed);
-                emit_event(
-                    app,
-                    if started {
-                        "call_started"
-                    } else {
-                        "call_ended"
-                    },
-                );
+                state.in_call.store(started, Ordering::Relaxed);
+                emit_event(app, if started { "call_started" } else { "call_ended" });
                 if !started {
                     auto_finalize_recording(app, state);
                 }
             }
         }
-    }
-    match trailing {
-        Some(tail) => *partial = tail.to_string(),
-        None => partial.clear(),
     }
 }
 
@@ -385,17 +424,116 @@ mod tests {
         assert_eq!(advance(&mut state, END_LINE), None);
     }
 
+    fn append(path: &Path, line: &str) {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "{line}").unwrap();
+    }
+
+    /// 真机 2026-10-09 复盘场景：同一分钟两份 SlimCore 日志，通话标记只在
+    /// 其中一份。首轮扫描必须合并两份推断出「在会」。
     #[test]
-    fn infer_state_detects_ongoing_meeting() {
-        assert_eq!(
-            infer_initial_state(&format!("{NOISE_LINE}\n{START_LINE}\n")),
-            CallState::InCall
+    fn first_scan_merges_concurrent_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        append(
+            &dir.path().join("MSTeamsNM_SlimCore_2026-10-09_17-02-22.41.log"),
+            &format!("{NOISE_LINE}\n{START_LINE}\n"),
         );
-        assert_eq!(
-            infer_initial_state(&format!("{START_LINE}\n{NOISE_LINE}\n{END_LINE}\n")),
-            CallState::Idle
+        append(
+            &dir.path().join("MSTeamsNM_SlimCore_2026-10-09_17-02-26.42.log"),
+            &format!("{NOISE_LINE}\n"),
         );
-        assert_eq!(infer_initial_state(NOISE_LINE), CallState::Idle);
+        let mut tails = TailSet::default();
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::FirstScan { in_call: true }
+        );
+    }
+
+    /// 状态机是全局一台：没标记那份日志再怎么写噪声，都不能翻转通话状态
+    /// （旧逻辑盯单份日志，两份交替更新时会来回误报开始/结束）。
+    #[test]
+    fn noise_in_markerless_log_does_not_flip_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let with_marker = dir.path().join("MSTeamsNM_SlimCore_a.41.log");
+        let noise_only = dir.path().join("MSTeamsNM_SlimCore_b.42.log");
+        append(&with_marker, &format!("{START_LINE}\n"));
+        append(&noise_only, &format!("{NOISE_LINE}\n"));
+        let mut tails = TailSet::default();
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::FirstScan { in_call: true }
+        );
+        // 无标记日志持续追加内容：不得产生任何事件。
+        append(&noise_only, &format!("{NOISE_LINE}\n{NOISE_LINE}\n"));
+        assert_eq!(tails.scan(dir.path()), ScanOutcome::Events(vec![]));
+        // 通话结束标记写在带标记那份：正常出结束事件。
+        append(&with_marker, &format!("{END_LINE}\n"));
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::Events(vec![CallEvent::Ended])
+        );
+    }
+
+    /// 启动时早已结束的通话（日志很久没写）不回放、不误报在会。
+    #[test]
+    fn first_scan_skips_stale_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("MSTeamsNM_SlimCore_old.39.log");
+        append(&path, &format!("{START_LINE}\n{NOISE_LINE}\n"));
+        let stale = SystemTime::now() - Duration::from_secs(3 * 60 * 60);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(stale))
+            .unwrap();
+        let mut tails = TailSet::default();
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::FirstScan { in_call: false }
+        );
+    }
+
+    /// 运行中新出现的日志（Teams 重启）从零读起，标记行照常出事件。
+    #[test]
+    fn new_log_mid_run_emits_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("MSTeamsNM_SlimCore_a.40.log");
+        append(&old, &format!("{START_LINE}\n"));
+        let mut tails = TailSet::default();
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::FirstScan { in_call: true }
+        );
+        let fresh = dir.path().join("MSTeamsNM_SlimCore_b.41.log");
+        append(&fresh, &format!("{END_LINE}\n"));
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::Events(vec![CallEvent::Ended])
+        );
+    }
+
+    /// 日志被清理截断后重写：从零重读，新内容里的结束标记照常出事件。
+    #[test]
+    fn truncated_log_rereads_new_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("MSTeamsNM_SlimCore_a.40.log");
+        append(&path, &format!("{START_LINE}\n{NOISE_LINE}\n"));
+        let mut tails = TailSet::default();
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::FirstScan { in_call: true }
+        );
+        fs::write(&path, format!("{END_LINE}\n")).unwrap();
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::Events(vec![CallEvent::Ended])
+        );
     }
 
     #[test]

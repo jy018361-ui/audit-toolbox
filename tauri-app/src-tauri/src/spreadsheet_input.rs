@@ -66,6 +66,26 @@ pub(crate) fn read_rows_limited(path: &Path, limit: usize) -> Result<Vec<Vec<Str
     )?;
     Ok(rows)
 }
+
+/// 只读文件开头若干行（不带单行字节预算），供合并预览在超大文本上
+/// 秒级取表头：几 GB 的台账也只扫到凑满 `limit` 行为止。
+pub(crate) fn read_rows_head(
+    path: &Path,
+    limit: usize,
+) -> Result<(Vec<Vec<String>>, TextReadReport), AppError> {
+    let mut rows = Vec::with_capacity(limit);
+    let report = text_rows_with_budget(
+        path,
+        &AtomicBool::new(false),
+        None,
+        Some(limit),
+        |row| {
+            rows.push(row);
+            Ok(())
+        },
+    )?;
+    Ok((rows, report))
+}
 pub(crate) fn text_metadata(path: &Path) -> Result<(String, char), AppError> {
     let (sample, encoding) = text_sample(path).map_err(io_error)?;
     Ok((
@@ -217,6 +237,11 @@ struct DecodedText {
     start: usize,
     end: usize,
     finished: bool,
+    /// 解码器替换出的 U+FFFD 个数（编码瑕疵的留痕，供调用方转成警告）。
+    replaced: std::rc::Rc<std::cell::Cell<u64>>,
+    /// 实际扫描过的原始字节数。行数受限的读取只扫文件头部，
+    /// 防误判阈值必须与扫过的量比，不能与整个文件大小比。
+    bytes_in: std::rc::Rc<std::cell::Cell<u64>>,
 }
 
 impl Read for DecodedText {
@@ -227,15 +252,21 @@ impl Read for DecodedText {
         while self.start == self.end && !self.finished {
             let bytes = self.input.fill_buf()?;
             let last = bytes.is_empty();
-            let (status, used, written, malformed) =
+            self.bytes_in.set(
+                self.bytes_in
+                    .get()
+                    .saturating_add(bytes.len() as u64),
+            );
+            // WHATWG 解码器遇到非法序列会输出 U+FFFD 并继续（不再像过去那样
+            // 整个文件判死）——源系统导出常见的「个别字符编码不出被写坏」
+            // 只伤及那一小段，其余几百万行照常可用。替换处会记数，读完后
+            // 由 [`text_rows_with_budget`] 判断是零星瑕疵还是编码判断错了。
+            let (status, used, written, _malformed) =
                 self.decoder.decode_to_utf8(bytes, &mut self.output, last);
             self.input.consume(used);
-            if malformed {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "文本编码无效或混杂，请重新导出为 UTF-8 文本",
-                ));
-            }
+            let replaced = count_replacement_chars(&self.output[..written]);
+            self.replaced
+                .set(self.replaced.get().saturating_add(replaced));
             self.start = 0;
             self.end = written;
             self.finished = last && status == encoding_rs::CoderResult::InputEmpty;
@@ -247,11 +278,41 @@ impl Read for DecodedText {
     }
 }
 
+fn count_replacement_chars(bytes: &[u8]) -> u64 {
+    let mut count = 0u64;
+    let mut i = 0usize;
+    while i + 3 <= bytes.len() {
+        if bytes[i] == 0xEF && bytes[i + 1] == 0xBF && bytes[i + 2] == 0xBD {
+            count += 1;
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    count
+}
+
+/// 文本读取的留痕：源文件里有多少字符按检测编码解不出来、被替换成了 U+FFFD。
+/// 零星替换（源系统导出瑕疵）照常出数据；大面积替换仍按编码错误报错。
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct TextReadReport {
+    pub(crate) replaced_chars: u64,
+}
+
 pub(crate) fn for_each_text_row(
     path: &Path,
     cancel: &AtomicBool,
     visit: impl FnMut(Vec<String>) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
+    text_rows_with_budget(path, cancel, None, None, visit).map(|_| ())
+}
+
+/// 与 [`for_each_text_row`] 相同，额外返回替换留痕，供合并结果转成用户可见的警告。
+pub(crate) fn for_each_text_row_reported(
+    path: &Path,
+    cancel: &AtomicBool,
+    visit: impl FnMut(Vec<String>) -> Result<(), AppError>,
+) -> Result<TextReadReport, AppError> {
     text_rows_with_budget(path, cancel, None, None, visit)
 }
 
@@ -261,7 +322,7 @@ pub(crate) fn for_each_text_row_bounded(
     max_record_bytes: usize,
     visit: impl FnMut(Vec<String>) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
-    text_rows_with_budget(path, cancel, Some(max_record_bytes), None, visit)
+    text_rows_with_budget(path, cancel, Some(max_record_bytes), None, visit).map(|_| ())
 }
 
 struct RecordBudget<R> {
@@ -284,15 +345,66 @@ impl<R: Read> Read for RecordBudget<R> {
     }
 }
 
+/// csv 默认跳过完全空白的记录。只在引号外的空行补入空字段，保持表格行号，
+/// 引号内换行、转义双引号和 CRLF 都原样交给 CSV 解析器。
+struct EmptyRecords<R: Read> {
+    reader: BufReader<R>,
+    state: u8, // 0 字段起点，1 普通字段，2 引号内，3 闭引号之后
+    empty: bool,
+    cr: bool,
+    pending: [u8; 3],
+    pending_start: usize,
+    pending_end: usize,
+    delimiter: u8,
+}
+impl<R: Read> EmptyRecords<R> {
+    fn new(reader: R, delimiter: u8) -> Self {
+        Self { reader: BufReader::new(reader), state: 0, empty: true, cr: false,
+            pending: [0;3], pending_start: 0, pending_end: 0, delimiter }
+    }
+}
+impl<R: Read> Read for EmptyRecords<R> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        let mut written=0;
+        while written < output.len() {
+            if self.pending_start < self.pending_end {
+                output[written]=self.pending[self.pending_start];
+                self.pending_start+=1;written+=1;continue;
+            }
+            let buffer=self.reader.fill_buf()?;
+            let Some(&byte)=buffer.first() else {break;};
+            self.reader.consume(1);
+            let newline=matches!(byte,b'\r'|b'\n') && self.state!=2;
+            let continuation=byte==b'\n' && self.cr;
+            self.cr=byte==b'\r' && newline;
+            let insert=newline && self.empty && !continuation;
+            if newline {self.empty=true;self.state=0;}
+            else {
+                self.empty=false;
+                self.state=match (self.state,byte) {
+                    (0,b'"')=>2,(2,b'"')=>3,(3,b'"')=>2,
+                    (2,_)=>2,(_,b) if b==self.delimiter=>0,_=>1,
+                };
+            }
+            self.pending_start=0;
+            if insert {self.pending=[b'"',b'"',byte];self.pending_end=3;}
+            else {self.pending[0]=byte;self.pending_end=1;}
+        }
+        Ok(written)
+    }
+}
+
 fn text_rows_with_budget(
     path: &Path,
     cancel: &AtomicBool,
     max_record_bytes: Option<usize>,
     row_limit: Option<usize>,
     mut visit: impl FnMut(Vec<String>) -> Result<(), AppError>,
-) -> Result<(), AppError> {
+) -> Result<TextReadReport, AppError> {
     let (sample, encoding) = text_sample(path).map_err(io_error)?;
     let delimiter = text_delimiter(path, &encoding.decode(&sample).0);
+    let replaced = std::rc::Rc::new(std::cell::Cell::new(0u64));
+    let bytes_in = std::rc::Rc::new(std::cell::Cell::new(0u64));
     let decoded = DecodedText {
         input: BufReader::new(fs::File::open(path).map_err(io_error)?),
         decoder: encoding.new_decoder(),
@@ -300,10 +412,12 @@ fn text_rows_with_budget(
         start: 0,
         end: 0,
         finished: false,
+        replaced: replaced.clone(),
+        bytes_in: bytes_in.clone(),
     };
     let used = std::rc::Rc::new(std::cell::Cell::new(0));
     let bounded = RecordBudget {
-        reader: decoded,
+        reader: EmptyRecords::new(decoded, delimiter),
         used: used.clone(),
         limit: max_record_bytes.unwrap_or(usize::MAX),
     };
@@ -312,10 +426,7 @@ fn text_rows_with_budget(
         .flexible(true)
         .delimiter(delimiter)
         .from_reader(bounded);
-    for (index, record) in reader.records().enumerate() {
-        if row_limit.is_some_and(|limit| index >= limit) {
-            break;
-        }
+    for (index, record) in reader.records().take(row_limit.unwrap_or(usize::MAX)).enumerate() {
         if index % 1000 == 0 {
             check_cancel(cancel)?;
         }
@@ -329,7 +440,23 @@ fn text_rows_with_budget(
         visit(record.iter().map(str::to_owned).collect())?;
         used.set(0);
     }
-    Ok(())
+    let report = TextReadReport {
+        replaced_chars: replaced.get(),
+    };
+    // 替换个数与实际扫描字节数比过高说明不是零星导出瑕疵，而是编码判断
+    // 错了（典型如无 BOM 的 UTF-16 被当 GBK，几乎每个字都会替换）——
+    // 这种情况读出来的行是乱码，宁可报错也不让乱数据混进底稿。
+    if report.replaced_chars > 0 && report.replaced_chars > bytes_in.get() / 8 {
+        return Err(error(
+            "TEXT_ENCODING_INVALID",
+            &format!(
+                "{}：文本编码无效或疑似判断错误，请重新导出为 UTF-8 文本。",
+                file_name(path)
+            ),
+            None,
+        ));
+    }
+    Ok(report)
 }
 
 pub(crate) fn sniff_delimiter(text: &str) -> u8 {
@@ -403,6 +530,89 @@ mod tests {
         let rows = read_rows_limited(&path, 3).unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[2], ["2", "跨行\n摘要", "2"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn text_empty_records_keep_table_rows_without_splitting_quoted_newlines() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("空行.csv");
+        fs::write(&path,"\r\n编号,摘要\r\n\r\n1,\"跨行\r\n\r\n与\"\"双引号\"\"\"\r\n\r\n2,末行\r\n\r\n").unwrap();
+        let rows=read_rows(&path).unwrap();
+        assert_eq!(rows,vec![vec![""],vec!["编号","摘要"],vec![""],vec!["1","跨行\r\n\r\n与\"双引号\""],vec![""],vec!["2","末行"],vec![""]]);
+        assert_eq!(read_rows_limited(&path,3).unwrap(),rows[..3]);
+        let mut utf16=vec![0xff,0xfe];for unit in "标题\n\n正文\n".encode_utf16(){utf16.extend_from_slice(&unit.to_le_bytes());}
+        fs::write(&path,utf16).unwrap();assert_eq!(read_rows(&path).unwrap(),vec![vec!["标题"],vec![""],vec!["正文"]]);
+    }
+
+    /// 真实场景：超大 GBK 台账中段混有导出时写坏的孤立字节（如 0xB1 后跟
+    /// ASCII '?'）。零星瑕疵只替换为 U+FFFD 并留痕计数，不再整档报错。
+    #[test]
+    fn sparse_bad_gbk_bytes_are_replaced_with_report() {
+        let root =
+            std::env::temp_dir().join(format!("spreadsheet-sparse-bad-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("台账.csv");
+        // "地址," 的 GBK 编码 + 坏字节 0xB1（后跟 ',' 非法尾字节）+ 正常行。
+        let mut bytes = GBK.encode("摘要,地址\n正常行,雅加达\n").0.into_owned();
+        bytes.extend_from_slice(&GBK.encode("带瑕疵,").0);
+        bytes.push(0xB1);
+        bytes.extend_from_slice(b",tail\n");
+        fs::write(&path, bytes).unwrap();
+        let cancel = AtomicBool::new(false);
+        let report = for_each_text_row_reported(&path, &cancel, |_| Ok(())).unwrap();
+        assert_eq!(report.replaced_chars, 1);
+        let mut rows = Vec::new();
+        for_each_text_row(&path, &cancel, |row| {
+            rows.push(row);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2][1], "\u{FFFD}");
+        assert_eq!(rows[2][2], "tail");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 大面积解码替换说明编码判断错了（如无 BOM 的 UTF-16 被当 GBK），
+    /// 仍要报错，不能让整档乱码混进结果。
+    #[test]
+    fn dense_corruption_still_errors() {
+        let root =
+            std::env::temp_dir().join(format!("spreadsheet-dense-bad-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("乱码.csv");
+        let mut bytes = GBK.encode("摘要,地址\n").0.into_owned();
+        bytes.extend(std::iter::repeat(0xFF).take(64 * 1024));
+        fs::write(&path, bytes).unwrap();
+        let err =
+            for_each_text_row_reported(&path, &AtomicBool::new(false), |_| Ok(()))
+                .unwrap_err();
+        assert_eq!(err.code, "TEXT_ENCODING_INVALID");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 只读文件开头的预览读取：凑满行数即停，文件尾部的内容（包括坏字节）
+    /// 根本不会被扫描——几 GB 的台账识别表头保持秒级。
+    #[test]
+    fn head_read_stops_before_tail_trouble() {
+        let root =
+            std::env::temp_dir().join(format!("spreadsheet-head-stop-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("大台账.csv");
+        let mut bytes = GBK.encode("摘要,地址\n").0.into_owned();
+        // 600 行 × 约 32 字节 ≈ 19KB，远超 csv 读取器 8KB 的缓冲窗口。
+        for i in 0..600 {
+            bytes.extend_from_slice(&GBK.encode(&format!("行{i}，张三丰的往来款说明文字\n")).0);
+        }
+        // 尾部埋一颗坏字节：全文扫描会替换并计数，早停读法则根本看不到。
+        bytes.push(0xB1);
+        bytes.push(b',');
+        bytes.extend_from_slice(b"end\n");
+        fs::write(&path, bytes).unwrap();
+        let (rows, report) = read_rows_head(&path, 5).unwrap();
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[4][0], "行3，张三丰的往来款说明文字");
+        assert_eq!(report.replaced_chars, 0);
         fs::remove_dir_all(root).unwrap();
     }
 }

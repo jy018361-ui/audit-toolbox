@@ -748,13 +748,14 @@ fn is_supported_job_method(method: &str) -> bool {
     SUPPORTED_JOB_METHODS.contains(&method)
 }
 
-/// 可以消费 JE 的长任务。是否实际启用内存保护还取决于本次文本输入总大小。
+/// 可能处理大表格的任务；实际保护由本次全部输入的联合预算决定。
 fn memory_protected_method(method: &str) -> bool {
     method.starts_with("kanzhang.")
         || method.starts_with("fx.")
         || method.starts_with("loan.")
         || method.starts_with("deposit.")
-        || method.starts_with("fa.tbje_")
+        || method.starts_with("fa.")
+        || method.starts_with("fuzzy.")
         || method.starts_with("tbje_check.")
 }
 
@@ -767,9 +768,12 @@ fn collect_input_paths(value: &Value, paths: &mut HashSet<PathBuf>) {
         Value::Object(values) => {
             for (key, value) in values {
                 let normalized = key.to_ascii_lowercase();
+                if matches!(normalized.as_str(), "sourcea" | "sourceb") {
+                    if let Some(path) = value.get("path").and_then(Value::as_str) { paths.insert(PathBuf::from(path)); }
+                }
                 if matches!(
                     normalized.as_str(),
-                    "inputpath" | "jepath" | "tbpath" | "sourcepath" | "ledgerpath"
+                    "inputpath" | "jepath" | "tbpath" | "sourcepath" | "ledgerpath" | "beginpath" | "endpath"
                 ) {
                     if let Some(path) = value.as_str() {
                         paths.insert(PathBuf::from(path));
@@ -835,10 +839,24 @@ fn memory_protected_for_text_bytes(method: &str, bytes: u64) -> bool {
     memory_protected_method(method) && bytes > LARGE_TEXT_INPUT_BYTES
 }
 
-/// Excel 输入不启用公共内存拦截。CSV/TXT/TSV 按本次任务去重后的输入总大小计，
-/// 只有严格超过 1 GiB 才启用启动等待、运行监测和 Job Object 硬上限。
+/// Large text inputs retain their existing guard. The added tools and OOXML
+/// sources also use the same combined-input estimate as disk path selection.
 fn memory_protected_job(method: &str, params: &Value) -> bool {
-    memory_protected_for_text_bytes(method, text_input_bytes(params))
+    if !memory_protected_method(method) { return false; }
+    if memory_protected_for_text_bytes(method, text_input_bytes(params)) { return true; }
+    let mut paths = HashSet::new();
+    collect_input_paths(params, &mut paths);
+    if method.starts_with("fa.dep_") {
+        if let Some(path) = params.get("path").and_then(Value::as_str) { paths.insert(path.into()); }
+    }
+    let paths = paths.iter().filter(|p| p.is_file()).map(PathBuf::as_path).collect::<Vec<_>>();
+    let factor = if method.starts_with("fa.tbje_") { 8 }
+        else if method.starts_with("fa.dep_") { 8 }
+        else if method.starts_with("fa.") { 12 }
+        else if method.starts_with("fuzzy.") || method.starts_with("deposit.") { 2 }
+        else if method.starts_with("loan.") || method.starts_with("tbje_check.") || method.starts_with("fx.") { 4 }
+        else { 1 };
+    !paths.is_empty() && crate::disk_table::should_use_disk(&paths, factor)
 }
 
 fn hard_memory_limited_job(method: &str, params: &Value) -> bool {
@@ -1771,16 +1789,12 @@ fn read_sheet_preview_rows(
     limit: usize,
 ) -> Result<(Vec<Vec<Cell>>, Vec<(u32, u32, u32, u32)>), AppError> {
     if is_text(path) {
-        let mut rows = Vec::new();
-        let mut count = 0usize;
-        for_each_text_row(path, &AtomicBool::new(false), |row| {
-            if count >= limit {
-                return Ok(());
-            }
-            count += 1;
-            rows.push(row);
-            Ok(())
-        })?;
+        // 只读到凑满 limit 行即停：几 GB 的文本台账识别表头不再全文扫描。
+        let (rows, _report) = crate::spreadsheet_input::read_rows_head(path, limit)?;
+        let rows = rows
+            .into_iter()
+            .map(|row| row.into_iter().map(Cell::String).collect())
+            .collect();
         return Ok((rows, Vec::new()));
     }
     let mut workbook = open_workbook_auto(path).map_err(|err| {
@@ -1894,18 +1908,23 @@ fn load_selected_sheets(
         );
         if is_text(path) {
             let mut rows = Vec::new();
-            let read = for_each_text_row(path, cancel, |row| {
+            let read = for_each_text_row_reported(path, cancel, |row| {
                 rows.push(row);
                 Ok(())
             });
             match read {
-                Ok(()) => result.push(SheetRows {
-                    file_path: path.clone(),
-                    file_name: file_name(path),
-                    sheet_name: "CSV".into(),
-                    include_sheet_column: params.sheet_action != "default",
-                    rows,
-                }),
+                Ok(report) => {
+                    if report.replaced_chars > 0 {
+                        warnings.push(replaced_chars_warning(path, report.replaced_chars));
+                    }
+                    result.push(SheetRows {
+                        file_path: path.clone(),
+                        file_name: file_name(path),
+                        sheet_name: "CSV".into(),
+                        include_sheet_column: params.sheet_action != "default",
+                        rows,
+                    })
+                }
                 Err(err) if err.code == "JOB_CANCELLED" => return Err(err),
                 Err(err) => warnings.push(format!("{}: {}", file_name(path), err.user_message)),
             }
@@ -2003,7 +2022,7 @@ fn write_vertical_xlsx_stream(
             // 预览确认后文件可能被改动：跳过表头前的行时顺手收集当前表头，
             // 与计划快照比对，不一致宁可停下也不按旧列位错排。
             let mut snapshot = HeaderSnapshot::new(assignment, path, "CSV");
-            for_each_text_row(path, cancel, |row| {
+            let report = for_each_text_row_reported(path, cancel, |row| {
                 if count < skip {
                     count += 1;
                     snapshot.push(&row)?;
@@ -2042,6 +2061,9 @@ fn write_vertical_xlsx_stream(
                 }
                 Ok(())
             })?;
+            if report.replaced_chars > 0 {
+                warnings.push(replaced_chars_warning(path, report.replaced_chars));
+            }
             continue;
         }
         let mut source_workbook = match open_workbook_auto(path) {
@@ -2697,7 +2719,7 @@ fn write_vertical_csv_stream(
             let mut seen = 0usize;
             let mut snapshot = HeaderSnapshot::new(assignment, path, "CSV");
             // A late text decoding error must abort, never publish a partially read file.
-            for_each_text_row(path, cancel, |row| {
+            let report = for_each_text_row_reported(path, cancel, |row| {
                 if seen < skip {
                     seen += 1;
                     snapshot.push(&row)?;
@@ -2706,6 +2728,9 @@ fn write_vertical_csv_stream(
                 seen += 1;
                 write_row(&source, &row)
             })?;
+            if report.replaced_chars > 0 {
+                warnings.push(replaced_chars_warning(path, report.replaced_chars));
+            }
         } else {
             match load_selected_sheets(std::slice::from_ref(path), params, progress, cancel) {
                 Ok((sheets, issues)) => {
@@ -3025,6 +3050,27 @@ fn for_each_text_row(
     crate::spreadsheet_input::for_each_text_row(path, cancel, |row| {
         visit(row.into_iter().map(Cell::String).collect())
     })
+}
+
+/// 逐行读取文本表格，带回替换留痕：源文件里解不出的字符已按 U+FFFD
+/// 占位读入，调用方要把它转成结果里用户可见的警告。
+fn for_each_text_row_reported(
+    path: &Path,
+    cancel: &AtomicBool,
+    mut visit: impl FnMut(Vec<Cell>) -> Result<(), AppError>,
+) -> Result<crate::spreadsheet_input::TextReadReport, AppError> {
+    crate::spreadsheet_input::for_each_text_row_reported(path, cancel, |row| {
+        visit(row.into_iter().map(Cell::String).collect())
+    })
+}
+
+/// 源文本存在编码瑕疵时的统一警告话术（审计留痕：替换了多少处要写明）。
+fn replaced_chars_warning(path: &Path, replaced_chars: u64) -> String {
+    format!(
+        "{}：源文件有 {} 处字符无法按检测编码解读，已用「�」占位继续处理，建议向数据提供方索取 UTF-8 版本复核该等字段。",
+        file_name(path),
+        replaced_chars
+    )
 }
 
 fn text_source(path: &Path, params: &MergeParams) -> SheetRows {
@@ -4257,10 +4303,25 @@ mod tests {
         bytes.push(0x81); // dangling GBK lead byte, beyond the sniff sample
         fs::write(&input, bytes).unwrap();
         let output = root.join("结果.csv");
+        let mut params = base_params(&[input.clone()], &output);
+        params["outputFormat"] = "csv".into();
+        // 零星编码瑕疵（如导出时个别字符写坏）：不再整档报错，替换为 U+FFFD
+        // 继续合并，并在结果警告里留痕。
+        let summary = test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+        let warnings = summary["warnings"].as_array().unwrap();
+        assert!(warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("占位继续处理")));
+        assert!(output.exists());
+        // 大面积解码替换说明编码判断错了：仍然中止，绝不发布读了一半的文件。
+        fs::remove_file(&output).unwrap();
+        let mut dense = GBK.encode(&text).0.into_owned();
+        dense.extend(std::iter::repeat(0xFF).take(120 * 1024));
+        fs::write(&input, dense).unwrap();
         let mut params = base_params(&[input], &output);
         params["outputFormat"] = "csv".into();
         let err = test_merge(params, Arc::new(AtomicBool::new(false))).unwrap_err();
-        assert_eq!(err.code, "TEXT_READ_FAILED");
+        assert_eq!(err.code, "TEXT_ENCODING_INVALID");
         assert!(err.user_message.contains("长文本.XLS"));
         assert!(!output.exists());
         assert!(!partial_output_path(&output).exists());
@@ -4348,11 +4409,14 @@ mod tests {
         assert!(memory_protected_method("fa.tbje_export"));
         assert!(memory_protected_method("tbje_check.run"));
         assert!(memory_protected_method("tbje_check.export_batch"));
+        for method in ["fa.dep_calculate", "fa.policy_compare", "fa.match", "fuzzy.match", "fuzzy.export"] {
+            assert!(memory_protected_method(method));
+        }
         assert!(!memory_protected_method("file_list.export"));
     }
 
     #[test]
-    fn excel_inputs_skip_all_memory_interception_across_tools() {
+    fn missing_excel_paths_do_not_force_worker_memory_limits() {
         let cases = [
             ("kanzhang.inspect", json!({"inputPath":"C:\\data\\je.xlsx"})),
             (
@@ -4386,6 +4450,17 @@ mod tests {
             assert!(!memory_protected_job(method, &params));
             assert!(!hard_memory_limited_job(method, &params));
         }
+    }
+
+    #[test]
+    fn joint_input_discovery_covers_card_lists_fuzzy_and_nested_sources() {
+        let params=json!({"beginPath":"begin.xlsx","endPath":"end.xlsx",
+            "sourceA":{"path":"a.csv"},"sourceB":{"path":"b.xlsx"},
+            "tbSource":{"source":{"inputPath":"tb.xlsx"}},"inputPaths":["a.csv","other.csv"],
+            "outputPath":"result.xlsx","snapshot":{"path":"cache.json"}});
+        let mut paths=HashSet::new();collect_input_paths(&params,&mut paths);
+        let expected=["begin.xlsx","end.xlsx","a.csv","b.xlsx","tb.xlsx","other.csv"].into_iter().map(PathBuf::from).collect();
+        assert_eq!(paths,expected);
     }
 
     #[test]

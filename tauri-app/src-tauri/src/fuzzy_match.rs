@@ -35,6 +35,8 @@ use std::{
     time::Instant,
 };
 
+mod disk;
+
 /// 粗筛后进入精算的候选上限（规格约定 200）。
 const CANDIDATE_LIMIT: usize = 200;
 /// 粗筛长度过滤：两侧字符数相差超过 3 倍即跳过。
@@ -80,7 +82,11 @@ pub(crate) fn run_job(
         "fuzzy.match" => {
             checkpoint(&cancel, pause)?;
             progress("load", 1, 4, "正在读取 A 侧数据…");
-            let out = match_flow(&params, progress, &cancel, pause)?;
+            let out = if disk::applies(&params)? {
+                disk::match_flow(&params, progress, &cancel, pause)?
+            } else {
+                match_flow(&params, progress, &cancel, pause)?
+            };
             checkpoint(&cancel, pause)?;
             persist_if_wired(&params, &out)?;
             progress("done", 4, 4, "两列匹配完成。");
@@ -1359,7 +1365,12 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
         .ok_or_else(|| error("MISSING_SOURCE", "缺少文件参数。", None))?;
     let spec: SourceSpec = serde_json::from_value(spec_value)
         .map_err(|e| error("INVALID_PARAMS", "文件参数不完整。", Some(e.to_string())))?;
-    let table = load_table(&spec)?;
+    let preview_only = crate::disk_table::should_use_disk(&[Path::new(&spec.path)], 2);
+    let table = if preview_only {
+        disk::preview(&spec)?
+    } else {
+        load_table(&spec)?
+    };
     let suggested = suggested_column(&table.headers)
         .map(|h| json!({"column": h}))
         .unwrap_or(Value::Null);
@@ -1371,6 +1382,7 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
         "headers": table.headers,
         "preview": table.rows.iter().take(8).collect::<Vec<_>>(),
         "rowCount": table.rows.len(),
+        "previewOnly": preview_only,
         "suggestedMapping": suggested,
     }))
 }
@@ -1420,9 +1432,8 @@ fn export_flow(params: &Value) -> Result<Value, AppError> {
         });
     // rows 直传（进程内调用与单测）优先；正常前端链路只传 jobId，靠接线层
     // 注入的 __dbPath 从本机结果库读回，并叠加人工确认状态。
-    let rows_owned: Vec<Value>;
-    let rows: &[Value] = match params.get("rows").and_then(Value::as_array) {
-        Some(rows) => rows,
+    let out = match params.get("rows").and_then(Value::as_array) {
+        Some(rows) => export_workbook(rows, &path)?,
         None => {
             let job_id = required_job_id(params)?;
             let db = injected(params, "__dbPath").ok_or_else(|| {
@@ -1433,21 +1444,45 @@ fn export_flow(params: &Value) -> Result<Value, AppError> {
                 )
             })?;
             let conn = open_db(Path::new(db))?;
-            let mut loaded = load_result_rows(&conn, &job_id)?;
-            if loaded.is_empty() {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM fuzzy_match_results WHERE job_id=?1",
+                    [&job_id],
+                    |r| r.get(0),
+                )
+                .map_err(disk_sql_error)?;
+            if count == 0 {
                 return Err(error(
                     "RESULTS_NOT_FOUND",
                     "该任务在本机没有保存匹配结果，请先完成匹配再导出。",
                     Some(job_id),
                 ));
             }
-            let confirmations = load_confirmations(&conn, &job_id)?;
-            apply_confirmations(&mut loaded, &confirmations);
-            rows_owned = loaded;
-            &rows_owned
+            export_workbook_from(
+                &|visitor| {
+                    // 分页只服务导出缓冲，不读取完整结果或完整确认列表。
+                    let mut after = 0;
+                    loop {
+                        let mut page =
+                            load_result_window(&conn, &job_id, 0, disk::PAGE_SIZE, "", after)?;
+                        if page.is_empty() {
+                            break;
+                        }
+                        let first = page.first().and_then(|r| r["aIndex"].as_u64()).unwrap_or(1);
+                        let last = page.last().and_then(|r| r["aIndex"].as_u64()).unwrap_or(0);
+                        let confirmations = load_confirmation_range(&conn, &job_id, first, last)?;
+                        apply_confirmations(&mut page, &confirmations);
+                        for row in &page {
+                            visitor(row)?;
+                        }
+                        after = last as usize;
+                    }
+                    Ok(())
+                },
+                &path,
+            )?
         }
     };
-    let out = export_workbook(rows, &path)?;
     // outputPaths 数组是 worker 事件协议的落点：monitor 靠它把产物加入
     // AllowedPaths，前端据此才能打开产物所在目录。
     Ok(json!({
@@ -1474,6 +1509,21 @@ fn confirmed_cn(v: &Value) -> &'static str {
 }
 
 fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
+    export_workbook_from(
+        &|visitor| {
+            for row in rows {
+                visitor(row)?;
+            }
+            Ok(())
+        },
+        path,
+    )
+}
+
+type ExportVisitor<'a> = dyn FnMut(&Value) -> Result<(), AppError> + 'a;
+type ExportSource<'a> = dyn Fn(&mut ExportVisitor<'_>) -> Result<(), AppError> + 'a;
+
+fn export_workbook_from(rows: &ExportSource<'_>, path: &Path) -> Result<PathBuf, AppError> {
     let mut wb = Workbook::new();
     let header = Format::new()
         .set_bold()
@@ -1509,7 +1559,7 @@ fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
         }
         let mut y = 1u32;
         let mut seq = 0u64;
-        for row in rows {
+        rows(&mut |row| {
             let a_index = row.get("aIndex").and_then(Value::as_u64).unwrap_or(0);
             let a_value = row.get("aValue").and_then(Value::as_str).unwrap_or("");
             let level = row.get("level").and_then(Value::as_str).unwrap_or("");
@@ -1534,7 +1584,7 @@ fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
                     ws, y, seq, a_index, a_value, 0, "", level, None, &reasons, "",
                 )?;
                 y += 1;
-                continue;
+                return Ok(());
             }
             for m in matches {
                 seq += 1;
@@ -1561,7 +1611,8 @@ fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
                 )?;
                 y += 1;
             }
-        }
+            Ok(())
+        })?;
     }
     // Sheet2 疑似确认记录：只列 suspect 行的全部 topK 候选（列布局与 Sheet1
     // 一致，便于并排核对；confirmed 列即确认操作落点）。
@@ -1592,9 +1643,9 @@ fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
         }
         let mut y = 1u32;
         let mut seq = 0u64;
-        for row in rows {
+        rows(&mut |row| {
             if row.get("level").and_then(Value::as_str) != Some("suspect") {
-                continue;
+                return Ok(());
             }
             let a_index = row.get("aIndex").and_then(Value::as_u64).unwrap_or(0);
             let a_value = row.get("aValue").and_then(Value::as_str).unwrap_or("");
@@ -1628,7 +1679,8 @@ fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
                 )?;
                 y += 1;
             }
-        }
+            Ok(())
+        })?;
     }
     // Sheet3 未匹配清单：unmatched + invalid 行。
     {
@@ -1645,10 +1697,10 @@ fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
         }
         let mut y = 1u32;
         let mut seq = 0u64;
-        for row in rows {
+        rows(&mut |row| {
             let level = row.get("level").and_then(Value::as_str).unwrap_or("");
             if matches!(level, "auto" | "suspect") {
-                continue;
+                return Ok(());
             }
             seq += 1;
             let reasons = row
@@ -1677,7 +1729,8 @@ fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
             ws.write_string(y, 3, level_cn(level)).map_err(xlsx)?;
             ws.write_string(y, 4, &reasons).map_err(xlsx)?;
             y += 1;
-        }
+            Ok(())
+        })?;
     }
     wb.save(path).map_err(xlsx)?;
     Ok(path.to_path_buf())
@@ -1781,6 +1834,9 @@ fn injected<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
 /// 单测直调不注入则跳过）。保存失败让任务失败：导出与跨会话恢复都依赖
 /// 这份行级结果，静默跳过只会让后续步骤报更难懂的错。
 fn persist_if_wired(params: &Value, result: &Value) -> Result<(), AppError> {
+    if result.get("processingMode").and_then(Value::as_str) == Some("disk") {
+        return Ok(());
+    }
     let (Some(db), Some(job)) = (injected(params, "__dbPath"), injected(params, "__jobId")) else {
         return Ok(());
     };
@@ -1803,7 +1859,8 @@ fn open_db(db_path: &Path) -> Result<Connection, AppError> {
     conn.execute_batch(
         "PRAGMA busy_timeout=5000;
          CREATE TABLE IF NOT EXISTS fuzzy_match_results(job_id TEXT NOT NULL,a_index INTEGER NOT NULL,a_value TEXT NOT NULL,level TEXT NOT NULL,match_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(job_id,a_index));
-         CREATE TABLE IF NOT EXISTS fuzzy_match_confirmations(job_id TEXT NOT NULL,a_index INTEGER NOT NULL,b_index INTEGER,action TEXT NOT NULL,note TEXT,confirmed_at TEXT NOT NULL,PRIMARY KEY(job_id,a_index));",
+         CREATE TABLE IF NOT EXISTS fuzzy_match_confirmations(job_id TEXT NOT NULL,a_index INTEGER NOT NULL,b_index INTEGER,action TEXT NOT NULL,note TEXT,confirmed_at TEXT NOT NULL,PRIMARY KEY(job_id,a_index));
+         CREATE TABLE IF NOT EXISTS fuzzy_match_summaries(job_id TEXT PRIMARY KEY,summary_json TEXT NOT NULL);",
     )
     .map_err(open_error)?;
     Ok(conn)
@@ -1873,6 +1930,13 @@ fn persist_results(db_path: &Path, job_id: &str, result: &Value) -> Result<(), A
             .map_err(write_error)?;
         }
     }
+    if let Some(summary) = result.get("summary") {
+        tx.execute(
+            "INSERT OR REPLACE INTO fuzzy_match_summaries(job_id,summary_json) VALUES(?1,?2)",
+            params![job_id, summary.to_string()],
+        )
+        .map_err(write_error)?;
+    }
     tx.commit().map_err(write_error)?;
     Ok(())
 }
@@ -1881,29 +1945,179 @@ fn persist_results(db_path: &Path, job_id: &str, result: &Value) -> Result<(), A
 /// 行级结果与确认全部从库读回，summary 优先取 task_history 完成事件里
 /// monitor 存的完整口径（含 rowsB/elapsedMs），取不到再按行级统计重建
 /// （rowsB/elapsedMs 无法从行级还原，以 0 兜底——前端类型要求 number）。
+const RESULT_FILTER: &str = "r.job_id=?1 AND (?2='' OR r.level=?2)
+    AND (?3='all' OR (?3='70-80' AND json_extract(r.match_json,'$[0].total')>=70 AND json_extract(r.match_json,'$[0].total')<80)
+      OR (?3='80-90' AND json_extract(r.match_json,'$[0].total')>=80 AND json_extract(r.match_json,'$[0].total')<90))
+    AND (?4=0 OR NOT EXISTS(SELECT 1 FROM fuzzy_match_confirmations c WHERE c.job_id=r.job_id AND c.a_index=r.a_index))";
+
+struct ResultFilter<'a> {
+    level: &'a str,
+    band: &'a str,
+    pending: bool,
+}
+impl Default for ResultFilter<'_> {
+    fn default() -> Self {
+        Self {
+            level: "",
+            band: "all",
+            pending: false,
+        }
+    }
+}
+
 fn get_results(db_path: &Path, params: &Value) -> Result<Value, AppError> {
     let job_id = required_job_id(params)?;
     let conn = open_db(db_path)?;
-    let rows = load_result_rows(&conn, &job_id)?;
-    if rows.is_empty() {
+    let level = if params.get("onlySuspect").and_then(Value::as_bool) == Some(true) {
+        "suspect"
+    } else {
+        params.get("level").and_then(Value::as_str).unwrap_or("")
+    };
+    if !matches!(level, "" | "auto" | "suspect" | "unmatched" | "invalid") {
+        return Err(error("INVALID_PARAMS", "匹配级别筛选无效。", None));
+    }
+    let band = params.get("band").and_then(Value::as_str).unwrap_or("all");
+    if !matches!(band, "all" | "70-80" | "80-90") {
+        return Err(error("INVALID_PARAMS", "分数区间筛选无效。", None));
+    }
+    let filter = ResultFilter {
+        level,
+        band,
+        pending: params
+            .get("onlyPending")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+    let total: i64 = conn
+        .query_row(
+            &format!("SELECT count(*) FROM fuzzy_match_results r WHERE {RESULT_FILTER}"),
+            params![job_id, level, band, filter.pending],
+            |r| r.get(0),
+        )
+        .map_err(disk_sql_error)?;
+    let overall: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM fuzzy_match_results WHERE job_id=?1",
+            [&job_id],
+            |r| r.get(0),
+        )
+        .map_err(disk_sql_error)?;
+    let saved_summary = conn
+        .query_row(
+            "SELECT summary_json FROM fuzzy_match_summaries WHERE job_id=?1",
+            [&job_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    if overall == 0 && saved_summary.is_none() {
         return Err(error(
             "RESULTS_NOT_FOUND",
             "该任务在本机没有保存匹配结果，请重新运行匹配。",
             Some(job_id),
         ));
     }
-    let confirmations = load_confirmations(&conn, &job_id)?;
-    let summary = summary_from_history(&conn, &job_id).unwrap_or_else(|| rebuild_summary(&rows));
-    Ok(json!({"summary": summary, "rows": rows, "confirmations": confirmations}))
+    let offset = params
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(i64::MAX as u64) as usize;
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(if overall <= 1000 {
+            1000
+        } else {
+            disk::PAGE_SIZE as u64
+        })
+        .clamp(1, 1000) as usize;
+    let rows = load_filtered_window(&conn, &job_id, offset, limit, &filter, 0)?;
+    let confirmations = confirmation_page(&conn, &job_id, offset, limit, &filter)?;
+    let summary = saved_summary
+        .or_else(|| summary_from_history(&conn, &job_id))
+        .unwrap_or_else(|| summary_from_database(&conn, &job_id));
+    Ok(
+        json!({"summary": summary, "rows": rows, "confirmations": confirmations,"offset":offset,"limit":limit,"total":total,"hasMore":offset.saturating_add(limit)<total as usize}),
+    )
+}
+
+fn disk_sql_error(e: rusqlite::Error) -> AppError {
+    error(
+        "STORAGE_ERROR",
+        "本机数据存储操作失败。",
+        Some(e.to_string()),
+    )
+}
+
+fn summary_from_database(conn: &Connection, job_id: &str) -> Value {
+    let mut summary = rebuild_summary(&[]);
+    if let Ok(mut stmt) = conn
+        .prepare("SELECT level,count(*) FROM fuzzy_match_results WHERE job_id=?1 GROUP BY level")
+    {
+        if let Ok(queried) = stmt.query_map([job_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?))
+        }) {
+            let mut total = 0;
+            for (level, count) in queried.flatten() {
+                total += count;
+                let key = match level.as_str() {
+                    "auto" => "autoCount",
+                    "suspect" => "suspectCount",
+                    "invalid" => "invalidCount",
+                    _ => "unmatchedCount",
+                };
+                summary[key] = json!(count);
+            }
+            summary["rowsA"] = json!(total);
+        }
+    }
+    summary
 }
 
 /// 逐行读回 fuzzy_match_results：match_json 反序列化回 matches；行级
 /// reasons 库里没存，invalid 行的文案是固定的，读回时按 level 重建。
-fn load_result_rows(conn: &Connection, job_id: &str) -> Result<Vec<Value>, AppError> {
+fn load_result_page(
+    conn: &Connection,
+    job_id: &str,
+    offset: usize,
+    limit: usize,
+    level: &str,
+) -> Result<Vec<Value>, AppError> {
+    load_result_window(conn, job_id, offset, limit, level, 0)
+}
+
+fn load_result_window(
+    conn: &Connection,
+    job_id: &str,
+    offset: usize,
+    limit: usize,
+    level: &str,
+    after: usize,
+) -> Result<Vec<Value>, AppError> {
+    load_filtered_window(
+        conn,
+        job_id,
+        offset,
+        limit,
+        &ResultFilter {
+            level,
+            ..Default::default()
+        },
+        after,
+    )
+}
+
+fn load_filtered_window(
+    conn: &Connection,
+    job_id: &str,
+    offset: usize,
+    limit: usize,
+    filter: &ResultFilter<'_>,
+    after: usize,
+) -> Result<Vec<Value>, AppError> {
     let mut stmt = conn
         .prepare(
-            "SELECT a_index,a_value,level,match_json FROM fuzzy_match_results
-             WHERE job_id=?1 ORDER BY a_index",
+            &format!("SELECT r.a_index,r.a_value,r.level,r.match_json FROM fuzzy_match_results r WHERE {RESULT_FILTER} AND r.a_index>?5 ORDER BY r.a_index LIMIT ?6 OFFSET ?7"),
         )
         .map_err(|e| {
             error(
@@ -1913,14 +2127,25 @@ fn load_result_rows(conn: &Connection, job_id: &str) -> Result<Vec<Value>, AppEr
             )
         })?;
     let queried = stmt
-        .query_map([job_id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        })
+        .query_map(
+            params![
+                job_id,
+                filter.level,
+                filter.band,
+                filter.pending,
+                after as i64,
+                limit as i64,
+                offset as i64
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
         .map_err(|e| {
             error(
                 "STORAGE_ERROR",
@@ -1954,12 +2179,29 @@ fn load_result_rows(conn: &Connection, job_id: &str) -> Result<Vec<Value>, AppEr
     Ok(out)
 }
 
-/// 确认记录全量读回（bIndex null 表示「确认该行确无匹配」的整行否决）。
-fn load_confirmations(conn: &Connection, job_id: &str) -> Result<Vec<Value>, AppError> {
+/// 只读当前筛选页的确认记录，避免确认列表随任务总行数增长。
+fn confirmation_page(
+    conn: &Connection,
+    job: &str,
+    offset: usize,
+    limit: usize,
+    filter: &ResultFilter<'_>,
+) -> Result<Vec<Value>, AppError> {
+    let mut stmt=conn.prepare(&format!("SELECT c.a_index,c.b_index,c.action,c.note FROM fuzzy_match_confirmations c JOIN (SELECT r.a_index FROM fuzzy_match_results r WHERE {RESULT_FILTER} ORDER BY r.a_index LIMIT ?5 OFFSET ?6) page ON page.a_index=c.a_index WHERE c.job_id=?1 ORDER BY c.a_index")).map_err(disk_sql_error)?;
+    let rows=stmt.query_map(params![job,filter.level,filter.band,filter.pending,limit as i64,offset as i64],|r|Ok(json!({"aIndex":r.get::<_,i64>(0)?,"bIndex":r.get::<_,Option<i64>>(1)?,"action":r.get::<_,String>(2)?,"note":r.get::<_,Option<String>>(3)?}))).map_err(disk_sql_error)?;
+    rows.map(|r| r.map_err(disk_sql_error)).collect()
+}
+
+fn load_confirmation_range(
+    conn: &Connection,
+    job_id: &str,
+    first: u64,
+    last: u64,
+) -> Result<Vec<Value>, AppError> {
     let mut stmt = conn
         .prepare(
             "SELECT a_index,b_index,action,note FROM fuzzy_match_confirmations
-             WHERE job_id=?1 ORDER BY a_index",
+             WHERE job_id=?1 AND a_index>=?2 AND a_index<=?3 ORDER BY a_index",
         )
         .map_err(|e| {
             error(
@@ -1969,7 +2211,7 @@ fn load_confirmations(conn: &Connection, job_id: &str) -> Result<Vec<Value>, App
             )
         })?;
     let queried = stmt
-        .query_map([job_id], |r| {
+        .query_map(params![job_id, first as i64, last as i64], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, Option<i64>>(1)?,
@@ -2239,13 +2481,13 @@ fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
                 Some(e.to_string()),
             )
         })?;
+        let start=range.start().unwrap_or((0,0));
+        let mut physical_rows=vec![Vec::new();start.0 as usize];
+        physical_rows.extend(range.rows().map(|r|{let mut row=vec![String::new();start.1 as usize];row.extend(r.iter().map(data_text));row}));
         (
             selected,
             sheets,
-            range
-                .rows()
-                .map(|r| r.iter().map(data_text).collect())
-                .collect(),
+            physical_rows,
         )
     };
     let (header_index, inferred_depth) = crate::header_detection::layout(
@@ -3405,9 +3647,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// 5 万行结果落库再整包取回的耗时基线（跨会话恢复路径）。
-    /// 打印实际耗时（--nocapture 可见）；断言只设防挂死的宽上限，
-    /// 是否需要 onlySuspect 按实测数字在接线报告里给结论。
+    /// 大结果默认只回首屏，统计覆盖全库；分页与筛选在数据库执行。
     #[test]
     fn 五万行get_results耗时基线() {
         let (db, dir) = temp_db("perf");
@@ -3453,9 +3693,52 @@ mod tests {
         let t1 = Instant::now();
         let back = storage_call(&db, "fuzzy.get_results", json!({"jobId": "job-perf"})).unwrap();
         let read_elapsed = t1.elapsed();
-        assert_eq!(back["rows"].as_array().unwrap().len(), N);
+        assert_eq!(back["rows"].as_array().unwrap().len(), disk::PAGE_SIZE);
         assert_eq!(back["summary"]["rowsA"], N);
-        println!("fuzzy.get_results 5万行：写库 {write_elapsed:?}，读回+重建 {read_elapsed:?}");
+        assert_eq!(back["total"], N);
+        assert_eq!(back["hasMore"], true);
+        let tail = storage_call(
+            &db,
+            "fuzzy.get_results",
+            json!({"jobId":"job-perf","offset":N-10,"limit":20}),
+        )
+        .unwrap();
+        assert_eq!(tail["rows"].as_array().unwrap().len(), 10);
+        assert_eq!(tail["hasMore"], false);
+        let suspects = storage_call(
+            &db,
+            "fuzzy.get_results",
+            json!({"jobId":"job-perf","onlySuspect":true,"limit":50}),
+        )
+        .unwrap();
+        assert_eq!(suspects["total"], 10_000);
+        assert!(
+            suspects["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["level"] == "suspect")
+        );
+        save_confirm(&db,&json!({"jobId":"job-perf","confirmations":[{"aIndex":7,"bIndex":7,"action":"accept"}]})).unwrap();
+        let pending=storage_call(&db,"fuzzy.get_results",json!({"jobId":"job-perf","onlySuspect":true,"onlyPending":true,"band":"70-80","limit":50})).unwrap();
+        assert_eq!(pending["total"], 9_999);
+        assert!(
+            pending["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["aIndex"] != 7)
+        );
+        assert_eq!(pending["confirmations"], json!([]));
+        let empty_band = storage_call(
+            &db,
+            "fuzzy.get_results",
+            json!({"jobId":"job-perf","onlySuspect":true,"band":"80-90"}),
+        )
+        .unwrap();
+        assert_eq!(empty_band["total"], 0);
+        assert_eq!(empty_band["rows"], json!([]));
+        println!("fuzzy.get_results 5万行：写库 {write_elapsed:?}，首屏+全库统计 {read_elapsed:?}");
         assert!(
             read_elapsed.as_secs() < 30,
             "5 万行读回异常缓慢：{read_elapsed:?}"

@@ -89,6 +89,44 @@ beforeEach(() => {
   });
 });
 
+it("大借款台账补齐后分页读取，换页保留人工字段映射", async () => {
+  const headers = ["合同号", "本金", "起始日", "备用起始日", "到期日", "利率", "期末余额"];
+  const inspection = {
+    headers, preview: [["首页合同", "1000", "2026-01-01", "2026-02-01", "2026-12-31", "4", "1000"]],
+    rowCount: 1, sheet: "台账", sheets: ["台账"], headerRow: 1, headerDepth: 1,
+    suggestedMapping: { loanId: "合同号", principal: "本金", startDate: "起始日", endDate: "到期日", rate: "利率", closingPrincipal: "期末余额" },
+  };
+  mock.pickPath.mockResolvedValue("large-ledger.xlsx");
+  mock.jobStart.mockResolvedValue("background-ledger");
+  mock.engineCall.mockImplementation(async (method: string, params?: { previewOffset?: number }) => {
+    if (method === "ledger.forms") return [];
+    if (method === "loan.inspect") return params?.previewOffset === 100
+      ? { ...inspection, rowCount: 101, preview: [["末页合同", "1000", "2026-01-01", "2026-02-01", "2026-12-31", "4", "1000"]], sampledPreview: false, metadataComplete: true, previewPaged: true, previewOffset: 100, hasMore: false }
+      : { ...inspection, sampledPreview: true, metadataComplete: false };
+    throw new Error(`unexpected ${method}`);
+  });
+  render(<LoanInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "选择完整借款台账文件" }));
+  await screen.findByText(/完整台账读取完成后可进入下一步/);
+  const nextStep = screen.getByRole("button", { name: "下一步：台账信息确认" });
+  expect(nextStep).toBeDisabled();
+  await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith("loan.inspect_full", {
+    kind: "ledger", source: { inputPath: "large-ledger.xlsx", sheet: "台账", headerRow: 1, headerDepth: 1 },
+  }));
+  fireEvent.change(screen.getByRole("combobox", { name: "将「起始日」映射为字段" }), { target: { value: "" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "将「备用起始日」映射为字段" }), { target: { value: "startDate" } });
+  act(() => mock.jobEvents.callback?.({ jobId: "background-ledger", toolId: "loan_interest", phase: "completed", current: 1, total: 1,
+    message: "已补齐", severity: "success", outputPaths: [], result: { ...inspection, rowCount: 101, sampledPreview: false, metadataComplete: true,
+      previewPaged: true, previewOffset: 0, hasMore: true } }));
+  await waitFor(() => expect(nextStep).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await screen.findByText("末页合同");
+  expect(mock.engineCall).toHaveBeenCalledWith("loan.inspect", expect.objectContaining({ kind: "ledger", previewOnly: false, previewOffset: 100 }), expect.any(String));
+  expect(screen.getByRole("combobox", { name: "将「备用起始日」映射为字段" })).toHaveValue("startDate");
+  expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+  expect(screen.getByText("第 101–101 行，共 101 行")).toBeInTheDocument();
+});
+
 it.each(["verified", "noMatch", "partialCoverage", "ambiguous", "noAnchors"] as const)("大JE完整读取后必须完成辅助校验；%s 决定TB辅助映射能否保留", async (status) => {
   const headers = ["科目编码", "科目名称", "日期", "期初余额", "期末余额", "借方", "贷方", "备用日期", "辅助核算"];
   const suggestedMapping = { accountCode: "科目编码", accountName: "科目名称", date: "日期", opening: "期初余额", closing: "期末余额", debit: "借方", credit: "贷方", auxiliary: "辅助核算" };

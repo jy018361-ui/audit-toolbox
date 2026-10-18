@@ -1,6 +1,7 @@
 import type { ToolManifest } from "../../types";
 import type { TourStep } from "./BeginnerTour";
 import { TOOL_TOUR_SCRIPTS } from "./toolTourContent";
+import { TOUR_COPY, formatTourText } from "./tourCopy";
 
 /**
  * 引导剧本。目标元素统一用 data-tour 属性挂点（App.tsx 侧边栏 / 工作台、
@@ -12,7 +13,7 @@ export const workspaceTourSteps: TourStep[] = [
   {
     id: "welcome",
     title: "欢迎使用 E点通工具箱",
-    body: "接下来用大约 1 分钟带你认识界面。引导过程中随时可以点「跳过引导」或按 Esc 退出，之后能在「设置 → 新手模式」里重新观看。",
+    body: "接下来用大约 1 分钟带你认识界面。引导过程中随时可以点「跳过引导」或按 Esc 退出；工作台右上角的「新手引导」可随时重播。",
   },
   {
     id: "sidebar-nav",
@@ -35,25 +36,25 @@ export const workspaceTourSteps: TourStep[] = [
   {
     id: "table-tips",
     title: "表格小技巧",
-    body: "各工具里的数据表都能像 Excel 一样调列宽：拖动列边界加宽、双击边界自动贴合内容、右键重置整表。调好的列宽会记在本机，下次打开不用再调。",
+    body: "带列宽调整手柄的数据表支持拖动列边界、双击边界贴合内容、右键重置列宽。接入此功能的表格会在本机记住列宽，下次打开可继续使用。",
   },
   {
     id: "nav-history",
     targetSelector: '[data-tour="nav-history"]',
     title: "历史记录",
-    body: "每个任务的状态、时间和输出文件位置都会留档，随时可以回看结果或恢复现场。",
+    body: "已登记任务的状态、时间和输出文件位置可在这里查询；有输出时可以打开结果，支持恢复的任务可点「继续任务」回填输入，修改后需重新运行。",
   },
   {
     id: "nav-settings",
     targetSelector: '[data-tour="nav-settings"]',
     title: "设置",
-    body: "界面主题、AI 与 OCR 配置、本地缓存清理都在这里；本引导也能在「设置 → 新手模式」里重新播放。",
+    body: "界面主题、AI、OCR、语音转写和本地缓存清理都在这里。需要重播界面总览时，回到工作台点击右上角「新手引导」。",
   },
   {
     id: "newbie-toggle",
     targetSelector: '[data-tour="newbie-toggle"]',
     title: "新手模式",
-    body: "侧边栏顶部的这个小开关管着全部分步引导：开启时，首次使用工具会有动画提示；不需要时随手关掉，重启后也保持你的选择。",
+    body: "侧边栏顶部的开关控制自动提示：开启时，每次进入工具都会播放导览，适用的步骤切换和任务完成也会有提示；关闭后停止自动提示，重启后保持你的选择。",
   },
   {
     id: "done",
@@ -67,26 +68,26 @@ function genericToolTourSteps(tool: ToolManifest): TourStep[] {
   return [
     {
       id: "tool-welcome",
-      title: `初识「${tool.name}」`,
-      body: `${tool.description}。跟着下面的提示快速熟悉一下，以后进入本工具不会再自动弹出。`,
+      title: formatTourText(TOUR_COPY.genericWelcomeTitle, { toolName: tool.name }),
+      body: formatTourText(TOUR_COPY.genericWelcome, { description: tool.description }),
     },
     {
       id: "tool-header",
       targetSelector: '[data-tour="page-header"]',
-      title: "工具页头",
-      body: "这里显示工具名称和说明，部分工具会把常用操作放在右侧。",
+      title: TOUR_COPY.genericHeaderTitle,
+      body: TOUR_COPY.genericHeader,
     },
     {
       id: "tool-steps",
       targetSelector: '[data-tour="step-indicator"]',
       optional: true,
-      title: "步骤条",
-      body: "操作从左到右分步进行：当前步骤高亮，完成过的步骤会打勾。之后每切换一步，步骤条下方都会弹出这一步的提示；点击可用的步骤也可以在已完成环节之间来回切换。",
+      title: TOUR_COPY.genericStepsTitle,
+      body: TOUR_COPY.genericSteps,
     },
     {
       id: "tool-done",
-      title: "可以开始了",
-      body: "从第一步开始操作吧。想再看一次引导，到「设置 → 新手模式」重播即可。",
+      title: TOUR_COPY.genericDoneTitle,
+      body: TOUR_COPY.genericDone,
     },
   ];
 }
@@ -107,7 +108,7 @@ export function buildToolTourSteps(tool: ToolManifest): TourStep[] {
       // 锚定页头：工具名称与说明就在那里，讲"是做什么的"时锁定它，
       // 避免整步只有一张全局居中卡片。
       targetSelector: '[data-tour="page-header"]',
-      title: `「${tool.name}」是做什么的`,
+      title: formatTourText(TOUR_COPY.purposeTitle, { toolName: tool.name }),
       body: script.purpose,
     });
   }
@@ -118,7 +119,7 @@ export function buildToolTourSteps(tool: ToolManifest): TourStep[] {
       id: "mode",
       targetSelector: '[data-tour="tool-mode"]',
       optional: true,
-      title: "先选对模式",
+      title: TOUR_COPY.modeTitle,
       body: script.mode,
     });
   }
@@ -126,18 +127,18 @@ export function buildToolTourSteps(tool: ToolManifest): TourStep[] {
     steps.push({
       id: "prepare",
       targetSelector: '[data-tour="tool-upload"]',
-      title: "要准备什么",
+      title: TOUR_COPY.prepareTitle,
       body: script.prepare,
     });
   } else {
-    steps.push({ id: "prepare", title: "要准备什么", body: script.prepare });
+    steps.push({ id: "prepare", title: TOUR_COPY.prepareTitle, body: script.prepare });
   }
   if (script.flow) {
     steps.push({
       id: "flow",
       targetSelector: '[data-tour="step-indicator"]',
       optional: true,
-      title: "操作流程",
+      title: TOUR_COPY.flowTitle,
       body: script.flow,
     });
   }
@@ -146,7 +147,7 @@ export function buildToolTourSteps(tool: ToolManifest): TourStep[] {
     // 收尾同样锚定页头（产出物没有固定挂点）：引导里不再出现全局卡片，
     // 个别页面没有页头时退化为居中卡片兜底。
     targetSelector: '[data-tour="page-header"]',
-    title: "做完你会得到什么",
+    title: TOUR_COPY.resultTitle,
     body: script.result,
   });
   return steps;

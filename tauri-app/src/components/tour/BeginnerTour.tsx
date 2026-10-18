@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { PartyPopper, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { TOUR_COPY, formatTourText } from "./tourCopy";
 import "./beginner-tour.css";
 
 export type TourStep = {
@@ -399,16 +400,16 @@ export function BeginnerTour({
   const actions = (
     <div className="tour-actions">
       <Button variant="ghost" size="sm" onClick={() => onFinish(false)}>
-        跳过引导
+        {TOUR_COPY.skip}
       </Button>
       <div className="tour-actions-nav">
         {index > 0 && (
           <Button variant="outline" size="sm" onClick={() => go(-1)}>
-            上一步
+            {TOUR_COPY.previous}
           </Button>
         )}
         <Button ref={primaryButtonRef} size="sm" onClick={() => go(1)}>
-          {isLast ? "完成" : "下一步"}
+          {isLast ? TOUR_COPY.finish : TOUR_COPY.next}
         </Button>
       </div>
     </div>
@@ -420,7 +421,7 @@ export function BeginnerTour({
       ))}
     </div>
   );
-  const stepCount = `第 ${index + 1} 步 · 共 ${steps.length} 步`;
+  const stepCount = formatTourText(TOUR_COPY.stepCount, { current: index + 1, total: steps.length });
 
   return (
     <div
@@ -428,7 +429,7 @@ export function BeginnerTour({
       className="tour-layer"
       role="dialog"
       aria-modal="true"
-      aria-label={`新手引导：${currentStep.title}`}
+      aria-label={formatTourText(TOUR_COPY.dialogLabel, { title: currentStep.title })}
     >
       {/* 透明挡板：吃掉对底层的所有点击。层级低于窗口控制按钮（800），
           引导期间最小化 / 关闭窗口仍然可用。没有挖孔目标时（居中卡片、

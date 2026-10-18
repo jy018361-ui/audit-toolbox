@@ -3683,11 +3683,7 @@ fn resolve_auto_header_layout(
                 Some(e.to_string()),
             )
         })?;
-        range
-            .rows()
-            .take(31)
-            .map(|row| row.iter().map(data_text).collect::<Vec<_>>())
-            .collect()
+        physical_workbook_rows(&range, Some(31))
     };
     let resolved = if rows.is_empty() {
         (1, 1)
@@ -3713,6 +3709,19 @@ fn parse_ledger_source(params: Value, message: &str) -> Result<SourceParams, App
         source.header_depth = depth;
     }
     Ok(source)
+}
+
+fn physical_workbook_rows(range: &calamine::Range<Data>, limit: Option<usize>) -> Vec<Vec<String>> {
+    let (start_row, start_col) = range.start().unwrap_or((0, 0));
+    let cap = limit.unwrap_or(usize::MAX);
+    let mut rows = vec![Vec::new(); (start_row as usize).min(cap)];
+    let remaining = cap.saturating_sub(rows.len());
+    rows.extend(range.rows().take(remaining).map(|cells| {
+        let mut row = vec![String::new(); start_col as usize];
+        row.extend(cells.iter().map(data_text));
+        row
+    }));
+    rows
 }
 
 fn load_table(
@@ -3768,10 +3777,7 @@ fn load_table(
             Some(e.to_string()),
         )
     })?;
-    let all = range
-        .rows()
-        .map(|row| row.iter().map(data_text).collect::<Vec<_>>())
-        .collect::<Vec<_>>();
+    let all = physical_workbook_rows(&range, None);
     let header_index = header_row.saturating_sub(1);
     if all.len() <= header_index {
         return Err(error("HEADER_ROW_INVALID", "标题行超出数据范围。", None));
@@ -3902,6 +3908,17 @@ pub(crate) fn open_disk_ledger(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<DiskLedger, AppError> {
+    open_disk_ledger_with_sheet(path, None, header_row, 1, progress, cancel)
+}
+
+pub(crate) fn open_disk_ledger_with_sheet(
+    path: &Path,
+    sheet: Option<&str>,
+    header_row: usize,
+    header_depth: usize,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<DiskLedger, AppError> {
     if !large_csv::applies(path) {
         return Err(error(
             "DISK_LEDGER_NOT_REQUIRED",
@@ -3912,11 +3929,12 @@ pub(crate) fn open_disk_ledger(
     let header_row = header_row.max(1);
     let source = SourceParams {
         input_path: path.to_string_lossy().into_owned(),
-        sheet: None,
+        sheet: sheet.map(str::to_owned),
         header_row,
-        header_depth: 1,
+        header_depth: header_depth.max(1),
     };
     let cache = large_csv::load(&source, progress, cancel)?;
+    let header_row = header_row + header_depth.max(1) - 1;
     Ok(DiskLedger { cache, header_row })
 }
 
@@ -4112,21 +4130,26 @@ pub(crate) fn open_prepared_disk_ledger(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<PreparedDiskLedger, AppError> {
-    if header_depth > 1 {
-        return Err(error(
-            "LARGE_CSV_DOUBLE_HEADER",
-            "超大 CSV 暂不支持双层标题，请先整理为单层标题后重试。",
-            None,
-        ));
-    }
+    open_prepared_disk_ledger_with_sheet(path, None, header_row, header_depth, mapping, progress, cancel)
+}
+
+pub(crate) fn open_prepared_disk_ledger_with_sheet(
+    path: &Path,
+    sheet: Option<&str>,
+    header_row: usize,
+    header_depth: usize,
+    mapping: &Map<String, Value>,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<PreparedDiskLedger, AppError> {
     // CSV 的自动标题行目前固定为第 1 行。在公共入口收口，避免任何工具把
     // `0` 与 `1` 写成两份原始缓存和凭证分析缓存。
     let header_row = header_row.max(1);
     let source = SourceParams {
         input_path: path.to_string_lossy().into_owned(),
-        sheet: None,
+        sheet: sheet.map(str::to_owned),
         header_row,
-        header_depth: 1,
+        header_depth: header_depth.max(1),
     };
     let cache_progress = |phase: &str, current: usize, total: usize, message: &str| {
         scaled_progress(progress, 0, 300, phase, current, total, message)
@@ -4135,6 +4158,7 @@ pub(crate) fn open_prepared_disk_ledger(
         scaled_progress(progress, 300, 1000, phase, current, total, message)
     };
     let cache = large_csv::load(&source, &cache_progress, cancel)?;
+    let header_row = header_row + header_depth.max(1) - 1;
     let core = prepared_mapping(mapping);
     let mut fill_columns = [
         "date",
@@ -6052,7 +6076,7 @@ fn fingerprint(
     // 双层表头会改变合并后的列名，同文件同 Sheet 换层数必须落不同的缓存。
     h.update(header_depth.to_le_bytes());
     // Shared strict text decoding must not reuse rows decoded lossily by older versions.
-    h.update(b"rust-polars-v3-shared-spreadsheet-input");
+    h.update(b"rust-polars-v5-shared-spreadsheet-physical-range");
     Ok(hex::encode(h.finalize()))
 }
 /// 缓存根目录：`%LOCALAPPDATA%/AuditToolbox/AuditToolbox/cache`。
@@ -6966,6 +6990,31 @@ fn je_mark_batches(job: &JeMarkParams) -> Result<Vec<LedgerBatch>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_disk_xlsx_keeps_selected_sheet_double_header_and_physical_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("多表双层.xlsx");
+        let mut wb = Workbook::new();
+        for (name, account) in [("第一页", "1001 现金"), ("第二页", "1002 银行存款")] {
+            let ws = wb.add_worksheet();
+            ws.set_name(name).unwrap();
+            ws.write_string(0, 0, "资料说明").unwrap();
+            for (col, val) in ["凭证号", "科目名称", "发生额", "发生额"].iter().enumerate() { ws.write_string(1,col as u16,*val).unwrap(); }
+            ws.write_string(2, 2, "借方").unwrap(); ws.write_string(2, 3, "贷方").unwrap();
+            ws.write_string(3,0,"V1").unwrap(); ws.write_string(3,1,account).unwrap(); ws.write_number(3,2,100.0).unwrap(); ws.write_number(3,3,0.0).unwrap();
+            ws.write_string(5,0,"V1").unwrap(); ws.write_string(5,1,"2001 应付款").unwrap(); ws.write_number(5,2,0.0).unwrap(); ws.write_number(5,3,100.0).unwrap();
+        }
+        wb.save(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mapping = json!({"id":["凭证号"],"accountName":["科目名称"],"functionalDebit":"发生额-借方","functionalCredit":"发生额-贷方"});
+        for (sheet, expected) in [("第一页","1001 现金"),("第二页","1002 银行存款")] {
+            let prepared = open_prepared_disk_ledger_with_sheet(&path,Some(sheet),2,2,mapping.as_object().unwrap(),&|_,_,_,_|{},&cancel).unwrap();
+            let mut rows = Vec::new();
+            prepared.visit(false,&cancel,|row|{rows.push((row.source_row,row.account,row.net));Ok(())}).unwrap();
+            assert_eq!(rows,vec![(4,expected.to_owned(),100.0),(6,"2001 应付款".to_owned(),-100.0)]);
+        }
+    }
 
     #[test]
     fn disk_export_subprogress_is_scaled_into_its_overall_range() {

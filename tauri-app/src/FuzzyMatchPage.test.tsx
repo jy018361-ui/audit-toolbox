@@ -224,6 +224,29 @@ describe("FuzzyMatchPage", () => {
     expect(screen.getByText("已取消")).toHaveAttribute("data-variant", "warning");
   });
 
+  it("大结果按页读取，分类筛选从第一页开始且导出保留任务编号", async () => {
+    const start = await setupBothSources();
+    fireEvent.click(start);
+    await waitFor(() => expect(sessionStorage.getItem("fuzzy-match-draft.v1")).toContain("job-1"));
+    const { engineCall } = await import("./api");
+    vi.mocked(engineCall).mockImplementation(async (method, params) => {
+      if (method !== "fuzzy.get_results") return { saved: true };
+      const p = params as { offset?: number; level?: string };
+      const row = { aIndex: (p.offset ?? 0) + 1, aValue: p.offset ? "第二页记录" : "第一页记录", matches: [] };
+      return { rows: Array.from({ length: p.level ? 1 : 200 }, (_, i) => ({ ...row, aIndex: row.aIndex + i })),
+        confirmations: [], total: p.level ? 1 : 401, hasMore: !p.level && p.offset !== 400 };
+    });
+    emitJob(doneEvent({ ...matchResult, processingMode: "disk", total: 401, hasMore: true }));
+    await waitFor(() => expect(engineCall).toHaveBeenCalledWith("fuzzy.get_results", { jobId: "job-1", offset: 0, limit: 200 }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(engineCall).toHaveBeenCalledWith("fuzzy.get_results", { jobId: "job-1", offset: 200, limit: 200 }));
+    await waitFor(() => expect(screen.getAllByText("第二页记录").length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByText("疑似待确认").closest("button")!);
+    await waitFor(() => expect(engineCall).toHaveBeenCalledWith("fuzzy.get_results", { jobId: "job-1", offset: 0, limit: 200, level: "suspect" }));
+    expect(screen.getByText("疑似确认及批量采纳适用于当前页，导出包含全部结果。")).toBeVisible();
+  });
+
   it("疑似确认卡：点候选后置灰、进度 +1、实时保存确认", async () => {
     const start = await setupBothSources();
     fireEvent.click(start);

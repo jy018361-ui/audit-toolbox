@@ -2618,6 +2618,11 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                       ? "（已添加）"
                       : "（必需）"}
                 </span>
+                <span className="fx-source-requirements-note">
+                  两份表内都必须包含币种、原币金额、本位币金额（TB
+                  为期初／期末余额，JE
+                  为本期发生额），缺任一项无法测算。
+                </span>
               </div>
               <FileDropInput
                 containerRef={uploadDropRef}

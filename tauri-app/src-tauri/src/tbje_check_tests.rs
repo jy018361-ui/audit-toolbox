@@ -192,6 +192,34 @@ fn 三条核对都通过时不报任何差异() {
 }
 
 #[test]
+fn missing_account_name_je_retains_code_and_reconciles_both_paths() {
+    let dir = fixture(&format!("missing-account-name-{}", uuid::Uuid::new_v4()));
+    平的账(&dir);
+    let mut request = params(&dir, true);
+    request["jeMapping"]
+        .as_object_mut()
+        .unwrap()
+        .remove("accountName");
+    for disk in [false, true] {
+        request["__testForceDiskLedger"] = json!(disk);
+        let prepared = prepare(&request).unwrap();
+        let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+        assert_eq!(result["tbVsJe"]["passed"], true, "{result:#}");
+        let spec: SourceSpec = serde_json::from_value(request["jeSource"].clone()).unwrap();
+        let table = fx::load_fx_table(&spec).unwrap();
+        let identity = identity_parts(
+            &table,
+            &table.rows[0],
+            request["jeMapping"].as_object().unwrap(),
+            "默认主体",
+        );
+        assert_eq!(identity.1, "1001");
+        assert!(identity.2.is_empty());
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn 完整性同码多名对je单名恢复编码勾稽() {
     let dir = fixture("integrity-code-fallback");
     std::fs::write(dir.join("tb.csv"),
@@ -1001,6 +1029,91 @@ fn 大csv磁盘路径与内存路径输出完全一致() {
     let disk = run(&input, &AtomicBool::new(false)).unwrap();
     assert_eq!(disk, memory);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn tb_disk_tbje_all_checks_and_exports_match_memory() {
+    let dir = fixture("disk-tb-all-checks");
+    平的账(&dir);
+    let mut input = params(&dir, true);
+    let memory_prepared = prepare(&input).unwrap();
+    let memory = evaluate_with_full_items(&memory_prepared, &AtomicBool::new(false)).unwrap();
+    input["__testForceDiskTb"] = json!(true);
+    let disk_prepared = prepare(&input).unwrap();
+    assert!(disk_prepared.tb.disk.is_some());
+    let disk = evaluate_with_full_items(&disk_prepared, &AtomicBool::new(false)).unwrap();
+    assert_eq!(disk, memory);
+    let memory_path = dir.join("memory.xlsx");
+    let disk_path = dir.join("disk.xlsx");
+    let mut memory_input = input.clone();
+    memory_input["outputPath"] = json!(memory_path);
+    input["outputPath"] = json!(disk_path);
+    export(&memory_input, &memory, &memory_prepared).unwrap();
+    export(&input, &disk, &disk_prepared).unwrap();
+    use calamine::Reader;
+    let mut a = calamine::open_workbook_auto(&memory_path).unwrap();
+    let mut b = calamine::open_workbook_auto(&disk_path).unwrap();
+    for sheet in a.sheet_names().to_vec() {
+        let ar = a.worksheet_range(&sheet).unwrap();
+        let br = b.worksheet_range(&sheet).unwrap();
+        assert_eq!(ar, br, "{sheet}");
+        assert_eq!(
+            a.worksheet_formula(&sheet).unwrap(),
+            b.worksheet_formula(&sheet).unwrap(),
+            "{sheet} formulas"
+        );
+    }
+}
+
+#[test]
+fn tb_disk_tbje_selected_xlsx_full_tail_and_mapping_domains() {
+    let dir = fixture("disk-tb-xlsx-tail");
+    平的账(&dir);
+    let mut input = params(&dir, false);
+    let path = dir.join("余额.xlsx");
+    let mut book = rust_xlsxwriter::Workbook::new();
+    book.add_worksheet()
+        .set_name("无关页")
+        .unwrap()
+        .write_string(0, 0, "不应读取")
+        .unwrap();
+    let sheet = book.add_worksheet();
+    sheet.set_name("完整TB").unwrap();
+    for (i, h) in [
+        "科目编码",
+        "科目名称",
+        "期初余额",
+        "本年借方",
+        "本年贷方",
+        "期末余额",
+    ]
+    .iter()
+    .enumerate()
+    {
+        sheet.write_string(2, i as u16, *h).unwrap();
+    }
+    for i in 0..260u32 {
+        sheet.write_string(i + 3, 0, format!("1001{i:04}")).unwrap();
+        sheet.write_string(i + 3, 1, format!("现金户{i}")).unwrap();
+        sheet.write_number(i + 3, 2, 10.0).unwrap();
+        sheet.write_number(i + 3, 3, 2.0).unwrap();
+        sheet.write_number(i + 3, 4, 0.0).unwrap();
+        sheet
+            .write_number(i + 3, 5, if i == 259 { 19.0 } else { 12.0 })
+            .unwrap();
+    }
+    book.save(&path).unwrap();
+    input["tbSource"] = json!({"inputPath":path,"sheet":"完整TB","headerRow":3,"headerDepth":1});
+    let memory = run(&input, &AtomicBool::new(false)).unwrap();
+    input["__testForceDiskTb"] = json!(true);
+    let disk = run(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(disk, memory);
+    assert_eq!(disk["rollforward"]["checked"], 260);
+    assert_eq!(disk["rollforward"]["mismatched"], 1);
+    assert_eq!(
+        disk["rollforward"]["units"][0]["items"][0]["sourceRow"],
+        263
+    );
 }
 
 #[test]
@@ -2815,10 +2928,22 @@ fn 中期表同时映射本期与本年累计时按通过率整表选用本期()
     // TB 侧发生额确为本期列的值（1001 借 500），不是本年累计的 1500。
     // run() 只返回有差异的科目，全对平时用 include_all 展开验证取数口径。
     let prepared = prepare(&value).unwrap();
-    assert_eq!(prepared.tb_leaf, ledger_mapping::tb_leaf_mask(
-        &prepared.tb.headers, &prepared.tb.rows, &|role| columns(&prepared.tb_map, role)));
-    assert_eq!(prepared.tb_identities, prepared.tb.rows.iter().map(|row|
-        identity_parts(&prepared.tb, row, &prepared.tb_map, &prepared.tb_fixed)).collect::<Vec<_>>());
+    assert_eq!(
+        prepared.tb_leaf,
+        ledger_mapping::tb_leaf_mask(&prepared.tb.headers, &prepared.tb.rows, &|role| columns(
+            &prepared.tb_map,
+            role
+        ))
+    );
+    assert_eq!(
+        prepared.tb_identities,
+        prepared
+            .tb
+            .rows
+            .iter()
+            .map(|row| identity_parts(&prepared.tb, row, &prepared.tb_map, &prepared.tb_fixed))
+            .collect::<Vec<_>>()
+    );
     let all = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
     let items = all["tbVsJe"]["items"].as_array().unwrap();
     let cash = items
@@ -2954,7 +3079,11 @@ fn 核对结果快照导出复用且映射修改后重算() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(run_items.len(), 1, "run 模式仍只保留差异科目：{run_items:#?}");
+    assert_eq!(
+        run_items.len(),
+        1,
+        "run 模式仍只保留差异科目：{run_items:#?}"
+    );
     assert_eq!(run_items[0]["code"], json!("1001"));
     assert_eq!(run_items[0]["jeDebit"], json!(400.0));
     let print = check_result_fingerprint(&group).unwrap();
@@ -3088,7 +3217,10 @@ fn 单组导出也复用核对结果快照() {
     .unwrap();
     assert!(dir.join("单组核对.xlsx").is_file());
     assert!(
-        messages.borrow().iter().any(|message| message.contains("复用")),
+        messages
+            .borrow()
+            .iter()
+            .any(|message| message.contains("复用")),
         "单组导出命中快照时进度必须提示复用：{:?}",
         messages.borrow()
     );

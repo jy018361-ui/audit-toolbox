@@ -1,5 +1,35 @@
 # 借款利息台账确认口径
 
+## 2026-10-18：借款 TB 识别与本期发生额提升的完整扫描
+
+- 大 TB 识别仅保留前缀预览，主体、科目组合及期间年度来自完整磁盘扫描；目录使用实际行组合。期间发生额提升通过两遍完整扫描统计统一符号与通过率，保持单侧方向推断、三行下限与 95% 门槛。超预算目录明确停止，不能返回残缺目录作为完成。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_disk_tb`；`cargo test --manifest-path src-tauri/Cargo.toml --lib disk_tb_period_promotion`。
+
+
+## 2026-10-18：借款 TB 全流程磁盘重放
+
+- 借款 TB 与 JE 共同参与预算；磁盘 TB 使用公共 `FxTbRows` / `DiskTbAnalysis` 的全表末级掩码、分类语境、符号票与各余额列自带符号信息。科目确认、轻量利率行、粘贴匹配、借款折叠、同码名称范围检查及账面利息支出归集全部访问完整表体；样例不参与全量金额计算。
+- 分类目录的父类与发生额需要源行时按原物理行号从同一 SQLite 源读取；保留主体、辅助、币种分桶和原行序。JE 仍在内存时的域修复改为完整 TB 扫描，不用前缀误判交集；修改映射后重新生成公共末级掩码。
+- 同一完整主体超预算时公共 TB 分析明确拒绝并提示拆分账套，不能把任意行批次当成独立主体。任务取消传入 TB 缓存建立、末级分析及扫描。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest::tb_disk::tests`；`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest::`。合成 CSV/XLSX 比较确认目录、利率行、账面利息、整户本金/利息及粘贴匹配。真实超大 TB 与发布 EXE worker 验收仍以实际统一验证日志为准。
+
+## 2026-10-18：大文件完整识别与正式 JE 共用磁盘入口
+
+- `loan.inspect_full` 在公共动态预算要求磁盘处理时，改为只读有限预览以确定映射，再扫描完整磁盘表补齐年度、主体及真实主体科目组合；不再以整表读取触发安全预算错误。完整元信息扫描覆盖预览之后的记录，取消信号传到磁盘缓存建立及扫描。
+- 正式 JE 汇总与辅助明细认定传入用户确认的 Sheet，复用公共带 Sheet 的规范化磁盘入口；支持范围由公共读表层决定，不静默改读首张表。
+- 台账逐行确认、借款分类、按实际日期还原本金和利率计算未改变。TB 末级判定仍由公共账表规则负责。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib disk_catalog_tests`；`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest::`。
+
+## 2026-10-18：缺名称账表的跨工具排查回归
+
+- 借款独立名称角色本已保留缺失值，未发现 FA 那种以纯编码伪造名称后拒绝匹配的问题，本次不改本金或计息算法。新增内存／磁盘回归：无 JE 名称时唯一银行仍接实际变动，同码多个银行仍需明确选择，选择整码汇总后每笔 JE 仅计一次。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib missing_account_name`。
+
+## 2026-10-18：综合本位币汇总不重复进入目录与计算
+
+- TB 目录和金额计算复用公共跨币种总分验证：全部已映射本位币金额相符才移除综合行；真实币种、主体和辅助选择粒度保持。歧义、坏金额或不平的综合组不自动删除，不改借款分类与利率规则。
+- 回归及真实 HK 目录验收见 `LEDGER_MAPPING_UNIFICATION.md` 的 `currency_rollup_` 条目。
+
 ## 2026-10-08：同码银行衔接口径选择与分段合计修复
 
 - 新界面请求启用 `requireMatchingFallbackChoice`。同主体同码多名称、无已验证辅助且 JE 名称不能完整分配时，第二步等待用户选择：`accountJe` 合并整码 TB 余额并按 JE 本位币金额和实际日期逐日测算；`tbAverage` 保留 TB 银行明细及各自利率，整组按年初年末平均测算。正常名称匹配和已验证辅助不改口径；按币种两点法已有明确选择时不重复弹窗。
@@ -71,3 +101,11 @@
 - 未保留为事实：合同到期日不能证明部分还款实际发生日；确认前不会自动将默认时点解释为已核实。
 
 验证：`npx vitest run src/LoanLedgerConfirmation.test.tsx src/BalanceLayouts.test.tsx src/loanForms.test.ts src/loanRateTypes.test.ts`；`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest::`。
+## 2026-10-18：借款台账与历史利率台账的磁盘读取
+
+- 完整台账模式在公共预算选择磁盘路径时，先扫描全部分段表头，再逐行复用原合同／变动表解析。多段金额单位、空白行剔除顺序、生成借款编号的段内行号、人工利率覆盖的整表行序保持原规则；不用任意分块单独推断表头或计息区间。
+- 大台账上传预览改为每页 100 行，返回精确总数及偏移；预览翻页不清除映射。正式计算读取全部数据，不以本页代替全表。
+- 历史利率台账在磁盘建立“规范借款标识→第一条原始行”的索引，保持旧版首次命中规则；不把全量利率表重新装回内存。
+- 边界：借款确认清单及最终计算结果仍需在内存保留；结果达到安全工作集预算时明确报错并保留源缓存。真实海量借款结果的完整分页确认／结果导出不在本次源表分批读取的保证范围内。旧二进制 XLS／ODS 大文件需转为 XLSX 或 CSV，不能宣称已有全格式流式读取。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_disk_`；公共源表与物理行号回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib disk_table`。
+

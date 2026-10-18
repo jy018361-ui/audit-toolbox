@@ -70,6 +70,7 @@ import { displayFileName } from "@/fileDisplay";
 import { SyncBusyDialog } from "@/components/SyncBusyDialog";
 import { MeetingWatch } from "@/components/MeetingWatch";
 import { StepIndicator } from "@/components/StepIndicator";
+import { TOUR_COPY } from "@/components/tour/tourCopy";
 import { ResultView } from "@/components/ResultView";
 import { EmptyState } from "@/components/EmptyState";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
@@ -1079,7 +1080,7 @@ function Dashboard({
         actions={
           <Button variant="outline" size="sm" onClick={onStartWorkspaceTour}>
             <Sparkles aria-hidden="true" />
-            新手引导
+            {TOUR_COPY.workspaceReplayLabel}
           </Button>
         }
       />

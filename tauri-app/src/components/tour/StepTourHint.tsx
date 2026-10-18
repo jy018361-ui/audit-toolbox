@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { loadTourState } from "./tourState";
 import { useCurrentToolId } from "./ToolTourContext";
 import { TOOL_TOUR_SCRIPTS } from "./toolTourContent";
+import { TOUR_COPY, formatTourText } from "./tourCopy";
 import "./beginner-tour.css";
 
 type HintStep = { key: string; label: string; disabled?: boolean };
@@ -138,22 +139,22 @@ export function StepTourHint({
         onFocusCapture={() => setPauseDismiss(true)}
       >
         <p className="step-hint-count">
-          第 {hint.index + 1} 步 · 共 {steps.length} 步
+          {formatTourText(TOUR_COPY.stepCount, { current: hint.index + 1, total: steps.length })}
         </p>
         <strong className="step-hint-title">{step.label}</strong>
         <p className="step-hint-body">
           {specific ??
             (isLast
-              ? "最后一步：完成它就能看到结果。想改前面的内容，点步骤条随时回去。"
-              : "完成这一步的操作后，点「下一步」或步骤条继续；想改前面的内容，随时点回去。")}
+              ? TOUR_COPY.fallbackLastHint
+              : TOUR_COPY.fallbackHint)}
         </p>
         <button
           type="button"
           className="step-hint-close"
-          aria-label="关闭本步提示"
+          aria-label={TOUR_COPY.closeStepHint}
           onClick={() => setHint(null)}
         >
-          ×
+          {TOUR_COPY.closeSymbol}
         </button>
       </div>
     </Fragment>

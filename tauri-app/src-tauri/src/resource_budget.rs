@@ -55,6 +55,15 @@ pub(crate) fn plan(total: u64, available: u64, commit_available: u64) -> MemoryB
 }
 
 pub(crate) fn budget() -> Result<MemoryBudget, AppError> {
+    #[cfg(test)]
+    if synthetic_test_budget_enabled() {
+        // Explicit opt-in for small synthetic fixtures only. The production
+        // binary has no override; physical safety is still checked below.
+        let memory = available()?;
+        if memory.available < 512 * MIB { return Err(failure("可用内存不足以运行合成小样本测试。")); }
+        return Ok(MemoryBudget { total_bytes:memory.total, available_bytes:memory.available,
+            reserve_bytes:memory.total/10, worker_bytes:256*MIB, batch_bytes:16*MIB, sqlite_cache_kib:16384 });
+    }
     let memory = available()?;
     let result = plan(memory.total, memory.available, memory.commit_available);
     if result.worker_bytes < 256 * MIB {
@@ -63,6 +72,11 @@ pub(crate) fn budget() -> Result<MemoryBudget, AppError> {
         ));
     }
     Ok(result)
+}
+
+#[cfg(test)]
+fn synthetic_test_budget_enabled() -> bool {
+    std::env::var_os("AUDIT_TOOLBOX_SYNTHETIC_TEST_BUDGET").is_some_and(|value| value == "1")
 }
 
 fn parallelism_for(worker_bytes: u64, logical_processors: usize) -> usize {
@@ -233,6 +247,10 @@ pub(crate) fn memory_retry_path(pause_path: &Path) -> PathBuf {
 }
 
 pub(crate) fn check_available() -> Result<(), AppError> {
+    #[cfg(test)]
+    if synthetic_test_budget_enabled() && RUNTIME_MEMORY_CONTROL.get().is_none() {
+        return budget().map(|_| ());
+    }
     let memory = available()?;
     if !runtime_memory_critical(memory.total, memory.available, memory.commit_available) {
         if let Some(control) = RUNTIME_MEMORY_CONTROL.get() {

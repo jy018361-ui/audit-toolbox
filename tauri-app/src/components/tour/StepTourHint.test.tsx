@@ -84,7 +84,7 @@ describe("StepTourHint", () => {
     rerender(<StepTourHint steps={steps} current={2} />);
     expect(
       screen.getByText(
-        "最后一步：完成它就能看到结果。想改前面的内容，点步骤条随时回去。",
+        "按页面提示完成测算或导出，再查看结果；修改输入后请重新运行，确保结果与当前设置一致。",
       ),
     ).toBeInTheDocument();
   });
@@ -123,7 +123,31 @@ describe("StepTourHint", () => {
         <StepTourHint steps={fallbackSteps} current={1} />
       </ToolTourProvider>,
     );
-    expect(screen.getByText(/完成这一步的操作后/)).toBeInTheDocument();
+    expect(screen.getByText(/按页面提示完成当前操作/)).toBeInTheDocument();
+  });
+
+  it("会议纪要按页面实际步骤 key 显示转写与结果提示", () => {
+    const meetingSteps = [
+      { key: "record", label: "会议记录" },
+      { key: "minutes", label: "纪要生成" },
+      { key: "result", label: "结果" },
+    ];
+    const { rerender } = render(
+      <ToolTourProvider toolId="meeting_minutes"><StepTourHint steps={meetingSteps} current={0} /></ToolTourProvider>,
+    );
+    rerender(<ToolTourProvider toolId="meeting_minutes"><StepTourHint steps={meetingSteps} current={1} /></ToolTourProvider>);
+    expect(screen.getByText(/导入录音需点击「从导入录音生成纪要」/)).toBeInTheDocument();
+    rerender(<ToolTourProvider toolId="meeting_minutes"><StepTourHint steps={meetingSteps} current={2} /></ToolTourProvider>);
+    expect(screen.getByText(/从转写稿重新生成/)).toBeInTheDocument();
+    expect(screen.queryByText(/按页面提示完成当前操作/)).not.toBeInTheDocument();
+  });
+
+  it("FA 默认 TB＋JE 模式在科目复核时显示对应提示", () => {
+    const faSteps = [{ key: "source", label: "上传与映射" }, { key: "accounts", label: "科目复核" }, { key: "output", label: "预览与导出" }];
+    const { rerender } = render(<ToolTourProvider toolId="fa_list"><StepTourHint steps={faSteps} current={0} /></ToolTourProvider>);
+    rerender(<ToolTourProvider toolId="fa_list"><StepTourHint steps={faSteps} current={1} /></ToolTourProvider>);
+    expect(screen.getByText(/确认哪些科目属于固定资产原值/)).toBeInTheDocument();
+    expect(screen.queryByText(/年初、年末清单/)).not.toBeInTheDocument();
   });
 
   it("精简提示的工具：没写提示的步骤保持安静，写到的照常弹出", () => {
@@ -152,7 +176,7 @@ describe("StepTourHint", () => {
       </ToolTourProvider>,
     );
     expect(screen.queryByText("上传与识别")).not.toBeInTheDocument();
-    expect(screen.queryByText(/完成这一步的操作后/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/按页面提示完成当前操作/)).not.toBeInTheDocument();
   });
 
   it("整工具精简（如折旧测算）任何步骤都不弹提示", () => {
@@ -170,7 +194,7 @@ describe("StepTourHint", () => {
         <StepTourHint steps={depSteps} current={1} />
       </ToolTourProvider>,
     );
-    expect(screen.queryByText(/完成这一步的操作后/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/按页面提示完成当前操作/)).not.toBeInTheDocument();
     expect(screen.queryByText("读取清单")).not.toBeInTheDocument();
     expect(screen.queryByText("核对字段映射")).not.toBeInTheDocument();
   });

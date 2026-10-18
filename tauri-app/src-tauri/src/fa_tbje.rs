@@ -20,7 +20,7 @@ use std::{
 use crate::{
     AppError,
     excel_merger::PauseCheckpoint,
-    fx::{FxTable, SourceSpec, load_fx_table, parse_date},
+    fx::{FxTable, FxTbRows, SourceSpec, load_fx_table, parse_date},
     ledger_mapping::{self, AmountInputs, EntitySide, SignConvention},
     tabular::{self, LedgerMapping},
 };
@@ -224,7 +224,7 @@ fn analysis_cache_key(params: &Value) -> String {
         .as_object_mut()
         .map(|map| map.remove("outputPath"));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&"fa-cross-table-matching-v2", &mut hasher);
+    std::hash::Hash::hash(&"fa-cross-table-matching-v5-disk-physicalrows-missing-name", &mut hasher);
     std::hash::Hash::hash_slice(
         serde_json::to_string(&normalized)
             .unwrap_or_default()
@@ -427,12 +427,15 @@ fn analyze_with_progress(
         !mapped_columns(&tb_map, "entity").is_empty(),
         !mapped_columns(&je_map, "entity").is_empty(),
     );
-    let tb = load_fx_table(&tb_spec)?;
-    let tb_keep = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| {
-        crate::fx::mapped_cols(&tb_map, role)
-    });
-    crate::fx::validate_mapped_amount_values(&tb, &tb_map, "tb", "TB", Some(&tb_keep))?;
-    let disk_mode = tabular::disk_ledger_applies(Path::new(&je_spec.input_path))
+    let force_tb = cfg!(test) && params.get("__testForceDiskTb").and_then(Value::as_bool).unwrap_or(false);
+    let joint_disk = crate::disk_table::should_use_disk(&[Path::new(&tb_spec.input_path), Path::new(&je_spec.input_path)], 8);
+    let tb = FaTbRows {
+        input: FxTbRows::open_controlled(&tb_spec, &tb_map, true, force_tb || joint_disk, cancel)?,
+        cancel,
+    };
+    let tb_keep = tb.input.leaf_analysis(&tb_map).keep;
+    tb.input.validate_amounts(&tb_map, "TB", Some(&tb_keep))?;
+    let disk_mode = tb.input.disk.is_some() || tabular::disk_ledger_applies(Path::new(&je_spec.input_path))
         || (cfg!(test)
             && params
                 .get("__testForceDiskLedger")
@@ -458,7 +461,7 @@ fn analyze_with_progress(
     });
     crate::fx::validate_mapped_amount_values(&raw_je, &je_map, "je", "JE", Some(&je_keep))?;
     let je = crate::fx::forward_filled_je_table(&raw_je, &je_map);
-    for (kind, table, map) in [("TB", &tb, &tb_map), ("JE", &je, &je_map)] {
+    for (kind, table, map) in [("TB", &*tb, &tb_map), ("JE", &je, &je_map)] {
         for role in map.keys() {
             if mapped_columns(map, role)
                 .iter()
@@ -490,7 +493,7 @@ fn analyze_with_progress(
         &je.headers,
         &plan_policy,
     )
-    .unwrap_or_else(|| {
+    .map(Ok).unwrap_or_else(|| {
         fa_auxiliary_columns(
             &tb,
             &tb_map,
@@ -500,7 +503,7 @@ fn analyze_with_progress(
             params,
             entity_key_enabled,
         )
-    });
+    })?;
     let assignments = if auxiliary_columns.is_empty() {
         assignments
     } else {
@@ -542,7 +545,7 @@ fn analyze_with_progress(
     )?;
     let (additions, disposals, mut totals) = classify_movements(&mut je_lines);
     let mut warnings = Vec::new();
-    let tb_accounts = account_identities(&tb, &tb_map, params, EntitySide::Tb, entity_key_enabled);
+    let tb_accounts = tb_account_identities(&tb, &tb_map, params, entity_key_enabled)?;
     let mut je_accounts =
         account_identities(&je, &je_map, params, EntitySide::Je, entity_key_enabled);
     apply_matching_auxiliary(&je, &mut je_accounts, &auxiliary_columns, EntitySide::Je);
@@ -581,7 +584,7 @@ fn analyze_with_progress(
 fn analyze_with_disk_je(
     params: &Value,
     cancel: &AtomicBool,
-    tb: &FxTable,
+    tb: &FaTbRows<'_>,
     tb_map: &Map<String, Value>,
     tb_keep: &[bool],
     je_spec: &SourceSpec,
@@ -590,8 +593,9 @@ fn analyze_with_disk_je(
     entity_scope: &ledger_mapping::EntityScope,
     progress: Progress<'_>,
 ) -> Result<Analysis, AppError> {
-    let disk = tabular::open_prepared_disk_ledger(
+    let disk = tabular::open_prepared_disk_ledger_with_sheet(
         Path::new(&je_spec.input_path),
+        (!je_spec.sheet.is_empty()).then_some(je_spec.sheet.as_str()),
         je_spec.header_row.max(1),
         je_spec.header_depth.max(1),
         je_map,
@@ -693,7 +697,7 @@ fn analyze_with_disk_je(
         ));
     }
     let je_identities = unique.into_values().collect::<Vec<_>>();
-    let tb_identities = account_identities(tb, tb_map, params, EntitySide::Tb, entity_key_enabled);
+    let tb_identities = tb_account_identities(tb, tb_map, params, entity_key_enabled)?;
     let assignments = assignment_index_from_identities(params, &tb_identities, &je_identities)?;
     if assignments.exact.is_empty() {
         return Err(error(
@@ -734,6 +738,8 @@ fn analyze_with_disk_je(
     }
     disk.select_accounts(&target_accounts, cancel)?;
     let mut selected_rows = Vec::new();
+    let mut selected_bytes = 0u64;
+    let selected_limit = crate::resource_budget::budget()?.worker_bytes / 3;
     let mut selected_count = 0usize;
     disk.visit_vouchers(true, cancel, |_, voucher_rows| {
         selected_count += voucher_rows.len();
@@ -745,7 +751,11 @@ fn analyze_with_disk_je(
                 "正在读取固定资产相关完整凭证…",
             );
         }
-        selected_rows.extend(voucher_rows.iter().map(|row| row.values.clone()));
+        for row in voucher_rows {
+            selected_bytes = selected_bytes.saturating_add((std::mem::size_of::<Vec<String>>() + row.values.iter().map(|v| std::mem::size_of::<String>() + v.len()).sum::<usize>()) as u64);
+            if selected_bytes > selected_limit { return Err(error("MEMORY_PROTECTION", "固定资产相关完整凭证超过当前安全预算，请按主体或期间拆分后重试。", None)); }
+            selected_rows.push(row.values.clone());
+        }
         Ok(())
     })?;
     let je = disk_table(je_spec, headers, selected_rows, disk.row_count());
@@ -760,7 +770,7 @@ fn analyze_with_disk_je(
         &je.headers,
         &plan_policy,
     )
-    .unwrap_or_else(|| {
+    .map(Ok).unwrap_or_else(|| {
         fa_auxiliary_columns(
             tb,
             tb_map,
@@ -770,7 +780,7 @@ fn analyze_with_disk_je(
             params,
             entity_key_enabled,
         )
-    });
+    })?;
     let assignments = if auxiliary_columns.is_empty() {
         assignments
     } else {
@@ -908,7 +918,7 @@ fn account_identity_from_row(
     if name.is_empty() {
         name = join(row, &indexes(table, map, "account"));
     }
-    name = ledger_mapping::account_name_of(if name.is_empty() { &raw_code } else { &name });
+    name = ledger_mapping::account_name_from_fields(&raw_code, &name);
     AccountIdentity {
         side,
         entity: resolve_entity(side, &raw_entity, entity_key_enabled, entity_scope),
@@ -1083,7 +1093,7 @@ fn mapped_roles(kind: &str, map: &Map<String, Value>) -> HashSet<&'static str> {
 }
 
 fn normalize_tb(
-    table: &FxTable,
+    table: &FaTbRows<'_>,
     map: &Map<String, Value>,
     mask: &[bool],
     assignments: &AssignmentIndex,
@@ -1091,34 +1101,21 @@ fn normalize_tb(
     entity_key_enabled: bool,
     auxiliary_columns: &BTreeMap<ledger_mapping::AuxiliaryGroupKey, (usize, usize)>,
 ) -> Result<Vec<TbLine>, AppError> {
-    let evidence =
-        ledger_mapping::detect_tb_sign_convention(&table.headers, &table.rows, &|role| {
-            mapped_columns(map, role)
-        });
-    let convention = evidence.convention.unwrap_or(SignConvention::Unsigned);
-    // 余额列是否整列自带符号，期初期末各判一次——两列的写法可以不一致。
-    let self_signed = |prefix: &str| {
-        ledger_mapping::balance_self_signed(
-            &table.headers,
-            &table.rows,
-            &|role| mapped_columns(map, role),
-            prefix,
-        )
+    let convention = if let Some(analysis) = &table.input.analysis {
+        analysis.sign_evidence.convention.unwrap_or(SignConvention::Unsigned)
+    } else {
+        ledger_mapping::detect_tb_sign_convention(&table.headers, &table.rows, &|role| mapped_columns(map, role))
+            .convention.unwrap_or(SignConvention::Unsigned)
     };
-    let (opening_self_signed, closing_self_signed) = (
-        self_signed("openingFunctional"),
-        self_signed("closingFunctional"),
-    );
-    let mut identities = account_identities(table, map, params, EntitySide::Tb, entity_key_enabled);
+    let self_signed = |prefix: &str| {
+        table.input.analysis.as_ref().map(|a| a.self_signed.get(prefix).copied().unwrap_or(false))
+            .unwrap_or_else(|| ledger_mapping::balance_self_signed(&table.headers, &table.rows, &|role| mapped_columns(map, role), prefix))
+    };
+    let (opening_self_signed, closing_self_signed) = (self_signed("openingFunctional"), self_signed("closingFunctional"));
+    let mut identities = tb_account_identities(table, map, params, entity_key_enabled)?;
     let mut dimension_rows = BTreeMap::new();
     for (group, (column, _)) in auxiliary_columns {
-        for dimension in ledger_mapping::tb_dimension_rows(
-            &table.headers,
-            &table.rows,
-            map,
-            "auxiliary",
-            Some(*column),
-        ) {
+        for dimension in table.input.dimension_rows_controlled(map, "auxiliary", Some(*column), table.cancel)? {
             if dimension.aux.is_empty() && !mask.get(dimension.index).copied().unwrap_or(true) {
                 continue;
             }
@@ -1155,16 +1152,16 @@ fn normalize_tb(
         }
     }
     let mut out = Vec::new();
-    for (index, row) in table.rows.iter().enumerate() {
+    table.visit(|row, index| {
         let refined = auxiliary_columns.contains_key(&fa_auxiliary_group(&identities[index]));
         if (refined && !dimension_rows.contains_key(&index))
             || (!refined && !mask.get(index).copied().unwrap_or(true))
         {
-            continue;
+            return Ok(());
         }
         let identity = &identities[index];
         let Some(assigned) = find_assignment(assignments, identity) else {
-            continue;
+            return Ok(());
         };
         out.push(TbLine {
             auxiliary: dimension_rows.get(&index).cloned().unwrap_or_default(),
@@ -1192,7 +1189,8 @@ fn normalize_tb(
             ),
             source_row: table.header_row + index + 2,
         });
-    }
+        Ok(())
+    })?;
     Ok(out)
 }
 
@@ -1221,17 +1219,17 @@ fn fa_auxiliary_group(identity: &AccountIdentity) -> ledger_mapping::AuxiliaryGr
 }
 
 fn fa_auxiliary_columns(
-    tb: &FxTable,
+    tb: &FaTbRows<'_>,
     tb_map: &Map<String, Value>,
     je: &FxTable,
     je_map: &Map<String, Value>,
     assignments: &AssignmentIndex,
     params: &Value,
     entity_key_enabled: bool,
-) -> BTreeMap<ledger_mapping::AuxiliaryGroupKey, (usize, usize)> {
-    let mut tb_ids = account_identities(tb, tb_map, params, EntitySide::Tb, entity_key_enabled);
+) -> Result<BTreeMap<ledger_mapping::AuxiliaryGroupKey, (usize, usize)>, AppError> {
+    let mut tb_ids = tb_account_identities(tb, tb_map, params, entity_key_enabled)?;
     for dimension in
-        ledger_mapping::tb_dimension_rows(&tb.headers, &tb.rows, tb_map, "auxiliary", None)
+        tb.input.dimension_rows_controlled(tb_map, "auxiliary", None, tb.cancel)?
     {
         let identity = &mut tb_ids[dimension.index];
         if identity.code.is_empty() {
@@ -1243,25 +1241,21 @@ fn fa_auxiliary_columns(
         }
     }
     let je_ids = account_identities(je, je_map, params, EntitySide::Je, entity_key_enabled);
-    let anchors = ledger_mapping::tb_auxiliary_anchor_groups(
-        &tb.headers,
-        &tb.rows,
-        tb_map,
-        "auxiliary",
-        |index, _| {
-            let identity = &tb_ids[index];
-            find_assignment(assignments, identity)
-                .is_some()
-                .then(|| fa_auxiliary_group(identity))
-        },
-    );
+    let mut anchors = BTreeMap::<ledger_mapping::AuxiliaryGroupKey, HashSet<String>>::new();
+    tb.visit(|row, index| {
+        let identity = &tb_ids[index];
+        let found = ledger_mapping::tb_auxiliary_anchor_groups(&tb.headers, std::slice::from_ref(&row.to_vec()), tb_map, "auxiliary", |_, _| {
+            find_assignment(assignments, identity).is_some().then(|| fa_auxiliary_group(identity))
+        });
+        for (group, values) in found { anchors.entry(group).or_default().extend(values); }
+        Ok(())
+    })?;
     let mut tb_acc = ledger_mapping::GroupedAnchorColumnAccumulator::new(tb.headers.len());
-    for (row, identity) in tb.rows.iter().zip(&tb_ids) {
-        let group = fa_auxiliary_group(identity);
-        if let Some(values) = anchors.get(&group) {
-            tb_acc.feed(group, row, values);
-        }
-    }
+    tb.visit(|row, index| {
+        let group = fa_auxiliary_group(&tb_ids[index]);
+        if let Some(values) = anchors.get(&group) { tb_acc.feed(group, row, values); }
+        Ok(())
+    })?;
     let mut je_acc = ledger_mapping::GroupedAnchorColumnAccumulator::new(je.headers.len());
     let mut totals = BTreeMap::new();
     let keep = ledger_mapping::ledger_junk_mask(&je.headers, &je.rows, &|role| {
@@ -1289,7 +1283,7 @@ fn fa_auxiliary_columns(
         "auxiliary",
         &preferred,
     );
-    ledger_mapping::auxiliary_verified_columns(
+    Ok(ledger_mapping::auxiliary_verified_columns(
         &verdicts,
         &tb_scans,
         &je_scans,
@@ -1297,7 +1291,7 @@ fn fa_auxiliary_columns(
         &je.headers,
         tb_map,
         "auxiliary",
-    )
+    ))
 }
 
 fn normalize_je(
@@ -3398,6 +3392,33 @@ fn ledger_mapping_for(map: &Map<String, Value>) -> LedgerMapping {
         credit: mapped_columns(map, "functionalCredit").first().cloned(),
     }
 }
+/// TB 原始正文保留在磁盘；这里仅保留有预算约束的身份元信息供严格消歧。
+struct FaTbRows<'a> { input: FxTbRows, cancel: &'a AtomicBool }
+impl std::ops::Deref for FaTbRows<'_> {
+    type Target = FxTable;
+    fn deref(&self) -> &FxTable { &self.input.table }
+}
+impl FaTbRows<'_> {
+    fn visit(&self, mut visitor: impl FnMut(&[String], usize) -> Result<(), AppError>) -> Result<(), AppError> {
+        self.input.visit(self.cancel, |row, index| visitor(row.values(), index))
+    }
+}
+fn tb_account_identities(table: &FaTbRows<'_>, map: &Map<String, Value>, params: &Value, entity_enabled: bool) -> Result<Vec<AccountIdentity>, AppError> {
+    let scope = params.get("entityScope").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let mapping = ledger_mapping_for(map);
+    let limit = crate::resource_budget::budget()?.worker_bytes / 8;
+    let mut bytes = 0u64;
+    let mut out = Vec::new();
+    table.visit(|row, _| {
+        let (_, display) = tabular::ledger_row_keys(std::slice::from_ref(&row.to_vec()), &table.headers, &mapping);
+        let identity = account_identity_from_row(table, row, map, &display[0], EntitySide::Tb, entity_enabled, &scope);
+        bytes = bytes.saturating_add((std::mem::size_of::<AccountIdentity>() + identity.entity.len() + identity.code.len() + identity.name.len() + identity.auxiliary.len() + identity.currency.len() + identity.display.len() + identity.legacy_display.len()) as u64);
+        if bytes > limit { return Err(error("MEMORY_PROTECTION", "固定资产 TB 的科目身份数量超过当前安全预算，请按主体拆分后重试。", None)); }
+        out.push(identity);
+        Ok(())
+    })?;
+    Ok(out)
+}
 fn account_identities(
     table: &FxTable,
     map: &Map<String, Value>,
@@ -3427,11 +3448,7 @@ fn account_identities(
             // （`1001010000:库存现金-人民币`），名称只能从编码那一格里取。
             // 08 号样例反过来——名称列写成 `10020101\银行存款\…`，编码在
             // 前面，得把它切掉，否则和序时账那侧的纯名称对不上。
-            if name.is_empty() {
-                name = ledger_mapping::account_name_of(&raw_code);
-            } else {
-                name = ledger_mapping::account_name_of(&name);
-            }
+            name = ledger_mapping::account_name_from_fields(&raw_code, &name);
             AccountIdentity {
                 side,
                 entity: resolve_entity(side, &raw_entity, entity_key_enabled, &entity_scope),
@@ -3449,13 +3466,13 @@ fn account_identities(
 
 fn assignment_index(
     params: &Value,
-    tb: &FxTable,
+    tb: &FaTbRows<'_>,
     tb_map: &Map<String, Value>,
     je: &FxTable,
     je_map: &Map<String, Value>,
     entity_key_enabled: bool,
 ) -> Result<AssignmentIndex, AppError> {
-    let tb_ids = account_identities(tb, tb_map, params, EntitySide::Tb, entity_key_enabled);
+    let tb_ids = tb_account_identities(tb, tb_map, params, entity_key_enabled)?;
     let je_ids = account_identities(je, je_map, params, EntitySide::Je, entity_key_enabled);
     assignment_index_from_identities(params, &tb_ids, &je_ids)
 }
@@ -3741,14 +3758,19 @@ fn build_je_assignment_matches(
             }
             continue;
         };
+        // 同一名称的币种／辅助明细仍属同一科目；随后继续校验这些维度。
+        // 不能把明细行数当作名称歧义，也不能在多个真实名称间猜测。
+        let unique_tb_name = matches.values()
+            .map(|tb| ledger_mapping::normalize_name(&tb.name))
+            .collect::<BTreeSet<_>>().len() == 1;
         let matching_names = matches
             .values()
             .copied()
             .filter(|tb| {
                 ledger_mapping::normalize_name(&tb.name) == ledger_mapping::normalize_name(&je.name)
                 || verified_account_path_alias(tb, je, parent_names)
-                // 编码唯一、只有一侧缺名称时，不把缺失文本当不同科目。
-                || ((tb.name.is_empty() || je.name.is_empty()) && matches.len() == 1)
+                // 科目名称唯一、只有一侧缺名称时，不把缺失文本当不同科目。
+                || ((tb.name.is_empty() || je.name.is_empty()) && unique_tb_name)
             })
             .collect::<Vec<_>>();
         if matching_names.is_empty() {
@@ -3865,16 +3887,22 @@ fn build_je_assignment_matches(
 
 fn assignment_index_with_auxiliary(
     params: &Value,
-    tb: &FxTable,
+    tb: &FaTbRows<'_>,
     tb_map: &Map<String, Value>,
     je: &FxTable,
     je_map: &Map<String, Value>,
     entity_key_enabled: bool,
     columns: &BTreeMap<ledger_mapping::AuxiliaryGroupKey, (usize, usize)>,
 ) -> Result<AssignmentIndex, AppError> {
-    let mut tb_ids = account_identities(tb, tb_map, params, EntitySide::Tb, entity_key_enabled);
+    let mut tb_ids = tb_account_identities(tb, tb_map, params, entity_key_enabled)?;
     let mut je_ids = account_identities(je, je_map, params, EntitySide::Je, entity_key_enabled);
-    apply_matching_auxiliary(tb, &mut tb_ids, columns, EntitySide::Tb);
+    tb.visit(|row, index| {
+        let id = &mut tb_ids[index];
+        if let Some(&(column, _)) = columns.get(&fa_auxiliary_group(id)) {
+            id.matching_auxiliary = Some(ledger_mapping::anchor_norm(row.get(column).map(String::as_str).unwrap_or("")));
+        }
+        Ok(())
+    })?;
     apply_matching_auxiliary(je, &mut je_ids, columns, EntitySide::Je);
     assignment_index_from_identities(params, &tb_ids, &je_ids)
 }
@@ -5207,6 +5235,89 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn missing_account_name_je_matches_unique_tb_in_memory_and_disk() {
+        for blank_column in [false, true] {
+            let (dir, _, mut params) = fixture();
+            if blank_column {
+                let path = dir.join("je.csv");
+                let content = std::fs::read_to_string(&path).unwrap();
+                let content = content.lines().enumerate().map(|(i, line)| {
+                    let mut cells = line.split(',').collect::<Vec<_>>();
+                    if i > 0 { cells[4] = ""; }
+                    cells.join(",")
+                }).collect::<Vec<_>>().join("\n");
+                std::fs::write(path, content).unwrap();
+            } else {
+                params["jeMapping"].as_object_mut().unwrap().remove("accountName");
+            }
+            for disk in [false, true] {
+                params["__testForceDiskLedger"] = json!(disk);
+                let result = analyze(&params, &AtomicBool::new(false)).unwrap();
+                let totals = &result.totals[&("A".into(), "机器设备".into())];
+                assert_eq!(totals.additions, 500.0);
+                assert_eq!(totals.disposals, 200.0);
+                assert_eq!(totals.dep_charge, 100.0);
+                assert!(!result.je.is_empty());
+            }
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn missing_account_name_cannot_guess_between_tb_names() {
+        let (dir, _, mut params) = fixture();
+        std::fs::write(dir.join("tb.csv"),
+            "主体,科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\nA,1601,机器设备,1000,500,200,1300\nA,1601,运输设备,300,20,0,320\n").unwrap();
+        params["jeMapping"].as_object_mut().unwrap().remove("accountName");
+        params["accountAssignments"] = json!([
+            {"account":"1601 机器设备","role":"cost","category":"设备"},
+            {"account":"1601 运输设备","role":"cost","category":"运输"}
+        ]);
+        for disk in [false, true] {
+            params["__testForceDiskLedger"] = json!(disk);
+            assert_eq!(analyze(&params, &AtomicBool::new(false)).unwrap_err().code, "FA_TBJE_JE_UNMATCHED");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[ignore = "需设置 MISSING_ACCOUNT_NAME_SAMPLE_DIR，原始账表只读"]
+    fn missing_account_name_original_3000_disk_analysis() {
+        let dir = PathBuf::from(std::env::var("MISSING_ACCOUNT_NAME_SAMPLE_DIR").expect("请指定3000原始账表目录"));
+        let tb_source = json!({"inputPath":dir.join("3000TB.XLSX"),"headerRow":1,"headerDepth":1});
+        let spec: SourceSpec = serde_json::from_value(tb_source.clone()).unwrap();
+        let tb = crate::fx::load_fx_table(&spec).unwrap();
+        assert_eq!(tb.row_count, 973);
+        assert_eq!(tb.headers[2], "总账科目");
+        let assignments = tb.rows.iter().filter_map(|row| {
+            let code = &row[2];
+            let role = if code.starts_with("1601") { "cost" }
+                else if code.starts_with("1602") || code.starts_with("1522") { "depreciation" }
+                else { return None; };
+            Some(json!({"account":format!("{} {}", code, row[3]),"role":role,"category":"固定资产"}))
+        }).collect::<Vec<_>>();
+        assert_eq!(assignments.iter().filter(|v| v["role"] == "cost").count(), 9);
+        assert_eq!(assignments.iter().filter(|v| v["role"] == "depreciation").count(), 12);
+        let params = json!({
+            "tbSource":tb_source,
+            "jeSource":{"inputPath":dir.join("3000JE.csv"),"headerRow":1,"headerDepth":1},
+            "tbMapping":{"accountCode":"总账科目","accountName":"科目名称","openingDirection":"方向","openingFunctionalAmount":"期初余额","ytdFunctionalDebit":"借方金额(本年)","ytdFunctionalCredit":"贷方金额(本年)","closingDirection":"方向_2","closingFunctionalAmount":"期末余额"},
+            "jeMapping":{"accountCode":"总帐帐目","date":"过账日期","id":"凭证编号","direction":"借/贷标识","functionalAmount":"本币金额","functionalCurrency":"本币","currency":"总帐货币","summary":"文本"},
+            "accountAssignments":assignments,"reportStart":"2025-01-01","reportEnd":"2025-12-31","__testForceDiskLedger":true
+        });
+        let result = analyze(&params, &AtomicBool::new(false)).unwrap();
+        let matched = result.je.iter().filter(|row| !row.counterpart).count();
+        assert_eq!(matched, 923, "与原始CSV逐行独立统计对照，不得漏分录或重复计入");
+        let cost_net: f64 = result.je.iter().filter(|row| row.role == "cost").map(|row| row.net).sum();
+        let dep_net: f64 = result.je.iter().filter(|row| row.role == "depreciation").map(|row| row.net).sum();
+        assert!((cost_net - (-23_731_202.46)).abs() < 0.005, "原值净额：{cost_net}");
+        assert!((dep_net - (-30_907_987.72)).abs() < 0.005, "折旧净额：{dep_net}");
+        assert!(result.je.iter().any(|row| row.role == "cost"));
+        assert!(result.je.iter().any(|row| row.role == "depreciation"));
+        eprintln!("3000原始件：TB={}，命中固定资产分录={}，新增={}，处置={}，警告={:?}", tb.row_count, matched, result.additions.len(), result.disposals.len(), result.warnings);
+    }
+
     fn append_fixture_column(path: &Path, header: &str, value: &str) {
         let content = std::fs::read_to_string(path).unwrap();
         let updated = content
@@ -5362,6 +5473,26 @@ mod tests {
                 "{}",
                 err.user_message
             );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn missing_account_name_same_named_currency_details_still_require_currency() {
+        let (dir, mut params) = split_dimension_fixture(true);
+        params["jeMapping"].as_object_mut().unwrap().remove("accountName");
+        for disk in [false, true] {
+            params["__testForceDiskLedger"] = json!(disk);
+            let result = analyze(&params, &AtomicBool::new(false)).unwrap();
+            assert_eq!(result.totals[&("A".into(), "甲类".into())].additions, 10.0);
+            assert_eq!(result.totals[&("A".into(), "乙类".into())].additions, 20.0);
+        }
+        params["jeMapping"].as_object_mut().unwrap().remove("currency");
+        for disk in [false, true] {
+            params["__testForceDiskLedger"] = json!(disk);
+            let err = analyze(&params, &AtomicBool::new(false)).unwrap_err();
+            assert_eq!(err.code, "FA_TBJE_JE_UNMATCHED");
+            assert!(err.user_message.contains("多个币种"), "{}", err.user_message);
         }
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5618,6 +5749,51 @@ mod tests {
             serde_json::to_value(AnalysisCache::from(&memory)).unwrap(),
             "大 CSV 的磁盘读取分支必须保持分类、冲销、对方科目及底稿明细一致"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn disk_tb_late_rows_keep_global_masks_signs_auxiliary_and_analysis() {
+        for xlsx in [false, true] {
+            let (dir, _, mut params) = fixture();
+            let source = dir.join("tb.csv");
+            let original = std::fs::read_to_string(&source).unwrap();
+            let mut text = original.lines().next().unwrap().to_owned() + "\n";
+            for i in 0..220 { text.push_str(&format!("A,1001{i:04},现金{i},1,0,0,1\n")); }
+            text.push_str("A,1601,机器设备,1000,500,200,1300\nA,1602,累计折旧,-200,50,100,-250\n");
+            if xlsx {
+                let path = dir.join("tb.xlsx");
+                let mut book = Workbook::new();
+                book.add_worksheet().set_name("空白说明").unwrap();
+                let ws = book.add_worksheet(); ws.set_name("正式余额表").unwrap();
+                for (r,line) in text.lines().enumerate() { for (c,value) in line.split(',').enumerate() {
+                    ws.write_string(r as u32,c as u16,value).unwrap();
+                } }
+                book.save(&path).unwrap();
+                params["tbSource"]["inputPath"] = json!(path);
+                params["tbSource"]["sheet"] = json!("正式余额表");
+            } else { std::fs::write(&source, text).unwrap(); }
+            let cancel = AtomicBool::new(false);
+            let memory = analyze(&params, &cancel).unwrap();
+            params["__testForceDiskTb"] = json!(true);
+            let disk = analyze(&params, &cancel).unwrap();
+            assert_eq!(serde_json::to_value(AnalysisCache::from(&memory)).unwrap(), serde_json::to_value(AnalysisCache::from(&disk)).unwrap());
+            assert!(disk.tb.iter().all(|line| line.source_row > 220));
+            assert_eq!(disk.totals[&("A".into(),"机器设备".into())].opening_cost,1000.0);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        // 既有辅助配对用例另外由全模块回归覆盖；这里验证完整维度访问与单行锚点累计等价。
+        let (dir, _, mut params) = fixture();
+        std::fs::write(dir.join("tb.csv"), "主体,科目编码,科目名称,辅助,期初余额,本年借方,本年贷方,期末余额\nA,1601,机器设备,甲,1000,500,200,1300\nA,1602,累计折旧,甲,-200,50,100,-250\n").unwrap();
+        let path = dir.join("je.csv");
+        let data = std::fs::read_to_string(&path).unwrap().lines().enumerate().map(|(i,line)| format!("{},{}",line,if i==0 { "辅助" } else { "甲" })).collect::<Vec<_>>().join("\n");
+        std::fs::write(path,data).unwrap();
+        params["tbMapping"]["auxiliary"] = json!(["辅助"]);
+        params["jeMapping"]["auxiliary"] = json!(["辅助"]);
+        let memory = analyze(&params,&AtomicBool::new(false)).unwrap();
+        params["__testForceDiskTb"] = json!(true);
+        let disk = analyze(&params,&AtomicBool::new(false)).unwrap();
+        assert_eq!(serde_json::to_value(AnalysisCache::from(&memory)).unwrap(),serde_json::to_value(AnalysisCache::from(&disk)).unwrap());
         let _ = std::fs::remove_dir_all(dir);
     }
 

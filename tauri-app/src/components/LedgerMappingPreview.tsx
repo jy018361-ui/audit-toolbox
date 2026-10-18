@@ -10,7 +10,7 @@ import { describeForm, formGroups, resolveForm, roleRequirement, useLedgerForms 
  */
 const MULTI = new Set(LEDGER_ROLES.map(([key]) => key).filter((key) => isMultiRole(key)));
 
-export function LedgerMappingPreview({inspect,mapping,setMap,llmBusy,headerExtras,maxHeight=380,resizeKey}:{inspect?:Inspect;mapping?:Mapping;setMap?:(key:keyof Mapping,value:string|string[])=>void;llmBusy?:boolean;headerExtras?:(header:string)=>React.ReactNode;maxHeight?:number;resizeKey?:string}){
+export function LedgerMappingPreview({inspect,mapping,setMap,llmBusy,headerExtras,banner,toolbar,maxHeight=380,resizeKey}:{inspect?:Inspect;mapping?:Mapping;setMap?:(key:keyof Mapping,value:string|string[])=>void;llmBusy?:boolean;headerExtras?:(header:string)=>React.ReactNode;banner?:React.ReactNode;toolbar?:React.ReactNode;maxHeight?:number;resizeKey?:string}){
   // 序时账三型的判定：下拉分组与必填标记跟着当前命中的型走。
   // hook 必须在提前 return 之前调用。
   const forms=useLedgerForms("je");
@@ -35,6 +35,8 @@ export function LedgerMappingPreview({inspect,mapping,setMap,llmBusy,headerExtra
     missing={mapping?missingKanzhangRequiredRoles(mapping):[]}
     busy={llmBusy}
     headerExtras={headerExtras}
+    banner={banner}
+    toolbar={toolbar}
     maxHeight={maxHeight}
     resizeKey={resizeKey}
     onChange={next=>{

@@ -71,6 +71,14 @@
   border-color: var(--border-soft);
   color: var(--text-muted);
 }
+/* 说明行独占一行，不吃徽章的胶囊样式。 */
+.fx-source-requirements > span.fx-source-requirements-note {
+  flex-basis: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+}
 .fx-data-notice {
   margin-top: var(--sp-3);
 }

@@ -9,6 +9,7 @@ mod bailian_plan_asr;
 mod confirmation;
 mod covenant_cases;
 mod deposit_interest;
+mod disk_table;
 #[cfg(windows)]
 mod excel_com;
 mod excel_header_match;

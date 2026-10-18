@@ -117,9 +117,8 @@ describe("JeSignMarkPage", () => {
     expect(screen.getByText(/不参与正负数配对/)).toBeInTheDocument();
   });
 
-  // 金额符号口径卡片：自动检测的结论与依据要亮出来，筛过的账要黄牌提醒，
-  // 手动选择要在导出参数里生效。
-  it("shows the sign convention card with basis and passes the manual choice to export", async () => {
+  // 正常检测静默；单边文件保留用户选择，并确保选择传入导出。
+  it("asks for a choice only for one-sided files and passes the manual choice to export", async () => {
     seedLoadedDraft();
     // 导出按钮需要有效批次：给种子草稿补一个已选科目的批次。
     const raw = JSON.parse(
@@ -143,12 +142,10 @@ describe("JeSignMarkPage", () => {
     });
     render(<JeSignMarkPage tool={tool} />);
     await waitFor(() =>
-      expect(screen.getByText(/36 张借贷齐全的凭证/)).toBeInTheDocument(),
+      expect(screen.getByText("文件仅含单边分录，请确认金额记录方式。")).toBeInTheDocument(),
     );
-    // 筛过的账：黄牌提醒必须出现，并且要点明成因是"按科目筛选后导出"，
-    // 不能让人误以为是字段映射出了问题。
-    expect(screen.getByText(/按科目筛选后导出/)).toBeInTheDocument();
-    expect(screen.getByText(/这不是映射问题/)).toBeInTheDocument();
+    expect(screen.queryByText(/36 张借贷齐全的凭证/)).not.toBeInTheDocument();
+    expect(screen.queryByText("查看判定依据")).not.toBeInTheDocument();
     // 全部凭证均为单边时才显示两个人工口径；选择后要进入导出参数。
     fireEvent.click(screen.getByRole("button", { name: "已带符号" }));
     fireEvent.click(screen.getByRole("button", { name: "标记并导出" }));
@@ -158,7 +155,7 @@ describe("JeSignMarkPage", () => {
     expect(params.markLossTransfer).toBe(true);
   });
 
-  it("hides manual sign choices when the file contains balanced vouchers", async () => {
+  it("hides routine sign information and places review in the mapping panel", async () => {
     seedLoadedDraft();
     const { engineCall } = await import("./api");
     vi.mocked(engineCall).mockResolvedValue({
@@ -174,8 +171,14 @@ describe("JeSignMarkPage", () => {
         keySuspect: false,
       },
     });
-    render(<JeSignMarkPage tool={tool} />);
-    await waitFor(() => expect(screen.getByText(/12 张凭证均可/)).toBeInTheDocument());
+    await act(async () => { render(<JeSignMarkPage tool={tool} />); });
+    expect(screen.queryByText(/12 张凭证均可/)).not.toBeInTheDocument();
+    expect(screen.queryByText("金额符号口径")).not.toBeInTheDocument();
+    expect(screen.queryByText(/金额方案.*已生效/)).not.toBeInTheDocument();
+    expect(screen.queryByText("查看判定依据")).not.toBeInTheDocument();
+    const review = screen.getByRole("button", { name: "复核映射" });
+    expect(review.closest(".mapping-panel")).toHaveTextContent("文件预览");
+    expect(document.querySelector(".jm-sign")).toBeNull();
     expect(screen.queryByRole("button", { name: "借贷符号一样" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "已带符号" })).not.toBeInTheDocument();
   });
@@ -196,10 +199,9 @@ describe("JeSignMarkPage", () => {
         keySuspect: false,
       },
     });
-    render(<JeSignMarkPage tool={tool} />);
-    await waitFor(() =>
-      expect(screen.getByText(/单一金额列必然已带符号/)).toBeInTheDocument(),
-    );
+    await act(async () => { render(<JeSignMarkPage tool={tool} />); });
+    expect(screen.queryByText(/单一金额列必然已带符号/)).not.toBeInTheDocument();
+    expect(document.querySelector(".jm-sign")).toBeNull();
     expect(
       screen.queryByRole("button", { name: "借贷符号一样" }),
     ).not.toBeInTheDocument();

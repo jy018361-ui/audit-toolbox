@@ -225,7 +225,7 @@ const SAYS_FA_EXPLICIT = /固定资产|固定資產/i;
  *  科目全名。与看账工具「关键词只认首段」同一口径。 */
 function saysFaExplicitAtHead(name: string): boolean {
   return name.split(/\s+/).some((token) => {
-    const head = token.replace(/^[\s:：\-—/\\|]+/, "").split(/[\s:：\-—/\\|]/)[0] ?? "";
+    const head = token.replace(/^[\s:：\-–—－/\\|]+/, "").split(/[\s:：\-–—－/\\|]/)[0] ?? "";
     return SAYS_FA_EXPLICIT.test(head);
   });
 }
@@ -266,7 +266,7 @@ function faCategory(name: string): string {
           /累计折旧|累計折舊|固定资产|固定資產|accumulated\s+depreciation|property[,\s]*plant\s*(and|&)\s*equipment|ppe/gi,
           "",
         )
-        .replace(/^[-—:：\s\\/|]+|[-—:：\s\\/|]+$/g, ""),
+        .replace(/^[-–—－:：\s\\/|]+|[-–—－:：\s\\/|]+$/g, ""),
     ) || "固定资产"
   );
 }
@@ -278,6 +278,19 @@ function nearestParent(chart: Map<string, string>, code: string): string {
     if (chart.has(prefix)) return prefix;
   }
   return "";
+}
+
+/** 编码列与混写名称列并用时，名称可能又以同一编码开头。
+ *  只为自动分类剥离这段重复前缀；原始科目串及复核身份仍保持原值。 */
+function faClassificationName(code: string, name: string): string {
+  let value = name.trim();
+  while (code && value.startsWith(code)) {
+    const rest = value.slice(code.length);
+    const boundary = /^[\s:：_\-—/\\|]+/.exec(rest);
+    if (!boundary) break;
+    value = rest.slice(boundary[0].length).trim();
+  }
+  return value;
 }
 
 /**
@@ -304,10 +317,10 @@ function nearestParent(chart: Map<string, string>, code: string): string {
  * 轻则原值与累计折旧配不上对，重则直接触发科目分类冲突。
  */
 export function suggestFaAccounts(accounts: string[]): Assignment[] {
-  const parts = accounts.map((account) => ({
-    account,
-    ...splitFaAccount(account),
-  }));
+  const parts = accounts.map((account) => {
+    const { code, name } = splitFaAccount(account);
+    return { account, code, name: faClassificationName(code, name) };
+  });
   const chart = new Map<string, string>();
   const firstName = new Map<string, string>();
   for (const { code, name } of parts) {

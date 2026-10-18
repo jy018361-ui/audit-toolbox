@@ -75,7 +75,7 @@ fn file_identity(path: &Path) -> Option<String> {
             .ok()?
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?
-            .as_secs()
+            .as_nanos()
     ))
 }
 
@@ -90,7 +90,7 @@ fn hash_text(text: &str) -> String {
 fn pair_key(params: &Value) -> Option<String> {
     let begin = file_identity(Path::new(params.get("beginPath")?.as_str()?))?;
     let end = file_identity(Path::new(params.get("endPath")?.as_str()?))?;
-    Some(hash_text(&format!("{begin}\n{end}")))
+    Some(hash_text(&format!("fa-merge-v2-physicalrows\n{begin}\n{end}")))
 }
 
 /// 主文件合并参数指纹；第二步补充清单不改变两期清单的匹配结果。
@@ -138,6 +138,7 @@ pub(crate) fn save(params: &Value, result: &MergeResult) {
     let Some(dir) = snapshot_dir() else { return };
     let Some(key) = pair_key(params) else { return };
     let Some(print) = fingerprint(params) else { return };
+    if result.rows.path().is_some() { save_disk(params, result, &dir, &key, &print); return; }
     let started = Instant::now();
     let height = result.rows.len();
     let mut columns = vec![
@@ -151,7 +152,7 @@ pub(crate) fn save(params: &Value, result: &MergeResult) {
         ),
         Column::new(
             "extra".into(),
-            result.rows.iter().map(extra_to_json).collect::<Vec<_>>(),
+            result.rows.iter().map(|row| extra_to_json(&row)).collect::<Vec<_>>(),
         ),
     ];
     for index in 0..result.begin.headers.len() {
@@ -237,6 +238,8 @@ fn table_meta(table: &Table) -> Value {
         "sheet": table.sheet,
         "headerRow": table.header_row,
         "headers": table.headers,
+        "sheets":table.sheets,
+        "rowCount":table.row_count,
     })
 }
 
@@ -300,11 +303,14 @@ pub(crate) fn load(params: &Value) -> Option<LoadedSnapshot> {
     let key = pair_key(params)?;
     let parquet = dir.join(format!("{key}.parquet"));
     let sidecar = dir.join(format!("{key}.json"));
-    if !parquet.is_file() || !sidecar.is_file() {
-        return None;
-    }
+    if !sidecar.is_file() { return None; }
     let started = Instant::now();
     let meta: Value = serde_json::from_str(&fs::read_to_string(&sidecar).ok()?).ok()?;
+    if meta.get("version").and_then(Value::as_u64) == Some(2) { return load_disk(params, &meta, &dir.join(format!("{key}.sqlite"))); }
+    // 旧 v1 快照会整列物化；源文件已超预算时转入新的磁盘合并，不能先读旧快照。
+    let begin_path=Path::new(params.get("beginPath")?.as_str()?);
+    let end_path=Path::new(params.get("endPath")?.as_str()?);
+    if crate::disk_table::should_use_disk(&[begin_path,end_path],12) {return None;}
     let frame = ParquetReader::new(File::open(&parquet).ok()?).finish().ok()?;
     let source_column = strings_column(&frame, "source")?;
     let match_column = strings_column(&frame, "match_value")?;
@@ -389,6 +395,60 @@ pub(crate) fn load(params: &Value) -> Option<LoadedSnapshot> {
     })
 }
 
+fn save_disk(params: &Value, result: &MergeResult, dir: &Path, key: &str, print: &str) {
+    let Some(source) = result.rows.path() else { return; };
+    if result.rows.check().is_err() || fs::create_dir_all(dir).is_err() { return; }
+    let target=dir.join(format!("{key}.sqlite"));
+    let partial=target.with_extension("sqlite.partial");
+    if fs::copy(source,&partial).is_err() { return; }
+    // 数据库与 sidecar 两次替换不能成为同一文件系统事务，以库内指纹拒绝混用。
+    let bind = (|| -> Result<(),rusqlite::Error> {
+        let conn=rusqlite::Connection::open(&partial)?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS snapshot_meta(fingerprint TEXT NOT NULL,joined_count INTEGER NOT NULL);DELETE FROM snapshot_meta;")?;
+        conn.execute("INSERT INTO snapshot_meta VALUES(?,?)",rusqlite::params![print,result.rows.len()])?;
+        Ok(())
+    })();
+    if bind.is_err() { let _=fs::remove_file(&partial);return; }
+    if crate::tabular::replace_file(&partial,&target).is_err() { return; }
+    let meta=json!({"version":2,"fingerprint":print,"mergeParams":merge_params_subset(params),
+        "beginTable":table_meta(&result.begin),"endTable":table_meta(&result.end),
+        "beginKeys":result.begin_keys,"endKeys":result.end_keys,
+        "duplicateValues":result.duplicate_values,"duplicateRows":result.duplicate_rows,
+        "unmatchedAddition":result.unmatched_addition,"unmatchedDisposal":result.unmatched_disposal});
+    let sidecar=dir.join(format!("{key}.json"));
+    let partial=sidecar.with_extension("json.partial");
+    if fs::write(&partial,meta.to_string()).is_ok() { let _=crate::tabular::replace_file(&partial,&sidecar); }
+}
+
+fn disk_table_meta(meta: &Value) -> Option<Table> {
+    Some(Table { path:PathBuf::from(meta.get("path")?.as_str()?), sheet:meta.get("sheet").and_then(Value::as_str).map(str::to_owned),
+        sheets:string_list(meta,"sheets").unwrap_or_default(), header_row:meta.get("headerRow")?.as_u64()? as usize,
+        headers:string_list(meta,"headers")?,row_count:meta.get("rowCount").and_then(Value::as_u64).unwrap_or(0) as usize,rows:Vec::new() })
+}
+
+fn load_disk(params:&Value,meta:&Value,path:&Path)->Option<LoadedSnapshot> {
+    let working=path.with_file_name(format!("working-{}-{}.sqlite",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos()));
+    fs::copy(path,&working).ok()?;
+    let rows=match crate::fa::JoinedRows::open(working.clone()){Ok(rows)=>rows,Err(_)=>{let _=fs::remove_file(working);return None;}};
+    {
+        let conn=rusqlite::Connection::open(&working).ok()?;
+        let (print,count): (String,usize)=conn.query_row("SELECT fingerprint,joined_count FROM snapshot_meta",[],|row|Ok((row.get(0)?,row.get(1)?))).ok()?;
+        if meta.get("fingerprint")?.as_str()? != print || count != rows.len() { return None; }
+    }
+    // 全量逐批验证快照结构，损坏即现场重算，不能把已截断的游标当成功。
+    for _ in rows.iter() {}
+    rows.check().ok()?;
+    let result=MergeResult { begin:disk_table_meta(meta.get("beginTable")?)?,end:disk_table_meta(meta.get("endTable")?)?,rows,
+        begin_keys:string_list(meta,"beginKeys")?,end_keys:string_list(meta,"endKeys")?,
+        duplicate_values:meta.get("duplicateValues")?.as_u64()? as usize,duplicate_rows:meta.get("duplicateRows")?.as_u64()? as usize,
+        unmatched_addition:string_matrix(meta,"unmatchedAddition").unwrap_or_default(),unmatched_disposal:string_matrix(meta,"unmatchedDisposal").unwrap_or_default() };
+    let stored=meta.get("mergeParams")?.as_object()?.clone();
+    let mut effective=params.clone();
+    let object=effective.as_object_mut()?;
+    for field in MERGE_PARAM_FIELDS { match stored.get(*field) {Some(value)=>{object.insert((*field).to_owned(),value.clone());},None=>{object.remove(*field);}} }
+    Some(LoadedSnapshot {result,effective_params:effective,matches_current:fingerprint(&Value::Object(stored))?==fingerprint(params)?})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +476,24 @@ mod tests {
 
     fn merge(params: &Value) -> crate::fa::MergeResult {
         crate::fa::merge(params, &|_, _, _, _| {}, &AtomicBool::new(false)).unwrap()
+    }
+
+    #[test]
+    fn corrupted_disk_snapshot_is_discarded_before_export() {
+        let dir=tempfile::tempdir().unwrap();let begin=dir.path().join("begin.csv");let end=dir.path().join("end.csv");
+        write_csv(&begin,"编号,原值",&["A1,100"]);write_csv(&end,"编号,原值",&["A1,110"]);
+        let mut params=params(&begin,&end);params["__forceDisk"]=json!(true);
+        let result=merge(&params);save(&params,&result);assert!(load(&params).is_some());
+        let path=snapshot_dir().unwrap().join(format!("{}.sqlite",pair_key(&params).unwrap()));
+        let conn=rusqlite::Connection::open(path).unwrap();conn.execute("UPDATE joined SET data='{broken'",[]).unwrap();drop(conn);
+        assert!(load(&params).is_none());
+        save(&params,&result);
+        let path=snapshot_dir().unwrap().join(format!("{}.sqlite",pair_key(&params).unwrap()));
+        let conn=rusqlite::Connection::open(&path).unwrap();conn.execute("DELETE FROM joined",[]).unwrap();drop(conn);
+        assert!(load(&params).is_none(),"有效JSON记录被截断也必须拒绝复用");
+        save(&params,&result);
+        let conn=rusqlite::Connection::open(&path).unwrap();conn.execute("UPDATE snapshot_meta SET fingerprint='另一份快照'",[]).unwrap();drop(conn);
+        assert!(load(&params).is_none(),"两阶段替换留下的不配套库与JSON必须拒绝复用");
     }
 
     #[test]

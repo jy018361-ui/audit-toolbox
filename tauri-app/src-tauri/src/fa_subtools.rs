@@ -372,12 +372,18 @@ fn dep_export(
         ));
     }
     progress("load", 0, 3, "正在读取期末固定资产清单");
-    let table = fa::load_table(
-        &path,
-        params.get("sheet").and_then(Value::as_str),
-        fa::optional_header(&params, "headerRow")?,
-        false,
-    )?;
+    let use_disk=params.get("__forceDisk").and_then(Value::as_bool).unwrap_or(false) || crate::disk_table::should_use_disk(&[&path],8);
+    let (table,disk)=if use_disk {
+        let (table,disk)=fa::disk::load_input(&path,params.get("sheet").and_then(Value::as_str),fa::optional_header(&params,"headerRow")?,progress,&cancel)?;
+        (table,Some(disk))
+    } else {
+        (fa::load_table(&path,params.get("sheet").and_then(Value::as_str),fa::optional_header(&params,"headerRow")?,false)?,None)
+    };
+    let read=||->Box<dyn Iterator<Item=Result<Vec<String>,AppError>>+'_> {
+        if let Some(disk)=disk.as_ref() {
+            Box::new(fa::disk::SourceIter::open(&disk.cache_path).filter_map(|row|match row {Ok(mut row)=>{if row.iter().all(|v|v.trim().is_empty()){return None;}row.resize(table.headers.len(),String::new());row.truncate(table.headers.len());Some(Ok(row))},Err(error)=>Some(Err(error))}))
+        } else {Box::new(table.rows.iter().cloned().map(Ok))}
+    };
     pause.wait()?;
     // 前置校验：公式块依赖六个映射列。fa.rs 的公式块在表头不齐时会静默跳过，
     // 专用工具必须在导出前把缺失说清楚，而不是产出一个没有测算列的"成功"文件。
@@ -430,17 +436,9 @@ fn dep_export(
     let residual_index = column_of("residualRate");
     let current_index = column_of("currentYearDep");
     // 使用寿命按整列判定年→月换算（与主工具 life_scale_for_column 同口径）。
-    let life_scale = life_index
-        .and_then(|index| mapped_header("life").map(|header| (index, header)))
-        .map(|(index, header)| {
-            let values = table
-                .rows
-                .iter()
-                .filter_map(|row| fa::parse_life_cell(fa::cell(row, index)))
-                .collect::<Vec<_>>();
-            fa::life_scale_for_column(header, &values)
-        })
-        .unwrap_or(1.0);
+    let mut life_stats=fa::LifeScaleStats::default();
+    if let Some(index)=life_index {for row in read(){let row=row?;if let Some(value)=fa::parse_life_cell(fa::cell(&row,index)){life_stats.push(value);}}}
+    let life_scale=life_stats.scale(mapped_header("life").unwrap_or(""));
     // 残值率归一：表头明示"残值"（金额列）时除以原值，其余按比率归一——
     // 与主工具 mapped_residual_rate 的判定逐字一致。必须写小数：写表器对
     // 残值率列套 0.00% 格式，写 5 会显示成 500%。
@@ -451,11 +449,7 @@ fn dep_export(
             || normalized.contains("salvagevalue")
     };
     progress("export", 1, 3, "正在生成折旧测算表");
-    let mut rows = Vec::with_capacity(table.rows.len());
-    for (row_index, row) in table.rows.iter().enumerate() {
-        if row_index % 256 == 0 {
-            fa::check_cancel(&cancel)?;
-        }
+    let convert=|row:&[String]| {
         let original = original_index
             .map(|index| fa::number(fa::cell(row, index)))
             .unwrap_or(0.0);
@@ -478,7 +472,7 @@ fn dep_export(
                 _ => 0.0,
             })
             .unwrap_or(0.0);
-        rows.push(vec![
+        vec![
             category_index
                 .map(|index| fa::cell(row, index).trim().to_owned())
                 .unwrap_or_default(),
@@ -496,16 +490,16 @@ fn dep_export(
                 .map(|index| fa::number(fa::cell(row, index)))
                 .map(fa::display_number)
                 .unwrap_or_else(|| "0".into()),
-        ]);
-    }
+        ]
+    };
     let output = subtool_output_path(&params, &table.path, "折旧测算")?;
     let mut wb = Workbook::new();
     let header = header_format();
-    fa::write_string_sheet_labelled(
+    fa::write_string_sheet_stream(
         &mut wb,
         "折旧测算",
         &DEP_SHEET_HEADERS,
-        &rows,
+        || read().map(|row|row.map(|row|convert(&row))),
         &header,
         Some(&balance_sheet_date),
         Some(&cancel),
@@ -518,7 +512,7 @@ fn dep_export(
     Ok(json!({
         "engine": "rust-fa",
         "message": "折旧测算导出完成。",
-        "rows": rows.len(),
+        "rows": disk.as_ref().map(|disk|disk.row_count).unwrap_or(table.rows.len()),
         "outputPaths": [output.to_string_lossy()],
     }))
 }
@@ -538,6 +532,7 @@ fn policy_export(
     pause.wait()?;
     fa::check_cancel(&cancel)?;
     let policy_rows = fa::build_depreciation_period(&result, &params);
+    result.rows.check()?;
     progress("analyze", 3, 5, "正在分析税法最低折旧年限");
     let tax_analysis = build_policy_tax_analysis(&policy_rows, &params, &cancel, pause)?;
     pause.wait()?;
@@ -556,6 +551,7 @@ fn policy_export(
         "折旧政策对比",
         &tax_analysis.rows,
     )?;
+    result.rows.check()?;
     fa::check_cancel(&cancel)?;
     write_tax_reference_sheet(&mut wb, &header)?;
     pause.wait()?;
@@ -1329,6 +1325,7 @@ fn xlsx_error(e: rust_xlsxwriter::XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use calamine::Reader;
     use std::io::Read;
 
     fn run_job_quiet(method: &str, params: Value) -> Result<Value, AppError> {
@@ -1656,9 +1653,30 @@ mod tests {
         assert!(sheet.contains("r=\"J12\""));
         assert!(!sheet.contains("r=\"J13\""));
         assert!(
-            zip_entry(Path::new(output), "xl/sharedStrings.xml").contains("【导出提速】折旧测算")
+            sheet.contains("【导出提速】折旧测算") || zip_entry(Path::new(output), "xl/sharedStrings.xml").contains("【导出提速】折旧测算")
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dep_disk_export_keeps_csv_xlsx_values_formulas_and_whole_column_life_decision() {
+        for xlsx in [false,true] {
+            let dir=temp_dir("fa-subtools-dep-disk-equivalence");
+            let mut params=dep_params(&dir);
+            if xlsx {
+                let path=dir.join("期末清单.xlsx");let mut wb=Workbook::new();let ws=wb.add_worksheet();
+                for(r,line) in DEP_CSV.lines().enumerate(){for(c,value)in line.split(',').enumerate(){ws.write_string(r as u32,c as u16,value).unwrap();}}
+                // 真正的Excel日期序号必须与内存入口采用相同展示日期。
+                ws.write_datetime_with_format(1,4,&rust_xlsxwriter::ExcelDateTime::from_ymd(2020,1,1).unwrap(),&Format::new().set_num_format("yyyy-mm-dd")).unwrap();
+                wb.save(&path).unwrap();params["path"]=json!(path);
+            }
+            let memory=dir.join("内存.xlsx");params["outputPath"]=json!(memory);run_job_quiet("fa.dep_export",params.clone()).unwrap();
+            let disk=dir.join("磁盘.xlsx");params["outputPath"]=json!(disk);params["__forceDisk"]=json!(true);run_job_quiet("fa.dep_export",params).unwrap();
+            let mut a=calamine::open_workbook_auto(&memory).unwrap();let mut b=calamine::open_workbook_auto(&disk).unwrap();
+            assert_eq!(a.worksheet_range("折旧测算").unwrap(),b.worksheet_range("折旧测算").unwrap());
+            assert_eq!(a.worksheet_formula("折旧测算").unwrap(),b.worksheet_formula("折旧测算").unwrap());
+            let _=fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

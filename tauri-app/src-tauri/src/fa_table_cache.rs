@@ -159,7 +159,7 @@ fn cache_key(
     hasher.update(sheet.as_bytes());
     hasher.update(header_row.to_le_bytes());
     hasher.update([(choose_best as u8)]);
-    hasher.update(b"fa-table-cache-v1");
+    hasher.update(b"fa-table-cache-v2-physicalrows");
     Some(hex::encode(hasher.finalize()))
 }
 
@@ -172,7 +172,7 @@ fn header_memo_key(path: &Path, sheet: &str, choose_best: bool) -> Option<String
     hasher.update(modified.to_le_bytes());
     hasher.update(sheet.as_bytes());
     hasher.update([(choose_best as u8)]);
-    hasher.update(b"fa-table-header-memo-v1");
+    hasher.update(b"fa-table-header-memo-v2-physicalrows");
     Some(hex::encode(hasher.finalize()))
 }
 

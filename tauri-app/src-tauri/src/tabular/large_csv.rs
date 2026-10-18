@@ -42,13 +42,23 @@ fn sql_error(e: rusqlite::Error) -> AppError {
 }
 
 pub(super) fn applies(path: &Path) -> bool {
+    if path.is_file() && (crate::spreadsheet_input::is_text(path)
+        || path.extension().is_some_and(|s| ["xlsx","xlsm","xls","xlsb","ods"].iter().any(|extension|s.eq_ignore_ascii_case(extension)))) {
+        return crate::disk_table::should_use_disk(&[path], 1);
+    }
+    false
+}
+
+#[cfg(test)]
+fn legacy_text_policy(path: &Path) -> bool {
     let delimited = path.extension().and_then(|s| s.to_str()).is_some_and(|s| {
         ["csv", "txt", "tsv"]
             .iter()
             .any(|ext| s.eq_ignore_ascii_case(ext))
     });
     if !delimited {
-        return false;
+        return path.extension().is_some_and(|s| s.eq_ignore_ascii_case("xlsx") || s.eq_ignore_ascii_case("xlsm"))
+            && crate::disk_table::should_use_disk(&[path], 1);
     }
     let Ok(metadata) = fs::metadata(path) else {
         return false;
@@ -152,6 +162,9 @@ pub(super) fn load(
     cancel: &AtomicBool,
 ) -> Result<Cache, AppError> {
     check_cancel(cancel)?;
+    if !crate::spreadsheet_input::is_text(Path::new(&source.input_path)) || source.header_depth > 1 {
+        return load_generic(source, progress, cancel);
+    }
     let source_path = Path::new(&source.input_path);
     // 大 CSV 的自动标题行 `0` 与实际第 1 行语义相同。缓存键也必须相同，
     // 否则不同工具/阶段参数回传形式不同时会重新扫描整个源文件。
@@ -190,6 +203,46 @@ pub(super) fn load(
     if result.is_err() {
         let _ = fs::remove_file(&partial);
     }
+    result
+}
+
+/// Adapt the common physical-row source to the existing sequential raw-cache
+/// contract. The voucher index joins rowid=seq+1, so it must not attach a table
+/// whose row IDs include headers or whose sheet identity has been discarded.
+fn load_generic(source: &SourceParams, progress: Progress<'_>, cancel: &AtomicBool) -> Result<Cache, AppError> {
+    let path = Path::new(&source.input_path);
+    let table = crate::disk_table::DiskTable::open(path, source.sheet.as_deref(), source.header_row, source.header_depth, progress, cancel)?;
+    let key = fingerprint(path, &table.sheet, table.header_row, table.header_depth)?;
+    let output = cache_path("ledger-stream-formats-v1", &key)?.with_extension("sqlite");
+    fs::create_dir_all(output.parent().unwrap()).map_err(io_error)?;
+    if let Ok(mut cache) = read_cache(&output, path) {
+        cache.table.sheet = table.sheet;
+        cache.table.sheets = table.sheets;
+        return Ok(cache);
+    }
+    let partial = output.with_extension(format!("{}.partial", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut db = open(&partial)?;
+        db.execute_batch("CREATE TABLE rows(data TEXT NOT NULL); CREATE TABLE meta(value TEXT NOT NULL);").map_err(sql_error)?;
+        let tx = db.transaction().map_err(sql_error)?;
+        let mut insert = tx.prepare("INSERT INTO rows VALUES (?1)").map_err(sql_error)?;
+        table.visit(cancel, |row, _| {
+            insert.execute([serde_json::to_string(row).map_err(|e| error("LEDGER_CACHE_FAILED", "无法编码缓存行。", Some(e.to_string())))?]).map_err(sql_error)?;
+            Ok(())
+        })?;
+        drop(insert);
+        let meta = json!({"version":1,"headers":table.headers,"rows":table.row_count,"encoding":null,"delimiter":null});
+        tx.execute("INSERT INTO meta VALUES (?1)", [meta.to_string()]).map_err(sql_error)?;
+        check_cancel(cancel)?;
+        tx.commit().map_err(sql_error)?;
+        drop(db);
+        replace_file(&partial, &output)?;
+        let mut cache = read_cache(&output, path)?;
+        cache.table.sheet = table.sheet;
+        cache.table.sheets = table.sheets;
+        Ok(cache)
+    })();
+    if result.is_err() { let _ = fs::remove_file(&partial); }
     result
 }
 

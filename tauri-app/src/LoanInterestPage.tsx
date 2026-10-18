@@ -90,6 +90,9 @@ type Mode = "ledger" | "tb";
 type Kind = "ledger" | "tb" | "je" | "rateLedger";
 type LoanMapping = MappingDict;
 type Inspection = {
+  previewPaged?: boolean;
+  previewOffset?: number;
+  hasMore?: boolean;
   headers: string[];
   preview: string[][];
   rowCount: number;
@@ -573,35 +576,39 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const [busy, setBusy] = useState(false);
   const restoreGeneration = useRef(0);
   const sampledJe = mode === "tb" && sources.je.inspection?.sampledPreview === true;
-  const metadataReady = !sampledJe;
-  const completionKey = sampledJe && !busy ? JSON.stringify([
-    restoreGeneration.current, sources.je.path, sources.je.inspection?.sheet,
-    sources.je.inspection?.headerRow, sources.je.inspection?.headerDepth,
+  const sampledLedger = mode === "ledger" && sources.ledger.inspection?.sampledPreview === true;
+  const completionKind = sampledJe ? "je" : "ledger";
+  const completionSource = sources[completionKind];
+  const metadataReady = !sampledJe && !sampledLedger;
+  const completionKey = (sampledJe || sampledLedger) && !busy ? JSON.stringify([
+    restoreGeneration.current, completionKind, completionSource.path, completionSource.inspection?.sheet,
+    completionSource.inspection?.headerRow, completionSource.inspection?.headerDepth,
   ]) : "";
   const completionGeneration = restoreGeneration.current;
   const completionKeyRef = useRef(completionKey);
   completionKeyRef.current = completionKey;
-  const baselineJe = sources.je;
+  const baselineJe = completionSource;
   const baselineReportEnd = reportEnd;
   const completion = useLoanInspectionCompletion(completionKey, {
-    kind: "je", source: {
-      inputPath: sources.je.path, sheet: sources.je.inspection?.sheet,
-      headerRow: sources.je.inspection?.headerRow, headerDepth: sources.je.inspection?.headerDepth,
+    kind: completionKind, source: {
+      inputPath: completionSource.path, sheet: completionSource.inspection?.sheet,
+      headerRow: completionSource.inspection?.headerRow, headerDepth: completionSource.inspection?.headerDepth,
     },
   }, (value) => {
     if (completionGeneration !== restoreGeneration.current || completionKeyRef.current !== completionKey) return;
     const full = value as Inspection;
     setSources((current) => {
-      if (current.je.path !== baselineJe.path || current.je.inspection !== baselineJe.inspection) return current;
+      const latest=current[completionKind];
+      if (latest.path !== baselineJe.path || latest.inspection !== baselineJe.inspection) return current;
       // 只有尚未被用户改动的建议映射才跟随全量识别更新（删除映射也算编辑）。
-      const mapping = { ...current.je.mapping };
+      const mapping = { ...latest.mapping };
       for (const role of new Set([...Object.keys(baselineJe.mapping), ...Object.keys(full.suggestedMapping)])) {
-        if (JSON.stringify(current.je.mapping[role]) === JSON.stringify(baselineJe.mapping[role])) {
+        if (JSON.stringify(latest.mapping[role]) === JSON.stringify(baselineJe.mapping[role])) {
           if (full.suggestedMapping[role] === undefined) delete mapping[role];
           else mapping[role] = full.suggestedMapping[role];
         }
       }
-      return { ...current, je: { ...current.je, inspection: full, mapping } };
+      return { ...current, [completionKind]: { ...latest, inspection: full, mapping } };
     });
     if (full.suggestedBalanceSheetDate) setReportEnd((current) => current === baselineReportEnd ? full.suggestedBalanceSheetDate! : current);
   });
@@ -1183,6 +1190,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         {
           kind,
           ...(kind === "je" ? { previewOnly: true } : {}),
+          ...(over?.previewOffset !== undefined ? { previewOffset: over.previewOffset, previewOnly: false } : {}),
           source: {
             inputPath: path,
             sheet,
@@ -1193,7 +1201,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         },
         `${fileNameOf(path)}${sheet ? ` / ${sheet}` : ""}`,
       )) as Inspection;
-      applyInspection(kind, path, x);
+      if (over?.previewOffset !== undefined) {
+        setSources(current => current[kind].path === path
+          ? { ...current, [kind]: { ...current[kind], inspection: x } }
+          : current);
+      } else {
+        applyInspection(kind, path, x);
+      }
       return x;
     } catch (e) {
       setError(errorText(e));
@@ -1502,7 +1516,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   });
   async function run(method: "loan.preview" | "loan.export") {
     setError("");
-    if (!metadataReady) return setError("请等待完整序时账的年度、主体与科目清单补齐后再测算。");
+    if (!metadataReady) return setError("请等待完整资料读取完成后再测算。");
     if (!auxiliaryCheckReady) return setError("请先完成 TB 与 JE 的辅助字段校验。");
     if (mode === "ledger" && !ledgerReady) return setError("请先完成台账信息校验并确认金额、利率及发生日期。");
     if (!reportEnd) return setError("请选择资产负债表日。");
@@ -1575,7 +1589,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   // 通过时才重新验证。弹口径选择框（required 且未通过）与请求失败不记忆。
   const currencyLinkCheckRef = useRef<{ key: string; ok: boolean } | null>(null);
   async function enterTbRateStep() {
-    if (!metadataReady) return setError("完整序时账信息仍在补齐，请稍候。");
+    if (!metadataReady) return setError("完整资料仍在读取，请稍候。");
     if (!auxiliaryCheckReady) return setError("TB 与 JE 的辅助字段校验尚未完成，请等待或重试。");
     if (mode !== "tb") {
       setStep(1);
@@ -2201,9 +2215,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                   {pairStatus}
                 </p>
               )}
-              {sampledJe && (
+              {(sampledJe || sampledLedger) && (
                 <div role="status" aria-live="polite">
-                  <p>表头预览已就绪，可先核对字段。完整年度、主体与科目清单补齐后可进入下一步。</p>
+                  <p>{sampledLedger ? "表头预览已就绪，可先核对字段。完整台账读取完成后可进入下一步。" : "表头预览已就绪，可先核对字段。完整年度、主体与科目清单补齐后可进入下一步。"}</p>
                   {completion.event ? <JobProgress job={completion.event} onCancel={jobCancel} compact /> : !completion.error && <p>正在启动完整读取…</p>}
                   {completion.error && <><ErrorBox error={completion.error} /><Button variant="secondary" onClick={completion.retry}>重试完整读取</Button></>}
                 </div>
@@ -2312,6 +2326,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       : false
                   }
                   change={(mapping) => setSource(kind, { mapping })}
+                  onPage={(offset) => void inspect(kind, undefined, { previewOffset: offset })}
                   header={(sheet, row, depth) =>
                     void inspect(kind, undefined, {
                       sheet,
@@ -3027,6 +3042,7 @@ function Mapping({
   reviewing,
   change,
   header,
+  onPage,
 }: {
   kind: Kind;
   source: Source;
@@ -3034,6 +3050,7 @@ function Mapping({
   reviewing: boolean;
   change: (m: LoanMapping) => void;
   header: (s: string, r: number, d: number) => void;
+  onPage: (offset: number) => void;
 }) {
   const x = source.inspection!;
   // 角色标签统一走共享解析：引擎下发的 roles（台账）优先，TB/JE 与浏览器预览
@@ -3101,6 +3118,11 @@ function Mapping({
         resizeKey={`loan.mapping.${kind === "rateLedger" ? "rate-ledger" : kind}`}
         toolbar={
           <>
+            {x.previewPaged && <>
+              <Button variant="secondary" disabled={busy || (x.previewOffset ?? 0) === 0} onClick={() => onPage(Math.max(0, (x.previewOffset ?? 0) - 100))}>上一页</Button>
+              <span>第 {(x.previewOffset ?? 0) + (x.preview.length ? 1 : 0)}–{(x.previewOffset ?? 0) + x.preview.length} 行，共 {x.rowCount} 行</span>
+              <Button variant="secondary" disabled={busy || !x.hasMore} onClick={() => onPage((x.previewOffset ?? 0) + 100)}>下一页</Button>
+            </>}
             <label>
               Sheet
               <select

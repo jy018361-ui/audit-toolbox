@@ -209,6 +209,9 @@ fn prepared_key(
 ) -> Result<String, AppError> {
     let mut hash = Sha256::new();
     hash.update(fingerprint(&cache.table.path, "CSV", header_row, 1)?.as_bytes());
+    if cache.table.sheet != "CSV" || cache.path.to_string_lossy().contains("ledger-stream-formats-v1") {
+        hash.update(cache.path.to_string_lossy().as_bytes());
+    }
     hash.update(serde_json::to_vec(mapping).map_err(|e| {
         error(
             "LEDGER_CACHE_FAILED",

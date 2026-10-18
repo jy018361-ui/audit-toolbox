@@ -34,6 +34,62 @@ it("同码汇总语义用于FA建议但不改变源行身份或覆盖人工分�
 });
 
 describe("FA TB+JE account role presets", () => {
+  it("混写名称重复编码时旧制度原值仍能识别，且无需拼入科目大类", () => {
+    const cost = "15010101 15010101\\固定资产－自有－机械设备";
+    const depreciation = "15020101 15020101\\累计折旧－自有－机械设备";
+    const rows = suggestFaAccounts([cost, depreciation]);
+    expect(rows.map((row) => [row.account, row.role])).toEqual([
+      [cost, "cost"],
+      [depreciation, "depreciation"],
+    ]);
+    expect(rows[0].category).toBe(rows[1].category);
+    expect(rows[0].category).not.toContain("15010101");
+
+    const pairs = [
+      { entity: "3080", account: cost, currency: "CNY", auxiliary: "变动维度" },
+      { entity: "3080", account: depreciation, currency: "CNY", auxiliary: "变动维度" },
+    ];
+    const assigned = faAssignmentsForEntityAccounts(faReviewEntityAccounts(pairs), []);
+    expect(assigned.map((row) => row.role)).toEqual(["cost", "depreciation"]);
+    expect(assigned[0]).toMatchObject(pairs[0]);
+    // 保留用户明确排除与手填类别，也不归一化原始名称或合并复核身份。
+    const manual = { ...assigned[0], role: "excluded" as const, category: "人工类别" };
+    expect(faAssignmentsForEntityAccounts(pairs, [manual])).toContainEqual(manual);
+    expect(unionEntityAccounts([pairs[0], { ...pairs[0], account: "15010101 固定资产－自有－机械设备" }], [])).toHaveLength(2);
+  });
+
+  it("重复编码仅影响分类取名，不放宽税费损益及使用权资产的排除规则", () => {
+    for (const [code, name] of [
+      ["2221010102", "应交税费-进项税额-固定资产"],
+      ["630102", "营业外收入-固定资产报废利得"],
+      ["15010105", "使用权资产-固定资产"],
+      ["10020101", "银行存款-汉口银行(房屋积金)"],
+      ["55000301", "共性费用－固定资产折旧－机械设备"],
+      ["2221010102", "应交税费－进项税额－固定资产"],
+      ["55000301", "共性费用–固定资产折旧–机械设备"],
+    ]) {
+      expect(suggestFaAccount(`${code} ${code}\\${name}`).role).toBe("excluded");
+    }
+    expect(suggestFaAccount("15010101 1501010101\\固定资产-机器设备").role).toBe("excluded");
+    expect(suggestFaAccount("15010101 22210101\\固定资产-机器设备").role).toBe("excluded");
+  });
+
+  it.skipIf(!process.env.FA_TBJE_CLASSIFICATION_SAMPLE)("真实TB在不映射Account Class时恢复原值分类", () => {
+    const sample = JSON.parse(readFileSync(process.env.FA_TBJE_CLASSIFICATION_SAMPLE!, "utf8")) as {
+      pairs: Array<{ entity: string; account: string; auxiliary: string; currency: string }>;
+      expectedRoles: Record<string, "cost" | "depreciation" | "excluded">;
+    };
+    const assigned = faAssignmentsForEntityAccounts(faReviewEntityAccounts(sample.pairs), []);
+    expect(assigned).toHaveLength(sample.pairs.length);
+    for (const row of assigned) {
+      const key = JSON.stringify([row.entity, row.account, row.auxiliary ?? "", row.currency ?? ""]);
+      expect(row.role, key).toBe(sample.expectedRoles[key]);
+    }
+    const counts = (roles: string[]) => Object.fromEntries(["cost", "depreciation", "excluded"].map((role) => [role, roles.filter((value) => value === role).length]));
+    expect(counts(assigned.map((row) => row.role))).toEqual(counts(Object.values(sample.expectedRoles)));
+    console.log("不映射 Account Class 的真实 TB 自动分类：", counts(assigned.map((row) => row.role)));
+  });
+
   it("suggests roles without creating an independent ledger dictionary", () => {
     expect(suggestFaAccount("1601 固定资产-机器设备")).toEqual({
       account: "1601 固定资产-机器设备",

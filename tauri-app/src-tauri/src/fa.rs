@@ -1909,13 +1909,13 @@ fn export(
             Some(balance_sheet_date),
         ));
     }
-    // 导出直接复用「开始匹配」那一次的合并快照：改了输入/映射应回第一步
+    // 导出直接复用「开始匹配」那一次的合并快照：改了主文件输入/映射应回第一步
     // 重新匹配（快照随之刷新）；指纹不一致只提示不重算，保证导出套表与
     // 第一步统计永远同源。没有可用快照（首次、换了文件对、快照损坏）才
     // 现场合并兜底。
     let merge_started = std::time::Instant::now();
     let (result, params, merge_label) = match crate::fa_merge_snapshot::load(&params) {
-        Some(loaded) => {
+        Some(mut loaded) => {
             let hint = if loaded.matches_current {
                 ""
             } else {
@@ -1927,6 +1927,9 @@ fn export(
                 5,
                 &format!("复用上一次匹配结果，跳过重新合并{hint}"),
             );
+            // 第二步在匹配后才选择补充清单。复用主匹配行，但必须清除旧补充
+            // 结果并按当前配置应用，覆盖新增、改列、移除和源文件内容变化。
+            apply_supplements(&mut loaded.result, &loaded.effective_params, &cancel)?;
             (loaded.result, loaded.effective_params, format!("复用上次匹配结果{hint}"))
         }
         None => {
@@ -1975,7 +1978,7 @@ fn export(
             .unwrap_or(Path::new("."))
             .join("[未匹配资产变动清单].xlsx");
         pause.wait()?;
-        write_unmatched(&path, &result, &cancel)?;
+        write_unmatched(&path, &result, &params, &cancel)?;
         export_message.push_str("；已生成未匹配资产变动清单");
     }
     // 各阶段真实耗时进完成消息，用户看得见时间去向。
@@ -2235,6 +2238,17 @@ fn apply_supplements(
     params: &Value,
     cancel: &AtomicBool,
 ) -> Result<(), AppError> {
+    result.unmatched_addition.clear();
+    result.unmatched_disposal.clear();
+    for row in &mut result.rows {
+        for field in [
+            "新增方式_辅助_文件2", "新增时间_辅助_文件2",
+            "处置方式_辅助_文件1", "处置时间_辅助_文件1",
+            "处置原值_辅助_文件1", "处置折旧_辅助_文件1",
+        ] {
+            row.extra.remove(field);
+        }
+    }
     let valid = result
         .rows
         .iter()
@@ -6702,7 +6716,7 @@ fn write_sheet_map(wb: &mut Workbook) -> Result<(), AppError> {
     ws.autofit();
     Ok(())
 }
-fn write_unmatched(path: &Path, result: &MergeResult, cancel: &AtomicBool) -> Result<(), AppError> {
+fn write_unmatched(path: &Path, result: &MergeResult, params: &Value, cancel: &AtomicBool) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io_error)?;
     }
@@ -6733,15 +6747,26 @@ fn write_unmatched(path: &Path, result: &MergeResult, cancel: &AtomicBool) -> Re
         .write_string(2, 1, "补充清单中未能匹配期初卡片的处置记录，请复核组合键。")
         .map_err(xlsx_error)?;
     guide.autofit();
+    // 未匹配行来自补充文件，列顺序和列数均可能与两期主清单不同。
+    let addition_headers = if result.unmatched_addition.is_empty() {
+        Vec::new()
+    } else {
+        load_supplement(&params["additionSupplement"])?.headers
+    };
+    let disposal_headers = if result.unmatched_disposal.is_empty() {
+        Vec::new()
+    } else {
+        load_supplement(&params["disposalSupplement"])?.headers
+    };
     for (name, headers, rows) in [
         (
             "未匹配新增清单",
-            &result.end.headers,
+            &addition_headers,
             &result.unmatched_addition,
         ),
         (
             "未匹配处置清单",
-            &result.begin.headers,
+            &disposal_headers,
             &result.unmatched_disposal,
         ),
     ] {
@@ -7718,6 +7743,48 @@ mod tests {
         let row = range.rows().find(|row| row.get(2).is_some_and(|value| data_string(value) == "甲")).unwrap();
         assert_eq!(data_string(&row[1]), "甲", "重新匹配后使用新的匹配键");
         assert_eq!(data_string(&row[6]), "40", "重新匹配后使用人工修改后的原值映射");
+    }
+
+    #[test]
+    fn export_applies_current_supplements_after_matching_and_clears_old_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = params(dir.path());
+        test_preview(p.clone()).unwrap();
+        let disposal = dir.path().join("处置.csv");
+        let addition = dir.path().join("新增.csv");
+        fs::write(&disposal, "编号,摘要,业务类型,日期,原值,折旧\nA2,报废,出售,2025-05-01,50,0\nX9,报废,出售,2025-05-01,1,1\n").unwrap();
+        fs::write(&addition, "编号,方式\nA3,购置\n").unwrap();
+        p["disposalSupplement"] = json!({"path":disposal,"keys":["编号"],"method":"摘要","date":"日期","originalValue":"原值","depreciation":"折旧"});
+        p["additionSupplement"] = json!({"path":addition,"keys":["编号"],"method":"方式"});
+        test_export(p.clone()).unwrap();
+        let mut wb = open_workbook_auto(dir.path().join("FA_List.xlsx")).unwrap();
+        let range = wb.worksheet_range("处置清单_BKD").unwrap();
+        assert_eq!(data_string(range.get((0, 11)).unwrap()), "处置方式");
+        assert_eq!(data_string(range.get((2, 11)).unwrap()), "报废");
+        assert_eq!(data_string(range.get((2, 12)).unwrap()), "2025-05-01");
+        assert_eq!(number(&data_string(range.get((2, 14)).unwrap())), 0.0);
+        let range = wb.worksheet_range("新增清单_BKD").unwrap();
+        assert_eq!(data_string(range.get((2, 8)).unwrap()), "购置");
+        let mut unmatched = open_workbook_auto(dir.path().join("[未匹配资产变动清单].xlsx")).unwrap();
+        let range = unmatched.worksheet_range("未匹配处置清单").unwrap();
+        assert_eq!(data_string(range.get((0, 0)).unwrap()), "编号");
+        assert_eq!(data_string(range.get((0, 1)).unwrap()), "摘要");
+        assert_eq!(data_string(range.get((1, 0)).unwrap()), "X9");
+        // 模拟旧快照已含补充数据；更换选列须采用当前映射。
+        test_preview(p.clone()).unwrap();
+        p["disposalSupplement"]["method"] = json!("业务类型");
+        test_export(p.clone()).unwrap();
+        let mut wb = open_workbook_auto(dir.path().join("FA_List.xlsx")).unwrap();
+        assert_eq!(data_string(wb.worksheet_range("处置清单_BKD").unwrap().get((2, 11)).unwrap()), "出售");
+        p.as_object_mut().unwrap().remove("disposalSupplement");
+        p.as_object_mut().unwrap().remove("additionSupplement");
+        let mut loaded = crate::fa_merge_snapshot::load(&p).unwrap();
+        apply_supplements(&mut loaded.result, &loaded.effective_params, &AtomicBool::new(false)).unwrap();
+        assert!(loaded.result.unmatched_disposal.is_empty());
+        assert!(loaded.result.rows.iter().all(|row| !row.extra.contains_key("处置方式_辅助_文件1") && !row.extra.contains_key("新增方式_辅助_文件2")));
+        test_export(p).unwrap();
+        let mut wb = open_workbook_auto(dir.path().join("FA_List.xlsx")).unwrap();
+        assert_eq!(data_string(wb.worksheet_range("处置清单_BKD").unwrap().get((2, 11)).unwrap()), "[处置方式?]");
     }
 
     fn test_export(params: Value) -> Result<Value, AppError> {

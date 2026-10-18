@@ -157,6 +157,33 @@ describe("MeetingMinutesPage", () => {
     ).toBeDisabled();
   });
 
+  it("转写启动后仍保留空录提醒", async () => {
+    const { meetingStatus, meetingRecordStop, jobStart } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValue({
+      watchEnabled: true, resident: false, inCall: true, logFound: true, recording: true,
+    });
+    vi.mocked(meetingRecordStop).mockResolvedValueOnce({
+      audioPath: "C:/data/record-1/audio-mix.wav", recordDir: "C:/data/record-1",
+      durationSec: 600, sizeBytes: 19200000, startedAt: "2026-09-26T10:00:00+08:00",
+      warnings: ["录音里疑似没有录到人声"],
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    (await screen.findByRole("button", { name: "停止并生成纪要" })).click();
+    await waitFor(() => expect(jobStart).toHaveBeenCalled());
+    expect(screen.getByText("录音里疑似没有录到人声")).toBeInTheDocument();
+  });
+
+  it("没有 SlimCore 日志时仍可通过音频会话等待会议", async () => {
+    const { meetingStatus } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValueOnce({
+      watchEnabled: true, resident: false, inCall: false, logFound: false,
+      audioDetectionAvailable: true, recording: false,
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByText("自动检测已开启，正在等待会议开始。")).toBeInTheDocument();
+    expect(screen.queryByText(/未找到新版 Teams 日志/)).not.toBeInTheDocument();
+  });
+
   it("displayAudioFileName 只显示文件名", () => {
     expect(displayAudioFileName("C:\\data\\record-1\\audio-mix.wav")).toBe(
       "audio-mix.wav",

@@ -1,3 +1,22 @@
+## 2026-10-16 · FA 补充清单预览留白与导出补充映射丢失修复
+
+- 目标：消除未选新增清单时的大块留白；修复第二步补充处置方式未进入导出的问题。
+- 设计决策：两份预览按内容独立撑高，空状态不再与有数据的表格等高；保留各表独立滚动。
+- 数据契约：第一步匹配键与主表映射仍沿用匹配快照；第二步补充清单始终按当前选择应用。导出前清除旧补充结果，支持新增、改列、移除与源文件变化。
+- 未匹配补充记录按补充文件原表头输出，便于追查组合键及源数据。
+- 后台进程：为 Windows 强制停止任务的清理命令补齐无控制台窗口标记；正常 worker 启动已有该标记。此次修复不代表已复现用户所见黑窗的具体进程。
+- 验证：`npx vitest run src/faListUi.test.ts src/FaPageDesign.test.ts`；`npm run build`；`cargo test --manifest-path src-tauri/Cargo.toml --lib fa::`；`cargo test --manifest-path src-tauri/Cargo.toml --lib fa_merge_snapshot::`。
+
+## 2026-10-15 · 会议检测音频兜底与转写结果误报修复
+
+- 目标：修复 Teams 不写 SlimCore 日志时没有会议询问、百炼已返回结果却被误报为空，以及空录提醒被立即清除的问题。
+- 设计决策：保留通话日志检测，增加 Windows 音频会话兜底；只跟踪 Teams 与其媒体子进程，持续采集会话 3 秒触发询问，采集与播放均停止 10 秒后收尾。提示音不触发；枚举失败属于未知状态，不据此停录。音频兜底属于启发式，预加入页或设备测试也可能触发询问，始终由用户确认后才录音。
+- 设计决策：主窗口先订阅事件再读当前会议状态，补回 Rust 在线程启动期间发出的询问事件；结束时同时关闭小窗与应用内降级弹窗。
+- 设计决策：麦克风优先选 Teams 正在使用的采集设备，即使当前无声也适用；无法确认时再按峰值选设备，最终回退默认通信麦克风并明确提示。录音来源与告警落盘到录音目录；页面录音质量提醒独立于任务错误，不再被转写启动清空。
+- 后端契约：百炼 HTTP 查询响应读取 `output.results`，兼容已有扁平快照；缺失结果地址不再当作“无人说话”。只有下载并解析到真正的空转写时才报无人声。
+- 验证命令：`npx vitest run src/MeetingMinutesPage.test.tsx src/components/MeetingWatch.test.tsx`；`npm run build`；`cargo test --manifest-path src-tauri/Cargo.toml --lib meeting_`；`cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_asr::tests::`。覆盖启动事件补偿、过期快照、结束关窗、质量提醒保留、多文件标记时间排序、音频状态防抖及真实百炼响应结构。
+- 真机边界与取证见 `MEETING_MINUTES_PARITY.md`、`artifacts/meeting-detection-transcription-diagnosis-20261015.md`。
+
 ## 2026-10-09 · 会议纪要：Teams 会议检测漏报与录音无声根治
 
 - 目标：修复用户反馈的两大问题——开了检测仍检测不到 Teams 会议召开（询问窗不弹）；手动开录也录不到声音。

@@ -61,6 +61,7 @@ export function displayAudioFileName(path: string) {
 export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   const [status, setStatus] = useState<MeetingStatus>();
   const [error, setError] = useState("");
+  const [recordWarning, setRecordWarning] = useState("");
   const [recordBusy, setRecordBusy] = useState(false);
   const [importPath, setImportPath] = useState("");
   const [title, setTitle] = useState("");
@@ -110,11 +111,12 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     if (recordBusy) return;
     setRecordBusy(true);
     setError("");
+    setRecordWarning("");
     try {
       const started = await meetingRecordStart();
       // 开录即亮设备疑点（退回默认设备/换了非默认麦克风），会议中还有机会调整。
       if (started.warnings.length) {
-        setError(started.warnings.join("；"));
+        setRecordWarning(started.warnings.join("；"));
       }
       refreshStatus();
     } catch (e) {
@@ -133,9 +135,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
       const stopped = await meetingRecordStop();
       refreshStatus();
       // 空录体检的疑点先亮出来：转写大概率没有内容，让用户知道原因和出路。
-      if (stopped.warnings.length) {
-        setError(stopped.warnings.join("；"));
-      }
+      setRecordWarning(stopped.warnings.join("；"));
       await startGenerate({ audioPath: stopped.audioPath });
     } catch (e) {
       setError(errorText(e));
@@ -177,7 +177,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     ? "浏览器预览模式：界面仅供查看，会议检测与录音请在桌面应用中使用。"
     : !status
     ? "正在读取状态…"
-    : !status.logFound
+    : !status.logFound && !status.audioDetectionAvailable
       ? "未找到新版 Teams 日志（未安装或未启动 Teams 时无法自动检测，可手动记录或导入录音）。"
       : status.watchEnabled
         ? status.inCall
@@ -202,6 +202,9 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
       />
       {error && (
         <ErrorBox error={error} onDismiss={() => setError("")} />
+      )}
+      {recordWarning && (
+        <ErrorBox error={recordWarning} onDismiss={() => setRecordWarning("")} />
       )}
       {job && (
         <JobProgress

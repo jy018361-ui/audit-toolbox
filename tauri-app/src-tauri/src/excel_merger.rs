@@ -1110,7 +1110,9 @@ fn print_event(value: Value) {
 
 #[cfg(windows)]
 fn terminate_process_tree(child: &mut std::process::Child) {
+    use std::os::windows::process::CommandExt;
     let _ = Command::new("taskkill.exe")
+        .creation_flags(0x08000000)
         .args(["/PID", &child.id().to_string(), "/T", "/F"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

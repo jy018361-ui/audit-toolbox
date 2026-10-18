@@ -7,7 +7,7 @@
 //! 耳机播放/收音，默认扬声器没声音可录、默认麦克风离人很远。因此：
 //! - 系统声轨优先按 ms-teams.exe 进程回环采集（Teams 用哪块声卡都能录到），
 //!   找不到 Teams 进程或初始化失败才退回默认设备回环；
-//! - 麦克风轨开录前采样各麦克风设备的音量峰值，优先选「正在收音」的那个。
+//! - 麦克风优先按 Teams 活跃采集会话选设备；无法确定时再用音量与默认通信设备。
 //!
 //! `profile.release` 是 `panic = "abort"`：采集线程里任何错误都必须走
 //! `Result` 返回，不允许 panic 带崩整个应用。
@@ -28,7 +28,9 @@ use std::{
     thread,
     time::Duration,
 };
-use wasapi::{AudioClient, Device, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
+use wasapi::{
+    AudioClient, Device, DeviceEnumerator, Direction, Role, SampleType, StreamMode, WaveFormat,
+};
 
 use crate::AppError;
 
@@ -130,7 +132,13 @@ pub(crate) fn start(data_dir: &Path) -> Result<ActiveRecording, AppError> {
                 // run_capture 正常返回（无论成败）都会经 ready 通道上报一次；
                 // 这里只兜 panic 没能上报的情况，避免重复消息。
                 if catch_unwind(AssertUnwindSafe(|| {
-                    run_capture(device_direction, &stop_flag, &path, &sender, &late_error_slot)
+                    run_capture(
+                        device_direction,
+                        &stop_flag,
+                        &path,
+                        &sender,
+                        &late_error_slot,
+                    )
                 }))
                 .is_err()
                 {
@@ -195,13 +203,19 @@ pub(crate) fn start(data_dir: &Path) -> Result<ActiveRecording, AppError> {
             Some(detail),
         ));
     }
-    Ok(ActiveRecording {
+    let active = ActiveRecording {
         stop,
         dir,
         started_at: chrono::Local::now(),
         handles: Mutex::new(handles),
         tracks,
-    })
+    };
+    // 来源与告警保存在录音旁，后续无需依赖当时是否看到了桌面通知。
+    let _ = fs::write(
+        active.dir.join("recording-start.json"),
+        recording_summary(&active).to_string(),
+    );
+    Ok(active)
 }
 
 pub(crate) fn recording_summary(active: &ActiveRecording) -> Value {
@@ -237,7 +251,11 @@ fn warnings_of(tracks: &[Track]) -> Vec<String> {
         if let Some(late) = track.late_error.lock().clone() {
             warnings.push(format!(
                 "{}轨中途停止采集：{}",
-                if track.label == "system" { "系统声" } else { "麦克风" },
+                if track.label == "system" {
+                    "系统声"
+                } else {
+                    "麦克风"
+                },
                 late
             ));
         }
@@ -264,17 +282,25 @@ pub(crate) fn finalize(active: Arc<ActiveRecording>) -> Result<Value, AppError> 
     // 停录即体检：设备没选对（如 Teams 用耳机、系统默认是扬声器）时两轨
     // 都近乎静音，混音里自然没有语音。与其等转写服务报「没有识别到语音
     // 内容」再让用户猜，不如当场把疑点说出来。
-    if let Some(hint) = silence_hint(&mix_path, duration_sec) {
+    if frames == 0 {
+        warnings.push("录音文件没有采集到音频数据，请检查 Teams 与工具箱的音频设备设置。".into());
+    } else if let Some(hint) = silence_hint(&mix_path, duration_sec) {
         warnings.push(hint);
     }
-    Ok(json!({
+    let summary = json!({
         "audioPath": mix_path.to_string_lossy(),
         "recordDir": active.dir.to_string_lossy(),
         "durationSec": duration_sec,
         "sizeBytes": size_bytes,
         "startedAt": active.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "warnings": warnings,
-    }))
+        "sources": recording_summary(&active),
+    });
+    let _ = fs::write(
+        active.dir.join("recording-summary.json"),
+        summary.to_string(),
+    );
+    Ok(summary)
 }
 
 /// 单秒窗口判「有声」的 RMS 阈值（-42dB ≈ 0.008）：正常说话每秒在
@@ -472,21 +498,44 @@ fn prepare_system(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String>
             )),
             Err(error) => {
                 let (prepared, meta) = default_render_loopback(path)?;
-                Ok((prepared, meta.with_caution(format!(
-                    "按 Teams 进程采集失败（{error}），已改用系统默认播放设备。"
-                ))))
+                Ok((
+                    prepared,
+                    meta.with_caution(format!(
+                        "按 Teams 进程采集失败（{error}），已改用系统默认播放设备。"
+                    )),
+                ))
             }
         };
     }
     let (prepared, meta) = default_render_loopback(path)?;
-    Ok((prepared, meta.with_caution("未找到运行中的 Teams，已按系统默认播放设备录制；Teams 没在放声音时此轨会没有内容。".into())))
+    Ok((
+        prepared,
+        meta.with_caution(
+            "未找到运行中的 Teams，已按系统默认播放设备录制；Teams 没在放声音时此轨会没有内容。"
+                .into(),
+        ),
+    ))
 }
 
 /// 麦克风轨：自动挑「正在收音」的设备（会议中 Teams 一直占用所选麦克风）。
 fn prepare_mic(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
     let enumerator = DeviceEnumerator::new().map_err(stringify)?;
+    // 音量为零不等于没使用：会议刚开场、Teams 静音时仍能从会话归属确定
+    // 正确设备。先按设备 ID 选 Teams 实际占用的麦克风，再考虑音量兜底。
+    let teams_device = crate::meeting_audio::active_capture_device(&enumerator);
+    if let Some(device) = teams_device {
+        let name = device
+            .get_friendlyname()
+            .unwrap_or_else(|_| "Teams 麦克风".into());
+        let prepared = open_stream(device.get_iaudioclient().map_err(stringify)?, path)?;
+        return Ok((
+            prepared,
+            CaptureMeta::new(format!("Teams 正在使用的麦克风（{name}）")),
+        ));
+    }
     let default = enumerator
-        .get_default_device(&Direction::Capture)
+        .get_default_device_for_role(&Direction::Capture, &Role::Communications)
+        .or_else(|_| enumerator.get_default_device(&Direction::Capture))
         .map_err(stringify)?;
     let default_name = default
         .get_friendlyname()
@@ -494,7 +543,12 @@ fn prepare_mic(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
     let picked = pick_active_capture_device(&enumerator, &default_name);
     let (device, name, caution) = match picked {
         Some(picked) => picked,
-        None => (default, default_name, None),
+        None => {
+            let caution = format!(
+                "无法确认 Teams 正在使用的麦克风，且未检测到明显输入，已使用默认通信麦克风「{default_name}」。请确认与 Teams 的麦克风设置一致。"
+            );
+            (default, default_name, Some(caution))
+        }
     };
     let client = device.get_iaudioclient().map_err(stringify)?;
     let prepared = open_stream(client, path)?;
@@ -747,6 +801,7 @@ mod tests {
         let mut samples = quiet.clone();
         samples.extend_from_slice(&loud);
         samples.extend_from_slice(&quiet);
+        write_test_wav(&path, &samples);
         assert_eq!(silence_hint(&path, 12), None);
     }
 

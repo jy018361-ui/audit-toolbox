@@ -28,6 +28,7 @@ mod ledger_engine_parity_tests;
 mod ledger_mapping;
 mod loan_interest;
 mod lpr;
+mod meeting_audio;
 mod meeting_minutes;
 mod meeting_record;
 mod meeting_watch;

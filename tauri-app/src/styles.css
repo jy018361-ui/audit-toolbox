@@ -1205,7 +1205,8 @@ summary:focus-visible {
 .fa-preview-stack {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: repeat(2, minmax(0, 1fr));
+  grid-template-rows: auto auto;
+  align-items: start;
   gap: var(--sp-4);
   flex: 1 1 auto;
   min-height: 0;

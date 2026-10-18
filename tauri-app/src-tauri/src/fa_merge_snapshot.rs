@@ -1,11 +1,12 @@
 //! `fa.match` 匹配结果的磁盘快照：导出直接复用「开始匹配」那一次的合并
 //! 结果，不再重新读表、重新配对。
 //!
-//! 流程契约：匹配之后改了输入/映射/补充清单，应回第一步重新匹配（按钮
+//! 流程契约：匹配之后改了主文件输入/映射，应回第一步重新匹配（按钮
 //! 变为「重新开始匹配」）。因此快照按「文件对身份」（两份主文件的规范
 //! 路径＋大小＋修改时间）为键取最近一次匹配，导出时命中即复用；指纹
 //! （合并相关参数＋文件身份）不一致也不回退重算——保证导出套表与第一步
 //! 展示的统计永远同源，只在完成消息里提示「其后有改动，建议重新匹配」。
+//! 第二步补充清单属于导出阶段，始终使用当前配置重新应用，不回放旧补充字段。
 //!
 //! 快照内容：合并行（来源/匹配值/b 列/e 列/extra JSON）写 snappy Parquet，
 //! 统计与生效参数写 JSON sidecar。期初/期末两张表本体不进快照，加载时经
@@ -41,8 +42,6 @@ const MERGE_PARAM_FIELDS: &[&str] = &[
     "endDepreciation",
     "removeSpaces",
     "caseSensitive",
-    "additionSupplement",
-    "disposalSupplement",
 ];
 
 pub(crate) struct LoadedSnapshot {
@@ -94,23 +93,10 @@ fn pair_key(params: &Value) -> Option<String> {
     Some(hash_text(&format!("{begin}\n{end}")))
 }
 
-/// 合并相关参数＋相关文件身份的指纹：判定「导出时的配置」与「上次匹配
-/// 时的配置」是否逐位一致。
+/// 主文件合并参数指纹；第二步补充清单不改变两期清单的匹配结果。
 fn fingerprint(params: &Value) -> Option<String> {
     let subset = merge_params_subset(params);
-    let mut material = serde_json::to_string(&subset).ok()?;
-    for field in ["additionSupplement", "disposalSupplement"] {
-        if let Some(path) = subset
-            .get(field)
-            .and_then(|config| config.get("path"))
-            .and_then(Value::as_str)
-        {
-            if let Some(identity) = file_identity(Path::new(path)) {
-                material.push('\n');
-                material.push_str(&identity);
-            }
-        }
-    }
+    let material = serde_json::to_string(&subset).ok()?;
     Some(hash_text(&material))
 }
 
@@ -388,8 +374,8 @@ pub(crate) fn load(params: &Value) -> Option<LoadedSnapshot> {
             }
         }
     }
-    let matches_current =
-        meta.get("fingerprint")?.as_str()? == fingerprint(params)?.as_str();
+    // 从已存参数重算，兼容 v1 快照中曾包含补充清单的旧指纹。
+    let matches_current = fingerprint(&Value::Object(stored))? == fingerprint(params)?;
     eprintln!(
         "FA 匹配快照命中（{} 行，载入 {:.1}s，与当前配置{}）",
         result.rows.len(),
@@ -465,6 +451,12 @@ mod tests {
             assert_eq!(restored.end, origin.end);
             assert_eq!(restored.extra, origin.extra);
         }
+
+        // 第二步补充清单使用当前配置，不被尚未选择清单的快照覆盖。
+        params["disposalSupplement"] = json!({"path":"处置.xlsx","method":"摘要"});
+        let loaded = load(&params).unwrap();
+        assert!(loaded.matches_current);
+        assert_eq!(loaded.effective_params["disposalSupplement"], params["disposalSupplement"]);
 
         // 匹配后改映射、不重新匹配：导出仍复用上次匹配，且生效参数回到
         // 匹配时的取值（与第一步统计同源），只标记配置不一致。

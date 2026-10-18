@@ -83,6 +83,7 @@ export const MeetingStatusSchema = z.object({
   resident: z.boolean(),
   inCall: z.boolean(),
   logFound: z.boolean(),
+  audioDetectionAvailable: z.boolean().optional(),
   recording: z.boolean(),
 });
 export type MeetingStatus = z.infer<typeof MeetingStatusSchema>;

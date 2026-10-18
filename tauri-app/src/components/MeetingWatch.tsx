@@ -23,9 +23,10 @@ import {
   listenMeetingEvents,
   meetingRecordStart,
   meetingRecordStop,
+  meetingStatus,
 } from "../api";
 import { errorText } from "@/lib/errors";
-import type { MeetingRecordStart, MeetingRecordStop } from "../types";
+import type { MeetingEvent, MeetingRecordStart, MeetingRecordStop } from "../types";
 import "../meeting-minutes.css";
 
 /** Teams 会议检测的全局交互：询问小窗、录音指示、结束后自动出纪要。
@@ -129,6 +130,7 @@ export function MeetingWatch() {
   // 「本次不记录」：通话结束前不再询问，结束后自动恢复。
   const suppressed = useRef(false);
   const recordingRef = useRef<MeetingRecordStart | undefined>(undefined);
+  const askGeneration = useRef(0);
 
   useEffect(() => {
     recordingRef.current = recording;
@@ -143,21 +145,30 @@ export function MeetingWatch() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
-    void listenMeetingEvents((event) => {
+    let receivedEvent = false;
+    const handleEvent = (event: MeetingEvent) => {
+      if (disposed) return;
+      receivedEvent = true;
       if (event.type === "call_started") {
         if (recordingRef.current || suppressed.current) return;
+        const generation = ++askGeneration.current;
         setAskError("");
         void notifyDesktop(
           "检测到 Teams 会议",
           "工具箱已就绪，请在弹出的询问窗口确认是否开始记录会议纪要。",
         );
-        openAskWindow().catch(() => {
+        openAskWindow().then(() => {
+          if (disposed || generation !== askGeneration.current) void closeAskWindow();
+        }).catch(() => {
+          if (disposed || generation !== askGeneration.current) return;
           // 降级：应用内弹窗 + 拉起主窗口，功能不能因为小窗失败而丢失。
           setAskOpen(true);
           focusMainWindow();
         });
       } else if (event.type === "call_ended") {
+        askGeneration.current += 1;
         suppressed.current = false;
+        setAskOpen(false);
         // 询问还没答，会议就结束了：小窗一并收掉。
         void closeAskWindow();
         // 录音收尾由 Rust 检测层完成（recording_auto_finished），
@@ -199,10 +210,20 @@ export function MeetingWatch() {
           `录音收尾出现问题：${event.message ?? "未知错误"}`,
         );
       }
-    })
+    };
+    void listenMeetingEvents(handleEvent)
       .then((fn) => {
         if (disposed) fn();
-        else unlisten = fn;
+        else {
+          unlisten = fn;
+          // Rust 检测线程早于 React 挂载。先订阅再读快照，补回启动时
+          // 已在会中的状态；期间收到新事件则以事件为准，避免过期快照。
+          void meetingStatus().then((status) => {
+            if (!disposed && !receivedEvent && status.watchEnabled && status.inCall && !status.recording) {
+              handleEvent({ type: "call_started", at: new Date().toISOString() });
+            }
+          }).catch(() => undefined);
+        }
       })
       .catch(() => undefined);
     return () => {

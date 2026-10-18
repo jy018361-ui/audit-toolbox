@@ -337,7 +337,8 @@ fn poll_transcription(
                     .map(str::to_owned)
                     .or_else(|| {
                         value
-                            .pointer("/results/0/message")
+                            .pointer("/output/results/0/message")
+                            .or_else(|| value.pointer("/results/0/message"))
                             .and_then(Value::as_str)
                             .map(str::to_owned)
                     })
@@ -382,15 +383,29 @@ fn query_task(
     read_json_response(response, "查询百炼转写任务失败。")
 }
 
-/// 任务已成功却拿不到结果地址：常见于录音过短/无人声（`results` 为空数组）
-/// 或单文件识别失败（`results[0]` 带 code/message）。要给出说得通的原因，
-/// 不再把“没有返回结果地址”这类排查向文案直接甩给用户。
+/// HTTP 正式响应在 output.results；兼容已有的扁平任务快照。
+/// 缺字段是协议/结果异常，不能据此断言录音中没有人声。
+fn task_results(task: &Value) -> Option<&Vec<Value>> {
+    task.pointer("/output/results")
+        .or_else(|| task.get("results"))?
+        .as_array()
+}
+
+fn transcription_url(task: &Value) -> Option<&str> {
+    task_results(task)?
+        .first()?
+        .get("transcription_url")?
+        .as_str()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+}
+
 fn missing_url_error(task: &Value) -> AppError {
-    let results = task.pointer("/results").and_then(Value::as_array);
-    if results.is_none_or(|rows| rows.is_empty()) {
+    let results = task_results(task);
+    if results.is_some_and(|rows| rows.is_empty()) {
         return asr_error(
-            "ASR_EMPTY_TRANSCRIPT",
-            "录音中没有识别到语音内容（录音过短或无人说话），请确认录音有效后再试。",
+            "ASR_RESULT_MISSING",
+            "转写服务未返回文件识别结果，原录音已保留，请稍后重试。",
             None,
         );
     }
@@ -433,10 +448,7 @@ pub(crate) fn transcribe_file(
     // 任务标记成功后结果地址偶尔滞后一步：补拉几次再判缺失。
     let mut retries = 3u8;
     let transcription_url = loop {
-        if let Some(url) = task
-            .pointer("/results/0/transcription_url")
-            .and_then(Value::as_str)
-        {
+        if let Some(url) = transcription_url(&task) {
             break url.to_owned();
         }
         if retries == 0 {
@@ -590,24 +602,52 @@ mod tests {
         assert_eq!(format_timestamp(3_661_000), "61:01");
     }
 
-    /// 成功任务 + 空 results：短录音/无语音的典型形态，要说人话而不是
-    /// 「没有返回结果地址」。
+    #[test]
+    fn http_success_extracts_nested_result_url() {
+        // HTTP 查询接口的完整信封；此前测试只造顶层 results，漏掉真实契约。
+        let task = json!({"request_id": "request", "output": {
+            "task_status": "SUCCEEDED", "results": [{
+                "subtask_status": "SUCCEEDED", "transcription_url": "https://example.com/result.json"
+            }]
+        }});
+        assert_eq!(
+            transcription_url(&task),
+            Some("https://example.com/result.json")
+        );
+        let flat = json!({"results": [{"transcription_url": "https://example.com/flat.json"}]});
+        assert_eq!(
+            transcription_url(&flat),
+            Some("https://example.com/flat.json")
+        );
+        assert_eq!(
+            transcription_url(&json!({"output": {"results": [{"transcription_url": " "}]}})),
+            None
+        );
+    }
+
+    #[test]
+    fn missing_results_field_does_not_claim_silent_recording() {
+        let error = missing_url_error(&json!({"output": {"task_status": "SUCCEEDED"}}));
+        assert_eq!(error.code, "ASR_RESULT_MISSING");
+        assert!(!error.user_message.contains("无人说话"));
+    }
+
     #[test]
     fn missing_url_error_explains_empty_results() {
         let task: Value =
-            serde_json::from_str(r#"{"output": {"task_status": "SUCCEEDED"}, "results": []}"#)
+            serde_json::from_str(r#"{"output": {"task_status": "SUCCEEDED", "results": []}}"#)
                 .unwrap();
         let error = missing_url_error(&task);
-        assert_eq!(error.code, "ASR_EMPTY_TRANSCRIPT");
-        assert!(error.user_message.contains("录音过短或无人说话"));
+        assert_eq!(error.code, "ASR_RESULT_MISSING");
+        assert!(error.user_message.contains("原录音已保留"));
     }
 
     #[test]
     fn missing_url_error_surfaces_per_file_failure() {
         let task: Value = serde_json::from_str(
-            r#"{"output": {"task_status": "SUCCEEDED"}, "results": [
+            r#"{"output": {"task_status": "SUCCEEDED", "results": [
                 {"code": "AUDIO_FILE_INVALID", "message": "audio too short"}
-            ]}"#,
+            ]}}"#,
         )
         .unwrap();
         let error = missing_url_error(&task);

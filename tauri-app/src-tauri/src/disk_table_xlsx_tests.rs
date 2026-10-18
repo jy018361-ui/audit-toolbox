@@ -1,6 +1,30 @@
 use super::*;
 use std::io::Write;
 
+#[test]
+fn disk_xlsx_shared_dictionary_reuses_reads_and_bounds_distinct_text() {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch("CREATE TABLE strings(id INTEGER PRIMARY KEY,value TEXT NOT NULL);").unwrap();
+    db.execute("INSERT INTO strings VALUES (0,?1)", ["固定资产－设备 & 中文"]).unwrap();
+    let large = "文".repeat(512 * 1024);
+    for id in 1..=8 {
+        db.execute("INSERT INTO strings VALUES (?1,?2)", params![id, large]).unwrap();
+    }
+    let mut reader = SharedStringReader::new(&db).unwrap();
+    for _ in 0..2000 { assert_eq!(reader.get(0).unwrap(), "固定资产－设备 & 中文"); }
+    assert_eq!(reader.lookup.get_status(rusqlite::StatementStatus::Run), 1,
+        "重复标签不能每格再查SQLite");
+    assert!(!db.is_autocommit(), "整张Sheet应复用一个只读快照");
+    for id in 1..=8 {
+        assert_eq!(reader.get(id).unwrap(), large);
+        assert!(reader.bytes <= SharedStringReader::CACHE_BYTES);
+        assert!(reader.values.len() <= SharedStringReader::CACHE_ENTRIES);
+    }
+    assert!(!reader.values.contains_key(&0), "缓存必须淘汰旧值");
+    assert_eq!(reader.get(0).unwrap(), "固定资产－设备 & 中文");
+    assert!(reader.get(99).is_err(), "无效共享文本编号继续报错");
+}
+
 fn fixture(path: &Path, worksheet: &str, strings: Option<&str>) {
     let mut book = rust_xlsxwriter::Workbook::new();
     book.add_worksheet()
@@ -27,6 +51,64 @@ fn fixture(path: &Path, worksheet: &str, strings: Option<&str>) {
     drop(source);
     fs::remove_file(path).unwrap();
     fs::rename(tmp, path).unwrap();
+}
+
+#[test]
+fn disk_xlsx_projected_metadata_keeps_values_dates_and_physical_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("目录投影.xlsx");
+    let mut book = rust_xlsxwriter::Workbook::new();
+    book.add_worksheet().set_name("无关表").unwrap().write_string(0, 0, "错表").unwrap();
+    let sheet = book.add_worksheet();
+    sheet.set_name("正确表").unwrap();
+    sheet.write_string(1, 0, "  科目 & 中文  ").unwrap();
+    sheet.write_string(1, 1, "无需进入目录的摘要").unwrap();
+    let date = rust_xlsxwriter::ExcelDateTime::from_ymd(2026, 10, 18).unwrap();
+    let format = rust_xlsxwriter::Format::new().set_num_format("yyyy-mm-dd");
+    sheet.write_datetime_with_format(1, 3, &date, &format).unwrap();
+    sheet.write_formula(4, 0, rust_xlsxwriter::Formula::new("1+2").set_result("3")).unwrap();
+    sheet.write_string(4, 5, "尾列不应改变物理宽度").unwrap();
+    book.save(&path).unwrap();
+    let cancel = AtomicBool::new(false);
+    let selected = HashSet::from([0, 3]);
+    let mut full = Vec::new();
+    visit(&path, "正确表", &cancel, false, |r, i| { full.push((i, r)); Ok(()) }).unwrap();
+    for (_, row) in &mut full {
+        for (column, value) in row.iter_mut().enumerate() {
+            if !selected.contains(&column) { value.clear(); }
+        }
+    }
+    let mut projected = Vec::new();
+    visit_projected(&path, "正确表", &cancel, false, Some(&selected),
+        |r, i| { projected.push((i, r)); Ok(()) }).unwrap();
+    assert_eq!(projected, full);
+    assert_eq!(projected.last().unwrap().0, 5);
+    assert!(projected[1].1[3].starts_with("2026-10-18"));
+}
+
+#[test]
+fn disk_xlsx_projection_skips_rich_inline_cells_but_keeps_cancel_and_byte_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("跳过富文本.xlsx");
+    fixture(&path,
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><r><t>无需&amp;解析</t></r><rPh><t>注音</t></rPh><r><t>第二段</t></r></is></c><c r="B1" t="inlineStr"><is><t>保留</t></is></c></row><row r="4"><c r="B4"><v>42</v></c></row></sheetData></worksheet>"#,
+        None);
+    let selected = HashSet::from([1]);
+    let cancel = AtomicBool::new(false);
+    let mut rows=Vec::new();
+    visit_projected(&path,"Sheet1",&cancel,false,Some(&selected),|row,i|{rows.push((i,row));Ok(())}).unwrap();
+    assert_eq!(rows[0].1,vec![String::new(),"保留".into()]);
+    assert_eq!(rows.last().unwrap(),&(4,vec![String::new(),"42".into()]));
+    let error=visit_projected(&path,"Sheet1",&cancel,false,Some(&selected),|_,_|{
+        cancel.store(true,Ordering::Relaxed); Ok(())
+    }).unwrap_err();
+    assert_eq!(error.code,"JOB_CANCELLED");
+    cancel.store(false,Ordering::Relaxed);
+    let large="x".repeat(MAX_ROW_BYTES+8192);
+    fixture(&path,&format!(r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{large}</t></is></c></row></sheetData></worksheet>"#),None);
+    let error=visit_projected(&path,"Sheet1",&cancel,false,Some(&selected),|_,_|Ok(())).unwrap_err();
+    assert_eq!(error.code,"DISK_TABLE_IO");
+    assert!(format!("{error:?}").contains("安全预算"));
 }
 
 #[test]

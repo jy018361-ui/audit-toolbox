@@ -97,6 +97,8 @@
 }
 
 .hmg-grid {
+  table-layout: fixed;
+  width: 100%;
   border-collapse: separate;
   border-spacing: 3px;
   font-size: var(--fs-sm);
@@ -187,20 +189,28 @@
 }
 
 .hmg-file-cell {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
   padding: 6px 8px;
+}
+
+.hmg-file-content {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-width: 180px;
+  min-width: 0;
 }
 
-.hmg-file-cell > span[title] {
+.hmg-file-content > span[title] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .hmg-expand {
+  flex: none;
   border: none;
   background: none;
   cursor: pointer;
@@ -312,24 +322,28 @@
   border-radius: 6px;
 }
 
-.hmg-preview-row td {
+.hmg-preview-row > td {
   background: var(--surface-sunken);
-  padding: 8px 12px;
+  padding: 8px 9px;
 }
 
-.hmg-preview-cols {
+.hmg-preview-file {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+
+.hmg-preview-file .hmg-detect-edit {
   display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding-bottom: 4px;
+  flex-wrap: wrap;
+  margin-top: 0;
 }
 
 .hmg-preview-col {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 110px;
-  max-width: 180px;
+  min-width: 0;
   font-size: var(--fs-xs);
   color: var(--text-muted);
 }
@@ -342,6 +356,7 @@
 }
 
 .hmg-preview-col span {
+  min-height: 1.5em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

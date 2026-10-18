@@ -341,6 +341,34 @@ describe("表头匹配网格", () => {
     expect(statOf("unmatched")).toBe("3 未匹配");
   });
 
+  it("预览按匹配列排列，保留空槽并跟随拖动交换和未匹配区排序", () => {
+    const preview = makePreview();
+    preview.rows[1].headers = ["备注", "单据编号", "记账日期", "附注"];
+    preview.rows[1].matches = [
+      { target: null, confidence: 0, reason: "" },
+      { target: 1, confidence: 1, reason: "名称一致" },
+      { target: 0, confidence: 1, reason: "名称一致" },
+      { target: null, confidence: 0, reason: "" },
+    ];
+    preview.rows[1].preview = [["回单", "D-1", "2026-02-01", "补充说明"], ["", "D-2"]];
+    setup(preview);
+    fireEvent.click(screen.getAllByRole("button", { name: "展开数据预览" })[1]);
+    const cells = () => [...document.querySelectorAll(".hmg-preview-slot")];
+    const headers = () => cells().map((cell) => cell.querySelector("strong")?.textContent ?? "");
+    expect(headers()).toEqual(["记账日期", "单据编号", "", "备注", "附注"]);
+    expect(cells()[0].querySelector("span")?.textContent).toBe("2026-02-01");
+    // 缺失值仍占一行，防止同一条记录的其他列向上错位。
+    expect([...cells()[0].querySelectorAll("span")].map((span) => span.textContent)).toEqual([
+      "2026-02-01", "",
+    ]);
+    pointerDrag(document.querySelector('[data-cell="1-1"]') as HTMLElement, columnHeader(0));
+    expect(headers()).toEqual(["单据编号", "记账日期", "", "备注", "附注"]);
+    expect(cells()[0].querySelector("span")?.textContent).toBe("D-1");
+    pointerDrag(document.querySelector('[data-cell="1-3"]') as HTMLElement, unmatchedSlot(1, 0));
+    expect(headers()).toEqual(["单据编号", "记账日期", "", "附注", "备注"]);
+    expect(cells()[3].querySelector("span")?.textContent).toBe("补充说明");
+  });
+
   it("手动移入未匹配区的列计入未匹配而不是匹配", async () => {
     setup();
     fireEvent.contextMenu(

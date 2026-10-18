@@ -1995,7 +1995,8 @@ fn inspect_with_control(
             .map_err(|e| error("INVALID_PARAMS", "文件参数不完整。", Some(e.to_string())))?;
     let preview_only = kind == "je" && params.get("previewOnly").and_then(Value::as_bool) == Some(true);
     let disk_catalog = kind == "je" && !preview_only
-        && crate::disk_table::should_use_disk(&[Path::new(&spec.input_path)], 1);
+        && ((cfg!(test) && params["__testForceDiskCatalog"].as_bool() == Some(true))
+            || crate::disk_table::should_use_disk(&[Path::new(&spec.input_path)], 1));
     let disk_tb = kind == "tb" && (crate::disk_table::should_use_disk(&[Path::new(&spec.input_path)], 4)
         || (cfg!(test) && params.get("__forceDiskTb").and_then(Value::as_bool).unwrap_or(false)));
     let disk_ledger = matches!(kind, "ledger" | "rateLedger") && ledger_disk::applies(params, &spec);
@@ -2013,7 +2014,7 @@ fn inspect_with_control(
             input_path: spec.input_path.clone(), sheet: spec.sheet.clone(),
             header_row: spec.header_row, header_depth: spec.header_depth,
         };
-        let shared = if disk_tb { crate::fx::load_fx_bounded_inspection(&fx_spec, Path::new(&spec.input_path))? }
+        let shared = if disk_tb || disk_catalog { crate::fx::load_fx_bounded_inspection(&fx_spec, Path::new(&spec.input_path))? }
             else { crate::fx::load_fx_inspection_table(&fx_spec)? };
         let sampled = shared.sampled;
         let count = shared.row_count;
@@ -2094,7 +2095,7 @@ fn inspect_with_control(
             input_path: spec.input_path, sheet: table.sheet.clone(),
             header_row: table.header_row, header_depth: table.header_depth,
         };
-        crate::fx::complete_disk_je_catalog(&source, &suggested, &mut out,
+        crate::fx::complete_disk_je_catalog(&source, &table.headers, &suggested, "loan-v1", &mut out,
             |row| account_text(&table, row, &suggested, "je"), progress, cancel)?;
     }
     if let Some(complete) = complete_tb {

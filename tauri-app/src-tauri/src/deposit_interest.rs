@@ -1801,8 +1801,9 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
             .unwrap_or_else(|| params.clone()),
     )
     .map_err(|e| error("INVALID_PARAMS", "文件参数不完整。", Some(e.to_string())))?;
-    let disk_catalog =
-        kind == "je" && crate::disk_table::should_use_disk(&[Path::new(&source.input_path)], 1);
+    let disk_catalog = kind == "je" && (
+        (cfg!(test) && params["__testForceDiskCatalog"].as_bool() == Some(true))
+        || crate::disk_table::should_use_disk(&[Path::new(&source.input_path)], 1));
     let disk_tb = kind == "tb"
         && (params
             .get("__testForceDiskTb")
@@ -1810,7 +1811,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
             .unwrap_or(false)
             || crate::disk_table::should_use_disk(&[Path::new(&source.input_path)], 2));
     let table = if disk_catalog || disk_tb {
-        crate::fx::load_fx_inspection_table(&source)?
+        crate::fx::load_fx_bounded_inspection(&source, Path::new(&source.input_path))?
     } else {
         load_fx_table(&source)?
     };
@@ -2105,7 +2106,9 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         let indexes = account_columns(&table, &mapping);
         crate::fx::complete_disk_je_catalog(
             &confirmed,
+            &table.headers,
             &mapping,
+            "deposit-v1",
             &mut response,
             |row| join_columns(row, &indexes),
             &|_, _, _, _| {},
@@ -6879,14 +6882,22 @@ mod tests {
             );
             assert_eq!(classified["kind"], kind);
             let sheet = classified["sheet"].as_str().unwrap();
-            let source = json!({"source": {"inputPath": path, "sheet": sheet, "headerRow": 0, "headerDepth": 0}});
+            let source = json!({"source": {"inputPath": path, "sheet": sheet, "headerRow": 0, "headerDepth": 0},
+                "__testForceDiskCatalog": kind == "je"});
             let started = std::time::Instant::now();
             let inspected = inspect(&source, kind).unwrap();
             eprintln!(
-                "deposit.inspect_{kind}: {:.3}s",
-                started.elapsed().as_secs_f64()
+                "deposit.inspect_{kind}: {:.3}s, rows={}, columns={}, metadataComplete={}",
+                started.elapsed().as_secs_f64(), inspected["rowCount"],
+                inspected["headers"].as_array().unwrap().len(), inspected["metadataComplete"]
             );
             assert!(inspected["rowCount"].as_u64().unwrap_or(0) > 0);
+            if kind == "je" {
+                if let Ok(expected) = std::env::var("DEPOSIT_JE_EXPECTED_ROWS") {
+                    assert_eq!(inspected["rowCount"].as_u64(), Some(expected.parse::<u64>().unwrap()));
+                    assert_eq!(inspected["metadataComplete"], true);
+                }
+            }
             let started = std::time::Instant::now();
             let repeated = inspect(&source, kind).unwrap();
             eprintln!(

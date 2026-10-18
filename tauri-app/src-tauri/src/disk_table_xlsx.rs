@@ -6,6 +6,46 @@ use quick_xml::{
     events::{BytesStart, Event},
 };
 use std::io::{BufRead, BufReader};
+use std::collections::{HashMap, VecDeque};
+
+/// Keep one read snapshot and prepared lookup for the sheet, rather than
+/// opening a SQLite read transaction and compiling SQL for every string cell.
+/// Repeated account/entity labels stay in a bounded cache; unique summaries
+/// spill through the dictionary without growing with the workbook.
+struct SharedStringReader<'a> {
+    lookup: rusqlite::Statement<'a>,
+    values: HashMap<u64, String>,
+    order: VecDeque<u64>,
+    bytes: usize,
+}
+impl<'a> SharedStringReader<'a> {
+    const CACHE_BYTES: usize = 8 * 1024 * 1024;
+    const CACHE_ENTRIES: usize = 65_536;
+
+    fn new(db: &'a Connection) -> Result<Self, AppError> {
+        db.execute_batch("BEGIN DEFERRED").map_err(sql)?;
+        Ok(Self {
+            lookup: db.prepare("SELECT value FROM strings WHERE id=?1").map_err(sql)?,
+            values: HashMap::new(), order: VecDeque::new(), bytes: 0,
+        })
+    }
+
+    fn get(&mut self, id: u64) -> Result<String, AppError> {
+        if let Some(value) = self.values.get(&id) { return Ok(value.clone()); }
+        let value: String = self.lookup.query_row([id], |row| row.get(0)).map_err(sql)?;
+        let cost = value.len().saturating_add(96);
+        if cost <= Self::CACHE_BYTES {
+            while self.bytes.saturating_add(cost) > Self::CACHE_BYTES || self.values.len() >= Self::CACHE_ENTRIES {
+                let Some(old) = self.order.pop_front() else { break; };
+                if let Some(value) = self.values.remove(&old) { self.bytes -= value.len() + 96; }
+            }
+            self.bytes += cost;
+            self.order.push_back(id);
+            self.values.insert(id, value.clone());
+        }
+        Ok(value)
+    }
+}
 
 /// Limit bytes consumed by each XML event before quick-xml expands its buffer.
 struct TokenBudget<'a, R: Read> {
@@ -326,7 +366,7 @@ fn cell_value(
     dates: &HashSet<usize>,
     epoch: bool,
     preserve_excel_dates: bool,
-    strings: Option<&Connection>,
+    strings: Option<&mut SharedStringReader<'_>>,
 ) -> Result<String, AppError> {
     if raw.is_empty() {
         return Ok(String::new());
@@ -336,8 +376,7 @@ fn cell_value(
             let id = raw.parse::<u64>().map_err(io)?;
             strings
                 .ok_or_else(|| io("共享文本表缺失"))?
-                .query_row("SELECT value FROM strings WHERE id=?1", [id], |r| r.get(0))
-                .map_err(sql)
+                .get(id)
         }
         "b" => Ok((raw != "0").to_string()),
         "inlineStr" | "is" | "str" | "d" => Ok(raw.into()),
@@ -383,9 +422,28 @@ pub(super) fn visit(
     sheet: &str,
     cancel: &AtomicBool,
     preserve_excel_dates: bool,
+    emit: impl FnMut(Vec<String>, usize) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    visit_projected(path, sheet, cancel, preserve_excel_dates, None, emit)
+}
+
+/// A metadata scan still visits every physical row, but only resolves values
+/// in requested columns. The normal business reader continues to decode all cells.
+pub(super) fn visit_projected(
+    path: &Path,
+    sheet: &str,
+    cancel: &AtomicBool,
+    preserve_excel_dates: bool,
+    columns: Option<&HashSet<usize>>,
     mut emit: impl FnMut(Vec<String>, usize) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
+    let projection = columns.map(|columns| {
+        let mut selected = vec![false; 16384];
+        for column in columns { if *column < selected.len() { selected[*column] = true; } }
+        selected
+    });
     let strings = dictionary(path, cancel)?;
+    let mut string_reader = strings.as_ref().map(SharedStringReader::new).transpose()?;
     let dates = crate::fx::xlsx_date_styles(path);
     let epoch = crate::fx::xlsx_uses_1904_epoch(path);
     let target = crate::fx::xlsx_sheet_entries(path)?
@@ -397,6 +455,7 @@ pub(super) fn visit(
     let entry = zip.by_name(&target).map_err(io)?;
     let (mut reader, token_bytes) = reader(entry, cancel);
     let mut buf = Vec::new();
+    let mut skipped = Vec::new();
     let mut row = Vec::new();
     let mut row_bytes = 0_usize;
     let mut physical = 0_usize;
@@ -411,6 +470,7 @@ pub(super) fn visit(
     let mut capture = 0;
     let mut phonetic = false;
     let mut in_cell = false;
+    let mut retain_cell = true;
     loop {
         token_bytes.set(0);
         match reader
@@ -434,18 +494,38 @@ pub(super) fn visit(
                 b"c" => {
                     in_cell = true;
                     raw.clear();
-                    kind = attr(&e, b"t")?.unwrap_or_default();
-                    style = attr(&e, b"s")?.and_then(|s| s.parse().ok()).unwrap_or(0);
                     col = attr(&e, b"r")?
                         .as_deref()
                         .and_then(column)
                         .unwrap_or(next_col);
+                    retain_cell = projection.as_ref().is_none_or(|columns| columns.get(col) == Some(&true));
+                    if !retain_cell {
+                        if col >= 16384 { return Err(io("列号超过Excel上限")); }
+                        // Let the XML parser skip unrelated cell content without
+                        // converting text, numbers, styles or shared-string IDs.
+                        // TokenBudget still bounds bytes and checks cancellation.
+                        reader.read_to_end_into(e.name(), &mut skipped)
+                            .map_err(|error| stream_error(error, cancel))?;
+                        row_bytes = row_bytes.saturating_add(col.saturating_add(1)
+                            .saturating_sub(row.len()).saturating_mul(32));
+                        if row_bytes > MAX_ROW_BYTES {
+                            return Err(failure("TABLE_ROW_TOO_LARGE",
+                                "单行数据超过安全预算，请检查异常长字段。", physical));
+                        }
+                        row.resize(row.len().max(col + 1), String::new());
+                        next_col = col + 1;
+                        in_cell = false;
+                        buf.clear();
+                        continue;
+                    }
+                    kind = if retain_cell { attr(&e, b"t")?.unwrap_or_default() } else { String::new() };
+                    style = if retain_cell { attr(&e, b"s")?.and_then(|s| s.parse().ok()).unwrap_or(0) } else { 0 };
                 }
-                b"v" if in_cell && kind != "inlineStr" && kind != "is" => capture = 1,
+                b"v" if in_cell && retain_cell && kind != "inlineStr" && kind != "is" => capture = 1,
                 // Calamine treats a redundant inline-string <v> as empty;
                 // a subsequent <is> supplies the actual string.
                 b"v" if in_cell => raw.clear(),
-                b"t" if in_cell && !phonetic => {
+                b"t" if in_cell && retain_cell && !phonetic => {
                     capture = 2;
                     text.clear();
                     preserve = attr(&e, b"space")?.as_deref() == Some("preserve");
@@ -493,15 +573,15 @@ pub(super) fn visit(
                     if col >= 16384 {
                         return Err(io("列号超过Excel上限"));
                     }
-                    let value = cell_value(
+                    let value = if retain_cell { cell_value(
                         &raw,
                         &kind,
                         style,
                         &dates,
                         epoch,
                         preserve_excel_dates,
-                        strings.as_ref(),
-                    )?;
+                        string_reader.as_mut(),
+                    )? } else { String::new() };
                     row_bytes = row_bytes.saturating_add(value.len()).saturating_add(
                         col.saturating_add(1)
                             .saturating_sub(row.len())
@@ -520,6 +600,7 @@ pub(super) fn visit(
                     in_cell = false;
                 }
                 b"row" => {
+                    if physical % 256 == 0 { check(cancel)?; }
                     emit(std::mem::take(&mut row), physical)?;
                     next_row = physical + 1;
                 }
@@ -555,9 +636,6 @@ pub(super) fn visit(
                 "单个文本超过安全预算，请检查异常长字段。",
                 physical,
             ));
-        }
-        if physical % 256 == 0 {
-            check(cancel)?;
         }
         buf.clear();
     }

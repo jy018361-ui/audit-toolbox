@@ -71,12 +71,21 @@ struct AccountIdentity {
     entity: String,
     code: String,
     name: String,
+    // 仅用于跨表对应：由实际映射列验证的重复大类／编码可省略。
+    // 原始 name/display 继续作为复核身份、排除项及输出的依据。
+    matching_name: Option<String>,
     auxiliary: String,
     currency: String,
     // 仅在公共锚点验证通过后取验证列；原始 auxiliary 继续服务 TB 复核身份。
     matching_auxiliary: Option<String>,
     display: String,
     legacy_display: String,
+}
+
+impl AccountIdentity {
+    fn matching_name(&self) -> &str {
+        self.matching_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -224,7 +233,7 @@ fn analysis_cache_key(params: &Value) -> String {
         .as_object_mut()
         .map(|map| map.remove("outputPath"));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&"fa-cross-table-matching-v5-disk-physicalrows-missing-name", &mut hasher);
+    std::hash::Hash::hash(&"fa-cross-table-matching-v6-verified-composite-name", &mut hasher);
     std::hash::Hash::hash_slice(
         serde_json::to_string(&normalized)
             .unwrap_or_default()
@@ -919,17 +928,51 @@ fn account_identity_from_row(
         name = join(row, &indexes(table, map, "account"));
     }
     name = ledger_mapping::account_name_from_fields(&raw_code, &name);
+    let matching_name = verified_composite_account_name(table, row, map, &raw_code);
     AccountIdentity {
         side,
         entity: resolve_entity(side, &raw_entity, entity_key_enabled, entity_scope),
         code: ledger_mapping::account_code_of(&raw_code),
         name,
+        matching_name,
         auxiliary: join(row, &indexes(table, map, "auxiliary")),
         currency: text(table, row, map, "currency"),
         matching_auxiliary: None,
         display: display.to_owned(),
         legacy_display: join(row, &account_indexes(table, map)),
     }
+}
+
+/// 多列名称中，仅当一列明确为“本行编码＋名称”，其余列都是该名称
+/// 已包含的完整上级前缀时，建立较短的跨表名称。不能截掉任意列或用
+/// 相同编码替代名称验证；原始复核身份及用户确认项完全不变。
+fn verified_composite_account_name(
+    table: &FxTable, row: &[String], map: &Map<String, Value>, raw_code: &str,
+) -> Option<String> {
+    let code = ledger_mapping::normalize_account_code(&ledger_mapping::account_code_of(raw_code));
+    if code.is_empty() { return None; }
+    let columns = indexes(table, map, "accountName");
+    let parts = columns.iter().filter_map(|i| row.get(*i))
+        .map(|v| v.trim()).filter(|v| !v.is_empty()).collect::<Vec<_>>();
+    if parts.len() < 2 { return None; }
+    let candidates = parts.iter().filter_map(|part| ledger_mapping::split_code_and_name(part))
+        .filter(|(candidate, _)| ledger_mapping::normalize_account_code(candidate) == code)
+        .map(|(_, name)| name).collect::<BTreeSet<_>>();
+    if candidates.len() != 1 { return None; }
+    let candidate = candidates.first().unwrap();
+    let canonical = ledger_mapping::normalize_name(candidate);
+    let redundant = parts.iter().all(|part| {
+        if let Some((own_code, name)) = ledger_mapping::split_code_and_name(part) {
+            return ledger_mapping::normalize_account_code(&own_code) == code
+                && ledger_mapping::normalize_name(&name) == canonical;
+        }
+        // 必须止于明确层级边界，不能把“固定”当作“固定资产”的重复大类。
+        ledger_mapping::normalize_name(part) == canonical
+            || candidate.char_indices().filter(|(_, c)| matches!(c,
+                '-' | '－' | '—' | '–' | '_' | '\\' | '/' | '>' | '＞'))
+                .any(|(i, _)| ledger_mapping::normalize_name(&candidate[..i]) == ledger_mapping::normalize_name(part))
+    });
+    redundant.then(|| candidate.clone())
 }
 
 /// 主体条件键（LEDGER_MAPPING_UNIFICATION.md「主体作为条件匹配键」）：
@@ -3412,7 +3455,7 @@ fn tb_account_identities(table: &FaTbRows<'_>, map: &Map<String, Value>, params:
     table.visit(|row, _| {
         let (_, display) = tabular::ledger_row_keys(std::slice::from_ref(&row.to_vec()), &table.headers, &mapping);
         let identity = account_identity_from_row(table, row, map, &display[0], EntitySide::Tb, entity_enabled, &scope);
-        bytes = bytes.saturating_add((std::mem::size_of::<AccountIdentity>() + identity.entity.len() + identity.code.len() + identity.name.len() + identity.auxiliary.len() + identity.currency.len() + identity.display.len() + identity.legacy_display.len()) as u64);
+        bytes = bytes.saturating_add((std::mem::size_of::<AccountIdentity>() + identity.entity.len() + identity.code.len() + identity.name.len() + identity.matching_name.as_ref().map_or(0, String::len) + identity.auxiliary.len() + identity.currency.len() + identity.display.len() + identity.legacy_display.len()) as u64);
         if bytes > limit { return Err(error("MEMORY_PROTECTION", "固定资产 TB 的科目身份数量超过当前安全预算，请按主体拆分后重试。", None)); }
         out.push(identity);
         Ok(())
@@ -3449,11 +3492,13 @@ fn account_identities(
             // 08 号样例反过来——名称列写成 `10020101\银行存款\…`，编码在
             // 前面，得把它切掉，否则和序时账那侧的纯名称对不上。
             name = ledger_mapping::account_name_from_fields(&raw_code, &name);
+            let matching_name = verified_composite_account_name(table, row, map, &raw_code);
             AccountIdentity {
                 side,
                 entity: resolve_entity(side, &raw_entity, entity_key_enabled, &entity_scope),
                 code: ledger_mapping::account_code_of(&raw_code),
                 name,
+                matching_name,
                 auxiliary: join(row, &indexes(table, map, "auxiliary")),
                 currency: text(table, row, map, "currency"),
                 matching_auxiliary: None,
@@ -3767,7 +3812,7 @@ fn build_je_assignment_matches(
             .values()
             .copied()
             .filter(|tb| {
-                ledger_mapping::normalize_name(&tb.name) == ledger_mapping::normalize_name(&je.name)
+                ledger_mapping::normalize_name(tb.matching_name()) == ledger_mapping::normalize_name(je.matching_name())
                 || verified_account_path_alias(tb, je, parent_names)
                 // 科目名称唯一、只有一侧缺名称时，不把缺失文本当不同科目。
                 || ((tb.name.is_empty() || je.name.is_empty()) && unique_tb_name)
@@ -5326,6 +5371,58 @@ mod tests {
             .map(|(index, line)| format!("{line},{}\n", if index == 0 { header } else { value }))
             .collect::<String>();
         std::fs::write(path, updated).unwrap();
+    }
+
+    #[test]
+    fn composite_account_name_matches_without_changing_confirmation_identity() {
+        for disk in [false, true] {
+            let (dir, _, mut params) = fixture();
+            let tb = dir.join("tb.csv");
+            std::fs::write(&tb, "主体,科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额,大类\nA,1601,1601\\固定资产－自有－机器设备,1000,500,200,1300,固定资产\nA,1602,1602\\累计折旧－自有－机器设备,-200,50,100,-250,累计折旧\n").unwrap();
+            let je = dir.join("je.csv");
+            let text = std::fs::read_to_string(&je).unwrap()
+                .replace(",1601,机器设备,", ",1601,固定资产－自有－机器设备,")
+                .replace(",1602,累计折旧,", ",1602,累计折旧－自有－机器设备,");
+            std::fs::write(&je, text).unwrap();
+            params["tbMapping"]["accountName"] = json!(["大类", "科目名称"]);
+            params["accountAssignments"][0]["account"] = json!("1601 1601\\固定资产－自有－机器设备 固定资产");
+            params["accountAssignments"][1]["account"] = json!("1602 1602\\累计折旧－自有－机器设备 累计折旧");
+            params["__testForceDiskLedger"] = json!(disk);
+            let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+            let totals = &analysis.totals[&("A".into(), "机器设备".into())];
+            assert_eq!((totals.additions, totals.disposals, totals.dep_charge), (500.0, 200.0, 100.0));
+            assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
+            assert!(analysis.tb.iter().any(|row| row.account.contains("固定资产-1601\\固定资产")),
+                "跨表对应不能改写原始TB展示／确认身份");
+            // 两个原始确认身份即使得到相同名称，也不能绕过明确排除。
+            let mut excluded = params["accountAssignments"][0].clone();
+            excluded["role"] = json!("excluded");
+            params["accountAssignments"].as_array_mut().unwrap().push(excluded);
+            let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+            assert!(!analysis.je.iter().any(|row| row.role == "cost"));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn composite_account_name_requires_own_code_and_redundant_whole_prefix() {
+        let spec = SourceSpec { input_path:String::new(), sheet:"Sheet1".into(), header_row:1, header_depth:1 };
+        let map = json!({"accountCode":"编码","accountName":["大类","名称"]}).as_object().unwrap().clone();
+        for (class, value, expected) in [
+            ("固定资产", "15010109\\固定资产－自有－电子设备", "固定资产－自有－电子设备"),
+            ("固定资产", "15010108\\固定资产－自有－电子设备", "固定资产 15010108\\固定资产－自有－电子设备"),
+            ("固定", "15010109\\固定资产－自有－电子设备", "固定 15010109\\固定资产－自有－电子设备"),
+            ("无形资产", "15010109\\固定资产－自有－电子设备", "无形资产 15010109\\固定资产－自有－电子设备"),
+            ("固定资产", "普通名称", "固定资产 普通名称"),
+        ] {
+            let table = disk_table(&spec, vec!["编码".into(),"大类".into(),"名称".into()],
+                vec![vec!["15010109".into(),class.into(),value.into()]], 1);
+            let id = account_identity_from_row(&table, &table.rows[0], &map, "原始展示", EntitySide::Tb,
+                false, &ledger_mapping::EntityScope::default());
+            assert_eq!(id.matching_name(), expected);
+            assert_eq!(id.name, format!("{class} {value}"));
+            assert_eq!(id.display, "原始展示");
+        }
     }
 
     #[test]

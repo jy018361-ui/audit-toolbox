@@ -870,7 +870,16 @@ export function HeaderMatchGrid(props: {
         </div>
 
         <div className="hmg-grid-wrap" ref={gridRef}>
-          <table className="hmg-grid">
+          <table
+            className="hmg-grid"
+            style={{ minWidth: 200 + (template.headers.length + unmatchedSlots) * 135 + 3 }}
+          >
+            <colgroup>
+              <col style={{ width: 200 }} />
+              {Array.from({ length: template.headers.length + unmatchedSlots }, (_, col) => (
+                <col key={col} />
+              ))}
+            </colgroup>
             <thead>
               <tr>
                 <th className="hmg-file-col">文件</th>
@@ -912,9 +921,11 @@ export function HeaderMatchGrid(props: {
             <tbody>
               <tr className="hmg-template-row">
                 <td className="hmg-file-cell">
-                  <span className="hmg-badge">基准</span>
-                  {preview.template.name}
-                  <span className="hmg-sheet-tag">{preview.template.external ? "外部模板" : ""}</span>
+                  <div className="hmg-file-content">
+                    <span className="hmg-badge">基准</span>
+                    <span title={preview.template.name}>{preview.template.name}</span>
+                    <span className="hmg-sheet-tag">{preview.template.external ? "外部模板" : ""}</span>
+                  </div>
                 </td>
                 {template.headers.map((header, col) => (
                   <td
@@ -978,27 +989,29 @@ export function HeaderMatchGrid(props: {
                           setFileMenu({ row, x: event.clientX, y: event.clientY });
                         }}
                       >
-                        <button
-                          type="button"
-                          className="hmg-expand"
-                          aria-label={isExpanded ? "折叠数据预览" : "展开数据预览"}
-                          aria-expanded={isExpanded}
-                          onClick={() =>
-                            setExpanded((current) => {
-                              const next = new Set(current);
-                              if (next.has(row)) next.delete(row);
-                              else next.add(row);
-                              return next;
-                            })
-                          }
-                        >
-                          {isExpanded ? "▼" : "▶"}
-                        </button>
-                        {state.detection.needsReview && (
-                          <span className="hmg-review-dot" title="表头行识别拿不准，请展开确认" />
-                        )}
-                        <span title={`${state.path} / ${state.sheet}`}>{state.name}</span>
-                        <span className="hmg-sheet-tag">{state.sheet}</span>
+                        <div className="hmg-file-content">
+                          <button
+                            type="button"
+                            className="hmg-expand"
+                            aria-label={isExpanded ? "折叠数据预览" : "展开数据预览"}
+                            aria-expanded={isExpanded}
+                            onClick={() =>
+                              setExpanded((current) => {
+                                const next = new Set(current);
+                                if (next.has(row)) next.delete(row);
+                                else next.add(row);
+                                return next;
+                              })
+                            }
+                          >
+                            {isExpanded ? "▼" : "▶"}
+                          </button>
+                          {state.detection.needsReview && (
+                            <span className="hmg-review-dot" title="表头行识别拿不准，请展开确认" />
+                          )}
+                          <span title={`${state.path} / ${state.sheet}`}>{state.name}</span>
+                          <span className="hmg-sheet-tag">{state.sheet}</span>
+                        </div>
                       </td>
                       {template.headers.map((_, col) => {
                         const occupant = slots.get(col);
@@ -1085,26 +1098,32 @@ export function HeaderMatchGrid(props: {
                     </tr>
                     {isExpanded && (
                       <tr className="hmg-preview-row">
-                        <td colSpan={template.headers.length + unmatchedSlots + 1}>
-                          <div className="hmg-preview">
-                            <div className="hmg-preview-cols">
-                              {state.headers.map((header, col) => (
-                                <div key={col} className="hmg-preview-col">
-                                  <strong title={header}>{header}</strong>
-                                  {state.preview.slice(0, 3).map((values, index) => (
-                                    <span key={index}>{values[col] ?? ""}</span>
-                                  ))}
-                                </div>
-                              ))}
-                            </div>
-                            <DetectionEditor
-                              detection={state.detection}
-                              onApply={(headerRow, count) =>
-                                applyDetectionEdit(false, row, headerRow, count)
-                              }
-                            />
-                          </div>
+                        <td className="hmg-preview-file">
+                          <DetectionEditor
+                            detection={state.detection}
+                            onApply={(headerRow, count) =>
+                              applyDetectionEdit(false, row, headerRow, count)
+                            }
+                          />
                         </td>
+                        {/* 与匹配格共用表格列，并按当前映射取源列；空槽不能挤掉后面的列。 */}
+                        {[
+                          ...template.headers.map((_, col) => slots.get(col)),
+                          ...Array.from({ length: unmatchedSlots }, (_, slot) => zone[slot]),
+                        ].map((source, col) => (
+                          <td key={col} className="hmg-preview-slot">
+                            {source != null && (
+                              <div className="hmg-preview-col">
+                                <strong title={state.headers[source]}>{state.headers[source]}</strong>
+                                {state.preview.slice(0, 3).map((values, index) => (
+                                  <span key={index} title={values[source] ?? ""}>
+                                    {values[source] ?? ""}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                        ))}
                       </tr>
                     )}
                   </Fragment>

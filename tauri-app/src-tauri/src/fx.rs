@@ -10,6 +10,8 @@ pub(crate) mod tb_replay;
 #[path = "fx_tb_promotion.rs"]
 mod tb_promotion;
 pub(crate) use tb_replay::FxTbRows;
+#[path = "fx_je_catalog.rs"]
+mod je_catalog;
 use crate::{AppError, excel_merger::PauseCheckpoint, tabular};
 use calamine::{Data, DataType, Reader, open_workbook_auto};
 use chrono::{Datelike, Duration, NaiveDate, Utc};
@@ -410,71 +412,20 @@ pub(crate) struct FxTable {
     pub(crate) sampled: bool,
 }
 
-/// Full JE metadata is collected by scanning the disk table, never by treating
+/// Full JE metadata is collected by scanning projected source rows, never by treating
 /// an upload sample as the complete account/year catalogue. The caller supplies
 /// its existing account formatter so display identities stay tool-compatible.
 pub(crate) fn complete_disk_je_catalog(
     source: &SourceSpec,
+    headers: &[String],
     mapping: &Map<String, Value>,
+    formatter: &str,
     response: &mut Value,
     account_of: impl Fn(&[String]) -> String,
     progress: &dyn Fn(&str, usize, usize, &str),
     cancel: &AtomicBool,
 ) -> Result<Option<NaiveDate>, AppError> {
-    let disk = crate::disk_table::DiskTable::open(
-        Path::new(&source.input_path), Some(source.sheet.as_str()), source.header_row,
-        source.header_depth, progress, cancel,
-    )?;
-    let columns = |role| mapped_cols(mapping, role).iter()
-        .filter_map(|column| ledger_mapping::header_index(&disk.headers, column))
-        .collect::<Vec<_>>();
-    let entity_columns = columns("entity");
-    let date_columns = columns("date");
-    let currency_columns = columns("currency");
-    let functional_currency_columns = columns("functionalCurrency");
-    let mut accounts = BTreeSet::new();
-    let mut entities = BTreeSet::new();
-    let mut combinations = BTreeSet::new();
-    let mut currencies = BTreeSet::new();
-    let mut years = BTreeSet::new();
-    let mut latest_date: Option<NaiveDate> = None;
-    let mut currency_tally = BTreeMap::new();
-    disk.visit(cancel, |row, _| {
-        let text = |indexes: &[usize]| indexes.iter()
-            .filter_map(|index| row.get(*index)).map(|v| v.trim())
-            .find(|v| !v.is_empty()).unwrap_or("");
-        let entity = text(&entity_columns);
-        if !entity.is_empty() { entities.insert(entity.to_owned()); }
-        let account = account_of(row);
-        tally_account_currency(&mut currency_tally, &account,
-            text(&currency_columns), text(&functional_currency_columns));
-        if !account.is_empty() && !ledger_mapping::is_report_footer_value(&account) {
-            accounts.insert(account.clone());
-            combinations.insert((if entity.is_empty() { DEFAULT_ENTITY.to_owned() } else { entity.to_owned() }, account));
-        }
-        let currency = text(&currency_columns);
-        if !currency.is_empty() { currencies.insert(currency.to_owned()); }
-        for index in &date_columns {
-            if let Some(date) = row.get(*index).and_then(|value| parse_date(value)) {
-                years.insert(date.year());
-                latest_date = Some(latest_date.map_or(date, |current| current.max(date)));
-            }
-        }
-        Ok(())
-    })?;
-    response["rowCount"] = json!(disk.row_count);
-    response["accounts"] = json!(accounts);
-    response["accountsLeaf"] = response["accounts"].clone();
-    response["entities"] = json!(entities);
-    response["entityAccounts"] = json!(combinations.into_iter()
-        .map(|(entity, account)| json!({"entity":entity,"account":account})).collect::<Vec<_>>());
-    response["currencies"] = json!(currencies);
-    response["accountCurrencyDetails"] = json!(finish_account_currency_tally(currency_tally));
-    response["dataYears"] = json!(years);
-    response["suggestedBalanceSheetDate"] = json!(latest_date.map(|date| format!("{}-12-31", date.year())));
-    response["metadataComplete"] = json!(true);
-    response["sampledPreview"] = json!(false);
-    Ok(latest_date)
+    je_catalog::complete(source, headers, mapping, formatter, response, account_of, progress, cancel)
 }
 
 #[cfg(test)]
@@ -482,10 +433,11 @@ mod disk_catalog_tests {
     use super::*;
 
     fn verify(source: SourceSpec) {
+        let headers = ["日期","主体","科目编码","科目名称","币种"].map(str::to_owned);
         let mapping = json!({"date":["日期"],"entity":"主体","currency":"币种",
             "accountCode":"科目编码","accountName":["科目名称"]});
         let mut response = json!({"sampledPreview":true,"metadataComplete":false});
-        let latest = complete_disk_je_catalog(&source, mapping.as_object().unwrap(),
+        let latest = complete_disk_je_catalog(&source, &headers, mapping.as_object().unwrap(), "test-v1",
             &mut response, |row| format!("{} {}", row[2], row[3]),
             &|_,_,_,_| {}, &AtomicBool::new(false)).unwrap();
         assert_eq!(response["rowCount"], 301);
@@ -496,8 +448,14 @@ mod disk_catalog_tests {
         assert_eq!(response["accountCurrencyDetails"]["1009 后段科目"]["columnDetected"], "USD");
         assert_eq!(response["metadataComplete"], true);
         assert_eq!(latest.unwrap().format("%Y-%m-%d").to_string(), "2026-07-31");
+        let expected = response.clone();
+        let mut repeated = json!({"sampledPreview":true,"metadataComplete":false});
+        complete_disk_je_catalog(&source, &headers, mapping.as_object().unwrap(), "test-v1",
+            &mut repeated, |_| panic!("目录缓存命中不应重新扫描"),
+            &|_,_,_,_| {}, &AtomicBool::new(false)).unwrap();
+        assert_eq!(repeated, expected);
         let cancelled = AtomicBool::new(true);
-        assert_eq!(complete_disk_je_catalog(&source, mapping.as_object().unwrap(),
+        assert_eq!(complete_disk_je_catalog(&source, &headers, mapping.as_object().unwrap(), "test-v1",
             &mut json!({}), |_| String::new(), &|_,_,_,_| {}, &cancelled).unwrap_err().code, "JOB_CANCELLED");
     }
 
@@ -528,6 +486,102 @@ mod disk_catalog_tests {
         }
         book.save(&path).unwrap();
         verify(SourceSpec { input_path:path.to_string_lossy().into_owned(), sheet:"完整JE".into(), header_row:1, header_depth:1 });
+    }
+
+    #[test]
+    fn disk_catalog_cache_isolates_tool_mapping_source_and_recovers_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("目录.csv");
+        fs::write(&path, "科目,名称,币种,替代币种\n1001,现金,CNY,USD\n").unwrap();
+        let headers = ["科目","名称","币种","替代币种"].map(str::to_owned);
+        let source = SourceSpec { input_path:path.to_string_lossy().into_owned(), sheet:"CSV".into(), header_row:1, header_depth:1 };
+        let mapping = json!({"account":"科目","accountName":["名称"],"currency":"币种"});
+        for tool in ["fx", "deposit", "loan"] {
+            let mut response = json!({});
+            complete_disk_je_catalog(&source, &headers, mapping.as_object().unwrap(), tool,
+                &mut response, |row| format!("{tool}:{} {}",row[0],row[1]),
+                &|phase,_,_,_| assert_ne!(phase,"disk_cache"), &AtomicBool::new(false)).unwrap();
+            assert_eq!(response["accounts"], json!([format!("{tool}:1001 现金")]));
+        }
+        let mut different = mapping.clone(); different["currency"] = json!("替代币种");
+        let mut response = json!({});
+        complete_disk_je_catalog(&source, &headers, different.as_object().unwrap(), "fx", &mut response,
+            |row| format!("{} {}",row[0],row[1]), &|_,_,_,_|{}, &AtomicBool::new(false)).unwrap();
+        assert_eq!(response["currencies"], json!(["USD"]));
+        // An incomplete/corrupt snapshot is recomputed, never accepted as complete metadata.
+        let key = je_catalog::key(&source,&headers,different.as_object().unwrap(),"fx").unwrap();
+        fs::write(je_catalog::cache_path(&key).unwrap(), b"{\"row_count\":1}").unwrap();
+        complete_disk_je_catalog(&source,&headers,different.as_object().unwrap(),"fx",&mut response,
+            |row| row[1].clone(), &|_,_,_,_|{},&AtomicBool::new(false)).unwrap();
+        assert_eq!(response["accounts"],json!(["现金"]));
+        fs::write(&path, "科目,名称,币种,替代币种\n1001,现金,CNY,USD\n1601,固定资产,CNY,EUR\n").unwrap();
+        complete_disk_je_catalog(&source,&headers,different.as_object().unwrap(),"fx",&mut response,
+            |row| row[1].clone(), &|_,_,_,_|{},&AtomicBool::new(false)).unwrap();
+        assert_eq!(response["rowCount"],2);
+        assert_eq!(response["accounts"],json!(["固定资产","现金"]));
+        assert_eq!(response["currencies"],json!(["EUR","USD"]));
+    }
+
+    #[test]
+    fn disk_catalog_all_upload_entries_keep_full_metadata_and_account_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("跨工具JE.xlsx");
+        let mut book = Workbook::new();
+        book.add_worksheet().set_name("无关页").unwrap().write_string(0,0,"无关页").unwrap();
+        let sheet = book.add_worksheet(); sheet.set_name("序时账").unwrap();
+        for (column, name) in ["记账日期","公司代码","凭证号","科目编码","科目名称","币种","本位币借方","本位币贷方"].iter().enumerate() {
+            sheet.write_string(0,column as u16,*name).unwrap();
+        }
+        for number in 1..=301 {
+            let tail = number == 301;
+            let values = if tail { ["2026-07-31","E2","末尾凭证","1601","固定资产","USD","100","0"] }
+                else { ["2024-01-01","E1","普通凭证","1001","现金","CNY","20","0"] };
+            for (column,value) in values.iter().enumerate() { sheet.write_string(number,column as u16,*value).unwrap(); }
+        }
+        book.save(&path).unwrap();
+        let base = json!({"source":{"inputPath":path,"sheet":"序时账","headerRow":1,"headerDepth":1},
+            "kind":"je","fullCatalog":true,"previewOnly":false});
+        for method in ["deposit.inspect_je", "fx.inspect_je", "loan.inspect"] {
+            let call = |params| match method {
+                "deposit.inspect_je" => crate::deposit_interest::call(method,params),
+                "fx.inspect_je" => super::call(method,params),
+                _ => crate::loan_interest::call(method,params),
+            }.unwrap();
+            let full = call(base.clone());
+            let mut forced = base.clone(); forced["__testForceDiskCatalog"] = json!(true);
+            let projected = call(forced.clone());
+            assert_eq!(projected["rowCount"],301,"{method}");
+            assert_eq!(projected["entities"],json!(["E1","E2"]),"{method}");
+            assert_eq!(projected["dataYears"],json!([2024,2026]),"{method}");
+            for field in ["accounts","entities","entityAccounts","currencies"] {
+                if !full[field].is_null() { assert_eq!(projected[field],full[field],"{method}: {field}"); }
+            }
+            assert_eq!(projected["metadataComplete"],true);
+            assert_eq!(call(forced),projected,"{method} 重读不改变返回值");
+        }
+    }
+
+    #[test]
+    fn disk_catalog_respects_double_headers_and_rejects_changed_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("双层.csv");
+        fs::write(&path,"说明\n科目,期间\n编码,日期\n1601,2026-10-18\n").unwrap();
+        let headers = ["科目-编码","期间-日期"].map(str::to_owned);
+        let source = SourceSpec { input_path:path.to_string_lossy().into_owned(), sheet:"CSV".into(), header_row:2, header_depth:2 };
+        let mapping = json!({"accountCode":"科目-编码","date":"期间-日期"});
+        let mut response=json!({});
+        complete_disk_je_catalog(&source,&headers,mapping.as_object().unwrap(),"double-v1",&mut response,
+            |row|row[0].clone(),&|_,_,_,_|{},&AtomicBool::new(false)).unwrap();
+        assert_eq!(response["accounts"],json!(["1601"]));
+        assert_eq!(response["rowCount"],1);
+        assert_eq!(response["dataYears"],json!([2026]));
+        let changed=std::cell::Cell::new(false);
+        let error=complete_disk_je_catalog(&source,&headers,mapping.as_object().unwrap(),"change-v1",&mut json!({}),
+            |row| {
+                if !changed.replace(true) { fs::write(&path,"源文件已更改\n").unwrap(); }
+                row[0].clone()
+            },&|_,_,_,_|{},&AtomicBool::new(false)).unwrap_err();
+        assert_eq!(error.code,"SOURCE_CHANGED");
     }
 }
 
@@ -1048,7 +1102,8 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     // 科目确认需要完整目录；上传第一步仍允许大文件采样以维持快速识别。
     let disk_catalog = kind == "je"
         && params.get("fullCatalog").and_then(Value::as_bool) == Some(true)
-        && crate::disk_table::should_use_disk(&[Path::new(&source.input_path)], 1);
+        && ((cfg!(test) && params["__testForceDiskCatalog"].as_bool() == Some(true))
+            || crate::disk_table::should_use_disk(&[Path::new(&source.input_path)], 1));
     let tb_disk_catalog=kind=="tb"&&params.get("fullCatalog").and_then(Value::as_bool)==Some(true)
         &&crate::disk_table::should_use_disk(&[Path::new(&source.input_path)],4);
     let table = if params.get("fullCatalog").and_then(Value::as_bool) == Some(true) && !disk_catalog && !tb_disk_catalog {
@@ -1348,7 +1403,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         let indexes = account_columns(&mapping).iter()
             .filter_map(|column| ledger_mapping::header_index(&table.headers, column))
             .collect::<Vec<_>>();
-        let latest_date = complete_disk_je_catalog(&confirmed, &mapping, &mut response,
+        let latest_date = complete_disk_je_catalog(&confirmed, &table.headers, &mapping, "fx-v1", &mut response,
             |row| indexes.iter().filter_map(|index| row.get(*index))
                 .map(|v| v.trim()).filter(|v| !v.is_empty()).collect::<Vec<_>>().join(" "),
             &|_, _, _, _| {}, &AtomicBool::new(false))?;

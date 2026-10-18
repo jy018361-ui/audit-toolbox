@@ -24,10 +24,9 @@ fn check(cancel: &AtomicBool) -> Result<(), AppError> {
     crate::resource_budget::check_available_if_managed()
 }
 
-/// All inputs share one budget, including intermediates and decompressed OOXML.
-/// A failure to estimate selects the safe path, never whole-table fallback.
+/// Small working sets retain the ordinary reader independently of host pressure.
+/// Larger/unknown working sets still require the dynamic disk-worker policy.
 pub(crate) fn should_use_disk(paths: &[&Path], working_factor: u64) -> bool {
-    let Ok(budget) = crate::resource_budget::budget() else { return true; };
     let mut seen = HashSet::new();
     let mut estimates = Vec::with_capacity(paths.len());
     for path in paths {
@@ -37,7 +36,18 @@ pub(crate) fn should_use_disk(paths: &[&Path], working_factor: u64) -> bool {
         let Some(bytes) = estimated_resident_bytes(path) else { return true; };
         estimates.push((meta.len(),bytes));
     }
-    decision(&estimates,budget.worker_bytes,working_factor)
+    decision_with_budget(&estimates, working_factor, || {
+        crate::resource_budget::budget().ok().map(|budget| budget.worker_bytes)
+    })
+}
+fn decision_with_budget(inputs: &[(u64, u64)], factor: u64, budget: impl FnOnce() -> Option<u64>) -> bool {
+    // 256 MiB is the existing minimum disk-worker budget. A complete task whose
+    // estimated peak fits its 65% threshold is small even on a busy host. Do not
+    // turn a failed worker-start check into a disk route for these ordinary reads.
+    if !decision(inputs, 256 * MIB, factor) {
+        return false;
+    }
+    budget().is_none_or(|worker| decision(inputs, worker, factor))
 }
 fn decision(inputs:&[(u64,u64)],worker:u64,factor:u64)->bool {
     let peak = inputs.iter().fold(0_u64,|total,(_,peak)| total.saturating_add(peak.saturating_mul(factor.max(1))));
@@ -101,6 +111,19 @@ pub(crate) fn for_each_source_row(
     visitor: impl FnMut(Vec<String>, usize) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
     for_each_source_row_with_style(path, sheet, cancel, false, visitor)
+}
+
+/// Read complete metadata columns without first writing a full-width row cache.
+/// Indexes and physical rows are unchanged; other formats retain their existing reader.
+pub(crate) fn for_each_source_row_projected(
+    path: &Path, sheet: &str, columns: &HashSet<usize>, cancel: &AtomicBool,
+    visitor: impl FnMut(Vec<String>, usize) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    check(cancel)?;
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xlsx") || e.eq_ignore_ascii_case("xlsm")) {
+        return xlsx::visit_projected(path, sheet, cancel, false, Some(columns), visitor);
+    }
+    for_each_source_row(path, Some(sheet), cancel, visitor)
 }
 pub(crate) fn for_each_source_row_with_style(
     path: &Path, sheet: Option<&str>, cancel: &AtomicBool, preserve_excel_dates: bool,
@@ -169,7 +192,7 @@ pub(crate) struct DiskTable {
     pub(crate) row_count: usize,
     db: Connection,
 }
-fn fingerprint(path: &Path, sheet: &str, row: usize, depth: usize) -> Result<String, AppError> {
+pub(crate) fn fingerprint(path: &Path, sheet: &str, row: usize, depth: usize) -> Result<String, AppError> {
     let meta = fs::metadata(path).map_err(io)?;
     let identity = (fs::canonicalize(path).map_err(io)?, meta.len(), meta.modified().map_err(io)?.duration_since(UNIX_EPOCH).map_err(io)?.as_nanos(), sheet, row, depth, 3);
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(&identity).map_err(io)?)))
@@ -272,6 +295,34 @@ impl DiskTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn small_working_set_does_not_request_a_worker_budget() {
+        // The reported FX2 workbook is about 2 MiB compressed and its base
+        // resident estimate is about 70 MiB. Small combined inputs also qualify.
+        for inputs in [vec![(2 * MIB, 71 * MIB)], vec![(MIB, 30 * MIB), (MIB, 40 * MIB)]] {
+            assert!(!decision_with_budget(&inputs, 1, || panic!("小文件不应申请大文件启动预算")));
+        }
+        assert!(!decision_with_budget(&[(MIB, 10 * MIB)], 12, || panic!("小工作集不应申请大文件启动预算")));
+        let boundary = 256 * MIB * 65 / 100;
+        assert!(!decision_with_budget(&[(MIB, boundary)], 1, || panic!("边界内仍是小工作集")));
+        assert!(decision_with_budget(&[(MIB, boundary + 1)], 1, || None));
+    }
+    #[test]
+    fn large_decompressed_or_combined_working_sets_keep_dynamic_protection() {
+        // A tiny compressed XLSX may expand dramatically; raw size alone must
+        // never exempt it. The sum and tool intermediates still count as well.
+        for (inputs, factor) in [
+            (vec![(MIB, 300 * MIB)], 1),
+            (vec![(MIB, 90 * MIB), (MIB, 90 * MIB)], 1),
+            (vec![(MIB, 20 * MIB)], 12),
+            (vec![(2 * GIB, MIB)], 1),
+        ] {
+            assert!(decision_with_budget(&inputs, factor, || None));
+        }
+        assert!(!decision_with_budget(&[(MIB, 300 * MIB)], 1, || Some(GIB)));
+        assert!(decision_with_budget(&[(MIB, 300 * MIB)], 1, || Some(256 * MIB)));
+        assert!(decision_with_budget(&[(2 * GIB, MIB)], 1, || Some(64 * GIB)));
+    }
     #[test]
     fn combined_input_budget_includes_all_files_and_module_working_set(){
         assert!(!decision(&[(10,300)],1000,1));

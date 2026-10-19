@@ -2656,6 +2656,10 @@ pub(crate) fn merge_consistent_header(value: &str) -> String {
 
 pub(crate) fn merge_headers(raw: &[Vec<String>], width: usize) -> Vec<String> {
     let mut upper = raw.first().cloned().unwrap_or_default();
+    // 流式读取的上层行可能只写到合并单元格左端，先补齐再横向延续。
+    if raw.len() > 1 {
+        upper.resize(width, String::new());
+    }
     let mut carry = String::new();
     for value in &mut upper {
         if value.trim().is_empty() {

@@ -153,6 +153,7 @@ fn dep_review(params: Value) -> Result<Value, AppError> {
     let payload = dep_llm_payload(&table, &mapping);
     let system = "你是固定资产折旧测算字段映射复核助手。只能使用 payload.file2.headers 中的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}]}。suggested_mapping 必须是 JSON 对象，例如 {\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep；file_side 固定为 file2；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因表头规整就宣称全部映射正确。已有映射必须结合 samples 逐项复核：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side=file2，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组。";
     let system = format!("{system}\n{}depreciation 表示截至期末的累计折旧余额，供累计折旧差异测算使用，绝不是当月、上月、本年或本期计提额；current_year_dep 表示本年度累计计提额。不得因月度样例金额看起来合理，就把 depreciation 从累计折旧列替换为当月折旧列。逐项检查，但只输出需要调整的项目；相容的 keep 项不逐条输出，没有可信候选的未映射项维持空缺。同一调整只放在 suggestions 或 fieldReviews 中一次，reason 最多一句话。", fa::FA_DATE_REVIEW_INSTRUCTION);
+    let system = format!("{system}{}", fa::FA_NORMALIZATION_REVIEW_INSTRUCTION);
     let content = fa::request_fa_llm(&settings, &system, &payload.to_string())?;
     let parsed = fa::parse_llm_json(&content).ok_or_else(|| {
         error(
@@ -269,7 +270,8 @@ fn dep_finalize_review(parsed: Value, payload: Value) -> Value {
         .filter_map(|mut item| {
             fa::sanitize_llm_review_item(&mut item, &payload);
             dep_sanitize_depreciation_scope(&mut item);
-            dep_review_item_is_applicable(&mut item).then_some(item)
+            (fa::llm_review_preserves_normalized_columns(&mut item, &payload)
+                && dep_review_item_is_applicable(&mut item)).then_some(item)
         })
         .collect::<Vec<_>>();
     let mut reviews = parsed
@@ -282,7 +284,8 @@ fn dep_finalize_review(parsed: Value, payload: Value) -> Value {
         .filter_map(|mut item| {
             fa::sanitize_llm_review_item(&mut item, &payload);
             dep_sanitize_depreciation_scope(&mut item);
-            dep_review_item_is_applicable(&mut item).then_some(item)
+            (fa::llm_review_preserves_normalized_columns(&mut item, &payload)
+                && dep_review_item_is_applicable(&mut item)).then_some(item)
         })
         .collect::<Vec<_>>();
     for mut fallback in fa::local_unmapped_suggestions(&payload) {
@@ -372,7 +375,9 @@ fn dep_export(
         ));
     }
     progress("load", 0, 3, "正在读取期末固定资产清单");
-    let use_disk=params.get("__forceDisk").and_then(Value::as_bool).unwrap_or(false) || crate::disk_table::should_use_disk(&[&path],8);
+    // 单文件测算逐行写出公式，没有两期连接和合并行，只计源表读取工作集。
+    let use_disk=params.get("__forceDisk").and_then(Value::as_bool).unwrap_or(false)
+        || fa::resources::uses_disk(&[(&path, params.get("sheet").and_then(Value::as_str))], fa::resources::Phase::Read);
     let (table,disk)=if use_disk {
         let (table,disk)=fa::disk::load_input(&path,params.get("sheet").and_then(Value::as_str),fa::optional_header(&params,"headerRow")?,progress,&cancel)?;
         (table,Some(disk))
@@ -1504,6 +1509,22 @@ mod tests {
         assert!(value["message"].as_str().unwrap().contains("未启用"));
         assert_eq!(value["autoApplied"], json!([]));
         assert_eq!(value["fieldReviews"], json!([]));
+    }
+
+    #[test]
+    fn dep_review_keeps_year_life_and_residual_amount_normalization() {
+        let payload = json!({"file2":{
+            "headers":["计划使用年","累计折旧月份","残值","残值率"],
+            "mapping":{"life":"计划使用年","residualRate":"残值"}
+        }});
+        let reviewed = dep_finalize_review(json!({"suggestions":[
+            {"role":"life","file_side":"file2","suggested_column":"累计折旧月份","action":"replace","confidence":0.99}
+        ],"fieldReviews":[
+            {"role":"residual","suggested_mapping":{"file2":"残值率"},"action":"replace","confidence":0.99}
+        ]}), payload);
+        assert_eq!(reviewed["autoApplied"], json!([]));
+        assert_eq!(reviewed["fieldReviews"], json!([]));
+        assert_eq!(reviewed["passed"], true);
     }
 
     #[test]

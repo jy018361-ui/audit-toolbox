@@ -27,13 +27,19 @@ fn check(cancel: &AtomicBool) -> Result<(), AppError> {
 /// Small working sets retain the ordinary reader independently of host pressure.
 /// Larger/unknown working sets still require the dynamic disk-worker policy.
 pub(crate) fn should_use_disk(paths: &[&Path], working_factor: u64) -> bool {
+    let sources = paths.iter().map(|path| (*path, None)).collect::<Vec<_>>();
+    should_use_disk_for_sheets(&sources, working_factor)
+}
+
+/// 指定工作表时只估算该表及工作簿共享字符串；未知选表时保守估算整本。
+pub(crate) fn should_use_disk_for_sheets(sources: &[(&Path, Option<&str>)], working_factor: u64) -> bool {
     let mut seen = HashSet::new();
-    let mut estimates = Vec::with_capacity(paths.len());
-    for path in paths {
+    let mut estimates = Vec::with_capacity(sources.len());
+    for &(path, sheet) in sources {
         let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        if !seen.insert(canonical) { continue; }
+        if !seen.insert((canonical, sheet)) { continue; }
         let Ok(meta) = fs::metadata(path) else { return true; };
-        let Some(bytes) = estimated_resident_bytes(path) else { return true; };
+        let Some(bytes) = estimated_sheet_resident_bytes(path, sheet) else { return true; };
         estimates.push((meta.len(),bytes));
     }
     decision_with_budget(&estimates, working_factor, || {
@@ -41,9 +47,7 @@ pub(crate) fn should_use_disk(paths: &[&Path], working_factor: u64) -> bool {
     })
 }
 fn decision_with_budget(inputs: &[(u64, u64)], factor: u64, budget: impl FnOnce() -> Option<u64>) -> bool {
-    // 256 MiB is the existing minimum disk-worker budget. A complete task whose
-    // estimated peak fits its 65% threshold is small even on a busy host. Do not
-    // turn a failed worker-start check into a disk route for these ordinary reads.
+    // 小工作集保持普通路径；超过此参考值仅选择磁盘处理，不拒绝任务启动。
     if !decision(inputs, 256 * MIB, factor) {
         return false;
     }
@@ -56,6 +60,10 @@ fn decision(inputs:&[(u64,u64)],worker:u64,factor:u64)->bool {
 }
 
 pub(crate) fn estimated_resident_bytes(path: &Path) -> Option<u64> {
+    estimated_sheet_resident_bytes(path, None)
+}
+
+fn estimated_sheet_resident_bytes(path: &Path, sheet: Option<&str>) -> Option<u64> {
     let size = fs::metadata(path).ok()?.len();
     if crate::spreadsheet_input::is_text(path) {
         if size <= 64 * MIB { return Some(size.saturating_mul(6)); }
@@ -70,15 +78,24 @@ pub(crate) fn estimated_resident_bytes(path: &Path) -> Option<u64> {
         return Some(size.saturating_add(rows.saturating_mul(32)).saturating_add(cells.saturating_mul(32)).saturating_mul(5).div_ceil(2));
     }
     if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("xlsx") || x.eq_ignore_ascii_case("xlsm")) {
+        let target = match sheet.filter(|name| !name.trim().is_empty()) {
+            Some(sheet) => Some(crate::fx::xlsx_sheet_entries(path).ok()?.into_iter()
+                .find(|(name, _)| name == sheet)?.1),
+            None => None,
+        };
         let mut zip = zip::ZipArchive::new(fs::File::open(path).ok()?).ok()?;
         let mut xml_bytes = 0_u64;
         for index in 0..zip.len() {
             let entry = zip.by_index(index).ok()?;
-            if entry.name().starts_with("xl/worksheets/") || entry.name() == "xl/sharedStrings.xml" {
+            let worksheet = target.as_deref().map_or_else(
+                || entry.name().starts_with("xl/worksheets/"),
+                |target| entry.name() == target,
+            );
+            if worksheet || entry.name() == "xl/sharedStrings.xml" {
                 xml_bytes = xml_bytes.saturating_add(entry.size());
             }
         }
-        return Some(xml_bytes.max(size).saturating_mul(4));
+        return Some(if target.is_some() { xml_bytes } else { xml_bytes.max(size) }.saturating_mul(4));
     }
     Some(size.saturating_mul(12))
 }
@@ -194,7 +211,7 @@ pub(crate) struct DiskTable {
 }
 pub(crate) fn fingerprint(path: &Path, sheet: &str, row: usize, depth: usize) -> Result<String, AppError> {
     let meta = fs::metadata(path).map_err(io)?;
-    let identity = (fs::canonicalize(path).map_err(io)?, meta.len(), meta.modified().map_err(io)?.duration_since(UNIX_EPOCH).map_err(io)?.as_nanos(), sheet, row, depth, 3);
+    let identity = (fs::canonicalize(path).map_err(io)?, meta.len(), meta.modified().map_err(io)?.duration_since(UNIX_EPOCH).map_err(io)?.as_nanos(), sheet, row, depth, 4);
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(&identity).map_err(io)?)))
 }
 impl DiskTable {
@@ -296,6 +313,38 @@ impl DiskTable {
 mod tests {
     use super::*;
     #[test]
+    fn selected_sheet_estimate_excludes_other_sheets_but_keeps_shared_strings() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("多工作表.xlsx");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&input).unwrap());
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, body) in [
+            ("xl/workbook.xml", "<workbook><sheets><sheet name=\"资产\" r:id=\"r1\"/><sheet name=\"其他\" r:id=\"r2\"/></sheets></workbook>"),
+            ("xl/_rels/workbook.xml.rels", "<Relationships><Relationship Id=\"r1\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"r2\" Target=\"worksheets/sheet2.xml\"/></Relationships>"),
+            ("xl/worksheets/sheet1.xml", "<worksheet><sheetData/></worksheet>"),
+            ("xl/sharedStrings.xml", "<sst><si><t>共享名称</t></si></sst>"),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(body.as_bytes()).unwrap();
+        }
+        archive.start_file("xl/worksheets/sheet2.xml", options).unwrap();
+        for _ in 0..256 { archive.write_all(&[b' '; 65536]).unwrap(); }
+        archive.finish().unwrap();
+        let small = estimated_sheet_resident_bytes(&input, Some("资产")).unwrap();
+        assert_eq!(small, ("<worksheet><sheetData/></worksheet>".len() + "<sst><si><t>共享名称</t></si></sst>".len()) as u64 * 4);
+        assert!(estimated_resident_bytes(&input).unwrap() > 64 * MIB);
+        assert!(estimated_sheet_resident_bytes(&input, Some("不存在")).is_none());
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total: 16 * GIB, available: 158 * GIB / 100, commit_available: 8 * GIB,
+        }, || {
+            assert!(!should_use_disk_for_sheets(&[(&input, Some("资产"))], 12));
+            assert!(should_use_disk_for_sheets(&[(&input, Some("其他"))], 12));
+            assert!(should_use_disk_for_sheets(&[(&input, Some("资产")), (&input, Some("其他"))], 12));
+        });
+    }
+
+    #[test]
     fn small_working_set_does_not_request_a_worker_budget() {
         // The reported FX2 workbook is about 2 MiB compressed and its base
         // resident estimate is about 70 MiB. Small combined inputs also qualify.
@@ -332,6 +381,38 @@ mod tests {
         assert!(decision(&[(2*GIB,1)],64*GIB,1));
         assert!(decision(&[(10,u64::MAX)],1000,u64::MAX));
     }
+    #[test]
+    fn disk_table_ragged_group_headers_match_rectangular_input_and_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected = ["基础信息-编号", "基础信息-名称", "金额-原值", "金额-累计折旧"];
+        for extension in ["csv", "xlsx"] {
+            let path = dir.path().join(format!("分组表头.{extension}"));
+            if extension == "csv" {
+                fs::write(&path, "基础信息,,金额\n编号,名称,原值,累计折旧\n0001,设备,100,10\n").unwrap();
+            } else {
+                let mut book = rust_xlsxwriter::Workbook::new();
+                let sheet = book.add_worksheet();
+                sheet.write_string(0, 0, "基础信息").unwrap();
+                sheet.write_string(0, 2, "金额").unwrap();
+                for (r, values) in [(1, ["编号", "名称", "原值", "累计折旧"]), (2, ["0001", "设备", "100", "10"])] {
+                    for (c, value) in values.iter().enumerate() {
+                        sheet.write_string(r, c as u16, *value).unwrap();
+                    }
+                }
+                book.save(&path).unwrap();
+            }
+            for _ in 0..2 {
+                let table = DiskTable::open(&path, None, 1, 2, &|_,_,_,_|{}, &AtomicBool::new(false)).unwrap();
+                assert_eq!(table.headers, expected);
+                assert_eq!(table.row_count, 1);
+                table.visit(&AtomicBool::new(false), |row, _| {
+                    assert_eq!(row, ["0001", "设备", "100", "10"]);
+                    Ok(())
+                }).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn disk_table_keeps_sparse_physical_rows_dates_and_reuses_cache() {
         let dir = tempfile::tempdir().unwrap();

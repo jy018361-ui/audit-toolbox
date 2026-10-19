@@ -346,6 +346,12 @@ fn fa_xlsx_prefix_matrix(prefix: &str, shared: &[String]) -> Vec<Vec<String>> {
         let Some((row_xml, _)) = fragment.split_once("</row>") else {
             break;
         };
+        // 空行常不写入 XML，不能把第 3 行表头压成第 1 行。
+        let physical = fa_xml_attribute(row_xml, "r")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| (1..=1_048_576).contains(value))
+            .unwrap_or(sparse.len() + 1);
+        sparse.resize_with(physical.saturating_sub(1).max(sparse.len()), Vec::new);
         let mut cells = Vec::<(usize, String)>::new();
         for cell in row_xml.split("<c ").skip(1) {
             let Some((cell_xml, _)) = cell.split_once("</c>") else {
@@ -415,7 +421,7 @@ fn fa_auto_sheet_memo_path(path: &Path, header: Option<usize>) -> Option<PathBuf
     hasher.update(meta.len().to_le_bytes());
     hasher.update(modified.to_le_bytes());
     hasher.update(header.unwrap_or(0).to_le_bytes());
-    hasher.update(b"fa-auto-sheet-v1");
+    hasher.update(b"fa-auto-sheet-v2-physical-origin");
     let key = hex::encode(hasher.finalize());
     Some(
         crate::tabular::cache_root()
@@ -528,7 +534,7 @@ fn prefix_cache_path(path: &Path, sheet: Option<&str>, header: Option<usize>) ->
     hasher.update(modified.to_le_bytes());
     hasher.update(sheet.unwrap_or("<auto>").as_bytes());
     hasher.update(header.unwrap_or(0).to_le_bytes());
-    hasher.update(b"fa-prefix-table-v1");
+    hasher.update(b"fa-prefix-table-v2-physical-origin");
     let key = hex::encode(hasher.finalize());
     Some(
         crate::tabular::cache_root()

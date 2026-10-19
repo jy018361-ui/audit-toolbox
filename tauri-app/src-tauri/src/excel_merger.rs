@@ -812,15 +812,13 @@ fn params_have_excel_input(value: &Value) -> bool {
 /// 内存保护统一跟随大文件磁盘分流，不再仅凭文本文件超过 1 GiB 单独开启。
 fn memory_protected_job(method: &str, params: &Value) -> bool {
     if !memory_protected_method(method) { return false; }
+    if method.starts_with("fa.") && !method.starts_with("fa.tbje_") {
+        return crate::fa::resources::job_uses_disk(method, params);
+    }
     let mut paths = HashSet::new();
     collect_input_paths(params, &mut paths);
-    if method.starts_with("fa.dep_") {
-        if let Some(path) = params.get("path").and_then(Value::as_str) { paths.insert(path.into()); }
-    }
     let paths = paths.iter().filter(|p| p.is_file()).map(PathBuf::as_path).collect::<Vec<_>>();
     let factor = if method.starts_with("fa.tbje_") { 8 }
-        else if method.starts_with("fa.dep_") { 8 }
-        else if method.starts_with("fa.") { 12 }
         else if method.starts_with("fuzzy.") || method.starts_with("deposit.") { 2 }
         else if method.starts_with("loan.") || method.starts_with("tbje_check.") || method.starts_with("fx.") { 4 }
         else { 1 };

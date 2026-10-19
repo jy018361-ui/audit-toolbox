@@ -205,7 +205,7 @@ fn load_generic(source: &SourceParams, progress: Progress<'_>, cancel: &AtomicBo
     let path = Path::new(&source.input_path);
     let table = crate::disk_table::DiskTable::open(path, source.sheet.as_deref(), source.header_row, source.header_depth, progress, cancel)?;
     let key = fingerprint(path, &table.sheet, table.header_row, table.header_depth)?;
-    let output = cache_path("ledger-stream-formats-v1", &key)?.with_extension("sqlite");
+    let output = cache_path("ledger-stream-formats-v2-header-width", &key)?.with_extension("sqlite");
     fs::create_dir_all(output.parent().unwrap()).map_err(io_error)?;
     if let Ok(mut cache) = read_cache(&output, path) {
         cache.table.sheet = table.sheet;

@@ -27,6 +27,8 @@ use crate::excel_merger::PauseCheckpoint;
 mod disk_rows;
 #[path = "fa_disk.rs"]
 pub(crate) mod disk;
+#[path = "fa_resources.rs"]
+pub(crate) mod resources;
 pub(crate) use disk_rows::JoinedRows;
 
 pub(crate) type Progress<'a> = &'a dyn Fn(&str, usize, usize, &str);
@@ -70,7 +72,7 @@ fn load_interactive_table(
     header: Option<usize>,
     choose_best: bool,
 ) -> Result<Table, AppError> {
-    if crate::disk_table::should_use_disk(&[path],12) {
+    if resources::uses_disk(&[(path, sheet)], resources::Phase::Read) {
         return disk::load_review(path,sheet,header,choose_best);
     }
     match crate::fa_sheet_pick::load_prefix_table(path, sheet, header, choose_best) {
@@ -255,7 +257,7 @@ fn inspect(params: Value) -> Result<Value, AppError> {
     // （与整表实现的口径逐字一致），并让后续手工调键/复核也用上整表。
     let prefix_only = begin.rows.len() < begin.row_count || end.rows.len() < end.row_count;
     if prefix_only
-        && !crate::disk_table::should_use_disk(&[&begin.path,&end.path],12)
+        && !resources::uses_disk(&[(&begin.path, begin.sheet.as_deref()), (&end.path, end.sheet.as_deref())], resources::Phase::Read)
         && (begin_keys != suggested_begin_keys
             || end_keys != suggested_end_keys
             || key_pairing
@@ -428,7 +430,7 @@ fn column_contains(table: &Table, index: usize, sample: &str) -> bool {
     if sample.is_empty() {
         return false;
     }
-    if table.rows.len()<table.row_count && crate::disk_table::should_use_disk(&[&table.path],12) {
+    if table.rows.len()<table.row_count && resources::uses_disk(&[(&table.path, table.sheet.as_deref())], resources::Phase::Read) {
         return disk::column_contains(table,index,sample).unwrap_or(false);
     }
     table
@@ -455,7 +457,7 @@ fn key_columns_intersect(begin: &Table, b_index: usize, end: &Table, e_index: us
         }
     }
     let deep = |table: &Table, index: usize, sample: Option<&str>| -> bool {
-        if table.rows.len()<table.row_count && crate::disk_table::should_use_disk(&[&table.path],12) {
+        if table.rows.len()<table.row_count && resources::uses_disk(&[(&table.path, table.sheet.as_deref())], resources::Phase::Read) {
             return sample.is_some_and(|value|disk::column_contains(table,index,value).unwrap_or(false));
         }
         sample
@@ -688,7 +690,7 @@ fn supplement_inspect(params: Value) -> Result<Value, AppError> {
             )?;
             // 键推断要拿参照表键列的全量值做成员证明：前缀表上定向抽列补深，
             // 补不动（非 xlsx 等）就退整表，证明口径不变。
-            if reference.rows.len() < reference.row_count && !crate::disk_table::should_use_disk(&[&reference.path],12) {
+            if reference.rows.len() < reference.row_count && !resources::uses_disk(&[(&reference.path, reference.sheet.as_deref())], resources::Phase::Read) {
                 let indexes: Vec<usize> = references
                     .iter()
                     .filter_map(|key| {
@@ -807,7 +809,7 @@ fn infer_supplement_keys_by_samples(
     else {
         return Vec::new();
     };
-    let disk_reference=crate::disk_table::should_use_disk(&[&reference.path],12);
+    let disk_reference=resources::uses_disk(&[(&reference.path, reference.sheet.as_deref())], resources::Phase::Read);
     let reference_values = reference_indexes
         .iter()
         .map(|index| {
@@ -895,11 +897,11 @@ fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
     let system = if supplement {
         "你是固定资产审计补充清单映射复核助手。只能使用 payload.headers 中的原始列名。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"新增方式\"}，禁止返回字符串。新增清单角色仅 addition_method/addition_date，file_side=file1；处置清单角色仅 disposal_method/disposal_date/disposal_orig/disposal_dep，file_side=file2。action 只能 fill/replace/clear/keep。逐项结合样例复核已有映射：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。新增与处置各角色（新增方式/新增日期/处置方式/处置日期/处置原值/处置折旧）仅在 headers 中存在唯一可信候选列时才输出补齐建议；存在多个竞争候选时不输出建议、保持未映射，不得强行猜一个。"
     } else {
-        "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项结合 samples 核对：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。类别列应为少量重复的分类文本；若已映射类别列的 samples 多数是 Y110、A12-3 这类短字母数字代码而非类别文字，且 headers 中存在值为类别文字的列（例如 资产类型描述），必须返回 action=replace 指向该列，不得 keep。原值/折旧/残值率应为数值，日期列为日期，寿命为月数。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。可选角色（开始使用日期/使用寿命/残值率/本年折旧/新增方式/新增日期）仅在 headers 中存在唯一可信候选列时才输出补齐建议；存在多个竞争候选时不输出建议、保持未映射，不得强行猜一个。"
+        "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项结合 samples 核对：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。类别列应为少量重复的分类文本；若已映射类别列的 samples 多数是 Y110、A12-3 这类短字母数字代码而非类别文字，且 headers 中存在值为类别文字的列（例如 资产类型描述），必须返回 action=replace 指向该列，不得 keep。原值/折旧应为数值，日期列为日期；寿命与残值字段按下述程序归一规则复核。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。可选角色（开始使用日期/使用寿命/残值率/本年折旧/新增方式/新增日期）仅在 headers 中存在唯一可信候选列时才输出补齐建议；存在多个竞争候选时不输出建议、保持未映射，不得强行猜一个。"
     };
     // 全量检查，只输出调整项，避免几十条 keep 和重复建议拖慢生成。
     let key_instruction = if supplement { "" } else { "公司名称、企业名称、单位名称等表头自动识别为现有资产ID角色，不是独立字段角色，不需要重复编号等前置条件。不得因为含公司或名称就排除这些 ID 列。资产ID可多列，保留其他已有ID列；需要补充公司名称 ID 列时在 matchReview 中返回两侧对应的 suggested_file1_columns/suggested_file2_columns。" };
-    let compact_system = format!("{system}\n{key_instruction}{FA_DATE_REVIEW_INSTRUCTION}逐项检查后只输出需要调整的项目；相容的 keep 项、没有可信候选的未映射项不逐条输出。同一调整仅放在 suggestions 或 fieldReviews 中一次。reason 最多一句话。匹配键无需调整时 matchReview 只返回 {{\"action\":\"keep\"}}。");
+    let compact_system = format!("{system}\n{key_instruction}{FA_DATE_REVIEW_INSTRUCTION}{FA_NORMALIZATION_REVIEW_INSTRUCTION}逐项检查后只输出需要调整的项目；相容的 keep 项、没有可信候选的未映射项不逐条输出。同一调整仅放在 suggestions 或 fieldReviews 中一次。reason 最多一句话。匹配键无需调整时 matchReview 只返回 {{\"action\":\"keep\"}}。");
     let started = std::time::Instant::now();
     let text = payload.to_string();
     let content = request_fa_llm(&settings, &compact_system, &text)?;
@@ -923,7 +925,8 @@ fn finalize_llm_review(parsed: Value, payload: Value, supplement: bool) -> Value
         .into_iter()
         .filter_map(|mut item| {
             sanitize_llm_review_item(&mut item, &payload);
-            llm_review_item_is_applicable(&mut item, supplement).then_some(item)
+            (llm_review_preserves_normalized_columns(&mut item, &payload)
+                && llm_review_item_is_applicable(&mut item, supplement)).then_some(item)
         })
         .collect::<Vec<_>>();
     let mut auto = Vec::new();
@@ -936,7 +939,8 @@ fn finalize_llm_review(parsed: Value, payload: Value, supplement: bool) -> Value
         .into_iter()
         .filter_map(|mut item| {
             sanitize_llm_review_item(&mut item, &payload);
-            llm_review_item_is_applicable(&mut item, supplement).then_some(item)
+            (llm_review_preserves_normalized_columns(&mut item, &payload)
+                && llm_review_item_is_applicable(&mut item, supplement)).then_some(item)
         })
         .collect::<Vec<_>>();
     for fallback in local_unmapped_suggestions(&payload) {
@@ -1349,6 +1353,50 @@ fn llm_date_column_is_compatible(payload: &Value, side: &str, column: &str) -> b
         parse_fa_date(value).is_some_and(|date| (1900..=2100).contains(&date.year()))
     }).count();
     !values.is_empty() && valid * 5 >= values.len() * 4
+}
+
+pub(crate) const FA_NORMALIZATION_REVIEW_INSTRUCTION: &str = "使用寿命可来自总使用年限或总使用月数，年转月由程序完成；累计折旧月份、已折旧月份、剩余折旧月份不是总使用寿命，禁止仅为取得月数而换列。残值率允许小数或百分数，也允许映射残值金额并由程序除以原值换算。已映射的正确寿命或残值字段无需因单位、百分数或金额形式而替换、清除或提示复核；仍可补齐未映射角色、纠正字段含义错误。";
+
+/// 对程序可归一的现有字段保留原映射；不能依赖模型对其自身理由的分类。
+/// 只保护具有明确语义的表头，误映射到累计/剩余月数等列仍可纠正。
+pub(crate) fn llm_review_preserves_normalized_columns(item: &mut Value, payload: &Value) -> bool {
+    let key = match item.get("role").and_then(Value::as_str) {
+        Some("life") => "life",
+        Some("residual") => "residualRate",
+        _ => return true,
+    };
+    for side in ["file1", "file2"] {
+        let Some(header) = payload.get(side).and_then(|v| v.get("mapping"))
+            .and_then(|v| v.get(key)).and_then(Value::as_str) else { continue; };
+        let h = normalize_header(header).to_lowercase();
+        let compatible = if key == "life" {
+            !["累计", "剩余", "已提", "已折旧", "remaining", "elapsed"].iter().any(|v| h.contains(v))
+                && ["寿命", "使用年", "使用月", "计划使用", "折旧年限", "预计年限", "预计使用期间数", "usefullife"].iter().any(|v| h.contains(v))
+        } else {
+            ["残值", "residual", "salvage"].iter().any(|v| h.contains(v))
+        };
+        if !compatible { continue; }
+        let explicit_side = item.get("file_side").and_then(Value::as_str) == Some(side);
+        let single_file_default = side == "file2" && payload.get("file1").is_none()
+            && item.get("file_side").is_none() && item.get("suggested_mapping").is_none();
+        let had_mapping = item.get("suggested_mapping").is_some();
+        if let Some(mapping) = item.get_mut("suggested_mapping").and_then(Value::as_object_mut) {
+            mapping.remove(side);
+        }
+        if explicit_side || single_file_default {
+            if let Some(object) = item.as_object_mut() {
+                object.remove("file_side");
+                object.remove("suggested_column");
+            }
+            if !item.get("suggested_mapping").and_then(Value::as_object).is_some_and(|m| !m.is_empty()) {
+                return false;
+            }
+        }
+        if had_mapping && item.get("suggested_mapping").and_then(Value::as_object).is_some_and(|m| m.is_empty()) {
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
@@ -2063,7 +2111,7 @@ pub(crate) fn merge(
         ));
     }
     if params.get("__forceDisk").and_then(Value::as_bool).unwrap_or(false)
-        || crate::disk_table::should_use_disk(&[&begin_path, &end_path], 12) {
+        || resources::pair_uses_disk(params, resources::Phase::Match) {
         return disk::merge(params, progress, cancel, begin_keys, end_keys);
     }
     progress("load", 0, 4, "正在读取期初固定资产清单");
@@ -2886,10 +2934,14 @@ pub(crate) fn load_table(
         let range = workbook
             .worksheet_range(sheet)
             .map_err(|e| error("FA_LOAD_FAILED", "无法读取工作表。", Some(e.to_string())))?;
-        let matrix = range
-            .rows()
-            .map(|r| r.iter().map(data_string).collect::<Vec<_>>())
-            .collect::<Vec<_>>();
+        // Calamine 的范围从首个非空单元格开始；标题行及列位仍是 Excel 物理坐标。
+        let (start_row, start_col) = range.start().unwrap_or((0, 0));
+        let mut matrix = vec![Vec::new(); start_row as usize];
+        matrix.extend(range.rows().map(|cells| {
+            let mut row = vec![String::new(); start_col as usize];
+            row.extend(cells.iter().map(data_string));
+            row
+        }));
         let judgement = crate::fa_sheet_pick::auto_sheet_judge(path, sheet, pos, &matrix, header);
         let take = best
             .as_ref()
@@ -8366,6 +8418,49 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn llm_keeps_normalizable_life_and_residual_columns() {
+        for (role, key, header, replacement) in [
+            ("life", "life", "计划使用年", "累计折旧月份"),
+            ("life", "life", "使用寿命(月)", "剩余折旧月份"),
+            ("residual", "residualRate", "残值", "残值率"),
+            ("residual", "residualRate", "残值率", "残值"),
+        ] {
+            let payload = json!({
+                "file1":{"headers":[header,replacement],"mapping":{key:header}},
+                "file2":{"headers":[header,replacement],"mapping":{key:header}}
+            });
+            for field in ["suggestions", "fieldReviews"] {
+                for side in ["file1", "file2"] {
+                    for item in [
+                        json!({"role":role,"file_side":side,"suggested_column":replacement,"action":"replace","confidence":0.99}),
+                        json!({"role":role,"suggested_mapping":{side:replacement},"action":"replace","confidence":0.99}),
+                        json!({"role":role,"file_side":side,"action":"clear","confidence":0.99}),
+                    ] {
+                        let reviewed = finalize_llm_review(json!({field:[item]}), payload.clone(), false);
+                        assert_eq!(reviewed["autoApplied"], json!([]));
+                        assert_eq!(reviewed["fieldReviews"], json!([]), "{role} {side} {field}");
+                        assert_eq!(reviewed["passed"], true);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn llm_can_fill_missing_units_and_correct_semantically_wrong_life() {
+        let payload = json!({
+            "file1":{"headers":["计划使用年"],"mapping":{"life":"计划使用年"}},
+            "file2":{"headers":["计划使用年","累计折旧月份","残值"],"mapping":{"life":"累计折旧月份"}}
+        });
+        let reviewed = finalize_llm_review(json!({"suggestions":[
+            {"role":"life","suggested_mapping":{"file1":"计划使用年","file2":"计划使用年"},"action":"replace","confidence":0.99},
+            {"role":"residual","file_side":"file2","suggested_column":"残值","action":"fill","confidence":0.99}
+        ]}), payload, false);
+        assert_eq!(reviewed["autoApplied"][0]["suggested_column"], "残值");
+        assert_eq!(reviewed["fieldReviews"][0]["suggested_mapping"], json!({"file2":"计划使用年"}));
+    }
+
     #[test]
     fn llm_contract_auto_applies_high_confidence_and_preserves_match_review() {
         let value = finalize_llm_review(

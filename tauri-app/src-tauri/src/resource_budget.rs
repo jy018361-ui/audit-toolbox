@@ -24,8 +24,7 @@ pub(crate) struct MemoryBudget {
 }
 
 fn safety_reserve(total: u64) -> u64 {
-    // 忙碌主机仍至少给 Windows 留出约 10% 物理内存；上限避免大内存主机被
-    // 不必要地挡住。剩余余量仍留出 30% 吸收系统波动。
+    // 仅用于调节吞吐量，不是任务准入线；实际压力由运行期检查负责。
     (total / 10).clamp(GIB, 4 * GIB)
 }
 
@@ -34,23 +33,17 @@ pub(crate) fn plan(total: u64, available: u64, commit_available: u64) -> MemoryB
     let usable = |bytes: u64| bytes.saturating_sub(reserve).saturating_mul(7) / 10;
     let worker = (total / 3)
         .min(usable(available))
-        .min(usable(commit_available));
-    let batch = if worker < 256 * MIB {
-        0
-    } else {
-        (worker / 12).clamp(8 * MIB, 256 * MIB)
-    };
+        .min(usable(commit_available))
+        .max(16 * MIB);
+    // 预算很小时仍提供可推进的批次，不能把磁盘分流再次变成启动拒绝。
+    let batch = (worker / 12).clamp(256 * 1024, 256 * MIB);
     MemoryBudget {
         total_bytes: total,
         available_bytes: available,
         reserve_bytes: reserve,
         worker_bytes: worker,
         batch_bytes: batch,
-        sqlite_cache_kib: if batch == 0 {
-            0
-        } else {
-            (batch / 1024).clamp(16_384, 262_144)
-        },
+        sqlite_cache_kib: (batch / 1024).clamp(256, 262_144),
     }
 }
 
@@ -65,17 +58,10 @@ pub(crate) fn budget() -> Result<MemoryBudget, AppError> {
             reserve_bytes:memory.total/10, worker_bytes:256*MIB, batch_bytes:16*MIB, sqlite_cache_kib:16384 });
     }
     let memory = available()?;
-    let result = plan(memory.total, memory.available, memory.commit_available);
-    if result.worker_bytes < 256 * MIB {
-        return Err(failure(
-            "当前剩余内存不足以安全处理，请关闭其他大型程序后重试。",
-        ));
-    }
-    Ok(result)
+    Ok(plan(memory.total, memory.available, memory.commit_available))
 }
 
-/// 共享业务逻辑只在实际使用大文件磁盘模式时申请受保护预算。
-/// 普通内存路径既不查询系统余量，也不套用磁盘 worker 的最低启动门槛。
+/// 共享业务逻辑只在磁盘模式时申请批次预算，估算预算不决定任务准入。
 pub(crate) fn budget_for_disk(disk_mode: bool) -> Result<Option<MemoryBudget>, AppError> {
     if disk_mode { budget().map(Some) } else { Ok(None) }
 }
@@ -245,7 +231,7 @@ impl MemoryStatus {
     }
 
     pub(crate) fn can_start_worker(self) -> bool {
-        self.worker_bytes() >= 256 * MIB
+        !self.should_pause()
     }
 
     pub(crate) fn worker_bytes(self) -> u64 {
@@ -410,10 +396,14 @@ mod tests {
         assert_eq!(limits.job_memory, 0);
     }
     #[test]
-    fn ordinary_mode_skips_disk_memory_gate_but_disk_mode_keeps_it() {
+    fn ordinary_mode_skips_budget_and_disk_mode_uses_small_batches() {
         with_test_memory(MemoryStatus { total: 16 * GIB, available: 128 * MIB, commit_available: 128 * MIB }, || {
             assert!(budget_for_disk(false).unwrap().is_none());
-            assert_eq!(budget_for_disk(true).unwrap_err().code, "MEMORY_PROTECTION");
+            let disk = budget_for_disk(true).unwrap().unwrap();
+            assert!(disk.batch_bytes > 0 && disk.batch_bytes < 8 * MIB);
+            assert!(disk.sqlite_cache_kib > 0 && disk.sqlite_cache_kib < 16_384);
+            // 估算预算不拒绝分批；实际系统压力依旧阻止 worker 启动。
+            assert!(!memory_status().unwrap().can_start_worker());
         });
     }
     #[test]
@@ -441,9 +431,23 @@ mod tests {
             plan(64 * GIB, 48 * GIB, GIB),
             plan(0, 0, 0),
         ] {
-            assert_eq!(p.worker_bytes, 0);
-            assert_eq!(p.batch_bytes, 0);
+            assert_eq!(p.worker_bytes, 16 * MIB);
+            assert!(p.batch_bytes > 0 && p.batch_bytes < 8 * MIB);
         }
+    }
+
+    #[test]
+    fn worker_starts_below_estimated_reserve_and_scales_down() {
+        let memory = MemoryStatus { total: 16 * GIB, available: 158 * GIB / 100, commit_available: 8 * GIB };
+        assert!(memory.can_start_worker());
+        let small = plan(memory.total, memory.available, memory.commit_available);
+        let ample = plan(16 * GIB, 8 * GIB, 8 * GIB);
+        assert!(small.worker_bytes < 256 * MIB);
+        assert!(small.batch_bytes < ample.batch_bytes);
+        assert!(small.sqlite_cache_kib < ample.sqlite_cache_kib);
+        assert_eq!(parallelism_for(small.worker_bytes, 8), 1);
+        assert!(!MemoryStatus { available: 400 * MIB, ..memory }.can_start_worker());
+        assert!(!MemoryStatus { commit_available: 512 * MIB, ..memory }.can_start_worker());
     }
 
     #[test]

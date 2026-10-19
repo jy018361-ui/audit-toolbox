@@ -307,10 +307,13 @@ pub(crate) fn load(params: &Value) -> Option<LoadedSnapshot> {
     let started = Instant::now();
     let meta: Value = serde_json::from_str(&fs::read_to_string(&sidecar).ok()?).ok()?;
     if meta.get("version").and_then(Value::as_u64) == Some(2) { return load_disk(params, &meta, &dir.join(format!("{key}.sqlite"))); }
-    // 旧 v1 快照会整列物化；源文件已超预算时转入新的磁盘合并，不能先读旧快照。
-    let begin_path=Path::new(params.get("beginPath")?.as_str()?);
-    let end_path=Path::new(params.get("endPath")?.as_str()?);
-    if crate::disk_table::should_use_disk(&[begin_path,end_path],12) {return None;}
+    // 旧 v1 快照会整列物化。按快照实际保存的 Sheet 估算，当前页面改选表
+    // 不应改变“沿用上次匹配”的契约，也不能用小表估算实际要载入的大表。
+    let sources = [meta.get("beginTable")?, meta.get("endTable")?].map(|table| {
+        Some((Path::new(table.get("path")?.as_str()?), table.get("sheet").and_then(Value::as_str)))
+    });
+    let sources = sources.into_iter().collect::<Option<Vec<_>>>()?;
+    if crate::fa::resources::uses_disk(&sources, crate::fa::resources::Phase::Export) {return None;}
     let frame = ParquetReader::new(File::open(&parquet).ok()?).finish().ok()?;
     let source_column = strings_column(&frame, "source")?;
     let match_column = strings_column(&frame, "match_value")?;
@@ -545,6 +548,34 @@ mod tests {
             loaded.effective_params["endMapping"]["originalValue"],
             json!("原值")
         );
+    }
+
+    #[test]
+    fn snapshot_uses_stored_sheets_for_export_estimate() {
+        let dir = tempfile::tempdir().unwrap();
+        let begin = dir.path().join("期初.xlsx");
+        let end = dir.path().join("期末.xlsx");
+        for path in [&begin, &end] {
+            let mut book = rust_xlsxwriter::Workbook::new();
+            let sheet = book.add_worksheet();
+            sheet.set_name("资产").unwrap();
+            for (r, cells) in [["编号", "原值"], ["A1", "100"]].iter().enumerate() {
+                for (c, value) in cells.iter().enumerate() {
+                    sheet.write_string(r as u32, c as u16, *value).unwrap();
+                }
+            }
+            book.save(path).unwrap();
+        }
+        let mut params = params(&begin, &end);
+        params["beginSheet"] = json!("资产");
+        params["endSheet"] = json!("资产");
+        let result = merge(&params);
+        save(&params, &result);
+        params["beginSheet"] = json!("页面改选但尚未重新匹配");
+        let loaded = load(&params).expect("导出按快照实际选表估算并复用");
+        assert!(!loaded.matches_current);
+        assert_eq!(loaded.effective_params["beginSheet"], "资产");
+        assert_eq!(loaded.result.rows.len(), result.rows.len());
     }
 
     #[test]

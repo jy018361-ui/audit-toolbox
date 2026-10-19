@@ -478,7 +478,7 @@ pub(super) fn apply_supplements(
         })?;
         tx.commit().map_err(db_error)?;
     }
-    result.rows.try_edit(|row| {
+    super::disk_rows::edit_disk_rows(&path, |conn, row| {
         check_cancel(cancel)?;
         for field in ["新增方式_辅助_文件2","新增时间_辅助_文件2","处置方式_辅助_文件1","处置时间_辅助_文件1","处置原值_辅助_文件1","处置折旧_辅助_文件1"] {row.extra.remove(field);}
         let key=canonical_display_key(&row.match_value);
@@ -572,6 +572,109 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn disk_fa_matches_and_exports_below_previous_start_budget() {
+        for xlsx in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut params = fixture(dir.path(), xlsx);
+            let cancel = AtomicBool::new(false);
+            let expected = super::super::merge(&params, &|_, _, _, _| {}, &cancel).unwrap();
+            let memory_output = dir.path().join("普通.xlsx");
+            params["outputPath"] = json!(memory_output);
+            let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+            super::super::export(params.clone(), &|_, _, _, _| {}, Arc::new(AtomicBool::new(false)), &pause).unwrap();
+            params["__forceDisk"] = json!(true);
+            let disk_output = dir.path().join("分批.xlsx");
+            params["outputPath"] = json!(disk_output);
+            const GIB: u64 = 1024 * 1024 * 1024;
+            crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+                total: 16 * GIB, available: 158 * GIB / 100, commit_available: 8 * GIB,
+            }, || {
+                let result = super::super::merge(&params, &|_, _, _, _| {}, &cancel).unwrap();
+                assert_eq!(joined(&expected), joined(&result));
+                result.rows.check().unwrap();
+                crate::fa_merge_snapshot::save(&params, &result);
+                let loaded = crate::fa_merge_snapshot::load(&params).unwrap();
+                assert_eq!(joined(&result), joined(&loaded.result));
+                super::super::export(params.clone(), &|_, _, _, _| {}, Arc::new(AtomicBool::new(false)), &pause).unwrap();
+            });
+            assert_workbooks_equal(&memory_output, &disk_output);
+        }
+    }
+
+    #[test]
+    fn disk_fa_sparse_origin_multilevel_headers_match_prefix_full_and_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("稀疏起点.xlsx");
+        let mut wb = Workbook::new();
+        let ws = wb.add_worksheet();
+        ws.set_name("资产").unwrap();
+        ws.write_string(1, 2, "业务说明").unwrap();
+        ws.write_string(2, 1, "表1").unwrap();
+        ws.merge_range(2, 2, 2, 6, "固定资产明细清单", &Format::new()).unwrap();
+        for (c, header) in ["固定资产类别", "固定资产编号", "固定资产名称", "原值", "累计折旧"].iter().enumerate() {
+            ws.write_string(3, (c + 2) as u16, *header).unwrap();
+        }
+        for (c, value) in ["设备", "0001", "测试设备", "100", "10"].iter().enumerate() {
+            ws.write_string(4, (c + 2) as u16, *value).unwrap();
+            ws.write_string(6, (c + 2) as u16, *value).unwrap();
+        }
+        wb.save(&path).unwrap();
+        for header in [Some(3), None] {
+            let full = load_table(&path, Some("资产"), header, false).unwrap();
+            let prefix = crate::fa_sheet_pick::load_prefix_table(&path, Some("资产"), header, false).unwrap();
+            let (disk, _) = load_input(&path, Some("资产"), header, &|_, _, _, _| {}, &AtomicBool::new(false)).unwrap();
+            assert!(full.headers.iter().any(|h| h == "固定资产明细清单-固定资产编号"));
+            assert_eq!(full.header_row, 3);
+            assert_eq!(full.headers, prefix.headers);
+            assert_eq!(full.headers, disk.headers);
+            assert_eq!(full.rows, prefix.rows);
+            assert_eq!(full.rows, disk.rows);
+            assert_eq!(full.rows.len(), 2);
+            for _ in 0..2 {
+                let cached = crate::fa_table_cache::load_table_cached(&path, Some("资产"), header, false).unwrap();
+                assert_eq!(full.headers, cached.headers);
+                assert_eq!(full.rows, cached.rows);
+                assert_eq!(full.header_row, cached.header_row);
+            }
+        }
+    }
+
+    #[test]
+    fn disk_fa_supplements_survive_writer_cache_spill() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = fixture(dir.path(), false);
+        let name = "长资产名称".repeat(160);
+        let mut body = format!("{HEAD}\n");
+        for i in 0..2048 {
+            body.push_str(&format!("A{i},机器,{name},100,10,2023-01-01,5,5,1\n"));
+        }
+        for key in ["beginPath", "endPath"] {
+            fs::write(params[key].as_str().unwrap(), &body).unwrap();
+        }
+        params["__forceDisk"] = json!(true);
+        let cancel = AtomicBool::new(false);
+        // 未选补充清单时也会清理旧辅助字段，必须覆盖同样的读写路径。
+        let mut result = super::super::merge(&params, &|_, _, _, _| {}, &cancel).unwrap();
+        assert_eq!(result.rows.len(), 2048);
+        let addition = dir.path().join("新增.csv");
+        fs::write(&addition, "编号,方式\nA0,购入\nA2047,调入\n").unwrap();
+        params["additionSupplement"] = json!({"path":addition,"headerRow":1,"keys":["编号"],"method":"方式"});
+        apply_supplements(&mut result, &params, &cancel).unwrap();
+        let rows = result.rows.iter().collect::<Vec<_>>();
+        for (key, method) in [("A0", "购入"), ("A2047", "调入")] {
+            let row = rows.iter().find(|row| row.match_value == key).unwrap();
+            assert_eq!(row.extra.get("新增方式_辅助_文件2"), Some(&Cell::Text(method.into())));
+        }
+        assert_eq!(rows.len(), 2048);
+        result.rows.check().unwrap();
+        drop(rows);
+        params.as_object_mut().unwrap().remove("additionSupplement");
+        apply_supplements(&mut result, &params, &cancel).unwrap();
+        assert!(result.rows.iter().all(|row| !row.extra.contains_key("新增方式_辅助_文件2")));
+        result.rows.check().unwrap();
+    }
+
     #[test]
     fn disk_fa_join_matches_memory_duplicates_order_policy_supplements_and_export() {
         for xlsx in [false, true] {

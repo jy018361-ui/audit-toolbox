@@ -148,27 +148,36 @@ impl JoinedRows {
                 }
             }
             Self::Disk { path, .. } => {
-                let mut conn = Connection::open(path).map_err(db_error)?;
-                let tx = conn.transaction().map_err(db_error)?;
-                let mut after = 0i64;
-                loop {
-                    let batch = read_batch(&tx, after)?;
-                    if batch.is_empty() {
-                        break;
-                    }
-                    for (id, mut row) in batch {
-                        edit(&mut row)?;
-                        let data = serde_json::to_string(&row).map_err(json_error)?;
-                        tx.execute("UPDATE joined SET data=? WHERE id=?", params![data, id])
-                            .map_err(db_error)?;
-                        after = id;
-                    }
-                }
-                tx.commit().map_err(db_error)?;
+                edit_disk_rows(path, |_, row| edit(row))?;
             }
         }
         Ok(())
     }
+}
+
+/// 辅助表读取必须复用写事务的连接；缓存溢写持有排他锁时，第二个连接会锁住自身。
+pub(crate) fn edit_disk_rows(
+    path: &Path,
+    mut edit: impl FnMut(&Connection, &mut JoinedRow) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let mut conn = Connection::open(path).map_err(db_error)?;
+    let tx = conn.transaction().map_err(db_error)?;
+    let mut after = 0i64;
+    loop {
+        let batch = read_batch(&tx, after)?;
+        if batch.is_empty() {
+            break;
+        }
+        for (id, mut row) in batch {
+            edit(&tx, &mut row)?;
+            let data = serde_json::to_string(&row).map_err(json_error)?;
+            tx.execute("UPDATE joined SET data=? WHERE id=?", params![data, id])
+                .map_err(db_error)?;
+            after = id;
+        }
+    }
+    tx.commit().map_err(db_error)?;
+    Ok(())
 }
 pub(crate) enum RowsIter<'a> {
     Memory(std::slice::Iter<'a, JoinedRow>),

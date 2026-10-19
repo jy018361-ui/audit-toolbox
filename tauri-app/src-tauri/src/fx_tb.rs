@@ -148,6 +148,7 @@ impl FxTbRows {
             &|_, _, _, _| {},
             &active,
         )?;
+        FxCalculationDiskMode::record_disk_source();
         Ok(Self {
             table,
             disk: Some(disk),
@@ -577,48 +578,5 @@ impl FxTbRows {
                 &|r| mapped_cols(mapping, r),
             ))
         }
-    }
-    /// Complete per-column value domains for key reconciliation. This table has no
-    /// row relationship and must never be used for amounts or hierarchy analysis.
-    pub(crate) fn complete_domains(&self) -> Result<FxTable, AppError> {
-        let mut sets = vec![BTreeSet::new(); self.headers.len()];
-        let mut bytes = 0usize;
-        let limit =
-            (crate::resource_budget::budget()?.worker_bytes / 5).min(128 * 1024 * 1024) as usize;
-        self.visit(&replay_cancel(), |r, _| {
-            for (i, value) in r.row.iter().enumerate().take(sets.len()) {
-                if !value.trim().is_empty() && sets[i].insert(value.clone()) {
-                    bytes = bytes.saturating_add(value.len() + 96);
-                    if bytes > limit {
-                        return Err(error(
-                            "TABLE_DOMAIN_BUDGET",
-                            "账表匹配键的完整值域超过安全预算，请拆分独立账套后重试。",
-                            None,
-                        ));
-                    }
-                }
-            }
-            Ok(())
-        })?;
-        let width = sets.len();
-        let len = sets.iter().map(BTreeSet::len).max().unwrap_or(0);
-        if len.saturating_mul(width).saturating_mul(32) > limit {
-            return Err(error(
-                "TABLE_DOMAIN_BUDGET",
-                "账表匹配键的完整值域超过安全预算，请拆分独立账套后重试。",
-                None,
-            ));
-        }
-        let mut rows = vec![vec![String::new(); width]; len];
-        for (i, set) in sets.into_iter().enumerate() {
-            for (j, value) in set.into_iter().enumerate() {
-                rows[j][i] = value;
-            }
-        }
-        let mut table = (*self.table).clone();
-        table.rows = rows;
-        table.row_count = len;
-        table.sampled = false;
-        Ok(table)
     }
 }

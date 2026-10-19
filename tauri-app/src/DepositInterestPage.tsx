@@ -755,6 +755,18 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const [matchingPromptKey, setMatchingPromptKey] = useState<string | null>(null);
   const [matchingDraft, setMatchingDraft] = useState<MatchingFallbackMode | "">("");
   const [matchingBusy, setMatchingBusy] = useState(false);
+  // 人工分类后停用第二步的自动准备；重读来源或映射后才恢复首次准备。
+  const [classificationEdited, setClassificationEdited] = useState(false);
+  const preparationGeneration = useRef(0);
+  function recordClassification() {
+    ++preparationGeneration.current;
+    setClassificationEdited(true);
+    setMatchingBusy(false);
+    activeJob.current = "";
+    setResult(undefined);
+    setRows([]);
+    setJob(undefined);
+  }
   function resetCurrencyFallback() {
     setCurrencyLink(null);
     setCurrencyFallbackMode("");
@@ -860,6 +872,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
    * 历史同源恢复不走这里，由 useTaskRestore 明确回填存档状态。
    */
   function resetFileDerivedState() {
+    ++preparationGeneration.current;
+    setClassificationEdited(false);
     setAccountRoles({});
     setAccountRoleOverrides({});
     setAccountTierOverrides({});
@@ -890,12 +904,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       accountRoles[a] ?? "",
     ),
   );
-  const interestBearingDepositAccountCount = accounts.filter((a) =>
-    ["deposit", "other_monetary"].includes(accountRoles[a] ?? ""),
-  ).length;
-  const interestAccounts = accounts.filter(
-    (a) => (accountRoles[a] ?? "") === "interest_income",
-  );
   // 科目分类清单的关键词筛选：只影响展示，不改变上方的分类计数和测算口径。
   const accountMatches = useMemo(
     () => keywordFilterPredicate(accountFilter),
@@ -921,6 +929,10 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     accountDetailRoleOverrides[row.key]
     ?? (row.auxiliaryKey ? accountDetailRoleOverrides[depositDetailKey(row.entity ?? "", depositAccountCode(row.account), row.auxiliaryKey)] : undefined)
     ?? accountRoleOverrides[row.account] ?? row.suggestedRole ?? accountRoles[row.account] ?? "";
+  const interestBearingDepositAccountCount = reviewAccounts.filter(row =>
+    ["deposit", "other_monetary"].includes(reviewRole(row)),
+  ).length;
+  const interestAccounts = reviewAccounts.filter(row => reviewRole(row) === "interest_income");
   // 账户级覆盖的键：读写两侧统一走 depositAccountOverrideKey（模块级导出，
   // 回传处理与测试同源），防止写入键与读取键错位。
   const accountOverrideKey = depositAccountOverrideKey;
@@ -960,8 +972,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         ),
       );
   }, []);
-  // 两侧映射齐了就认定辅助列联动。金额/币种/日期映射不影响结论；
-  // 计息科目分类会改变验证范围，必须进入键，避免把旧计划复用到新选中的科目。
+  // 两侧映射齐了就认定辅助列联动。分类影响验证范围，但人工调整不逐项重验，
+  // 而是废弃旧计划的计算复用，在第三步测算时验证当前选择。
   const auxiliaryValidationRequired = Boolean(
     tb && je && ledgerHasMappedRole(tbMapping, "auxiliary"),
   );
@@ -973,12 +985,15 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       })
     : null;
   useEffect(() => {
+    // 人工分类只记录；保留已有辅助行，正式测算按最新选择重新验证。
+    if (classificationEdited) return;
     if (!auxiliaryValidationRequired || !tb || !je || auxLinkKey === null) {
       setAuxLink(null);
       setValidationWarning("auxiliary");
       return;
     }
     setAuxLink(null);
+    const generation = preparationGeneration.current;
     let cancelled = false;
     void verifyAuxiliaryLink({
       ...payload(),
@@ -988,7 +1003,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         )
         .map(([account]) => ({ account })),
     }).then((result) => {
-      if (cancelled) return;
+      if (cancelled || generation !== preparationGeneration.current) return;
       setAuxLink(result);
       if (!result) {
         setValidationWarning(
@@ -1004,8 +1019,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auxLinkKey]);
-  // 测算前行清单（含分币种拆行与引擎行键）：身份输入一变就重取，
+  }, [auxLinkKey, classificationEdited]);
+  // 首次测算前行清单（含分币种拆行与引擎行键）：来源和映射变化时重取，
+  // 人工分类沿用现有清单的行键，不在编辑时读取账表。
   // 键与测算结果行一致，第二步的逐行利率与第三步逐户改价共用同一键空间。
   const accountCurrencyKey = tb
     ? JSON.stringify({
@@ -1024,6 +1040,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   matchingKeyRef.current = accountCurrencyKey;
   useEffect(() => {
     setMatchingBusy(false);
+    if (classificationEdited) return;
     if (accountCurrencyKey === null) {
       setAccountCurrencyRows([]);
       return;
@@ -1038,9 +1055,10 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       return;
     }
     let cancelled = false;
+    const generation = preparationGeneration.current;
     void engineCall("deposit.account_currencies", payload())
       .then(async (x) => {
-        if (cancelled) return;
+        if (cancelled || generation !== preparationGeneration.current) return;
         const candidates = (x as { matchingFallbackCandidates?: MatchingFallbackGroup[] }).matchingFallbackCandidates ?? [];
         let groups = matchingCheck?.key === accountCurrencyKey ? matchingCheck.groups : [];
         if (candidates.length && matchingCheck?.key !== accountCurrencyKey) {
@@ -1049,7 +1067,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           delete request.matchingFallbackMode;
           delete request.matchingFallbackGroups;
           const check = await engineCall("deposit.matching_fallback", request, "检查存款明细衔接") as { matchingFallbackGroups: MatchingFallbackGroup[] };
-          if (cancelled || accountCurrencyKey !== matchingKeyRef.current) return;
+          if (cancelled || generation !== preparationGeneration.current || accountCurrencyKey !== matchingKeyRef.current) return;
           groups = check.matchingFallbackGroups;
           setMatchingCheck({ key: accountCurrencyKey, groups });
         }
@@ -1065,7 +1083,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         setValidationWarning("accounts");
       })
       .catch(() => {
-        if (!cancelled) {
+        if (!cancelled && generation === preparationGeneration.current) {
           setAccountCurrencyRows([]);
           setValidationWarning(
             "accounts",
@@ -1077,7 +1095,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountCurrencyKey, step, matchingFallbackMode]);
+  }, [accountCurrencyKey, step, matchingFallbackMode, classificationEdited]);
   useEffect(() => {
     resetCurrencyFallback();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1111,6 +1129,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const restoreGeneration = useRef(0);
   const catalogRefreshGeneration = useRef({ tb: 0, je: 0 });
   useTaskRestore(tool.id, (restore) => {
+    ++preparationGeneration.current;
+    setClassificationEdited(false);
     const generation = ++restoreGeneration.current;
     type DepositSourceParams = {
       inputPath?: string;
@@ -1434,6 +1454,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     }
   }
   function applyInspection(kind: Kind, path: string, response: Inspection) {
+    setClassificationEdited(false);
     catalogRefreshGeneration.current[kind] += 1;
     resetCurrencyFallback();
     // 历史恢复后重新识别同一文件：用存档映射与科目分类顶回建议值，
@@ -1509,8 +1530,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     kind: Kind,
     mapping: Record<string, string | string[]>,
   ) {
-    resetCurrencyFallback();
     const current = kind === "tb" ? tbMapping : jeMapping;
+    if (JSON.stringify(current) !== JSON.stringify(mapping)) setClassificationEdited(false);
+    resetCurrencyFallback();
     if (kind === "tb") setTbMapping(mapping);
     else setJeMapping(mapping);
     if (
@@ -1655,7 +1677,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       rateOverrides,
       accountRateOverrides,
       tierRates,
-      ...(tb && je && auxLink?.planKey
+      ...(tb && je && auxLink?.planKey && !classificationEdited
         ? {
             auxiliaryPlan: {
               planKey: auxLink.planKey,
@@ -1780,15 +1802,15 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       );
       return;
     }
-    if (!depositAccounts.length) {
+    if (!interestBearingDepositAccountCount) {
       setError("请先确认至少一个银行存款或其他货币资金科目。");
       return;
     }
-    if (matchingBusy || (matchingGroups.length > 0 && !matchingFallbackMode)) {
+    if (!classificationEdited && (matchingBusy || (matchingGroups.length > 0 && !matchingFallbackMode))) {
       setError("请先完成存款明细衔接检查并选择测算口径。");
       return;
     }
-    if (matchingFallbackMode === "accountJe" && accountCurrencyRows.some(row => row.account.includes("存款科目汇总") && engineRateOf(row.key) === undefined)) {
+    if (!classificationEdited && matchingFallbackMode === "accountJe" && accountCurrencyRows.some(row => row.account.includes("存款科目汇总") && engineRateOf(row.key) === undefined)) {
       setError("请先为存款科目汇总填写统一年利率。");
       return;
     }
@@ -1797,8 +1819,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   }
   async function run(method: "deposit.preview" | "deposit.export") {
     setError("");
-    if (matchingBusy || (matchingGroups.length > 0 && !matchingFallbackMode)) return setError("请先完成存款明细衔接检查并选择测算口径。");
-    if (matchingFallbackMode === "accountJe" && accountCurrencyRows.some(row => row.account.includes("存款科目汇总") && engineRateOf(row.key) === undefined)) return setError("请先为存款科目汇总填写统一年利率。");
+    if (!classificationEdited && (matchingBusy || (matchingGroups.length > 0 && !matchingFallbackMode))) return setError("请先完成存款明细衔接检查并选择测算口径。");
+    if (!classificationEdited && matchingFallbackMode === "accountJe" && accountCurrencyRows.some(row => row.account.includes("存款科目汇总") && engineRateOf(row.key) === undefined)) return setError("请先为存款科目汇总填写统一年利率。");
     if (!tb) return setError("请先上传并识别 TB 科目余额表。");
     if (!reportEnd) return setError("请选择资产负债表日。");
     const tbMissing = depositMissingDetails("tb", tbMapping, Boolean(jePath));
@@ -1813,17 +1835,49 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           `序时账尚未映射：${jeMissing.join("、")}。请先在预览表头完成字段映射。`,
         );
     }
-    if (!depositAccounts.length)
+    if (!interestBearingDepositAccountCount)
       return setError(
         "科目分类里没有任何计息的货币资金科目，请先确认银行存款/其他货币资金科目。",
       );
     setBusy(true);
+    let started = false;
+    const key = accountCurrencyKey;
+    const generation = preparationGeneration.current;
     try {
+      const request = payload();
+      if (classificationEdited && jePath && key !== null) {
+        let groups = matchingCheck?.key === key ? matchingCheck.groups : null;
+        if (groups === null) {
+          const check = await engineCall("deposit.matching_fallback", request, "检查存款明细衔接") as { matchingFallbackGroups: MatchingFallbackGroup[] };
+          if (key !== matchingKeyRef.current || generation !== preparationGeneration.current) return;
+          groups = check.matchingFallbackGroups;
+          setMatchingCheck({ key, groups });
+        }
+        request.matchingFallbackGroups = groups;
+        if (groups.length && !matchingFallbackMode) {
+          setMatchingDraft("");
+          setMatchingPromptKey(key);
+          return;
+        }
+        if (groups.length && matchingFallbackMode === "accountJe") {
+          const prepared = await engineCall("deposit.account_currencies", request) as { rows: typeof accountCurrencyRows };
+          if (key !== matchingKeyRef.current || generation !== preparationGeneration.current) return;
+          setAccountCurrencyRows(prepared.rows);
+          const summaries = prepared.rows.filter(row => row.account.includes("存款科目汇总"));
+          if (!summaries.length) throw new Error("尚未生成存款科目汇总，请重试。");
+          if (summaries.some(row => engineRateOf(row.key) === undefined)) {
+            setError("请先为存款科目汇总填写统一年利率。");
+            return;
+          }
+        }
+      }
       lastRunMethod.current = method;
-      activeJob.current = await jobStart(method, payload());
+      activeJob.current = await jobStart(method, request);
+      started = true;
     } catch (e) {
-      setBusy(false);
-      setError(errorText(e));
+      if (key === matchingKeyRef.current && generation === preparationGeneration.current) setError(errorText(e));
+    } finally {
+      if (!started) setBusy(false);
     }
   }
   /** 第二步逐户利率：清空即回到该户当前档位的默认利率。 */
@@ -2350,7 +2404,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           </div>
         </>
       )}
-      {step === 1 && (
+      {step > 0 && (
         <>
           {matchingGroups.length > 0 && <section className="deposit-currency-mode" role="status">
             <span>{matchingFallbackMode === "accountJe" ? "明细衔接口径：JE 本位币科目汇总，按月均余额测算" : matchingFallbackMode === "tbAverage" ? "明细衔接口径：保留 TB 明细，按年初年末平均测算" : "请先选择存款明细衔接测算口径"}</span>
@@ -2363,6 +2417,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               <input type="number" step="0.0001" aria-label={`${row.entity} / ${row.account}的统一年利率`} value={engineRateOf(row.key) === undefined ? "" : engineRateOf(row.key)! * 100} onChange={event => overrideRow(row.key, {annualRate:depositPercentToRate(event.target.value)})} />
             </label>)}
           </section>}
+        </>
+      )}
+      {step === 1 && (
+        <>
+          {classificationEdited && <p className="fx-hint" role="status">科目分类已记录，将在下一步测算时生效。</p>}
           {currencyFallbackMode && (
             <section className="deposit-currency-mode" role="status">
               <span>
@@ -2526,6 +2585,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                                       : (accountRoleOverrides[row.account] ?? "")
                                   }
                                   onChange={(e) => {
+                                    recordClassification();
                                     const value = e.target.value;
                                     const setter = (tb?.reviewAccounts?.length || row.auxiliaryKey)
                                       ? setAccountDetailRoleOverrides
@@ -2825,6 +2885,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                         tiers ?? null,
                         Boolean(tb?.reviewAccounts?.length),
                       );
+                      recordClassification();
                       setAccountRoleOverrides((current) => ({ ...current, ...plan.roleAccountUpdates }));
                       setAccountDetailRoleOverrides((current) => ({ ...current, ...plan.roleDetailUpdates }));
                       setAccountTierOverrides((current) => ({ ...current, ...plan.tierAccountUpdates }));
@@ -3071,7 +3132,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           setMatchingPromptKey(null);
           setResult(undefined);
           setRows([]);
-          setStep(1);
+          if (!classificationEdited) setStep(1);
         }} />
       <CurrencyFallbackDialog
         open={currencyDialogOpen}

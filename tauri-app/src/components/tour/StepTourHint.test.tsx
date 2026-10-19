@@ -20,11 +20,73 @@ const steps = [
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   window.localStorage.clear();
   document.querySelectorAll(".tour-layer").forEach((el) => el.remove());
 });
 
 describe("StepTourHint", () => {
+  it("从有提示步骤返回精简模式的静默步骤时立即移除旧卡片及遮罩", () => {
+    const depositSteps = [{ key: "source", label: "上传与识别" }, { key: "accounts", label: "科目与利率确认" }];
+    const { rerender } = render(<ToolTourProvider toolId="deposit_interest"><StepTourHint steps={depositSteps} current={0} /></ToolTourProvider>);
+    rerender(<ToolTourProvider toolId="deposit_interest"><StepTourHint steps={depositSteps} current={1} /></ToolTourProvider>);
+    expect(screen.getByText("科目与利率确认")).toBeInTheDocument();
+    rerender(<ToolTourProvider toolId="deposit_interest"><StepTourHint steps={depositSteps} current={0} /></ToolTourProvider>);
+    expect(document.querySelector(".step-hint")).toBeNull();
+    expect(document.querySelector(".step-hint-veil")).toBeNull();
+  });
+
+  it("切到禁用步骤或原步骤被替换后不保留上一条提示", () => {
+    const { rerender } = render(<StepTourHint steps={steps} current={0} />);
+    rerender(<StepTourHint steps={steps} current={1} />);
+    expect(screen.getByText("确认输入")).toBeInTheDocument();
+    rerender(<StepTourHint steps={steps.map(step => ({ ...step, disabled: true }))} current={2} />);
+    expect(document.querySelector(".step-hint-veil")).toBeNull();
+    rerender(<StepTourHint steps={steps} current={1} />);
+    expect(screen.getByText("确认输入")).toBeInTheDocument();
+    rerender(<StepTourHint steps={[steps[0], { key: "replacement", label: "已更换的流程" }, steps[2]]} current={1} />);
+    expect(document.querySelector(".step-hint")).toBeNull();
+  });
+
+  it("键盘焦点离开提示卡后恢复自动关闭", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<StepTourHint steps={steps} current={0} autoDismissMs={1000} />);
+    rerender(<StepTourHint steps={steps} current={1} autoDismissMs={1000} />);
+    const close = screen.getByRole("button", { name: "关闭本步提示" });
+    act(() => close.focus());
+    act(() => vi.advanceTimersByTime(2000));
+    expect(screen.getByText("确认输入")).toBeInTheDocument();
+    act(() => close.blur());
+    act(() => vi.advanceTimersByTime(1001));
+    expect(document.querySelector(".step-hint-veil")).toBeNull();
+  });
+
+  it("当前步骤失效后重新启用也不重现旧提示", () => {
+    const { rerender } = render(<StepTourHint steps={steps} current={0} />);
+    rerender(<StepTourHint steps={steps} current={1} />);
+    expect(screen.getByText("确认输入")).toBeInTheDocument();
+    rerender(<StepTourHint steps={steps.map(step => ({ ...step, disabled: true }))} current={1} />);
+    expect(document.querySelector(".step-hint-veil")).toBeNull();
+    rerender(<StepTourHint steps={steps} current={1} />);
+    expect(document.querySelector(".step-hint")).toBeNull();
+  });
+
+  it("鼠标移出时若键盘焦点仍在卡片内，继续暂停自动关闭", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<StepTourHint steps={steps} current={0} autoDismissMs={1000} />);
+    rerender(<StepTourHint steps={steps} current={1} autoDismissMs={1000} />);
+    const card = document.querySelector(".step-hint")!;
+    const close = screen.getByRole("button", { name: "关闭本步提示" });
+    fireEvent.mouseEnter(card);
+    act(() => close.focus());
+    fireEvent.mouseLeave(card);
+    act(() => vi.advanceTimersByTime(2000));
+    expect(screen.getByText("确认输入")).toBeInTheDocument();
+    act(() => close.blur());
+    act(() => vi.advanceTimersByTime(1001));
+    expect(document.querySelector(".step-hint-veil")).toBeNull();
+  });
+
   it("首次挂载不弹提示，切换到第二步时弹出该步说明", () => {
     const { rerender } = render(<StepTourHint steps={steps} current={0} />);
     expect(screen.queryByText("确认输入")).not.toBeInTheDocument();

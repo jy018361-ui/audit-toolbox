@@ -22,7 +22,7 @@ it.each(["accountJe","tbAverage"] as const)("选择%s才生成对应利率表，
     if(method==="ledger.currency_link")return {required:false,verified:true,missingCurrencies:[],affectedGroupCount:0};
     if(method==="deposit.classify_source")return {...inspection,kind:(p.source as {inputPath:string}).inputPath.startsWith("je")?"je":"tb",scores:{tb:10,je:1},confidence:1};
     if(method==="loan.inspect")return inspection;
-    if(method==="loan.tb_accounts")return {accounts:[{key:"2001",code:"2001",name:"短期借款",account:"2001 短期借款",opening:300,closing:400,suggestedType:"loan"}]};
+    if(method==="loan.tb_accounts")return {accounts:[{key:"2001",code:"2001",name:"短期借款",account:"2001 短期借款",opening:300,closing:400,suggestedType:"loan"}, {key:"6603",code:"6603",name:"利息支出",account:"6603 利息支出",opening:0,closing:10,suggestedType:"interest_expense"}]};
     if(method==="loan.prepare_rates"){
       if(!p.matchingFallbackMode)return {rows:[],matchingFallbackGroups:groups};
       const names = p.matchingFallbackMode === "accountJe" ? ["借款汇总（明细无法衔接）"] : ["银行甲","银行乙"];
@@ -56,4 +56,26 @@ it.each(["accountJe","tbAverage"] as const)("选择%s才生成对应利率表，
   fireEvent.click(within(again).getByRole("radio",{name:choice === "accountJe" ? /保留 TB 明细/ : /合并同码借款/}));
   fireEvent.click(within(again).getByRole("button",{name:"按所选口径继续"}));
   await waitFor(()=>expect(mock.engineCall).toHaveBeenLastCalledWith("loan.prepare_rates",expect.objectContaining({matchingFallbackMode:choice === "accountJe" ? "tbAverage" : "accountJe",rateConfirmationAccepted:false}),"生成借款利率明细"));
+  // 分类变更只记录；第三步发起测算后才重新核对衔接口径。
+  await waitFor(() => expect(screen.getByRole("button", {name:"下一步：测算与底稿"})).toBeEnabled());
+  const preparationCount = () => mock.engineCall.mock.calls.filter(([method]) => method === "loan.prepare_rates").length;
+  const beforeEdit = preparationCount();
+  const classification = screen.getByRole("combobox", {name:"2001 短期借款的科目类型"});
+  fireEvent.change(classification, {target:{value:"skip"}});
+  fireEvent.change(classification, {target:{value:"loan"}});
+  fireEvent.change(screen.getByRole("combobox", {name:"6603 利息支出的科目类型"}), {target:{value:"skip"}});
+  expect(preparationCount()).toBe(beforeEdit);
+  fireEvent.click(screen.getByRole("button", {name:"下一步：测算与底稿"}));
+  expect(preparationCount()).toBe(beforeEdit);
+  expect(mock.jobStart).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", {name:"生成并复核借款变动表"}));
+  const calculationDialog = await screen.findByRole("dialog");
+  expect(mock.jobStart).not.toHaveBeenCalled();
+  fireEvent.click(within(calculationDialog).getByRole("radio", {name:/保留 TB 明细/}));
+  fireEvent.click(within(calculationDialog).getByRole("button", {name:"按所选口径继续"}));
+  fireEvent.click(screen.getByRole("button", {name:"生成并复核借款变动表"}));
+  await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith("loan.preview", expect.objectContaining({
+    matchingFallbackMode:"tbAverage", loanAccounts:["2001"],
+    rateRows:expect.arrayContaining([expect.objectContaining({accountCode:"2001", fixedRate:0.03})]),
+  })));
 });

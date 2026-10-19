@@ -1,3 +1,51 @@
+## 2026-10-19 · Teams 会议结束后后台自动生成纪要及结果反馈
+
+- 目标：修复会议开始可识别、结束却未收尾，以及用户看不到纪要生成结果的问题。
+- 设计决策：日志与音频会话共用会态；结束后由后台直接停录混音并启动上传、转写和纪要生成，无需再次确认。前端仅展示自动停录事件，避免重复上传。
+- 反馈：沿用全局任务进度；成功后提示并提供纪要／转写稿打开入口，失败时展示原因。晚打开会议页或 WebView 重载可从后台快照恢复当前进度和结果，系统通知不可用也能看到应用内反馈。
+- 验证：`npx vitest run src/components/MeetingWatch.test.tsx src/MeetingMinutesPage.test.tsx`；`npm run build`；`cargo test --manifest-path src-tauri/Cargo.toml --lib meeting_`。未执行真实 Teams 加入、退会及云端转写验收，未发布新安装包；边界见 `MEETING_MINUTES_PARITY.md`。
+
+## 2026-10-19 · 现有新手步骤提示残留及自动关闭修补
+
+- 目标：修复切回静默／禁用步骤后旧提示和遮罩残留，以及键盘焦点离开提示卡后不再自动关闭的问题。
+- 设计决策：沿用现有新手模式、自动播放规则、聚光遮罩和提示样式；步骤提示绑定工具及步骤身份，切换流程时清理旧卡片；首次挂载仍不弹步骤提示。
+- 设计决策：鼠标悬停和键盘焦点独立暂停计时，二者均离开后恢复原有自动关闭，防止焦点尚在卡片中时鼠标移出导致提示消失。
+- 验证：`npx vitest run src/components/tour`；`npm run build`。不新增显示文字或交互入口。
+
+## 2026-10-19 · 取消数据规模预算硬拦截
+
+- 目标：TBJE 已走磁盘仍因收集全列去重值报“账表匹配键的完整值域超过安全预算”，并排查其他工具的同类数据体积阻拦。
+- 设计决策：TBJE／存款的匹配域按需索引到磁盘，保留全量交集与可选键修复；摘要和流水号不再提前占用匹配内存。公共 TB、FA、汇兑、存款、借款、看账的目录、完整组、凭证、结果／透视矩阵取消固定和比例预算拒绝，FA 超批次的单条记录独占批次继续读取。
+- 资源行为：大文件预算继续调节分批和并行度；后台不再安装预估内存硬配额，实际资源紧张仍暂停、恢复与取消。异常文件、错误映射和真实资源故障保留明确提示，不能截断后报成功。
+- 验证：`python artifacts/data-volume-limits-20261019/verify.py`；真实 3080 核对及 worker 验证记录见同目录。数据与迁移边界见各工具同日文档。
+
+## 2026-10-19 · 内存不足提示仅用于大文件磁盘模式
+
+- 目标：普通文件读取和测算不再误用大文件启动预算，触发“当前剩余内存不足以安全处理”。
+- 设计决策：按实际读取模式启用内存拦截；修复汇兑普通重估、月度索引、结果汇总及 FA 科目身份整理的共用路径。大文件磁盘模式继续保留预算、暂停及恢复保护；自动分流阈值不变。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml --lib ordinary_mode`；`--lib resource_budget::`、`--lib disk_table::`、`--lib fx::`、`--lib fa_tbje::`。模拟低内存核验普通模式继续计算、磁盘模式仍受保护。
+
+## 2026-10-19 · 统一其他工具的分类编辑与测算边界
+
+- 目标：按“分类阶段只记录，后续主动测算时统一生效”的口径核对其他工具，消除逐项调整时重复等待。
+- 核对结果：存款分类会触发辅助验证、账户清单及明细衔接检查，已修复；汇兑科目／凭证分类、FA TB＋JE 科目角色／资产类别修改均只维护本地选择，保留原行为。TBJE、看账、正负数凭证标记及两期 FA 清单的对应选择入口未发现分类变动自动发起正式测算。
+- 设计决策：存款连续分类及确认表回传只记录，保留已填利率；下一步只跳转，第三步发起测算时统一检查当前范围。必要的明细衔接口径和科目汇总利率可在第三步处理。初次识别、字段映射及首次利率准备沿用原流程。
+- 数据契约：手工明细角色进入分类计数与测算门禁；旧辅助计划不跨分类复用；检查失败或汇总利率缺失时不启动任务。新手提示同步。
+- 验证：`npx vitest run src/DepositInterestInteractions.test.tsx src/DepositInterestPage.test.ts src/DepositInterestLinks.test.tsx src/DepositInterestStyles.test.ts src/FxAuditPageUi.test.tsx src/FaTbJePage.test.ts src/FaPageDesign.test.ts src/AccountCatalogRefresh.test.ts src/components/tour`；`npm run build`。
+
+## 2026-10-19 · 借款测算结果预览列宽收紧
+
+- 目标：修复长借款标识撑大默认列宽、横向滚动后冻结列遮住结果形成大块空白的问题。
+- 设计决策：结果表使用固定列布局，主体列默认 96px、借款标识列 280px，金额列 168px；长文本省略并保留悬停全文，继续支持列宽拖动、记忆和重置。测算及导出数据保持原值。
+- 验证：`npx vitest run src/LoanInterestStyles.test.ts src/LoanInterestPageUi.test.tsx src/components/useTableColumnResize.test.tsx`；`npm run build`；浏览器按 1912、1280、1000px 窗宽核对长标识、十亿级金额、横向滚动及列宽拖动重置，记录见 `artifacts/loan-result-columns-20261019/`。
+
+## 2026-10-19 · 借款科目分类仅记录，第三步测算时统一生效
+
+- 目标：避免第二步每改一个科目类型就重新读取账表并弹出等待窗口，允许连续完成多项分类。
+- 设计决策：第二步修改分类及回传分类只记录当前选择、作废旧测算，保留已填利率；不增加“应用”按钮。下一步仅跳转，第三步点击“生成并复核借款变动表”时统一生成当前借款明细并测算，新增借款采用原有暂估利率规则。
+- 数据契约：最新借款、利息支出及主体／辅助行选择进入同一次测算请求；衔接口径随当前选择重新核对，未选择或准备失败时不启动测算，旧结果不能导出。首次进入的利率准备保留。
+- 验证：`npx vitest run src/LoanInterestPageUi.test.tsx src/LoanMatchingFallbackUi.test.tsx src/LoanInterestPage.test.ts src/AccountCatalogRefresh.test.ts src/LoanInterestStyles.test.ts src/components/tour`；`npm run build`。
+
 ## 2026-10-18 · 表头匹配标题、匹配格与数据预览逐列对齐
 
 - 目标：修复展开数据后标题与信息错位，尤其是源文件列顺序不同或横向滚动时无法逐列核对的问题。

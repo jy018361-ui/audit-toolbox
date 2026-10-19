@@ -1,5 +1,10 @@
 # 看账小工具迁移功能矩阵
 
+## 2026-10-19：套表和科目目录取消数据体积硬拦截
+
+- 凭证科目组合、透视列、科目目录不再因估算体积拒绝，继续使用磁盘聚合、动态解码批次和实际资源检查，完整数据不截断。内存读取入口不在调用方选定模式后重复判定并拒绝读取。
+- 分组与金额规则、磁盘损坏及取消检查保留。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib tabular::disk_suite::`；`--lib ordinary_mode`。worker 固定内存配额取消，改为实际内存暂停恢复，详见 `LEDGER_MAPPING_UNIFICATION.md`。
+
 ## 2026-10-18：共享读取性能与目录缓存管理
 
 - 看账／正负数的磁盘 XLSX 路径继承公共共享文本查询复用和行边界内存检查；全列记录、物理行号、日期及金额口径不改。两个工具不调用账表完整 JE 科目目录，本轮按需列扫描只用于 FA／存款、借款及汇兑的目录。
@@ -75,6 +80,11 @@
 - 该规则只在实际观察到“期初余额锚点后的正文缺少科目”时启用；普通平铺序时账继续使用原有正文过滤和填充逻辑。金额校验与正文认定复用同一分段计划，因此真实明细中的坏金额仍按源 Excel 行号报错。
 - 实现位于公共账表引擎，并非看账专属；看账只消费公共正规化结果，与 TBJE、汇兑、存款、借款及 FA 勾稽保持一致。
 - 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib kanzhang`；真实样例可设置 `KANZHANG_SECTIONED_SAMPLE` 后执行 `cargo test --manifest-path src-tauri/Cargo.toml --lib 分段看账真实样例控制数 -- --ignored --nocapture`，控制结果为 12,265 条正文、目标科目完整凭证 1,228 行、483 个凭证，借贷各 13,061,773.26。
+
+## 2026-10-19 · 内存门禁统一跟随磁盘模式
+
+- 共享调度层取消文本输入合计超过 1 GiB 的独立门禁，按现有联合工作集磁盘分流结果启用保护。普通模式不因 worker 最低启动预算被阻止；磁盘模式保留启动等待、内存上限、暂停及恢复。
+- 本条更新下述 2026-09-09 的历史调度规则；看账磁盘分流、完整凭证筛选与导出内容不变。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib ordinary_mode_workers`、`--lib disk_table::`、`--lib memory_protection`。
 
 ## 2026-09-09 · 内存拦截收窄到超过 1 GiB 的文本输入
 

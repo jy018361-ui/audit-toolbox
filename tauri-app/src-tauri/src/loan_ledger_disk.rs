@@ -57,11 +57,11 @@ pub(super) fn calculate(params:&Value,progress:&dyn Fn(&str,usize,usize,&str),ca
     let overrides=rate_overrides(params);
     let mut mapping=mapping;
     let mut segment=1_usize;let mut segment_start=0_usize;
-    let mut out=Vec::new();let mut output_bytes=0_u64;
-    let output_budget=crate::resource_budget::budget()?.worker_bytes.saturating_mul(35)/100;
+    let mut out=Vec::new();
     visit(&disk,cancel,|row,index|{
         if index%256==0{
             if cancel.load(Ordering::Relaxed){return Err(error("JOB_CANCELLED","任务已取消。",None));}
+            crate::resource_budget::check_available_if_managed()?;
             progress("read",index,disk.row_count,"正在从磁盘分批解析借款台账…");
         }
         if contract_mode && index>0 {
@@ -77,7 +77,6 @@ pub(super) fn calculate(params:&Value,progress:&dyn Fn(&str,usize,usize,&str),ca
             let issues=ledger_mapping::mapped_amount_parse_issues("loan",&table.headers,&table.rows,&|role|mapped_names(&mapping,"loan",role));
             if let Some(issue)=issues.first(){return Err(error("AMOUNT_VALUE_INVALID",format!("LEDGER金额列「{}」第{}行的值“{}”无法解析为数值，请修正后重试。",issue.column,table.header_row+table.header_depth+index,issue.value.chars().take(80).collect::<String>()),None));}
         }
-        let prior=out.len();
         if let Some(period)=period{
             if !mapping.contains_key("principal"){return Ok(());}
             let unit=if multi {unit_factor(mapping.get("principal").and_then(Value::as_str).unwrap_or(""))}else{1.0};
@@ -92,12 +91,6 @@ pub(super) fn calculate(params:&Value,progress:&dyn Fn(&str,usize,usize,&str),ca
                 Err(e)=>return Err(e),
             }
         }
-        for row in &out[prior..]{
-            output_bytes=output_bytes.saturating_add(std::mem::size_of::<LoanRow>() as u64)
-                .saturating_add(row.source_cells.iter().map(|s|s.len() as u64+32).sum::<u64>())
-                .saturating_add(row.source_columns.iter().map(|s|s.len() as u64+32).sum::<u64>());
-        }
-        if output_bytes>output_budget{return Err(error("LOAN_RESULT_MEMORY_BUDGET","借款明细结果超过当前安全预算，请按主体拆分台账后重试。源文件磁盘缓存已保留。",None));}
         Ok(())
     })?;
     if out.is_empty(){return Err(error("NO_LOANS","未从借款台账识别到可测算的借款。",None));}

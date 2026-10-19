@@ -2102,8 +2102,6 @@ fn inspect_with_control(
         let period = mapped_names(&suggested, "tb", "period").iter().filter_map(|name| ledger_mapping::header_index(&table.headers, name)).collect::<Vec<_>>();
         let entity = mapped_names(&suggested, "tb", "entity").iter().filter_map(|name| ledger_mapping::header_index(&table.headers, name)).collect::<Vec<_>>();
         let (mut years, mut entities, mut accounts) = (BTreeSet::<i32>::new(), BTreeSet::<String>::new(), BTreeSet::<(String,String)>::new());
-        let mut bytes = 0u64;
-        let limit = crate::resource_budget::budget()?.worker_bytes / 8;
         complete.visit(cancel, |record, index| {
             let row = record.values();
             for i in &period {
@@ -2115,10 +2113,9 @@ fn inspect_with_control(
             if !account.trim().is_empty() && !ledger_mapping::is_report_footer_value(&account) {
                 let entity = entity.iter().filter_map(|i| row.get(*i)).map(|v| v.trim()).find(|v| !v.is_empty()).unwrap_or(ledger_mapping::DEFAULT_ENTITY).to_owned();
                 if entity != ledger_mapping::DEFAULT_ENTITY { entities.insert(entity.clone()); }
-                let size = entity.len() + account.len() + 128;
-                if accounts.insert((entity, account)) { bytes = bytes.saturating_add(size as u64); }
+                accounts.insert((entity, account));
             }
-            if bytes > limit { return Err(error("MEMORY_PROTECTION", "借款余额表的完整识别目录超过当前安全预算，请按主体拆分后重试。", None)); }
+            if index % 256 == 0 { crate::resource_budget::check_available_if_managed()?; }
             if index % 50_000 == 0 { progress("loan-tb-catalog", index, complete.row_count.max(1), "正在识别完整余额表目录…"); }
             Ok(())
         })?;

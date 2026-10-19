@@ -110,12 +110,15 @@ impl JoinedRows {
             *error.lock().unwrap() = Some(message);
         }
     }
-    pub(crate) fn record_budget_error(&self, message: String) {
-        self.record_error(format!("MEMORY_PROTECTION:{message}"));
+    pub(crate) fn record_resource_error(&self, error: &AppError) {
+        self.record_error(format!("RESOURCE_ERROR:{}\n{}", error.code, error.user_message));
     }
     pub(crate) fn check(&self) -> Result<(), AppError> {
         if let Self::Disk { error, .. } = self {
             if let Some(detail) = error.lock().unwrap().as_ref() {
+                if let Some((code,message)) = detail.strip_prefix("RESOURCE_ERROR:").and_then(|value| value.split_once('\n')) {
+                    return Err(super::error(code, message, None));
+                }
                 if let Some(message) = detail.strip_prefix("MEMORY_PROTECTION:") {
                     return Err(super::error("MEMORY_PROTECTION", message, None));
                 }
@@ -196,7 +199,9 @@ impl<'a> Iterator for RowsIter<'a> {
                             buffer.extend(batch);
                         }
                         Some(Err(e)) => {
-                            *error.lock().unwrap() = Some(if e.code == "MEMORY_PROTECTION" {
+                            *error.lock().unwrap() = Some(if e.code == "JOB_CANCELLED" {
+                                format!("RESOURCE_ERROR:{}\n{}",e.code,e.user_message)
+                            } else if e.code == "MEMORY_PROTECTION" {
                                 format!("MEMORY_PROTECTION:{}", e.user_message)
                             } else {
                                 e.user_message.clone()
@@ -240,16 +245,8 @@ fn read_batch_limited(
         let data: String = row.get(1).map_err(db_error)?;
         // JSON 字符串、反序列化明细及本批缓存同时存活，预留三份空间。
         let estimated = (data.len() as u64).saturating_mul(3).saturating_add(512);
-        if bytes.saturating_add(estimated) > limit {
-            if output.is_empty() {
-                return Err(super::error(
-                    "MEMORY_PROTECTION",
-                    "固定资产单条明细超过当前安全批次预算，请缩短超长文本或拆分后重试。",
-                    None,
-                ));
-            }
-            break;
-        }
+        if bytes.saturating_add(estimated) > limit && !output.is_empty() { break; }
+        if output.is_empty() { crate::resource_budget::check_available_if_managed()?; }
         bytes += estimated;
         output.push((
             row.get(0).map_err(db_error)?,
@@ -276,6 +273,17 @@ fn json_error(e: serde_json::Error) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn disk_result_resource_checkpoint_keeps_cancellation_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cancel.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE joined(id INTEGER PRIMARY KEY,data TEXT)").unwrap();
+        drop(conn);
+        let rows = JoinedRows::open(path).unwrap();
+        rows.record_resource_error(&super::super::error("JOB_CANCELLED", "任务已取消。", None));
+        assert_eq!(rows.check().unwrap_err().code, "JOB_CANCELLED");
+    }
     #[test]
     fn disk_cursor_byte_batches_resume_without_skipping_the_deferred_row() {
         let db = Connection::open_in_memory().unwrap();
@@ -309,10 +317,9 @@ mod tests {
             }
         }
         assert_eq!(ids, vec![1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(
-            read_batch_limited(&db, 0, 10).unwrap_err().code,
-            "MEMORY_PROTECTION"
-        );
+        let single = read_batch_limited(&db, 0, 10).unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].0, 1);
     }
     #[test]
     fn corrupt_disk_cursor_records_failure_instead_of_accepting_truncated_rows() {

@@ -1,5 +1,17 @@
 # 存款利息上传识别行为与性能回归
 
+## 2026-10-19：磁盘 TB 匹配值域取消大小拦截
+
+- 磁盘 TB 对内存 JE 校验主体和辅助时改用共享按需磁盘值域，不再收集全列唯一摘要／金额或分配空矩阵，取消 `TABLE_DOMAIN_BUDGET`。归一化、完整值域、候选修复顺序与金额计算保持。
+- JE 目录及公共 TB 关系分析的估算硬拦截同步取消，资源保护见 `LEDGER_MAPPING_UNIFICATION.md`。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib deposit_interest::`、`--lib disk_domains`。
+
+## 2026-10-19：分类只记录，第三步统一应用
+
+- 第二步首次准备的账户／币种行键继续用于利率编辑。人工分类及确认表回传后，停止该步骤的辅助联动、账户清单与明细衔接自动请求；保留稳定行键下的已填利率，作废旧测算展示。迟到的准备结果不能覆盖人工分类后的状态。
+- “下一步”仅导航。第三步发起预览或生成底稿时，按当前分类统一检查同码明细衔接；检查失败或尚未选择口径时不启动任务。JE 科目汇总所需的新行及统一利率可直接在第三步准备、填写，不强制退回分类步骤。
+- 人工分类后不向计算传入旧范围的 `auxiliaryPlan`，由原有 Rust 完整验证按当前选择重建。账户／明细角色、存款档位、逐户利率及原有计息规则保持；确认统计与进入测算门禁改按屏幕最终行角色计算，允许原自动排除的明细被手工纳入。
+- 回归：`npx vitest run src/DepositInterestInteractions.test.tsx src/DepositInterestPage.test.ts src/DepositInterestLinks.test.tsx src/DepositInterestStyles.test.ts`。覆盖连续修改、行级覆盖、确认表回传、请求次数、原利率保留、第三步失败重试和两种衔接口径。
+
 ## 2026-10-18：完整 JE 目录避免全列缓存与重复汇总
 
 - `deposit.inspect_je`（FA 复用）直接完整扫描目录所需列，跳过无关列的文本查询和全列缓存写入；目录完成后按源表、Sheet、标题、映射及显示口径缓存。二次识别无需再次汇总整张 JE。业务金额计算仍用完整来源，首条和末尾数据均保留。

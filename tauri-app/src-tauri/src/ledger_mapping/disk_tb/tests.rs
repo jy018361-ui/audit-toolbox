@@ -315,7 +315,7 @@ fn tb_disk_random_interleaved_entities_matches_memory() {
     }
 }
 #[test]
-fn tb_disk_rejects_oversized_whole_group_and_cancel() {
+fn tb_disk_whole_group_ignores_estimated_cap_and_keeps_cancel() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("预算.csv");
     let mut w = csv::Writer::from_path(&path).unwrap();
@@ -327,10 +327,8 @@ fn tb_disk_rejects_oversized_whole_group_and_cancel() {
     w.flush().unwrap();
     let cancel = AtomicBool::new(false);
     let source = DiskTable::open(&path, None, 1, 1, &|_, _, _, _| {}, &cancel).unwrap();
-    let err = analyze_with_limit(&source, &columns, true, &|_, _, _, _| {}, &cancel, Some(1))
-        .err()
-        .unwrap();
-    assert_eq!(err.code, "TB_DISK_ANALYSIS_FAILED");
+    let result = analyze_with_limit(&source, &columns, true, &|_, _, _, _| {}, &cancel, Some(1)).unwrap();
+    assert_eq!(result.analysis.keep, vec![true]);
     cancel.store(true, Ordering::Relaxed);
     assert_eq!(
         analyze(&source, &columns, true, &|_, _, _, _| {}, &cancel)

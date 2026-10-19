@@ -3159,18 +3159,16 @@ fn fold_tb_accounts(
     // 必须先于下方 TB 扫描：候选行的主体取自 tb_map 的映射列；JE 走磁盘
     // 大账时不回读整表，跳过校验，保持流式语义不变。
     if let Some(JeInput::Memory(je_table, je_map)) = je_input.as_mut() {
-        let domains = if tb.disk.is_some() {
-            Some(tb.complete_domains()?)
+        if tb.disk.is_some() {
+            let mut domains = ledger_mapping::disk_domains::DiskDomains::new(&tb.headers,
+                Box::new(|visitor| tb.visit(cancel, |r,_| visitor(r.row))), &je_table.headers,
+                Box::new(|visitor| { for row in &je_table.rows { visitor(row)?; } Ok(()) }), cancel)?;
+            domains.reconcile("entity", &mut tb_map, je_map)?;
+            domains.reconcile("auxiliary", &mut tb_map, je_map)?;
         } else {
-            None
-        };
-        let domain_rows = domains
-            .as_ref()
-            .map(|s| s.rows.as_slice())
-            .unwrap_or(tb.rows.as_slice());
         ledger_mapping::reconcile_entity_domains(
             &tb.headers,
-            domain_rows,
+            &tb.rows,
             &mut tb_map,
             &je_table.headers,
             &je_table.rows,
@@ -3185,12 +3183,13 @@ fn fold_tb_accounts(
         ledger_mapping::reconcile_key_domains(
             "auxiliary",
             &tb.headers,
-            domain_rows,
+            &tb.rows,
             &mut tb_map,
             &je_table.headers,
             &je_table.rows,
             je_map,
         );
+        }
     }
     let entity_key_enabled = ledger_mapping::entity_key_enabled(
         !column_indexes(&tb, &tb_map, "entity").is_empty(),

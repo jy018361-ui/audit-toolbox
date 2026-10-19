@@ -133,14 +133,6 @@ fn estimate_peak_bytes(path: &Path, file_bytes: u64) -> Option<u64> {
     )
 }
 
-pub(super) fn full_table_error() -> AppError {
-    error(
-        "KANZHANG_MEMORY_BUDGET",
-        "该文件已超过当前电脑的安全内存预算，已阻止整表读取以保护电脑。当前工具尚未接入大文件磁盘计算，请改用看账工具处理，或缩小文件后重试。",
-        None,
-    )
-}
-
 pub(super) struct Cache {
     pub(super) db: Connection,
     pub(super) path: PathBuf,
@@ -593,15 +585,21 @@ mod tests {
     }
 
     #[test]
-    fn large_csv_cannot_fall_back_to_whole_table_loading() {
+    fn explicitly_selected_reader_does_not_reject_by_a_second_budget_decision() {
         let root = fixture();
-        let input = root.join("large.csv");
-        File::create(&input)
-            .unwrap()
-            .set_len(ALWAYS_DISK_BYTES)
-            .unwrap();
-        let err = load_ledger_cached(&input, None, 1, 1).unwrap_err();
-        assert_eq!(err.code, "KANZHANG_MEMORY_BUDGET");
+        let input = root.join("selected-reader.csv");
+        let mut writer = csv::Writer::from_path(&input).unwrap();
+        writer.write_record(["编码","说明"]).unwrap();
+        for _ in 0..40000 { writer.write_record(["1002",&"X".repeat(1024)]).unwrap(); }
+        writer.flush().unwrap();
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total: 16 * 1024 * 1024 * 1024, available: 128 * 1024 * 1024, commit_available: 128 * 1024 * 1024,
+        }, || {
+            assert!(applies(&input)); // 上层仍会自动分流；显式选定的读取器不二次拒绝。
+            let table = load_ledger_cached(&input, None, 1, 1).unwrap();
+            assert_eq!(table.rows.len(),40000);
+            assert_eq!(table.rows[39999][1].len(),1024);
+        });
         fs::remove_dir_all(root).unwrap();
     }
 }
@@ -850,7 +848,6 @@ impl Cache {
         let mut codes = Vec::new();
         let mut names = Vec::new();
         let mut total = 0;
-        let mut bytes = 0usize;
         let mut stmt = self
             .db
             .prepare(&format!(
@@ -875,14 +872,6 @@ impl Cache {
             total += 1;
             if values.len() < limit {
                 let name: String = row.get(2).map_err(sql_error)?;
-                bytes += value.len() + code.len() + name.len();
-                if bytes > 16 * 1024 * 1024 {
-                    return Err(error(
-                        "KANZHANG_RESULT_TOO_LARGE",
-                        "科目列表超过安全预算，请检查科目映射或缩小查询范围。",
-                        None,
-                    ));
-                }
                 values.push(value);
                 codes.push(code);
                 names.push(name);

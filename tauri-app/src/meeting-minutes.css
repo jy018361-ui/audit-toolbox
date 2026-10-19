@@ -233,3 +233,24 @@ body.meeting-ask-body {
     opacity: 0.35;
   }
 }
+
+.meeting-processing-card {
+  position: fixed;
+  right: var(--sp-4);
+  bottom: var(--sp-4);
+  z-index: 60;
+  display: grid;
+  gap: var(--sp-2);
+  width: min(420px, calc(100vw - 2 * var(--sp-4)));
+  max-height: 50vh;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: var(--sp-4);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-overlay);
+  font-size: var(--fs-sm);
+}
+
+.meeting-processing-card p { margin: 0; }

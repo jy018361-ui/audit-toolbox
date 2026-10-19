@@ -381,52 +381,6 @@ fn tb_basis(
     }
 }
 
-/// Cross-table key repair uses complete distinct column domains, not a first-page sample.
-fn complete_domains(
-    table: &FxTable,
-    mut visit: impl FnMut(&mut dyn FnMut(&[String]) -> Result<(), AppError>) -> Result<(), AppError>,
-) -> Result<FxTable, AppError> {
-    let mut sets = vec![BTreeSet::new(); table.headers.len()];
-    let mut bytes = 0usize;
-    let limit =
-        (crate::resource_budget::budget()?.worker_bytes / 5).min(128 * 1024 * 1024) as usize;
-    visit(&mut |row| {
-        for (i, value) in row.iter().enumerate().take(sets.len()) {
-            if !value.trim().is_empty() && sets[i].insert(value.clone()) {
-                bytes = bytes.saturating_add(value.len() + 96);
-                if bytes > limit {
-                    return Err(error(
-                        "TBJE_DOMAIN_BUDGET",
-                        "账表匹配键的完整值域超过安全预算，请拆分独立账套后重试。",
-                        None,
-                    ));
-                }
-            }
-        }
-        Ok(())
-    })?;
-    let width = sets.len();
-    let len = sets.iter().map(BTreeSet::len).max().unwrap_or(0);
-    if len.saturating_mul(width).saturating_mul(32) > limit {
-        return Err(error(
-            "TBJE_DOMAIN_BUDGET",
-            "账表匹配键的完整值域超过安全预算，请拆分独立账套后重试。",
-            None,
-        ));
-    }
-    let mut rows = vec![vec![String::new(); width]; len];
-    for (i, set) in sets.into_iter().enumerate() {
-        for (j, value) in set.into_iter().enumerate() {
-            rows[j][i] = value;
-        }
-    }
-    let mut result = table.clone();
-    result.rows = rows;
-    result.row_count = len;
-    result.sampled = false;
-    Ok(result)
-}
-
 /// Small ledgers retain the existing in-memory table. Large CSV ledgers keep
 /// only a bounded inspection sample in `table`; their rows remain in SQLite.
 struct PreparedJe {
@@ -667,6 +621,10 @@ fn align_account_mappings(
         &tb.rows,
         &tb_column,
     );
+    account_overlap_warnings(overlap, je_count, tb_count, &je_column, &tb_column)
+}
+
+fn account_overlap_warnings(overlap: usize, je_count: usize, tb_count: usize, je_column: &str, tb_column: &str) -> Result<Vec<String>, AppError> {
     if overlap > 0 {
         let mut warnings = Vec::new();
         if je_count >= 10 && overlap * 10 < je_count.min(tb_count) {
@@ -821,45 +779,24 @@ fn prepare_with_control(
         .map_err(|e| error("INVALID_PARAMS", "主体口径参数无效。", Some(e.to_string())))?
         .unwrap_or_default();
 
-    let je_map_before_alignment = je_map.clone();
-    let tb_domains = if tb.disk.is_some() {
-        Some(complete_domains(&tb, |visitor| {
-            tb.visit(cancel, |r, _| visitor(r.row))
-        })?)
-    } else {
-        None
-    };
-    let je_domains = if let Some(je) = &je {
-        if let Some(disk) = &je.disk {
-            Some(complete_domains(&je.table, |visitor| {
-                disk.visit(false, cancel, |r| visitor(&r.values))
-            })?)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let tb_domain = tb_domains.as_ref().unwrap_or(&tb.table);
+    let original_je_map = je_map.clone();
+    let mut domains = if let Some(je) = je.as_ref().filter(|je| tb.disk.is_some() || je.disk.is_some()) {
+        Some(ledger_mapping::disk_domains::DiskDomains::new(&tb.headers,
+            Box::new(|visitor| tb.visit(cancel, |r, _| visitor(r.row))), &je.table.headers,
+            Box::new(|visitor| {
+                if let Some(disk) = &je.disk { disk.visit(false, cancel, |r| visitor(&r.values)) }
+                else { for row in &je.table.rows { visitor(row)?; } Ok(()) }
+            }), cancel)?)
+    } else { None };
     let mut mapping_warnings = if let Some(je) = je.as_ref() {
-        align_account_mappings(
-            tb_domain,
-            &mut tb_map,
-            je_domains.as_ref().unwrap_or(&je.table),
-            &mut je_map,
-        )?
+        if let Some(domains) = domains.as_mut() {
+            if let Some((overlap,jc,tc)) = domains.account_overlap(&tb_map,&je_map)? {
+                account_overlap_warnings(overlap,jc,tc,&columns(&je_map,"accountCode")[0],&columns(&tb_map,"accountCode")[0])?
+            } else { Vec::new() }
+        } else { align_account_mappings(&tb.table,&mut tb_map,&je.table,&mut je_map)? }
     } else {
         Vec::new()
     };
-
-    // 磁盘规范化缓存的正文判定、账户键和向下填充都依赖映射。若跨表校验纠正了
-    // JE 映射，必须用纠正后的映射重开缓存；只改 je_map 会让后续汇总继续读取按
-    // 错误科目列建成的 prepared 数据，极端情况下会静默漏行。
-    if je_map != je_map_before_alignment && je.as_ref().is_some_and(|value| value.disk.is_some()) {
-        if let Some(spec) = je_spec.as_ref() {
-            je = Some(prepared_disk_je(spec, &je_map, progress, cancel)?);
-        }
-    }
 
     // 流水级导出没有汇总行，末级判定的金额勾稽折叠在该类表上已跳过（公共引擎
     // 统一行为）。核对口径变了必须让用户知道，否则与旧结果对不上时无从解释。
@@ -880,10 +817,13 @@ fn prepare_with_control(
     }
 
     if let Some(je) = je.as_ref() {
-        let je = je_domains.as_ref().unwrap_or(&je.table);
-        if columns(&je_map, "entity").iter().any(|column| {
+        let disk_je = je.disk.is_some();
+        let je = &je.table;
+        let is_unit = if let Some(domains) = domains.as_mut().filter(|_| disk_je) { domains.measurement_unit(1,&je_map)? }
+        else { columns(&je_map, "entity").iter().any(|column| {
             ledger_mapping::entity_column_is_measurement_unit(&je.headers, &je.rows, column)
-        }) {
+        }) };
+        if is_unit {
             // 计量单位列误映射为主体：静默摘除即可，不产生任何用户提示。
             je_map.remove("entity");
         }
@@ -903,14 +843,15 @@ fn prepare_with_control(
         // 自动换同值域列；两侧都找不到替代列时摘除双侧主体，按既有单侧
         // 口径退默认主体——不产生任何提示。
         let had_entity = !columns(&tb_map, "entity").is_empty();
-        ledger_mapping::reconcile_entity_domains(
+        if let Some(domains) = domains.as_mut() { domains.reconcile("entity",&mut tb_map,&mut je_map)?; }
+        else { ledger_mapping::reconcile_entity_domains(
             &tb.headers,
-            &tb_domain.rows,
+            &tb.rows,
             &mut tb_map,
             &je.headers,
             &je.rows,
             &mut je_map,
-        );
+        ); }
         if had_entity && columns(&tb_map, "entity").is_empty() {
             tb_fixed = ledger_mapping::DEFAULT_ENTITY.to_owned();
             je_fixed = ledger_mapping::DEFAULT_ENTITY.to_owned();
@@ -922,15 +863,21 @@ fn prepare_with_control(
         // 反查：TB 锚点与 JE 偏好列都取换列后的映射，维度值才在同一值
         // 体系上比对；映射阶段的辅助计划（auxiliaryPlan）按原始映射校验
         // 指纹，不受此处静默换列影响。
-        ledger_mapping::reconcile_key_domains(
+        if let Some(domains) = domains.as_mut() { domains.reconcile("auxiliary",&mut tb_map,&mut je_map)?; }
+        else { ledger_mapping::reconcile_key_domains(
             "auxiliary",
             &tb.headers,
-            &tb_domain.rows,
+            &tb.rows,
             &mut tb_map,
             &je.headers,
             &je.rows,
             &mut je_map,
-        );
+        ); }
+    }
+    drop(domains);
+    // Optional-key repairs also affect normalized disk rows. Reopen with final mapping.
+    if je_map != original_je_map && je.as_ref().is_some_and(|value| value.disk.is_some()) {
+        if let Some(spec) = je_spec.as_ref() { je = Some(prepared_disk_je(spec,&je_map,progress,cancel)?); }
     }
     let mut je_rows = if let Some(je) = je.as_ref() {
         let je = &*je.table;
@@ -1534,7 +1481,7 @@ fn hash_text(text: &str) -> String {
 /// 修改时间。指纹一致即认定「输入与上次核对时相同」，导出直接复用已落盘
 /// 的核对结果；任一项变化指纹即变，自然回落到现行重算并刷新快照。
 fn check_result_fingerprint(params: &Value) -> Option<String> {
-    let mut material = String::from("tbje-stream-tb-replay-20261018\n");
+    let mut material = String::from("tbje-disk-key-domains-20261019\n");
     for field in CHECK_PARAM_FIELDS {
         match params.get(*field) {
             Some(value) => {

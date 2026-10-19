@@ -1085,10 +1085,8 @@ it("选择本位币后利率明细按新口径自动重算并携带 functionalCu
   ).toBeEnabled();
 });
 
-/** 缺陷回归：手动把某行科目类型改成「借款科目」后，无需点「重新生成借款利率表」，
- *  页面自动按新选择重跑 loan.preview，利率输入随新明细立即可编辑；改回
- *  「排除」时利率输入随之消失。 */
-it("科目类型改为借款后利率输入立即可编辑（自动重生成）", async () => {
+/** 分类只记录，导航不计算；第三步发起测算才统一更新，失败可重试。 */
+it.each([false, true])("连续调整科目分类仅记录，第三步测算时统一生效（首次更新失败：%s）", async (failFirst) => {
   const tbHeaders = ["科目编码", "科目名称", "辅助核算", "期初余额", "期末余额"];
   const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
   const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
@@ -1149,6 +1147,11 @@ it("科目类型改为借款后利率输入立即可编辑（自动重生成）"
           { key: "2001", code: "2001", name: "短期借款", account: "2001 短期借款", opening: 1000000, closing: 900000 },
           // 2202 初始建议排除：预选只有 2001，首张利率表没有它的利率输入。
           { key: "2202", code: "2202", name: "长期借款", account: "2202 长期借款", opening: 500000, closing: 500000, suggestedType: "skip", suggestionReason: "初始建议排除" },
+          ...Array.from({ length: 10 }, (_, i) => ({
+            key: `6603${i}`, code: `6603${i}`, name: `利息支出${i}`,
+            account: `6603${i} 利息支出${i}`, opening: 0, closing: 100,
+            suggestedType: "interest_expense",
+          })),
         ],
       };
     }
@@ -1194,24 +1197,70 @@ it("科目类型改为借款后利率输入立即可编辑（自动重生成）"
     .closest("tr")!;
   expect((skipRow.querySelector("select") as HTMLSelectElement).value).toBe("skip");
   expect(within(skipRow).queryAllByRole("spinbutton")).toHaveLength(0);
-  // 手动改成「借款科目」：无需任何按钮，自动按新选择重跑 loan.preview。
+  const prepareCalls = () => mock.engineCall.mock.calls.filter(([method]) => method === "loan.prepare_rates");
+  const beforeChanges = prepareCalls().length;
+  fireEvent.change(screen.getByRole("spinbutton", { name: "2001 短期借款的执行利率" }), { target: { value: "4.25" } });
+  // 连续排除十个利息支出科目，逐次渲染后都不能发起请求。
+  for (let i = 0; i < 10; i++) {
+    await act(async () => {
+      fireEvent.change(screen.getByRole("combobox", { name: `6603${i} 利息支出${i}的科目类型` }), { target: { value: "skip" } });
+    });
+    expect(prepareCalls()).toHaveLength(beforeChanges);
+  }
+  // 新增借款也只记录，下一步导航仍不计算。
   fireEvent.change(
     screen.getByRole("combobox", { name: "2202 长期借款的科目类型" }),
     { target: { value: "loan" } },
   );
   expect(screen.getByText("2202 长期借款已设为借款科目。")).toBeVisible();
+  expect(prepareCalls()).toHaveLength(beforeChanges);
+  expect(screen.queryByRole("spinbutton", { name: "C银行借款的执行利率" })).not.toBeInTheDocument();
+  expect(screen.getByText("科目分类已记录，将在下一步测算时生效。")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "应用科目调整" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "下一步：测算与底稿" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: /3 测算与底稿/ })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "下一步：测算与底稿" }));
+  expect(prepareCalls()).toHaveLength(beforeChanges);
+  expect(mock.jobStart).not.toHaveBeenCalled();
+  if (failFirst) {
+    mock.engineCall.mockRejectedValueOnce(new Error("测试更新失败"));
+    fireEvent.click(screen.getByRole("button", { name: "生成并复核借款变动表" }));
+    await screen.findByText("测试更新失败");
+    expect(prepareCalls()).toHaveLength(beforeChanges + 1);
+    expect(mock.jobStart).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "生成并复核借款变动表" })).toBeEnabled();
+  }
+  fireEvent.click(screen.getByRole("button", { name: "生成并复核借款变动表" }));
   await waitFor(() =>
     expect(mock.engineCall).toHaveBeenLastCalledWith(
       "loan.prepare_rates",
-      expect.objectContaining({ loanAccounts: ["2001", "2202"] }),
+      expect.objectContaining({
+        loanAccounts: ["2001", "2202"], interestExpenseAccounts: [],
+        rateRows: expect.arrayContaining([expect.objectContaining({ accountCode: "2001", fixedRate: 0.0425 })]),
+      }),
       "生成借款利率明细",
     ),
   );
-  // 新科目的利率输入随重生成结果立即可编辑。
+  await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith(
+    "loan.preview", expect.objectContaining({
+      loanAccounts: ["2001", "2202"], interestExpenseAccounts: [],
+      rateRows: expect.arrayContaining([
+        expect.objectContaining({ accountCode: "2001", fixedRate: 0.0425 }),
+        expect.objectContaining({ accountCode: "2202", fixedRate: 0.03 }),
+      ]),
+    }),
+  ));
+  expect(prepareCalls()).toHaveLength(beforeChanges + (failFirst ? 2 : 1));
+  // 完成后回到第二步，新借款明细可填写利率，旧利率保持原值。
+  await act(async () => mock.jobEvents.callback?.({ jobId: "job-auto", phase: "failed", message: "测试任务结束" }));
+  fireEvent.click(screen.getByRole("button", { name: "返回利率确认" }));
   const newRate = await screen.findByRole("spinbutton", {
     name: "C银行借款的执行利率",
   });
   expect(newRate).toBeEnabled();
+  expect(prepareCalls()).toHaveLength(beforeChanges + (failFirst ? 2 : 1));
+  expect(screen.getByRole("spinbutton", { name: "2001 短期借款的执行利率" })).toHaveValue(4.25);
+  expect(screen.getByRole("button", { name: "下一步：测算与底稿" })).toBeEnabled();
   fireEvent.change(newRate, { target: { value: "3.10" } });
   expect(newRate).toHaveValue(3.1);
   // 改回「排除」：利率输入立即消失，恢复为「—」。
@@ -1222,6 +1271,8 @@ it("科目类型改为借款后利率输入立即可编辑（自动重生成）"
   expect(
     screen.queryByRole("spinbutton", { name: "C银行借款的执行利率" }),
   ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "下一步：测算与底稿" })).toBeEnabled();
+  expect(prepareCalls()).toHaveLength(beforeChanges + (failFirst ? 2 : 1));
 });
 
 /** 辅助联动通过后，同一借款科目的各银行明细分别成为确认行并逐笔设置利率；
@@ -1363,24 +1414,7 @@ it("同一科目多笔辅助借款各行设置利率，改类型不丢已填利�
   ).not.toBeInTheDocument();
   fireEvent.change(roleSelect, { target: { value: "loan" } });
   expect(await screen.findByRole("spinbutton", { name: "A银行借款的执行利率" })).toHaveValue(3.85);
-  // 手填利率按明细 rowKey 进入测算 payload。第二步先按当前利率刷新快照；
-  // 进入第三步只导航，不额外启动任务。
-  await waitFor(() =>
-    expect(mock.engineCall).toHaveBeenLastCalledWith(
-      "loan.prepare_rates",
-      expect.objectContaining({
-        loanAccounts: ["2001"],
-        rateRows: expect.arrayContaining([
-          expect.objectContaining({
-            rowKey: "tb\u001f甲公司\u001f2001\u001fA银行",
-            rateType: "fixed",
-            fixedRate: 0.0385,
-          }),
-        ]),
-      }),
-      "生成借款利率明细",
-    ),
-  );
+  // 手填利率按明细 rowKey 进入测算 payload，进入第三步只导航。
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "下一步：测算与底稿" })).toBeEnabled(),
   );

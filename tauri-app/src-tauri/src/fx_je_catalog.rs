@@ -192,7 +192,6 @@ pub(super) fn complete(
         currency_details: BTreeMap::new(),
     };
     let mut currency_tally = BTreeMap::new();
-    let mut catalog_bytes = 0_u64;
     let mut tick = Instant::now();
     let first_data = source.header_row.saturating_add(source.header_depth);
     let mut last_physical = 0;
@@ -218,50 +217,25 @@ pub(super) fn complete(
                     .unwrap_or("")
             };
             let entity = text(&entity_columns);
-            if !entity.is_empty() && snapshot.entities.insert(entity.to_owned()) {
-                catalog_bytes += entity.len() as u64 + 128;
-            }
+            if !entity.is_empty() { snapshot.entities.insert(entity.to_owned()); }
             let account = account_of(&row);
-            let previous_currency_keys = currency_tally
-                .get(&account)
-                .map_or(0, |entry: &CurrencyTally| {
-                    entry.0.len() + entry.2.len() + entry.3.len()
-                });
             tally_account_currency(
                 &mut currency_tally,
                 &account,
                 text(&currency_columns),
                 text(&functional_currency_columns),
             );
-            let currency_keys = currency_tally
-                .get(&account)
-                .map_or(0, |entry| entry.0.len() + entry.2.len() + entry.3.len());
-            catalog_bytes = catalog_bytes.saturating_add(
-                (currency_keys - previous_currency_keys) as u64
-                    * (text(&currency_columns).len()
-                        + text(&functional_currency_columns).len()
-                        + 128) as u64,
-            );
             if !account.is_empty() && !ledger_mapping::is_report_footer_value(&account) {
-                if snapshot.accounts.insert(account.clone()) {
-                    catalog_bytes += account.len() as u64 + 512;
-                }
+                snapshot.accounts.insert(account.clone());
                 let entity = if entity.is_empty() {
                     DEFAULT_ENTITY
                 } else {
                     entity
                 };
-                if snapshot
-                    .combinations
-                    .insert((entity.to_owned(), account.clone()))
-                {
-                    catalog_bytes += (entity.len() + account.len()) as u64 + 256;
-                }
+                snapshot.combinations.insert((entity.to_owned(), account.clone()));
             }
             let currency = text(&currency_columns);
-            if !currency.is_empty() && snapshot.currencies.insert(currency.to_owned()) {
-                catalog_bytes += currency.len() as u64 + 128;
-            }
+            if !currency.is_empty() { snapshot.currencies.insert(currency.to_owned()); }
             for index in &date_columns {
                 if let Some(date) = row.get(*index).and_then(|value| parse_date(value)) {
                     snapshot.years.insert(date.year());
@@ -271,13 +245,6 @@ pub(super) fn complete(
                             .map_or(date, |current| current.max(date)),
                     );
                 }
-            }
-            if catalog_bytes > limit {
-                return Err(error(
-                    "JE_CATALOG_TOO_LARGE",
-                    "序时账识别目录超过安全预算，请按独立主体拆分后重试。",
-                    None,
-                ));
             }
             if physical % 256 == 0 {
                 check()?;

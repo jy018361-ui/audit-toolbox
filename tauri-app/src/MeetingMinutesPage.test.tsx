@@ -191,4 +191,30 @@ describe("MeetingMinutesPage", () => {
     expect(displayAudioFileName("/home/me/meeting.mp3")).toBe("meeting.mp3");
     expect(displayAudioFileName("裸文件名.m4a")).toBe("裸文件名.m4a");
   });
+
+  it("页面晚于自动任务打开时从后台快照显示结果", async () => {
+    const { meetingStatus, openOutput } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValueOnce({
+      watchEnabled: true, resident: true, inCall: false, logFound: true, recording: false,
+      latestJob: {
+        jobId: "auto-job", toolId: tool.id, phase: "completed", current: 4, total: 4,
+        message: "会议纪要已生成", severity: "success", outputPaths: ["C:/data/纪要.md"],
+        result: { title: "项目周会", minutesPath: "C:/data/纪要.md", transcriptPath: "C:/data/转写.txt" },
+      },
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByText("项目周会")).toBeInTheDocument();
+    (await screen.findByRole("button", { name: "打开会议纪要" })).click();
+    await waitFor(() => expect(openOutput).toHaveBeenCalledWith("C:/data/纪要.md"));
+  });
+
+  it("后台自动任务未能启动时显示原因", async () => {
+    const { meetingStatus } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValueOnce({
+      watchEnabled: true, resident: true, inCall: false, logFound: true, recording: false,
+      processingError: "纪要任务启动失败：无法读取配置",
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByText("纪要任务启动失败：无法读取配置")).toBeInTheDocument();
+  });
 });

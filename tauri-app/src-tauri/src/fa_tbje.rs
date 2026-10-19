@@ -747,8 +747,6 @@ fn analyze_with_disk_je(
     }
     disk.select_accounts(&target_accounts, cancel)?;
     let mut selected_rows = Vec::new();
-    let mut selected_bytes = 0u64;
-    let selected_limit = crate::resource_budget::budget()?.worker_bytes / 3;
     let mut selected_count = 0usize;
     disk.visit_vouchers(true, cancel, |_, voucher_rows| {
         selected_count += voucher_rows.len();
@@ -761,8 +759,7 @@ fn analyze_with_disk_je(
             );
         }
         for row in voucher_rows {
-            selected_bytes = selected_bytes.saturating_add((std::mem::size_of::<Vec<String>>() + row.values.iter().map(|v| std::mem::size_of::<String>() + v.len()).sum::<usize>()) as u64);
-            if selected_bytes > selected_limit { return Err(error("MEMORY_PROTECTION", "固定资产相关完整凭证超过当前安全预算，请按主体或期间拆分后重试。", None)); }
+            if selected_rows.len() % 256 == 0 { crate::resource_budget::check_available_if_managed()?; }
             selected_rows.push(row.values.clone());
         }
         Ok(())
@@ -3449,14 +3446,11 @@ impl FaTbRows<'_> {
 fn tb_account_identities(table: &FaTbRows<'_>, map: &Map<String, Value>, params: &Value, entity_enabled: bool) -> Result<Vec<AccountIdentity>, AppError> {
     let scope = params.get("entityScope").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
     let mapping = ledger_mapping_for(map);
-    let limit = crate::resource_budget::budget()?.worker_bytes / 8;
-    let mut bytes = 0u64;
     let mut out = Vec::new();
     table.visit(|row, _| {
         let (_, display) = tabular::ledger_row_keys(std::slice::from_ref(&row.to_vec()), &table.headers, &mapping);
         let identity = account_identity_from_row(table, row, map, &display[0], EntitySide::Tb, entity_enabled, &scope);
-        bytes = bytes.saturating_add((std::mem::size_of::<AccountIdentity>() + identity.entity.len() + identity.code.len() + identity.name.len() + identity.matching_name.as_ref().map_or(0, String::len) + identity.auxiliary.len() + identity.currency.len() + identity.display.len() + identity.legacy_display.len()) as u64);
-        if bytes > limit { return Err(error("MEMORY_PROTECTION", "固定资产 TB 的科目身份数量超过当前安全预算，请按主体拆分后重试。", None)); }
+        if table.input.disk.is_some() && out.len() % 256 == 0 { crate::resource_budget::check_available_if_managed()?; }
         out.push(identity);
         Ok(())
     })?;
@@ -4171,6 +4165,19 @@ mod tests {
     use crate::deposit_interest;
     use calamine::{DataType, Reader, open_workbook_auto};
     use std::io::Read;
+
+    #[test]
+    fn ordinary_mode_fa_calculates_under_low_memory_without_disk_gate() {
+        let (dir, _, params) = fixture();
+        let analysis = crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total: 16 * 1024 * 1024 * 1024, available: 128 * 1024 * 1024, commit_available: 128 * 1024 * 1024,
+        }, || analyze(&params, &AtomicBool::new(false))).unwrap();
+        let totals = &analysis.totals[&(String::from("A"), String::from("机器设备"))];
+        assert_eq!(totals.closing_cost, 1300.0);
+        assert_eq!(totals.additions, 500.0);
+        assert_eq!(totals.disposals, 200.0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn fa科目身份应用用户确认的主体归集() {

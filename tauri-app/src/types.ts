@@ -85,6 +85,9 @@ export const MeetingStatusSchema = z.object({
   logFound: z.boolean(),
   audioDetectionAvailable: z.boolean().optional(),
   recording: z.boolean(),
+  recordingSummary: z.lazy(() => MeetingRecordStartSchema).nullish(),
+  latestJob: JobEventSchema.nullish(),
+  processingError: z.string().nullish(),
 });
 export type MeetingStatus = z.infer<typeof MeetingStatusSchema>;
 

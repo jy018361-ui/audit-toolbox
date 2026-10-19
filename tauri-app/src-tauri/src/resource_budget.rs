@@ -1,4 +1,4 @@
-//! Windows worker memory protection. Limits are installed before sending stdin.
+//! Windows worker resource monitoring and process lifetime protection.
 use crate::AppError;
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -74,6 +74,28 @@ pub(crate) fn budget() -> Result<MemoryBudget, AppError> {
     Ok(result)
 }
 
+/// 共享业务逻辑只在实际使用大文件磁盘模式时申请受保护预算。
+/// 普通内存路径既不查询系统余量，也不套用磁盘 worker 的最低启动门槛。
+pub(crate) fn budget_for_disk(disk_mode: bool) -> Result<Option<MemoryBudget>, AppError> {
+    if disk_mode { budget().map(Some) } else { Ok(None) }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_MEMORY: std::cell::Cell<Option<MemoryStatus>> = const { std::cell::Cell::new(None) };
+}
+
+/// 仅测试使用，按线程模拟内存压力，避免实际占满内存或干扰并行测试。
+#[cfg(test)]
+pub(crate) fn with_test_memory<T>(memory: MemoryStatus, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<MemoryStatus>);
+    impl Drop for Restore {
+        fn drop(&mut self) { TEST_MEMORY.with(|slot| slot.set(self.0)); }
+    }
+    let _restore = Restore(TEST_MEMORY.with(|slot| slot.replace(Some(memory))));
+    run()
+}
+
 #[cfg(test)]
 fn synthetic_test_budget_enabled() -> bool {
     std::env::var_os("AUDIT_TOOLBOX_SYNTHETIC_TEST_BUDGET").is_some_and(|value| value == "1")
@@ -106,8 +128,8 @@ fn physical_pause_floor(total: u64) -> u64 {
 
 fn runtime_memory_critical(total: u64, available: u64, commit_available: u64) -> bool {
     // 启动时按 safety_reserve 计算 worker 上限；运行中先在系统接近失稳时暂停。
-    // 两者若共用同一条保留线，Windows 的正常缓存波动就会把已经受 Job Object
-    // 限制的磁盘任务误杀。阈值仍随总内存变化，并为提交余量保留独立底线。
+    // 两者若共用同一条保留线，Windows 的正常缓存波动就会误暂停磁盘任务。
+    // 阈值仍随总内存变化，并为提交余量保留独立底线。
     available < physical_pause_floor(total) || commit_available < GIB
 }
 
@@ -178,6 +200,11 @@ fn failure(message: &str) -> AppError {
     AppError::new("MEMORY_PROTECTION", message, true, None)
 }
 fn available() -> Result<Memory, AppError> {
+    #[cfg(test)]
+    if let Some(memory) = TEST_MEMORY.with(|slot| slot.get()) {
+        return Ok(Memory { total: memory.total, available: memory.available,
+            commit_available: memory.commit_available, ..Default::default() });
+    }
     let mut memory = Memory {
         length: size_of::<Memory>() as u32,
         ..Default::default()
@@ -334,24 +361,21 @@ pub(crate) fn check_disk_space(path: &std::path::Path, estimated: u64) -> Result
     }
     Ok(())
 }
-pub(crate) struct WorkerLimit(*mut c_void);
-impl WorkerLimit {
-    pub(crate) fn attach(child: &std::process::Child, worker_bytes: u64) -> Result<Self, AppError> {
+// Job Object only owns the worker lifetime. Estimated working-set budgets must
+// not become OS allocation ceilings; actual system pressure controls pause/resume.
+fn worker_lifetime_limits() -> Limits {
+    Limits { basic: Basic { flags: 0x2000, ..Default::default() }, ..Default::default() }
+}
+pub(crate) struct WorkerLifetime(*mut c_void);
+impl WorkerLifetime {
+    pub(crate) fn attach(child: &std::process::Child) -> Result<Self, AppError> {
         use std::os::windows::io::AsRawHandle;
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
-            return Err(failure("无法启用任务内存保护，未开始读取。"));
+            return Err(failure("无法启用任务进程保护，未开始读取。"));
         }
         let guard = Self(handle);
-        let limits = Limits {
-            basic: Basic {
-                flags: 0x100 | 0x200 | 0x2000,
-                ..Default::default()
-            },
-            process_memory: worker_bytes as usize,
-            job_memory: worker_bytes as usize,
-            ..Default::default()
-        };
+        let limits = worker_lifetime_limits();
         if unsafe {
             SetInformationJobObject(
                 handle,
@@ -362,12 +386,12 @@ impl WorkerLimit {
         } == 0
             || unsafe { AssignProcessToJobObject(handle, child.as_raw_handle()) } == 0
         {
-            return Err(failure("无法安装任务内存上限，未开始读取。"));
+            return Err(failure("无法安装任务进程保护，未开始读取。"));
         }
         Ok(guard)
     }
 }
-impl Drop for WorkerLimit {
+impl Drop for WorkerLifetime {
     fn drop(&mut self) {
         unsafe {
             CloseHandle(self.0);
@@ -378,6 +402,20 @@ impl Drop for WorkerLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn worker_job_owns_lifetime_without_estimated_memory_ceiling() {
+        let limits = worker_lifetime_limits();
+        assert_eq!(limits.basic.flags, 0x2000);
+        assert_eq!(limits.process_memory, 0);
+        assert_eq!(limits.job_memory, 0);
+    }
+    #[test]
+    fn ordinary_mode_skips_disk_memory_gate_but_disk_mode_keeps_it() {
+        with_test_memory(MemoryStatus { total: 16 * GIB, available: 128 * MIB, commit_available: 128 * MIB }, || {
+            assert!(budget_for_disk(false).unwrap().is_none());
+            assert_eq!(budget_for_disk(true).unwrap_err().code, "MEMORY_PROTECTION");
+        });
+    }
     #[test]
     fn adaptive_budget_scales_with_host_memory() {
         let mut previous = 0;

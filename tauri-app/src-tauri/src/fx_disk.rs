@@ -10,6 +10,7 @@ fn failure(e: impl ToString) -> AppError {
 pub(super) struct Replay {
     db: Connection,
     table: Arc<FxTable>,
+    large_file_disk_mode: bool,
     _cleanup: Cleanup,
 }
 struct Cleanup(PathBuf);
@@ -21,7 +22,7 @@ impl Replay {
         let metadata=fs::metadata(&input.table.path).map_err(failure)?;
         let key=serde_json::to_string(&json!([fs::canonicalize(&input.table.path).map_err(failure)?,metadata.len(),
             metadata.modified().map_err(failure)?.duration_since(std::time::UNIX_EPOCH).map_err(failure)?.as_nanos().to_string(),
-            input.table.sheet,input.table.header_row,input.table.header_depth,mapping,
+            input.table.sheet,input.table.header_row,input.table.header_depth,mapping,input.disk.is_some(),
             params.get("fixedEntity"),params.get("entityScope"),params.get("__entityKeyEnabled"),
             params.get("__entityCoverage"),params.get("reportEnd")])).map_err(failure)?;
         if let Some(cached)=FX_DISK_REPLAY_CACHE.with(|cache|cache.borrow().as_ref().and_then(|cache|cache.get(&key).cloned())){return Ok(cached);}
@@ -68,7 +69,7 @@ impl Replay {
         })?;
         tx.commit().map_err(failure)?;
         db.execute_batch("CREATE INDEX voucher_rows ON rows(voucher,source); CREATE INDEX chronological ON rows(date,source); CREATE INDEX loss_rows ON rows(loss_key);").map_err(failure)?;
-        Ok(Self { db, table:Arc::clone(&input.table), _cleanup:cleanup })
+        Ok(Self { db, table:Arc::clone(&input.table), large_file_disk_mode: input.disk.is_some(), _cleanup:cleanup })
     }
 
     pub(super) fn visit(&self, condition: &str, order: &str, cancel: &AtomicBool,
@@ -94,8 +95,6 @@ impl Replay {
         let mut values = Vec::<(usize,Vec<String>)>::new();
         let mut loss = false;
         // 原凭证规则仍需一份独立行视图及临时分类结构，预留其余预算。
-        let voucher_budget = crate::resource_budget::budget()?.worker_bytes/5;
-        let mut voucher_bytes=0_u64;
         let index = Rc::new(self.table.headers.iter().enumerate().map(|(i,h)| (h.as_str(),i)).collect::<HashMap<_,_>>());
         let mut emit = |id: &str, values: &[(usize,Vec<String>)], loss| {
             let records = values.iter().map(|(source,row)| RowRecord { source_row:*source,
@@ -105,11 +104,10 @@ impl Replay {
         while let Some(row) = cursor.next().map_err(failure)? {
             if cancel.load(Ordering::Relaxed)||replay_cancel().load(Ordering::Relaxed) { return Err(error("JOB_CANCELLED", "任务已取消。", None)); }
             let id: String = row.get(0).map_err(failure)?;
-            if !values.is_empty() && id != current { emit(&current, &values, loss)?; values.clear(); loss=false; voucher_bytes=0; }
+            if !values.is_empty() && id != current { emit(&current, &values, loss)?; values.clear(); loss=false; }
             current=id;
             let raw:String=row.get(2).map_err(failure)?;
-            voucher_bytes=voucher_bytes.saturating_add(raw.len() as u64*4+64);
-            if voucher_bytes>voucher_budget{return Err(error("FX_VOUCHER_MEMORY_BUDGET","单张凭证的数据超过当前安全内存预算，请检查异常凭证编号或拆分该凭证后重试。",None));}
+            if self.large_file_disk_mode && values.len() % 256 == 0 { crate::resource_budget::check_available_if_managed()?; }
             values.push((row.get(1).map_err(failure)?,serde_json::from_str(&raw).map_err(failure)?));
             loss |= row.get::<_,bool>(3).map_err(failure)?;
         }

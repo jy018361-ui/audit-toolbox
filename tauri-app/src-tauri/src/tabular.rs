@@ -3855,9 +3855,7 @@ fn load_ledger_cached(
     header_row: usize,
     header_depth: usize,
 ) -> Result<Table, AppError> {
-    if large_csv::applies(path) {
-        return Err(large_csv::full_table_error());
-    }
+    // 调用方已选择读取模式；这里不因内存波动再次改判并拒绝整表读取。
     load_ts_cached(path, sheet, header_row, header_depth, true).map(|(table, _, _)| table)
 }
 

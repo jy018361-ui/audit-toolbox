@@ -427,7 +427,7 @@ fn visit_raw(
 }
 
 /// `source` body is already disk-backed; only a full semantic group can be loaded.
-/// The group budget is a hard gate, never a reason to weaken a hierarchy rule.
+/// Complete hierarchy groups retain their semantics; size estimates never reject them.
 pub(crate) fn analyze(
     source: &DiskTable,
     column: &dyn Fn(&str) -> Vec<String>,
@@ -447,17 +447,7 @@ fn analyze_with_limit(
     limit: Option<usize>,
 ) -> Result<DiskTbAnalysis, AppError> {
     check(cancel)?;
-    let budget = crate::resource_budget::budget()?;
-    let group_limit = limit.unwrap_or((budget.worker_bytes / 4).min(256 * 1024 * 1024) as usize);
-    let required = source
-        .row_count
-        .saturating_mul(if collect_context { 65 } else { 1 });
-    if required as u64 > budget.worker_bytes / 3 {
-        return Err(failure(
-            "TB 行级分类结果超过安全内存预算，请拆分独立账套后重试。",
-            required,
-        ));
-    }
+    let group_limit = limit.unwrap_or(usize::MAX);
     let temp = Temp(
         std::env::temp_dir().join(format!("audit_tb_{}.sqlite", uuid::Uuid::new_v4().simple())),
     );
@@ -778,7 +768,6 @@ fn analyze_with_limit(
         analysis.keep[id - 1] = !excluded;
     }
     if collect_context {
-        let mut context_bytes = body_count.saturating_mul(2 * std::mem::size_of::<String>() + 1);
         each_entity(&db, headers, column, &basis, group_limit, cancel, |g| {
             let local: HashMap<usize, usize> = g
                 .ids
@@ -809,15 +798,7 @@ fn analyze_with_limit(
             let a = tb_leaf_context(headers, &g.rows, column, true, g.excluded.clone(), parents);
             for (i, id) in g.ids.iter().copied().enumerate() {
                 if id > 0 {
-                    context_bytes = context_bytes
-                        .saturating_add(a.contexts[i].len())
-                        .saturating_add(a.parent_names[i].len());
-                    if context_bytes as u64 > budget.worker_bytes / 3 {
-                        return Err(failure(
-                            "TB 分类上下文超过安全内存预算，请拆分独立账套后重试。",
-                            context_bytes,
-                        ));
-                    }
+                    if i % 256 == 0 { check(cancel)?; }
                     analysis.contexts[id - 1] = a.contexts[i].clone();
                     analysis.parent_names[id - 1] = a.parent_names[i].clone();
                 }
@@ -855,15 +836,8 @@ fn save_mask(db: &Connection, g: &Group) -> Result<(), AppError> {
     Ok(())
 }
 
-fn guard(bytes: usize, limit: usize) -> Result<(), AppError> {
-    if bytes > limit {
-        Err(failure(
-            "TB 单个完整主体或连续科目组超过安全分析预算，请按独立主体拆分后重试；不会拆散父子勾稽关系。",
-            format!("{bytes}>{limit}"),
-        ))
-    } else {
-        Ok(())
-    }
+fn guard(_bytes: usize, _limit: usize) -> Result<(), AppError> {
+    crate::resource_budget::check_available_if_managed()
 }
 
 fn each_entity(

@@ -1,5 +1,10 @@
 # TS 管理迁移一致性矩阵
 
+## 2026-10-19：共享内存读取不重复按体积拒绝
+
+- 调用方确定普通／磁盘模式后，共享 `load_ledger_cached` 不因实时预算波动重新判定并返回整表预算错误。上层自动磁盘分流及 TS 数据规则不变；实际内存保护见 `LEDGER_MAPPING_UNIFICATION.md`。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml --lib tabular::`；回归日志见 `artifacts/data-volume-limits-20261019/`。
+
 ## 2026-09-04 · 共享 CSV 内存复制优化
 
 `load_text` 整理行宽时移动原行，`rows_to_frame` 使用字符串借用构建列，减少中间副本；不改变 TS 的标题、行序、列值或 Parquet 缓存语义。看账新增的 SQLite 大文件路径不用于 TS，不宣称 TS 已支持有界内存处理。回归命令：`cargo test --lib -j 1 --manifest-path src-tauri/Cargo.toml tabular:: -- --test-threads=1`。

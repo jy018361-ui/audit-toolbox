@@ -630,6 +630,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const [tbAccounts, setTbAccounts] = useState<TbAccount[]>([]);
   const [accountsBusy, setAccountsBusy] = useState(false);
   const [ratesBusy, setRatesBusy] = useState(false);
+  const [accountChangesPending, setAccountChangesPending] = useState(false);
+  const [preparedRateKey, setPreparedRateKey] = useState("");
   /** 科目角色确认：行键 → 借款科目/排除；预选规则为名称含「借款/贷款」。 */
   const [loanAccountRoles, setLoanAccountRoles] = useState<Record<string, LoanAccountRole>>({});
   const [loanDetailRoles, setLoanDetailRoles] = useState<Record<string, LoanAccountRole>>({});
@@ -814,13 +816,22 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const autoRateKey = useRef("");
   const invalidateResults = () => {
     autoRateKey.current = "";
+    setPreparedRateKey("");
     activeJob.current = "";
     if (rows.length || result) setResultStale(true);
     setRatesConfirmed(false);
     setJob(undefined);
   };
+  const recordAccountChanges = () => {
+    // 连续改回原分类也属于人工编辑，迟到的准备结果不能清除待测算状态。
+    ++prepareRateRequestRef.current;
+    setRatesBusy(false);
+    setAccountChangesPending(true);
+    invalidateResults();
+  };
   const setSource = (kind: Kind, next: Partial<Source>) => {
     invalidateResults();
+    setAccountChangesPending(false);
     setResultRateEdits({});
     if (kind === "tb" || kind === "je") {
       setCurrencyFallbackMode("");
@@ -947,9 +958,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         role: loanReviewRole(row),
         selected: loanReviewRole(row) === "loan",
       }));
-  /** 借款利率表的自动生成键：借款科目/利息支出科目选择（含辅助明细勾选）
-   *  或主体范围一变，屏幕上的利率明细快照即过期，第二步会自动按新选择
-   *  重新生成——利率填写入口随科目类型实时出现/消失，不再依赖手动按钮。 */
+  /** 科目选择（含辅助明细）、主体和本位币共同标识利率明细的输入。
+   *  人工分类只记录选择，第三步发起测算时统一生成。 */
   const loanSelectionKey = useMemo(
     () =>
       JSON.stringify([
@@ -965,6 +975,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const matchingInputKey = JSON.stringify([source("tb"), source("je"), loanSelectionKey, reportEnd, currencyFallbackMode]);
   const matchingGroups = matchingGroupKey === matchingInputKey ? preparedMatchingGroups : [];
   const matchingFallbackMode = matchingChoice?.key === matchingInputKey ? matchingChoice.mode : "";
+  const ratePreparationKey = JSON.stringify([matchingInputKey, matchingFallbackMode]);
+  const ratesCurrent = preparedRateKey === ratePreparationKey && !accountChangesPending;
   const matchingInputKeyRef = useRef(matchingInputKey);
   matchingInputKeyRef.current = matchingInputKey;
   const editTbRate = (row: LoanRow, patch: Partial<PasteRateRow>) => {
@@ -1407,6 +1419,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           : undefined;
     }
     invalidateResults();
+    setAccountChangesPending(false);
     setSources(next);
     setRateEdits({});
     // 「确认科目与利率」的选择一并回填：确认清单按行键恢复，利率按行标识恢复。
@@ -1546,7 +1559,18 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     setBusy(true);
     setActiveRun(method);
     try {
-      activeJob.current = await jobStart(method, payload());
+      const request: Record<string, unknown> = payload();
+      if (mode === "tb" && !ratesCurrent) {
+        const prepared = await prepareRates();
+        if (!prepared) {
+          setBusy(false);
+          setActiveRun(undefined);
+          return;
+        }
+        // 分类变更在测算时生效；新借款行补默认利率，旧行沿用人工填写值。
+        request.rateRows = prepared.map(resolvedTbRate);
+      }
+      activeJob.current = await jobStart(method, request);
     } catch (e) {
       setBusy(false);
       setActiveRun(undefined);
@@ -1565,7 +1589,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         payload(),
         "生成借款利率明细",
       )) as { rows?: LoanRow[]; matchingFallbackGroups?: MatchingFallbackGroup[] };
-      if (requestId !== prepareRateRequestRef.current || inputKey !== matchingInputKeyRef.current) return;
+      if (requestId !== prepareRateRequestRef.current || inputKey !== matchingInputKeyRef.current) return null;
       const groups = next.matchingFallbackGroups ?? [];
       setMatchingGroups(groups);
       setMatchingGroupKey(inputKey);
@@ -1574,11 +1598,17 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         setMatchingPromptKey(inputKey);
       }
       setRows(next.rows ?? []);
+      setPreparedRateKey(groups.length && !matchingFallbackMode ? "" : ratePreparationKey);
+      autoRateKey.current = `${loanSelectionKey}|${matchingInputKey}|${matchingFallbackMode}`;
       setResult(undefined);
       setResultStale(false);
       setRatesConfirmed(false);
+      if (groups.length && !matchingFallbackMode) return null;
+      setAccountChangesPending(false);
+      return next.rows ?? [];
     } catch (e) {
-      setError(errorText(e));
+      if (requestId === prepareRateRequestRef.current && inputKey === matchingInputKeyRef.current) setError(errorText(e));
+      return null;
     } finally {
       if (requestId === prepareRateRequestRef.current) setRatesBusy(false);
     }
@@ -1645,7 +1675,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setError("请先补齐字段映射。");
       return;
     }
-    if (mode === "tb" && (!tbAccounts.length || !selectedAccountCount || !rows.length)) {
+    if (mode === "tb" && (!tbAccounts.length || !selectedAccountCount || (!rows.length && !accountChangesPending) || ratesBusy)) {
       setError(
         !tbAccounts.length
           ? "科目清单尚未生成，请稍候。"
@@ -1793,7 +1823,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       !ratesBusy &&
       tbAccounts.length > 0 &&
       selectedAccountCount > 0 &&
-      rows.length > 0);
+      (rows.length > 0 || accountChangesPending));
   const selectedInterestExpenseCount = tbAccounts.filter(
     (row) => loanAccountRoles[row.identity ?? row.key] === "interest_expense",
   ).length;
@@ -1842,15 +1872,15 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   }, [mode, step, mappingsReady, ledgerSourceKey, ledgerInformationKey]);
   const ledgerErrors = Object.values(ledgerInformation).flatMap(row => ledgerInformationErrors(row, loanReportStart(reportEnd), reportEnd));
   const ledgerReady = ledgerInformationKey === ledgerSourceKey && Object.keys(ledgerInformation).length > 0 && !ledgerErrors.length && ledgerConfirmed;
-  // 进入「确认科目与利率」即自动生成利率确认表，且科目选择（含辅助明细勾选、
-  // 利息支出科目、主体范围）一变就自动按新选择重新生成：生成是必经动作，
-  // 利率填写入口必须随科目类型实时出现，不再依赖「重新生成借款利率表」按钮。
+  // 首次进入自动生成；人工分类只记录，第三步点击测算时再统一更新。
+  // 映射、主体等其他输入变化仍自动更新；分类调整后不在本步骤启动请求。
   // 生成键在结果作废时由 invalidateResults 清空，作废后回到本步骤自动补一次；
   // 键值相同则不重跑，避免引擎返回空明细时陷入无限重试。
   useEffect(() => {
     if (
       mode !== "tb" ||
       step !== 1 ||
+      accountChangesPending ||
       autoRateKey.current === `${loanSelectionKey}|${matchingInputKey}|${matchingFallbackMode}` ||
       accountsBusy ||
       ratesBusy ||
@@ -2037,7 +2067,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       {mode === "tb" && step !== 0 && matchingGroups.length > 0 && (
         <div className="loan-mode-context" role="status">
           <span>{matchingFallbackMode === "accountJe" ? "明细衔接口径：JE 本位币汇总逐日测算（需统一确认利率）" : matchingFallbackMode === "tbAverage" ? "明细衔接口径：TB 明细年初年末平均测算" : "请先选择明细衔接测算口径"}</span>
-          <Button variant="secondary" onClick={() => { setMatchingDraft(matchingFallbackMode); setMatchingPromptKey(matchingInputKey); setStep(1); }}>选择明细衔接口径</Button>
+          <Button variant="secondary" onClick={() => { setMatchingDraft(matchingFallbackMode); setMatchingPromptKey(matchingInputKey); }}>选择明细衔接口径</Button>
         </div>
       )}
 
@@ -2428,11 +2458,12 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                     </label>
                     {accountChangeNote && <span role="status">{accountChangeNote}</span>}
                   </div>
+                  {accountChangesPending && <p className="fx-hint" role="status">科目分类已记录，将在下一步测算时生效。</p>}
                   {!rows.length && (
                     <EmptyState
                       compact
                       title="等待生成利率明细"
-                      description="进入本步骤后按已确认的借款科目自动生成利率明细，并在本表利率列逐笔确认；科目类型改动后也会自动刷新。若因映射缺失未自动生成，请回第一步补齐映射后再进入本步骤。"
+                      description="首次进入自动生成利率明细，可在本表逐笔确认利率。科目分类修改只在此记录，将在下一步测算时生效。"
                     />
                   )}
                   {summaryRateRows.length > 0 && (
@@ -2540,7 +2571,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                                   } else {
                                     setLoanAccountRoles((v) => ({ ...v, [a.identity ?? a.key]: next }));
                                   }
-                                  invalidateResults();
+                                  recordAccountChanges();
                                   setAccountChangeNote(
                                     `${a.account}已设为${
                                       next === "loan"
@@ -2691,7 +2722,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       }
                       setLoanDetailRoles((current) => ({ ...current, ...Object.fromEntries(roleUpdates.filter(({ account }) => account.auxiliaryKey || account.entity).map(({ account, role }) => [account.reviewKey, role])) }));
                       setLoanAccountRoles((current) => ({ ...current, ...Object.fromEntries(roleUpdates.filter(({ account }) => !account.auxiliaryKey && !account.entity).map(({ account, role }) => [account.identity ?? account.key, role])) }));
-                      invalidateResults();
+                      if (roleUpdates.length) recordAccountChanges();
+                      else invalidateResults();
                       setTbRateEdits((current) => {
                         const next = { ...current };
                         for (const { detail, patch } of rateUpdates) {
@@ -3169,6 +3201,10 @@ function Mapping({
   );
 }
 
+// 固定默认列宽，避免长借款标识参与自动布局，把冻结列和整张表撑大。
+// width 属性保留在 col 上，拖动列宽后重置仍可恢复这些默认值。
+const LOAN_RESULT_COLUMN_WIDTHS = [96, 280, 112, 168, 168, 168, 168, 168, 168, 100, 104, 144, 100, 112, 168, 128];
+
 export function Results({
   rows,
   editRate,
@@ -3322,7 +3358,10 @@ export function Results({
         </div>
       </div>
       <div className="loan-rate-table" ref={resultsResize.ref}>
-        <table>
+        <table style={{ width: LOAN_RESULT_COLUMN_WIDTHS.reduce((sum, width) => sum + width, 0) }}>
+          <colgroup>
+            {LOAN_RESULT_COLUMN_WIDTHS.map((width, index) => <col key={index} width={width} />)}
+          </colgroup>
           <thead>
             <tr>
               <th aria-label="主体">主体</th>
@@ -3354,9 +3393,9 @@ export function Results({
               const inferredClosing = r.openingPrincipal + r.additions - r.reductions;
               const principalDifference = loanEquation(r);
               return <tr key={`${r.loanId}-${i}`}>
-                <td>{!r.entity || r.entity === "默认主体" ? "未区分主体" : r.entity}</td>
+                <td title={!r.entity || r.entity === "默认主体" ? "未区分主体" : r.entity}>{!r.entity || r.entity === "默认主体" ? "未区分主体" : r.entity}</td>
                 <td title={[r.loanId, r.matchBasis].filter(Boolean).join("\n")}>{r.loanId}</td>
-                <td>{r.currency || "—"}</td>
+                <td title={r.currency || "—"}>{r.currency || "—"}</td>
                 {[
                   r.openingPrincipal,
                   r.additions,

@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 pub(crate) mod disk_tb;
+pub(crate) mod disk_domains;
 
 /// 没有启用双侧主体键时，以及已映射主体列中的空值，统一使用这一稳定键。
 pub(crate) const DEFAULT_ENTITY: &str = "默认主体";

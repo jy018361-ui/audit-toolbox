@@ -376,16 +376,8 @@ impl Iterator for SourceIter {
                 while let Some(row) = cursor.next().map_err(db_error)? {
                     let data: String = row.get(1).map_err(db_error)?;
                     let estimated = (data.len() as u64).saturating_mul(3).saturating_add(512);
-                    if bytes.saturating_add(estimated) > limit {
-                        if output.is_empty() {
-                            return Err(error(
-                                "MEMORY_PROTECTION",
-                                "固定资产单条源记录超过当前安全批次预算，请缩短超长文本或拆分后重试。",
-                                None,
-                            ));
-                        }
-                        break;
-                    }
+                    if bytes.saturating_add(estimated) > limit && !output.is_empty() { break; }
+                    if output.is_empty() { crate::resource_budget::check_available_if_managed()?; }
                     bytes += estimated;
                     output.push((
                         row.get(0).map_err(db_error)?,
@@ -690,12 +682,10 @@ mod tests {
         assert!(!output.with_extension("csv.partial").exists());
     }
     #[test]
-    fn disk_fa_pivot_dense_output_is_rejected_before_allocating_the_cross_product() {
+    fn disk_fa_pivot_dense_output_continues_above_old_estimated_cap() {
         let dir = tempfile::tempdir().unwrap();
         let mut params = fixture(dir.path(), false);
-        let budget = crate::resource_budget::budget().unwrap().worker_bytes / 8;
-        let count = ((budget as f64 / (128.0 * 4.0)).sqrt() as usize + 8).max(30);
-        assert!(count < 20_000, "测试需使用有限合成预算");
+        let count = 300;
         let records = (0..count)
             .map(|i| format!("A{i:05},电子,资产{i},100,10,2024-01-01,5,5,1"))
             .collect::<Vec<_>>()
@@ -708,10 +698,10 @@ mod tests {
         let result =
             super::super::merge(&params, &|_, _, _, _| {}, &AtomicBool::new(false)).unwrap();
         let (headers, rows) = build_pivot(&result, &params);
-        assert!(headers.is_empty() && rows.is_empty());
-        let err = result.rows.check().unwrap_err();
-        assert_eq!(err.code, "MEMORY_PROTECTION");
-        assert!(err.user_message.contains("数据透视表"));
+        result.rows.check().unwrap();
+        assert_eq!(rows.len(), count + 1); // 完整数据行＋公式合计行。
+        assert!(headers.len() > count);
+        assert_eq!(rows.iter().flat_map(|row| &row[1..]).filter(|v| v.parse::<f64>().is_ok_and(|n| n != 0.0)).count(), count * 4);
     }
     #[test]
     fn disk_fa_life_metadata_failure_cannot_fall_back_to_an_empty_preview() {

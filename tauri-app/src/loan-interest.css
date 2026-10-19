@@ -296,9 +296,8 @@
   table-layout: auto;
 }
 .loan-rate-table table {
-  width: max-content;
   min-width: 100%;
-  table-layout: auto;
+  table-layout: fixed;
 }
 .loan-rate-confirmation th,
 .loan-rate-confirmation td,
@@ -354,6 +353,8 @@
 .loan-rate-table th,
 .loan-rate-table td {
   text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .loan-rate-table th:first-child,
 .loan-rate-table td:first-child,
@@ -369,17 +370,13 @@
   position: sticky;
   left: 0;
   z-index: 2;
-  width: 110px;
-  min-width: 110px;
   background: var(--card);
 }
 .loan-rate-table th:nth-child(2),
 .loan-rate-table td:nth-child(2) {
   position: sticky;
-  left: 110px;
+  left: 96px;
   z-index: 2;
-  width: 180px;
-  min-width: 180px;
   background: var(--card);
 }
 .loan-rate-table td:nth-child(2) {

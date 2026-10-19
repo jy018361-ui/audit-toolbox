@@ -21,12 +21,16 @@ import {
   jobStart,
   listenMeetingAskChoice,
   listenMeetingEvents,
+  listenJobEvents,
   meetingRecordStart,
   meetingRecordStop,
   meetingStatus,
+  openOutput,
 } from "../api";
+import { terminalJobError } from "./JobProgress";
 import { errorText } from "@/lib/errors";
-import type { MeetingEvent, MeetingRecordStart, MeetingRecordStop } from "../types";
+import type { JobEvent, MeetingEvent, MeetingRecordStart, MeetingRecordStop } from "../types";
+import type { MeetingResult } from "../MeetingMinutesPage";
 import "../meeting-minutes.css";
 
 /** Teams 会议检测的全局交互：询问小窗、录音指示、结束后自动出纪要。
@@ -105,20 +109,6 @@ function elapsedText(startedAt: string) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-/** 会议结束后自动出纪要的标题与全局弹窗流程保持一致。 */
-function autoMinutesTitle(startedAt: string) {
-  const started = Date.parse(startedAt);
-  const stamp = Number.isFinite(started)
-    ? new Date(started).toLocaleString("zh-CN", {
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    : "";
-  return `Teams 会议 ${stamp}`.trim();
-}
-
 export function MeetingWatch() {
   // 应用内弹窗只作为小窗创建失败的降级形态。
   const [askOpen, setAskOpen] = useState(false);
@@ -127,10 +117,37 @@ export function MeetingWatch() {
   const [recording, setRecording] = useState<MeetingRecordStart>();
   const [stopping, setStopping] = useState(false);
   const [tick, setTick] = useState(0);
+  const [latestJob, setLatestJob] = useState<JobEvent>();
+  const [processingError, setProcessingError] = useState("");
   // 「本次不记录」：通话结束前不再询问，结束后自动恢复。
   const suppressed = useRef(false);
   const recordingRef = useRef<MeetingRecordStart | undefined>(undefined);
   const askGeneration = useRef(0);
+  const jobVersion = useRef(0);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenJobEvents((event) => {
+      if (disposed || event.toolId !== "meeting_minutes") return;
+      jobVersion.current += 1;
+      setLatestJob(event);
+      setProcessingError("");
+      if (event.phase === "completed") {
+        const result = event.result as MeetingResult | undefined;
+        void notifyDesktop(
+          result?.minutesPath ? "会议纪要已生成" : "会议纪要需要处理",
+          result?.minutesError || (result?.minutesPath ? "会议纪要和转写稿已保存，可在工具箱中打开。" : "任务结束但未返回会议纪要，请查看任务结果。"),
+        );
+      } else if (event.phase === "failed" || event.phase === "cancelled") {
+        void notifyDesktop("会议纪要未生成", terminalJobError(event));
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
 
   useEffect(() => {
     recordingRef.current = recording;
@@ -176,7 +193,9 @@ export function MeetingWatch() {
       } else if (event.type === "recording_started") {
         const parsed = pickStartSummary(event.summary);
         if (parsed) {
+          recordingRef.current = parsed;
           setRecording(parsed);
+          setProcessingError("");
           // 开录即提示设备疑点（如退回默认设备、麦克风换了非默认设备）：
           // 等会议结束才发现没录到声音就晚了，中途还有机会调整设备。
           for (const warning of parsed.warnings) {
@@ -184,8 +203,10 @@ export function MeetingWatch() {
           }
         }
       } else if (event.type === "recording_stopped") {
+        recordingRef.current = undefined;
         setRecording(undefined);
       } else if (event.type === "recording_auto_finished") {
+        recordingRef.current = undefined;
         setRecording(undefined);
         const stopped = pickStopSummary(event.summary);
         if (!stopped) return;
@@ -197,17 +218,14 @@ export function MeetingWatch() {
         for (const warning of stopped.warnings) {
           void notifyDesktop("录音质量提醒", warning);
         }
-        void jobStart("meeting.generate", {
-          audioPath: stopped.audioPath,
-          title: autoMinutesTitle(stopped.startedAt),
-        }).catch((error) => {
-          void notifyDesktop("会议纪要", `纪要任务启动失败：${errorText(error)}`);
-        });
+        // 后台已负责启动任务；这里再启动会重复上传、重复计费。
       } else if (event.type === "recording_failed") {
+        recordingRef.current = undefined;
         setRecording(undefined);
+        setProcessingError(event.message ?? "录音收尾出现问题");
         void notifyDesktop(
           "会议纪要",
-          `录音收尾出现问题：${event.message ?? "未知错误"}`,
+          event.message ?? "录音收尾出现问题",
         );
       }
     };
@@ -218,7 +236,17 @@ export function MeetingWatch() {
           unlisten = fn;
           // Rust 检测线程早于 React 挂载。先订阅再读快照，补回启动时
           // 已在会中的状态；期间收到新事件则以事件为准，避免过期快照。
+          const version = jobVersion.current;
           void meetingStatus().then((status) => {
+            if (disposed) return;
+            if (!receivedEvent && status.recordingSummary) {
+              recordingRef.current = status.recordingSummary;
+              setRecording(status.recordingSummary);
+            }
+            if (!receivedEvent && version === jobVersion.current) {
+              setLatestJob(status.latestJob ?? undefined);
+              setProcessingError(status.processingError ?? "");
+            }
             if (!disposed && !receivedEvent && status.watchEnabled && status.inCall && !status.recording) {
               handleEvent({ type: "call_started", at: new Date().toISOString() });
             }
@@ -284,10 +312,18 @@ export function MeetingWatch() {
         audioPath: stopped.audioPath,
       });
     } catch (error) {
-      setAskError(errorText(error));
+      setProcessingError(errorText(error));
     } finally {
       setStopping(false);
     }
+  }
+
+  const finished = latestJob && ["completed", "failed", "cancelled"].includes(latestJob.phase);
+  const result = latestJob?.phase === "completed" ? latestJob.result as MeetingResult | undefined : undefined;
+  const resultError = processingError || terminalJobError(latestJob) || result?.minutesError;
+  async function openResult(path: string) {
+    try { await openOutput(path); }
+    catch (error) { setProcessingError(errorText(error)); }
   }
 
   return (
@@ -327,6 +363,7 @@ export function MeetingWatch() {
           <span className="meeting-recording-text">
             正在录制会议 {elapsedText(recording.startedAt) || "…"}
           </span>
+          {processingError && <span role="alert">{processingError}</span>}
           <Button
             size="sm"
             variant="secondary"
@@ -335,6 +372,17 @@ export function MeetingWatch() {
           >
             {stopping ? "正在收尾…" : "停止并生成纪要"}
           </Button>
+        </div>
+      )}
+      {!recording && (processingError || finished) && (
+        <div className="meeting-processing-card" role={resultError ? "alert" : "status"}>
+          <strong>{result?.minutesPath ? "会议纪要已生成" : "会议纪要未生成"}</strong>
+          {resultError && <p>{resultError}</p>}
+          <div className="meeting-result-actions">
+            {result?.minutesPath && <Button size="sm" onClick={() => void openResult(result.minutesPath!)}>打开会议纪要</Button>}
+            {result?.transcriptPath && <Button size="sm" variant="secondary" onClick={() => void openResult(result.transcriptPath!)}>打开转写稿</Button>}
+            <Button size="sm" variant="ghost" onClick={() => { setLatestJob(undefined); setProcessingError(""); }}>关闭提示</Button>
+          </div>
         </div>
       )}
     </>

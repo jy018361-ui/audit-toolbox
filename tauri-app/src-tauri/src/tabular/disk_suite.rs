@@ -118,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn classification_budget_fails_cleanly() {
+    fn classification_continues_above_estimated_budget() {
         let item = info(
             "001",
             &[("很长的目标科目", 1.0), ("很长的对方科目", -1.0)],
@@ -138,8 +138,9 @@ mod tests {
             ],
         )
         .unwrap();
-        let failure = classify(&db, false, 64, &AtomicBool::new(false)).unwrap_err();
-        assert_eq!(failure.code, "KANZHANG_SUITE_MEMORY_LIMIT");
+        classify(&db, false, 64, &AtomicBool::new(false)).unwrap();
+        let members: usize = db.query_row("SELECT COUNT(*) FROM suite_members", [], |r| r.get(0)).unwrap();
+        assert_eq!(members, 1);
     }
 
     #[test]
@@ -285,15 +286,8 @@ fn json_error(e: serde_json::Error) -> AppError {
 fn encode<T: Serialize + ?Sized>(value: &T) -> Result<String, AppError> {
     serde_json::to_string(value).map_err(json_error)
 }
-fn guard(bytes: usize, budget: u64) -> Result<(), AppError> {
-    if bytes as u64 > budget {
-        return Err(error(
-            "KANZHANG_SUITE_MEMORY_LIMIT",
-            "此批次的凭证科目组合或透视列超过当前可用内存预算。请缩小目标科目批次或减少透视列后重试；明细筛选不受此分析限制。",
-            None,
-        ));
-    }
-    Ok(())
+fn guard(_bytes: usize, _budget: u64) -> Result<(), AppError> {
+    crate::resource_budget::check_available_if_managed()
 }
 fn shape_bytes(full: &BTreeSet<String>, signs: &BTreeMap<String, i8>) -> usize {
     full.iter().map(|v| v.len() + 96).sum::<usize>()

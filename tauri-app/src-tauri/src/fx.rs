@@ -59,6 +59,7 @@ static FX_RATE_INDEX: OnceLock<Mutex<Option<(String, HashMap<(String, String), R
     OnceLock::new();
 
 thread_local! {
+    static FX_CALCULATION_DISK_MODE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static FX_DISK_REPLAY_CACHE:RefCell<Option<HashMap<String,Rc<disk_replay::Replay>>>>=const{RefCell::new(None)};
     static FX_CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
     static FX_REPLAY_TABLE: RefCell<Option<(Arc<FxTable>, Vec<usize>)>> = const { RefCell::new(None) };
@@ -72,6 +73,25 @@ thread_local! {
     static FX_ACCOUNT_ROLE_CACHE: RefCell<Option<HashMap<String, String>>> = const {
         RefCell::new(None)
     };
+}
+
+/// 只记录本次测算实际打开过的大文件来源，结束时不再按波动中的余量重新分流。
+struct FxCalculationDiskMode(Option<bool>);
+impl FxCalculationDiskMode {
+    fn begin() -> Self {
+        Self(FX_CALCULATION_DISK_MODE.with(|mode| mode.replace(Some(false))))
+    }
+    fn used_disk(&self) -> bool {
+        FX_CALCULATION_DISK_MODE.with(|mode| mode.get() == Some(true))
+    }
+    fn record_disk_source() {
+        FX_CALCULATION_DISK_MODE.with(|mode| {
+            if mode.get().is_some() { mode.set(Some(true)); }
+        });
+    }
+}
+impl Drop for FxCalculationDiskMode {
+    fn drop(&mut self) { FX_CALCULATION_DISK_MODE.with(|mode| mode.set(self.0)); }
 }
 
 struct FxJobTableCacheGuard;
@@ -102,19 +122,10 @@ fn row_in_matched_scope(row:&RowRecord<'_>,mapping:&Map<String,Value>,params:&Va
     matched.iter().filter_map(Value::as_str).any(|value|ledger_mapping::normalized_entity_name(value)==entity)
 }
 
-fn json_result_bytes(value:&Value)->u64{
-    match value{
-        Value::String(value)=>48+value.capacity()as u64,
-        Value::Array(values)=>32+values.iter().map(json_result_bytes).sum::<u64>(),
-        Value::Object(values)=>64+values.iter().map(|(key,value)|64+key.capacity()as u64+json_result_bytes(value)).sum::<u64>(),
-        _=>32,
-    }
-}
-fn check_result_buffers<'a>(buffers:impl IntoIterator<Item=&'a [Value]>)->Result<(),AppError>{
-    let limit=crate::resource_budget::budget()?.worker_bytes/5;
-    let retained=buffers.into_iter().flat_map(|rows|rows.iter()).map(json_result_bytes).sum::<u64>();
-    if retained>limit{return Err(error("FX_RESULT_MEMORY_BUDGET","测算结果及逐笔追溯明细已超过当前安全内存预算。源数据已保留在磁盘缓存，请缩小报告期间或按主体分次生成底稿。",None));}
-    Ok(())
+fn check_result_buffers<'a>(disk_mode:bool,buffers:impl IntoIterator<Item=&'a [Value]>)->Result<(),AppError>{
+    if !disk_mode { return Ok(()); }
+    let _ = buffers;
+    crate::resource_budget::check_available_if_managed()
 }
 
 impl FxTbRows{
@@ -3517,6 +3528,7 @@ impl FxJeRows {
         disk.visit_limit(false, 256, &cancel, |row| { table.rows.push(row.values); Ok(()) })?;
         table.row_count = disk.row_count();
         table.sampled = true;
+        FxCalculationDiskMode::record_disk_source();
         Ok(Self { table: Arc::new(table), disk:Some(disk) })
     }
 
@@ -9871,6 +9883,7 @@ fn calculate(
     cancel: &AtomicBool,
     pause: &PauseCheckpoint,
 ) -> Result<Value, AppError> {
+    let disk_mode = FxCalculationDiskMode::begin();
     const TOTAL_STAGES: usize = 10;
     progress("validate", 0, TOTAL_STAGES, "正在校验账表映射与金额数据…");
     let validation = validate_mapping(params)?;
@@ -10300,7 +10313,7 @@ fn calculate(
             }
         }
     }
-    check_result_buffers([realized.as_slice(),unrealized.as_slice(),classification.as_slice(),quality.as_slice(),
+    check_result_buffers(disk_mode.used_disk(),[realized.as_slice(),unrealized.as_slice(),classification.as_slice(),quality.as_slice(),
         pending_review.as_slice(),voucher_detail.as_slice(),classification_controls.as_slice()])?;
     Ok(json!({
         "mode": mode,
@@ -11027,16 +11040,13 @@ fn build_review_bridge(
                 "pendingReviewAmount":0.0,"coveredBookFxGainLoss":0.0,"jeFxGainLoss":0.0,
                 "automaticCoveredVouchers":0,"pendingReviewCount":0,"pendingUnclassifiedCount":0,
                 "pendingUnmeasurableCount":0,"notFxEventCount":0,"notFxEventAmount":0.0,"coverageDifference":0.0});
-            let limit=crate::resource_budget::budget()?.worker_bytes/5;
-            let mut retained=0_u64;
             replay.vouchers(&cancel, |_, rows, is_loss| {
                 if is_loss { return Ok(()); }
                 let _single = replay.single_table(rows);
                 let part = build_review_bridge(params, realized, unrealized)?;
                 for (key, value) in part.as_object().into_iter().flatten() {
                     if let Some(values) = value.as_array() {
-                        retained=retained.saturating_add(values.iter().map(json_result_bytes).sum::<u64>());
-                        if retained>limit{return Err(error("FX_RESULT_MEMORY_BUDGET","待复核事项及分类明细超过安全内存预算，请缩小报告期间或按主体分次生成底稿。",None));}
+                        crate::resource_budget::check_available_if_managed()?;
                         output[key].as_array_mut().expect("复核明细集合").extend(values.iter().cloned());
                     } else if let Some(number) = value.as_f64() {
                         output[key] = json!(output[key].as_f64().unwrap_or(0.0) + number);
@@ -11502,8 +11512,6 @@ fn calculate_realized(
             let replay = disk_replay::Replay::shared(&input, &mapping, params, cancel)?;
             let mut output = (Vec::new(), Vec::new(), Vec::new());
             let mut count = 0;
-            let limit=crate::resource_budget::budget()?.worker_bytes/5;
-            let mut retained=0_u64;
             replay.vouchers(cancel, |id, rows, is_loss| {
                 if let Some(control) = control {
                     checkpoint(control.cancel, control.pause)?;
@@ -11512,7 +11520,7 @@ fn calculate_realized(
                 }
                 count += 1;
                 if is_loss {
-                    if count%500==0{check_result_buffers([output.0.as_slice(),output.1.as_slice(),output.2.as_slice()])?;}
+                    if count%500==0{check_result_buffers(true,[output.0.as_slice(),output.1.as_slice(),output.2.as_slice()])?;}
                     output.1.push(json!({"voucherId":display_voucher_id(id),
                         "classification":"不构成汇兑事项","eventType":"期间损益结转",
                         "realizedScore":0.0,"unrealizedScore":0.0,
@@ -11522,8 +11530,7 @@ fn calculate_realized(
                 }
                 let _single = replay.single_table(rows);
                 let (calculation, classes, issues) = calculate_realized(params, snapshot, None)?;
-                retained=retained.saturating_add(calculation.iter().chain(&classes).chain(&issues).map(json_result_bytes).sum::<u64>());
-                if retained>limit{return Err(error("FX_RESULT_MEMORY_BUDGET","测算事项及逐笔追溯明细超过安全内存预算，请缩小报告期间或按主体分次生成底稿。",None));}
+                crate::resource_budget::check_available_if_managed()?;
                 output.0.extend(calculation); output.1.extend(classes); output.2.extend(issues);
                 Ok(())
             })?;
@@ -11532,7 +11539,7 @@ fn calculate_realized(
                 if issue.get("type").and_then(Value::as_str) != Some("记账日期仅到月份") { return true; }
                 let keep = !month_noted; month_noted = true; keep
             });
-            check_result_buffers([output.0.as_slice(),output.1.as_slice(),output.2.as_slice()])?;
+            check_result_buffers(true,[output.0.as_slice(),output.1.as_slice(),output.2.as_slice()])?;
             return Ok(output);
         }
     }
@@ -12345,11 +12352,10 @@ fn calculate_unrealized(
     let mut quality = Vec::new();
     let mut seen = HashSet::new();
     let mut scanned=0_usize;
-    let mut key_bytes=0_u64;
-    let key_limit=crate::resource_budget::budget()?.worker_bytes/10;
+    let disk_mode = input.disk.is_some();
     input.visit_scoped(&mapping,params,&replay_cancel(), |row,_| {
         scanned+=1;
-        if scanned%256==0{check_result_buffers([output.as_slice(),quality.as_slice()])?;}
+        if scanned%256==0{check_result_buffers(disk_mode,[output.as_slice(),quality.as_slice()])?;}
         let entity = scoped_entity_for(&row, &mapping, params, ledger_mapping::EntitySide::Tb);
         let account = account_name(&row, &mapping);
         let currency = currency_for(&row, &mapping, &account, params);
@@ -12373,7 +12379,6 @@ fn calculate_unrealized(
         );
         // 同一余额键的多行按各自的余额独立重估，结果自然相加——
         // 旧版在这里直接 `continue` 丢掉后来的行，按费用性质拆行的 TB 会少算一大截。
-        let key_length=key.len()as u64;
         if !seen.insert(key.clone()) {
             // 提示里的键展示账里原本的编码写法，不用去零后的匹配键。
             quality.push(json!({
@@ -12386,9 +12391,6 @@ fn calculate_unrealized(
                 "severity": "合并",
                 "detail": "该行与前面某行的主体＋科目＋币种相同，已各自重估后合并计入。"
             }));
-        }else{
-            key_bytes=key_bytes.saturating_add(key_length+96);
-            if key_bytes>key_limit{return Err(error("FX_RESULT_MEMORY_BUDGET","余额身份数量已超过当前安全内存预算，请按主体分次生成底稿。",None));}
         }
         let role = role_for_row(&row, &mapping, &account, params);
         if matches!(
@@ -12459,7 +12461,7 @@ fn calculate_unrealized(
         }));
             Ok(())
     })?;
-    check_result_buffers([output.as_slice(),quality.as_slice()])?;
+    check_result_buffers(disk_mode,[output.as_slice(),quality.as_slice()])?;
     if has_je {
         let monthly = calculate_monthly_unrealized(
             params,
@@ -12709,6 +12711,7 @@ fn calculate_monthly_unrealized(
     let table = &input.table;
     let cancel = AtomicBool::new(false);
     let replay = disk_replay::Replay::shared(&input, &mapping, params, &cancel)?;
+    let disk_mode = input.disk.is_some();
     let account_column_names = account_columns(&mapping);
     let foreign_amount = JeAmountPlan::new(&table.headers, &mapping, "foreign");
     let functional_amount = JeAmountPlan::new(&table.headers, &mapping, "functional");
@@ -12898,7 +12901,7 @@ fn calculate_monthly_unrealized(
         let mut scanned=0usize;
         replay.visit(&condition, "source", &cancel, |record, _| {
             scanned+=1;
-            if scanned%1000==0{check_result_buffers(movement_details.values().map(Vec::as_slice).chain(std::iter::once(output.as_slice())))?;}
+            if scanned%1000==0{check_result_buffers(disk_mode,movement_details.values().map(Vec::as_slice).chain(std::iter::once(output.as_slice())))?;}
             let row = &record;
             let account = account_name_from_columns(row, &account_column_names);
             let role = role_for_row(row, &mapping, &account, params);
@@ -13110,7 +13113,7 @@ fn calculate_monthly_unrealized(
             customer_book_state.insert(key, customer_post_revaluation);
         }
     }
-    check_result_buffers([output.as_slice(),quality.as_slice()])?;
+    check_result_buffers(disk_mode,[output.as_slice(),quality.as_slice()])?;
     Ok(output)
 }
 
@@ -15957,6 +15960,85 @@ fn xlsx_err(value: XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_mode_fx_buffers_and_disk_buffers_do_not_reject_by_estimated_size() {
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total: 16 * 1024 * 1024 * 1024, available: 128 * 1024 * 1024, commit_available: 128 * 1024 * 1024,
+        }, || {
+            let rows = [json!({"auditGainLoss": 20.0})];
+            check_result_buffers(false, [rows.as_slice()]).unwrap();
+            check_result_buffers(true, [rows.as_slice()]).unwrap();
+        });
+    }
+
+    #[test]
+    fn ordinary_mode_fx_does_not_inherit_previous_calculations_disk_mode() {
+        {
+            let scope = FxCalculationDiskMode::begin();
+            assert!(!scope.used_disk());
+            FxCalculationDiskMode::record_disk_source();
+            assert!(scope.used_disk());
+        }
+        let scope = FxCalculationDiskMode::begin();
+        assert!(!scope.used_disk());
+    }
+
+    #[test]
+    fn ordinary_mode_fx_revaluation_and_monthly_replay_work_under_low_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let tb = dir.path().join("tb.csv");
+        let je = dir.path().join("je.csv");
+        fs::write(&tb, "主体,科目,币种,期初原币,期末原币,期初本币,期末本币,科目编码\nA,1122 应收账款,USD,100,110,700,770,1122\n").unwrap();
+        fs::write(&je, "主体,日期,凭证号,科目,币种,原币,本币,科目编码\nA,2025-01-15,V1,1122 应收账款,USD,10,70,1122\n").unwrap();
+        let mut params = json!({
+            "fixedEntity":"A", "entityCurrencies":{"A":"CNY"},
+            "reportStart":"2025-01-01", "reportEnd":"2025-01-31",
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbMapping":{"entity":"主体","account":["科目"],"accountCode":"科目编码","currency":"币种",
+                "openingForeignAmount":"期初原币","closingForeignAmount":"期末原币",
+                "openingFunctionalAmount":"期初本币","closingFunctionalAmount":"期末本币"},
+            "accountRoles":{"1122 应收账款":"monetary_asset"}
+        });
+        let snapshot = RateSnapshot {
+            source: "测试".into(), source_url: String::new(), fetched_at: String::new(),
+            response_hash: test_snapshot_hash("ordinary_mode_low_memory"),
+            start_date: "2025-01-01".into(), end_date: "2025-01-31".into(),
+            rates: ["2025-01-01", "2025-01-31"].into_iter().flat_map(|date|
+                [("USD", 7.2), ("CNY", 1.0)].into_iter().map(move |(currency, value)| RatePoint {
+                    requested_date: date.into(), published_date: date.into(), currency: currency.into(), cny_per_unit: value,
+                })).collect(), missing: Vec::new(),
+        };
+        let mut monthly_params = params.clone();
+        monthly_params["jeSource"] = json!({"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1});
+        monthly_params["jeMapping"] = json!({"entity":"主体","date":"日期","id":["凭证号"],"accountCode":"科目编码",
+            "account":["科目"],"currency":"币种","foreignAmount":"原币","functionalAmount":"本币"});
+        let normal_monthly = calculate_unrealized(&monthly_params, &snapshot, &[], &[]).unwrap();
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total: 16 * 1024 * 1024 * 1024, available: 128 * 1024 * 1024, commit_available: 128 * 1024 * 1024,
+        }, || {
+            let (rows, _) = calculate_unrealized(&params, &snapshot, &[], &[]).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!((rows[0]["suggestedAdjustment"].as_f64().unwrap() - 22.0).abs() < 0.001);
+            params = monthly_params;
+            let monthly = calculate_unrealized(&params, &snapshot, &[], &[]).unwrap();
+            assert_eq!(monthly, normal_monthly);
+            let (input, mapping) = FxJeRows::from_params(&params).unwrap();
+            assert!(input.disk.is_none());
+            let cancel = AtomicBool::new(false);
+            let replay = disk_replay::Replay::shared(&input, &mapping, &params, &cancel).unwrap();
+            let mut vouchers = 0;
+            replay.vouchers(&cancel, |_, _, _| { vouchers += 1; Ok(()) }).unwrap();
+            assert_eq!(vouchers, 1);
+            params["mode"] = json!("combined");
+            params["rateSnapshot"] = json!(snapshot);
+            let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+            let result = run_job("fx.preview", params.clone(), &|_, _, _, _| {}, Arc::new(cancel), &pause).unwrap();
+            assert_eq!(result["largeJeDiskMode"], false);
+            assert_eq!(result["previewDataOmitted"], true);
+            assert!(result["summary"]["unrealizedAdjustment"].as_f64().is_some());
+        });
+    }
 
     #[test]
     fn xlsx_metadata_budget_rejects_oversized_styles_without_date_fallback() {

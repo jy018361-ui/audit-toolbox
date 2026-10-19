@@ -3888,19 +3888,21 @@ struct SummaryLine {
 
 /// `short_labels` 为真时，期初期末行直接叫「期初原值／期末原值」；导出底稿
 /// 沿用旧版写法，把来源工作簿名拼进项目名（`side_label`）。
-/// 明细已落磁盘，派生分组和透视矩阵仍须单独限额；超限只能失败，不能截断后报成功。
-struct FaAggregateBudget<'a> { rows: &'a JoinedRows, label: &'static str, limit: u64, used: u64 }
+/// 派生结果不按预估体积硬拦截；实际内存紧张时由 worker 等待恢复。
+struct FaAggregateBudget<'a> { rows: &'a JoinedRows, checks: usize }
 impl<'a> FaAggregateBudget<'a> {
-    fn new(result: &'a MergeResult, label: &'static str) -> Self {
-        let limit = if result.rows.path().is_some() { crate::resource_budget::budget().map(|b| b.worker_bytes / 8).unwrap_or(0) } else { u64::MAX };
-        Self { rows: &result.rows, label, limit, used: 0 }
+    fn new(result: &'a MergeResult, _label: &'static str) -> Self {
+        Self { rows: &result.rows, checks: 0 }
     }
-    fn reserve(&mut self, bytes: u64) -> bool {
-        self.used = self.used.saturating_add(bytes);
-        if self.used > self.limit {
-            self.rows.record_budget_error(format!("{}的分组或结果矩阵超过当前安全预算，请减少分组维度或按主体拆分后重试。",self.label));
-            false
-        } else { true }
+    fn reserve(&mut self, _bytes: u64) -> bool {
+        self.checks += 1;
+        if self.rows.path().is_some() && (self.checks == 1 || self.checks % 256 == 0) {
+            if let Err(error) = crate::resource_budget::check_available_if_managed() {
+                self.rows.record_resource_error(&error);
+                return false;
+            }
+        }
+        true
     }
 }
 fn build_summary_lines(

@@ -270,9 +270,8 @@ impl ExcelMergerService {
         }
         let pause_path = self.cancel_root.join(format!("{job_id}.pause"));
         let memory_retry_path = crate::resource_budget::memory_retry_path(&pause_path);
-        let hard_limited = memory_protected;
         let monitored = memory_protected;
-        let available_worker_memory = if monitored {
+        let _available_worker_memory = if monitored {
             let mut last_notice = None::<Instant>;
             Some(loop {
                 if cancel_path.exists() {
@@ -412,11 +411,8 @@ impl ExcelMergerService {
                 return;
             }
         };
-        let _memory_limit = if hard_limited {
-            match crate::resource_budget::WorkerLimit::attach(
-                &child,
-                available_worker_memory.expect("硬限制任务必须有内存上限"),
-            ) {
+        let _worker_lifetime = if monitored {
+            match crate::resource_budget::WorkerLifetime::attach(&child) {
                 Ok(limit) => Some(limit),
                 Err(err) => {
                     terminate_process_tree(&mut child);
@@ -598,9 +594,7 @@ impl ExcelMergerService {
                             (
                                 "failed",
                                 "error",
-                                if hard_limited {
-                                    "数据处理任务异常退出，可能达到内存保护上限。请减小数据范围后重试。"
-                                } else if params_have_excel_input(&request.params) {
+                                if params_have_excel_input(&request.params) {
                                     "Excel 数据处理进程异常退出。请重试；若持续发生，请查看诊断记录。"
                                 } else {
                                     "Rust Excel 处理进程异常退出。"
@@ -671,6 +665,12 @@ impl ExcelMergerService {
                         );
                     }
                 }
+            }
+        }
+        if payload.get("toolId").and_then(Value::as_str) == Some("meeting_minutes") {
+            if let Some(meeting) = self.app.try_state::<Arc<crate::meeting_watch::MeetingState>>() {
+                // 页面晚打开、WebView 重载时也能从快照取回进度与完整结果。
+                meeting.update_job(&payload);
             }
         }
         let _ = self.app.emit("job-event", payload);
@@ -759,8 +759,6 @@ fn memory_protected_method(method: &str) -> bool {
         || method.starts_with("tbje_check.")
 }
 
-const LARGE_TEXT_INPUT_BYTES: u64 = 1024 * 1024 * 1024;
-
 /// 只收集明确的输入路径字段，避免把 outputPath 或结果目录计入保护阈值。
 /// 递归扫描可同时覆盖直接参数、批量任务及各工具嵌套的 source。
 fn collect_input_paths(value: &Value, paths: &mut HashSet<PathBuf>) {
@@ -811,39 +809,9 @@ fn params_have_excel_input(value: &Value) -> bool {
     paths.iter().any(|path| is_excel_input_path(path))
 }
 
-fn is_protected_text_input_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            ["csv", "txt", "tsv"]
-                .iter()
-                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-        })
-}
-
-fn text_input_bytes_with(value: &Value, size_of: impl Fn(&Path) -> Option<u64>) -> u64 {
-    let mut paths = HashSet::new();
-    collect_input_paths(value, &mut paths);
-    paths
-        .iter()
-        .filter(|path| is_protected_text_input_path(path))
-        .filter_map(|path| size_of(path))
-        .fold(0_u64, u64::saturating_add)
-}
-
-fn text_input_bytes(value: &Value) -> u64 {
-    text_input_bytes_with(value, |path| fs::metadata(path).ok().map(|meta| meta.len()))
-}
-
-fn memory_protected_for_text_bytes(method: &str, bytes: u64) -> bool {
-    memory_protected_method(method) && bytes > LARGE_TEXT_INPUT_BYTES
-}
-
-/// Large text inputs retain their existing guard. The added tools and OOXML
-/// sources also use the same combined-input estimate as disk path selection.
+/// 内存保护统一跟随大文件磁盘分流，不再仅凭文本文件超过 1 GiB 单独开启。
 fn memory_protected_job(method: &str, params: &Value) -> bool {
     if !memory_protected_method(method) { return false; }
-    if memory_protected_for_text_bytes(method, text_input_bytes(params)) { return true; }
     let mut paths = HashSet::new();
     collect_input_paths(params, &mut paths);
     if method.starts_with("fa.dep_") {
@@ -4443,10 +4411,6 @@ mod tests {
 
         for (method, params) in cases {
             assert!(memory_protected_method(method));
-            assert_eq!(
-                text_input_bytes_with(&params, |_| Some(8 * LARGE_TEXT_INPUT_BYTES)),
-                0
-            );
             assert!(!memory_protected_job(method, &params));
             assert!(!hard_memory_limited_job(method, &params));
         }
@@ -4464,38 +4428,26 @@ mod tests {
     }
 
     #[test]
-    fn text_inputs_are_protected_only_when_combined_size_exceeds_one_gib() {
-        let params = json!({
-            "jeSource":{"inputPath":"C:\\data\\je.csv"},
-            "tbSource":{"inputPath":"C:\\data\\tb.tsv"},
-            "inputPaths":["C:\\data\\je.csv", "C:\\data\\notes.txt", "C:\\data\\reference.xlsx"],
-            "outputPath":"C:\\output\\result.xlsx"
+    fn ordinary_mode_workers_skip_low_memory_gate_but_disk_inputs_remain_protected() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small.csv");
+        fs::write(&small, "科目,金额\n1002,10\n").unwrap();
+        let expanded = dir.path().join("expanded.xlsx");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&expanded).unwrap());
+        archive.start_file("xl/worksheets/sheet1.xml", zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)).unwrap();
+        for _ in 0..1024 { archive.write_all(&[b' '; 65536]).unwrap(); }
+        archive.finish().unwrap();
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total: 16 * 1024 * 1024 * 1024, available: 128 * 1024 * 1024, commit_available: 128 * 1024 * 1024,
+        }, || {
+            for method in ["loan.preview", "deposit.preview", "fx.preview", "fa.tbje_preview", "tbje_check.run", "kanzhang.export", "fuzzy.match"] {
+                assert!(!hard_memory_limited_job(method, &json!({"inputPath":small})), "{method}");
+                assert!(hard_memory_limited_job(method, &json!({"inputPath":expanded})), "{method}");
+            }
+            assert!(!hard_memory_limited_job("file_list.export", &json!({"inputPath":expanded})));
         });
-        let size = |path: &Path| match path.file_name().and_then(|name| name.to_str()) {
-            Some("je.csv") => Some(600 * 1024 * 1024),
-            Some("tb.tsv") => Some(400 * 1024 * 1024),
-            Some("notes.txt") => Some(25 * 1024 * 1024),
-            _ => Some(20 * LARGE_TEXT_INPUT_BYTES),
-        };
-        // je.csv appears twice but is counted once. outputPath is ignored.
-        let bytes = text_input_bytes_with(&params, size);
-        assert_eq!(bytes, 1025 * 1024 * 1024);
-        assert!(memory_protected_for_text_bytes("kanzhang.export", bytes));
-        assert!(!memory_protected_for_text_bytes("file_list.export", bytes));
-    }
-
-    #[test]
-    fn one_gib_text_input_is_not_yet_protected() {
-        let params = json!({"inputPath":"C:\\data\\je.csv"});
-        assert_eq!(
-            text_input_bytes_with(&params, |_| Some(LARGE_TEXT_INPUT_BYTES)),
-            LARGE_TEXT_INPUT_BYTES
-        );
-        // The product rule is strictly greater than 1 GiB.
-        assert!(!memory_protected_for_text_bytes(
-            "kanzhang.export",
-            LARGE_TEXT_INPUT_BYTES
-        ));
     }
 
     /// FA 子工具的 job 事件必须路由到各自的页面（useJobEvents 按 toolId 过滤），

@@ -8,6 +8,49 @@ use serde_json::json;
 use std::sync::atomic::AtomicBool;
 
 #[test]
+fn tbje_disk_domains_large_unique_unmapped_values_do_not_block_checks() {
+    let dir = fixture("disk-key-domains-unrelated-text");
+    平的账(&dir);
+    let original = std::fs::read_to_string(dir.join("je.csv")).unwrap();
+    let first = original.lines().next().unwrap();
+    let seed = original.lines().skip(1).collect::<Vec<_>>();
+    let path = dir.join("large-je.csv");
+    let mut writer = csv::Writer::from_path(&path).unwrap();
+    let mut headers = first.split(',').map(str::to_owned).collect::<Vec<_>>();
+    headers.extend(["不参与匹配的长摘要".into(),"不参与匹配的流水号".into()]);
+    writer.write_record(headers).unwrap();
+    for i in 0..12000 {
+        let mut values = seed[i % seed.len()].split(',').map(str::to_owned).collect::<Vec<_>>();
+        values.extend([format!("{i}{}","独立摘要".repeat(1000)),format!("seq{i}")]);
+        writer.write_record(values).unwrap();
+    }
+    writer.flush().unwrap();
+    let mut input = params(&dir,true);
+    input["jeSource"]["inputPath"] = json!(path);
+    let memory = run(&input,&AtomicBool::new(false)).unwrap();
+    input["__testForceDiskTb"] = json!(true);
+    input["__testForceDiskLedger"] = json!(true);
+    let disk = run(&input,&AtomicBool::new(false)).unwrap();
+    assert_eq!(disk,memory);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "需指定 TBJE_ACCEPTANCE_PARAMS，完整读取真实账表"]
+fn tbje_disk_domains_real_3080_acceptance() {
+    let file = std::env::var("TBJE_ACCEPTANCE_PARAMS").unwrap();
+    let mut params: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    params["__testForceDiskTb"] = json!(true);
+    params["__testForceDiskLedger"] = json!(true);
+    let result = run(&params,&AtomicBool::new(false)).unwrap();
+    let path = std::env::var("TBJE_ACCEPTANCE_OUTPUT").unwrap();
+    std::fs::write(path,serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+    assert!(result.get("rollforward").is_some());
+    assert!(result.get("tbVsJe").is_some());
+    assert!(result.get("equation").is_some());
+}
+
+#[test]
 fn 完整性独立策略保留旧编码匹配与双侧名称细分() {
     let identities = |names: &[&str]| {
         names

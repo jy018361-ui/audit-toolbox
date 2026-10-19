@@ -1,5 +1,16 @@
 # Excel 批量合并迁移差异记录
 
+## 2026-10-19：共享 worker 不再安装预估内存硬配额
+
+- 大文件后台进程 Job Object 仅保留退出清理，不再设置进程／任务内存配额；仍按实际系统资源暂停、恢复、取消，持续危险才终止。异常退出不再猜测达到预算上限并要求缩小文件。
+- 联合工作集仍决定磁盘模式，预算仍调节批次及并行度，不改变合并内容。共享读取入口不再二次分流后返回“超过预算，未接入磁盘”错误。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib resource_budget::`、`--lib ordinary_mode`、`--lib memory_protection`；真实 worker 验证见 `artifacts/data-volume-limits-20261019/`。
+
+## 2026-10-19 · 共享 worker 内存保护只跟随大文件磁盘分流
+
+- 共享后台调度不再仅凭文本输入合计超过 1 GiB 单独启用内存门禁，统一使用原有联合工作集磁盘分流判定。普通模式不等待大文件 worker 的最低预算；磁盘任务仍安装原有内存上限并支持内存暂停、恢复及取消。
+- 自动磁盘分流阈值及各工具业务计算不变，未扩大受保护方法范围。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib ordinary_mode_workers`、`--lib memory_protection`、`--lib disk_table::`。测试模拟低内存，对照普通 CSV 与压缩体积小、解压工作集大的输入。
+
 ## 2026-10-18 · 超大文本台账兼容：零星编码瑕疵容错 + 表头识别只读文件头
 
 **起因：印尼 2.9GB/4GB 两份 GBK 台账，其中一份在约 418MB 处有源系统导出时写坏的

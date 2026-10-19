@@ -70,10 +70,14 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   const [result, setResult] = useState<MeetingResult>();
   const [resident, setResident] = useState(false);
   const generateParams = useRef<Record<string, unknown>>({});
+  const jobVersion = useRef(0);
 
   const onJobEvent = useCallback((event: { phase: string; result?: unknown }) => {
+    jobVersion.current += 1;
     if (event.phase === "completed" && event.result) {
       setResult(event.result as MeetingResult);
+    } else if (event.phase !== "completed") {
+      setResult(undefined);
     }
   }, []);
   const { job, setJob, activeJobId } = useJobEvents({
@@ -87,13 +91,22 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   }, [tool.id]);
 
   const refreshStatus = useCallback(() => {
+    const version = jobVersion.current;
     meetingStatus()
       .then((value) => {
         setStatus(value);
         setResident(value.resident);
+        // 自动任务可能在本页首次打开前已经完成；快照补回结果，新的事件优先。
+        if (version === jobVersion.current) {
+          if (value.latestJob) {
+            setJob(value.latestJob);
+            onJobEvent(value.latestJob);
+          }
+          if (value.processingError) setError(value.processingError);
+        }
       })
       .catch(() => undefined);
-  }, []);
+  }, [setJob, onJobEvent]);
 
   useEffect(() => {
     refreshStatus();

@@ -1,5 +1,15 @@
 # FA List Rust 迁移覆盖矩阵
 
+## 2026-10-19：身份与完整凭证取消预估大小拦截
+
+- TB 身份数量和相关完整凭证不再按 worker 预算比例拒绝，保留全量数据并在磁盘模式检查实际内存状态。共享 TB 完整关系、末级和上下文的静态门槛同步取消；匹配、分类、金额和凭证边界不改。
+- 清单分组、透视和批次更新见 `FA_LIST_PARITY.md`；进程保护见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib fa_tbje::`、`--lib ordinary_mode`。
+
+## 2026-10-19：普通 TB 科目身份不套用磁盘启动预算
+
+- FA TB＋JE 共用科目身份整理时，仅对实际使用磁盘正文的 TB 申请安全预算。普通内存路径保留完整身份整理，不因系统余量低而触发大文件 worker 的最低启动拦截。
+- 磁盘路径的身份上限、完整凭证上限及 worker 内存保护保留；科目分类、匹配与金额规则不变。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib ordinary_mode_fa`、`--lib fa_tbje::`。
+
 ## 2026-10-18：多列科目名称的重复大类只用于跨表对应
 
 - TB 同时映射 `Account Class` 与“本行编码＋名称”列时，原始名称可能为“固定资产 15010109\固定资产－自有－电子设备”。新增仅供 JE→TB 对应的名称证据：混写列编码必须等于本行编码、候选名称唯一，其他非空名称列必须等于候选或其明确层级边界前缀。否则继续严格原名匹配。

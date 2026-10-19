@@ -8,14 +8,6 @@ use crate::AppError;
 pub fn covenant_case_workbook(
     bytes: Vec<u8>,
 ) -> Result<BTreeMap<String, Vec<Vec<String>>>, AppError> {
-    if bytes.len() > 8 * 1024 * 1024 {
-        return Err(AppError::new(
-            "CASE_LIBRARY_INVALID",
-            "案例库工作簿不能超过 8 MB",
-            false,
-            None,
-        ));
-    }
     let mut workbook: Xlsx<_> = Xlsx::new(Cursor::new(bytes)).map_err(|e| {
         AppError::new(
             "CASE_LIBRARY_INVALID",
@@ -34,14 +26,6 @@ pub fn covenant_case_workbook(
                 Some(e.to_string()),
             )
         })?;
-        if range.height() > 10000 || range.width() > 100 {
-            return Err(AppError::new(
-                "CASE_LIBRARY_INVALID",
-                format!("工作表 {name} 超出案例库规模限制"),
-                false,
-                None,
-            ));
-        }
         sheets.insert(
             name.to_string(),
             range
@@ -62,8 +46,21 @@ mod tests {
         assert!(covenant_case_workbook(b"not an excel file".to_vec()).is_err());
     }
     #[test]
-    fn oversized_workbook_is_rejected() {
+    fn large_invalid_workbook_still_reports_a_format_error() {
         assert!(covenant_case_workbook(vec![0; 8 * 1024 * 1024 + 1]).is_err());
+    }
+    #[test]
+    fn valid_case_sheets_are_not_rejected_by_row_or_column_count() {
+        let mut workbook = rust_xlsxwriter::Workbook::new();
+        for name in ["使用说明", "分类规则", "正例条款", "排除与支持", "C300回归"] {
+            let sheet = workbook.add_worksheet();
+            sheet.set_name(name).unwrap();
+            sheet.write_string(0,0,"首行").unwrap();
+            if name == "正例条款" { sheet.write_string(10000,100,"末尾完整条款").unwrap(); }
+        }
+        let result = covenant_case_workbook(workbook.save_to_buffer().unwrap()).unwrap();
+        assert_eq!(result["正例条款"].len(),10001);
+        assert_eq!(result["正例条款"][10000][100],"末尾完整条款");
     }
     #[test]
     fn imports_review_workbook() {

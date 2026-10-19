@@ -362,6 +362,26 @@ it("TB 未映射辅助字段时第一步下一步不调用辅助验证", async (
   ).toBe(false);
 });
 
+it("科目分类连续修改只记录，下一步不计算，测算预览使用最终分类", async () => {
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  await screen.findByRole("button", { name: "下一步：测算与底稿" });
+  const calls = mock.engineCall.mock.calls.length;
+  for (let i = 0; i < 10; i++) {
+    const select = document.querySelector(".fx-accounts label select") as HTMLSelectElement;
+    await act(async () => fireEvent.change(select, { target: { value: i % 2 ? "cash" : "excluded" } }));
+    expect(mock.engineCall.mock.calls).toHaveLength(calls);
+    expect(mock.jobStart).not.toHaveBeenCalled();
+  }
+  fireEvent.click(screen.getByRole("button", { name: "下一步：测算与底稿" }));
+  expect(mock.engineCall.mock.calls).toHaveLength(calls);
+  expect(mock.jobStart).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("资产负债表日"), { target: { value: "20251231" } });
+  fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+  await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith("fx.preview", expect.objectContaining({ accountRoles: { "1002 银行存款": "cash" } })));
+});
+
 /** 回归（用户反馈 B）：TB/JE 识别出多个实际主体时，第二步科目确认表必须
  *  带主体列；单主体账套维持原三列布局。 */
 it("多主体账套第二步出现主体列，单主体不出现", async () => {

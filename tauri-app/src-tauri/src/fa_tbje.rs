@@ -233,7 +233,8 @@ fn analysis_cache_key(params: &Value) -> String {
         .as_object_mut()
         .map(|map| map.remove("outputPath"));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&"fa-cross-table-matching-v6-verified-composite-name", &mut hasher);
+    std::hash::Hash::hash(&"fa-cross-table-matching-v8", &mut hasher);
+    std::hash::Hash::hash(&ledger_mapping::TB_STRUCTURE_RULE_VERSION, &mut hasher);
     std::hash::Hash::hash_slice(
         serde_json::to_string(&normalized)
             .unwrap_or_default()

@@ -51,7 +51,6 @@ const SAFE_CURRENCIES: [&str; 25] = [
 ];
 /// 测算口径或结果契约改变时必须更新，避免跨 worker 磁盘缓存恢复旧算法结果。
 /// 2026-09-28：连续滚动基础及实际人民币结算金额；兼容银行确认成货币性资产。
-const FX_PREVIEW_CACHE_SCHEMA: &str = "2026-10-18-disk-replay-v23";
 static FX_PREVIEW_CACHE: OnceLock<Mutex<Option<(String, Value)>>> = OnceLock::new();
 static FX_TABLE_CACHE: OnceLock<Mutex<HashMap<String, Arc<FxTable>>>> = OnceLock::new();
 static FX_INSPECTION_CACHE: OnceLock<Mutex<HashMap<String, Arc<FxTable>>>> = OnceLock::new();
@@ -228,7 +227,7 @@ fn normalized_preview_params(params: &Value) -> Value {
         object.insert("__sourceFingerprints".into(), Value::Object(fingerprints));
         object.insert(
             "__fxPreviewCacheSchema".into(),
-            Value::String(FX_PREVIEW_CACHE_SCHEMA.to_owned()),
+            Value::String(format!("fx-preview-{}", ledger_mapping::TB_STRUCTURE_RULE_VERSION)),
         );
     }
     normalized

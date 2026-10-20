@@ -1258,7 +1258,7 @@ fn import_rates(params: &Value) -> Result<Value, AppError> {
     Ok(json!({ "rateRows": rows }))
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct BookedInterestExpense {
     amount: f64,
     selected: bool,
@@ -1381,7 +1381,41 @@ fn interest_expense_occurrence(
     None
 }
 
+// 账面费用是独立的预览结果；选科目后只刷新这份结果，不重算借款本金。
+fn booked_expense_key(params: &Value) -> Option<String> {
+    let material = format!("booked-{}-v2\n{}\n{}",
+        ledger_mapping::TB_STRUCTURE_RULE_VERSION, calc_fingerprint(params)?, params.get("interestExpenseAccounts").unwrap_or(&Value::Null));
+    Some(hex::encode(Sha256::digest(material.as_bytes())))
+}
+
+fn cached_booked_interest_expense(params: &Value) -> Result<BookedInterestExpense, AppError> {
+    let path = snapshot_dir().zip(booked_expense_key(params))
+        .map(|(dir, key)| dir.join(format!("expense-{key}.json")));
+    if let Some(cached) = path.as_ref().and_then(|p| fs::read(p).ok())
+        .and_then(|bytes| serde_json::from_slice::<BookedInterestExpense>(&bytes).ok()) {
+        return Ok(cached);
+    }
+    let result = booked_interest_expense(params)?;
+    if let Some(path) = path {
+        let partial = path.with_extension(format!("{}.partial", std::process::id()));
+        if fs::create_dir_all(path.parent().unwrap()).is_ok() {
+            if let Ok(bytes) = serde_json::to_vec(&result) {
+                if fs::write(&partial, bytes).is_ok() {
+                    let _ = crate::tabular::replace_file(&partial, &path);
+                }
+            }
+        }
+        let _ = fs::remove_file(partial);
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+thread_local! { static BOOKED_EXPENSE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 fn booked_interest_expense(params: &Value) -> Result<BookedInterestExpense, AppError> {
+    #[cfg(test)]
+    BOOKED_EXPENSE_CALLS.with(|count| count.set(count.get() + 1));
     let review_roles = account_review_roles(params);
     let selected = params
         .get("interestExpenseAccounts")
@@ -1518,7 +1552,7 @@ pub(crate) fn run_job(
     };
     checkpoint(&cancel, pause)?;
     // 同一任务的导出底稿与结果摘要共用本次账面费用取数；仍按当前参数读取。
-    let booked_expense = booked_interest_expense(&params)?;
+    let booked_expense = cached_booked_interest_expense(&params)?;
     let mut output_paths = vec![];
     if method == "loan.export" {
         progress("export", 3, 3, "正在生成借款利息审计底稿…");
@@ -1558,8 +1592,8 @@ pub(crate) fn run_job(
 // ---------------------------------------------------------------------------
 
 /// 参与测算的参数字段白名单：这些字段的取值加上相关文件身份共同构成
-/// 快照键。`outputPath`、`interestExpenseAccounts`（账面利息基准在导出时
-/// 始终按当前参数现算）等导出阶段字段不在其中——导出一律用当前值。
+/// 快照键。`outputPath` 不参与计算；`interestExpenseAccounts` 另入账面费用
+/// 快照键，科目选择变化只刷新账面费用，不重算本金和计息。
 /// 预览之后改了输入、映射或利率，指纹随之变化，快照自然失效走重算。
 const SNAPSHOT_PARAM_FIELDS: &[&str] = &[
     // 模式（tb＝TB＋JE；其余按台账）与测算期间
@@ -1613,7 +1647,7 @@ fn snapshot_file_identity(path: &Path) -> Option<String> {
             .ok()?
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?
-            .as_secs()
+            .as_nanos()
     ))
 }
 
@@ -1621,7 +1655,7 @@ fn snapshot_file_identity(path: &Path) -> Option<String> {
 /// 任一文件被替换或续写（大小/修改时间变化），键即变化，旧快照作废。
 fn calc_fingerprint(params: &Value) -> Option<String> {
     let subset = snapshot_param_subset(params);
-    let mut material = serde_json::to_string(&subset).ok()?;
+    let mut material = format!("loan-{}\n{}", ledger_mapping::TB_STRUCTURE_RULE_VERSION, serde_json::to_string(&subset).ok()?);
     for field in ["ledgerSource", "tbSource", "jeSource", "rateLedgerSource"] {
         if let Some(path) = subset
             .get(field)
@@ -1629,10 +1663,8 @@ fn calc_fingerprint(params: &Value) -> Option<String> {
             .and_then(|source| source.get("inputPath"))
             .and_then(Value::as_str)
         {
-            if let Some(identity) = snapshot_file_identity(Path::new(path)) {
-                material.push('\n');
-                material.push_str(&identity);
-            }
+            material.push('\n');
+            material.push_str(&snapshot_file_identity(Path::new(path))?);
         }
     }
     let mut hasher = Sha256::new();
@@ -8350,6 +8382,21 @@ mod tests {
             "interestExpenseAccounts": ["6603"],
             "rateRows": [{"loanId":"工行贷款","rateType":"fixed","fixedRate":0.0365}]
         });
+        let cached = cached_booked_interest_expense(&params).unwrap();
+        assert_eq!(cached.amount, 30_000.);
+        let count = BOOKED_EXPENSE_CALLS.with(|c| c.get());
+        assert_eq!(cached_booked_interest_expense(&params).unwrap().amount, cached.amount);
+        assert_eq!(BOOKED_EXPENSE_CALLS.with(|c| c.get()), count, "导出不得重新读 TB 计算账面费用");
+        let key = booked_expense_key(&params).unwrap();
+        let expense_file = snapshot_dir().unwrap().join(format!("expense-{key}.json"));
+        fs::write(&expense_file, b"broken").unwrap();
+        assert_eq!(cached_booked_interest_expense(&params).unwrap().amount, 30_000.);
+        assert_eq!(BOOKED_EXPENSE_CALLS.with(|c| c.get()), count + 1);
+        let mut changed_expense = params.clone();
+        changed_expense["interestExpenseAccounts"] = json!([]);
+        assert_ne!(booked_expense_key(&changed_expense), Some(key));
+        assert!(!cached_booked_interest_expense(&changed_expense).unwrap().selected);
+
         let mut rows = calculate(&params).unwrap();
         calculate_interest(&mut rows, &params).unwrap();
         let n = rows.len();

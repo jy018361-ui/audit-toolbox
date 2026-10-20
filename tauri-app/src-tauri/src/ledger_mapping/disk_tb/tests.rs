@@ -81,6 +81,14 @@ fn compare(rows: &[Vec<String>], case: &str) {
     assert_eq!(b.parent_names, a.parent_names, "parent {case}");
 }
 #[test]
+fn tb_disk_cross_organization_totals_match_memory_after_local_selection() {
+    compare(&[
+        row("", "1002", "银行", "", "CNY", "1",30.,120.,100.,10.,"借"),
+        row("A", "1002", "银行", "", "CNY", "1",10.,45.,40.,5.,"借"),
+        row("B", "1002", "银行", "", "CNY", "1",20.,75.,60.,5.,"借"),
+    ],"跨组织完整金额层");
+}
+#[test]
 fn tb_disk_global_rules_keep_original_order_and_classification() {
     let r = |e, c, n, a, cur, l, o, cl, d, cr, dir| row(e, c, n, a, cur, l, o, cl, d, cr, dir);
     let cases = vec![
@@ -337,4 +345,28 @@ fn tb_disk_whole_group_ignores_estimated_cap_and_keeps_cancel() {
             .code,
         "JOB_CANCELLED"
     );
+}
+
+#[test]
+fn tb_disk_dimension_slices_do_not_depend_on_period_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("TB.csv");
+    let mut h = headers();
+    h.push("无关字段".into());
+    let mut rows = vec![];
+    for amount in [35310., 15510., 19800.] {
+        let mut r = row("E", "5500010104", "伙食补贴", &format!("部门{amount}"), "CNY", "4", 0., amount, amount, 0., "借");
+        r.push("任意内容".into());
+        rows.push(r);
+    }
+    let cols = columns;
+    let mut writer = csv::Writer::from_path(&path).unwrap();
+    writer.write_record(&h).unwrap();
+    for r in &rows { writer.write_record(r).unwrap(); }
+    writer.flush().unwrap();
+    let cancel = AtomicBool::new(false);
+    let source = DiskTable::open(&path, None, 1, 1, &|_,_,_,_| {}, &cancel).unwrap();
+    let disk = analyze(&source, &cols, true, &|_,_,_,_| {}, &cancel).unwrap();
+    assert_eq!(disk.analysis.keep, vec![true;3]);
+    assert_eq!(disk.analysis.keep, tb_leaf_mask(&h, &rows, &cols));
 }

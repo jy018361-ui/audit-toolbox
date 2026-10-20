@@ -6107,6 +6107,7 @@ fn cache_entries() -> Result<Vec<(PathBuf, SystemTime, u64)>, AppError> {
                 // `.sheet` 是自动选表结论的小记事文件，跟着 Parquet 缓存一起
                 // 统计、清空与扫除，不然会在缓存目录里悄悄攒下来。
                 Some("parquet") | Some("sheet") | Some("header") | Some("sqlite") | Some("catalog")
+                    | Some("json") | Some("xlsx") | Some("sha256")
             ) {
                 let used = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 out.push((path, used, meta.len()));

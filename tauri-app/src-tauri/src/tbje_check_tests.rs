@@ -2437,16 +2437,7 @@ fn 二零零二真实样例的流水级导出不折叠() {
     let prepared = prepare(&value).unwrap();
     let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
 
-    // 口径提示必须带上：核对范围与旧结果不同，用户需要知道原因。
-    assert!(
-        result["mappingWarnings"]
-            .as_array()
-            .is_some_and(|warnings| warnings.iter().any(|warning| warning
-                .as_str()
-                .is_some_and(|text| text.contains("流水级导出")))),
-        "应提示已识别流水级导出并跳过汇总勾稽折叠：{result:#}"
-    );
-
+    // 按各组维度证据验证；不再根据期间／列数判整表“没有汇总”。
     // 1405000000：TB 与 JE 的借贷发生额必须分毫一致（真值均为
     // 借 28,132,424.67 / 贷 27,816,003.21）。
     let item = result["tbVsJe"]["items"]
@@ -3134,6 +3125,7 @@ fn 核对结果快照导出复用且映射修改后重算() {
     assert!(snapshot_path.is_file(), "核对完成必须落结果快照");
 
     // 2) 立刻批量导出：命中快照跳过 evaluate，进度里明示复用。
+    let prepare_count = PREPARE_CALLS.with(|c| c.get());
     let reuse_dir = dir.join("复用导出");
     let messages = std::cell::RefCell::new(Vec::new());
     let exported = run_job(
@@ -3153,10 +3145,12 @@ fn 核对结果快照导出复用且映射修改后重算() {
         "快照命中时进度必须提示复用：{:?}",
         messages.borrow()
     );
+    assert_eq!(PREPARE_CALLS.with(|c| c.get()), prepare_count, "导出不得重新读账或分析末级");
     let reused_book = reuse_dir.join("第一组_完整性核对.xlsx");
     assert!(reused_book.is_file());
 
     // 3) 删掉快照重导：按现行流程重算并刷新快照；工作簿与复用版逐格一致。
+    std::fs::write(snapshot_dir().unwrap().join(format!("{print}.xlsx")), "损坏缓存".as_bytes()).unwrap();
     std::fs::remove_file(&snapshot_path).unwrap();
     let recalc_dir = dir.join("重算导出");
     let recalc_messages = std::cell::RefCell::new(Vec::new());
@@ -3247,6 +3241,7 @@ fn 单组导出也复用核对结果快照() {
     value["outputPath"] = json!(dir.join("单组核对.xlsx").to_string_lossy());
     // 先核对落快照，再走 run_job 单组导出入口：命中快照时进度明示复用。
     run(&value, &AtomicBool::new(false)).unwrap();
+    let prepare_count = PREPARE_CALLS.with(|c| c.get());
     let cancel = std::sync::Arc::new(AtomicBool::new(false));
     let pause = PauseCheckpoint::unpaused(cancel.clone());
     let messages = std::cell::RefCell::new(Vec::new());
@@ -3258,6 +3253,7 @@ fn 单组导出也复用核对结果快照() {
         &pause,
     )
     .unwrap();
+    assert_eq!(PREPARE_CALLS.with(|c| c.get()), prepare_count);
     assert!(dir.join("单组核对.xlsx").is_file());
     assert!(
         messages
@@ -3267,5 +3263,13 @@ fn 单组导出也复用核对结果快照() {
         "单组导出命中快照时进度必须提示复用：{:?}",
         messages.borrow()
     );
+    // 结果 JSON 仍在，仅完整工作簿被破坏：必须验证哈希并回退重算。
+    let key = check_result_fingerprint(&value).unwrap();
+    std::fs::write(snapshot_dir().unwrap().join(format!("{key}.xlsx")), b"broken").unwrap();
+    let pause = PauseCheckpoint::unpaused(std::sync::Arc::new(AtomicBool::new(false)));
+    run_job("tbje_check.export", value.clone(), &|_,_,_,_| {},
+        std::sync::Arc::new(AtomicBool::new(false)), &pause).unwrap();
+    assert_eq!(PREPARE_CALLS.with(|c| c.get()), prepare_count + 1);
+    assert!(cached_workbook(&value).is_some());
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -47,7 +47,6 @@ pub(crate) struct DiskTbAnalysis {
     pub(crate) self_signed: BTreeMap<String, bool>,
     pub(crate) sign_evidence: SignEvidence,
     pub(crate) balance_basis_self_signed: BTreeMap<String, bool>,
-    pub(crate) posting_level: bool,
     store: Option<DiskTbStore>,
 }
 
@@ -254,7 +253,7 @@ impl Group {
         }
         let entities = indices(headers, column, "entity");
         let names = indices(headers, column, "accountName");
-        let aux = indices(headers, column, "auxiliary");
+        let aux = tb_rollup_auxiliary_indexes(headers, column);
         let mut currencies = indices(headers, column, "currency");
         currencies.extend(indices(headers, column, "functionalCurrency"));
         currencies.sort_unstable();
@@ -276,7 +275,7 @@ impl Group {
                 .map(|r| (join(r, &entities), account_code_of(&join(r, &codes))))
                 .collect(),
             names: rows.iter().map(|r| join(r, &names)).collect(),
-            aux: rows.iter().map(|r| join(r, &aux)).collect(),
+            aux: rows.iter().map(|r| tb_rollup_auxiliary_key(r, &aux)).collect(),
             currencies: rows.iter().map(|r| join(r, &currencies)).collect(),
             levels: rows
                 .iter()
@@ -486,7 +485,6 @@ fn analyze_with_limit(
             self_signed: BTreeMap::new(),
             sign_evidence: detect_tb_sign_convention(headers, &[], column),
             balance_basis_self_signed: BTreeMap::new(),
-            posting_level: false,
             store: None,
         });
     }
@@ -501,11 +499,7 @@ fn analyze_with_limit(
     .into_iter()
     .map(|p| (p.to_owned(), SignedCounter::default()))
     .collect();
-    let (mut code_alive, mut name_alive, mut last_identity, mut has_label) =
-        (false, false, 0usize, false);
-    let mut label_positions = indices(headers, column, "accountCode");
-    label_positions.extend(indices(headers, column, "accountName"));
-    label_positions.extend(indices(headers, column, "account"));
+    let (mut code_alive, mut name_alive, mut last_identity) = (false, false, 0usize);
     let mut body_count = 0;
     // Source visits retain physical IDs; body mask output indexes follow visit order.
     source.visit(cancel, |row, _| {
@@ -515,10 +509,6 @@ fn analyze_with_limit(
         if rule.has_identity(row) {
             last_identity = body_count;
         }
-        has_label |= label_positions
-            .iter()
-            .filter_map(|i| row.get(*i))
-            .any(|v| is_rollup_label(v));
         for (p, c) in &mut counters {
             c.push(headers, row, column, p);
         }
@@ -533,7 +523,8 @@ fn analyze_with_limit(
         .map_err(sql)?;
         Ok(())
     })?;
-    db.execute_batch("COMMIT;").map_err(sql)?;
+    // 正文和各轮掩码都属于可重建临时分析；按行提交会使大 TB 反复刷盘。
+    db.execute_batch("COMMIT; BEGIN;").map_err(sql)?;
     let balance_basis_self_signed = counters
         .iter()
         .map(|(p, c)| {
@@ -557,6 +548,8 @@ fn analyze_with_limit(
         convention: sign_evidence.convention.unwrap_or(SignConvention::Unsigned),
         signed,
     };
+    let mut label_positions = indices(headers, column, "accountCode");
+    label_positions.extend(indices(headers, column, "accountName"));
     let mut strict = false;
     visit_raw(&db, cancel, |id, row| {
         let blank = row.iter().all(|v| v.trim().is_empty());
@@ -588,6 +581,7 @@ fn analyze_with_limit(
                 && !is_rollup_label(raw)
                 && !is_formula_error(raw)
                 && !looks_like_account_code(&account_code_of(raw))
+                && !has_verified_auxiliary_code_suffix(headers,&row,column,&account_code_of(raw))
             {
                 keep = false;
             }
@@ -629,120 +623,41 @@ fn analyze_with_limit(
         }
         Ok(())
     })?;
-    let mut lengths = BTreeSet::new();
-    let mut account = indices(headers, column, "accountCode");
-    if account.is_empty() {
-        account = indices(headers, column, "account");
-        account.truncate(1);
+    progress("tb_disk", 0, body_count, "正在按完整结构验证 TB 父子汇总关系…");
+    if !column("entity").is_empty() {
+        let mut proof=structured_tb::CrossEntityRollups::new(headers,column);
+        each_entity(&db,headers,column,&basis,group_limit,cancel,|g| {
+            proof.collect(headers,&g.rows,column,&g.values,&g.excluded,Some(&g.ids));Ok(())
+        })?;
+        if proof.has_targets() {
+            each_entity(&db,headers,column,&basis,group_limit,cancel,|g| {
+                proof.observe(headers,&g.rows,column,&g.values,&g.excluded,Some(&g.ids));Ok(())
+            })?;
+            for id in proof.blank_pair_exclusions() {db.execute("UPDATE body SET excluded=1 WHERE id=?1",[id as i64]).map_err(sql)?;}
+        }
     }
-    let mut amounts = TB_AMOUNT_ROLES
-        .iter()
-        .flat_map(|p| indices(headers, column, p))
-        .collect::<Vec<_>>();
-    amounts.sort_unstable();
-    amounts.dedup();
-    visit_raw(&db, cancel, |id, row| {
-        let excluded: bool = db
-            .query_row("SELECT excluded FROM body WHERE id=?1", [id as i64], |r| {
-                r.get(0)
-            })
-            .map_err(sql)?;
-        let code = account_code_of(&join(&row, &account));
-        if !excluded && !code.is_empty() {
-            lengths.insert(code.chars().count());
+    let mut cross = structured_tb::CrossEntityRollups::new(headers, column);
+    each_entity(&db, headers, column, &basis, group_limit, cancel, |mut g| {
+        let parents = structured_tb::analyze(headers, &g.rows, column, &g.values, &mut g.excluded);
+        cross.collect(headers, &g.rows, column, &g.values, &g.excluded, Some(&g.ids));
+        save_mask(&db, &g)?;
+        if collect_context {
+            for (child,parent) in parents {
+                if g.ids[child] > 0 && g.ids[parent] > 0 {
+                    db.execute("INSERT OR IGNORE INTO parents(child,parent) VALUES(?1,?2)", params![g.ids[child] as i64,g.ids[parent] as i64]).map_err(sql)?;
+                }
+            }
         }
         Ok(())
     })?;
-    let fixed = lengths.len() == 1;
-    if fixed {
-        visit_raw(&db, cancel, |id, row| {
-            if account_code_of(&join(&row, &account)).is_empty() {
-                db.execute("UPDATE body SET excluded=1 WHERE id=?1", [id as i64])
-                    .map_err(sql)?;
-            }
+    if cross.has_targets() {
+        each_entity(&db, headers, column, &basis, group_limit, cancel, |g| {
+            cross.observe(headers, &g.rows, column, &g.values, &g.excluded, Some(&g.ids));
             Ok(())
         })?;
     }
-    // Posting table classification depends on headers and the presence of any label.
-    let posting = !has_label && tb_is_posting_level_export(headers, &[], column);
-    let semantic_count =
-        rollup_value_columns_with_basis(headers, &[], column, basis.convention, &|p| {
-            basis.self_signed(p)
-        })
-        .len();
-    if amounts.len() >= 2 && semantic_count >= 2 && !posting {
-        each_segment(
-            &db,
-            false,
-            headers,
-            column,
-            &basis,
-            group_limit,
-            cancel,
-            |mut g| {
-                if g.values.len() >= 2 {
-                    mark_zero_value_parents(
-                        &g.identities,
-                        &g.currencies,
-                        &g.levels,
-                        &g.values,
-                        &mut g.excluded,
-                    );
-                    save_mask(&db, &g)?;
-                }
-                Ok(())
-            },
-        )?;
-        if !fixed {
-            non_contiguous(&db, headers, column, &basis, group_limit, cancel)?;
-        }
-        adjacent(
-            &db,
-            false,
-            headers,
-            column,
-            &basis,
-            group_limit,
-            fixed,
-            collect_context,
-            cancel,
-        )?;
-        for round in 0..4 {
-            let before: usize = db
-                .query_row("SELECT count(*) FROM body WHERE excluded=0", [], |r| {
-                    r.get(0)
-                })
-                .map_err(sql)?;
-            if before < 2 {
-                break;
-            }
-            progress(
-                "tb_disk",
-                round + 1,
-                4,
-                "正在按完整原序逐轮验证 TB 末级科目…",
-            );
-            adjacent(
-                &db,
-                true,
-                headers,
-                column,
-                &basis,
-                group_limit,
-                fixed,
-                collect_context,
-                cancel,
-            )?;
-            let after: usize = db
-                .query_row("SELECT count(*) FROM body WHERE excluded=0", [], |r| {
-                    r.get(0)
-                })
-                .map_err(sql)?;
-            if before == after {
-                break;
-            }
-        }
-        non_contiguous(&db, headers, column, &basis, group_limit, cancel)?;
+    for id in cross.exclusions() {
+        db.execute("UPDATE body SET excluded=1 WHERE id=?1", [id as i64]).map_err(sql)?;
     }
     let mut analysis = TbLeafAnalysis {
         keep: vec![true; body_count],
@@ -808,6 +723,7 @@ fn analyze_with_limit(
     }
     check(cancel)?;
     drop(mask);
+    db.execute_batch("COMMIT;").map_err(sql)?;
     Ok(DiskTbAnalysis {
         analysis,
         currency_warnings: warnings,
@@ -817,7 +733,6 @@ fn analyze_with_limit(
         self_signed: basis.signed,
         sign_evidence,
         balance_basis_self_signed,
-        posting_level: posting,
         store: Some(DiskTbStore {
             db,
             _temp: temp,

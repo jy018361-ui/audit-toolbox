@@ -77,35 +77,7 @@ pub(crate) fn run_job(
         "tbje_check.export" => {
             progress("read", 1, 3, "正在读取科目余额表与序时账…");
             pause.wait()?;
-            // 先查结果快照：与最近一次核对时的输入指纹一致就复用落盘结果，
-            // 跳过 evaluate 的整表重算。prepare_with_control 仍要执行——两张
-            // 直接读表的底稿页（发生额勾稽明细、BS与PL勾稽）需要它，表加载
-            // 走既有磁盘缓存，成本可接受。
-            let reused = load_result_snapshot(&params);
-            if reused.is_some() {
-                progress("read", 1, 3, "复用上一次核对结果，跳过重新计算…");
-            } else {
-                // 与“复用”提示对称：未命中快照多半是源文件、Sheet 或映射
-                // 在核对后被改动，导出需要完整重算，让用户知道慢在哪里。
-                progress(
-                    "read",
-                    1,
-                    3,
-                    "未命中核对结果缓存（源文件、Sheet 或映射可能已变化），正在重新计算后导出…",
-                );
-            }
-            let prepared = prepare_with_control(&params, &cancel, progress)?;
-            let result = match reused {
-                Some(result) => result,
-                None => {
-                    let result = evaluate(&prepared, &cancel, true)?;
-                    save_result_snapshot(&params, &result);
-                    result
-                }
-            };
-            pause.wait()?;
-            progress("write", 2, 3, "正在写出核对明细…");
-            let path = export(&params, &result, &prepared)?;
+            let (path, result) = export_checked(&params, progress, &cancel, pause)?;
             progress("done", 3, 3, "明细已导出。");
             Ok(json!({ "outputPath": path.to_string_lossy(), "result": result }))
         }
@@ -291,6 +263,9 @@ fn load(
     })?;
     load_fx_table(&spec).map(Some)
 }
+
+#[cfg(test)]
+thread_local! { static PREPARE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 struct PreparedCheck {
     tb: FxTbRows,
@@ -705,6 +680,8 @@ fn prepare_with_control(
     cancel: &AtomicBool,
     progress: Progress<'_>,
 ) -> Result<PreparedCheck, AppError> {
+    #[cfg(test)]
+    PREPARE_CALLS.with(|count| count.set(count.get() + 1));
     let tb_spec: SourceSpec =
         serde_json::from_value(params.get("tbSource").cloned().ok_or_else(|| {
             error(
@@ -797,24 +774,6 @@ fn prepare_with_control(
     } else {
         Vec::new()
     };
-
-    // 流水级导出没有汇总行，末级判定的金额勾稽折叠在该类表上已跳过（公共引擎
-    // 统一行为）。核对口径变了必须让用户知道，否则与旧结果对不上时无从解释。
-    if tb
-        .analysis
-        .as_ref()
-        .map(|a| a.posting_level)
-        .unwrap_or_else(|| {
-            ledger_mapping::tb_is_posting_level_export(&tb.headers, &tb.rows, &|r| {
-                columns(&tb_map, r)
-            })
-        })
-    {
-        mapping_warnings.push(
-            "余额表识别为流水级导出（带凭证/期间列与多辅助维度，逐笔列示、无汇总行），已跳过“汇总行金额勾稽”剔除，全部数据行参与核对。"
-                .to_owned(),
-        );
-    }
 
     if let Some(je) = je.as_ref() {
         let disk_je = je.disk.is_some();
@@ -1106,10 +1065,16 @@ fn run_with_progress(
     cancel: &AtomicBool,
     progress: Progress<'_>,
 ) -> Result<Value, AppError> {
+    let input_key = check_result_fingerprint(params);
     let prepared = prepare_with_control(params, cancel, progress)?;
     // 先按全量科目组装并落一份结果快照（尽力而为），再按 run 口径过滤
     // items——「刚核对完就导出」的主路径由此免去导出时的整表重算。
     let mut result = evaluate(&prepared, cancel, true)?;
+    if check_result_fingerprint(params) != input_key {
+        return Err(error("SOURCE_CHANGED", "核对期间源文件已变化，请重新核对。", None));
+    }
+    progress("prepare_export", 2, 3, "正在保存完整核对底稿，供导出直接复用…");
+    save_export_snapshot(params, &result, &prepared, cancel)?;
     save_result_snapshot(params, &result);
     trim_items_for_run_mode(&mut result);
     Ok(result)
@@ -1298,9 +1263,7 @@ fn run_batch(
 /// 每组仍保留一份独立的三页工作簿，避免十组的同名核对页混在一个文件里难以定位；
 /// 前端只需选择一次目录。单组失败不会抹掉已经成功写出的其他组。
 ///
-/// 每组导出前先查「核对结果快照」：输入指纹与最近一次核对一致时直接复用落盘
-/// 结果，跳过 evaluate 整表重算（参见下方结果快照一节）；不一致按现行流程
-/// 重算，并把新结果刷新落盘。
+/// 每组优先复制核对时生成的完整底稿；输入变化或缓存损坏才重新核对。
 fn export_batch(
     params: &Value,
     progress: Progress,
@@ -1369,42 +1332,8 @@ fn export_batch(
         let mut export_params = group.clone();
         export_params["outputPath"] = json!(output_path.to_string_lossy());
 
-        // 先查结果快照：与最近一次核对时的输入指纹一致就复用落盘结果，跳过
-        // evaluate（prepare 仍要执行——两张直接读表的底稿页需要它，表加载走
-        // 既有磁盘缓存，成本可接受）。
-        let reused = load_result_snapshot(&export_params);
-        if reused.is_some() {
-            progress(
-                "export",
-                index + 1,
-                total,
-                &format!("复用第 {display_label} 组核对结果，跳过重新计算…"),
-            );
-        } else {
-            // 与“复用”提示对称：未命中快照时导出要完整重算，进度里
-            // 明示原因，避免大账被误认为卡死。
-            progress(
-                "export",
-                index + 1,
-                total,
-                &format!(
-                    "第 {display_label} 组未命中核对结果缓存（源文件、Sheet 或映射可能已变化），正在重新计算…"
-                ),
-            );
-        }
-        let exported =
-            prepare_with_control(&export_params, cancel, progress).and_then(|prepared| {
-                let result = match reused {
-                    Some(result) => result,
-                    None => {
-                        let result = evaluate(&prepared, cancel, true)?;
-                        save_result_snapshot(&export_params, &result);
-                        result
-                    }
-                };
-                let path = export(&export_params, &result, &prepared)?;
-                Ok(path)
-            });
+        let exported = export_checked(&export_params, progress, cancel, pause)
+            .map(|(path, _)| path);
         match exported {
             Ok(path) => {
                 output_paths.push(path.to_string_lossy().into_owned());
@@ -1451,7 +1380,7 @@ fn snapshot_dir() -> Option<PathBuf> {
         crate::tabular::cache_root()
             .ok()?
             .join("tbje-results")
-            .join("v1"),
+            .join("v2"),
     )
 }
 
@@ -1467,7 +1396,7 @@ fn file_identity(path: &std::path::Path) -> Option<String> {
             .ok()?
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?
-            .as_secs()
+            .as_nanos()
     ))
 }
 
@@ -1481,7 +1410,7 @@ fn hash_text(text: &str) -> String {
 /// 修改时间。指纹一致即认定「输入与上次核对时相同」，导出直接复用已落盘
 /// 的核对结果；任一项变化指纹即变，自然回落到现行重算并刷新快照。
 fn check_result_fingerprint(params: &Value) -> Option<String> {
-    let mut material = String::from("tbje-disk-key-domains-20261019\n");
+    let mut material = format!("tbje-{}\n", ledger_mapping::TB_STRUCTURE_RULE_VERSION);
     for field in CHECK_PARAM_FIELDS {
         match params.get(*field) {
             Some(value) => {
@@ -1565,6 +1494,99 @@ fn load_result_snapshot(params: &Value) -> Option<Value> {
     }
     eprintln!("TBJE 核对结果快照命中，导出复用（跳过重新计算）");
     Some(result)
+}
+
+// 核对时一次生成完整底稿；结果 JSON 与工作簿同时有效才允许直接导出。
+// 这样跨 worker 也不再加载 JE、重复映射校验或 TB 末级分析。
+fn save_export_snapshot(
+    params: &Value, result: &Value, prepared: &PreparedCheck, cancel: &AtomicBool,
+) -> Result<(), AppError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(error("JOB_CANCELLED", "任务已取消。", None));
+    }
+    let Some(dir) = snapshot_dir() else { return Ok(()) };
+    let Some(key) = check_result_fingerprint(params) else { return Ok(()) };
+    if std::fs::create_dir_all(&dir).is_err() { return Ok(()) }
+    let target = dir.join(format!("{key}.xlsx"));
+    let partial = dir.join(format!("{key}.{}.partial.xlsx", std::process::id()));
+    let mut output = params.clone();
+    output["outputPath"] = json!(partial.to_string_lossy());
+    let saved = export_with_control(&output, result, prepared, cancel).and_then(|_| {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(error("JOB_CANCELLED", "任务已取消。", None));
+        }
+        if check_result_fingerprint(params).as_deref() != Some(key.as_str()) {
+            return Err(error("SOURCE_CHANGED", "核对期间源文件已变化，请重新核对。", None));
+        }
+        let digest = workbook_digest(&partial).ok_or_else(|| error("IO_ERROR", "无法校验核对底稿缓存。", None))?;
+        crate::tabular::replace_file(&partial, &target)?;
+        std::fs::write(dir.join(format!("{key}.sha256")), digest)
+            .map_err(|e| error("IO_ERROR", "无法保存核对底稿校验信息。", Some(e.to_string())))?;
+        Ok(())
+    });
+    let _ = std::fs::remove_file(&partial);
+    match saved {
+        Err(e) if e.code == "JOB_CANCELLED" || e.code == "SOURCE_CHANGED" => Err(e),
+        Err(e) => { eprintln!("无法保存核对底稿缓存：{}", e.user_message); Ok(()) }
+        Ok(()) => Ok(()),
+    }
+}
+
+fn workbook_digest(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let size = file.read(&mut buffer).ok()?;
+        if size == 0 { break }
+        hash.update(&buffer[..size]);
+    }
+    Some(format!("{:x}", hash.finalize()))
+}
+
+fn cached_workbook(params: &Value) -> Option<PathBuf> {
+    let dir = snapshot_dir()?;
+    let key = check_result_fingerprint(params)?;
+    let path = dir.join(format!("{key}.xlsx"));
+    let expected = std::fs::read_to_string(dir.join(format!("{key}.sha256"))).ok()?;
+    (workbook_digest(&path)? == expected).then_some(path)
+}
+
+fn export_checked(
+    params: &Value, progress: Progress<'_>, cancel: &AtomicBool, pause: &PauseCheckpoint,
+) -> Result<(PathBuf, Value), AppError> {
+    pause.wait()?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(error("JOB_CANCELLED", "任务已取消。", None));
+    }
+    if let Some(result) = load_result_snapshot(params) {
+        if let Some(cached) = cached_workbook(params) {
+            let label = params.get("label").and_then(Value::as_str).unwrap_or("");
+            progress("write", 2, 3, &format!("复用第 {label} 组核对结果，直接导出完整底稿…"));
+            let path = output_path(params)?;
+            std::fs::copy(cached, &path)
+                .map_err(|e| error("IO_ERROR", "无法导出核对底稿，请检查文件是否被占用。", Some(e.to_string())))?;
+            return Ok((path, result));
+        }
+    }
+    progress("read", 1, 3, "完整底稿缓存缺失、损坏或输入已变化，正在重新核对后导出…");
+    let input_key = check_result_fingerprint(params);
+    let prepared = prepare_with_control(params, cancel, progress)?;
+    let result = evaluate(&prepared, cancel, true)?;
+    if check_result_fingerprint(params) != input_key {
+        return Err(error("SOURCE_CHANGED", "核对期间源文件已变化，请重新核对。", None));
+    }
+    save_export_snapshot(params, &result, &prepared, cancel)?;
+    save_result_snapshot(params, &result);
+    pause.wait()?;
+    let path = if let Some(cached) = cached_workbook(params) {
+        let path = output_path(params)?;
+        std::fs::copy(cached, &path)
+            .map_err(|e| error("IO_ERROR", "无法导出核对底稿。", Some(e.to_string())))?;
+        path
+    } else { export(params, &result, &prepared)? };
+    Ok((path, result))
 }
 
 // ────────────────────────────── 导出明细 ──────────────────────────────
@@ -1712,6 +1734,7 @@ fn column_letter(mut index: u16) -> String {
 fn write_rollforward_sheet(
     workbook: &mut Workbook,
     prepared: &PreparedCheck,
+    cancel: &AtomicBool,
 ) -> Result<(), AppError> {
     let sheet = workbook.add_worksheet_with_constant_memory();
     sheet.set_name("TB发生额与余额勾稽").map_err(xlsx)?;
@@ -1768,7 +1791,7 @@ fn write_rollforward_sheet(
         {
             continue;
         }
-        prepared.tb.visit(&AtomicBool::new(false),|record,index|{
+        prepared.tb.visit(cancel,|record,index|{
             let row=record.row;
             if !junk.get(index).copied().unwrap_or(true) {
                 return Ok(());
@@ -1789,7 +1812,7 @@ fn write_rollforward_sheet(
                 value if value.is_empty() => "未标明".to_owned(),
                 value => value,
             };
-            let source_row = prepared.tb.header_row + prepared.tb.header_depth + index + 1;
+            let source_row = record.source_row;
             let excel_row = output_row + 1;
             let derived = open + debit - credit;
             let difference = derived - close;
@@ -2089,12 +2112,13 @@ struct EquationDetail {
 
 fn visit_equation_details(
     prepared: &PreparedCheck,
+    cancel: &AtomicBool,
     mut visitor: impl FnMut(EquationDetail) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
     let leaf = &prepared.tb_leaf;
     let opening_basis = tb_basis(&prepared.tb, &prepared.tb_map, "openingFunctional")?;
     let closing_basis = tb_basis(&prepared.tb, &prepared.tb_map, "closingFunctional")?;
-    prepared.tb.visit(&AtomicBool::new(false), |record, index| {
+    prepared.tb.visit(cancel, |record, index| {
         if !prepared.tb_rows.get(index).copied().unwrap_or(true) {
             return Ok(());
         }
@@ -2106,7 +2130,7 @@ fn visit_equation_details(
             return Ok(());
         }
         let category = ledger_mapping::account_category(&code);
-        let source_row = prepared.tb.header_row + prepared.tb.header_depth + index + 1;
+        let source_row = record.source_row;
         for (period, prefix, basis) in [
             ("年初", "openingFunctional", &opening_basis),
             ("年末", "closingFunctional", &closing_basis),
@@ -2131,7 +2155,7 @@ fn visit_equation_details(
     })
 }
 
-fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck) -> Result<(), AppError> {
+fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck, cancel: &AtomicBool) -> Result<(), AppError> {
     let sheet = workbook.add_worksheet_with_constant_memory();
     sheet.set_name("BS与PL勾稽").map_err(xlsx)?;
     let categories = [
@@ -2170,7 +2194,7 @@ fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck) -> Re
     let mut all_totals = BTreeMap::<&str, f64>::new();
     let mut unclassified = BTreeSet::new();
     let mut incomplete = BTreeSet::new();
-    visit_equation_details(prepared, |item| {
+    visit_equation_details(prepared, cancel, |item| {
         detail_count += 1;
         if item.included {
             *totals
@@ -2309,7 +2333,7 @@ fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck) -> Re
             .map_err(xlsx)?;
     }
     let mut index = 0;
-    visit_equation_details(prepared, |item| {
+    visit_equation_details(prepared, cancel, |item| {
         let row = detail_data_row + index as u32;
         index += 1;
         for (column, value) in [
@@ -2385,11 +2409,15 @@ fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck) -> Re
 
 /// 正式工作底稿固定为三页：每页保留全量取数证据，并用 Excel 公式重算差异与结论。
 fn export(params: &Value, result: &Value, prepared: &PreparedCheck) -> Result<PathBuf, AppError> {
+    export_with_control(params, result, prepared, &AtomicBool::new(false))
+}
+
+fn export_with_control(params: &Value, result: &Value, prepared: &PreparedCheck, cancel: &AtomicBool) -> Result<PathBuf, AppError> {
     let path = output_path(params)?;
     let mut workbook = Workbook::new();
-    write_rollforward_sheet(&mut workbook, prepared)?;
+    write_rollforward_sheet(&mut workbook, prepared, cancel)?;
     write_tbje_sheet(&mut workbook, result, prepared)?;
-    write_equation_sheet(&mut workbook, prepared)?;
+    write_equation_sheet(&mut workbook, prepared, cancel)?;
     workbook.save(&path).map_err(xlsx)?;
     Ok(path)
 }

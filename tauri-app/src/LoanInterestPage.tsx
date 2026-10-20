@@ -1110,7 +1110,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       }
       setPairStatus(
         scan.hiddenSheets
-          ? `${scan.hiddenSheets} 张低置信度 Sheet 已忽略，请核对已选工作表。`
+          ? `${scan.hiddenSheets} 张空白或低置信度 Sheet 已忽略，请核对已选工作表。`
           : "",
       );
       if (failures.length) setError(failures.join("；"));
@@ -1936,7 +1936,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
             <option value="floating">浮动</option>
           </select>
         </td>
-        <td>
+        <td className="loan-rate-cell">
           <span className="loan-rate-input-stack">
             <input
               aria-label={`${label}的执行利率`}
@@ -3222,7 +3222,9 @@ export function Results({
   const [exceptionsOnly, setExceptionsOnly] = useState(false);
   // 容器 div 在本组件内无条件渲染，ref 直接挂原 div。
   const resultsResize = useTableColumnResize<HTMLDivElement>({
-    storageKey: "loan.results",
+    // 紧凑布局升级后隔离旧记忆：旧版曾保存上千像素的金额列宽，
+    // 会覆盖 colgroup 默认值；用户后续主动调整仍按新键保存。
+    storageKey: "loan.results.compact-v2",
   });
   const total = rows.reduce((s, r) => s + Number(r.calculatedInterest ?? 0), 0);
   const totals = rows.reduce(

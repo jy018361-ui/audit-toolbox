@@ -1383,8 +1383,8 @@ fn interest_expense_occurrence(
 
 // 账面费用是独立的预览结果；选科目后只刷新这份结果，不重算借款本金。
 fn booked_expense_key(params: &Value) -> Option<String> {
-    let material = format!("booked-{}-v2\n{}\n{}",
-        ledger_mapping::TB_STRUCTURE_RULE_VERSION, calc_fingerprint(params)?, params.get("interestExpenseAccounts").unwrap_or(&Value::Null));
+    let material = format!("booked-{}-{}-v2\n{}\n{}",
+        ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, calc_fingerprint(params)?, params.get("interestExpenseAccounts").unwrap_or(&Value::Null));
     Some(hex::encode(Sha256::digest(material.as_bytes())))
 }
 
@@ -1655,7 +1655,7 @@ fn snapshot_file_identity(path: &Path) -> Option<String> {
 /// 任一文件被替换或续写（大小/修改时间变化），键即变化，旧快照作废。
 fn calc_fingerprint(params: &Value) -> Option<String> {
     let subset = snapshot_param_subset(params);
-    let mut material = format!("loan-{}\n{}", ledger_mapping::TB_STRUCTURE_RULE_VERSION, serde_json::to_string(&subset).ok()?);
+    let mut material = format!("loan-{}-{}-{}-{}\n{}", ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, ledger_mapping::JE_BODY_RULE_VERSION, crate::header_detection::RULE_VERSION, serde_json::to_string(&subset).ok()?);
     for field in ["ledgerSource", "tbSource", "jeSource", "rateLedgerSource"] {
         if let Some(path) = subset
             .get(field)
@@ -6304,10 +6304,7 @@ fn load_ledger_table(spec: &SourceSpec) -> Result<Table, AppError> {
         (
             selected,
             sheets,
-            range
-                .rows()
-                .map(|r| r.iter().map(data_text).collect())
-                .collect(),
+            crate::fx::physical_range_rows(&range),
         )
     };
     finish_ledger_table(spec, path, sheet, sheets, all)
@@ -7642,6 +7639,59 @@ mod loan_form_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn 通用表头借款与利率台账保留物理行列及确认后首条正文() {
+        let path = std::env::temp_dir().join(format!("loan-origin-{}.xlsx", uuid::Uuid::new_v4()));
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let sheet = book.add_worksheet();
+        for (r, row) in [
+            ["银行", "编号", "本金", "利率"],
+            ["某银行", "001", "100", "3.5"],
+            ["另一银行", "002", "200", "4.0"],
+        ].iter().enumerate() {
+            for (c, value) in row.iter().enumerate() {
+                sheet.write_string(3 + r as u32, 2 + c as u16, *value).unwrap();
+            }
+        }
+        book.save(&path).unwrap();
+        let mut spec: super::SourceSpec = serde_json::from_value(
+            serde_json::json!({"inputPath":path,"headerRow":0,"headerDepth":0}),
+        ).unwrap();
+        let auto = super::load_ledger_table(&spec).unwrap();
+        assert_eq!((auto.header_row, auto.header_depth), (4, 1));
+        assert_eq!(&auto.headers[2..], ["银行", "编号", "本金", "利率"]);
+        assert_eq!(auto.rows.len(), 2);
+        assert_eq!(auto.rows[0][4], "100");
+        let (disk_preview, count) = super::ledger_disk::preview(&spec, 0, 10, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        assert_eq!((disk_preview.header_row, disk_preview.header_depth), (4, 1));
+        assert_eq!(disk_preview.headers, auto.headers);
+        assert_eq!(disk_preview.rows[0], auto.rows[0]);
+        assert_eq!(count, 2);
+        spec.header_row = auto.header_row;
+        spec.header_depth = auto.header_depth;
+        for kind in ["ledger", "rateLedger"] {
+            let confirmed = super::load(&spec, kind).unwrap();
+            assert_eq!(confirmed.headers, auto.headers);
+            assert_eq!(confirmed.rows[0], auto.rows[0]);
+            assert_eq!(confirmed.rows.len(), auto.rows.len());
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn 通用表头借款台账不吞关键词较多的第一笔本金() {
+        let path = std::env::temp_dir().join(format!("loan-body-{}.csv", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "银行,编号,本金,备注,\n某银行,借款编号,100,备注,说明\n另一银行,002,200,正常,说明\n").unwrap();
+        let spec: super::SourceSpec = serde_json::from_value(serde_json::json!({"inputPath":path,"headerRow":0,"headerDepth":0})).unwrap();
+        let auto = super::load_ledger_table(&spec).unwrap();
+        assert_eq!((auto.header_row, auto.header_depth), (1, 1));
+        assert_eq!(auto.rows.len(), 2);
+        assert_eq!(auto.rows[0][2], "100");
+        let (disk, count) = super::ledger_disk::preview(&spec, 0, 10, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        assert_eq!(disk.headers, auto.headers);
+        assert_eq!(disk.rows[0], auto.rows[0]);
+        assert_eq!(count, 2);
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn 通用表头借款台账双层并保留手动单层() {
         let path = std::env::temp_dir().join(format!("loan-header-{}.csv", uuid::Uuid::new_v4()));

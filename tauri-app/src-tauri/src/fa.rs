@@ -3029,11 +3029,14 @@ pub(crate) fn asset_header_depth(rows: &[Vec<String>], start: usize) -> usize {
 }
 pub(crate) fn asset_headers(rows: &[Vec<String>], start: usize) -> Vec<String> {
     let depth = asset_header_depth(rows, start);
+    // 流式行尾空单元格可被省略，正文却仍有该列；以实际读取宽度保留列位。
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
     if depth == 2 {
-        let width = rows[start].len().max(rows[start + 1].len());
         unique_headers(crate::fx::merge_headers(&rows[start..start + depth], width))
     } else {
-        unique_headers(rows.get(start).cloned().unwrap_or_default())
+        let mut header = rows.get(start).cloned().unwrap_or_default();
+        header.resize(width, String::new());
+        unique_headers(header)
     }
 }
 fn unique_headers(row: Vec<String>) -> Vec<String> {
@@ -7285,6 +7288,47 @@ fn xlsx_error(e: rust_xlsxwriter::XlsxError) -> AppError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn 通用表头资产首条编号名称金额不充当下层且磁盘读取一致() {
+        let path = std::env::temp_dir().join(format!("fa-body-{}.xlsx", uuid::Uuid::new_v4()));
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let sheet = book.add_worksheet();
+        for (r, row) in [
+            ["编号", "名称", "原值", "折旧", ""],
+            ["资产编号", "设备名称", "100", "折旧说明", "说明"],
+            ["002", "设备乙", "200", "20", "其他"],
+        ].iter().enumerate() {
+            for (c, value) in row.iter().enumerate() {
+                sheet.write_string(3 + r as u32, 2 + c as u16, *value).unwrap();
+            }
+        }
+        book.save(&path).unwrap();
+        let auto = super::load_table(&path, None, None, false).unwrap();
+        assert_eq!(auto.header_row, 4);
+        assert_eq!(auto.headers[4], "原值");
+        assert_eq!(auto.rows.len(), 2);
+        assert_eq!(auto.rows[0][4], "100");
+        let manual = super::load_table(&path, auto.sheet.as_deref(), Some(4), false).unwrap();
+        assert_eq!(manual.headers, auto.headers);
+        assert_eq!(manual.rows, auto.rows);
+        let prefix = crate::fa_sheet_pick::load_prefix_table(&path, auto.sheet.as_deref(), Some(4), false).unwrap();
+        assert_eq!(prefix.headers, auto.headers);
+        assert_eq!(prefix.rows, auto.rows);
+        let (disk, _) = super::disk::load_input(&path, auto.sheet.as_deref(), Some(4), &|_,_,_,_|{}, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        assert_eq!(disk.headers, auto.headers);
+        assert_eq!(disk.rows, auto.rows);
+        book.worksheet_from_index(0).unwrap().write_string(250, 8, "窗口外尾列").unwrap();
+        book.save(&path).unwrap();
+        let full = super::load_table(&path, auto.sheet.as_deref(), Some(4), false).unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let (preview, disk) = super::disk::load_input(&path, auto.sheet.as_deref(), Some(4), &|_,_,_,_|{}, &cancel).unwrap();
+        assert_eq!(preview.headers, full.headers);
+        assert_eq!(preview.headers.len(), 9);
+        let mut last = Vec::new();
+        disk.visit(&cancel, |row, _| { last = row.to_vec(); Ok(()) }).unwrap();
+        assert_eq!(last[8], "窗口外尾列");
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn 通用表头固定资产双层与手动行号读取一致() {
         let path = std::env::temp_dir().join(format!("asset-header-{}.csv", uuid::Uuid::new_v4()));

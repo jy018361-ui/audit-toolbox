@@ -211,7 +211,7 @@ pub(crate) struct DiskTable {
 }
 pub(crate) fn fingerprint(path: &Path, sheet: &str, row: usize, depth: usize) -> Result<String, AppError> {
     let meta = fs::metadata(path).map_err(io)?;
-    let identity = (fs::canonicalize(path).map_err(io)?, meta.len(), meta.modified().map_err(io)?.duration_since(UNIX_EPOCH).map_err(io)?.as_nanos(), sheet, row, depth, 4);
+    let identity = (fs::canonicalize(path).map_err(io)?, meta.len(), meta.modified().map_err(io)?.duration_since(UNIX_EPOCH).map_err(io)?.as_nanos(), sheet, row, depth, 4, crate::header_detection::RULE_VERSION);
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(&identity).map_err(io)?)))
 }
 impl DiskTable {
@@ -450,6 +450,28 @@ mod tests {
         cancel.store(true,Ordering::Relaxed);
         assert!(second.visit(&cancel,|_,_|Ok(())).is_err());
     }
+    #[test]
+    fn 通用表头单层空标题普通与磁盘列位一致() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("空标题.csv");
+        fs::write(&input, "科目编码,,科目名称,借方金额,\n1001,辅助甲,现金,10,尾列\n").unwrap();
+        let regular = crate::fx::load_fx_table(&crate::fx::SourceSpec {
+            input_path: input.to_string_lossy().into_owned(), sheet: String::new(), header_row: 1, header_depth: 1,
+        }).unwrap();
+        let cancel = AtomicBool::new(false);
+        let disk = DiskTable::open(&input, None, 1, 1, &|_,_,_,_|{}, &cancel).unwrap();
+        assert_eq!(regular.headers, ["科目编码", "列2", "科目名称", "借方金额", "列5"]);
+        let automatic = crate::fx::load_fx_table(&crate::fx::SourceSpec {
+            input_path: input.to_string_lossy().into_owned(), sheet: String::new(), header_row: 0, header_depth: 1,
+        }).unwrap();
+        assert_eq!(automatic.headers, regular.headers);
+        assert_eq!(automatic.rows, regular.rows);
+        assert_eq!(disk.headers, regular.headers);
+        let mut rows = Vec::new();
+        disk.visit(&cancel, |row, _| { rows.push(row.to_vec()); Ok(()) }).unwrap();
+        assert_eq!(rows, regular.rows);
+    }
+
     #[test]
     fn disk_table_xlsx_matches_reader_strings_dates_formulas_and_sheet_identity() {
         let dir = tempfile::tempdir().unwrap();

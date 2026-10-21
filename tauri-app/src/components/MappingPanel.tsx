@@ -1,4 +1,5 @@
 import { DataTable } from "@/components/DataTable";
+import { recordManualLedgerMapping } from "../manualLedgerMapping";
 
 /**
  * 五个工具共用的字段映射面板。
@@ -156,7 +157,7 @@ export function MappingPanel(props: MappingPanelProps) {
     if (role) {
       next[role] = isMulti(role) ? [...asColumns(next[role]), column] : column;
     }
-    props.onChange(next);
+    props.onChange(recordManualLedgerMapping(mapping, next, column, role));
   };
 
   const rolesOnColumn = (column: string): string[] =>
@@ -180,7 +181,7 @@ export function MappingPanel(props: MappingPanelProps) {
     const rest = asColumns(next[role]).filter((item) => item !== column);
     if (rest.length) next[role] = isMulti(role) ? rest : rest[0];
     else delete next[role];
-    props.onChange(next);
+    props.onChange(recordManualLedgerMapping(mapping, next, column, role));
   };
 
   // 必填／选填的标注跟在标签后面。下拉的 <option> 没法上样式，只能用文字标。

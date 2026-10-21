@@ -336,6 +336,45 @@ it("统一上传自动分类出 TB 与 JE 来源卡，并可一键更正类型",
   ).toBeVisible();
 });
 
+it("同时上传 TB 和 JE 时，TB 内的空白 Sheet 不影响两侧识别", async () => {
+  mock.pickPath.mockResolvedValue(["20251231科目余额表.xlsx", "20251231序时账.xlsx"]);
+  mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
+    const p = params as { kind?: string; source?: { inputPath: string; sheet: string } };
+    if (method === "ledger.forms") return [];
+    if (method === "ledger.currency_link")
+      return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
+    const tb = p.source?.inputPath.includes("科目余额表");
+    const sheet = tb ? "Sheet1" : "序时账";
+    const headers = tb ? ["科目编码", "科目名称", "期初余额", "期末余额"] : ["记账日期", "凭证号", "科目编码", "贷方金额"];
+    if (method === "deposit.classify_source") {
+      if (p.source?.sheet === "Sheet2")
+        throw { code: "SOURCE_EMPTY", userMessage: "文件中没有可读取的数据。" };
+      return {
+        kind: tb ? "tb" : "je", scores: { tb: tb ? 10 : 1, je: tb ? 1 : 10 },
+        confidence: 0.95, needsLlm: false, sheet, sheets: tb ? ["Sheet1", "Sheet2"] : ["序时账"],
+        headers, preview: [], headerRow: 1, headerDepth: 1,
+      };
+    }
+    if (method === "loan.inspect") return {
+      sheet, sheets: tb ? ["Sheet1", "Sheet2"] : ["序时账"], headers, preview: [],
+      headerRow: 1, headerDepth: 1, rowCount: tb ? 2545 : 298504,
+      suggestedMapping: {}, sampledPreview: false, metadataComplete: true,
+    };
+    throw new Error(`unexpected ${method}`);
+  });
+  render(<LoanInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "TB＋JE" }));
+  fireEvent.click(screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }));
+  expect(await screen.findByText("已识别：TB 科目余额表")).toBeVisible();
+  expect(await screen.findByText("已识别：JE 序时账")).toBeVisible();
+  expect(screen.queryByText(/文件中没有可读取的数据/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "补充上传 TB" })).not.toBeInTheDocument();
+  expect(screen.getByText(/1 张空白或低置信度 Sheet 已忽略/)).toBeVisible();
+  expect(mock.engineCall).toHaveBeenCalledWith("loan.inspect", expect.objectContaining({
+    kind: "tb", source: { inputPath: "20251231科目余额表.xlsx", sheet: "Sheet1", headerRow: 1, headerDepth: 1 },
+  }), "20251231科目余额表.xlsx / Sheet1");
+});
+
 it("公共入口重建整组，待上传单侧入口只补充对应来源", async () => {
   const classify = (kind: "tb" | "je", path: string) => ({
     kind,

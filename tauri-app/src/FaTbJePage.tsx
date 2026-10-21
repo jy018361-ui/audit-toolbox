@@ -1105,7 +1105,7 @@ export function FaTbJePage() {
       setSourceStatus(
         recognized.length
           ? scan.hiddenSheets
-            ? `${scan.hiddenSheets} 张低置信度 Sheet 已忽略，请核对已选工作表。`
+            ? `${scan.hiddenSheets} 张空白或低置信度 Sheet 已忽略，请核对已选工作表。`
             : ""
           : "没有文件识别成功，请检查文件内容后重试。",
       );

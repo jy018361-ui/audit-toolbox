@@ -38,6 +38,11 @@ const pick = (select: HTMLSelectElement, role: string) =>
   fireEvent.change(select, { target: { value: role } });
 
 describe("共用字段映射面板", () => {
+  it("手选辅助列记录确认，改为其他角色时清除确认", () => {
+    const { onChange, selects } = panel({ roles: [...ROLES, ["auxiliary", "辅助核算"]], multi: new Set(["auxiliary"]) });
+    pick(selects[0], "auxiliary");
+    expect(onChange.mock.calls[0][0]).toEqual({ auxiliary: ["会计科目"], __manualAuxiliary: '{"auxiliary":["会计科目"]}' });
+  });
   it("每一列给一个角色下拉，选中后回写映射", () => {
     const { onChange, selects } = panel();
     expect(screen.getByText("文件预览").closest("section")).toHaveClass(

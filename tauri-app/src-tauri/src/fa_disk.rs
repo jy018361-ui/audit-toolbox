@@ -70,6 +70,15 @@ pub(crate) fn load_input(
         progress,
         cancel,
     )?;
+    // 预览窗口之外才出现的无标题尾列也必须进入正式处理，不能被截掉。
+    if table.headers.len() < disk.headers.len() {
+        let mut headers = table.headers;
+        headers.resize(disk.headers.len(), String::new());
+        table.headers = unique_headers(headers);
+        for row in &mut table.rows {
+            row.resize(table.headers.len(), String::new());
+        }
+    }
     table.row_count = disk.row_count;
     Ok((table, disk))
 }

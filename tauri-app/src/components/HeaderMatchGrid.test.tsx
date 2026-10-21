@@ -109,8 +109,10 @@ it("操作说明默认折叠，关键动作仍可操作且保留键盘帮助", (
   setup();
   const summary = screen.getByText("操作说明");
   expect(summary.closest("details")?.open).toBe(false);
-  expect(screen.getByRole("button", { name: /开始合并/ })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "下一处待确认" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "调整后导出" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "按原列顺序导出" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "下一处待确认" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /全部按建议执行/ })).toBeNull();
   expect(summary.closest("details")?.textContent).toContain("键盘 Tab 定位格子，Enter 确认建议");
   cleanup();
 });
@@ -124,7 +126,7 @@ const unmatchedSlot = (row: number, slot: number) =>
   document.querySelector(`[data-drop="unm:${row}:${slot}"]`) as HTMLElement;
 
 const confirmButton = () =>
-  screen.getByRole("button", { name: /开始合并/ }) as HTMLButtonElement;
+  screen.getByRole("button", { name: "调整后导出" }) as HTMLButtonElement;
 
 const rematchButton = () =>
   screen.getByRole("button", { name: /重新匹配/ }) as HTMLButtonElement;
@@ -257,11 +259,22 @@ describe("表头匹配网格", () => {
     expect(bColumns[2].discard).toBe(true);
   });
 
-  it("全部按建议执行后黄色清零且按钮不再提示", async () => {
-    setup();
-    fireEvent.click(screen.getByRole("button", { name: /全部按建议执行/ }));
-    expect(statOf("yellow")).toBe("0 待确认");
-    expect(confirmButton().textContent).toBe("开始合并");
+  it("按原列顺序导出忽略匹配丢弃与模板移除，保留表头定位及宽表尾列", () => {
+    const preview = makePreview();
+    preview.rows[1].headers.push("尾列");
+    preview.rows[1].matches.push({ target: null, confidence: 0, reason: "" });
+    const { onConfirm } = setup(preview);
+    fireEvent.contextMenu(screen.getByText("备注").closest("[data-cell]") as HTMLElement);
+    fireEvent.click(screen.getByText("丢弃此列（不合并）"));
+    fireEvent.contextMenu(columnHeader(2));
+    fireEvent.click(screen.getByText("移出此模板列（重新匹配后生效）"));
+    fireEvent.click(screen.getByRole("button", { name: "按原列顺序导出" }));
+    const plan = onConfirm.mock.calls[0][0] as HeaderMatchingPlanJson;
+    expect(plan.templateHeaders).toEqual(["日期", "凭证号", "金额", "尾列"]);
+    expect(plan.rememberAliases).toEqual([]);
+    expect(plan.assignments[1]).toMatchObject({ headerRow: 1, headerRowsCount: 1 });
+    expect(plan.assignments[1].columns.map((column) => column.target)).toEqual([0, 1, 2, 3]);
+    expect(plan.assignments[1].columns.every((column) => !column.discard)).toBe(true);
   });
 
   it("确认时生成带表头识别信息与独立列顺序的合并计划", async () => {
@@ -367,6 +380,25 @@ describe("表头匹配网格", () => {
     pointerDrag(document.querySelector('[data-cell="1-3"]') as HTMLElement, unmatchedSlot(1, 0));
     expect(headers()).toEqual(["单据编号", "记账日期", "", "附注", "备注"]);
     expect(cells()[3].querySelector("span")?.textContent).toBe("补充说明");
+  });
+
+  it("改模板表头行只同步模板来源，其他文件保留各自的行号和字段", async () => {
+    const preview = makePreview();
+    preview.template.detection.needsReview = true;
+    preview.template.rawRows = [["标题"], ["日期", "凭证号", "金额"], ["2026-01-01", "记-1", "100"]];
+    preview.rows[0].rawRows = preview.template.rawRows;
+    const { onConfirm, onRematch } = setup(preview);
+    const editor = document.querySelector(".hmg-template-review") as HTMLElement;
+    fireEvent.change(editor.querySelector("input")!, { target: { value: "2" } });
+    fireEvent.click(editor.querySelector("button")!);
+    await waitFor(() => expect(onRematch).toHaveBeenCalledTimes(2));
+    expect(onRematch).toHaveBeenLastCalledWith(
+      ["日期", "凭证号", "金额"], ["记账日期", "单据编号", "备注"], [],
+    );
+    fireEvent.click(screen.getByRole("button", { name: "按原列顺序导出" }));
+    const plan = onConfirm.mock.calls[0][0] as HeaderMatchingPlanJson;
+    expect(plan.assignments[0].headerRow).toBe(1);
+    expect(plan.assignments[1]).toMatchObject({ headerRow: 1, headers: ["记账日期", "单据编号", "备注"] });
   });
 
   it("手动移入未匹配区的列计入未匹配而不是匹配", async () => {

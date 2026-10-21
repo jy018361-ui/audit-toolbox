@@ -1,8 +1,33 @@
+## 2026-10-21 · Excel 合并明确两种导出路径
+
+- 目标：让希望按原始列位拼接的用户直接导出，避免必须接受机器匹配或逐格撤销。
+- 设计决策：底部增加「按原列顺序导出」，将「开始合并」改为「调整后导出」；删除「全部按建议执行」「下一处待确认」。原列导出忽略配对／丢弃但保留表头行／层数与较宽来源尾列；调整导出使用当前网格，黄色建议仍在导出前明示。两按钮的说明置于操作帮助及悬浮提示。
+- 同步修复：模板改行号不会重取其他文件的同一行，正文预览随确认设置刷新；真正的表头快照不一致说明停止原因和核对方法，不再猜测用户改了文件。新手引导同步两条路径。
+- 验证：`npx vitest run src/components/HeaderMatchGrid.test.tsx src/ExcelMergerPage.test.ts src/ToolPageJobEvents.test.tsx`；`npm run build`；Rust 实际导出与特殊表头回归见 `EXCEL_MERGER_PARITY.md` 同日记录。
+
+## 2026-10-20 · 手选辅助字段在核对导出后保留
+
+- 目标：修复手工映射辅助字段后，JE关联失败导致实际任务参数与返回第二步的选择一起被清空。
+- 设计决策：公共面板逐列记录人工确认并随映射恢复；仅保留明确手选的辅助／借款明细列，自动候选仍按原验证撤销。保留映射表示TB字段已指定，跨表失败提示与主体＋科目降级保持。
+- 验证：`npx vitest run src/ledgerMappingAuxiliary.test.ts src/components/MappingPanel.test.tsx src/TbjeCheckPage.test.tsx`；`npm run build`。覆盖手选、自动、取消、混合候选、任务核对导出及返回第二步。
+
 ## 2026-10-20 · 借款利率格「暂估」小字不再挤动输入框对齐
 
 - 目标：修复确认科目与利率表中，「暂估 3.00%」小字把执行利率输入框顶高，导致同一行内四格输入框上下不齐的问题。
 - 设计决策：小字改为悬浮显示在输入框正下方（不占单元格高度），利率格下方预留小字空间；输入框位置只由行高决定，小字出现或消失都不再改变对齐。
 - 验证：`npx vitest run src/LoanInterestPageUi.test.tsx`；`npm run build`。汇总利率确认表与科目明细表共用同一利率格组件，一并生效。
+
+## 2026-10-20 · 借款结果默认紧凑列宽自动生效
+
+- 目标：修复默认列宽已收紧后，本机旧列宽记忆继续覆盖默认值，导致结果预览大片空白的问题。
+- 设计决策：结果表启用独立的紧凑布局记忆键，升级时自动忽略旧版异常宽度，后续主动拖动仍保存；按用户要求不新增“重置列宽”按钮，默认打开即可正常显示，无需手动重置。测算数据与导出不变。
+- 验证：`npx vitest run src/LoanResultColumns.test.tsx src/LoanInterestStyles.test.ts src/LoanInterestPageUi.test.tsx src/components/useTableColumnResize.test.tsx`；`npm run build`。浏览器带入本机历史 1791 像素金额列宽，在 1912／1280／1000 像素窗口验证默认升级、金额显示、横向滚动及既有拖动能力，截图和测量见 `artifacts/loan-result-columns-20261020/`。
+
+## 2026-10-20 · 批量上传忽略空白工作表并保留有效账表
+
+- 目标：修复 TB＋JE 同时上传时，TB 已识别成功却因同工作簿中的空白 Sheet 报错而整份丢失的问题。
+- 设计决策：公共逐 Sheet 分类只跳过明确的 `SOURCE_EMPTY`，继续扫描其余工作表并保留有效来源；整本为空、读取失败及取消仍报告错误。借款、存款、汇兑、FA 与 TBJE 核对提示统一为“空白或低置信度”，不改变分类、配对及测算规则。
+- 验证：`npx vitest run src/ledgerWorkbookSheets.test.ts src/LoanInterestPageUi.test.tsx`；`npm run build`。覆盖空白页位于默认正表前后、后续有效 JE、整本为空及其他错误不可忽略；借款页面覆盖双文件同时选入后两侧来源卡保留。
 
 ## 2026-10-19 · 补齐父子汇总漏识别反向验收
 

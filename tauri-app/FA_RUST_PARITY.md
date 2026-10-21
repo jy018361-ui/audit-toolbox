@@ -1,5 +1,13 @@
 # FA List Rust 迁移覆盖矩阵
 
+## 2026-10-20：人工辅助与JE正文公共修复
+
+TB＋JE人工辅助列保留、自动验证不放宽，普通缺科目续行继承使用日期、凭证号、金额AND条件并排除明确合计，分析缓存引用公共JE正文版本。原值／折旧分类及类别提示不改。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib fa_tbje::`；`npx vitest run src/FaTbJePage.test.ts src/ledgerMappingAuxiliary.test.ts`。
+
+## 2026-10-20：公共币种代码金额兼容
+
+公共金额解析支持已知币种代码前后缀及原有负数/借贷标记，拒绝未知代码和脏文本，不换算币种；FA TB＋JE结果缓存纳入独立金额规则版本。范围及回归命令见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目。
+
 ## 2026-10-19：公共TB结构规则接入核查
 
 TB消费者统一调用公共结构引擎，结果缓存统一引用公共结构版本；JE正文不套用TB汇总剔除。适用入口、缓存与回归命令见 `LEDGER_MAPPING_UNIFICATION.md` 同日「各工具统一引用TB结构规则版本」。

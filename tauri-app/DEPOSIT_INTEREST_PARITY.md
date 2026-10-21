@@ -1,5 +1,14 @@
 # 存款利息上传识别行为与性能回归
 
+## 2026-10-20：人工辅助与JE续行公共修复
+
+- 人工辅助列保留为TB结构证据，自动辅助仍按JE完整联动验证；无法关联只退回主体＋科目，不强制辅助匹配。普通JE续行补科目使用日期、凭证号、金额AND条件并排除明确合计；结果指纹引用公共JE正文版本，旧快照失效。
+- 利率、月均余额及账面利息原规则保持。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib deposit_interest::`；`npx vitest run src/DepositInterestInteractions.test.tsx src/ledgerMappingAuxiliary.test.ts`。
+
+## 2026-10-20：公共币种代码金额兼容
+
+公共金额解析支持已知币种代码前后缀及原有负数/借贷标记，拒绝未知代码和脏文本，不换算币种；结果缓存纳入独立金额规则版本。范围及回归命令见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目。
+
 ## 2026-10-19：公共TB结构规则接入核查
 
 TB消费者统一调用公共结构引擎，结果缓存统一引用公共结构版本；JE正文不套用TB汇总剔除。适用入口、缓存与回归命令见 `LEDGER_MAPPING_UNIFICATION.md` 同日「各工具统一引用TB结构规则版本」。

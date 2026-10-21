@@ -26,8 +26,8 @@ use crate::ledger_mapping::{header_row_score, normalize_header};
 
 // ────────────────────────────── 表头探测 ──────────────────────────────
 
-/// 扫描前多少行找表头。真实导出里标题区一般不超过十来行，20 留足余量。
-const HEADER_SCAN_ROWS: usize = 20;
+/// 扫描前多少行找表头。真实导出里标题区一般不超过十来行，30 与公共账表入口一致。
+const HEADER_SCAN_ROWS: usize = 30;
 /// 探测置信度低于该值（或与次高分行难分伯仲）时要求人工确认表头行。
 const HEADER_REVIEW_SCORE: f64 = 0.55;
 const HEADER_REVIEW_MARGIN: f64 = 0.05;
@@ -45,112 +45,39 @@ pub(crate) struct HeaderDetection {
     pub needs_review: bool,
 }
 
-/// 单元格字符串是否读得出金额（表头行几乎读不出金额）。
-fn parses_as_amount(raw: &str) -> bool {
-    crate::ledger_mapping::parse_amount(raw).is_ok()
-}
-
-/// 探测一个 Sheet 的表头行与层数（无合并单元格信息，如 CSV）。
+/// 合并与 TBJE 共用账表候选行和层数判据；合并区域不再另开宽松路径。
 pub(crate) fn detect_header(rows: &[Vec<String>]) -> Option<HeaderDetection> {
     detect_header_with_merges(rows, &[])
 }
 
-/// 探测一个 Sheet 的表头行与层数，`merges` 是 (首行, 首列, 末行, 末列)
-/// 的合并单元格清单。
-///
-/// 两层表头的定义性特征是**第一层存在横向合并单元格**（「金额」跨列），
-/// 而第一行下面是第二层表头、不像数据，逐行打分天然偏向第二层——因此
-/// 打分选出行后，若上一行有窄幅横向合并（且该行有多个非空格），把表头
-/// 行上移一行并判定两层。整行宽的大标题合并不算。
-///
-/// `rows` 只需前若干行（调用方传前 24 行即可）。全空返回 None，由调用方
-/// 按「无表头」处理。
 pub(crate) fn detect_header_with_merges(
     rows: &[Vec<String>],
-    merges: &[(u32, u32, u32, u32)],
+    _merges: &[(u32, u32, u32, u32)],
 ) -> Option<HeaderDetection> {
-    let scan = rows.len().min(HEADER_SCAN_ROWS);
-    if scan == 0 {
+    if !rows.iter().any(|row| row.iter().any(|value| !value.trim().is_empty())) {
         return None;
     }
-    let mut best = (0usize, 0.0_f64);
-    let mut second = f64::MIN;
-    let has_fields = rows
-        .iter()
-        .take(scan)
-        .any(|row| !crate::header_detection::is_title(row));
-    for i in 0..scan {
-        if has_fields && crate::header_detection::is_title(&rows[i]) {
-            continue;
-        }
-        let score = header_row_score(rows, i);
-        if score > best.1 {
-            second = best.1;
-            best = (i, score);
-        } else if score > second {
-            second = score;
-        }
-    }
-    if best.1 <= 0.0 {
-        return None;
-    }
-    let sheet_width = rows.iter().map(Vec::len).max().unwrap_or(0);
-    let merge_parent_layer = best.0 > 0
-        && rows
-            .get(best.0 - 1)
-            .is_some_and(|row| !crate::header_detection::is_title(row))
-        && merges.iter().any(|&(r1, c1, r2, c2)| {
-            let width = (c2 - c1 + 1) as usize;
-            r1 == r2 && r1 as usize + 1 == best.0 && c2 > c1 && width < sheet_width
-        });
-    let (header_row, two_layer) = if merge_parent_layer {
-        (best.0 - 1, true)
-    } else {
-        let two_layer = best.0 + 1 < rows.len()
-            && looks_like_second_header_layer(
-                &rows[best.0 + 1],
-                rows.get(best.0 + 2).map(|v| v.as_slice()),
-            );
-        (best.0, two_layer)
-    };
+    let (row, depth) = crate::fx::infer_public_header_layout(rows);
+    let header_row = row.saturating_sub(1);
+    let score = header_row_score(rows, header_row);
+    let second = (0..rows.len().min(HEADER_SCAN_ROWS))
+        .filter(|&i| i != header_row && i >= header_row + depth)
+        .map(|i| header_row_score(rows, i))
+        .fold(0.0_f64, f64::max);
     Some(HeaderDetection {
         header_row,
-        header_rows_count: if two_layer { 2 } else { 1 },
-        confidence: (best.1 * 100.0).round() / 100.0,
-        needs_review: best.1 < HEADER_REVIEW_SCORE
-            || (second > 0.0 && best.1 - second < HEADER_REVIEW_MARGIN),
+        header_rows_count: depth,
+        confidence: (score * 100.0).round() / 100.0,
+        needs_review: score < HEADER_REVIEW_SCORE || score - second < HEADER_REVIEW_MARGIN,
     })
 }
 
-/// 表头行的下一行是否是两层表头的第二层：非空格基本全是文字、至少带一个
-/// 账表关键词、再下一行像数据。合并单元格在读取层只剩左上角有值，因此
-/// 判定必须容忍空格而不是要求占满。
-fn looks_like_second_header_layer(row: &[String], next: Option<&[String]>) -> bool {
-    let non_empty: Vec<&String> = row.iter().filter(|v| !v.trim().is_empty()).collect();
-    if non_empty.len() < 2 {
-        return false;
-    }
-    let text_ratio =
-        non_empty.iter().filter(|v| !parses_as_amount(v)).count() as f64 / non_empty.len() as f64;
-    if text_ratio < 0.8 {
-        return false;
-    }
-    let keyword_hits = crate::ledger_mapping::header_semantic_hits(row);
-    if keyword_hits == 0 && !row.iter().any(|v| normalize_header(v).len() >= 2) {
-        return false;
-    }
-    match next {
-        Some(next) => {
-            let cells = next.len().max(1) as f64;
-            let numeric = next
-                .iter()
-                .filter(|v| parses_as_amount(v) || crate::ledger_mapping::parse_date(v).is_some())
-                .count() as f64;
-            numeric / cells >= 0.3
-        }
-        // 第二层已是最后一行、再无数据可佐证：保守按单层处理。
-        None => false,
-    }
+/// 空表头保留原列位置；不把左侧字段名扩散到空标题列。
+pub(crate) fn single_layer_headers(row: &[String]) -> Vec<String> {
+    row.iter().enumerate().map(|(index, value)| {
+        let name = crate::fx::merge_consistent_header(value);
+        if name.is_empty() { format!("列{}", index + 1) } else { name }
+    }).collect()
 }
 
 /// 两层表头拍平成单层列名：父级向右填充（合并单元格只有首格有值），
@@ -162,9 +89,10 @@ pub(crate) fn flatten_two_layer(first: &[String], second: &[String]) -> Vec<Stri
     for index in 0..width {
         let top = first.get(index).map(String::as_str).unwrap_or("").trim();
         if !top.is_empty() {
-            parent = top.to_string();
+            parent = crate::fx::merge_consistent_header(top);
         }
-        let child = second.get(index).map(String::as_str).unwrap_or("").trim();
+        let child = crate::fx::merge_consistent_header(second.get(index).map(String::as_str).unwrap_or(""));
+        let child = child.as_str();
         let name = if parent.is_empty() {
             child.to_string()
         } else if child.is_empty() || child == parent {

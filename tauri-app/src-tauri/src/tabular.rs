@@ -1824,7 +1824,7 @@ fn preprocess_ledger(
     // 普通平铺 JE 的顺序不能反：先按公共引擎剔噪声行（表尾小计/手工草稿、
     // 有钱没身份的游离行），再做非金额列的向下填充。分段明细账已在上一步用
     // 精确结构标签和“凭证号＋金额”先拆出正文，避免期初余额锚点被当垃圾行删掉。
-    let keep = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
+    let keep = ledger_mapping::ledger_fill_mask(&table.headers, &table.rows, &|role| {
         ledger_role_columns(mapping, role)
     });
     let mut kept_rows = Vec::with_capacity(table.rows.len());
@@ -5924,24 +5924,8 @@ fn validate_mapping_required(m: &LedgerMapping) -> Result<(), AppError> {
 }
 
 fn normalize_headers(row: &[String], width: usize) -> Vec<String> {
-    let mut used = HashMap::<String, usize>::new();
-    (0..width)
-        .map(|i| {
-            let base = row
-                .get(i)
-                .map(|v| v.trim())
-                .filter(|v| !v.is_empty())
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("Column_{}", i + 1));
-            let count = used.entry(base.clone()).or_default();
-            *count += 1;
-            if *count == 1 {
-                base
-            } else {
-                format!("{base}_{}", *count)
-            }
-        })
-        .collect()
+    // 确认后的 Polars 路径必须与自动识别、磁盘路径使用同一空标题和换行规则。
+    crate::fx::merge_headers(&[row.to_vec()], width)
 }
 fn normalize_rows(rows: &[Vec<String>], width: usize) -> Vec<Vec<String>> {
     rows.iter()
@@ -6075,6 +6059,7 @@ fn fingerprint(
     h.update(header_depth.to_le_bytes());
     // Shared strict text decoding must not reuse rows decoded lossily by older versions.
     h.update(b"rust-polars-v5-shared-spreadsheet-physical-range");
+    h.update(crate::header_detection::RULE_VERSION.as_bytes());
     Ok(hex::encode(h.finalize()))
 }
 /// 缓存根目录：`%LOCALAPPDATA%/AuditToolbox/AuditToolbox/cache`。
@@ -7349,7 +7334,7 @@ mod tests {
     fn headers_are_stable_and_unique() {
         assert_eq!(
             normalize_headers(&["".into(), "Name".into(), "Name".into()], 3),
-            vec!["Column_1", "Name", "Name_2"]
+            vec!["列1", "Name", "Name_2"]
         );
     }
     #[test]

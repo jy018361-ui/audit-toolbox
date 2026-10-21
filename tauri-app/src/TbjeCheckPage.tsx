@@ -1098,7 +1098,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       failures.length
         ? `已识别其余可用来源；${failures.length} 个来源失败，请展开上方错误查看。`
         : hiddenSheets
-          ? `已识别可用账表；${hiddenSheets} 张低置信度工作表未显示。`
+          ? `已识别可用账表；${hiddenSheets} 张空白或低置信度工作表未显示。`
           : "",
     );
     setBusy(false);

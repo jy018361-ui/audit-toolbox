@@ -1615,7 +1615,7 @@ fn snapshot_file_identity(path: &Path) -> Option<String> {
 /// 或续写（大小/修改时间变化），键即变化，旧快照自然作废。
 fn calc_fingerprint(params: &Value) -> Option<String> {
     let subset = snapshot_param_subset(params);
-    let mut material = format!("deposit-{}\n", ledger_mapping::TB_STRUCTURE_RULE_VERSION);
+    let mut material = format!("deposit-{}-{}-{}\n", ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, ledger_mapping::JE_BODY_RULE_VERSION);
     material.push_str(&serde_json::to_string(&subset).ok()?);
     for field in ["tbSource", "jeSource"] {
         if let Some(path) = subset

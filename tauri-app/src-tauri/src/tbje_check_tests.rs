@@ -1928,7 +1928,7 @@ fn 导出的发生额余额勾稽按主体映射增减主体列() {
     assert_eq!(sheet.get_cell((9, 7)).unwrap().get_formula(), "F7+G7-H7");
     assert_eq!(sheet.get_cell((11, 7)).unwrap().get_formula(), "I7-J7");
     let verdict = sheet.get_cell((12, 7)).unwrap().get_formula();
-    assert!(verdict.contains("ABS(K7)"), "{verdict}");
+    assert_eq!(verdict, "IF(ABS(K7)<=MAX($B$3,MAX(ABS(F7),ABS(I7),ABS(J7))*1E-8),\"通过\",\"差异\")");
 
     // 未映射主体时整表回到旧布局，第一列仍是币种，公式列不变。
     let plain = json!({
@@ -3271,5 +3271,62 @@ fn 单组导出也复用核对结果快照() {
         std::sync::Arc::new(AtomicBool::new(false)), &pause).unwrap();
     assert_eq!(PREPARE_CALLS.with(|c| c.get()), prepare_count + 1);
     assert!(cached_workbook(&value).is_some());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn tbje币种金额文本与纯数值在内存磁盘三项核对等价() {
+    let plain = fixture(&format!("currency-plain-{}", uuid::Uuid::new_v4()));
+    let decorated = fixture(&format!("currency-text-{}", uuid::Uuid::new_v4()));
+    平的账(&plain);
+    for file in ["tb.csv", "je.csv"] {
+        let mut reader = csv::Reader::from_path(plain.join(file)).unwrap();
+        let headers = reader.headers().unwrap().clone();
+        let mut writer = csv::Writer::from_path(decorated.join(file)).unwrap();
+        writer.write_record(&headers).unwrap();
+        for record in reader.records() {
+            let record = record.unwrap();
+            let row = record.iter().enumerate().map(|(i, value)| {
+                let header = headers.get(i).unwrap();
+                if header.contains("余额") || header == "借方" || header == "贷方" || header.starts_with("本年") {
+                    let number = value.parse::<f64>().unwrap();
+                    if number < 0.0 { format!("CNY({:.2})", -number) } else { format!("{number:.2} CNY") }
+                } else { value.to_owned() }
+            }).collect::<Vec<_>>();
+            writer.write_record(&row).unwrap();
+        }
+        writer.flush().unwrap();
+    }
+    let expected = run_all_accounts(&params(&plain, true), &AtomicBool::new(false)).unwrap();
+    for disk in [false, true] {
+        let mut request = params(&decorated, true);
+        request["__testForceDiskTb"] = json!(disk);
+        request["__testForceDiskLedger"] = json!(disk);
+        let actual = run_all_accounts(&request, &AtomicBool::new(false)).unwrap();
+        for key in ["rollforward", "tbVsJe", "equation", "currencyScope", "entityScope"] {
+            assert_eq!(actual[key], expected[key], "disk={disk},section={key}");
+        }
+        assert_eq!(actual["tbVsJe"]["passed"], true);
+    }
+    let _ = std::fs::remove_dir_all(plain);
+    let _ = std::fs::remove_dir_all(decorated);
+}
+
+#[test]
+fn tbje币种金额文本中夹杂业务文字仍在两条路径拒绝() {
+    let dir = fixture(&format!("currency-invalid-{}", uuid::Uuid::new_v4()));
+    平的账(&dir);
+    let path = dir.join("tb.csv");
+    let content = std::fs::read_to_string(&path).unwrap()
+        .replace("1001,库存现金,100,", "1001,库存现金,CNY待确认100,");
+    std::fs::write(path, content).unwrap();
+    for disk in [false, true] {
+        let mut request = params(&dir, true);
+        request["__testForceDiskTb"] = json!(disk);
+        request["__testForceDiskLedger"] = json!(disk);
+        let failure = run(&request, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(failure.code, "AMOUNT_VALUE_INVALID");
+        assert!(failure.user_message.contains("CNY待确认100"));
+    }
     let _ = std::fs::remove_dir_all(dir);
 }

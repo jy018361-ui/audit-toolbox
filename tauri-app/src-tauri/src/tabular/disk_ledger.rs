@@ -226,6 +226,8 @@ fn prepared_key(
             .as_bytes(),
     );
     hash.update(PREPARED_CACHE_VERSION.to_le_bytes());
+    hash.update(crate::ledger_mapping::AMOUNT_PARSE_RULE_VERSION.as_bytes());
+    hash.update(crate::ledger_mapping::JE_BODY_RULE_VERSION.as_bytes());
     Ok(hex::encode(hash.finalize()))
 }
 
@@ -545,7 +547,7 @@ fn build_prepared(
             if !normalizer.normalize(&mut row) {
                 return Ok(());
             }
-        } else if !body.is_body(&row) {
+        } else if !body.is_body(&row) && !body.can_fill_account(&row) {
             return Ok(());
         }
         // Validate before fill/filter, exactly as the ordinary export path does.
@@ -1666,6 +1668,39 @@ mod tests {
             },
             root,
         )
+    }
+
+    #[test]
+    fn currency_amount_disk_cache_preserves_numeric_values() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("currency.csv");
+        fs::write(&input,
+            "凭证号,科目,借方,贷方\n001,现金,CNY100,CNY0\n,收入,0CNY,100CNY\n002,银行,CNY40-,0\n,费用,0,CNY-40\n").unwrap();
+        let source = SourceParams {
+            input_path: input.to_string_lossy().into_owned(), sheet: None, header_row: 1, header_depth: 1,
+        };
+        let cancel = AtomicBool::new(false);
+        let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel).unwrap();
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()], account_name: vec!["科目".into()],
+            debit: Some("借方".into()), credit: Some("贷方".into()), ..Default::default()
+        };
+        let key = prepared_key(&cache, &mapping, Some(SignConvention::Unsigned), 1).unwrap();
+        let prepared_path = cache_path("kanzhang-ledger", &key).unwrap().with_extension("sqlite");
+        for cached in [false, true] {
+            let messages = RefCell::new(Vec::new());
+            let ledger = prepare(&cache, &mapping, Some(SignConvention::Unsigned), 1,
+                &|_, _, _, message| messages.borrow_mut().push(message.to_owned()), &cancel).unwrap();
+            let mut amounts = Vec::new();
+            ledger.visit_processed(false, &cancel, |row| {
+                amounts.push((row.debit, row.credit, row.net));
+                Ok(())
+            }).unwrap();
+            assert_eq!(amounts, [(100.0, 0.0, 100.0), (0.0, 100.0, -100.0),
+                (-40.0, 0.0, -40.0), (0.0, -40.0, 40.0)]);
+            assert_eq!(messages.borrow().iter().any(|s| s.contains("已复用凭证分析缓存")), cached);
+        }
+        fs::remove_file(prepared_path).unwrap();
     }
 
     #[test]

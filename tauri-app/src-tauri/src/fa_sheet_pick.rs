@@ -422,6 +422,7 @@ fn fa_auto_sheet_memo_path(path: &Path, header: Option<usize>) -> Option<PathBuf
     hasher.update(modified.to_le_bytes());
     hasher.update(header.unwrap_or(0).to_le_bytes());
     hasher.update(b"fa-auto-sheet-v2-physical-origin");
+    hasher.update(crate::header_detection::RULE_VERSION.as_bytes());
     let key = hex::encode(hasher.finalize());
     Some(
         crate::tabular::cache_root()
@@ -535,6 +536,7 @@ fn prefix_cache_path(path: &Path, sheet: Option<&str>, header: Option<usize>) ->
     hasher.update(sheet.unwrap_or("<auto>").as_bytes());
     hasher.update(header.unwrap_or(0).to_le_bytes());
     hasher.update(b"fa-prefix-table-v2-physical-origin");
+    hasher.update(crate::header_detection::RULE_VERSION.as_bytes());
     let key = hex::encode(hasher.finalize());
     Some(
         crate::tabular::cache_root()

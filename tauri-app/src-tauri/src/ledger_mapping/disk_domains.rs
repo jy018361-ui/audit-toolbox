@@ -413,6 +413,7 @@ impl<'a> DiskDomains<'a> {
         tb: &mut serde_json::Map<String, serde_json::Value>,
         je: &mut serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), AppError> {
+        if super::has_manual_auxiliary_mapping(tb, role) { return Ok(()); }
         let (Some(tc), Some(jc)) = (self.column(0, tb, role), self.column(1, je, role)) else {
             return Ok(());
         };

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { recordManualLedgerMapping } from "./manualLedgerMapping";
 import {
   dropUnlinkedTbAuxiliary,
   ledgerReviewAccountLabel,
@@ -51,5 +52,22 @@ describe("TB 辅助核算映射须通过 JE 联动验证", () => {
     expect(
       dropUnlinkedTbAuxiliary(mapping, verdict("noMatch"), "loanId"),
     ).toEqual({ accountCode: "科目编码" });
+  });
+
+  it.each(["noMatch", "noAnchors", "partialCoverage", "ambiguous"] as const)(
+    "人工确认字段在%s时保留，往返序列化后也不丢失",
+    (status) => {
+      const mapping = recordManualLedgerMapping({}, { auxiliary: ["核算维度编码"] }, "核算维度编码", "auxiliary");
+      const restored = JSON.parse(JSON.stringify(mapping));
+      expect(dropUnlinkedTbAuxiliary(restored, verdict(status))).toEqual(mapping);
+      expect(verdict(status).status).toBe(status);
+    },
+  );
+
+  it("自动候选不能借同角色中另一列的人工确认而保留，取消后确认也失效", () => {
+    const manual = recordManualLedgerMapping({}, { auxiliary: ["人工列", "自动列"] }, "人工列", "auxiliary");
+    expect(dropUnlinkedTbAuxiliary(manual, verdict("noMatch"))).toMatchObject({ auxiliary: ["人工列"] });
+    const removed = recordManualLedgerMapping(manual, { auxiliary: ["自动列"] }, "人工列", "");
+    expect(dropUnlinkedTbAuxiliary(removed, verdict("noMatch"))).toEqual({});
   });
 });

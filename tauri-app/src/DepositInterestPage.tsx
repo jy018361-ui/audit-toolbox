@@ -1445,7 +1445,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       }
       setSourceStatus(
         scan.hiddenSheets
-          ? `${scan.hiddenSheets} 张低置信度 Sheet 已忽略，请核对已选工作表。`
+          ? `${scan.hiddenSheets} 张空白或低置信度 Sheet 已忽略，请核对已选工作表。`
           : "",
       );
       if (failures.length) setError(failures.join("；"));

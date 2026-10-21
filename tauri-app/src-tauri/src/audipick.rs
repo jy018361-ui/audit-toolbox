@@ -709,14 +709,17 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
 /// 两张表共用的复核纪律。**只放对 TB 与 JE 都成立的规则**——
 /// 各自的角色清单与形态规则分别放在 [`REVIEW_JE`] 与 [`REVIEW_TB`] 里，
 /// 免得复核一张表时眼前摆着另一张表的规矩。
-const REVIEW_COMMON: &str = "只能使用输入 availableRoles 中列出的角色——它是本工具当前形态启用的角色清单，包含当前形态的必填、选填角色以及不属于任何互斥形态的公共角色；没列出的角色属于其他形态，即使表里有对应的列也不要提。输入的 currentForm 是脚本按整组匹配判出的账表形态。complete=true 只表示构成该形态的槽位已有非空映射，不证明映射正确；必须先结合 headers 与 sampleRows 逐项验证。当前列与角色语义及取值形态相容时维持现状；明显不相容且有可信替代列时必须 replace；明显不相容但没有可信替代列时必须 clear；证据不足时 uncertain。净额列里是正数还是自带正负号不影响形态判定，借贷符号口径由数据配平判定，不由列名判定。**只有当前映射和候选映射都通过语义及样例验证、仅属偏好差异时，才维持现状，不要为了让它更好看而改**。complete 不代表整张表的映射已经完备——availableRoles 里本工具需要、currentMapping 还缺着的角色（比如原币币种、会计期间），仍必须照样补齐。complete 为 false 时，优先补齐 currentForm.missingSlots 里点名缺失的槽位。除此之外，必须主动补齐 currentMapping 中缺失、但可由 headers 与 sampleRows 判断出来的角色，不得仅复核已有映射。只能使用输入 headers 中真实存在的列，不得虚构列名。双语表头（如「科目描述 Description」「过账日期 Posting Date」）按其中的中文段判断角色。一列只承载一个语义，不能把同一列同时映射到两个角色——唯一的例外是下述「编码与名称写在同一格」的科目列。判断依据必须落在 sampleRows 的实际取值上：每提出一个 replace，先从 sampleRows 里随意取三五行看该列的真实内容，若这几行取值与该角色应有的形态不符（科目编码列应是稳定的数字或字母数字编码，科目名称列应是可读文本，币种列应是三位 ISO 代码，金额列应是数值），就不要提出该 replace。accountCode 与 accountName 是两个彼此独立的角色，不能互换：编码给 accountCode，名称/文本给 accountName。**编码与名称写在同一格**是例外情形（`1001010000:库存现金-人民币`、`1001/库存现金`、`1001_现金`，也有编码后面接反斜杠再接多级名称的写法——分隔符是斜杠、冒号、下划线、反斜杠、竖线之一，前半段是一串数字或字母数字编码）：这一列应**同时映射为 accountCode 与 accountName 两个角色**（脚本自动映射正是这么做的），既不要因为这列里有名称就改判成纯 accountName，也不要把其中任何一个角色挪走或删掉。务必与**层级名称拼接**区分开——`交易性金融资产_结构性存款`、`管理费用_研发费用_水电气费`，以及用反斜杠拼起来的「银行存款、在财务公司存款、活期」这种，前半段是上级科目名不是编码，这些整列属于 accountName。科目余额表与序时账是同一套账，同名角色必须同口径——两边的 accountCode 必须是同一种科目编码，accountName 同理。`抵销科目`、`统驭科目`、`对方科目`、`往来科目`、`预算科目` 记的是对手方或参考科目，取值同样是一串科目编码，跟本方科目长得一模一样，但它们绝不是 accountCode，也不是 accountName。entity 是记账主体（公司代码、核算主体、账套公司），绝不是交易对手方、往来单位（往來單位、Counterparty）、客户（客戶）、供应商（供應商）这类对手方字段，也不是制单人、录入人、审核人、过账人这类操作员；没有明确的主体列时让 entity 空缺，不得拿对手方字段凑数。集团货币／报告货币（Group Currency、集团货币金额）是第三套口径，既不是本位币也不是原币，对应的金额列与币种列一律不映射到任何角色。changes 数组只放真实调整：replace 条目的 suggestedColumn 必须是 headers 中真实存在且不同于当前映射的列；clear 条目必须写 action=clear 并省略 suggestedColumn，只用于删除已经确定错误且无可信替代列的现有映射。确认正确、确认某个本来就空缺的角色应继续空缺、或没有实际变更时不要输出 changes。置信度低于 0.6 的建议不要输出。reason 必须与 action 和 suggestedColumn 指向同一结论。同一列在 changes 里最多出现一次。『整列同值』的意思是全列每一行取值完全相同；只要出现两种以上取值，该列就在逐行区分交易或账户，绝不是本位币列。优先建议原始数据列：由其他列推算出的公式辅助列（如按方向列把金额改写成的「借正贷负」列、用日期与凭证号拼出的唯一码列）不要抢原始列的角色。不要计算金额、汇率或业务分类，只管映射。";
+const REVIEW_COMMON: &str = "第一阶段只能使用输入 availableRoles 中列出的角色——它是本工具当前形态启用的角色清单，包含当前形态的必填、选填角色以及不属于任何互斥形态的公共角色；其他形态字段只能在满足后述 formFallback 条件后，放入独立的类型纠正计划。输入的 currentForm 是脚本按整组匹配判出的账表形态。complete=true 只表示构成该形态的槽位已有非空映射，不证明映射正确；必须先结合 headers 与 sampleRows 逐项验证。当前列与角色语义及取值形态相容时维持现状；明显不相容且有可信替代列时必须 replace；明显不相容但没有可信替代列时必须 clear；证据不足时 uncertain。净额列里是正数还是自带正负号不影响形态判定，借贷符号口径由数据配平判定，不由列名判定。**只有当前映射和候选映射都通过语义及样例验证、仅属偏好差异时，才维持现状，不要为了让它更好看而改**。complete 不代表整张表的映射已经完备——availableRoles 里本工具需要、currentMapping 还缺着的角色（比如原币币种、会计期间），仍必须照样补齐。complete 为 false 时，优先补齐 currentForm.missingSlots 里点名缺失的槽位。除此之外，必须主动补齐 currentMapping 中缺失、但可由 headers 与 sampleRows 判断出来的角色，不得仅复核已有映射。只能使用输入 headers 中真实存在的列，不得虚构列名。双语表头（如「科目描述 Description」「过账日期 Posting Date」）按其中的中文段判断角色。一列只承载一个语义，不能把同一列同时映射到两个角色——唯一的例外是下述「编码与名称写在同一格」的科目列。判断依据必须落在 sampleRows 的实际取值上：每提出一个 replace，先从 sampleRows 里随意取三五行看该列的真实内容，若这几行取值与该角色应有的形态不符（科目编码列应是稳定的数字或字母数字编码，科目名称列应是可读文本，币种列应是三位 ISO 代码，金额列应是数值），就不要提出该 replace。accountCode 与 accountName 是两个彼此独立的角色，不能互换：编码给 accountCode，名称/文本给 accountName。**编码与名称写在同一格**是例外情形（`1001010000:库存现金-人民币`、`1001/库存现金`、`1001_现金`，也有编码后面接反斜杠再接多级名称的写法——分隔符是斜杠、冒号、下划线、反斜杠、竖线之一，前半段是一串数字或字母数字编码）：这一列应**同时映射为 accountCode 与 accountName 两个角色**（脚本自动映射正是这么做的），既不要因为这列里有名称就改判成纯 accountName，也不要把其中任何一个角色挪走或删掉。务必与**层级名称拼接**区分开——`交易性金融资产_结构性存款`、`管理费用_研发费用_水电气费`，以及用反斜杠拼起来的「银行存款、在财务公司存款、活期」这种，前半段是上级科目名不是编码，这些整列属于 accountName。科目余额表与序时账是同一套账，同名角色必须同口径——两边的 accountCode 必须是同一种科目编码，accountName 同理。`抵销科目`、`统驭科目`、`对方科目`、`往来科目`、`预算科目` 记的是对手方或参考科目，取值同样是一串科目编码，跟本方科目长得一模一样，但它们绝不是 accountCode，也不是 accountName。entity 是记账主体（公司代码、核算主体、账套公司），绝不是交易对手方、往来单位（往來單位、Counterparty）、客户（客戶）、供应商（供應商）这类对手方字段，也不是制单人、录入人、审核人、过账人这类操作员；没有明确的主体列时让 entity 空缺，不得拿对手方字段凑数。集团货币／报告货币（Group Currency、集团货币金额）是第三套口径，既不是本位币也不是原币，对应的金额列与币种列一律不映射到任何角色。changes 数组只放真实调整：replace 条目的 suggestedColumn 必须是 headers 中真实存在且不同于当前映射的列；clear 条目必须写 action=clear 并省略 suggestedColumn，只用于删除已经确定错误且无可信替代列的现有映射。确认正确、确认某个本来就空缺的角色应继续空缺、或没有实际变更时不要输出 changes。置信度低于 0.6 的建议不要输出。reason 必须与 action 和 suggestedColumn 指向同一结论。同一列在 changes 里最多出现一次。『整列同值』的意思是全列每一行取值完全相同；只要出现两种以上取值，该列就在逐行区分交易或账户，绝不是本位币列。优先建议原始数据列：由其他列推算出的公式辅助列（如按方向列把金额改写成的「借正贷负」列、用日期与凭证号拼出的唯一码列）不要抢原始列的角色。不要计算金额、汇率或业务分类，只管映射。";
 
 fn review_common_instruction() -> String {
-    REVIEW_COMMON.replace(
+    let common = REVIEW_COMMON.replace(
         "同一列在 changes 里最多出现一次。",
         "同一列在 changes 里通常最多出现一次；唯一例外是经 sampleRows 确认的科目编码＋科目名称混写列，可分别为 accountCode 与 accountName 各出现一次，除此之外绝不放宽。",
-    )
+    );
+    format!("{common}{REVIEW_FORM_FALLBACK}")
 }
+
+const REVIEW_FORM_FALLBACK: &str = "类型纠正必须按两个阶段顺序判断。第一阶段仅在 availableRoles 范围内，优先寻找 currentForm.missingSlots 的候选并放入正常 changes；能补齐当前类型时严禁换型。第二阶段仅在输入存在 formFallback、且第一阶段仍有必填字段找不到可信候选时启用：逐项核对全部表头和样例后，在 formCorrection 中报告 {targetForm:string,missingRoleSearches:[{role:string,status:\"found\"|\"no_candidate\",reason:string}],changes:[与正常changes相同结构]}。missingRoleSearches 必须覆盖 formFallback.missingRoles 的每个角色，已找到候选的标为 found 并放入正常 changes；仍缺失的标为 no_candidate，并说明当前类型为什么没有相容列；不确定、样例全空、仅偏好其他类型均不能作为找不到的证据。只能选择 formFallback.alternatives 中的类型，并使用该类型的 availableRoles；必须提供能完整成立的整组映射，置信度均须高于0.75，禁止只补半套、将借贷单侧充当净额或把本期当本年累计。不属于目标类型的旧金额映射必须显式清除，只有已经确定错误的旧映射才能清除。无充分证据时省略 formCorrection，保留当前类型和缺项。联合复核分别返回 tbFormCorrection、jeFormCorrection；单表（含看账）返回 formCorrection。正常 changes 仍严格局限第一阶段的 availableRoles，禁止把第二阶段字段混入正常 changes。";
 
 /// 科目标题在不同 ERP 导出中含义会互换。这类纠偏必须由 LLM 读取样例值提出，
 /// Coding 只负责在响应返回后拦截与数据形态明显冲突的建议，不能代替模型补答案。
@@ -1148,6 +1151,10 @@ fn inject_current_form(payload: &mut Value, kind: &str) {
 /// 当前形态的必填、任一、选填槽全部保留；没有归属到任何互斥形态的公共角色
 /// （例如主体、科目、会计期间）也保留。只有明确属于其他形态的角色才排除。
 fn restrict_review_roles_to_current_form(payload: &mut Value, kind: &str) {
+    // 输入中的历史/外部元数据不能自行开启换型。
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("formFallback");
+    }
     let Some(form_id) = payload
         .get("currentForm")
         .and_then(|form| form.get("id"))
@@ -1178,6 +1185,7 @@ fn restrict_review_roles_to_current_form(payload: &mut Value, kind: &str) {
     else {
         return;
     };
+    let original_available = available.clone();
     available.retain(|value| {
         let Some(raw_role) = value.as_str() else {
             return false;
@@ -1185,6 +1193,54 @@ fn restrict_review_roles_to_current_form(payload: &mut Value, kind: &str) {
         let role = crate::ledger_mapping::migrate_role_name(kind, raw_role);
         !all_form_roles.contains(role) || current_roles.contains(role)
     });
+    // 不完整类型仍先按原边界复核；其他类型只放在独立的条件出口中。
+    if payload["currentForm"]["complete"] == false {
+        let mapping = payload.get("currentMapping").and_then(Value::as_object);
+        let missing = current_form
+            .required
+            .iter()
+            .flat_map(|slot| slot.iter())
+            .copied()
+            .filter(|role| {
+                !mapping
+                    .and_then(|m| m.get(*role))
+                    .is_some_and(value_is_filled)
+            })
+            .collect::<Vec<_>>();
+        let allowed = original_available
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|role| crate::ledger_mapping::migrate_role_name(kind, role))
+            .collect::<std::collections::HashSet<_>>();
+        let alternatives = forms
+            .iter()
+            .filter(|form| form.id != current_form.id)
+            .filter(|form| {
+                form.required
+                    .iter()
+                    .flat_map(|slot| slot.iter())
+                    .all(|role| allowed.contains(*role))
+            })
+            .map(|form| {
+                let form_roles = roles_of(form);
+                let available = original_available
+                    .iter()
+                    .filter(|value| {
+                        let role = crate::ledger_mapping::migrate_role_name(
+                            kind,
+                            value.as_str().unwrap_or(""),
+                        );
+                        !all_form_roles.contains(role) || form_roles.contains(role)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                json!({"id":form.id,"label":form.label,"availableRoles":available})
+            })
+            .collect::<Vec<_>>();
+        if !missing.is_empty() && !alternatives.is_empty() {
+            payload["formFallback"] = json!({"missingRoles":missing,"alternatives":alternatives});
+        }
+    }
 }
 
 /// 所有 TB/JE 工具共用的唯一映射复核入口。
@@ -1284,7 +1340,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
          \"tbRoleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"replace\"|\"clear\"|\"uncertain\",\"reason\":string}}],\
          \"jeRoleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"replace\"|\"clear\"|\"uncertain\",\"reason\":string}}],\
          \"pairFindings\":[{{\"type\":string,\"confidence\":number,\"reason\":string}}],\"summary\":string}}。\
-         TB 建议只能使用 tb.availableRoles 与 tb.headers，JE 建议只能使用 je.availableRoles 与 je.headers。\
+         第一阶段的 TB 建议只能使用 tb.availableRoles 与 tb.headers，JE 建议只能使用 je.availableRoles 与 je.headers。仅满足下述 formFallback 条件时，可额外返回 tbFormCorrection／jeFormCorrection。\
          两侧 engineFacts 是 Coding 根据样例验证的处理事实；protected=true 的事实不得修改。\
          同一源列可合法承担 engineFacts.mappedRoles 中列出的多个角色，Coding 会在后续完成拆分、组合或标准化。\
          requiredMissingRoles 是当前仍缺失的公共必填角色清单；requiredMissingAny 中每组至少补一个相容角色。只要 headers 与 sampleRows 中存在相容列，就必须输出 change，不得只复核已有映射。摘要是选填，不因缺失而阻拦。\
@@ -1351,7 +1407,8 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
             .find_map(|alias| parsed.get(alias))
             .cloned()
             .unwrap_or_else(|| json!([]));
-        let mut wrapper = json!({"changes": changes});
+        let correction_key = if kind == "tb" { "tbFormCorrection" } else { "jeFormCorrection" };
+        let mut wrapper = json!({"changes": changes,"formCorrection":parsed.get(correction_key)});
         sanitize_mapping_changes(&mut wrapper, side, kind, date_policy);
         output[key] = wrapper["changes"].clone();
     }
@@ -1530,6 +1587,266 @@ fn sanitize_mapping_changes(
     // 的候选。多候选或证据不足仍保持空缺，交给用户确认，绝不猜列。
     if kind == "je" && date_policy == ReviewDatePolicy::TbjeComposite {
         supplement_tbje_required_je_changes(value, payload);
+    }
+    sanitize_form_correction(value, payload, kind, date_policy);
+}
+
+/// 只预演已过滤的建议，不自动替模型猜列。多列角色沿用追加语义。
+fn review_projected_mapping(
+    payload: &Value,
+    kind: &str,
+    changes: &[Value],
+) -> serde_json::Map<String, Value> {
+    let mut mapping = payload
+        .get("currentMapping")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for change in changes {
+        let Some(role) = change.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+        if change.get("action").and_then(Value::as_str) == Some("clear") {
+            mapping.remove(role);
+        } else if let Some(column) = change.get("suggestedColumn").and_then(Value::as_str) {
+            if crate::ledger_mapping::role_of(kind, role).is_some_and(|role| role.multi) {
+                let mut columns = match mapping.get(role) {
+                    Some(Value::Array(all)) => all.clone(),
+                    Some(Value::String(one)) if !one.is_empty() => vec![json!(one)],
+                    _ => Vec::new(),
+                };
+                if !columns.iter().any(|value| value.as_str() == Some(column)) {
+                    columns.push(json!(column));
+                }
+                mapping.insert(role.into(), json!(columns));
+            } else {
+                mapping.insert(role.into(), json!(column));
+            }
+        }
+    }
+    mapping
+}
+
+/// 当前类型优先。只有逐项查无候选、原类型仍不完整、替代类型整组可安全应用，
+/// 才把独立的纠型计划并入正常建议。缺证据、低置信、过滤后半套均整组拒绝。
+fn sanitize_form_correction(
+    value: &mut Value,
+    payload: &Value,
+    kind: &str,
+    date_policy: ReviewDatePolicy,
+) {
+    let Some(fallback) = payload.get("formFallback") else {
+        return;
+    };
+    let Some(correction) = value.get("formCorrection") else {
+        return;
+    };
+    if payload["currentForm"]["complete"] != false {
+        return;
+    }
+    let Some(missing) = fallback
+        .get("missingRoles")
+        .and_then(Value::as_array)
+        .filter(|all| !all.is_empty())
+    else {
+        return;
+    };
+    let Some(searches) = correction
+        .get("missingRoleSearches")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let Some(target) = correction
+        .get("targetForm")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(alternative) = fallback
+        .get("alternatives")
+        .and_then(Value::as_array)
+        .and_then(|all| all.iter().find(|form| form["id"] == target))
+    else {
+        return;
+    };
+    let key = if value.get("changes").is_some() {
+        "changes"
+    } else {
+        "fills"
+    };
+    let mut primary = value
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if key == "fills" {
+        primary.extend(
+            value
+                .get("reviews")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
+    }
+    let base_mapping = review_projected_mapping(payload, kind, &primary);
+    let unresolved = missing
+        .iter()
+        .filter(|role| {
+            !role
+                .as_str()
+                .and_then(|role| base_mapping.get(role))
+                .is_some_and(value_is_filled)
+        })
+        .collect::<Vec<_>>();
+    if unresolved.is_empty()
+        || !missing.iter().all(|role| {
+            let matches = searches
+                .iter()
+                .filter(|search| search.get("role") == Some(role))
+                .collect::<Vec<_>>();
+            let status = if unresolved.contains(&role) {
+                "no_candidate"
+            } else {
+                "found"
+            };
+            matches.len() == 1
+                && matches[0]["status"] == status
+                && matches[0]
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| !reason.trim().is_empty())
+        })
+    {
+        return;
+    }
+    let Some(proposed) = correction
+        .get("changes")
+        .and_then(Value::as_array)
+        .filter(|all| !all.is_empty())
+    else {
+        return;
+    };
+    let mut corrected_payload = payload.clone();
+    corrected_payload["currentMapping"] = json!(base_mapping);
+    // 目标类型角色供 replace；原类型角色仅供显式清除旧错配。
+    let mut allowed = alternative["availableRoles"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for role in payload["availableRoles"].as_array().into_iter().flatten() {
+        if !allowed.contains(role) {
+            allowed.push(role.clone());
+        }
+    }
+    corrected_payload["availableRoles"] = json!(allowed);
+    let mut wrapper = json!({"changes":proposed});
+    sanitize_change_list(
+        &mut wrapper,
+        &corrected_payload,
+        kind,
+        "changes",
+        date_policy,
+    );
+    let accepted = wrapper["changes"].as_array().unwrap();
+    let target_roles = alternative["availableRoles"].as_array().unwrap();
+    let mut seen = std::collections::HashSet::new();
+    if accepted.len() != proposed.len()
+        || accepted.iter().any(|change| {
+            let role = change["role"].as_str().unwrap_or("");
+            !seen.insert(role)
+                || change["confidence"]
+                    .as_f64()
+                    .is_none_or(|confidence| confidence <= 0.75)
+                || if change["action"] == "clear" {
+                    change["autoClearSafe"] != true
+                } else {
+                    !target_roles
+                        .iter()
+                        .any(|allowed| allowed.as_str() == Some(role))
+                }
+        })
+    {
+        return;
+    }
+    let mapping = review_projected_mapping(&corrected_payload, kind, accepted);
+    let mapped = mapping
+        .iter()
+        .filter(|(_, value)| value_is_filled(value))
+        .map(|(role, _)| role.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if !crate::ledger_mapping::match_forms(kind, &mapped)
+        .iter()
+        .any(|form| form.form == target && form.complete)
+    {
+        return;
+    }
+    let all_form_roles = crate::ledger_mapping::forms(kind)
+        .iter()
+        .flat_map(|form| {
+            form.required
+                .iter()
+                .chain(form.optional.iter())
+                .flat_map(|slot| slot.iter())
+                .copied()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if mapped.iter().any(|role| {
+        all_form_roles.contains(role)
+            && !target_roles
+                .iter()
+                .any(|allowed| allowed.as_str() == Some(*role))
+    }) {
+        return;
+    }
+    // 替代形态的金额字段必须有真实、可解析的样例值，不能靠空列凑完整。
+    let headers = payload.get("headers").and_then(Value::as_array);
+    let rows = sample_rows_of(payload).unwrap_or_default();
+    for role in mapped
+        .iter()
+        .filter(|role| role.contains("Amount") || role.contains("Debit") || role.contains("Credit"))
+    {
+        let Some(column) = mapping.get(*role).and_then(Value::as_str) else {
+            return;
+        };
+        let Some(index) = headers.and_then(|all| {
+            all.iter()
+                .position(|header| header.as_str() == Some(column))
+        }) else {
+            return;
+        };
+        let mut has_number = false;
+        for raw in rows
+            .iter()
+            .filter_map(|row| row.get(index))
+            .filter(|raw| !raw.trim().is_empty())
+        {
+            match crate::ledger_mapping::parse_amount(raw) {
+                Ok(Some(_)) => has_number = true,
+                Ok(None) => (),
+                Err(_) => return,
+            }
+        }
+        if !has_number {
+            return;
+        }
+    }
+    let target_is_je1 = target == "JE1";
+    let Some(output) = value.as_object_mut() else {
+        return;
+    };
+    let Some(changes) = output
+        .entry(key)
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+    else {
+        return;
+    };
+    changes.extend(accepted.iter().cloned());
+    if key == "fills" && kind == "je" {
+        value["scheme"] = json!(if target_is_je1 { "B" } else { "A" });
     }
 }
 
@@ -2365,7 +2682,7 @@ pub(crate) fn fx_account_translation_llm_call(
     Ok(output)
 }
 
-const REVIEW_CONCISE_OUTPUT: &str = "\n输出精简规则：mappedRolesToReview 中的每个角色仍须逐项返回 roleReviews，保留原始 currentColumns 和 status。keep 的 reason 只写样例相容的简短依据，最多 20 个字；replace、clear、uncertain 及 change 的理由只写一句关键依据，不重复表头清单、样例行或整段业务规则。不要为尚未映射且没有可信候选的角色额外生成确认记录，也不要重复输出同一调整。";
+const REVIEW_CONCISE_OUTPUT: &str = "\n输出精简规则：mappedRolesToReview 中的每个角色仍须逐项返回 roleReviews，保留原始 currentColumns 和 status。keep 的 reason 只写样例相容的简短依据，最多 20 个字；replace、clear、uncertain 及 change 的理由只写一句关键依据，不重复表头清单、样例行或整段业务规则。除 formCorrection 要求的查无候选证据外，不要为尚未映射且没有可信候选的角色额外生成确认记录，也不要重复输出同一调整。";
 
 /// 看账与正负数凭证标记的复核提示词。
 ///
@@ -4284,6 +4601,8 @@ mod mapping_prompt_tests {
         assert_eq!(payload["currentForm"]["id"], "TB3");
         restrict_review_roles_to_current_form(&mut payload, "tb");
 
+        assert!(payload.get("formFallback").is_none(), "完整类型不开放纠型出口");
+
         assert_eq!(
             payload["availableRoles"],
             json!([
@@ -4296,6 +4615,167 @@ mod mapping_prompt_tests {
             ]),
             "公共角色和当前形态选填槽应保留，其他形态专属槽应排除"
         );
+    }
+
+    fn form_fallback_case() -> (Value, Value) {
+        let mut payload = json!({
+            "headers":["科目编码","期初余额-本位币(借)","期初余额-本位币(贷)","期末余额-本位币(借)","期末余额-本位币(贷)","本年借方","本年贷方"],
+            "sampleRows":[["1001","1","0","2","0","3","2"]],
+            "currentMapping":{"accountCode":"科目编码","ytdFunctionalDebit":"本年借方","ytdFunctionalCredit":"本年贷方"},
+            "availableRoles":crate::ledger_mapping::roles("tb").iter().map(|role| role.name).collect::<Vec<_>>()
+        });
+        inject_current_form(&mut payload, "tb");
+        restrict_review_roles_to_current_form(&mut payload, "tb");
+        inject_mapping_review_scope(&mut payload, "tb");
+        assert_eq!(payload["currentForm"]["id"], "TB1");
+        let changes = [
+            ("openingFunctionalDebit","期初余额-本位币(借)"),
+            ("openingFunctionalCredit","期初余额-本位币(贷)"),
+            ("closingFunctionalDebit","期末余额-本位币(借)"),
+            ("closingFunctionalCredit","期末余额-本位币(贷)"),
+        ].iter().map(|(role,column)|json!({"role":role,"suggestedColumn":column,"confidence":0.96,"reason":"借贷分列余额"})).collect::<Vec<_>>();
+        let response = json!({"changes":[],"formCorrection":{
+            "targetForm":"TB3",
+            "missingRoleSearches":[
+                {"role":"openingFunctionalAmount","status":"no_candidate","reason":"只有期初借贷分列，没有净额列"},
+                {"role":"closingFunctionalAmount","status":"no_candidate","reason":"只有期末借贷分列，没有净额列"}
+            ],"changes":changes
+        }});
+        (payload, response)
+    }
+
+    #[test]
+    fn form_fallback_requires_exhausted_current_type_and_complete_safe_plan() {
+        let (payload, mut response) = form_fallback_case();
+        assert!(
+            !payload["availableRoles"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("openingFunctionalDebit")),
+            "第一阶段边界保留"
+        );
+        sanitize_mapping_changes(&mut response, &payload, "tb", ReviewDatePolicy::Strict);
+        assert_eq!(response["changes"].as_array().unwrap().len(), 4);
+        for invalid in [
+            "missing_evidence",
+            "uncertain",
+            "blank_reason",
+            "half_plan",
+            "wrong_currency",
+            "low_confidence",
+            "unsupported_type",
+            "blank_samples",
+        ] {
+            let (mut payload, mut response) = form_fallback_case();
+            match invalid {
+                "missing_evidence" => {
+                    response["formCorrection"]["missingRoleSearches"]
+                        .as_array_mut()
+                        .unwrap()
+                        .pop();
+                }
+                "uncertain" => {
+                    response["formCorrection"]["missingRoleSearches"][0]["status"] = json!("uncertain")
+                }
+                "blank_reason" => {
+                    response["formCorrection"]["missingRoleSearches"][0]["reason"] = json!("")
+                }
+                "half_plan" => {
+                    response["formCorrection"]["changes"]
+                        .as_array_mut()
+                        .unwrap()
+                        .pop();
+                }
+                "wrong_currency" => {
+                    response["formCorrection"]["changes"][0]["suggestedColumn"] =
+                        json!("期初余额-原币(借)")
+                }
+                "low_confidence" => response["formCorrection"]["changes"][0]["confidence"] = json!(0.7),
+                "unsupported_type" => response["formCorrection"]["targetForm"] = json!("TB_UNKNOWN"),
+                "blank_samples" => payload["sampleRows"] = json!([]),
+                _ => unreachable!(),
+            }
+            sanitize_mapping_changes(&mut response, &payload, "tb", ReviewDatePolicy::Strict);
+            assert!(
+                response["changes"].as_array().unwrap().is_empty(),
+                "{invalid}: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn form_fallback_keeps_current_type_when_missing_fields_can_be_filled() {
+        let (mut payload, mut response) = form_fallback_case();
+        payload["headers"]
+            .as_array_mut()
+            .unwrap()
+            .extend([json!("期初净额"), json!("期末净额")]);
+        payload["sampleRows"][0]
+            .as_array_mut()
+            .unwrap()
+            .extend([json!("1"), json!("2")]);
+        response["changes"] = json!([
+            {"role":"openingFunctionalAmount","suggestedColumn":"期初净额","confidence":0.96,"reason":"找到期初净额"},
+            {"role":"closingFunctionalAmount","suggestedColumn":"期末净额","confidence":0.96,"reason":"找到期末净额"}
+        ]);
+        sanitize_mapping_changes(&mut response, &payload, "tb", ReviewDatePolicy::Strict);
+        let changes = response["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(
+            changes
+                .iter()
+                .all(|change| change["role"].as_str().unwrap().ends_with("Amount"))
+        );
+    }
+
+    #[test]
+    fn form_fallback_rejects_unconditional_other_type_changes_and_tool_scope_escape() {
+        let (mut payload, mut response) = form_fallback_case();
+        response["changes"] = response["formCorrection"]["changes"].clone();
+        response.as_object_mut().unwrap().remove("formCorrection");
+        sanitize_mapping_changes(&mut response, &payload, "tb", ReviewDatePolicy::Strict);
+        assert!(response["changes"].as_array().unwrap().is_empty());
+        // 工具未启用的原币角色不得借纠型出口重新放进来。
+        payload["availableRoles"] = json!([
+            "accountCode",
+            "ytdFunctionalDebit",
+            "ytdFunctionalCredit",
+            "openingFunctionalAmount",
+            "closingFunctionalAmount"
+        ]);
+        payload["formFallback"] = json!({"alternatives":[{"id":"伪造"}]});
+        restrict_review_roles_to_current_form(&mut payload, "tb");
+        assert!(payload.get("formFallback").is_none());
+    }
+
+    #[test]
+    fn form_fallback_je_reuses_safe_clear_and_kanzhang_scheme() {
+        let mut payload = json!({
+            "headers":["科目编码","金额"],"sampleRows":[["1001","2"],["2001","-2"]],
+            "currentMapping":{"accountCode":"科目编码","functionalDebit":"不存在的旧列"},
+            "availableRoles":["accountCode","functionalDebit","functionalCredit","functionalAmount","direction"]
+        });
+        inject_current_form(&mut payload, "je");
+        restrict_review_roles_to_current_form(&mut payload, "je");
+        inject_mapping_review_scope(&mut payload, "je");
+        assert_eq!(payload["currentForm"]["id"], "JE1");
+        let correction = json!({
+            "targetForm":"JE3",
+            "missingRoleSearches":[{"role":"functionalCredit","status":"no_candidate","reason":"只有带正负号净额，没有贷方单列"}],
+            "changes":[
+                {"role":"functionalDebit","action":"clear","confidence":0.96,"reason":"旧列已不存在"},
+                {"role":"functionalAmount","suggestedColumn":"金额","confidence":0.96,"reason":"原始带符号净额"}
+            ]
+        });
+        let mut response = json!({"fills":[],"reviews":[],"scheme":"B","formCorrection":correction});
+        sanitize_mapping_changes(&mut response, &payload, "je", ReviewDatePolicy::Strict);
+        assert_eq!(response["scheme"], "A");
+        assert_eq!(response["fills"].as_array().unwrap().len(), 2);
+        assert_eq!(response["fills"][0]["autoClearSafe"], true);
+        // 即使模型漏掉普通数组，条件纠型也不得导致后端 panic。
+        let mut missing_array = json!({"formCorrection":correction});
+        sanitize_mapping_changes(&mut missing_array, &payload, "je", ReviewDatePolicy::Strict);
+        assert_eq!(missing_array["fills"].as_array().unwrap().len(), 2);
     }
 
     #[test]

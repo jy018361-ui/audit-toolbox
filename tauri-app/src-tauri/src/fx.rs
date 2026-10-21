@@ -227,7 +227,7 @@ fn normalized_preview_params(params: &Value) -> Value {
         object.insert("__sourceFingerprints".into(), Value::Object(fingerprints));
         object.insert(
             "__fxPreviewCacheSchema".into(),
-            Value::String(format!("fx-preview-{}", ledger_mapping::TB_STRUCTURE_RULE_VERSION)),
+            Value::String(format!("fx-preview-{}-{}-{}", ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, ledger_mapping::JE_BODY_RULE_VERSION)),
         );
     }
     normalized
@@ -335,7 +335,8 @@ fn fx_table_cache_key(source: &SourceSpec, path: &Path) -> Option<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?;
     Some(format!(
-        "physical-range-v4|{}|{}|{}|{}|{}|{}",
+        "physical-range-v4|{}|{}|{}|{}|{}|{}|{}",
+        crate::header_detection::RULE_VERSION,
         path.to_string_lossy(),
         source.sheet,
         source.header_row,
@@ -2469,7 +2470,7 @@ fn read_text_rows(path: &Path) -> Result<Vec<Vec<String>>, AppError> {
     crate::spreadsheet_input::read_rows(path)
 }
 
-fn physical_range_rows(range: &calamine::Range<Data>) -> Vec<Vec<String>> {
+pub(crate) fn physical_range_rows(range: &calamine::Range<Data>) -> Vec<Vec<String>> {
     let (start_row, start_col) = range.start().unwrap_or((0, 0));
     let mut rows = vec![Vec::new(); start_row as usize];
     rows.extend(range.rows().map(|cells| {
@@ -2658,13 +2659,13 @@ pub(crate) fn merge_headers(raw: &[Vec<String>], width: usize) -> Vec<String> {
     // 流式读取的上层行可能只写到合并单元格左端，先补齐再横向延续。
     if raw.len() > 1 {
         upper.resize(width, String::new());
-    }
-    let mut carry = String::new();
-    for value in &mut upper {
-        if value.trim().is_empty() {
-            *value = carry.clone();
-        } else {
-            carry = value.trim().to_owned();
+        let mut carry = String::new();
+        for value in &mut upper {
+            if value.trim().is_empty() {
+                *value = carry.clone();
+            } else {
+                carry = value.trim().to_owned();
+            }
         }
     }
     let mut seen = HashMap::new();
@@ -3575,6 +3576,7 @@ impl FxJeRows {
 
     fn reconcile_domains(&self, role: &str, tb_input: &FxTbRows,
         tb_map: &mut Map<String, Value>, je_map: &mut Map<String, Value>) -> Result<(), AppError> {
+        if ledger_mapping::has_manual_auxiliary_mapping(tb_map, role) { return Ok(()); }
         let tb=&tb_input.table;
         if self.disk.is_none() && tb_input.disk.is_none() {
             ledger_mapping::reconcile_key_domains(role, &tb.headers, &tb.rows, tb_map,
@@ -15962,6 +15964,16 @@ fn xlsx_err(value: XlsxError) -> AppError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn 通用表头单层空标题不承接左列而双层保留分组() {
+        let row = vec!["科目编码".to_owned(), String::new(), "金额".to_owned(), String::new()];
+        assert_eq!(merge_headers(&[row], 5), ["科目编码", "列2", "金额", "列4", "列5"]);
+        let grouped = vec![
+            vec!["身份".to_owned(), String::new(), "金额".to_owned()],
+            vec!["编码".to_owned(), "名称".to_owned(), "借方".to_owned(), "贷方".to_owned()],
+        ];
+        assert_eq!(merge_headers(&grouped, 4), ["身份-编码", "身份-名称", "金额-借方", "金额-贷方"]);
+    }
     use super::*;
 
     #[test]
@@ -17180,14 +17192,13 @@ mod tests {
         .unwrap()
         .clone();
         let filled = forward_filled_je_table(&table, &mapping);
-        // 合并单元格形态：有凭证号即有身份，照常填。
-        assert_eq!(filled.rows[1], vec!["JE-1", "银行存款", "提现", "200"]);
+        // 仅凭证号不足以补科目：本行没有有效日期，保留原始空白。
+        assert_eq!(filled.rows[1], vec!["JE-1", "", "", "200"]);
         // 两行合计形态：不接收填充，原样保留。
         assert_eq!(filled.rows[2], vec!["", "", "", "300"]);
         assert_eq!(filled.rows[3], vec!["", "", "合计", "400"]);
-        // 合计行之后的新分录照常填，且摘要来自 JE-1 行的「提现」，
-        // 不是上一行合计行写在摘要里的「合计」——噪声行不向外传播。
-        assert_eq!(filled.rows[4], vec!["JE-2", "银行存款", "提现", "50"]);
+        // 新凭证同样不能只靠凭证号恢复缺失科目。
+        assert_eq!(filled.rows[4], vec!["JE-2", "", "", "50"]);
     }
 
     #[test]

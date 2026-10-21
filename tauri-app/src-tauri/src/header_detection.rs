@@ -1,6 +1,9 @@
 //! 通用表头结构判据；业务模块提供自己的字段评分，避免套用账表关键词。
 use std::collections::HashSet;
 
+/// 读取、前缀与结果缓存共同引用，防止表头规则修复后继续使用旧列名或正文。
+pub(crate) const RULE_VERSION: &str = "headers-v3-body-and-empty-slots";
+
 pub(crate) fn distinct_labels(row: &[String]) -> usize {
     row.iter()
         .filter(|v| !v.trim().is_empty())
@@ -45,6 +48,14 @@ pub(crate) fn layout(
     }
 }
 
+fn is_body_scalar(value: &str) -> bool {
+    if let Some(number) = crate::ledger_mapping::parse_amount(value).ok().flatten() {
+        // 年份可以是合法分组名称，金额、序号等实际取值不能成为下层字段。
+        return !(number.fract() == 0.0 && (1900.0..=2100.0).contains(&number));
+    }
+    crate::ledger_mapping::parse_date(value).is_some()
+}
+
 /// 只有分组上层、带业务字段的文字下层、随后确有数据三项齐备才采用双层。
 pub(crate) fn depth(rows: &[Vec<String>], start: usize, hit: impl Fn(&str) -> bool) -> usize {
     let Some(top) = rows.get(start) else {
@@ -74,6 +85,8 @@ pub(crate) fn depth(rows: &[Vec<String>], start: usize, hit: impl Fn(&str) -> bo
         .count();
     if !is_title(top)
         && !is_title(lower)
+        && !lower.iter().any(|value| is_body_scalar(value))
+        && top.iter().filter(|value| is_body_scalar(value)).take(2).count() < 2
         && grouped
         && non >= 2
         && lower.iter().filter(text).count() * 5 >= non * 4
@@ -89,6 +102,17 @@ pub(crate) fn depth(rows: &[Vec<String>], start: usize, hit: impl Fn(&str) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn 通用表头含金额或日期的首条正文不能变成下层() {
+        for scalar in ["100", "2026-01-02"] {
+            let rows: Vec<Vec<String>> = [
+                vec!["客户名称", "编号", "金额", "备注", ""],
+                vec!["客户甲", "客户编号", scalar, "备注说明", "辅助名称"],
+                vec!["客户乙", "002", "200", "正常", "其他"],
+            ].into_iter().map(|r| r.into_iter().map(str::to_owned).collect()).collect();
+            assert_eq!(depth(&rows, 0, |_| true), 1, "{scalar}");
+        }
+    }
     #[test]
     fn 通用表头排除重复标题并保留工具评分() {
         let rows = vec![

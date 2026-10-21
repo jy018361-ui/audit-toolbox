@@ -2622,6 +2622,20 @@ fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppE
 #[cfg(test)]
 mod tests {
     #[test]
+    fn 通用表头模糊匹配首条名称与金额不能充当下层() {
+        let path = std::env::temp_dir().join(format!("fuzzy-body-{}.csv", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "客户名称,编号,金额,备注,\n客户甲,客户编号,100,备注说明,辅助名称\n客户乙,002,200,正常,其他\n").unwrap();
+        let spec: super::SourceSpec = serde_json::from_value(serde_json::json!({"inputPath":path,"headerRow":0,"headerDepth":0})).unwrap();
+        let auto = super::load_table(&spec).unwrap();
+        assert_eq!((auto.header_row, auto.header_depth), (1, 1));
+        assert_eq!(auto.rows.len(), 2);
+        assert_eq!(auto.rows[0][0], "客户甲");
+        let disk = super::disk::preview(&spec).unwrap();
+        assert_eq!(disk.headers, auto.headers);
+        assert_eq!(disk.rows, auto.rows);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn 通用表头模糊匹配双层不混入正文() {
         let path = std::env::temp_dir().join(format!("fuzzy-header-{}.csv", uuid::Uuid::new_v4()));
         std::fs::write(&path, "客户清单,客户清单,客户清单,客户清单\n客户信息,,交易金额,\n编号,名称,金额,数量\n001,客户甲,100,10\n").unwrap();

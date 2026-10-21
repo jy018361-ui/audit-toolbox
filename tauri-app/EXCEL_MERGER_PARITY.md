@@ -1,5 +1,15 @@
 # Excel 批量合并迁移差异记录
 
+## 2026-10-21 · 原列顺序导出、公共表头识别与文本快照修复
+
+- 匹配页提供「按原列顺序导出」与「调整后导出」，移除「全部按建议执行」「下一处待确认」。原列路径按物理列位拼接，保留已确认的表头行和层数，忽略映射、丢弃、模板移除及对照表学习；更宽来源的尾列保留。调整路径继续使用网格及黄色建议确认。
+- 自动行号／层数直接调用 TBJE 使用的 `fx::infer_public_header_layout`，扫描前 30 行，取消合并工具独立的宽松双层判断；表头仍保留同名列独立槽位，避免修改既有列匹配语义。
+- 预览与匹配导出同步恢复 Calamine 裁剪的物理空行／空列。单层空标题按原列位显示「列N」，不借用左侧列名；预览、人工修正、正式快照统一清理换行。修改模板行号只同步模板所在 Sheet，其他文件保持各自行号／层数，并刷新正文预览。
+- 文本型 XLS／CSV 的快照复核此前错误收集文件起始行，现先跳过计划 `headerRow`，再收集确认的表头层；未改原件不再因此误报 `HEADER_PLAN_STALE`，真实表头变化仍中止并清除输出。提示改为说明实际读取差异，不推断用户修改文件。
+- 回归：`npx vitest run src/components/HeaderMatchGrid.test.tsx src/ExcelMergerPage.test.ts src/ToolPageJobEvents.test.tsx`；`npm run build`；`cargo test --manifest-path src-tauri/Cargo.toml --lib excel_`；`--lib header_data`。
+- 特殊样本：`--lib header_regression -- --include-ignored`，真实件用 `MERGER_HEADER_NATIVE_CASES`（path／label／0基headerRow／headerRowsCount）与 `MERGER_HEADER_NATIVE_OUTPUT` 指定。覆盖 TBJEPBC 03／06两期间／10 及十月 HK／AUS 六份原件，双格式实际导出对比全部正文行；另有五类合成物理空行空列／空标题／横纵合并，以及 GBK 文本型 XLS 的误报和真实改动反例。
+- 用户补充截图的原件不在本机，文本快照错误已用同结构样本复现；截图中正文被解析成两列表头的具体分隔符／源格式原因尚不能确认。
+
 ## 2026-10-19 · 公共 worker 的估算预算与启动保护分离
 
 - 公共表格任务的估算内存预算只用于普通／磁盘选路、批次、SQLite 缓存和并行度，不再因扣除预留内存后不足 256 MiB 拒绝磁盘任务。小预算下仍有可推进的批次，真实系统状态无法读取时仍明确失败。

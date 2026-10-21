@@ -1540,10 +1540,10 @@ fn inspect(paths: &[PathBuf]) -> Result<Value, AppError> {
 /// 只读前若干行），前端进匹配网格前调用。
 fn match_preview(params: &Value) -> Result<Value, AppError> {
     use crate::excel_header_match::{
-        detect_header_with_merges, flatten_two_layer, load_aliases, match_columns,
+        detect_header_with_merges, load_aliases, match_columns,
     };
 
-    const PREVIEW_ROWS: usize = 24;
+    const PREVIEW_ROWS: usize = 34;
     const DATA_PREVIEW_ROWS: usize = 3;
 
     let paths = parse_input_paths(params)?;
@@ -1786,14 +1786,21 @@ fn read_sheet_preview_rows(
             Some(format!("{} / {name}", path.display())),
         )
     })?;
-    Ok((
-        range
-            .rows()
-            .take(limit)
-            .map(|row| row.iter().map(Cell::from_excel).collect())
-            .collect(),
-        merges,
-    ))
+    Ok((physical_cell_rows(&range, Some(limit)), merges))
+}
+
+/// Calamine 的 range 从首个非空格开始；预览和导出均恢复物理行列。
+fn physical_cell_rows(range: &calamine::Range<Data>, limit: Option<usize>) -> Vec<Vec<Cell>> {
+    let cap = limit.unwrap_or(usize::MAX);
+    let (start_row, start_col) = range.start().unwrap_or((0, 0));
+    let mut rows = vec![Vec::new(); (start_row as usize).min(cap)];
+    let remaining = cap.saturating_sub(rows.len());
+    rows.extend(range.rows().take(remaining).map(|row| {
+        let mut cells = vec![Cell::String(String::new()); start_col as usize];
+        cells.extend(row.iter().map(Cell::from_excel));
+        cells
+    }));
+    rows
 }
 
 /// XLSX/XLS 的合并单元格清单；XLSB/ODS 读不到就当没有（两层判定退化为
@@ -1850,9 +1857,9 @@ fn flattened_headers(
             .unwrap_or_default();
         crate::excel_header_match::flatten_two_layer(&first, &second)
     } else {
-        rows.get(detection.header_row)
-            .map(|row| as_strings(row))
-            .unwrap_or_default()
+        crate::excel_header_match::single_layer_headers(
+            &rows.get(detection.header_row).map(|row| as_strings(row)).unwrap_or_default(),
+        )
     }
 }
 
@@ -1918,10 +1925,11 @@ fn load_selected_sheets(
                     continue;
                 }
             };
-            let rows = range
-                .rows()
-                .map(|row| row.iter().map(Cell::from_excel).collect())
-                .collect();
+            let rows = if params.header_matching.is_some() {
+                physical_cell_rows(&range, None)
+            } else {
+                range.rows().map(|row| row.iter().map(Cell::from_excel).collect()).collect()
+            };
             result.push(SheetRows {
                 file_path: path.clone(),
                 file_name: file_name(path),
@@ -2080,22 +2088,15 @@ fn write_vertical_xlsx_stream(
                 assignment.map(|a| a.header_row + a.header_rows_count),
             )?;
             if let Some(assignment) = assignment {
-                let current: Vec<Vec<String>> = range
-                    .rows()
-                    .skip(assignment.header_row)
-                    .take(assignment.header_rows_count)
-                    .map(|row| {
-                        row.iter()
-                            .map(Cell::from_excel)
-                            .map(|cell| cell.display())
-                            .collect()
-                    })
-                    .collect();
+                let current = display_rows(&physical_cell_rows(
+                    &range, Some(assignment.header_row + assignment.header_rows_count),
+                )).into_iter().skip(assignment.header_row).collect::<Vec<_>>();
                 verify_current_headers(&current, path, &name, assignment)?;
             }
             let mut reorder_buffer = Vec::new();
+            let (start_row, start_col) = range.start().unwrap_or((0, 0));
             for (row_index, data_row) in range.rows().enumerate() {
-                if row_index < skip {
+                if row_index + (start_row as usize) < skip {
                     continue;
                 }
                 if !data_row.iter().any(|cell| {
@@ -2103,7 +2104,9 @@ fn write_vertical_xlsx_stream(
                 }) {
                     continue;
                 }
-                let cells = data_row.iter().map(Cell::from_excel).collect::<Vec<_>>();
+                let mut cells = vec![Cell::String(String::new());
+                    if matched.is_some() { start_col as usize } else { 0 }];
+                cells.extend(data_row.iter().map(Cell::from_excel));
                 if let (Some(layout), Some(assignment), Some(pos)) =
                     (matched.as_ref(), assignment, assignment_pos)
                 {
@@ -2190,7 +2193,9 @@ fn verify_current_headers(
             current_rows.get(1).map(Vec::as_slice).unwrap_or(&[]),
         )
     } else {
-        current_rows.first().cloned().unwrap_or_default()
+        crate::excel_header_match::single_layer_headers(
+            current_rows.first().map(Vec::as_slice).unwrap_or(&[]),
+        )
     };
     let same = flattened.len() == assignment.headers.len()
         && flattened
@@ -2203,7 +2208,7 @@ fn verify_current_headers(
     Err(error(
         "HEADER_PLAN_STALE",
         &format!(
-            "「{} / {}」的表头与预览确认时不一致（文件可能在预览后被修改）。请返回匹配界面重新预览确认。",
+            "「{} / {}」合并时读取到的表头与已确认表头不同，已停止导出以避免错列。请返回匹配网格核对表头行与层数后重试。",
             file_name(path),
             sheet
         ),
@@ -2217,6 +2222,7 @@ struct HeaderSnapshot<'a> {
     path: PathBuf,
     sheet: String,
     rows: Vec<Vec<String>>,
+    seen: usize,
 }
 
 impl<'a> HeaderSnapshot<'a> {
@@ -2230,6 +2236,7 @@ impl<'a> HeaderSnapshot<'a> {
             path: path.to_path_buf(),
             sheet: sheet.to_string(),
             rows: Vec::new(),
+            seen: 0,
         }
     }
 
@@ -2237,6 +2244,11 @@ impl<'a> HeaderSnapshot<'a> {
         let Some(assignment) = self.assignment else {
             return Ok(());
         };
+        let row_index = self.seen;
+        self.seen += 1;
+        if row_index < assignment.header_row {
+            return Ok(());
+        }
         if self.rows.len() >= assignment.header_rows_count {
             return Ok(());
         }
@@ -3522,6 +3534,7 @@ mod tests {
     use super::*;
     use calamine::Reader;
     use std::io::Read;
+    include!("excel_merger_header_tests.rs");
 
     fn test_merge(params: Value, cancel: Arc<AtomicBool>) -> Result<Value, AppError> {
         let pause = PauseCheckpoint::unpaused(cancel.clone());

@@ -1,5 +1,13 @@
 # 汇兑损益测算口径
 
+## 2026-10-20：人工辅助与JE正文公共修复
+
+人工TB辅助列在关联失败时保留，自动候选仍按完整JE验证；普通缺科目续行须原始日期、凭证号、可解析金额同时有效，明确合计不得补齐。预览缓存加入公共JE正文版本。汇率、币种及已实现／未实现测算规则保持。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib fx::`；`npx vitest run src/FxAuditPage.test.ts src/ledgerMappingAuxiliary.test.ts`。
+
+## 2026-10-20：公共币种代码金额兼容
+
+公共金额解析支持已知币种代码前后缀及原有负数/借贷标记，拒绝未知代码和脏文本，不换算币种；汇兑预览结果缓存纳入独立金额规则版本。范围及回归命令见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目。
+
 ## 2026-10-19：公共TB结构规则接入核查
 
 TB消费者统一调用公共结构引擎，结果缓存统一引用公共结构版本；JE正文不套用TB汇总剔除。适用入口、缓存与回归命令见 `LEDGER_MAPPING_UNIFICATION.md` 同日「各工具统一引用TB结构规则版本」。

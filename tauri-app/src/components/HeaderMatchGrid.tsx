@@ -85,8 +85,8 @@ export function flattenTwoLayerHeader(
   let parent = "";
   for (let index = 0; index < width; index += 1) {
     const top = (first[index] ?? "").trim();
-    if (top) parent = top;
-    const child = (second[index] ?? "").trim();
+    if (top) parent = top.replace(/[\n\r]/g, " ");
+    const child = (second[index] ?? "").trim().replace(/[\n\r]/g, " ");
     const name = !parent
       ? child
       : !child || child === parent
@@ -327,19 +327,6 @@ export function HeaderMatchGrid(props: {
     setToast("已重置全部手动修改");
   }
 
-  function acceptAll() {
-    setRows((current) =>
-      current.map((state) => ({
-        ...state,
-        cells: state.cells.map((cell) =>
-          cell.target != null && cell.confidence < GREEN_THRESHOLD
-            ? { ...cell, manual: true, reason: "已确认建议" }
-            : cell,
-        ),
-      })),
-    );
-  }
-
   function confirmCell(row: number, col: number) {
     setRows((current) =>
       current.map((state, index) =>
@@ -355,34 +342,6 @@ export function HeaderMatchGrid(props: {
           : state,
       ),
     );
-  }
-
-  function jumpNextPending() {
-    for (let index = 0; index < rows.length; index += 1) {
-      const col = rows[index].cells.findIndex(
-        (cell) =>
-          !cell.manual &&
-          !cell.discard &&
-          cell.target != null &&
-          cell.confidence < GREEN_THRESHOLD,
-      );
-      if (col >= 0) {
-        const cellNode = gridRef.current?.querySelector<HTMLDivElement>(
-          `[data-cell="${index}-${col}"]`,
-        );
-        cellNode?.scrollIntoView?.({ block: "center", inline: "center" });
-        cellNode?.focus();
-        cellNode?.animate?.(
-          [
-            { boxShadow: "0 0 0 3px rgba(234,179,8,.9)" },
-            { boxShadow: "0 0 0 3px rgba(234,179,8,0)" },
-          ],
-          { duration: 1200 },
-        );
-        return;
-      }
-    }
-    setToast("没有待确认的黄色格子了");
   }
 
   /** 移出模板列（延迟生效）：格子原地不动，点「重新匹配」才批量清到未匹配区。 */
@@ -478,11 +437,13 @@ export function HeaderMatchGrid(props: {
     headerRow: number,
     headerRowsCount: number,
   ) {
-    const reflatten = (raw: string[][]) => {
-      if (headerRowsCount >= 2) {
-        return flattenTwoLayerHeader(raw[headerRow] ?? [], raw[headerRow + 1] ?? []);
+    const reflatten = (raw: string[][], start = headerRow, depth = headerRowsCount) => {
+      if (depth >= 2) {
+        return flattenTwoLayerHeader(raw[start] ?? [], raw[start + 1] ?? []);
       }
-      return [...(raw[headerRow] ?? [])];
+      return (raw[start] ?? []).map((value, index) =>
+        value.trim().replace(/[\n\r]/g, " ") || `列${index + 1}`,
+      );
     };
     // 修改前的人工配对快照（源列名 → 目标列名），重跑后按名字恢复。
     const manualPairs = new Map<string, string>();
@@ -527,13 +488,26 @@ export function HeaderMatchGrid(props: {
       const before = rows;
       before.forEach(collectManual);
       const nextRows: RowState[] = [];
+      const templateSource = preview.rows.find((source) =>
+        source.path === preview.template.path
+        && source.headers.length === preview.template.headers.length
+        && source.headers.every((header, index) => header === preview.template.headers[index]),
+      );
       for (const state of before) {
-        const rowHeaders = reflatten(state.rawRows);
+        const isTemplateSource = !preview.template.external && state.path === preview.template.path
+          && state.sheet === templateSource?.sheet;
+        const detection = isTemplateSource
+          ? { ...state.detection, headerRow, headerRowsCount, needsReview: false }
+          : state.detection;
+        const rowHeaders = reflatten(state.rawRows, detection.headerRow, detection.headerRowsCount);
         const matches = await props.onRematch(nextTemplate, rowHeaders, []);
         const cells = rebuildCells(rowHeaders, matches, nextTemplate);
         nextRows.push({
           ...state,
           headers: rowHeaders,
+          detection,
+          preview: state.rawRows.slice(detection.headerRow + detection.headerRowsCount,
+            detection.headerRow + detection.headerRowsCount + 3),
           cells,
           unmatchedOrder: unmatchedColumnsOf(cells),
         });
@@ -541,7 +515,7 @@ export function HeaderMatchGrid(props: {
       setTemplate((current) => ({
         ...current,
         headers,
-        detection: { ...current.detection, headerRow, headerRowsCount },
+        detection: { ...current.detection, headerRow, headerRowsCount, needsReview: false },
       }));
       setExcluded(new Set());
       setRows(nextRows);
@@ -560,7 +534,8 @@ export function HeaderMatchGrid(props: {
           ? {
               ...item,
               headers: rowHeaders,
-              detection: { ...item.detection, headerRow, headerRowsCount },
+              detection: { ...item.detection, headerRow, headerRowsCount, needsReview: false },
+              preview: item.rawRows.slice(headerRow + headerRowsCount, headerRow + headerRowsCount + 3),
               cells,
               unmatchedOrder: unmatchedColumnsOf(cells),
             }
@@ -574,8 +549,8 @@ export function HeaderMatchGrid(props: {
     if (stats.yellow > 0) {
       const ok = await confirmDialog({
         title: "还有未确认的黄色建议",
-        message: `还有 ${stats.yellow} 项黄色建议未确认，将直接按建议执行，确定开始合并吗？`,
-        confirmLabel: "按建议合并",
+        message: `还有 ${stats.yellow} 项黄色建议未确认，调整后导出将按这些建议排列对应列。`,
+        confirmLabel: "调整后导出",
         tone: "danger",
       });
       if (!ok) return null;
@@ -635,6 +610,30 @@ export function HeaderMatchGrid(props: {
   async function handleConfirm() {
     const plan = await buildPlan();
     if (plan) props.onConfirm(plan);
+  }
+
+  function exportOriginalOrder() {
+    // 用完整列宽按位置映射，忽略网格配对、丢弃和对照表设置。
+    const width = Math.max(template.headers.length, ...rows.map((row) => row.headers.length));
+    const templateHeaders = Array.from({ length: width }, (_, index) =>
+      template.headers[index] || rows.find((row) => row.headers[index])?.headers[index] || `列${index + 1}`,
+    );
+    props.onConfirm({
+      templatePath: preview.template.path,
+      templateHeaders,
+      rememberAliases: [],
+      assignments: rows.map((state) => ({
+        path: state.path,
+        sheet: state.sheet,
+        headerRow: state.detection.headerRow,
+        headerRowsCount: state.detection.headerRowsCount,
+        headers: state.headers,
+        independentOrder: [],
+        columns: state.headers.map((_, source) => ({
+          source, target: source, discard: false, manual: false, reason: "按原列顺序",
+        })),
+      })),
+    });
   }
 
   // ───────────────────────── 指针拖拽（替代 HTML5 DnD） ─────────────────────────
@@ -838,6 +837,7 @@ export function HeaderMatchGrid(props: {
               左键拖拽格子到目标列；未匹配列可在本行内排序，顺序即输出顺序。
               右键格子、列头或文件名打开菜单；拖入丢弃区可移除列，模板列头拖到未匹配区可移出。
               键盘 Tab 定位格子，Enter 确认建议。
+              「按原列顺序导出」按列位置拼接，保留表头行设置，忽略匹配和丢弃设置；「调整后导出」按当前网格输出。
             </p>
           </details>
           <Button
@@ -857,12 +857,6 @@ export function HeaderMatchGrid(props: {
           </Button>
           <Button variant="ghost" size="sm" onClick={() => setExpanded(new Set())}>
             全部收起
-          </Button>
-          <Button variant="secondary" size="sm" disabled={!stats.yellow || busy} onClick={acceptAll}>
-            全部按建议执行（{stats.yellow}）
-          </Button>
-          <Button variant="secondary" size="sm" onClick={jumpNextPending}>
-            下一处待确认
           </Button>
           <Button variant="ghost" size="sm" onClick={resetAll}>
             ↺ 重置手动调整
@@ -1149,9 +1143,13 @@ export function HeaderMatchGrid(props: {
             <Button variant="secondary" onClick={props.onCancel} disabled={busy}>
               取消
             </Button>
-            <Button onClick={() => void handleConfirm()} disabled={busy}>
-              开始合并
-              {stats.yellow > 0 ? `（${stats.yellow} 项黄色将按建议执行）` : ""}
+            <Button variant="secondary" onClick={exportOriginalOrder} disabled={busy || rematchBusy}
+              title="按 A 列对 A 列、B 列对 B 列拼接；保留表头行设置，忽略列匹配和丢弃设置">
+              按原列顺序导出
+            </Button>
+            <Button onClick={() => void handleConfirm()} disabled={busy || rematchBusy}
+              title="按当前网格中的列对应关系和丢弃设置导出">
+              调整后导出
             </Button>
           </div>
         </div>

@@ -25,6 +25,24 @@ pub(crate) mod disk_domains;
 /// 修改结构取层语义时只在这里升级，避免某个工具继续命中旧结果。
 pub(crate) const TB_STRUCTURE_RULE_VERSION: &str = "complete-structure-v6-20261019";
 
+/// 公共金额语法的缓存版本；业务结果须同时纳入结构与金额版本。
+pub(crate) const AMOUNT_PARSE_RULE_VERSION: &str = "currency-affix-v1-20261020";
+/// JE续行补齐及噪声规则，所有规范化JE／业务结果缓存共用。
+pub(crate) const JE_BODY_RULE_VERSION: &str = "continuation-and-v1-20261020";
+#[cfg(test)]
+#[path = "ledger_continuation_tests.rs"]
+mod continuation_tests;
+
+pub(crate) fn has_manual_auxiliary_mapping(map: &serde_json::Map<String, serde_json::Value>, role: &str) -> bool {
+    if !matches!(role, "auxiliary" | "loanId") { return false; }
+    let selected = mapped_column_names(map, role);
+    map.get("__manualAuxiliary").and_then(serde_json::Value::as_str)
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get(role).cloned())
+        .and_then(|v| v.as_array().cloned())
+        .is_some_and(|values| values.iter().filter_map(serde_json::Value::as_str).any(|s| selected.iter().any(|c| c == s)))
+}
+
 /// 没有启用双侧主体键时，以及已映射主体列中的空值，统一使用这一稳定键。
 pub(crate) const DEFAULT_ENTITY: &str = "默认主体";
 
@@ -241,6 +259,8 @@ pub(crate) fn reconcile_key_domains(
     je_map: &mut serde_json::Map<String, serde_json::Value>,
 ) {
     let tb_mapped = mapped_headers(tb_map, role);
+    // 人工确认仅保留TB结构字段；是否进入跨表键仍由后续辅助联动完整验证。
+    if has_manual_auxiliary_mapping(tb_map, role) { return; }
     let je_mapped = mapped_headers(je_map, role);
     // 该角色是条件性匹配键：只有双侧都映射了才启用，单侧映射不参与校验。
     if tb_mapped.is_empty() || je_mapped.is_empty() {
@@ -2789,6 +2809,56 @@ fn two_way_account_header(header: &str) -> bool {
         .any(|segment| TWO_WAY_ACCOUNT_HEADERS.contains(&segment.as_str()))
 }
 
+/// 分组表头的金额语义：只匹配完整的「时点＋币种＋借贷」结构，
+/// 不把业务文本中的单字「借／贷」当成金额列。支持两种币种／借贷顺序。
+fn structured_amount_header_role(header: &str) -> Option<String> {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| regex::Regex::new(concat!(
+        r"^(?P<scope>期初(?:余额|餘額|金额|金額)?|年初(?:余额|餘額)?|",
+        r"期末(?:余额|餘額|金额|金額)?|年末(?:余额|餘額)?|",
+        r"本年(?:(?:累计|累計)(?:发生额|發生額)?|发生额|發生額|发生|發生)|(?:累计|累計)(?:发生额|發生額)?|",
+        r"本期(?:发生额|發生額|发生|發生)?|本月(?:发生额|發生額|发生|發生)?)?",
+        r"(?:(?P<currency>本位币|本位幣|本币|本幣|原币|原幣|外币|外幣)(?P<side>借方?|[贷貸]方?)|",
+        r"(?P<side_first>借方?|[贷貸]方?)(?P<currency_last>本位币|本位幣|本币|本幣|原币|原幣|外币|外幣))$"
+    )).expect("分组金额表头正则合法"));
+    let captures = pattern.captures(header)?;
+    let scope = captures.name("scope").map_or("", |value| value.as_str());
+    let prefix = if scope.starts_with("期初") || scope.starts_with("年初") {
+        "opening"
+    } else if scope.starts_with("期末") || scope.starts_with("年末") {
+        "closing"
+    } else if scope.starts_with("本期") || scope.starts_with("本月") {
+        "period"
+    } else if scope.is_empty() {
+        ""
+    } else {
+        "ytd"
+    };
+    let currency = captures
+        .name("currency")
+        .or_else(|| captures.name("currency_last"))?
+        .as_str();
+    let foreign = currency.starts_with('原') || currency.starts_with('外');
+    let currency_role = match (prefix.is_empty(), foreign) {
+        (true, true) => "foreign",
+        (true, false) => "functional",
+        (false, true) => "Foreign",
+        (false, false) => "Functional",
+    };
+    let side = captures
+        .name("side")
+        .or_else(|| captures.name("side_first"))?
+        .as_str();
+    Some(format!(
+        "{prefix}{currency_role}{}",
+        if side.starts_with('借') {
+            "Debit"
+        } else {
+            "Credit"
+        }
+    ))
+}
+
 pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
     let n = normalize_header(header);
     if n.is_empty() {
@@ -2815,7 +2885,11 @@ pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
     if excludes_group_currency(role) && NOT_GROUP.iter().any(|c| n.contains(&normalize_header(c))) {
         return None;
     }
-    let mut best: Option<f64> = None;
+    let mut best = (role.name.ends_with("Debit") || role.name.ends_with("Credit"))
+        .then(|| structured_amount_header_role(&n))
+        .flatten()
+        .filter(|name| name == role.name)
+        .map(|_| 2.0 + n.chars().count() as f64 / 100.0);
     for a in role.aliases {
         let na = normalize_header(a);
         if na.is_empty() {
@@ -4136,6 +4210,9 @@ pub(crate) struct LedgerRowAnalysis {
 /// 金额三项齐备）。整表版额外做的表尾倒扫与编码语法校验这里没有，流式路径的
 /// 表尾噪声靠业务行协议兜住（表尾草稿行三项必有缺）。
 pub(crate) struct LedgerBodyRule {
+    headers: Vec<String>,
+    date: Vec<usize>,
+    id: Vec<usize>,
     identity: Vec<usize>,
     amount: Vec<usize>,
     code: Vec<usize>,
@@ -4176,6 +4253,9 @@ impl LedgerBodyRule {
         // 后续跨表策略再判断名称能否安全配对。不能用空名称把真实分录整片删掉。
         let boundary = (!code.is_empty() || !name.is_empty()) && !je_amounts.is_empty();
         LedgerBodyRule {
+            headers: headers.to_vec(),
+            date: indexes(&["date"]),
+            id: indexes(&["id"]),
             identity,
             amount,
             code,
@@ -4187,6 +4267,7 @@ impl LedgerBodyRule {
 
     /// 该行是否属于账表正文。身份列都没映射时无从判断，一律算正文。
     pub(crate) fn is_body(&self, row: &[String]) -> bool {
+        if self.is_explicit_noise(row) { return false; }
         if self.identity.is_empty() {
             return true;
         }
@@ -4195,6 +4276,30 @@ impl LedgerBodyRule {
                 && self.has_parseable_je_amount(row);
         }
         self.has_identity(row) || !self.has_amount(row)
+    }
+
+    pub(crate) fn is_explicit_noise(&self, row: &[String]) -> bool {
+        self.identity.iter().filter_map(|i| row.get(*i)).any(|s| is_rollup_label(s) || is_report_footer_value(s))
+            || (!self.has_account(row) && row.iter().any(|s| is_rollup_label(s) || is_report_footer_value(s)))
+    }
+
+    fn has_account(&self, row: &[String]) -> bool {
+        self.has_field(row, &self.code) || self.has_field(row, &self.name)
+    }
+
+    /// 缺科目续行只按本行原始证据放行：日期 AND 全部凭证键 AND 金额。
+    pub(crate) fn can_fill_account(&self, row: &[String]) -> bool {
+        !self.is_explicit_noise(row) && !self.has_account(row)
+            && self.has_valid_voucher_amount(row)
+    }
+
+    fn has_valid_voucher_amount(&self, row: &[String]) -> bool {
+        parse_mapped_date(&self.headers, row, &self.date, None).is_some()
+            && !self.id.is_empty() && self.id.iter().all(|i| {
+                row.get(*i).is_some_and(|s| !s.trim().is_empty() && !is_formula_error(s)
+                    && !is_rollup_label(s) && !is_report_footer_value(s))
+            })
+            && self.has_parseable_je_amount(row)
     }
 
     /// 空白分隔后表尾协议区的重开条件。编码与名称两列**实际有值**时要求同时
@@ -4438,7 +4543,12 @@ pub(crate) fn ledger_fill_mask(
             strict_region = true;
             continue;
         }
-        if mask.get(index).copied().unwrap_or(false) || !rule.has_identity(row) {
+        if rule.is_explicit_noise(row) {
+            mask[index] = false;
+            continue;
+        }
+        if mask.get(index).copied().unwrap_or(false)
+            || !(rule.can_fill_account(row) || (rule.has_account(row) && rule.has_identity(row))) {
             continue;
         }
         if strict_region && rule.boundary && !strict_reopen(row) {
@@ -4466,11 +4576,13 @@ pub(crate) fn ledger_post_fill_body_mask(
     let mut mask = vec![true; rows.len()];
     let mut after_barrier = false;
     for (index, row) in rows.iter().enumerate() {
-        if row.iter().any(|value| is_rollup_label(value.trim())) {
+        if rule.is_explicit_noise(row) {
+            mask[index] = false;
             after_barrier = true;
             continue;
         }
-        if after_barrier && !reopen(row) {
+        if (after_barrier && !reopen(row) && !(rule.has_account(row) && rule.has_valid_voucher_amount(row)))
+            || (!rule.has_account(row) && rule.boundary) {
             mask[index] = false;
         }
     }
@@ -6063,7 +6175,9 @@ pub(crate) fn entity_column_is_measurement_unit(
 /// 把单元格文本读成金额。`None` 表示空值或占位符，`Err` 表示确实读不出来。
 ///
 /// 认得实务里的各种写法：千分位（含全角逗号与不间断空格）、括号负数 `(500)`、
-/// 尾部负号 `800-`、`CR`／`DR` 后缀、中文「借」「贷」后缀。
+/// 尾部负号 `800-`、`CR`／`DR` 后缀、中文「借」「贷」后缀，以及公共币种
+/// 词典认得的三字母币种前／后缀（`CNY2,940.58`、`1,234.56 USD`）。
+/// 币种装饰只读取原数，不换算、归并币种；未知代码与夹杂文本仍严格报错。
 ///
 /// 此前看账那份只去引号和千分位、失败一律返回 0——`(500)`、`1,234CR` 全都
 /// 静默变成 0，金额无声无息地丢掉。能力沉到这里之后三个工具共用同一套。
@@ -6075,35 +6189,59 @@ pub(crate) fn parse_amount(raw: &str) -> Result<Option<f64>, String> {
     if s.is_empty() || is_placeholder(&s) {
         return Ok(None);
     }
+    let invalid = || format!("无法解析数值：{raw}");
     let mut sign = 1.0;
-    if s.starts_with('(') && s.ends_with(')') {
-        sign = -1.0;
-        s = s[1..s.len() - 1].to_owned();
+    let (mut currency, mut brackets, mut leading_sign, mut trailing_sign, mut direction) =
+        (false, false, false, false, false);
+    // 装饰只从完整数值的边界逐层读取，不能从任意文本中抽取数字。
+    // 各类装饰最多出现一次；CNY100USD、重复CR、嵌套括号均不能被洗成金额。
+    loop {
+        let known_code = |token: &str| {
+            token.len() == 3
+                && token.bytes().all(|byte| byte.is_ascii_alphabetic())
+                && normalize_currency_code(token).is_some()
+        };
+        if s.get(..3).is_some_and(known_code) {
+            if currency { return Err(invalid()); }
+            currency = true;
+            s.drain(..3);
+        } else if s.len() >= 3 && s.get(s.len() - 3..).is_some_and(known_code) {
+            if currency { return Err(invalid()); }
+            currency = true;
+            s.truncate(s.len() - 3);
+        } else if s.starts_with('(') && s.ends_with(')') {
+            if brackets { return Err(invalid()); }
+            brackets = true;
+            sign *= -1.0;
+            s = s[1..s.len() - 1].to_owned();
+        } else if s.starts_with(['-', '+']) {
+            if leading_sign { return Err(invalid()); }
+            leading_sign = true;
+            if s.starts_with('-') { sign *= -1.0; }
+            s.remove(0);
+        } else if s.ends_with('-') {
+            if trailing_sign { return Err(invalid()); }
+            trailing_sign = true;
+            sign *= -1.0;
+            s.pop();
+        } else {
+            let upper = s.to_ascii_uppercase();
+            let suffix = if upper.ends_with("CR") { Some((2, true)) }
+                else if upper.ends_with("DR") { Some((2, false)) }
+                else if s.ends_with('贷') { Some(('贷'.len_utf8(), true)) }
+                else if s.ends_with('借') { Some(('借'.len_utf8(), false)) }
+                else { None };
+            if let Some((bytes, credit)) = suffix {
+                if direction { return Err(invalid()); }
+                direction = true;
+                if credit { sign *= -1.0; }
+                s.truncate(s.len() - bytes);
+            } else { break; }
+        }
     }
-    if s.ends_with('-') {
-        sign *= -1.0;
-        s.pop();
-    }
-    let upper = s.to_ascii_uppercase();
-    if upper.ends_with("CR") {
-        sign *= -1.0;
-        s.truncate(s.len() - 2);
-    } else if upper.ends_with("DR") {
-        s.truncate(s.len() - 2);
-    }
-    if s.ends_with('贷') {
-        sign *= -1.0;
-        s.pop();
-    } else if s.ends_with('借') {
-        s.pop();
-    }
-    if s.trim().is_empty() {
-        return Ok(None);
-    }
-    s.trim()
-        .parse::<f64>()
-        .map(|v| Some(sign * v))
-        .map_err(|_| format!("无法解析数值：{raw}"))
+    let value = s.parse::<f64>().map_err(|_| invalid())?;
+    if !value.is_finite() { return Err(invalid()); }
+    Ok(Some(sign * value))
 }
 
 /// 更宽松的金额读取：先剥掉 [`parse_amount`] 不认的写法，再走同一套解析。
@@ -6123,13 +6261,8 @@ pub(crate) fn parse_amount_lenient(raw: &str) -> Option<f64> {
         .chars()
         .filter(|c| !matches!(c, '%' | '$' | '¥' | '￥'))
         .collect();
-    let s = stripped.trim();
-    let s = if s.starts_with('(') && s.ends_with(')') && s.len() >= 2 {
-        format!("-{}", &s[1..s.len() - 1])
-    } else {
-        s.to_owned()
-    };
-    parse_amount(&s).ok().flatten()
+    // 括号与符号组合统一交给严格语法，避免预转换把嵌套括号洗成双重负号。
+    parse_amount(stripped.trim()).ok().flatten()
 }
 
 /// 把单元格文本读成日期。
@@ -13210,6 +13343,135 @@ mod tests {
         assert!(!is_rollup_label("试剂耗材合计"));
     }
 
+    /// HK分组表头的完整角色及误识别反例。
+    #[test]
+    fn grouped_amount_header_hk_layout_and_negative_cases() {
+        let mut headers = vec!["科目编码".to_owned(), "科目名称".to_owned()];
+        let mut expected = Vec::new();
+        for (scope, prefix) in [
+            ("期初余额", "opening"),
+            ("本期发生", "period"),
+            ("本年累计", "ytd"),
+            ("期末余额", "closing"),
+        ] {
+            for (currency, currency_role) in [("原币", "Foreign"), ("本位币", "Functional")] {
+                for (side, side_role) in [("借", "Debit"), ("贷", "Credit")] {
+                    let role = format!("{prefix}{currency_role}{side_role}");
+                    let header = format!("{scope}-{currency}({side})");
+                    if role_of("tb", &role).is_some() {
+                        assert!(
+                            alias_score(role_of("tb", &role).unwrap(), &header).is_some(),
+                            "{role}: {header}"
+                        );
+                        expected.push((headers.len(), role));
+                    }
+                    headers.push(header);
+                }
+            }
+        }
+        let mapped = suggest_roles("tb", &headers);
+        for (index, role) in expected {
+            assert_eq!(
+                mapped.get(&index).copied(),
+                Some(role.as_str()),
+                "{}",
+                headers[index]
+            );
+        }
+        let roles = mapped.values().copied().collect::<HashSet<_>>();
+        let FormVerdict::Matched(form) = resolve_form("tb", &roles) else {
+            panic!("HK 应完整命中");
+        };
+        assert_eq!(form.form, "TB6");
+        for (header, role) in [
+            ("期初余额（本位币）（借方）", "openingFunctionalDebit"),
+            ("期末餘額\n原幣（貸）", "closingForeignCredit"),
+            ("本年累计-贷方-本币", "ytdFunctionalCredit"),
+            ("本位币(借)", "functionalDebit"),
+        ] {
+            let kind = if role == "functionalDebit" {
+                "je"
+            } else {
+                "tb"
+            };
+            assert!(
+                alias_score(role_of(kind, role).unwrap(), header).is_some(),
+                "{header}"
+            );
+        }
+        for header in ["期初余额-本位币(借)", "期末余额-原币(贷)"] {
+            let role = if header.starts_with("期初") {
+                "openingFunctionalAmount"
+            } else {
+                "closingForeignAmount"
+            };
+            assert!(
+                alias_score(role_of("tb", role).unwrap(), header).is_none(),
+                "单侧不得当净额：{header}"
+            );
+        }
+        for header in [
+            "借款本金",
+            "期初余额-本位币借贷",
+            "期末余额-集团货币(借)",
+            "对方科目-原币(贷)",
+            "本期发生-本位币(借)",
+        ] {
+            assert!(
+                alias_score(role_of("tb", "ytdFunctionalDebit").unwrap(), header).is_none(),
+                "不得误作累计：{header}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires CURRENCY_ROLLUP_SAMPLE_DIR pointing to the original 10月TBJE directory"]
+    fn grouped_amount_header_original_hk_automatic_inspection() {
+        let root = std::path::PathBuf::from(std::env::var("CURRENCY_ROLLUP_SAMPLE_DIR").unwrap());
+        let source = serde_json::json!({"inputPath":root.join("TB 202501-202512/TB 202501-202512/科目余额表_HK.xlsx")});
+        for method in ["fx.inspect_tb", "deposit.inspect_tb"] {
+            let params = serde_json::json!({"source":source});
+            let result = if method.starts_with("fx.") {
+                crate::fx::call(method, params)
+            } else {
+                crate::deposit_interest::call(method, params)
+            }
+            .unwrap();
+            assert_eq!(result["headerRow"], 2, "{method}");
+            assert_eq!(result["headerDepth"], 2, "{method}");
+            let mapping = result["suggestedMapping"].as_object().unwrap();
+            for (role, column) in [
+                ("openingFunctionalDebit", "期初余额-本位币(借)"),
+                ("openingFunctionalCredit", "期初余额-本位币(贷)"),
+                ("closingFunctionalDebit", "期末余额-本位币(借)"),
+                ("closingFunctionalCredit", "期末余额-本位币(贷)"),
+                ("openingForeignDebit", "期初余额-原币(借)"),
+                ("openingForeignCredit", "期初余额-原币(贷)"),
+                ("closingForeignDebit", "期末余额-原币(借)"),
+                ("closingForeignCredit", "期末余额-原币(贷)"),
+                ("ytdFunctionalDebit", "本年累计-本位币(借)"),
+                ("ytdFunctionalCredit", "本年累计-本位币(贷)"),
+                ("ytdForeignDebit", "本年累计-原币(借)"),
+                ("ytdForeignCredit", "本年累计-原币(贷)"),
+            ] {
+                assert_eq!(
+                    mapping.get(role).and_then(Value::as_str),
+                    Some(column),
+                    "{method}: {role}"
+                );
+            }
+            let mapped = mapping
+                .iter()
+                .filter(|(_, value)| !value.is_null())
+                .map(|(role, _)| role.as_str())
+                .collect::<HashSet<_>>();
+            let FormVerdict::Matched(form) = resolve_form("tb", &mapped) else {
+                panic!("{method} 应完整命中");
+            };
+            assert_eq!(form.form, "TB6");
+        }
+    }
+
     /// 某个角色被判到了哪几列。
     fn 落在(kind: &str, headers: &[&str], role: &str) -> Vec<String> {
         let headers: Vec<String> = headers.iter().map(|h| (*h).to_string()).collect();
@@ -14058,11 +14320,10 @@ mod tests {
                 "135".into(),
                 "".into(),
             ],
-            // 合并单元格的续行：日期在、科目空。分析判噪声，但带身份，
-            // 填充掩码必须放行，否则真实分录会被整片丢掉。
+            // 合并单元格续行：日期与凭证号均有效，科目空，允许补齐。
             vec![
                 "2024/1/31".into(),
-                "".into(),
+                "记1".into(),
                 "报销".into(),
                 "".into(),
                 "".into(),
@@ -14956,6 +15217,61 @@ mod tests {
         }
         // 真读不出来才报错，交给调用方决定是中断还是按 0 继续。
         assert!(parse_amount("待补").is_err());
+    }
+
+    #[test]
+    fn 金额解析支持已知币种边界及借贷负号组合() {
+        for (raw, expected) in [
+            ("CNY2,940.58", 2940.58),
+            ("USD 1,234.56", 1234.56),
+            ("1,234.56 USD", 1234.56),
+            ("\"cny 2，940.58\"", 2940.58),
+            ("-CNY2,940.58", -2940.58),
+            ("CNY-2,940.58", -2940.58),
+            ("CNY2,940.58-", -2940.58),
+            ("2,940.58-CNY", -2940.58),
+            ("CNY(2,940.58)", -2940.58),
+            ("(CNY2,940.58)", -2940.58),
+            ("(2,940.58)CNY", -2940.58),
+            ("USD2,940.58CR", -2940.58),
+            ("2,940.58CRUSD", -2940.58),
+            ("USD2,940.58DR", 2940.58),
+            ("2,940.58借USD", 2940.58),
+            ("CNY2,940.58贷", -2940.58),
+            // 红字在原借贷侧冲减：沿用已有符号乘积，不凭币种推断业务方向。
+            ("USD-100CR", 100.0),
+            ("(USD100)CR", 100.0),
+            ("HKD1.25e3", 1250.0),
+            ("+1.25e-3EUR", 0.00125),
+            ("USD0.00", 0.0),
+            ("RMB1", 1.0),
+            ("NTD1", 1.0),
+        ] {
+            assert_eq!(parse_amount(raw).unwrap(), Some(expected), "{raw}");
+            assert_eq!(parse_amount_lenient(raw), Some(expected), "宽松入口 {raw}");
+        }
+        // 覆盖公共币种词典的全部规范代码，非仅对 CNY/USD 写特例。
+        for code in ["CNY", "USD", "HKD", "EUR", "JPY", "GBP", "AUD", "CAD", "SGD",
+            "CHF", "KRW", "TWD", "MOP", "NZD", "THB", "MYR", "RUB", "INR", "SEK",
+            "NOK", "DKK", "ZAR", "BRL", "AED", "VND", "IDR"] {
+            assert!(normalize_currency_code(code).is_some());
+            assert_eq!(parse_amount(&format!("{code}1,234.50")).unwrap(), Some(1234.5));
+            assert_eq!(parse_amount(&format!("1,234.50{code}")).unwrap(), Some(1234.5));
+        }
+    }
+
+    #[test]
+    fn 金额解析不从未知代码或脏文本抽取数字() {
+        for raw in ["ABC2,940.58", "CNY2,940.58待核", "金额CNY2,940.58", "CNY12x34",
+            "100CNY200", "CNY100USD", "CNYUSD100", "CNY100CNY", "CNY", "CNY-",
+            "CNYN/A", "CNY(无)", "CNY100CRDR", "CNY100CR贷", "((CNY100))", "--CNY100",
+            "CNYNaN", "CNYinf", "CNY1e999", "NaN", "inf", "-inf"] {
+            assert!(parse_amount(raw).is_err(), "坏值不得静默成为金额或空值：{raw}");
+            assert_eq!(parse_amount_lenient(raw), None, "{raw}");
+        }
+        // 百分号仍仅属于原有宽松利率入口，严格金额入口不吞掉量纲。
+        assert!(parse_amount("CNY3.5%").is_err());
+        assert_eq!(parse_amount_lenient("CNY3.5%"), Some(3.5));
     }
 
     #[test]

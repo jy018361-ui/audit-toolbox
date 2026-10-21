@@ -1,5 +1,22 @@
 # 借款利息台账确认口径
 
+## 2026-10-21：台账表头物理位置与首条本金保护
+
+借款与利率台账普通 Excel 读取恢复顶部空行及左侧空列，与预览／磁盘路径保持同一物理坐标；确认第 4 行表头后重读不会偏移到正文。公共双层判据阻止带实际金额或日期的第一笔数据被银行／编号／备注关键词吞作下层表头。借款结果快照引用公共表头规则版本，旧结果不复用；本金、利率及计息公式不改。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest::`，包含普通／磁盘预览、两种台账确认重读和原双层正例。
+
+## 2026-10-20：人工辅助与JE续行公共修复
+
+人工辅助／借款明细列不因JE关联失败被清空，自动候选仍须完整验证；不强制进入跨表键。普通缺科目续行继承使用日期、凭证号、金额AND条件并排除明确合计，借款结果缓存引用公共JE正文版本。本金计息和利率规则保持。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest::`；`npx vitest run src/LoanInterestPageUi.test.tsx src/ledgerMappingAuxiliary.test.ts`。
+
+## 2026-10-20：同时上传 TB＋JE 不因空白 Sheet 丢失 TB
+
+- 公共逐 Sheet 上传分类仅忽略明确的 `SOURCE_EMPTY`，保留同工作簿中的有效 TB 并继续扫描。整本为空或其他读取错误仍报告；借款本金、计息和单侧补传规则不变。详细原因与共用范围见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目。
+- 回归：`npx vitest run src/ledgerWorkbookSheets.test.ts src/LoanInterestPageUi.test.tsx`，覆盖含有效 `Sheet1` 与空白 `Sheet2` 的 TB 和独立 JE 同时上传，两侧识别卡均保留且不再提示整份 TB 无数据。
+
+## 2026-10-20：公共币种代码金额兼容
+
+公共金额解析支持已知币种代码前后缀及原有负数/借贷标记，拒绝未知代码和脏文本，不换算币种；本金与账面费用结果缓存纳入独立金额规则版本。范围及回归命令见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目。
+
 ## 2026-10-19：公共TB结构规则接入核查
 
 TB消费者统一调用公共结构引擎，结果缓存统一引用公共结构版本；JE正文不套用TB汇总剔除。适用入口、缓存与回归命令见 `LEDGER_MAPPING_UNIFICATION.md` 同日「各工具统一引用TB结构规则版本」。

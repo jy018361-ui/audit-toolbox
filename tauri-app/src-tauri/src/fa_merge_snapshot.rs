@@ -90,7 +90,7 @@ fn hash_text(text: &str) -> String {
 fn pair_key(params: &Value) -> Option<String> {
     let begin = file_identity(Path::new(params.get("beginPath")?.as_str()?))?;
     let end = file_identity(Path::new(params.get("endPath")?.as_str()?))?;
-    Some(hash_text(&format!("fa-merge-v2-physicalrows\n{begin}\n{end}")))
+    Some(hash_text(&format!("fa-merge-v2-physicalrows\n{}\n{begin}\n{end}", crate::header_detection::RULE_VERSION)))
 }
 
 /// 主文件合并参数指纹；第二步补充清单不改变两期清单的匹配结果。

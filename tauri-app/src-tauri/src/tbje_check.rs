@@ -1410,7 +1410,7 @@ fn hash_text(text: &str) -> String {
 /// 修改时间。指纹一致即认定「输入与上次核对时相同」，导出直接复用已落盘
 /// 的核对结果；任一项变化指纹即变，自然回落到现行重算并刷新快照。
 fn check_result_fingerprint(params: &Value) -> Option<String> {
-    let mut material = format!("tbje-{}\n", ledger_mapping::TB_STRUCTURE_RULE_VERSION);
+    let mut material = format!("tbje-export-v2-{}-{}-{}\n", ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, ledger_mapping::JE_BODY_RULE_VERSION);
     for field in CHECK_PARAM_FIELDS {
         match params.get(*field) {
             Some(value) => {
@@ -1897,7 +1897,7 @@ fn write_rollforward_sheet(
                     output_row,
                     diff_col + 1,
                     Formula::new(format!(
-                        "IF(ABS({diff_l}{excel_row})<=MAX($B$3,MAX(ABS({open_l}{excel_row}),ABS({derived_l}{excel_row}),ABS({close_l}{excel_row}))*1E-8)),\"通过\",\"差异\")"
+                        "IF(ABS({diff_l}{excel_row})<=MAX($B$3,MAX(ABS({open_l}{excel_row}),ABS({derived_l}{excel_row}),ABS({close_l}{excel_row}))*1E-8),\"通过\",\"差异\")"
                     ))
                     .set_result(verdict),
                     &formula_text_format(),

@@ -56,6 +56,42 @@ it("批量核对仅对完整组合生成自动复核身份，替换任一文件�
 });
 
 describe("TbjeCheckPage", () => {
+  it.each([false, true])("辅助联动失败后仅保留手选映射，核对导出及返回第二步一致（人工：%s）", async (manual) => {
+    const { engineCall, jobStart, listenJobEvents, pickPath } = await import("./api");
+    vi.mocked(pickPath).mockResolvedValueOnce(["C:/samples/01TB.xlsx", "C:/samples/01JE.xlsx"]).mockResolvedValueOnce("C:/exports");
+    vi.mocked(engineCall).mockImplementation(async (method, params) => {
+      if (method === "ledger.forms") return [];
+      if (method === "ledger.review_pair_mapping") return { tbChanges: [], jeChanges: [] };
+      if (method === "ledger.check_mapping_alignment") return { aligned: true };
+      if (method === "ledger.auxiliary_link") return { tbAuxMapped: true, status: "noMatch", warnings: [] };
+      const tb = String((params as {source:{inputPath:string}}).source.inputPath).includes("TB");
+      if (method === "deposit.classify_source") return { kind: tb ? "tb" : "je", sheet: "Sheet1", headerRow: 1, headerDepth: 1 };
+      return { sheet: "Sheet1", sheets: ["Sheet1"], headerRow: 1, headerDepth: 1, rowCount: 1,
+        headers: ["科目编码", "核算维度编码"], preview: [["1002", "BANK-A"]],
+        suggestedMapping: { accountCode: "科目编码", ...(tb ? {auxiliary:["核算维度编码"]} : {}) } };
+    });
+    let emit: ((e: never) => void) | undefined;
+    vi.mocked(listenJobEvents).mockImplementation(async cb => { emit = cb as typeof emit; return () => {}; });
+    const { container } = render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", {name:/把多组 TB 与 JE 一起拖进来/}));
+    await screen.findByText("01TB.xlsx");
+    fireEvent.click(screen.getAllByText("查看字段映射")[0]);
+    const select = () => screen.getByLabelText("将「核算维度编码」映射为字段");
+    if (manual) fireEvent.change(select(), {target:{value:"auxiliary"}});
+    fireEvent.click(screen.getByRole("button", {name:"开始核对 1 组"}));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("tbje_check.run_batch", expect.anything()));
+    const run = vi.mocked(jobStart).mock.calls.find(c => c[0] === "tbje_check.run_batch")![1] as {groups:{tbMapping:Record<string,unknown>}[]};
+    expect(run.groups[0].tbMapping.auxiliary).toEqual(manual ? ["核算维度编码"] : undefined);
+    act(() => emit?.({jobId:"job-1", toolId:"tbje_check", phase:"completed", current:1,total:1,message:"完成",severity:"success",outputPaths:[], result:{groups:[{label:"1",ok:true,result:{rollforward:{performed:true,passed:true},tbVsJe:{performed:true,passed:true},equation:{performed:true,passed:true}}}]}} as never));
+    fireEvent.click(await screen.findByRole("button", {name:"导出全部结果"}));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("tbje_check.export_batch", expect.anything()));
+    const exported = vi.mocked(jobStart).mock.calls.find(c => c[0] === "tbje_check.export_batch")![1] as typeof run;
+    expect(exported.groups[0].tbMapping).toEqual(run.groups[0].tbMapping);
+    act(() => emit?.({jobId:"job-1",toolId:"tbje_check",phase:"completed",current:1,total:1,message:"导出完成",severity:"success",outputPaths:[],result:{outputDirectory:"C:/exports"}} as never));
+    const steps = container.querySelector(".step-indicator") as HTMLElement;
+    fireEvent.click(within(steps).getByRole("button", {name:/确认配对/}));
+    expect(select()).toHaveValue(manual ? "auxiliary" : "");
+  });
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();

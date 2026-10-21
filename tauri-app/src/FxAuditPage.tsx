@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { recordManualLedgerMapping } from "./manualLedgerMapping";
 import type { ToolManifest, JobEvent } from "./types";
 import { useTaskRestore } from "./restore";
 import {
@@ -1873,13 +1874,13 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
         }
       }
       const hiddenText = scan.hiddenSheets
-        ? `；另有 ${scan.hiddenSheets} 张低置信度 Sheet 已忽略`
+        ? `；另有 ${scan.hiddenSheets} 张空白或低置信度 Sheet 已忽略`
         : "";
       setSourceStatus(
         scan.llmFallbacks
           ? `智能复核不可用，已保留本机识别结果${hiddenText}。`
           : scan.hiddenSheets
-            ? `${scan.hiddenSheets} 张低置信度 Sheet 已忽略，请核对已选工作表。`
+            ? `${scan.hiddenSheets} 张空白或低置信度 Sheet 已忽略，请核对已选工作表。`
             : "",
       );
       if (failures.length) setError(failures.join("；"));
@@ -3635,9 +3636,9 @@ function FxPreview(props: {
       })
       .map(([role]) => role);
   const attach = (header: string, role: string) =>
-    props.onMappingChange((current) => fxAttachRole(current, header, role));
+    props.onMappingChange((current) => recordManualLedgerMapping(current, fxAttachRole(current, header, role), header, role));
   const detach = (header: string, role: string) =>
-    props.onMappingChange((current) => fxDetachRole(current, header, role));
+    props.onMappingChange((current) => recordManualLedgerMapping(current, fxDetachRole(current, header, role), header, role));
   const usedRoles = new Set(
     roles
       .filter(([role]) => {

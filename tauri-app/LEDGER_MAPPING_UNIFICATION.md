@@ -1,5 +1,32 @@
 # 账表映射统一方案
 
+## 2026-10-20：人工辅助保留与JE续行AND门禁
+
+- 共用面板逐列保存人工辅助确认（`__manualAuxiliary`，随映射和任务恢复保存）。自动识别／自动LLM建议不取得人工确认，自动辅助仍须完整JE联动验证；失败时仅保留明确手选的列。五个TB／JE工具共用此规则。跨表值域协调不得改写人工TB辅助列，实际辅助匹配仍按原完整验证决定，无法关联时退回主体＋科目，不强制拼辅助键。
+- 普通JE缺科目续行只有原始行的有效日期、完整凭证识别字段、可解析金额同时具备才允许继承科目。已具编码或名称的业务行保留原上下文规则；显式合计／小计／页脚不得接收传播填充值或被后置过滤重新放行。分段明细账已验证期初锚点归一化保持。内存与磁盘共用条件，金额零有效。
+- 新增公共`JE_BODY_RULE_VERSION`，规范JE磁盘缓存及TBJE、汇兑、存款、借款、FA结果指纹引用；TB结构金额验证、自动辅助成功标准及核对结论不变，不新增固定资产类别提示。
+- 回归：`npx vitest run src/ledgerMappingAuxiliary.test.ts src/components/MappingPanel.test.tsx src/TbjeCheckPage.test.tsx`；`cargo test --manifest-path src-tauri/Cargo.toml --lib`。真实两套原件的worker复核另记本轮验收报告。
+
+## 2026-10-20：批量上传的空白 Sheet 隔离
+
+- 公共前端 `classifyLedgerWorkbookSheets` 在默认正表识别成功后，逐张指定 Sheet 时只跳过 Rust 明确返回的 `SOURCE_EMPTY`，不再让空白页撤销整本已取得的有效结果；继续读取后续有效页。`scanLedgerUploadSources` 将这些空白页计入已忽略工作表，五个 TB/JE 工具共用此入口。
+- 默认读取整本为空、读取失败、取消及仅有同文案而无明确错误码的异常仍向上传递。不改 Rust 读表、字段映射、配对顺序及金额规则。
+- 原件排查：`10月TBJE/新建文件夹/20251231科目余额表.xlsx` 的 `Sheet1` 有数据、`Sheet2` 为空；批量入口逐 Sheet 扫描会在后者报错，单侧补传自动选中前者因此正常。
+- 回归：`npx vitest run src/ledgerWorkbookSheets.test.ts src/LoanInterestPageUi.test.tsx`；`npm run build`。
+
+## 2026-10-20：拆分金额表头与当前类型优先纠正
+
+- 公共 `alias_score` 增加完整结构正则，识别「期初余额-本位币(借)」「本年累计-原币(贷)」等时点／币种／借贷组合，支持借贷简称、全角括号、换行、繁体及币种与借贷顺序交换。仍先执行角色冲突词和集团货币排除；本期不冒充累计、单侧借贷不冒充净额，不修改金额与勾稽规则。
+- LLM 第一阶段继续只使用当前类型的角色，优先补齐缺失字段。仅未完整识别时提供独立 `formFallback` 备选；模型必须逐项报告原缺失角色的查找结果，仍无可信候选才可提交独立的整组 `formCorrection`。单表、TB＋JE联合及看账共用条件校验，正常建议不能越过原类型边界。
+- 纠正计划经过既有列名／角色／币种／占用校验后还须完整成立，全部建议高于75%且金额有可解析样例；无证据、原类型已补齐、目标类型不完整、工具未启用角色、低置信或需人工确认的清除均不自动换型。完整类型不开放此出口，原有语义错配复核仍保留。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib grouped_amount_header`、`--lib form_fallback`、`--lib audipick::`、`--lib ledger_mapping::`。原始HK自动识别以 `CURRENCY_ROLLUP_SAMPLE_DIR` 指向 `10月TBJE` 后运行 `--lib grouped_amount_header_original_hk_automatic_inspection -- --ignored --nocapture`，不传手工映射，验证两层表头、余额／累计字段及TB类型F。
+
+## 2026-10-20：已知币种代码金额文本兼容
+
+- 公共 `parse_amount` 复用 `normalize_currency_code` 词典，支持三字母已知币种代码前后缀（如 `CNY2,940.58`、`1,234.56 USD`、RMB/NTD别名）与既有负号、括号、CR/DR、借贷后缀组合。仅读取原数，不换算、不合并币种；未知代码、多个币种、夹杂业务文字、缺少数值及非有限值严格拒绝，禁止抽取脏文本里的数字。
+- 新增独立 `AMOUNT_PARSE_RULE_VERSION`，TBJE、汇兑、存款、借款本金与账面费用、FA结果快照和看账/正负数的规范凭证磁盘缓存纳入版本，避免复用旧解析结果；只保存原始文本的表缓存不失效。父子结构和TBJE期间选择规则不改。宽松利率入口继续复用此解析器及既有百分号语义。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 金额解析`、`--lib currency_amount_disk_cache`、`--lib ledger_mapping::`；TBJE入口的带币种文本与纯数字对照覆盖普通与磁盘路径。
+
 ## 2026-10-19：各工具统一引用TB结构规则版本
 
 - TB父子结构实现继续唯一维护于公共 `ledger_mapping::structured_tb`；普通读取由 `tb_leaf_mask` / `tb_classification_analysis` 进入，大文件由 `disk_tb::analyze` 进入，两条路径共享判据。

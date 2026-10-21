@@ -2490,6 +2490,7 @@ fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
             physical_rows,
         )
     };
+    crate::header_detection::require_tabular(&all, spec.header_row == 0)?;
     let (header_index, inferred_depth) = crate::header_detection::layout(
         &all,
         30,

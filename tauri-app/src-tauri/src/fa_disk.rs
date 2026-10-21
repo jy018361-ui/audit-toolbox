@@ -50,6 +50,7 @@ pub(crate) fn load_input(
     if crate::spreadsheet_input::is_text(path) {
         sheets.clear();
     }
+    crate::header_detection::require_tabular(&prefix, header.is_none())?;
     let hi = header
         .map(|row| row.saturating_sub(1))
         .unwrap_or_else(|| detect_header(&prefix));

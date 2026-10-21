@@ -1609,37 +1609,75 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
     let external = !inputs.iter().any(|path| path == &template_path);
 
     let header_detection_json = |detection: &Option<crate::excel_header_match::HeaderDetection>,
-                                 fallback_row: usize|
+                                 fallback_row: usize, confirmed_empty: bool|
      -> Value {
         match detection {
             Some(detection) => json!({
+                "kind": detection.kind,
                 "headerRow": detection.header_row,
                 "headerRowsCount": detection.header_rows_count,
                 "confidence": detection.confidence,
                 "needsReview": detection.needs_review,
             }),
             None => json!({
+                "kind": if confirmed_empty { "empty" } else { "uncertain" },
                 "headerRow": fallback_row,
                 "headerRowsCount": 1,
                 "confidence": 0.0,
-                "needsReview": true,
+                "needsReview": !confirmed_empty,
             }),
         }
     };
 
-    let (template_rows, template_headers, template_detection) = if external {
-        let (rows, merges) = read_sheet_preview_rows(&template_path, None, PREVIEW_ROWS)?;
-        let detection = detect_header_with_merges(&display_rows(&rows), &merges);
-        let headers = flattened_headers(&rows, &detection);
-        (rows, headers, detection)
+    // 基准由文件 + Sheet 唯一确定；显式选表必须精确读取，不能回退首表。
+    let requested_sheet = params
+        .get("templateSheet")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty());
+    let mut template_sheet = if is_text(&template_path) {
+        if requested_sheet.is_some_and(|name| name != "CSV") {
+            return Err(error("SHEET_READ_FAILED", "文本文件仅支持 CSV 工作表。", None));
+        }
+        "CSV".to_string()
     } else {
-        let first_sheet = first_target_sheet(&template_path, &probe);
-        let (rows, merges) =
-            read_sheet_preview_rows(&template_path, first_sheet.as_deref(), PREVIEW_ROWS)?;
-        let detection = detect_header_with_merges(&display_rows(&rows), &merges);
-        let headers = flattened_headers(&rows, &detection);
-        (rows, headers, detection)
+        let workbook = open_workbook_auto(&template_path).map_err(|err| {
+            error("WORKBOOK_READ_FAILED", &format!("无法读取基准工作簿：{err}"), None)
+        })?;
+        let names = workbook.sheet_names();
+        match requested_sheet {
+            Some(name) if names.iter().any(|sheet| sheet == name) => name.to_string(),
+            Some(name) => return Err(error(
+                "SHEET_READ_FAILED",
+                &format!("基准工作簿中未找到工作表「{name}」，请重新选择。"),
+                Some(template_path.display().to_string()),
+            )),
+            None => {
+                let candidates = if external { names } else { target_sheet_names(&names, &probe) };
+                candidates.first().cloned().ok_or_else(|| error(
+                    "MERGER_NO_TARGET_SHEET", "基准工作簿中没有符合条件的工作表。", None,
+                ))?
+            }
+        }
     };
+    let (mut template_rows, mut template_merges) =
+        read_sheet_preview_rows(&template_path, Some(&template_sheet), PREVIEW_ROWS)?;
+    if requested_sheet.is_none() && !is_text(&template_path)
+        && detect_header_with_merges(&display_rows(&template_rows), &template_merges)
+            .is_none_or(|d| d.header_rows_count == 0) {
+        let book = open_workbook_auto(&template_path).map_err(|e| error("WORKBOOK_READ_FAILED", &e.to_string(), None))?;
+        let candidates = if external { book.sheet_names() } else { target_sheet_names(&book.sheet_names(), &probe) };
+        for name in candidates {
+            let (rows, merges) = read_sheet_preview_rows(&template_path, Some(&name), PREVIEW_ROWS)?;
+            if detect_header_with_merges(&display_rows(&rows), &merges).is_some_and(|d| d.header_rows_count > 0) {
+                template_sheet = name; template_rows = rows; template_merges = merges; break;
+            }
+        }
+    }
+    let template_detection = detect_header_with_merges(&display_rows(&template_rows), &template_merges);
+    if template_detection.as_ref().is_some_and(|d| d.header_rows_count == 0) {
+        return Err(error("HEADER_TEMPLATE_UNREADABLE", "该工作表是参数／说明页，没有常规表头。请选择数据表作为基准。", None));
+    }
+    let template_headers = flattened_headers(&template_rows, &template_detection);
     if template_headers
         .iter()
         .all(|header| header.trim().is_empty())
@@ -1676,11 +1714,15 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
                 .take(DATA_PREVIEW_ROWS)
                 .map(|row| row.iter().map(Cell::display).collect::<Vec<_>>())
                 .collect::<Vec<_>>();
-            let matches = match_columns(&template_headers, &headers, &aliases);
+            let matches = if detection.as_ref().is_some_and(|d| d.header_rows_count == 0) {
+                headers.iter().map(|_| crate::excel_header_match::ColumnMatch {
+                    target: None, confidence: 0.0, reason: "无常规表头，从首行原样保留".into(),
+                }).collect()
+            } else { match_columns(&template_headers, &headers, &aliases) };
             file_rows.push(json!({
                 "path": path.to_string_lossy(), "name": name, "sheet": "CSV",
                 "headers": headers,
-                "detection": header_detection_json(&detection, 0),
+                "detection": header_detection_json(&detection, 0, rows.is_empty()),
                 "matches": matches,
                 "preview": preview,
                 "rawRows": raw_rows_json(&rows),
@@ -1719,11 +1761,15 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
                 .take(DATA_PREVIEW_ROWS)
                 .map(|row| row.iter().map(Cell::display).collect::<Vec<_>>())
                 .collect::<Vec<_>>();
-            let matches = match_columns(&template_headers, &headers, &aliases);
+            let matches = if detection.as_ref().is_some_and(|d| d.header_rows_count == 0) {
+                headers.iter().map(|_| crate::excel_header_match::ColumnMatch {
+                    target: None, confidence: 0.0, reason: "无常规表头，从首行原样保留".into(),
+                }).collect()
+            } else { match_columns(&template_headers, &headers, &aliases) };
             file_rows.push(json!({
                 "path": path.to_string_lossy(), "name": name, "sheet": sheet,
                 "headers": headers,
-                "detection": header_detection_json(&detection, 0),
+                "detection": header_detection_json(&detection, 0, rows.is_empty()),
                 "matches": matches,
                 "preview": preview,
                 "rawRows": raw_rows_json(&rows),
@@ -1736,8 +1782,9 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
         "template": {
             "path": template_path.to_string_lossy(),
             "name": file_name(&template_path),
+            "sheet": template_sheet,
             "headers": template_headers,
-            "detection": header_detection_json(&template_detection, 0),
+            "detection": header_detection_json(&template_detection, 0, template_rows.is_empty()),
             "external": external,
             "rawRows": raw_rows_json(&template_rows),
         },
@@ -1821,16 +1868,6 @@ fn merge_regions(
         .collect()
 }
 
-fn first_target_sheet(path: &Path, probe: &MergeParams) -> Option<String> {
-    if is_text(path) {
-        return None;
-    }
-    let workbook = open_workbook_auto(path).ok()?;
-    target_sheet_names(&workbook.sheet_names(), probe)
-        .first()
-        .cloned()
-}
-
 fn display_rows(rows: &[Vec<Cell>]) -> Vec<Vec<String>> {
     rows.iter()
         .map(|row| row.iter().map(Cell::display).collect())
@@ -1846,6 +1883,10 @@ fn flattened_headers(
         return Vec::new();
     };
     let as_strings = |row: &[Cell]| -> Vec<String> { row.iter().map(Cell::display).collect() };
+    if detection.header_rows_count == 0 {
+        return (0..rows.iter().map(Vec::len).max().unwrap_or(0))
+            .map(|i| format!("原样列{}", i + 1)).collect();
+    }
     if detection.header_rows_count >= 2 {
         let first = rows
             .get(detection.header_row)
@@ -2007,7 +2048,7 @@ fn write_vertical_xlsx_stream(
                     if let (Some(layout), Some(assignment), Some(pos)) =
                         (matched.as_ref(), assignment, assignment_pos)
                     {
-                        reorder_matched_row(&mut reorder_buffer, &row, assignment, pos, layout);
+                        reorder_matched_row(&mut reorder_buffer, &row, assignment, pos, layout)?;
                         write_matched_vertical_row(
                             &mut workbook,
                             &mut worksheet,
@@ -2110,7 +2151,7 @@ fn write_vertical_xlsx_stream(
                 if let (Some(layout), Some(assignment), Some(pos)) =
                     (matched.as_ref(), assignment, assignment_pos)
                 {
-                    reorder_matched_row(&mut reorder_buffer, &cells, assignment, pos, layout);
+                    reorder_matched_row(&mut reorder_buffer, &cells, assignment, pos, layout)?;
                     write_matched_vertical_row(
                         &mut workbook,
                         &mut worksheet,
@@ -2187,6 +2228,8 @@ fn verify_current_headers(
     sheet: &str,
     assignment: &crate::excel_header_match::FileAssignment,
 ) -> Result<(), AppError> {
+    // 无表头页从首行保留，不能拿占位列名去和参数内容复核。
+    if assignment.header_rows_count == 0 { return Ok(()); }
     let flattened = if assignment.header_rows_count >= 2 {
         crate::excel_header_match::flatten_two_layer(
             current_rows.first().map(Vec::as_slice).unwrap_or(&[]),
@@ -2375,7 +2418,13 @@ fn reorder_matched_row(
     assignment: &crate::excel_header_match::FileAssignment,
     assignment_index: usize,
     layout: &MatchedLayout,
-) {
+) -> Result<(), AppError> {
+    if assignment.headers.is_empty() && row.iter().any(|v| !v.is_empty()) {
+        return Err(error("HEADER_PLAN_STALE", "预览中未识别到表头的工作表实际含有数据，请重新指定表头或选择原样保留后导出。", None));
+    }
+    if assignment.header_rows_count == 0 && row.iter().skip(assignment.headers.len()).any(|v| !v.is_empty()) {
+        return Err(error("HEADER_PLAN_STALE", "原样保留页出现预览范围外的新列，请重新检查文件列数后导出。", None));
+    }
     let width = layout.template_headers.len() + layout.independent.len();
     buffer.clear();
     buffer.resize(width, Cell::Empty);
@@ -2399,6 +2448,7 @@ fn reorder_matched_row(
             }
         }
     }
+    Ok(())
 }
 
 /// 匹配模式的表头行：来源文件、来源Sheet、模板列、独立列，加粗。
@@ -2667,7 +2717,7 @@ fn write_vertical_csv_stream(
                     })?;
                 let assignment = layout.ordered[position].clone();
                 let mut buffer = Vec::new();
-                reorder_matched_row(&mut buffer, row, &assignment, position, layout);
+                reorder_matched_row(&mut buffer, row, &assignment, position, layout)?;
                 let mut record = vec![source.file_name.clone(), source.sheet_name.clone()];
                 record.extend(buffer.iter().map(Cell::display));
                 writer.write_record(record).map_err(csv_error)?;
@@ -4088,6 +4138,88 @@ mod tests {
         let error = test_merge(params, Arc::new(AtomicBool::new(false))).unwrap_err();
         assert_eq!(error.code, "HEADER_PLAN_STALE");
         assert!(!output.exists(), "表头不符时不能产出文件");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn match_preview_selects_exact_template_sheet_and_exports_its_column_order() {
+        let root = std::env::temp_dir().join(format!("audit-match-sheet-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("多工作表.xlsx");
+        let mut workbook = Workbook::new();
+        for (name, headers, values) in [
+            ("原表", ["日期", "凭证号", "金额"], ["2026-01-01", "记-001", "100"]),
+            ("新增清单", ["金额", "日期", "凭证号"], ["200", "2026-02-01", "记-002"]),
+        ] {
+            let sheet = workbook.add_worksheet();
+            sheet.set_name(name).unwrap();
+            for (col, header) in headers.iter().enumerate() {
+                sheet.write_string(0, col as u16, *header).unwrap();
+                sheet.write_string(1, col as u16, values[col]).unwrap();
+            }
+        }
+        workbook.save(&input).unwrap();
+        let request = json!({
+            "inputPaths": [input.to_string_lossy()], "templatePath": input.to_string_lossy(),
+            "templateSheet": "新增清单", "sheetAction": "merge_all",
+        });
+        let preview = match_preview(&request).unwrap();
+        assert_eq!(preview["template"]["sheet"], "新增清单");
+        assert_eq!(preview["template"]["headers"], json!(["金额", "日期", "凭证号"]));
+        assert_eq!(preview["template"]["rawRows"][1][0], "200");
+        assert_eq!(preview["rows"][0]["sheet"], "原表");
+        assert_eq!(preview["rows"][0]["matches"][0]["target"], 1);
+        assert_eq!(preview["rows"][1]["matches"][0]["target"], 0);
+        let assignments: Vec<Value> = preview["rows"].as_array().unwrap().iter().map(|row| {
+            let columns: Vec<Value> = row["matches"].as_array().unwrap().iter().enumerate()
+                .map(|(source, matched)| json!({
+                    "source": source, "target": matched["target"], "discard": false,
+                    "manual": false, "reason": matched["reason"],
+                })).collect();
+            json!({
+                "path": row["path"], "sheet": row["sheet"], "headers": row["headers"],
+                "headerRow": row["detection"]["headerRow"],
+                "headerRowsCount": row["detection"]["headerRowsCount"], "columns": columns,
+            })
+        }).collect();
+        let output = root.join("切换后导出.xlsx");
+        let mut params = base_params(&[input.clone()], &output);
+        params["sheetAction"] = json!("merge_all");
+        params["headerMatching"] = json!({
+            "templatePath": input.to_string_lossy(), "templateHeaders": preview["template"]["headers"],
+            "rememberAliases": [], "assignments": assignments,
+        });
+        test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+        let rows = read_merged_sheet(&output, "Merged");
+        assert_eq!(rows[0], vec!["来源文件", "来源Sheet", "金额", "日期", "凭证号"]);
+        assert_eq!(&rows[1][2..], &["100", "2026-01-01", "记-001"]);
+        assert_eq!(&rows[2][2..], &["200", "2026-02-01", "记-002"]);
+
+        let mut invalid = request.clone();
+        invalid["templateSheet"] = json!("不存在");
+        assert_eq!(match_preview(&invalid).unwrap_err().code, "SHEET_READ_FAILED");
+
+        let mut default_request = request.clone();
+        default_request.as_object_mut().unwrap().remove("templateSheet");
+        assert_eq!(match_preview(&default_request).unwrap()["template"]["sheet"], "原表");
+        default_request["sheetAction"] = json!("match_selected");
+        default_request["targetSheets"] = json!(["新增清单"]);
+        assert_eq!(match_preview(&default_request).unwrap()["template"]["sheet"], "新增清单");
+
+        // 外部模板同样精确按 Sheet 取表头，数据只来自输入清单。
+        let text = root.join("明细.csv");
+        fs::write(&text, "日期,凭证号,金额\n2026-03-01,记-003,300\n").unwrap();
+        let mut external = request;
+        external["inputPaths"] = json!([text.to_string_lossy()]);
+        let external_preview = match_preview(&external).unwrap();
+        assert_eq!(external_preview["template"]["sheet"], "新增清单");
+        assert_eq!(external_preview["template"]["external"], true);
+        assert_eq!(external_preview["rows"].as_array().unwrap().len(), 1);
+        external["templatePath"] = json!(text.to_string_lossy());
+        external["templateSheet"] = json!("CSV");
+        assert_eq!(match_preview(&external).unwrap()["template"]["sheet"], "CSV");
+        external["templateSheet"] = json!("不存在");
+        assert_eq!(match_preview(&external).unwrap_err().code, "SHEET_READ_FAILED");
         let _ = fs::remove_dir_all(root);
     }
 

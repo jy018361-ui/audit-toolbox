@@ -16,6 +16,116 @@ fn preview_position_plan(preview: &Value) -> Value {
 }
 
 #[test]
+fn header_structure_auto_baseline_skips_non_tables_but_explicit_bad_sheet_is_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join("混合工作簿.xlsx");
+    let mut book = Workbook::new();
+    book.add_worksheet().set_name("空页").unwrap();
+    let params = book.add_worksheet();
+    params.set_name("参数").unwrap();
+    for (r, (key, value)) in [
+        ("测算期间", "2025-01-01 至 2025-12-31".to_string()),
+        ("取数方式", "按确认的口径取原始账户明细并保留各科目发生额，取得余额后逐项复核取数与计算依据，不把说明文字作为业务字段".to_string()),
+        ("复核依据", "保留原始凭证及核算说明，所有未明确的参数均需要核对原始资料以后才能确认，避免错误套用其他账户的口径进行计算".to_string()),
+    ].iter().enumerate() {
+        params.write_string(r as u32,0,*key).unwrap();
+        params.write_string(r as u32,1,value).unwrap();
+    }
+    let data = book.add_worksheet();
+    data.set_name("数据").unwrap();
+    data.write_string(0,0,"日期").unwrap().write_string(0,1,"金额").unwrap();
+    data.write_string(1,0,"2025-01-01").unwrap().write_number(1,1,10).unwrap();
+    book.save(&input).unwrap();
+    let preview = match_preview(&json!({"inputPaths":[input],"sheetAction":"merge_all"})).unwrap();
+    assert_eq!(preview["template"]["sheet"],"数据");
+    assert_eq!(preview["rows"][0]["detection"]["kind"],"empty");
+    assert_eq!(preview["rows"][1]["detection"]["kind"],"key_value");
+    assert_eq!(match_preview(&json!({"inputPaths":[input],"sheetAction":"merge_all","templateSheet":"参数"})).unwrap_err().code,"HEADER_TEMPLATE_UNREADABLE");
+}
+
+#[test]
+#[ignore = "需指定 HEADER_STRUCTURE_NATIVE_ROOT，核对用户三份原件的每张工作表与两种实际导出"]
+fn header_structure_user_three_workbooks_all_sheets_and_raw_export() {
+    let root = PathBuf::from(std::env::var("HEADER_STRUCTURE_NATIVE_ROOT").unwrap());
+    let inputs = ["FA_TBJE_20261020_201129.xlsx", "存款利息收入测算_20261020_200843.xlsx", "20251231科目余额表.xlsx"].map(|n| root.join(n));
+    let preview = match_preview(&json!({"inputPaths": inputs, "sheetAction":"merge_all"})).unwrap();
+    assert_eq!(preview["template"]["detection"]["headerRow"], 0);
+    assert_eq!(preview["template"]["detection"]["headerRowsCount"], 2);
+    let rows = preview["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 13);
+    for row in rows {
+        let sheet = row["sheet"].as_str().unwrap();
+        match sheet {
+            "固定资产汇总变动表" => {
+                assert_eq!(row["detection"]["headerRowsCount"], 2);
+                assert_eq!(row["headers"][2], "合计-计算");
+                assert_eq!(row["preview"][0][0], "原值");
+            },
+            "参数与口径" => {
+                assert_eq!(row["detection"]["kind"], "key_value");
+                assert_eq!(row["detection"]["headerRowsCount"], 0);
+                assert_eq!(row["preview"][0][0], "测算期间");
+                assert!(row["matches"].as_array().unwrap().iter().all(|m| m["target"].is_null()));
+            },
+            "Sheet2" => {
+                assert_eq!(row["detection"]["kind"], "empty");
+                assert_eq!(row["headers"].as_array().unwrap().len(), 0);
+                assert_eq!(row["detection"]["needsReview"], false);
+            },
+            "Sheet1" => {
+                assert_eq!(row["detection"]["headerRowsCount"], 2);
+                assert_eq!(row["headers"][4], "期初余额-借方");
+                assert_eq!(row["headers"][11], "期末余额-贷方");
+            },
+            _ => assert_eq!(row["detection"]["headerRowsCount"], 1, "{sheet}"),
+        }
+        assert_eq!(row["detection"]["headerRow"], 0, "{sheet}");
+        if !matches!(sheet, "Sheet2" | "参数与口径") {
+            let path = PathBuf::from(row["path"].as_str().unwrap());
+            let source = crate::fx::SourceSpec { input_path: path.to_string_lossy().into_owned(), sheet: sheet.into(), header_row: 0, header_depth: 0 };
+            let regular = crate::fx::load_fx_table(&source).unwrap();
+            let bounded = crate::fx::load_fx_bounded_inspection(&source, &path).unwrap();
+            assert_eq!((regular.header_row,regular.header_depth),(1,row["detection"]["headerRowsCount"].as_u64().unwrap() as usize), "{sheet}");
+            assert_eq!((bounded.header_row,bounded.header_depth),(regular.header_row,regular.header_depth), "{sheet}");
+            assert_eq!(bounded.headers,regular.headers,"{sheet}");
+        }
+    }
+    let mut plan = preview_position_plan(&preview);
+    let width = rows.iter().map(|r| r["headers"].as_array().unwrap().len()).max().unwrap();
+    let headers = plan["templateHeaders"].as_array_mut().unwrap();
+    while headers.len() < width { headers.push(json!(format!("列{}",headers.len()+1))); }
+    let output = tempfile::tempdir().unwrap();
+    let mut exported = Vec::new();
+    for format in ["csv", "xlsx"] {
+        let path = output.path().join(format!("three.{format}"));
+        let mut params = base_params(&inputs, &path);
+        params["outputFormat"] = json!(format);
+        params["headerMatching"] = plan.clone();
+        params["sheetAction"] = json!("merge_all");
+        test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+        let actual = if format == "csv" { crate::spreadsheet_input::read_rows(&path).unwrap() } else { read_merged_sheet(&path, "Merged") };
+        let mut expected = Vec::new();
+        for row in rows {
+            let path = PathBuf::from(row["path"].as_str().unwrap());
+            let sheet = row["sheet"].as_str().unwrap();
+            let mut book = open_workbook_auto(&path).unwrap();
+            let all = display_rows(&physical_cell_rows(&book.worksheet_range(sheet).unwrap(), None));
+            let skip = row["detection"]["headerRow"].as_u64().unwrap() as usize + row["detection"]["headerRowsCount"].as_u64().unwrap() as usize;
+            expected.extend(all.into_iter().skip(skip).filter(|r| r.iter().any(|v| !v.is_empty())));
+        }
+        assert_eq!(actual.len(),expected.len()+1,"{format}");
+        for (got,want) in actual.iter().skip(1).zip(expected) {
+            assert_eq!(&got[2..2+want.len()],want,"{format}");
+        }
+        exported.push(json!({"format":format,"bodyRows":actual.len()-1,"allRowsPreserved":true}));
+    }
+    if let Ok(path) = std::env::var("HEADER_STRUCTURE_REPORT") {
+        let sheets = rows.iter().map(|row| json!({"file":file_name(Path::new(row["path"].as_str().unwrap())),"sheet":row["sheet"],"detection":row["detection"],"headers":row["headers"]})).collect::<Vec<_>>();
+        fs::write(path,serde_json::to_vec_pretty(&json!({"sheets":sheets,"exports":exported})).unwrap()).unwrap();
+    }
+}
+
+#[test]
 fn header_regression_text_xls_snapshot_checks_selected_row_and_still_rejects_changes() {
     let root = std::env::temp_dir().join(format!("merge-header-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();

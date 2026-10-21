@@ -160,6 +160,7 @@ fn cache_key(
     hasher.update(header_row.to_le_bytes());
     hasher.update([(choose_best as u8)]);
     hasher.update(b"fa-table-cache-v3-physical-origin");
+    hasher.update(crate::header_detection::RULE_VERSION.as_bytes());
     Some(hex::encode(hasher.finalize()))
 }
 
@@ -173,6 +174,7 @@ fn header_memo_key(path: &Path, sheet: &str, choose_best: bool) -> Option<String
     hasher.update(sheet.as_bytes());
     hasher.update([(choose_best as u8)]);
     hasher.update(b"fa-table-header-memo-v3-physical-origin");
+    hasher.update(crate::header_detection::RULE_VERSION.as_bytes());
     Some(hex::encode(hasher.finalize()))
 }
 

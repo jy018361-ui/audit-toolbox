@@ -18,6 +18,7 @@ function makePreview(): HeaderMatchPreview {
     template: {
       path: "C:/tmp/A.xlsx",
       name: "A.xlsx",
+      sheet: "Sheet1",
       external: false,
       headers: ["日期", "凭证号", "金额"],
       detection: { headerRow: 0, headerRowsCount: 1, confidence: 0.95, needsReview: false },
@@ -61,6 +62,44 @@ function makePreview(): HeaderMatchPreview {
   };
 }
 
+it("参数页保留首行且空表标记跳过，重新匹配不为它们推断表头", async () => {
+  const preview = makePreview();
+  preview.rows.push({
+    path: "C:/tmp/params.xlsx", name: "params.xlsx", sheet: "参数与口径",
+    headers: ["原样列1", "原样列2"],
+    detection: { kind: "key_value", headerRow: 0, headerRowsCount: 0, confidence: 1, needsReview: false },
+    matches: [0, 1].map(() => ({ target: null, confidence: 0, reason: "无常规表头，从首行原样保留" })),
+    rawRows: [["测算期间", "2025全年"], ["计算口径", "按月计算"]],
+    preview: [["测算期间", "2025全年"], ["计算口径", "按月计算"]],
+  }, {
+    path: "C:/tmp/empty.xlsx", name: "empty.xlsx", sheet: "Sheet2", headers: [],
+    detection: { kind: "empty", headerRow: 0, headerRowsCount: 1, confidence: 0, needsReview: false },
+    matches: [], rawRows: [], preview: [],
+  });
+  const { onRematch, onConfirm } = setup(preview);
+  expect(screen.getByText("无常规表头 · 原样保留")).toBeTruthy();
+  expect(screen.getByText("空表 · 已跳过")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: /重新匹配/ }));
+  await waitFor(() => expect(onRematch).toHaveBeenCalledTimes(2));
+  fireEvent.click(screen.getByRole("button", { name: "按原列顺序导出" }));
+  const plan = onConfirm.mock.calls[0][0] as HeaderMatchingPlanJson;
+  const raw = plan.assignments.find(row => row.sheet === "参数与口径")!;
+  expect(raw.headerRowsCount).toBe(0);
+  expect(raw.headerRow).toBe(0);
+  expect(raw.columns.map(c => c.target)).toEqual([0, 1]);
+  expect(plan.assignments.find(row => row.path.includes("empty"))?.columns).toEqual([]);
+  fireEvent.click(screen.getByRole("button", { name: "全部展开" }));
+  expect(screen.getByText("测算期间")).toBeTruthy();
+  expect(screen.getByText("空表，无数据可导出")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "调整后导出" }));
+  await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(2));
+  const adjusted = onConfirm.mock.calls[1][0] as HeaderMatchingPlanJson;
+  const rawAdjusted = adjusted.assignments.find(row => row.sheet === "参数与口径")!;
+  expect(rawAdjusted.headerRowsCount).toBe(0);
+  expect(rawAdjusted.columns.map(c => c.target)).toEqual([null, null]);
+  cleanup();
+});
+
 function setup(
   preview = makePreview(),
   extra: Partial<Parameters<typeof HeaderMatchGrid>[0]> = {},
@@ -87,10 +126,6 @@ function setup(
   render(
     <HeaderMatchGrid
       preview={preview}
-      files={[
-        { path: "C:/tmp/A.xlsx", name: "A.xlsx" },
-        { path: "C:/tmp/B.xlsx", name: "B.xlsx" },
-      ]}
       onTemplateChange={onTemplateChange}
       onExternalTemplate={onExternalTemplate}
       onRematch={onRematch}
@@ -412,6 +447,26 @@ describe("表头匹配网格", () => {
     expect(statOf("unmatched")).toBe("2 未匹配");
   });
 
+  it("同文件同表头的两张 Sheet，改基准表头行只更新所选 Sheet", async () => {
+    const preview = makePreview();
+    preview.rows[1] = { ...preview.rows[0], sheet: "第二张", rawRows: [
+      ["日期", "凭证号", "金额"], ["记账日期", "单据编号", "借方金额"], ["2026-02-01", "记-2", "200"],
+    ] };
+    preview.template.sheet = "第二张";
+    preview.template.rawRows = preview.rows[1].rawRows;
+    preview.template.detection.needsReview = true;
+    const { onConfirm, onRematch } = setup(preview);
+    const editor = document.querySelector(".hmg-template-review")!;
+    fireEvent.change(editor.querySelector("input")!, { target: { value: "2" } });
+    fireEvent.click(editor.querySelector("button")!);
+    await waitFor(() => expect(onRematch).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "按原列顺序导出" }));
+    const plan = onConfirm.mock.calls[0][0] as HeaderMatchingPlanJson;
+    expect(plan.assignments[0]).toMatchObject({ sheet: "Sheet1", headerRow: 0, headers: ["日期", "凭证号", "金额"] });
+    expect(plan.assignments[1]).toMatchObject({ sheet: "第二张", headerRow: 1, headers: ["记账日期", "单据编号", "借方金额"] });
+    expect(plan.templateHeaders).toEqual(["记账日期", "单据编号", "借方金额"]);
+  });
+
   it("一键展开与收起全部", () => {
     setup();
     fireEvent.click(screen.getByRole("button", { name: "全部展开" }));
@@ -420,18 +475,43 @@ describe("表头匹配网格", () => {
     expect(screen.queryByText("回单")).toBeNull();
   });
 
-  it("文件名右键可直接设为模板", () => {
+  it("文件名右键按文件和 Sheet 设为基准", () => {
     const { onTemplateChange } = setup();
     const fileCells = document.querySelectorAll(".hmg-file-cell");
     fireEvent.contextMenu(fileCells[2] as HTMLElement);
-    fireEvent.click(screen.getByText("设为模板"));
-    expect(onTemplateChange).toHaveBeenCalledWith("C:/tmp/B.xlsx");
+    fireEvent.click(screen.getByRole("button", { name: "设为基准" }));
+    expect(onTemplateChange).toHaveBeenCalledWith("C:/tmp/B.xlsx", "Sheet1");
   });
 
-  it("模板下拉选择外部文件入口", () => {
+  it("同一文件不同 Sheet 可切换，只有当前 Sheet 显示当前基准", () => {
+    const preview = makePreview();
+    preview.rows[1].path = preview.rows[0].path;
+    preview.rows[1].name = preview.rows[0].name;
+    preview.rows[1].sheet = "新增清单";
+    const { onTemplateChange } = setup(preview);
+    const cells = document.querySelectorAll("tbody tr:not(.hmg-template-row) .hmg-file-cell");
+    fireEvent.contextMenu(cells[0]);
+    expect((screen.getByRole("button", { name: "当前基准" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.contextMenu(cells[1].querySelector(".hmg-sheet-tag")!);
+    fireEvent.click(screen.getByRole("button", { name: "设为基准" }));
+    expect(onTemplateChange).toHaveBeenCalledWith("C:/tmp/A.xlsx", "新增清单");
+  });
+
+  it("键盘菜单可切换 Sheet，预览加载时禁止再次切换", () => {
+    const { onTemplateChange } = setup(makePreview(), { busy: true });
+    const cell = screen.getByLabelText("B.xlsx / Sheet1，右键设为基准");
+    fireEvent.keyDown(cell, { key: "F10", shiftKey: true });
+    const button = screen.getByRole("button", { name: "设为基准" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(onTemplateChange).not.toHaveBeenCalled();
+  });
+
+  it("右上角展示基准 Sheet 并保留外部文件入口，不再提供文件下拉", () => {
     const { onExternalTemplate } = setup();
-    const select = document.querySelector(".hmg-template select") as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: "__pick_external__" } });
+    expect(screen.getByText("当前基准：A.xlsx / Sheet1")).toBeTruthy();
+    expect(document.querySelector(".hmg-template select")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "选择外部基准…" }));
     expect(onExternalTemplate).toHaveBeenCalled();
   });
 

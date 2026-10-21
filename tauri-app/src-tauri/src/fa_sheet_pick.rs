@@ -102,7 +102,8 @@ pub(crate) fn auto_sheet_judge(
         }
         - penalty
         + sheet_name_affinity(path, sheet)
-        - pos as i32;
+        - pos as i32
+        - if crate::header_detection::sheet_kind(matrix) == crate::header_detection::SheetKind::KeyValue { 10_000 } else { 0 };
     AutoSheetJudgement {
         score,
         header_row: hi,
@@ -668,6 +669,7 @@ pub(crate) fn load_prefix_table(
     if matrix.is_empty() {
         return None;
     }
+    crate::header_detection::require_tabular(&matrix, header.is_none()).ok()?;
     let hi = header
         .map(|v| v.saturating_sub(1))
         .unwrap_or_else(|| detect_header(&matrix));

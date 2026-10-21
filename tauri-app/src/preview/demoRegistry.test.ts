@@ -170,8 +170,13 @@ describe("browser preview shared engine handlers", () => {
     }
     expect(preview.rows[1].matches.at(-1)?.target).toBeNull();
     expect(demoLookup("excel_merger.match_preview")?.({
+      inputPaths: [path], templatePath: path, templateSheet: "回款登记", sheetAction: "merge_all",
+    })).toMatchObject({
+      template: { sheet: "回款登记", headers: ["日期", "单据编号", "客户名称", "金额", "备注"] },
+    });
+    expect(demoLookup("excel_merger.match_preview")?.({
       inputPaths: [path], sheetAction: "match_selected", targetSheets: ["回款登记"],
-    })).toMatchObject({ rows: [{ sheet: "回款登记" }] });
+    })).toMatchObject({ template: { sheet: "回款登记" }, rows: [{ sheet: "回款登记" }] });
     expect(demoJobLookup("excel_merger.merge")).toBeTypeOf("function");
   });
 

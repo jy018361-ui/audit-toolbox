@@ -37,6 +37,7 @@ pub(super) fn preview(spec: &SourceSpec) -> Result<Table, AppError> {
         (!spec.sheet.is_empty()).then_some(spec.sheet.as_str()),
         64,
     )?;
+    crate::header_detection::require_tabular(&all, spec.header_row == 0)?;
     let (header_index, inferred_depth) = crate::header_detection::layout(
         &all,
         30,

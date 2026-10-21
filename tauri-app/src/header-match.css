@@ -78,8 +78,23 @@
   font-size: var(--fs-sm);
 }
 
-.hmg-template select {
-  max-width: 260px;
+.hmg-template-label {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hmg-baseline-hint {
+  align-self: center;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.hmg-toast.hmg-error {
+  background: var(--surface);
+  color: var(--danger-fg);
+  border: 1px solid var(--danger-fg);
 }
 
 .hmg-actions {
@@ -517,4 +532,13 @@
   background: var(--surface-muted);
   color: var(--text-muted);
   font-size: var(--fs-sm);
+}
+
+/* 非数据页的状态单独成行，避免挤占文件名和工作表名。 */
+.hmg-source-note {
+  margin-top: 4px;
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  color: var(--text-muted);
+  white-space: normal;
 }

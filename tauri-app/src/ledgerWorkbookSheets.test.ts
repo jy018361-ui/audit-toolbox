@@ -29,6 +29,18 @@ function classification(
 }
 
 describe("工作簿 Sheet 分类", () => {
+  it("参数说明页不会撤销同本工作簿已识别的数据表，单独参数工作簿仍报告原因", async () => {
+    const failure = { code: "SOURCE_NOT_TABULAR", userMessage: "该工作表是参数／说明页，没有常规表头。" };
+    const call = vi.fn(async (_method: string, params: Record<string, unknown>) => {
+      const source = params.source as { inputPath: string; sheet: string };
+      if (source.inputPath === "参数.xlsx" || source.sheet === "参数与口径") throw failure;
+      return classification(source.sheet || "TB", ["TB", "参数与口径"], { je: 1, tb: 10 });
+    });
+    const result = await scanLedgerUploadSources(call, ["账套.xlsx", "参数.xlsx"]);
+    expect(result.sources.map(item => item.classification.sheet)).toEqual(["TB"]);
+    expect(result.hiddenSheets).toBe(1);
+    expect(result.failures).toEqual([{ path: "参数.xlsx", error: failure }]);
+  });
   it.each([false, true])("空白 Sheet 不丢弃有效 TB，也不阻断后续 JE（空白页在前：%s）", async (emptyFirst) => {
     const names = emptyFirst ? ["空白", "TB", "JE"] : ["TB", "空白", "JE"];
     const call = vi.fn(async (_method: string, params: Record<string, unknown>) => {

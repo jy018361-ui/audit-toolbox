@@ -22,12 +22,11 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::AppError;
-use crate::ledger_mapping::{header_row_score, normalize_header};
+use crate::ledger_mapping::normalize_header;
 
 // ────────────────────────────── 表头探测 ──────────────────────────────
 
 /// 扫描前多少行找表头。真实导出里标题区一般不超过十来行，30 与公共账表入口一致。
-const HEADER_SCAN_ROWS: usize = 30;
 /// 探测置信度低于该值（或与次高分行难分伯仲）时要求人工确认表头行。
 const HEADER_REVIEW_SCORE: f64 = 0.55;
 const HEADER_REVIEW_MARGIN: f64 = 0.05;
@@ -35,6 +34,7 @@ const HEADER_REVIEW_MARGIN: f64 = 0.05;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HeaderDetection {
+    pub kind: crate::header_detection::SheetKind,
     /// 表头行下标（0 基）。
     pub header_row: usize,
     /// 表头占几行（1=单层，2=合并单元格两层）。
@@ -57,18 +57,25 @@ pub(crate) fn detect_header_with_merges(
     if !rows.iter().any(|row| row.iter().any(|value| !value.trim().is_empty())) {
         return None;
     }
-    let (row, depth) = crate::fx::infer_public_header_layout(rows);
+    let kind = crate::header_detection::sheet_kind(rows);
+    if kind == crate::header_detection::SheetKind::KeyValue {
+        return Some(HeaderDetection { kind, header_row: 0, header_rows_count: 0, confidence: 1.0, needs_review: false });
+    }
+    let (row, depth, candidates) = crate::fx::public_header_candidates(rows);
     let header_row = row.saturating_sub(1);
-    let score = header_row_score(rows, header_row);
-    let second = (0..rows.len().min(HEADER_SCAN_ROWS))
-        .filter(|&i| i != header_row && i >= header_row + depth)
-        .map(|i| header_row_score(rows, i))
+    let score = candidates.iter().find(|v| v.0 == row).map(|v| v.1).unwrap_or(0.0);
+    let second = candidates.iter()
+        .filter(|(number, _)| *number != row && !(*number > row && *number < row + depth))
+        .map(|(_, score)| *score)
         .fold(0.0_f64, f64::max);
     Some(HeaderDetection {
+        kind,
         header_row,
         header_rows_count: depth,
-        confidence: (score * 100.0).round() / 100.0,
-        needs_review: score < HEADER_REVIEW_SCORE || score - second < HEADER_REVIEW_MARGIN,
+        confidence: (score.min(1.0) * 100.0).round() / 100.0,
+        needs_review: kind == crate::header_detection::SheetKind::Uncertain
+            || crate::header_detection::body_support(rows, header_row, depth) == 0
+            || score < HEADER_REVIEW_SCORE || score - second < HEADER_REVIEW_MARGIN,
     })
 }
 

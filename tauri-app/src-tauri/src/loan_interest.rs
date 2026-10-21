@@ -6311,6 +6311,7 @@ fn load_ledger_table(spec: &SourceSpec) -> Result<Table, AppError> {
 }
 
 fn finish_ledger_table(spec: &SourceSpec, path: PathBuf, sheet: String, sheets: Vec<String>, all: Vec<Vec<String>>) -> Result<Table, AppError> {
+    crate::header_detection::require_tabular(&all, spec.header_row == 0)?;
     let (header_index, inferred_depth) = crate::header_detection::layout(
         &all,
         30,

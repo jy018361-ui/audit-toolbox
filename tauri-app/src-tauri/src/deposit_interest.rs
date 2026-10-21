@@ -1616,6 +1616,8 @@ fn snapshot_file_identity(path: &Path) -> Option<String> {
 fn calc_fingerprint(params: &Value) -> Option<String> {
     let subset = snapshot_param_subset(params);
     let mut material = format!("deposit-{}-{}-{}\n", ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, ledger_mapping::JE_BODY_RULE_VERSION);
+    material.push_str(crate::header_detection::RULE_VERSION);
+    material.push('\n');
     material.push_str(&serde_json::to_string(&subset).ok()?);
     for field in ["tbSource", "jeSource"] {
         if let Some(path) = subset

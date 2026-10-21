@@ -66,9 +66,7 @@ impl FxTbRows {
                     Some(name),
                     source.header_row.saturating_add(32).max(200),
                 )?;
-                let header = (0..rows.len().min(30))
-                    .map(|i| ledger_mapping::header_row_score(&rows, i))
-                    .fold(0.0_f64, f64::max);
+                let header = crate::header_detection::table_score(&rows);
                 let declared = entries
                     .as_ref()
                     .and_then(|entries| entries.iter().find(|(n, _)| n == name))
@@ -85,6 +83,7 @@ impl FxTbRows {
                 prefix = rows;
             }
         }
+        crate::header_detection::require_tabular(&prefix, source.header_row == 0)?;
         let (auto_row, auto_depth) = infer_public_header_layout(&prefix);
         let header_row = if source.header_row > 0 {
             source.header_row

@@ -44,6 +44,60 @@ beforeEach(async () => {
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.clearAllMocks(); });
 
 describe("真实工具页任务事件状态", () => {
+  it("Excel 右键切换同文件 Sheet：传递精确基准、失败保留原网格、重试后按新列序导出", async () => {
+    const api = await import("./api");
+    const path = "C:/客户/合并源.xlsx";
+    const headers = ["日期", "凭证号", "金额"];
+    const detection = { headerRow: 0, headerRowsCount: 1, confidence: 1, needsReview: false };
+    const previewFor = (sheet: string) => {
+      const targetHeaders = sheet === "新增清单" ? ["金额", "日期", "凭证号"] : headers;
+      return {
+        template: { path, name: "合并源.xlsx", sheet, headers: targetHeaders, detection, external: false, rawRows: [targetHeaders] },
+        rows: ["原表", "新增清单"].map((name) => ({
+          path, name: "合并源.xlsx", sheet: name, headers, detection, preview: [], rawRows: [headers],
+          matches: headers.map((header) => ({ target: targetHeaders.indexOf(header), confidence: 1, reason: "名称一致" })),
+        })),
+      };
+    };
+    let failSwitch = true;
+    vi.mocked(api.pickPath).mockResolvedValue([path]);
+    vi.mocked(api.engineCall).mockImplementation(async (method, params) => {
+      if (method === "excel_merger.inspect") return {
+        files: [{ path, name: "合并源.xlsx", size: 100, sheets: ["原表", "新增清单"] }], availableSheets: ["原表", "新增清单"],
+      };
+      const sheet = (params as { templateSheet?: string }).templateSheet ?? "原表";
+      if (sheet === "新增清单" && failSwitch) throw new Error("工作表读取失败，请重试");
+      return previewFor(sheet);
+    });
+    render(<ExcelMergerPage tool={tool("excel_merger", "Excel 批量合并")} />);
+    fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+    await screen.findByText("1 个文件");
+    fireEvent.click(screen.getByRole("button", { name: "检查文件与 Sheet" }));
+    await waitFor(() => expect(api.engineCall).toHaveBeenCalledWith("excel_merger.inspect", expect.anything()));
+    fireEvent.click(screen.getByRole("button", { name: "智能匹配并预览" }));
+    await screen.findByText("当前基准：合并源.xlsx / 原表");
+    const chooseSecond = () => {
+      fireEvent.contextMenu(screen.getByLabelText("合并源.xlsx / 新增清单，右键设为基准"));
+      fireEvent.click(screen.getByRole("button", { name: "设为基准" }));
+    };
+    chooseSecond();
+    await waitFor(() => expect(document.querySelector(".hmg-error")).toHaveTextContent("工作表读取失败"));
+    expect(screen.getByText("当前基准：合并源.xlsx / 原表")).toBeInTheDocument();
+    expect(api.engineCall).toHaveBeenLastCalledWith("excel_merger.match_preview", expect.objectContaining({ templatePath: path, templateSheet: "新增清单" }));
+    failSwitch = false;
+    chooseSecond();
+    await screen.findByText("当前基准：合并源.xlsx / 新增清单");
+    expect(document.querySelector(".hmg-error")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(screen.getByRole("button", { name: "智能匹配并预览" }));
+    await screen.findByText("当前基准：合并源.xlsx / 新增清单");
+    expect(api.engineCall).toHaveBeenLastCalledWith("excel_merger.match_preview", expect.objectContaining({ templateSheet: "新增清单" }));
+    fireEvent.click(screen.getByRole("button", { name: "调整后导出" }));
+    await waitFor(() => expect(api.jobStart).toHaveBeenCalledWith("excel_merger.merge", expect.objectContaining({
+      headerMatching: expect.objectContaining({ templateHeaders: ["金额", "日期", "凭证号"] }),
+    })));
+  });
+
   it("Excel 合并：运行、失败和取消占用结果区，失败结果不能显示成功", async () => {
     const api = await import("./api");
     vi.mocked(api.pickPath).mockResolvedValue(["C:/客户/合并源.xlsx"]);

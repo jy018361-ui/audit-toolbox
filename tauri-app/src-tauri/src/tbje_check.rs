@@ -1411,6 +1411,8 @@ fn hash_text(text: &str) -> String {
 /// 的核对结果；任一项变化指纹即变，自然回落到现行重算并刷新快照。
 fn check_result_fingerprint(params: &Value) -> Option<String> {
     let mut material = format!("tbje-export-v2-{}-{}-{}\n", ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, ledger_mapping::JE_BODY_RULE_VERSION);
+    material.push_str(crate::header_detection::RULE_VERSION);
+    material.push('\n');
     for field in CHECK_PARAM_FIELDS {
         match params.get(*field) {
             Some(value) => {

@@ -3516,9 +3516,7 @@ fn auto_select_sheet(workbook: &mut AutoWorkbook, sheets: &[String]) -> Option<S
         if !has_any {
             continue;
         }
-        let header = (0..head.len().min(30))
-            .map(|index| ledger_mapping::header_row_score(&head, index))
-            .fold(0.0_f64, f64::max);
+        let header = crate::header_detection::table_score(&head);
         let score = ledger_mapping::sheet_score(header, populated, name);
         if best.as_ref().is_none_or(|(_, current)| score > *current) {
             best = Some((name.clone(), score));
@@ -3545,6 +3543,7 @@ fn auto_sheet_memo_path(path: &Path) -> Result<PathBuf, AppError> {
     hasher.update(meta.len().to_le_bytes());
     hasher.update(modified.to_le_bytes());
     hasher.update(b"auto-sheet-v1");
+    hasher.update(crate::header_detection::RULE_VERSION.as_bytes());
     let key = hex::encode(hasher.finalize());
     Ok(cache_root()?
         .join("ts")
@@ -3571,6 +3570,7 @@ fn auto_header_memo_path(path: &Path, sheet: Option<&str>) -> Result<PathBuf, Ap
     hasher.update(sheet.unwrap_or("<auto>").as_bytes());
     // v2 同时记住行号与层数，并废弃曾把重复的合并标题记为第 1 行的旧结论。
     hasher.update(b"auto-header-v2");
+    hasher.update(crate::header_detection::RULE_VERSION.as_bytes());
     let key = hex::encode(hasher.finalize());
     Ok(cache_root()?
         .join("ts")
@@ -3685,6 +3685,7 @@ fn resolve_auto_header_layout(
         })?;
         physical_workbook_rows(&range, Some(31))
     };
+    crate::header_detection::require_tabular(&rows, true)?;
     let resolved = if rows.is_empty() {
         (1, 1)
     } else {

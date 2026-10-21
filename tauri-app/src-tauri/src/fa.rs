@@ -2951,6 +2951,7 @@ pub(crate) fn load_table(
         }
     }
     let (judgement, sheet, matrix) = best.unwrap();
+    crate::header_detection::require_tabular(&matrix, header.is_none())?;
     Ok(finalize_table(
         path,
         Some(sheet),
@@ -2997,6 +2998,7 @@ pub(crate) fn finalize_table(
 
 fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
     let matrix = crate::spreadsheet_input::read_rows(path)?;
+    crate::header_detection::require_tabular(&matrix, header.is_none())?;
     let hi = header
         .map(|v| v.saturating_sub(1))
         .unwrap_or_else(|| detect_header(&matrix));

@@ -213,8 +213,8 @@ export async function classifyLedgerWorkbookSheets<
       results.push(sheet === first.sheet ? first : await classify(sheet));
     } catch (error) {
       // 默认读取已找到有效正表；其他空白页不能让整份工作簿的有效结果作废。
-      // 只跳过引擎明确报告的空表，读取失败、取消等错误仍交给调用方处理。
-      if (!(typeof error === "object" && error !== null && "code" in error && error.code === "SOURCE_EMPTY"))
+      // 只跳过引擎明确报告的空表／参数说明页，读取失败、取消等错误仍交给调用方处理。
+      if (!(typeof error === "object" && error !== null && "code" in error && ["SOURCE_EMPTY", "SOURCE_NOT_TABULAR"].includes(String(error.code))))
         throw error;
       onEmptySheet?.(sheet);
     }

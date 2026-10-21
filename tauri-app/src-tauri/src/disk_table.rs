@@ -224,6 +224,7 @@ impl DiskTable {
     fn open_style(path: &Path, sheet: Option<&str>, header_row: usize, header_depth: usize, progress: Progress<'_>, cancel: &AtomicBool, fa_style: bool) -> Result<Self, AppError> {
         check(cancel)?;
         let (selected, sheets, prefix) = preview_source_with_cancel(path, sheet, header_row.saturating_add(32).max(32), cancel)?;
+        crate::header_detection::require_tabular(&prefix, header_row == 0)?;
         let inferred = crate::fx::infer_public_header_layout(&prefix);
         let header_row = if header_row == 0 { inferred.0 } else { header_row };
         let header_depth = if header_depth == 0 { inferred.1 } else { header_depth }.clamp(1, 2);

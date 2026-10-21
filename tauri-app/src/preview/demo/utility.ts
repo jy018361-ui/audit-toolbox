@@ -140,13 +140,15 @@ const mergerMatchPreview = (params: DemoParams) => {
       : action === "default" ? sheets.slice(0, 1) : sheets;
     return chosen.map((sheet) => ({ path, name: file.name, sheet }));
   });
-  const templateSheet = toMergerFile(templatePath).sheets[0] || "CSV";
+  const templateSheet = asString(params.templateSheet)
+    || targetFiles.find((file) => file.path === templatePath)?.sheet
+    || toMergerFile(templatePath).sheets[0] || "CSV";
   const templateRows = rawRowsFor(templateSheet);
   const templateHeaders = templateRows[0];
   return {
     engine: "rust",
     template: {
-      path: templatePath, name: fileNameOf(templatePath), headers: templateHeaders,
+      path: templatePath, name: fileNameOf(templatePath), sheet: templateSheet, headers: templateHeaders,
       detection, external: !inputPaths.includes(templatePath), rawRows: templateRows,
     },
     rows: targetFiles.map(({ path, name, sheet }) => {

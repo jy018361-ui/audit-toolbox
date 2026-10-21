@@ -1883,47 +1883,9 @@ fn xlsx_sample_rows(
 /// 被错误回传为第 5 行。正式 Polars 读取按物理第 5 行取表头后只得到
 /// `Column_1…Column_23`。这里保留稀疏行号，不靠“补空行”猜位置。
 fn infer_xlsx_header_layout(all: &[XlsxSampleRow]) -> (usize, usize, Vec<(usize, f64)>) {
-    let limit = all.len().min(30);
-    let compact = all
-        .iter()
-        .take(limit)
-        .map(|row| row.cells.clone())
-        .collect::<Vec<_>>();
-    let mut row_scores = (0..limit)
-        .map(|index| {
-            (
-                all[index].number,
-                ledger_mapping::header_row_score(&compact, index),
-            )
-        })
-        .collect::<Vec<_>>();
-    row_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let mut best = row_scores
-        .first()
-        .map(|(row, score)| (*row, 1usize, *score))
-        .unwrap_or((1, 1, 0.0));
-    for index in 0..limit.saturating_sub(1) {
-        // 双层表头必须是工作表中真正相邻的两行；中间缺失的空白行不能被压缩掉。
-        if all[index + 1].number != all[index].number + 1 {
-            continue;
-        }
-        if !is_two_level_header_pair(&compact[index], &compact[index + 1]) {
-            continue;
-        }
-        let combined_hits = combined_semantic_score(&compact[index], &compact[index + 1]);
-        let width = compact[index].len().max(compact[index + 1].len());
-        let merged = merge_headers(&compact[index..=index + 1], width);
-        let mut synthetic = vec![merged];
-        if let Some(next) = compact.get(index + 2) {
-            synthetic.push(next.clone());
-        }
-        let pair_score = ledger_mapping::header_row_score(&synthetic, 0)
-            + (combined_hits.min(16) as f64 / 16.0) * 0.10;
-        if pair_score > best.2 {
-            best = (all[index].number, 2, pair_score);
-        }
-    }
-    (best.0, best.1, row_scores)
+    let rows = all.iter().take(34).map(|r| r.cells.clone()).collect::<Vec<_>>();
+    let numbers = all.iter().take(34).map(|r| r.number).collect::<Vec<_>>();
+    infer_numbered_header_layout(&rows, &numbers)
 }
 
 /// 供看账等公共账表入口复用的 OOXML 轻量标题探测。
@@ -1958,9 +1920,7 @@ pub(crate) fn lightweight_xlsx_header_layout(
             .take(30)
             .map(|row| row.cells.clone())
             .collect::<Vec<_>>();
-        let header = (0..compact.len())
-            .map(|index| ledger_mapping::header_row_score(&compact, index))
-            .fold(0.0_f64, f64::max);
+        let header = crate::header_detection::table_score(&compact);
         let score = ledger_mapping::sheet_score(header, total_rows, name);
         if best.as_ref().is_none_or(|(_, _, current)| score > *current) {
             best = Some((name.clone(), rows, score));
@@ -1968,6 +1928,7 @@ pub(crate) fn lightweight_xlsx_header_layout(
     }
     let (sheet, rows, _) =
         best.ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿中没有可读取的数据Sheet。", None))?;
+    crate::header_detection::require_tabular(&rows.iter().map(|r| r.cells.clone()).collect::<Vec<_>>(), true)?;
     let (row, depth, _) = infer_xlsx_header_layout(&rows);
     Ok((sheet, row, depth))
 }
@@ -1999,9 +1960,7 @@ fn load_large_xlsx_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<Fx
             .take(30)
             .map(|row| row.cells.clone())
             .collect::<Vec<_>>();
-        let header = (0..compact.len())
-            .map(|index| ledger_mapping::header_row_score(&compact, index))
-            .fold(0.0_f64, f64::max);
+        let header = crate::header_detection::table_score(&compact);
         let score = ledger_mapping::sheet_score(header, total_rows, name);
         if best.as_ref().is_none_or(|current| score > current.3) {
             best = Some((name.clone(), rows, total_rows, score));
@@ -2050,9 +2009,7 @@ fn load_large_xls_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<FxT
             .take(30)
             .map(|row| row.cells.clone())
             .collect::<Vec<_>>();
-        let header = (0..compact.len())
-            .map(|index| ledger_mapping::header_row_score(&compact, index))
-            .fold(0.0_f64, f64::max);
+        let header = crate::header_detection::table_score(&compact);
         let score = ledger_mapping::sheet_score(header, sample.total_rows, &sample.name);
         if best.as_ref().is_none_or(|current| score > current.3) {
             best = Some((sample.name.clone(), rows, sample.total_rows, score));
@@ -2071,6 +2028,7 @@ fn finish_sampled_inspection(
     all: Vec<XlsxSampleRow>,
     total_rows: usize,
 ) -> Result<Arc<FxTable>, AppError> {
+    crate::header_detection::require_tabular(&all.iter().map(|r| r.cells.clone()).collect::<Vec<_>>(), source.header_row == 0)?;
     let (auto_header_row, auto_header_depth, scored) = infer_xlsx_header_layout(&all);
     let header_row = if source.header_row > 0 {
         source.header_row
@@ -2136,7 +2094,7 @@ pub(crate) fn load_fx_bounded_inspection(source:&SourceSpec,path:&Path)->Result<
             let entries=xlsx_sheet_entries(&path).ok();let mut best=None;
             for name in &sheets{
                 let(_,_,rows)=crate::disk_table::preview_source(&path,Some(name),source.header_row.saturating_add(255).max(256))?;
-                let header=(0..rows.len().min(30)).map(|index|ledger_mapping::header_row_score(&rows,index)).fold(0.0_f64,f64::max);
+                let header=crate::header_detection::table_score(&rows);
                 let declared=entries.as_ref().and_then(|values|values.iter().find(|(current,_)|current==name)).and_then(|(_,entry)|xlsx_sheet_prefix(&path,entry,256).ok()).map(|xml|xlsx_dimension(&xml).0).unwrap_or(rows.len());
                 let score=ledger_mapping::sheet_score(header,declared,name);
                 if best.as_ref().is_none_or(|(current,_,_)|score>*current){best=Some((score,name.clone(),rows));}
@@ -2144,6 +2102,7 @@ pub(crate) fn load_fx_bounded_inspection(source:&SourceSpec,path:&Path)->Result<
             if let Some((_,selected,rows))=best{sheet=selected;all=rows;}
         }
         if all.is_empty(){return Err(error("SOURCE_EMPTY","文件中没有可读取的数据。",None));}
+        crate::header_detection::require_tabular(&all, source.header_row == 0)?;
         let (auto_row,auto_depth,scored)=infer_header_layout(&all);
         let header_row=if source.header_row>0{source.header_row}else{auto_row};
         let header_depth=if source.header_depth>0{source.header_depth.clamp(1,2)}else if source.header_row>0{
@@ -2223,6 +2182,7 @@ fn load_large_text_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<Fx
     if all.is_empty() {
         return Err(error("SOURCE_EMPTY", "文件中没有可读取的数据。", None));
     }
+    crate::header_detection::require_tabular(&all, source.header_row == 0)?;
     let (auto_header_row, auto_header_depth, scored) = infer_header_layout(&all);
     let header_row = if source.header_row > 0 {
         source.header_row
@@ -2392,9 +2352,7 @@ pub(crate) fn load_fx_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppErro
                 {
                     continue;
                 }
-                let header = (0..values.len().min(30))
-                    .map(|index| ledger_mapping::header_row_score(&values, index))
-                    .fold(0.0_f64, f64::max);
+                let header = crate::header_detection::table_score(&values);
                 let populated = values
                     .iter()
                     .filter(|row| row.iter().filter(|value| !value.trim().is_empty()).count() >= 2)
@@ -2413,6 +2371,7 @@ pub(crate) fn load_fx_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppErro
     if all.is_empty() {
         return Err(error("SOURCE_EMPTY", "文件中没有可读取的数据。", None));
     }
+    crate::header_detection::require_tabular(&all, source.header_row == 0)?;
     let (auto_header_row, auto_header_depth, scored) = infer_header_layout(&all);
     let header_row = if source.header_row > 0 {
         source.header_row
@@ -2606,37 +2565,50 @@ fn is_two_level_header_pair(upper: &[String], lower: &[String]) -> bool {
 /// Jointly infer the first header row and its depth. A two-row TB header must
 /// compete as one candidate; otherwise its lower `借方/贷方` row can win alone.
 fn infer_header_layout(all: &[Vec<String>]) -> (usize, usize, Vec<(usize, f64)>) {
+    infer_numbered_header_layout(all, &(1..=all.len().min(34)).collect::<Vec<_>>())
+}
+
+/// 普通读取与稀疏 OOXML 预览共用候选筛选、双层与正文边界，行号单独保留。
+fn infer_numbered_header_layout(all: &[Vec<String>], numbers: &[usize]) -> (usize, usize, Vec<(usize, f64)>) {
     let limit = all.len().min(30);
-    let mut row_scores = (0..limit)
-        .map(|index| (index + 1, ledger_mapping::header_row_score(all, index)))
+    let eligible = (0..limit).filter(|&i| crate::header_detection::candidate_row(all, i)).collect::<Vec<_>>();
+    let has_body = eligible.iter().any(|&i| crate::header_detection::body_support(all, i, 1) > 0);
+    let quality = |i: usize, depth: usize, base: f64| {
+        base + crate::header_detection::body_support(all, i, depth).min(3) as f64 * 0.04
+    };
+    let mut row_scores = eligible.iter().copied()
+        .filter(|&i| !has_body || crate::header_detection::body_support(all, i, 1) > 0)
+        .map(|i| (numbers[i], quality(i, 1, ledger_mapping::header_row_score(all, i))))
         .collect::<Vec<_>>();
-    row_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let mut best = row_scores
-        .first()
-        .map(|(row, score)| (*row, 1usize, *score))
-        .unwrap_or((1, 1, 0.0));
-    for index in 0..limit.saturating_sub(1) {
-        // 只有一个不同名称的上一行是**标题行**（「序时账」「XX公司科目余额表」），不是分组表头。
-        // [`merge_headers`] 会把它顺延到每一列，于是每个列名都被冠上标题前缀
-        // （「序时账-公司代码」），既污染映射标签，也与看账那侧的单行读取对不上。
-        // 真正的两行表头（期初｜期末 覆在 借方｜贷方 上）上一行至少有两个不同分组名。
-        if !is_two_level_header_pair(&all[index], &all[index + 1]) {
-            continue;
-        }
-        let combined_hits = combined_semantic_score(&all[index], &all[index + 1]);
-        let width = all[index].len().max(all[index + 1].len());
-        let merged = merge_headers(&all[index..=index + 1], width);
-        let mut synthetic = vec![merged];
-        if let Some(data) = all.get(index + 2) {
-            synthetic.push(data.clone());
-        }
-        let pair_score = ledger_mapping::header_row_score(&synthetic, 0)
-            + (combined_hits.min(16) as f64 / 16.0) * 0.10;
-        if pair_score > best.2 {
-            best = (index + 1, 2, pair_score);
-        }
+    row_scores.sort_by(|a,b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut best = row_scores.first().map(|&(row, score)| (row, 1, score))
+        .unwrap_or_else(|| (all.iter().position(|r| r.iter().any(|v| !v.trim().is_empty())).and_then(|i| numbers.get(i)).copied().unwrap_or(1), 1, 0.0));
+    for i in 0..limit.saturating_sub(1) {
+        if numbers[i + 1] != numbers[i] + 1
+            || !crate::header_detection::candidate_row(all, i)
+            || !crate::header_detection::candidate_row(all, i + 1) { continue; }
+        let structural = crate::header_detection::depth(all, i, |v| ledger_mapping::header_semantic_hits(&[v.to_string()]) > 0) == 2;
+        if !structural && !is_two_level_header_pair(&all[i], &all[i + 1]) { continue; }
+        let support = crate::header_detection::body_support(all, i, 2);
+        if support == 0 { continue; }
+        let width = all[i].len().max(all[i + 1].len());
+        let mut synthetic = vec![merge_headers(&all[i..=i + 1], width)];
+        if let Some(data) = all.get(i + 2) { synthetic.push(data.clone()); }
+        let base = ledger_mapping::header_row_score(&synthetic, 0)
+            + combined_semantic_score(&all[i], &all[i + 1]).min(16) as f64 / 16.0 * 0.10
+            + if structural { 0.06 } else { 0.0 };
+        let score = quality(i, 2, base);
+        if score > best.2 { best = (numbers[i], 2, score); }
+    }
+    if best.1 == 2 {
+        if let Some(candidate) = row_scores.iter_mut().find(|v| v.0 == best.0) { candidate.1 = best.2; }
+        row_scores.sort_by(|a,b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     }
     (best.0, best.1, row_scores)
+}
+
+pub(crate) fn public_header_candidates(all: &[Vec<String>]) -> (usize, usize, Vec<(usize, f64)>) {
+    infer_header_layout(all)
 }
 
 pub(crate) fn infer_public_header_layout(all: &[Vec<String>]) -> (usize, usize) {

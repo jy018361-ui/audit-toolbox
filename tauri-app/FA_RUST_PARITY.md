@@ -1,5 +1,9 @@
 # FA List Rust 迁移覆盖矩阵
 
+## 2026-10-21：公共表头结构候选修复
+
+自动表头识别继承公共短字段／段落筛选、后续正文及联合双层边界判据，避免说明段落仅凭业务词胜出；明确参数页要求选择数据表或手动指定表头。批量账表扫描保留同本有效 Sheet；普通与大文件入口使用一致结构规则，旧识别／结果缓存失效。各工具自身字段词表、人工指定及业务计算规则保持。接入范围、限制及回归命令见 `HEADER_DETECTION.md` 同日条目。
+
 ## 2026-10-20：人工辅助与JE正文公共修复
 
 TB＋JE人工辅助列保留、自动验证不放宽，普通缺科目续行继承使用日期、凭证号、金额AND条件并排除明确合计，分析缓存引用公共JE正文版本。原值／折旧分类及类别提示不改。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib fa_tbje::`；`npx vitest run src/FaTbJePage.test.ts src/ledgerMappingAuxiliary.test.ts`。

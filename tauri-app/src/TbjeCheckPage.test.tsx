@@ -500,6 +500,87 @@ describe("TbjeCheckPage", () => {
     );
   });
 
+  it.each([false, true])("同名组按身份预览与导出，不带入跳过的组（旧 worker：%s）", async (legacyWorker) => {
+    const { engineCall, jobStart, listenJobEvents, pickPath } = await import("./api");
+    vi.mocked(pickPath)
+      .mockResolvedValueOnce(["甲", "乙", "丙"].flatMap((name) => [
+        `C:/samples/${name}/02科目余额表.xlsx`, `C:/samples/${name}/02序时账.xlsx`,
+      ]))
+      .mockResolvedValueOnce("C:/exports/乙.xlsx")
+      .mockResolvedValueOnce("C:/exports");
+    vi.mocked(engineCall).mockImplementation(async (method, params) => {
+      if (method === "ledger.forms") return [];
+      if (method === "ledger.review_pair_mapping") return { tbChanges: [], jeChanges: [] };
+      if (method === "ledger.auxiliary_link") return { status: "notNeeded", warnings: [] };
+      if (method === "ledger.check_mapping_alignment") {
+        const path = (params as { tbSource: { inputPath: string } }).tbSource.inputPath;
+        return { aligned: !path.includes("丙"), errors: ["科目无法对齐"] };
+      }
+      const path = (params as { source: { inputPath: string } }).source.inputPath;
+      if (method === "deposit.classify_source") return {
+        kind: path.includes("科目余额表") ? "tb" : "je", sheet: "Sheet1", headerRow: 1, headerDepth: 1,
+      };
+      return {
+        sheet: "Sheet1", sheets: ["Sheet1"], headerRow: 1, headerDepth: 1,
+        headers: ["科目编码"], preview: [], entities: [path.split("/")[3]],
+        suggestedMapping: { accountCode: "科目编码" },
+      };
+    });
+    let emit: ((event: never) => void) | undefined;
+    vi.mocked(listenJobEvents).mockImplementation(async (callback) => {
+      emit = callback as typeof emit;
+      return () => {};
+    });
+    const { container } = render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
+    await screen.findByRole("button", { name: "开始核对 3 组" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "开始核对 3 组" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "开始核对 3 组" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("tbje_check.run_batch", expect.anything()));
+    type Group = { groupId: string; label: string; tbSource: { inputPath: string } };
+    const run = vi.mocked(jobStart).mock.calls.find(([method]) => method === "tbje_check.run_batch")![1] as { groups: Group[] };
+    expect(run.groups).toHaveLength(2);
+    expect(run.groups.map((group) => group.label)).toEqual(["2", "2"]);
+    expect(new Set(run.groups.map((group) => group.groupId)).size).toBe(2);
+    const emitDone = (result: unknown) => act(() => emit?.({
+      jobId: "job-1", toolId: "tbje_check", phase: "completed", current: 1, total: 1,
+      severity: "success", message: "完成", outputPaths: [], result,
+    } as never));
+    const results = run.groups.map((group, index) => ({
+      ...(legacyWorker ? {} : { groupId: group.groupId }), label: group.label, ok: true,
+      result: {
+        rollforward: { performed: true, passed: true },
+        tbVsJe: { performed: true, passed: false, mismatched: index + 1, accounts: 10 },
+        equation: { performed: true, passed: true },
+      },
+    }));
+    // 新 worker 按返回身份关联，即使顺序变化也不会串组；旧 worker 按实际提交顺序兼容。
+    emitDone({ groups: legacyWorker ? results : results.toReversed() });
+    const table = await screen.findByRole("table", { name: "TB/JE 完整性核对结果" });
+    const firstRow = within(table).getByText(legacyWorker ? "1 / 10 科目" : "2 / 10 科目").closest("tr")!;
+    const secondRow = within(table).getByText(legacyWorker ? "2 / 10 科目" : "1 / 10 科目").closest("tr")!;
+    fireEvent.click(within(firstRow).getByRole("button", { name: "预览明细" }));
+    fireEvent.click(within(secondRow).getByRole("button", { name: "预览明细" }));
+    expect(within(firstRow).getByRole("button", { name: "预览明细" })).toHaveAttribute("aria-expanded", "false");
+    expect(within(secondRow).getByRole("button", { name: "收起明细" })).toHaveAttribute("aria-expanded", "true");
+
+    const target = run.groups.find((group) => group.tbSource.inputPath.includes("乙"))!;
+    const targetRow = within(table).getByText("2 / 10 科目").closest("tr")!;
+    fireEvent.click(within(targetRow).getByRole("button", { name: "导出明细" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("tbje_check.export", expect.objectContaining({ groupId: target.groupId, tbSource: target.tbSource })));
+    emitDone({ outputPath: "C:/exports/乙.xlsx" });
+    fireEvent.click(screen.getByRole("button", { name: "导出全部结果" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("tbje_check.export_batch", expect.anything()));
+    const exported = vi.mocked(jobStart).mock.calls.find(([method]) => method === "tbje_check.export_batch")![1] as typeof run;
+    expect(exported.groups).toEqual(run.groups);
+    expect(exported.groups.some((group) => group.tbSource.inputPath.includes("丙"))).toBe(false);
+    emitDone({ outputDirectory: "C:/exports" });
+    fireEvent.click(within(targetRow).getByRole("button", { name: "检查映射" }));
+    const expanded = container.querySelector(".tbje-group-mapping")!;
+    expect(expanded.closest(".tbje-group-row")?.textContent).toContain("02科目余额表.xlsx");
+    expect(expanded.id).toBe(`tbje-mapping-${target.groupId}-tb`);
+  });
+
   it("names the failed group and still checks the rest when alignment fails", async () => {
     const { engineCall, jobStart, pickPath } = await import("./api");
     vi.mocked(pickPath).mockResolvedValue([
@@ -732,6 +813,7 @@ describe("TbjeCheckPage", () => {
         result: {
           groups: [
             {
+              groupId: pairingFileKey({ path: "C:/samples/01TB.xlsx", sheet: "Sheet1" }),
               label: "1",
               ok: true,
               result: {
@@ -755,6 +837,7 @@ describe("TbjeCheckPage", () => {
         groups: [
           {
             accountMatchPolicy: "tbjeIntegrity",
+            groupId: pairingFileKey({ path: "C:/samples/01TB.xlsx", sheet: "Sheet1" }),
             label: "1",
             tbSource: {
               inputPath: "C:/samples/01TB.xlsx",

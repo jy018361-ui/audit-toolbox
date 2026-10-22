@@ -2647,7 +2647,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                   size="sm"
                                   disabled={busy}
                                   aria-expanded={detail === outcome.groupId}
-                                  aria-controls={`tbje-result-detail-${outcome.groupId}`}
+                                  aria-controls={`tbje-result-detail-${encodeURIComponent(outcome.groupId)}`}
                                   onClick={() =>
                                     setDetail(
                                       detail === outcome.groupId
@@ -2700,7 +2700,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                           outcome.result && (
                             <TableRow className="tbje-detail-row">
                               <TableCell
-                                id={`tbje-result-detail-${outcome.groupId}`}
+                                id={`tbje-result-detail-${encodeURIComponent(outcome.groupId)}`}
                                 colSpan={5}
                               >
                                 <OutcomeDetail

@@ -888,7 +888,8 @@ const tbjeRunBatchEvents = (params: DemoParams): DemoJobEvent[] => {
       severity: "success",
       outputPaths: [],
       result: {
-        groups: labels.map((label) => ({
+        groups: labels.map((label, index) => ({
+          groupId: asRecord(Array.isArray(params.groups) ? params.groups[index] : undefined).groupId,
           label,
           ok: true,
           result: TBJE_DEMO_CHECK,

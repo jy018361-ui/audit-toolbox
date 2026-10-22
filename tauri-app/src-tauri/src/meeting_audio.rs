@@ -80,9 +80,12 @@ fn has_active_teams_session(device: &Device, owned: &HashSet<u32>) -> Result<boo
     Ok(false)
 }
 
-pub(crate) fn active_capture_device(enumerator: &DeviceEnumerator) -> Option<Device> {
+fn active_device(enumerator: &DeviceEnumerator, direction: Direction) -> Option<Device> {
     let owned = teams_processes(&process_table());
-    let devices = enumerator.get_device_collection(&Direction::Capture).ok()?;
+    if owned.is_empty() {
+        return None;
+    }
+    let devices = enumerator.get_device_collection(&direction).ok()?;
     for index in 0..devices.get_nbr_devices().ok()? {
         let Ok(device) = devices.get_device_at_index(index) else {
             continue;
@@ -92,6 +95,14 @@ pub(crate) fn active_capture_device(enumerator: &DeviceEnumerator) -> Option<Dev
         }
     }
     None
+}
+
+pub(crate) fn active_capture_device(enumerator: &DeviceEnumerator) -> Option<Device> {
+    active_device(enumerator, Direction::Capture)
+}
+
+pub(crate) fn active_render_device(enumerator: &DeviceEnumerator) -> Option<Device> {
+    active_device(enumerator, Direction::Render)
 }
 
 /// 调用线程须先初始化 COM。任一路无法可靠枚举时返回错误，检测层不能把它当作会议结束。

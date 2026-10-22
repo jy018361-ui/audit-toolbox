@@ -1615,7 +1615,7 @@ fn snapshot_file_identity(path: &Path) -> Option<String> {
 /// 或续写（大小/修改时间变化），键即变化，旧快照自然作废。
 fn calc_fingerprint(params: &Value) -> Option<String> {
     let subset = snapshot_param_subset(params);
-    let mut material = format!("deposit-{}-{}-{}\n", ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, ledger_mapping::JE_BODY_RULE_VERSION);
+    let mut material = format!("deposit-auxiliary-details-v1-{}-{}-{}\n", ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, ledger_mapping::JE_BODY_RULE_VERSION);
     material.push_str(crate::header_detection::RULE_VERSION);
     material.push('\n');
     material.push_str(&serde_json::to_string(&subset).ok()?);
@@ -3014,6 +3014,8 @@ struct FoldedTb {
     /// 同一账户名下出现多个币种的清单（分币种拆行的提示用）。
     multi_currency_accounts: Vec<Value>,
     auxiliary_warnings: Vec<String>,
+    /// 从本轮实际折叠的计息账户记录降级范围，不从全局告警猜测受影响账户。
+    auxiliary_fallback_accounts: Vec<Value>,
     booked_interest_rows: Vec<Value>,
     booked_interest: f64,
 }
@@ -3588,6 +3590,7 @@ fn fold_tb_accounts(
         }
     }
     let mut accounts: Vec<AccountRow> = vec![];
+    let mut auxiliary_fallback_accounts = Vec::new();
     // 测算行键 → 科目确认表的辅助明细键。逐户利率改写按明细键匹配，
     // 与存款类型覆盖同一键空间；行键里拼了币种，不能直接当明细键用。
     let mut detail_keys: BTreeMap<String, String> = BTreeMap::new();
@@ -3637,6 +3640,25 @@ fn fold_tb_accounts(
         } else {
             fold.first.account.clone()
         };
+        if je_input.is_some() && key.2.is_empty() && !fold.auxiliaries.is_empty() {
+            let reason = auxiliary_plan.verdicts.iter()
+                .find(|group| group.entity == key.0 && group.account == key.1)
+                .map(|group| match group.verdict.status {
+                    "noMatch" => "JE 无对应列或辅助列未通过验证。",
+                    "ambiguous" => "JE 中多列命中辅助值，无法唯一确定对应列。",
+                    "partialCoverage" => "JE 辅助列未完整覆盖 TB 辅助明细。",
+                    _ => "未找到已验证的 JE 对应辅助列。",
+                })
+                .unwrap_or("未找到已验证的 JE 对应辅助列。");
+            auxiliary_fallback_accounts.push(json!({
+                "key": row_key,
+                "entity": key.0,
+                "account": account_text,
+                "currency": currency,
+                "auxiliaries": fold.auxiliaries.iter().collect::<Vec<_>>(),
+                "reason": reason,
+            }));
+        }
         let detail_key = format!(
             "{}\u{1f}{}\u{1f}{}",
             key.0,
@@ -3792,6 +3814,7 @@ fn fold_tb_accounts(
         multi_currency_group_count,
         multi_currency_accounts,
         auxiliary_warnings,
+        auxiliary_fallback_accounts,
         booked_interest_rows,
         booked_interest,
     })
@@ -3828,6 +3851,7 @@ fn calculate(
         multi_currency_group_count,
         multi_currency_accounts: _,
         auxiliary_warnings,
+        auxiliary_fallback_accounts,
         booked_interest_rows,
         booked_interest,
     } = fold_tb_accounts(params, cancel, progress, total, true)?;
@@ -4245,6 +4269,7 @@ fn calculate(
                 "status": group.verdict.status, "column": group.verdict.column,
             })).collect::<Vec<_>>(),
             "auxiliaryWarnings": auxiliary_warnings,
+            "auxiliaryFallbackAccounts": auxiliary_fallback_accounts,
             "amountScheme": amount_scheme,
             "amountEvidence": amount_evidence,
             "openingSource": if accounts.iter().all(|a| a.opening_from_tb) {
@@ -11262,6 +11287,7 @@ mod tests {
             json!("verified"),
             "{summary:#?}"
         );
+        assert_eq!(summary["auxiliaryFallbackAccounts"], json!([]));
         assert!(
             summary["auxiliaryWarnings"]
                 .as_array()
@@ -11324,6 +11350,11 @@ mod tests {
                 .unwrap_or(false),
             "降级必须带提示: {summary:#?}"
         );
+        let affected = summary["auxiliaryFallbackAccounts"].as_array().unwrap();
+        assert_eq!(affected.len(), 1, "降级必须点名实际计息账户: {summary:#?}");
+        assert_eq!(affected[0]["account"], json!("1002 银行存款"));
+        assert_eq!(affected[0]["auxiliaries"], json!(["工行理财"]));
+        assert!(affected[0]["reason"].as_str().unwrap().contains("JE"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

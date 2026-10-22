@@ -380,14 +380,13 @@ fn nonempty_string<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
 fn task_error_detail(task: &Value, task_id: Option<&str>) -> String {
     let mut reasons = Vec::new();
     let mut add_reason = |value: &Value| {
-        let reason = [
-            nonempty_string(value, "code"),
-            nonempty_string(value, "message"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("：");
+        let code = nonempty_string(value, "code");
+        let message = nonempty_string(value, "message").filter(|message| Some(*message) != code);
+        let reason = [code, message]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("：");
         if !reason.is_empty() && !reasons.contains(&reason) {
             reasons.push(reason);
         }
@@ -418,6 +417,17 @@ fn task_error_detail(task: &Value, task_id: Option<&str>) -> String {
 }
 
 fn failed_task_error(task: &Value, task_id: Option<&str>) -> AppError {
+    let no_speech = std::iter::once(task)
+        .chain(task.get("output"))
+        .chain(task_results(task).into_iter().flatten())
+        .any(|value| nonempty_string(value, "code") == Some("SUCCESS_WITH_NO_VALID_FRAGMENT"));
+    if no_speech {
+        return asr_error(
+            "ASR_EMPTY_TRANSCRIPT",
+            "百炼未检测到有效语音。请先回放原录音；若无声请检查录音设备后重新录制，若有清晰讲话请保留录音排查识别问题。",
+            Some(task_error_detail(task, task_id)),
+        );
+    }
     asr_error(
         "ASR_TASK_FAILED",
         "百炼转写任务失败，原录音已保留，可重新导入重试。",
@@ -738,6 +748,24 @@ mod tests {
             "FAILED",
         ] {
             assert!(detail.contains(expected), "缺少 {expected}：{detail}");
+        }
+    }
+
+    #[test]
+    fn no_valid_fragment_explains_provider_vad_without_claiming_recording_is_silent() {
+        let code = "SUCCESS_WITH_NO_VALID_FRAGMENT";
+        for task in [
+            json!({"code": code, "message": code, "output": {"task_status": "FAILED"}, "request_id": "request-vad"}),
+            json!({"output": {"task_status": "FAILED", "code": code, "message": code}}),
+            json!({"output": {"task_status": "SUCCEEDED", "results": [{"subtask_status": "FAILED", "code": code, "message": code}]}}),
+        ] {
+            let error = task_finished(&task, "task-vad").unwrap_err();
+            assert_eq!(error.code, "ASR_EMPTY_TRANSCRIPT");
+            assert!(error.user_message.contains("百炼未检测到有效语音"));
+            assert!(error.user_message.contains("若有清晰讲话"));
+            let detail = error.detail.unwrap();
+            assert_eq!(detail.matches(code).count(), 1, "不应重复输出相同错误码");
+            assert!(detail.contains("task-vad"));
         }
     }
 

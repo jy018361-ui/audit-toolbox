@@ -1,3 +1,23 @@
+## 2026-10-22 · 存款辅助核算提示折叠并点名受影响账户
+
+- 目标：修复黄色提示写“以下账户”却只有通用原因、看不到实际账户的问题。
+- 设计决策：默认收起，摘要保留受影响账户数与主体＋科目测算口径；展开可看主体、科目、币种、TB 辅助值和未拆分原因。清单由后端实际参与合并的计息账户生成，已验证拆分的账户不混入；旧任务仅有通用原因时明确需重算查看清单。
+- 验证：`npx vitest run src/DepositAuxiliaryNotice.test.tsx src/DepositInterestInteractions.test.tsx src/DepositInterestPage.test.ts src/DepositInterestStyles.test.ts`；`npm run build`。后端及原件验证见 `DEPOSIT_INTEREST_PARITY.md` 同日记录。
+
+## 2026-10-22 · 会议空录诊断与实际播放设备采集
+
+- 目标：处理两路设备均显示初始化成功、成品却无声，最终只得到百炼无有效语音错误的问题。
+- 设计决策：优先采集 Teams 活跃会话所在的播放设备；设备回环可能录入同设备其他应用的声音，开录时说明；不可用时保留进程／默认通信设备兜底并提醒短录确认。空录提示不再笼统要求改成系统默认，而是核对实际设备与耳机静音开关。
+- 实现约束：仅对本地确认全零／空数据的 PCM WAV 停止上传，不按低音量比例误拦真实讲话；百炼无有效语音错误用中文解释，继续保留任务编号。原录音和每轨音量统计保存在会议目录。
+- 结束状态：保留音频停止十秒防抖，收到明确退会事件后立刻将全局「正在录制」改为「正在保存录音」，收尾成功／失败后解除；不在前端重复启动上传。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml --lib meeting_`；`cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_asr::tests::`；`npx vitest run src/MeetingMinutesPage.test.tsx src/components/MeetingWatch.test.tsx src/lib/errors.test.ts`；`npm run build`。设备选择、静音／低音量 WAV、两种转写通道入口及落盘回归；尚未在反馈用户耳机与 Teams 环境真机验收。
+
+## 2026-10-22 · LLM 映射复核无需调整时保留完成反馈
+
+- 目标：修复点击 LLM 复核后，没有调整建议时结果区消失、用户无法确认是否完成的问题。
+- 设计决策：共享复核区始终展示每个已上传文件的状态；TBJE 每组保留「已复核 · 无需调整」。进行中、失败、待确认和缺失字段沿用原提示，建议应用与映射规则不变。
+- 验证：`npx vitest run src/components/LedgerReviewAll.test.tsx src/TbjeCheckPage.test.tsx`；`npm run build`。新增先失败后修复的回归，覆盖双表均无建议、再次复核的进行中与分组内完成反馈。
+
 ## 2026-10-22 · 会议转写失败展示详细原因
 
 - 目标：修复自动录音后点击「停止并生成纪要」时只显示「转写任务失败」、无法判断原因的问题。

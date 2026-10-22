@@ -91,6 +91,7 @@ fn generate(
             Some(audio_path.to_string_lossy().into_owned()),
         ));
     }
+    crate::meeting_record::check_transcription_audio(&audio_path)?;
     let settings = params.get("__settings").cloned().unwrap_or(Value::Null);
     // 套餐通道（token_plan）：密钥只能访问套餐端点，走 realtime 协议刷套餐
     // 额度；通用通道维持 paraformer 文件转写。套餐转写不区分说话人，
@@ -421,6 +422,40 @@ mod tests {
         );
         assert_eq!(detail_param(&json!({})), "standard");
         assert_eq!(detail_param(&json!({"detailLevel": "别的"})), "standard");
+    }
+
+    #[test]
+    fn silent_recording_is_rejected_before_credentials_or_cloud_in_both_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audio-mix.wav");
+        let mut writer = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for _ in 0..16000 {
+            writer.write_sample(0i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        for channel in ["general", "token_plan"] {
+            let error = run_job(
+                "meeting.generate",
+                json!({"audioPath": path.to_string_lossy(),
+                "__settings": {"meeting": {"asr_channel": channel}}}),
+                &|_, _, _, _| {},
+                Arc::new(AtomicBool::new(false)),
+                &test_pause(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "MEETING_AUDIO_SILENT");
+            assert!(error.user_message.contains("停止上传"));
+            assert!(path.is_file());
+        }
     }
 
     #[test]

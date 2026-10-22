@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { z } from "zod";
 import type { ToolManifest, JobEvent } from "./types";
 import { useTaskRestore } from "./restore";
 import {
@@ -84,6 +85,14 @@ const DEPOSIT_MULTI = new Set([
   "date",
 ]);
 const ACCOUNT_REVIEW_PAGE_SIZE = 250;
+const auxiliaryFallbackAccountsSchema = z.array(z.object({
+  key: z.string(),
+  entity: z.string(),
+  account: z.string(),
+  currency: z.string(),
+  auxiliaries: z.array(z.string()),
+  reason: z.string(),
+}));
 import "./fx-audit.css";
 import "./deposit-interest.css";
 import { AccountConfirmationActions, type ConfirmationRow } from "./AccountConfirmationActions";
@@ -3650,6 +3659,8 @@ export function Results({
   const auxiliaryWarnings = Array.isArray(summary.auxiliaryWarnings)
     ? summary.auxiliaryWarnings.map(String).filter(Boolean)
     : [];
+  const auxiliaryDetails = auxiliaryFallbackAccountsSchema.safeParse(summary.auxiliaryFallbackAccounts);
+  const auxiliaryFallbackAccounts = auxiliaryDetails.success ? auxiliaryDetails.data : [];
   const stale =
     Math.abs(liveTotal - Number(summary.calculatedInterest ?? 0)) > 0.005;
   const jeCurrencyAllocationWarning = String(
@@ -3757,16 +3768,24 @@ export function Results({
           <span>{jeCurrencyAllocationWarning}</span>
         </p>
       )}
-      {auxiliaryWarnings.length > 0 && (
-        <section className="deposit-notice" aria-label="辅助核算联动">
-          <h4>辅助核算联动</h4>
-          <p>以下账户未按辅助核算拆分，已按主体＋科目执行测算：</p>
-          <ul>
-            {auxiliaryWarnings.map((warning) => (
-              <li key={warning}>{warning}</li>
-            ))}
-          </ul>
-        </section>
+      {(auxiliaryWarnings.length > 0 || auxiliaryFallbackAccounts.length > 0) && (
+        <details className="deposit-notice deposit-auxiliary-notice" aria-label="辅助核算联动">
+          <summary>
+            辅助核算联动：{auxiliaryFallbackAccounts.length > 0 ? `${auxiliaryFallbackAccounts.length} 个账户` : "账户"}未按辅助核算拆分，已按主体＋科目测算（查看明细）
+          </summary>
+          <div className="deposit-auxiliary-details">
+            {auxiliaryWarnings.length > 0 && <ul>
+              {auxiliaryWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+            </ul>}
+            {auxiliaryFallbackAccounts.length > 0 ? <ul className="deposit-auxiliary-accounts">
+              {auxiliaryFallbackAccounts.map((account) => <li key={account.key}>
+                <strong>{account.entity === DEFAULT_ENTITY ? "未区分主体" : account.entity} / {account.account} / {account.currency || "未标币种"}</strong>
+                <p>未拆分原因：{account.reason}</p>
+                <p>TB 辅助明细（{account.auxiliaries.length} 项）：{account.auxiliaries.join("、")}</p>
+              </li>)}
+            </ul> : !auxiliaryDetails.success && <p>此历史结果未记录受影响账户，请重新测算查看明细。</p>}
+          </div>
+        </details>
       )}
       {jeUncoveredEntities.length > 0 && (
         <p className="deposit-stale" role="alert">

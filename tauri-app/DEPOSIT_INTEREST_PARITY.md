@@ -1,5 +1,11 @@
 # 存款利息上传识别行为与性能回归
 
+## 2026-10-22：辅助降级清单与折叠提示
+
+- 结果新增 `summary.auxiliaryFallbackAccounts`：按本轮真实计息账户的折叠键记录主体、科目、币种、TB 辅助值与原因，仅列有辅助明细但未取得 JE 验证列的实际合并账户。复用空辅助计划时也记录范围，不依赖可能为空的 `auxiliaryGroups`，不从全局原因猜测账户。
+- 界面默认折叠，展开看账户和原因；已验证拆分、未纳入计息及本来无辅助明细的行不列入。旧结果缺清单时只展示已有原因并提示重新测算；来源字段按 zod 校验。结果快照增加独立明细版本，避免复用缺清单的旧测算。
+- 原辅助验证、TB 结构、科目合并、利率与月均利息公式保持；Excel 导出格式保持。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib deposit_interest:: -- --test-threads=2`；`npx vitest run src/DepositAuxiliaryNotice.test.tsx src/DepositInterestInteractions.test.tsx src/DepositInterestPage.test.ts src/DepositInterestStyles.test.ts`；`npm run build`。
+
 ## 2026-10-21：公共表头结构候选修复
 
 自动表头识别继承公共短字段／段落筛选、后续正文及联合双层边界判据，避免说明段落仅凭业务词胜出；明确参数页要求选择数据表或手动指定表头。批量账表扫描保留同本有效 Sheet；普通与大文件入口使用一致结构规则，旧识别／结果缓存失效。各工具自身字段词表、人工指定及业务计算规则保持。接入范围、限制及回归命令见 `HEADER_DETECTION.md` 同日条目。

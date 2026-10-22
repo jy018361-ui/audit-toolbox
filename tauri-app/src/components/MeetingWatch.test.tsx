@@ -79,6 +79,37 @@ it("首次挂载从后台快照恢复纪要结果", async () => {
   expect(screen.getByRole("button", { name: "打开转写稿" })).toBeInTheDocument();
 });
 
+it("确认退会后立即显示保存录音，收尾完成才显示结果", async () => {
+  mocks.status.mockResolvedValue({ watchEnabled: true, inCall: true, recording: true,
+    recordingSummary: { startedAt: "2026-10-22T16:22:48+08:00", warnings: [] } });
+  render(<MeetingWatch />);
+  expect(await screen.findByText(/正在录制会议/)).toBeInTheDocument();
+  await act(async () => mocks.listener?.({ type: "call_ended", at: "end" }));
+  expect(screen.queryByText(/正在录制会议/)).not.toBeInTheDocument();
+  expect(screen.getByText("会议已结束，正在保存录音…")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "停止并生成纪要" })).not.toBeInTheDocument();
+  await act(async () => {
+    mocks.listener?.({ type: "recording_auto_finished", at: "saved", summary: {
+      audioPath: "C:/data/audio.wav", durationSec: 296, startedAt: "2026-10-22T16:22:48+08:00",
+    } });
+    mocks.jobListener?.(completed);
+  });
+  expect(screen.queryByText("会议已结束，正在保存录音…")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "打开会议纪要" })).toBeInTheDocument();
+  expect(mocks.jobStart).not.toHaveBeenCalled();
+});
+
+it("退会后收尾失败时退出保存状态并显示原因", async () => {
+  mocks.status.mockResolvedValue({ watchEnabled: true, inCall: true, recording: true,
+    recordingSummary: { startedAt: "2026-10-22T16:22:48+08:00", warnings: [] } });
+  render(<MeetingWatch />);
+  await screen.findByText(/正在录制会议/);
+  await act(async () => mocks.listener?.({ type: "call_ended", at: "end" }));
+  await act(async () => mocks.listener?.({ type: "recording_failed", at: "saved", message: "混音文件保存失败" }));
+  expect(screen.queryByText("会议已结束，正在保存录音…")).not.toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("混音文件保存失败");
+});
+
 it("通知不可用时仍显示后台失败原因；LLM 失败仍可打开转写稿", async () => {
   mocks.status.mockResolvedValue({ watchEnabled: true, inCall: false, recording: false });
   render(<MeetingWatch />);

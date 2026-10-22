@@ -889,6 +889,29 @@ span.deposit-rate-missing {
   gap: 4px;
   padding-left: 20px;
 }
+.deposit-auxiliary-notice {
+  display: block;
+}
+.deposit-auxiliary-notice summary {
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.deposit-auxiliary-notice summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 4px;
+}
+.deposit-auxiliary-details {
+  display: grid;
+  gap: 12px;
+  max-height: 360px;
+  overflow: auto;
+  margin-top: 12px;
+  overflow-wrap: anywhere;
+}
+.deposit-auxiliary-accounts > li + li {
+  margin-top: 8px;
+}
 .deposit-currency-mode {
   display: flex;
   align-items: center;

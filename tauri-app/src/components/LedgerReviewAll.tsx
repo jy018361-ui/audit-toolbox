@@ -314,11 +314,6 @@ export function LedgerReviewAll(props: {
   const subject = props.present
     .map((kind) => props.names[kind])
     .join(both ? "＋" : "");
-  const statusKinds = props.present.filter((kind) => {
-    const result = props.results?.[kind];
-    return !result || result.failed || props.reviewing[kind] || result.applied.length > 0 ||
-      result.pending.length > 0 || Boolean(result.missingAfter?.length) || Boolean(result.mappingWarnings?.length);
-  });
   return (
     <section className="fx-review-all" aria-label="字段映射一键复核">
       <div>
@@ -332,8 +327,8 @@ export function LedgerReviewAll(props: {
             。
           </p>
         )}
-        {statusKinds.length > 0 && <div className="fx-review-states" aria-live="polite">
-          {statusKinds.map((kind) =>
+        {props.present.length > 0 && <div className="fx-review-states" aria-live="polite">
+          {props.present.map((kind) =>
             (() => {
               const result = props.results?.[kind];
               const presentation = result

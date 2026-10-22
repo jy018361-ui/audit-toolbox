@@ -127,6 +127,8 @@ describe("TbjeCheckPage", () => {
     vi.mocked(engineCall).mockImplementation(
       async (method: string, params: unknown) => {
         if (method === "ledger.forms") return [];
+        if (method === "ledger.review_pair_mapping")
+          return { tbChanges: [], jeChanges: [] };
         if (method === "ledger.check_mapping_alignment")
           return { aligned: true, warnings: [] };
         const source = (params as { source: { inputPath: string } }).source;
@@ -171,6 +173,10 @@ describe("TbjeCheckPage", () => {
     ).not.toBeInTheDocument();
     expect(pairingList).toHaveTextContent("科目余额表 TB");
     expect(pairingList).not.toHaveTextContent("配对依据");
+    await waitFor(() => {
+      expect(container.querySelector(".tbje-group-llm-result")).toHaveTextContent("仍缺");
+    });
+    expect(container.querySelector(".tbje-group-llm-result")).not.toHaveTextContent("无需调整");
     expect(pairingList).toHaveTextContent("序时账 JE");
     expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
     expect(screen.getByLabelText("为第 1 组选择序时账")).toBeInTheDocument();
@@ -352,7 +358,11 @@ describe("TbjeCheckPage", () => {
       screen.getByRole("button", { name: "LLM 一键联合复核 1 组" }),
     );
     await screen.findByText("联合复核完成：已复核 1 组。");
-    expect(screen.getByText("已复核 · 无需调整")).toBeVisible();
+    expect(screen.getAllByText("已复核 · 无需调整").length).toBeGreaterThan(0);
+    // 分组内也必须保留完成提示，不能只在顶部按钮附近或收起的映射徽标中显示。
+    expect(container.querySelector(".tbje-group-llm-result")).toHaveTextContent(
+      "已复核 · 无需调整",
+    );
     expect(
       vi.mocked(engineCall).mock.calls.some(([method]) => method === "ledger.auxiliary_link"),
     ).toBe(false);

@@ -2,6 +2,7 @@
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   renderHook,
   screen,
@@ -36,6 +37,32 @@ const slot = (onApplied = vi.fn(), column = "A编码") => ({
 afterEach(cleanup);
 
 describe("共享账表复核生命周期", () => {
+  it("TB 与 JE 复核均无需调整时仍分别显示完成提示，再次复核时显示进行中", async () => {
+    const call = vi.fn().mockResolvedValue({ tbChanges: [], jeChanges: [] });
+    function Review() {
+      const reviews = useLedgerDictReviews(call);
+      return (
+        <LedgerReviewAll
+          present={["tb", "je"]}
+          names={{ tb: "TB", je: "JE" }}
+          {...reviews}
+          onReviewAll={() => void reviews.reviewAll({ tb: slot(), je: slot() })}
+        />
+      );
+    }
+    render(<Review />);
+    fireEvent.click(screen.getByRole("button", { name: "一键复核 TB＋JE" }));
+    await screen.findByText("TB：已复核 · 无需调整");
+    expect(screen.getByText("JE：已复核 · 无需调整")).toBeTruthy();
+    const next = deferred();
+    call.mockReturnValueOnce(next.promise);
+    fireEvent.click(screen.getByRole("button", { name: "一键复核 TB＋JE" }));
+    expect(screen.getByText("TB：LLM 复核中")).toBeTruthy();
+    expect(screen.getByText("JE：LLM 复核中")).toBeTruthy();
+    await act(async () => next.resolve({ tbChanges: [], jeChanges: [] }));
+    await screen.findByText("TB：已复核 · 无需调整");
+  });
+
   it("每个新来源身份默认自动复核一次", async () => {
     const review = vi.fn();
     const view = render(

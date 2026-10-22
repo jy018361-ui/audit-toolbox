@@ -254,6 +254,7 @@ const CHECK_NAMES = {
 } as const;
 
 type GroupOutcome = {
+  groupId: string;
   label: string;
   ok: boolean;
   error?: string;
@@ -698,6 +699,8 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const pageRef = useRef<HTMLElement | null>(null);
   const intakeRef = useRef<(paths: string[]) => void>(() => undefined);
   const automaticReviewKeysRef = useRef(new Set<string>());
+  // 旧 worker 未返回 groupId 时，只能按本次实际提交的顺序补齐，不能按显示组名猜测。
+  const submittedGroupIdsRef = useRef<string[]>([]);
   const scopeEntityGroups = visibleGroups.filter((group) =>
     group.tb && group.je && ledgerEntityKeyEnabled(
       mappings[pairingFileKey(group.tb)] ?? {},
@@ -780,7 +783,10 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     onEvent: (event) => {
       const payload = event.result as { groups?: GroupOutcome[] } | undefined;
       if (payload?.groups) {
-        setOutcomes(payload.groups);
+        setOutcomes(payload.groups.map((outcome, index) => ({
+          ...outcome,
+          groupId: outcome.groupId ?? submittedGroupIdsRef.current[index] ?? `unbound-result-${index}`,
+        })));
         setResultsStale(false);
         setCurrentStep(2);
       }
@@ -1626,6 +1632,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     };
     const params: Record<string, unknown> = {
       accountMatchPolicy: "tbjeIntegrity",
+      groupId: group.id,
       label: group.label,
       tbSource: source(group.tb),
       tbMapping: mappings[pairingFileKey(group.tb!)] ?? {},
@@ -1675,17 +1682,17 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   }
 
   /** 导出某一组的差异明细。逐组导——十组的明细塞一个工作簿没法看。 */
-  async function exportGroup(label: string) {
+  async function exportGroup(groupId: string) {
     if (resultsStale) {
       setError("当前结果对应修改前的输入，请先重新核对再导出。");
       return;
     }
-    const group = runnable.find((item) => item.label === label);
+    const group = runnable.find((item) => item.id === groupId);
     if (!group?.tb) return;
     const suggested = group.tb.path.replace(/\.[^.\/]+$/, `_完整性核对.xlsx`);
     const picked = await pickPath(
       "save",
-      `导出第 ${label} 组的核对明细`,
+      `导出第 ${group.label} 组的核对明细`,
       ["xlsx"],
       fileName(suggested),
     );
@@ -1718,7 +1725,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       return;
     }
     const successful = runnable.filter((group) =>
-      outcomes.some((outcome) => outcome.label === group.label && outcome.ok),
+      outcomes.some((outcome) => outcome.groupId === group.id && outcome.ok),
     );
     if (!successful.length) return;
     const picked = await pickPath("folder", "选择全部核对结果的导出文件夹", []);
@@ -1883,6 +1890,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         setBusy(false);
         return;
       }
+      submittedGroupIdsRef.current = alignedGroups.map((group) => group.groupId as string);
       const id = await jobStart("tbje_check.run_batch", {
         groups: alignedGroups,
         __restoreSnapshot: restoreSnapshotParam(),
@@ -2380,11 +2388,15 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                             total + (review[kind]?.pending.length ?? 0),
                           0,
                         );
-                        if (!failed && !appliedCount && !pendingCount) return null;
                         const presentation = llmReviewPresentation({
                           failed,
                           applied: appliedCount,
                           pending: pendingCount,
+                          missing: missingOf("tb", group.tb).length + missingOf("je", group.je).length,
+                          warnings: present.reduce(
+                            (total, kind) => total + (review[kind]?.mappingWarnings?.length ?? 0),
+                            0,
+                          ),
                         });
                         return (
                           <div
@@ -2568,7 +2580,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   </TableHeader>
                   <TableBody>
                     {displayedOutcomes.map((outcome) => (
-                      <Fragment key={outcome.label}>
+                      <Fragment key={outcome.groupId}>
                         <TableRow>
                           <TableCell className="tbje-group-result">
                             {outcome.label || "—"}
@@ -2634,18 +2646,18 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                   variant="default"
                                   size="sm"
                                   disabled={busy}
-                                  aria-expanded={detail === outcome.label}
-                                  aria-controls={`tbje-result-detail-${outcome.label}`}
+                                  aria-expanded={detail === outcome.groupId}
+                                  aria-controls={`tbje-result-detail-${outcome.groupId}`}
                                   onClick={() =>
                                     setDetail(
-                                      detail === outcome.label
+                                      detail === outcome.groupId
                                         ? undefined
-                                        : outcome.label,
+                                        : outcome.groupId,
                                     )
                                   }
                                 >
                                   <Eye aria-hidden="true" />
-                                  {detail === outcome.label
+                                  {detail === outcome.groupId
                                     ? "收起明细"
                                     : "预览明细"}
                                 </Button>
@@ -2655,7 +2667,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                   size="sm"
                                   disabled={busy}
                                   onClick={() =>
-                                    void exportGroup(outcome.label)
+                                    void exportGroup(outcome.groupId)
                                   }
                                 >
                                   <Download aria-hidden="true" />
@@ -2667,7 +2679,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                   size="sm"
                                   onClick={() => {
                                     const group = visibleGroups.find(
-                                      (item) => item.label === outcome.label,
+                                      (item) => item.id === outcome.groupId,
                                     );
                                     if (!group) return;
                                     setCurrentStep(1);
@@ -2683,12 +2695,12 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                             )}
                           </TableCell>
                         </TableRow>
-                        {detail === outcome.label &&
+                        {detail === outcome.groupId &&
                           outcome.ok &&
                           outcome.result && (
                             <TableRow className="tbje-detail-row">
                               <TableCell
-                                id={`tbje-result-detail-${outcome.label}`}
+                                id={`tbje-result-detail-${outcome.groupId}`}
                                 colSpan={5}
                               >
                                 <OutcomeDetail

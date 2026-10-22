@@ -116,6 +116,7 @@ export function MeetingWatch() {
   const [starting, setStarting] = useState(false);
   const [recording, setRecording] = useState<MeetingRecordStart>();
   const [stopping, setStopping] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
   const [tick, setTick] = useState(0);
   const [latestJob, setLatestJob] = useState<JobEvent>();
   const [processingError, setProcessingError] = useState("");
@@ -130,6 +131,7 @@ export function MeetingWatch() {
     let unlisten: (() => void) | undefined;
     void listenJobEvents((event) => {
       if (disposed || event.toolId !== "meeting_minutes") return;
+      setFinalizing(false);
       jobVersion.current += 1;
       setLatestJob(event);
       setProcessingError("");
@@ -188,9 +190,15 @@ export function MeetingWatch() {
         setAskOpen(false);
         // 询问还没答，会议就结束了：小窗一并收掉。
         void closeAskWindow();
+        if (recordingRef.current) {
+          recordingRef.current = undefined;
+          setRecording(undefined);
+          setFinalizing(true);
+        }
         // 录音收尾由 Rust 检测层完成（recording_auto_finished），
         // 无论录音从询问小窗还是工具页开始都会被照顾到。
       } else if (event.type === "recording_started") {
+        setFinalizing(false);
         const parsed = pickStartSummary(event.summary);
         if (parsed) {
           recordingRef.current = parsed;
@@ -203,9 +211,11 @@ export function MeetingWatch() {
           }
         }
       } else if (event.type === "recording_stopped") {
+        setFinalizing(false);
         recordingRef.current = undefined;
         setRecording(undefined);
       } else if (event.type === "recording_auto_finished") {
+        setFinalizing(false);
         recordingRef.current = undefined;
         setRecording(undefined);
         const stopped = pickStopSummary(event.summary);
@@ -220,6 +230,7 @@ export function MeetingWatch() {
         }
         // 后台已负责启动任务；这里再启动会重复上传、重复计费。
       } else if (event.type === "recording_failed") {
+        setFinalizing(false);
         recordingRef.current = undefined;
         setRecording(undefined);
         setProcessingError(event.message ?? "录音收尾出现问题");
@@ -374,7 +385,12 @@ export function MeetingWatch() {
           </Button>
         </div>
       )}
-      {!recording && (processingError || finished) && (
+      {finalizing && (
+        <div className="meeting-processing-card" role="status" aria-live="polite">
+          <strong>会议已结束，正在保存录音…</strong>
+        </div>
+      )}
+      {!recording && !finalizing && (processingError || finished) && (
         <div className="meeting-processing-card" role={resultError ? "alert" : "status"}>
           <strong>{result?.minutesPath ? "会议纪要已生成" : "会议纪要未生成"}</strong>
           {resultError && <p>{resultError}</p>}

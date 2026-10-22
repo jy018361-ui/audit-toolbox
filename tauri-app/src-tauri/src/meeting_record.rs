@@ -5,8 +5,8 @@
 //! 设备选择的教训（真机 2026-09-28 复盘：系统声轨 14 秒后无数据、麦克风
 //! 轨 2.6 小时近乎无声）：不能按「系统默认设备」录——Teams 常单独选用
 //! 耳机播放/收音，默认扬声器没声音可录、默认麦克风离人很远。因此：
-//! - 系统声轨优先按 ms-teams.exe 进程回环采集（Teams 用哪块声卡都能录到），
-//!   找不到 Teams 进程或初始化失败才退回默认设备回环；
+//! - 系统声轨优先按 Teams 活跃播放会话选实际设备，避免进程回环打开成功却无声；
+//!   设备不可用才退回进程回环，最后使用默认通信／播放设备；
 //! - 麦克风优先按 Teams 活跃采集会话选设备；无法确定时再用音量与默认通信设备。
 //!
 //! `profile.release` 是 `panic = "abort"`：采集线程里任何错误都必须走
@@ -295,12 +295,71 @@ pub(crate) fn finalize(active: Arc<ActiveRecording>) -> Result<Value, AppError> 
         "startedAt": active.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "warnings": warnings,
         "sources": recording_summary(&active),
+        "audioStats": {
+            "system": audio_stats(&active.dir.join("track-system.wav")),
+            "mic": audio_stats(&active.dir.join("track-mic.wav")),
+            "mix": audio_stats(&mix_path),
+        },
     });
     let _ = fs::write(
         active.dir.join("recording-summary.json"),
         summary.to_string(),
     );
     Ok(summary)
+}
+
+/// 只分析可准确读取的 16 位 PCM WAV；不把音量阈值当作语音检测。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AudioStats {
+    sample_count: u64,
+    nonzero_sample_count: u64,
+    peak: f64,
+    rms: f64,
+}
+
+pub(crate) fn audio_stats(path: &Path) -> Option<AudioStats> {
+    let mut reader = WavReader::open(path).ok()?;
+    if reader.spec().sample_format != SampleFormat::Int || reader.spec().bits_per_sample != 16 {
+        return None;
+    }
+    let mut stats = AudioStats {
+        sample_count: 0,
+        nonzero_sample_count: 0,
+        peak: 0.0,
+        rms: 0.0,
+    };
+    let mut sum_sq = 0.0;
+    for sample in reader.samples::<i16>() {
+        let sample = sample.ok()?;
+        let normalized = f64::from(sample) / 32768.0;
+        stats.sample_count += 1;
+        stats.nonzero_sample_count += u64::from(sample != 0);
+        stats.peak = stats.peak.max(normalized.abs());
+        sum_sq += normalized * normalized;
+    }
+    if stats.sample_count > 0 {
+        stats.rms = (sum_sq / stats.sample_count as f64).sqrt();
+    }
+    Some(stats)
+}
+
+/// 仅拦截可确认的空数据／全零样本，安静或低音量录音仍交给识别服务。
+pub(crate) fn check_transcription_audio(path: &Path) -> Result<(), AppError> {
+    if let Some(stats) = audio_stats(path) {
+        if stats.nonzero_sample_count == 0 {
+            return Err(record_error(
+                "MEETING_AUDIO_SILENT",
+                "录音未采集到声音，已停止上传转写。原录音已保留，请检查 Teams 的播放设备、麦克风及耳机静音开关后重新录制。",
+                Some(format!(
+                    "录音文件：{}；样本数：{}；非零样本数：0",
+                    path.display(),
+                    stats.sample_count
+                )),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 单秒窗口判「有声」的 RMS 阈值（-42dB ≈ 0.008）：正常说话每秒在
@@ -352,10 +411,9 @@ fn silence_hint(mix_path: &Path, duration_sec: u64) -> Option<String> {
     let fraction = loud_windows as f64 / windows as f64;
     (fraction < SPEECH_FRACTION_MIN).then(|| {
         format!(
-            "录音里疑似没有录到人声（有声时间仅约 {:.0}%）：系统声已优先按 Teams 进程采集、\
-             麦克风已自动选用正在收音的设备，若仍录不到，可能是会议全程静音，\
-             或 Teams 正通过其他虚拟音频设备收音；请检查 Teams 的设备设置（尽量选「系统默认」），\
-             或改用扬声器外放重新录制。开录时的「录音质量提醒」里若提到退回了默认设备，也请一并查看。",
+            "录音里疑似没有录到人声（有声时间仅约 {:.0}%）。设备初始化成功不代表实际录到了声音；\
+             请先回放原录音，核对 Teams 的播放设备、麦克风及耳机静音开关。\
+             若回放有清晰讲话，可重新导入转写；若没有声音，需要调整设备后重新录制。",
             fraction * 100.0
         )
     })
@@ -466,12 +524,12 @@ fn open_stream(mut client: AudioClient, path: &Path) -> Result<PreparedCapture, 
     })
 }
 
-/// 旧方案兜底：系统默认播放设备的回环。Teams 单独选用别的设备时录不到
-/// 会议声音，只作为按进程采集不可用时的退路。
+/// 最后兜底：优先默认通信播放设备，再用默认播放设备。
 fn default_render_loopback(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
     let enumerator = DeviceEnumerator::new().map_err(stringify)?;
     let device = enumerator
-        .get_default_device(&Direction::Render)
+        .get_default_device_for_role(&Direction::Render, &Role::Communications)
+        .or_else(|_| enumerator.get_default_device(&Direction::Render))
         .map_err(stringify)?;
     let name = device
         .get_friendlyname()
@@ -480,13 +538,12 @@ fn default_render_loopback(path: &Path) -> Result<(PreparedCapture, CaptureMeta)
     let prepared = open_stream(client, path)?;
     Ok((
         prepared,
-        CaptureMeta::new(format!("系统默认播放设备（{name}）回环")),
+        CaptureMeta::new(format!("默认通信／播放设备（{name}）回环")),
     ))
 }
 
-/// 系统声轨：优先按 ms-teams.exe 进程回环——Teams 把声音播到哪块声卡
-/// 都能录到，这正是真机「录了 14 秒就没数据」的根治手段。
-fn prepare_system(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
+/// 进程回环无法证明目标树确实有播放流，只作为实际播放设备不可用时的兜底。
+fn process_or_default_system(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
     if let Some(pid) = find_teams_main_pid() {
         let attempt = AudioClient::new_application_loopback_client(pid, true)
             .map_err(stringify)
@@ -501,7 +558,7 @@ fn prepare_system(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String>
                 Ok((
                     prepared,
                     meta.with_caution(format!(
-                        "按 Teams 进程采集失败（{error}），已改用系统默认播放设备。"
+                        "按 Teams 进程采集失败（{error}），已改用默认通信／播放设备。"
                     )),
                 ))
             }
@@ -511,10 +568,54 @@ fn prepare_system(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String>
     Ok((
         prepared,
         meta.with_caution(
-            "未找到运行中的 Teams，已按系统默认播放设备录制；Teams 没在放声音时此轨会没有内容。"
+            "未找到运行中的 Teams，已按默认通信／播放设备录制；Teams 没在放声音时此轨会没有内容。"
                 .into(),
         ),
     ))
+}
+
+fn prepare_system(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
+    prefer_teams_render(
+        || {
+            let enumerator = DeviceEnumerator::new().map_err(stringify)?;
+            let Some(device) = crate::meeting_audio::active_render_device(&enumerator) else {
+                return Ok(None);
+            };
+            let name = device
+                .get_friendlyname()
+                .unwrap_or_else(|_| "Teams 播放设备".into());
+            let prepared = open_stream(device.get_iaudioclient().map_err(stringify)?, path)?;
+            Ok(Some((
+                prepared,
+                CaptureMeta::new(format!("Teams 正在使用的播放设备（{name}）回环")).with_caution(
+                    "系统声按 Teams 播放设备采集，同一设备上其他应用的声音也会被录入。".into(),
+                ),
+            )))
+        },
+        || process_or_default_system(path),
+    )
+}
+
+fn prefer_teams_render<T>(
+    endpoint: impl FnOnce() -> Result<Option<(T, CaptureMeta)>, String>,
+    fallback: impl FnOnce() -> Result<(T, CaptureMeta), String>,
+) -> Result<(T, CaptureMeta), String> {
+    match endpoint() {
+        Ok(Some(prepared)) => Ok(prepared),
+        result => {
+            let (prepared, mut meta) = fallback()?;
+            let reason = match result {
+                Err(error) => format!("无法采集 Teams 实际播放设备（{error}）"),
+                _ => "未找到 Teams 活跃播放会话".into(),
+            };
+            let caution = format!(
+                "{reason}，已使用备用系统声来源；请先录制短片确认有声。{}",
+                meta.caution.as_deref().unwrap_or("")
+            );
+            meta.caution = Some(caution);
+            Ok((prepared, meta))
+        }
+    }
 }
 
 /// 麦克风轨：自动挑「正在收音」的设备（会议中 Teams 一直占用所选麦克风）。
@@ -775,6 +876,119 @@ mod tests {
             .samples::<i16>()
             .map(|sample| sample.unwrap())
             .collect()
+    }
+
+    #[test]
+    fn teams_render_endpoint_wins_over_successful_process_fallback() {
+        let (value, meta) = prefer_teams_render(
+            || Ok(Some(("headset", CaptureMeta::new("Teams 耳机")))),
+            || panic!("已识别 Teams 实际播放设备，不应退回可能无声的进程来源"),
+        )
+        .unwrap();
+        assert_eq!(value, "headset");
+        assert_eq!(meta.source, "Teams 耳机");
+    }
+
+    #[test]
+    fn unavailable_render_endpoint_keeps_fallback_and_explains_source() {
+        for endpoint in [Ok(None), Err("设备已断开".to_string())] {
+            let (value, meta) = prefer_teams_render(
+                || endpoint,
+                || {
+                    Ok((
+                        "process",
+                        CaptureMeta::new("进程").with_caution("原有提醒".into()),
+                    ))
+                },
+            )
+            .unwrap();
+            assert_eq!(value, "process");
+            let caution = meta.caution.unwrap();
+            assert!(caution.contains("备用系统声来源"));
+            assert!(caution.contains("原有提醒"));
+        }
+        let error =
+            prefer_teams_render::<()>(|| Ok(None), || Err("两种来源均不可用".into())).unwrap_err();
+        assert_eq!(error, "两种来源均不可用");
+    }
+
+    #[test]
+    fn pcm_stats_distinguish_silence_quiet_audio_and_full_negative_peak() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audio.wav");
+        write_test_wav(&path, &[0, 0]);
+        let stats = audio_stats(&path).unwrap();
+        assert_eq!(stats.sample_count, 2);
+        assert_eq!(stats.nonzero_sample_count, 0);
+        assert_eq!(stats.peak, 0.0);
+        assert_eq!(stats.rms, 0.0);
+        assert_eq!(
+            check_transcription_audio(&path).unwrap_err().code,
+            "MEETING_AUDIO_SILENT"
+        );
+        write_test_wav(&path, &[0, 1, -1, 0]);
+        assert_eq!(audio_stats(&path).unwrap().nonzero_sample_count, 2);
+        assert!(
+            check_transcription_audio(&path).is_ok(),
+            "低音量不等于无有效语音，不能拦截"
+        );
+        write_test_wav(&path, &[i16::MIN]);
+        let stats = audio_stats(&path).unwrap();
+        assert_eq!(stats.peak, 1.0);
+        assert_eq!(stats.rms, 1.0);
+        write_test_wav(&path, &[]);
+        assert_eq!(
+            check_transcription_audio(&path).unwrap_err().code,
+            "MEETING_AUDIO_SILENT"
+        );
+        assert!(audio_stats(&dir.path().join("missing.wav")).is_none());
+    }
+
+    #[test]
+    fn unsupported_audio_still_goes_to_existing_cloud_decoder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("import.mp3");
+        fs::write(&path, b"ID3test").unwrap();
+        assert!(check_transcription_audio(&path).is_ok());
+        let path = dir.path().join("float.wav");
+        let mut writer = WavWriter::create(
+            &path,
+            WavSpec {
+                bits_per_sample: 32,
+                sample_format: SampleFormat::Float,
+                ..target_spec()
+            },
+        )
+        .unwrap();
+        writer.write_sample(0.0f32).unwrap();
+        writer.finalize().unwrap();
+        assert!(audio_stats(&path).is_none());
+        assert!(check_transcription_audio(&path).is_ok());
+    }
+
+    #[test]
+    fn finalized_silent_recording_keeps_per_track_stats_and_original_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for track in ["track-system.wav", "track-mic.wav"] {
+            write_test_wav(&dir.path().join(track), &[0; 160]);
+        }
+        let active = Arc::new(ActiveRecording {
+            stop: Arc::new(AtomicBool::new(false)),
+            dir: dir.path().to_path_buf(),
+            started_at: chrono::Local::now(),
+            handles: Mutex::new(vec![]),
+            tracks: Mutex::new(vec![]),
+        });
+        let summary = finalize(active).unwrap();
+        for track in ["system", "mic", "mix"] {
+            assert_eq!(summary["audioStats"][track]["sampleCount"], 160);
+            assert_eq!(summary["audioStats"][track]["nonzeroSampleCount"], 0);
+        }
+        assert!(dir.path().join("audio-mix.wav").is_file());
+        let saved: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("recording-summary.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["audioStats"], summary["audioStats"]);
     }
 
     /// 空录体检：全程静音的「会议」必须被点名，且提示里要说清设备原因。

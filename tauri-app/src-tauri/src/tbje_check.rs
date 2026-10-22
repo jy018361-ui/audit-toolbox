@@ -1244,10 +1244,11 @@ fn run_batch(
             ),
         );
         match run_with_progress(group, cancel, progress) {
-            Ok(result) => results.push(json!({ "label": label, "ok": true, "result": result })),
+            Ok(result) => results.push(json!({ "groupId": group.get("groupId"), "label": label, "ok": true, "result": result })),
             // 取消要中断整批，别的错误只记在这一组上。
             Err(e) if e.code == "JOB_CANCELLED" => return Err(e),
             Err(e) => results.push(json!({
+                "groupId": group.get("groupId"),
                 "label": label,
                 "ok": false,
                 "error": e.user_message,
@@ -1296,6 +1297,7 @@ fn export_batch(
     let total = groups.len();
     let mut output_paths = Vec::new();
     let mut results = Vec::new();
+    let mut used_names = HashSet::new();
     for (index, group) in groups.iter().enumerate() {
         pause.wait()?;
         if cancel.load(Ordering::Relaxed) {
@@ -1328,7 +1330,21 @@ fn export_batch(
                 }
             })
             .collect();
-        let output_path = output_directory.join(format!("第{safe_label}组_完整性核对.xlsx"));
+        // Windows 文件名不区分大小写；同名组、非法字符清理后的碰撞及已有文件均避让。
+        let stem = format!("第{safe_label}组_完整性核对");
+        let mut suffix = 1usize;
+        let output_path = loop {
+            let name = if suffix == 1 {
+                format!("{stem}.xlsx")
+            } else {
+                format!("{stem}（{suffix}）.xlsx")
+            };
+            let path = output_directory.join(&name);
+            if !path.exists() && used_names.insert(name.to_lowercase()) {
+                break path;
+            }
+            suffix += 1;
+        };
         let mut export_params = group.clone();
         export_params["outputPath"] = json!(output_path.to_string_lossy());
 
@@ -1337,10 +1353,11 @@ fn export_batch(
         match exported {
             Ok(path) => {
                 output_paths.push(path.to_string_lossy().into_owned());
-                results.push(json!({ "label": display_label, "ok": true, "outputPath": path.to_string_lossy() }));
+                results.push(json!({ "groupId": group.get("groupId"), "label": display_label, "ok": true, "outputPath": path.to_string_lossy() }));
             }
             Err(e) if e.code == "JOB_CANCELLED" => return Err(e),
             Err(e) => results.push(json!({
+                "groupId": group.get("groupId"),
                 "label": display_label,
                 "ok": false,
                 "error": e.user_message,

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ReleaseNotesSchema } from "./updateNotes";
+import { JobStartDelivery } from "./jobStartDelivery";
 import { version as appVersion } from "../package.json";
 import { demoDataEnabled, demoJobLookup, demoLookup, demoPath,
   cancelDemoJob, demoReplayJobs, injectDemoJobEvent, registerDemoReplayJob,
@@ -145,7 +146,7 @@ export function syncBusyAbortAll(): number {
   for (const id of pending) {
     const item = syncBusyActive.get(id);
     syncBusyActive.delete(id);
-    item?.abort(new Error(SYNC_BUSY_ABORTED_MESSAGE));
+    item?.abort(Object.assign(new Error(SYNC_BUSY_ABORTED_MESSAGE), { code: "SYNC_BUSY_ABORTED" }));
   }
   if (pending.length > 0) notifySyncBusy();
   return pending.length;
@@ -239,6 +240,8 @@ const demoJobToolId = (method: string): string =>
   DEMO_JOB_TOOL_ID_RULES.find(([prefix]) => method.startsWith(prefix))?.[1] ??
   "Excel_Merger";
 
+const jobStartDelivery = new JobStartDelivery();
+
 export async function jobStart(
   method: string,
   params: Record<string, unknown>,
@@ -255,7 +258,15 @@ export async function jobStart(
     registerDemoReplayJob(jobId, method, toolId, events);
     return Promise.resolve(jobId);
   }
-  return invoke<string>("job_start", { method, params });
+  const finishStart = jobStartDelivery.begin();
+  let jobId: string | undefined;
+  try {
+    jobId = await invoke<string>("job_start", { method, params });
+    return jobId;
+  } finally {
+    // 成功和拒绝都释放通知，避免一次启动失败拖住其他工具的事件。
+    finishStart(jobId);
+  }
 }
 
 export const jobCancel = (jobId: string) => {
@@ -528,7 +539,12 @@ export async function listenJobEvents(
     if (demoDataEnabled()) return subscribeDemoJobs(callback);
     return () => undefined;
   }
-  return listen("job-event", (e) => callback(JobEventSchema.parse(e.payload)));
+  let active = true;
+  const off = await listen("job-event", (e) => {
+    const event = JobEventSchema.parse(e.payload);
+    jobStartDelivery.deliver(event.jobId, () => { if (active) callback(event); });
+  });
+  return () => { active = false; off(); };
 }
 
 export async function listenFileDrops(

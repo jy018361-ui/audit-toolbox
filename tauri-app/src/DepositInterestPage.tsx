@@ -27,7 +27,7 @@ import {
   verifyCurrencyLink,
   type CurrencyLinkResult,
 } from "@/ledgerMapping";
-import { errorText } from "@/lib/errors";
+import { errorText, isSyncBusyAborted } from "@/lib/errors";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress, terminalJobError } from "@/components/JobProgress";
@@ -838,11 +838,13 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   // 三步导引，与汇兑损益／FA 一致：上传识别 → 科目分类 → 测算与底稿。
   const [step, setStep] = useState(0);
   const [error, setError] = useState("");
+  const [currencyValidationNotice, setCurrencyValidationNotice] = useState("");
   const [validationWarnings, setValidationWarnings] = useState<
     Record<string, string>
   >({});
   const [job, setJob] = useState<JobEvent>();
   const activeJob = useRef("");
+  const startingJobEvents = useRef<Map<string, JobEvent> | null>(null);
   const lastRunMethod = useRef<"deposit.preview" | "deposit.export">(
     "deposit.preview",
   );
@@ -1329,6 +1331,24 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     })();
   });
+  function applyJobEvent(event: JobEvent) {
+    if (event.jobId !== activeJob.current) return;
+    setJob(event);
+    if (event.phase === "completed") {
+      activeJob.current = "";
+      setBusy(false);
+      const next = (event.result ?? {}) as Record<string, unknown>;
+      setResult((current) => ({ ...current, ...next }));
+      setRows((next.rows ?? []) as AccountRow[]);
+    } else if (event.phase === "failed" || event.phase === "cancelled") {
+      activeJob.current = "";
+      setBusy(false);
+      const payload = event.result as
+        { error?: { userMessage?: string } } | undefined;
+      setError(payload?.error ? errorText(payload.error) : event.message);
+    }
+  }
+
   useEffect(() => {
     const drops = listenPositionedFileDrops(({ paths, x, y }) => {
       if (
@@ -1342,19 +1362,16 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       void classifyAndInspect(paths);
     });
     const jobs = listenJobEvents((event) => {
-      if (event.jobId !== activeJob.current) return;
-      setJob(event);
-      if (event.phase === "completed") {
-        setBusy(false);
-        const next = event.result as Record<string, unknown>;
-        setResult((current) => ({ ...current, ...next }));
-        setRows((next.rows ?? []) as AccountRow[]);
-      } else if (event.phase === "failed" || event.phase === "cancelled") {
-        setBusy(false);
-        const payload = event.result as
-          { error?: { userMessage?: string } } | undefined;
-        setError(payload?.error ? errorText(payload.error) : event.message);
+      if (event.toolId !== tool.id) return;
+      const early = startingJobEvents.current;
+      if (early) {
+        const previous = early.get(event.jobId);
+        if (!previous || !["completed", "failed", "cancelled"].includes(previous.phase))
+          early.set(event.jobId, event);
+        if (early.size > 64) early.delete(early.keys().next().value!);
+        return;
       }
+      applyJobEvent(event);
     });
     return () => {
       void drops.then((x) => x());
@@ -1744,6 +1761,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     ]);
   }
   async function advanceToConfirmation(): Promise<boolean> {
+    setCurrencyValidationNotice("");
     const key = currencyCheckKey();
     const cached =
       currencyCheckRef.current.key === key
@@ -1767,7 +1785,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       const check = await verifyCurrencyLink({
         ...payload(),
         selectedAccounts: depositAccounts.map((account) => ({ account })),
-      });
+      }, { throwOnError: true });
       if (!check) {
         setError("暂时无法验证 TB 与 JE 的外币币种对应关系，请稍后重试。");
         return false;
@@ -1781,6 +1799,13 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       setCurrencyFallbackMode("");
       setStep(1);
       return true;
+    } catch (error) {
+      if (isSyncBusyAborted(error)) {
+        setCurrencyValidationNotice("已停止币种衔接验证，当前映射已保留；可重新点击下一步。");
+      } else {
+        setError(`TB 与 JE 的币种衔接验证失败：${errorText(error)}`);
+      }
+      return false;
     } finally {
       setBusy(false);
     }
@@ -1881,8 +1906,21 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         }
       }
       lastRunMethod.current = method;
-      activeJob.current = await jobStart(method, request);
-      started = true;
+      const early = new Map<string, JobEvent>();
+      startingJobEvents.current = early;
+      activeJob.current = "";
+      setJob(undefined);
+      try {
+        const id = await jobStart(method, request);
+        if (generation !== preparationGeneration.current) return;
+        activeJob.current = id;
+        started = true;
+        startingJobEvents.current = null;
+        const event = early.get(id);
+        if (event) applyJobEvent(event);
+      } finally {
+        if (startingJobEvents.current === early) startingJobEvents.current = null;
+      }
     } catch (e) {
       if (key === matchingKeyRef.current && generation === preparationGeneration.current) setError(errorText(e));
     } finally {
@@ -2091,6 +2129,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         detail="按月均余额重算存款利息，并与 TB 勾稽。"
       />
       <ErrorBox error={step === 2 && error === terminalJobError(job) ? "" : error} onDismiss={() => setError("")} />
+      {step === 0 && currencyValidationNotice && <p className="fx-source-status" role="status">{currencyValidationNotice}</p>}
       {Object.keys(validationWarnings).length > 0 && (
         <details className="deposit-validation-warnings" role="status" aria-live="polite">
           <summary>
@@ -2523,7 +2562,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                           </th>
                           <th aria-label="发生额">
                             发生额
-                            <HelpTip text="优先取本年累计借贷发生额，其次取本期借贷发生额；已结转的损益科目按登记方向还原。第三步有发生额时用发生额比较，没有发生额列时才使用余额。" />
+                            <HelpTip text="分类前即可查看 TB 发生额；优先取本年累计，其次取本期，已结转的损益科目按登记方向还原，悬停金额可看取数依据。未取得金额显示“—”，真实零值显示0；分类决定是否纳入第三步比较，不影响这里的金额展示。" />
                           </th>
                           <th aria-label="存款类型">存款类型</th>
                           <th aria-label="利率（%）">
@@ -2549,8 +2588,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                           const isDepositRow = ["deposit", "other_monetary"].includes(
                             reviewRole(row),
                           );
-                          const isInterestIncomeRow =
-                            reviewRole(row) === "interest_income";
                           const variants = engineVariantsOf(row);
                           // 引擎行按币种（多主体时含主体）拆成多行；没有引擎
                           // 行的（旧后端／仅在序时账出现）保持科目整行一条。
@@ -2677,7 +2714,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                                         ?.occurrenceBasis ?? undefined
                                 }
                               >
-                                {!isInterestIncomeRow || row.auxiliary
+                                {row.auxiliary
                                   ? "—"
                                   : depositDisplayAmount(
                                       row.entity
@@ -3840,8 +3877,10 @@ export function Results({
             !booked
               ? "TB 中未识别到利息收入科目"
               : missing.length
-                ? `差异率 ${percent(summary.differenceRatio)}；尚有 ${missing.length} 户未定利率`
-                : `差异率 ${percent(summary.differenceRatio)}`,
+                ? `${summary.differenceRatio == null ? "账面收入为零，差异率不适用" : `差异率 ${percent(summary.differenceRatio)}`}；尚有 ${missing.length} 户未定利率`
+                : summary.differenceRatio == null
+                  ? "账面收入为零，差异率不适用"
+                  : `差异率 ${percent(summary.differenceRatio)}`,
             booked && summary.reconciliationPassed === true
               ? "pass"
               : "warning",

@@ -148,7 +148,8 @@ fn identity_parts(
         entity
     };
     let raw = text(table, row, map, "accountCode");
-    let code = ledger_mapping::account_code_of(&raw);
+    let raw_name = joined(table, row, map, "accountName");
+    let code = ledger_mapping::account_code_from_fields(&raw, &raw_name);
     let name = display_name(table, row, map);
     (entity, ledger_mapping::normalize_account_code(&code), name)
 }
@@ -595,6 +596,8 @@ fn align_account_mappings(
         &tb.headers,
         &tb.rows,
         &tb_column,
+        columns(je_map, "accountName").contains(&je_column),
+        columns(tb_map, "accountName").contains(&tb_column),
     );
     account_overlap_warnings(overlap, je_count, tb_count, &je_column, &tb_column)
 }

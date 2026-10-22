@@ -113,6 +113,17 @@ describe("共用字段映射面板", () => {
     });
   });
 
+  it("连字符组合科目允许双映射，数字辅助编码不套用", () => {
+    const { onChange, selects } = panel({
+      headers: ["会计科目"],
+      rows: [["1219000101-其他应收款-应收单位及个人款"], ["1002010109-人民币存款-民生银行"], ["5001010101-教育事业费用"], ["1002010103-人民币存款-建设银行"]],
+      mapping: { accountName: ["会计科目"] },
+      multi: new Set(["accountName"]),
+    });
+    pick(selects[0], "accountCode");
+    expect(onChange).toHaveBeenCalledWith({ accountCode: "会计科目", accountName: ["会计科目"] });
+  });
+
   it("借款页的字符串映射也能保存混写列双角色且不产生数组状态", () => {
     const mixedHeader = "科目";
     const { onChange, selects } = panel({

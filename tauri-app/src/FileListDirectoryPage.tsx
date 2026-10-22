@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   jobCancel,
@@ -49,7 +49,12 @@ export default function FileListDirectoryPage({
   const [outputPath, setOutputPath] = useState("");
   const [scan, setScan] = useState<FileListScan>();
   const [job, setJob] = useState<JobEvent>();
-  const [activeJobId, setActiveJobId] = useState("");
+  const [activeJobId, setActiveJobIdState] = useState("");
+  const activeJobRef = useRef("");
+  function setActiveJobId(id: string) {
+    activeJobRef.current = id;
+    setActiveJobIdState(id);
+  }
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [step, setStep] = useState<1 | 2>(1);
@@ -93,10 +98,12 @@ export default function FileListDirectoryPage({
   });
 
   useEffect(() => {
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     void listenJobEvents((event) => {
+      if (disposed) return;
       if (event.toolId !== "file_list_directory") return;
-      if (activeJobId && event.jobId !== activeJobId) return;
+      if (activeJobRef.current && event.jobId !== activeJobRef.current) return;
       setJob(event);
       // 扫描和导出共用同一条任务通道，靠结果形状区分：扫描回来的是预览数据。
       const payload = event.result;
@@ -108,10 +115,11 @@ export default function FileListDirectoryPage({
         setBusy(false);
       }
     }).then((stop) => {
-      unlisten = stop;
+      if (disposed) stop();
+      else unlisten = stop;
     });
-    return () => unlisten?.();
-  }, [activeJobId]);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
 
   // 拖放上传：把文件夹拖进窗口即选择扫描范围，并自动开始扫描。
   useEffect(() => {

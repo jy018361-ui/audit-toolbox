@@ -577,11 +577,13 @@ fn analyze_with_limit(
         }
         if keep && let Some(i) = rule.code.first() {
             let raw = row.get(*i).map(|s| s.trim()).unwrap_or("");
+            let raw_name = rule.name.iter().filter_map(|i| row.get(*i)).map(String::as_str).collect::<Vec<_>>().join(" ");
+            let code = account_code_from_fields(raw, &raw_name);
             if !raw.is_empty()
                 && !is_rollup_label(raw)
                 && !is_formula_error(raw)
-                && !looks_like_account_code(&account_code_of(raw))
-                && !has_verified_auxiliary_code_suffix(headers,&row,column,&account_code_of(raw))
+                && !looks_like_account_code(&code)
+                && !has_verified_auxiliary_code_suffix(headers,&row,column,&code)
             {
                 keep = false;
             }

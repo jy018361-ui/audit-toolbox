@@ -309,8 +309,9 @@ impl<'a> DiskDomains<'a> {
                 };
                 let value = match kind {
                     0 => crate::fa::normalize_join_key(raw),
-                    1 => {
-                        let value = account_code_of(raw).trim().to_uppercase();
+                    1 | 3 => {
+                        let value = if kind == 3 { account_code_from_fields(raw, raw) } else { account_code_of(raw) };
+                        let value = value.trim().to_uppercase();
                         if !(3..=24).contains(&value.len())
                             || !value.chars().any(|c| c.is_ascii_digit())
                             || !value
@@ -377,12 +378,17 @@ impl<'a> DiskDomains<'a> {
         ) else {
             return Ok(None);
         };
-        self.ensure(0, &[tc], 1)?;
-        self.ensure(1, &[jc], 1)?;
+        let tk = if mapped_headers(tb, "accountName").iter().any(|n| header_index(&self.headers[0], n) == Some(tc)) { 3 } else { 1 };
+        let jk = if mapped_headers(je, "accountName").iter().any(|n| header_index(&self.headers[1], n) == Some(jc)) { 3 } else { 1 };
+        self.ensure(0, &[tc], tk)?;
+        self.ensure(1, &[jc], jk)?;
+        let overlap: usize = self.db().query_row(
+            "SELECT COUNT(*) FROM domains a JOIN domains b ON b.side=1 AND b.col=?2 AND b.kind=?4 AND b.value=a.value WHERE a.side=0 AND a.col=?1 AND a.kind=?3",
+            params![tc, jc, tk, jk], |row| row.get(0)).map_err(failure)?;
         Ok(Some((
-            self.overlap(0, tc, 1, jc, 1, true)?,
-            self.count(1, jc, 1)?,
-            self.count(0, tc, 1)?,
+            overlap,
+            self.count(1, jc, jk)?,
+            self.count(0, tc, tk)?,
         )))
     }
     pub(crate) fn measurement_unit(

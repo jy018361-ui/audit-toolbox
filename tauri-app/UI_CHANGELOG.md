@@ -1,3 +1,41 @@
+## 2026-10-22 · 存款分类前展示发生额
+
+- 目标：修复“财务费用－利息”选为不参与测算时发生额被隐藏，无法凭金额作分类判断的问题。
+- 设计决策：科目级源发生额展示与参与测算分类解耦；未分类、选择利息收入及排除均保留引擎已返回的金额。真实0显示0，未取得金额显示“—”；辅助明细不重复显示整科合计，选择行为、收入取数及测算金额不变。
+- 验证：`npx vitest run src/DepositInterestInteractions.test.tsx src/DepositInterestPage.test.ts`；`npm run build`。覆盖非零、真实0与未取得三种数据，以及分类切换后金额不变；不打包EXE。
+
+## 2026-10-22 · 组合科目双映射与存款零基准展示
+
+- 目标：允许用户确认连字符格式的组合科目；避免缺少收入基准或零分母显示0%差异率。
+- 设计决策：公共面板按整列值形态允许编码、名称共用组合列，后端只在明确双角色时解析，不全局拆数字辅助编码。存款未识别收入时继续显示无法比较；已识别且收入为零时说明差异率不适用，底稿增加比较状态并与页面保持一致。
+- 验证：`npx vitest run src/components/MappingPanel.test.tsx src/ledgerMappingAuxiliary.test.ts src/DepositInterestInteractions.test.tsx src/DepositInterestPage.test.ts`；`npm run build`；Rust及原件入口见 `TBJE_CHECK.md`、`DEPOSIT_INTEREST_PARITY.md` 同日记录。仅修改代码和验证，不打包EXE。
+
+## 2026-10-22 · FA 按资产角色与类别确认两侧来源
+
+- 目标：修复已确认资产分类仍因 TB、JE 科目名称或编码不同被拦截的问题。
+- 设计决策：复核前按最终字段映射刷新两侧完整目录；清单标明 TB／JE 来源，相同源身份可共用确认，不同写法分别绑定角色与资产类别。业务按同主体下的类别及原值／折旧角色汇总；编码、名称用于查找源记录，未确认或排除的科目不因同码自动纳入。
+- 验证：`npx vitest run src/FaTbJePage.test.ts`；`npm run build`；Rust 内存／磁盘与原始件验收入口见 `FA_RUST_PARITY.md` 同日记录。
+
+## 2026-10-22 · 借款币种衔接失败展示原因
+
+- 目标：避免进入第二步失败时仅显示“暂时无法验证，请重试”，无法分辨字段错误、文件读取或用户停止等待。
+- 设计决策：借款保留引擎原中文错误及校验明细，失败恢复按钮并停留第一步，成功重试后才导航。主动“停止等待”有独立中止标记，借款和存款显示普通状态提示、保留映射、停留原步骤，重试仍须验证，不报校验失败。公共币种检查先分析 TB，只有真正需要验证且 JE 已映射币种时才打开 JE，减少单币种来源不必要的等待；计算与口径选择规则保持。
+- 验证：`npx vitest run src/LoanInterestPageUi.test.tsx src/DepositInterestInteractions.test.tsx`；`cargo test --manifest-path src-tauri/Cargo.toml --lib currency_link`、`--lib 用户映射币种列`；真实 TBJE-2000/2002 原件请求对照见本轮验收日志。
+
+## 2026-10-22 · 快速任务结束后恢复按钮与导出入口
+
+- 目标：修复 Excel 已写出但页面仍转圈、仍显示上一轮完成进度、未出现文件入口的问题。
+- 设计决策：桌面共用任务通道在启动响应返回且调用方记录任务编号后投递提前到达的事件；按编号分别释放，并行启动中的慢请求不阻挡已返回任务和正在运行任务的进度。启动拒绝同样释放，页面退订后不回传延迟事件，保留各工具原有身份过滤。
+- 存款页：新任务清除旧进度，启动期间暂存本工具事件，只接收返回编号对应的最新状态，完成／失败／取消后恢复按钮，终态不被迟到进度覆盖。文件夹清单改用稳定订阅和同步身份引用，消除改编号时的监听空窗。
+- 验证：`npx vitest run src/jobStartDelivery.test.ts src/apiJobDelivery.test.ts src/DepositInterestInteractions.test.tsx src/FileListDirectoryPage.test.tsx`；相关工具页面事件回归；`npm run build`。公共桌面入口覆盖存款、汇兑、借款、TBJE、Excel合并、FA、文件清单、函证、模糊匹配、滚期、TS、PDF和通用任务；业务计算及底稿内容不改。
+
+## 2026-10-22 · TBJE 同名分组结果与导出按唯一身份关联
+
+- 目标：修复预览核对五组、批量导出却因同名组多带入未核对来源，触发重算且覆盖文件的问题。
+- 设计决策：核对参数和成功／失败结果传递稳定 `groupId`；结果行、展开明细、单组导出、检查映射与批量成功组选择均使用该身份。旧 worker 缺少身份时只按本轮实际提交顺序补齐，不按组名猜测。
+- 导出：同名组、清理非法字符后同名、Windows 大小写冲突及目录已有文件均加序号避让；组身份和显示名不参与计算缓存指纹，继续复用有效完整底稿。
+- 验证：`npx vitest run src/TbjeCheckPage.test.tsx src/preview/demoRegistry.test.ts`；`npm run build`；后端身份、重名文件保留与缓存复用回归见 `TBJE_CHECK.md` 同日记录。
+
 ## 2026-10-22 · 存款辅助核算提示折叠并点名受影响账户
 
 - 目标：修复黄色提示写“以下账户”却只有通用原因、看不到实际账户的问题。

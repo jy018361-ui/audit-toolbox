@@ -248,6 +248,71 @@ const STEP1 = /^1\s*上传与识别/;
 const goToStep = (label: RegExp) =>
   fireEvent.click(screen.getByRole("button", { name: label }));
 
+describe("快速任务完成早于启动返回", () => {
+  async function enterCalculation() {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", {
+      name: "拖放或选择 TB、序时账文件（可同时选择）",
+    }));
+    await waitFor(() => expect(screen.getByRole("button", { name: STEP2 })).toBeEnabled());
+    goToStep(STEP2);
+    goToStep(STEP3);
+  }
+
+  it("预览完成后立即导出，提前到达的完成事件仍展示文件并停止转圈", async () => {
+    mock.jobStart.mockResolvedValueOnce("preview-job");
+    await enterCalculation();
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+    act(() => mock.event?.({ ...complete, jobId: "preview-job", message: "旧预览完成" }));
+    expect(screen.getByRole("button", { name: "生成 Excel 底稿" })).toBeEnabled();
+
+    let resolveStart!: (id: string) => void;
+    mock.jobStart.mockImplementationOnce(() => new Promise<string>((resolve) => {
+      resolveStart = resolve;
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "生成 Excel 底稿" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledTimes(2));
+    // 新任务不能继续显示上一轮的完成状态。
+    expect(screen.queryByText("旧预览完成")).not.toBeInTheDocument();
+    act(() => {
+      mock.event?.({ ...complete, jobId: "other-job", message: "其他任务完成" });
+      mock.event?.({
+        ...complete, jobId: "export-job", message: "导出完成",
+        result: { rows: [], outputPaths: ["C:/output/存款底稿.xlsx"] },
+      });
+      mock.event?.({ ...complete, jobId: "export-job", phase: "running", message: "迟到进度" });
+      mock.event?.({ ...complete, jobId: "export-job", toolId: "loan_interest", message: "其他工具完成" });
+    });
+    expect(screen.getByRole("button", { name: "生成 Excel 底稿" })).toBeDisabled();
+    await act(async () => resolveStart("export-job"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "生成 Excel 底稿" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "测算预览" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "打开 Excel 底稿" })).toBeVisible();
+    expect(screen.getByText("导出完成")).toBeVisible();
+    expect(screen.queryByText("其他任务完成")).not.toBeInTheDocument();
+    expect(screen.queryByText("迟到进度")).not.toBeInTheDocument();
+    expect(document.querySelector(".fx-actions .busy-spinner")).toBeNull();
+  });
+
+  it.each(["failed", "cancelled"])("启动返回前收到 %s 也恢复按钮", async (phase) => {
+    await enterCalculation();
+    mock.jobStart.mockImplementationOnce(async () => {
+      mock.event?.({
+        ...complete, jobId: "fast-terminal", phase,
+        message: phase === "failed" ? "底稿生成失败" : "任务已取消",
+        result: undefined,
+      });
+      return "fast-terminal";
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成 Excel 底稿" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole("button", { name: "生成 Excel 底稿" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "测算预览" })).toBeEnabled();
+    expect(document.querySelector(".fx-actions .busy-spinner")).toBeNull();
+  });
+});
+
 it("同码银行先选择JE汇总，再填写统一利率，参数与选择一致", async () => {
   const original = mock.engineCall.getMockImplementation()!;
   const groups = [{entity:"默认主体",accountCode:"1002",names:["银行甲","银行乙"],canUseJe:true}];
@@ -783,6 +848,40 @@ describe("第二步余额列示", () => {
 /** 手填利率的回归：受控输入若每敲一个字符就"数字→文本"来回转，
  *  敲到「0.0」时会被改写回「0」，小数点连着后面的位数一起被吞，
  *  用户永远填不进 0.05%。编辑期间必须原样保留用户敲的文本。 */
+describe("分类前利息发生额", () => {
+  it.each([
+    [923800.5, "923,800.5"],
+    [0, "0"],
+    [null, "—"],
+  ] as const)("不参与测算时仍展示源发生额 %s，不用余额0替代", async (occurrence, displayed) => {
+    const interest = "66030002 财务费用-利息";
+    const basis = "已结转·红字冲减费用，按收入计入";
+    const original = mock.engineCall.getMockImplementation()!;
+    mock.engineCall.mockImplementation(async (method: string, params?: unknown) => {
+      if (method === "deposit.inspect_tb") return {
+        ...inspection,
+        accounts: [bank, interest], accountsLeaf: [bank, interest],
+        suggestedAccountRoles: { [bank]: "deposit", [interest]: "excluded" },
+        accountMetrics: { [interest]: { opening: 0, closing: 0, occurrence, occurrenceBasis: basis } },
+      };
+      return original(method, params);
+    });
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled());
+    goToStep(STEP2);
+    const classification = await screen.findByRole("combobox", { name: `${interest}的分类` });
+    const sourceCell = () => within(classification.closest("tr")!).getByTitle(basis);
+    expect(sourceCell()).toHaveTextContent(displayed);
+    expect(classification).toHaveValue("");
+    fireEvent.change(classification, { target: { value: "interest_income" } });
+    expect(sourceCell()).toHaveTextContent(displayed);
+    fireEvent.change(classification, { target: { value: "excluded" } });
+    expect(sourceCell()).toHaveTextContent(displayed);
+    expect(mock.jobStart).not.toHaveBeenCalled();
+  });
+});
+
 describe("利率手工填写", () => {
   it("逐字符敲 0.05 不会被输入框吞掉小数位，并按 0.0005 提交", async () => {
     render(<DepositInterestPage tool={tool} />);
@@ -813,6 +912,34 @@ describe("利率手工填写", () => {
 });
 
 describe("JE 币种资料提示", () => {
+  it.each([false, true])("账面收入基准是否已确认 %s，缺失与真实零值分别展示", async (hasIncome) => {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled());
+    goToStep(STEP2);
+    goToStep(STEP3);
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+    act(() => mock.event?.({ ...complete, result: { rows: [{
+      key: "zero-baseline-bank", entity: "默认主体", account: bank, auxiliary: "", currency: "CNY",
+      role: "deposit", tier: "demand", tierLabel: "活期存款", category: "demand", termLabel: "",
+      annualRate: 0.005, rateResolved: true, rateProvisional: false,
+      openingBalance: 24600, tbClosingBalance: 24600, derivedClosingBalance: 24600,
+      reconciliationDiff: 0, averageBalance: 24600, calculatedInterest: 123,
+      months: [], status: "已勾稽", note: "",
+    }], summary: {
+      hasInterestIncomeAccount: hasIncome, bookedInterestIncome: hasIncome ? 0 : null,
+      calculatedInterest: 123, difference: hasIncome ? 123 : null, differenceRatio: null,
+      reconciliationPassed: false,
+    } } }));
+    if (hasIncome) {
+      expect(await screen.findByText("账面收入为零，差异率不适用")).toBeVisible();
+    } else {
+      expect(await screen.findByText("无法比较")).toBeVisible();
+      expect(screen.getByText("TB 中未识别到利息收入科目")).toBeVisible();
+    }
+    expect(screen.queryByText("差异率 0.00%")).not.toBeInTheDocument();
+  });
   it("在结果顶部说明 JE 发生额无法按币种分配", async () => {
     render(<DepositInterestPage tool={tool} />);
     fireEvent.click(
@@ -986,6 +1113,28 @@ describe("导航步骤切换不重复验证", () => {
   const currencyLinkCalls = () =>
     mock.engineCall.mock.calls.filter(([m]) => m === "ledger.currency_link")
       .length;
+
+  it("停止币种验证不会报映射错误或放行，重试成功才进入第二步", async () => {
+    withBothSources();
+    render(<DepositInterestPage tool={tool} />);
+    await waitFor(() => expect(mock.engineCall).toHaveBeenCalledWith("deposit.inspect_tb", expect.anything()));
+    const original = mock.engineCall.getMockImplementation()!;
+    let stop = true;
+    mock.engineCall.mockImplementation(async (method, params) => {
+      if (method === "ledger.currency_link" && stop) throw Object.assign(new Error("已停止等待：界面已恢复。"), { code: "SYNC_BUSY_ABORTED" });
+      return original(method, params);
+    });
+    goToStep(STEP2);
+    expect(await screen.findByText("已停止币种衔接验证，当前映射已保留；可重新点击下一步。")).toBeVisible();
+    expect(screen.queryByText(/验证失败|暂时无法验证/)).not.toBeInTheDocument();
+    expect(screen.queryByText("逐个核对科目分类（末级明细）")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: STEP2 })).toBeEnabled();
+    stop = false;
+    goToStep(STEP2);
+    expect(await screen.findByText("逐个核对科目分类（末级明细）")).toBeVisible();
+    expect(currencyLinkCalls()).toBe(2);
+    expect(screen.queryByText(/已停止币种衔接验证/)).not.toBeInTheDocument();
+  });
 
   it("第一步不后台生成账户清单，进入第二步才做轻量准备且不启动测算", async () => {
     withBothSources();

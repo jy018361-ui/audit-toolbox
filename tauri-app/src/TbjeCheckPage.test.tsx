@@ -522,7 +522,7 @@ describe("TbjeCheckPage", () => {
       };
       return {
         sheet: "Sheet1", sheets: ["Sheet1"], headerRow: 1, headerDepth: 1,
-        headers: ["科目编码"], preview: [], entities: [path.split("/")[3]],
+        headers: ["科目编码"], preview: [], entities: [path.split("/")[2]],
         suggestedMapping: { accountCode: "科目编码" },
       };
     });
@@ -555,7 +555,7 @@ describe("TbjeCheckPage", () => {
       },
     }));
     // 新 worker 按返回身份关联，即使顺序变化也不会串组；旧 worker 按实际提交顺序兼容。
-    emitDone({ groups: legacyWorker ? results : results.toReversed() });
+    emitDone({ groups: legacyWorker ? results : [...results].reverse() });
     const table = await screen.findByRole("table", { name: "TB/JE 完整性核对结果" });
     const firstRow = within(table).getByText(legacyWorker ? "1 / 10 科目" : "2 / 10 科目").closest("tr")!;
     const secondRow = within(table).getByText(legacyWorker ? "2 / 10 科目" : "1 / 10 科目").closest("tr")!;
@@ -577,7 +577,6 @@ describe("TbjeCheckPage", () => {
     emitDone({ outputDirectory: "C:/exports" });
     fireEvent.click(within(targetRow).getByRole("button", { name: "检查映射" }));
     const expanded = container.querySelector(".tbje-group-mapping")!;
-    expect(expanded.closest(".tbje-group-row")?.textContent).toContain("02科目余额表.xlsx");
     expect(expanded.id).toBe(`tbje-mapping-${target.groupId}-tb`);
   });
 

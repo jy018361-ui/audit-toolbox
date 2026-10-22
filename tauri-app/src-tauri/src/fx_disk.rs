@@ -188,7 +188,7 @@ pub(super) fn alignment(input:&FxJeRows,mapping:&Map<String,Value>)->Result<Alig
         scanned+=1;
         if scanned>100000{return Ok(());}
         for role in ["currency","accountCode","accountName"]{
-            let value=mapped_cols(mapping,role).iter().filter_map(|column|row.get(column)).map(|value|normalized_account_role_value(value.trim(),role))
+            let value=mapped_cols(mapping,role).iter().filter_map(|column|row.get(column).map(|value|mapped_account_role_value(value.trim(),column,mapping,role)))
                 .map(|value|if role=="accountCode"{ledger_mapping::normalize_account_code(value)}else{value.trim().to_uppercase()})
                 .filter(|value|!value.is_empty()).collect::<Vec<_>>().join(" ");
             if !value.is_empty(){values.entry(role.into()).or_default().insert(value);}
@@ -213,7 +213,7 @@ pub(super) fn alignment_tb(input:&FxTbRows,mapping:&Map<String,Value>)->Result<A
         scanned+=1;
         if scanned>100000{return Ok(());}
         for role in ["currency","accountCode","accountName"]{
-            let value=mapped_cols(mapping,role).iter().filter_map(|column|row.get(column)).map(|value|normalized_account_role_value(value.trim(),role))
+            let value=mapped_cols(mapping,role).iter().filter_map(|column|row.get(column).map(|value|mapped_account_role_value(value.trim(),column,mapping,role)))
                 .map(|value|if role=="accountCode"{ledger_mapping::normalize_account_code(value)}else{value.trim().to_uppercase()})
                 .filter(|value|!value.is_empty()).collect::<Vec<_>>().join(" ");
             if !value.is_empty(){values.entry(role.into()).or_default().insert(value);}

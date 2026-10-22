@@ -437,18 +437,19 @@ describe("FA TB+JE 真实主体×科目组合", () => {
     expect(groupAssignmentViews(rows).map((row) => row.entity)).toEqual(["甲公司", "乙公司"]);
   });
 
-  it("科目复核只采用 TB 科目，不把 JE 独有的对方科目带入清单", () => {
+  it("两侧分别复核，异码异名的原值和折旧可确认到同一类别，对方科目默认排除", () => {
     const rows = faReviewEntityAccounts([
       { entity: "默认主体", account: "1601020000 固定资产-房屋" },
+    ], true, [
+      { entity: "默认主体", account: "FA01 固定资产-房屋" },
+      { entity: "默认主体", account: "AD01 累计折旧-房屋" },
+      { entity: "默认主体", account: "660201 修理费-房屋建筑物-大修理" },
     ]);
-    const jeOnly = [
-      { entity: "默认主体", account: "修理费-房屋建筑物-大修理" },
-    ];
-
-    expect(rows).toEqual([
-      { entity: "默认主体", account: "1601020000 固定资产-房屋" },
-    ]);
-    expect(rows).not.toContainEqual(jeOnly[0]);
+    const assigned = faAssignmentsForEntityAccounts(rows, []);
+    expect(assigned).toHaveLength(4);
+    expect(assigned.filter((row) => row.role !== "excluded").map((row) => [row.role, row.category]))
+      .toEqual([["cost", "房屋"], ["cost", "房屋"], ["depreciation", "房屋"]]);
+    expect(assigned.find((row) => row.account.startsWith("660201"))?.role).toBe("excluded");
   });
 
   it("只有 TB 有主体映射时，复核项使用测算引擎的默认主体", () => {
@@ -662,14 +663,16 @@ describe("FA TB+JE 三步向导（源码契约）", () => {
     expect(source).toMatch(/groupAssignmentViews\(\s*assignments/);
   });
 
-  it("复核表只列 TB 科目，并提供按编码或名称即时筛选", () => {
+  it("复核表包含 TB、JE 来源并按类别和角色提交，提供科目筛选", () => {
     expect(source).toContain('<div className="fa-tbje-account-cell">');
     expect(source).not.toContain(
       '<td\n                        className="fa-tbje-account-cell"',
     );
     expect(source).toContain(
-      "faReviewEntityAccounts(effective, entityKeyEnabled)",
+      'faReviewEntityAccounts(effective("tb"), entityKeyEnabled, effective("je"))',
     );
+    expect(source).toContain('assignmentBasis: "assetRoleCategory"');
+    expect(source).toContain('view.sources.map((kind) => kind.toUpperCase())');
     expect(source).toContain('ariaLabel="筛选科目"');
     expect(source).toContain('placeholder="输入科目编码或名称"');
     expect(source).not.toContain('className="fa-tbje-source-tag"');

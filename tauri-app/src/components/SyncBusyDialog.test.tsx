@@ -220,6 +220,7 @@ describe("同步操作等待弹窗", () => {
     await flush();
     expect(caught).toHaveLength(1);
     expect((caught[0] as Error).message).toContain("已停止等待");
+    expect(caught[0]).toMatchObject({ code: "SYNC_BUSY_ABORTED" });
     // 弹窗关闭，也不留右下角小条：终止就是不要了。
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByText(/点击展开/)).toBeNull();

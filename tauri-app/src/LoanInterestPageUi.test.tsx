@@ -1577,6 +1577,50 @@ function renderLoanTbJeWorkspace(entities: string[], jeEntityMapped = true) {
   );
 }
 
+it("币种验证失败显示底层原因且恢复按钮，重试成功才进入第二步", async () => {
+  renderLoanTbJeWorkspace([]);
+  await screen.findByText("已识别：TB 科目余额表");
+  await screen.findByText("已识别：JE 序时账");
+  const original = mock.engineCall.getMockImplementation()!;
+  let fail = true;
+  mock.engineCall.mockImplementation(async (method, params) => {
+    if (method === "ledger.currency_link" && fail) throw {
+      code: "MAPPING_INVALID", userMessage: "字段映射校验未通过。",
+      detail: JSON.stringify({ errors: ["本位币金额列不存在：金额"] }),
+    };
+    return original(method, params);
+  });
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  expect(await screen.findByText(/币种衔接验证失败：字段映射校验未通过。具体是：1. 本位币金额列不存在：金额/)).toBeVisible();
+  expect(screen.getByRole("button", { name: /下一步：确认科目与利率/ })).toBeEnabled();
+  expect(screen.queryByText("确认借款及利息支出科目并设置利率")).not.toBeInTheDocument();
+  fail = false;
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  expect(await screen.findByText("确认借款及利息支出科目并设置利率")).toBeVisible();
+});
+
+it("停止币种验证后保留第一步并恢复操作，重试仍须重新验证", async () => {
+  renderLoanTbJeWorkspace([]);
+  await screen.findByText("已识别：TB 科目余额表");
+  await screen.findByText("已识别：JE 序时账");
+  const original = mock.engineCall.getMockImplementation()!;
+  let stop = true;
+  mock.engineCall.mockImplementation(async (method, params) => {
+    if (method === "ledger.currency_link" && stop) throw Object.assign(new Error("已停止等待：界面已恢复。"), { code: "SYNC_BUSY_ABORTED" });
+    return original(method, params);
+  });
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  expect(await screen.findByText("已停止币种衔接验证，当前映射已保留；可重新点击下一步。")).toBeVisible();
+  expect(screen.queryByText(/验证失败|暂时无法验证/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /下一步：确认科目与利率/ })).toBeEnabled();
+  expect(screen.queryByText("确认借款及利息支出科目并设置利率")).not.toBeInTheDocument();
+  stop = false;
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  expect(await screen.findByText("确认借款及利息支出科目并设置利率")).toBeVisible();
+  expect(mock.engineCall.mock.calls.filter(([method]) => method === "ledger.currency_link")).toHaveLength(2);
+  expect(screen.queryByText(/已停止币种衔接验证/)).not.toBeInTheDocument();
+});
+
 it("同一输入下来回进出第二步不重复验证币种衔接", async () => {
   renderLoanTbJeWorkspace([]);
   await screen.findByText("已识别：TB 科目余额表");

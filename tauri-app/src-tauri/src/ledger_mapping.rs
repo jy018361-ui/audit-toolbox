@@ -23,12 +23,12 @@ pub(crate) mod disk_domains;
 
 /// TB 结构规则的唯一缓存版本。所有消费 TB 的业务快照必须纳入此值；
 /// 修改结构取层语义时只在这里升级，避免某个工具继续命中旧结果。
-pub(crate) const TB_STRUCTURE_RULE_VERSION: &str = "complete-structure-v6-20261019";
+pub(crate) const TB_STRUCTURE_RULE_VERSION: &str = "complete-structure-v7-20261022";
 
 /// 公共金额语法的缓存版本；业务结果须同时纳入结构与金额版本。
 pub(crate) const AMOUNT_PARSE_RULE_VERSION: &str = "currency-affix-v1-20261020";
 /// JE续行补齐及噪声规则，所有规范化JE／业务结果缓存共用。
-pub(crate) const JE_BODY_RULE_VERSION: &str = "continuation-and-v1-20261020";
+pub(crate) const JE_BODY_RULE_VERSION: &str = "continuation-and-combined-account-v2-20261022";
 #[cfg(test)]
 #[path = "ledger_continuation_tests.rs"]
 mod continuation_tests;
@@ -649,11 +649,12 @@ pub(crate) struct AccountColumnAlignment {
     pub(crate) ratio: f64,
 }
 
-fn account_values(rows: &[Vec<String>], index: usize, limit: usize) -> HashSet<String> {
+fn account_values(rows: &[Vec<String>], index: usize, limit: usize, combined: bool) -> HashSet<String> {
     rows.iter()
         .take(limit)
         .filter_map(|row| row.get(index))
-        .map(|value| account_code_of(value).trim().to_uppercase())
+        .map(|value| if combined { account_code_from_fields(value, value) } else { account_code_of(value) })
+        .map(|value| value.trim().to_uppercase())
         .filter(|value| {
             value.len() >= 3
                 && value.len() <= 24
@@ -679,13 +680,13 @@ pub(crate) fn align_account_code_columns(
     let je = je_headers
         .iter()
         .enumerate()
-        .map(|(index, header)| (header, account_values(je_rows, index, MAX_ROWS)))
+        .map(|(index, header)| (header, account_values(je_rows, index, MAX_ROWS, false)))
         .filter(|(_, values)| values.len() >= 2)
         .collect::<Vec<_>>();
     let tb = tb_headers
         .iter()
         .enumerate()
-        .map(|(index, header)| (header, account_values(tb_rows, index, MAX_ROWS)))
+        .map(|(index, header)| (header, account_values(tb_rows, index, MAX_ROWS, false)))
         .filter(|(_, values)| values.len() >= 2)
         .collect::<Vec<_>>();
     let mut best: Option<AccountColumnAlignment> = None;
@@ -724,6 +725,8 @@ pub(crate) fn mapped_account_overlap(
     tb_headers: &[String],
     tb_rows: &[Vec<String>],
     tb_column: &str,
+    je_combined: bool,
+    tb_combined: bool,
 ) -> (usize, usize, usize) {
     let Some(je_index) = je_headers.iter().position(|header| header == je_column) else {
         return (0, 0, 0);
@@ -731,8 +734,8 @@ pub(crate) fn mapped_account_overlap(
     let Some(tb_index) = tb_headers.iter().position(|header| header == tb_column) else {
         return (0, 0, 0);
     };
-    let je = account_values(je_rows, je_index, 100_000);
-    let tb = account_values(tb_rows, tb_index, 100_000);
+    let je = account_values(je_rows, je_index, 100_000, je_combined);
+    let tb = account_values(tb_rows, tb_index, 100_000, tb_combined);
     (je.intersection(&tb).count(), je.len(), tb.len())
 }
 
@@ -4428,7 +4431,9 @@ pub(crate) fn analyze_ledger_rows(
             if raw.is_empty() || is_rollup_label(raw) || is_formula_error(raw) {
                 continue;
             }
-            let code = account_code_of(raw);
+            let raw_name = rule.name.iter().filter_map(|i| row.get(*i))
+                .map(String::as_str).collect::<Vec<_>>().join(" ");
+            let code = account_code_from_fields(raw, &raw_name);
             if !looks_like_account_code(&code)
                 && !has_verified_auxiliary_code_suffix(headers,row,column_of,&code) {
                 keep[index] = false;
@@ -4501,7 +4506,9 @@ pub(crate) fn ledger_validation_mask(
             .collect::<Vec<_>>();
         if !nonempty_codes.is_empty()
             && nonempty_codes.iter().all(|raw| {
-                let code = account_code_of(raw);
+                let raw_name = rule.name.iter().filter_map(|i| row.get(*i))
+                    .map(String::as_str).collect::<Vec<_>>().join(" ");
+                let code = account_code_from_fields(raw, &raw_name);
                 is_formula_error(raw) || (!looks_like_account_code(&code)
                     && !has_verified_auxiliary_code_suffix(headers,row,column_of,&code))
             })
@@ -4602,6 +4609,7 @@ fn tb_rollup_auxiliary_indexes(headers: &[String], column: &dyn Fn(&str) -> Vec<
         (mapped.contains(&index) || name.starts_with("核算编号") || matches!(name.as_str(),
             "assistprojectcode" | "subitemvalue" | "salesdivision" | "productcategory"
             | "paymentnature" | "supplier" | "customer" | "bank" | "wbselement"
+            | "辅助编码" | "辅助名称" | "核算维度编码" | "核算维度名称"
             | "部门编码" | "客户编码" | "供应商编码" | "成本中心" | "costcentre" | "costcenter"))
             .then_some(index)
     }).collect()
@@ -7391,7 +7399,8 @@ pub(crate) fn plan_combined_account_fill(
                 strong.extend(claimed(role));
             }
         }
-        headers
+        claimed("accountName").into_iter().find(|header| combined(header))
+            .or_else(|| headers
             .iter()
             .find(|header| {
                 !strong.contains(header.as_str())
@@ -7405,7 +7414,7 @@ pub(crate) fn plan_combined_account_fill(
                         && combined(header)
                 })
             })
-            .cloned()
+            .cloned())
     };
 
     let name_column = if !claimed("accountName").is_empty() || legacy_account {
@@ -8602,7 +8611,7 @@ pub(crate) fn is_combined_account_column(values: impl Iterator<Item = String>) -
             continue;
         }
         total += 1;
-        if split_code_and_name(&value).is_some() {
+        if split_code_and_name(&value).is_some() || split_combined_account_fields_ref(&value, &value).is_some() {
             split += 1;
         }
     }
@@ -8616,6 +8625,35 @@ pub(crate) fn account_code_of(value: &str) -> String {
         .unwrap_or_else(|| value.trim().to_owned())
 }
 
+/// 连字符只在编码和名称明确共用同一个组合值时拆分；普通复合编码不变。
+/// 不从“2241002-吴子鉴”这样的独立编码列猜辅助，也不拆数字辅助后缀。
+pub(crate) fn split_combined_account_fields_ref<'a>(raw_code: &'a str, raw_name: &str) -> Option<(&'a str, &'a str)> {
+    let raw = raw_code.trim();
+    if raw.is_empty() || raw != raw_name.trim() { return None; }
+    let (code, name) = raw.split_once('-')?;
+    let (code, name) = (code.trim(), name.trim());
+    (code.len() >= 4 && code.chars().all(|c| c.is_ascii_digit())
+        && name.chars().next().is_some_and(|c| c.is_alphabetic() && !c.is_ascii())
+        && name.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)))
+        .then_some((code, name))
+}
+
+pub(crate) fn account_code_from_fields(raw_code: &str, raw_name: &str) -> String {
+    split_combined_account_fields_ref(raw_code, raw_name)
+        .map(|(code, _)| code.to_owned()).unwrap_or_else(|| account_code_of(raw_code))
+}
+
+#[test]
+fn three_fixes_hyphen_combined_fields_do_not_rewrite_auxiliary_codes() {
+    let combined = "1002010109-人民币存款-民生银行";
+    assert_eq!(account_code_from_fields(combined, combined), "1002010109");
+    assert_eq!(account_name_from_fields(combined, combined), "人民币存款-民生银行");
+    assert_eq!(account_code_of(combined), combined, "未确认组合角色时保留原始编码");
+    for (code, name) in [("1012003-100200002002001", "中国银行"), ("2241002-吴子鉴", "吴子鉴"), ("1002-123456", "1002-123456")] {
+        assert_eq!(account_code_from_fields(code, name), code);
+    }
+}
+
 /// 从一格里取科目名称：混写时取编码后面那半，否则原样。
 pub(crate) fn account_name_of(value: &str) -> String {
     split_code_and_name(value)
@@ -8626,6 +8664,9 @@ pub(crate) fn account_name_of(value: &str) -> String {
 /// 身份提取须区分独立名称列与编码列：缺名称时，只从混写编码中拆名，
 /// 纯编码不能充当名称。明确映射的名称仍按原口径保留。
 pub(crate) fn account_name_from_fields(raw_code: &str, raw_name: &str) -> String {
+    if let Some((_, name)) = split_combined_account_fields_ref(raw_code, raw_name) {
+        return name.to_owned();
+    }
     if raw_name.trim().is_empty() {
         split_code_and_name(raw_code).map(|(_, name)| name).unwrap_or_default()
     } else {

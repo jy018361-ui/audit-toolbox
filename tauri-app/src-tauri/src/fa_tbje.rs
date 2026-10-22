@@ -233,7 +233,7 @@ fn analysis_cache_key(params: &Value) -> String {
         .as_object_mut()
         .map(|map| map.remove("outputPath"));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&"fa-cross-table-matching-v8", &mut hasher);
+    std::hash::Hash::hash(&"fa-cross-table-matching-v9", &mut hasher);
     std::hash::Hash::hash(&ledger_mapping::TB_STRUCTURE_RULE_VERSION, &mut hasher);
     std::hash::Hash::hash(&ledger_mapping::AMOUNT_PARSE_RULE_VERSION, &mut hasher);
     std::hash::Hash::hash(&ledger_mapping::JE_BODY_RULE_VERSION, &mut hasher);
@@ -562,8 +562,7 @@ fn analyze_with_progress(
     let mut je_accounts =
         account_identities(&je, &je_map, params, EntitySide::Je, entity_key_enabled);
     apply_matching_auxiliary(&je, &mut je_accounts, &auxiliary_columns, EntitySide::Je);
-    append_je_only_warnings(&mut warnings, &tb_accounts, &je_accounts, &assignments);
-    append_unmatched_account_warnings(&mut warnings, &tb_accounts, &je_accounts, &assignments);
+    append_classification_warnings(&mut warnings, &tb_accounts, &je_accounts, &assignments, params);
     for line in &tb_lines {
         let slot = totals
             .entry((line.entity.clone(), line.category.clone()))
@@ -835,8 +834,7 @@ fn analyze_with_disk_je(
     let mut je_identities =
         account_identities(&je, je_map, params, EntitySide::Je, entity_key_enabled);
     apply_matching_auxiliary(&je, &mut je_identities, &auxiliary_columns, EntitySide::Je);
-    append_je_only_warnings(&mut warnings, &tb_identities, &je_identities, &assignments);
-    append_unmatched_account_warnings(&mut warnings, &tb_identities, &je_identities, &assignments);
+    append_classification_warnings(&mut warnings, &tb_identities, &je_identities, &assignments, params);
     add_tb_totals(&mut totals, &tb_lines);
     Ok(Analysis {
         tb: tb_lines,
@@ -992,6 +990,32 @@ fn resolve_entity(
         &ledger_mapping::effective_entity(raw, entity_key_enabled),
         entity_scope,
     )
+}
+
+fn append_classification_warnings(
+    warnings: &mut Vec<String>,
+    tb: &[AccountIdentity],
+    je: &[AccountIdentity],
+    assignments: &AssignmentIndex,
+    params: &Value,
+) {
+    if !uses_role_category(params) {
+        append_je_only_warnings(warnings, tb, je, assignments);
+        append_unmatched_account_warnings(warnings, tb, je, assignments);
+        return;
+    }
+    let tb_groups = tb.iter().filter_map(|id| find_assignment(assignments, id)
+        .map(|assigned| (id.entity.as_str(), assigned.category.as_str(), assigned.role.as_str())))
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    for id in je {
+        let Some(assigned) = find_assignment(assignments, id) else { continue };
+        let group = (id.entity.as_str(), assigned.category.as_str(), assigned.role.as_str());
+        if !tb_groups.contains(&group) && seen.insert(group) {
+            warnings.push(format!("主体 {} 的资产类别 {}、角色 {} 仅在 JE 中确认，已保留变动；TB 无同类别同角色余额，请复核勾稽差异。",
+                id.entity, assigned.category, if assigned.role == "cost" { "原值" } else { "累计折旧" }));
+        }
+    }
 }
 
 fn append_je_only_warnings(
@@ -1561,6 +1585,11 @@ fn je_unmatched_error(
     raw_entities: &[String],
     period_row_count: usize,
 ) -> AppError {
+    if uses_role_category(params) {
+        return error("FA_TBJE_JE_UNMATCHED", format!(
+            "报告期间内序时账有 {period_row_count} 行数据，但没有已确认原值／折旧角色与资产类别的 JE 分录。请回到科目复核步骤，检查 JE 来源科目的角色、资产类别及主体范围后重试。"
+        ), None);
+    }
     let rows: Vec<Assignment> = serde_json::from_value(
         params
             .get("accountAssignments")
@@ -3532,6 +3561,9 @@ fn assignment_index_from_identities(
             .unwrap_or_else(|| json!([])),
     )
     .map_err(|e| error("INVALID_PARAMS", "科目分类参数无效。", Some(e.to_string())))?;
+    if uses_role_category(params) {
+        return confirmed_role_category_index(&rows, tb_ids, je_ids);
+    }
     let tuples = |ids: &[AccountIdentity]| {
         ids.iter()
             .map(|id| (id.entity.clone(), id.code.clone(), id.name.clone()))
@@ -3692,6 +3724,66 @@ fn assignment_index_from_identities(
         })
         .collect::<HashSet<_>>();
     build_je_assignment_matches(&mut out, tb_ids, je_ids, &valid_names, &parent_names);
+    Ok(out)
+}
+
+fn uses_role_category(params: &Value) -> bool {
+    params.get("assignmentBasis").and_then(Value::as_str) == Some("assetRoleCategory")
+}
+
+/// 两侧来源分别绑定复核分类，业务汇总只使用主体、资产类别和原值／折旧角色。
+/// 编码、名称、辅助与币种只用于定位被确认的源记录，不要求跨表一致。
+fn confirmed_role_category_index(
+    rows: &[Assignment],
+    tb_ids: &[AccountIdentity],
+    je_ids: &[AccountIdentity],
+) -> Result<AssignmentIndex, AppError> {
+    let only_default = tb_ids.iter().chain(je_ids)
+        .all(|id| id.entity == ledger_mapping::DEFAULT_ENTITY);
+    let mut by_account = HashMap::<String, Vec<&AccountIdentity>>::new();
+    for id in tb_ids.iter().chain(je_ids) {
+        let display = norm(&id.display);
+        let legacy = norm(&id.legacy_display);
+        by_account.entry(display.clone()).or_default().push(id);
+        if legacy != display {
+            by_account.entry(legacy).or_default().push(id);
+        }
+    }
+    let mut out = AssignmentIndex::default();
+    for row in rows {
+        if !matches!(row.role.as_str(), "cost" | "depreciation" | "excluded") {
+            return Err(error("INVALID_PARAMS", "固定资产角色只能选择原值、累计折旧或排除。", None));
+        }
+        if row.role != "excluded" && (row.category.trim().is_empty() || row.category.trim() == "未分类") {
+            return Err(error("FA_TBJE_CATEGORY_REQUIRED", "请为纳入范围的原值与折旧科目确认资产类别。", None));
+        }
+        for id in by_account.get(&norm(&row.account)).into_iter().flatten()
+            .filter(|id| assignment_matches_identity(row, id, only_default))
+        {
+            let key = assignment_identity(id);
+            if row.role == "excluded" {
+                out.excluded.insert(key);
+                continue;
+            }
+            let assigned = Assigned { role: row.role.clone(), category: row.category.trim().to_owned() };
+            if out.exact.get(&key).is_some_and(|old| old != &assigned) {
+                return Err(error("FA_TBJE_ACCOUNT_ASSIGNMENT_CONFLICT",
+                    format!("主体 {} 的科目 {} 存在冲突分类，请逐项复核。", id.entity, id.display), None));
+            }
+            out.exact.insert(key, assigned);
+        }
+    }
+    for key in &out.excluded {
+        out.exact.remove(key);
+    }
+    for je in je_ids {
+        let key = je_matching_identity(je);
+        if let Some(assigned) = out.exact.get(&key.0) {
+            out.je_matches.insert(key, assigned.clone());
+        } else {
+            out.unmatched_reasons.insert(key, "该 JE 源科目未确认原值／折旧角色与资产类别，或已明确排除".to_owned());
+        }
+    }
     Ok(out)
 }
 
@@ -5255,6 +5347,91 @@ mod tests {
             "reportEnd":"2025-12-31","outputPath":out
         });
         (dir, out, params)
+    }
+
+    #[test]
+    fn role_category_aggregates_confirmed_sources_without_code_or_name_alignment() {
+        for disk in [false, true] {
+            let (dir, out, mut params) = fixture();
+            let je = dir.join("je.csv");
+            let content = std::fs::read_to_string(&je).unwrap()
+                .replace(",1601,机器设备,", ",9901,人工原值源甲,")
+                .replace(",1602,累计折旧,", ",AD99,人工折旧源乙,");
+            std::fs::write(&je, content).unwrap();
+            params["assignmentBasis"] = json!("assetRoleCategory");
+            params["__testForceDiskLedger"] = json!(disk);
+            params["accountAssignments"].as_array_mut().unwrap().extend([
+                json!({"entity":"A","account":"9901 人工原值源甲","role":"cost","category":"机器设备"}),
+                json!({"entity":"A","account":"AD99 人工折旧源乙","role":"depreciation","category":"机器设备"}),
+                json!({"entity":"A","account":"2202 应付账款","role":"excluded","category":"机器设备"}),
+            ]);
+            let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+            let totals = &analysis.totals[&("A".into(), "机器设备".into())];
+            assert_eq!((totals.opening_cost, totals.closing_cost, totals.additions, totals.disposals),
+                (1000.0, 1300.0, 500.0, 200.0));
+            assert_eq!((totals.opening_dep, totals.closing_dep, totals.dep_charge), (200.0, 250.0, 100.0));
+            assert!(analysis.je.iter().any(|row| row.account.contains("9901") && row.role == "cost"));
+            assert!(analysis.je.iter().any(|row| row.account.contains("AD99") && row.role == "depreciation"));
+            assert!(analysis.je.iter().filter(|row| row.account.contains("2202")).all(|row| row.counterpart));
+            assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
+            assert_eq!(preview_json(&analysis)["reconciliationDifferences"], 0);
+            write_workbook(&out, &analysis, &AtomicBool::new(false)).unwrap();
+            assert_export_caches(&out, &analysis);
+            // 人工类别改变后独立成组，绝不能再按相同名称／编码折回原组。
+            params["accountAssignments"][2]["category"] = json!("人工其他类别");
+            let changed = analyze(&params, &AtomicBool::new(false)).unwrap();
+            assert_eq!(changed.totals[&("A".into(), "人工其他类别".into())].additions, 500.0);
+            assert_eq!(changed.totals[&("A".into(), "机器设备".into())].additions, 0.0);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn role_category_does_not_spread_confirmation_by_code_name_or_category_alone() {
+        let (dir, _, mut params) = fixture();
+        let je = dir.join("je.csv");
+        let content = std::fs::read_to_string(&je).unwrap()
+            .replace(",1601,机器设备,", ",1601,另一源记录,")
+            .replace(",1602,累计折旧,", ",AD99,机器设备,");
+        std::fs::write(je, content).unwrap();
+        params["assignmentBasis"] = json!("assetRoleCategory");
+        for disk in [false, true] {
+            params["__testForceDiskLedger"] = json!(disk);
+            let err = analyze(&params, &AtomicBool::new(false)).unwrap_err();
+            assert_eq!(err.code, "FA_TBJE_JE_UNMATCHED");
+            assert!(err.user_message.contains("角色与资产类别"));
+            assert!(!err.user_message.contains("科目名称不一致"));
+        }
+        // JE 已确认的类别与角色可以独立于科目名称含义；明确排除仍优先。
+        params["accountAssignments"].as_array_mut().unwrap().extend([
+            json!({"entity":"A","account":"1601 另一源记录","role":"cost","category":"机器设备"}),
+            json!({"entity":"A","account":"1601 另一源记录","role":"excluded","category":"机器设备"}),
+            json!({"entity":"A","account":"AD99 机器设备","role":"depreciation","category":"机器设备"}),
+        ]);
+        let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+        assert!(analysis.je.iter().all(|row| row.role != "cost"));
+        assert!(analysis.je.iter().any(|row| row.role == "depreciation"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[ignore = "需 FA_ROLE_CATEGORY_REQUEST 指向原始账表的确认分类请求"]
+    fn role_category_original_request_analysis_and_export() {
+        let request = std::fs::read_to_string(std::env::var("FA_ROLE_CATEGORY_REQUEST").unwrap()).unwrap();
+        let params: Value = serde_json::from_str(&request).unwrap();
+        assert!(uses_role_category(&params));
+        let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+        let cost: Vec<_> = analysis.je.iter().filter(|row| row.role == "cost").collect();
+        let dep: Vec<_> = analysis.je.iter().filter(|row| row.role == "depreciation").collect();
+        assert_eq!((cost.len(), dep.len()), (13, 49));
+        assert!((cost.iter().map(|row| row.net).sum::<f64>() + 1_867_562.65).abs() < 0.005);
+        assert!((dep.iter().map(|row| row.net).sum::<f64>() - 440_731.33).abs() < 0.005);
+        assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
+        assert_eq!(preview_json(&analysis)["reconciliationDifferences"], 0);
+        let output = output_path(&params).unwrap();
+        write_workbook(&output, &analysis, &AtomicBool::new(false)).unwrap();
+        assert_export_caches(&output, &analysis);
+        eprintln!("{}", preview_json(&analysis));
     }
 
     #[test]

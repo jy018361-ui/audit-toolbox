@@ -1,5 +1,29 @@
 # 存款利息上传识别行为与性能回归
 
+## 2026-10-22：分类前发生额不再隐藏
+
+第二步科目级发生额直接展示引擎返回的 `accountMetrics`／`entityMetrics`，不再以“已选择利息收入”为可见前提。真实0、未取得值继续分别显示0和“—”，辅助行仍不重复整科金额；分类只决定是否参与业务计算，不改变显示取数、登记方向还原或收入费用混合科目的性质。
+
+回归：`npx vitest run src/DepositInterestInteractions.test.tsx src/DepositInterestPage.test.ts`；`npm run build`。本项为前端展示修复，未重写利息计算，也未打包EXE。
+
+## 2026-10-22：缺失账面收入基准与零分母分别展示
+
+- 未纳入收入科目时，结果的账面收入与差异为 `null`，保留原始金额字段和 `hasInterestIncomeAccount=false`，不认定勾稽通过；页面及Excel列示“未识别／无法比较”，状态为“待确认利息收入科目”。
+- 已确认收入科目但金额为零时保留数值0与金额差异，差异率不适用。Excel公式支持改写基准后的重新计算，零分母不再由 `IFERROR` 变成0%；计算利息、收入分类和原有通过门槛不变。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib three_fixes`、`--lib`；`npx vitest run src/DepositInterestInteractions.test.tsx src/DepositInterestPage.test.ts`；`npm run build`。原始07请求通过 `DEPOSIT_THREE_FIXES_PARAMS/OUTPUT` 运行 `--lib three_fixes_original -- --ignored --nocapture`，不构建应用 EXE。
+
+## 2026-10-22：币种预检单币种不读取JE
+
+存款和借款共用币种衔接入口：先按完整 TB 的主体科目范围判断是否需要多币种验证，无需验证时不打开 JE；真正多币种的锚点、缺失提示与口径选择不变。实现边界与回归命令见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目，不改变存款建户或月均计息规则。
+
+主动停止币种预检时保留映射、恢复按钮并显示普通状态提示，停留上传步骤；不误报币种衔接失败，也不记为通过。真正失败展示引擎中文原因，重试成功后才放行。回归：`npx vitest run src/DepositInterestInteractions.test.tsx src/components/SyncBusyDialog.test.tsx`。
+
+## 2026-10-22：快速导出终态接收
+
+- 桌面共用任务通道保证启动返回的任务编号先交给页面，再投递提前到达的通知；并发按编号释放，不等待业务处理完成。存款页额外按返回编号接收启动期间的最新本工具事件，拒绝其他任务／其他工具串入，终态之后不再接收该任务的迟到进度。
+- 新任务清除旧进度，完成、失败、取消均恢复预览与导出按钮；成功展示文件入口。只修前端任务生命周期，不改变账户范围、计算规则、利率或底稿内容。
+- 回归：`npx vitest run src/DepositInterestInteractions.test.tsx src/apiJobDelivery.test.ts src/jobStartDelivery.test.ts`；`npm run build`。包含先预览后快速导出、启动返回前失败／取消及通知乱序。
+
 ## 2026-10-22：辅助降级清单与折叠提示
 
 - 结果新增 `summary.auxiliaryFallbackAccounts`：按本轮真实计息账户的折叠键记录主体、科目、币种、TB 辅助值与原因，仅列有辅助明细但未取得 JE 验证列的实际合并账户。复用空辅助计划时也记录范围，不依赖可能为空的 `auxiliaryGroups`，不从全局原因猜测账户。

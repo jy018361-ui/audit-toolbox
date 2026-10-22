@@ -4089,6 +4089,10 @@ fn role_values(table: &FxTable, mapping: &Map<String, Value>, role: &str) -> Vec
     if indexes.is_empty() {
         return Vec::new();
     }
+    let combined_indexes = mapped_cols(mapping, "accountCode").iter()
+        .filter(|name| mapped_cols(mapping, "accountName").contains(name))
+        .filter_map(|name| ledger_mapping::header_index(&table.headers, name))
+        .collect::<BTreeSet<_>>();
     table
         .rows
         .iter()
@@ -4096,8 +4100,14 @@ fn role_values(table: &FxTable, mapping: &Map<String, Value>, role: &str) -> Vec
         .map(|row| {
             indexes
                 .iter()
-                .filter_map(|index| row.get(*index))
-                .map(|value| normalized_account_role_value(value.trim(), role))
+                .filter_map(|index| row.get(*index).map(|value| (*index, value)))
+                .map(|(index, value)| {
+                    if combined_indexes.contains(&index)
+                        && let Some((code, name)) = ledger_mapping::split_combined_account_fields_ref(value, value) {
+                        return if role == "accountCode" { code } else { name };
+                    }
+                    normalized_account_role_value(value.trim(), role)
+                })
                 .map(|value| {
                     if role == "accountCode" {
                         ledger_mapping::normalize_account_code(value)
@@ -4145,7 +4155,7 @@ fn account_identity_rows(
             };
             let raw_code = joined(&code_indexes);
             let raw_name = joined(&name_indexes);
-            let code = ledger_mapping::account_code_of(&raw_code);
+            let code = ledger_mapping::account_code_from_fields(&raw_code, &raw_name);
             let name = ledger_mapping::account_name_from_fields(&raw_code, &raw_name);
             // 字段口径核对只判断两列是不是同一种科目身份；主体列可能只在
             // 一侧存在，不能让它干扰科目列本身的判断。正式业务汇总仍按主体建键。
@@ -4255,6 +4265,15 @@ fn normalized_account_role_value<'a>(value: &'a str, role: &str) -> &'a str {
         "accountName" => name,
         _ => value,
     }
+}
+
+fn mapped_account_role_value<'a>(value: &'a str, column: &str, mapping: &Map<String, Value>, role: &str) -> &'a str {
+    if mapped_cols(mapping, "accountCode").iter().any(|c| c == column)
+        && mapped_cols(mapping, "accountName").iter().any(|c| c == column)
+        && let Some((code, name)) = ledger_mapping::split_combined_account_fields_ref(value, value) {
+        return match role { "accountCode" => code, "accountName" => name, _ => value };
+    }
+    normalized_account_role_value(value, role)
 }
 
 fn split_combined_account_value(value: &str) -> Option<(&str, &str)> {
@@ -4880,7 +4899,6 @@ pub(crate) fn currency_link_check(params: &Value) -> Result<Value, AppError> {
     let tb_mapping=mapping_obj(params,"tbMapping");
     let tb_input=FxTbRows::open_forced(&source_of("tbSource")?,&tb_mapping,false,je_uses_disk(params))?;
     let je_mapping = mapping_obj(params, "jeMapping");
-    let je_input = FxJeRows::open(&source_of("jeSource")?, &je_mapping)?;
     let entity_enabled = ledger_mapping::entity_key_enabled(
         !mapped_cols(&tb_mapping, "entity").is_empty(),
         !mapped_cols(&je_mapping, "entity").is_empty(),
@@ -4982,7 +5000,10 @@ pub(crate) fn currency_link_check(params: &Value) -> Result<Value, AppError> {
         .collect::<BTreeMap<_, _>>();
 
     let mut je_hits = BTreeMap::<(String, String), BTreeSet<String>>::new();
-    if first_col(&je_mapping, "currency").is_some() {
+    // TB 已证明每个主体＋科目只有一种币种时，无须打开和规范化整份 JE。
+    // JE 未映射币种时也无从查找锚点，按下方缺失币种结果让用户选择口径。
+    if !required_groups.is_empty() && first_col(&je_mapping, "currency").is_some() {
+        let je_input = FxJeRows::open(&source_of("jeSource")?, &je_mapping)?;
         je_input.visit_body(&je_mapping, &replay_cancel(), |row| {
             let group = identity(&row, &je_mapping, ledger_mapping::EntitySide::Je);
             if !required_groups.contains_key(&group) {
@@ -7154,7 +7175,7 @@ fn account_code_and_name(row: &RowRecord, mapping: &Map<String, Value>) -> (Stri
     let explicit_name = read(&mapped_cols(mapping, "accountName"));
     if !explicit_code.is_empty() || !explicit_name.is_empty() {
         return (
-            ledger_mapping::account_code_of(&explicit_code),
+            ledger_mapping::account_code_from_fields(&explicit_code, &explicit_name),
             ledger_mapping::account_name_from_fields(&explicit_code, &explicit_name),
         );
     }
@@ -22135,6 +22156,52 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         assert_eq!(missing["verified"], false, "{missing:#}");
         assert_eq!(missing["missingCurrencies"], json!(["HKD"]));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "需要 CURRENCY_LINK_PROBE_REQUEST 指向真实账表请求 JSON"]
+    fn currency_link_original_request_probe() {
+        let path = std::env::var("CURRENCY_LINK_PROBE_REQUEST").expect("设置请求文件路径");
+        let request: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let params = request.get("params").unwrap_or(&request);
+        match currency_link_check(params) {
+            Ok(value) => println!("CURRENCY_LINK_PROBE_OK {value}"),
+            Err(err) => panic!("CURRENCY_LINK_PROBE_ERROR {}", serde_json::to_string(&err).unwrap()),
+        }
+    }
+
+    #[test]
+    fn currency_link_single_currency_does_not_open_je() {
+        let dir = std::env::temp_dir().join(format!("currency-link-lazy-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let tb = dir.join("tb.csv");
+        let params = json!({
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbMapping":{"entity":"主体","accountCode":"科目编码","currency":"币种","openingFunctionalAmount":"期初余额","closingFunctionalAmount":"期末余额"},
+            "jeSource":{"inputPath":dir.join("不存在的JE.xlsx"),"sheet":"Sheet1","headerRow":1,"headerDepth":1},
+            "jeMapping":{"entity":"主体","accountCode":"科目编码","currency":"币种","functionalAmount":"金额"}
+        });
+        fs::write(&tb, "主体,科目编码,币种,期初余额,期末余额\n2000,2001,USD,100,120\n2002,2001,EUR,200,240\n").unwrap();
+        for disk in [false, true] {
+            let mut p = params.clone();
+            p["__largeJeDiskMode"] = json!(disk);
+            let result = currency_link_check(&p).unwrap();
+            assert_eq!(result["required"], false, "跨主体不同币种不构成同户多币种：{result}");
+            assert_eq!(result["verified"], true);
+            assert_eq!(result["groups"], json!([]));
+        }
+        fs::write(&tb, "主体,科目编码,币种,期初余额,期末余额\n2000,2001,USD,100,120\n2000,2001,CNY,200,240\n").unwrap();
+        assert!(currency_link_check(&params).is_err(), "同一主体科目真正多币种时必须继续读取JE");
+        let mut no_currency = params.clone();
+        no_currency["jeMapping"].as_object_mut().unwrap().remove("currency");
+        let result = currency_link_check(&no_currency).unwrap();
+        assert_eq!(result["required"], true);
+        assert_eq!(result["verified"], false);
+        assert_eq!(result["missingCurrencies"], json!(["USD"]));
+        let mut excluded = params.clone();
+        excluded["selectedAccounts"] = json!([{"entity":"2000","accountCode":"9999"}]);
+        assert_eq!(currency_link_check(&excluded).unwrap()["required"], false);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

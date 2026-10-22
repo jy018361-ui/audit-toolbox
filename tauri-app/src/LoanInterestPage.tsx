@@ -75,7 +75,7 @@ import { useTableColumnResize } from "@/components/useTableColumnResize";
 import { JargonTip } from "@/components/JargonTip";
 import { NumberInput } from "@/components/NumberInput";
 import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
-import { errorText } from "@/lib/errors";
+import { errorText, isSyncBusyAborted } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -647,6 +647,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const [resultStale, setResultStale] = useState(false);
   const [ratesConfirmed, setRatesConfirmed] = useState(false);
   const [error, setError] = useState("");
+  const [currencyValidationNotice, setCurrencyValidationNotice] = useState("");
   const [pairStatus, setPairStatus] = useState("");
   const [currencyFallbackMode, setCurrencyFallbackMode] = useState<
     CurrencyFallbackMode | ""
@@ -1619,6 +1620,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   // 通过时才重新验证。弹口径选择框（required 且未通过）与请求失败不记忆。
   const currencyLinkCheckRef = useRef<{ key: string; ok: boolean } | null>(null);
   async function enterTbRateStep() {
+    setCurrencyValidationNotice("");
     if (!metadataReady) return setError("完整资料仍在读取，请稍候。");
     if (!auxiliaryCheckReady) return setError("TB 与 JE 的辅助字段校验尚未完成，请等待或重试。");
     if (mode !== "tb") {
@@ -1653,8 +1655,19 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     }
     setError("");
     setBusy(true);
-    const link = await verifyCurrencyLink(request);
-    setBusy(false);
+    let link: CurrencyLinkResult | null;
+    try {
+      link = await verifyCurrencyLink(request, { throwOnError: true });
+    } catch (error) {
+      if (isSyncBusyAborted(error)) {
+        setCurrencyValidationNotice("已停止币种衔接验证，当前映射已保留；可重新点击下一步。");
+      } else {
+        setError(`TB 与 JE 的币种衔接验证失败：${errorText(error)}`);
+      }
+      return;
+    } finally {
+      setBusy(false);
+    }
     if (!link) {
       setError("暂时无法验证 TB 与 JE 的外币币种衔接，请重试。");
       return;
@@ -2014,6 +2027,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         detail="从完整借款台账直接重算，或以 TB＋JE 模糊还原逐笔本金变动后测算利息。"
       />
       <ErrorBox error={step === 2 && error === terminalJobError(job) ? "" : error} onDismiss={() => setError("")} />
+      {step === 0 && currencyValidationNotice && <p className="fx-source-status" role="status">{currencyValidationNotice}</p>}
       <StepIndicator
         steps={[
           { key: "source", label: "上传与识别" },

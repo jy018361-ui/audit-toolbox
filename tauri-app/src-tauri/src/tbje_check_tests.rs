@@ -8,6 +8,54 @@ use serde_json::json;
 use std::sync::atomic::AtomicBool;
 
 #[test]
+fn three_fixes_combined_account_mapping_checks_and_amounts_agree_in_memory_and_disk() {
+    let dir = fixture("three-fixes-combined-account");
+    std::fs::write(dir.join("tb.csv"), "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n1002,银行存款,100,5,0,105\n4001,实收资本,-100,0,5,-105\n").unwrap();
+    std::fs::write(dir.join("je.csv"), "日期,凭证号,会计科目,借方,贷方\n2026-01-01,记1,1002-银行存款,5,0\n2026-01-01,记1,4001-实收资本,0,5\n").unwrap();
+    let mut input = params(&dir, true);
+    input["jeMapping"]["accountCode"] = json!("会计科目");
+    input["jeMapping"]["accountName"] = json!("会计科目");
+    let alignment = crate::fx::check_mapping_alignment(&input).unwrap();
+    assert_eq!(alignment["aligned"], json!(true), "{alignment}");
+    for disk in [false, true] {
+        input["__testForceDiskTb"] = json!(disk);
+        input["__testForceDiskLedger"] = json!(disk);
+        let result = run_all_accounts(&input, &AtomicBool::new(false)).unwrap();
+        assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result}");
+        assert_eq!(result["tbVsJe"]["accounts"], json!(2));
+        assert!(result["mappingWarnings"].as_array().unwrap().iter().all(|v| !v.as_str().unwrap().contains("不符合科目编码")), "{result}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "需设置 TBJE_THREE_FIXES_PARAMS 指向原始请求；不构建应用 EXE"]
+fn three_fixes_original_tbje_requests() {
+    let path = std::env::var("TBJE_THREE_FIXES_PARAMS").unwrap();
+    let input: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let mut results = Vec::new();
+    for case in input.as_array().unwrap() {
+        let params = &case["params"];
+        let result = run_all_accounts(params, &AtomicBool::new(false)).unwrap();
+        if case["name"] == "10" {
+            assert_eq!(result["equation"]["balancePassed"], json!(true), "{result}");
+            assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result}");
+        } else {
+            assert_eq!(result["tbVsJe"]["performed"], json!(true), "{result}");
+            assert!(result["tbVsJe"]["items"].as_array().unwrap().iter().any(|r| r["code"] == "1002010109"));
+        }
+        if let Some(output) = case["output"].as_str() {
+            let prepared = prepare_with_control(params, &AtomicBool::new(false), &|_,_,_,_| {}).unwrap();
+            let mut export_params = params.clone();
+            export_params["outputPath"] = json!(output);
+            export(&export_params, &result, &prepared).unwrap();
+        }
+        results.push(json!({"name":case["name"],"result":result}));
+    }
+    std::fs::write(std::env::var("TBJE_THREE_FIXES_OUTPUT").unwrap(), serde_json::to_vec_pretty(&results).unwrap()).unwrap();
+}
+
+#[test]
 fn tbje_disk_domains_large_unique_unmapped_values_do_not_block_checks() {
     let dir = fixture("disk-key-domains-unrelated-text");
     平的账(&dir);
@@ -3070,6 +3118,65 @@ fn workbook_cells(path: &std::path::Path) -> Vec<(String, Vec<String>)> {
             (sheet.get_name().to_owned(), cells)
         })
         .collect()
+}
+
+#[test]
+fn 同名组传回身份且导出避让重名并复用底稿() {
+    let dir = fixture(&format!("duplicate-group-{}", uuid::Uuid::new_v4()));
+    平的账(&dir);
+    let mut first = params(&dir, true);
+    first["groupId"] = json!("来源甲");
+    first["label"] = json!("2");
+    let mut second = params(&dir, false);
+    second["groupId"] = json!("来源乙");
+    second["label"] = json!("2");
+    let mut failed = first.clone();
+    failed["groupId"] = json!("来源丙");
+    failed["tbSource"]["inputPath"] = json!(dir.join("不存在.csv"));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let pause = PauseCheckpoint::unpaused(cancel.clone());
+    let checked = run_job("tbje_check.run_batch",
+        json!({"groups": [first.clone(), second.clone(), failed]}),
+        &|_,_,_,_| {}, cancel.clone(), &pause).unwrap();
+    for (index, id) in ["来源甲", "来源乙", "来源丙"].iter().enumerate() {
+        assert_eq!(checked["groups"][index]["groupId"], json!(id));
+    }
+    assert_eq!(checked["groups"][0]["ok"], true);
+    assert_eq!(checked["groups"][1]["ok"], true);
+    assert_eq!(checked["groups"][2]["ok"], false);
+
+    let output = dir.join("导出");
+    std::fs::create_dir_all(&output).unwrap();
+    let existing = output.join("第2组_完整性核对.xlsx");
+    std::fs::write(&existing, b"keep existing file").unwrap();
+    let mut groups = vec![first.clone(), second.clone()];
+    // 非法字符替换后的同名，以及 Windows 大小写等价的文件名也须避让。
+    for (index, label) in ["2/", "2:", "ABC", "abc"].iter().enumerate() {
+        let mut group = first.clone();
+        group["groupId"] = json!(format!("附加来源{index}"));
+        group["label"] = json!(label);
+        assert_eq!(check_result_fingerprint(&group), check_result_fingerprint(&first),
+            "组身份和显示名不得使有效缓存失效");
+        groups.push(group);
+    }
+    let prepare_count = PREPARE_CALLS.with(|c| c.get());
+    let exported = run_job("tbje_check.export_batch",
+        json!({"groups": groups, "outputDirectory": output}),
+        &|_,_,_,_| {}, cancel, &pause).unwrap();
+    assert_eq!(PREPARE_CALLS.with(|c| c.get()), prepare_count, "导出不能重复准备或计算");
+    let exports = exported["exports"].as_array().unwrap();
+    assert_eq!(exports.len(), groups.len());
+    let mut names = HashSet::new();
+    for (group, result) in groups.iter().zip(exports) {
+        assert_eq!(result["ok"], true, "{result:#}");
+        assert_eq!(result["groupId"], group["groupId"]);
+        let path = PathBuf::from(result["outputPath"].as_str().unwrap());
+        assert!(names.insert(path.file_name().unwrap().to_string_lossy().to_lowercase()));
+        assert_eq!(std::fs::read(&path).unwrap(), std::fs::read(cached_workbook(group).unwrap()).unwrap(),
+            "各组输出必须来自其自己的完整底稿缓存");
+    }
+    assert_eq!(std::fs::read(existing).unwrap(), b"keep existing file");
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

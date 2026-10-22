@@ -1105,6 +1105,28 @@ mod tests {
         );
     }
     #[test]
+    fn three_fixes_unmapped_explicit_auxiliary_columns_preserve_account_tree_without_confirming_je_mapping() {
+        let (mut h, r, mut m) = fixture(&[
+            &["1221", "其他应收款", "", "CNY", "30", "100", "10", "120"],
+            &["1221.02", "个人", "", "CNY", "10", "40", "5", "45"],
+            &["", "", "    甲", "CNY", "10", "40", "5", "45"],
+            &["1221.03", "单位", "", "CNY", "20", "60", "5", "75"],
+            &["", "", "    乙", "CNY", "20", "60", "5", "75"],
+        ]);
+        h[2] = "核算维度名称".into();
+        m.remove("auxiliary");
+        let keep = tb_leaf_mask(&h, &r, &|role| mapped_column_names(&m, role));
+        assert!(!keep[0], "完整父子应只保留一个金额层：{keep:?}");
+        assert!(mapped_column_names(&m, "auxiliary").is_empty(), "结构证据不得确认跨表辅助映射");
+        for j in 4..8 {
+            let selected: f64 = r.iter().zip(&keep).filter(|(_,k)| **k).map(|(r,_)| parse_amount(&r[j]).unwrap().unwrap_or(0.0)).sum();
+            assert!((selected - parse_amount(&r[0][j]).unwrap().unwrap()).abs() < 0.01, "金额列 {j} 不守恒");
+        }
+        let mut broken = r.clone();
+        broken[0][5] = "101".into();
+        assert!(tb_leaf_mask(&h, &broken, &|role| mapped_column_names(&m, role))[0], "不勾稽不能认定父子并删除父项");
+    }
+    #[test]
     fn complete_auxiliary_group_can_include_unallocated_residual() {
         let (h, r, m) = fixture(&[
             &["1002", "银行", "", "CNY", "30", "100", "10", "120"],

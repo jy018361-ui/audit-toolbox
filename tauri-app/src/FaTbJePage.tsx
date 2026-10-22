@@ -448,17 +448,19 @@ export function unionEntityAccounts(
   return pairs;
 }
 
-/** 固定资产科目复核只以 TB 为范围；JE 只用于匹配变动与保留整张凭证。 */
+/** 两侧分别确认角色与类别；相同源身份可共用确认，跨表科目无需同码同名。 */
 export function faReviewEntityAccounts(
   tb: EntityAccountPair[] | undefined,
   entityKeyEnabled = true,
+  je: EntityAccountPair[] | undefined = undefined,
 ): EntityAccountPair[] {
+  const effective = (pairs: EntityAccountPair[] | undefined) => pairs?.map((pair) => ({
+    ...pair,
+    entity: entityKeyEnabled ? pair.entity : DEFAULT_ENTITY,
+  }));
   return unionEntityAccounts(
-    tb?.map((pair) => ({
-      ...pair,
-      entity: entityKeyEnabled ? pair.entity : DEFAULT_ENTITY,
-    })),
-    undefined,
+    effective(tb),
+    effective(je),
   );
 }
 
@@ -832,21 +834,21 @@ export function FaTbJePage() {
     const detected = [...new Set(inspects.tb?.entities ?? [])].filter(Boolean);
     return detected.length ? detected : [DEFAULT_ENTITY];
   }, [inspects.tb, entityKeyEnabled]);
-  // 科目复核只以 TB 中真实存在的「主体×科目」为范围。JE 是变动明细来源，
-  // 其中的对方科目不能进入固定资产科目分类。旧后端／浏览器预览没有
-  // entityAccounts 时，回退为 TB 主体 × TB 科目。
+  // TB 余额和 JE 变动各自绑定确认分类，再按资产类别与角色汇总。
+  // 所有实际科目都可复核；对方科目默认排除，不因编码／名称相同扩散分类。
   const entityAccountPairs = useMemo(
     () => {
-      const raw = inspects.tb?.reviewAccounts ?? inspects.tb?.entityAccounts;
       const verified = auxiliaryLink?.status === "verified";
-      const effective = raw?.map((pair) => ({
+      const effective = (kind: Kind) => (inspects[kind]?.reviewAccounts ?? inspects[kind]?.entityAccounts
+        ?? (inspects[kind]?.entities.length ? inspects[kind]!.entities : [DEFAULT_ENTITY]).flatMap((entity) =>
+          (inspects[kind]?.accounts ?? []).map((account) => ({ entity, account }))))?.map((pair) => ({
         ...pair,
         auxiliary: verified && "auxiliary" in pair && typeof pair.auxiliary === "string"
           ? pair.auxiliary : undefined,
       }));
-      return faReviewEntityAccounts(effective, entityKeyEnabled);
+      return faReviewEntityAccounts(effective("tb"), entityKeyEnabled, effective("je"));
     },
-    [inspects.tb?.reviewAccounts, inspects.tb?.entityAccounts, entityKeyEnabled, auxiliaryLink?.status],
+    [inspects.tb, inspects.je, entityKeyEnabled, auxiliaryLink?.status],
   );
   const entityScope = useEntityScopeConfirmation({
     tbEntities: entityKeyEnabled ? (inspects.tb?.entities ?? []) : [],
@@ -875,14 +877,30 @@ export function FaTbJePage() {
   useEffect(() => {
     setAuxiliaryLink(null);
   }, [auxiliaryLinkKey]);
-  // 确认行按主体、编码、名称、有效辅助值和币种区分；只有完整身份相同才合并。
+  const assignmentSources = useMemo(() => {
+    const sources = new Map<string, Kind[]>();
+    for (const kind of ["tb", "je"] as const) {
+      const pairs = inspects[kind]?.reviewAccounts ?? inspects[kind]?.entityAccounts
+        ?? (inspects[kind]?.entities.length ? inspects[kind]!.entities : [DEFAULT_ENTITY]).flatMap((entity) =>
+          (inspects[kind]?.accounts ?? []).map((account) => ({ entity, account })));
+      for (const pair of pairs) {
+        const key = JSON.stringify([entityKeyEnabled ? pair.entity : DEFAULT_ENTITY, pair.account]);
+        const kinds = sources.get(key) ?? [];
+        if (!kinds.includes(kind)) kinds.push(kind);
+        sources.set(key, kinds);
+      }
+    }
+    return sources;
+  }, [inspects.tb, inspects.je, entityKeyEnabled]);
+  // 完整源身份只用于绑定人工分类，不作为跨表业务匹配条件。
   const assignmentViews = useMemo(
-    () => groupAssignmentViews(assignments),
-    [assignments],
+    () => groupAssignmentViews(assignments, (entity, account) =>
+      assignmentSources.get(JSON.stringify([entity, account])) ?? []),
+    [assignments, assignmentSources],
   );
   const showReviewEntity = entityKeyEnabled &&
     new Set(assignmentViews.map((view) => view.entity)).size > 1;
-  const showReviewCurrency = ledgerHasMappedRole(mappings.tb, "currency");
+  const showReviewCurrency = ledgerHasMappedRole(mappings.tb, "currency") || ledgerHasMappedRole(mappings.je, "currency");
   const includedViews = assignmentViews.filter(
     (view) => view.role !== "excluded",
   );
@@ -1296,6 +1314,7 @@ export function FaTbJePage() {
         ...assignment,
         category: normalizeFaCategory(assignment.category),
       })),
+      assignmentBasis: "assetRoleCategory",
       tbFixedEntity: DEFAULT_ENTITY,
       jeFixedEntity: DEFAULT_ENTITY,
       entityScope: entityScope.selection,
@@ -1312,7 +1331,7 @@ export function FaTbJePage() {
     if (!mappingsReady) return;
     setBusy(true);
     setError("");
-    setSourceStatus("正在确认映射口径并刷新 TB 科目清单…");
+    setSourceStatus("正在确认映射口径并刷新 TB、JE 科目清单…");
     try {
       // 辅助核算属于映射口径，不依赖第二步才确认的固定资产目标科目。
       // 后端会在 TB 未映射辅助字段或没有有效锚点时直接返回，不读取 JE。
@@ -1328,18 +1347,20 @@ export function FaTbJePage() {
       if (tbMapping !== mappings.tb) {
         setMappings((current) => ({ ...current, tb: tbMapping }));
       }
-      // 科目分类只以 TB 中真实存在的主体×科目为范围；JE 不在这里重读。
-      const refreshedTb = (await engineCall("deposit.inspect_tb", {
-        source: source("tb"),
-        mapping: tbMapping,
-      }, `TB ${fileName(paths.tb)}`)) as Inspection;
+      // 两侧都按最终映射刷新完整目录，确保确认分类能定位当前源记录。
+      const [refreshedTb, refreshedJe] = await Promise.all((['tb', 'je'] as const).map(async (kind) =>
+        (await engineCall(`deposit.inspect_${kind}`, {
+          source: source(kind),
+          mapping: kind === 'tb' ? tbMapping : mappings.je,
+        }, `${kind.toUpperCase()} ${fileName(paths[kind])}`)) as Inspection));
       setInspects((current) => ({
         ...current,
         tb: refreshedTb,
+        je: refreshedJe,
       }));
       setAccountsReviewed(false);
       setAssignmentPage(0);
-      setSourceStatus("映射口径已确认；已按 TB 刷新主体与科目清单，请复核分类。");
+      setSourceStatus("映射口径已确认；请分别确认 TB、JE 科目的原值／折旧角色与资产类别。");
       setStep(2);
     } catch (e) {
       setError(errorText(e));
@@ -1689,6 +1710,7 @@ export function FaTbJePage() {
             </div>
           </CardHeader>
           <CardContent className="form-stack">
+            <p>TB 与 JE 分别确认分类，按同一主体下的资产类别与原值／折旧角色汇总。</p>
             <div className="fa-tbje-account-toolbar">
               <Button
                 type="button"
@@ -1746,6 +1768,7 @@ export function FaTbJePage() {
                           <span className="fa-tbje-account-name">
                             {ledgerReviewAccountLabel(view.label, view.auxiliary, view.parentAccountName)}
                           </span>
+                          <Badge variant="outline">{view.sources.map((kind) => kind.toUpperCase()).join("／")}</Badge>
                         </div>
                       </td>
                       {showReviewCurrency && <td>{view.currency || "—"}</td>}
@@ -1792,7 +1815,7 @@ export function FaTbJePage() {
                       <td colSpan={3 + Number(showReviewEntity) + Number(showReviewCurrency)} className="fa-tbje-empty-table">
                         {accountQuery.trim()
                           ? "没有匹配的科目。"
-                          : "没有可复核的 TB 科目。"}
+                          : "没有可复核的 TB／JE 科目。"}
                       </td>
                     </tr>
                   )}

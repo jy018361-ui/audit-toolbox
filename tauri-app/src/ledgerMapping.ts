@@ -688,6 +688,11 @@ export const isCombinedAccountValues = (values: string[]): boolean => {
     const value = raw.trim();
     if (!value) continue;
     total += 1;
+    // 仅用于允许明确的编码＋名称双角色；实际解析仍要求两角色共用该列。
+    if (/^\d{4,}-\s*[\u4e00-\u9fff]/u.test(value)) {
+      split += 1;
+      continue;
+    }
     // 与 Rust split_code_and_name_ref 同口径：完整日期不是科目；分隔符后
     // 若仍是编码也不是名称（例如 1001/02）。
     if (/^(?:19|20)\d{2}\/\d{1,2}\/\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/.test(value))
@@ -1665,6 +1670,7 @@ export type CurrencyLinkResult = {
  */
 export async function verifyCurrencyLink(
   params: Record<string, unknown>,
+  options: { throwOnError?: boolean } = {},
 ): Promise<CurrencyLinkResult | null> {
   try {
     const { engineCall } = await import("./api");
@@ -1672,8 +1678,11 @@ export async function verifyCurrencyLink(
       "ledger.currency_link",
       params,
     )) as CurrencyLinkResult;
-    return result && typeof result.required === "boolean" ? result : null;
-  } catch {
+    if (result && typeof result.required === "boolean") return result;
+    if (options.throwOnError) throw new Error("币种衔接验证未返回有效结果，请重新识别账表后重试。");
+    return null;
+  } catch (error) {
+    if (options.throwOnError) throw error;
     return null;
   }
 }

@@ -4181,8 +4181,9 @@ fn calculate(
     // 此前对合计取绝对值是为迁就用友符号惯例，但会把费用翻成一笔正的
     // 利息收入，差异方向失真；符号已在逐行按口径归一，合计不再翻正。
     let booked = booked_interest;
-    let difference = calculated - booked;
-    let ratio = (booked.abs() > 0.005).then(|| difference / booked.abs());
+    let has_booked = !booked_interest_rows.is_empty();
+    let difference = has_booked.then_some(calculated - booked);
+    let ratio = difference.filter(|_| booked.abs() > 0.005).map(|d| d / booked.abs());
     let mut booked_notes: Vec<String> = vec![];
     if booked < -0.005 {
         booked_notes
@@ -4230,7 +4231,7 @@ fn calculate(
         "summary": {
             "accountCount": accounts.len(),
             "calculatedInterest": calculated,
-            "bookedInterestIncome": booked,
+            "bookedInterestIncome": has_booked.then_some(booked),
             "bookedInterestRaw": booked_interest,
             "bookedNote": booked_note,
             "difference": difference,
@@ -6314,12 +6315,8 @@ fn write_reconciliation(
     let booked = summary["bookedInterestIncome"].as_f64().unwrap_or(0.0);
     let calculated = summary["calculatedInterest"].as_f64().unwrap_or(0.0);
     let difference = calculated - booked;
-    // 缓存必须对应导出公式本身：差异率取绝对值，账面为零时沿用 IFERROR 的零值。
-    let ratio = if booked == 0.0 {
-        0.0
-    } else {
-        (difference / booked).abs()
-    };
+    let has_booked = summary["hasInterestIncomeAccount"].as_bool().unwrap_or(true);
+    let ratio = (has_booked && booked.abs() > 0.005).then(|| (difference / booked).abs());
     // 同一张 sheet，公式不再带 sheet 前缀；行号全部平移 offset。
     let (row_calc, row_booked, row_diff, row_ratio) =
         (offset + 2, offset + 3, offset + 4, offset + 5);
@@ -6340,9 +6337,11 @@ fn write_reconciliation(
     sheet
         .write_string(row_booked, 0, "TB 账面利息收入（取自利息收入类科目）")
         .map_err(xlsx)?;
-    sheet
-        .write_number_with_format(row_booked, 1, booked, &amount)
-        .map_err(xlsx)?;
+    if has_booked {
+        sheet.write_number_with_format(row_booked, 1, booked, &amount).map_err(xlsx)?;
+    } else {
+        sheet.write_string(row_booked, 1, "未识别").map_err(xlsx)?;
+    }
     sheet
         .write_string(row_diff, 0, "差异（测算－账面）")
         .map_err(xlsx)?;
@@ -6350,8 +6349,8 @@ fn write_reconciliation(
         .write_formula_with_format(
             row_diff,
             1,
-            Formula::new(format!("B{}-B{}", row_calc + 1, row_booked + 1))
-                .set_result(difference.to_string()),
+            Formula::new(format!("IF(ISNUMBER(B{}),B{}-B{},\"无法比较\")", row_booked + 1, row_calc + 1, row_booked + 1))
+                .set_result(if has_booked { difference.to_string() } else { "无法比较".into() }),
             &amount,
         )
         .map_err(xlsx)?;
@@ -6361,14 +6360,18 @@ fn write_reconciliation(
             row_ratio,
             1,
             Formula::new(format!(
-                "IFERROR(ABS(B{}/B{}),0)",
-                row_diff + 1,
-                row_booked + 1
+                "IF(ISNUMBER(B{b}),IF(ABS(B{b})>0.005,ABS(B{d}/B{b}),\"不适用\"),\"不适用\")",
+                b = row_booked + 1,
+                d = row_diff + 1
             ))
-            .set_result(ratio.to_string()),
+            .set_result(ratio.map(|r| r.to_string()).unwrap_or_else(|| "不适用".into())),
             &percent,
         )
         .map_err(xlsx)?;
+    sheet.write_string(offset + 6, 0, "比较状态").map_err(xlsx)?;
+    sheet.write_string(offset + 6, 1, if !has_booked { "待确认利息收入科目" }
+        else if ratio.is_none() { "账面收入已确认，零基准差异率不适用" }
+        else { "已取得账面比较基准" }).map_err(xlsx)?;
     let mut y = offset + 6;
     y += 2;
     sheet
@@ -6616,6 +6619,22 @@ fn xlsx(value: XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "需 DEPOSIT_THREE_FIXES_PARAMS 指向07原始任务；仅运行库测试"]
+    fn three_fixes_original_07_missing_income_baseline_export() {
+        let params: Value = serde_json::from_slice(&fs::read(std::env::var("DEPOSIT_THREE_FIXES_PARAMS").unwrap()).unwrap()).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = calculate(&params, &cancel, &pause, &|_,_,_,_| {}, 1).unwrap();
+        assert_eq!(result["summary"]["hasInterestIncomeAccount"], json!(false));
+        assert!(result["summary"]["bookedInterestIncome"].is_null());
+        assert!(result["summary"]["difference"].is_null());
+        assert!(result["summary"]["differenceRatio"].is_null());
+        assert_eq!(result["summary"]["reconciliationPassed"], json!(false));
+        export(&params, &result).unwrap();
+        fs::write(std::env::var("DEPOSIT_THREE_FIXES_OUTPUT").unwrap(), serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+    }
 
     #[test]
     fn tb_disk_deposit_catalog_fold_and_calculation_match_memory() {
@@ -11754,7 +11773,7 @@ mod tests {
     }
 
     #[test]
-    fn 导出汇总公式缓存保留负差异和零分母口径() {
+    fn three_fixes_导出区分缺失基准和真实零基准并保留负差异() {
         let dir = tempfile::tempdir().unwrap();
         let rows = vec![AccountRow {
             account: "1002 银行存款".into(),
@@ -11778,17 +11797,19 @@ mod tests {
             ..blank_row()
         }];
         for (index, booked, expected_difference, expected_ratio) in [
-            (0, 72_868.2, -69_433.51546666666, 0.952864424627844),
-            (1, -900.0, 4_334.684533333332, 4.816316148148147),
-            (2, 0.0, 3_434.684533333332, 0.0),
-            (3, 3_434.684533333332, 0.0, 0.0),
+            (0, 72_868.2, -69_433.51546666666, Some(0.952864424627844)),
+            (1, -900.0, 4_334.684533333332, Some(4.816316148148147)),
+            (2, 0.0, 3_434.684533333332, None),
+            (3, 3_434.684533333332, 0.0, Some(0.0)),
+            (4, 0.0, 3_434.684533333332, None),
         ] {
             let path = dir.path().join(format!("cache-{index}.xlsx"));
             let result = json!({
                 "rows": rows,
                 "summary": {
                     "calculatedInterest": 3_434.684533333332,
-                    "bookedInterestIncome": booked
+                    "bookedInterestIncome": booked,
+                    "hasInterestIncomeAccount": index != 4
                 }
             });
             export(&json!({"outputPath": path}), &result).unwrap();
@@ -11797,9 +11818,9 @@ mod tests {
             for (cell, expected) in [
                 ((2, 13), 3_434.684533333332),
                 ((5, 1), 3_434.684533333332),
-                ((7, 1), expected_difference),
-                ((8, 1), expected_ratio),
+                ((7, 1), if index == 4 { 0.0 } else { expected_difference }),
             ] {
+                if index == 4 && cell == (7, 1) { continue; }
                 let cached = values
                     .get(cell)
                     .unwrap()
@@ -11811,10 +11832,23 @@ mod tests {
                     "场景 {index} 缓存 {cell:?}: {cached} != {expected}"
                 );
             }
+            if let Some(ratio) = expected_ratio {
+                let cached = values.get((8, 1)).unwrap().to_string().parse::<f64>().unwrap();
+                assert!((cached - ratio).abs() < 1e-9);
+            } else {
+                assert_eq!(values.get((8, 1)).unwrap().to_string(), "不适用");
+            }
+            if index == 4 {
+                assert_eq!(values.get((6, 1)).unwrap().to_string(), "未识别");
+                assert_eq!(values.get((7, 1)).unwrap().to_string(), "无法比较");
+                assert_eq!(values.get((9, 1)).unwrap().to_string(), "待确认利息收入科目");
+            } else if index == 2 {
+                assert_eq!(values.get((6, 1)).unwrap().to_string().parse::<f64>().unwrap(), 0.0);
+            }
             let formulas = calamine::Reader::worksheet_formula(&mut book, SUMMARY_SHEET).unwrap();
             assert_eq!(formulas.get_value((2, 13)).unwrap(), "SUM(N2:N2)");
-            assert_eq!(formulas.get_value((7, 1)).unwrap(), "B6-B7");
-            assert_eq!(formulas.get_value((8, 1)).unwrap(), "IFERROR(ABS(B8/B7),0)");
+            assert_eq!(formulas.get_value((7, 1)).unwrap(), "IF(ISNUMBER(B7),B6-B7,\"无法比较\")");
+            assert_eq!(formulas.get_value((8, 1)).unwrap(), "IF(ISNUMBER(B7),IF(ABS(B7)>0.005,ABS(B8/B7),\"不适用\"),\"不适用\")");
         }
     }
 

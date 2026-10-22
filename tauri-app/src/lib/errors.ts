@@ -28,6 +28,15 @@ export function errorText(error: unknown): string {
   return "操作失败，请检查输入后重试。";
 }
 
+/** 会议任务的云端失败原因常放在 detail，录音页、通知和失败快照统一保留。 */
+export function meetingErrorText(error: unknown): string {
+  const message = errorText(error);
+  const detail = (error as { detail?: unknown } | null)?.detail;
+  return typeof detail === "string" && detail.trim() && !message.includes(detail.trim())
+    ? `${message} 详细原因：${detail.trim()}`
+    : message;
+}
+
 /** 校验未通过时，把后端塞在 detail 里的那段 `{errors:[...]}` JSON 拆成人话。 */
 export function validationDetail(detail: unknown): string {
   if (typeof detail !== "string" || !detail.includes("errors")) return "";

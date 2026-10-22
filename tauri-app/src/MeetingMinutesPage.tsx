@@ -12,12 +12,12 @@ import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorBox } from "@/components/ErrorBox";
 import { FileDropInput } from "@/components/FileDropInput";
-import { JobProgress } from "@/components/JobProgress";
+import { JobProgress, terminalJobError } from "@/components/JobProgress";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
 import { SwitchInput } from "@/components/SwitchInput";
 import { useJobEvents } from "@/hooks/useJobEvents";
-import { errorText } from "@/lib/errors";
+import { meetingErrorText as errorText } from "@/lib/errors";
 import {
   jobCancel,
   jobStart,
@@ -222,6 +222,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
       {job && (
         <JobProgress
           job={job}
+          detail={terminalJobError(job)}
           onCancel={busy && activeJobId ? (id) => void jobCancel(id) : undefined}
         />
       )}

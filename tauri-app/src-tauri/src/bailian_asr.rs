@@ -186,13 +186,7 @@ fn read_json_response(
     if !status.is_success() {
         let detail = serde_json::from_str::<Value>(&body)
             .ok()
-            .and_then(|value| {
-                value
-                    .pointer("/message")
-                    .or_else(|| value.get("message"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
+            .map(|value| task_error_detail(&value, None))
             .unwrap_or_else(|| snippet(&body));
         let code = if status.as_u16() == 401 || status.as_u16() == 403 {
             "ASR_KEY_INVALID"
@@ -308,7 +302,13 @@ fn submit_transcription(
         .pointer("/output/task_id")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| asr_error("ASR_SUBMIT_INVALID", "百炼未返回任务编号。", None))
+        .ok_or_else(|| {
+            asr_error(
+                "ASR_SUBMIT_INVALID",
+                "百炼未返回任务编号。",
+                Some(task_error_detail(&value, None)),
+            )
+        })
 }
 
 fn poll_transcription(
@@ -324,32 +324,9 @@ fn poll_transcription(
             return Err(cancelled_error());
         }
         let value = query_task(client, key, task_id)?;
-        let status = value
-            .pointer("/output/task_status")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        match status {
-            "SUCCEEDED" => return Ok(value),
-            "FAILED" | "CANCELED" | "CANCELLED" => {
-                let message = value
-                    .pointer("/output/message")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .or_else(|| {
-                        value
-                            .pointer("/output/results/0/message")
-                            .or_else(|| value.pointer("/results/0/message"))
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .unwrap_or_else(|| "任务失败".into());
-                return Err(asr_error(
-                    "ASR_TASK_FAILED",
-                    "百炼转写任务失败。",
-                    Some(message),
-                ));
-            }
-            _ => {
+        match task_finished(&value, task_id)? {
+            true => return Ok(value),
+            false => {
                 let elapsed = started.elapsed().as_secs() / 60;
                 progress(
                     "running",
@@ -391,6 +368,92 @@ fn task_results(task: &Value) -> Option<&Vec<Value>> {
         .as_array()
 }
 
+fn nonempty_string<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value
+        .get(field)?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// 只保留诊断字段，不把临时文件 URL、签名或整个响应当作错误详情。
+fn task_error_detail(task: &Value, task_id: Option<&str>) -> String {
+    let mut reasons = Vec::new();
+    let mut add_reason = |value: &Value| {
+        let reason = [
+            nonempty_string(value, "code"),
+            nonempty_string(value, "message"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("：");
+        if !reason.is_empty() && !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
+    };
+    if let Some(output) = task.get("output") {
+        add_reason(output);
+    }
+    add_reason(task);
+    if let Some(rows) = task_results(task) {
+        for row in rows {
+            add_reason(row);
+        }
+    }
+    if reasons.is_empty() {
+        reasons.push("服务端未返回具体失败原因".into());
+    }
+    let output = task.get("output").unwrap_or(task);
+    if let Some(status) = nonempty_string(output, "task_status") {
+        reasons.push(format!("任务状态：{status}"));
+    }
+    if let Some(id) = nonempty_string(output, "task_id").or(task_id) {
+        reasons.push(format!("任务编号：{id}"));
+    }
+    if let Some(id) = nonempty_string(task, "request_id") {
+        reasons.push(format!("请求编号：{id}"));
+    }
+    reasons.join("；")
+}
+
+fn failed_task_error(task: &Value, task_id: Option<&str>) -> AppError {
+    asr_error(
+        "ASR_TASK_FAILED",
+        "百炼转写任务失败，原录音已保留，可重新导入重试。",
+        Some(task_error_detail(task, task_id)),
+    )
+}
+
+/// 兼容 HTTP 信封和扁平快照；明确失败立即退出，缺状态不再轮询一小时。
+fn task_finished(task: &Value, task_id: &str) -> Result<bool, AppError> {
+    let output = task.get("output").unwrap_or(task);
+    let file_failed = task_results(task)
+        .and_then(|rows| rows.first())
+        .is_some_and(|row| {
+            matches!(
+                nonempty_string(row, "subtask_status"),
+                Some("FAILED" | "CANCELED" | "CANCELLED")
+            ) || nonempty_string(row, "code").is_some()
+        });
+    match nonempty_string(output, "task_status") {
+        Some("FAILED" | "CANCELED" | "CANCELLED") => Err(failed_task_error(task, Some(task_id))),
+        Some("SUCCEEDED") if file_failed => Err(failed_task_error(task, Some(task_id))),
+        Some("SUCCEEDED") => Ok(true),
+        Some("PENDING" | "RUNNING") => Ok(false),
+        _ if nonempty_string(task, "code").is_some()
+            || nonempty_string(output, "code").is_some() =>
+        {
+            Err(failed_task_error(task, Some(task_id)))
+        }
+        _ => Err(asr_error(
+            "ASR_RESPONSE_INVALID",
+            "百炼返回了无法识别的任务状态，请稍后重试。",
+            Some(task_error_detail(task, Some(task_id))),
+        )),
+    }
+}
+
 fn transcription_url(task: &Value) -> Option<&str> {
     task_results(task)?
         .first()?
@@ -410,24 +473,14 @@ fn missing_url_error(task: &Value) -> AppError {
         );
     }
     if let Some(first) = results.and_then(|rows| rows.first()) {
-        let code = first.get("code").and_then(Value::as_str).unwrap_or("");
-        let message = first
-            .pointer("/message")
-            .or_else(|| first.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if !code.is_empty() || !message.is_empty() {
-            return asr_error(
-                "ASR_TASK_FAILED",
-                "这段录音未能完成转写。",
-                Some(format!("{code} {message}").trim().to_owned()),
-            );
+        if nonempty_string(first, "code").is_some() || nonempty_string(first, "message").is_some() {
+            return failed_task_error(task, None);
         }
     }
     asr_error(
         "ASR_RESULT_MISSING",
         "百炼任务成功但没有返回结果地址。",
-        Some(task.to_string()),
+        Some(task_error_detail(task, None)),
     )
 }
 
@@ -460,6 +513,7 @@ pub(crate) fn transcribe_file(
             return Err(cancelled_error());
         }
         task = query_task(&client, &key, &task_id)?;
+        task_finished(&task, &task_id)?;
     };
     let download = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
@@ -665,5 +719,122 @@ mod tests {
         .unwrap();
         let error = missing_url_error(&task);
         assert_eq!(error.code, "ASR_RESULT_MISSING");
+    }
+
+    #[test]
+    fn failed_task_keeps_top_level_reason_and_tracking_ids() {
+        let task = json!({
+            "request_id": "request-123", "code": "InvalidApiKey", "message": "Invalid API-key",
+            "output": {"task_id": "task-123", "task_status": "FAILED", "message": " "}
+        });
+        let error = task_finished(&task, "fallback-task").unwrap_err();
+        assert_eq!(error.code, "ASR_TASK_FAILED");
+        let detail = error.detail.unwrap();
+        for expected in [
+            "InvalidApiKey",
+            "Invalid API-key",
+            "task-123",
+            "request-123",
+            "FAILED",
+        ] {
+            assert!(detail.contains(expected), "缺少 {expected}：{detail}");
+        }
+    }
+
+    #[test]
+    fn failed_task_keeps_nested_and_file_reasons_without_urls() {
+        let task = json!({"output": {
+            "task_status": "FAILED", "code": "TaskFailed", "message": "转写服务异常",
+            "results": [{"subtask_status": "FAILED", "code": "InvalidFile.DownloadFailed",
+                "message": "The audio file cannot be downloaded.",
+                "file_url": "oss://private-file", "transcription_url": "https://example.com/?Signature=secret"}]
+        }});
+        let error = task_finished(&task, "submitted-task").unwrap_err();
+        let detail = error.detail.unwrap();
+        assert!(detail.contains("转写服务异常"));
+        assert!(detail.contains("InvalidFile.DownloadFailed"));
+        assert!(detail.contains("submitted-task"));
+        assert!(!detail.contains("private-file"));
+        assert!(!detail.contains("secret"));
+    }
+
+    #[test]
+    fn successful_task_with_failed_file_is_not_retried_as_missing_url() {
+        let task = json!({"task_id": "flat-task", "task_status": "SUCCEEDED", "results": [{
+            "subtask_status": "FAILED", "code": "InvalidFile.AudioFormatError", "message": "Invalid audio format"
+        }]});
+        let error = task_finished(&task, "flat-task").unwrap_err();
+        assert_eq!(error.code, "ASR_TASK_FAILED");
+        assert!(
+            error
+                .detail
+                .unwrap()
+                .contains("InvalidFile.AudioFormatError")
+        );
+    }
+
+    #[test]
+    fn failed_task_without_reason_still_has_tracking_context() {
+        for status in ["FAILED", "CANCELED", "CANCELLED"] {
+            let error =
+                task_finished(&json!({"output": {"task_status": status}}), "task-123").unwrap_err();
+            let detail = error.detail.unwrap();
+            assert!(detail.contains("服务端未返回具体失败原因"));
+            assert!(detail.contains("task-123"));
+            assert!(detail.contains(status));
+        }
+    }
+
+    #[test]
+    fn task_status_checks_waiting_success_and_invalid_responses() {
+        for status in ["PENDING", "RUNNING"] {
+            assert!(!task_finished(&json!({"output": {"task_status": status}}), "id").unwrap());
+        }
+        assert!(task_finished(&json!({"task_status": "SUCCEEDED"}), "id").unwrap());
+        let error = task_finished(
+            &json!({"request_id": "req", "code": "AccessDenied", "message": "No permission"}),
+            "id",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "ASR_TASK_FAILED");
+        assert!(error.detail.unwrap().contains("AccessDenied"));
+        for task in [json!({}), json!({"output": {"task_status": "UNKNOWN"}})] {
+            assert_eq!(
+                task_finished(&task, "id").unwrap_err().code,
+                "ASR_RESPONSE_INVALID"
+            );
+        }
+    }
+
+    #[test]
+    fn http_error_keeps_provider_code_and_request_id() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 2048];
+            socket.read(&mut request).unwrap();
+            let body = r#"{"code":"Throttling","message":"Rate limit exceeded","request_id":"request-http"}"#;
+            write!(socket, "HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let response = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .unwrap();
+        let error = read_json_response(response, "查询百炼转写任务失败。").unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.code, "ASR_REQUEST_FAILED");
+        let detail = error.detail.unwrap();
+        for expected in ["429", "Throttling", "Rate limit exceeded", "request-http"] {
+            assert!(detail.contains(expected));
+        }
     }
 }

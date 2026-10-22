@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useJobOwnedByDialog } from "@/components/JobDialog";
-import { errorText, isJobGone } from "@/lib/errors";
+import { errorText, isJobGone, meetingErrorText } from "@/lib/errors";
 import type { JobEvent } from "@/types";
 import { jobPresentation } from "@/jobState";
 import "./task-state.css";
@@ -19,7 +19,9 @@ export type JobProgressProps = {
 export function terminalJobError(job?: JobEvent): string {
   if (!job || (job.phase !== "failed" && job.phase !== "cancelled")) return "";
   const result = job.result as { error?: unknown } | undefined;
-  return result?.error ? errorText(result.error) : job.message;
+  return result?.error
+    ? (job.toolId === "meeting_minutes" ? meetingErrorText : errorText)(result.error)
+    : job.message;
 }
 
 /**

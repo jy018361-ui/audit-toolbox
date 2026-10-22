@@ -95,8 +95,9 @@ it("转写任务失败时显示详细原因", async () => {
   mocks.status.mockResolvedValue({ watchEnabled: true, inCall: false, recording: false });
   render(<MeetingWatch />);
   await waitFor(() => expect(mocks.status).toHaveBeenCalled());
-  await act(async () => mocks.jobListener?.({ ...completed, phase: "failed", message: "语音转写失败", result: { error: { code: "ASR_FAILED", userMessage: "密钥已失效", retryable: true, diagnosticId: "test" } } }));
+  await act(async () => mocks.jobListener?.({ ...completed, phase: "failed", message: "语音转写失败", result: { error: { code: "ASR_FAILED", userMessage: "密钥已失效", detail: "InvalidApiKey；请求编号：request-123", retryable: true, diagnosticId: "test" } } }));
   expect(screen.getByRole("alert")).toHaveTextContent("密钥已失效");
+  expect(screen.getByRole("alert")).toHaveTextContent("InvalidApiKey；请求编号：request-123");
 });
 
 it("迟到的快照不会覆盖刚收到的后台错误", async () => {

@@ -28,7 +28,7 @@ import {
   openOutput,
 } from "../api";
 import { terminalJobError } from "./JobProgress";
-import { errorText } from "@/lib/errors";
+import { meetingErrorText as errorText } from "@/lib/errors";
 import type { JobEvent, MeetingEvent, MeetingRecordStart, MeetingRecordStop } from "../types";
 import type { MeetingResult } from "../MeetingMinutesPage";
 import "../meeting-minutes.css";

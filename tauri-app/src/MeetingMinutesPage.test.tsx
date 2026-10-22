@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   displayAudioFileName,
@@ -216,5 +216,40 @@ describe("MeetingMinutesPage", () => {
     });
     render(<MeetingMinutesPage tool={tool} />);
     expect(await screen.findByText("纪要任务启动失败：无法读取配置")).toBeInTheDocument();
+  });
+
+  it("自动录音手动停止后，转写失败显示服务端详细原因和任务编号", async () => {
+    const { meetingStatus, jobStart, listenJobEvents } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValue({
+      watchEnabled: true, resident: false, inCall: true, logFound: true, recording: true,
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    (await screen.findByRole("button", { name: "停止并生成纪要" })).click();
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("meeting.generate", expect.anything()));
+    const listener = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+    expect(listener).toBeDefined();
+    await act(async () => listener?.({
+      jobId: "job-1", toolId: tool.id, phase: "failed", current: 1, total: 1,
+      message: "百炼转写任务失败。", severity: "error", outputPaths: [],
+      result: { error: { code: "ASR_TASK_FAILED", userMessage: "百炼转写任务失败。",
+        detail: "InvalidFile.DownloadFailed；任务编号：task-123", retryable: true, diagnosticId: "test" } },
+    }));
+    expect(screen.getByRole("alert")).toHaveTextContent("InvalidFile.DownloadFailed");
+    expect(screen.getByRole("alert")).toHaveTextContent("task-123");
+  });
+
+  it("重新打开页面从失败快照恢复详细原因", async () => {
+    const { meetingStatus } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValueOnce({
+      watchEnabled: true, resident: true, inCall: false, logFound: true, recording: false,
+      latestJob: {
+        jobId: "failed-job", toolId: tool.id, phase: "failed", current: 1, total: 1,
+        message: "网络请求失败", severity: "error", outputPaths: [],
+        result: { error: { code: "NETWORK_ERROR", userMessage: "网络请求失败",
+          detail: "连接超时，任务编号：task-456", retryable: true, diagnosticId: "test" } },
+      },
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByText(/连接超时，任务编号：task-456/)).toBeInTheDocument();
   });
 });

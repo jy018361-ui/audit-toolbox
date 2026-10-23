@@ -1577,6 +1577,58 @@ function renderLoanTbJeWorkspace(entities: string[], jeEntityMapped = true) {
   );
 }
 
+it.each([false, true])("只修改表日提示日期变化并保留利率，重算后才能导出（已有结果：%s）", async (hasResult) => {
+  renderLoanTbJeWorkspace([]);
+  mock.jobStart.mockResolvedValue("job-date");
+  await screen.findByText("已识别：TB 科目余额表");
+  await screen.findByText("已识别：JE 序时账");
+  fireEvent.change(screen.getByRole("combobox", { name: "将「期初余额」映射为字段" }), { target: { value: "openingFunctionalAmount" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "将「期末余额」映射为字段" }), { target: { value: "closingFunctionalAmount" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "将「贷方金额」映射为字段" }), { target: { value: "functionalCredit" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "将「凭证号」映射为字段" }), { target: { value: "id" } });
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认科目与利率" }));
+  const rateInput = await screen.findByRole("spinbutton", { name: "2001 短期借款的执行利率" });
+  expect(rateInput).toHaveValue(3);
+  fireEvent.click(screen.getByRole("button", { name: "下一步：测算与底稿" }));
+  expect(screen.queryByText(/已修改，等待测算/)).not.toBeInTheDocument();
+
+  const previewResult = {
+    ...mockPreparedRateRows({ loanAccounts: ["2001"] }),
+    summary: { loanCount: 1 },
+  };
+  const completePreview = () => act(() => mock.jobEvents.callback?.({
+    jobId: "job-date", phase: "completed", result: previewResult,
+  }));
+  if (hasResult) {
+    fireEvent.click(screen.getByRole("button", { name: "生成并复核借款变动表" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith("loan.preview", expect.anything()));
+    completePreview();
+    fireEvent.click(screen.getByRole("checkbox", { name: /我已根据合同/ }));
+    expect(screen.getByRole("button", { name: "生成 Excel 底稿" })).toBeEnabled();
+  }
+  mock.jobStart.mockClear();
+  fireEvent.change(screen.getByLabelText("资产负债表日"), { target: { value: "2026-08-31" } });
+  expect(screen.queryByText("利率已修改，等待测算")).not.toBeInTheDocument();
+  if (hasResult) {
+    expect(screen.getByText("当前展示的是修改前结果")).toBeVisible();
+    expect(screen.getByText(/^资产负债表日已经变化/)).toBeVisible();
+  } else {
+    expect(screen.getByText("资产负债表日已修改，等待测算")).toBeVisible();
+  }
+  expect(screen.getByRole("button", { name: "生成 Excel 底稿" })).toBeDisabled();
+  expect(screen.getByRole("checkbox", { name: /我已根据合同/ })).not.toBeChecked();
+  expect(mock.jobStart).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "生成并复核借款变动表" }));
+  await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith("loan.preview", expect.objectContaining({
+    reportEnd: "2026-08-31",
+    rateRows: [expect.objectContaining({ fixedRate: 0.03 })],
+  })));
+  completePreview();
+  expect(screen.queryByText(/已修改，等待测算/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("checkbox", { name: /我已根据合同/ }));
+  expect(screen.getByRole("button", { name: "生成 Excel 底稿" })).toBeEnabled();
+});
+
 it("币种验证失败显示底层原因且恢复按钮，重试成功才进入第二步", async () => {
   renderLoanTbJeWorkspace([]);
   await screen.findByText("已识别：TB 科目余额表");

@@ -645,6 +645,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const [tbRateEdits, setTbRateEdits] = useState<Record<string, PasteRateRow>>({});
   const [result, setResult] = useState<Record<string, unknown>>();
   const [resultStale, setResultStale] = useState(false);
+  const [changedCalculationInput, setChangedCalculationInput] = useState<"测算条件" | "资产负债表日" | "利率">("测算条件");
   const [ratesConfirmed, setRatesConfirmed] = useState(false);
   const [error, setError] = useState("");
   const [currencyValidationNotice, setCurrencyValidationNotice] = useState("");
@@ -815,11 +816,14 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
    *  使用的科目选择；结果作废（换映射/换文件/换主体范围等）时清空，回到
    *  第二步会自动补一次生成，不给用户留「表没了又没有按钮」的死路。 */
   const autoRateKey = useRef("");
-  const invalidateResults = () => {
+  const invalidateResults = (changedInput: "测算条件" | "资产负债表日" | "利率" = "测算条件") => {
     autoRateKey.current = "";
     setPreparedRateKey("");
     activeJob.current = "";
-    if (rows.length || result) setResultStale(true);
+    if (rows.length || result) {
+      setResultStale(true);
+      setChangedCalculationInput(changedInput);
+    }
     setRatesConfirmed(false);
     setJob(undefined);
   };
@@ -878,6 +882,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setLedgerInformation(current => current[key] ? {...current, [key]: {...current[key], ...patch}} : current);
     }
     setResultStale(true);
+    setChangedCalculationInput("利率");
     setRatesConfirmed(false);
     const id = loanRowKey(rows[index]);
     setRows((v) =>
@@ -982,6 +987,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   matchingInputKeyRef.current = matchingInputKey;
   const editTbRate = (row: LoanRow, patch: Partial<PasteRateRow>) => {
     if (rows.length || result) setResultStale(true);
+    setChangedCalculationInput("利率");
     setRatesConfirmed(false);
     const key = loanRowKey(row);
     setTbRateEdits((v) => {
@@ -1915,7 +1921,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   useEffect(() => {
     if (generatedReportEnd.current === reportEnd) return;
     generatedReportEnd.current = reportEnd;
-    if (rows.length) invalidateResults();
+    if (rows.length) invalidateResults("资产负债表日");
   }, [reportEnd, rows.length]);
   const mappingWarnings = Array.isArray(result?.mappingWarnings)
     ? result.mappingWarnings.filter((item): item is string => typeof item === "string")
@@ -2396,7 +2402,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         <>
           {mode === "ledger" ? (
             <>
-              <label className="loan-report-date">资产负债表日<DateInput aria-label="资产负债表日" value={reportEnd} disabled={busy || ratesBusy} onChange={value => { invalidateResults(); setLedgerConfirmed(false); setReportEnd(value); }} /></label>
+              <label className="loan-report-date">资产负债表日<DateInput aria-label="资产负债表日" value={reportEnd} disabled={busy || ratesBusy} onChange={value => { invalidateResults("资产负债表日"); setLedgerConfirmed(false); setReportEnd(value); }} /></label>
               <div className="fx-actions"><Button variant="secondary" disabled={busy || ratesBusy} onClick={() => { invalidateResults(); setLedgerConfirmed(false); setLedgerInformation({}); setLedgerInformationKey(""); }}>恢复台账默认信息</Button><span role="status">{ratesBusy ? "正在读取完整台账信息…" : `${Object.keys(ledgerInformation).length} 笔借款，${Object.values(ledgerInformation).filter(row=>ledgerInformationErrors(row,loanReportStart(reportEnd),reportEnd).length).length} 笔待补充或修正`}</span></div>
               <LoanLedgerConfirmation rows={Object.values(ledgerInformation)} start={loanReportStart(reportEnd)} end={reportEnd} busy={busy || ratesBusy}
                 onEdit={row => { invalidateResults(); setLedgerConfirmed(false); setLedgerInformation(v => ({...v,[row.rowKey]:row})); }} />
@@ -2737,7 +2743,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       setLoanDetailRoles((current) => ({ ...current, ...Object.fromEntries(roleUpdates.filter(({ account }) => account.auxiliaryKey || account.entity).map(({ account, role }) => [account.reviewKey, role])) }));
                       setLoanAccountRoles((current) => ({ ...current, ...Object.fromEntries(roleUpdates.filter(({ account }) => !account.auxiliaryKey && !account.entity).map(({ account, role }) => [account.identity ?? account.key, role])) }));
                       if (roleUpdates.length) recordAccountChanges();
-                      else invalidateResults();
+                      else invalidateResults("利率");
                       setTbRateEdits((current) => {
                         const next = { ...current };
                         for (const { detail, patch } of rateUpdates) {
@@ -2899,9 +2905,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               )}
               {resultStale && (
                 <section className="loan-warning" role="status">
-                  <strong>{result ? "当前展示的是修改前结果" : "利率已修改，等待测算"}</strong>
+                  <strong>{result ? "当前展示的是修改前结果" : `${changedCalculationInput}已修改，等待测算`}</strong>
                   <span>{result
-                    ? "参数或利率已经变化。旧结果保留供对照，但不能作为当前结果导出；请重新生成预览。"
+                    ? `${changedCalculationInput}已经变化。旧结果保留供对照，但不能作为当前结果导出；请重新生成预览。`
                     : "请生成测算预览，并核对结果后再导出底稿。"}</span>
                 </section>
               )}

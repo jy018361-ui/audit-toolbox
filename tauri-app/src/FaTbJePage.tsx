@@ -312,11 +312,8 @@ function faClassificationName(code: string, name: string): string {
  *    国标科目表（1602 整支折旧）则靠编码，因为明细科目只写「机械设备」不写折旧。
  *    名称写了「减值准备」「清理」「折旧费」的一律排除，不能混进原值。
  *
- * **结论按科目编码归一**：同一个科目在 TB 与 JE 里可能拼出两种科目串
- * （列序不同、名称取的列也不同），角色按信息最全的那个名称判，资产类别取
- * 首次出现的那个（科目串按 TB 在前、JE 在后传入，即以余额表的科目名为准）。
- * 不归一的话，同一科目的两条分类会带着不同的资产类别送进引擎，
- * 轻则原值与累计折旧配不上对，重则直接触发科目分类冲突。
+ * 同编码名称用于补充自动建议上下文；同码多名称仍保留各自类别和原始身份。
+ * 自动建议只供 TB 人工确认，不创建 JE 人工分类或改写已确认的类别。
  */
 export function suggestFaAccounts(accounts: string[]): Assignment[] {
   const parts = accounts.map((account) => {
@@ -420,10 +417,10 @@ export function faAssignmentsForEntities(
 /** 账里真实存在的「主体×科目」组合（inspect_* 的 entityAccounts 项）。 */
 export type EntityAccountPair = { entity: string; account: string; auxiliary?: string; currency?: string; classificationContext?: string; parentAccountName?: string };
 
-/** reviewAccounts 是 TB 选层目录；JE 的旧协议通常显式返回 []，须读完整 entityAccounts。 */
-export function faInspectionAccounts(inspection: Inspection | undefined, kind: Kind): EntityAccountPair[] {
+/** 只使用公共 TB 选层目录；显式空目录不能回退带回已剔除的汇总行。 */
+export function faInspectionAccounts(inspection: Inspection | undefined): EntityAccountPair[] {
   if (!inspection) return [];
-  if (inspection.reviewAccounts && (kind === "tb" || inspection.reviewAccounts.length > 0)) {
+  if (inspection.reviewAccounts) {
     return inspection.reviewAccounts;
   }
   if (inspection.entityAccounts) return inspection.entityAccounts;
@@ -461,20 +458,21 @@ export function unionEntityAccounts(
   return pairs;
 }
 
-/** 两侧分别确认角色与类别；相同源身份可共用确认，跨表科目无需同码同名。 */
+/** 第二步只复核 TB；JE 分录由业务引擎承接已确认的角色与类别。 */
 export function faReviewEntityAccounts(
   tb: EntityAccountPair[] | undefined,
   entityKeyEnabled = true,
-  je: EntityAccountPair[] | undefined = undefined,
 ): EntityAccountPair[] {
-  const effective = (pairs: EntityAccountPair[] | undefined) => pairs?.map((pair) => ({
+  return unionEntityAccounts(tb?.map((pair) => ({
     ...pair,
     entity: entityKeyEnabled ? pair.entity : DEFAULT_ENTITY,
-  }));
-  return unionEntityAccounts(
-    effective(tb),
-    effective(je),
-  );
+  })), undefined);
+}
+
+/** 过滤旧两侧草稿中的 JE 项；按完整 TB 身份保留人工分类及明确排除。 */
+export function faConfirmedTbAssignments(pairs: EntityAccountPair[], assignments: Assignment[]): Assignment[] {
+  const identities = new Set(pairs.map(faAssignmentIdentity));
+  return assignments.filter((row) => identities.has(faAssignmentIdentity(row)));
 }
 
 /**
@@ -525,18 +523,16 @@ export function faAssignmentsForEntityAccounts(
     });
 }
 
-/** 科目复核表的一行（显示层）：同一「主体＋科目编码」的 TB/JE 两种写法合并。 */
+/** 科目复核显示行；同码多名称、辅助和币种仍按完整 TB 源身份区分。 */
 export type AssignmentView = {
   entity: string;
   auxiliary?: string;
   currency?: string;
-  /** 分组键：科目编码；认不出编码时用科目串本身。 */
+  /** 分组键：完整 TB 源身份，包含主体、编码、名称、辅助和币种。 */
   key: string;
   /** 展示用科目串：优先带名称的写法，否则纯编码写法。 */
   label: string;
   parentAccountName?: string;
-  /** 组内原始科目串的来源侧（TB／JE），空数组表示无从判断（回退口径）。 */
-  sources: Kind[];
   /** 组内全部原始科目串——payload 逐条使用，缺一不可。 */
   accounts: string[];
   /** 组首行在 assignments 里的下标；改角色/类别经 updateAssignment 同步整组。 */
@@ -546,14 +542,11 @@ export type AssignmentView = {
 };
 
 /**
- * payload 级分配行 → 显示行：按（主体, splitFaAccount(account).code）分组
- * （code 为空时按科目串本身分组），每组只渲染一行。
- * 发给引擎的 accountAssignments 仍逐条使用 entityAccounts 里的原始科目串
- * （两种写法各自成行），这里只是显示层的合并——引擎按这些串逐侧匹配。
+ * payload 级分配行 → 显示行：按主体、编码、名称、辅助和币种分组。
+ * 发给引擎的 accountAssignments 保留 TB 原始身份，不混入 JE 人工分类。
  */
 export function groupAssignmentViews(
   assignments: Assignment[],
-  sourcesOf: (entity: string, account: string) => Kind[] = () => [],
 ): AssignmentView[] {
   const groups = new Map<
     string,
@@ -567,12 +560,6 @@ export function groupAssignmentViews(
     groups.set(key, group);
   });
   return [...groups.values()].map((group) => {
-    const sourceSet = new Set<Kind>();
-    for (const { row } of group.rows) {
-      for (const kind of sourcesOf(row.entity ?? DEFAULT_ENTITY, row.account)) {
-        sourceSet.add(kind);
-      }
-    }
     const accounts = group.rows.map(({ row }) => row.account);
     const first = group.rows[0];
     return {
@@ -583,10 +570,9 @@ export function groupAssignmentViews(
       label:
         accounts.find((account) => splitFaAccount(account).name) ?? accounts[0],
       ...(first.row.parentAccountName ? { parentAccountName: first.row.parentAccountName } : {}),
-      sources: (["tb", "je"] as const).filter((kind) => sourceSet.has(kind)),
       accounts,
       index: first.index,
-      // 组内各行已按「主体＋科目编码」同步（updateAssignment / 自动归一），
+      // 组内各行已按完整 TB 源身份同步（updateAssignment），
       // 取首行的角色与类别即可代表整组。
       role: first.row.role,
       category: first.row.category,
@@ -771,8 +757,7 @@ export function FaTbJePage() {
           ? (p.jeMapping as Mapping)
           : {},
     });
-    if (Array.isArray(p.accountAssignments))
-      setAssignments(p.accountAssignments as Assignment[]);
+    setAssignments(Array.isArray(p.accountAssignments) ? p.accountAssignments : []);
     if (typeof p.outputPath === "string") setOutputPath(p.outputPath);
     // 字段映射已并入第 1 步，直接落回「上传与映射」。
     setStep(1);
@@ -835,10 +820,6 @@ export function FaTbJePage() {
     })();
   });
 
-  const accounts = useMemo(
-    () => [...new Set(inspects.tb?.accounts ?? [])],
-    [inspects.tb],
-  );
   // 主体是公共映射字段；源表没有主体列时由引擎统一使用默认主体。
   const entitiesReady = Boolean(inspects.tb && inspects.je);
   const entityKeyEnabled = ledgerEntityKeyEnabled(mappings.tb, mappings.je);
@@ -847,19 +828,10 @@ export function FaTbJePage() {
     const detected = [...new Set(inspects.tb?.entities ?? [])].filter(Boolean);
     return detected.length ? detected : [DEFAULT_ENTITY];
   }, [inspects.tb, entityKeyEnabled]);
-  // TB 余额和 JE 变动各自绑定确认分类，再按资产类别与角色汇总。
-  // 所有实际科目都可复核；对方科目默认排除，不因编码／名称相同扩散分类。
+  // 人工分类仅绑定公共 TB 选层后的源身份，JE 由引擎自动承接分类。
   const entityAccountPairs = useMemo(
-    () => {
-      const verified = auxiliaryLink?.status === "verified";
-      const effective = (kind: Kind) => faInspectionAccounts(inspects[kind], kind).map((pair) => ({
-        ...pair,
-        auxiliary: verified && "auxiliary" in pair && typeof pair.auxiliary === "string"
-          ? pair.auxiliary : undefined,
-      }));
-      return faReviewEntityAccounts(effective("tb"), entityKeyEnabled, effective("je"));
-    },
-    [inspects.tb, inspects.je, entityKeyEnabled, auxiliaryLink?.status],
+    () => faReviewEntityAccounts(faInspectionAccounts(inspects.tb), entityKeyEnabled),
+    [inspects.tb, entityKeyEnabled],
   );
   const entityScope = useEntityScopeConfirmation({
     tbEntities: entityKeyEnabled ? (inspects.tb?.entities ?? []) : [],
@@ -888,38 +860,28 @@ export function FaTbJePage() {
   useEffect(() => {
     setAuxiliaryLink(null);
   }, [auxiliaryLinkKey]);
-  const assignmentSources = useMemo(() => {
-    const sources = new Map<string, Kind[]>();
-    for (const kind of ["tb", "je"] as const) {
-      const pairs = faInspectionAccounts(inspects[kind], kind);
-      for (const pair of pairs) {
-        const key = JSON.stringify([entityKeyEnabled ? pair.entity : DEFAULT_ENTITY, pair.account]);
-        const kinds = sources.get(key) ?? [];
-        if (!kinds.includes(kind)) kinds.push(kind);
-        sources.set(key, kinds);
-      }
-    }
-    return sources;
-  }, [inspects.tb, inspects.je, entityKeyEnabled]);
+  // 旧草稿/历史任务可能含 JE 分类。目录回填前不显示或提交旧项，
+  // 回填后仅保留当前 TB 完整身份，不按编码放宽过滤。
+  const tbAssignments = useMemo(
+    () => faConfirmedTbAssignments(entityAccountPairs, assignments),
+    [assignments, entityAccountPairs],
+  );
   // 完整源身份只用于绑定人工分类，不作为跨表业务匹配条件。
   const assignmentViews = useMemo(
-    () => groupAssignmentViews(assignments, (entity, account) =>
-      assignmentSources.get(JSON.stringify([entity, account])) ?? []),
-    [assignments, assignmentSources],
+    () => groupAssignmentViews(tbAssignments),
+    [tbAssignments],
   );
   const showReviewEntity = entityKeyEnabled &&
     new Set(assignmentViews.map((view) => view.entity)).size > 1;
-  const showReviewCurrency = ledgerHasMappedRole(mappings.tb, "currency") || ledgerHasMappedRole(mappings.je, "currency");
+  const showReviewCurrency = ledgerHasMappedRole(mappings.tb, "currency");
   const includedViews = assignmentViews.filter(
     (view) => view.role !== "excluded",
   );
   const unresolvedViews = includedViews.filter(
     (view) => !view.category.trim() || view.category === "未分类",
   );
-  const hasConfirmedJe = assignmentViews.some((view) => view.role !== "excluded" && view.sources.includes("je"));
   const assignmentsReady =
     assignmentViews.some((view) => view.role === "cost") &&
-    hasConfirmedJe &&
     unresolvedViews.length === 0;
   // 科目复核铺开全部科目：只列固定资产候选的话，被自动分类漏判的科目
   // 连露面的机会都没有；科目已按角色降序分组，分页浏览即可，不再需要检索。
@@ -947,15 +909,15 @@ export function FaTbJePage() {
   useEffect(() => {
     if (restoredDraftOnMount.current) {
       restoredDraftOnMount.current = false;
-      return;
+      // 正常子页切换保留确认状态；旧两侧草稿必须剔除 JE 后重新确认。
+      if (tbAssignments.length === assignments.length) return;
     }
+    if (!inspects.tb) return;
     setAssignments((current) =>
-      entityAccountPairs.length
-        ? faAssignmentsForEntityAccounts(entityAccountPairs, current)
-        : faAssignmentsForEntities(accounts, entities, current),
+      faAssignmentsForEntityAccounts(entityAccountPairs, current),
     );
     setAccountsReviewed(false);
-  }, [entityAccountPairs, accounts, entities]);
+  }, [entityAccountPairs]);
   useEffect(() => {
     faTbJeDraftCache = {
       step,
@@ -1321,7 +1283,7 @@ export function FaTbJePage() {
               })),
             }
           : undefined,
-      accountAssignments: assignments.map((assignment) => ({
+      accountAssignments: tbAssignments.map((assignment) => ({
         ...assignment,
         category: normalizeFaCategory(assignment.category),
       })),
@@ -1342,7 +1304,7 @@ export function FaTbJePage() {
     if (!mappingsReady) return;
     setBusy(true);
     setError("");
-    setSourceStatus("正在确认映射口径并刷新 TB、JE 科目清单…");
+    setSourceStatus("正在确认映射口径并刷新 TB 科目清单…");
     try {
       // 辅助核算属于映射口径，不依赖第二步才确认的固定资产目标科目。
       // 后端会在 TB 未映射辅助字段或没有有效锚点时直接返回，不读取 JE。
@@ -1358,20 +1320,18 @@ export function FaTbJePage() {
       if (tbMapping !== mappings.tb) {
         setMappings((current) => ({ ...current, tb: tbMapping }));
       }
-      // 两侧都按最终映射刷新完整目录，确保确认分类能定位当前源记录。
-      const [refreshedTb, refreshedJe] = await Promise.all((['tb', 'je'] as const).map(async (kind) =>
-        (await engineCall(`deposit.inspect_${kind}`, {
-          source: source(kind),
-          mapping: kind === 'tb' ? tbMapping : mappings.je,
-        }, `${kind.toUpperCase()} ${fileName(paths[kind])}`)) as Inspection));
+      // 只刷新 TB 公共选层目录；JE 无需另建人工分类清单。
+      const refreshedTb = await engineCall("deposit.inspect_tb", {
+        source: source("tb"),
+        mapping: tbMapping,
+      }, `TB ${fileName(paths.tb)}`) as Inspection;
       setInspects((current) => ({
         ...current,
         tb: refreshedTb,
-        je: refreshedJe,
       }));
       setAccountsReviewed(false);
       setAssignmentPage(0);
-      setSourceStatus("映射口径已确认；请分别确认 TB、JE 科目的原值／折旧角色与资产类别。");
+      setSourceStatus("映射口径已确认；请确认 TB 科目的原值／折旧角色与资产类别。");
       setStep(2);
     } catch (e) {
       setError(errorText(e));
@@ -1406,11 +1366,6 @@ export function FaTbJePage() {
     }
     if (unresolvedViews.length) {
       setError("仍有已纳入科目未确认资产类别，请返回科目复核步骤处理。");
-      setStep(2);
-      return;
-    }
-    if (!hasConfirmedJe) {
-      setError("尚未确认 JE 来源科目的原值／折旧角色与资产类别，请在科目复核中确认 JE 分类。");
       setStep(2);
       return;
     }
@@ -1450,11 +1405,7 @@ export function FaTbJePage() {
     }
   }
 
-  // 同一个科目在 TB 与 JE 里可能拼成两种科目串（列序不同，编码一头一尾），
-  // 两行分别参与两侧匹配、缺一不可。用户只改其中一行的话，引擎会按
-  // FA_TBJE_ACCOUNT_ASSIGNMENT_CONFLICT 拒绝导出——所以改动按「主体＋科目编码」同步。
-  // 复核表把这两种写法合并成一行显示（见 groupAssignmentViews），本函数的
-  // 同步范围恰好就是该行背后的整组原始串，改一处即整组生效。
+  // 仅同步同一完整 TB 身份；同码多名称、辅助和币种保持独立。
   function updateAssignment(index: number, patch: Partial<Assignment>) {
     invalidateResult();
     setAccountsReviewed(false);
@@ -1463,11 +1414,10 @@ export function FaTbJePage() {
         ? { ...patch, category: normalizeFaCategory(patch.category) }
         : patch;
     setAssignments((rows) => {
-      const target = rows[index];
+      const target = tbAssignments[index];
       if (!target) return rows;
       const identity = faAssignmentIdentity(target);
-      return rows.map((row, rowIndex) =>
-        rowIndex === index ||
+      return rows.map((row) =>
         faAssignmentIdentity(row) === identity
           ? { ...row, ...normalizedPatch }
           : row,
@@ -1726,7 +1676,7 @@ export function FaTbJePage() {
             </div>
           </CardHeader>
           <CardContent className="form-stack">
-            <p>TB 与 JE 分别确认分类，按同一主体下的资产类别与原值／折旧角色汇总。</p>
+            <p>确认 TB 科目的资产类别与原值／折旧角色，JE 分录自动承接分类并汇总变动。</p>
             <div className="fa-tbje-account-toolbar">
               <Button
                 type="button"
@@ -1784,7 +1734,6 @@ export function FaTbJePage() {
                           <span className="fa-tbje-account-name">
                             {ledgerReviewAccountLabel(view.label, view.auxiliary, view.parentAccountName)}
                           </span>
-                          <Badge variant="outline">{view.sources.map((kind) => kind.toUpperCase()).join("／")}</Badge>
                         </div>
                       </td>
                       {showReviewCurrency && <td>{view.currency || "—"}</td>}
@@ -1831,7 +1780,7 @@ export function FaTbJePage() {
                       <td colSpan={3 + Number(showReviewEntity) + Number(showReviewCurrency)} className="fa-tbje-empty-table">
                         {accountQuery.trim()
                           ? "没有匹配的科目。"
-                          : "没有可复核的 TB／JE 科目。"}
+                          : "没有可复核的 TB 科目。"}
                       </td>
                     </tr>
                   )}
@@ -1911,9 +1860,7 @@ export function FaTbJePage() {
                   ? "至少需要 1 个固定资产原值科目。"
                   : unresolvedViews.length
                     ? `还有 ${unresolvedViews.length} 个已纳入科目未确认资产类别。`
-                    : !hasConfirmedJe
-                      ? "尚未确认 JE 来源科目的原值／折旧角色与资产类别。"
-                      : "科目角色与类别已就绪。"}
+                    : "科目角色与类别已就绪。"}
               </span>
               <Button
                 disabled={!assignmentsReady || busy}

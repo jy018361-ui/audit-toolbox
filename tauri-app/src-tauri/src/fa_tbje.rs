@@ -233,7 +233,7 @@ fn analysis_cache_key(params: &Value) -> String {
         .as_object_mut()
         .map(|map| map.remove("outputPath"));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&"fa-cross-table-matching-v10-combined-account-20261023", &mut hasher);
+    std::hash::Hash::hash(&"fa-cross-table-matching-v12-tb-classification-20261023", &mut hasher);
     std::hash::Hash::hash(&ledger_mapping::TB_STRUCTURE_RULE_VERSION, &mut hasher);
     std::hash::Hash::hash(&ledger_mapping::AMOUNT_PARSE_RULE_VERSION, &mut hasher);
     std::hash::Hash::hash(&ledger_mapping::JE_BODY_RULE_VERSION, &mut hasher);
@@ -710,7 +710,7 @@ fn analyze_with_disk_je(
     }
     let je_identities = unique.into_values().collect::<Vec<_>>();
     let tb_identities = tb_account_identities(tb, tb_map, params, entity_key_enabled)?;
-    let assignments = assignment_index_from_identities(params, &tb_identities, &je_identities)?;
+    let assignments = assignment_index_for_tb_scope(params, &tb_identities, &je_identities, tb_keep)?;
     if assignments.exact.is_empty() {
         return Err(error(
             "FA_TBJE_ACCOUNTS_REQUIRED",
@@ -1004,6 +1004,20 @@ fn append_classification_warnings(
         append_je_only_warnings(warnings, tb, je, assignments);
         append_unmatched_account_warnings(warnings, tb, je, assignments);
         return;
+    }
+    append_unmatched_account_warnings(warnings, tb, je, assignments);
+    let confirmed_codes = tb.iter().filter(|id| find_assignment(assignments, id).is_some())
+        .map(|id| (id.entity.as_str(), ledger_mapping::normalize_account_code(&id.code))).collect::<HashSet<_>>();
+    let mut unmatched_seen = HashSet::new();
+    for id in je {
+        if find_assignment(assignments, id).is_some() || fa_name_role_category(id.matching_name()).is_none()
+            || confirmed_codes.contains(&(id.entity.as_str(), ledger_mapping::normalize_account_code(&id.code))) { continue; }
+        let key = je_matching_identity(id);
+        let Some(reason) = assignments.unmatched_reasons.get(&key) else { continue; };
+        if reason.contains("明确排除") || !unmatched_seen.insert(key) { continue; }
+        if unmatched_seen.len() <= 10 {
+            warnings.push(format!("主体 {} 的 JE 资产科目 {} 未自动承接 TB 分类，相关分录未纳入固定资产变动；原因：{}。", id.entity, id.display, reason));
+        }
     }
     let tb_groups = tb.iter().filter_map(|id| find_assignment(assignments, id)
         .map(|assigned| (id.entity.as_str(), assigned.category.as_str(), assigned.role.as_str())))
@@ -1587,8 +1601,12 @@ fn je_unmatched_error(
     period_row_count: usize,
 ) -> AppError {
     if uses_role_category(params) {
+        let reasons = je_identities.iter().filter_map(|id| {
+            assignments.unmatched_reasons.get(&je_matching_identity(id))
+                .map(|reason| format!("{}：{}", id.display, reason))
+        }).collect::<BTreeSet<_>>().into_iter().take(5).collect::<Vec<_>>().join("；");
         return error("FA_TBJE_JE_UNMATCHED", format!(
-            "报告期间内序时账有 {period_row_count} 行数据，但没有已确认原值／折旧角色与资产类别的 JE 分录。请回到科目复核步骤，检查 JE 来源科目的角色、资产类别及主体范围后重试。"
+            "报告期间内序时账有 {period_row_count} 行数据，但无法按已确认的 TB 原值／折旧角色与资产类别归集固定资产分录。请检查 TB 分类、两侧科目字段映射及主体范围。自动归集原因：{reasons}。"
         ), None);
     }
     let rows: Vec<Assignment> = serde_json::from_value(
@@ -3548,7 +3566,24 @@ fn assignment_index(
 ) -> Result<AssignmentIndex, AppError> {
     let tb_ids = tb_account_identities(tb, tb_map, params, entity_key_enabled)?;
     let je_ids = account_identities(je, je_map, params, EntitySide::Je, entity_key_enabled);
-    assignment_index_from_identities(params, &tb_ids, &je_ids)
+    assignment_index_for_tb_scope(params, &tb_ids, &je_ids, &tb.input.leaf_analysis(tb_map).keep)
+}
+
+/// 未确认的候选必须来自公共业务选层；被剔除的结构父项无需人工确认。
+/// 显式确认/排除身份仍保留，兼容公共目录展开的辅助子项和历史确认表。
+fn assignment_index_for_tb_scope(params: &Value, tb_ids: &[AccountIdentity], je_ids: &[AccountIdentity], keep: &[bool]) -> Result<AssignmentIndex, AppError> {
+    if !uses_role_category(params) { return assignment_index_from_identities(params, tb_ids, je_ids); }
+    let rows: Vec<Assignment> = serde_json::from_value(params.get("accountAssignments").cloned().unwrap_or_else(|| json!([])))
+        .map_err(|e| error("INVALID_PARAMS", "科目分类参数无效。", Some(e.to_string())))?;
+    let only_default = tb_ids.iter().chain(je_ids).all(|id| id.entity == ledger_mapping::DEFAULT_ENTITY);
+    let mut by_account = HashMap::<String, Vec<&Assignment>>::new();
+    for row in &rows { by_account.entry(norm(&row.account)).or_default().push(row); }
+    let selected = tb_ids.iter().enumerate().filter(|(index, id)| {
+        keep.get(*index).copied().unwrap_or(false)
+            || [norm(&id.display), norm(&id.legacy_display)].iter().any(|account| by_account.get(account)
+                .is_some_and(|rows| rows.iter().any(|row| assignment_matches_identity(row, id, only_default))))
+    }).map(|(_, id)| id.clone()).collect::<Vec<_>>();
+    assignment_index_from_identities(params, &selected, je_ids)
 }
 
 fn assignment_index_from_identities(
@@ -3733,8 +3768,8 @@ fn uses_role_category(params: &Value) -> bool {
     params.get("assignmentBasis").and_then(Value::as_str) == Some("assetRoleCategory")
 }
 
-/// 两侧来源分别绑定复核分类，业务汇总只使用主体、资产类别和原值／折旧角色。
-/// 编码、名称、辅助与币种只用于定位被确认的源记录，不要求跨表一致。
+/// 只复核 TB；程序为 JE 承接其分类，汇总只使用主体、资产类别和原值／折旧角色。
+/// 编码、名称只是源记录的定位证据，不是业务分组维度。
 fn confirmed_role_category_index(
     rows: &[Assignment],
     tb_ids: &[AccountIdentity],
@@ -3759,10 +3794,16 @@ fn confirmed_role_category_index(
         if row.role != "excluded" && (row.category.trim().is_empty() || row.category.trim() == "未分类") {
             return Err(error("FA_TBJE_CATEGORY_REQUIRED", "请为纳入范围的原值与折旧科目确认资产类别。", None));
         }
+        let matches_tb = by_account.get(&norm(&row.account)).into_iter().flatten()
+            .any(|id| id.side == EntitySide::Tb && assignment_matches_identity(row, id, only_default));
         for id in by_account.get(&norm(&row.account)).into_iter().flatten()
             .filter(|id| assignment_matches_identity(row, id, only_default))
         {
             let key = assignment_identity(id);
+            // 兼容历史存档的 JE 独有确认项；当前页面只提交 TB 复核项。
+            if id.side == EntitySide::Je && !matches_tb {
+                out.explicit_je.insert(key.clone());
+            }
             if row.role == "excluded" {
                 out.excluded.insert(key);
                 continue;
@@ -3778,15 +3819,155 @@ fn confirmed_role_category_index(
     for key in &out.excluded {
         out.exact.remove(key);
     }
-    for je in je_ids {
-        let key = je_matching_identity(je);
-        if let Some(assigned) = out.exact.get(&key.0) {
-            out.je_matches.insert(key, assigned.clone());
-        } else {
-            out.unmatched_reasons.insert(key, "该 JE 源科目未确认原值／折旧角色与资产类别，或已明确排除".to_owned());
+    inherit_tb_classification(&mut out, tb_ids, je_ids);
+    Ok(out)
+}
+
+/// 仅剥离名称首段明确的资产角色词，不能把费用、税金或处置损益的尾部说明当资产。
+fn fa_name_role_category(name: &str) -> Option<(&'static str, String)> {
+    let value = name.trim().to_lowercase().replace('_', " ");
+    // 自动来源提示不把清理过渡户、费用或损益当作资产本体。
+    // 同码人工确认先于该提示，用户明确指定的角色不会在此被改写。
+    if ["使用权", "使用權", "清账", "清賬", "right of use", "right-of-use",
+        "减值准备", "減值準備", "impairment", "清理", "清算", "clearing",
+        "折旧费", "折舊費", "depreciation expense", "摊销", "攤銷", "amortization", "amortisation",
+        "租赁费", "租賃費", "rental expense", "营业外", "營業外", "待处理", "待處理",
+        "处置", "處置", "disposal", "损失", "損失", "报废", "報廢"].iter().any(|term| value.contains(term)) {
+        return None;
+    }
+    for (prefix, role) in [
+        ("accumulated depreciation", "depreciation"), ("accum. dep", "depreciation"),
+        ("累计折旧", "depreciation"), ("累計折舊", "depreciation"),
+        ("depreciation", "depreciation"), ("fixed assets", "cost"), ("fixed asset", "cost"),
+        ("固定资产原值", "cost"), ("固定資產原值", "cost"),
+        ("固定资产", "cost"), ("固定資產", "cost"),
+    ] {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            // 英文词必须完整，避免 Fixed assetsXYZ 被当作角色词。
+            if prefix.is_ascii() && rest.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) { continue; }
+            let mut category = fa_category_key(rest);
+            let mut role = role;
+            if role == "cost" {
+                for prefix in ["累计折旧", "累計折舊"] {
+                    if let Some(rest) = category.strip_prefix(prefix) {
+                        category = rest.to_owned(); role = "depreciation"; break;
+                    }
+                }
+                if let Some(rest) = category.strip_prefix("原值") { category = rest.to_owned(); }
+            }
+            if !category.is_empty() { return Some((role, category)); }
         }
     }
-    Ok(out)
+    None
+}
+
+fn fa_category_key(value: &str) -> String {
+    value.chars().filter(|c| !c.is_whitespace() && !matches!(c,
+        '_' | '-' | '－' | '—' | '–' | ':' | '：' | '/' | '\\' | '|' | '>' | '＞'))
+        .flat_map(char::to_lowercase).collect()
+}
+
+fn inherit_tb_classification(out: &mut AssignmentIndex, tb_ids: &[AccountIdentity], je_ids: &[AccountIdentity]) {
+    // 包括排除和未确认项；先删掉它们会把真实歧义伪造成唯一分类。
+    let tb = tb_ids.iter().map(|id| (assignment_identity(id), id)).collect::<BTreeMap<_, _>>();
+    let mut by_code = HashMap::<(String, String), Vec<&AccountIdentity>>::new();
+    let mut by_name = HashMap::<(String, String), Vec<&AccountIdentity>>::new();
+    let mut by_category = HashMap::<(String, String, String), BTreeMap<AssignmentKey, &AccountIdentity>>::new();
+    for (&id, key) in tb.values().zip(tb.keys()) {
+        if !id.code.is_empty() {
+            by_code.entry((id.entity.clone(), ledger_mapping::normalize_account_code(&id.code))).or_default().push(id);
+        }
+        if !id.name.is_empty() {
+            by_name.entry((id.entity.clone(), ledger_mapping::normalize_name(id.matching_name()))).or_default().push(id);
+        }
+        let hint = fa_name_role_category(id.matching_name());
+        let assigned = out.exact.get(key);
+        let role = assigned.map(|a| a.role.as_str()).or_else(|| hint.as_ref().map(|(r, _)| *r))
+            // 仅为排除/未确认短名称建立潜在来源，绝不据编码自行纳入。
+            .or_else(|| if id.code.starts_with("1601") { Some("cost") }
+                else if id.code.starts_with("1602") { Some("depreciation") } else { None });
+        if let Some(role) = role {
+            let mut labels = vec![hint.map(|(_, c)| c).unwrap_or_else(|| fa_category_key(id.matching_name()))];
+            if let Some(assigned) = assigned { labels.push(fa_category_key(&assigned.category)); }
+            for label in labels.into_iter().filter(|label| !label.is_empty()) {
+                by_category.entry((id.entity.clone(), role.into(), label)).or_default().insert(key.clone(), id);
+            }
+        }
+    }
+    let unique = je_ids.iter().map(|id| (je_matching_identity(id), id)).collect::<BTreeMap<_, _>>();
+    for (key, je) in unique {
+        if out.excluded.contains(&key.0) {
+            out.unmatched_reasons.insert(key, "该身份属于明确排除项".into());
+            continue;
+        }
+        if out.explicit_je.contains(&key.0) {
+            if let Some(assigned) = out.exact.get(&key.0) { out.je_matches.insert(key, assigned.clone()); }
+            continue;
+        }
+        let hint = fa_name_role_category(je.matching_name());
+        let code = ledger_mapping::normalize_account_code(&je.code);
+        let mut candidates = by_code.get(&(je.entity.clone(), code.clone())).cloned().unwrap_or_default();
+        let same_code = !candidates.is_empty();
+        if !same_code {
+            let mut fallback = BTreeMap::new();
+            // 无编码时可采用严格名称证据，但仍须所有真实候选分类一致。
+            for id in by_name.get(&(je.entity.clone(), ledger_mapping::normalize_name(je.matching_name()))).into_iter().flatten()
+                .filter(|id| code.is_empty() || id.code.is_empty()) {
+                fallback.insert(assignment_identity(id), *id);
+            }
+            if let Some((role, category)) = &hint {
+                for (key, id) in by_category.get(&(je.entity.clone(), (*role).into(), category.clone())).into_iter().flatten() {
+                    fallback.insert(key.clone(), *id);
+                }
+            }
+            candidates = fallback.into_values().collect();
+        }
+        let consensus = |ids: &[&AccountIdentity]| -> Option<Assigned> {
+            let first = out.exact.get(&assignment_identity(ids.first()?))?;
+            ids.iter().all(|id| out.exact.get(&assignment_identity(id)) == Some(first)).then(|| first.clone())
+        };
+        let mut assigned = consensus(&candidates);
+        if assigned.is_none() && same_code {
+            // 只有分类本身有歧义时才用名称缩小候选；名称缺失/差异本身不拦截。
+            let named = candidates.iter().copied().filter(|id| !je.name.is_empty()
+                && ledger_mapping::normalize_name(id.matching_name()) == ledger_mapping::normalize_name(je.matching_name())).collect::<Vec<_>>();
+            if !named.is_empty() { candidates = named; }
+            assigned = consensus(&candidates);
+            if assigned.is_none() {
+                if let Some((role, category)) = &hint {
+                    let semantic = candidates.iter().copied().filter(|id| {
+                        let source = fa_name_role_category(id.matching_name());
+                        source.as_ref().is_some_and(|(r, c)| r == role && c == category)
+                    }).collect::<Vec<_>>();
+                    if !semantic.is_empty() { candidates = semantic; }
+                    assigned = consensus(&candidates);
+                }
+            }
+            if assigned.is_none() && !je.currency.trim().is_empty() {
+                let currencies = candidates.iter().copied().filter(|id| id.currency.trim().is_empty()
+                    || id.currency.trim().eq_ignore_ascii_case(je.currency.trim())).collect::<Vec<_>>();
+                if !currencies.is_empty() { candidates = currencies; }
+                assigned = consensus(&candidates);
+            }
+            if assigned.is_none() && let Some(je_auxiliary) = &je.matching_auxiliary {
+                let auxiliaries = candidates.iter().copied().filter(|id| id.matching_auxiliary.as_ref()
+                    .is_none_or(|value| value == je_auxiliary)).collect::<Vec<_>>();
+                if !auxiliaries.is_empty() { candidates = auxiliaries; }
+                assigned = consensus(&candidates);
+            }
+        }
+        if let Some(assigned) = assigned {
+            out.je_matches.insert(key, assigned);
+        } else {
+            out.unmatched_reasons.insert(key, if !candidates.is_empty() && candidates.iter().all(|id| out.excluded.contains(&assignment_identity(id))) {
+                "对应 TB 来源已明确排除".into()
+            } else if candidates.is_empty() {
+                "同一主体内无对应 TB 编码，且没有唯一的资产角色与类别来源证据".into()
+            } else {
+                "对应 TB 来源存在不同分类、排除或未确认项，无法唯一承接角色与资产类别".into()
+            });
+        }
+    }
 }
 
 fn assignment_matches_identity(
@@ -4041,7 +4222,7 @@ fn assignment_index_with_auxiliary(
         Ok(())
     })?;
     apply_matching_auxiliary(je, &mut je_ids, columns, EntitySide::Je);
-    assignment_index_from_identities(params, &tb_ids, &je_ids)
+    assignment_index_for_tb_scope(params, &tb_ids, &je_ids, &tb.input.leaf_analysis(tb_map).keep)
 }
 
 fn apply_matching_auxiliary(
@@ -5389,7 +5570,7 @@ mod tests {
     }
 
     #[test]
-    fn role_category_does_not_spread_confirmation_by_code_name_or_category_alone() {
+    fn role_category_inherits_tb_classification_by_code_without_je_review() {
         let (dir, _, mut params) = fixture();
         let je = dir.join("je.csv");
         let content = std::fs::read_to_string(&je).unwrap()
@@ -5399,10 +5580,10 @@ mod tests {
         params["assignmentBasis"] = json!("assetRoleCategory");
         for disk in [false, true] {
             params["__testForceDiskLedger"] = json!(disk);
-            let err = analyze(&params, &AtomicBool::new(false)).unwrap_err();
-            assert_eq!(err.code, "FA_TBJE_JE_UNMATCHED");
-            assert!(err.user_message.contains("角色与资产类别"));
-            assert!(!err.user_message.contains("科目名称不一致"));
+            let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+            assert!(analysis.je.iter().any(|row| row.role == "cost"));
+            // AD99 只有裸类别，没有任何折旧角色证据，不能从类别猜成折旧。
+            assert!(analysis.je.iter().all(|row| row.role != "depreciation"));
         }
         // JE 已确认的类别与角色可以独立于科目名称含义；明确排除仍优先。
         params["accountAssignments"].as_array_mut().unwrap().extend([
@@ -5414,6 +5595,203 @@ mod tests {
         assert!(analysis.je.iter().all(|row| row.role != "cost"));
         assert!(analysis.je.iter().any(|row| row.role == "depreciation"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tb_role_category_consensus_ignores_cross_table_name_currency_and_auxiliary() {
+        let make = |side, entity: &str, name: &str, currency: &str, auxiliary: &str| AccountIdentity {
+            side, entity: entity.into(), code: "1601".into(), name: name.into(), matching_name: None,
+            currency: currency.into(), auxiliary: auxiliary.into(), matching_auxiliary: Some(auxiliary.into()),
+            display: format!("1601 {name}"), legacy_display: format!("1601 {name}"),
+        };
+        let tb = vec![make(EntitySide::Tb,"A","原值甲","USD","部门甲"), make(EntitySide::Tb,"A","原值乙","CNY","部门乙")];
+        let je = vec![make(EntitySide::Je,"A","","EUR","未提供TB辅助"), make(EntitySide::Je,"B","","EUR","")];
+        let mut params = json!({"assignmentBasis":"assetRoleCategory","accountAssignments":[
+            {"entity":"A","account":"1601 原值甲","currency":"USD","auxiliary":"部门甲","role":"cost","category":"人工类别"},
+            {"entity":"A","account":"1601 原值乙","currency":"CNY","auxiliary":"部门乙","role":"cost","category":"人工类别"}
+        ]});
+        let index = assignment_index_from_identities(&params, &tb, &je).unwrap();
+        assert_eq!(find_assignment(&index, &je[0]).unwrap().category, "人工类别");
+        assert!(find_assignment(&index, &je[1]).is_none(), "不能跨主体承接");
+        for role in ["cost", "excluded"] {
+            params["accountAssignments"][1]["role"] = json!(role);
+            params["accountAssignments"][1]["category"] = json!("另一类别");
+            let index = assignment_index_from_identities(&params, &tb, &je).unwrap();
+            assert!(find_assignment(&index, &je[0]).is_none(), "同码分类或排除歧义不能猜测");
+        }
+        // 只有分类确实有歧义时，币种或公共验证辅助才参与消歧。
+        params["accountAssignments"][1]["role"] = json!("cost");
+        let mut je_usd = je[0].clone();
+        je_usd.currency = "USD".into();
+        let index = assignment_index_from_identities(&params, &tb, &[je_usd.clone()]).unwrap();
+        assert_eq!(find_assignment(&index, &je_usd).unwrap().category, "人工类别");
+        je_usd.currency.clear(); je_usd.matching_auxiliary = Some("部门乙".into());
+        let index = assignment_index_from_identities(&params, &tb, &[je_usd.clone()]).unwrap();
+        assert_eq!(find_assignment(&index, &je_usd).unwrap().category, "另一类别");
+        params["accountAssignments"].as_array_mut().unwrap().pop();
+        let index = assignment_index_from_identities(&params, &tb, &je).unwrap();
+        assert!(find_assignment(&index, &je[0]).is_none(), "未确认来源也参与一致性检查");
+    }
+
+    #[test]
+    fn tb_only_role_category_inherits_prefixed_names_and_different_codes_in_both_paths() {
+        for disk in [false, true] {
+            let (dir, out, mut params) = fixture();
+            let tb_path = dir.join("tb.csv");
+            let tb_source = std::fs::read_to_string(&tb_path).unwrap().replace(",1602,累计折旧,", ",1602,累计折旧-机器设备,");
+            std::fs::write(tb_path, tb_source).unwrap();
+            params["accountAssignments"][1]["account"] = json!("1602 累计折旧-机器设备");
+            let path = dir.join("je.csv");
+            let source = std::fs::read_to_string(&path).unwrap()
+                .replace(",1601,机器设备,", ",FA99,固定资产-机器设备,")
+                .replace(",1602,累计折旧,", ",AD99,固定资产-累计折旧-机器设备,");
+            std::fs::write(path, source).unwrap();
+            params["assignmentBasis"] = json!("assetRoleCategory");
+            params["__testForceDiskLedger"] = json!(disk);
+            // 人工类别不回退成源科目名称；源名称只是自动对应证据。
+            params["accountAssignments"][0]["category"] = json!("人工资产类别");
+            params["accountAssignments"][1]["category"] = json!("人工资产类别");
+            let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+            let totals = &analysis.totals[&("A".into(), "人工资产类别".into())];
+            assert_eq!((totals.additions, totals.disposals, totals.dep_charge), (500.0,200.0,100.0));
+            assert_eq!(preview_json(&analysis)["reconciliationDifferences"], 0);
+            write_workbook(&out, &analysis, &AtomicBool::new(false)).unwrap();
+            assert_export_caches(&out, &analysis);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn tb_role_category_exclusion_and_unconfirmed_sources_cannot_be_bypassed() {
+        let make = |side, code: &str, name: &str| AccountIdentity {
+            side, entity: "A".into(), code: code.into(), name: name.into(), matching_name: None,
+            currency: String::new(), auxiliary: String::new(), matching_auxiliary: None,
+            display: format!("{code} {name}"), legacy_display: format!("{code} {name}"),
+        };
+        let tb = vec![
+            make(EntitySide::Tb,"1601","固定资产-机器设备"),
+            make(EntitySide::Tb,"1601","固定资产-运输设备"),
+            make(EntitySide::Tb,"FA02","固定资产-机器设备"),
+        ];
+        let je = vec![
+            make(EntitySide::Je,"1601","固定资产-机器设备"),
+            make(EntitySide::Je,"FA99","固定资产-机器设备"),
+            make(EntitySide::Je,"6602","折旧费-机器设备"),
+            make(EntitySide::Je,"6115","资产处置损益-机器设备"),
+        ];
+        let mut params = json!({"assignmentBasis":"assetRoleCategory","accountAssignments":[
+            {"account":"1601 固定资产-机器设备","role":"excluded","category":"机器设备"},
+            {"account":"1601 固定资产-运输设备","role":"cost","category":"运输设备"},
+            {"account":"FA02 固定资产-机器设备","role":"cost","category":"机器设备"}
+        ]});
+        let index = assignment_index_from_identities(&params, &tb, &je).unwrap();
+        assert!(je.iter().all(|id| find_assignment(&index, id).is_none()), "同码明确排除不能绕过；异码包含排除候选不能猜；费用不推断资产角色");
+        params["accountAssignments"].as_array_mut().unwrap().remove(0);
+        let index = assignment_index_from_identities(&params, &tb, &je).unwrap();
+        assert!(find_assignment(&index, &je[1]).is_none(), "异码角色类别候选中的未确认来源也不能绕过");
+        let mut short_tb = tb.clone();
+        short_tb[0] = make(EntitySide::Tb,"1601","机器设备");
+        let index = assignment_index_from_identities(&params, &short_tb, &je).unwrap();
+        assert!(find_assignment(&index, &je[1]).is_none(), "标准角色分支下未确认短名称也参与异码类别歧义");
+        params["accountAssignments"].as_array_mut().unwrap().push(json!({"account":"1601 机器设备","role":"excluded","category":"机器设备"}));
+        let index = assignment_index_from_identities(&params, &short_tb, &je).unwrap();
+        assert!(find_assignment(&index, &je[1]).is_none(), "标准角色分支下明确排除短名称也不能绕过");
+    }
+
+    #[test]
+    fn tb_role_category_non_asset_counterparts_do_not_get_asset_hints_or_warnings() {
+        for name in ["固定资产清理-机器设备", "固定资产-减值准备-机器设备", "固定资产-折旧费-机器设备",
+            "固定资产-处置损益-机器设备", "固定资产-报废损失-机器设备", "固定资产-使用权-机器设备",
+            "Fixed assets clearing - machinery", "Fixed assets impairment - machinery",
+            "Depreciation expense - machinery", "Fixed assets disposal - machinery"] {
+            assert!(fa_name_role_category(name).is_none(), "{name}");
+        }
+        for disk in [false, true] {
+            let (dir, _, mut params) = fixture();
+            let path = dir.join("je.csv");
+            std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace(",2202,应付账款,", ",1606,固定资产清理-机器设备,")).unwrap();
+            params["assignmentBasis"] = json!("assetRoleCategory");
+            params["__testForceDiskLedger"] = json!(disk);
+            let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+            assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
+            assert!(analysis.je.iter().filter(|row| row.account.contains("1606")).all(|row| row.counterpart));
+            // 用户明确将同码 TB 来源指定为原值时，自动提示排除词不能否决其选择。
+            let tb = dir.join("tb.csv");
+            std::fs::write(&tb, std::fs::read_to_string(&tb).unwrap().replace(",1601,机器设备,", ",1601,固定资产清理-机器设备,")).unwrap();
+            params["accountAssignments"][0]["account"] = json!("1601 固定资产清理-机器设备");
+            let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+            assert!(analysis.je.iter().any(|row| row.role == "cost"));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn tb_role_category_public_scope_does_not_treat_removed_parents_as_unconfirmed_sources() {
+        let headers = ["科目编码","科目名称","辅助","币种","期初","借方","贷方","期末"]
+            .into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let rows = [
+            ["1601","固定资产","","CNY","130","50","10","170"],
+            ["1601000101","固定资产-房屋及构筑物","","CNY","100","10","1","109"],
+            ["1601000102","固定资产-专用设备","","CNY","30","10","2","38"],
+            ["160101","固定资产-房屋及构筑物","","CNY","0","30","7","23"],
+            ["1601000107","固定资产-房屋及构筑物-房屋","","CNY","0","20","5","15"],
+            ["1601000108","固定资产-房屋及构筑物-其他","","CNY","0","10","2","8"],
+        ].into_iter().map(|row| row.into_iter().map(str::to_owned).collect::<Vec<_>>()).collect::<Vec<_>>();
+        let map = json!({"accountCode":"科目编码","accountName":"科目名称","currency":"币种",
+            "openingFunctionalAmount":"期初","ytdFunctionalDebit":"借方","ytdFunctionalCredit":"贷方","closingFunctionalAmount":"期末"}).as_object().unwrap().clone();
+        let keep = ledger_mapping::tb_leaf_mask(&headers, &rows, &|role| mapped_columns(&map, role));
+        assert_eq!(keep, vec![false,true,true,false,true,true], "真实公共名称路径取层必须先剔除两个父项");
+        let spec = SourceSpec { input_path:String::new(), sheet:String::new(), header_row:1, header_depth:1 };
+        let table = disk_table(&spec, headers, rows, 6);
+        let tb = account_identities(&table, &map, &json!({}), EntitySide::Tb, false);
+        let mut je = tb[1].clone(); je.side = EntitySide::Je; je.code = "FA99".into();
+        je.display = "FA99 固定资产-房屋及构筑物".into(); je.legacy_display = je.display.clone();
+        let mut params = json!({"assignmentBasis":"assetRoleCategory","accountAssignments":[
+            {"account":"1601000101 固定资产-房屋及构筑物","role":"cost","category":"房屋及构筑物"},
+            {"account":"1601000102 固定资产-专用设备","role":"cost","category":"专用设备"},
+            {"account":"1601000107 固定资产-房屋及构筑物-房屋","role":"cost","category":"房屋及构筑物-房屋"},
+            {"account":"1601000108 固定资产-房屋及构筑物-其他","role":"cost","category":"房屋及构筑物-其他"}
+        ]});
+        let index = assignment_index_for_tb_scope(&params, &tb, &[je.clone()], &keep).unwrap();
+        assert_eq!(find_assignment(&index, &je).unwrap().category, "房屋及构筑物");
+        let mut retained = keep.clone(); retained[3] = true;
+        let index = assignment_index_for_tb_scope(&params, &tb, &[je.clone()], &retained).unwrap();
+        assert!(find_assignment(&index, &je).is_none(), "公共业务范围内同形未确认来源必须保留歧义");
+        // 显式排除/确认身份是实际确认来源，不能因公共keep为false而被静默丢弃。
+        params["accountAssignments"].as_array_mut().unwrap().push(json!({"account":"160101 固定资产-房屋及构筑物","role":"excluded","category":"房屋及构筑物"}));
+        let index = assignment_index_for_tb_scope(&params, &tb, &[je.clone()], &keep).unwrap();
+        assert!(find_assignment(&index, &je).is_none());
+    }
+
+    #[test]
+    #[ignore = "需 FA_TB_ONLY_CASES 指向由前端生成的真实 TB-only 分类请求"]
+    fn tb_only_original_cases_agree_in_memory_disk_and_export() {
+        let raw = std::fs::read_to_string(std::env::var("FA_TB_ONLY_CASES").unwrap()).unwrap();
+        let cases: Vec<Value> = serde_json::from_str(&raw).unwrap();
+        for case in cases {
+            for disk in [false, true] {
+                let mut params = case["params"].clone();
+                params["__testForceDiskLedger"] = json!(disk);
+                let requested_output = output_path(&params).unwrap();
+                let stem = requested_output.file_stem().unwrap().to_string_lossy();
+                params["outputPath"] = json!(requested_output.with_file_name(format!("{stem}-native-{}.xlsx", if disk { "disk" } else { "memory" })));
+                let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+                for role in ["cost", "depreciation"] {
+                    let rows = analysis.je.iter().filter(|row| row.role == role).collect::<Vec<_>>();
+                    let expected = &case["expected"][role];
+                    assert_eq!(rows.len(), expected["rows"].as_u64().unwrap() as usize, "{} {role} disk={disk}", case["name"]);
+                    let net = rows.iter().map(|row| row.net).sum::<f64>();
+                    assert!((net - expected["net"].as_f64().unwrap()).abs() < 0.005, "{} {role} net={net} disk={disk}", case["name"]);
+                }
+                let preview = preview_json(&analysis);
+                assert_eq!(preview["reconciliationDifferences"], case["expectedDifferences"], "{} disk={disk}", case["name"]);
+                assert_eq!(analysis.je.len(), case["expectedJeRows"].as_u64().unwrap() as usize, "{} disk={disk}", case["name"]);
+                let output = output_path(&params).unwrap();
+                write_workbook(&output, &analysis, &AtomicBool::new(false)).unwrap();
+                assert_export_caches(&output, &analysis);
+                eprintln!("{} disk={disk}: {preview}", case["name"]);
+            }
+        }
     }
 
     #[test]
@@ -5491,7 +5869,7 @@ mod tests {
                 .replace(",6602,折旧费,", ",6602-折旧费,折旧费,");
             std::fs::write(&je, source).unwrap();
             params["jeMapping"]["accountName"] = json!(["科目编码"]);
-            // 当前角色类别方式仍须确认 JE 来源；旧方式继续只用 TB 分类。
+            // 两种方式均只使用 TB 分类，组合列原文继续保留。
             for role_category in [false, true] {
                 params["assignmentBasis"] = json!(if role_category { "assetRoleCategory" } else { "" });
                 params["accountAssignments"] = json!([

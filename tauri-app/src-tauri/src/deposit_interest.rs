@@ -1217,6 +1217,45 @@ fn account_columns(table: &FxTable, mapping: &Map<String, Value>) -> Vec<usize> 
     out
 }
 
+/// JE 匹配专用的科目文本；不改源单元格、上传目录或用户确认的显示身份。
+/// 只有同一列明确兼挂编码和名称时才调用公共组合解析，独立辅助复合编码不拆。
+struct JeAccountColumns {
+    indexes: Vec<usize>,
+    combined: BTreeSet<usize>,
+}
+
+impl JeAccountColumns {
+    fn new(headers: &[String], mapping: &Map<String, Value>) -> Self {
+        let codes = column_indexes_from_headers(headers, mapping, "accountCode");
+        let names = column_indexes_from_headers(headers, mapping, "accountName");
+        let combined = codes.iter().copied().filter(|i| names.contains(i)).collect();
+        let mut indexes = codes.into_iter().chain(names).collect::<Vec<_>>();
+        if indexes.is_empty() {
+            indexes = column_indexes_from_headers(headers, mapping, "account");
+        }
+        indexes.sort_unstable();
+        indexes.dedup();
+        Self { indexes, combined }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.indexes.is_empty()
+    }
+
+    fn text(&self, row: &[String]) -> String {
+        self.indexes.iter().filter_map(|i| {
+            let raw = row.get(*i)?.trim();
+            if raw.is_empty() { return None; }
+            if self.combined.contains(i)
+                && let Some((code, name)) = ledger_mapping::split_combined_account_fields_ref(raw, raw)
+            {
+                return Some(format!("{code} {name}"));
+            }
+            Some(raw.to_owned())
+        }).collect::<Vec<_>>().join(" ")
+    }
+}
+
 /// 列名分不出「本年累计」与「本期发生」时，按金额量级重判：合计大的是本年累计。
 /// 本工具的候选打分带列画像加权，映射不是内核直接产出的，所以在成型之后再过一道。
 fn refine_layout(table: &FxTable, kind: &str, mapping: &mut Map<String, Value>) {
@@ -1581,6 +1620,7 @@ const SNAPSHOT_PARAM_FIELDS: &[&str] = &[
     "rateOverrides",
     "tierRates",
     "__testForceDiskTb",
+    "__testForceDiskLedger",
 ];
 
 fn snapshot_param_subset(params: &Value) -> Map<String, Value> {
@@ -1615,7 +1655,7 @@ fn snapshot_file_identity(path: &Path) -> Option<String> {
 /// 或续写（大小/修改时间变化），键即变化，旧快照自然作废。
 fn calc_fingerprint(params: &Value) -> Option<String> {
     let subset = snapshot_param_subset(params);
-    let mut material = format!("deposit-auxiliary-details-v1-{}-{}-{}\n", ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, ledger_mapping::JE_BODY_RULE_VERSION);
+    let mut material = format!("deposit-combined-account-v2-20261023-{}-{}-{}\n", ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, ledger_mapping::JE_BODY_RULE_VERSION);
     material.push_str(crate::header_detection::RULE_VERSION);
     material.push('\n');
     material.push_str(&serde_json::to_string(&subset).ok()?);
@@ -2906,15 +2946,7 @@ fn deposit_matching_groups(
                 .filter_map(|s| headers.iter().position(|h| h == *s))
                 .collect()
         };
-        let mut account_cols = indexes("accountCode");
-        for i in indexes("accountName") {
-            if !account_cols.contains(&i) {
-                account_cols.push(i);
-            }
-        }
-        if account_cols.is_empty() {
-            account_cols = indexes("account");
-        }
+        let account_cols = JeAccountColumns::new(headers, mapping);
         let entity_index = indexes("entity").first().copied();
         let date_indexes = indexes("date");
         let start = date_param(params, "reportStart")?;
@@ -2928,7 +2960,7 @@ fn deposit_matching_groups(
             if date < start || date > end {
                 return;
             }
-            let account = join_columns(row, &account_cols);
+            let account = account_cols.text(row);
             let entity = scoped_entity(
                 entity_index
                     .and_then(|i| row.get(i))
@@ -4599,7 +4631,9 @@ fn open_je_input(
     if let Some(tb_path) = tb_path {
         input_paths.push(tb_path);
     }
-    if crate::disk_table::should_use_disk(&input_paths, 2) {
+    if (cfg!(test) && params["__testForceDiskLedger"].as_bool() == Some(true))
+        || crate::disk_table::should_use_disk(&input_paths, 2)
+    {
         require_mappings("je", &je_map, false)?;
         let disk_progress = |_: &str, current: usize, inner_total: usize, message: &str| {
             let percent = if inner_total == 0 {
@@ -4640,12 +4674,12 @@ fn je_account_identities(
     let mut seen = BTreeSet::new();
     match je {
         JeInput::Memory(table, mapping) => {
-            let account_cols = account_columns(table, mapping);
+            let account_cols = JeAccountColumns::new(&table.headers, mapping);
             if account_cols.is_empty() {
                 return Ok(Vec::new());
             }
             for row in &table.rows {
-                let account = join_columns(row, &account_cols);
+                let account = account_cols.text(row);
                 if account.is_empty() {
                     continue;
                 }
@@ -4678,22 +4712,13 @@ fn je_account_identities(
                     .filter_map(|column| headers.iter().position(|header| header == column))
                     .collect()
             };
-            let mut account_cols = indexes("accountCode");
-            for index in indexes("accountName") {
-                if !account_cols.contains(&index) {
-                    account_cols.push(index);
-                }
-            }
-            if account_cols.is_empty() {
-                account_cols = indexes("account");
-            }
-            account_cols.sort_unstable();
+            let account_cols = JeAccountColumns::new(headers, mapping);
             if account_cols.is_empty() {
                 return Ok(Vec::new());
             }
             let entity_index = indexes("entity").first().copied();
             ledger.visit(false, cancel, |row| {
-                let account = join_columns(&row.values, &account_cols);
+                let account = account_cols.text(&row.values);
                 if account.is_empty() {
                     return Ok(());
                 }
@@ -4801,17 +4826,9 @@ fn deposit_auxiliary_plan(
     let preferred = ledger_mapping::mapped_column_names(je_map, "auxiliary");
     let mut accumulator = ledger_mapping::GroupedAnchorColumnAccumulator::new(headers.len());
     let mut totals = BTreeMap::<ledger_mapping::AuxiliaryGroupKey, usize>::new();
+    let je_account_cols = JeAccountColumns::new(headers, je_map);
     let mut feed = |row: &[String]| {
-        let account_cols = column_indexes_from_headers(headers, je_map, "accountCode")
-            .into_iter()
-            .chain(column_indexes_from_headers(headers, je_map, "accountName"))
-            .collect::<Vec<_>>();
-        let account_cols = if account_cols.is_empty() {
-            column_indexes_from_headers(headers, je_map, "account")
-        } else {
-            account_cols
-        };
-        let account = join_columns(row, &account_cols);
+        let account = je_account_cols.text(row);
         if account.is_empty() {
             return;
         }
@@ -4990,7 +5007,7 @@ fn monthly_movements(
                     None,
                 ));
             }
-            let account_cols = account_columns(table, mapping);
+            let account_cols = JeAccountColumns::new(&table.headers, mapping);
             if account_cols.is_empty() {
                 return Err(error(
                     "MAPPING_INCOMPLETE",
@@ -5026,7 +5043,7 @@ fn monthly_movements(
                 if date < start || date > end {
                     continue;
                 }
-                let account = join_columns(row, &account_cols);
+                let account = account_cols.text(row);
                 if account.is_empty() {
                     continue;
                 }
@@ -5105,16 +5122,7 @@ fn monthly_movements(
                     None,
                 ));
             }
-            let mut account_cols = indexes("accountCode");
-            for index in indexes("accountName") {
-                if !account_cols.contains(&index) {
-                    account_cols.push(index);
-                }
-            }
-            if account_cols.is_empty() {
-                account_cols = indexes("account");
-            }
-            account_cols.sort_unstable();
+            let account_cols = JeAccountColumns::new(headers, mapping);
             if account_cols.is_empty() {
                 return Err(error(
                     "MAPPING_INCOMPLETE",
@@ -5156,7 +5164,7 @@ fn monthly_movements(
                 if date < start || date > end {
                     return Ok(());
                 }
-                let account = join_columns(&row.values, &account_cols);
+                let account = account_cols.text(&row.values);
                 if account.is_empty() {
                     return Ok(());
                 }
@@ -6619,6 +6627,142 @@ fn xlsx(value: XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combined_je_account_requires_confirmed_shared_roles_and_preserves_auxiliary_codes() {
+        let headers = vec!["会计科目".to_owned(), "名称".to_owned()];
+        let shared = json!({"accountCode":"会计科目","accountName":["会计科目"]});
+        let combined = JeAccountColumns::new(&headers, shared.as_object().unwrap());
+        let row = vec!["1002010109-人民币存款-民生银行".to_owned(), String::new()];
+        assert_eq!(combined.text(&row), "1002010109 人民币存款-民生银行");
+        assert_eq!(row[0], "1002010109-人民币存款-民生银行", "不得修改源值");
+        let code_only = json!({"accountCode":"会计科目"});
+        assert_eq!(JeAccountColumns::new(&headers, code_only.as_object().unwrap()).text(&row), row[0]);
+        let separate = json!({"accountCode":"会计科目","accountName":"名称"});
+        let separate = JeAccountColumns::new(&headers, separate.as_object().unwrap());
+        assert_eq!(separate.text(&["2241002-吴子鉴".into(), "吴子鉴".into()]),
+            "2241002-吴子鉴 吴子鉴");
+        assert_eq!(combined.text(&["1012003-100200001001001".into(), String::new()]),
+            "1012003-100200001001001");
+        assert_eq!(combined.text(&["1002 银行存款".into(), String::new()]), "1002 银行存款");
+        assert_eq!(combined.text(&[String::new(), String::new()]), "");
+    }
+
+    fn combined_je_fixture(auxiliary: bool) -> (tempfile::TempDir, Value) {
+        let dir = tempfile::tempdir().unwrap();
+        let tb = dir.path().join("tb.csv");
+        let je = dir.path().join("je.csv");
+        let (a, b, aux_a, aux_b) = if auxiliary {
+            ("银行存款", "银行存款", "甲户", "乙户")
+        } else {
+            ("银行存款-甲户", "银行存款-乙户", "", "")
+        };
+        fs::write(&tb, format!("科目编码,科目名称,辅助,期初余额,期末余额,本年借方,本年贷方\n1002,{a},{aux_a},100,150,50,0\n1002,{b},{aux_b},200,180,0,20\n")).unwrap();
+        fs::write(&je, format!("日期,凭证号,会计科目,辅助,借方,贷方\n2026-01-15,V1,1002-{a},{aux_a},50,0\n2026-01-15,V1,2202-应付账款,,0,50\n2026-02-01,V2,1002-{b},{aux_b},0,20\n2026-02-01,V2,2202-应付账款,,20,0\n")).unwrap();
+        let mut params = json!({"tbSource":{"inputPath":tb,"headerRow":1,"headerDepth":1},
+            "tbMapping":{"accountCode":"科目编码","accountName":"科目名称","openingFunctionalAmount":"期初余额","closingFunctionalAmount":"期末余额","ytdFunctionalDebit":"本年借方","ytdFunctionalCredit":"本年贷方"},
+            "jeSource":{"inputPath":je,"headerRow":1,"headerDepth":1},
+            "jeMapping":{"accountCode":"会计科目","accountName":["会计科目"],"date":"日期","id":"凭证号","functionalDebit":"借方","functionalCredit":"贷方"},
+            "reportStart":"2026-01-01","reportEnd":"2026-02-28","dayBasis":"month12",
+            "accountRateOverrides":{format!("1002 {a}"):0.12,format!("1002 {b}"):0.12}});
+        if auxiliary {
+            params["tbMapping"]["auxiliary"] = json!("辅助");
+            params["jeMapping"]["auxiliary"] = json!("辅助");
+        }
+        (dir, params)
+    }
+
+    #[test]
+    fn combined_je_same_code_distinct_names_keep_separate_monthly_amounts_in_both_paths() {
+        combined_je_check(false);
+    }
+
+    #[test]
+    fn combined_je_auxiliary_verification_and_monthly_allocation_agree_in_both_paths() {
+        combined_je_check(true);
+    }
+
+    fn combined_je_check(auxiliary: bool) {
+        let (_dir, mut params) = combined_je_fixture(auxiliary);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let mut memory = None;
+        for disk in [false, true] {
+            params["__testForceDiskTb"] = json!(disk);
+            params["__testForceDiskLedger"] = json!(disk);
+            let input = open_je_input(&params, &cancel, &|_, _, _, _| {}, 1).unwrap().unwrap();
+            assert_eq!(matches!(input, JeInput::Disk(..)), disk);
+            let result = calculate(&params, &cancel, &pause, &|_, _, _, _| {}, 1).unwrap();
+            assert_eq!(result["summary"]["accountCount"], 2);
+            assert_eq!(result["summary"]["jeUncoveredAccountCount"], 0);
+            assert_eq!(result["summary"]["monthlySource"], "序时账逐月还原");
+            assert!((result["summary"]["calculatedInterest"].as_f64().unwrap() - 6.65).abs() < 1e-9);
+            if auxiliary {
+                assert_eq!(result["summary"]["auxiliaryMatch"]["status"], "verified", "{result}");
+            }
+            let rows = result["rows"].as_array().unwrap();
+            for row in rows {
+                assert_eq!(row["jeReconciled"], true);
+                assert_eq!(row["twoPoint"], false);
+                assert!(row["reconciliationDiff"].as_f64().unwrap().abs() < 0.01);
+                let is_a = row["openingBalance"] == 100.0;
+                let months = row["months"].as_array().unwrap();
+                assert_eq!(months[0]["debit"], if is_a { 50.0 } else { 0.0 });
+                assert_eq!(months[1]["credit"], if is_a { 0.0 } else { 20.0 });
+            }
+            if let Some(ref expected) = memory { assert_eq!(&result, expected); }
+            else { memory = Some(result); }
+        }
+    }
+
+    #[test]
+    #[ignore = "需 DEPOSIT_COMBINED_REQUEST/OUTPUT_DIR 指向大学原始任务；只运行库测试，不打包 EXE"]
+    fn combined_je_original_university_preview_export_and_full_rows_match_both_paths() {
+        let input: Value = serde_json::from_slice(&fs::read(
+            std::env::var("DEPOSIT_COMBINED_REQUEST").unwrap()).unwrap()).unwrap();
+        let dir = PathBuf::from(std::env::var("DEPOSIT_COMBINED_OUTPUT_DIR").unwrap());
+        fs::create_dir_all(&dir).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let mut memory = None;
+        for disk in [false, true] {
+            let tag = if disk { "disk" } else { "memory" };
+            let mut params = input.clone();
+            params["__testForceDiskTb"] = json!(disk);
+            params["__testForceDiskLedger"] = json!(disk);
+            params["outputPath"] = json!(dir.join(format!("大学_存款修复验证_{tag}.xlsx")));
+            let preview = run_job("deposit.preview", params.clone(), &|_, _, _, _| {}, cancel.clone(), &pause).unwrap();
+            assert_eq!(preview["summary"]["accountCount"], 10, "{preview}");
+            assert_eq!(preview["summary"]["jeUncoveredAccountCount"], 0);
+            for row in preview["rows"].as_array().unwrap() {
+                assert_eq!(row["jeReconciled"], true, "{row}");
+                assert_eq!(row["twoPoint"], false, "{row}");
+                assert!(row["reconciliationDiff"].as_f64().unwrap().abs() < 0.01, "{row}");
+            }
+            if let Some(ref expected) = memory { assert_eq!(&preview, expected); }
+            else { memory = Some(preview.clone()); }
+            let messages = std::sync::Mutex::new(Vec::new());
+            let mut exported = run_job("deposit.export", params.clone(), &|_, _, _, message| {
+                messages.lock().unwrap().push(message.to_owned());
+            }, cancel.clone(), &pause).unwrap();
+            assert!(messages.lock().unwrap().iter().any(|message| message.contains("复用测算结果")),
+                "导出应复用同轮预览：{messages:?}");
+            exported["outputPaths"] = json!([]);
+            // 实际快照经过一次 JSON 写入/读取；按相同序列化结果精确比较，
+            // 避免把 f64 往返的末位差异当作业务金额变化。
+            let cached_preview: Value = serde_json::from_slice(&serde_json::to_vec(&preview).unwrap()).unwrap();
+            assert_eq!(exported, cached_preview);
+            fs::write(dir.join(format!("original-result-{tag}.json")), serde_json::to_vec_pretty(&preview).unwrap()).unwrap();
+            let folded = fold_tb_accounts(&params, &cancel, &|_, _, _, _| {}, 1, true).unwrap();
+            assert_eq!(matches!(&folded.je_input, Some(JeInput::Disk(..))), disk);
+            let movements = monthly_movements(folded.je_input.as_ref().unwrap(), &folded.policy,
+                &folded.accounts, &folded.auxiliary_plan, folded.entity_key_enabled, &folded.entity_scope,
+                date_param(&params, "reportStart").unwrap(), date_param(&params, "reportEnd").unwrap(),
+                &cancel, &pause, &|_, _, _, _| {}, 1).unwrap().unwrap();
+            assert_eq!(movements.matched_rows.values().sum::<usize>(), 5023);
+            fs::write(dir.join(format!("matched-rows-{tag}.json")), serde_json::to_vec_pretty(&movements.matched_rows).unwrap()).unwrap();
+        }
+    }
 
     #[test]
     #[ignore = "需 DEPOSIT_THREE_FIXES_PARAMS 指向07原始任务；仅运行库测试"]

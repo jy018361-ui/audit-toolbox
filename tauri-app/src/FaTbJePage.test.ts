@@ -1,9 +1,10 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   faAssignmentsForEntities,
   faAssignmentsForEntityAccounts,
   faReviewEntityAccounts,
+  faInspectionAccounts,
   faTbJeMissingMappings,
   groupAssignmentViews,
   normalizeFaCategory,
@@ -13,6 +14,65 @@ import {
   defaultOutput,
   unionEntityAccounts,
 } from "./FaTbJePage";
+import type { Inspection } from "./DepositInterestPage";
+
+it("JE显式空复核目录回退完整实体科目，纯编码JE仍进入角色与类别确认", () => {
+  const tb = { reviewAccounts: [
+    { entity: "2002", account: "1601020000 Fixed assets_Machinery equipment", auxiliary: "", currency: "EUR" },
+    { entity: "2002", account: "1602020000 Depreciation_Machinery equipment", auxiliary: "", currency: "EUR" },
+  ], entityAccounts: [], entities: ["2002"], accounts: [] } as unknown as Inspection;
+  const je = { reviewAccounts: [], entityAccounts: [
+    { entity: "2002", account: "1601020000" },
+    { entity: "2002", account: "1602020000" },
+    { entity: "2002", account: "6601160100" },
+  ], entities: ["2002"], accounts: ["1601020000", "1602020000", "6601160100"] } as unknown as Inspection;
+  expect(faInspectionAccounts(je, "je")).toEqual(je.entityAccounts);
+  const rows = faAssignmentsForEntityAccounts(faReviewEntityAccounts(
+    faInspectionAccounts(tb, "tb"), true, faInspectionAccounts(je, "je")), []);
+  expect(rows.filter((row) => row.role !== "excluded").map((row) => [row.account, row.role, row.category]))
+    .toEqual([
+      ["1601020000 Fixed assets_Machinery equipment", "cost", "Machinery equipment"],
+      ["1601020000", "cost", "Machinery equipment"],
+      ["1602020000 Depreciation_Machinery equipment", "depreciation", "Machinery equipment"],
+      ["1602020000", "depreciation", "Machinery equipment"],
+    ]);
+  expect(rows.find((row) => row.account === "6601160100")?.role).toBe("excluded");
+  // TB 空目录表示选层后无可复核项，不得重新带回父项；JE 有真实复核项时仍优先。
+  expect(faInspectionAccounts({ ...tb, reviewAccounts: [], entityAccounts: [{ entity: "2002", account: "1601 汇总" }] }, "tb")).toEqual([]);
+  expect(faInspectionAccounts({ ...je, reviewAccounts: tb.reviewAccounts }, "je")).toEqual(tb.reviewAccounts);
+  expect(faInspectionAccounts(undefined, "je")).toEqual([]);
+});
+
+it("英文角色前缀只影响类别建议，保留原始身份及人工类别", () => {
+  for (const suffix of ["Machinery equipment", "Furniture, tools, appliances", "Electoric equipment"]) {
+    const pairs = [
+      { entity: "2002", account: `1601020000 Fixed assets_${suffix}` },
+      { entity: "2002", account: `1602020000 Depreciation_${suffix}` },
+    ];
+    const rows = faAssignmentsForEntityAccounts(pairs, []);
+    expect(rows.map((row) => row.category)).toEqual([suffix, suffix]);
+    const manual = { ...rows[0], category: "人工类别" };
+    expect(faAssignmentsForEntityAccounts(pairs, [manual])[0]).toEqual(manual);
+  }
+  expect(suggestFaAccount("FA01 Machinery with depreciation sensor").category).toBe("Machinery with depreciation sensor");
+  expect(suggestFaAccount("FA01 DepreciationSensor").category).toBe("DepreciationSensor");
+});
+
+it.skipIf(!process.env.FA_SAP_SNAPSHOT)("真实SAP空JE复核目录保留135科目，角色类别送入实际worker请求", () => {
+  const snapshot = JSON.parse(readFileSync(process.env.FA_SAP_SNAPSHOT!, "utf8"));
+  const { tb, je } = snapshot.data.inspects as { tb: Inspection; je: Inspection };
+  expect(je.reviewAccounts).toEqual([]);
+  expect(faInspectionAccounts(je, "je")).toHaveLength(135);
+  const rows = faAssignmentsForEntityAccounts(faReviewEntityAccounts(
+    faInspectionAccounts(tb, "tb"), true, faInspectionAccounts(je, "je")), []);
+  expect(rows.filter((row) => row.role !== "excluded")).toHaveLength(16);
+  const jeIncluded = rows.filter((row) => row.role !== "excluded" && /^\d+$/.test(row.account));
+  expect(jeIncluded).toHaveLength(6);
+  expect(new Set(jeIncluded.map((row) => row.category)).size).toBe(3);
+  if (process.env.FA_SAP_ASSIGNMENTS_OUTPUT) {
+    writeFileSync(process.env.FA_SAP_ASSIGNMENTS_OUTPUT, JSON.stringify(rows, null, 2));
+  }
+});
 
 it("同码汇总语义用于FA建议但不改变源行身份或覆盖人工分类", () => {
   const pairs = faReviewEntityAccounts([
@@ -532,7 +592,7 @@ describe("FA TB+JE 真实主体×科目组合", () => {
     ]);
     // 两种写法经自动归一拿到同一角色与类别。
     expect(new Set(rows.map((row) => `${row.role}|${row.category}`))).toEqual(
-      new Set(["cost|Fixed assets Machinery equipment"]),
+      new Set(["cost|Machinery equipment"]),
     );
     const views = groupAssignmentViews(rows, (entity, account) =>
       account.includes("Fixed assets") ? ["tb" as const] : ["je" as const],

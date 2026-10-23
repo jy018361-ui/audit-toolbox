@@ -266,6 +266,8 @@ function faCategory(name: string): string {
           /累计折旧|累計折舊|固定资产|固定資產|accumulated\s+depreciation|property[,\s]*plant\s*(and|&)\s*equipment|ppe/gi,
           "",
         )
+        // 英文账套的角色前缀与资产类别分开；只消费名称开头的完整角色词。
+        .replace(/^\s*(?:fixed[\s_]+assets?|depreciation)(?=$|[\s_\-–—－:：\\/|])[,\s_\-–—－:：\\/|]*/i, "")
         .replace(/^[-–—－:：\s\\/|]+|[-–—－:：\s\\/|]+$/g, ""),
     ) || "固定资产"
   );
@@ -417,6 +419,17 @@ export function faAssignmentsForEntities(
 
 /** 账里真实存在的「主体×科目」组合（inspect_* 的 entityAccounts 项）。 */
 export type EntityAccountPair = { entity: string; account: string; auxiliary?: string; currency?: string; classificationContext?: string; parentAccountName?: string };
+
+/** reviewAccounts 是 TB 选层目录；JE 的旧协议通常显式返回 []，须读完整 entityAccounts。 */
+export function faInspectionAccounts(inspection: Inspection | undefined, kind: Kind): EntityAccountPair[] {
+  if (!inspection) return [];
+  if (inspection.reviewAccounts && (kind === "tb" || inspection.reviewAccounts.length > 0)) {
+    return inspection.reviewAccounts;
+  }
+  if (inspection.entityAccounts) return inspection.entityAccounts;
+  const entities = inspection.entities.length ? inspection.entities : [DEFAULT_ENTITY];
+  return entities.flatMap((entity) => inspection.accounts.map((account) => ({ entity, account })));
+}
 
 const faAssignmentIdentity = (row: Pick<Assignment, "entity" | "account" | "auxiliary" | "currency">) => {
   const { code, name } = splitFaAccount(row.account);
@@ -839,9 +852,7 @@ export function FaTbJePage() {
   const entityAccountPairs = useMemo(
     () => {
       const verified = auxiliaryLink?.status === "verified";
-      const effective = (kind: Kind) => (inspects[kind]?.reviewAccounts ?? inspects[kind]?.entityAccounts
-        ?? (inspects[kind]?.entities.length ? inspects[kind]!.entities : [DEFAULT_ENTITY]).flatMap((entity) =>
-          (inspects[kind]?.accounts ?? []).map((account) => ({ entity, account }))))?.map((pair) => ({
+      const effective = (kind: Kind) => faInspectionAccounts(inspects[kind], kind).map((pair) => ({
         ...pair,
         auxiliary: verified && "auxiliary" in pair && typeof pair.auxiliary === "string"
           ? pair.auxiliary : undefined,
@@ -880,9 +891,7 @@ export function FaTbJePage() {
   const assignmentSources = useMemo(() => {
     const sources = new Map<string, Kind[]>();
     for (const kind of ["tb", "je"] as const) {
-      const pairs = inspects[kind]?.reviewAccounts ?? inspects[kind]?.entityAccounts
-        ?? (inspects[kind]?.entities.length ? inspects[kind]!.entities : [DEFAULT_ENTITY]).flatMap((entity) =>
-          (inspects[kind]?.accounts ?? []).map((account) => ({ entity, account })));
+      const pairs = faInspectionAccounts(inspects[kind], kind);
       for (const pair of pairs) {
         const key = JSON.stringify([entityKeyEnabled ? pair.entity : DEFAULT_ENTITY, pair.account]);
         const kinds = sources.get(key) ?? [];
@@ -907,8 +916,10 @@ export function FaTbJePage() {
   const unresolvedViews = includedViews.filter(
     (view) => !view.category.trim() || view.category === "未分类",
   );
+  const hasConfirmedJe = assignmentViews.some((view) => view.role !== "excluded" && view.sources.includes("je"));
   const assignmentsReady =
     assignmentViews.some((view) => view.role === "cost") &&
+    hasConfirmedJe &&
     unresolvedViews.length === 0;
   // 科目复核铺开全部科目：只列固定资产候选的话，被自动分类漏判的科目
   // 连露面的机会都没有；科目已按角色降序分组，分页浏览即可，不再需要检索。
@@ -1395,6 +1406,11 @@ export function FaTbJePage() {
     }
     if (unresolvedViews.length) {
       setError("仍有已纳入科目未确认资产类别，请返回科目复核步骤处理。");
+      setStep(2);
+      return;
+    }
+    if (!hasConfirmedJe) {
+      setError("尚未确认 JE 来源科目的原值／折旧角色与资产类别，请在科目复核中确认 JE 分类。");
       setStep(2);
       return;
     }
@@ -1895,7 +1911,9 @@ export function FaTbJePage() {
                   ? "至少需要 1 个固定资产原值科目。"
                   : unresolvedViews.length
                     ? `还有 ${unresolvedViews.length} 个已纳入科目未确认资产类别。`
-                    : "科目角色与类别已就绪。"}
+                    : !hasConfirmedJe
+                      ? "尚未确认 JE 来源科目的原值／折旧角色与资产类别。"
+                      : "科目角色与类别已就绪。"}
               </span>
               <Button
                 disabled={!assignmentsReady || busy}
@@ -1918,7 +1936,7 @@ export function FaTbJePage() {
             <CardHeader className="fa-tbje-card-head">
               <CardTitle>生成预览并导出五表</CardTitle>
               <Badge variant={resultStale ? "warning" : "success"}>
-                {resultStale ? "结果待重算" : "全部就绪"}
+                {resultStale ? "结果待重算" : !assignmentsReady ? "分类待复核" : "全部就绪"}
               </Badge>
             </CardHeader>
             <CardContent className="form-stack">

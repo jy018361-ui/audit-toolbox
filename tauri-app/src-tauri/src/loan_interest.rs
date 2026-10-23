@@ -1631,6 +1631,10 @@ fn snapshot_param_subset(params: &Value) -> Map<String, Value> {
                 out.insert((*field).to_owned(), value.clone());
             }
         }
+        #[cfg(test)]
+        if let Some(value) = object.get("__testForceDiskLedger") {
+            out.insert("__testForceDiskLedger".into(), value.clone());
+        }
     }
     out
 }
@@ -1655,7 +1659,7 @@ fn snapshot_file_identity(path: &Path) -> Option<String> {
 /// 任一文件被替换或续写（大小/修改时间变化），键即变化，旧快照作废。
 fn calc_fingerprint(params: &Value) -> Option<String> {
     let subset = snapshot_param_subset(params);
-    let mut material = format!("loan-{}-{}-{}-{}\n{}", ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, ledger_mapping::JE_BODY_RULE_VERSION, crate::header_detection::RULE_VERSION, serde_json::to_string(&subset).ok()?);
+    let mut material = format!("loan-combined-account-v2-20261023-{}-{}-{}-{}\n{}", ledger_mapping::TB_STRUCTURE_RULE_VERSION, ledger_mapping::AMOUNT_PARSE_RULE_VERSION, ledger_mapping::JE_BODY_RULE_VERSION, crate::header_detection::RULE_VERSION, serde_json::to_string(&subset).ok()?);
     for field in ["ledgerSource", "tbSource", "jeSource", "rateLedgerSource"] {
         if let Some(path) = subset
             .get(field)
@@ -3444,19 +3448,7 @@ fn disk_role_text(
     mapping: &Map<String, Value>,
     role: &str,
 ) -> String {
-    let raw = mapped_names(mapping, "je", role)
-        .iter()
-        .filter_map(|name| headers.iter().position(|header| header == name))
-        .filter_map(|index| row.get(index))
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    match role {
-        "accountCode" => ledger_mapping::account_code_of(&raw),
-        "accountName" => ledger_mapping::account_name_of(&raw),
-        _ => raw,
-    }
+    mapped_role_text(headers, row, mapping, "je", role)
 }
 
 fn normalized_disk_je_mapping(mapping: &Map<String, Value>) -> Map<String, Value> {
@@ -3486,7 +3478,11 @@ fn calculate_tb(
     progress: &dyn Fn(&str, usize, usize, &str),
     cancel: &AtomicBool,
 ) -> Result<Vec<LoanRow>, AppError> {
-    calculate_tb_impl(params, progress, cancel, false)
+    #[cfg(test)]
+    let force_disk = params["__testForceDiskLedger"].as_bool().unwrap_or(false);
+    #[cfg(not(test))]
+    let force_disk = false;
+    calculate_tb_impl(params, progress, cancel, force_disk)
 }
 
 /// 折叠后的整户借款：SAP 余额表同一科目按维度拆多行（银行/款项性质等），
@@ -6727,13 +6723,20 @@ fn role_text(
     kind: &str,
     role: &str,
 ) -> String {
-    let raw = raw_role_text(table, row, m, kind, role);
-    // 公共映射允许 accountCode/accountName 指向同一物理列，例如
-    // `2501010000:长期借款-中国银行`。借款模块过去把整格当编码，导致与
-    // JE 的纯编码无法匹配；身份角色在这里接公共拆码口径。
+    mapped_role_text(&table.headers, row, m, kind, role)
+}
+
+/// 内存与磁盘使用相同的双角色取值；只有已确认的组合身份才拆连字符，
+/// 不对独立辅助复合编码做全局截断。
+fn mapped_role_text(
+    headers: &[String], row: &[String], m: &Map<String, Value>, kind: &str, role: &str,
+) -> String {
+    let raw = raw_role_text_from_headers(headers, row, m, kind, role);
     match role {
-        "accountCode" => ledger_mapping::account_code_of(&raw),
-        "accountName" => ledger_mapping::account_name_of(&raw),
+        "accountCode" => ledger_mapping::account_code_from_fields(
+            &raw, &raw_role_text_from_headers(headers, row, m, kind, "accountName")),
+        "accountName" if !raw.is_empty() => ledger_mapping::account_name_from_fields(
+            &raw_role_text_from_headers(headers, row, m, kind, "accountCode"), &raw),
         _ => raw,
     }
 }
@@ -6745,9 +6748,15 @@ fn raw_role_text(
     kind: &str,
     role: &str,
 ) -> String {
+    raw_role_text_from_headers(&table.headers, row, m, kind, role)
+}
+
+fn raw_role_text_from_headers(
+    headers: &[String], row: &[String], m: &Map<String, Value>, kind: &str, role: &str,
+) -> String {
     mapped_names(m, kind, role)
         .iter()
-        .filter_map(|h| table.headers.iter().position(|x| x == h))
+        .filter_map(|h| headers.iter().position(|x| x == h))
         .filter_map(|i| row.get(i))
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
@@ -6762,13 +6771,12 @@ fn raw_role_text(
 fn account_text(table: &Table, row: &[String], m: &Map<String, Value>, kind: &str) -> String {
     let raw_code = raw_role_text(table, row, m, kind, "accountCode");
     let raw_name = raw_role_text(table, row, m, kind, "accountName");
-    let code = ledger_mapping::account_code_of(&raw_code);
-    let name_source = if raw_name.is_empty() {
-        &raw_code
+    let code = ledger_mapping::account_code_from_fields(&raw_code, &raw_name);
+    let name = if raw_name.is_empty() {
+        ledger_mapping::account_name_of(&raw_code)
     } else {
-        &raw_name
+        ledger_mapping::account_name_from_fields(&raw_code, &raw_name)
     };
-    let name = ledger_mapping::account_name_of(name_source);
     if code.is_empty() {
         name
     } else if name.is_empty() || name == code {
@@ -11312,6 +11320,107 @@ mod tests {
             disk_role_text(&disk_headers, &disk_row, &disk_mapping, "accountName"),
             "长期借款-中国银行"
         );
+    }
+
+    #[test]
+    fn combined_account_roles_preserve_unconfirmed_and_auxiliary_codes() {
+        let shared = json!({"accountCode":"编码","accountName":"编码"}).as_object().unwrap().clone();
+        let separate = json!({"accountCode":"编码","accountName":"名称"}).as_object().unwrap().clone();
+        let code_only = json!({"accountCode":"编码"}).as_object().unwrap().clone();
+        for (code, name, mapping, expected_code, expected_name) in [
+            ("2001-短期借款-工行", "", &shared, "2001", "短期借款-工行"),
+            ("2241002-吴子鉴", "吴子鉴", &separate, "2241002-吴子鉴", "吴子鉴"),
+            ("2001-123456", "", &shared, "2001-123456", "2001-123456"),
+            ("2001-短期借款-工行", "", &code_only, "2001-短期借款-工行", ""),
+        ] {
+            let table = je_table(&["编码", "名称"], &[code, name]);
+            let row = &table.rows[0];
+            for role in ["accountCode", "accountName"] {
+                let expected = if role == "accountCode" { expected_code } else { expected_name };
+                assert_eq!(role_text(&table, row, mapping, "je", role), expected);
+                assert_eq!(disk_role_text(&table.headers, row, mapping, role), expected);
+            }
+            if mapping == &code_only {
+                assert_eq!(account_text(&table, row, mapping, "je"), code);
+            }
+        }
+    }
+
+    #[test]
+    fn combined_account_preview_export_matches_separate_columns_in_both_paths() {
+        let fixture = SyntheticLedger::new(&[]);
+        let tb = fixture.dir.join("tb.csv");
+        let je = fixture.dir.join("je.csv");
+        fs::write(&tb, "编码,名称,期初贷,期末贷\n2001,短期借款,1000000,900000\n").unwrap();
+        let mut params = json!({
+            "mode":"tb","reportStart":"2025-01-01","reportEnd":"2025-12-31",
+            "loanAccounts":["2001"],"requireMatchingFallbackChoice":true,
+            "tbSource":{"source":{"inputPath":tb,"headerRow":1,"headerDepth":1},
+                "mapping":{"accountCode":"编码","accountName":"名称","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}},
+            "jeSource":{"source":{"inputPath":je,"headerRow":1,"headerDepth":1},
+                "mapping":{"accountCode":"编码","accountName":"名称","id":"凭证","date":"日期","functionalDebit":"借方","functionalCredit":"贷方"}},
+            "rateRows":[{"loanId":"2001 短期借款","rateType":"fixed","fixedRate":0.03}],
+            "rateConfirmationAccepted":true
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let mut baseline = None;
+        for combined in [false, true] {
+            let code = if combined { "2001-短期借款-工行朝阳户" } else { "2001" };
+            fs::write(&je, format!("凭证,日期,编码,名称,借方,贷方\nV1,2025-03-01,{code},短期借款-工行朝阳户,0,100000\nV2,2025-06-01,{code},短期借款-工行朝阳户,200000,0\n")).unwrap();
+            params["jeSource"]["mapping"]["accountName"] = json!(if combined { "编码" } else { "名称" });
+            for disk in [false, true] {
+                params["__testForceDiskLedger"] = json!(disk);
+                let preview = run_job("loan.preview", params.clone(), &|_,_,_,_|{}, cancel.clone(), &pause).unwrap();
+                let row = &preview["rows"][0];
+                assert_eq!(row["additions"], json!(100000.0));
+                assert_eq!(row["reductions"], json!(200000.0));
+                assert_eq!(row["matchStatus"], "已匹配");
+                // 独立按实际日期加权：59天100万＋92天110万＋214天90万。
+                let expected = (59.0 * 1_000_000.0 + 92.0 * 1_100_000.0 + 214.0 * 900_000.0) * 0.03 / 365.0;
+                assert!((row["calculatedInterest"].as_f64().unwrap() - expected).abs() < 0.000001);
+                let actual = json!([preview["rows"], preview["summary"]]);
+                if let Some(expected) = &baseline { assert_eq!(&actual, expected); }
+                else { baseline = Some(actual); }
+                params["outputPath"] = json!(fixture.dir.join(format!("combined-{combined}-{disk}.xlsx")));
+                let reused = std::cell::Cell::new(false);
+                let exported = run_job("loan.export", params.clone(), &|_,_,_,message| {
+                    if message.contains("复用测算结果") { reused.set(true); }
+                }, cancel.clone(), &pause).unwrap();
+                assert!(reused.get());
+                assert!((exported["rows"][0]["calculatedInterest"].as_f64().unwrap() - expected).abs() < 0.000001);
+                let mut book = open_workbook_auto(exported["outputPaths"][0].as_str().unwrap()).unwrap();
+                let range = book.worksheet_range("借款变动与利息测算").unwrap();
+                assert!(range.rows().flatten().any(|cell| cell.to_string().parse::<f64>().is_ok_and(|v| (v-expected).abs() < 0.01)));
+            }
+        }
+    }
+
+    #[test]
+    fn combined_account_same_code_distinct_names_do_not_duplicate_je() {
+        let fixture = SyntheticLedger::new(&[]);
+        let tb = fixture.dir.join("tb.csv");
+        let je = fixture.dir.join("je.csv");
+        fs::write(&tb, "编码,名称,期初贷,期末贷\n2001,短期借款-甲银行,1000000,1100000\n2001,短期借款-乙银行,2000000,1800000\n").unwrap();
+        fs::write(&je, "凭证,日期,科目,借方,贷方\nV1,2025-03-01,2001-短期借款-甲银行,0,100000\nV2,2025-06-01,2001-短期借款-乙银行,200000,0\n").unwrap();
+        let params = json!({"mode":"tb","reportStart":"2025-01-01","reportEnd":"2025-12-31",
+            "loanAccounts":["2001"],"requireMatchingFallbackChoice":true,
+            "tbSource":{"source":{"inputPath":tb,"headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"名称","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}},
+            "jeSource":{"source":{"inputPath":je,"headerRow":1,"headerDepth":1},"mapping":{"id":"凭证","date":"日期","accountCode":"科目","accountName":"科目","functionalDebit":"借方","functionalCredit":"贷方"}}});
+        for disk in [false, true] {
+            let rows = calculate_tb_impl(&params, &|_,_,_,_|{}, &AtomicBool::new(false), disk).unwrap();
+            assert_eq!(rows.len(), 2);
+            for row in &rows {
+                assert_eq!(row.match_status, "已匹配");
+                assert_eq!(row.events.len(), 1);
+                if row.account_name.ends_with("甲银行") {
+                    assert_eq!((row.additions, row.reductions), (100000.0, 0.0));
+                } else {
+                    assert!(row.account_name.ends_with("乙银行"));
+                    assert_eq!((row.additions, row.reductions), (0.0, 200000.0));
+                }
+            }
+        }
     }
 
     #[test]

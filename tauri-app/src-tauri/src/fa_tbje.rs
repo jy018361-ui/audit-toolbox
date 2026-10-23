@@ -233,7 +233,7 @@ fn analysis_cache_key(params: &Value) -> String {
         .as_object_mut()
         .map(|map| map.remove("outputPath"));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&"fa-cross-table-matching-v9", &mut hasher);
+    std::hash::Hash::hash(&"fa-cross-table-matching-v10-combined-account-20261023", &mut hasher);
     std::hash::Hash::hash(&ledger_mapping::TB_STRUCTURE_RULE_VERSION, &mut hasher);
     std::hash::Hash::hash(&ledger_mapping::AMOUNT_PARSE_RULE_VERSION, &mut hasher);
     std::hash::Hash::hash(&ledger_mapping::JE_BODY_RULE_VERSION, &mut hasher);
@@ -926,12 +926,13 @@ fn account_identity_from_row(
     if name.is_empty() {
         name = join(row, &indexes(table, map, "account"));
     }
+    let code = ledger_mapping::account_code_from_fields(&raw_code, &name);
     name = ledger_mapping::account_name_from_fields(&raw_code, &name);
     let matching_name = verified_composite_account_name(table, row, map, &raw_code);
     AccountIdentity {
         side,
         entity: resolve_entity(side, &raw_entity, entity_key_enabled, entity_scope),
-        code: ledger_mapping::account_code_of(&raw_code),
+        code,
         name,
         matching_name,
         auxiliary: join(row, &indexes(table, map, "auxiliary")),
@@ -3518,12 +3519,13 @@ fn account_identities(
             // （`1001010000:库存现金-人民币`），名称只能从编码那一格里取。
             // 08 号样例反过来——名称列写成 `10020101\银行存款\…`，编码在
             // 前面，得把它切掉，否则和序时账那侧的纯名称对不上。
+            let code = ledger_mapping::account_code_from_fields(&raw_code, &name);
             name = ledger_mapping::account_name_from_fields(&raw_code, &name);
             let matching_name = verified_composite_account_name(table, row, map, &raw_code);
             AccountIdentity {
                 side,
                 entity: resolve_entity(side, &raw_entity, entity_key_enabled, &entity_scope),
-                code: ledger_mapping::account_code_of(&raw_code),
+                code,
                 name,
                 matching_name,
                 auxiliary: join(row, &indexes(table, map, "auxiliary")),
@@ -5466,6 +5468,55 @@ mod tests {
                 .any(|warning| warning.contains("未匹配"))
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn combined_account_legacy_and_role_category_match_in_memory_and_disk() {
+        for combined_tb in [false, true] {
+            let (dir, out, mut params) = fixture();
+            let tb = dir.join("tb.csv");
+            if combined_tb {
+                let source = std::fs::read_to_string(&tb).unwrap()
+                    .replace(",1601,机器设备,", ",1601-机器设备,机器设备,")
+                    .replace(",1602,累计折旧,", ",1602-累计折旧,累计折旧,");
+                std::fs::write(&tb, source).unwrap();
+                params["tbMapping"]["accountName"] = json!(["科目编码"]);
+            }
+            let je = dir.join("je.csv");
+            let source = std::fs::read_to_string(&je).unwrap()
+                .replace(",1601,机器设备,", ",1601-机器设备,机器设备,")
+                .replace(",1602,累计折旧,", ",1602-累计折旧,累计折旧,")
+                .replace(",2202,应付账款,", ",2202-应付账款,应付账款,")
+                .replace(",1002,银行存款,", ",1002-银行存款,银行存款,")
+                .replace(",6602,折旧费,", ",6602-折旧费,折旧费,");
+            std::fs::write(&je, source).unwrap();
+            params["jeMapping"]["accountName"] = json!(["科目编码"]);
+            // 当前角色类别方式仍须确认 JE 来源；旧方式继续只用 TB 分类。
+            for role_category in [false, true] {
+                params["assignmentBasis"] = json!(if role_category { "assetRoleCategory" } else { "" });
+                params["accountAssignments"] = json!([
+                    {"entity":"A","account":"1601-机器设备","role":"cost","category":"机器设备"},
+                    {"entity":"A","account":"1602-累计折旧","role":"depreciation","category":"机器设备"}
+                ]);
+                for disk in [false, true] {
+                    params["__testForceDiskLedger"] = json!(disk);
+                    let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+                    let totals = &analysis.totals[&("A".into(), "机器设备".into())];
+                    assert_eq!((totals.opening_cost, totals.closing_cost, totals.additions, totals.disposals), (1000.0,1300.0,500.0,200.0));
+                    assert_eq!((totals.opening_dep, totals.closing_dep, totals.dep_charge), (200.0,250.0,100.0));
+                    assert_eq!(preview_json(&analysis)["reconciliationDifferences"], 0);
+                    assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
+                    assert!(analysis.je.iter().any(|row| row.account == "1601-机器设备" && row.role == "cost"));
+                    assert!(analysis.tb.iter().any(|row| row.account == "1601-机器设备" && row.role == "cost"));
+                    write_workbook(&out, &analysis, &AtomicBool::new(false)).unwrap();
+                    assert_export_caches(&out, &analysis);
+                    // 解析用于匹配，不能抹掉源字符串或改变原始确认项。
+                    assert!(analysis.je.iter().filter(|row| row.account == "1601-机器设备")
+                        .all(|row| row.raw[3] == "1601-机器设备"));
+                }
+            }
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

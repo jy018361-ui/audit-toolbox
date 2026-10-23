@@ -5,6 +5,11 @@ fn tolerance(a: f64, b: f64) -> bool {
     a.is_finite() && b.is_finite() && (a - b).abs() <= 0.0100001
 }
 
+fn account_name_path(name: &str) -> Option<Vec<&str>> {
+    let parts = name.split(['-', '－']).map(str::trim).collect::<Vec<_>>();
+    (!parts.is_empty() && parts.iter().all(|part| !part.is_empty())).then_some(parts)
+}
+
 pub(super) fn analyze(
     headers: &[String],
     rows: &[Vec<String>],
@@ -456,6 +461,81 @@ pub(super) fn analyze(
         }
     }
 
+    // 没有明确级次/缩进时，名称路径只提供连续范围候选，不凭同名或金额凑组。
+    // 例如 160101「固定资产-房屋及构筑物」下面的 1601000107/08，
+    // 编码不是其后代，但名称逐层展开且完整金额勾稽。不同主体/币种、辅助、
+    // 空行或无法解释的路径立即终止范围；不跨区间寻找同名锚点。
+    let mut name_children = BTreeSet::new();
+    if na.len() == 1 && explicit_levels.iter().all(Option::is_none) && !use_indent {
+        let paths = names.iter().map(|name| account_name_path(name)).collect::<Vec<_>>();
+        let mut path_stack = Vec::<usize>::new();
+        let mut path_graph = BTreeMap::<usize, Vec<usize>>::new();
+        let mut incomplete = BTreeSet::new();
+        for i in 0..n {
+            if i > 0 && (entities[i] != entities[i - 1] || currency[i] != currency[i - 1]) {
+                path_stack.clear();
+            }
+            let unique_code = bycode
+                .get(&(entities[i].clone(), codes[i].clone(), currency[i].clone()))
+                .is_some_and(|group| group.len() == 1);
+            if excluded[i] || !own_code[i] || codes[i].contains('-')
+                || !auxiliary[i].is_empty() || !valid[i] || !has_value[i] || !unique_code
+                || paths[i].is_none() || names[i].is_empty()
+            {
+                path_stack.clear();
+                continue;
+            }
+            let path = paths[i].as_ref().unwrap();
+            while let Some(p) = path_stack.last().copied() {
+                let parent = paths[p].as_ref().unwrap();
+                if path.len() > parent.len() && path.starts_with(parent) {
+                    break;
+                }
+                path_stack.pop();
+            }
+            if let Some(p) = path_stack.last().copied() {
+                if path.len() == paths[p].as_ref().unwrap().len() + 1 {
+                    path_graph.entry(p).or_default().push(i);
+                } else {
+                    // 缺失中间名称层，不能只收集其余可解释行后凑出完整金额。
+                    incomplete.insert(p);
+                }
+            }
+            path_stack.push(i);
+        }
+        // 明确的发生额列即使尚未映射，也只能作额外否决证据，不确认/改写映射。
+        let extra_amounts = headers.iter().enumerate().filter_map(|(j, header)| {
+            matches!(normalize_header(header).as_str(),
+                "借方发生额" | "贷方发生额" | "借方累计发生额" | "贷方累计发生额")
+                .then_some(j)
+        }).collect::<Vec<_>>();
+        let mut complete_paths = BTreeSet::new();
+        for (p, ch) in path_graph.iter().rev() {
+            if ch.len() < 2 || incomplete.contains(p)
+                || ch.iter().any(|i| path_graph.contains_key(i) && !complete_paths.contains(i))
+                || !ch.iter().any(|i| values.iter().any(|v| v[*i].abs() > 0.005))
+                || !matches(*p, ch)
+                || !extra_amounts.iter().all(|j| {
+                    let number = |i: usize| rows[i].get(*j)
+                        .and_then(|s| parse_amount(s).ok()).map(|v| v.unwrap_or(0.0));
+                    let Some(parent) = number(*p) else { return false; };
+                    let Some(children) = ch.iter().map(|i| number(*i)).collect::<Option<Vec<_>>>() else {
+                        return false;
+                    };
+                    tolerance(parent, children.iter().sum())
+                })
+            {
+                continue;
+            }
+            complete_paths.insert(*p);
+            // 编码已经能表达的关系继续走原规则；不覆盖辅助/显式层级图。
+            if !graph.contains_key(p) && ch.iter().any(|i| !is_ancestor_code(&codes[*p], &codes[*i])) {
+                name_children.extend(ch.iter().copied());
+                graph.insert(*p, ch.clone());
+            }
+        }
+    }
+
     // 非连续编码层：先选每个编码现有的汇总代表，避免重复加中间汇总和辅助行。
     let mut code_rows = BTreeMap::<(String, String), Vec<usize>>::new();
     let same_code_children = graph
@@ -476,6 +556,11 @@ pub(super) fn analyze(
     }
     let mut code_children = BTreeMap::<(String, String), Vec<String>>::new();
     for (entity, code) in code_rows.keys() {
+        // 已由名称路径及完整金额确认直接父项的行，不再另挂到编码上级，
+        // 否则上层会同时纳入中间汇总及其明细。编码仍留在索引供更下层使用。
+        if code_rows[&(entity.clone(), code.clone())].iter().all(|i| name_children.contains(i)) {
+            continue;
+        }
         for (cut, _) in code.char_indices().rev().filter(|(i, _)| *i > 0) {
             let parent = &code[..cut];
             if parent.len() > 15 && parent.chars().all(|c| c.is_ascii_digit()) {
@@ -1061,6 +1146,119 @@ mod tests {
         let m=serde_json::json!({"accountCode":"科目编码","accountName":"科目名称","auxiliary":"辅助","currency":"币种",
             "openingFunctionalAmount":"期初","ytdFunctionalDebit":"借方","ytdFunctionalCredit":"贷方","closingFunctionalAmount":"期末"}).as_object().unwrap().clone();
         (h, r, m)
+    }
+    fn university_name_path_fixture() -> (Vec<String>, Vec<Vec<String>>, serde_json::Map<String, Value>) {
+        fixture(&[
+            &["1601", "固定资产", "", "CNY", "130", "50", "10", "170"],
+            &["1601000101", "固定资产-房屋及构筑物", "", "CNY", "100", "10", "1", "109"],
+            &["1601000102", "固定资产-专用设备", "", "CNY", "30", "10", "2", "38"],
+            &["160101", "固定资产-房屋及构筑物", "", "CNY", "0", "30", "7", "23"],
+            &["1601000107", "固定资产-房屋及构筑物-房屋", "", "CNY", "0", "20", "5", "15"],
+            &["1601000108", "固定资产-房屋及构筑物-其他", "", "CNY", "0", "10", "2", "8"],
+        ])
+    }
+    #[test]
+    fn university_name_path_confirms_nonprefix_parent_and_counts_each_level_once() {
+        let (h, r, m) = university_name_path_fixture();
+        let keep = tb_leaf_mask(&h, &r, &|role| mapped_column_names(&m, role));
+        assert_eq!(keep, vec![false, true, true, false, true, true]);
+        for j in 4..8 {
+            let selected: f64 = r.iter().zip(&keep).filter(|(_, k)| **k)
+                .map(|(row, _)| parse_amount(&row[j]).unwrap().unwrap()).sum();
+            assert!(tolerance(selected, parse_amount(&r[0][j]).unwrap().unwrap()), "列 {j} 不守恒");
+        }
+        // 同名早期行没有连续子项，不能与后面独立金额的同名汇总合并。
+        let a = tb_classification_analysis(&h, &r, &|role| mapped_column_names(&m, role));
+        assert!(a.keep[1]);
+        assert_eq!(a.keep, keep);
+    }
+    #[test]
+    fn university_name_path_requires_every_amount_including_unmapped_period_columns() {
+        let (mut h, mut r, m) = university_name_path_fixture();
+        for j in 4..8 {
+            let mut broken = r.clone();
+            broken[3][j] = (parse_amount(&broken[3][j]).unwrap().unwrap() + 1.0).to_string();
+            assert_eq!(tb_leaf_mask(&h, &broken, &|role| mapped_column_names(&m, role)),
+                vec![true; 6], "金额列 {j} 不符不能确认名称父子");
+        }
+        h.extend(["借方发生额".into(), "贷方发生额".into()]);
+        for row in &mut r {
+            row.extend([row[5].clone(), row[6].clone()]);
+        }
+        assert_eq!(tb_leaf_mask(&h, &r, &|role| mapped_column_names(&m, role)),
+            vec![false, true, true, false, true, true]);
+        for j in 8..10 {
+            let mut broken = r.clone();
+            broken[3][j] = (parse_amount(&broken[3][j]).unwrap().unwrap() + 1.0).to_string();
+            assert_eq!(tb_leaf_mask(&h, &broken, &|role| mapped_column_names(&m, role)), vec![true; 6]);
+        }
+        r[4][8] = "非金额".into();
+        assert_eq!(tb_leaf_mask(&h, &r, &|role| mapped_column_names(&m, role)), vec![true; 6]);
+    }
+    #[test]
+    fn university_name_path_stops_at_sibling_unknown_gap_entity_currency_or_auxiliary() {
+        let (h, r, mut m) = university_name_path_fixture();
+        for boundary in ["固定资产-专用设备", "名称不详", "固定资产-房屋及构筑物（其他）"] {
+            let mut interrupted = r[3..].to_vec();
+            let mut row = interrupted[1].clone();
+            row[0] = "270001".into();
+            row[1] = boundary.into();
+            for j in 4..8 { row[j] = "0".into(); }
+            interrupted.insert(2, row);
+            assert_eq!(tb_leaf_mask(&h, &interrupted, &|role| mapped_column_names(&m, role)), vec![true; 4]);
+        }
+        for (j, value) in [(2, "辅助甲"), (3, "USD"), (1, "")] {
+            let mut broken = r[3..].to_vec();
+            broken[1][j] = value.into();
+            assert_eq!(tb_leaf_mask(&h, &broken, &|role| mapped_column_names(&m, role)), vec![true; 3]);
+        }
+        let mut gap = r[3..].to_vec();
+        gap.insert(2, vec![String::new(); h.len()]);
+        assert!(tb_leaf_mask(&h, &gap, &|role| mapped_column_names(&m, role))[0]);
+        let mut h = h;
+        h.push("主体".into());
+        let mut r = r[3..].to_vec();
+        for row in &mut r { row.push("甲".into()); }
+        r[1][8] = "乙".into();
+        m.insert("entity".into(), serde_json::json!("主体"));
+        assert_eq!(tb_leaf_mask(&h, &r, &|role| mapped_column_names(&m, role)), vec![true; 3]);
+    }
+    #[test]
+    fn university_name_path_does_not_use_equal_amount_peers_partial_ranges_or_missing_levels() {
+        let (h, mut r, m) = university_name_path_fixture();
+        r = r[3..].to_vec();
+        let mut tail = r[1].clone();
+        tail[0] = "280001".into();
+        tail[5] = "1".into();
+        r.push(tail); // 全部连续子项不勾稽，不能挑前两条凑数。
+        assert_eq!(tb_leaf_mask(&h, &r, &|role| mapped_column_names(&m, role)), vec![true; 4]);
+        r.pop();
+        r[1][1] = "固定资产-房屋及构筑物-缺失层-房屋".into();
+        assert_eq!(tb_leaf_mask(&h, &r, &|role| mapped_column_names(&m, role)), vec![true; 3]);
+        r[1][1] = r[0][1].clone();
+        assert_eq!(tb_leaf_mask(&h, &r, &|role| mapped_column_names(&m, role)), vec![true; 3]);
+    }
+    #[test]
+    fn university_name_path_respects_explicit_levels_directions_and_ambiguous_codes() {
+        let (h, r, m) = university_name_path_fixture();
+        let mut wide = r.clone();
+        for row in &mut wide { row[1] = row[1].replace('-', "－"); }
+        assert_eq!(tb_leaf_mask(&h, &wide, &|role| mapped_column_names(&m, role)),
+            vec![false, true, true, false, true, true]);
+        let mut h = h;
+        h.push("级次".into());
+        let mut explicit = r[3..].to_vec();
+        for row in &mut explicit { row.push("1".into()); }
+        assert_eq!(tb_leaf_mask(&h, &explicit, &|role| mapped_column_names(&m, role)), vec![true; 3]);
+        h[8] = "期末方向".into();
+        let mut m = m;
+        m.insert("closingDirection".into(), serde_json::json!("期末方向"));
+        for row in &mut explicit { row[8] = "借".into(); }
+        explicit[1][8] = "贷".into();
+        assert_eq!(tb_leaf_mask(&h, &explicit, &|role| mapped_column_names(&m, role)), vec![true; 3]);
+        let mut ambiguous = r[3..].to_vec();
+        ambiguous.push(ambiguous[0].clone());
+        assert_eq!(tb_leaf_mask(&h[..8], &ambiguous, &|role| mapped_column_names(&m, role)), vec![true; 4]);
     }
     #[test]
     fn one_detail_pair_requires_verified_upper_code_cover() {

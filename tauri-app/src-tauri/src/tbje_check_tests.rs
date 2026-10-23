@@ -56,6 +56,47 @@ fn three_fixes_original_tbje_requests() {
 }
 
 #[test]
+#[ignore = "需设置 TBJE_UNIVERSITY_REQUEST/OUTPUT_DIR，完整读取大学原件；仅库测试，不打包应用 EXE"]
+fn university_name_path_original_tbje_and_export_agree_in_memory_and_disk() {
+    let input: Value = serde_json::from_slice(&std::fs::read(
+        std::env::var("TBJE_UNIVERSITY_REQUEST").unwrap()).unwrap()).unwrap();
+    let dir = std::path::PathBuf::from(std::env::var("TBJE_UNIVERSITY_OUTPUT_DIR").unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut memory = None;
+    for disk in [false, true] {
+        let mut params = input.clone();
+        params["__testForceDiskTb"] = json!(disk);
+        params["__testForceDiskLedger"] = json!(disk);
+        let prepared = prepare_with_control(&params, &cancel, &|_, _, _, _| {}).unwrap();
+        let result = evaluate(&prepared, &cancel, true).unwrap();
+        assert_eq!(result["rollforward"]["passed"], json!(true), "{result}");
+        assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result}");
+        assert_eq!(result["tbVsJe"]["accounts"], json!(158));
+        assert_eq!(result["tbVsJe"]["mismatched"], json!(0));
+        assert_eq!(result["equation"]["passed"], json!(true), "{result}");
+        for period in ["opening", "closing"] {
+            assert!(result["equation"][period]["total"].as_f64().unwrap().abs() < 0.01);
+        }
+        for (code, expected) in [("1601", false), ("160101", false),
+            ("1601000101", true), ("1601000107", true), ("1601000108", true)] {
+            let row = prepared.tb_identities.iter().position(|(_, c, _)| c == code).unwrap();
+            assert_eq!(prepared.tb_leaf[row], expected, "大学科目 {code}，disk={disk}");
+        }
+        let tag = if disk { "disk" } else { "memory" };
+        params["outputPath"] = json!(dir.join(format!("大学_修复验证_{tag}.xlsx")));
+        export(&params, &result, &prepared).unwrap();
+        std::fs::write(dir.join(format!("original-result-{tag}.json")),
+            serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+        if let Some(ref expected) = memory {
+            assert_eq!(&result, expected, "大学内存/磁盘结果必须逐字段一致");
+        } else {
+            memory = Some(result);
+        }
+    }
+}
+
+#[test]
 fn tbje_disk_domains_large_unique_unmapped_values_do_not_block_checks() {
     let dir = fixture("disk-key-domains-unrelated-text");
     平的账(&dir);

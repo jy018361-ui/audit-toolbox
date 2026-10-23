@@ -23,7 +23,7 @@ pub(crate) mod disk_domains;
 
 /// TB 结构规则的唯一缓存版本。所有消费 TB 的业务快照必须纳入此值；
 /// 修改结构取层语义时只在这里升级，避免某个工具继续命中旧结果。
-pub(crate) const TB_STRUCTURE_RULE_VERSION: &str = "complete-structure-v7-20261022";
+pub(crate) const TB_STRUCTURE_RULE_VERSION: &str = "complete-structure-v8-name-path-20261023";
 
 /// 公共金额语法的缓存版本；业务结果须同时纳入结构与金额版本。
 pub(crate) const AMOUNT_PARSE_RULE_VERSION: &str = "currency-affix-v1-20261020";

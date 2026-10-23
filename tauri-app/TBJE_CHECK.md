@@ -1,5 +1,11 @@
 # TBJE 完整性核对
 
+## 2026-10-23：大学固定资产跨编码层级去重
+
+- 修复 `160101` 的两条明细 `1601000107/08` 不以其编码开头，导致中间及上层汇总同时保留的问题。公共结构引擎在无有效级次／缩进时，以连续、逐层展开的完整名称路径建立候选，完整金额验证后才确认；不合并前面同名但金额独立的 `1601000101`，不跨科目区间或搜索局部金额组合。
+- 已确认名称子项不再另挂到编码上级，余额滚动、TBJE 发生额和 BS／PL 共用修复后的选层。内存、磁盘共用规则及缓存版本；辅助跨表确认和 JE 取数不变。本轮仅处理大学，其余案例暂不处理。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib university_name_path`、`--lib`；真实大学请求及两条路径的导出验收记录见 `artifacts/tbje-university-name-path-20261023/`。原件测试通过 `TBJE_UNIVERSITY_REQUEST/OUTPUT_DIR` 显式运行 `--lib university_name_path_original_tbje_and_export_agree_in_memory_and_disk -- --ignored --nocapture`，不打包应用 EXE。
+
 ## 2026-10-22：大学组合科目与10组父子重复计入
 
 - JE 的“会计科目”兼挂编码和名称时，受限解析 `1002010109-人民币存款-民生银行`，映射检查及普通／磁盘正式核对共用结果；保留源单元格，不全局拆辅助复合编码。

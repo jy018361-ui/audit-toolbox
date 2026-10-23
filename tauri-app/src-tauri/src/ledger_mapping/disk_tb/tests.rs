@@ -81,6 +81,24 @@ fn compare(rows: &[Vec<String>], case: &str) {
     assert_eq!(b.parent_names, a.parent_names, "parent {case}");
 }
 #[test]
+fn university_name_path_disk_and_memory_preserve_the_same_verified_amount_layer() {
+    let rows = vec![
+        row("A", "1601", "固定资产", "", "CNY", "", 130., 170., 50., 10., "借"),
+        row("A", "1601000101", "固定资产-房屋及构筑物", "", "CNY", "", 100., 109., 10., 1., "借"),
+        row("A", "1601000102", "固定资产-专用设备", "", "CNY", "", 30., 38., 10., 2., "借"),
+        row("A", "160101", "固定资产-房屋及构筑物", "", "CNY", "", 0., 23., 30., 7., "借"),
+        row("A", "1601000107", "固定资产-房屋及构筑物-房屋", "", "CNY", "", 0., 15., 20., 5., "借"),
+        row("A", "1601000108", "固定资产-房屋及构筑物-其他", "", "CNY", "", 0., 8., 10., 2., "借"),
+    ];
+    assert_eq!(tb_classification_analysis(&headers(), &rows, &columns).keep,
+        vec![false, true, true, false, true, true]);
+    compare(&rows, "大学非前缀名称路径，完整金额层");
+    let mut broken = rows.clone();
+    broken[3][8] = "31".into();
+    assert_eq!(tb_classification_analysis(&headers(), &broken, &columns).keep, vec![true; 6]);
+    compare(&broken, "大学名称路径金额不符不得剔除");
+}
+#[test]
 fn tb_disk_cross_organization_totals_match_memory_after_local_selection() {
     compare(&[
         row("", "1002", "银行", "", "CNY", "1",30.,120.,100.,10.,"借"),

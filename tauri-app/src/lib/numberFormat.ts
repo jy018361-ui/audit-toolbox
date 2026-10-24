@@ -66,3 +66,15 @@ export function formatCount(
   if (!Number.isFinite(value)) return String(value);
   return formatter.format(Object.is(value, -0) ? 0 : value);
 }
+
+/**
+ * 预览/结果表格里「看起来是数值」的单元格判定：带千位分隔或带小数点的
+ * 数字（可带负号、括号负数、百分号）才右对齐。纯整数字串（科目编码、
+ * 年份、单号）不匹配，保持左对齐，避免编码被右对齐造成误读。
+ */
+const NUMERIC_CELL_PATTERN =
+  /^\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?%?$|^\(?-?\d+\.\d+\)?%?$/;
+
+export function isNumericCellText(text: string): boolean {
+  return NUMERIC_CELL_PATTERN.test(text.trim());
+}

@@ -1837,8 +1837,36 @@ summary:focus-visible {
   border-radius: var(--r-md);
   background: var(--surface);
 }
+.data-table-frame {
+  position: relative;
+}
+/* 右缘/底缘还有未滚到的内容时渐隐提示（数据属性由 DataTable 组件维护）：
+   WebView2 的覆盖式滚动条会自动隐藏，被裁一半的行列看起来像渲染坏了。 */
+.data-table-frame[data-more-right="true"]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 34px;
+  pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--surface));
+}
+.data-table-frame[data-more-bottom="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 20px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--surface));
+}
 .data-table-table {
-  width: 100%;
+  /* 列按内容取宽：width:100% 会把宽表压扁、表头下拉被切成半个字。
+     内容不足时仍撑满容器；超出时由 .data-table-scroll 横向滚动。 */
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: var(--fs-sm);
 }
@@ -1853,6 +1881,13 @@ summary:focus-visible {
   padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border);
 }
+.data-table-table th > span {
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .data-table-table td {
   padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border-soft);
@@ -1860,6 +1895,12 @@ summary:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 金额/数量单元格右对齐（判定见 lib/numberFormat 的 isNumericCellText）：
+   位数竖向可比是审计预览表的基本可读性。 */
+.data-table-table td.data-table-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .data-table-table tr:last-child td {
   border-bottom: 0;
@@ -2523,7 +2564,12 @@ summary:focus-visible {
   background: color-mix(in srgb, var(--brand) 12%, transparent);
 }
 .data-table-table th .dt-header-control select {
-  width: 100%;
+  /* 映射目标是用户必须看清的信息：宽度跟内容（否则不参与列宽计算，
+     长选项被切成半个字），列更宽时撑满，上限防长选项把列撑爆。 */
+  width: auto;
+  min-width: 100%;
+  max-width: 260px;
+  text-overflow: ellipsis;
   height: 28px;
   font-size: var(--fs-xs);
   border: 1px solid var(--control-border);

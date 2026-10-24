@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatCount, formatMoney } from "./numberFormat";
+import { formatCount, formatMoney, isNumericCellText } from "./numberFormat";
 
 describe("formatMoney 统一金额口径", () => {
   it("千位分隔 + 固定两位小数", () => {
@@ -54,5 +54,35 @@ describe("formatCount 统一计数口径", () => {
   it("需要小数的计数可保留位数（如工时）", () => {
     expect(formatCount(1234.5, { maxFractionDigits: 2 })).toBe("1,234.5");
     expect(formatCount(1234.567, { maxFractionDigits: 2 })).toBe("1,234.57");
+  });
+});
+
+describe("isNumericCellText 表格数值单元格判定", () => {
+  it.each([
+    "85,600.00",
+    "20,000,000.00",
+    "-3,112,068",
+    "(1,234.50)",
+    "0.00",
+    "4.38",
+    "4.38%",
+    "12,345",
+    "  2,860,000.00  ",
+  ])("%s 判为数值右对齐", (text) => {
+    expect(isNumericCellText(text)).toBe(true);
+  });
+
+  it.each([
+    "1001",
+    "100101",
+    "2026",
+    "JK-2025-008",
+    "2026-01-01",
+    "借款汇总",
+    "",
+    "1.1.1",
+    "36 KB",
+  ])("%s 保持左对齐", (text) => {
+    expect(isNumericCellText(text)).toBe(false);
   });
 });

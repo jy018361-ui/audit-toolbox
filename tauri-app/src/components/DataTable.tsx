@@ -1,5 +1,6 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { useTableColumnResize } from "./useTableColumnResize";
+import { isNumericCellText } from "@/lib/numberFormat";
 
 export type DataTableProps = {
   columns: string[];
@@ -39,56 +40,99 @@ export function DataTable({
   trailingColumns,
 }: DataTableProps) {
   const resize = useTableColumnResize<HTMLDivElement>({ storageKey: resizeKey ?? "" });
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // 滚动条会自动隐藏（WebView2 覆盖式滚动条），被裁一半的行/列看起来
+  // 像渲染坏了。右缘/底缘还有未滚到的内容时给外框挂渐隐提示。
+  useEffect(() => {
+    const frame = frameRef.current;
+    const scroller = scrollRef.current;
+    if (!frame || !scroller) return;
+    const update = () => {
+      const beyondRight = scroller.scrollWidth - scroller.clientWidth - scroller.scrollLeft > 4;
+      const beyondBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > 4;
+      frame.dataset.moreRight = beyondRight ? "true" : "false";
+      frame.dataset.moreBottom = beyondBottom ? "true" : "false";
+    };
+    update();
+    scroller.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(update);
+      observer.observe(scroller);
+    }
+    return () => {
+      scroller.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+      observer?.disconnect();
+    };
+  }, [columns, rows, headerControls, trailingColumns, maxHeight, caption]);
+
   return (
     <div className="data-table">
       {caption != null && <div className="data-table-caption">{caption}</div>}
-      <div className="data-table-scroll" style={{ maxHeight }} ref={resize.ref}>
-        {rows.length === 0 && !headerControls?.length ? (
-          <div className="empty">{emptyText}</div>
-        ) : (
-          <table className="data-table-table">
-            <thead>
-              <tr>
-                {columns.map((col, index) => (
-                  <th key={index}>
-                    {headerControls?.[index]}
-                    <span>{col}</span>
-                  </th>
-                ))}
-                {trailingColumns?.map((col) => (
-                  <th key={col.key} className="data-table-trailing">
-                    <span>{col.title}</span>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 && (
+      <div className="data-table-frame" ref={frameRef}>
+        <div
+          className="data-table-scroll"
+          style={{ maxHeight }}
+          ref={(node) => {
+            resize.ref.current = node;
+            scrollRef.current = node;
+          }}
+        >
+          {rows.length === 0 && !headerControls?.length ? (
+            <div className="empty">{emptyText}</div>
+          ) : (
+            <table className="data-table-table">
+              <thead>
                 <tr>
-                  <td colSpan={columns.length + (trailingColumns?.length ?? 0)}>{emptyText}</td>
-                </tr>
-              )}
-              {rows.map((row, rowIndex) => (
-                <tr key={rowIndex}>
-                  {columns.map((_, colIndex) => {
-                    const cell = row[colIndex];
-                    const text = cell == null ? "" : String(cell);
-                    return (
-                      <td key={colIndex} title={text}>
-                        {text}
-                      </td>
-                    );
-                  })}
+                  {columns.map((col, index) => (
+                    <th key={index}>
+                      {headerControls?.[index]}
+                      <span>{col}</span>
+                    </th>
+                  ))}
                   {trailingColumns?.map((col) => (
-                    <td key={col.key} className="data-table-trailing">
-                      {col.render(rowIndex)}
-                    </td>
+                    <th key={col.key} className="data-table-trailing">
+                      <span>{col.title}</span>
+                    </th>
                   ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+              </thead>
+              <tbody>
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan={columns.length + (trailingColumns?.length ?? 0)}>{emptyText}</td>
+                  </tr>
+                )}
+                {rows.map((row, rowIndex) => (
+                  <tr key={rowIndex}>
+                    {columns.map((_, colIndex) => {
+                      const cell = row[colIndex];
+                      const text = cell == null ? "" : String(cell);
+                      return (
+                        <td
+                          key={colIndex}
+                          title={text}
+                          className={isNumericCellText(text) ? "data-table-num" : undefined}
+                        >
+                          {text}
+                        </td>
+                      );
+                    })}
+                    {trailingColumns?.map((col) => (
+                      <td key={col.key} className="data-table-trailing">
+                        {col.render(rowIndex)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       </div>
     </div>
   );

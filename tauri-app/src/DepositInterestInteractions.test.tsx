@@ -1125,7 +1125,7 @@ describe("导航步骤切换不重复验证", () => {
       return original(method, params);
     });
     goToStep(STEP2);
-    expect(await screen.findByText("已停止币种衔接验证，当前映射已保留；可重新点击下一步。")).toBeVisible();
+    expect(await screen.findByText("已停止币种衔接验证，当前映射已保留。")).toBeVisible();
     expect(screen.queryByText(/验证失败|暂时无法验证/)).not.toBeInTheDocument();
     expect(screen.queryByText("逐个核对科目分类（末级明细）")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: STEP2 })).toBeEnabled();

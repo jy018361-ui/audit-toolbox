@@ -3005,11 +3005,11 @@ function FaCardListPage() {
                     clearLabel="恢复默认"
                   />
                 </Field>
-                <p className="hint">
-                  {outputPathTouched
-                    ? "已指定保存位置，导出会写入上面这个文件。"
-                    : "默认保存到期末文件所在目录，文件名为 FA_List_<日期>_<时间>.xlsx（导出时按当前时间生成）。"}
-                </p>
+                {!outputPathTouched && (
+                  <p className="hint">
+                    {"默认保存到期末文件所在目录，文件名为 FA_List_<日期>_<时间>.xlsx（导出时按当前时间生成）。"}
+                  </p>
+                )}
                 <div className="actions">
                   <Button
                     variant="secondary"
@@ -3046,10 +3046,9 @@ function FaCardListPage() {
             <div className="fa-preview-workspace-title">
               <div>
                 <h2>文件预览</h2>
-                <p>预览区已锁定；各文件可独立纵向、横向滚动。</p>
                 {/* 与其他工具的映射面板同一条说明：下拉角色后的“＊”表示必填。 */}
                 <p className="mapping-requirement-legend">
-                  各列顶部的下拉为必选映射；＊ 为必填字段。
+                  ＊ 为必填字段。
                 </p>
                 {step === 1 &&
                   inspection &&

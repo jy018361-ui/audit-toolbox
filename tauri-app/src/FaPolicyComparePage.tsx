@@ -1088,7 +1088,6 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
             <div className="fa-preview-workspace-title">
               <div>
                 <h2>文件预览</h2>
-                <p>预览区已锁定；各文件可独立纵向、横向滚动。</p>
               </div>
               <Badge variant="info">导入文件</Badge>
             </div>

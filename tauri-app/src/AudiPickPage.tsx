@@ -4070,7 +4070,6 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               <div className="section-title">
                 <div>
                   <h2>项目工作台</h2>
-                  <p className="hint">查找项目、查看处理进度或新建摘录任务。</p>
                 </div>
                 <div className="actions compact">
                   <button className="secondary" disabled={busy} onClick={() => void refresh()}>刷新</button>
@@ -4885,7 +4884,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             </div>
           </div>
           {workLog.length === 0 ? (
-            <EmptyState compact title="暂无处理记录" description="导入 PDF、文字识别和智能提取的处理记录会显示在这里。" />
+            <EmptyState compact title="暂无处理记录" />
           ) : (
             <div className="worklog-list">
               {workLog.map((entry) => (

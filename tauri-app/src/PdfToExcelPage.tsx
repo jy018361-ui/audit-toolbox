@@ -197,7 +197,6 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
       {summary && (
         <div className="pdf-result-callout" role="status">
           <strong>转换完成：成功 {summary.successCount} 份，失败 {summary.failCount} 份</strong>
-          <span>逐份结果与失败原因见下方「进度与结果」。</span>
         </div>
       )}
       {job?.phase === "cancelled" && (
@@ -389,9 +388,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                 <EmptyState
                   title="等待转换结果"
                   description={
-                    pdfPaths.length
-                      ? "开始转换后，这里会显示总体进度和每份回函的处理结果。"
-                      : "先添加回函 PDF，再开始转换。"
+                    pdfPaths.length ? undefined : "先添加回函 PDF，再开始转换。"
                   }
                 />
               )

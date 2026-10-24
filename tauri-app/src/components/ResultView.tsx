@@ -40,8 +40,8 @@ function stringList(value: unknown): string[] {
  * 从 App.tsx 抽出供 FaListPage 等页面共用，避免页面抽取时的循环依赖。
  *
  * 默认文案不宣称"处理完成"：本组件不知道展示的结果来自刚成功的任务，
- * 还是失败/取消后残留的上次结果（甚至是失败任务中途写出的部分产物），
- * 只有"结果文件已生成、可打开核对"是各种场景下都真实的中性表述。
+ * 还是失败/取消后残留的上次结果（甚至是失败任务中途写出的部分产物）。
+ * 有结果文件时不写概要句，让下面的文件链接自己说明；没有文件才说"运行结束"。
  * 页面若知道最近一次任务未成功，传 stale 显示醒目提示。
  */
 export function ResultView({
@@ -84,18 +84,18 @@ export function ResultView({
     : [];
   const valid = typeof obj.valid === "boolean" ? obj.valid : undefined;
   const limited = (items: string[]) => items.slice(0, 20);
+  const summaryText =
+    message ??
+    (valid === true
+      ? "输入检查通过。"
+      : valid === false
+        ? "输入检查未通过。"
+        : outputPaths.length
+          ? null
+          : "运行结束。");
   return (
     <div className="result-summary" role="status" aria-live="polite">
-      <p>
-        {message ??
-          (valid === true
-            ? "输入检查通过。"
-            : valid === false
-              ? "输入检查未通过。"
-              : outputPaths.length
-                ? "以下为已生成的结果文件，可打开核对。"
-                : "运行结束。")}
-      </p>
+      {summaryText && <p>{summaryText}</p>}
       {stale && (
         <p className="result-stale-note" role="note">
           注意：最近一次任务未成功完成，以下结果可能不完整或来自上次成功运行，请核对后再使用。

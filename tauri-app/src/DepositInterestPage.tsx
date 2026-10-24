@@ -1804,7 +1804,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       return true;
     } catch (error) {
       if (isSyncBusyAborted(error)) {
-        setCurrencyValidationNotice("已停止币种衔接验证，当前映射已保留；可重新点击下一步。");
+        setCurrencyValidationNotice("已停止币种衔接验证，当前映射已保留。");
       } else {
         setError(`TB 与 JE 的币种衔接验证失败：${errorText(error)}`);
       }

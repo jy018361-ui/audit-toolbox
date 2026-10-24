@@ -1985,11 +1985,7 @@ export function FaTbJePage() {
                 />
               </label>
               <div className="fa-tbje-step-actions">
-                <span>
-                  {outputPath
-                    ? "输出路径已确认。"
-                    : "预览无需输出路径；导出前请选择保存位置。"}
-                </span>
+                {!outputPath && <span>导出前请选择保存位置。</span>}
                 <Button
                   variant="secondary"
                   disabled={busy || reviewing}

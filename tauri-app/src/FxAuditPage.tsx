@@ -3324,7 +3324,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               )}
               <details className="fx-stage-note">
                 <summary>测算与导出说明</summary>
-                <p>测算预览会在下方展示结果；修改分类后可重新测算。生成 Excel 底稿不会清空预览结果。</p>
+                <p>生成 Excel 底稿不会清空预览结果。</p>
               </details>
               <div className="fx-actions">
                 <Button
@@ -3401,14 +3401,12 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 busy ? (
                   <div className="fx-export-stage" role="status">
                     <strong>正在生成Excel底稿</strong>
-                    <span>
-                      测算预览已经完成；当前步骤仅整理并保存底稿，页面上的测算结果会继续保留。
-                    </span>
+                    <span>预览结果不会丢失。</span>
                   </div>
                 ) : (
                   completedStage === "fx.export" &&
                   outputsFrom(result).length > 0 && (
-                    <p className="fx-export-complete" role="status">底稿已生成，可在下方结果区打开。</p>
+                    <p className="fx-export-complete" role="status">底稿已生成。</p>
                   )
                 )
               ) : (

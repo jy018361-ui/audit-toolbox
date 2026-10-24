@@ -543,11 +543,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
                 );
               })
             ) : (
-              <EmptyState
-                compact
-                title="尚未添加文件"
-                description="添加文件或扫描文件夹后，可检查 Sheet 并设置合并顺序。"
-              />
+              <EmptyState compact title="尚未添加文件" />
             )}
           </div>
           <div className="actions">
@@ -724,9 +720,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             )}
           </div>
           <p className="output-hint">
-            {outputDirectoryTouched
-              ? "已指定输出目录。"
-              : "默认保存到第一个输入文件所在目录。"}
+            {!outputDirectoryTouched && "默认保存到第一个输入文件所在目录。"}
             文件名自动生成：Excel合并结果_日期_时间.
             {outputMode === "one_workbook" ? "xlsx" : outputFormat}
           </p>
@@ -790,10 +784,10 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             }
             description={
               !paths.length
-                ? "添加文件或扫描文件夹后，可在这里查看检查结果与合并进度。"
+                ? undefined
                 : !files.length
                   ? "先检查文件与 Sheet，确认结构后再设置合并规则。"
-                  : "规则已就绪，开始合并后可在这里查看进度与输出结果。"
+                  : undefined
             }
           />
         )}

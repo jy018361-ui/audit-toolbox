@@ -267,8 +267,8 @@ describe("共用字段映射面板", () => {
             ? "optional"
             : undefined,
     });
-    expect(screen.getByText(/为必填字段/)).toHaveTextContent(
-      "＊ 为必填字段；（选填）须按当前分组的整组规则补充。",
+    expect(screen.getByText(/为必填/)).toHaveTextContent(
+      "＊ 为必填；（选填）须按当前分组的整组规则补充。",
     );
     expect(
       selects[0].querySelector('option[value="functionalAmount"]'),

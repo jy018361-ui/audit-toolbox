@@ -2362,11 +2362,6 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                       ? `${resultReviewCount} 组需复核`
                       : "全部核对通过"}
                   </Badge>
-                  <span className="fx-hint">
-                    {resultReviewCount
-                      ? "先预览异常组并检查字段映射，确认后再导出底稿。"
-                      : "未发现异常，可逐组预览或一次导出全部结果。"}
-                  </span>
                 </div>
                 <Button
                   type="button"
@@ -2380,7 +2375,6 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   导出全部结果
                 </Button>
               </div>
-              <p className="tbje-result-scroll-hint">结果表可左右滚动，查看其余核对列；操作列保持可见。</p>
               <TbjeResultTableWrap>
                 <Table className="tbje-result-table">
                   <caption className="sr-only">TB/JE 完整性核对结果</caption>

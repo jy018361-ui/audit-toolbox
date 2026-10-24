@@ -631,7 +631,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
             <CardHeader className="dep-card-header">
               <div>
                 <CardTitle>核对字段映射</CardTitle>
-                <p>表头下拉框选择测算字段，下方保留原始列名；累计折旧应选累计余额列。</p>
+                <p>累计折旧应选累计余额列。</p>
               </div>
               <Badge variant={missing.length ? "warning" : "success"}>
                 {missing.length ? `待补 ${missing.length} 项` : "映射完整"}

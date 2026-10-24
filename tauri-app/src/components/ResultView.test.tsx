@@ -10,13 +10,14 @@ afterEach(cleanup);
 // 失败/取消后页面常仍展示上一轮成功的结果（或失败任务的部分产物），
 // 宣称完成会让审计师把失败当成功、误用旧底稿。
 describe("ResultView 默认文案与残留结果提示", () => {
-  it("有结果文件时用中性表述，不宣称处理完成", () => {
+  it("有结果文件时只列文件链接，不宣称处理完成", () => {
     render(
       <ResultView value={{ outputPaths: ["C:\\底稿\\A1_现金.xlsx"] }} />,
     );
     expect(
-      screen.getByText("以下为已生成的结果文件，可打开核对。"),
+      screen.getByRole("button", { name: "A1_现金.xlsx" }),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/已生成的结果文件/)).toBeNull();
     expect(screen.queryByText(/处理完成/)).toBeNull();
   });
 

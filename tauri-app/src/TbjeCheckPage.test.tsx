@@ -754,7 +754,6 @@ describe("TbjeCheckPage", () => {
 
     await screen.findByRole("heading", { level: 2, name: "3. 查看核对结果" });
     const table = screen.getByRole("table", { name: "TB/JE 完整性核对结果" });
-    expect(screen.getByText(/结果表可左右滚动/)).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "核对结果表，可横向滚动" })).toHaveAttribute("tabindex", "0");
     expect(table.querySelectorAll("colgroup col")).toHaveLength(5);
     for (const name of [

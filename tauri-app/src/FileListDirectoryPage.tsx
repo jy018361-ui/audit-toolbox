@@ -372,9 +372,7 @@ export default function FileListDirectoryPage({
                 description={
                   scanInterrupted
                     ? "已选文件夹仍保留，可点击上方“重新扫描”再次尝试。"
-                    : busy
-                    ? "扫描完成后，这里会显示前 50 个文件及目录层级。"
-                    : "从上方选择源文件夹后，这里会显示前 50 个文件及目录层级。"
+                    : undefined
                 }
               />
             ) : scan.fileCount === 0 ? (

@@ -359,10 +359,7 @@ export default function ConfirmationProgressPage({
                     disabled={busy}
                   />
                 </Field>
-                <p className="hint">
-                  支持
-                  XLSX、XLS；选择后点击「检查数据」读取表头、数量与必需字段。
-                </p>
+                <p className="hint">支持 XLSX、XLS。</p>
                 <div className="actions">
                   <Button
                     type="button"

@@ -1672,7 +1672,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       link = await verifyCurrencyLink(request, { throwOnError: true });
     } catch (error) {
       if (isSyncBusyAborted(error)) {
-        setCurrencyValidationNotice("已停止币种衔接验证，当前映射已保留；可重新点击下一步。");
+        setCurrencyValidationNotice("已停止币种衔接验证，当前映射已保留。");
       } else {
         setError(`TB 与 JE 的币种衔接验证失败：${errorText(error)}`);
       }
@@ -2273,7 +2273,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               )}
               {(sampledJe || sampledLedger) && (
                 <div role="status" aria-live="polite">
-                  <p>{sampledLedger ? "表头预览已就绪，可先核对字段。完整台账读取完成后可进入下一步。" : "表头预览已就绪，可先核对字段。完整年度、主体与科目清单补齐后可进入下一步。"}</p>
+                  <p>{sampledLedger ? "完整台账读取完成后可进入下一步。" : "完整年度、主体与科目清单补齐后可进入下一步。"}</p>
                   {completion.event ? <JobProgress job={completion.event} onCancel={jobCancel} compact /> : !completion.error && <p>正在启动完整读取…</p>}
                   {completion.error && <><ErrorBox error={completion.error} /><Button variant="secondary" onClick={completion.retry}>重试完整读取</Button></>}
                 </div>

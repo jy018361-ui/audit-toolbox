@@ -146,7 +146,7 @@ it.each(["verified", "noMatch", "partialCoverage", "ambiguous", "noAnchors"] as 
   render(<LoanInterestPage tool={tool} />);
   fireEvent.click(screen.getByRole("button", { name: "TB＋JE" }));
   fireEvent.click(screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }));
-  await screen.findByText(/表头预览已就绪/);
+  await screen.findByText(/完整年度、主体与科目清单补齐后可进入下一步/);
   expect(mock.engineCall.mock.calls.filter(([method]) => method === "ledger.auxiliary_link")).toHaveLength(0);
   expect(screen.getByRole("button", { name: "下一步：确认科目与利率" })).toBeDisabled();
   await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith("loan.inspect_full", {
@@ -185,7 +185,7 @@ it.each(["verified", "noMatch", "partialCoverage", "ambiguous", "noAnchors"] as 
   }
   await act(async () => auxiliaryResolvers[latest]({ tbAuxMapped: true, status, column: status === "verified" ? "辅助核算" : null, competingColumns: [], warnings: [] }));
   await waitFor(() => expect(screen.getByRole("button", { name: "下一步：确认科目与利率" })).toBeEnabled());
-  expect(screen.queryByText(/表头预览已就绪/)).toBeNull();
+  expect(screen.queryByText(/完整年度、主体与科目清单补齐后可进入下一步/)).toBeNull();
   expect(editedDate).toHaveAttribute("data-mapped", "true");
   expect(originalDate).toHaveAttribute("data-mapped", "false");
   expect(screen.getAllByRole("combobox", { name: "将「辅助核算」映射为字段" })[0]).toHaveAttribute("data-mapped", status === "verified" ? "true" : "false");
@@ -1695,7 +1695,7 @@ it("停止币种验证后保留第一步并恢复操作，重试仍须重新验�
     return original(method, params);
   });
   fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
-  expect(await screen.findByText("已停止币种衔接验证，当前映射已保留；可重新点击下一步。")).toBeVisible();
+  expect(await screen.findByText("已停止币种衔接验证，当前映射已保留。")).toBeVisible();
   expect(screen.queryByText(/验证失败|暂时无法验证/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: /下一步：确认科目与利率/ })).toBeEnabled();
   expect(screen.queryByText("确认借款及利息支出科目并设置利率")).not.toBeInTheDocument();

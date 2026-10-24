@@ -1114,9 +1114,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
           <details className="jm-export-help">
             <summary>导出文件格式与列说明</summary>
             <p className="kz-hint">
-            {draft.outputTouched
-              ? "已指定保存位置，导出会以这个文件名为基准。"
-              : "默认保存到凭证文件所在目录，文件名为「正负数标记_源文件名[_工作表]_<时间戳>.csv」（导出时按当前时间生成）。"}
+            {!draft.outputTouched &&
+              "默认保存到凭证文件所在目录，文件名为「正负数标记_源文件名[_工作表]_<时间戳>.csv」（导出时按当前时间生成）。"}
             每个批次单独出一个文件，选 .csv 出 CSV、选 .xlsx
             出工作簿；明细最前面是
             {draft.markLossTransfer ? "【损益结转】" : ""}

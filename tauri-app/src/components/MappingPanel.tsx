@@ -404,7 +404,7 @@ export function MappingPanel(props: MappingPanelProps) {
           ) : null}
           {props.requirementOf ? (
             <span className="mapping-requirement-legend">
-              ＊ 为必填字段；{props.alternatesOf ? "标注「二选一」的映射其中一个即可；" : ""}（选填）须按当前分组的整组规则补充。
+              ＊ 为必填；{props.alternatesOf ? "「二选一」任选其一；" : ""}（选填）须按当前分组的整组规则补充。
             </span>
           ) : null}
         </p>

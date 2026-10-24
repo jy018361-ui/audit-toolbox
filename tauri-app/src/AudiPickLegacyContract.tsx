@@ -291,7 +291,7 @@ function FileFlowCard({
             <p>
               {hasExtracted
                 ? `当前模板已有 ${flow.resultCount} 条结果。`
-                : "提取完成后可查看底稿并导出 Excel。"}
+                : "提取完成后可导出。"}
             </p>
           </div>
           <div className="aplc-flow-actions">

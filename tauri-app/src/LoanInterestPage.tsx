@@ -1875,6 +1875,51 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       orderedTbAccounts.some((row) => Boolean(row.entity)) ||
       rows.some((row) => Boolean(row.entity && row.entity !== DEFAULT_ENTITY))
     );
+  // 确认弹层的上下文键与行清单：全量科目＋利率明细的拼串建组只随真正
+  // 影响内容的输入重算，切步骤等整页重渲染不再重复跑一遍（大账套下是
+  // 每次渲染上百毫秒的大头）。
+  const confirmationContext = useMemo(
+    () =>
+      JSON.stringify([
+        "review-layout-v2",
+        source("tb"),
+        source("je"),
+        orderedTbAccounts.map((account) => account.reviewKey),
+        confirmationRateRows.map(loanRowKey),
+      ]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sources.tb, sources.je, orderedTbAccounts, confirmationRateRows],
+  );
+  const confirmationRows = useMemo(() => [
+    ...orderedTbAccounts.map((account): ConfirmationRow => ({
+      key: `account:${account.reviewKey}`,
+      editable: [false, ...(showSubject ? [false] : []), false, ...(showCurrencyColumn ? [false] : []), true, false, false, false, false],
+      values: ["科目", ...(showSubject ? [account.entity ?? ""] : []),
+        ledgerReviewAccountLabel(account.account, account.auxiliary, account.parentAccountName),
+        ...(showCurrencyColumn ? [account.currency ?? ""] : []),
+        loanReviewRole(account) === "loan" ? "借款科目" : loanReviewRole(account) === "interest_expense" ? "利息支出科目" : "排除",
+        "", "", "", ""],
+    })),
+    ...confirmationRateRows.map((detail): ConfirmationRow => {
+      const edit = resolvedTbRate(detail);
+      const parent = orderedTbAccounts.find((account) =>
+        reviewRateDetails.get(account.reviewKey)?.some((row) => loanRowKey(row) === loanRowKey(detail)))?.parentAccountName;
+      return { key: `rate:${loanRowKey(detail)}`,
+        editable: [false, ...(showSubject ? [false] : []), false, ...(showCurrencyColumn ? [false] : []), false, true, true, true, true],
+        values: [
+          "借款明细", ...(showSubject ? [detail.entity ?? ""] : []),
+          ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary, parent),
+          ...(showCurrencyColumn ? [detail.currency ?? ""] : []), "",
+          edit.rateType === "floating" ? "浮动" : "固定",
+          edit.fixedRate == null ? "" : String(edit.fixedRate * 100),
+          edit.benchmarkRate == null ? "" : String(edit.benchmarkRate * 100),
+          edit.spreadBps == null ? "" : String(edit.spreadBps),
+        ] };
+    }),
+    // 利率类型/数值来自 tbRateEdits（resolvedTbRate），角色来自科目角色状态
+    // （orderedTbAccounts/confirmationRateRows 已随之重建），列形态随主体/币种列。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ], [orderedTbAccounts, confirmationRateRows, reviewRateDetails, tbRateEdits, showSubject, showCurrencyColumn]);
   const ledgerSourceKey = JSON.stringify({source: source("ledger"), reportEnd});
   useEffect(() => {
     if (mode !== "ledger" || step !== 1 || !mappingsReady || ledgerInformationKey === ledgerSourceKey) return;
@@ -2676,7 +2721,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                     <AccountConfirmationActions
                     tool="loan"
                     title="借款利息"
-                    context={JSON.stringify(["review-layout-v2", source("tb"), source("je"), orderedTbAccounts.map((account) => account.reviewKey), confirmationRateRows.map(loanRowKey)])}
+                    context={confirmationContext}
                     columns={[
                       { key: "kind", title: "行类型" },
                       ...(showSubject ? [{ key: "entity", title: "主体" }] : []),
@@ -2688,33 +2733,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       { key: "benchmarkRate", title: "浮动基准（%）", editable: true },
                       { key: "spreadBps", title: "加减点（BP）", editable: true },
                     ]}
-                    rows={[
-                      ...orderedTbAccounts.map((account): ConfirmationRow => ({
-                        key: `account:${account.reviewKey}`,
-                        editable: [false, ...(showSubject ? [false] : []), false, ...(showCurrencyColumn ? [false] : []), true, false, false, false, false],
-                        values: ["科目", ...(showSubject ? [account.entity ?? ""] : []),
-                          ledgerReviewAccountLabel(account.account, account.auxiliary, account.parentAccountName),
-                          ...(showCurrencyColumn ? [account.currency ?? ""] : []),
-                          loanReviewRole(account) === "loan" ? "借款科目" : loanReviewRole(account) === "interest_expense" ? "利息支出科目" : "排除",
-                          "", "", "", ""],
-                      })),
-                      ...confirmationRateRows.map((detail): ConfirmationRow => {
-                        const edit = resolvedTbRate(detail);
-                        const parent = orderedTbAccounts.find((account) =>
-                          reviewRateDetails.get(account.reviewKey)?.some((row) => loanRowKey(row) === loanRowKey(detail)))?.parentAccountName;
-                        return { key: `rate:${loanRowKey(detail)}`,
-                          editable: [false, ...(showSubject ? [false] : []), false, ...(showCurrencyColumn ? [false] : []), false, true, true, true, true],
-                          values: [
-                          "借款明细", ...(showSubject ? [detail.entity ?? ""] : []),
-                          ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary, parent),
-                          ...(showCurrencyColumn ? [detail.currency ?? ""] : []), "",
-                          edit.rateType === "floating" ? "浮动" : "固定",
-                          edit.fixedRate == null ? "" : String(edit.fixedRate * 100),
-                          edit.benchmarkRate == null ? "" : String(edit.benchmarkRate * 100),
-                          edit.spreadBps == null ? "" : String(edit.spreadBps),
-                        ] };
-                      }),
-                    ]}
+                    rows={confirmationRows}
                     disabled={busy || accountsBusy || ratesBusy}
                     onImport={(changed) => {
                       const accountsByKey = new Map(orderedTbAccounts.map((row) => [`account:${row.reviewKey}`, row]));
@@ -3199,6 +3218,8 @@ function Mapping({
 // 固定默认列宽，避免长借款标识参与自动布局，把冻结列和整张表撑大。
 // width 属性保留在 col 上，拖动列宽后重置仍可恢复这些默认值。
 const LOAN_RESULT_COLUMN_WIDTHS = [96, 280, 112, 168, 168, 168, 168, 168, 168, 100, 104, 144, 100, 112, 168, 128];
+// 结果表每批渲染行数，口径与存款利息科目复核（250 条/批）一致。
+const LOAN_RESULT_PAGE_SIZE = 250;
 
 export function Results({
   rows,
@@ -3236,10 +3257,6 @@ export function Results({
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
-  const principalDifferenceCount = rows.filter((row) => {
-    const difference = loanEquation(row);
-    return difference != null && Math.abs(difference) >= 0.005;
-  }).length;
   const measurementStatus = (row: LoanRow) => {
     const missingRate =
       row.rateType === "floating"
@@ -3250,24 +3267,47 @@ export function Results({
     if (row.matchStatus === "两点法推算") return "两点法推算";
     return "时点待确认";
   };
-  const measurementReviewCount = rows.filter(
-    (row) => measurementStatus(row) !== "已确认",
-  ).length;
-  const visibleRows = rows
-    .map((row, index) => ({ row, index }))
-    .filter(({ row }) => {
-      const keyword = query.trim().toLowerCase();
-      const matchesQuery =
-        !keyword ||
-        `${row.entity} ${row.loanId} ${row.accountCode ?? ""} ${row.accountName ?? ""} ${row.auxiliary ?? ""}`
-          .toLowerCase()
-          .includes(keyword);
-      const difference = loanEquation(row);
-      const isException =
-        (difference != null && Math.abs(difference) >= 0.005) ||
-        measurementStatus(row) !== "已确认";
-      return matchesQuery && (!exceptionsOnly || isException);
-    });
+  // 徽章计数与筛选只随行数据/筛选条件重算，切步骤等重渲染不再全表扫一遍。
+  const principalDifferenceCount = useMemo(
+    () =>
+      rows.filter((row) => {
+        const difference = loanEquation(row);
+        return difference != null && Math.abs(difference) >= 0.005;
+      }).length,
+    [rows],
+  );
+  const measurementReviewCount = useMemo(
+    () => rows.filter((row) => measurementStatus(row) !== "已确认").length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows],
+  );
+  const visibleRows = useMemo(
+    () =>
+      rows
+        .map((row, index) => ({ row, index }))
+        .filter(({ row }) => {
+          const keyword = query.trim().toLowerCase();
+          const matchesQuery =
+            !keyword ||
+            `${row.entity} ${row.loanId} ${row.accountCode ?? ""} ${row.accountName ?? ""} ${row.auxiliary ?? ""}`
+              .toLowerCase()
+              .includes(keyword);
+          const difference = loanEquation(row);
+          const isException =
+            (difference != null && Math.abs(difference) >= 0.005) ||
+            measurementStatus(row) !== "已确认";
+          return matchesQuery && (!exceptionsOnly || isException);
+        }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, query, exceptionsOnly],
+  );
+  // 结果表分批显示：数据全量保留在状态里，界面先画首批，点「继续显示」
+  // 再追加——与存款利息科目复核同一套做法，避免几千行结果一次性铺开。
+  const [resultLimit, setResultLimit] = useState(LOAN_RESULT_PAGE_SIZE);
+  useEffect(() => {
+    setResultLimit(LOAN_RESULT_PAGE_SIZE);
+  }, [query, exceptionsOnly, rows]);
+  const renderedRows = visibleRows.slice(0, resultLimit);
   const summary = (result?.summary ?? {}) as Record<string, unknown>;
   const hasInterestExpenseAccount = summary.hasInterestExpenseAccount === true;
   const bookedInterestExpense = Number(summary.bookedInterestExpense ?? 0);
@@ -3313,7 +3353,7 @@ export function Results({
           <input type="checkbox" checked={exceptionsOnly} onChange={(event) => setExceptionsOnly(event.target.checked)} />
           只看有差异或待确认
         </label>
-        <span>显示 {visibleRows.length} / {rows.length} 行</span>
+        <span>显示 {renderedRows.length} / {visibleRows.length} 行（筛选自 {rows.length} 行）</span>
       </div>
       <div className="fx-bridge-step">
         <div className="fx-step-label">
@@ -3386,7 +3426,7 @@ export function Results({
             </tr>
           </thead>
           <tbody>
-            {visibleRows.map(({ row: r, index: i }) => {
+            {renderedRows.map(({ row: r, index: i }) => {
               const inferredClosing = r.openingPrincipal + r.additions - r.reductions;
               const principalDifference = loanEquation(r);
               return <tr key={`${r.loanId}-${i}`}>
@@ -3503,6 +3543,19 @@ export function Results({
           </tbody>
         </table>
       </div>
+      {renderedRows.length < visibleRows.length && (
+        <div className="loan-result-more">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() =>
+              setResultLimit((current) => current + LOAN_RESULT_PAGE_SIZE)
+            }
+          >
+            继续显示（已显示 {renderedRows.length} / {visibleRows.length}）
+          </Button>
+        </div>
+      )}
     </section>
   );
 }

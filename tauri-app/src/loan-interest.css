@@ -492,6 +492,12 @@
   font-size: var(--fs-sm);
   line-height: 36px;
 }
+/* 结果表分批显示的「继续显示」入口，与存款利息科目复核同款形态。 */
+.loan-result-more {
+  display: flex;
+  justify-content: center;
+  padding-top: 12px;
+}
 .loan-bridge-equation {
   display: grid;
   grid-template-columns:

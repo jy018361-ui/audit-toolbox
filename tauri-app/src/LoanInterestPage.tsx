@@ -644,7 +644,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const restoredInterestExpenseAccounts = useRef<string[] | null>(null);
   const [accountQuery, setAccountQuery] = useState("");
   const [accountPage, setAccountPage] = useState(0);
-  const [accountChangeNote, setAccountChangeNote] = useState("");
   const accountListRef = useRef<HTMLDivElement>(null);
   /** 利率手填：行标识 → 利率口径（叠加在 preview 借款行之上）。 */
   const [tbRateEdits, setTbRateEdits] = useState<Record<string, PasteRateRow>>({});
@@ -1836,9 +1835,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const goToAccountPage = (nextPage: number) => {
     const page = Math.max(0, Math.min(nextPage, accountPageCount - 1));
     setAccountPage(page);
-    const first = page * accountPageSize + 1;
-    const last = Math.min((page + 1) * accountPageSize, filteredTbAccounts.length);
-    setAccountChangeNote(`已切换到第 ${page + 1} 页（第 ${first}–${last} 项）。`);
     requestAnimationFrame(() => accountListRef.current?.scrollTo?.({ top: 0, left: 0 }));
   };
   const selectedAccountCount = orderedTbAccounts.filter((row) => loanReviewRole(row) === "loan").length;
@@ -2527,7 +2523,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                         <option value="SGD">新加坡元 SGD</option>
                       </select>
                     </label>
-                    {accountChangeNote && <span role="status">{accountChangeNote}</span>}
                   </div>
                   {accountChangesPending && <p className="fx-hint" role="status">科目分类已记录，将在下一步测算时生效。</p>}
                   {!rows.length && (
@@ -2643,15 +2638,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                                     setLoanAccountRoles((v) => ({ ...v, [a.identity ?? a.key]: next }));
                                   }
                                   recordAccountChanges();
-                                  setAccountChangeNote(
-                                    `${a.account}已设为${
-                                      next === "loan"
-                                        ? "借款科目"
-                                        : next === "interest_expense"
-                                          ? "利息支出科目"
-                                          : "排除"
-                                    }。`,
-                                  );
                                 }}
                               >
                                 <option value="loan">借款科目</option>

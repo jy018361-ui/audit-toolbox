@@ -3406,7 +3406,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 ) : (
                   completedStage === "fx.export" &&
                   outputsFrom(result).length > 0 && (
-                    <p className="fx-export-complete" role="status">底稿已生成。</p>
+                    <p className="fx-export-complete" role="status">
+                      底稿已生成：{outputsFrom(result).map(fileName).join("、")}
+                    </p>
                   )
                 )
               ) : (

@@ -726,10 +726,9 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   expect(accountRows.length).toBeLessThanOrEqual(81);
   expect(screen.getByText("第 1 / 3 页")).toBeVisible();
   fireEvent.change(loanSelect, { target: { value: "skip" } });
-  expect(screen.getByText("2001 短期借款已设为排除。")).toBeVisible();
+  expect((loanSelect as HTMLSelectElement).value).toBe("skip");
   fireEvent.click(screen.getByRole("button", { name: "下一页" }));
   expect(screen.getByText("第 2 / 3 页")).toBeVisible();
-  expect(screen.getByText(/已切换到第 2 页/)).toBeVisible();
   // 生成利率表已全自动化；排除唯一借款科目后，下一步仍须阻断。
   expect(
     screen.queryByRole("button", { name: "生成借款利率表" }),
@@ -1261,7 +1260,6 @@ it.each([false, true])("连续调整科目分类仅记录，第三步测算时�
     screen.getByRole("combobox", { name: "2202 长期借款的科目类型" }),
     { target: { value: "loan" } },
   );
-  expect(screen.getByText("2202 长期借款已设为借款科目。")).toBeVisible();
   expect(prepareCalls()).toHaveLength(beforeChanges);
   expect(screen.queryByRole("spinbutton", { name: "C银行借款的执行利率" })).not.toBeInTheDocument();
   expect(screen.getByText("科目分类已记录，将在下一步测算时生效。")).toBeVisible();

@@ -56,7 +56,6 @@ export function AccountConfirmationActions({
     try {
       await engineCall("account_confirmation.export", { tool, context, columns, rows, outputPath, ...(documentKind ? { documentKind } : {}) });
       if (currentContext.current !== context) return;
-      setNote(`已下载 ${rows.length} 行${name}。`);
       setDownloadPath(outputPath);
     } catch (error) {
       setNote(errorMessage(error));

@@ -356,6 +356,12 @@
   flex: 1 1 280px;
   max-width: 520px;
 }
+/* 汇总表/透视表分批显示的「继续显示」入口，与存款利息同款形态。 */
+.fa-tbje-table-more {
+  display: flex;
+  justify-content: center;
+  padding-top: 12px;
+}
 .fa-tbje-confirm-footer {
   display: flex;
   align-items: center;

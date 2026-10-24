@@ -120,6 +120,8 @@ let faTbJeDraftCache: FaTbJeDraft | undefined;
 
 const MULTI = new Set(["id", "accountName", "account", "auxiliary", "date"]);
 const PAGE_SIZE = 50;
+// 汇总变动表/对方科目透视表的每批渲染行数，与存款利息 250 条/批口径一致。
+const FA_TABLE_PAGE_SIZE = 250;
 
 const hasMapped = (mapping: Mapping, role: string) => {
   const value = mapping[role];
@@ -469,6 +471,11 @@ const faAssignmentIdentity = (row: Pick<Assignment, "entity" | "account" | "auxi
     row.currency ?? "",
   ]);
 };
+
+/** 确认表与表体共用的行键：与旧 JSON.stringify 键同值域的唯一串，
+    大账套逐行建键时不再反复序列化。 */
+const faViewKey = (entity: string | undefined, key: string) =>
+  `${entity ?? DEFAULT_ENTITY}\u0000${key}`;
 
 /** TB 在前、JE 在后合并两侧真实组合，按「主体＋科目串」去重（TB 写法优先保留）。 */
 export function unionEntityAccounts(
@@ -910,6 +917,29 @@ export function FaTbJePage() {
   const showReviewEntity = entityKeyEnabled &&
     new Set(assignmentViews.map((view) => view.entity)).size > 1;
   const showReviewCurrency = ledgerHasMappedRole(mappings.tb, "currency");
+  // 确认弹层的上下文键与行清单：全量科目的拼串建键只随真正影响内容的输入
+  // 重算，切步骤等整页重渲染不再重复跑一遍。
+  const confirmationContext = useMemo(
+    () =>
+      JSON.stringify([
+        "review-layout-v2",
+        paths,
+        mappings,
+        assignmentViews.map((view) => [view.entity, view.key]),
+      ]),
+    [paths, mappings, assignmentViews],
+  );
+  const confirmationRows = useMemo(
+    () =>
+      assignmentViews.map((view) => ({
+        key: faViewKey(view.entity, view.key),
+        values: [...(showReviewEntity ? [view.entity] : []), ledgerReviewAccountLabel(view.label, view.auxiliary, view.parentAccountName),
+          ...(showReviewCurrency ? [view.currency ?? ""] : []),
+          view.role === "cost" ? "固定资产原值" : view.role === "depreciation" ? "累计折旧" : "排除",
+          view.category],
+      })),
+    [assignmentViews, showReviewEntity, showReviewCurrency],
+  );
   const includedViews = assignmentViews.filter(
     (view) => view.role !== "excluded",
   );
@@ -938,9 +968,13 @@ export function FaTbJePage() {
       visibleAssignmentPage * PAGE_SIZE,
       (visibleAssignmentPage + 1) * PAGE_SIZE,
     );
-  const roleCounts = assignmentViews.reduce(
-    (counts, view) => ({ ...counts, [view.role]: counts[view.role] + 1 }),
-    { cost: 0, depreciation: 0, excluded: 0 } as Record<AccountRole, number>,
+  const roleCounts = useMemo(
+    () =>
+      assignmentViews.reduce(
+        (counts, view) => ({ ...counts, [view.role]: counts[view.role] + 1 }),
+        { cost: 0, depreciation: 0, excluded: 0 } as Record<AccountRole, number>,
+      ),
+    [assignmentViews],
   );
   useEffect(() => {
     if (restoredDraftOnMount.current) {
@@ -1775,7 +1809,7 @@ export function FaTbJePage() {
                 </thead>
                 <tbody>
                   {pagedViews.map(({ view, index }) => (
-                    <tr key={JSON.stringify([view.entity, view.key])}>
+                    <tr key={faViewKey(view.entity, view.key)}>
                       {showReviewEntity && <td><Badge variant="outline">{view.entity}</Badge></td>}
                       <td title={ledgerReviewAccountLabel(view.label, view.auxiliary, view.parentAccountName)}>
                         <div className="fa-tbje-account-cell">
@@ -1867,7 +1901,7 @@ export function FaTbJePage() {
               <AccountConfirmationActions
                 tool="fa_tbje"
                 title="固定资产TBJE"
-                context={JSON.stringify(["review-layout-v2", paths, mappings, assignmentViews.map((view) => [view.entity, view.key])])}
+                context={confirmationContext}
                 columns={[
                   ...(showReviewEntity ? [{ key: "entity", title: "主体" }] : []),
                   { key: "account", title: "科目" },
@@ -1875,17 +1909,11 @@ export function FaTbJePage() {
                   { key: "role", title: "角色", editable: true, options: ["排除", "固定资产原值", "累计折旧"] },
                   { key: "category", title: "资产类别", editable: true },
                 ]}
-                rows={assignmentViews.map((view) => ({
-                  key: JSON.stringify([view.entity, view.key]),
-                  values: [...(showReviewEntity ? [view.entity] : []), ledgerReviewAccountLabel(view.label, view.auxiliary, view.parentAccountName),
-                    ...(showReviewCurrency ? [view.currency ?? ""] : []),
-                    view.role === "cost" ? "固定资产原值" : view.role === "depreciation" ? "累计折旧" : "排除",
-                    view.category],
-                }))}
+                rows={confirmationRows}
                 disabled={busy}
                 onImport={(changed) => {
                   invalidateResult();
-                  const byKey = new Map(assignmentViews.map((view) => [JSON.stringify([view.entity, view.key]), view]));
+                  const byKey = new Map(assignmentViews.map((view) => [faViewKey(view.entity, view.key), view]));
                   const updates = new Map(changed.map((row) => {
                     const view = byKey.get(row.key)!;
                     const roleIndex = Number(showReviewEntity) + 1 + Number(showReviewCurrency);
@@ -1895,7 +1923,7 @@ export function FaTbJePage() {
                     return [row.key, { role, category: normalizeFaCategory(row.values[roleIndex + 1]) }] as const;
                   }));
                   setAssignments((current) => current.map((row) => {
-                    const key = JSON.stringify([row.entity ?? DEFAULT_ENTITY, faAssignmentIdentity(row)]);
+                    const key = faViewKey(row.entity, faAssignmentIdentity(row));
                     return updates.has(key) ? { ...row, ...updates.get(key)! } : row;
                   }));
                   setAccountsReviewed(false);
@@ -2072,17 +2100,25 @@ export function FaSummaryTable({
   });
   const [query, setQuery] = useState("");
   const [differencesOnly, setDifferencesOnly] = useState(false);
-  const matches = keywordFilterPredicate(query);
-  const visibleRows = rows.filter((row) => {
-    const values = Array.isArray(row.values) ? row.values : [];
-    if (
-      differencesOnly &&
-      (row.section !== "勾稽差异" ||
-        !values.some((value) => Math.abs(Number(value) || 0) >= 0.005))
-    )
-      return false;
-    return matches(`${row.section ?? ""} ${row.item ?? ""}`);
-  });
+  const visibleRows = useMemo(() => {
+    const matches = keywordFilterPredicate(query);
+    return rows.filter((row) => {
+      const values = Array.isArray(row.values) ? row.values : [];
+      if (
+        differencesOnly &&
+        (row.section !== "勾稽差异" ||
+          !values.some((value) => Math.abs(Number(value) || 0) >= 0.005))
+      )
+        return false;
+      return matches(`${row.section ?? ""} ${row.item ?? ""}`);
+    });
+  }, [rows, query, differencesOnly]);
+  // 变动项目分批显示：数据全量保留，界面先画首批，避免多主体大账套一次铺开。
+  const [rowLimit, setRowLimit] = useState(FA_TABLE_PAGE_SIZE);
+  useEffect(() => {
+    setRowLimit(FA_TABLE_PAGE_SIZE);
+  }, [query, differencesOnly, rows]);
+  const renderedRows = visibleRows.slice(0, rowLimit);
   let lastSection: string | null = null;
   return (
     <div className="fa-tbje-summary-shell">
@@ -2123,7 +2159,7 @@ export function FaSummaryTable({
           </tr>
         </thead>
         <tbody>
-          {visibleRows.map((row, index) => {
+          {renderedRows.map((row, index) => {
             const section =
               row.section && row.section !== lastSection ? row.section : "";
             lastSection = row.section ?? lastSection;
@@ -2173,6 +2209,17 @@ export function FaSummaryTable({
         </tbody>
       </table>
       </div>
+      {renderedRows.length < visibleRows.length && (
+        <div className="fa-tbje-table-more">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => setRowLimit((current) => current + FA_TABLE_PAGE_SIZE)}
+          >
+            继续显示（已显示 {renderedRows.length} / {visibleRows.length}）
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -2238,13 +2285,23 @@ export function FaPivotTable({
   const resize = useTableColumnResize<HTMLDivElement>({
     storageKey: resizeKey ?? "",
   });
-  const totals = rows.reduce<{ debit: number; credit: number }>(
-    (acc, row) => ({
-      debit: acc.debit + (Number(row.debit) || 0),
-      credit: acc.credit + (Number(row.credit) || 0),
-    }),
-    { debit: 0, credit: 0 },
+  const totals = useMemo(
+    () =>
+      rows.reduce<{ debit: number; credit: number }>(
+        (acc, row) => ({
+          debit: acc.debit + (Number(row.debit) || 0),
+          credit: acc.credit + (Number(row.credit) || 0),
+        }),
+        { debit: 0, credit: 0 },
+      ),
+    [rows],
   );
+  // 对方科目分批显示：与汇总表同款，避免凭证科目多时一次铺开。
+  const [rowLimit, setRowLimit] = useState(FA_TABLE_PAGE_SIZE);
+  useEffect(() => {
+    setRowLimit(FA_TABLE_PAGE_SIZE);
+  }, [rows]);
+  const renderedRows = rows.slice(0, rowLimit);
   return (
     <div className="fa-tbje-pivot-block">
       <h4>{title}</h4>
@@ -2265,7 +2322,7 @@ export function FaPivotTable({
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, index) => (
+            {renderedRows.map((row, index) => (
               <tr key={index}>
                 <td title={String(row.entity ?? "")}>
                   {String(row.entity ?? "")}
@@ -2297,6 +2354,17 @@ export function FaPivotTable({
           </tbody>
         </table>
       </div>
+      {renderedRows.length < rows.length && (
+        <div className="fa-tbje-table-more">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => setRowLimit((current) => current + FA_TABLE_PAGE_SIZE)}
+          >
+            继续显示（已显示 {renderedRows.length} / {rows.length}）
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

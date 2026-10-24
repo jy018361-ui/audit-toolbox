@@ -44,6 +44,7 @@ function outcomeStatus(outcome: LedgerReviewOutcome): string {
 export function useLedgerDictReviews(
   call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
   sourceKeys?: Partial<Record<"je" | "tb", string>>,
+  mappings?: Partial<Record<"je" | "tb", Record<string, string | string[] | undefined>>>,
 ) {
   const [reviewing, setReviewing] = useState<Record<"je" | "tb", boolean>>({
     je: false,
@@ -60,6 +61,11 @@ export function useLedgerDictReviews(
   const slotsRef = useRef<Partial<Record<"je" | "tb", LedgerReviewSlot>>>({});
   const mounted = useRef(true);
   const previousSources = useRef(sourceKeys);
+  const mappingKey = (mapping: Record<string, unknown> | undefined) => JSON.stringify(
+    Object.entries(mapping ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+  );
+  const mappingKeys = { tb: mappingKey(mappings?.tb), je: mappingKey(mappings?.je) };
+  const previousMappings = useRef(mappingKeys);
   /** 开始换文件/重新识别时即调用；旧请求仍可结束，但不得再回写。 */
   const clearReview = useCallback((kind: "je" | "tb") => {
     generation.current[kind] += 1;
@@ -84,6 +90,16 @@ export function useLedgerDictReviews(
     }
     previousSources.current = sourceKeys;
   }, [sourceKeys?.je, sourceKeys?.tb, clearReview]);
+  useLayoutEffect(() => {
+    for (const kind of ["je", "tb"] as const) {
+      // 自动采纳、撤销和确认建议已同时更新 outcome，不应清掉刚得到的新结论。
+      // 手工修改或其他映射变化则使旧结论及迟到的请求立即失效。
+      if (previousMappings.current[kind] !== mappingKeys[kind] &&
+          mappingKeys[kind] !== mappingKey(results[kind]?.mapping))
+        clearReview(kind);
+    }
+    previousMappings.current = mappingKeys;
+  }, [mappingKeys.je, mappingKeys.tb, clearReview]);
   const reviewAll = useCallback(
     async (
       slots: Partial<Record<"je" | "tb", LedgerReviewSlot>>,

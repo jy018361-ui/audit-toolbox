@@ -1,5 +1,35 @@
 # 借款利息台账确认口径
 
+## 2026-10-24：自动映射共用成组字段、冲突补选与辅助候选
+
+- 接入公共 Oracle Entered／Accounted、冲突后的未占用次选及有取值证据的辅助候选；规则与边界见 `LEDGER_MAPPING_UNIFICATION.md` 同日“自动映射补丁统一到公共引擎”。保留人工确认覆盖、工具业务角色范围和辅助跨表验证要求。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib unified_automatic` 及本工具库测试；记录见 `artifacts/public-mapping-unification-20261024/`。本项不打包 EXE。
+
+
+## 2026-10-24：公共双方向列识别接入
+
+借款沿用公共角色建议和方向收口；已识别期初不再漏掉第二条方向，双列不误走单列共享，LLM 复核指导同步引用公共规则。普通／磁盘正式识别与存款／FA、汇兑／TBJE 的同件对照见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目及 `--lib direction_pair` 回归。本次不改本金、利率或父子勾稽规则；历史人工映射不静默改写。
+
+## 2026-10-24：取消 JE 金额映射的前后端门禁
+
+- JE 本位币金额要求净额或完整借贷两列，取消任一必需列或全部金额列后立即提示缺失；底部下一步、步骤条、测算与正式 worker 的 `validate_run_request` 使用一致口径。净额方案无需方向列，空字符串及仅含空白的数组不视作有效映射。
+- TB 期初和累计发生额的既有豁免、期末余额家族任一即可，以及台账形态、币种、辅助验证和计息公式保持。映射下拉的必填/选填标记及表型说明落实相同豁免，避免公共表型的星号误导。
+- 借款复核状态绑定当前映射：手改后旧结果和迟到请求失效；补回不自动恢复已复核结论；自动应用建议保留本次结论。
+- 回归：`npx vitest run src/LoanInterestPage.test.ts src/LoanInterestPageUi.test.tsx src/ledgerForms.test.ts src/components/LedgerReviewAll.test.tsx`；`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest::`；`npm run build`。Rust 用例同时调用正式 `run_job`，确认预览/导出均在读表和缓存复用前拒绝缺失映射；不打包 EXE。
+
+## 2026-10-24：读取计划与内存保护统一
+
+- 借款完整识别、测算预览和导出在任务启动时生成读取计划，随 worker 请求传递；任务监控与同线程的嵌套公共读表共用该计划，不随启动等待或运行中的内存波动重新分流。普通计划不启用大文件暂停保护，磁盘计划继续沿用实际内存压力下的暂停、恢复和取消。
+- 完整 JE、借款台账和利率台账按单源基础工作集判断，TB 完整识别保留四倍工作集，正式 TB＋JE 保留联合四倍工作集；指定 Sheet 时只估算该表及共享字符串，未知选表仍保守估算整本。同文件用于多个来源时合并为更保守的磁盘决定。模式切换后未参与读取的旧来源不计入本次计划；不存在的输入仍走原读取错误。独立 worker 没有父进程计划时在入口生成一次；旧请求格式继续兼容。
+- 借款工具入口及其嵌套读表使用同一计划；其他工具的接入边界见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目。不修改内存暂停阈值或本金利息规则，也不代表普通模式不会发生实际内存分配失败。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_read_plan`、`--lib disk_table::tests::`、`--lib resource_budget::tests::`、`--lib loan_interest:: -- --test-threads=1`。覆盖旧 JE 乘数不一致、未选 Sheet 干扰、worker 序列化传递、内存波动不切换、联合 TB＋JE、台账及利率台账策略。
+
+## 2026-10-24：推算期末余额公式缓存与明细、合计一致
+
+- 借款底稿 F 列“期末余额（推算）”的缓存改为按 B＋C－D（期初＋新增－偿还）计算；F 列合计缓存汇总同一推算值，不再取 `closing_principal`。TB＋JE 与台账模式共用此导出逻辑，预览快照复用后导出也重新写入正确公式缓存。
+- E 列来源期末及 G 列“推算－来源”勾稽差异保持，真实账表不一致不会被缓存掩盖；无来源期末时，G 列显式保存空字符串缓存，避免写表库把空结果退回默认 0。本金、计息、方向映射和账面费用口径不改。已导出的旧文件不会自动更新。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib predicted_closing_formula_cache_preserves_source_differences`；`cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest:: -- --test-threads=1`。覆盖两种模式、方向相反的期末、真实差异、无来源期末、完全勾稽及 E／F／G 合计。本轮不打包 EXE。
+
 ## 2026-10-23：组合科目双角色贯通本金与计息
 
 - TB／JE 将同一组合单元格兼挂科目编码和名称时，借款内存、磁盘的角色取值及匹配文本接入公共 `account_code_from_fields`／`account_name_from_fields`，受限拆分四位以上数字编码＋连字符＋中文名称。独立辅助复合编码、未确认双角色的连字符编码及原有冒号等旧格式保持；无名称映射时不凭空填入名称角色。

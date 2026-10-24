@@ -1,5 +1,27 @@
 # FA List Rust 迁移覆盖矩阵
 
+## 2026-10-24：折旧费用语境优先于资产角色词
+
+- FA 自动分类先检查科目自身、真实上级及分类语境中的“费用／費用”＋“折旧／折舊”，命中则排除；无费用语境的“固定资产折旧／固定資產折舊”建议为累计折旧，并剥离角色前缀生成类别。保留既有使用权、清理、减值及折旧费排除和人工确认优先级，不按6开头编码无条件排除自定义科目。
+- 公共确认目录保留原结构上级及源表明确“科目级别描述／科目大类名称／上级科目名称”的语境，不要求明细编码延续大类编码；同一完整身份有多个上级时新增 `parentAccountNames` 保存原始列表，不伪造唯一上级、不据此建立金额父子关系或更改身份及末级掩码。FA 消费列表作本项分类，存款／汇兑原有角色建议不变。普通与磁盘目录使用同一实现。Rust 异码 JE 分类承接的名称证据同步认识“固定资产折旧”，含费用及折旧词的名称不提供资产角色证据。FA分析指纹升级避免复用旧名称承接结果。
+- 回归：`npx vitest run src/FaTbJePage.test.ts src/faListUi.test.ts`、`npm run build`；`cargo test --manifest-path src-tauri/Cargo.toml --lib depreciation_context`、`--lib fa_tbje:: -- --test-threads=1`。05原件先设 `FA_DEPRECIATION_CASE/OUTPUT` 运行 `depreciation_context_original_catalog -- --ignored`，前端 `FA_TB_ONLY_CASES/OUTPUT` 生成确认项，再设 `FA_DEPRECIATION_CONFIRMED` 运行 `depreciation_context_original_confirmed_export -- --ignored`。只运行库测试，不打包应用 EXE；不改大学类别配对或完整性会计要素分类。
+
+## 2026-10-24：自动映射共用成组字段、冲突补选与辅助候选
+
+- 接入公共 Oracle Entered／Accounted、冲突后的未占用次选及有取值证据的辅助候选；规则与边界见 `LEDGER_MAPPING_UNIFICATION.md` 同日“自动映射补丁统一到公共引擎”。保留人工确认覆盖、工具业务角色范围和辅助跨表验证要求。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib unified_automatic` 及本工具库测试；记录见 `artifacts/public-mapping-unification-20261024/`。本项不打包 EXE。
+
+
+## 2026-10-24：读取计划与内存保护统一
+
+FA 清单／子工具及 TB＋JE 的任务监控与实际读表共用固定计划，保留各业务倍率，覆盖大型补充表，避免等待后的重复分流。 普通计划不启用本套大文件暂停；磁盘计划保留原内存阈值、暂停恢复及取消。策略、跨工具边界和回归命令见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目，worker 合成验收记录见 `build/loan-read-plan-check/`。本次不改业务计算或用户映射。
+
+## 2026-10-24：前端必填映射与后端门禁对齐
+
+- FA 前端缺失清单接入公共 TB/JE 表型，取消 TB 累计借方或贷方后立即提示并禁用科目复核入口；表型尚未取得的兼容回退同样要求累计借贷完整。身份槽、净额/借贷选择及后端校验保持。
+- 手工改映射使旧 LLM 复核结论失效；自动采纳建议保留本次复核结果。分类、主体、资产角色、类别承接、金额计算及输出未变。
+- 回归：`npx vitest run src/FaTbJePage.test.ts src/components/LedgerReviewAll.test.tsx`；`npm run build`。页面测试覆盖累计贷方取消/补回的提示和门禁；原有仅 TB 分类及历史恢复流程使用完整映射回归，不打包 EXE。
+
 ## 2026-10-23：仅TB分类的独立程序原件验收
 
 - 前端实际函数仅生成TB确认项（含人工排除），Tauri CLI验收EXE完成上海君屹、SAP2000/2002、大学三组worker预览和导出。原值／折旧分录数、净额及完整凭证逐项与独立原件统计一致，三组均无警告；君屹与大学勾稽差异为零，SAP缺少2000主体JE形成的两类真实折旧差异保留。

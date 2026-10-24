@@ -1874,6 +1874,7 @@ summary:focus-visible {
 }
 .mapping-panel > .loan-map-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
   gap: var(--sp-4);
@@ -1886,7 +1887,7 @@ summary:focus-visible {
   margin: 0;
   color: var(--ink-strong);
   font-size: var(--fs-lg);
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   text-wrap: balance;
 }
 .mapping-panel > .loan-map-head p {
@@ -1899,6 +1900,50 @@ summary:focus-visible {
   align-items: flex-end;
   flex-wrap: wrap;
   gap: var(--sp-2);
+  min-width: 0;
+  max-width: 100%;
+}
+.mapping-source-controls {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  min-width: 0;
+  width: max-content;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.mapping-source-controls > label {
+  min-width: 0;
+  max-width: 100%;
+}
+.mapping-source-controls > label:first-child {
+  flex: 0 1 200px;
+  width: 200px;
+  max-width: 260px;
+}
+.mapping-source-controls input,
+.mapping-source-controls select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+.mapping-source-controls input[type="number"] {
+  width: 100px;
+}
+.source-preview {
+  min-width: 0;
+}
+.source-preview-toolbar {
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+.source-preview-empty {
+  padding: var(--sp-4) var(--sp-5);
+  color: var(--text-muted);
 }
 .mapping-panel-toolbar label {
   display: grid;

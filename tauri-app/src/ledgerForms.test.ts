@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   describeForm,
   formGroups,
+  interestLedgerForms,
   resolveForm,
   roleRequirement,
   type LedgerForm,
@@ -63,6 +64,26 @@ const debitCreditMapping = {
 };
 
 describe("按型号判定", () => {
+  it("利息TB期初和累计独立选填，期末借贷任一到位即可", () => {
+    const forms = interestLedgerForms("tb", TB_FORMS, "loan");
+    const mapping = {accountCode: "科目", closingFunctionalCredit: "期末贷方"};
+    expect(resolveForm("tb", forms, mapping)?.complete).toBe(true);
+    const groups = formGroups("tb", TB_ROLES, forms, mapping);
+    for (const group of groups) {
+      expect(group.required ?? []).not.toContain("openingFunctionalAmount");
+      expect(group.required ?? []).not.toContain("ytdFunctionalDebit");
+      expect(group.required ?? []).not.toContain("ytdFunctionalCredit");
+    }
+    expect(resolveForm("tb", forms, {...mapping, openingFunctionalDebit: "期初借方"})?.complete).toBe(true);
+    expect(resolveForm("tb", forms, {})?.complete).toBe(false);
+  });
+
+  it("存款单侧JE金额有效，借款借贷方案缺一侧仍不完整", () => {
+    const forms: LedgerForm[] = [{id:"JE1",label:"借贷分列",required:[["functionalDebit","functionalCredit"]],anyOf:[],optional:[]}];
+    const mapping={functionalDebit:"借方"};
+    expect(resolveForm("je", interestLedgerForms("je", forms, "deposit"), mapping)?.complete).toBe(true);
+    expect(resolveForm("je", interestLedgerForms("je", forms, "loan"), mapping)?.complete).toBe(false);
+  });
   it("借贷分列齐全时命中借贷分列那一型，型号名给用户看的是字母", () => {
     const match = resolveForm("tb", TB_FORMS, debitCreditMapping);
     expect(match?.form.id).toBe("TB3");

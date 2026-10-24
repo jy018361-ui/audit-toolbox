@@ -21,8 +21,8 @@ import { FileInput } from "@/components/FileInput";
 import { FileDropInput } from "@/components/FileDropInput";
 import { displayFileName } from "@/fileDisplay";
 import { DataTable } from "@/components/DataTable";
+import { SourceTableControls } from "@/components/SourceTableControls";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { DateInput, isValidIsoDate } from "@/components/DateInput";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -309,7 +309,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
         enabled: true,
         passed: false,
         failed: true,
-        message: `${errorText(e).replace(/[。.]+$/, "")}。字段映射本身没有问题，脚本自动映射已完成，可直接核对后继续；LLM 复核只是可选的辅助检查。`,
+        message: `${errorText(e).replace(/[。.]+$/, "")}。智能复核未完成，当前映射仍可手动核对后继续。`,
         detail,
         autoApplied: [],
         fieldReviews: [],
@@ -687,46 +687,16 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
 
               {/* 与借款等账表工具一致：Sheet/标题行跟随映射预览，上传时不出现。 */}
               <div className="mapping-panel-toolbar dep-map-toolbar">
-                <label>
-                  Sheet
-                  {inspection.sheets.length ? (
-                    <select
-                      value={sheet}
-                      disabled={busy}
-                      onChange={(e) => {
-                        setSheet(e.target.value);
-                        setHeaderRow("");
-                        void inspect({
-                          sheet: e.target.value,
-                          headerRow: "",
-                        });
-                      }}
-                    >
-                      {inspection.sheets.map((value) => (
-                        <option key={value}>{value}</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <Input
-                      value={sheet}
-                      placeholder="自动选择"
-                      disabled={busy}
-                      onChange={(e) => setSheet(e.target.value)}
-                    />
-                  )}
-                </label>
-                <label>
-                  标题行
-                  <Input
-                    value={headerRow}
-                    placeholder="自动识别"
-                    disabled={busy}
-                    onChange={(e) => setHeaderRow(e.target.value)}
-                    onBlur={() => {
-                      if (path && inspection) void inspect();
-                    }}
-                  />
-                </label>
+                <SourceTableControls
+                  sheet={sheet} sheets={inspection.sheets} headerRow={headerRow} editableSheet disabled={busy || llmBusy}
+                  onSheetChange={(sheet) => {
+                    setSheet(sheet);
+                    setHeaderRow("");
+                    if (inspection.sheets.length) void inspect({ sheet, headerRow: "" });
+                  }}
+                  onHeaderRowChange={setHeaderRow}
+                  onHeaderRowBlur={() => { if (path && inspection) void inspect(); }}
+                />
               </div>
               <DataTable
                 columns={inspection.headers}

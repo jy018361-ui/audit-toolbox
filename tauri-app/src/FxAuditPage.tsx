@@ -16,6 +16,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { AuxiliaryLinkStatusView } from "@/components/AuxiliaryLinkStatus";
 import { EmptyState } from "@/components/EmptyState";
 import { FileDropInput } from "@/components/FileDropInput";
+import { SourceTableControls } from "@/components/SourceTableControls";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress, terminalJobError } from "@/components/JobProgress";
 import { DateInput } from "@/components/DateInput";
@@ -2689,9 +2690,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                     setJeMapping({});
                   }}
                   onInspect={() => void inspect("je")}
-                  onHeaderChange={(headerRow, headerDepth, sheet) =>
-                    void inspect("je", { headerRow, headerDepth, sheet })
-                  }
                   onKindChange={
                     () => void changeSourceKind("je", "tb")
                   }
@@ -2742,9 +2740,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                     setTbMapping({});
                   }}
                   onInspect={() => void inspect("tb")}
-                  onHeaderChange={(headerRow, headerDepth, sheet) =>
-                    void inspect("tb", { headerRow, headerDepth, sheet })
-                  }
                   onKindChange={
                     () => void changeSourceKind("tb", "je")
                   }
@@ -2873,6 +2868,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 kind="je"
                 mode={mode}
                 inspection={je}
+                onHeaderChange={(headerRow, headerDepth, sheet) => void inspect("je", { headerRow, headerDepth, sheet })}
+                sourceBusy={busy || reviewingAny}
                 mapping={jeMapping}
                 labels={JE_LABELS}
                 missing={fxMissingDetails("je", jeMapping, je.headers)}
@@ -2900,6 +2897,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 kind="tb"
                 mode={mode}
                 inspection={tb}
+                onHeaderChange={(headerRow, headerDepth, sheet) => void inspect("tb", { headerRow, headerDepth, sheet })}
+                sourceBusy={busy || reviewingAny}
                 mapping={tbMapping}
                 labels={TB_LABELS}
                 missing={fxMissingDetails("tb", tbMapping, tb.headers)}
@@ -3440,7 +3439,6 @@ function SourceCard(props: {
   onReplace: () => void;
   onClear: () => void;
   onInspect: () => void;
-  onHeaderChange: (row: number, depth: number, sheet: string) => void;
   onKindChange?: () => void;
   kindChangeLabel?: string;
 }) {
@@ -3489,52 +3487,6 @@ function SourceCard(props: {
         {props.inspection && (
           <div className="fx-source-meta">
             <span>{props.inspection.rowCount.toLocaleString()} 行</span>
-            <label>
-              Sheet
-              <select
-                value={props.inspection.sheet}
-                onChange={(e) => props.onHeaderChange(0, 0, e.target.value)}
-              >
-                {props.inspection.sheets.length ? (
-                  props.inspection.sheets.map((s) => (
-                    <option key={s}>{s}</option>
-                  ))
-                ) : (
-                  <option>{props.inspection.sheet}</option>
-                )}
-              </select>
-            </label>
-            <label>
-              标题行
-              <input
-                type="number"
-                min={1}
-                value={props.inspection.headerRow}
-                onChange={(e) =>
-                  props.onHeaderChange(
-                    Number(e.target.value),
-                    props.inspection!.headerDepth,
-                    props.inspection!.sheet,
-                  )
-                }
-              />
-            </label>
-            <label>
-              表头层数
-              <select
-                value={props.inspection.headerDepth}
-                onChange={(e) =>
-                  props.onHeaderChange(
-                    props.inspection!.headerRow,
-                    Number(e.target.value),
-                    props.inspection!.sheet,
-                  )
-                }
-              >
-                <option value={1}>1层</option>
-                <option value={2}>2层</option>
-              </select>
-            </label>
           </div>
         )}
       </CardContent>
@@ -3604,6 +3556,8 @@ function FxPreview(props: {
   /** JE 与 TB 的原币币种都是必填角色。 */
   mode: Mode;
   inspection: Inspection;
+  onHeaderChange: (row: number, depth: number, sheet: string) => void;
+  sourceBusy: boolean;
   mapping: Record<string, string | string[]>;
   labels: Record<string, string>;
   missing: string[];
@@ -3742,6 +3696,16 @@ function FxPreview(props: {
       isLocked={locked}
       missing={props.missing}
       banner={props.banner}
+      toolbar={
+        <SourceTableControls
+          sheet={props.inspection.sheet} sheets={props.inspection.sheets}
+          headerRow={props.inspection.headerRow} headerDepth={props.inspection.headerDepth}
+          disabled={props.sourceBusy}
+          onSheetChange={(sheet) => props.onHeaderChange(0, 0, sheet)}
+          onHeaderRowChange={(row) => props.onHeaderChange(Number(row), props.inspection.headerDepth, props.inspection.sheet)}
+          onHeaderDepthChange={(depth) => props.onHeaderChange(props.inspection.headerRow, depth, props.inspection.sheet)}
+        />
+      }
       busy={props.reviewBusy}
       mode="toggle"
       rolesOf={mappedRoles}

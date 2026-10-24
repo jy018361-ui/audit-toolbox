@@ -2582,11 +2582,12 @@ export function Settings({
           <section className="list-card">
             <h2>语音转写（百炼）</h2>
             <p className="settings-note">
-              供会议纪要助手使用。通用通道：录音上传百炼文件转写，按录音时长计费
-              （新开通通常有免费额度），自动区分说话人；套餐通道：走 Token Plan
-              专属实时接口，转写消耗套餐 token，不区分说话人，仅支持 WAV
-              录音（工具箱自录会议即为 WAV）。纪要整理继续使用上方统一 LLM 配置。
+              会议录音会发送至你配置的百炼转写服务；纪要整理使用上方的大模型配置。
             </p>
+            <details className="settings-note">
+              <summary>查看通道差异与计费方式</summary>
+              <p>通用通道按录音时长计费，可区分说话人；套餐通道消耗 Token Plan 套餐额度，不区分说话人，仅支持 WAV 录音。</p>
+            </details>
             <div className="form-grid">
               <label className="field">
                 <span>转写通道</span>

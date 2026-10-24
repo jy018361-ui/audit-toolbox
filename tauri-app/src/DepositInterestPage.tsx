@@ -52,11 +52,13 @@ import {
   type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
 import { MappingPanel } from "@/components/MappingPanel";
+import { SourceTableControls } from "@/components/SourceTableControls";
 import { useTableColumnResize } from "@/components/useTableColumnResize";
 import { BusySpinner } from "@/components/BusySpinner";
 import {
   describeForm,
   formGroups,
+  interestLedgerForms,
   resolveForm,
   roleRequirement,
   useLedgerForms,
@@ -137,6 +139,7 @@ export type Inspection = {
     currency: string;
     classificationContext?: string;
     parentAccountName?: string;
+    parentAccountNames?: string[];
     suggestedDepositRole?: string;
     suggestedFxRole?: string;
   }>;
@@ -3046,12 +3049,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   </span>
                 </label>
               </div>
-              {jePath && (
-                <p className="deposit-layout">
-                  当前序时账布局：{JE_LAYOUT_LABEL[depositJeLayout(jeMapping)]}
-                  （由你映射的列决定）；金额符号记法由系统按凭证配平自动识别，测算结果中会披露判定依据。
-                </p>
-              )}
               {requiredMappingsMissing.length > 0 && (
                 <p className="fx-warning" aria-live="polite">
                   还不能测算：{requiredMappingsMissing.join("、")}。请回到
@@ -3083,6 +3080,18 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                 >
                   {busy && <BusySpinner />}生成 Excel 底稿
                 </Button>
+                {rows.some((row) => !row.rateResolved) && (
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      requestAnimationFrame(() =>
+                        document.querySelector<HTMLInputElement>(".deposit-table input.deposit-rate-missing")?.focus(),
+                      )
+                    }
+                  >
+                    补全利率
+                  </Button>
+                )}
               </div>
               {job && (
                 <JobProgress
@@ -3525,7 +3534,7 @@ function MappingPreview(props: {
   // 标签优先取引擎随识别结果下发的 roles，未下发（或没有该角色）回落本地表。
   const labels = resolveRoleLabels(props.inspection.roles, props.labels);
   const roles = Object.entries(labels);
-  const forms = useLedgerForms(props.kind);
+  const forms = interestLedgerForms(props.kind, useLedgerForms(props.kind), "deposit");
   const formMatch = forms.length
     ? resolveForm(props.kind, forms, props.mapping)
     : undefined;
@@ -3538,6 +3547,7 @@ function MappingPreview(props: {
       roles={roles}
       groups={formGroups(props.kind, roles, forms, props.mapping)}
       requirementOf={(role) => roleRequirement(formMatch, role)}
+      alternatesOf={(role) => formMatch?.form.anyOf.find((slot) => slot.includes(role) && slot.length > 1)?.filter((other) => other !== role)}
       formNote={describeForm(formMatch, (role) => labels[role] ?? role)}
       formComplete={formMatch?.complete}
       multi={DEPOSIT_MULTI}
@@ -3546,54 +3556,14 @@ function MappingPreview(props: {
       busy={props.reviewBusy}
       resizeKey={`deposit.mapping.${props.kind}`}
       toolbar={
-        <>
-          <label>
-            Sheet
-            <select
-              value={props.inspection.sheet}
-              onChange={(e) => props.onHeaderChange(0, 0, e.target.value)}
-            >
-              {(props.inspection.sheets.length
-                ? props.inspection.sheets
-                : [props.inspection.sheet]
-              ).map((sheet) => (
-                <option key={sheet}>{sheet}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            标题行
-            <Input
-              controlSize="sm"
-              type="number"
-              min={1}
-              value={props.inspection.headerRow}
-              onChange={(e) =>
-                props.onHeaderChange(
-                  Number(e.target.value),
-                  props.inspection.headerDepth,
-                  props.inspection.sheet,
-                )
-              }
-            />
-          </label>
-          <label>
-            表头层数
-            <select
-              value={props.inspection.headerDepth}
-              onChange={(e) =>
-                props.onHeaderChange(
-                  props.inspection.headerRow,
-                  Number(e.target.value),
-                  props.inspection.sheet,
-                )
-              }
-            >
-              <option value={1}>1层</option>
-              <option value={2}>2层</option>
-            </select>
-          </label>
-        </>
+        <SourceTableControls
+          sheet={props.inspection.sheet} sheets={props.inspection.sheets}
+          headerRow={props.inspection.headerRow} headerDepth={props.inspection.headerDepth}
+          disabled={props.reviewBusy}
+          onSheetChange={(sheet) => props.onHeaderChange(0, 0, sheet)}
+          onHeaderRowChange={(row) => props.onHeaderChange(Number(row), props.inspection.headerDepth, props.inspection.sheet)}
+          onHeaderDepthChange={(depth) => props.onHeaderChange(props.inspection.headerRow, depth, props.inspection.sheet)}
+        />
       }
       onChange={(next) =>
         props.onMappingChange(next as Record<string, string | string[]>)
@@ -3755,7 +3725,7 @@ export function Results({
           }
         >
           {missing.length
-            ? "测算未完整"
+            ? "待补利率"
             : provisional.length
               ? "利率待确认"
               : stale
@@ -3783,9 +3753,8 @@ export function Results({
 
       {missing.length > 0 && (
         <p className="deposit-stale">
-          <b>{missing.length} 个账户尚未确定利率，测算尚不完整</b>
           <span>
-            涉及 {[...new Set(missing.map((row) => row.tierLabel))].join("、")}
+            {missing.length} 个账户待补实际利率，涉及 {[...new Set(missing.map((row) => row.tierLabel))].join("、")}
             ，月均余额合计{" "}
             {amount(missing.reduce((sum, row) => sum + row.averageBalance, 0))}
             。

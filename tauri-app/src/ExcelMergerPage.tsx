@@ -451,7 +451,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         steps={[
           { key: "1", label: "文件源", disabled: true },
           { key: "2", label: "合并规则", disabled: true },
-          { key: "3", label: "执行合并", disabled: true },
+          { key: "3", label: "执行合并", disabled: true, status: job?.phase === "completed" ? "done" : job?.phase === "failed" ? "error" : undefined },
         ]}
         current={currentStep}
       />

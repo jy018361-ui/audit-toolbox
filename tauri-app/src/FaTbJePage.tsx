@@ -15,6 +15,7 @@ import {
   TB_LABELS,
 } from "./DepositInterestPage";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { SourceTableControls } from "@/components/SourceTableControls";
 import { useTableColumnResize } from "@/components/useTableColumnResize";
 import {
   completeLedgerPairReviewKey,
@@ -62,6 +63,7 @@ import {
   resolveForm,
   roleRequirement,
   useLedgerForms,
+  type LedgerForm,
 } from "@/ledgerForms";
 import "./fx-audit.css";
 import "./fa-tbje.css";
@@ -124,7 +126,7 @@ const hasMapped = (mapping: Mapping, role: string) => {
   return Array.isArray(value) ? value.some(Boolean) : Boolean(value?.trim());
 };
 
-export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
+export function faTbJeMissingMappings(kind: Kind, mapping: Mapping, forms: LedgerForm[] = []): string[] {
   const missing: string[] = [];
   const amountPairHint = (prefix: string, label: string) => {
     const absent = [
@@ -135,6 +137,20 @@ export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
   };
   if (!hasMapped(mapping, "accountCode") && !hasMapped(mapping, "accountName"))
     missing.push("科目编码或科目名称");
+  if (forms.length) {
+    if (kind === "je") {
+      if (!hasMapped(mapping, "id")) missing.push("凭证标识");
+      if (!hasMapped(mapping, "date")) missing.push("记账日期");
+    }
+    const match = resolveForm(kind, forms, mapping);
+    const labels = kind === "tb" ? TB_LABELS : JE_LABELS;
+    if (match) {
+      missing.push(...match.missing.map((role) => labels[role] ?? role));
+      missing.push(...match.missingAny.map((slot) => `${slot.map((role) => labels[role] ?? role).join("／")}（任一）`));
+      missing.push(...match.partialOptional.map((role) => labels[role] ?? role));
+    }
+    return [...new Set(missing)];
+  }
   if (kind === "tb") {
     const opening =
       hasMapped(mapping, "openingFunctionalAmount") ||
@@ -146,6 +162,8 @@ export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
         hasMapped(mapping, "closingFunctionalCredit"));
     if (!opening) missing.push(`期初余额（${amountPairHint("openingFunctional", "期初本位币")}）`);
     if (!closing) missing.push(`期末余额（${amountPairHint("closingFunctional", "期末本位币")}）`);
+    if (!hasMapped(mapping, "ytdFunctionalDebit") || !hasMapped(mapping, "ytdFunctionalCredit"))
+      missing.push("本年累计借方和贷方发生额");
   } else {
     if (!hasMapped(mapping, "id")) missing.push("凭证标识");
     if (!hasMapped(mapping, "date")) missing.push("记账日期");
@@ -155,7 +173,7 @@ export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
         hasMapped(mapping, "functionalCredit"));
     if (!amount) missing.push(`本位币金额（${amountPairHint("functional", "本位币")}）`);
   }
-  return missing;
+  return [...new Set(missing)];
 }
 
 /**
@@ -209,7 +227,12 @@ function roleFromCode(code: string): AccountRole | undefined {
 }
 
 const SAYS_DEPRECIATION =
-  /累计折旧|累計折舊|accumulated\s+depreciation|accum\.?\s*dep/i;
+  /累计折旧|累計折舊|(?:^|[\s\/|])(?:固定资产折旧|固定資產折舊)(?=$|[\s:_\-–—－：\/|])|accumulated\s+depreciation|accum\.?\s*dep/i;
+/** 名称及真实上级共同提供费用语境；不能把“固定资产折旧”中的资产词当原值。 */
+function saysDepreciationExpense(...names: string[]): boolean {
+  const context = names.join(" ");
+  return /费用|費用/.test(context) && /折旧|折舊/.test(context);
+}
 /** 名称一出现就整枝出局（优先于折旧词）：使用权资产与 SAP 技术性清账科目不是固定资产本体。 */
 const SAYS_NOT_IN_SCOPE = /使用权|使用權|清账|清賬|right[-\s]?of[-\s]?use/i;
 /** 名称一出现就不是原值：减值准备、清理清算过渡户、折旧费／摊销／租赁费等费用科目。
@@ -233,6 +256,7 @@ const SAYS_FIXED_ASSET =
   /固定资产|固定資產|房屋|建筑物|建築物|机器|機器|机械|機械|设备|設備|运输工具|運輸工具|电子设备|办公设备|fixture|equipment|building|vehicle/i;
 
 function roleFromName(name: string): AccountRole {
+  if (saysDepreciationExpense(name)) return "excluded";
   if (SAYS_NOT_IN_SCOPE.test(name)) return "excluded";
   if (SAYS_DEPRECIATION.test(name)) return "depreciation";
   if (SAYS_NOT_COST.test(name)) return "excluded";
@@ -263,7 +287,7 @@ function faCategory(name: string): string {
         // 类别列先剥掉它，08 号样例的类别才不会显示成「160101\房屋建筑物」。
         .replace(/^[0-9][0-9A-Za-z._]*[\s:：\-—/\\|]+/, "")
         .replace(
-          /累计折旧|累計折舊|固定资产|固定資產|accumulated\s+depreciation|property[,\s]*plant\s*(and|&)\s*equipment|ppe/gi,
+          /累计折旧|累計折舊|固定资产折旧|固定資產折舊|固定资产|固定資產|accumulated\s+depreciation|property[,\s]*plant\s*(and|&)\s*equipment|ppe/gi,
           "",
         )
         // 英文账套的角色前缀与资产类别分开；只消费名称开头的完整角色词。
@@ -335,6 +359,7 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
     const byCode = roleFromCode(code);
     if (byCode) return byCode;
     if (/^\d/.test(code)) {
+      if (saysDepreciationExpense(name)) return "excluded";
       if (SAYS_NOT_IN_SCOPE.test(name)) return "excluded";
       if (SAYS_DEPRECIATION.test(name)) return "depreciation";
       if (SAYS_NOT_COST.test(name)) return "excluded";
@@ -347,6 +372,11 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
     const cached = resolved.get(cacheKey);
     if (cached) return cached;
     const parent = depth < 32 ? nearestParent(chart, code) : "";
+    const context = [name];
+    for (let ancestor = parent, count = 0; ancestor && count < 32; count += 1) {
+      context.push(chart.get(ancestor) ?? "");
+      ancestor = nearestParent(chart, ancestor);
+    }
     const base = parent
       ? roleOf(parent, chart.get(parent) ?? "", depth + 1)
       : rootRole(code, name || code);
@@ -354,7 +384,8 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
     // 名称修正对整枝生效（含继承为「排除」的枝）：累计折旧提为折旧，
     // 清理／折旧费／使用权压回排除；被排除的数字编码若自身名称首段明确写出
     // 「固定资产」则提为原值——上级名不含语义、子级写明的账套也能进表。
-    if (SAYS_NOT_IN_SCOPE.test(name)) role = "excluded";
+    if (saysDepreciationExpense(...context)) role = "excluded";
+    else if (SAYS_NOT_IN_SCOPE.test(name)) role = "excluded";
     else if (SAYS_DEPRECIATION.test(name)) role = "depreciation";
     else if (SAYS_NOT_COST.test(name)) role = "excluded";
     else if (
@@ -415,7 +446,7 @@ export function faAssignmentsForEntities(
 }
 
 /** 账里真实存在的「主体×科目」组合（inspect_* 的 entityAccounts 项）。 */
-export type EntityAccountPair = { entity: string; account: string; auxiliary?: string; currency?: string; classificationContext?: string; parentAccountName?: string };
+export type EntityAccountPair = { entity: string; account: string; auxiliary?: string; currency?: string; classificationContext?: string; parentAccountName?: string; parentAccountNames?: string[] };
 
 /** 只使用公共 TB 选层目录；显式空目录不能回退带回已剔除的汇总行。 */
 export function faInspectionAccounts(inspection: Inspection | undefined): EntityAccountPair[] {
@@ -453,7 +484,7 @@ export function unionEntityAccounts(
     const key = faAssignmentIdentity({ entity, account, auxiliary: pair.auxiliary, currency: pair.currency });
     if (seen.has(key)) continue;
     seen.add(key);
-    pairs.push({ entity, account, ...(pair.auxiliary ? { auxiliary: pair.auxiliary } : {}), ...(pair.currency ? { currency: pair.currency } : {}), ...(pair.classificationContext ? { classificationContext: pair.classificationContext } : {}), ...(pair.parentAccountName ? { parentAccountName: pair.parentAccountName } : {}) });
+    pairs.push({ entity, account, ...(pair.auxiliary ? { auxiliary: pair.auxiliary } : {}), ...(pair.currency ? { currency: pair.currency } : {}), ...(pair.classificationContext ? { classificationContext: pair.classificationContext } : {}), ...(pair.parentAccountName ? { parentAccountName: pair.parentAccountName } : {}), ...(pair.parentAccountNames ? { parentAccountNames: pair.parentAccountNames } : {}) });
   }
   return pairs;
 }
@@ -487,11 +518,14 @@ export function faAssignmentsForEntityAccounts(
   pairs: EntityAccountPair[],
   current: Assignment[],
 ): Assignment[] {
-  const contextualSuggestions = new Map(pairs.filter((pair) => pair.classificationContext).map((pair) => {
-    const text = `${pair.account} ${pair.classificationContext}`;
-    const category = faCategory(pair.classificationContext!);
+  const contextualSuggestions = new Map(pairs.filter((pair) => pair.classificationContext ||
+    saysDepreciationExpense(pair.account, pair.parentAccountName ?? "", ...(pair.parentAccountNames ?? []))).map((pair) => {
+    const text = [pair.account, pair.classificationContext].filter(Boolean).join(" ");
+    const category = faCategory(pair.classificationContext || splitFaAccount(pair.account).name);
     return [faAssignmentIdentity(pair), {
       ...suggestFaAccount(text), account: pair.account,
+      ...(saysDepreciationExpense(pair.account, pair.classificationContext ?? "", pair.parentAccountName ?? "", ...(pair.parentAccountNames ?? []))
+        ? { role: "excluded" as const } : {}),
       category: category === "固定资产" ? suggestFaAccount(pair.account).category : category,
     }] as const;
   }));
@@ -630,6 +664,8 @@ export function FaTbJePage() {
   const [mappings, setMappings] = useState<Record<Kind, Mapping>>(
     () => faTbJeDraftCache?.mappings ?? { tb: {}, je: {} },
   );
+  const tbForms = useLedgerForms("tb");
+  const jeForms = useLedgerForms("je");
   const [assignments, setAssignments] = useState<Assignment[]>(
     () => faTbJeDraftCache?.assignments ?? [],
   );
@@ -671,7 +707,7 @@ export function FaTbJePage() {
       inspects.je?.headerRow,
       inspects.je?.headerDepth,
     ]),
-  });
+  }, mappings);
   const ledgerReviewOwner = useRef({});
   const reviewing = Boolean(reviews.reviewing.tb || reviews.reviewing.je);
   const { job, setJob, activeJobId } = useJobEvents({
@@ -842,8 +878,8 @@ export function FaTbJePage() {
     },
   });
   const missingMappings = {
-    tb: faTbJeMissingMappings("tb", mappings.tb),
-    je: faTbJeMissingMappings("je", mappings.je),
+    tb: faTbJeMissingMappings("tb", mappings.tb, tbForms),
+    je: faTbJeMissingMappings("je", mappings.je, jeForms),
   };
   const mappingsReady =
     Boolean(inspects.tb && inspects.je) &&
@@ -1524,7 +1560,6 @@ export function FaTbJePage() {
                       onKindChange={() =>
                         void changeSourceKind(kind, kind === "tb" ? "je" : "tb")
                       }
-                      onHeaderChange={(over) => void reinspect(kind, over)}
                     />
                   ) : (
                     <Card variant="subtle" className="fx-source-empty">
@@ -1586,7 +1621,7 @@ export function FaTbJePage() {
                           setMappings((value) => ({ ...value, tb: next }));
                         },
                         missingAfter: (mapping) =>
-                          faTbJeMissingMappings("tb", mapping),
+                          faTbJeMissingMappings("tb", mapping, tbForms),
                       }
                     : undefined,
                   je: inspects.je
@@ -1602,7 +1637,7 @@ export function FaTbJePage() {
                           setMappings((value) => ({ ...value, je: next }));
                         },
                         missingAfter: (mapping) =>
-                          faTbJeMissingMappings("je", mapping),
+                          faTbJeMissingMappings("je", mapping, jeForms),
                       }
                     : undefined,
                 })
@@ -1624,6 +1659,19 @@ export function FaTbJePage() {
                   missing={missingMappings[kind]}
                   busy={reviews.reviewing[kind] || busy}
                   note={`${inspects[kind]!.rowCount.toLocaleString("zh-CN")} 行 × ${inspects[kind]!.headers.length} 列`}
+                  toolbar={
+                    <SourceTableControls
+                      namePrefix={kind}
+                      sheet={inspects[kind]!.sheet}
+                      sheets={inspects[kind]!.sheets}
+                      headerRow={inspects[kind]!.headerRow}
+                      headerDepth={inspects[kind]!.headerDepth}
+                      disabled={busy || reviews.reviewing[kind]}
+                      onSheetChange={(sheet) => void reinspect(kind, { sheet, headerRow: 0, headerDepth: 0 })}
+                      onHeaderRowChange={(row) => void reinspect(kind, { headerRow: Number(row) })}
+                      onHeaderDepthChange={(headerDepth) => void reinspect(kind, { headerDepth })}
+                    />
+                  }
                   onChange={(next) => {
                     invalidateResult();
                     setAccountsReviewed(false);
@@ -2369,9 +2417,6 @@ function FaLedgerSourceCard(props: {
   onReplace: () => void;
   onClear: () => void;
   onKindChange: () => void;
-  onHeaderChange: (
-    over: Partial<Pick<Inspection, "sheet" | "headerRow" | "headerDepth">>,
-  ) => void;
 }) {
   const { kind, inspection } = props;
   return (
@@ -2409,60 +2454,6 @@ function FaLedgerSourceCard(props: {
         </div>
         <div className="fx-source-meta">
           <span>{inspection.rowCount.toLocaleString("zh-CN")} 行</span>
-          <label>
-            Sheet
-            <select
-              name={`${kind}-sheet`}
-              autoComplete="off"
-              disabled={props.disabled}
-              value={inspection.sheet}
-              onChange={(event) =>
-                props.onHeaderChange({
-                  sheet: event.target.value,
-                  headerRow: 0,
-                  headerDepth: 0,
-                })
-              }
-            >
-              {(inspection.sheets.length
-                ? inspection.sheets
-                : [inspection.sheet]
-              ).map((sheet) => (
-                <option key={sheet}>{sheet}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            标题行
-            <Input
-              name={`${kind}-header-row`}
-              autoComplete="off"
-              disabled={props.disabled}
-              type="number"
-              min={1}
-              value={inspection.headerRow}
-              onChange={(event) =>
-                props.onHeaderChange({ headerRow: Number(event.target.value) })
-              }
-            />
-          </label>
-          <label>
-            表头层数
-            <select
-              name={`${kind}-header-depth`}
-              autoComplete="off"
-              disabled={props.disabled}
-              value={inspection.headerDepth}
-              onChange={(event) =>
-                props.onHeaderChange({
-                  headerDepth: Number(event.target.value),
-                })
-              }
-            >
-              <option value={1}>1层</option>
-              <option value={2}>2层</option>
-            </select>
-          </label>
         </div>
       </CardContent>
     </Card>
@@ -2483,6 +2474,7 @@ function FaTbJeMappingPanel(props: {
   missing: string[];
   busy: boolean;
   note: string;
+  toolbar?: ReactNode;
   onChange: (next: MappingDict) => void;
 }) {
   const labels = resolveRoleLabels(
@@ -2510,6 +2502,7 @@ function FaTbJeMappingPanel(props: {
       missing={props.missing}
       busy={props.busy}
       note={props.note}
+      toolbar={props.toolbar}
       onChange={props.onChange}
     />
   );

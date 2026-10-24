@@ -14,7 +14,7 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
-import { LedgerSourceCard } from "@/components/LedgerSourceCard";
+import { LedgerSourceCard, LedgerSourceControls } from "@/components/LedgerSourceCard";
 import { LedgerLlmReview } from "@/components/LedgerLlmReview";
 import { LedgerMappingPreview } from "@/components/LedgerMappingPreview";
 import { confirmDialog } from "@/components/ConfirmDialog";
@@ -338,6 +338,10 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const truncated=accountTotal>accounts.length;
   const setMap=(key:keyof Mapping,value:string|string[])=>patch({mapping:setKanzhangMapping(draft.mapping,key,value)});
   async function chooseInput(){const value=await pickPath("file","选择凭证文件",["xlsx","xls","xlsm","csv","txt","parquet"]);if(typeof value==="string")resetSource(value);}
+  function changeSourceHeader(change:Partial<Pick<KanzhangDraft,"sheet"|"headerRow"|"headerDepth">>){
+    llmGeneration.current+=1;setLlmBusy(false);setLlmFailed(false);setLlmStatus("");setChanges([]);setPending([]);setResult(undefined);
+    setDraft(current=>invalidateKanzhangInspection(current,change));
+  }
   async function inspect(){if(!draft.inputPath){setError("请选择凭证文件。");return;}setBusy(true);setError("");inspectKeyRef.current=`${draft.inputPath}|${(draft.sheet||"").trim()}`;try{await jobStart("kanzhang.inspect",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth});return;}catch(e){setError(kanzhangErrorText(e));setBusy(false);}}
   // 读取任务回来后套用表结构；改走任务通道是为了让大凭证文件的读取能报进度、能取消。
   // 透视默认只按科目名称分行——旧版就是这个口径。之前把公司也塞进行字段，
@@ -389,7 +393,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
       if(generation!==llmGeneration.current)return;
       const {mapping,changes:merged,pending:rest}=applyLedgerReviews(source,value);
       patch({mapping});setChanges(merged);setPending(rest);setLlmStatus(kanzhangReviewSummary(merged.length,rest.length));}
-    catch(e){if(generation!==llmGeneration.current)return;setLlmFailed(true);setLlmStatus(`${kanzhangErrorText(e).replace(/[。.]+$/,"")}。脚本自动映射已完成，可直接核对后继续；LLM 复核只是可选的辅助检查。`);}
+    catch(e){if(generation!==llmGeneration.current)return;setLlmFailed(true);setLlmStatus(`${kanzhangErrorText(e).replace(/[。.]+$/,"")}。智能复核未完成，当前映射仍可手动核对后继续。`);}
     finally{if(generation===llmGeneration.current)setLlmBusy(false);}
   }
   const undoChange=(target:MappingChange)=>{patch({mapping:undoMappingChange(draft.mapping,target)});setChanges(values=>values.filter(value=>value!==target));};
@@ -547,13 +551,9 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     {job?.phase==="cancelled"&&<div className="flex flex-wrap items-center gap-2" role="status"><Badge variant="warning">已取消</Badge><span className="hint">本次任务已停止；文件与设置仍保留，可重新读取或运行。</span></div>}
     {draft.step===1&&<div className="fa-stack">
       <LedgerSourceCard
-        inputPath={draft.inputPath} sheet={draft.sheet} knownSheets={draft.knownSheets} headerRow={draft.headerRow} headerDepth={draft.headerDepth}
-        detectedHeaderRow={draft.headerRow===0?draft.inspect?.headerRow:undefined}
-        dragHover={dragHover} busy={busy} job={job} needsReload={!draft.inspect&&draft.knownSheets.length>0}
+        inputPath={draft.inputPath}
+        dragHover={dragHover} busy={busy} job={job}
         onBrowse={chooseInput} onClear={clearAll}
-        onSheetChange={value=>setDraft(current=>invalidateKanzhangInspection({...current,headerRow:0,headerDepth:0},{sheet:value}))}
-        onHeaderRowChange={value=>setDraft(current=>invalidateKanzhangInspection(current,{headerRow:value}))}
-        onHeaderDepthChange={value=>setDraft(current=>invalidateKanzhangInspection(current,{headerDepth:value}))}
         onInspect={inspect} onCancel={(jobId)=>jobCancel(jobId)}
       >
       {draft.inspect&&<>
@@ -563,7 +563,15 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
         <div className="kz-actions"><Button variant="secondary" size="sm" disabled={busy||llmBusy} onClick={()=>void reviewMapping()}>{llmBusy?"LLM 正在复核…":"重新进行 LLM 复核"}</Button><Button variant="default" disabled={llmBusy||missingRequired.length>0} onClick={()=>patch({step:2})}>下一步：科目筛选</Button></div>
       </>}
       </LedgerSourceCard>
-      <LedgerMappingPreview inspect={draft.inspect} mapping={draft.mapping} setMap={setMap} llmBusy={llmBusy}/></div>}
+      <LedgerMappingPreview inspect={draft.inspect} mapping={draft.mapping} setMap={setMap} llmBusy={llmBusy}
+        toolbar={draft.inputPath && <LedgerSourceControls
+          sheet={draft.sheet} knownSheets={draft.knownSheets} headerRow={draft.headerRow} headerDepth={draft.headerDepth} busy={busy||llmBusy}
+          onSheetChange={sheet=>changeSourceHeader({sheet,headerRow:0,headerDepth:0})}
+          onHeaderRowChange={headerRow=>changeSourceHeader({headerRow})}
+          onHeaderDepthChange={headerDepth=>changeSourceHeader({headerDepth})}
+        />}
+        sourceNote={draft.inspect && draft.headerRow===0 ? <p className="fx-hint">已自动按第 {draft.inspect.headerRow} 行识别表头。</p> : !draft.inspect && draft.inputPath ? <p className="fx-hint">请读取文件以刷新预览和映射。</p> : undefined}
+      /></div>}
     {draft.step===2&&<div className="kz-grid kz-filter-grid"><section className="kz-card"><h2>目标批次</h2><div className="kz-row"><Button variant="secondary" size="sm" disabled={accountsBusy||!accounts.length} onClick={()=>void applyAuditFocusPresets()}>{accountsBusy?"正在生成批次…":"套用审计关注科目预设（8类）"}</Button><Button variant="secondary" size="sm" disabled={accountsBusy||!accounts.length} onClick={()=>void applyAllPrimaryAccounts()}>按一级科目生成全科目批次（不含货币资金）</Button><Button variant="secondary" size="sm" onClick={deleteBatch}>删除当前批次</Button><Button variant="secondary" size="sm" disabled={draft.batches.length===1&&!draft.batches[0]?.accounts.length} onClick={clearBatches}>一键删除全部批次</Button></div>{presetSummary&&<PresetSummary summary={presetSummary}/>} {primaryPresetSummary&&<PrimaryPresetSummary summary={primaryPresetSummary}/>}<div className="kz-tabs">{draft.batches.map((value,index)=><button className={index===draft.activeBatch?"active":""} onClick={()=>patch({activeBatch:index})} key={`${value.presetId??value.name}-${index}`}>{value.name} ({value.accounts.length})</button>)}</div><label>批次名称<Input value={batch.name} onChange={e=>updateBatch({name:e.target.value})}/></label>
       <div className="kz-search"><Input value={query} placeholder="输入科目编码或名称，如 1601、固定资产" title="纯编码按前缀筛选，名称按关键词筛选；多个编码可用逗号分隔" onChange={e=>{setQuery(e.target.value);setSearchResults([]);}} onKeyDown={e=>{if(e.key==="Enter"&&truncated)void searchAccounts();}}/>{truncated&&<Button variant="secondary" size="sm" onClick={searchAccounts}>到全库检索</Button>}<Button variant="secondary" size="sm" onClick={()=>{setQuery("");setSearchResults([]);}}>清除</Button></div>
       <div className="kz-source-panel"><h3>待选科目 ({available.length}{truncated?` / 共 ${accountTotal}`:""})</h3>{accountsBusy&&<p className="kz-hint">正在载入全部科目…</p>}{truncated&&<p className="kz-hint">科目过多，仅载入前 {accounts.length} 个；未命中时回车或点"到全库检索"。</p>}

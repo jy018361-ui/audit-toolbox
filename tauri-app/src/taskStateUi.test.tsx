@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it } from "vitest";
 import catalog from "../public/tool-catalog.json";
 import { JobProgress, jobStatusText, terminalJobError } from "./components/JobProgress";
+import { StepIndicator } from "./components/StepIndicator";
 import { ResultView } from "./components/ResultView";
 import { jobPresentation } from "./jobState";
 import {
@@ -61,6 +62,35 @@ describe("18 个工具的动态任务状态契约", () => {
   it("完成事件含警告、跳过或缺失项时明确标记部分完成", () => {
     expect(jobPresentation(makeJob({ phase: "completed", severity: "warning" })).state).toBe("partial");
     expect(jobPresentation(makeJob({ phase: "completed", result: { skippedPaths: ["C:\\很长\\文件.xlsx"] } })).state).toBe("partial");
+  });
+
+  it("存款测算有账户利率未定时不显示绿色完成", () => {
+    expect(jobPresentation(makeJob({
+      toolId: "deposit_interest", phase: "completed", current: 1, total: 1,
+      result: { rows: [{ rateResolved: true }, { rateResolved: false }] },
+    }))).toMatchObject({ state: "partial", label: "待补利率", tone: "warning", percent: null });
+  });
+
+  it("最后一步完成时显示对勾，不被只读步骤的禁用视觉冲淡", () => {
+    render(<StepIndicator steps={[
+      { key: "upload", label: "上传", disabled: true },
+      { key: "run", label: "执行", disabled: true, status: "done" },
+    ]} current={1} />);
+    const completed = screen.getByRole("button", { name: /2 执行（已完成）/ });
+    expect(completed.className).toContain("done");
+    expect(completed.className).not.toContain("disabled");
+    expect(completed.getAttribute("aria-current")).toBeNull();
+  });
+
+  it("TBJE 未执行成功的组不能显示绿色完成或百分之百，勾稽差异仍属于已处理", () => {
+    const job = makeJob({toolId:"tbje_check",phase:"completed",current:1,total:1,message:"处理完成。",severity:"success"});
+    const partial = render(<JobProgress job={{...job,result:{groups:[{ok:true},{ok:false}]}}} />);
+    expect(screen.getByText(/已处理 1 \/ 2 组/)).toBeTruthy();
+    expect(screen.queryByText("处理完成。")).toBeNull();
+    expect(screen.queryByText("100%")).toBeNull();
+    partial.unmount();
+    expect(jobPresentation({...job,result:{exports:[{ok:false}]}})).toMatchObject({state:"failed",percent:null,tone:"danger"});
+    expect(jobPresentation({...job,result:{groups:[{ok:true,result:{tbVsJe:{passed:false}}}]}})).toMatchObject({state:"completed",percent:100});
   });
 
   it("状态词与进度消息同词时只渲染一次，不再出现“排队中 排队中”", () => {

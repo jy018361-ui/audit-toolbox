@@ -36,6 +36,9 @@ const EXCEL_MAX_COLS: usize = 16_384;
 /// source column degrades to plain text, exactly like the legacy writer did.
 const EXCEL_MAX_HYPERLINKS: usize = 65_530;
 
+#[path = "job_read_plan.rs"]
+mod read_plan;
+
 #[derive(Clone)]
 pub(crate) struct ExcelMergerService {
     app: AppHandle,
@@ -58,6 +61,8 @@ struct WorkerRequest {
     pause_path: String,
     #[serde(default)]
     memory_protected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    read_plan: Option<crate::disk_table::ReadPlan>,
 }
 
 /// Cooperative pause gate shared by all native heavy jobs.
@@ -136,7 +141,11 @@ impl ExcelMergerService {
         let job_id = uuid::Uuid::new_v4().simple().to_string();
         let cancel_path = self.cancel_root.join(format!("{job_id}.cancel"));
         let pause_path = self.cancel_root.join(format!("{job_id}.pause"));
-        let memory_protected = hard_memory_limited_job(method, &params);
+        let read_plan = read_plan::for_job(method, &params);
+        let memory_protected = read_plan.as_ref().map_or_else(
+            || hard_memory_limited_job(method, &params),
+            crate::disk_table::ReadPlan::uses_disk,
+        );
         let _ = fs::remove_file(&cancel_path);
         let _ = fs::remove_file(&pause_path);
         self.jobs.lock().insert(
@@ -161,6 +170,7 @@ impl ExcelMergerService {
                 params,
                 cancel_path,
                 memory_protected,
+                read_plan,
             )
         });
         Ok(job_id)
@@ -239,6 +249,7 @@ impl ExcelMergerService {
         params: Value,
         cancel_path: PathBuf,
         memory_protected: bool,
+        read_plan: Option<crate::disk_table::ReadPlan>,
     ) {
         let worker_tool_id = tool_id(&method);
         self.emit(event_for(
@@ -339,6 +350,7 @@ impl ExcelMergerService {
             cancel_path: cancel_path.to_string_lossy().into_owned(),
             pause_path: pause_path.to_string_lossy().into_owned(),
             memory_protected: monitored,
+            read_plan,
         };
         let mut command = match std::env::current_exe() {
             // 重任务靠"再启动一份自己"来跑。程序文件在运行期间被移走或重新构建过时
@@ -812,6 +824,9 @@ fn params_have_excel_input(value: &Value) -> bool {
 /// 内存保护统一跟随大文件磁盘分流，不再仅凭文本文件超过 1 GiB 单独开启。
 fn memory_protected_job(method: &str, params: &Value) -> bool {
     if !memory_protected_method(method) { return false; }
+    if let Some(plan) = read_plan::for_job(method, params) {
+        return plan.uses_disk();
+    }
     if method.starts_with("fa.") && !method.starts_with("fa.tbje_") {
         return crate::fa::resources::job_uses_disk(method, params);
     }
@@ -853,7 +868,13 @@ pub fn worker_main() -> i32 {
     let job_id = request.job_id.clone();
     let worker_tool_id = tool_id(&request.method);
     let pause = PauseCheckpoint::new(PathBuf::from(&request.pause_path), cancel.clone());
-    if request.memory_protected {
+    // 发布 EXE 的独立 worker 入口没有父进程计划时，也只在这里生成一次。
+    let read_plan = request.read_plan.clone().or_else(||
+        read_plan::for_job(&request.method, &request.params));
+    let memory_protected = read_plan.as_ref().map_or(request.memory_protected,
+        crate::disk_table::ReadPlan::uses_disk);
+    let _read_plan_guard = read_plan.map(crate::disk_table::ReadPlan::enter);
+    if memory_protected {
         crate::resource_budget::install_runtime_memory_control(
             cancel.clone(),
             crate::resource_budget::memory_retry_path(Path::new(&request.pause_path)),
@@ -974,6 +995,14 @@ pub fn worker_main() -> i32 {
     };
     match result {
         Ok(result) => {
+            let incomplete = if matches!(request.method.as_str(), "tbje_check.run_batch" | "tbje_check.export_batch") {
+                crate::tbje_check::incomplete_batch(&result)
+            } else { None };
+            let (phase, severity, current, total, message) = match incomplete.as_ref() {
+                Some((0, total, message)) => ("failed", "error", 0, *total, message.as_str()),
+                Some((current, total, message)) => ("completed", "warning", *current, *total, message.as_str()),
+                None => ("completed", "success", 1, 1, "处理完成。"),
+            };
             let outputs = result
                 .get("outputPaths")
                 .and_then(Value::as_array)
@@ -988,15 +1017,15 @@ pub fn worker_main() -> i32 {
             print_event(event_for(
                 worker_tool_id,
                 &request.job_id,
-                "completed",
-                1,
-                1,
-                "处理完成。",
-                "success",
+                phase,
+                current,
+                total,
+                message,
+                severity,
                 outputs,
                 Some(result),
             ));
-            0
+            if phase == "failed" { 1 } else { 0 }
         }
         Err(err) if err.code == "JOB_CANCELLED" => {
             print_event(event_for(
@@ -4529,6 +4558,8 @@ mod tests {
     #[test]
     fn missing_excel_paths_do_not_force_worker_memory_limits() {
         let cases = [
+            ("loan.inspect_full", json!({"kind":"je","source":{"inputPath":"C:\\data\\missing-je.xlsx"}})),
+            ("loan.preview", json!({"mode":"ledger","ledgerSource":{"source":{"inputPath":"C:\\data\\missing-ledger.xlsx"}}})),
             ("kanzhang.inspect", json!({"inputPath":"C:\\data\\je.xlsx"})),
             (
                 "fx.preview",
@@ -4560,6 +4591,15 @@ mod tests {
     }
 
     #[test]
+    fn tbje_mapping_preflight_uses_the_same_read_plan_as_the_check() {
+        let params = json!({"prepareMappings":true,"groups":[
+            {"tbSource":{"inputPath":"C:/not-yet-read/tb.csv"},"jeSource":{"inputPath":"C:/not-yet-read/je.csv"}}
+        ]});
+        assert!(!hard_memory_limited_job("tbje_check.run_batch", &params));
+        assert!(!hard_memory_limited_job("tbje_check.run_batch", &json!({"groups":[]})));
+    }
+
+    #[test]
     fn joint_input_discovery_covers_card_lists_fuzzy_and_nested_sources() {
         let params=json!({"beginPath":"begin.xlsx","endPath":"end.xlsx",
             "sourceA":{"path":"a.csv"},"sourceB":{"path":"b.xlsx"},
@@ -4568,6 +4608,107 @@ mod tests {
         let mut paths=HashSet::new();collect_input_paths(&params,&mut paths);
         let expected=["begin.xlsx","end.xlsx","a.csv","b.xlsx","tb.xlsx","other.csv"].into_iter().map(PathBuf::from).collect();
         assert_eq!(paths,expected);
+    }
+
+    #[test]
+    fn loan_read_plan_matches_reader_and_survives_worker_transfer() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("多表读取策略.xlsx");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&input).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, body) in [
+            ("xl/workbook.xml", "<workbook><sheets><sheet name=\"序时账\" r:id=\"r1\"/><sheet name=\"其他\" r:id=\"r2\"/></sheets></workbook>"),
+            ("xl/_rels/workbook.xml.rels", "<Relationships><Relationship Id=\"r1\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"r2\" Target=\"worksheets/sheet2.xml\"/></Relationships>"),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(body.as_bytes()).unwrap();
+        }
+        for (name, blocks) in [("sheet1.xml", 192), ("sheet2.xml", 1024)] {
+            archive.start_file(format!("xl/worksheets/{name}"), options).unwrap();
+            archive.write_all(b"<worksheet><sheetData/>").unwrap();
+            for _ in 0..blocks { archive.write_all(&[b' '; 65536]).unwrap(); }
+            archive.write_all(b"</worksheet>").unwrap();
+        }
+        archive.finish().unwrap();
+        let gib = 1024_u64 * 1024 * 1024;
+        let params = json!({"kind":"je","source":{"inputPath":input,"sheet":"序时账"}});
+        let low = crate::resource_budget::MemoryStatus {
+            total:16*gib, available:gib/8, commit_available:gib/8,
+        };
+        let normal = crate::resource_budget::with_test_memory(low, || {
+            // 复现旧监控乘4判磁盘，而实际JE读取乘1仍为普通模式。
+            assert!(crate::disk_table::should_use_disk(&[&input], 4));
+            assert!(!crate::disk_table::should_use_disk_for_sheets(&[(&input, Some("序时账"))], 1));
+            assert!(!hard_memory_limited_job("loan.inspect_full", &params));
+            crate::loan_interest::job_read_plan("loan.inspect_full", &params).unwrap()
+        });
+        assert!(!normal.uses_disk());
+        let request = WorkerRequest {
+            job_id:"read-plan".into(), method:"loan.inspect_full".into(), params:params.clone(),
+            cancel_path:String::new(), pause_path:String::new(), memory_protected:false,
+            read_plan:Some(normal),
+        };
+        let transferred: WorkerRequest = serde_json::from_value(serde_json::to_value(request).unwrap()).unwrap();
+        let guard = transferred.read_plan.unwrap().enter();
+        crate::resource_budget::with_test_memory(low, || {
+            // worker内包括公共嵌套读表也遵守计划，不重新按整本/其他倍数判磁盘。
+            assert!(!crate::disk_table::should_use_disk(&[&input], 4));
+            assert!(!crate::tabular::disk_ledger_applies(&input));
+        });
+        drop(guard);
+        let disk = crate::resource_budget::with_test_memory(low, || {
+            let tb = json!({"kind":"tb","source":{"inputPath":input,"sheet":"序时账"}});
+            assert!(hard_memory_limited_job("loan.inspect_full", &tb));
+            let other = json!({"kind":"je","source":{"inputPath":input,"sheet":"其他"}});
+            assert!(hard_memory_limited_job("loan.inspect_full", &other));
+            crate::loan_interest::job_read_plan("loan.inspect_full", &other).unwrap()
+        });
+        let guard = disk.enter();
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total:64*gib, available:60*gib, commit_available:60*gib,
+        }, || {
+            assert!(crate::disk_table::should_use_disk(&[&input], 1), "内存恢复也不切回整表读取");
+        });
+        drop(guard);
+        crate::resource_budget::with_test_memory(low, || {
+            assert!(crate::disk_table::should_use_disk(&[&input], 4), "计划作用域结束后恢复动态判断");
+        });
+    }
+
+    #[test]
+    fn loan_read_plan_preserves_joint_tb_je_and_ledger_policies() {
+        let dir = tempfile::tempdir().unwrap();
+        let tb = dir.path().join("tb.csv");
+        let je = dir.path().join("je.csv");
+        // 每份基础估算约24MiB：单份普通，TB+JE乘4的联合工作集进入磁盘。
+        fs::write(&tb, vec![b' '; 4*1024*1024]).unwrap();
+        fs::write(&je, vec![b' '; 4*1024*1024]).unwrap();
+        let gib = 1024_u64 * 1024 * 1024;
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total:16*gib, available:gib/8, commit_available:gib/8,
+        }, || {
+            assert!(!crate::disk_table::should_use_disk(&[&tb], 4));
+            for method in ["loan.preview", "loan.export"] {
+                let params = json!({"mode":"tb","tbSource":{"source":{"inputPath":tb}},
+                    "jeSource":{"source":{"inputPath":je}}});
+                let plan = crate::loan_interest::job_read_plan(method, &params).unwrap();
+                assert!(hard_memory_limited_job(method, &params));
+                let _guard = plan.enter();
+                assert!(crate::disk_table::should_use_disk(&[&tb], 4));
+                assert!(crate::tabular::disk_ledger_applies(&je));
+            }
+            let params = json!({"mode":"ledger","ledgerSource":{"source":{"inputPath":tb}},
+                "tbSource":{"source":{"inputPath":tb}}, "jeSource":{"source":{"inputPath":je}},
+                "rateLedgerSource":{"source":{"inputPath":je}}});
+            assert!(!hard_memory_limited_job("loan.preview", &params), "台账不沿用TB+JE的乘4口径");
+            let plan = crate::loan_interest::job_read_plan("loan.export", &params).unwrap();
+            assert!(!plan.uses_disk());
+            let _guard = plan.enter();
+            assert!(!crate::tabular::disk_ledger_applies(&tb));
+            assert!(!crate::tabular::disk_ledger_applies(&je));
+        });
     }
 
     #[test]

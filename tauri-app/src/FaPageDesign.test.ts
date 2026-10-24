@@ -7,10 +7,14 @@ describe("固定资产与凭证页视觉契约", () => {
   it.each(["FaListPage", "FaDepCalcPage", "FaPolicyComparePage", "FaTbJePage", "JeSignMarkPage"])(
     "%s 使用共享输入框",
     (name) => {
-      expect(source(name)).toContain("<Input");
+      expect(source(name)).toMatch(/<(?:Input|SourceTableControls)\b/);
       expect(source(name)).not.toMatch(/<input\b/);
     },
   );
+  it("共用读取设置沿用共享输入框", () => {
+    expect(source("components/SourceTableControls")).toContain("<Input");
+    expect(source("components/SourceTableControls")).not.toMatch(/<input\b/);
+  });
   it.each(["FaListPage", "FaPolicyComparePage"])(
     "%s 提供结果空状态",
     (name) => expect(source(name)).toContain("<EmptyState"),

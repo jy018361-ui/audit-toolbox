@@ -156,6 +156,43 @@ it("同码汇总语义用于FA建议但不改变源行身份或覆盖人工分�
 });
 
 describe("FA TB+JE account role presets", () => {
+  it("折旧费用优先排除，无费用语境的固定资产折旧建议为累计折旧", () => {
+    for (const name of ["固定资产折旧", "固定資產折舊", "固定资产折旧-机器设备"]) {
+      expect(suggestFaAccount(`1998 ${name}`).role).toBe("depreciation");
+    }
+    expect(suggestFaAccount("1998 固定资产折旧-机器设备").category).toBe("机器设备");
+    expect(suggestFaAccount("1998 固定资产折旧").category).toBe("固定资产");
+    for (const name of ["管理费用-固定资产折旧", "固定资产折旧-制造费用", "銷售費用-固定資產折舊", "费用-累计折旧", "折旧费用"]) {
+      expect(suggestFaAccount(`1998 ${name}`).role, name).toBe("excluded");
+    }
+    const chart = ["6600 管理费用", "660032 固定资产折旧", "66003201 机器设备"];
+    expect(suggestFaAccounts(chart).map((row) => row.role)).toEqual(["excluded", "excluded", "excluded"]);
+    expect(suggestFaAccount("1602 累计折旧-机器设备").role).toBe("depreciation");
+    expect(suggestFaAccount("1601 固定资产-机器设备").role).toBe("cost");
+    expect(suggestFaAccount("1998 使用权资产-固定资产折旧").role).toBe("excluded");
+    expect(suggestFaAccount("222101 进项税额-固定资产折旧").role).toBe("excluded");
+    expect(suggestFaAccount("100201 银行存款-固定资产折旧专户").role).toBe("excluded");
+  });
+
+  it("05同名折旧费用按每条来源的上级及分类语境排除，不覆盖人工确认", () => {
+    const pairs: EntityAccountPair[] = [
+      ...["制造费用", "销售费用", "管理费用"].map((parent, i) => ({
+        entity: "A", account: "6600320000 固定资产折旧", auxiliary: `来源${i}`,
+        parentAccountName: parent,
+      })),
+      { entity: "B", account: "6600320000 固定资产折旧", parentAccountName: "固定资产" },
+      { entity: "C", account: "1998 固定资产折旧", classificationContext: "制造费用" },
+      { entity: "D", account: "1998 固定资产折旧", classificationContext: "固定资产", parentAccountName: "管理费用" },
+      { entity: "E", account: "6600320000 固定资产折旧", parentAccountNames: ["制造费用", "销售费用", "管理费用"] },
+    ];
+    const rows = faAssignmentsForEntityAccounts(faReviewEntityAccounts(pairs), []);
+    expect(rows.filter((row) => row.entity !== "B").every((row) => row.role === "excluded")).toBe(true);
+    expect(rows.find((row) => row.entity === "B")?.role).toBe("depreciation");
+    const manual = { ...pairs[0], role: "cost" as const, category: "人工类别" };
+    expect(faAssignmentsForEntityAccounts(pairs, [manual])).toContainEqual(manual);
+    expect(faConfirmedTbAssignments(pairs, rows)).toEqual(rows);
+  });
+
   it("混写名称重复编码时旧制度原值仍能识别，且无需拼入科目大类", () => {
     const cost = "15010101 15010101\\固定资产－自有－机械设备";
     const depreciation = "15020101 15020101\\累计折旧－自有－机械设备";
@@ -508,6 +545,7 @@ describe("FA TB+JE account role presets", () => {
       "科目编码或科目名称",
       "期初余额（还缺期初本位币借方、期初本位币贷方；或映射期初本位币净额）",
       "期末余额（还缺期末本位币借方、期末本位币贷方；或映射期末本位币净额）",
+      "本年累计借方和贷方发生额",
     ]);
     expect(
       faTbJeMissingMappings("tb", {
@@ -515,12 +553,16 @@ describe("FA TB+JE account role presets", () => {
         openingFunctionalDebit: "期初借方",
         openingFunctionalCredit: "期初贷方",
         closingFunctionalAmount: "期末余额",
+        ytdFunctionalDebit: "本年借方",
+        ytdFunctionalCredit: "本年贷方",
       }),
     ).toEqual([]);
     expect(faTbJeMissingMappings("tb", {
       accountCode: "科目编码",
       openingFunctionalDebit: "期初借方",
       closingFunctionalAmount: "期末净额",
+      ytdFunctionalDebit: "本年借方",
+      ytdFunctionalCredit: "本年贷方",
     })).toEqual(["期初余额（还缺期初本位币贷方；或映射期初本位币净额）"]);
     expect(
       faTbJeMissingMappings("je", {
@@ -813,7 +855,7 @@ describe("FA只复核TB的实际页面流程", () => {
   ];
   const inspection = (kind: "tb" | "je"): Inspection => ({
     sheet: "Sheet1", sheets: ["Sheet1"], headerRow: 1, headerDepth: 1, rowCount: 12,
-    headers: ["科目", "期初", "期末", "凭证", "日期", "借方", "贷方"], preview: [],
+    headers: ["科目", "期初", "期末", "凭证", "日期", "借方", "贷方", "本年借方", "本年贷方"], preview: [],
     entities: ["默认主体"], accounts: kind === "tb" ? pairs.map((row) => row.account) : ["160101", "160201", "6601"],
     entityAccounts: kind === "tb" ? pairs : [{ entity: "默认主体", account: "JE独有费用科目" }],
     reviewAccounts: kind === "tb" ? pairs : [],
@@ -825,7 +867,7 @@ describe("FA只复核TB的实际页面流程", () => {
     params: {
       tbSource: { inputPath: "D:\\tb.xlsx", sheet: "Sheet1" },
       jeSource: { inputPath: "D:\\je.xlsx", sheet: "Sheet1" },
-      tbMapping: { accountName: "科目", openingFunctionalAmount: "期初", closingFunctionalAmount: "期末", currency: "币种" },
+      tbMapping: { accountName: "科目", openingFunctionalAmount: "期初", closingFunctionalAmount: "期末", currency: "币种", ytdFunctionalDebit: "本年借方", ytdFunctionalCredit: "本年贷方" },
       jeMapping: { accountName: "科目", id: "凭证", date: "日期", functionalDebit: "借方", functionalCredit: "贷方" },
       accountAssignments: [
         { ...pairs[0], role: "cost", category: "人工类别" },
@@ -871,6 +913,20 @@ describe("FA只复核TB的实际页面流程", () => {
     const previous = restore().params.accountAssignments as ReturnType<typeof faAssignmentsForEntityAccounts>;
     expect(params.accountAssignments).toEqual(previous.slice(0, 3));
     expect(screen.queryByText(/尚未确认 JE 来源科目/)).not.toBeInTheDocument();
+  });
+
+  it("取消TB累计贷方映射立即提示并阻止进入科目复核，补回恢复", async () => {
+    prepare();
+    render(createElement(FaTbJePage));
+    act(() => publishTaskRestore(restore()));
+    const next = await screen.findByRole("button", {name:"下一步：复核科目分类"});
+    await waitFor(() => expect(next).toBeEnabled());
+    const credit = screen.getAllByRole("combobox", {name:"将「本年贷方」映射为字段"})[0];
+    fireEvent.change(credit,{target:{value:""}});
+    expect(screen.getByText("尚未映射：本年累计借方和贷方发生额")).toBeInTheDocument();
+    expect(next).toBeDisabled();
+    fireEvent.change(credit,{target:{value:"ytdFunctionalCredit"}});
+    expect(next).toBeEnabled();
   });
 
   it("无可用快照时重新读取来源仍保留TB人工类别且过滤旧JE项", async () => {

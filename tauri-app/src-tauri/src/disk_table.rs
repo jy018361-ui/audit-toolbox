@@ -14,6 +14,51 @@ const MAX_ROW_BYTES: usize = 8 * 1024 * 1024;
 mod xlsx;
 pub(crate) type Progress<'a> = &'a dyn Fn(&str, usize, usize, &str);
 
+/// 同一任务的监控与所有嵌套读表共用启动时的决定，不随内存波动重新分流。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct ReadPlan {
+    sources: Vec<(PathBuf, bool)>,
+}
+
+impl ReadPlan {
+    pub(crate) fn add(&mut self, path: &Path, disk: bool) {
+        let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if let Some((_, previous)) = self.sources.iter_mut().find(|(source, _)| *source == path) {
+            *previous |= disk;
+        } else {
+            self.sources.push((path, disk));
+        }
+    }
+
+    pub(crate) fn uses_disk(&self) -> bool {
+        self.sources.iter().any(|(_, disk)| *disk)
+    }
+
+    fn decision(&self, sources: &[(&Path, Option<&str>)]) -> Option<bool> {
+        let mut disk = false;
+        for (path, _) in sources {
+            let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            disk |= self.sources.iter().find(|(source, _)| *source == path)?.1;
+        }
+        Some(disk)
+    }
+
+    pub(crate) fn enter(self) -> ReadPlanGuard {
+        ReadPlanGuard(READ_PLAN.with(|slot| slot.replace(Some(self))))
+    }
+}
+
+thread_local! {
+    static READ_PLAN: std::cell::RefCell<Option<ReadPlan>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) struct ReadPlanGuard(Option<ReadPlan>);
+impl Drop for ReadPlanGuard {
+    fn drop(&mut self) {
+        READ_PLAN.with(|slot| { slot.replace(self.0.take()); });
+    }
+}
+
 fn failure(code: &str, message: &str, detail: impl ToString) -> AppError {
     AppError::new(code, message, true, Some(detail.to_string()))
 }
@@ -33,6 +78,9 @@ pub(crate) fn should_use_disk(paths: &[&Path], working_factor: u64) -> bool {
 
 /// 指定工作表时只估算该表及工作簿共享字符串；未知选表时保守估算整本。
 pub(crate) fn should_use_disk_for_sheets(sources: &[(&Path, Option<&str>)], working_factor: u64) -> bool {
+    if let Some(disk) = READ_PLAN.with(|slot| slot.borrow().as_ref().and_then(|plan| plan.decision(sources))) {
+        return disk;
+    }
     let mut seen = HashSet::new();
     let mut estimates = Vec::with_capacity(sources.len());
     for &(path, sheet) in sources {

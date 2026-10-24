@@ -23,7 +23,7 @@ import { SwitchInput } from "@/components/SwitchInput";
 import { CircleMinus, Equal, Search } from "lucide-react";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { JobProgress } from "@/components/JobProgress";
-import { LedgerSourceCard } from "@/components/LedgerSourceCard";
+import { LedgerSourceCard, LedgerSourceControls } from "@/components/LedgerSourceCard";
 import { LedgerLlmReview } from "@/components/LedgerLlmReview";
 import { LedgerMappingPreview } from "@/components/LedgerMappingPreview";
 import { displayFileName } from "@/fileDisplay";
@@ -388,6 +388,13 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   function invalidate(
     change: Partial<Pick<JeMarkDraft, "sheet" | "headerRow" | "headerDepth">>,
   ) {
+    llmGeneration.current += 1;
+    setLlmBusy(false);
+    setLlmFailed(false);
+    setLlmStatus("");
+    setChanges([]);
+    setPending([]);
+    setResult(undefined);
     setValueCache({});
     setMenu(undefined);
     setDraft((current) => ({
@@ -573,7 +580,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       if (generation !== llmGeneration.current) return;
       setLlmFailed(true);
       setLlmStatus(
-        `${ledgerErrorText(e).replace(/[。.]+$/, "")}。脚本自动映射已完成，可直接核对后继续；LLM 复核只是可选的辅助检查。`,
+        `${ledgerErrorText(e).replace(/[。.]+$/, "")}。智能复核未完成，当前映射仍可手动核对后继续。`,
       );
     } finally {
       if (generation === llmGeneration.current) setLlmBusy(false);
@@ -785,20 +792,11 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       <LedgerSourceCard
         className={draft.inspect ? "jm-source-loaded" : undefined}
         inputPath={draft.inputPath}
-        sheet={draft.sheet}
-        knownSheets={draft.knownSheets}
-        headerRow={draft.headerRow}
-        headerDepth={draft.headerDepth}
-        detectedHeaderRow={draft.headerRow === 0 ? draft.inspect?.headerRow : undefined}
         dragHover={dragHover}
         busy={busy}
         job={job}
-        needsReload={!draft.inspect && draft.knownSheets.length > 0}
         onBrowse={chooseInput}
         onClear={clearAll}
-        onSheetChange={(value) => invalidate({ sheet: value, headerRow: 0, headerDepth: 0 })}
-        onHeaderRowChange={(value) => invalidate({ headerRow: value })}
-        onHeaderDepthChange={(value) => invalidate({ headerDepth: value })}
         onInspect={inspect}
         onCancel={(jobId) => jobCancel(jobId)}
       >
@@ -989,7 +987,15 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         mapping={draft.mapping}
         setMap={setMap}
         llmBusy={llmBusy}
-        toolbar={draft.inspect && (
+        sourceNote={draft.inspect && draft.headerRow === 0 ? <p className="fx-hint">已自动按第 {draft.inspect.headerRow} 行识别表头。</p> : !draft.inspect && draft.inputPath ? <p className="fx-hint">请读取文件以刷新预览和映射。</p> : undefined}
+        toolbar={<>
+          {draft.inputPath && <LedgerSourceControls
+            sheet={draft.sheet} knownSheets={draft.knownSheets} headerRow={draft.headerRow} headerDepth={draft.headerDepth} busy={busy || llmBusy}
+            onSheetChange={(sheet) => invalidate({ sheet, headerRow: 0, headerDepth: 0 })}
+            onHeaderRowChange={(headerRow) => invalidate({ headerRow })}
+            onHeaderDepthChange={(headerDepth) => invalidate({ headerDepth })}
+          />}
+          {draft.inspect && (
           <Button
             variant="secondary"
             size="sm"
@@ -998,7 +1004,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
           >
             {llmBusy ? "复核中…" : "复核映射"}
           </Button>
-        )}
+          )}
+        </>}
         banner={!signLoading && (signError || signWarnings.length > 0) ? (
           <div className="jm-sign" role="alert">
             {signError ? (

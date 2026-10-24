@@ -48,6 +48,53 @@ fn one() -> usize {
     1
 }
 
+/// 按实际操作生成一次读取计划；监控与 worker 的嵌套公共读取均复用它。
+pub(crate) fn job_read_plan(method: &str, params: &Value) -> Option<crate::disk_table::ReadPlan> {
+    fn decide(specs: &[&SourceSpec], factor: u64) -> bool {
+        let sources = specs.iter().map(|spec| (
+            Path::new(&spec.input_path),
+            (!spec.sheet.trim().is_empty()).then_some(spec.sheet.as_str()),
+        )).collect::<Vec<_>>();
+        crate::disk_table::should_use_disk_for_sheets(&sources, factor)
+    }
+    let mut plan = crate::disk_table::ReadPlan::default();
+    if method == "loan.inspect_full" {
+        let spec: SourceSpec = serde_json::from_value(params.get("source")?.clone()).ok()?;
+        if !Path::new(&spec.input_path).is_file() { return None; }
+        let factor = if params["kind"].as_str() == Some("tb") { 4 } else { 1 };
+        plan.add(Path::new(&spec.input_path), decide(&[&spec], factor));
+    } else if matches!(method, "loan.preview" | "loan.export") {
+        // 正式 TB+JE 测算保留联合工作集口径；台账及历史利率按各自读取口径。
+        let tb_mode = params["mode"].as_str() == Some("tb");
+        let reads_expense_tb = params["interestExpenseAccounts"].as_array().is_some_and(|items|
+            items.iter().any(|value| value.as_str().is_some()));
+        let tb = (tb_mode || reads_expense_tb).then(|| source_config(params, "tbSource").ok())
+            .flatten().map(|(spec, _)| spec);
+        let je = (tb_mode || reads_expense_tb).then(|| source_config(params, "jeSource").ok())
+            .flatten().map(|(spec, _)| spec);
+        if tb_mode && (tb.is_none() || je.is_none()) {
+            return None;
+        }
+        let specs = tb.iter().chain(je.iter()).collect::<Vec<_>>();
+        if specs.iter().any(|spec| !Path::new(&spec.input_path).is_file()) { return None; }
+        if !specs.is_empty() {
+            let disk = decide(&specs, 4);
+            for spec in specs { plan.add(Path::new(&spec.input_path), disk); }
+        }
+        // 页面切换模式后仍会携带另一模式的来源，未参与本次读取的文件不计入计划。
+        let key = if tb_mode { "rateLedgerSource" } else { "ledgerSource" };
+        if let Ok((spec, _)) = source_config(params, key) {
+            if !Path::new(&spec.input_path).is_file() { return None; }
+            plan.add(Path::new(&spec.input_path), decide(&[&spec], 1));
+        } else if !tb_mode {
+            return None;
+        }
+    } else {
+        return None;
+    }
+    Some(plan)
+}
+
 fn scoped_entity(
     raw: &str,
     enabled: bool,
@@ -1960,11 +2007,14 @@ fn validate_run_request(method: &str, params: &Value) -> Result<(), AppError> {
             params,
             "jeSource",
             &["accountCode", "accountName", "account"],
-        );
+        )
+        && (mapped_role(params, "jeSource", "functionalAmount")
+            || (mapped_role(params, "jeSource", "functionalDebit")
+                && mapped_role(params, "jeSource", "functionalCredit")));
     if !tb_ready || !je_ready {
         return Err(error(
             "LOAN_MAPPING_INCOMPLETE",
-            "TB 或 JE 的字段映射尚未补齐，不能开始借款利息测算。",
+            "TB 或 JE 的字段映射尚未补齐。TB 须映射科目和期末余额；JE 须映射科目、记账日期、凭证识别字段及本位币金额（净额，或借方和贷方）。",
             None,
         ));
     }
@@ -5534,7 +5584,7 @@ fn export_with_booked(rows: &[LoanRow], params: &Value, booked: &BookedInterestE
             y,
             5,
             Formula::new(format!("=B{excel_row}+C{excel_row}-D{excel_row}"))
-                .set_result(row.closing_principal.to_string()),
+                .set_result((row.opening_principal + row.additions - row.reductions).to_string()),
             &amount,
         )
         .map_err(xlsx)?;
@@ -5553,6 +5603,10 @@ fn export_with_booked(rows: &[LoanRow], params: &Value, booked: &BookedInterestE
             &amount,
         )
         .map_err(xlsx)?;
+        if row.ledger_closing.is_none() {
+            // 空字符串传给 Formula 会退回默认缓存 0；写入后显式保留公式的空值结果。
+            ws.set_formula_result(y, 6, "");
+        }
         let floating = row.rate_type == "floating";
         ws.write_string_with_format(
             y,
@@ -5684,7 +5738,7 @@ fn export_with_booked(rows: &[LoanRow], params: &Value, booked: &BookedInterestE
                     2 => row.additions,
                     3 => row.reductions,
                     4 => row.ledger_closing.unwrap_or(0.0),
-                    5 => row.closing_principal,
+                    5 => row.opening_principal + row.additions - row.reductions,
                     6 => row
                         .ledger_closing
                         .map(|lc| row.opening_principal + row.additions - row.reductions - lc)
@@ -6455,7 +6509,17 @@ fn suggest_with_rows(headers: &[String], kind: &str, rows: &[Vec<String>]) -> Ma
                 continue;
             }
             if let Some(header) = headers.get(column) {
-                out.insert((*role).into(), Value::String(header.clone()));
+                if role == "auxiliary" {
+                    match out.get_mut(role) {
+                        Some(Value::Array(all)) => all.push(Value::String(header.clone())),
+                        Some(value @ Value::String(_)) => {
+                            *value = Value::Array(vec![value.clone(), Value::String(header.clone())]);
+                        }
+                        _ => { out.insert(role.into(), Value::String(header.clone())); }
+                    }
+                } else {
+                    out.insert((*role).into(), Value::String(header.clone()));
+                }
             }
         }
         if kind == "tb" {
@@ -7738,10 +7802,40 @@ mod tests {
                 "id": "凭证号",
                 "accountCode": "科目编码",
                 "accountName": "科目名称",
-                "summary": "摘要"
+                "summary": "摘要",
+                "functionalDebit": "借方",
+                "functionalCredit": "贷方"
             }},
             "loanAccounts": ["2001"]
         })
+    }
+
+    #[test]
+    fn tb任务入口取消金额映射立即阻断预览与导出() {
+        for method in ["loan.preview", "loan.export"] {
+            for roles in [vec!["functionalDebit"], vec!["functionalCredit"],
+                vec!["functionalDebit", "functionalCredit"]] {
+                let mut params = valid_tb_run_request();
+                for role in roles { params["jeSource"]["mapping"].as_object_mut().unwrap().remove(role); }
+                let failure = validate_run_request(method, &params).unwrap_err();
+                assert_eq!(failure.code, "LOAN_MAPPING_INCOMPLETE");
+                assert!(failure.user_message.contains("本位币金额"));
+                // 正式 worker 路径须在读表、命中旧预览缓存或导出前拒绝缺失映射。
+                let cancel = Arc::new(AtomicBool::new(false));
+                let pause = PauseCheckpoint::unpaused(cancel.clone());
+                assert_eq!(run_job(method, params, &|_,_,_,_| panic!("缺失金额映射不应进入读表测算"),
+                    cancel, &pause).unwrap_err().code, "LOAN_MAPPING_INCOMPLETE");
+            }
+        }
+        let mut params = valid_tb_run_request();
+        params["jeSource"]["mapping"]["functionalCredit"] = json!([" "]);
+        assert_eq!(validate_run_request("loan.preview", &params).unwrap_err().code,
+            "LOAN_MAPPING_INCOMPLETE");
+        params["jeSource"]["mapping"]["functionalAmount"] = json!("净额");
+        assert!(validate_run_request("loan.preview", &params).is_ok());
+        // 金额净额方案无需方向列；期初与累计发生额的既有豁免保持。
+        params["tbSource"]["mapping"].as_object_mut().unwrap().remove("openingFunctionalAmount");
+        assert!(validate_run_request("loan.preview", &params).is_ok());
     }
 
     #[test]
@@ -8338,6 +8432,56 @@ mod tests {
     }
 
     #[test]
+    fn predicted_closing_formula_cache_preserves_source_differences() {
+        let dir = tempfile::tempdir().unwrap();
+        // 覆盖方向相反、真实账表差异、无来源期末及完全勾稽；两种模式共用导出。
+        let rows = vec![
+            LoanRow { opening_principal: 0.0, additions: 7_000_000.0,
+                reductions: 700_000.0, closing_principal: -6_300_000.0,
+                ledger_closing: Some(-6_300_000.0), ..LoanRow::default() },
+            LoanRow { opening_principal: 100.0, additions: 30.0, reductions: 10.0,
+                closing_principal: 115.0, ledger_closing: Some(115.0), ..LoanRow::default() },
+            LoanRow { opening_principal: 50.0, additions: 0.0, reductions: 70.0,
+                closing_principal: -20.0, ledger_closing: None, ..LoanRow::default() },
+            LoanRow { opening_principal: 10.0, additions: 5.0, reductions: 3.0,
+                closing_principal: 12.0, ledger_closing: Some(12.0), ..LoanRow::default() },
+        ];
+        for mode in ["tb", "ledger"] {
+            let path = dir.path().join(format!("{mode}.xlsx"));
+            export(&rows, &json!({"mode":mode, "outputPath":path})).unwrap();
+            let mut book = open_workbook_auto(&path).unwrap();
+            let values = book.worksheet_range("借款变动与利息测算").unwrap();
+            let formulas = book.worksheet_formula("借款变动与利息测算").unwrap();
+            let numeric = |r, c| values.get_value((r, c)).unwrap().to_string().parse::<f64>().unwrap();
+            let mut predicted_total = 0.0;
+            let mut source_total = 0.0;
+            let mut diff_total = 0.0;
+            for (index, expected) in [6_300_000.0, 120.0, -20.0, 12.0].into_iter().enumerate() {
+                let y = (index + 1) as u32;
+                let excel_row = y + 1;
+                assert_eq!(numeric(y, 5), expected, "{mode} F{excel_row}");
+                assert_eq!(formulas.get_value((y, 5)).unwrap(), &format!("B{excel_row}+C{excel_row}-D{excel_row}"));
+                predicted_total += expected;
+                if let Some(source) = rows[index].ledger_closing {
+                    assert_eq!(numeric(y, 4), source, "来源期末保持原值");
+                    assert_eq!(numeric(y, 6), expected - source, "账表差异不能被缓存掩盖");
+                    source_total += source;
+                    diff_total += expected - source;
+                } else {
+                    assert!(values.get_value((y, 4)).is_none_or(|cell| cell.to_string().is_empty()));
+                    assert!(values.get_value((y, 6)).is_none_or(|cell| cell.to_string().is_empty()));
+                }
+            }
+            let total_y = (rows.len() + 1) as u32;
+            for (col, expected) in [(4, source_total), (5, predicted_total), (6, diff_total)] {
+                assert_eq!(numeric(total_y, col), expected, "{mode} 合计列{col}");
+                let letter = char::from(b'A' + col as u8);
+                assert_eq!(formulas.get_value((total_y, col)).unwrap(), &format!("SUM({letter}2:{letter}5)"));
+            }
+        }
+    }
+
+    #[test]
     fn uploaded_floating_execution_rate_and_formula_caches_agree() {
         let fixture = SyntheticLedger::new(&[["4.2%", "浮动", "", "90"]]);
         let mut params = fixture.params();
@@ -8847,7 +8991,7 @@ mod tests {
     }
 
     #[test]
-    fn je_preview_does_not_claim_sampled_catalog_complete() {
+    fn loan_read_plan_je_preview_does_not_claim_sampled_catalog_complete() {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("je.xlsx");
@@ -8890,6 +9034,20 @@ mod tests {
         assert_eq!(preview["preview"], full["preview"]);
         full_params["previewOnly"] = json!(false);
         assert_eq!(full, inspect(&full_params).unwrap());
+        for disk in [false, true] {
+            let mut plan = crate::disk_table::ReadPlan::default();
+            plan.add(&path, disk);
+            let _guard = plan.enter();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let planned = run_job("loan.inspect_full", full_params.clone(), &|_,_,_,_| {},
+                cancel.clone(), &PauseCheckpoint::unpaused(cancel)).unwrap();
+            for key in ["headers", "suggestedMapping", "rowCount", "metadataComplete", "dataYears", "entities", "entityAccounts"] {
+                assert_eq!(planned[key], full[key], "磁盘计划={disk}，完整识别字段={key}");
+            }
+            let cancel = Arc::new(AtomicBool::new(true));
+            assert_eq!(run_job("loan.inspect_full", full_params.clone(), &|_,_,_,_| {},
+                cancel.clone(), &PauseCheckpoint::unpaused(cancel)).unwrap_err().code, "JOB_CANCELLED");
+        }
         let cancelled = Arc::new(AtomicBool::new(true));
         assert_eq!(run_job("loan.inspect_full", full_params, &|_,_,_,_| {}, cancelled.clone(), &PauseCheckpoint::unpaused(cancelled)).unwrap_err().code, "JOB_CANCELLED");
     }

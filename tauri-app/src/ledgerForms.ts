@@ -111,6 +111,36 @@ export function roleRequirement(
   return undefined;
 }
 
+/** 利息工具的既有豁免也必须应用到下拉标记和表型说明，不能仅放宽运行门禁。 */
+export function interestLedgerForms(
+  kind: "tb" | "je",
+  forms: LedgerForm[],
+  tool: "loan" | "deposit",
+): LedgerForm[] {
+  if (kind === "je" && tool === "loan") return forms;
+  // 利息业务不消费原币金额表型；币种字段仍是独立的选填身份字段。
+  const supported = (role: string) => !/Foreign|^foreign/.test(role);
+  return forms.filter((form) => !form.required.flat().some((role) => !supported(role)))
+    .map((form) => {
+      if (kind === "je") return {
+        ...form,
+        required: [],
+        anyOf: [form.required.flat().filter((role) => /^functional(Amount|Debit|Credit)$/.test(role))],
+        optional: [["direction"]],
+      };
+      const closing = form.required.flat().filter((role) => /^closingFunctional/.test(role));
+      const optional = [...new Set([...form.required, ...form.optional].flat()
+        .filter((role) => supported(role) && !closing.includes(role)))];
+      return {
+        ...form,
+        required: [],
+        anyOf: [closing],
+        // 期初和累计发生额可以独立提供，不套用公共表型的整组必填规则。
+        optional: optional.map((role) => [role]),
+      };
+    });
+}
+
 /** 面板上那句「已识别为 TB-类型C（本位币借贷分列）」/「最接近 …，还缺 …」。 */
 export function describeForm(
   match: LedgerFormMatch | undefined,

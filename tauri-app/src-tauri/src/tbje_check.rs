@@ -1206,13 +1206,75 @@ fn evaluate_with_full_items(
     }))
 }
 
-/// 一次核对多组账。
-///
-/// 每组一份余额表配一份序时账。**一组跑完再跑下一组**——序时账动辄几十万行，
-/// 并行跑十组会把内存顶穿；串行还能逐组报进度，用户看得见跑到哪了。
-///
-/// 单组失败不打断整批：把错误记在那一组上继续往下跑。十组里有一组文件损坏，
-/// 不该让另外九组的结论一起丢掉。
+/// 映射预检也在受内存控制的 worker 内执行，返回最终映射供页面与导出继续使用。
+fn prepare_batch_group(group: &mut Value) -> Result<Value, AppError> {
+    if group.get("jeSource").is_none() {
+        return Ok(Value::Null);
+    }
+    let alignment = fx::check_mapping_alignment(group)?;
+    if alignment.get("aligned").and_then(Value::as_bool) == Some(false) {
+        let reasons = alignment["errors"].as_array().map(|items| {
+            items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("；")
+        }).unwrap_or_else(|| "TB与JE的科目字段无法对齐。".into());
+        return Err(error("MAPPING_INVALID", reasons, None));
+    }
+    for key in ["tbMapping", "jeMapping"] {
+        if let Some(fix) = alignment.get("fix").and_then(|fix| fix.get(key)).and_then(Value::as_object) {
+            let mut mapping = mapping_of(group, key);
+            mapping.extend(fix.clone());
+            group[key] = json!(mapping);
+        }
+    }
+    // 与原映射页保持相同的降级规则；内存等待和取消属于任务控制，不能吞掉。
+    let auxiliary = match fx::auxiliary_link_check(group) {
+        Ok(result) => result,
+        Err(err) if matches!(err.code.as_str(), "JOB_CANCELLED" | "MEMORY_PROTECTION") => return Err(err),
+        Err(_) => Value::Null,
+    };
+    let verified = auxiliary["status"].as_str() == Some("verified");
+    if auxiliary["tbAuxMapped"].as_bool() == Some(true) && !verified {
+        let mut mapping = mapping_of(group, "tbMapping");
+        let confirmed = mapping.get("__manualAuxiliary").and_then(Value::as_str)
+            .and_then(|text| serde_json::from_str::<Value>(text).ok()).unwrap_or(Value::Null);
+        let selected = columns(&mapping, "auxiliary");
+        let manual = selected.iter().filter(|column| {
+            confirmed["auxiliary"].as_array().is_some_and(|items| items.iter().any(|value| value.as_str() == Some(column)))
+                || confirmed["auxiliary"].as_str() == Some(column)
+        }).cloned().collect::<Vec<_>>();
+        if manual.len() != selected.len() {
+            if manual.is_empty() { mapping.remove("auxiliary"); }
+            else { mapping.insert("auxiliary".into(), json!(manual)); }
+        }
+        group["tbMapping"] = json!(mapping);
+    }
+    group.as_object_mut().unwrap().remove("auxiliaryPlan");
+    if verified && auxiliary["planKey"].as_str().is_some_and(|key| !key.is_empty()) {
+        let groups = auxiliary["groups"].as_array().into_iter().flatten().map(|item| json!({
+            "entity": item["entity"], "account": item["account"],
+            "tbColumn": item["tbColumn"], "jeColumn": item["column"],
+        })).collect::<Vec<_>>();
+        group["auxiliaryPlan"] = json!({ "planKey": auxiliary["planKey"], "groups": groups });
+    }
+    Ok(auxiliary)
+}
+
+/// 核对结论可以有差异；这里仅统计真正执行成功的组，不能把运行失败算完成。
+pub(crate) fn incomplete_batch(result: &Value) -> Option<(usize, usize, String)> {
+    let groups = result.get("groups").or_else(|| result.get("exports"))?.as_array()?;
+    let failed = groups.iter().filter(|group| group["ok"].as_bool() == Some(false)).count();
+    if failed == 0 { return None; }
+    let total = groups.len();
+    let succeeded = total - failed;
+    let message = if succeeded == 0 {
+        format!("处理失败：共 {total} 组，均未成功处理，请检查各组原因后重试。")
+    } else {
+        format!("部分完成：已处理 {succeeded} / {total} 组，{failed} 组未成功，请检查各组原因后重试。")
+    };
+    Some((succeeded, total, message))
+}
+
+/// 一组预检并核对完再处理下一组，避免并行读取大表抬高内存峰值。
+/// 单组映射或文件错误保留在结果中；取消和内存保护停止整批。
 fn run_batch(
     params: &Value,
     progress: Progress,
@@ -1225,8 +1287,10 @@ fn run_batch(
         .ok_or_else(|| error("INVALID_PARAMS", "缺少要核对的分组。", None))?;
     let total = groups.len().max(1);
     let mut results = Vec::new();
-    for (index, group) in groups.iter().enumerate() {
+    let mut prepared_groups = Vec::new();
+    for (index, source_group) in groups.iter().enumerate() {
         pause.wait()?;
+        let mut group = source_group.clone();
         let label = group
             .get("label")
             .and_then(Value::as_str)
@@ -1246,10 +1310,22 @@ fn run_batch(
                 }
             ),
         );
-        match run_with_progress(group, cancel, progress) {
+        let preparation = if params["prepareMappings"].as_bool() == Some(true) {
+            progress("map", index, total, &format!("正在对齐第 {} / {total} 组字段并验证辅助核算…", index + 1));
+            prepare_batch_group(&mut group)
+        } else { Ok(Value::Null) };
+        pause.wait()?;
+        let checked = preparation.and_then(|auxiliary| {
+            prepared_groups.push(json!({
+                "groupId": group.get("groupId"), "tbMapping": group.get("tbMapping"),
+                "jeMapping": group.get("jeMapping"), "auxiliaryLink": auxiliary,
+            }));
+            run_with_progress(&group, cancel, progress)
+        });
+        match checked {
             Ok(result) => results.push(json!({ "groupId": group.get("groupId"), "label": label, "ok": true, "result": result })),
             // 取消要中断整批，别的错误只记在这一组上。
-            Err(e) if e.code == "JOB_CANCELLED" => return Err(e),
+            Err(e) if matches!(e.code.as_str(), "JOB_CANCELLED" | "MEMORY_PROTECTION") => return Err(e),
             Err(e) => results.push(json!({
                 "groupId": group.get("groupId"),
                 "label": label,
@@ -1258,8 +1334,8 @@ fn run_batch(
             })),
         }
     }
-    progress("done", total, total, "全部核对完成。");
-    Ok(json!({ "groups": results }))
+    progress("done", total, total, "本批核对已结束，正在汇总结果。");
+    Ok(json!({ "groups": results, "preparedGroups": prepared_groups }))
 }
 
 /// 一键导出全部已完成分组。

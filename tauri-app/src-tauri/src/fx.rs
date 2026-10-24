@@ -1197,7 +1197,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     fill_combined_account_column(kind, &table, &mut mapping);
     reconcile_account_identity_by_data(kind, &table, &mut mapping);
     if kind == "tb" {
-        complete_entered_accounted_tb_mapping(&table.headers, &mut mapping);
+        ledger_mapping::complete_entered_accounted_tb_mapping(&table.headers, &table.rows, &mut mapping);
     }
     // 一份合并 TB 可能同时包含多家公司，各公司的本位币不同。此时币种列
     // 全表并非单一值，但在每个主体内仍然是填满且单一的公司本位币列。
@@ -2672,7 +2672,7 @@ pub(crate) fn merge_headers(raw: &[Vec<String>], width: usize) -> Vec<String> {
         .collect()
 }
 
-type Candidate = (String, f64, Vec<String>, Vec<String>);
+type Candidate = ledger_mapping::MappingCandidate;
 
 /// 列名分不出「本年累计」与「本期发生」时，按金额量级重判：合计大的是本年累计。
 /// 本工具的候选打分带列画像加权，映射不是内核直接产出的，所以在成型之后再过一道。
@@ -2699,63 +2699,6 @@ fn refine_layout(table: &FxTable, kind: &str, mapping: &mut Map<String, Value>) 
     }
 }
 
-/// Oracle 等余额表把原币写成 Entered、本位币写成 Accounted。
-/// 仅在标准列成组存在时按明确列名定口径，避免宽表的泛化别名把
-/// 发生额识别为科目编码，或把 Entered 余额当成本位币。人工确认的
-/// 映射在 inspect 后单独覆盖。
-fn complete_entered_accounted_tb_mapping(headers: &[String], mapping: &mut Map<String, Value>) {
-    let find = |name: &str| {
-        headers.iter().find(|header| normalize_header(header) == normalize_header(name))
-    };
-    if [
-        "Begin Balance (Entered)",
-        "Begin Balance (Accounted)",
-        "End Balance (Entered)",
-        "End Balance (Accounted)",
-    ]
-    .iter()
-    .any(|name| find(name).is_none())
-    {
-        return;
-    }
-    for (role, name) in [
-        ("openingForeignAmount", "Begin Balance (Entered)"),
-        ("openingFunctionalAmount", "Begin Balance (Accounted)"),
-        ("closingForeignAmount", "End Balance (Entered)"),
-        ("closingFunctionalAmount", "End Balance (Accounted)"),
-    ] {
-        let Some(header) = find(name) else { continue };
-        mapping.insert(role.to_owned(), Value::String(header.clone()));
-    }
-    let identity_and_movement = [
-        ("entity", "Company"),
-        ("accountCode", "Code Combination"),
-        ("accountName", "Account Description"),
-        ("currency", "Currency Code"),
-        ("periodForeignDebit", "Period Net (Entered Dr)"),
-        ("periodForeignCredit", "Period Net (Entered Cr)"),
-        ("periodFunctionalDebit", "Period Net (Accounted Dr)"),
-        ("periodFunctionalCredit", "Period Net (Accounted Cr)"),
-    ];
-    if identity_and_movement.iter().all(|(_, name)| find(name).is_some()) {
-        for (role, name) in identity_and_movement {
-            let header = find(name).expect("checked above");
-            let value = if role == "accountName" {
-                Value::Array(vec![Value::String(header.clone())])
-            } else {
-                Value::String(header.clone())
-            };
-            mapping.insert(role.to_owned(), value);
-        }
-        // “Period Net”是发生额；通用别名不能再把它占作会计期间。
-        if first_col(mapping, "period")
-            .is_some_and(|column| column.starts_with("Period Net ("))
-        {
-            mapping.remove("period");
-        }
-    }
-}
-
 /// 一列只承载一个语义：同一列被多个角色选中时，分数高的留下。
 ///
 /// 可多列的角色（科目名称、凭证识别字段）逐列参与——被挤掉时只丢那一列，
@@ -2765,66 +2708,7 @@ fn drop_column_conflicts(
     candidates: &BTreeMap<String, Vec<Candidate>>,
     mapping: &mut Map<String, Value>,
 ) {
-    let score_of = |role: &str, column: &str| {
-        candidates
-            .get(role)
-            .and_then(|all| all.iter().find(|c| c.0 == column))
-            .map(|c| c.1)
-            .unwrap_or(0.0)
-    };
-    let mut picks: Vec<(String, String, f64)> = Vec::new();
-    for (role, value) in mapping.iter() {
-        match value {
-            Value::String(column) => {
-                picks.push((role.clone(), column.clone(), score_of(role, column)))
-            }
-            Value::Array(columns) => {
-                for column in columns.iter().filter_map(Value::as_str) {
-                    picks.push((role.clone(), column.to_string(), score_of(role, column)));
-                }
-            }
-            _ => {}
-        }
-    }
-    for (role, column) in ledger_mapping::conflicting_roles(kind, &picks) {
-        let drop_whole = match mapping.get_mut(&role) {
-            Some(Value::Array(columns)) => {
-                columns.retain(|x| x.as_str() != Some(column.as_str()));
-                columns.is_empty()
-            }
-            _ => true,
-        };
-        if drop_whole {
-            // 列被更高分的角色占走时，先试次选列再放弃：两列同名「借/贷」
-            // （2-2026.08 余额表）本该一列期初、一列期末，把输家整个删掉
-            // 会让期初方向凭空消失。
-            let used: std::collections::HashSet<String> = mapping
-                .values()
-                .filter_map(|value| match value {
-                    Value::String(s) => Some(s.clone()),
-                    Value::Array(all) => all
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(|s| s.to_string())
-                        .next(),
-                    _ => None,
-                })
-                .collect();
-            let next = candidates.get(&role).and_then(|all| {
-                all.iter()
-                    .find(|c| c.1 >= 0.55 && !used.contains(&c.0))
-                    .map(|c| c.0.clone())
-            });
-            match next {
-                Some(fallback) => {
-                    mapping.insert(role.clone(), Value::String(fallback));
-                }
-                None => {
-                    mapping.remove(&role);
-                }
-            }
-        }
-    }
+    ledger_mapping::resolve_mapping_column_conflicts(kind, candidates, mapping);
 }
 
 /// 科目编码整个空缺时，找一列「编码+名称混写」的顶上。
@@ -3105,6 +2989,19 @@ fn suggest_mappings(
             },
         );
         out.insert(role.into(), choices);
+    }
+    if !skip_je_auxiliary {
+        let assigned: BTreeMap<usize, &'static str> = ledger_mapping::suggest_roles_with_data(
+            kind, &table.headers, &table.rows).into_iter().collect();
+        // 公共候选已先排除身份列、摘要及缺少取值证据的歧义标题。
+        for index in ledger_mapping::auxiliary_dimension_candidates(kind, &table.headers, &table.rows,
+            &assigned.iter().filter(|(_, role)| **role != "auxiliary").map(|(i, r)| (*i, *r)).collect()) {
+            let header = &table.headers[index];
+            let all = out.entry("auxiliary".into()).or_insert_with(Vec::new);
+            if !all.iter().any(|c| c.0 == *header) {
+                all.push((header.clone(), 0.94, vec![header.clone()], Vec::new()));
+            }
+        }
     }
     out
 }

@@ -30,6 +30,16 @@
 .fa-list-shell .fa-supplement-side {
   min-width: 0;
 }
+.fa-list-shell .fa-match-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  color: var(--text-muted);
+}
+.fa-list-shell .fa-match-metrics strong {
+  color: var(--ink-strong);
+  font-variant-numeric: tabular-nums;
+}
 .fa-list-shell .fa-supplement-side .fa-side-title {
   margin-bottom: var(--sp-3);
 }

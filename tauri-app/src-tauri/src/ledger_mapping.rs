@@ -20,6 +20,11 @@ use std::sync::{Arc, Mutex};
 pub(crate) mod disk_tb;
 mod structured_tb;
 pub(crate) mod disk_domains;
+mod automatic_mapping;
+pub(crate) use automatic_mapping::{
+    MappingCandidate, auxiliary_dimension_candidates, complete_entered_accounted_tb_mapping,
+    resolve_mapping_column_conflicts,
+};
 
 /// TB 结构规则的唯一缓存版本。所有消费 TB 的业务快照必须纳入此值；
 /// 修改结构取层语义时只在这里升级，避免某个工具继续命中旧结果。
@@ -29,9 +34,14 @@ pub(crate) const TB_STRUCTURE_RULE_VERSION: &str = "complete-structure-v8-name-p
 pub(crate) const AMOUNT_PARSE_RULE_VERSION: &str = "currency-affix-v1-20261020";
 /// JE续行补齐及噪声规则，所有规范化JE／业务结果缓存共用。
 pub(crate) const JE_BODY_RULE_VERSION: &str = "continuation-and-combined-account-v2-20261022";
+/// 自动识别和公共 LLM 复核使用同一份方向裁决说明。
+pub(crate) const TB_DIRECTION_REVIEW_RULES: &str = "方向列应先完整识别再分配：明确的期初／期末名称优先；存在两列通用方向（如借/贷与借/贷_2）时，前列映射 openingDirection，后列映射 closingDirection，不得因已识别期初而遗漏期末，也不得把两列当成单列共享。仅确实只有一列方向时，按它与期初、期末净余额列的远近判归；余额列缺失或证据有歧义时保留待确认，不能一律指定期末。单列方向同时用于两侧必须有整表勾稽证据，不能只凭少量预览推定；第二条独立方向列全空也不表示两侧共用第一列。人工确认映射保留，由复核说明矛盾并提出可追溯建议。";
 #[cfg(test)]
 #[path = "ledger_continuation_tests.rs"]
 mod continuation_tests;
+#[cfg(test)]
+#[path = "ledger_mapping_consistency_tests.rs"]
+mod mapping_consistency_tests;
 
 pub(crate) fn has_manual_auxiliary_mapping(map: &serde_json::Map<String, serde_json::Value>, role: &str) -> bool {
     if !matches!(role, "auxiliary" | "loanId") { return false; }
@@ -864,9 +874,8 @@ const NOT_NAME: &[&str] = &[
     "对方",
     "對方",
 ];
-/// 辅助核算的别名。**只收汇兑损益那一份**——存款利息另有一份把「文本／科目文本／
-/// 账户文本」也算辅助核算（它靠这些列认存款档次），并进来会把科目名称抢走。
-/// 工具需要额外写法时在自己那边追加，标准表保持保守。
+/// 确定性辅助别名。账户／文本等歧义标题统一由 automatic_mapping 结合
+/// 已占用身份列与取值提出候选，不在子工具追加，也不通过裸别名抢科目列。
 const AUX: &[&str] = &[
     "辅助核算",
     "輔助核算",
@@ -2968,9 +2977,8 @@ pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
 /// 成型映射里的方向列按位置定归属，汇兑损益/TBJE 与存款利息/FA List 的
 /// 映射组装共用：
 ///
-/// 1. 两列方向（openingDirection/closingDirection）：冲突消解按角色名
-///    字母序让 closing 先挑列，可能把前柱分给期末。余额表一律期初在前、
-///    期末在后（2-2026.08、北重精工等样例），事后换回来。
+/// 1. 两列方向：显式时点名称优先；通用同名列按前期初、后期末补齐及摆正。
+///    无论初判已占期初、期末或错误共享，都先处理完整的双列证据。
 /// 2. 单一方向列：按它与期初/期末余额列的远近判归——紧邻期初余额的是
 ///    期初方向（北重精工、泓源化工等 R4 裁决），置于表尾靠近期末余额的
 ///    是期末方向（陇能建设、澄宇结算中心等裁决）。余额列缺失时不改判。
@@ -2985,17 +2993,30 @@ pub(crate) fn align_tb_direction_pair(
             .and_then(Value::as_str)
             .and_then(|c| headers.iter().position(|h| h == c))
     };
-    if let (Some(op), Some(cl)) = (
-        col(mapping, "openingDirection"),
-        col(mapping, "closingDirection"),
-    ) && op > cl
-    {
-        let a = mapping.get("openingDirection").cloned();
-        let b = mapping.get("closingDirection").cloned();
-        if let (Some(a), Some(b)) = (a, b) {
-            mapping.insert("openingDirection".into(), b);
-            mapping.insert("closingDirection".into(), a);
+    // 先找完整的物理方向列，不能因一个角色已有初判而漏掉第二列，
+    // 也不能把两列方向误当成一列共享。这里仅处理自动建议，人工映射由调用方随后覆盖。
+    let occupied: HashSet<usize> = mapping.iter()
+        .filter(|(role, _)| !matches!(role.as_str(), "openingDirection" | "closingDirection"))
+        .flat_map(|(_, value)| match value {
+            Value::String(name) => vec![name.as_str()],
+            Value::Array(names) => names.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        })
+        .filter_map(|name| headers.iter().position(|header| header == name))
+        .collect();
+    if let Some((opening, closing)) = tb_direction_pair(headers, |index| !occupied.contains(&index)) {
+        for (role, index) in [("openingDirection", opening), ("closingDirection", closing)] {
+            if rows.is_empty() || rows.iter().any(|row| row.get(index).is_some_and(|value| !value.trim().is_empty())) {
+                mapping.insert(role.into(), Value::String(headers[index].clone()));
+            } else {
+                mapping.remove(role);
+            }
         }
+        return;
+    }
+    // 第二列即使全空也依然是一条独立的方向列；缺值不能证明两侧共用第一列。
+    if tb_direction_columns(headers).len() > 1 {
+        return;
     }
     if mapping.contains_key("openingDirection") ^ mapping.contains_key("closingDirection") {
         let (have, index) = if let Some(i) = col(mapping, "openingDirection") {
@@ -3037,6 +3058,7 @@ fn share_single_tb_direction_when_reconciled(
     mapping: &mut serde_json::Map<String, Value>,
 ) {
     if rows.is_empty()
+        || tb_direction_columns(headers).len() > 1
         || !(mapping.contains_key("openingDirection") ^ mapping.contains_key("closingDirection"))
     {
         return;
@@ -3204,10 +3226,34 @@ fn tb_direction_rollforward_score(
     Some((eligible, passed, movement == "period"))
 }
 
-/// 期初与期末的方向列常常**列名完全一样**（都叫「方向 Dr/Cr」），光看名字分不出。
-/// 这时按位置分配：靠前的给期初、靠后的给期末——余额表一律按期初、发生、期末排列。
-///
-/// 实测样例：06 艾维特苏州（Oracle EBS）就是这样两列同名。
+/// 保留每条方向列的物理身份，包含读表时生成的重复列名后缀。
+fn tb_direction_columns(headers: &[String]) -> Vec<usize> {
+    let opening = role_of("tb", "openingDirection").expect("角色存在");
+    let closing = role_of("tb", "closingDirection").expect("角色存在");
+    headers.iter().enumerate()
+        .filter(|(_, header)| alias_score(opening, header).is_some() || alias_score(closing, header).is_some())
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// 明确的期初／期末命名优先；两列通用同名方向才按物理前后分配。
+/// 重复列名的 _2 后缀仍保留为物理身份，不改全局表头归一化。
+fn tb_direction_pair(headers: &[String], available: impl Fn(usize) -> bool) -> Option<(usize, usize)> {
+    let candidates = tb_direction_columns(headers).into_iter().filter(|index| available(*index)).collect::<Vec<_>>();
+    let [first, second] = candidates.as_slice() else { return None };
+    let explicit = |index: usize| {
+        let name = normalize_header(&headers[index]);
+        let opening = ["期初", "年初", "opening"].iter().any(|word| name.contains(word));
+        let closing = ["期末", "年末", "closing"].iter().any(|word| name.contains(word));
+        match (opening, closing) { (true, false) => Some(true), (false, true) => Some(false), _ => None }
+    };
+    match (explicit(*first), explicit(*second)) {
+        (Some(true), Some(true)) | (Some(false), Some(false)) => None,
+        (Some(false), _) | (_, Some(true)) => Some((*second, *first)),
+        _ => Some((*first, *second)),
+    }
+}
+
 fn disambiguate_directions(
     kind: &str,
     headers: &[String],
@@ -3218,31 +3264,12 @@ fn disambiguate_directions(
     if kind != "tb" {
         return;
     }
-    let opening = role_of("tb", "openingDirection").expect("角色存在");
-    let closing = role_of("tb", "closingDirection").expect("角色存在");
-    // 期初方向已经落到某一列上，说明列名本身就分得开，不必按位置猜。
-    if assigned.values().any(|r| *r == "openingDirection") {
-        return;
+    if let Some((opening, closing)) = tb_direction_pair(headers, |index| {
+        assigned.get(&index).is_none_or(|role| matches!(*role, "openingDirection" | "closingDirection"))
+    }) {
+        assigned.insert(opening, "openingDirection");
+        assigned.insert(closing, "closingDirection");
     }
-    let mut candidates: Vec<usize> = headers
-        .iter()
-        .enumerate()
-        .filter(|(i, h)| {
-            let taken = assigned.get(i).copied();
-            // 已经落到别的角色上的列不动，除非它就是期末方向。
-            (taken.is_none() || taken == Some("closingDirection"))
-                && (alias_score(opening, h).is_some() || alias_score(closing, h).is_some())
-        })
-        .map(|(i, _)| i)
-        .collect();
-    if candidates.len() < 2 {
-        return;
-    }
-    candidates.sort_unstable();
-    let first = candidates[0];
-    let last = *candidates.last().expect("至少两列");
-    assigned.insert(first, "openingDirection");
-    assigned.insert(last, "closingDirection");
 }
 
 /// 对一批表头逐列判定归属角色，返回 `列索引 -> 角色标准名`。
@@ -3279,6 +3306,30 @@ pub(crate) fn suggest_roles(kind: &str, headers: &[String]) -> BTreeMap<usize, &
             continue;
         }
         out.insert(i, name);
+    }
+    // 保留原首选裁决，只让落败角色通过同一公共规则尝试未占用的次选列。
+    let candidates: BTreeMap<String, Vec<MappingCandidate>> = score_columns(kind, headers)
+        .into_iter().map(|(role, all)| (role.into(), all.into_iter()
+            .map(|c| (c.column.to_string(), c.score, Vec::new(), Vec::new())).collect())).collect();
+    let mut mapping = serde_json::Map::new();
+    for (index, role) in &out {
+        if role_of(kind, role).is_some_and(|r| r.multi) {
+            mapping.entry(*role).or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut().unwrap().push(Value::String(index.to_string()));
+        } else { mapping.insert((*role).into(), Value::String(index.to_string())); }
+    }
+    for (role, all) in &candidates {
+        if !mapping.contains_key(role) && !SHARED_COLUMN_ROLES.contains(&role.as_str())
+            && let Some(first) = all.first()
+        { mapping.insert(role.clone(), Value::String(first.0.clone())); }
+    }
+    resolve_mapping_column_conflicts(kind, &candidates, &mut mapping);
+    out.clear();
+    for role in all {
+        for column in mapped_column_names(&mapping, role.name) {
+            // 公共初判使用物理下标作占位键，同名表头仍是两条独立列。
+            if let Ok(index) = column.parse::<usize>() { out.insert(index, role.name); }
+        }
     }
     disambiguate_directions(kind, headers, &mut out);
     out
@@ -7027,6 +7078,17 @@ pub(crate) fn suggest_roles_with_data(
     align_opening_period_scope(kind, headers, &mut out);
     fill_combined_account_column(rows, &mut out, headers.len());
     refine_account_identity_by_data(kind, headers, rows, &mut out);
+    if kind == "tb" {
+        let columns = automatic_mapping::entered_accounted_tb_columns(headers);
+        if !columns.is_empty() {
+            let roles: HashSet<_> = columns.iter().map(|(_, role)| *role).collect();
+            out.retain(|_, role| !roles.contains(role));
+            for (index, role) in columns { out.insert(index, role); }
+        }
+    }
+    for index in auxiliary_dimension_candidates(kind, headers, rows, &out) {
+        out.insert(index, "auxiliary");
+    }
     // 「外币/原币」裸列头的双语义仲裁：装币种代码时归 currency（别名层已认），
     // 装金额数字时是原币净额——神火 NC 系序时账（选样/君屹/国贸/JE-2023）
     // 都用「外币」给原币金额列命名。币种角色已有归属时，别让它两侧落空。

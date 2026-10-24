@@ -188,7 +188,7 @@ export function MappingPanel(props: MappingPanelProps) {
   const mark = (role: string, group?: MappingGroup) => {
     const others = alternates(role);
     const note = others.length
-      ? `（与${others.map((r) => labelOf.get(r) ?? r).join("／")}二选一${
+      ? `（与${others.map((r) => labelOf.get(r) ?? r).join("／")}${others.length === 1 ? "二选一" : "至少选一"}${
           !used.has(role) && altSatisfied(role)
             ? `，已选${labelOf.get(others[0]) ?? others[0]}`
             : ""

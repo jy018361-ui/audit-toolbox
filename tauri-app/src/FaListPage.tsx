@@ -47,6 +47,7 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { StepIndicator } from "@/components/StepIndicator";
 import { StatGrid } from "@/components/StatGrid";
 import { DataTable } from "@/components/DataTable";
+import { SourceTableControls } from "@/components/SourceTableControls";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DateInput } from "@/components/DateInput";
@@ -305,7 +306,7 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
         title={mode === "tbje" ? "固定资产 TB＋JE 变动表" : tool.name}
         detail={
           mode === "tbje"
-            ? "公共 TB/JE 引擎识别与映射；固定资产业务层生成变动汇总、新增、处置、JE底表和对方科目汇总。"
+            ? "核对固定资产科目，生成变动汇总、新增与处置明细。"
             : "按期初、期末两份固定资产表按组合键匹配，先核对仅期初、仅期末与重复键，再决定是否补充新增、处置清单。"
         }
       />
@@ -334,9 +335,6 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
           两期固定资产清单
         </button>
       </div>
-      <p className="hint fa-mode-guide">
-        有科目余额表和序时账请选择“TB＋JE 变动表”；有期初、期末资产卡片请选择“两期固定资产清单”。
-      </p>
       {mode === "cards" ? <FaCardListPage /> : <FaTbJePage />}
     </div>
   );
@@ -1322,7 +1320,7 @@ function FaCardListPage() {
         enabled: true,
         passed: false,
         failed: true,
-        message: `${errorText(e).replace(/[。.]+$/, "")}。字段映射本身没有问题，脚本自动映射已完成，可直接核对后继续；LLM 复核只是可选的辅助检查。`,
+        message: `${errorText(e).replace(/[。.]+$/, "")}。智能复核未完成，当前映射仍可手动核对后继续。`,
         detail,
         autoApplied: [],
         fieldReviews: [],
@@ -2113,11 +2111,12 @@ function FaCardListPage() {
       setter: React.Dispatch<React.SetStateAction<FaSupplementConfig>>;
     },
   ) => {
+    const awaitingSheet = Boolean(supplement && inspect.sheets.length && !supplement.config.sheet);
     const hasControls = Boolean(mapping && side) || Boolean(supplement);
     let controls: React.ReactNode[] | undefined;
     if (mapping && side) {
       controls = columnMappingControls(side, inspect, mapping).controls;
-    } else if (supplement) {
+    } else if (supplement && !awaitingSheet) {
       controls = supplementColumnControls(
         supplement.kind,
         inspect,
@@ -2131,7 +2130,7 @@ function FaCardListPage() {
     if (mapping && side) {
       const m = missingRoles(side);
       if (m.length) missingHint = `尚未映射：${m.join("、")}`;
-    } else if (supplement) {
+    } else if (supplement && !awaitingSheet) {
       const req = supplementRoleOptions(supplement.kind);
       const missing = req.filter(({ field }) => {
         const v = supplement.config[field];
@@ -2141,9 +2140,58 @@ function FaCardListPage() {
         missingHint = `尚未映射：${missing.map((x) => x.label).join("、")}`;
     }
     return (
+      <div className="source-preview" aria-label={title}>
+      {supplement && <div className="mapping-panel-toolbar source-preview-toolbar">
+        <SourceTableControls
+          sheet={supplement.config.sheet} sheets={inspect.sheets} headerRow={supplement.config.headerRow}
+          sheetPlaceholder="请选择工作表" disabled={busy || supplementLlmBusy}
+          onSheetChange={(sheet) => {
+            const next: FaSupplementConfig = { ...supplement.config, sheet, headerRow: "", keys: [], matchKeysVerified: false, method: "", date: "", originalValue: "", depreciation: "" };
+            supplementReviewGeneration.current += 1;
+            autoSupplementReviewKey.current = "";
+            setSupplementLlmBusy(false);
+            supplement.setter(next);
+            setSupplementLlmReview(undefined);
+            setSupplementLlmBypassed(false);
+            void inspectSupplement(supplement.kind, next);
+          }}
+          onHeaderRowChange={(headerRow) => supplement.setter((current) => ({ ...current, headerRow }))}
+          onHeaderRowBlur={() => {
+            if (!awaitingSheet) {
+              supplementReviewGeneration.current += 1;
+              autoSupplementReviewKey.current = "";
+              setSupplementLlmReview(undefined);
+              setSupplementLlmBypassed(false);
+              void inspectSupplement(supplement.kind, supplement.config);
+            }
+          }}
+        />
+      </div>}
+      {side && (
+        <div className="mapping-panel-toolbar source-preview-toolbar">
+          <SourceTableControls
+            sheet={side === "begin" ? beginSheet : endSheet}
+            sheets={inspect.sheets}
+            headerRow={side === "begin" ? beginHeaderRow : endHeaderRow}
+            editableSheet
+            disabled={busy || llmBusy}
+            onSheetChange={(sheet) => {
+              if (inspect.sheets.length) void reinspectMain(side, { sheet, headerRow: "" });
+              else {
+                if (side === "begin") { setBeginSheet(sheet); setBeginHeaderRow(""); }
+                else { setEndSheet(sheet); setEndHeaderRow(""); }
+              }
+            }}
+            onSheetBlur={() => void reinspectMain(side, { sheet: side === "begin" ? beginSheet : endSheet, headerRow: "" })}
+            onHeaderRowChange={side === "begin" ? setBeginHeaderRow : setEndHeaderRow}
+            onHeaderRowBlur={() => void reinspectMain(side, { headerRow: side === "begin" ? beginHeaderRow : endHeaderRow })}
+          />
+        </div>
+      )}
       <DataTable
-        columns={inspect.headers}
-        rows={inspect.preview}
+        columns={awaitingSheet ? [] : inspect.headers}
+        rows={awaitingSheet ? [] : inspect.preview}
+        emptyText={awaitingSheet ? "请选择工作表" : "暂无数据"}
         caption={
           <div className="fa-table-caption">
             <strong>
@@ -2161,6 +2209,7 @@ function FaCardListPage() {
         resizeKey="fa-list.preview"
         headerControls={controls}
       />
+      </div>
     );
   };
   const supplementEditor = (
@@ -2211,47 +2260,6 @@ function FaCardListPage() {
           </Button>
           {info && <span>已读取 {headers.length} 列</span>}
         </div>
-        {info && (
-          <div className="form-grid">
-            {!!info.sheets.length && (
-              <Field label="工作表（Sheet）">
-                <select
-                  disabled={busy || supplementLlmBusy}
-                  value={config.sheet}
-                  onChange={(e) => {
-                    const next: FaSupplementConfig = {
-                      ...config,
-                      sheet: e.target.value,
-                      headerRow: "",
-                      keys: [],
-                      matchKeysVerified: false,
-                      method: "",
-                      date: "",
-                      originalValue: "",
-                      depreciation: "",
-                    };
-                    supplementReviewGeneration.current += 1;
-                    autoSupplementReviewKey.current = "";
-                    setSupplementLlmBusy(false);
-                    setter(next);
-                    setSupplementLlmReview(undefined);
-                    setSupplementLlmBypassed(false);
-                    void inspectSupplement(kind, next);
-                  }}
-                >
-                  <option value="" disabled>
-                    请选择工作表
-                  </option>
-                  {info.sheets.map((sheet) => (
-                    <option key={sheet} value={sheet}>
-                      {sheet}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            )}
-          </div>
-        )}
       </div>
     );
   };
@@ -2506,51 +2514,6 @@ function FaCardListPage() {
                         />
                       </div>
                     </Field>
-                    <Field label="Sheet">
-                      {inspection?.begin.sheets.length ? (
-                        <select
-                          value={beginSheet}
-                          onChange={(e) =>
-                            void reinspectMain("begin", {
-                              sheet: e.target.value,
-                              headerRow: "",
-                            })
-                          }
-                        >
-                          {inspection.begin.sheets.map((value) => (
-                            <option key={value}>{value}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <Input
-                          value={beginSheet}
-                          onChange={(e) => {
-                            setBeginSheet(e.target.value);
-                            setBeginHeaderRow("");
-                          }}
-                          onBlur={() =>
-                            void reinspectMain("begin", {
-                              sheet: beginSheet,
-                              headerRow: "",
-                            })
-                          }
-                        />
-                      )}
-                    </Field>
-                    <Field label="标题行（留空自动识别）">
-                      <Input
-                        value={beginHeaderRow}
-                        placeholder="自动"
-                        onChange={(e) => {
-                          setBeginHeaderRow(e.target.value);
-                        }}
-                        onBlur={() =>
-                          void reinspectMain("begin", {
-                            headerRow: beginHeaderRow,
-                          })
-                        }
-                      />
-                    </Field>
                   </div>
                   <div className="fa-side fa-side-end">
                     <h3 className="fa-side-title">期末（年末）</h3>
@@ -2572,51 +2535,6 @@ function FaCardListPage() {
                           disabled={busy}
                         />
                       </div>
-                    </Field>
-                    <Field label="Sheet">
-                      {inspection?.end.sheets.length ? (
-                        <select
-                          value={endSheet}
-                          onChange={(e) =>
-                            void reinspectMain("end", {
-                              sheet: e.target.value,
-                              headerRow: "",
-                            })
-                          }
-                        >
-                          {inspection.end.sheets.map((value) => (
-                            <option key={value}>{value}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <Input
-                          value={endSheet}
-                          onChange={(e) => {
-                            setEndSheet(e.target.value);
-                            setEndHeaderRow("");
-                          }}
-                          onBlur={() =>
-                            void reinspectMain("end", {
-                              sheet: endSheet,
-                              headerRow: "",
-                            })
-                          }
-                        />
-                      )}
-                    </Field>
-                    <Field label="标题行（留空自动识别）">
-                      <Input
-                        value={endHeaderRow}
-                        placeholder="自动"
-                        onChange={(e) => {
-                          setEndHeaderRow(e.target.value);
-                        }}
-                        onBlur={() =>
-                          void reinspectMain("end", {
-                            headerRow: endHeaderRow,
-                          })
-                        }
-                      />
                     </Field>
                   </div>
                 </div>
@@ -2687,7 +2605,7 @@ function FaCardListPage() {
                     {(llmBusy || llmReview) && (
                       <div
                         className={`fa-llm-review ${
-                          llmReview?.passed === false ? "warning" : ""
+                          llmPending.length > 0 || llmReview?.passed === false ? "warning" : ""
                         }`}
                       >
                         <div className="section-title">
@@ -2696,7 +2614,7 @@ function FaCardListPage() {
                             className={`pill ${
                               llmBusy
                                 ? "preview"
-                                : llmReview?.passed === false
+                                : llmPending.length > 0 || llmReview?.passed === false
                                   ? "warning"
                                   : llmReview?.enabled
                                     ? "ready"
@@ -2707,6 +2625,8 @@ function FaCardListPage() {
                               ? "复核中"
                               : llmReview?.failed
                                 ? "失败（不阻塞）"
+                                : llmPending.length > 0
+                                  ? `待确认 ${llmPending.length} 项`
                                 : llmReview?.passed === false
                                   ? "需人工复核"
                                   : llmReview?.enabled
@@ -2721,7 +2641,7 @@ function FaCardListPage() {
                             <p>{llmReview.detail}</p>
                           </details>
                         ) : null}
-                        {llmReview && !llmBusy ? (
+                        {llmReview && !llmBusy && (llmPending.length === 0 || llmReview.failed) ? (
                           <div className="fa-review-conclusion" role="status">
                             <strong>复核结论</strong>
                             <p>
@@ -2838,16 +2758,13 @@ function FaCardListPage() {
                 )}
                 {faStats && (
                   <div className="fa-next-choice" role="status">
-                    <strong>匹配完成，请先核对关键统计</strong>
-                    <StatGrid
-                      items={[
-                        { label: "合并总行数", value: faStats.rows ?? 0 },
-                        { label: "两期均有", value: faStats.both ?? 0 },
-                        { label: "仅期初", value: faStats.beginOnly ?? 0 },
-                        { label: "仅期末", value: faStats.endOnly ?? 0 },
-                      ]}
-                      columns={4}
-                    />
+                    <strong>匹配统计</strong>
+                    <div className="fa-match-metrics" aria-label="匹配统计">
+                      <span>总行数 <strong>{faStats.rows ?? 0}</strong></span>
+                      <span>两期均有 <strong>{faStats.both ?? 0}</strong></span>
+                      <span>仅期初 <strong>{faStats.beginOnly ?? 0}</strong></span>
+                      <span>仅期末 <strong>{faStats.endOnly ?? 0}</strong></span>
+                    </div>
                     {faStats.duplicates?.hasDuplicates && (
                       <div className="warning-box">
                         发现 {faStats.duplicates.duplicateValueCount ?? 0} 个重复匹配键（涉及 {faStats.duplicates.duplicateRowCount ?? 0} 行），请复核后再继续。
@@ -2858,7 +2775,6 @@ function FaCardListPage() {
                         上述统计为上一次匹配结果，导出也将基于该次匹配生成套表。主文件或其映射有改动时，请回第一步重新匹配；第二步补充清单按当前配置导出。
                       </div>
                     )}
-                    <span>核对完成后，再选择是否补充新增或处置清单。</span>
                   </div>
                 )}
               </>
@@ -3185,8 +3101,7 @@ function FaCardListPage() {
                 </>
               ) : (
                 <>
-                  {additionInspect &&
-                  (!additionInspect.sheets.length || addition.sheet) ? (
+                  {additionInspect ? (
                     previewTable(
                       additionInspect,
                       "新增清单预览",
@@ -3204,8 +3119,7 @@ function FaCardListPage() {
                       <EmptyState compact title="等待结果" description="选择新增清单及工作表后，在此显示表格内容。" />
                     </section>
                   )}
-                  {disposalInspect &&
-                  (!disposalInspect.sheets.length || disposal.sheet) ? (
+                  {disposalInspect ? (
                     previewTable(
                       disposalInspect,
                       "处置清单预览",

@@ -20,6 +20,7 @@ import { Field } from "@/components/Field";
 import { FileInput } from "@/components/FileInput";
 import { FileDropInput } from "@/components/FileDropInput";
 import { DataTable } from "@/components/DataTable";
+import { SourceTableControls } from "@/components/SourceTableControls";
 import { displayFileName } from "@/fileDisplay";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
@@ -315,7 +316,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
   });
 
   /// 两表检查直接复用 fa.inspect；建议映射裁剪到政策比较实际使用的字段 + 匹配键。
-  async function inspect(overrides?: { beginPath?: string; endPath?: string }) {
+  async function inspect(overrides?: { beginPath?: string; endPath?: string; beginSheet?: string; endSheet?: string; beginHeaderRow?: string; endHeaderRow?: string }) {
     const bPath = overrides?.beginPath ?? beginPath;
     const ePath = overrides?.endPath ?? endPath;
     if (!bPath || !ePath) {
@@ -324,14 +325,20 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     }
     setBusy(true);
     setError("");
+    reviewGeneration.current += 1;
+    setLlmBusy(false);
+    setLlmReview(undefined);
+    setLlmChanges([]);
+    setLlmPending([]);
+    setJob(undefined);
     try {
       const value = (await engineCall("fa.inspect", {
         beginPath: bPath,
         endPath: ePath,
-        beginSheet: beginSheet || undefined,
-        endSheet: endSheet || undefined,
-        beginHeaderRow: Number(beginHeaderRow) || undefined,
-        endHeaderRow: Number(endHeaderRow) || undefined,
+        beginSheet: (overrides?.beginSheet ?? beginSheet) || undefined,
+        endSheet: (overrides?.endSheet ?? endSheet) || undefined,
+        beginHeaderRow: Number(overrides?.beginHeaderRow ?? beginHeaderRow) || undefined,
+        endHeaderRow: Number(overrides?.endHeaderRow ?? endHeaderRow) || undefined,
       })) as PolicyInspection;
       setInspection(value);
       setBeginSheet(value.begin.selectedSheet ?? beginSheet);
@@ -477,7 +484,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         enabled: true,
         passed: false,
         failed: true,
-        message: `${errorText(e).replace(/[。.]+$/, "")}。字段映射本身没有问题，脚本自动映射已完成，可直接核对后继续；LLM 复核只是可选的辅助检查。`,
+        message: `${errorText(e).replace(/[。.]+$/, "")}。智能复核未完成，当前映射仍可手动核对后继续。`,
         detail,
         autoApplied: [],
         fieldReviews: [],
@@ -698,11 +705,11 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
 
   const sidePanel = (
     side: "begin" | "end",
-    inspect: InspectSide,
+    sourceInspect: InspectSide,
     keys: string[],
     mapping: PolicyMapping,
   ) => {
-    const headers = inspect.headers;
+    const headers = sourceInspect.headers;
     // 政策对比的提示和下拉共用 POLICY_MAPPING_ROLES；新增方式/新增日期不参与
     // 本底稿，避免出现“提示缺失但下拉没有该选项”的矛盾。
     const visibleRoles = POLICY_MAPPING_ROLES;
@@ -783,17 +790,35 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     const missing = missingRoles(side);
     const optional = optionalMissing(side);
     return (
+      <div className="source-preview" aria-label={side === "begin" ? "期初预览" : "期末预览"}>
+      <div className="mapping-panel-toolbar source-preview-toolbar">
+        <SourceTableControls
+          sheet={side === "begin" ? beginSheet : endSheet}
+          sheets={sourceInspect.sheets}
+          headerRow={side === "begin" ? beginHeaderRow : endHeaderRow}
+          editableSheet
+          disabled={busy || llmBusy}
+          onSheetChange={(sheet) => {
+            if (side === "begin") { setBeginSheet(sheet); setBeginHeaderRow(""); }
+            else { setEndSheet(sheet); setEndHeaderRow(""); }
+            if (sourceInspect.sheets.length) void inspect(side === "begin" ? { beginSheet: sheet, beginHeaderRow: "" } : { endSheet: sheet, endHeaderRow: "" });
+          }}
+          onSheetBlur={() => { if (beginPath && endPath) void inspect(); }}
+          onHeaderRowChange={side === "begin" ? setBeginHeaderRow : setEndHeaderRow}
+          onHeaderRowBlur={() => { if (beginPath && endPath) void inspect(); }}
+        />
+      </div>
       <DataTable
         columns={headers}
-        rows={inspect.preview}
+        rows={sourceInspect.preview}
         resizeKey={`fa.policy-compare.${side}`}
         caption={
           <div className="fa-table-caption">
             <strong>
               {side === "begin" ? "期初" : "期末"} ·{" "}
-              {inspect.displayName ?? inspect.selectedSheet ?? "数据预览"} ·{" "}
-              {inspect.dimensions?.rows ?? 0} 行 ×{" "}
-              {inspect.dimensions?.columns ?? 0} 列
+              {sourceInspect.displayName ?? sourceInspect.selectedSheet ?? "数据预览"} ·{" "}
+              {sourceInspect.dimensions?.rows ?? 0} 行 ×{" "}
+              {sourceInspect.dimensions?.columns ?? 0} 列
             </strong>
             {missing.length > 0 && (
               <span className="fa-caption-missing">
@@ -813,6 +838,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         maxHeight={430}
         headerControls={controls}
       />
+      </div>
     );
   };
 
@@ -894,57 +920,6 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                           />
                         </div>
                       </Field>
-                      {/* 与 FA 匹配工具一致：Sheet/标题行在读取后才出现，上传时不先展示。 */}
-                      {inspection && (
-                        <>
-                          <Field label="工作表（Sheet）">
-                            {inspection[side].sheets.length ? (
-                              <select
-                                value={side === "begin" ? beginSheet : endSheet}
-                                disabled={busy}
-                                onChange={(e) => {
-                                  if (side === "begin")
-                                    setBeginSheet(e.target.value);
-                                  else setEndSheet(e.target.value);
-                                  if (side === "begin") setBeginHeaderRow("");
-                                  else setEndHeaderRow("");
-                                }}
-                              >
-                                {inspection[side].sheets.map((value) => (
-                                  <option key={value}>{value}</option>
-                                ))}
-                              </select>
-                            ) : (
-                              <Input
-                                value={side === "begin" ? beginSheet : endSheet}
-                                disabled={busy}
-                                onChange={(e) => {
-                                  if (side === "begin")
-                                    setBeginSheet(e.target.value);
-                                  else setEndSheet(e.target.value);
-                                }}
-                              />
-                            )}
-                          </Field>
-                          <Field label="标题行（留空自动识别）">
-                            <Input
-                              value={
-                                side === "begin" ? beginHeaderRow : endHeaderRow
-                              }
-                              placeholder="自动"
-                              disabled={busy}
-                              onChange={(e) => {
-                                if (side === "begin")
-                                  setBeginHeaderRow(e.target.value);
-                                else setEndHeaderRow(e.target.value);
-                              }}
-                              onBlur={() => {
-                                if (beginPath && endPath) void inspect();
-                              }}
-                            />
-                          </Field>
-                        </>
-                      )}
                     </div>
                   ))}
                 </div>

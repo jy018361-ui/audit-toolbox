@@ -76,7 +76,8 @@ export function JobProgress({
   const presentation = jobPresentation(job);
   // P2-2：消息与状态徽标输出同一状态词时（“排队中 排队中”“处理中 处理中”）只渲染
   // 一次——消息区优先展示业务阶段文案，状态词只在消息缺失或不同时出现。
-  const message = job.message && job.message !== presentation.label ? job.message : "";
+  const progressMessage = presentation.message ?? job.message;
+  const message = progressMessage && progressMessage !== presentation.label ? progressMessage : "";
   const value = Math.max(
     0,
     Math.min(job.current, presentation.terminal ? max : max * 0.99),

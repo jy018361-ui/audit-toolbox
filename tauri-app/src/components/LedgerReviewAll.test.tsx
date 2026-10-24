@@ -9,6 +9,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
 import { completeLedgerPairReviewKey, LedgerReviewAll, useLedgerDictReviews } from "./LedgerReviewAll";
 
 it("自动复核键只在 TB 与 JE 都完整时生成", () => {
@@ -37,6 +38,31 @@ const slot = (onApplied = vi.fn(), column = "A编码") => ({
 afterEach(cleanup);
 
 describe("共享账表复核生命周期", () => {
+  it("手动取消映射使旧复核结论失效，补回也不自动冒充已复核", async () => {
+    const call = vi.fn().mockResolvedValue({ changes: [] });
+    const mapping: Record<string, string> = {accountCode: "编码", closingFunctionalAmount: "期末"};
+    const {result,rerender} = renderHook(({mapping}) => useLedgerDictReviews(call, {tb:"same.xlsx"}, {tb:mapping}), {initialProps:{mapping}});
+    await act(async () => { await result.current.reviewAll({tb:{...slot(),mapping}}); });
+    expect(result.current.status.tb).toContain("无需调整");
+    rerender({mapping:{accountCode:"编码"}});
+    expect(result.current.status.tb).toBe("");
+    expect(result.current.results.tb).toBeUndefined();
+    rerender({mapping});
+    expect(result.current.status.tb).toBe("");
+    expect(call).toHaveBeenCalledOnce();
+  });
+
+  it("自动建议回写映射时保留刚得到的复核结果", async () => {
+    const call = vi.fn().mockResolvedValue({changes:[{role:"accountCode",suggestedColumn:"B编码",confidence:1,engineVerified:true}]});
+    const {result} = renderHook(() => {
+      const [mapping,setMapping] = useState<Record<string,string|string[]>>({accountCode:"A编码"});
+      return {mapping,setMapping,reviews:useLedgerDictReviews(call,{tb:"same.xlsx"},{tb:mapping})};
+    });
+    await act(async () => { await result.current.reviews.reviewAll({tb:{...slot(),onApplied:result.current.setMapping,headers:["A编码","B编码"],mapping:result.current.mapping}}); });
+    expect(result.current.mapping.accountCode).toBe("B编码");
+    expect(result.current.reviews.results.tb?.applied).toHaveLength(1);
+    expect(result.current.reviews.status.tb).toContain("已自动调整");
+  });
   it("TB 与 JE 复核均无需调整时仍分别显示完成提示，再次复核时显示进行中", async () => {
     const call = vi.fn().mockResolvedValue({ tbChanges: [], jeChanges: [] });
     function Review() {

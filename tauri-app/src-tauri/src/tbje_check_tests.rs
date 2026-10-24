@@ -8,6 +8,62 @@ use serde_json::json;
 use std::sync::atomic::AtomicBool;
 
 #[test]
+fn batch_preflight_runs_all_groups_and_returns_final_mappings() {
+    let dir = fixture(&format!("worker-preflight-{}", uuid::Uuid::new_v4()));
+    平的账(&dir);
+    let mut first = params(&dir, true);
+    first["groupId"] = json!("第一组");
+    let mut second = first.clone();
+    second["groupId"] = json!("第二组");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let pause = PauseCheckpoint::unpaused(cancel.clone());
+    let result = run_job("tbje_check.run_batch", json!({
+        "prepareMappings":true,"groups":[first,second],
+    }), &|_,_,_,_| {}, cancel, &pause).unwrap();
+    assert_eq!(result["groups"].as_array().unwrap().len(), 2);
+    assert!(result["groups"].as_array().unwrap().iter().all(|group| group["ok"] == true), "{result}");
+    assert_eq!(result["preparedGroups"].as_array().unwrap().len(), 2);
+    assert_eq!(result["preparedGroups"][1]["groupId"], "第二组");
+    assert!(incomplete_batch(&result).is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn batch_preflight_preserves_only_confirmed_auxiliary_when_link_fails() {
+    let dir = fixture(&format!("preflight-aux-{}", uuid::Uuid::new_v4()));
+    std::fs::write(dir.join("tb.csv"), "科目编码,科目名称,辅助核算,期初余额,本年借方,本年贷方,期末余额\n1002,银行存款,A部门,0,100,0,100\n1002,银行存款,B部门,0,50,0,50\n").unwrap();
+    std::fs::write(dir.join("je.csv"), "日期,凭证号,科目编码,科目名称,摘要,借方,贷方\n2025-03-01,V1,1002,银行存款,收往来款,150,0\n").unwrap();
+    for manual in [false, true] {
+        let mut group = auxiliary_params(&dir, None);
+        if manual { group["tbMapping"]["__manualAuxiliary"] = json!("{\"auxiliary\":[\"辅助核算\"]}"); }
+        let auxiliary = prepare_batch_group(&mut group).unwrap();
+        assert_ne!(auxiliary["status"], "verified");
+        assert_eq!(group["tbMapping"].get("auxiliary").is_some(), manual);
+        assert!(group.get("auxiliaryPlan").is_none());
+    }
+    std::fs::write(dir.join("je.csv"), "日期,凭证号,科目编码,科目名称,部门,借方,贷方\n2025-03-01,V1,1002,银行存款,A部门,100,0\n2025-03-01,V2,1002,银行存款,B部门,50,0\n").unwrap();
+    let mut verified = auxiliary_params(&dir, None);
+    let auxiliary = prepare_batch_group(&mut verified).unwrap();
+    assert_eq!(auxiliary["status"], "verified", "{auxiliary}");
+    assert_eq!(verified["auxiliaryPlan"]["planKey"], auxiliary["planKey"]);
+    assert_eq!(verified["auxiliaryPlan"]["groups"][0]["jeColumn"], "部门");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn batch_execution_failures_are_not_successful_completion() {
+    for key in ["groups", "exports"] {
+        assert!(incomplete_batch(&json!({key:[{"ok":true,"result":{"tbVsJe":{"passed":false}}}]})).is_none());
+        let partial = incomplete_batch(&json!({key:[{"ok":true},{"ok":false}]})).unwrap();
+        assert_eq!((partial.0, partial.1), (1, 2));
+        assert!(partial.2.starts_with("部分完成"));
+        let failed = incomplete_batch(&json!({key:[{"ok":false}]})).unwrap();
+        assert_eq!((failed.0, failed.1), (0, 1));
+        assert!(failed.2.starts_with("处理失败"));
+    }
+}
+
+#[test]
 fn three_fixes_combined_account_mapping_checks_and_amounts_agree_in_memory_and_disk() {
     let dir = fixture("three-fixes-combined-account");
     std::fs::write(dir.join("tb.csv"), "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n1002,银行存款,100,5,0,105\n4001,实收资本,-100,0,5,-105\n").unwrap();

@@ -21,6 +21,7 @@ import {
   TB_LABELS,
 } from "./DepositInterestPage";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { SourceTableControls } from "@/components/SourceTableControls";
 import { useTableColumnResize } from "@/components/useTableColumnResize";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { LedgerReviewCompact } from "@/components/LedgerReviewAll";
@@ -57,14 +58,12 @@ import { errorText } from "@/lib/errors";
 import {
   applyLedgerPendingChange,
   applyLedgerReviewsTogether,
-  dropUnlinkedTbAuxiliary,
   ledgerEntityKeyEnabled,
   LEDGER_MULTI_COLUMN_ROLES,
   missingGoldIdentity,
   scanLedgerUploadSources,
   resolveRoleLabels,
   selectLedgerWorkbookKindSources,
-  verifyAuxiliaryLink,
   type AuxiliaryLinkResult,
   type LedgerReviewOutcome,
   type LedgerWorkbookSheetClassification,
@@ -781,7 +780,28 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const { job, setJob, activeJobId } = useJobEvents({
     toolId: "tbje_check",
     onEvent: (event) => {
-      const payload = event.result as { groups?: GroupOutcome[] } | undefined;
+      const payload = event.result as {
+        groups?: GroupOutcome[];
+        preparedGroups?: Array<{
+          groupId: string;
+          tbMapping: Mapping;
+          jeMapping?: Mapping;
+          auxiliaryLink: AuxiliaryLinkResult | null;
+        }>;
+      } | undefined;
+      if (payload?.preparedGroups) {
+        const corrected: Record<string, Mapping> = {};
+        const links: Record<string, AuxiliaryLinkResult | null> = {};
+        for (const prepared of payload.preparedGroups) {
+          const group = groups.find((item) => item.id === prepared.groupId);
+          if (!group) continue;
+          if (group.tb) corrected[pairingFileKey(group.tb)] = prepared.tbMapping;
+          if (group.je && prepared.jeMapping) corrected[pairingFileKey(group.je)] = prepared.jeMapping;
+          links[group.id] = prepared.auxiliaryLink;
+        }
+        setMappings((current) => ({ ...current, ...corrected }));
+        setAuxLinks(links);
+      }
       if (payload?.groups) {
         setOutcomes(payload.groups.map((outcome, index) => ({
           ...outcome,
@@ -1216,7 +1236,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   }
 
   /** 用户明确指定类型时不再经过分类器：选 Excel 后由对应 inspect 自动选正表，
-   *  行内 Sheet 下拉仍可继续改。TB 是建组锚点；JE 可选、可替换。 */
+   *  预览区 Sheet 下拉仍可继续改。TB 是建组锚点；JE 可选、可替换。 */
   async function pickManualSource(kind: LedgerKind, groupId?: string) {
     if (busy) return;
     const picked = await pickPath(
@@ -1758,141 +1778,15 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     // 新结果成功返回前保留上一版，预检或任务失败时仍可回看原结果。
     if (outcomes.length) setResultsStale(true);
     setBusy(true);
+    setJob(undefined);
+    setStatus("正在启动核对…");
     try {
-      const alignedByIndex: Array<Record<string, unknown> | undefined> =
-        Array.from({ length: runnable.length });
-      const correctedMappings: Record<string, Mapping> = {};
-      const alignmentWarnings: string[] = [];
-      // 对齐失败的组要指名道姓地报出来，并且只跳过该组——
-      // 其余组照常核对，不能一组映射问题拖住整批。
-      const alignmentFailures: string[] = [];
-      let alignmentCursor = 0;
-      let alignmentCompleted = 0;
-      setStatus(`正在对齐 0 / ${runnable.length} 组…`);
-      const alignWorker = async () => {
-        while (alignmentCursor < runnable.length) {
-          const index = alignmentCursor++;
-          const group = runnable[index];
-          const groupParams = paramsOf(group);
-          try {
-            if (group.je) {
-              const alignment = (await engineCall(
-                "ledger.check_mapping_alignment",
-                groupParams,
-                `「${group.label}」组`,
-              )) as {
-                aligned?: boolean;
-                errors?: string[];
-                warnings?: string[];
-                fix?: {
-                  jeMapping?: Mapping;
-                  tbMapping?: Mapping;
-                };
-              };
-              if (alignment.aligned === false) {
-                alignmentFailures.push(
-                  `「${group.label}」组（${group.tb ? fileName(group.tb.path) : "无余额表"} × ${fileName(group.je.path)}）：${alignment.errors?.join("；") || "TB与JE的科目字段无法对齐。"}`,
-                );
-                continue;
-              }
-              if (alignment.fix?.tbMapping && group.tb) {
-                groupParams.tbMapping = {
-                  ...(groupParams.tbMapping as Mapping),
-                  ...alignment.fix.tbMapping,
-                };
-                correctedMappings[pairingFileKey(group.tb)] =
-                  groupParams.tbMapping as Mapping;
-              }
-              if (alignment.fix?.jeMapping) {
-                groupParams.jeMapping = {
-                  ...(groupParams.jeMapping as Mapping),
-                  ...alignment.fix.jeMapping,
-                };
-                correctedMappings[pairingFileKey(group.je)] =
-                  groupParams.jeMapping as Mapping;
-              }
-              alignmentWarnings.push(...(alignment.warnings ?? []));
-            }
-            alignedByIndex[index] = groupParams;
-          } catch (alignmentError) {
-            alignmentFailures.push(
-              `「${group.label}」组（${group.tb ? fileName(group.tb.path) : "无余额表"}${group.je ? ` × ${fileName(group.je.path)}` : ""}）：${errorText(alignmentError)}`,
-            );
-          } finally {
-            alignmentCompleted += 1;
-            setStatus(`正在对齐 ${alignmentCompleted} / ${runnable.length} 组…`);
-          }
-        }
-      };
-      await Promise.all(
-        Array.from({ length: Math.min(2, runnable.length) }, () => alignWorker()),
-      );
-      // 辅助核算验证是字段映射确认的一部分：只在用户点击“开始核对”后
-      // 执行，不在页面停留或业务筛选变化时后台扫描 JE。验证范围覆盖
-      // 当前组全部 TB 主体×科目，后续正式核对只复用认定列。
-      const auxiliaryNext: Record<string, AuxiliaryLinkResult | null> = {};
-      const auxiliaryIndexes = alignedByIndex
-        .map((params, index) => ({ params, index }))
-        .filter((item) => Boolean(item.params && runnable[item.index]?.je));
-      let auxiliaryCursor = 0;
-      let auxiliaryCompleted = 0;
-      if (auxiliaryIndexes.length) {
-        setStatus(`正在验证辅助字段 0 / ${auxiliaryIndexes.length} 组…`);
-        const auxiliaryWorker = async () => {
-          while (auxiliaryCursor < auxiliaryIndexes.length) {
-            const { params, index } = auxiliaryIndexes[auxiliaryCursor++];
-            const group = runnable[index];
-            const groupParams = params!;
-            const result = await verifyAuxiliaryLink(groupParams);
-            auxiliaryNext[group.id] = result;
-            const tbMapping = groupParams.tbMapping as Mapping;
-            const cleaned = dropUnlinkedTbAuxiliary(tbMapping, result);
-            if (cleaned !== tbMapping && group.tb) {
-              groupParams.tbMapping = cleaned;
-              correctedMappings[pairingFileKey(group.tb)] = cleaned;
-            }
-            attachAuxiliaryPlan(groupParams, result);
-            auxiliaryCompleted += 1;
-            setStatus(
-              `正在验证辅助字段 ${auxiliaryCompleted} / ${auxiliaryIndexes.length} 组…`,
-            );
-          }
-        };
-        await Promise.all(
-          Array.from(
-            { length: Math.min(2, auxiliaryIndexes.length) },
-            () => auxiliaryWorker(),
-          ),
-        );
-      }
-      setAuxLinks(auxiliaryNext);
-      const alignedGroups = alignedByIndex.filter(
-        (group): group is Record<string, unknown> => Boolean(group),
-      );
-      if (Object.keys(correctedMappings).length) {
-        setMappings((current) => ({ ...current, ...correctedMappings }));
-      }
-      if (alignmentFailures.length) {
-        setError(
-          `有 ${alignmentFailures.length} 组因科目字段无法对齐已跳过，其余组继续核对：\n${alignmentFailures.join("\n")}`,
-        );
-      }
-      if (alignmentWarnings.length)
-        setStatus(
-          `${alignmentWarnings.length} 条对齐提示：${alignmentWarnings[0]}`,
-        );
-      else
-        setStatus(
-          `已完成 ${runnable.length} 组映射对齐${auxiliaryIndexes.length ? "与辅助字段验证" : ""}，正在启动核对…`,
-        );
-      if (!alignedGroups.length) {
-        setStatus("");
-        setBusy(false);
-        return;
-      }
-      submittedGroupIdsRef.current = alignedGroups.map((group) => group.groupId as string);
+      // 对齐和辅助验证也可能读取大表，必须与核对共用 worker 的内存等待、取消与暂停。
+      const submitted = runnable.map(paramsOf);
+      submittedGroupIdsRef.current = runnable.map((group) => group.id);
       const id = await jobStart("tbje_check.run_batch", {
-        groups: alignedGroups,
+        groups: submitted,
+        prepareMappings: true,
         __restoreSnapshot: restoreSnapshotParam(),
       });
       activeJobId.current = id;
@@ -2148,41 +2042,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                             {group.tb ? fileName(group.tb.path) : "选择 TB Excel"}
                           </button>
                         </div>
-                        {group.tb &&
-                          (() => {
-                            const inspected = inspects[pairingFileKey(group.tb)];
-                            if (!inspected) return null;
-                            const sheets = inspected.sheets ?? [];
-                            return (
-                              <label className="tbje-sheet-picker">
-                                <span>工作表</span>
-                                {sheets.length > 0 ? (
-                                  <select
-                                    aria-label="余额表使用的工作表"
-                                    value={inspected.sheet}
-                                    disabled={busy || llmReviewBusy || sheets.length === 1}
-                                    onChange={(event) =>
-                                      void switchSheet(
-                                        group.tb!,
-                                        "tb",
-                                        event.target.value,
-                                      )
-                                    }
-                                  >
-                                    {sheets.map((name) => (
-                                      <option key={name} value={name}>
-                                        {name}
-                                      </option>
-                                    ))}
-                                  </select>
-                                ) : (
-                                  <span className="tbje-sheet-name">
-                                    {inspected.sheet || "（自动）"}
-                                  </span>
-                                )}
-                              </label>
-                            );
-                          })()}
+                        {group.tb && <span className="tbje-sheet-name">{inspects[pairingFileKey(group.tb)]?.sheet || "（自动）"}</span>}
                         {missingOf("tb", group.tb).length > 0 && (
                           <button
                             type="button"
@@ -2272,41 +2132,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                               </option>
                             ))}
                         </select>
-                        {group.je &&
-                          (() => {
-                            const inspected = inspects[pairingFileKey(group.je)];
-                            if (!inspected) return null;
-                            const sheets = inspected.sheets ?? [];
-                            return (
-                              <label className="tbje-sheet-picker">
-                                <span>工作表</span>
-                                {sheets.length > 0 ? (
-                                  <select
-                                    aria-label="序时账使用的工作表"
-                                    value={inspected.sheet}
-                                    disabled={busy || llmReviewBusy || sheets.length === 1}
-                                    onChange={(event) =>
-                                      void switchSheet(
-                                        group.je!,
-                                        "je",
-                                        event.target.value,
-                                      )
-                                    }
-                                  >
-                                    {sheets.map((name) => (
-                                      <option key={name} value={name}>
-                                        {name}
-                                      </option>
-                                    ))}
-                                  </select>
-                                ) : (
-                                  <span className="tbje-sheet-name">
-                                    {inspected.sheet || "（自动）"}
-                                  </span>
-                                )}
-                              </label>
-                            );
-                          })()}
+                        {group.je && <span className="tbje-sheet-name">{inspects[pairingFileKey(group.je)]?.sheet || "（自动）"}</span>}
                         {group.je && missingOf("je", group.je).length > 0 && (
                           <button
                             type="button"
@@ -2441,13 +2267,11 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                               }
                               disabled={busy || llmReviewBusy}
                               resizeKey={`tbje.mapping.${file.kind}`}
-                              onHeaderChange={(row, depth) =>
+                              onHeaderChange={(row, depth, sheet) =>
                                 void switchSheet(
                                   file,
                                   file.kind,
-                                  inspects[pairingFileKey(file)]?.sheet ??
-                                    file.sheet ??
-                                    "",
+                                  sheet,
                                   row,
                                   depth,
                                 )
@@ -2756,7 +2580,7 @@ function LedgerMappingPanel(props: {
   mapping: MappingDict;
   forms: LedgerForm[];
   disabled?: boolean;
-  onHeaderChange?: (row: number, depth: number) => void;
+  onHeaderChange?: (row: number, depth: number, sheet: string) => void;
   onKindChange?: () => void;
   onChange: (next: MappingDict) => void;
   resizeKey?: string;
@@ -2789,37 +2613,16 @@ function LedgerMappingPanel(props: {
       toolbar={
         props.onHeaderChange ? (
           <>
-            <label>
-              标题行
-              <input
-                type="number"
-                min={1}
-                value={props.inspection.headerRow}
-                disabled={props.disabled}
-                onChange={(event) =>
-                  props.onHeaderChange?.(
-                    Number(event.target.value),
-                    props.inspection!.headerDepth,
-                  )
-                }
-              />
-            </label>
-            <label>
-              表头层数
-              <select
-                value={props.inspection.headerDepth}
-                disabled={props.disabled}
-                onChange={(event) =>
-                  props.onHeaderChange?.(
-                    props.inspection!.headerRow,
-                    Number(event.target.value),
-                  )
-                }
-              >
-                <option value={1}>1层</option>
-                <option value={2}>2层</option>
-              </select>
-            </label>
+            <SourceTableControls
+              sheet={props.inspection.sheet} sheets={props.inspection.sheets ?? []}
+              sheetLabel={props.kind === "tb" ? "余额表使用的工作表" : "序时账使用的工作表"}
+              sheetDisabled={(props.inspection.sheets?.length ?? 0) <= 1}
+              headerRow={props.inspection.headerRow} headerDepth={props.inspection.headerDepth}
+              disabled={props.disabled}
+              onSheetChange={(sheet) => props.onHeaderChange?.(0, 0, sheet)}
+              onHeaderRowChange={(row) => props.onHeaderChange?.(Number(row), props.inspection!.headerDepth, props.inspection!.sheet)}
+              onHeaderDepthChange={(depth) => props.onHeaderChange?.(props.inspection!.headerRow, depth, props.inspection!.sheet)}
+            />
             <Button
               type="button"
               variant="secondary"

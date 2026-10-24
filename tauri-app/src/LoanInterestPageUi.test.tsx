@@ -128,9 +128,9 @@ it("大借款台账补齐后分页读取，换页保留人工字段映射", asyn
 });
 
 it.each(["verified", "noMatch", "partialCoverage", "ambiguous", "noAnchors"] as const)("大JE完整读取后必须完成辅助校验；%s 决定TB辅助映射能否保留", async (status) => {
-  const headers = ["科目编码", "科目名称", "日期", "期初余额", "期末余额", "借方", "贷方", "备用日期", "辅助核算"];
-  const suggestedMapping = { accountCode: "科目编码", accountName: "科目名称", date: "日期", opening: "期初余额", closing: "期末余额", debit: "借方", credit: "贷方", auxiliary: "辅助核算" };
-  const inspection = { headers, preview: [["2001", "短期借款", "2026-01-01", "100", "100", "0", "0", "2026-02-01", "A银行"]], rowCount: 2000,
+  const headers = ["科目编码", "科目名称", "日期", "期初余额", "期末余额", "借方", "贷方", "备用日期", "辅助核算", "凭证号"];
+  const suggestedMapping = { accountCode: "科目编码", accountName: "科目名称", date: "日期", id: "凭证号", openingFunctionalAmount: "期初余额", closingFunctionalAmount: "期末余额", functionalDebit: "借方", functionalCredit: "贷方", auxiliary: "辅助核算" };
+  const inspection = { headers, preview: [["2001", "短期借款", "2026-01-01", "100", "100", "0", "0", "2026-02-01", "A银行", "V1"]], rowCount: 2000,
     sheet: "Sheet1", sheets: ["Sheet1"], headerRow: 3, headerDepth: 1, suggestedMapping };
   mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
   mock.jobStart.mockResolvedValue("background-je");
@@ -176,7 +176,7 @@ it.each(["verified", "noMatch", "partialCoverage", "ambiguous", "noAnchors"] as 
   let latest = 1;
   if (status === "verified") {
     // 读取中的映射改变，旧请求的“不匹配”不能撤掉当前来源的辅助字段。
-    fireEvent.change(screen.getAllByRole("combobox", { name: "将「借方」映射为字段" }).at(-1)!, { target: { value: "summary" } });
+    fireEvent.change(screen.getAllByRole("combobox", { name: "将「科目名称」映射为字段" }).at(-1)!, { target: { value: "summary" } });
     await waitFor(() => expect(auxiliaryResolvers).toHaveLength(3));
     await act(async () => auxiliaryResolvers[1]({ tbAuxMapped: true, status: "noMatch", column: null, competingColumns: [], warnings: [] }));
     expect(screen.getByRole("button", { name: "下一步：确认科目与利率" })).toBeDisabled();
@@ -345,7 +345,7 @@ it("同时上传 TB 和 JE 时，TB 内的空白 Sheet 不影响两侧识别", a
       return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
     const tb = p.source?.inputPath.includes("科目余额表");
     const sheet = tb ? "Sheet1" : "序时账";
-    const headers = tb ? ["科目编码", "科目名称", "期初余额", "期末余额"] : ["记账日期", "凭证号", "科目编码", "贷方金额"];
+    const headers = tb ? ["科目编码", "科目名称", "期初余额", "期末余额"] : ["记账日期", "凭证号", "科目编码", "借方金额", "贷方金额"];
     if (method === "deposit.classify_source") {
       if (p.source?.sheet === "Sheet2")
         throw { code: "SOURCE_EMPTY", userMessage: "文件中没有可读取的数据。" };
@@ -460,7 +460,7 @@ it("借款 TB＋JE 一键联合复核并按单列映射写回，不会白屏", a
     headerDepth: 1,
     suggestedMapping:
       kind === "je"
-        ? { date: "记账日期", id: "凭证号", accountCode: "总账科目" }
+        ? { date: "记账日期", id: "凭证号", accountCode: "总账科目", functionalAmount: "本币金额" }
         : {
             accountCode: "科目编码",
             accountName: "科目名称",
@@ -608,7 +608,7 @@ it("本金无差异与计息口径分开显示，并列示利息支出差异", (
 /** TB＋JE 第二步为「确认科目与利率」：科目清单预选借款科目；借款明细不再拦路。 */
 it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不提借款明细", async () => {
   const tbHeaders = ["科目编码", "科目名称", "借款明细", "期初余额", "期末余额"];
-  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
+  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "借方金额", "贷方金额"];
   const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
     kind,
     scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
@@ -636,6 +636,8 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
             accountCode: "科目编码",
             accountName: "科目名称",
             summary: "摘要",
+            functionalDebit: "借方金额",
+            functionalCredit: "贷方金额",
           },
   });
   mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
@@ -676,8 +678,13 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   );
   await screen.findByText("已识别：TB 科目余额表");
   await screen.findByText("已识别：JE 序时账");
-  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
-  // 科目清单渲染，借款科目按名称预选，应收账款默认排除；科目与利率已合并为一张表。
+  const next = screen.getByRole("button", { name: /下一步：确认科目与利率/ });
+  expect(next).toBeDisabled();
+  expect(screen.getByText("尚未映射：期末余额")).toBeVisible();
+  fireEvent.change(screen.getByRole("combobox", {name:"将「期末余额」映射为字段"}), {target:{value:"closingFunctionalAmount"}});
+  expect(next).toBeEnabled();
+  fireEvent.click(next);
+  // 补齐映射后才可进入科目复核；借款科目预选，应收账款默认排除。
   expect(await screen.findByText("确认借款及利息支出科目并设置利率")).toBeVisible();
   expect(screen.queryByRole("columnheader", { name: "系统建议" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "恢复系统建议" })).not.toBeInTheDocument();
@@ -723,16 +730,13 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   fireEvent.click(screen.getByRole("button", { name: "下一页" }));
   expect(screen.getByText("第 2 / 3 页")).toBeVisible();
   expect(screen.getByText(/已切换到第 2 页/)).toBeVisible();
-  // 「第 2 项 设置借款利率」卡已并入同一张表：生成利率表已全自动化，按钮删除，
-  // 映射缺失时只显示等待空态（回第一步补齐映射后再进入本步骤会自动生成）。
+  // 生成利率表已全自动化；排除唯一借款科目后，下一步仍须阻断。
   expect(
     screen.queryByRole("button", { name: "生成借款利率表" }),
   ).not.toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "重新生成借款利率表" }),
   ).not.toBeInTheDocument();
-  expect(screen.getByRole("region", { name: "等待生成利率明细" })).toBeVisible();
-  // 金额映射没补齐：下一步仍拦，但不再出现「借款明细/辅助核算」的旧提示。
   expect(
     screen.getByRole("button", { name: "下一步：测算与底稿" }),
   ).toBeDisabled();
@@ -745,7 +749,7 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
  *  进入第三步只导航，须明确生成当前预览后才能确认并导出。 */
 it("手填利率后进入第三步不自动测算且未确认不可导出", async () => {
   const tbHeaders = ["科目编码", "科目名称", "辅助核算", "期初余额", "期末余额"];
-  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
+  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "借方金额", "贷方金额"];
   const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
     kind,
     scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
@@ -779,6 +783,8 @@ it("手填利率后进入第三步不自动测算且未确认不可导出", asyn
             accountCode: "科目编码",
             accountName: "科目名称",
             summary: "摘要",
+            functionalDebit: "借方金额",
+            functionalCredit: "贷方金额",
           },
   });
   mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
@@ -972,7 +978,7 @@ it("手填利率后进入第三步不自动测算且未确认不可导出", asyn
  *  分录归入同一币种桶（诺桥美国样例）。 */
 it("选择本位币后利率明细按新口径自动重算并携带 functionalCurrency", async () => {
   const tbHeaders = ["科目编码", "科目名称", "辅助核算", "期初余额", "期末余额"];
-  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
+  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "借方金额", "贷方金额"];
   const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
     kind,
     scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
@@ -1006,6 +1012,8 @@ it("选择本位币后利率明细按新口径自动重算并携带 functionalCu
             accountCode: "科目编码",
             accountName: "科目名称",
             summary: "摘要",
+            functionalDebit: "借方金额",
+            functionalCredit: "贷方金额",
           },
   });
   mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
@@ -1127,7 +1135,7 @@ it("选择本位币后利率明细按新口径自动重算并携带 functionalCu
 /** 分类只记录，导航不计算；第三步发起测算才统一更新，失败可重试。 */
 it.each([false, true])("连续调整科目分类仅记录，第三步测算时统一生效（首次更新失败：%s）", async (failFirst) => {
   const tbHeaders = ["科目编码", "科目名称", "辅助核算", "期初余额", "期末余额"];
-  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
+  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "借方金额", "贷方金额"];
   const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
     kind,
     scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
@@ -1161,6 +1169,8 @@ it.each([false, true])("连续调整科目分类仅记录，第三步测算时�
             accountCode: "科目编码",
             accountName: "科目名称",
             summary: "摘要",
+            functionalDebit: "借方金额",
+            functionalCredit: "贷方金额",
           },
   });
   mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
@@ -1319,7 +1329,7 @@ it.each([false, true])("连续调整科目分类仅记录，第三步测算时�
  *  切回借款即恢复，手填利率按 rowKey 进入测算 payload。 */
 it("同一科目多笔辅助借款各行设置利率，改类型不丢已填利率", async () => {
   const tbHeaders = ["科目编码", "科目名称", "辅助核算", "期初余额", "期末余额"];
-  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
+  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "借方金额", "贷方金额"];
   const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
     kind,
     scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
@@ -1353,6 +1363,8 @@ it("同一科目多笔辅助借款各行设置利率，改类型不丢已填利�
             accountCode: "科目编码",
             accountName: "科目名称",
             summary: "摘要",
+            functionalDebit: "借方金额",
+            functionalCredit: "贷方金额",
           },
   });
   mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
@@ -1514,8 +1526,8 @@ function renderLoanTbJeWorkspace(entities: string[], jeEntityMapped = true) {
     ? ["主体", "科目编码", "科目名称", "期初余额", "期末余额"]
     : ["科目编码", "科目名称", "期初余额", "期末余额"];
   const jeHeaders = entities.length && jeEntityMapped
-    ? ["主体", "记账日期", "凭证号", "科目编码", "贷方金额"]
-    : ["记账日期", "凭证号", "科目编码", "贷方金额"];
+    ? ["主体", "记账日期", "凭证号", "科目编码", "借方金额", "贷方金额"]
+    : ["记账日期", "凭证号", "科目编码", "借方金额", "贷方金额"];
   const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
     kind,
     scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
@@ -1534,11 +1546,11 @@ function renderLoanTbJeWorkspace(entities: string[], jeEntityMapped = true) {
     headerRow: 1,
     headerDepth: 1,
     entities,
-    // TB 故意只建议科目两列：金额缺失拦住自动生成利率表，专注导航行为本身。
+    // 导航也执行必填门禁，使用完整TB和JE映射。
     suggestedMapping:
       kind === "tb"
-        ? { ...(entities.length ? { entity: "主体" } : {}), accountCode: "科目编码", accountName: "科目名称" }
-        : { ...(entities.length && jeEntityMapped ? { entity: "主体" } : {}), date: "记账日期", accountCode: "科目编码" },
+        ? { ...(entities.length ? { entity: "主体" } : {}), accountCode: "科目编码", accountName: "科目名称", closingFunctionalAmount: "期末余额" }
+        : { ...(entities.length && jeEntityMapped ? { entity: "主体" } : {}), date: "记账日期", accountCode: "科目编码", id: "凭证号", functionalDebit: "借方金额", functionalCredit: "贷方金额" },
   });
   mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
   mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
@@ -1576,6 +1588,27 @@ function renderLoanTbJeWorkspace(entities: string[], jeEntityMapped = true) {
     }),
   );
 }
+
+it("取消JE贷方金额立即提示、禁用下一步并清除旧复核，补回后恢复", async () => {
+  renderLoanTbJeWorkspace([]);
+  const original = mock.engineCall.getMockImplementation()!;
+  mock.engineCall.mockImplementation(async (method,params) => method === "ledger.review_pair_mapping"
+    ? {tbChanges:[],jeChanges:[]} : original(method,params));
+  await screen.findByText("已识别：JE 序时账");
+  await screen.findByText(/^JE：已复核/);
+  const next = screen.getByRole("button",{name:"下一步：确认科目与利率"});
+  expect(next).toBeEnabled();
+  const credit = screen.getByRole("combobox",{name:"将「贷方金额」映射为字段"});
+  fireEvent.change(credit,{target:{value:""}});
+  expect(screen.getByText("尚未映射：本位币金额（净额，或借方和贷方）")).toBeVisible();
+  expect(next).toBeDisabled();
+  expect(screen.getByRole("button",{name:"2 确认科目与利率"})).toBeDisabled();
+  expect(screen.queryByText(/^JE：已复核/)).not.toBeInTheDocument();
+  fireEvent.change(credit,{target:{value:"functionalCredit"}});
+  expect(next).toBeEnabled();
+  expect(screen.queryByText(/^JE：已复核/)).not.toBeInTheDocument();
+  expect(mock.engineCall.mock.calls.filter(([method])=>method === "ledger.review_pair_mapping")).toHaveLength(1);
+});
 
 it.each([false, true])("只修改表日提示日期变化并保留利率，重算后才能导出（已有结果：%s）", async (hasResult) => {
   renderLoanTbJeWorkspace([]);
@@ -1719,11 +1752,11 @@ it("多主体账套第二步合并表显示主体列", async () => {
   expect(
     await screen.findByRole("columnheader", { name: "主体" }),
   ).toBeVisible();
-  // 科目行由全表汇总而来、无单一主体：主体列显示占位符 —。
+  // 科目行由全表汇总而来、无单一主体：明说来源未区分主体。
   const loanRow = await screen
     .findByRole("combobox", { name: "2001 短期借款的科目类型" })
     .then((element) => element.closest("tr")!);
-  expect(loanRow.querySelector("td")?.textContent).toBe("—");
+  await waitFor(() => expect(loanRow.querySelector("td")?.textContent).toBe("未区分主体"));
 });
 
 it("仅 TB 有主体映射时按默认主体复核，不显示原始主体列", async () => {

@@ -1,5 +1,24 @@
 # TBJE 完整性核对
 
+## 2026-10-24：自动映射共用成组字段、冲突补选与辅助候选
+
+- 接入公共 Oracle Entered／Accounted、冲突后的未占用次选及有取值证据的辅助候选；规则与边界见 `LEDGER_MAPPING_UNIFICATION.md` 同日“自动映射补丁统一到公共引擎”。保留人工确认覆盖、工具业务角色范围和辅助跨表验证要求。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib unified_automatic` 及本工具库测试；记录见 `artifacts/public-mapping-unification-20261024/`。本项不打包 EXE。
+
+
+## 2026-10-24：普通与磁盘任务共用读取计划
+
+- 单组核对／导出及批量核对／导出按实际逐组 TB＋JE 联合工作集和 TB 层级分析生成固定计划；映射预检复用它。普通组不再因 `prepareMappings` 或整批文件体积被误启大文件暂停；实际磁盘组继续受内存暂停、恢复和取消管理。计划传递及跨工具边界见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目。
+- 不改变预检映射修正、辅助降级、三条勾稽或逐组成功／失败汇总。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib table_job_read_plan`、`--lib tbje_mapping_preflight`、`--lib tbje_check::`。
+
+## 2026-10-24：映射预检与核对共用内存等待任务
+
+- 页面提交全部组及 `prepareMappings`，将原同步字段对齐与辅助验证移入 `run_batch` worker。内存控制器按同日“普通与磁盘任务共用读取计划”条目决定；磁盘任务启动前等待可用内存，运行期间沿用公共暂停／恢复与取消机制，内存保护异常不作为映射错误跳过。每组预检、核对、底稿缓存完成后才处理下一组。
+- 保留字段自动修正、自动辅助须验证与人工辅助列保留规则；通过验证的辅助计划仍按 `entity/account/tbColumn/jeColumn` 下发。回传 `preparedGroups` 供页面与后续导出使用最终映射；旧无 `prepareMappings` 请求继续沿用原核对入口，计算规则不变。
+- 真正的单组映射／读取失败保留身份及原因。worker 终态按成功组数决定：全部成功才发成功完成；部分成功发警告并列实际组数；全部失败发失败。前端兼容旧成功事件里的失败组，避免绿色完成及 100%；勾稽差异不算运行失败。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib tbje_check::`、`--lib tbje_mapping_preflight`、`--lib resource_budget::tests::`；前端命令见 `UI_CHANGELOG.md` 同日条目。覆盖两组完整执行、自动／人工辅助降级、成功辅助计划、核对与导出失败汇总，以及预检始终受内存等待管理。未通过耗尽本机内存制造真实压力。
+- 冷启动 worker 验收：使用本次调试构建的 EXE 自身 `--rust-table-worker` 入口验证两组完整预检核对、暂停后继续、部分组真实读取失败、全部失败及取消，事件与退出码均符合预期。请求、事件与报告保存在 `build/tbje-memory-wait-smoke/`；验收脚本为 `build/verify_tbje_memory_wait_worker.py`。没有生成或替换发布版 EXE。
+
 ## 2026-10-23：大学固定资产跨编码层级去重
 
 - 修复 `160101` 的两条明细 `1601000107/08` 不以其编码开头，导致中间及上层汇总同时保留的问题。公共结构引擎在无有效级次／缩进时，以连续、逐层展开的完整名称路径建立候选，完整金额验证后才确认；不合并前面同名但金额独立的 `1601000101`，不跨科目区间或搜索局部金额组合。

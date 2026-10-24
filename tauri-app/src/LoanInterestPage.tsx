@@ -61,7 +61,7 @@ import {
   type LoanForm,
   type LoanRole,
 } from "@/loanForms";
-import { formGroups, useLedgerForms, type LedgerFormKind } from "@/ledgerForms";
+import { formGroups, interestLedgerForms, resolveForm, useLedgerForms, type LedgerFormKind } from "@/ledgerForms";
 import {
   loanBps,
   loanRateDefaults,
@@ -71,6 +71,7 @@ import {
   type LoanRateSetting,
 } from "@/loanRateTypes";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { SourceTableControls } from "@/components/SourceTableControls";
 import { useTableColumnResize } from "@/components/useTableColumnResize";
 import { JargonTip } from "@/components/JargonTip";
 import { NumberInput } from "@/components/NumberInput";
@@ -532,7 +533,7 @@ export function loanMissing(
 ) {
   const filled = (role: string) => {
     const value = m[role];
-    return Array.isArray(value) ? value.some(Boolean) : Boolean(value?.trim());
+    return Array.isArray(value) ? value.some((column) => Boolean(column?.trim())) : Boolean(value?.trim());
   };
   const groups = ANY_OF[kind];
   if (groups) {
@@ -545,7 +546,11 @@ export function loanMissing(
       .map((g, i) => (g.some(filled) ? "" : ANY_OF_LABEL[kind][i]))
       .filter(Boolean);
     // 借款科目在金标身份槽里已经报过，本工具的「借款科目」组不再重复报。
-    return [...new Set([...gold, ...own])];
+    const missing = [...new Set([...gold, ...own])];
+    if (kind === "je" && !filled("functionalAmount") &&
+        !(filled("functionalDebit") && filled("functionalCredit")))
+      missing.push("本位币金额（净额，或借方和贷方）");
+    return missing;
   }
   // 利率台账是选填资料，映射不全不拦（用户可在变动表里逐笔手填利率）。
   if (kind === "rateLedger") return [];
@@ -682,7 +687,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       sources.je.inspection?.headerRow,
       sources.je.inspection?.headerDepth,
     ]),
-  });
+  }, { tb: sources.tb.mapping, je: sources.je.mapping });
   const ledgerReviewOwner = useRef({});
   const reviewingAny = reviews.reviewing.tb || reviews.reviewing.je;
   // TB＋JE 统一上传框：拖放命中以这个框的坐标为准（台账模式不渲染，自然不响应）。
@@ -1629,6 +1634,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     setCurrencyValidationNotice("");
     if (!metadataReady) return setError("完整资料仍在读取，请稍候。");
     if (!auxiliaryCheckReady) return setError("TB 与 JE 的辅助字段校验尚未完成，请等待或重试。");
+    if (mappingGaps.length) return setError(`尚未映射：${mappingGaps.join("、")}。`);
     if (mode !== "tb") {
       setStep(1);
       return;
@@ -2037,7 +2043,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       <StepIndicator
         steps={[
           { key: "source", label: "上传与识别" },
-          { key: "rates", label: mode === "tb" ? "确认科目与利率" : "台账信息确认", disabled: !sourcesReady },
+          { key: "rates", label: mode === "tb" ? "确认科目与利率" : "台账信息确认", disabled: !mappingsReady },
           { key: "run", label: "测算与底稿", disabled: !mappingsReady || !tbRunReady },
         ]}
         current={step}
@@ -2389,7 +2395,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           )}
           <div className="fx-step-actions">
             <Button
-              disabled={!sourcesReady || reviewingAny}
+              disabled={!mappingsReady || reviewingAny}
               onClick={() => void enterTbRateStep()}
             >
               {mode === "tb" ? "下一步：确认科目与利率" : "下一步：台账信息确认"}
@@ -3124,13 +3130,14 @@ function Mapping({
   const groupKind: LedgerFormKind =
     kind === "tb" || kind === "je" ? kind : "loan";
   const fetchedForms = useLedgerForms(groupKind);
-  const forms =
-    groupKind === "loan" && x.forms?.length ? x.forms : fetchedForms;
-  // 借款台账按四型判定：命中哪一型决定哪些字段必填。利率台账不判型。
+  const forms = groupKind === "loan"
+    ? (x.forms?.length ? x.forms : fetchedForms)
+    : interestLedgerForms(groupKind, fetchedForms, "loan");
+  // TB/JE 采用已落实业务豁免的表型，台账沿用下发四型；利率台账不判型。
   const hit =
     kind === "ledger" && x.forms?.length
       ? resolveLoanForm(x.forms, source.mapping)
-      : undefined;
+      : reviewable ? resolveForm(groupKind, forms, source.mapping) : undefined;
   const formNote = hit
     ? describeLoanForm(hit, (role) => labels[role] ?? role)
     : undefined;
@@ -3175,45 +3182,13 @@ function Mapping({
               <span>第 {(x.previewOffset ?? 0) + (x.preview.length ? 1 : 0)}–{(x.previewOffset ?? 0) + x.preview.length} 行，共 {x.rowCount} 行</span>
               <Button variant="secondary" disabled={busy || !x.hasMore} onClick={() => onPage((x.previewOffset ?? 0) + 100)}>下一页</Button>
             </>}
-            <label>
-              Sheet
-              <select
-                value={x.sheet}
-                onChange={(e) => header(e.target.value, 0, 0)}
-              >
-                {x.sheets.map((s) => (
-                  <option key={s}>{s}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              标题行
-              <Input
-                controlSize="sm"
-                type="number"
-                min={1}
-                value={x.headerRow}
-                onChange={(e) =>
-                  header(x.sheet, Number(e.target.value), x.headerDepth)
-                }
-              />
-            </label>
-            {/* 表头层数只有 TB/JE 需要（「金额」下再分借方/贷方的两层表头）； */}
-            {/* 台账固定单层，引擎也不支持多级表头，不给这个控件。 */}
-            {reviewable && (
-              <label>
-                表头层数
-                <select
-                  value={x.headerDepth}
-                  onChange={(e) =>
-                    header(x.sheet, x.headerRow, Number(e.target.value))
-                  }
-                >
-                  <option value={1}>1层</option>
-                  <option value={2}>2层</option>
-                </select>
-              </label>
-            )}
+            <SourceTableControls
+              sheet={x.sheet} sheets={x.sheets} headerRow={x.headerRow} headerDepth={x.headerDepth}
+              disabled={busy || reviewing}
+              onSheetChange={(sheet) => header(sheet, 0, 0)}
+              onHeaderRowChange={(row) => header(x.sheet, Number(row), x.headerDepth)}
+              onHeaderDepthChange={reviewable ? (depth) => header(x.sheet, x.headerRow, depth) : undefined}
+            />
           </>
         }
         onChange={change}

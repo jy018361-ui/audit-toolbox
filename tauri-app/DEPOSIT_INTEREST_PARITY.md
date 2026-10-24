@@ -1,5 +1,29 @@
 # 存款利息上传识别行为与性能回归
 
+## 2026-10-24：共享确认目录补充多个真实上级
+
+- 同一确认身份的上级不唯一时保留 `parentAccountNames` 列表，唯一上级仍用原字段；供 FA 判断折旧费用语境。存款的角色建议、账户身份、金额及利息算法保持，普通／磁盘目录共用。边界与验收见 `LEDGER_MAPPING_UNIFICATION.md`、`FA_RUST_PARITY.md` 同日条目。
+
+## 2026-10-24：自动映射共用成组字段、冲突补选与辅助候选
+
+- 接入公共 Oracle Entered／Accounted、冲突后的未占用次选及有取值证据的辅助候选；规则与边界见 `LEDGER_MAPPING_UNIFICATION.md` 同日“自动映射补丁统一到公共引擎”。保留人工确认覆盖、工具业务角色范围和辅助跨表验证要求。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib unified_automatic` 及本工具库测试；记录见 `artifacts/public-mapping-unification-20261024/`。本项不打包 EXE。
+
+
+## 2026-10-24：读取计划与内存保护统一
+
+存款预览／导出固定 TB＋JE 联合读取计划，并覆盖 TB 完整层级分析；监控与嵌套读表复用，指定 Sheet 不被其他表干扰。 普通计划不启用本套大文件暂停；磁盘计划保留原内存阈值、暂停恢复及取消。策略、跨工具边界和回归命令见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目，worker 合成验收记录见 `build/loan-read-plan-check/`。本次不改业务计算或用户映射。
+
+## 2026-10-24：公共双方向列完整识别
+
+存款／FA 共用识别入口继续消费公共方向裁决，公共初判和最终组装均先识别完整双列，再按明确时点或物理前后定归属；独立第二列空白不共享第一列。大学原件普通／磁盘路径与借款、汇兑／TBJE 同件映射一致。计息、辅助验证和人工确认保持。回归及规则边界见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目、`--lib direction_pair`。
+
+## 2026-10-24：映射标记落实既有字段豁免
+
+- 映射下拉与表型提示按现有业务门禁展示：TB 期初余额和累计发生额独立选填，期末余额至少提供一种记法；JE 净额或单侧借/贷金额即可，均为空仍拦截。未更改 Rust 豁免、单侧缺列按零处理、计息公式或导出结果。
+- 公共表型仍由 Rust 下发，前端只对利息工具已有豁免作适配；借款 JE 不使用存款的单侧金额豁免。
+- 回归：`npx vitest run src/ledgerForms.test.ts src/DepositInterestPage.test.ts src/DepositInterestInteractions.test.tsx src/components/MappingPanel.test.tsx`；`npm run build`。
+
 ## 2026-10-23：JE 组合科目身份与月度归集统一解析
 
 - 存款测算的 JE 身份预扫、逐月发生额、辅助锚点验证及同码汇总口径预检共用映射感知的 `JeAccountColumns`。只有同一源列明确兼挂科目编码和名称时，调用公共 `split_combined_account_fields_ref`，将 `1002010109-人民币存款-民生银行` 作为编码 `1002010109` 与完整名称参与匹配；普通内存和磁盘路径一致。

@@ -233,7 +233,7 @@ fn analysis_cache_key(params: &Value) -> String {
         .as_object_mut()
         .map(|map| map.remove("outputPath"));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&"fa-cross-table-matching-v12-tb-classification-20261023", &mut hasher);
+    std::hash::Hash::hash(&"fa-cross-table-matching-v13-depreciation-context-20261024", &mut hasher);
     std::hash::Hash::hash(&ledger_mapping::TB_STRUCTURE_RULE_VERSION, &mut hasher);
     std::hash::Hash::hash(&ledger_mapping::AMOUNT_PARSE_RULE_VERSION, &mut hasher);
     std::hash::Hash::hash(&ledger_mapping::JE_BODY_RULE_VERSION, &mut hasher);
@@ -3826,6 +3826,11 @@ fn confirmed_role_category_index(
 /// 仅剥离名称首段明确的资产角色词，不能把费用、税金或处置损益的尾部说明当资产。
 fn fa_name_role_category(name: &str) -> Option<(&'static str, String)> {
     let value = name.trim().to_lowercase().replace('_', " ");
+    if ["费用", "費用"].iter().any(|word| value.contains(word))
+        && ["折旧", "折舊"].iter().any(|word| value.contains(word))
+    {
+        return None;
+    }
     // 自动来源提示不把清理过渡户、费用或损益当作资产本体。
     // 同码人工确认先于该提示，用户明确指定的角色不会在此被改写。
     if ["使用权", "使用權", "清账", "清賬", "right of use", "right-of-use",
@@ -3838,6 +3843,7 @@ fn fa_name_role_category(name: &str) -> Option<(&'static str, String)> {
     for (prefix, role) in [
         ("accumulated depreciation", "depreciation"), ("accum. dep", "depreciation"),
         ("累计折旧", "depreciation"), ("累計折舊", "depreciation"),
+        ("固定资产折旧", "depreciation"), ("固定資產折舊", "depreciation"),
         ("depreciation", "depreciation"), ("fixed assets", "cost"), ("fixed asset", "cost"),
         ("固定资产原值", "cost"), ("固定資產原值", "cost"),
         ("固定资产", "cost"), ("固定資產", "cost"),
@@ -5699,12 +5705,82 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "需 FA_DEPRECIATION_CASE 指向05原件参数，仅运行库测试"]
+    fn depreciation_context_original_catalog() {
+        let params: Value = serde_json::from_slice(&std::fs::read(std::env::var("FA_DEPRECIATION_CASE").unwrap()).unwrap()).unwrap();
+        let output = std::path::PathBuf::from(std::env::var("FA_DEPRECIATION_OUTPUT").unwrap());
+        std::fs::create_dir_all(&output).unwrap();
+        let mut inspected = Vec::new();
+        for disk in [false, true] {
+            let result = crate::deposit_interest::call("deposit.inspect_tb", json!({
+                "source":params["tbSource"], "mapping":params["tbMapping"], "__testForceDiskTb":disk,
+            })).unwrap();
+            std::fs::write(output.join(format!("05-catalog-{disk}.json")), serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+            let row = result["reviewAccounts"].as_array().unwrap().iter()
+                .find(|row| row["account"].as_str().unwrap_or("").contains("6600320000")).unwrap();
+            assert_eq!(row["parentAccountNames"], json!(["4105_制造费用", "6601_销售费用", "6602_管理费用"]), "{row}");
+            inspected.push(result);
+        }
+        assert_eq!(inspected[0]["reviewAccounts"], inspected[1]["reviewAccounts"]);
+        std::fs::write(output.join("frontend-cases.json"), serde_json::to_vec_pretty(&json!([
+            {"name":"05-depreciation-context", "params":params, "pairs":inspected[0]["reviewAccounts"]}
+        ])).unwrap()).unwrap();
+    }
+
+    #[test]
+    #[ignore = "需 FA_DEPRECIATION_CONFIRMED 为前端生成的05分类参数，仅运行库测试"]
+    fn depreciation_context_original_confirmed_export() {
+        let cases: Value = serde_json::from_slice(&std::fs::read(std::env::var("FA_DEPRECIATION_CONFIRMED").unwrap()).unwrap()).unwrap();
+        let output = std::path::PathBuf::from(std::env::var("FA_DEPRECIATION_OUTPUT").unwrap());
+        for disk in [false, true] {
+            let mut params = cases[0]["params"].clone();
+            let expense = params["accountAssignments"].as_array().unwrap().iter()
+                .find(|row| row["account"].as_str().unwrap_or("").contains("6600320000")).unwrap();
+            assert_eq!(expense["role"], "excluded");
+            params["__testForceDiskLedger"] = json!(disk);
+            params["__testForceDiskTb"] = json!(disk);
+            let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+            let closing: f64 = analysis.totals.values().map(|row| row.closing_cost).sum();
+            assert!((closing - 4_403_504.48).abs() < 0.005, "{closing}");
+            assert_eq!(preview_json(&analysis)["reconciliationDifferences"], 0);
+            assert!(analysis.je.iter().all(|row| !row.account.contains("6600320000") || row.role.is_empty()));
+            let path = output.join(if disk { "05-磁盘验收.xlsx" } else { "05-普通验收.xlsx" });
+            write_workbook(&path, &analysis, &AtomicBool::new(false)).unwrap();
+            assert_export_caches(&path, &analysis);
+        }
+    }
+
+    #[test]
+    fn depreciation_context_alias_matches_confirmed_tb_in_memory_and_disk() {
+        for disk in [false, true] {
+            let (dir, out, mut params) = fixture();
+            let tb = dir.join("tb.csv");
+            std::fs::write(&tb, std::fs::read_to_string(&tb).unwrap().replace(",1602,累计折旧,", ",1602,累计折旧-机器设备,")).unwrap();
+            params["accountAssignments"][1]["account"] = json!("1602 累计折旧-机器设备");
+            let je = dir.join("je.csv");
+            std::fs::write(&je, std::fs::read_to_string(&je).unwrap().replace(",1602,累计折旧,", ",AD99,固定资产折旧-机器设备,")).unwrap();
+            params["assignmentBasis"] = json!("assetRoleCategory");
+            params["__testForceDiskLedger"] = json!(disk);
+            let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+            assert_eq!(analysis.totals[&("A".into(), "机器设备".into())].dep_charge, 100.0);
+            assert_eq!(preview_json(&analysis)["reconciliationDifferences"], 0);
+            write_workbook(&out, &analysis, &AtomicBool::new(false)).unwrap();
+            assert_export_caches(&out, &analysis);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
     fn tb_role_category_non_asset_counterparts_do_not_get_asset_hints_or_warnings() {
         for name in ["固定资产清理-机器设备", "固定资产-减值准备-机器设备", "固定资产-折旧费-机器设备",
+            "管理费用-固定资产折旧-机器设备", "固定资产折旧-管理费用", "費用-固定資產折舊",
             "固定资产-处置损益-机器设备", "固定资产-报废损失-机器设备", "固定资产-使用权-机器设备",
             "Fixed assets clearing - machinery", "Fixed assets impairment - machinery",
             "Depreciation expense - machinery", "Fixed assets disposal - machinery"] {
             assert!(fa_name_role_category(name).is_none(), "{name}");
+        }
+        for name in ["固定资产折旧-机器设备", "固定資產折舊-机器设备"] {
+            assert_eq!(fa_name_role_category(name), Some(("depreciation", "机器设备".into())));
         }
         for disk in [false, true] {
             let (dir, _, mut params) = fixture();

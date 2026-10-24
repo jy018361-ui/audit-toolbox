@@ -146,9 +146,7 @@ describe("MeetingMinutesPage", () => {
     expect(
       screen.getByText(/浏览器中预览界面，Teams 检测、录音与生成纪要需在桌面应用中使用/),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/浏览器预览模式：界面仅供查看/),
-    ).toBeInTheDocument();
+    expect(screen.queryByText(/浏览器预览模式：界面仅供查看/)).toBeNull();
     expect(
       screen.getByRole("button", { name: "手动开始记录" }),
     ).toBeDisabled();

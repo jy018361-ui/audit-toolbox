@@ -4,6 +4,34 @@ use serde_json::{Value, json};
 
 const HEADERS: [&str; 6] = ["科目代码", "科目名称", "主体", "币种", "期初余额", "期末余额"];
 
+#[test]
+fn depreciation_context_catalog_keeps_multiple_real_parents() {
+    let (_dir, source) = fixture(&rows());
+    let mut table = fx::FxTable {
+        path: source["inputPath"].as_str().unwrap().into(), sheet: "Sheet1".into(),
+        sheets: vec!["Sheet1".into()], header_row: 1, header_depth: 1,
+        raw_headers: vec![], headers: HEADERS.map(str::to_owned).to_vec(),
+        rows: vec![vec!["6600320000", "固定资产折旧", "A", "CNY", "0", "10"].into_iter().map(str::to_owned).collect(); 3],
+        row_count: 3, header_candidates: vec![], sampled: false,
+    };
+    let parents = ["制造费用", "销售费用", "管理费用"].map(str::to_owned);
+    let items = deposit_interest::distinct_review_accounts_with_mask(
+        &table, mapping().as_object().unwrap(), &[true; 3], &vec![String::new(); 3], &parents,
+    );
+    assert_eq!(items.len(), 1);
+    assert!(!items[0].contains_key("parentAccountName"));
+    assert_eq!(items[0]["parentAccountNames"], json!(["制造费用", "管理费用", "销售费用"]));
+    table.headers.push("科目级别描述".into());
+    for (row, parent) in table.rows.iter_mut().zip(["4105_制造费用", "6601_销售费用", "6602_管理费用"]) {
+        row.push(parent.into());
+    }
+    let items = deposit_interest::distinct_review_accounts_with_mask(
+        &table, mapping().as_object().unwrap(), &[true; 3], &vec![String::new(); 3], &vec![String::new(); 3],
+    );
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["parentAccountNames"], json!(["4105_制造费用", "6601_销售费用", "6602_管理费用"]));
+}
+
 pub(crate) fn mapping() -> Value {
     json!({"accountCode":"科目代码", "accountName":"科目名称", "entity":"主体",
         "currency":"币种", "openingFunctionalAmount":"期初余额", "closingFunctionalAmount":"期末余额"})

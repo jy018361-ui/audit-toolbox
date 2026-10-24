@@ -16,6 +16,7 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Badge } from "@/components/ui/badge";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { SourceTableControls } from "@/components/SourceTableControls";
 import { JargonTip } from "@/components/JargonTip";
 import { Button } from "@/components/ui/button";
 import {
@@ -807,46 +808,6 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                     />
                   </div>
                   {s.inspection && (
-                    <div className="fuzzy-source-meta">
-                      <span>
-                        {s.inspection.previewOnly ? "已预览" : "已识别"} {formatCount(s.inspection.rowCount)} 行 ·{" "}
-                        {s.inspection.sheet}
-                      </span>
-                      <label>
-                        Sheet
-                        <select
-                          value={s.inspection.sheet}
-                          disabled={busy}
-                          onChange={(e) =>
-                            void inspect(kind, { sheet: e.target.value })
-                          }
-                        >
-                          {s.inspection.sheets.length ? (
-                            s.inspection.sheets.map((x) => (
-                              <option key={x}>{x}</option>
-                            ))
-                          ) : (
-                            <option>{s.inspection.sheet}</option>
-                          )}
-                        </select>
-                      </label>
-                      <label>
-                        表头行
-                        <input
-                          type="number"
-                          min={1}
-                          disabled={busy}
-                          value={s.headerRow}
-                          onChange={(e) =>
-                            void inspect(kind, {
-                              headerRow: Number(e.target.value),
-                            })
-                          }
-                        />
-                      </label>
-                    </div>
-                  )}
-                  {s.inspection && (
                     <MappingPanel
                       title={`${SOURCE_LABEL[kind]}匹配列`}
                       note={`${s.inspection.previewOnly ? "已预览 " : ""}${formatCount(s.inspection.rowCount)} 行 × ${s.inspection.headers.length} 列${s.inspection.previewOnly ? "，正式匹配时统计总行数" : ""}`}
@@ -858,6 +819,14 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                       busy={busy}
                       maxHeight={260}
                       resizeKey={`fuzzy.preview.${kind}`}
+                      toolbar={
+                        <SourceTableControls
+                          sheet={s.inspection.sheet} sheets={s.inspection.sheets}
+                          headerRow={s.headerRow} disabled={busy}
+                          onSheetChange={(sheet) => void inspect(kind, { sheet })}
+                          onHeaderRowChange={(row) => void inspect(kind, { headerRow: Number(row) })}
+                        />
+                      }
                       onChange={(next) => setSource(kind, { mapping: next })}
                     />
                   )}

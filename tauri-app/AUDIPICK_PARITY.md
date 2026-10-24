@@ -1,3 +1,8 @@
+## 2026-10-24 · 公共 TB 复核方向指导统一
+
+- 公共单表和 TB＋JE 联合字段复核均以 `review_tb_instruction` 引用 `ledger_mapping::TB_DIRECTION_REVIEW_RULES`，移除单方向在余额左侧仍“一律期末”的旧指导；双列、显式时点、单列与缺值证据规则和脚本一致。
+- 仅修改字段复核提示词组装，不替代人工确认、自动执行模型建议或修改 AudiPick 业务选样。回归 `cargo test --manifest-path src-tauri/Cargo.toml --lib direction_pair`、`--lib audipick::`；未调用付费模型，未打包应用 EXE。
+
 ## 2026-10-19 · 案例库取消固定体积和表格规模限制
 
 - 案例库 Excel 不再按 8 MB、10,000 行或 100 列直接拒绝，读取所有已约定工作表，保留格式损坏／必要工作表缺失的明确错误。分类及契约提取规则不变。

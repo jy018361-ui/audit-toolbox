@@ -1,3 +1,36 @@
+## 2026-10-24 · 表格读取设置统一到预览区
+
+- 目标：统一各工具 Sheet、标题行与表头层数的位置，减少上传区与映射预览之间的往返。
+- 设计决策：读取设置跟随各自的预览，统一按 Sheet、标题行、表头层数排列；文案保留“标题行”。FA 底稿、汇兑、FA 清单匹配（含补充清单）、折旧政策对比、模糊匹配、看账、正负数凭证标记与工时工具迁入预览区域；TBJE 的 Sheet 从配对行移入映射预览，配对行只显示当前工作表；存款、借款与折旧测算沿用同一共用设置栏。引擎不支持多层表头的清单不增设层数控件，合并工具的批量 Sheet 范围保留为任务设置。
+- 看账与凭证标记在清空旧预览等待重读时仍保留设置，修改来源同时清除旧复核状态；共用设置栏在运行或复核期间锁定。紧凑工具栏可换行，长工作表名称不撑开预览。
+- 验证：`npm run build`；`npx vitest run --maxWorkers=3 --exclude src/AccountCatalogRefresh.test.ts`；浏览器演示数据在 1600px 与 1000px 验证各工具的控件位置、重新读取与窗口布局。`npm test` 的既有 `AccountCatalogRefresh.test.ts` 仍因 FA 科目目录源码字符串断言与当前实现不符而失败，未改动该断言或业务逻辑。不打包 EXE。
+
+## 2026-10-24 · 二轮视觉审计：状态一致性与首屏密度
+
+- 目标：消除 FA 复核待处理却显示完成、存款利率缺失却显示绿色完成，以及会议页状态卡挤压主要操作等用户可见问题。
+- 设计决策：FA 有待采纳建议时标为“待确认”并移除重复结论，匹配四项统计收为一行，精简模式说明和实现术语；会议状态合并为三项紧凑信息，保留录音上传告知，转写通道细节移入按需展开；存款未定利率的完成事件归一为黄色“待补利率”，提供直达未填利率输入框的主操作，结果区避免重复警告；Excel 合并终步完成显示对勾。多工具智能复核失败文案只说明当前映射可人工核对，不再重复解释内部自动映射机制。
+- 验证：`npx vitest run src/taskStateUi.test.tsx src/MeetingMinutesPage.test.tsx src/faListUi.test.ts`；`npm run build`；浏览器演示数据对 FA、会议和存款页在 1600／1180／1000px 做截图与几何复核。浏览器演示不代替真实 Rust 导入及 Windows 缩放验收。
+
+## 2026-10-24 · FA 折旧费用与累计折旧自动建议区分
+
+- 目标：避免05“固定资产折旧”在费用大类下被建议为资产原值，并保留无费用语境时的累计折旧建议。
+- 设计决策：自动建议联合科目名、分类语境、单一或多个真实上级，费用与折旧共同出现时优先排除；其余“固定资产折旧”归累计折旧候选。同名同码跨主体或辅助的确认身份保持隔离，人工已有角色和类别继续优先，不静默重写历史选择。未改变资产类别配对、金额计算和其他工具分类。
+- 验证：`npx vitest run src/FaTbJePage.test.ts src/faListUi.test.ts`；`npm run build`；Rust目录、JE承接及05原件两条路径验收见 `FA_RUST_PARITY.md` 同日条目。不打包 EXE。
+
+## 2026-10-24 · 手动取消映射后的必填提示与复核失效
+
+- 目标：修复借款 JE 金额映射被清空仍可进入下一步、FA TB 累计发生额前端漏提示，以及手改映射后残留“已复核·无需调整”的问题。
+- 设计决策：借款 JE 必须提供本位币净额或完整借贷两列，字段提示、步骤条、下一步、测算及 worker 入口共同阻断缺失；FA 前端接入公共表型缺失清单，兼容回退同样要求累计借贷完整。借款、FA 的复核结果绑定当前映射，手动修改立即失效，自动采纳建议不误清除刚得到的结果，补回字段也不冒充已经重新复核。
+- 利息工具下拉标记同时落实既有豁免：TB 期初与累计独立选填、期末余额任一有效记法；存款 JE 可提供单侧金额，借款 JE 的借贷方案须完整。公共表型定义与测算公式保持，借款台账和利率台账规则保持。
+- 验证：`npx vitest run src/LoanInterestPageUi.test.tsx src/LoanInterestPage.test.ts src/FaTbJePage.test.ts src/DepositInterestPage.test.ts src/DepositInterestInteractions.test.tsx src/ledgerForms.test.ts src/components/LedgerReviewAll.test.tsx src/components/MappingPanel.test.tsx`；`npm run build`；借款 worker 回归见 `LOAN_INTEREST_PARITY.md` 同日条目。不打包 EXE。
+
+## 2026-10-24 · TBJE 预检统一等待内存并按实际结果提示完成
+
+- 目标：修复内存不足尚未启动的组被当成映射错误跳过、剩余组跑完却显示“处理完成 100%”的问题。
+- 设计决策：开始核对时将全部可运行组一次提交；字段对齐、辅助验证和正式核对在同一个受内存控制的 worker 中逐组执行。内存不足沿用公共任务通道等待与自动恢复，支持暂停和取消；等待期间保留所有组，不报完成。新任务立即清除旧完成进度。
+- worker 回传最终字段映射及辅助认定，页面、检查映射与导出使用同一份结果。真实映射／文件错误保留失败结果行，部分成功显示实际组数与“部分完成”，全部失败显示失败；勾稽有差异仍表示该组已处理，不混淆运行失败。
+- 验证：`npx vitest run src/TbjeCheckPage.test.tsx src/taskStateUi.test.tsx src/components/JobDialog.test.tsx src/TerminalJobVisibility.test.ts src/preview/demoRegistry.test.ts`；`npm run build`；Rust 与 worker 验收见 `TBJE_CHECK.md` 同日记录。页面事件回归覆盖内存等待、恢复、最后一组完成前不显示 100%、全部完成及真实映射失败。
+
 ## 2026-10-23 · FA 恢复仅复核 TB 科目
 
 - 目标：撤销新增的 JE 人工分类要求，第二步只确认 TB 科目的资产类别及原值／折旧角色，JE 分录由引擎自动承接分类。

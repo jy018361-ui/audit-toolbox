@@ -16,21 +16,15 @@
 
 .meeting-status-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: var(--sp-3);
-}
-
-@media (max-width: 1279px) {
-  .meeting-status-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+  grid-template-columns: minmax(0, 0.75fr) minmax(0, 0.9fr) minmax(0, 1.7fr);
+  gap: var(--sp-2);
 }
 
 .meeting-status-item {
   display: grid;
   align-content: center;
-  gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-4);
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
   background: var(--surface-muted);
   border: 1px solid var(--border-soft);
   border-radius: var(--r-md);
@@ -50,6 +44,12 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+}
+
+.meeting-watch-hint {
+  margin: var(--sp-2) 0 0;
+  color: var(--label);
+  font-size: var(--fs-xs);
 }
 
 .meeting-options-grid {

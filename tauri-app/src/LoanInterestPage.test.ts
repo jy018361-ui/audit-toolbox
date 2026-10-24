@@ -10,6 +10,14 @@ import {
 } from "./LoanInterestPage";
 
 describe("借款利息测算", () => {
+  it("取消 JE 金额映射后提示缺失，净额或完整借贷二选一", () => {
+    const identity = {accountCode: "科目", date: ["日期"], id: ["凭证号"]};
+    expect(loanMissing("je", identity)).toContain("本位币金额（净额，或借方和贷方）");
+    expect(loanMissing("je", {...identity, functionalDebit: "借方"})).toContain("本位币金额（净额，或借方和贷方）");
+    expect(loanMissing("je", {...identity, functionalAmount: "净额"})).toEqual([]);
+    expect(loanMissing("je", {...identity, functionalDebit: "借方", functionalCredit: "贷方"})).toEqual([]);
+    expect(loanMissing("je", {...identity, functionalAmount: [" "]})).toContain("本位币金额（净额，或借方和贷方）");
+  });
   it("未提供合同利率时预填当前一年期LPR 3.00%", () =>
     expect(DEFAULT_LOAN_RATE).toBe(0.03));
   it("正零和负零都只显示0", () => {

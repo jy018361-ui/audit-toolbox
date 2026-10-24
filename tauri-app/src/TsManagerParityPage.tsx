@@ -20,6 +20,7 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { FileInput } from "@/components/FileInput";
 import { displayFileName } from "@/fileDisplay";
 import { DataTable } from "@/components/DataTable";
+import { SourceTableControls } from "@/components/SourceTableControls";
 import {
   BLANK_TOKEN,
   ColumnFilterMenu,
@@ -29,7 +30,6 @@ import {
 } from "@/components/ColumnFilterMenu";
 import { StatGrid } from "@/components/StatGrid";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
@@ -685,51 +685,6 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     disabled={busy}
                   />
                 </Field>
-                <div className="form-grid">
-                  <Field label="Sheet">
-                    {state.inspect?.sheets?.length ? (
-                      <select
-                        value={state.sheet}
-                        onChange={(event) => {
-                          const sheet = event.target.value;
-                          setMenu(undefined);
-                          setValueCache({});
-                          patch({
-                            sheet,
-                            inspect: switchSheetInspect(state.inspect, sheet),
-                            selections: {},
-                            filtered: undefined,
-                            result: undefined,
-                          });
-                          setStep(1);
-                        }}
-                      >
-                        {state.inspect.sheets.map((name) => (
-                          <option key={name}>{name}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <Input
-                        value={state.sheet}
-                        onChange={(event) => {
-                          patch({ sheet: event.target.value });
-                          setStep(1);
-                        }}
-                      />
-                    )}
-                  </Field>
-                  <Field label="标题行（默认 1）">
-                    <Input
-                      type="number"
-                      min={1}
-                      max={50}
-                      value={state.headerRow}
-                      onChange={(event) => {
-                        resetForNewSource({ headerRow: event.target.value });
-                      }}
-                    />
-                  </Field>
-                </div>
                 <div className="actions">
                   <Button
                     type="button"
@@ -743,7 +698,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   <Button
                     type="button"
                     variant="default"
-                    disabled={!state.inspect}
+                    disabled={!headers.length}
                     onClick={() => setStep(2)}
                   >
                     下一步：条件筛选
@@ -878,6 +833,20 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
             <CardTitle>数据预览</CardTitle>
           </CardHeader>
           <CardContent>
+            {state.inputPath && <div className="mapping-panel-toolbar source-preview-toolbar">
+              <SourceTableControls
+                sheet={state.sheet} sheets={state.inspect?.sheets ?? []} headerRow={state.headerRow}
+                editableSheet headerRowMax={50} disabled={busy}
+                onSheetChange={(sheet) => {
+                  setMenu(undefined);
+                  setValueCache({});
+                  patch({ sheet, inspect: switchSheetInspect(state.inspect, sheet), selections: {}, filtered: undefined, result: undefined });
+                  setStep(1);
+                }}
+                onHeaderRowChange={(headerRow) => resetForNewSource({ headerRow, inspect: switchSheetInspect(state.inspect, state.sheet) })}
+              />
+              {!headers.length && <Button variant="secondary" size="sm" disabled={busy} onClick={() => void inspect()}>重新加载</Button>}
+            </div>}
             {state.inspect && (
               <StatGrid
                 columns={4}
@@ -906,7 +875,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                 该工作簿共有 {state.inspect?.sheets?.length}{" "}
                 个工作表，当前使用「
                 {state.sheet || state.inspect?.selectedSheet}」。
-                如果数据不在这一张，请在上方切换 Sheet 后重新加载。
+                如果数据不在这一张，请在预览区切换 Sheet 后重新加载。
               </div>
             )}
             {preview.length > 0 && (

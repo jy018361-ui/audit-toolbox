@@ -203,7 +203,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
       <PageHeader
         eyebrow="运营支持"
         title={tool.name}
-        detail="检测 Teams 会议并询问记录；录音上传阿里云百炼转写（区分说话人）后由统一大模型生成结构化纪要。"
+        detail="记录会议或导入录音，转写后生成结构化纪要。"
       />
       <StepIndicator
         steps={[
@@ -262,10 +262,6 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                 <dd>{recording ? "正在录制会议" : status?.inCall ? "会议进行中（未记录）" : "空闲"}</dd>
               </div>
               <div className="meeting-status-item">
-                <dt>说明</dt>
-                <dd>{watchHint}</dd>
-              </div>
-              <div className="meeting-status-item">
                 <dt>后台常驻</dt>
                 <dd className="meeting-resident-cell">
                   <SwitchInput
@@ -281,6 +277,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                 </dd>
               </div>
             </dl>
+            {!previewMode && <p className="meeting-watch-hint" role="status">{watchHint}</p>}
             <div className="meeting-actions-row">
               {recording ? (
                 <Button

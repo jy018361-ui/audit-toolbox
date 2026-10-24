@@ -1160,7 +1160,7 @@ fn is_deposit_role(role: &str) -> bool {
 // 字段词典
 // ---------------------------------------------------------------------------
 
-type Candidate = (String, f64, Vec<String>, Vec<String>);
+type Candidate = ledger_mapping::MappingCandidate;
 
 /// 本工具在公共角色表之外的自有角色（角色, 命中词, 冲突词）：
 /// JE 的数量列（识别计息天数之类的辅助信息）、TB 的会计期间
@@ -1186,18 +1186,6 @@ fn tool_roles(kind: &str) -> Vec<(&'static str, Vec<&'static str>, Vec<&'static 
             vec!["金额", "余额", "amount", "balance"],
         )]
     }
-}
-
-/// 辅助核算的银行业务特有写法。公共引擎先判；内核没占到辅助核算时，再用
-/// 这批扩充别名本地补一刀。TB 侧的泛化「文本」只留在 TB——部分银行余额表
-/// 的「文本」确实承载账户维度，而 JE 的「文本」必须留给摘要，否则 SAP 行
-/// 项目文本会与成本中心一起被错误挂成辅助核算多列。
-fn auxiliary_extra_aliases(kind: &str) -> Vec<&'static str> {
-    let mut out = vec!["账户", "财务项目"];
-    if kind == "tb" {
-        out.extend(["文本", "科目文本", "账户文本"]);
-    }
-    out
 }
 
 /// 科目编码与科目名称的列合在一起——分类逻辑要看完整文本，
@@ -1290,39 +1278,7 @@ fn drop_column_conflicts(
     candidates: &BTreeMap<String, Vec<Candidate>>,
     mapping: &mut Map<String, Value>,
 ) {
-    let score_of = |role: &str, column: &str| {
-        candidates
-            .get(role)
-            .and_then(|all| all.iter().find(|c| c.0 == column))
-            .map(|c| c.1)
-            .unwrap_or(0.0)
-    };
-    let mut picks: Vec<(String, String, f64)> = Vec::new();
-    for (role, value) in mapping.iter() {
-        match value {
-            Value::String(column) => {
-                picks.push((role.clone(), column.clone(), score_of(role, column)))
-            }
-            Value::Array(columns) => {
-                for column in columns.iter().filter_map(Value::as_str) {
-                    picks.push((role.clone(), column.to_string(), score_of(role, column)));
-                }
-            }
-            _ => {}
-        }
-    }
-    for (role, column) in ledger_mapping::conflicting_roles(kind, &picks) {
-        let drop_whole = match mapping.get_mut(&role) {
-            Some(Value::Array(columns)) => {
-                columns.retain(|x| x.as_str() != Some(column.as_str()));
-                columns.is_empty()
-            }
-            _ => true,
-        };
-        if drop_whole {
-            mapping.remove(&role);
-        }
-    }
+    ledger_mapping::resolve_mapping_column_conflicts(kind, candidates, mapping);
 }
 
 /// 一个角色映射到的列名集合（单列是字符串、多列是数组，两种形状都收）。
@@ -1364,19 +1320,6 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
         };
         alternates.retain(|c| !claimed.contains(&c.0));
         out.entry(role.to_string()).or_default().extend(alternates);
-    }
-    // 辅助核算的银行业务特有写法并入替补池（「账户」「财务项目」，TB 侧
-    // 另有泛化「文本」）；冲突词沿用内核定义。
-    {
-        let conflicts = ledger_mapping::role_of(kind, "auxiliary")
-            .map(|role| role.conflicts.to_vec())
-            .unwrap_or_default();
-        let mut alternates =
-            local_choices(table, &auxiliary_extra_aliases(kind), &conflicts).unwrap_or_default();
-        alternates.retain(|c| !claimed.contains(&c.0));
-        out.entry("auxiliary".to_string())
-            .or_default()
-            .extend(alternates);
     }
     // 本工具自有角色（数量／会计期间）继续本地打分。
     for (role, aliases, conflicts) in tool_roles(kind) {
@@ -1917,6 +1860,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         mapping.insert("accountName".into(), json!(identity.names));
     }
     if kind == "tb" {
+        ledger_mapping::complete_entered_accounted_tb_mapping(&table.headers, &table.rows, &mut mapping);
         crate::fx::promote_period_movement(&table, &mut mapping);
     }
     // 用友式「月/日分列无年份」的序时账：把日列一并挂进 date（09 号样例
@@ -2554,6 +2498,13 @@ pub(crate) fn distinct_review_accounts_with_global_currency(
     let entity_index = column_index(table, mapping, "entity");
     let auxiliary_indexes = column_indexes(table, mapping, "auxiliary");
     let currency_index = column_index(table, mapping, "currency");
+    // 某些账套将费用大类另放在明确的描述列，明细编码不一定延续大类编码。
+    // 仅保留源表明示名称作确认语境，不据此建立父子金额关系或改选层。
+    let explicit_parent_indexes = table.headers.iter().enumerate().filter_map(|(index, header)| {
+        matches!(ledger_mapping::normalize_header(header).as_str(),
+            "科目级别描述" | "科目級別描述" | "科目大类名称" | "科目大類名稱" | "上级科目名称" | "上級科目名稱")
+            .then_some(index)
+    }).collect::<Vec<_>>();
     // 跨币种合计已验证时，确认目录也采用相同的真实分币种层。
     // 空编码辅助行通过公共维度视图继承科目；只在其父行是有效末级且
     // 金额已证明可由辅助替代时展开，避免合计换个入口重新进入确认清单。
@@ -2642,9 +2593,13 @@ pub(crate) fn distinct_review_accounts_with_global_currency(
         names
             .0
             .insert(contexts.get(parent).cloned().unwrap_or_default());
-        names
-            .1
-            .insert(parent_names.get(parent).cloned().unwrap_or_default());
+        let explicit_parents = explicit_parent_indexes.iter().filter_map(|column| table.rows[parent].get(*column))
+            .map(|value| value.trim()).filter(|value| !value.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+        let structural_parent = parent_names.get(parent).cloned().unwrap_or_default();
+        if explicit_parents.is_empty() || !structural_parent.is_empty() {
+            names.1.insert(structural_parent);
+        }
+        names.1.extend(explicit_parents);
     }
     seen.into_iter()
         .map(
@@ -2654,6 +2609,11 @@ pub(crate) fn distinct_review_accounts_with_global_currency(
                     && let Some(name) = parents.first().filter(|name| !name.is_empty())
                 {
                     item.insert("parentAccountName".into(), json!(name));
+                }
+                if parents.len() > 1 {
+                    // 同一确认身份可能来自多个费用大类；保留全部真实语境，不能
+                    // 因上级不唯一就丢失费用证据，也不伪造成一个确定的上级。
+                    item.insert("parentAccountNames".into(), json!(parents));
                 }
                 if contexts.len() == 1
                     && let Some(context) = contexts.first().filter(|value| !value.is_empty())

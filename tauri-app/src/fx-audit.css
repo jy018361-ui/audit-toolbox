@@ -87,9 +87,28 @@
   border-color: color-mix(in srgb, var(--brand-accent) 34%, var(--border));
   box-shadow: 0 10px 28px color-mix(in srgb, var(--brand) 7%, transparent);
 }
+/* 已识别卡标题：绿色横条改为椭圆背景层。椭圆绝对定位垫在标题文字后面，
+   文字位置、字号、卡片高度与内容间距保持不变；配 CardTitle 的定位保证文字在椭圆之上。 */
 .fx-source-card > div:first-child {
-  border-bottom: 1px solid var(--border-soft);
-  background: color-mix(in srgb, var(--success-bg) 58%, var(--card));
+  background: none;
+}
+.fx-source-card > div:first-child > div:first-child {
+  position: relative;
+  z-index: 1;
+  width: fit-content;
+}
+.fx-source-card > div:first-child > div:first-child::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: 50%;
+  left: -16px;
+  right: -16px;
+  height: 32px;
+  transform: translateY(-50%);
+  border-radius: 50%;
+  background: var(--success-bg);
+  pointer-events: none;
 }
 .fx-source-slot {
   min-width: 0;

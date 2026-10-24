@@ -1,3 +1,9 @@
+## 2026-10-25 · 已识别卡标题绿横条改为椭圆背景
+
+- 目标：落实用户反馈——借款利息 / 存款利息 / 汇兑损益三个页面「已识别：××」卡片标题的整条绿色横条显丑。经三轮效果图（小圆点徽标 → 单圆形 → 椭圆四变体，存档 `ui-mockups/`）用户选定「标准浅绿椭圆、布局零改动」方案。
+- 设计决策：只改 `src/fx-audit.css` 的 `.fx-source-card` 标题规则，组件结构不动——撤掉标题行的整条底色与底边线，改为 CardTitle 上绝对定位的 `::before` 椭圆层（`--success-bg` 填充、高 32px、左右比文字各多出 16px、`border-radius:50%`）；CardTitle 加 `width: fit-content` 让椭圆贴合文字宽度、加定位层级（`z-index:1` + 伪元素 `z-index:-1`）保证文字压在椭圆之上。文字位置、字号、卡片高度、内容间距与现状完全一致；待补充的灰卡（`fx-source-empty`，不带 `fx-source-card` 类）不受影响。
+- 验证：`npx vitest run src/DepositInterestInteractions.test.tsx src/FxAuditPageUi.test.tsx src/LoanInterestPageUi.test.tsx`（3 文件 80 项通过）；`npm run build`。不打包 EXE。
+
 ## 2026-10-24 · 视觉审核第一批修复：宽表滚动提示、金额右对齐、占位残留与任务状态操作
 
 - 目标：落实全量界面视觉审核（19 个工具全步骤 + 全部弹窗与任务状态，报告见 `ui-audit-20261024/视觉审核报告.md`）的第一批速赢项——全部落在共用组件，一处修复全局生效。

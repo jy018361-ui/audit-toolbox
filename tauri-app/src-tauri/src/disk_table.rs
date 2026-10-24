@@ -126,24 +126,37 @@ fn estimated_sheet_resident_bytes(path: &Path, sheet: Option<&str>) -> Option<u6
         return Some(size.saturating_add(rows.saturating_mul(32)).saturating_add(cells.saturating_mul(32)).saturating_mul(5).div_ceil(2));
     }
     if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("xlsx") || x.eq_ignore_ascii_case("xlsm")) {
-        let target = match sheet.filter(|name| !name.trim().is_empty()) {
-            Some(sheet) => Some(crate::fx::xlsx_sheet_entries(path).ok()?.into_iter()
-                .find(|(name, _)| name == sheet)?.1),
-            None => None,
-        };
-        let mut zip = zip::ZipArchive::new(fs::File::open(path).ok()?).ok()?;
-        let mut xml_bytes = 0_u64;
-        for index in 0..zip.len() {
-            let entry = zip.by_index(index).ok()?;
-            let worksheet = target.as_deref().map_or_else(
-                || entry.name().starts_with("xl/worksheets/"),
-                |target| entry.name() == target,
-            );
-            if worksheet || entry.name() == "xl/sharedStrings.xml" {
-                xml_bytes = xml_bytes.saturating_add(entry.size());
+        let Some((sheets, shared)) = xlsx::shapes(path) else { return None; };
+        let wanted = sheet.filter(|name| !name.trim().is_empty());
+        // xlsx 的 XML 是给 Excel 看的标记文本：未压缩 XML 字节与解析后的常驻体量
+        // 同一量级（稠密表两者相差约一成），不能按标记体量再乘系数。有 dimension
+        // 时按行列结构求和并与 XML 体量取大者——稀疏表靠行数兜底、谎报维度靠
+        // XML 兜底；没有 dimension 的生成器退回按 XML 4 倍的旧口径。
+        let mut total = shared;
+        let mut matched = 0_usize;
+        for (name, xml, dims) in sheets {
+            if wanted.is_some_and(|wanted| &name != wanted) { continue; }
+            matched += 1;
+            match dims {
+                Some((rows, cols)) => {
+                    // 单元格数受 XML 体量约束（每个单元格在 XML 中至少十余字节），
+                    // 防止谎报维度撑爆估算；稀疏空行不占 XML 但行结构真实，行数不设上限。
+                    let cells = rows.saturating_mul(cols).min(xml.saturating_div(12));
+                    total = total.saturating_add(xml
+                        .max(rows.saturating_mul(32).saturating_add(cells.saturating_mul(32))));
+                }
+                None => total = total.saturating_add(xml.saturating_mul(4)),
             }
         }
-        return Some(if target.is_some() { xml_bytes } else { xml_bytes.max(size) }.saturating_mul(4));
+        if wanted.is_some() && matched == 0 { return None; }
+        return Some(total);
+    }
+    // 老格式 .xls 读 BIFF 维度记录取真实行列：文件字节本身就是单元格数据，
+    // 没有标记膨胀，按“文件体量 + 行列结构”求和；读不出维度时回退 12 倍旧口径。
+    if let Some((rows, cells)) = crate::xls_sample::sheet_shape(path, sheet) {
+        return Some(size
+            .saturating_add(rows.saturating_mul(32))
+            .saturating_add(cells.saturating_mul(32)));
     }
     Some(size.saturating_mul(12))
 }
@@ -381,7 +394,8 @@ mod tests {
         for _ in 0..256 { archive.write_all(&[b' '; 65536]).unwrap(); }
         archive.finish().unwrap();
         let small = estimated_sheet_resident_bytes(&input, Some("资产")).unwrap();
-        assert_eq!(small, ("<worksheet><sheetData/></worksheet>".len() + "<sst><si><t>共享名称</t></si></sst>".len()) as u64 * 4);
+        // 这些表没有 dimension 标签，退回按 XML 4 倍估算；共享字符串只计一次。
+        assert_eq!(small, "<sst><si><t>共享名称</t></si></sst>".len() as u64 + "<worksheet><sheetData/></worksheet>".len() as u64 * 4);
         assert!(estimated_resident_bytes(&input).unwrap() > 64 * MIB);
         assert!(estimated_sheet_resident_bytes(&input, Some("不存在")).is_none());
         crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
@@ -391,6 +405,101 @@ mod tests {
             assert!(should_use_disk_for_sheets(&[(&input, Some("其他"))], 12));
             assert!(should_use_disk_for_sheets(&[(&input, Some("资产")), (&input, Some("其他"))], 12));
         });
+    }
+
+    #[test]
+    fn xlsx_estimate_tracks_content_and_stays_in_memory_at_low_watermarks() {
+        // 黄金测试集 01 组体量（约 3.7 万行 × 29 列，文件约 5MB）：估算应接近
+        // 真实常驻体量而不是标记体量的倍数，且任何内存水位都不再切磁盘缓存。
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("序时账.xlsx");
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let sheet = book.add_worksheet();
+        for col in 0..29_u16 {
+            sheet.write_string(0, col, format!("列{}", col + 1)).unwrap();
+        }
+        for row in 1..37_329_u32 {
+            for col in 0..29_u16 {
+                sheet.write_number(row, col, row as f64 * (col as f64 + 1.0)).unwrap();
+            }
+        }
+        book.save(&input).unwrap();
+        let estimate = estimated_resident_bytes(&input).unwrap();
+        assert!(estimate < 60 * MIB, "估算应接近真实体量：{estimate}");
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total: 16 * GIB, available: MIB, commit_available: MIB,
+        }, || {
+            assert!(!should_use_disk(&[&input], 4), "01 组体量在最低内存水位也不应切磁盘");
+        });
+    }
+
+    #[test]
+    fn xlsx_estimate_caps_lied_dimensions_with_markup_bytes() {
+        use std::io::Write;
+        // 个别生成器会写出整表尺寸的 dimension：单元格数以 XML 体量封顶，
+        // 行结构按谎报行数计（约 32MB 上限），不会撑爆估算。
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("谎报.xlsx");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&input).unwrap());
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, body) in [
+            ("xl/workbook.xml", "<workbook><sheets><sheet name=\"数据\" r:id=\"r1\"/></sheets></workbook>"),
+            ("xl/_rels/workbook.xml.rels", "<Relationships><Relationship Id=\"r1\" Target=\"worksheets/sheet1.xml\"/></Relationships>"),
+            ("xl/worksheets/sheet1.xml", "<worksheet><dimension ref=\"A1:XFD1048576\"/><sheetData><row r=\"1\"><c r=\"A1\"><v>1</v></c></row></sheetData></worksheet>"),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(body.as_bytes()).unwrap();
+        }
+        archive.finish().unwrap();
+        let estimate = estimated_resident_bytes(&input).unwrap();
+        assert!(estimate < 64 * MIB, "谎报维度应以 XML 体量封顶：{estimate}");
+    }
+
+    #[test]
+    #[ignore = "设置 AUDIT_GOLDEN_DIR 指向 TBJE 黄金测试集目录后运行"]
+    fn golden_tbje_pairs_keep_memory_switch_points() {
+        let Some(root) = std::env::var_os("AUDIT_GOLDEN_DIR").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let sources = |je: &str, tb: &str| -> Vec<(std::path::PathBuf, Option<&'static str>)> {
+            vec![(root.join(je), None), (root.join(tb), None)]
+        };
+        let extreme = crate::resource_budget::MemoryStatus {
+            total: 16 * GIB, available: MIB, commit_available: MIB,
+        };
+        // 01/06/08/09 组（0.4MB–5MB）：任何内存水位都整表读取。
+        for (je, tb) in [
+            ("01序时账 (JE).xlsx", "01科目余额表（TB）.xls"),
+            ("06序时账-2024.1-3.xlsx", "06科目余额表_2024.1-3.xlsx"),
+            ("08序时账 (2).xlsx", "08TB.xlsx"),
+            ("09序时账-2025.xls", "09科目余额表-2025.xls"),
+        ] {
+            let owned = sources(je, tb);
+            let pairs = owned.iter().map(|(path, sheet)| (path.as_path(), *sheet)).collect::<Vec<_>>();
+            crate::resource_budget::with_test_memory(extreme, || {
+                assert!(!should_use_disk_for_sheets(&pairs, 4), "{je} 极端低水位不应切磁盘");
+            });
+        }
+        // 02/03/04 组（23MB–80MB）：16GB 机器内存充裕（可用 8GB）时整表读取，
+        // 真正紧张（可用 2GB）才切磁盘保护。
+        for (je, tb) in [
+            ("02序时账 (2).xlsx", "02科目余额表.xlsx"),
+            ("03序时账 (2).xlsx", "03科目余额表.xlsx"),
+            ("04JE.XLSX", "04TB.XLSX"),
+        ] {
+            let owned = sources(je, tb);
+            let pairs = owned.iter().map(|(path, sheet)| (path.as_path(), *sheet)).collect::<Vec<_>>();
+            crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+                total: 16 * GIB, available: 8 * GIB, commit_available: 8 * GIB,
+            }, || {
+                assert!(!should_use_disk_for_sheets(&pairs, 4), "{je} 16GB 机器可用 8GB 不应切磁盘");
+            });
+            crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+                total: 16 * GIB, available: 2 * GIB, commit_available: 2 * GIB,
+            }, || {
+                assert!(should_use_disk_for_sheets(&pairs, 4), "{je} 可用 2GB 应切磁盘保护");
+            });
+        }
     }
 
     #[test]

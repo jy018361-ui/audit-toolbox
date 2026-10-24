@@ -179,6 +179,54 @@ fn reference(text: &quick_xml::events::BytesRef<'_>) -> Result<String, AppError>
         .map_err(io)?
         .into_owned())
 }
+/// 磁盘分流前的体量估算素材：每张工作表的 (表名, 未压缩 XML 字节, 维度行列)
+/// 与共享字符串未压缩字节。只读各表文件头部的 dimension 标签，不解析单元格。
+pub(super) fn shapes(
+    path: &Path,
+) -> Option<(Vec<(String, u64, Option<(u64, u64)>)>, u64)> {
+    let entries = crate::fx::xlsx_sheet_entries(path).ok()?;
+    let mut zip = zip::ZipArchive::new(fs::File::open(path).ok()?).ok()?;
+    let shared = zip
+        .by_name("xl/sharedStrings.xml")
+        .map(|entry| entry.size())
+        .unwrap_or(0);
+    let mut sheets = Vec::with_capacity(entries.len());
+    for (name, entry) in entries {
+        let mut file = zip.by_name(&entry).ok()?;
+        let xml = file.size();
+        let mut head = vec![0u8; 8192];
+        let read = file.read(&mut head).ok()?;
+        head.truncate(read);
+        sheets.push((name, xml, dimension(&head)));
+    }
+    Some((sheets, shared))
+}
+
+/// 稠密生成器都在工作表头部写 dimension；缺失或数值离谱时返回 None，
+/// 由调用方回退旧口径，不在此猜测。
+fn dimension(head: &[u8]) -> Option<(u64, u64)> {
+    let text = std::str::from_utf8(head).ok()?;
+    let tag = text.find("dimension")?;
+    let rest = &text[tag..];
+    let value = rest.find("ref=")? + 4;
+    let rest = &rest[value..];
+    if !rest.starts_with('"') {
+        return None;
+    }
+    let end = rest[1..].find('"')? + 1;
+    let reference = &rest[1..end];
+    let (_, last) = reference.split_once(':').unwrap_or(("", reference));
+    let rows: u64 = last
+        .trim_start_matches(|c: char| c.is_ascii_alphabetic())
+        .parse()
+        .ok()?;
+    let cols = column(last)? as u64 + 1;
+    if rows == 0 || rows > 1_048_576 || cols == 0 || cols > 16_384 {
+        return None;
+    }
+    Some((rows, cols))
+}
+
 pub(super) fn sheets(path: &Path, wanted: Option<&str>) -> Result<(String, Vec<String>), AppError> {
     let entries = crate::fx::xlsx_sheet_entries(path)?;
     let all = entries

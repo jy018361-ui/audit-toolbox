@@ -139,7 +139,9 @@
 .loan-account-confirm.loan-confirm-table td {
   white-space: nowrap;
 }
-.loan-account-confirm.loan-confirm-table input {
+/* 选择器不限定 loan-confirm-table：上方「借款汇总利率确认」小表没有挂该类，
+   之前的输入框无框无底，看上去像不可编辑的静态文字。 */
+.loan-account-confirm input {
   min-height: 32px;
   padding: 4px 8px;
   border: 1px solid var(--control-border);
@@ -147,9 +149,14 @@
   background: var(--control-bg);
   color: var(--foreground);
 }
-.loan-account-confirm.loan-confirm-table input[type="number"] {
+.loan-account-confirm input[type="number"] {
   width: 112px;
   min-width: 96px;
+}
+.loan-account-confirm input:disabled {
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  cursor: not-allowed;
 }
 /* 利率与 BP 都是审计人员据实录入；隐藏浏览器的步进箭头，避免误点改数。 */
 .loan-manual-number {

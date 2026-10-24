@@ -62,8 +62,13 @@ describe("四个账表工具的科目清单刷新契约", () => {
     expect(review).toContain("mapping: tbMapping");
     expect(review).not.toContain("deposit.inspect_je");
     expect(review).toContain("setAccountsReviewed(false)");
-    expect(text).toContain("[...new Set(inspects.tb?.accounts ?? [])]");
-    expect(text).toContain("faReviewEntityAccounts(effective, entityKeyEnabled)");
-    expect(text).toContain("const effective = raw?.map((pair) => (");
+    // 科目清单改由 inspect 下发的 reviewAccounts/entityAccounts 推导（faInspectionAccounts），TB 写法优先去重。
+    expect(text).toContain(
+      "faReviewEntityAccounts(faInspectionAccounts(inspects.tb), entityKeyEnabled)",
+    );
+    expect(text).toContain("export function faInspectionAccounts(");
+    expect(text).toContain(
+      "if (inspection.entityAccounts) return inspection.entityAccounts;",
+    );
   });
 });

@@ -161,15 +161,54 @@ fn estimated_sheet_resident_bytes(path: &Path, sheet: Option<&str>) -> Option<u6
     Some(size.saturating_mul(12))
 }
 
+/// 老格式工作簿（.xls 等）是否大到不能整本载入：只按文件自身的诚实体量
+/// 判定，不受同任务其他大文件的联合读取计划连累——联合任务转入分批时，
+/// 自身不大的 .xls 仍应整本载入再分批建缓存，而不是要求用户手工转存。
+fn legacy_workbook_needs_stream(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else { return true; };
+    let Some(estimate) = estimated_sheet_resident_bytes(path, None) else { return true; };
+    decision(&[(meta.len(), estimate)], 256 * MIB, 1)
+}
+
+/// 真正巨大的老格式工作簿自动转存 XLSX 副本供分批读取。副本按源文件指纹
+/// 缓存在本机数据目录，同一文件重复任务直接复用；本机没有 Excel 或文件
+/// 含宏等无法自动转存时，回到人工另存提示。
+fn xls_stream_copy(path: &Path) -> Result<PathBuf, AppError> {
+    let unsupported = |detail: String| {
+        failure(
+            "STREAM_FORMAT_UNSUPPORTED",
+            "此文件过大且为老式 Excel 格式，自动转存未成功，请另存为 XLSX 或 CSV 后重试。",
+            detail,
+        )
+    };
+    let key = fingerprint(path, "xls-convert", 1, 1)
+        .map_err(|e| unsupported(e.user_message))?;
+    let root = crate::tabular::cache_root()
+        .map_err(|e| unsupported(e.user_message))?
+        .join("tables/xls-convert-v1");
+    fs::create_dir_all(&root).map_err(|e| unsupported(e.to_string()))?;
+    let output = root.join(format!("{key}.xlsx"));
+    if output.is_file() {
+        return Ok(output);
+    }
+    let size = fs::metadata(path).map(|m| m.len()).unwrap_or_default();
+    crate::resource_budget::check_disk_space(&root, size)
+        .map_err(|e| unsupported(e.user_message))?;
+    crate::excel_com::convert_xls_to_xlsx(path, &output)
+        .map_err(|e| unsupported(e.user_message))?;
+    Ok(output)
+}
+
 fn workbook_sheets(path: &Path, sheet: Option<&str>) -> Result<(String, Vec<String>), AppError> {
     if crate::spreadsheet_input::is_text(path) { return Ok(("CSV".into(), vec!["CSV".into()])); }
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xlsx") || e.eq_ignore_ascii_case("xlsm")) {
         return xlsx::sheets(path, sheet);
     }
-    // Legacy workbook constructors can materialize the complete workbook before
-    // worksheet access. Reject over-budget sources before even opening them.
-    if should_use_disk(&[path], 1) {
-        return Err(failure("STREAM_FORMAT_UNSUPPORTED", "此格式的大文件暂不支持磁盘分批读取，请另存为 XLSX 或 CSV 后重试。", path.display()));
+    // 老格式没有流式读取器：自身不大就整本载入；自身巨大时先自动转存
+    // XLSX 副本再分批读取（需本机 Excel），转存不了才提示人工另存。
+    if legacy_workbook_needs_stream(path) {
+        let converted = xls_stream_copy(path)?;
+        return xlsx::sheets(&converted, sheet);
     }
     let book = open_workbook_auto(path).map_err(io)?;
     let all = book.sheet_names().to_vec();
@@ -222,10 +261,12 @@ pub(crate) fn for_each_source_row_with_style(
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xlsx") || e.eq_ignore_ascii_case("xlsm")) {
         return xlsx::visit(path, &selected, cancel, preserve_excel_dates, emit);
     }
-    // BIFF/ODS lack a bounded row reader here. Never silently load a large
-    // legacy workbook while advertising a disk processing path.
-    if should_use_disk(&[path], 1) {
-        return Err(failure("STREAM_FORMAT_UNSUPPORTED", "此格式的大文件暂不支持磁盘分批读取，请另存为 XLSX 或 CSV 后重试。", path.display()));
+    // BIFF/ODS lack a bounded row reader here. A workbook that is small on its
+    // own is still loaded whole (the joint plan must not doom it); an oversized
+    // one is first converted to a cached XLSX copy for row streaming.
+    if legacy_workbook_needs_stream(path) {
+        let converted = xls_stream_copy(path)?;
+        return xlsx::visit(&converted, &selected, cancel, preserve_excel_dates, emit);
     }
     let mut book = open_workbook_auto(path).map_err(io)?;
     let range = book.worksheet_range(&selected).map_err(io)?;
@@ -499,6 +540,53 @@ mod tests {
             }, || {
                 assert!(should_use_disk_for_sheets(&pairs, 4), "{je} 可用 2GB 应切磁盘保护");
             });
+        }
+    }
+
+    #[test]
+    fn small_legacy_workbook_loads_even_when_joint_plan_marks_disk() {
+        // 联合任务转入分批时，自身不大的 .xls 不应被连累成「请另存为 XLSX」，
+        // 而是照常整本载入再分批建缓存。
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/Excel Merger/simple-biff8.xls");
+        assert!(!legacy_workbook_needs_stream(&path), "小 .xls 不应触发流式要求");
+        let mut plan = ReadPlan::default();
+        plan.add(&path, true);
+        let _guard = plan.enter();
+        assert!(should_use_disk(&[&path], 1), "联合计划确实标记了磁盘");
+        let (selected, sheets) = workbook_sheets(&path, None).unwrap();
+        assert!(!sheets.is_empty());
+        let cancel = AtomicBool::new(false);
+        let mut rows = 0_usize;
+        for_each_source_row(&path, Some(&selected), &cancel, |_, _| {
+            rows += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert!(rows > 0, "应能读出数据行");
+    }
+
+    #[test]
+    #[ignore = "需要本机 Excel，并设置 AUDIT_GOLDEN_DIR 指向含 .xls 的目录"]
+    fn oversized_legacy_workbook_converts_and_streams_via_excel() {
+        let root = std::env::var_os("AUDIT_GOLDEN_DIR")
+            .map(std::path::PathBuf::from)
+            .expect("AUDIT_GOLDEN_DIR is required");
+        let path = root.join("09序时账-2025.xls");
+        let converted = xls_stream_copy(&path).unwrap();
+        // 副本缓存生效：再次转换应直接复用同一文件。
+        assert_eq!(xls_stream_copy(&path).unwrap(), converted);
+        // Excel 自身转存应无损：同一读取器逐格比对原文件与副本。
+        let mut before = open_workbook_auto(&path).unwrap();
+        let sheet = before.sheet_names().first().unwrap().clone();
+        let mut after = open_workbook_auto(&converted).unwrap();
+        let original = before.worksheet_range(&sheet).unwrap();
+        let copy = after.worksheet_range(&sheet).unwrap();
+        assert_eq!((original.width(), original.height()), (copy.width(), copy.height()));
+        for (left, right) in original.rows().zip(copy.rows()) {
+            for (a, b) in left.iter().zip(right.iter()) {
+                assert_eq!(crate::fx::data_text(a), crate::fx::data_text(b));
+            }
         }
     }
 

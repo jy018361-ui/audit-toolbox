@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import type { ChangeEvent } from "react";
 import { markToolPageLive } from "./toolPageActivity";
@@ -2319,9 +2320,9 @@ function FaCardListPage() {
               them left users unaware that cards were paired by occurrence. */}
           {Boolean(stats.duplicates?.hasDuplicates) && (
             <div className="warning-box">
-              匹配列存在重复值：{stats.duplicates?.duplicateValueCount ?? 0}{" "}
+              匹配列存在重复值：{formatCount(stats.duplicates?.duplicateValueCount ?? 0)}{" "}
               个重复键、
-              {stats.duplicates?.duplicateRowCount ?? 0}{" "}
+              {formatCount(stats.duplicates?.duplicateRowCount ?? 0)}{" "}
               行；已按合并聚合口径计算增减变动，确保合计数无误。
             </div>
           )}
@@ -2760,14 +2761,14 @@ function FaCardListPage() {
                   <div className="fa-next-choice" role="status">
                     <strong>匹配统计</strong>
                     <div className="fa-match-metrics" aria-label="匹配统计">
-                      <span>总行数 <strong>{faStats.rows ?? 0}</strong></span>
-                      <span>两期均有 <strong>{faStats.both ?? 0}</strong></span>
-                      <span>仅期初 <strong>{faStats.beginOnly ?? 0}</strong></span>
-                      <span>仅期末 <strong>{faStats.endOnly ?? 0}</strong></span>
+                      <span>总行数 <strong>{formatCount(faStats.rows ?? 0)}</strong></span>
+                      <span>两期均有 <strong>{formatCount(faStats.both ?? 0)}</strong></span>
+                      <span>仅期初 <strong>{formatCount(faStats.beginOnly ?? 0)}</strong></span>
+                      <span>仅期末 <strong>{formatCount(faStats.endOnly ?? 0)}</strong></span>
                     </div>
                     {faStats.duplicates?.hasDuplicates && (
                       <div className="warning-box">
-                        发现 {faStats.duplicates.duplicateValueCount ?? 0} 个重复匹配键（涉及 {faStats.duplicates.duplicateRowCount ?? 0} 行），请复核后再继续。
+                        发现 {formatCount(faStats.duplicates.duplicateValueCount ?? 0)} 个重复匹配键（涉及 {formatCount(faStats.duplicates.duplicateRowCount ?? 0)} 行），请复核后再继续。
                       </div>
                     )}
                     {resultStale && (

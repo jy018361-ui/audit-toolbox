@@ -1,3 +1,4 @@
+import { formatCount, formatMoney } from "@/lib/numberFormat";
 import { LoanLedgerConfirmation, ledgerInformationErrors, type LedgerInformation } from "./LoanLedgerConfirmation";
 import { LoanLedgerConfirmationActions } from "./LoanLedgerConfirmationActions";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -460,14 +461,6 @@ export function mergeRestoredLoanMapping(
 /** 底稿反馈里只展示文件名，完整路径放 title 悬浮提示。 */
 function fileNameOf(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
-}
-/** JavaScript 会把 IEEE-754 的 -0 原样格式化成“-0”；界面展示统一归零。 */
-export function loanDisplayNumber(
-  value: number,
-  options?: Intl.NumberFormatOptions,
-) {
-  if (value === 0) return "0";
-  return value.toLocaleString("zh-CN", options);
 }
 export function loanEffectiveRate(
   type: string,
@@ -2545,8 +2538,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                           <tbody>{summaryRateRows.map((detail) => (
                             <tr key={loanRowKey(detail)}>
                               <td>{detail.entity} · {detail.accountCode} {detail.accountName}</td>
-                              <td className="loan-num">{loanDisplayNumber(detail.openingPrincipal)}</td>
-                              <td className="loan-num">{loanDisplayNumber(detail.closingPrincipal)}</td>
+                              <td className="loan-num">{formatMoney(detail.openingPrincipal)}</td>
+                              <td className="loan-num">{formatMoney(detail.closingPrincipal)}</td>
                               {rateEditCells(detail)}
                             </tr>
                           ))}</tbody>
@@ -2647,15 +2640,15 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                                 <option value="skip">排除</option>
                               </select>
                             </td>
-                            <td className="loan-num">{a.auxiliary ? "—" : loanDisplayNumber(a.opening)}</td>
-                            <td className="loan-num">{a.auxiliary ? "—" : loanDisplayNumber(a.closing)}</td>
+                            <td className="loan-num">{a.auxiliary ? "—" : formatMoney(a.opening)}</td>
+                            <td className="loan-num">{a.auxiliary ? "—" : formatMoney(a.closing)}</td>
                             <td
                               className="loan-num"
                               title={a.occurrenceBasis ?? undefined}
                             >
                               {role !== "interest_expense" || a.auxiliary || a.occurrence == null
                                 ? "—"
-                                : loanDisplayNumber(a.occurrence)}
+                                : formatMoney(a.occurrence)}
                             </td>
                             {role === "loan" && inline ? (
                               rateEditCells(inline)
@@ -2692,8 +2685,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                               <td>
                                 <span className="loan-detail-tag">借款明细</span>
                               </td>
-                              <td className="loan-num">{loanDisplayNumber(detail.openingPrincipal)}</td>
-                              <td className="loan-num">{loanDisplayNumber(detail.closingPrincipal)}</td>
+                              <td className="loan-num">{formatMoney(detail.openingPrincipal)}</td>
+                              <td className="loan-num">{formatMoney(detail.closingPrincipal)}</td>
                               <td>—</td>
                               {rateEditCells(detail)}
                             </tr>
@@ -3184,7 +3177,7 @@ function Mapping({
           <>
             {x.previewPaged && <>
               <Button variant="secondary" disabled={busy || (x.previewOffset ?? 0) === 0} onClick={() => onPage(Math.max(0, (x.previewOffset ?? 0) - 100))}>上一页</Button>
-              <span>第 {(x.previewOffset ?? 0) + (x.preview.length ? 1 : 0)}–{(x.previewOffset ?? 0) + x.preview.length} 行，共 {x.rowCount} 行</span>
+              <span>第 {formatCount((x.previewOffset ?? 0) + (x.preview.length ? 1 : 0))}–{formatCount((x.previewOffset ?? 0) + x.preview.length)} 行，共 {formatCount(x.rowCount)} 行</span>
               <Button variant="secondary" disabled={busy || !x.hasMore} onClick={() => onPage((x.previewOffset ?? 0) + 100)}>下一页</Button>
             </>}
             <SourceTableControls
@@ -3238,11 +3231,7 @@ export function Results({
     }),
     { opening: 0, additions: 0, reductions: 0, closing: 0 },
   );
-  const amount = (value: number) =>
-    loanDisplayNumber(value, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
+  const amount = (value: number) => formatMoney(value);
   const measurementStatus = (row: LoanRow) => {
     const missingRate =
       row.rateType === "floating"
@@ -3428,7 +3417,7 @@ export function Results({
                   principalDifference,
                 ].map((n, j) => (
                   <td key={j} className={j === 5 && principalDifference != null && Math.abs(principalDifference) >= 0.005 ? "loan-principal-difference" : undefined}>
-                    {n == null ? "—" : loanDisplayNumber(Number(n), { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    {n == null ? "—" : formatMoney(n)}
                   </td>
                 ))}
                 <td>
@@ -3510,7 +3499,7 @@ export function Results({
                           ) * 100
                         ).toFixed(4)}%`}
                 </td>
-                <td>{loanDisplayNumber(Number(r.calculatedInterest ?? 0))}</td>
+                <td>{formatMoney(r.calculatedInterest ?? 0)}</td>
                 <td>
                   <Badge
                     variant="outline"

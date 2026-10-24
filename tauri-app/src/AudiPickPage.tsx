@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { useNavigate } from "react-router-dom";
 import {
   audipickPdfBytes,
@@ -3891,7 +3892,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                 revenueMissingTasks.length > 0 ? (
                   <div className="error-box aplc-revenue-missing">
                     <strong>
-                      收入底稿待补资料（{revenueMissingTasks.length}）
+                      收入底稿待补资料（{formatCount(revenueMissingTasks.length)}）
                     </strong>
                     {revenueMissingTasks
                       .slice(0, 8)
@@ -4436,7 +4437,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           {batchFailures.length > 0 && (
             <div className="error-box">
               <strong>
-                批量提取失败 {batchFailures.length} 份（成功 {batchSuccessCount}{" "}
+                批量提取失败 {formatCount(batchFailures.length)} 份（成功 {formatCount(batchSuccessCount)}{" "}
                 份）
               </strong>
               {batchFailures.slice(0, 10).map((item, index) => (
@@ -4563,7 +4564,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           )}
           {revenueMissingTasks.length > 0 && (
             <div className="error-box">
-              <strong>收入底稿待补资料（{revenueMissingTasks.length}）</strong>
+              <strong>收入底稿待补资料（{formatCount(revenueMissingTasks.length)}）</strong>
               {/* The rule module reports `text` / `questionNos` / `blocking`.
                   Reading `title` first meant every row fell through to the
                   placeholder, so the panel never said what was missing. */}
@@ -4590,7 +4591,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             <>
               <div className="ap-result-heading">
                 <div>
-                  <h3>当前底稿结果（{currentResults.length}）</h3>
+                  <h3>当前底稿结果（{formatCount(currentResults.length)}）</h3>
                   <small>重新提取不会覆盖历史版本；人工修改只作用于当前版本。</small>
                 </div>
                 {resultRuns.length > 0 && (
@@ -4709,7 +4710,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               />
             </label>
             <p className="hint">
-              共 {rules.length} 个模板 · 点击卡片查看右侧详情
+              共 {formatCount(rules.length)} 个模板 · 点击卡片查看右侧详情
             </p>
             <div className="ap-template-list">
               {rules

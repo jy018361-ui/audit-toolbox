@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatCount, formatMoney } from "@/lib/numberFormat";
 import type { ReactNode } from "react";
 import { recordManualLedgerMapping } from "./manualLedgerMapping";
 import type { ToolManifest, JobEvent } from "./types";
@@ -3678,7 +3679,7 @@ function FxPreview(props: {
     <MappingPanel
       title={props.title}
       resizeKey={`fx.mapping-${props.kind}`}
-      note={`${props.inspection.rowCount} 行 × ${props.inspection.headers.length} 列`}
+      note={`${formatCount(props.inspection.rowCount)} 行 × ${props.inspection.headers.length} 列`}
       headers={props.inspection.headers}
       rows={props.inspection.preview}
       mapping={props.mapping}
@@ -3838,11 +3839,7 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
   const prominentWarnings = warnings.filter((message) =>
     message.startsWith("【期间不一致") || message.startsWith("JE 已跳过"),
   );
-  const money = (value: unknown) =>
-    new Intl.NumberFormat("zh-CN", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(Number(value ?? 0));
+  const money = (value: unknown) => formatMoney(value ?? 0);
   const isolatedGroups = groups.filter((g) => g.severity === "隔离" || g.severity === "阻断");
   const isolatedVouchers = new Set(isolatedGroups.flatMap((g) => g.voucherIds)).size;
   const isolatedRecords = isolatedGroups
@@ -3969,11 +3966,7 @@ function RollforwardIssues({
   const [open, setOpen] = useState(false);
   const issues = (validation?.issues ?? []) as Array<Record<string, unknown>>;
   if (!issues.length) return null;
-  const money = (value: unknown) =>
-    new Intl.NumberFormat("zh-CN", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(Number(value ?? 0));
+  const money = (value: unknown) => formatMoney(value ?? 0);
   const unit = String(validation?.unit ?? "本位币");
   return (
     <section className="fx-rollforward-issues">
@@ -4049,13 +4042,7 @@ function FxResult({ result }: { result: Record<string, unknown> }) {
     ? summary.formalMeasurementGateReasons.map(String)
     : [];
   const outputs = (result.outputPaths ?? []) as string[];
-  const amount = (value: unknown) => {
-    const number = Number(value ?? 0);
-    return new Intl.NumberFormat("zh-CN", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(Object.is(number, -0) || Math.abs(number) < 0.005 ? 0 : number);
-  };
+  const amount = (value: unknown) => formatMoney(value ?? 0);
   const percent = (value: unknown) =>
     value == null
       ? "无法计算"

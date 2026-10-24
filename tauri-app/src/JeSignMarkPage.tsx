@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
@@ -1244,11 +1245,11 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
             {batches.map((item, index) => (
               <div key={index}>
                 <b>{String(item.name ?? `批次${index + 1}`)}</b>
-                <span>明细 {String(item.rows ?? 0)} 行</span>
-                <span>直接匹配 {String(item.matchedPairs ?? 0)} 对</span>
-                <span>跨凭证匹配 {String(item.crossMatchedPairs ?? 0)} 对</span>
-                <span>未匹配 {String(item.unmatchedRows ?? 0)} 行</span>
-                <span>损益结转 {String(item.lossTransferVouchers ?? 0)} 笔</span>
+                <span>明细 {formatCount(item.rows ?? 0)} 行</span>
+                <span>直接匹配 {formatCount(item.matchedPairs ?? 0)} 对</span>
+                <span>跨凭证匹配 {formatCount(item.crossMatchedPairs ?? 0)} 对</span>
+                <span>未匹配 {formatCount(item.unmatchedRows ?? 0)} 行</span>
+                <span>损益结转 {formatCount(item.lossTransferVouchers ?? 0)} 笔</span>
               </div>
             ))}
           </div>

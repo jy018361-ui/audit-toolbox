@@ -1,5 +1,6 @@
 import { openOutput } from "@/api";
 import { displayFileName } from "@/fileDisplay";
+import { formatCount } from "@/lib/numberFormat";
 import "./task-state.css";
 
 const RESULT_COUNT_LABELS: Record<string, string> = {
@@ -105,7 +106,7 @@ export function ResultView({
         <div className="result-metrics">
           {counts.map((item) => (
             <span key={item.label}>
-              <b>{item.value}</b>
+              <b>{formatCount(item.value)}</b>
               {item.label}
             </span>
           ))}
@@ -113,54 +114,54 @@ export function ResultView({
       )}
       {!!warnings.length && (
         <div className="warning-box result-summary-list">
-          <strong>需要注意（{warnings.length}）</strong>
+          <strong>需要注意（{formatCount(warnings.length)}）</strong>
           <ul>
             {limited(warnings).map((item, index) => (
               <li key={`${item}-${index}`}>{displayFileName(item)}</li>
             ))}
           </ul>
-          {warnings.length > 20 && <p>另有 {warnings.length - 20} 项未显示。</p>}
+          {warnings.length > 20 && <p>另有 {formatCount(warnings.length - 20)} 项未显示。</p>}
         </div>
       )}
       {!!unmatched.length && (
         <div className="warning-box result-summary-list">
           <strong>
-            未在 Section List 中匹配到的服务单（{unmatched.length}）
+            未在 Section List 中匹配到的服务单（{formatCount(unmatched.length)}）
           </strong>
           <ul>
             {limited(unmatched).map((item, index) => (
               <li key={`${item}-${index}`}>{item}</li>
             ))}
           </ul>
-          {unmatched.length > 20 && <p>另有 {unmatched.length - 20} 项未显示。</p>}
+          {unmatched.length > 20 && <p>另有 {formatCount(unmatched.length - 20)} 项未显示。</p>}
         </div>
       )}
       {!!differences.length && (
         <div className="warning-box result-summary-list">
-          <strong>Outlook Hours 核对不一致（{differences.length}）</strong>
+          <strong>Outlook Hours 核对不一致（{formatCount(differences.length)}）</strong>
           <ul>
             {differences.slice(0, 20).map((item, index) => (
               <li key={`${String(item.serviceNumber ?? index)}`}>
                 {String(item.serviceNumber ?? "")}{" "}
                 {String(item.engagementName ?? "")}： 方案{" "}
-                {String(item.calculated ?? "")} / 源表{" "}
-                {String(item.source ?? "")}， 差额{" "}
-                {String(item.difference ?? "")}
+                {formatCount(item.calculated, { maxFractionDigits: 2 })} / 源表{" "}
+                {formatCount(item.source, { maxFractionDigits: 2 })}， 差额{" "}
+                {formatCount(item.difference, { maxFractionDigits: 2 })}
               </li>
             ))}
           </ul>
-          {differences.length > 20 && <p>另有 {differences.length - 20} 项未显示。</p>}
+          {differences.length > 20 && <p>另有 {formatCount(differences.length - 20)} 项未显示。</p>}
         </div>
       )}
       {!!skipped.length && (
         <div className="warning-box result-summary-list">
-          <strong>无法访问、已跳过的路径（{skipped.length}）</strong>
+          <strong>无法访问、已跳过的路径（{formatCount(skipped.length)}）</strong>
           <ul>
             {skipped.slice(0, 20).map((item) => (
               <li key={item}>{item}</li>
             ))}
           </ul>
-          {skipped.length > 20 && <p>另有 {skipped.length - 20} 项未显示。</p>}
+          {skipped.length > 20 && <p>另有 {formatCount(skipped.length - 20)} 项未显示。</p>}
         </div>
       )}
       {!!outputPaths.length && (

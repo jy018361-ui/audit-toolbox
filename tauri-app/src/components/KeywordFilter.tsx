@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { formatCount } from "@/lib/numberFormat";
 
 /**
  * 关键词匹配规则：按空白拆成多个词、全部命中才算匹配（与），
@@ -42,7 +43,7 @@ export function KeywordFilter(props: {
       />
       {filtering && props.matched != null && props.total != null && (
         <span className="fx-list-filter-count">
-          {props.matched} / {props.total}
+          {formatCount(props.matched)} / {formatCount(props.total)}
         </span>
       )}
       {filtering && (

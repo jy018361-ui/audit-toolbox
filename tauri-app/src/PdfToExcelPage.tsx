@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
@@ -196,7 +197,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
       />
       {summary && (
         <div className="pdf-result-callout" role="status">
-          <strong>转换完成：成功 {summary.successCount} 份，失败 {summary.failCount} 份</strong>
+          <strong>转换完成：成功 {formatCount(summary.successCount)} 份，失败 {formatCount(summary.failCount)} 份</strong>
         </div>
       )}
       {job?.phase === "cancelled" && (
@@ -434,10 +435,10 @@ function PdfConvertResultTable({
                     {fileStatusLabel(row)}
                   </span>
                 </td>
-                <td>{row.pages}</td>
-                <td>{row.textRows}</td>
-                <td>{row.tables}</td>
-                <td>{row.tableDataRows}</td>
+                <td>{formatCount(row.pages)}</td>
+                <td>{formatCount(row.textRows)}</td>
+                <td>{formatCount(row.tables)}</td>
+                <td>{formatCount(row.tableDataRows)}</td>
                 <td title={row.error}>{row.error}</td>
               </tr>
             ))}

@@ -716,7 +716,7 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   expect((skipSelect as HTMLSelectElement).value).toBe("skip");
   const expenseSelect = await screen.findByRole("combobox", { name: "66030001 财务费用-利息支出的科目类型" });
   expect((expenseSelect as HTMLSelectElement).value).toBe("interest_expense");
-  expect(screen.getByText("-923,800.5")).toHaveAttribute(
+  expect(screen.getByText("-923,800.50")).toHaveAttribute(
     "title",
     "本期发生额·已结转，按科目登记方向还原",
   );
@@ -948,7 +948,8 @@ it("手填利率后进入第三步不自动测算且未确认不可导出", asyn
       summary: { loanCount: 1 },
     },
   });
-  expect(await screen.findByText("38,500")).toBeVisible();
+  // 计息明细行与合计现在同为两位小数，两处文本一致，任取其一验证可见。
+  expect((await screen.findAllByText("38,500.00")).at(0)).toBeVisible();
   // 正式底稿必须显式确认利率；确认后沿用同一份确认清单与利率。
   fireEvent.click(screen.getByRole("checkbox", { name: /我已根据合同/ }));
   fireEvent.click(screen.getByRole("button", { name: "生成 Excel 底稿" }));

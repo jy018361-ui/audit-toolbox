@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import type { JobEvent, ToolManifest } from "./types";
 import { useTaskRestore } from "./restore";
 import {
@@ -303,7 +304,6 @@ const ROW_LEVEL_LABEL: Record<RowLevel | "invalid", string> = {
 };
 const formatScore = (value: number) =>
   Number.isFinite(value) ? String(Math.round(value)) : "—";
-const formatCount = (value: number) => value.toLocaleString("zh-CN");
 
 export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   const emptySource = (): SourceState => ({

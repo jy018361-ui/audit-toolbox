@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
@@ -854,7 +855,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   {
                     label: "数据行",
                     value: filters.length
-                      ? `${shownRows} / ${totalRows}`
+                      ? `${formatCount(shownRows)} / ${formatCount(totalRows)}`
                       : totalRows,
                   },
                   {

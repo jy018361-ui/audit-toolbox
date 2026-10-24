@@ -1,3 +1,4 @@
+import { formatCount } from "@/lib/numberFormat";
 import { cn } from "@/lib/utils";
 
 export type StatItem = {
@@ -20,7 +21,9 @@ export function StatGrid({ items, columns = 4 }: StatGridProps) {
       {items.map((item, index) => (
         <div className="stat-cell" key={`${item.label}-${index}`}>
           <span className="stat-label">{item.label}</span>
-          <strong className="stat-value">{item.value}</strong>
+          <strong className="stat-value">
+            {typeof item.value === "number" ? formatCount(item.value) : item.value}
+          </strong>
           {item.hint && <small className="stat-hint">{item.hint}</small>}
         </div>
       ))}

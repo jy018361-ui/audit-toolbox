@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
@@ -459,7 +460,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         <section className="form-card merger-source">
           <div className="section-title">
             <h2>1. 文件源</h2>
-            <span>{paths.length} 个文件</span>
+            <span>{formatCount(paths.length)} 个文件</span>
           </div>
           <button
             type="button"
@@ -561,7 +562,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             <h2>2. 合并规则</h2>
             <span>
               {files.length
-                ? `已检查 ${files.length} 个文件`
+                ? `已检查 ${formatCount(files.length)} 个文件`
                 : "检查后配置规则"}
             </span>
           </div>

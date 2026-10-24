@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatMoney } from "@/lib/numberFormat";
 import type { ReactNode } from "react";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
@@ -2373,12 +2374,7 @@ export function FaPivotTable({
 
 /** 与导出格式 `#,##0.00;[Red]-#,##0.00;-` 对齐：零值显示短横线。 */
 function formatPivotAmount(value: unknown): string {
-  const num = Number(value);
-  if (!Number.isFinite(num) || Math.abs(num) < 0.005) return "-";
-  return num.toLocaleString("zh-CN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  return formatMoney(value, { zeroText: "-", invalidText: "-" });
 }
 
 /** 任务结果卡片：完成状态、关键指标、输出文件与告警集中在一处，
@@ -2467,12 +2463,7 @@ function FaTbJeResultCard({ value }: { value: unknown }) {
 }
 
 function formatPreviewAmount(value: unknown): string {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return "—";
-  return num.toLocaleString("zh-CN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  return formatMoney(value ?? 0);
 }
 
 function FaLedgerSourceCard(props: {

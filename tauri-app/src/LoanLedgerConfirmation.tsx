@@ -1,4 +1,5 @@
 import { Fragment, useState } from "react";
+import { formatMoney } from "@/lib/numberFormat";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import { LoanLedgerNumberInput, loanLedgerNumber } from "./LoanLedgerNumberInput";
@@ -631,18 +632,14 @@ export function LoanLedgerConfirmation({
                             <td></td>
                             <td></td>
                             <td>
-                              {details
-                                .reduce((s, e) => s + (e.addAmount ?? 0), 0)
-                                .toLocaleString("zh-CN", {
-                                  minimumFractionDigits: 2,
-                                })}
+                              {formatMoney(
+                                details.reduce((s, e) => s + (e.addAmount ?? 0), 0),
+                              )}
                             </td>
                             <td>
-                              {details
-                                .reduce((s, e) => s + (e.repayAmount ?? 0), 0)
-                                .toLocaleString("zh-CN", {
-                                  minimumFractionDigits: 2,
-                                })}
+                              {formatMoney(
+                                details.reduce((s, e) => s + (e.repayAmount ?? 0), 0),
+                              )}
                             </td>
                             <td></td>
                             <td></td>

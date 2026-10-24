@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import {
   engineCall,
   jobCancel,
@@ -516,7 +517,7 @@ export default function ConfirmationProgressPage({
                     { label: "往来函证", value: inspection.statistics.trade },
                     {
                       label: "项目 / 单位",
-                      value: `${inspection.statistics.projects} / ${inspection.statistics.units}`,
+                      value: `${formatCount(inspection.statistics.projects)} / ${formatCount(inspection.statistics.units)}`,
                     },
                   ]}
                 />

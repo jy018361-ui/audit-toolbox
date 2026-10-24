@@ -88,7 +88,7 @@ describe("存款第二步主体拆行", () => {
 
 describe("存款余额勾稽与利率状态分别显示", () => {
   it("第二步发生额保留红字方向并使用千分位", () => {
-    expect(depositDisplayAmount(-923800.5)).toBe("-923,800.5");
+    expect(depositDisplayAmount(-923800.5)).toBe("-923,800.50");
     expect(depositDisplayAmount(null)).toBe("—");
   });
   it("差异为零但使用暂估利率时仍显示已勾稽", () => {

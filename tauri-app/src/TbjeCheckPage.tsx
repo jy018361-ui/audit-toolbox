@@ -6,6 +6,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { formatCount, formatMoney } from "@/lib/numberFormat";
 import {
   engineCall,
   jobCancel,
@@ -260,11 +261,7 @@ type GroupOutcome = {
   result?: CheckResult;
 };
 
-const money = (value: number) =>
-  value.toLocaleString("zh-CN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+const money = (value: number) => formatMoney(value);
 
 function VerdictBadge({ verdict }: { verdict?: Verdict }) {
   if (!verdict?.performed)
@@ -416,8 +413,8 @@ function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: st
       {rollforwardUnits.map((unit) => (
         <div key={unit.unit} className="tbje-preview-block">
           <h4>
-            {CHECK_NAMES.rollforward}不平（{unit.unit}）{unit.mismatched} /{" "}
-            {unit.checked} 行
+            {CHECK_NAMES.rollforward}不平（{unit.unit}）{formatCount(unit.mismatched)} /{" "}
+            {formatCount(unit.checked)} 行
           </h4>
           <TbjePreviewTableScroll storageKey="tbje.detail.rollforward">
             <Table className="tbje-preview-table">
@@ -467,7 +464,7 @@ function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: st
           </TbjePreviewTableScroll>
           {unit.items.length > PREVIEW_CAP && (
             <p className="fx-hint">
-              仅显示前 {PREVIEW_CAP} 行，共 {unit.items.length}{" "}
+              仅显示前 {formatCount(PREVIEW_CAP)} 行，共 {formatCount(unit.items.length)}{" "}
               行——导出工作簿看全部。
             </p>
           )}
@@ -553,7 +550,7 @@ function OutcomeDetail({ result, query = "" }: { result: CheckResult; query?: st
           </TbjePreviewTableScroll>
           {tbItems.length > PREVIEW_CAP && (
             <p className="fx-hint">
-              仅显示前 {PREVIEW_CAP} 条，共 {tbItems.length}{" "}
+              仅显示前 {formatCount(PREVIEW_CAP)} 条，共 {formatCount(tbItems.length)}{" "}
               条——导出工作簿看全部。
             </p>
           )}
@@ -2411,8 +2408,8 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                 />
                                 {outcome.result?.rollforward.mismatched ? (
                                   <span className="tbje-detail">
-                                    {outcome.result.rollforward.mismatched} /{" "}
-                                    {outcome.result.rollforward.checked} 行
+                                    {formatCount(outcome.result.rollforward.mismatched)} /{" "}
+                                    {formatCount(outcome.result.rollforward.checked)} 行
                                   </span>
                                 ) : null}
                               </TableCell>
@@ -2420,11 +2417,11 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                 <TbJeVerdict check={outcome.result?.tbVsJe} />
                                 {outcome.result?.tbVsJe.mismatched ? (
                                   <span className="tbje-detail">
-                                    {outcome.result.tbVsJe.mismatched} /{" "}
-                                    {outcome.result.tbVsJe.accounts} 科目
+                                    {formatCount(outcome.result.tbVsJe.mismatched)} /{" "}
+                                    {formatCount(outcome.result.tbVsJe.accounts)} 科目
                                     {(outcome.result.tbVsJe.netMismatched ??
                                       0) > 0 &&
-                                      ` · ${outcome.result.tbVsJe.netMismatched} 个科目净额不通过`}
+                                      ` · ${formatCount(outcome.result.tbVsJe.netMismatched ?? 0)} 个科目净额不通过`}
                                     {outcome.result.tbVsJe.widespread &&
                                       " · 大范围差异"}
                                   </span>

@@ -1,13 +1,15 @@
 import { useState } from "react";
 import { Input } from "./components/ui/input";
+import { formatMoney } from "@/lib/numberFormat";
 
 export function loanLedgerNumber(value: number | null | undefined, percent = false): string {
   if (value == null || !Number.isFinite(value)) return "";
-  return new Intl.NumberFormat("zh-CN", {
-    useGrouping: !percent,
-    minimumFractionDigits: percent ? 0 : 2,
-    maximumFractionDigits: percent ? 8 : 2,
-  }).format(percent ? value * 100 : value);
+  if (percent)
+    return new Intl.NumberFormat("zh-CN", {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 8,
+    }).format(value * 100);
+  return formatMoney(value);
 }
 
 /** 编辑时保留小数草稿，失焦后恢复千位分隔／百分比显示。 */

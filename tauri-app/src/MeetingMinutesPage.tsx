@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -386,7 +387,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                 <div className="meeting-result-meta">
                   <span>{result.title || "会议纪要"}</span>
                   {typeof result.speakerCount === "number" && result.speakerCount > 0 && (
-                    <span>识别出 {result.speakerCount} 位说话人</span>
+                    <span>识别出 {formatCount(result.speakerCount)} 位说话人</span>
                   )}
                 </div>
                 {result.minutesError && (

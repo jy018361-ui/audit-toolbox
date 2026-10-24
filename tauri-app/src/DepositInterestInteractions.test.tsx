@@ -828,7 +828,7 @@ describe("第二步余额列示", () => {
     goToStep(STEP2);
     // 轻量逐户清单会替换刚进入页面时的科目级兜底行；等待清单余额出现，
     // 避免抓到随后被卸载的旧 select 节点。
-    expect(await screen.findByRole("cell", { name: "1,000" })).toBeVisible();
+    expect(await screen.findByRole("cell", { name: "1,000.00" })).toBeVisible();
     expect(
       screen.getByRole("columnheader", { name: /^期初余额/ }),
     ).toBeVisible();
@@ -837,8 +837,8 @@ describe("第二步余额列示", () => {
     ).toBeVisible();
     // 有逐户行时按户拆示：2000 户期初 1,000、期末 2,000；2002 户没有
     // 年初列，期初显示「—」，期末 3,000。
-    expect(screen.getByRole("cell", { name: "2,000" })).toBeVisible();
-    expect(screen.getByRole("cell", { name: "3,000" })).toBeVisible();
+    expect(screen.getByRole("cell", { name: "2,000.00" })).toBeVisible();
+    expect(screen.getByRole("cell", { name: "3,000.00" })).toBeVisible();
     expect(
       screen.getAllByRole("cell", { name: "—" }).length,
     ).toBeGreaterThan(0);

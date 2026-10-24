@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import { markToolPageLive } from "./toolPageActivity";
 import {
@@ -966,7 +967,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
               <div className="metrics roll-company-metrics">
                 <div>
                   <span>已选科目</span>
-                  <strong>{company.subjects.length}</strong>
+                  <strong>{formatCount(company.subjects.length)}</strong>
                 </div>
                 <div>
                   <span>状态</span>
@@ -974,11 +975,11 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
                 </div>
                 <div>
                   <span>已生成</span>
-                  <strong>{company.generated ?? 0}</strong>
+                  <strong>{formatCount(company.generated ?? 0)}</strong>
                 </div>
                 <div>
                   <span>失败</span>
-                  <strong>{company.failed ?? 0}</strong>
+                  <strong>{formatCount(company.failed ?? 0)}</strong>
                 </div>
               </div>
               <label className="field">
@@ -1258,7 +1259,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
                 })
               }
             />
-            将 {company?.cra_table_records.length ?? 0} 条确认记录写入底稿
+            将 {formatCount(company?.cra_table_records.length ?? 0)} 条确认记录写入底稿
           </label>
           <label className="check-row">
             <SwitchInput

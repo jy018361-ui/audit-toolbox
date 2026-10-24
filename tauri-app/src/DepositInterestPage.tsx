@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { formatMoney } from "@/lib/numberFormat";
 import { z } from "zod";
 import type { ToolManifest, JobEvent } from "./types";
 import { useTaskRestore } from "./restore";
@@ -637,11 +638,7 @@ export function depositPercentToRate(text: string) {
 }
 
 export function depositDisplayAmount(value: number | null | undefined) {
-  if (value == null || !Number.isFinite(value)) return "—";
-  return new Intl.NumberFormat("zh-CN", {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  }).format(Object.is(value, -0) ? 0 : value);
+  return formatMoney(value);
 }
 export function depositReportStart(balanceSheetDate: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(balanceSheetDate)
@@ -3625,11 +3622,7 @@ export function Results({
     storageKey: "deposit.results",
   });
   const summary = (result?.summary ?? {}) as Record<string, unknown>;
-  const amount = (value: unknown) =>
-    new Intl.NumberFormat("zh-CN", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(Number(value ?? 0));
+  const amount = (value: unknown) => formatMoney(value ?? 0);
   const percent = (value: unknown) =>
     value == null
       ? "无法计算"

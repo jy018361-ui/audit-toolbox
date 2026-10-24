@@ -41,6 +41,7 @@ import type { ReleaseNotes } from "./updateNotes";
 import { Button } from "@/components/ui/button";
 import { errorText } from "@/lib/errors";
 import { useCountUp } from "./lib/useCountUp";
+import { formatCount } from "./lib/numberFormat";
 import { SwitchInput } from "@/components/SwitchInput";
 import { DateInput } from "@/components/DateInput";
 import { demoDataEnabled } from "./preview/demoRegistry";
@@ -2921,7 +2922,7 @@ function Metric({
   return (
     <div className="metric">
       <span>{label}</span>
-      <strong>{numeric === null ? value : rolled}</strong>
+      <strong>{numeric === null ? value : formatCount(rolled)}</strong>
       {detail ? <small>{detail}</small> : null}
     </div>
   );

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { z } from "zod";
 import { displayFileName } from "./fileDisplay";
 import { engineCall, openOutput, pickPath } from "./api";
@@ -96,9 +97,9 @@ export function AccountConfirmationActions({
         setNote(`${name}没有修改，页面保持原样。`);
         return;
       }
-      if (!window.confirm(`将回传 ${changed.length} 行修改到当前页面，继续吗？`)) return;
+      if (!window.confirm(`将回传 ${formatCount(changed.length)} 行修改到当前页面，继续吗？`)) return;
       onImport(changed);
-      setNote(`已回传 ${changed.length} 行，页面已更新；请继续检查并测算。`);
+      setNote(`已回传 ${formatCount(changed.length)} 行，页面已更新；请继续检查并测算。`);
     } catch (error) {
       setNote(errorMessage(error));
     } finally {

@@ -233,6 +233,23 @@ describe("FA TB+JE account role presets", () => {
     expect(suggestFaAccount("15010101 22210101\\固定资产-机器设备").role).toBe("excluded");
   });
 
+  it("预付／应付固定资产往来科目不因名称带资产词自动进表", () => {
+    for (const account of [
+      "1123.02 预付固定资产款-付美慧/上海书锐科技有限公司",
+      "1123 预付账款-设备款",
+      "2202.02 应付固定资产款",
+      "1511 预付设备款",
+      "FA01 Prepaid equipment",
+      "FA01 Accounts payable - equipment",
+    ]) {
+      expect(suggestFaAccount(account).role, account).toBe("excluded");
+    }
+    const chart = ["1123 预付账款", "1123.02 预付固定资产款-付美慧/上海书锐科技有限公司"];
+    expect(suggestFaAccounts(chart).map((row) => row.role)).toEqual(["excluded", "excluded"]);
+    // 旧制度／自定义编码的固定资产本体不受新增排除词影响。
+    expect(suggestFaAccount("1501 固定资产-机器设备").role).toBe("cost");
+  });
+
   it.skipIf(!process.env.FA_TBJE_CLASSIFICATION_SAMPLE)("真实TB在不映射Account Class时恢复原值分类", () => {
     const sample = JSON.parse(readFileSync(process.env.FA_TBJE_CLASSIFICATION_SAMPLE!, "utf8")) as {
       pairs: Array<{ entity: string; account: string; auxiliary: string; currency: string }>;

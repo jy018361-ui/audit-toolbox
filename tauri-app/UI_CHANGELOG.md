@@ -1,3 +1,15 @@
+## 2026-10-24 · 全工程排查无边框输入框，统一补边框
+
+- 目标：借款汇总表输入框漏边框的问题在其他页面还有同款——全局重置剥掉原生边框后，凡是没有专门规则的输入框都看起来像不可编辑的静态文字。逐一核对全部 96 处输入框的样式覆盖后补齐。
+- 设计决策：存款利息第二步「统一年利率」（`.deposit-currency-mode input`，与借款汇总表同功能存款版，款式对齐表格内利率格）；AudiPick 合同审查的合同原文粘贴框、结果编辑框与结果搜索框（`.aplc-contract-text textarea`／`.aplc-result-fields textarea`／`.aplc-filter input`）；AudiPick PDF 识别文本框与结果编辑框（`.pdf-text`／`.ap-result-editor textarea`）；WP Roll Forward 的 CRA 粘贴框与记录行输入框（`.roll-setup-layout .form-card textarea`／`.mapping-row.roll-cra-row input`，限定本页作用域避免波及其他页面的 form-card 与 mapping-row）。其余 90 余处输入框经核对已有边框规则，勾选框、开关、下拉框不受全局重置影响，未改动。
+- 验证：`npm run build`；`npx vitest run src/DepositInterestPage.test.ts src/DepositInterestInteractions.test.tsx`；浏览器用构建产物渲染五处控件截图核对边框。不打包 EXE。
+
+## 2026-10-24 · 预付／应付往来科目不再被自动建议为固定资产
+
+- 目标：解决用户反馈的 TB 第二步「自动识别分类科目类别」把 1123.02 预付固定资产款-供应商 这类往来科目整批（约 74 条）自动设为固定资产原值的问题。
+- 设计决策：科目名称含「预付／应付（prepaid／payable）」的一律不自动进固定资产表（仍可手工改回原值或折旧）。此前这类科目因名称带「固定资产」三字被"非 1601/1602 编码但名称首段明确写出固定资产则提为原值"的补救规则误捞——该规则为旧会计制度（1501）与自定义编码账套保留，不动。旧制度与 SAP 型固定资产本体科目经测试不受新增排除词影响；人工确认和历史存档里的既有分类不会被自动改写。
+- 验证：`npx vitest run src/FaTbJePage.test.ts`（43 通过）；`cargo test --manifest-path src-tauri/Cargo.toml --lib tb_role_category`；Rust 侧 JE 承接的名称证据同步收紧，见 `FA_RUST_PARITY.md` 同日条目。不打包 EXE。
+
 ## 2026-10-24 · 借款汇总利率确认表输入框补边框
 
 - 目标：修复第二步「借款汇总利率确认」表的执行利率／浮动基准／加减点输入框没有边框和底色，看上去像不可编辑的静态文字的问题。

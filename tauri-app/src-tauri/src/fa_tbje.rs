@@ -3831,13 +3831,15 @@ fn fa_name_role_category(name: &str) -> Option<(&'static str, String)> {
     {
         return None;
     }
-    // 自动来源提示不把清理过渡户、费用或损益当作资产本体。
-    // 同码人工确认先于该提示，用户明确指定的角色不会在此被改写。
+    // 自动来源提示不把清理过渡户、费用、损益或预付／应付往来当作资产本体
+    // （预付固定资产款名称带资产词，本体是往来）。同码人工确认先于该提示，
+    // 用户明确指定的角色不会在此被改写。
     if ["使用权", "使用權", "清账", "清賬", "right of use", "right-of-use",
         "减值准备", "減值準備", "impairment", "清理", "清算", "clearing",
         "折旧费", "折舊費", "depreciation expense", "摊销", "攤銷", "amortization", "amortisation",
         "租赁费", "租賃費", "rental expense", "营业外", "營業外", "待处理", "待處理",
-        "处置", "處置", "disposal", "损失", "損失", "报废", "報廢"].iter().any(|term| value.contains(term)) {
+        "处置", "處置", "disposal", "损失", "損失", "报废", "報廢",
+        "预付", "預付", "应付", "應付", "prepaid", "payable"].iter().any(|term| value.contains(term)) {
         return None;
     }
     for (prefix, role) in [
@@ -5775,6 +5777,8 @@ mod tests {
         for name in ["固定资产清理-机器设备", "固定资产-减值准备-机器设备", "固定资产-折旧费-机器设备",
             "管理费用-固定资产折旧-机器设备", "固定资产折旧-管理费用", "費用-固定資產折舊",
             "固定资产-处置损益-机器设备", "固定资产-报废损失-机器设备", "固定资产-使用权-机器设备",
+            "固定资产-预付款-机器设备", "预付固定资产款-机器设备", "应付固定资产款-机器设备",
+            "Prepaid fixed assets - machinery", "Accounts payable - fixed assets",
             "Fixed assets clearing - machinery", "Fixed assets impairment - machinery",
             "Depreciation expense - machinery", "Fixed assets disposal - machinery"] {
             assert!(fa_name_role_category(name).is_none(), "{name}");

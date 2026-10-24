@@ -48,7 +48,7 @@ export function ErrorBox({ error, onDismiss, onRetry }: ErrorBoxProps) {
           )}
           {onRetry && (
             <Button
-              variant="ghost"
+              variant="secondary"
               size="xs"
               type="button"
               onClick={onRetry}

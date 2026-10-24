@@ -173,10 +173,15 @@ describe("18 个工具的动态任务状态契约", () => {
     expect(screen.getAllByRole("alert")).toHaveLength(1);
   });
 
-  it("长结果仅展示前 20 条并保留完整路径提示", () => {
+  it("长结果默认折叠 8 条，展开后完整列出", () => {
     const path = `C:\\${"超长目录\\".repeat(20)}结果文件.xlsx`;
     render(<ResultView value={{ warnings: Array.from({ length: 27 }, (_, i) => `${i}-${path}`), outputPaths: [path] }} />);
-    expect(screen.getByText("另有 7 项未显示。")).toBeTruthy();
+    expect(screen.getByText("需要注意（27）")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "展开全部（共 27 项）" })).toBeTruthy();
+    expect(screen.queryAllByRole("listitem")).toHaveLength(8);
+    fireEvent.click(screen.getByRole("button", { name: "展开全部（共 27 项）" }));
+    expect(screen.queryAllByRole("listitem")).toHaveLength(27);
+    expect(screen.getByRole("button", { name: "收起" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "结果文件.xlsx" }).getAttribute("title")).toBe(path);
   });
 });

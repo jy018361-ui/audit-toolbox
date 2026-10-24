@@ -116,7 +116,7 @@ export function JobProgress({
         )}
         {onCancel && !presentation.terminal && (
           <Button
-            variant="ghost"
+            variant="secondary"
             size="xs"
             type="button"
             className="job-cancel"

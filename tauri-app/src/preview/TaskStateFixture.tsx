@@ -1,4 +1,3 @@
-import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { ResultView } from "@/components/ResultView";
 import { Button } from "@/components/ui/button";
@@ -110,9 +109,14 @@ export function TaskStateFixture() {
       <section className="result-card">
         <h2>任务进度与结果</h2>
         {!['restored', 'history_resume'].includes(scenario) && (
-          <JobProgress job={job} onCancel={() => undefined} />
+          <JobProgress
+            job={job}
+            detail={scenario === "failed" ? "请检查来源文件与字段映射后重试。" : undefined}
+            onCancel={() => undefined}
+          />
         )}
-        {scenario === "failed" && <ErrorBox error={LONG_ERROR} onRetry={() => undefined} onDismiss={() => undefined} />}
+        {/* 失败详情与真实页面同口径：JobProgress 已展示失败消息时，
+            页面级 ErrorBox 不再重复同一段文案。 */}
         {completed && (
           <ResultView
             value={scenario === "partial" ? job.result : { message: job.message, outputPaths: [LONG_PATH, `${LONG_PATH}.副本.xlsx`], rows: 128600 }}

@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { openOutput } from "@/api";
 import { displayFileName } from "@/fileDisplay";
 import { formatCount } from "@/lib/numberFormat";
+import { Button } from "@/components/ui/button";
 import "./task-state.css";
 
 const RESULT_COUNT_LABELS: Record<string, string> = {
@@ -34,6 +36,48 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : [];
+}
+
+/** 折叠时最多直出的条数：更多时给「展开全部」而不是无声截断。 */
+const SUMMARY_LIST_PREVIEW = 8;
+
+/**
+ * 结果摘要里的长清单：默认只显示前几条，一键展开后完整列出并在
+ * 固定高度内滚动。旧行为是硬截 20 条加一句「另有 N 项未显示」，
+ * 用户既看不全也没有出口。
+ */
+function SummaryList({
+  title,
+  items,
+  renderItem,
+}: {
+  title: string;
+  items: unknown[];
+  renderItem: (item: unknown, index: number) => React.ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? items : items.slice(0, SUMMARY_LIST_PREVIEW);
+  return (
+    <div className="warning-box result-summary-list">
+      <strong>{title}</strong>
+      <ul>
+        {visible.map((item, index) => (
+          <li key={index}>{renderItem(item, index)}</li>
+        ))}
+      </ul>
+      {items.length > SUMMARY_LIST_PREVIEW && (
+        <Button
+          variant="secondary"
+          size="xs"
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "收起" : `展开全部（共 ${formatCount(items.length)} 项）`}
+        </Button>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -84,7 +128,6 @@ export function ResultView({
     ? (obj.outlookDifferences as Array<Record<string, unknown>>)
     : [];
   const valid = typeof obj.valid === "boolean" ? obj.valid : undefined;
-  const limited = (items: string[]) => items.slice(0, 20);
   const summaryText =
     message ??
     (valid === true
@@ -113,56 +156,41 @@ export function ResultView({
         </div>
       )}
       {!!warnings.length && (
-        <div className="warning-box result-summary-list">
-          <strong>需要注意（{formatCount(warnings.length)}）</strong>
-          <ul>
-            {limited(warnings).map((item, index) => (
-              <li key={`${item}-${index}`}>{displayFileName(item)}</li>
-            ))}
-          </ul>
-          {warnings.length > 20 && <p>另有 {formatCount(warnings.length - 20)} 项未显示。</p>}
-        </div>
+        <SummaryList
+          title={`需要注意（${formatCount(warnings.length)}）`}
+          items={warnings}
+          renderItem={(item) => displayFileName(String(item))}
+        />
       )}
       {!!unmatched.length && (
-        <div className="warning-box result-summary-list">
-          <strong>
-            未在 Section List 中匹配到的服务单（{formatCount(unmatched.length)}）
-          </strong>
-          <ul>
-            {limited(unmatched).map((item, index) => (
-              <li key={`${item}-${index}`}>{item}</li>
-            ))}
-          </ul>
-          {unmatched.length > 20 && <p>另有 {formatCount(unmatched.length - 20)} 项未显示。</p>}
-        </div>
+        <SummaryList
+          title={`未在 Section List 中匹配到的服务单（${formatCount(unmatched.length)}）`}
+          items={unmatched}
+          renderItem={(item) => String(item)}
+        />
       )}
       {!!differences.length && (
-        <div className="warning-box result-summary-list">
-          <strong>Outlook Hours 核对不一致（{formatCount(differences.length)}）</strong>
-          <ul>
-            {differences.slice(0, 20).map((item, index) => (
-              <li key={`${String(item.serviceNumber ?? index)}`}>
-                {String(item.serviceNumber ?? "")}{" "}
-                {String(item.engagementName ?? "")}： 方案{" "}
-                {formatCount(item.calculated, { maxFractionDigits: 2 })} / 源表{" "}
-                {formatCount(item.source, { maxFractionDigits: 2 })}， 差额{" "}
-                {formatCount(item.difference, { maxFractionDigits: 2 })}
-              </li>
-            ))}
-          </ul>
-          {differences.length > 20 && <p>另有 {formatCount(differences.length - 20)} 项未显示。</p>}
-        </div>
+        <SummaryList
+          title={`Outlook Hours 核对不一致（${formatCount(differences.length)}）`}
+          items={differences}
+          renderItem={(item) => {
+            const row = item as Record<string, unknown>;
+            return `${String(row.serviceNumber ?? "")} ${String(row.engagementName ?? "")}： 方案 ${formatCount(
+              row.calculated,
+              { maxFractionDigits: 2 },
+            )} / 源表 ${formatCount(row.source, { maxFractionDigits: 2 })}， 差额 ${formatCount(
+              row.difference,
+              { maxFractionDigits: 2 },
+            )}`;
+          }}
+        />
       )}
       {!!skipped.length && (
-        <div className="warning-box result-summary-list">
-          <strong>无法访问、已跳过的路径（{formatCount(skipped.length)}）</strong>
-          <ul>
-            {skipped.slice(0, 20).map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-          {skipped.length > 20 && <p>另有 {formatCount(skipped.length - 20)} 项未显示。</p>}
-        </div>
+        <SummaryList
+          title={`无法访问、已跳过的路径（${formatCount(skipped.length)}）`}
+          items={skipped}
+          renderItem={(item) => String(item)}
+        />
       )}
       {!!outputPaths.length && (
         <div className="result-output-list" aria-label="输出文件">

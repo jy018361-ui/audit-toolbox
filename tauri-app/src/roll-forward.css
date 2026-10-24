@@ -7,6 +7,26 @@
   min-width: 0;
 }
 
+/* CRA 粘贴框与记录行输入框：全局重置会剥掉原生边框，本页输入框又不在
+   .field 内，不补规则会被误读为不可编辑的静态文字。 */
+.roll-setup-layout .form-card textarea {
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2);
+  background: var(--surface-sunken);
+  color: var(--ink-strong);
+  font: inherit;
+}
+
+.mapping-row.roll-cra-row input {
+  min-height: 34px;
+  padding: 5px 8px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--control-bg);
+  color: var(--foreground);
+}
+
 .roll-company-metrics {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--sp-2);

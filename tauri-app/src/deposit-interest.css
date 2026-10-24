@@ -924,6 +924,18 @@ span.deposit-rate-missing {
   background: var(--muted);
   font-size: 13px;
 }
+/* 本区块内的「统一年利率」输入框（JE 汇总口径）：全局重置会剥掉原生边框，
+   不补规则会被误读为不可编辑的静态文字；款式与表格内利率格一致。 */
+.deposit-currency-mode input {
+  min-height: 32px;
+  width: 104px;
+  padding: 5px 8px;
+  border: 1px solid var(--control-border);
+  border-radius: 7px;
+  background: var(--control-bg);
+  color: var(--foreground);
+  text-align: right;
+}
 
 /* === UI 审计修复 P1-7（2026-09-24）：结果明细表金额列可读性 ===
    症状同借款利息结果表：相邻金额列粘连、最右列被视口右缘裁切且无

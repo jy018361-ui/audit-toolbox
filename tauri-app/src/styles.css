@@ -1544,8 +1544,14 @@ summary:focus-visible {
 .pdf-text {
   width: 100%;
   min-height: 260px;
+  padding: var(--sp-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--control-bg);
+  color: var(--foreground);
   font-family: Consolas, monospace;
   font-size: var(--fs-xs);
+  resize: vertical;
 }
 .chip-list {
   display: flex;
@@ -3469,6 +3475,11 @@ summary:focus-visible {
 .ap-result-editor textarea {
   width: 100%;
   min-height: 220px;
+  padding: var(--sp-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--control-bg);
+  color: var(--foreground);
   resize: vertical;
   font-family: var(--font-mono);
   font-size: var(--fs-sm);

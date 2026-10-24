@@ -456,6 +456,10 @@
   width: 100%;
   min-height: 190px;
   padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  color: var(--ink-strong);
   resize: vertical;
   font-family: Consolas, "Microsoft YaHei UI", monospace;
   font-size: var(--fs-sm);
@@ -618,6 +622,12 @@
 .aplc-filter input {
   min-width: 0;
   flex: 1;
+  min-height: 34px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  color: var(--ink-strong);
 }
 
 .aplc-filter span {
@@ -728,6 +738,10 @@
 .aplc-result-fields textarea {
   width: 100%;
   padding: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  color: var(--ink-strong);
   resize: vertical;
   font-size: var(--fs-xs);
   line-height: 1.55;

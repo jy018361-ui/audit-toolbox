@@ -353,6 +353,7 @@ export default function ConfirmationProgressPage({
                   <FileDropInput
                     value={inputPath}
                     placeholder="拖放或点击选择 Excel 函证清单"
+                    hideFilledLabel
                     onBrowse={() => void chooseInput()}
                     onClear={inputPath && !busy ? clearInput : undefined}
                     onDragStateChange={() => {}}

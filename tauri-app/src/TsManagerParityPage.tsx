@@ -679,6 +679,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   <FileDropInput
                     value={state.inputPath}
                     placeholder="拖放或点击选择 Timesheet 文件"
+                    hideFilledLabel
                     onBrowse={() => void chooseInput()}
                     onClear={state.inputPath && !busy ? clearAll : undefined}
                     onDragStateChange={() => {}}

@@ -906,6 +906,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                                 ? "拖放或点击选择年初清单"
                                 : "拖放或点击选择年末清单"
                             }
+                            hideFilledLabel
                             onBrowse={() => void choose(side)}
                             onDragStateChange={(active) =>
                               setDragHover(active ? side : null)

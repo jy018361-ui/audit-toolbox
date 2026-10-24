@@ -10,7 +10,8 @@ export type FileDropInputProps = {
   displayValue?: ReactNode;
   /**
    * 已选文件时仅显示文件信息和清空操作。适合页面已在上方交代上传方式的
-   * 汇总上传栏，避免把“拖放或选择”这类引导语重复展示为文件槽标签。
+   * 汇总上传栏（或外层 Field 已带字段名），避免把“拖放或选择”这类引导语
+   * 重复展示为文件槽标签。
    */
   hideFilledLabel?: boolean;
   disabled?: boolean;
@@ -30,6 +31,39 @@ export type FileDropInputProps = {
   ariaLabel?: string;
   className?: string;
 };
+
+/**
+ * 已选文件后的槽位标签：占位符是「怎么选」的引导句，直接沿用会让用户
+ * 以为占位没消失；剥掉引导前缀只留名词（「Excel 函证清单」「输出文件夹」）。
+ */
+const GUIDE_PREFIXES = [
+  "拖放或点击选择",
+  "拖放或选择",
+  "拖放或单击选择",
+  "拖放并点击选择",
+  "拖放文件到窗口",
+  "选择",
+];
+
+function filledSlotLabel(placeholder?: string): string {
+  const text = (placeholder ?? "").trim();
+  if (!text) return "已选文件";
+  for (const prefix of GUIDE_PREFIXES) {
+    if (text.startsWith(prefix)) {
+      return text.slice(prefix.length).trim() || "已选文件";
+    }
+  }
+  const orClick = text.indexOf("或点击选择");
+  if (orClick >= 0) {
+    return text.slice(orClick + "或点击选择".length).trim() || "已选文件";
+  }
+  // 「导入已有录音（…），点击右侧浏览选择」这类长句：逗号前是名词主体。
+  const cut = text.search(/[，,]\s*(?:点击|拖放)/);
+  if (cut > 0) {
+    return text.slice(0, cut).trim() || "已选文件";
+  }
+  return text;
+}
 
 /**
  * 拖拽 + 点击双通道文件输入框（单个槽位）。
@@ -78,7 +112,7 @@ export function FileDropInput({
         <div className={cn("file-drop-slot filled", hideFilledLabel && "without-label")}>
           {!hideFilledLabel && (
             <span className="file-drop-slot-label">
-              {placeholder ?? "已选文件"}
+              {filledSlotLabel(placeholder)}
             </span>
           )}
           <button

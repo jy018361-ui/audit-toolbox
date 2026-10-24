@@ -580,6 +580,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                   <FileDropInput
                     value={path}
                     placeholder="拖放或点击选择期末固定资产清单"
+                    hideFilledLabel
                     onBrowse={() => void chooseFile()}
                     onDragStateChange={setDragHover}
                     highlight={dragHover}

@@ -281,6 +281,7 @@ export default function FileListDirectoryPage({
                          看起来像没选上。清空按钮由组件自带。 */
                       displayValue={sourceDir}
                       placeholder="拖放或点击选择要扫描的文件夹"
+                      hideFilledLabel
                       onBrowse={() => void chooseSource()}
                       onClear={sourceDir ? clear : undefined}
                       onDragStateChange={() => {}}

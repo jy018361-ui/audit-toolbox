@@ -317,6 +317,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                 <FileDropInput
                   value={outputDir}
                   placeholder="拖放或点击选择输出文件夹"
+                  hideFilledLabel
                   onBrowse={() => void chooseOutputDir()}
                   onClear={outputDir ? () => setOutputDir("") : undefined}
                   onDragStateChange={() => {}}

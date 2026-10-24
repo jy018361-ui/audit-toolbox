@@ -2501,6 +2501,7 @@ function FaCardListPage() {
                         <FileDropInput
                           value={beginPath}
                           placeholder="拖放或点击选择年初清单"
+                          hideFilledLabel
                           onBrowse={() => void choose("begin")}
                           onClear={
                             beginPath && !busy
@@ -2523,6 +2524,7 @@ function FaCardListPage() {
                         <FileDropInput
                           value={endPath}
                           placeholder="拖放或点击选择年末清单"
+                          hideFilledLabel
                           onBrowse={() => void choose("end")}
                           onClear={
                             endPath && !busy

@@ -2038,6 +2038,46 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   );
   const multiEntity = ledgerEntityKeyEnabled(tbMapping, jeMapping) && entitySet.size > 1;
   const showReviewCurrency = ledgerHasMappedRole(tbMapping, "currency");
+  // 确认弹层的上下文键与行清单：全量科目的拼串建组只随真正影响内容的输入
+  // 重算，切步骤等整页重渲染不再重复跑一遍（大账套下是每次渲染的大头）。
+  const confirmationContext = useMemo(
+    () =>
+      JSON.stringify([
+        "review-layout-v2",
+        tbPath,
+        jePath,
+        tbMapping,
+        jeMapping,
+        reviewAccounts.map((row) => row.key),
+      ]),
+    [tbPath, jePath, tbMapping, jeMapping, reviewAccounts],
+  );
+  const confirmationRows = useMemo(
+    () =>
+      reviewAccounts.map((row) => {
+        const tier = (tiers?.tiers ?? []).find((item) => item.key === reviewTier(row));
+        const manualRate = accountRateOverrides[accountOverrideKey(row)];
+        const effectiveRate = Number.isFinite(manualRate)
+          ? manualRate
+          : depositEffectiveTierRate(tier, tierRates);
+        const isRateRow = ["deposit", "other_monetary"].includes(reviewRole(row));
+        return { key: row.key, values: [
+          ...(multiEntity ? [row.entity ?? ""] : []),
+          ledgerReviewAccountLabel(row.account, row.auxiliary, row.parentAccountName),
+          ...(showReviewCurrency ? [row.currency ?? ""] : []),
+          ROLE_OPTIONS.find(([key]) => key === reviewRole(row))?.[1] ?? "",
+          (tiers?.categories ?? []).find((item) => item.key === tier?.category)?.label ?? "",
+          tier?.termLabel ?? "",
+          isRateRow ? depositRateToPercent(effectiveRate) : "",
+        ] };
+      }),
+    // reviewRole/reviewTier 读角色与期限覆盖表，accountTier 读 tb/je 建议，均列入依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [reviewAccounts, tiers, accountRateOverrides, tierRates,
+      accountRoleOverrides, accountDetailRoleOverrides, accountRoles,
+      accountTierOverrides, accountDetailTierOverrides, tb, je,
+      multiEntity, showReviewCurrency],
+  );
   // 引擎下发的测算行按科目编码归组，确认表据此按币种（或主体）拆行展示。
   const engineRowsByCode = useMemo(() => {
     const map = new Map<string, typeof accountCurrencyRows>();
@@ -2895,7 +2935,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   <AccountConfirmationActions
                     tool="deposit"
                     title="存款利息"
-                    context={JSON.stringify(["review-layout-v2", tbPath, jePath, tbMapping, jeMapping, reviewAccounts.map((row) => row.key)])}
+                    context={confirmationContext}
                     columns={[
                       ...(multiEntity ? [{ key: "entity", title: "主体" }] : []),
                       { key: "account", title: "科目" },
@@ -2905,23 +2945,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                       { key: "term", title: "存款期限", editable: true, options: [...new Set((tiers?.tiers ?? []).map((tier) => tier.termLabel))] },
                       { key: "rate", title: "利率（%）", editable: true },
                     ]}
-                    rows={reviewAccounts.map((row) => {
-                      const tier = (tiers?.tiers ?? []).find((item) => item.key === reviewTier(row));
-                      const manualRate = accountRateOverrides[accountOverrideKey(row)];
-                      const effectiveRate = Number.isFinite(manualRate)
-                        ? manualRate
-                        : depositEffectiveTierRate(tier, tierRates);
-                      const isRateRow = ["deposit", "other_monetary"].includes(reviewRole(row));
-                      return { key: row.key, values: [
-                        ...(multiEntity ? [row.entity ?? ""] : []),
-                        ledgerReviewAccountLabel(row.account, row.auxiliary, row.parentAccountName),
-                        ...(showReviewCurrency ? [row.currency ?? ""] : []),
-                        ROLE_OPTIONS.find(([key]) => key === reviewRole(row))?.[1] ?? "",
-                        (tiers?.categories ?? []).find((item) => item.key === tier?.category)?.label ?? "",
-                        tier?.termLabel ?? "",
-                        isRateRow ? depositRateToPercent(effectiveRate) : "",
-                      ] };
-                    })}
+                    rows={confirmationRows}
                     onImport={(changed) => {
                       const byKey = new Map(reviewAccounts.map((row) => [row.key, row]));
                       const reviewValueOffset = Number(multiEntity) + Number(showReviewCurrency);
@@ -3643,26 +3667,47 @@ export function Results({
           0,
         )
       : 0;
-  const liveTotal = rows
-    .filter((row) => row.rateResolved)
-    .reduce((sum, row) => sum + rowInterest(row), 0);
-  const missing = rows.filter((row) => !row.rateResolved);
+  // 合计与筛选只随行数据/筛选条件重算，切步骤等整页重渲染不再全表扫一遍。
+  const liveTotal = useMemo(
+    () =>
+      rows
+        .filter((row) => row.rateResolved)
+        .reduce((sum, row) => sum + rowInterest(row), 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows],
+  );
+  const missing = useMemo(
+    () => rows.filter((row) => !row.rateResolved),
+    [rows],
+  );
   // 来源文案已统一，是否"系统预设暂估"看引擎标记位。
-  const provisional = rows.filter((row) => row.rateProvisional === true);
-  const resultMatches = keywordFilterPredicate(resultQuery);
-  const visibleRows = rows.filter((row) => {
-    if (
-      !resultMatches(
-        `${row.entity} ${row.account} ${row.auxiliary ?? ""} ${row.currency ?? ""}`,
+  const provisional = useMemo(
+    () => rows.filter((row) => row.rateProvisional === true),
+    [rows],
+  );
+  const visibleRows = useMemo(() => {
+    const resultMatches = keywordFilterPredicate(resultQuery);
+    return rows.filter((row) => {
+      if (
+        !resultMatches(
+          `${row.entity} ${row.account} ${row.auxiliary ?? ""} ${row.currency ?? ""}`,
+        )
       )
-    )
-      return false;
-    if (!reviewOnly) return true;
-    return (
-      depositBalanceCheckStatus(row) !== "已勾稽" ||
-      depositRateCheckStatus(row) !== "已填利率"
-    );
-  });
+        return false;
+      if (!reviewOnly) return true;
+      return (
+        depositBalanceCheckStatus(row) !== "已勾稽" ||
+        depositRateCheckStatus(row) !== "已填利率"
+      );
+    });
+  }, [rows, resultQuery, reviewOnly]);
+  // 结果表分批显示：行数据全量保留，界面先画首批（与科目复核 250 条/批同款），
+  // 避免几千户结果一次性铺开拖慢切步与首绘。
+  const [resultLimit, setResultLimit] = useState(ACCOUNT_REVIEW_PAGE_SIZE);
+  useEffect(() => {
+    setResultLimit(ACCOUNT_REVIEW_PAGE_SIZE);
+  }, [resultQuery, reviewOnly, rows]);
+  const renderedRows = visibleRows.slice(0, resultLimit);
   const auxiliaryWarnings = Array.isArray(summary.auxiliaryWarnings)
     ? summary.auxiliaryWarnings.map(String).filter(Boolean)
     : [];
@@ -3861,7 +3906,7 @@ export function Results({
         <div>
           <h4>逐户余额勾稽与利息测算</h4>
           <p>
-            当前显示 {visibleRows.length} / {rows.length} 户；年利率输入上限为 20%，超过时请先核对单位。
+            当前显示 {renderedRows.length} / {visibleRows.length} 户（筛选自 {rows.length} 户）；年利率输入上限为 20%，超过时请先核对单位。
           </p>
         </div>
         <Button variant="secondary" disabled={busy} onClick={onRecalculate}>
@@ -3920,7 +3965,7 @@ export function Results({
             </tr>
           </thead>
           <tbody>
-            {visibleRows.map((row) => (
+            {renderedRows.map((row) => (
               <Fragment key={row.key}>
                 <tr
                   className={
@@ -4143,6 +4188,19 @@ export function Results({
           </tbody>
         </table>
       </div>
+      {renderedRows.length < visibleRows.length && (
+        <div className="deposit-account-more">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() =>
+              setResultLimit((current) => current + ACCOUNT_REVIEW_PAGE_SIZE)
+            }
+          >
+            继续显示（已显示 {renderedRows.length} / {visibleRows.length}）
+          </Button>
+        </div>
+      )}
     </section>
   );
 }

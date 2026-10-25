@@ -566,3 +566,58 @@ it("只上传单边文件时空槽提供补充上传按钮并可直接补齐", a
     screen.queryByRole("button", { name: "补充上传 TB" }),
   ).not.toBeInTheDocument();
 });
+
+/** 回归（视觉审核 S4/S3）：导出成功要有醒目的绿色完成条＋「打开 Excel 底稿」
+ *  入口；同屏不再出现重复的成功文案——任务横幅让位、结果标题不挂重复按钮，
+ *  返回按钮也不应悬在步骤条下方（移到页面底部操作区）。 */
+it("导出完成后显示绿色完成条与唯一打开入口", async () => {
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  fireEvent.click(await screen.findByRole("button", { name: "下一步：测算与底稿" }));
+  fireEvent.change(await screen.findByLabelText("资产负债表日"), {
+    target: { value: "20251231" },
+  });
+  // 导出按钮依赖已有测算结果：先跑一次测算预览并让它成功。
+  fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenCalledWith("fx.preview", expect.anything()),
+  );
+  await act(async () => {
+    mock.jobListener?.({
+      jobId: "fx-job-1",
+      toolId: "fx_audit",
+      phase: "completed",
+      current: 100,
+      total: 100,
+      message: "测算完成：已实现 98,400 元。",
+      severity: "success",
+      outputPaths: [],
+      result: { summary: { formalMeasurementAvailable: true } },
+    });
+  });
+  fireEvent.click(screen.getByRole("button", { name: "生成Excel底稿" }));
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenCalledWith("fx.export", expect.anything()),
+  );
+  await act(async () => {
+    mock.jobListener?.({
+      jobId: "fx-job-1",
+      toolId: "fx_audit",
+      phase: "completed",
+      current: 100,
+      total: 100,
+      message: "导出完成：汇兑损益测算底稿.xlsx 已生成。",
+      severity: "success",
+      outputPaths: ["C:/演示数据/汇兑损益测算底稿.xlsx"],
+      result: { outputPaths: ["C:/演示数据/汇兑损益测算底稿.xlsx"] },
+    });
+  });
+  const receipt = await screen.findByText(/底稿已生成：汇兑损益测算底稿\.xlsx/);
+  expect(receipt.closest(".fx-export-done")).toBeInTheDocument();
+  // 入口只出现一次（完成条内），标题行不再挂重复按钮。
+  expect(screen.getAllByRole("button", { name: "打开 Excel 底稿" })).toHaveLength(1);
+  // 成功回执不与任务横幅重复出现。
+  expect(document.querySelector(".job-progress")).not.toBeInTheDocument();
+  expect(screen.queryByText("打开Excel底稿")).not.toBeInTheDocument();
+});

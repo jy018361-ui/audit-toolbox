@@ -578,6 +578,12 @@
   font-size: 10px;
   font-weight: 400;
 }
+/* 前两列（大类/期限）是窄列：auto 布局在剩余宽度紧张时会把两字列头逐字竖排
+   折行（视觉审核门禁波动项）。给足最小宽度根治，不依赖表内其他列的余量。 */
+.deposit-tier-table th:nth-child(-n + 2),
+.deposit-tier-table td:nth-child(-n + 2) {
+  min-width: 72px;
+}
 .deposit-tier-table th:nth-child(-n + 2),
 .deposit-tier-table td:nth-child(-n + 2),
 .deposit-tier-table th:last-child,
@@ -670,20 +676,22 @@
   min-width: 104px;
 }
 .deposit-stale {
+  /* 视觉审核：结果页曾连排三条同深浅的米黄条，主次不清。任务状态条是
+     主提示；本条与其下的 .deposit-notice 降为次要——小一号、底色变淡。 */
   display: grid;
-  gap: 5px;
-  margin: 0 0 14px;
-  padding: 13px 16px;
-  border: 1px solid var(--warning-border);
+  gap: 4px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning-border) 45%, var(--border));
   border-radius: 10px;
-  background: var(--warning-bg);
+  background: color-mix(in srgb, var(--warning-bg) 45%, var(--card));
   color: var(--warning-fg);
 }
 .deposit-stale b {
-  font-size: 14px;
+  font-size: 13px;
 }
 .deposit-stale span {
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.6;
 }
 .deposit-tier-unset td {
@@ -862,13 +870,14 @@ span.deposit-rate-missing {
   font-size: 12px;
 }
 .deposit-notice {
+  /* 同 .deposit-stale：次要提示，弱于页内主提示（任务状态条）。 */
   display: grid;
-  gap: 7px;
-  margin: 0 0 14px;
-  padding: 14px 16px;
-  border: 1px solid var(--warning-border);
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning-border) 45%, var(--border));
   border-radius: 10px;
-  background: var(--warning-bg);
+  background: color-mix(in srgb, var(--warning-bg) 45%, var(--card));
   color: var(--warning-fg);
 }
 .deposit-notice h4,
@@ -877,11 +886,11 @@ span.deposit-rate-missing {
   margin: 0;
 }
 .deposit-notice h4 {
-  font-size: 14px;
+  font-size: 13px;
 }
 .deposit-notice p,
 .deposit-notice li {
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.6;
 }
 .deposit-notice ul {

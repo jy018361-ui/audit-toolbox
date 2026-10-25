@@ -24,7 +24,7 @@ import { DateInput } from "@/components/DateInput";
 import { JargonTip } from "@/components/JargonTip";
 import { defaultBalanceSheetDate } from "@/dateDefaults";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   DEFAULT_ENTITY,
   dropUnlinkedTbAuxiliary,
@@ -2808,7 +2808,13 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
           {(je || tb) && (
             <Card>
               <CardHeader>
-                <CardTitle>公司本位币</CardTitle>
+                <CardTitle>公司本位币（按主体选择）</CardTitle>
+                {/* 视觉审核：此卡曾只剩一行公司名＋币种下拉，无从属感。
+                    说明行点明这是主体级本位币选择及其对测算的影响。 */}
+                <CardDescription>
+                  从 TB/JE 识别出的主体列在这里逐个确认记账本位币；
+                  币种等于本位币的记录不参与汇兑测算。
+                </CardDescription>
               </CardHeader>
               <CardContent className="fx-list">
                 {entities.length ? (
@@ -3234,11 +3240,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       )}
       {step === 2 && (
         <>
-          <div className="fx-step-actions">
-            <Button variant="secondary" onClick={() => setStep(1)}>
-              返回科目类型确认
-            </Button>
-          </div>
           {entityScope.panel}
           <Card>
             <CardHeader>
@@ -3407,9 +3408,22 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 ) : (
                   completedStage === "fx.export" &&
                   outputsFrom(result).length > 0 && (
-                    <p className="fx-export-complete" role="status">
-                      底稿已生成：{outputsFrom(result).map(fileName).join("、")}
-                    </p>
+                    <div className="fx-export-done" role="status">
+                      <p>
+                        底稿已生成：
+                        {outputsFrom(result).map(fileName).join("、")}
+                        。生成底稿不会清空下方测算结果。
+                      </p>
+                      {outputsFrom(result).map((path) => (
+                        <Button
+                          key={path}
+                          variant="secondary"
+                          onClick={() => void openOutput(path)}
+                        >
+                          打开 Excel 底稿
+                        </Button>
+                      ))}
+                    </div>
                   )
                 )
               ) : (
@@ -3426,6 +3440,13 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               )}
             </CardContent>
           </Card>
+          {/* 返回按钮与第一步的操作区同位（页面底部、靠右）：
+              视觉审核——曾悬在步骤条与卡片之间的空白里。 */}
+          <div className="fx-step-actions">
+            <Button variant="secondary" onClick={() => setStep(1)}>
+              返回科目类型确认
+            </Button>
+          </div>
         </>
       )}
     </main>
@@ -4041,7 +4062,6 @@ function FxResult({ result }: { result: Record<string, unknown> }) {
   const formalGateReasons = Array.isArray(summary.formalMeasurementGateReasons)
     ? summary.formalMeasurementGateReasons.map(String)
     : [];
-  const outputs = (result.outputPaths ?? []) as string[];
   const amount = (value: unknown) => formatMoney(value ?? 0);
   const percent = (value: unknown) =>
     value == null
@@ -4092,15 +4112,8 @@ function FxResult({ result }: { result: Record<string, unknown> }) {
         <div>
           <h3 id="fx-result-title">汇兑损益测算结果</h3>
         </div>
-        {outputs.map((path) => (
-          <Button
-            key={path}
-            variant="secondary"
-            onClick={() => void openOutput(path)}
-          >
-            打开Excel底稿
-          </Button>
-        ))}
+        {/* 打开底稿的入口只在导出成功条里出现一次；标题行不放重复按钮
+            （视觉审核 S3：主操作不混进标题行）。 */}
       </div>
       <div
         className={`fx-result-status ${resultStatus.tone}`}

@@ -65,6 +65,17 @@
   color: var(--label);
 }
 
+/* 约束：全局重置会剥掉 select 的原生边框，不补规则时「纪要详细度」下拉
+   看起来像一行普通文字（视觉审核）。款式与同网格内的 Input 一致。 */
+.meeting-options-grid select {
+  min-height: 36px;
+  padding: 6px 28px 6px 9px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-md);
+  background: var(--control-bg);
+  color: var(--fg);
+}
+
 .meeting-file-row {
   display: flex;
   align-items: center;

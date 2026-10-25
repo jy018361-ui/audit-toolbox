@@ -1415,3 +1415,27 @@ describe("利率档位单向联动", () => {
     ).toBeTruthy();
   });
 });
+
+/** 回归（视觉审核 S5）：进入第二步时「逐账户币种清单加载失败」的黄条
+ *  不能滞留到测算成功之后——完成事件一到就应清除，避免一边报失败一边展示成功。 */
+it("币种清单加载失败后测算成功即清除滞留提示", async () => {
+  render(<DepositInterestPage tool={tool} />);
+  fireEvent.click(
+    screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: STEP2 })).toBeEnabled(),
+  );
+  goToStep(STEP2);
+  // 默认引擎桩未实现 deposit.account_currencies：走真实失败同款的 catch 路径。
+  expect(await screen.findByText("逐账户币种清单加载失败")).toBeVisible();
+  goToStep(STEP3);
+  fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+  await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+  act(() => mock.event?.({ ...complete, result: { rows: [] } }));
+  await waitFor(() =>
+    expect(screen.queryByText("逐账户币种清单加载失败")).not.toBeInTheDocument(),
+  );
+  // 黄条容器整体退场，而不是只剩空壳。
+  expect(document.querySelector(".deposit-validation-warnings")).toBeNull();
+});

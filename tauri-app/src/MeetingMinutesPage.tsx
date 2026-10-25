@@ -209,7 +209,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
       <StepIndicator
         steps={[
           { key: "record", label: "会议记录" },
-          { key: "minutes", label: "纪要生成" },
+          { key: "minutes", label: "纪要选项" },
           { key: "result", label: "结果" },
         ]}
         current={busy ? 1 : result ? 2 : 0}
@@ -303,7 +303,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
             </p>
             <FileDropInput
               value={importPath ? displayAudioFileName(importPath) : ""}
-              placeholder="导入已有录音（wav / mp3 / m4a 等），点击右侧浏览选择"
+              placeholder="拖放或点击选择已有录音（wav / mp3 / m4a 等）"
               disabled={busy}
               onBrowse={browseAudio}
               onDragStateChange={() => undefined}

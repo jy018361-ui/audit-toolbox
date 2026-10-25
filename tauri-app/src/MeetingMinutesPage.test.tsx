@@ -67,9 +67,22 @@ describe("MeetingMinutesPage", () => {
     expect(screen.getByText("1. 会议记录")).toBeInTheDocument();
     expect(screen.getByText("2. 纪要选项")).toBeInTheDocument();
     expect(screen.getByText("3. 结果")).toBeInTheDocument();
+    // 视觉审核 S8：步骤条第 2 步与正文卡片统一叫「纪要选项」。
+    expect(
+      screen.getByRole("button", { name: "2 纪要选项" }),
+    ).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByText("自动检测已开启，正在等待会议开始。")).toBeInTheDocument(),
     );
+  });
+
+  it("导入录音拖放框文案与实际交互一致（整框点击或拖入）", () => {
+    render(<MeetingMinutesPage tool={tool} />);
+    // 视觉审核 S8：不再指向不存在的「右侧浏览」按钮。
+    expect(
+      screen.getByText("拖放或点击选择已有录音（wav / mp3 / m4a 等）"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/点击右侧浏览/)).not.toBeInTheDocument();
   });
 
   it("检测关闭时给出设置指引", async () => {

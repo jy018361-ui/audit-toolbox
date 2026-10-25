@@ -1340,6 +1340,10 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       const next = (event.result ?? {}) as Record<string, unknown>;
       setResult((current) => ({ ...current, ...next }));
       setRows((next.rows ?? []) as AccountRow[]);
+      // 测算/导出成功即证明可以出结果：进入第二步时「逐账户币种清单加载
+      // 失败」的黄条不能再滞留到成功页（视觉审核：一边报失败一边展示成功）。
+      // 利率缺口由结果行自身的「待填利率」标注继续提示。
+      setValidationWarning("accounts");
     } else if (event.phase === "failed" || event.phase === "cancelled") {
       activeJob.current = "";
       setBusy(false);

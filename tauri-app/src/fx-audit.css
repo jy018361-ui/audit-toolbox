@@ -696,10 +696,25 @@
   color: var(--muted-foreground);
   font-size: 13px;
 }
-.fx-export-complete {
-  margin: 8px 0 0;
+/* 导出成功条：与存款利息 .deposit-export-done 同款（视觉审核 S4——汇兑成功
+   提示曾降级为小灰字）。绿色大条 + 打开入口是本页唯一的成功回执。 */
+.fx-export-done {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--success-border);
+  border-radius: 10px;
+  background: var(--success-bg);
   color: var(--success-fg);
-  font-size: 13px;
+}
+.fx-export-done p {
+  flex: 1 1 320px;
+  margin: 0;
+  line-height: 1.55;
 }
 .fx-currency-confirm {
   display: flex;

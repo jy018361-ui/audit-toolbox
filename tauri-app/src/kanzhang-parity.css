@@ -92,10 +92,14 @@
   font-size: var(--fs-md);
 }
 /*
- * 多选列表（透视设计的行/列/值字段）高度交给 <select size>：CSS 写死的像素
- * 高度除不尽原生选项行高时，最后一项会被容器底边拦腰切半。size 属性按整行
- * 数取高，任何缩放比例下都不会截断，故这里不再设 min-height。
+ * 多选列表（透视设计的行/列/值字段）不写像素高度：CSS 写死的像素高度
+ * 除不尽原生选项行高时，最后一项会被容器底边拦腰切半。可见行数交给
+ * <select size>（取字段总数，列表全部可见、无滚动截断），选项更多时
+ * 由浏览器原生滚动；height:auto 防 inherited 规则压出半行。
  */
+.kz-card select[multiple] {
+  height: auto;
+}
 .kz-card button:not([data-slot="button"]) {
   border: 0;
   border-radius: var(--r-sm);

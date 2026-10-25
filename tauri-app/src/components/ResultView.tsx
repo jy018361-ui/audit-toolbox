@@ -44,7 +44,8 @@ const SUMMARY_LIST_PREVIEW = 8;
 /**
  * 结果摘要里的长清单：默认只显示前几条，一键展开后完整列出并在
  * 固定高度内滚动。旧行为是硬截 20 条加一句「另有 N 项未显示」，
- * 用户既看不全也没有出口。
+ * 用户既看不全也没有出口。展开按钮放在滚动区外——按钮在框内会
+ * 随长清单滚出视野，等于没有出口。
  */
 function SummaryList({
   title,
@@ -57,19 +58,31 @@ function SummaryList({
 }) {
   const [expanded, setExpanded] = useState(false);
   const visible = expanded ? items : items.slice(0, SUMMARY_LIST_PREVIEW);
+  const expandable = items.length > SUMMARY_LIST_PREVIEW;
   return (
     <div className="warning-box result-summary-list">
       <strong>{title}</strong>
-      <ul>
-        {visible.map((item, index) => (
-          <li key={index}>{renderItem(item, index)}</li>
-        ))}
-      </ul>
-      {items.length > SUMMARY_LIST_PREVIEW && (
+      {expandable ? (
+        <div className="result-summary-list-scroll">
+          <ul>
+            {visible.map((item, index) => (
+              <li key={index}>{renderItem(item, index)}</li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <ul>
+          {visible.map((item, index) => (
+            <li key={index}>{renderItem(item, index)}</li>
+          ))}
+        </ul>
+      )}
+      {expandable && (
         <Button
           variant="secondary"
           size="xs"
           type="button"
+          className="result-summary-list-toggle"
           aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)}
         >

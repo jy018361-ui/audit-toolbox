@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -38,4 +38,43 @@ export function ScrollFadeBox({
       </div>
     </div>
   );
+}
+
+/**
+ * 双轴滚动检测 hook：给「容器自身就是滚动区」的自定义表格用（如
+ * loan-account-confirm）。把返回值展开到外层包装元素上，滚动区作为
+ * 其唯一子元素；CSS 侧按 data-more-right / data-more-bottom 渲染渐隐。
+ */
+export function useScrollFadeFlags<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null);
+  const [flags, setFlags] = useState<{ right: boolean; bottom: boolean }>({ right: false, bottom: false });
+  const update = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const right = el.scrollWidth - el.clientWidth - el.scrollLeft > 4;
+    const bottom = el.scrollHeight - el.clientHeight - el.scrollTop > 4;
+    setFlags((current) => (current.right === right && current.bottom === bottom ? current : { right, bottom }));
+  }, []);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(update);
+      observer.observe(el);
+    }
+    return () => {
+      el.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+      observer?.disconnect();
+    };
+  }, [update]);
+  return {
+    ref,
+    ...(flags.right ? { "data-more-right": "true" as const } : {}),
+    ...(flags.bottom ? { "data-more-bottom": "true" as const } : {}),
+  };
 }

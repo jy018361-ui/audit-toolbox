@@ -88,7 +88,9 @@
   box-shadow: 0 10px 28px color-mix(in srgb, var(--brand) 7%, transparent);
 }
 /* 已识别卡标题：绿色横条改为椭圆背景层。椭圆绝对定位垫在标题文字后面，
-   文字位置、字号、卡片高度与内容间距保持不变；配 CardTitle 的定位保证文字在椭圆之上。 */
+   文字位置、字号、卡片高度与内容间距保持不变；配 CardTitle 的定位保证文字在椭圆之上。
+   椭圆两侧的延伸用对称 padding＋负 margin 实现（伪元素若用负 left/right
+   溢出容器，会把标题 scrollWidth 撑出 16px，触发几何门禁 child-overflow-x）。 */
 .fx-source-card > div:first-child {
   background: none;
 }
@@ -96,14 +98,18 @@
   position: relative;
   z-index: 1;
   width: fit-content;
+  padding-left: 16px;
+  padding-right: 16px;
+  margin-left: -16px;
+  margin-right: -16px;
 }
 .fx-source-card > div:first-child > div:first-child::before {
   content: "";
   position: absolute;
   z-index: -1;
   top: 50%;
-  left: -16px;
-  right: -16px;
+  left: 0;
+  right: 0;
   height: 32px;
   transform: translateY(-50%);
   border-radius: 50%;

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useJobOwnedByDialog } from "@/components/JobDialog";
+import { jobPause } from "@/api";
 import { errorText, isJobGone, meetingErrorText } from "@/lib/errors";
 import type { JobEvent } from "@/types";
 import { jobPresentation } from "@/jobState";
@@ -52,6 +53,8 @@ export function JobProgress({
 }: JobProgressProps) {
   const [cancelPending, setCancelPending] = useState(false);
   const [cancelError, setCancelError] = useState("");
+  const [resumePending, setResumePending] = useState(false);
+  const [resumeError, setResumeError] = useState("");
   async function cancel() {
     if (!onCancel || cancelPending) return;
     setCancelPending(true);
@@ -67,6 +70,25 @@ export function JobProgress({
       );
     } finally {
       setCancelPending(false);
+    }
+  }
+  // 内存暂停：任务弹窗被最小化时，页面内联状态也要给出「继续」出口，
+  // 不能只让文案承诺「可继续」却无处可点。
+  async function resume() {
+    if (resumePending) return;
+    setResumePending(true);
+    setResumeError("");
+    try {
+      const accepted = await jobPause(job.jobId, false);
+      if (!accepted) throw new Error("任务可能已结束，继续指令未被接受。请检查任务状态后重试。");
+    } catch (error) {
+      setResumeError(
+        isJobGone(error)
+          ? "任务可能已结束，继续指令未被接受。请检查任务状态后重试。"
+          : `继续失败：${errorText(error)}`,
+      );
+    } finally {
+      setResumePending(false);
     }
   }
   // 全局弹窗或最小化任务条接管时让位，同一进度只呈现一次。
@@ -114,6 +136,18 @@ export function JobProgress({
         {presentation.percent !== null && (
           <span className="job-pct">{presentation.percent}%</span>
         )}
+        {job.phase === "memory_paused" && (
+          <Button
+            variant="secondary"
+            size="xs"
+            type="button"
+            className="job-cancel"
+            onClick={() => void resume()}
+            disabled={resumePending}
+          >
+            {resumePending ? "正在继续…" : "尝试继续"}
+          </Button>
+        )}
         {onCancel && !presentation.terminal && (
           <Button
             variant="secondary"
@@ -131,6 +165,7 @@ export function JobProgress({
         <p className="job-progress-error">{detail}</p>
       )}
       {cancelError && <p className="job-progress-error" role="alert">{cancelError}</p>}
+      {resumeError && <p className="job-progress-error" role="alert">{resumeError}</p>}
       {!presentation.terminal && (
         <progress
           aria-label={`${presentation.label}进度`}

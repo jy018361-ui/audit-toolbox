@@ -32,6 +32,8 @@ import { errorText, isSyncBusyAborted } from "@/lib/errors";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress, terminalJobError } from "@/components/JobProgress";
+import { useScrollFadeFlags } from "@/components/ScrollFade";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -4218,8 +4220,16 @@ function ResizableTableBox({
   children: ReactNode;
 }) {
   const resize = useTableColumnResize<HTMLDivElement>({ storageKey: resizeKey });
+  const { ref: fadeRef, ...fadeFlags } = useScrollFadeFlags<HTMLDivElement>();
   return (
-    <div className={className} ref={resize.ref}>
+    <div
+      className={cn("scroll-fade-x", className)}
+      ref={(node) => {
+        resize.ref.current = node;
+        fadeRef.current = node;
+      }}
+      {...fadeFlags}
+    >
       {children}
     </div>
   );

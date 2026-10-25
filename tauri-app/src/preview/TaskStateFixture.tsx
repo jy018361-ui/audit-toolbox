@@ -119,7 +119,7 @@ export function TaskStateFixture() {
             页面级 ErrorBox 不再重复同一段文案。 */}
         {completed && (
           <ResultView
-            value={scenario === "partial" ? job.result : { message: job.message, outputPaths: [LONG_PATH, `${LONG_PATH}.副本.xlsx`], rows: 128600 }}
+            value={scenario === "partial" ? job.result : { outputPaths: [LONG_PATH, `${LONG_PATH}.副本.xlsx`], rows: 128600 }}
           />
         )}
         {scenario === "restored" && (

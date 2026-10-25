@@ -1089,9 +1089,11 @@ describe("看账视觉审核修复（界面防溢出）", () => {
   });
 
   it("透视三个多选列表按整行取高，末项不再被容器底边拦腰切半", () => {
-    // CSS 像素高度除不尽原生选项行高就会截断末项，高度必须交给 size 属性。
+    // CSS 像素高度除不尽原生选项行高就会截断末项：height 交给 size 属性
+    // （取字段总数，列表全部可见），CSS 侧 height:auto 兜底防继承压出半行。
     expect(css).not.toMatch(/select\[multiple\][^{]*\{[^}]*min-height/);
-    expect((tsx.match(/multiple size=\{6\}/g) ?? []).length).toBe(3);
+    expect(css).toMatch(/\.kz-card select\[multiple\]\s*\{[^}]*height:\s*auto/);
+    expect((tsx.match(/multiple size=\{12\}/g) ?? []).length).toBe(3);
   });
 
   it("文件预览卡头部在本页垂直居中，覆盖公共的贴底对齐", () => {

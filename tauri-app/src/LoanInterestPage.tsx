@@ -84,6 +84,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import "./loan-interest.css";
 import { AccountConfirmationActions, type ConfirmationRow } from "./AccountConfirmationActions";
+import { useScrollFadeFlags } from "@/components/ScrollFade";
+import { cn } from "@/lib/utils";
 // 来源卡与统一上传框的样式（fx-source-grid／fx-source-card／fx-detected-file）
 // 与其他账表工具共用，定义在 fx-audit.css。
 import "./fx-audit.css";
@@ -3078,13 +3080,16 @@ function ResizableTableBox({
   children: ReactNode;
 }) {
   const resize = useTableColumnResize<HTMLDivElement>({ storageKey: resizeKey });
+  const { ref: fadeRef, ...fadeFlags } = useScrollFadeFlags<HTMLDivElement>();
   return (
     <div
-      className={className}
+      className={cn("scroll-fade-x", className)}
       ref={(node) => {
         resize.ref.current = node;
+        fadeRef.current = node;
         if (containerRef) containerRef.current = node;
       }}
+      {...fadeFlags}
     >
       {children}
     </div>

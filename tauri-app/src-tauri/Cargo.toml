@@ -1,6 +1,6 @@
 [package]
 name = "audit-toolbox"
-version = "2.0.0-alpha.123"
+version = "2.0.0-alpha.124"
 description = "统一的 Tauri 审计工具箱"
 authors = ["Audit Toolbox"]
 edition = "2024"
@@ -75,3 +75,20 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# 大表写出与 ZIP 热路径优先速度；应用其余代码仍采用上方的体积优化。
+# 同 XML / 同压缩等级的优化构建对照见 artifacts/export-deep-20261025/。
+[profile.release.package.rust_xlsxwriter]
+opt-level = 3
+
+[profile.release.package.zip]
+opt-level = 3
+
+[profile.release.package.flate2]
+opt-level = 3
+
+[profile.release.package.zlib-rs]
+opt-level = 3
+
+[profile.release.package.crc32fast]
+opt-level = 3

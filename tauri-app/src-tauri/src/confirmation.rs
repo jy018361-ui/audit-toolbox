@@ -237,7 +237,6 @@ fn write_report(
         .rows
         .iter()
         .filter(|row| BANK_TYPES.contains(&cell(row, type_index)) == is_bank)
-        .cloned()
         .collect::<Vec<_>>();
     let output_dir = input
         .parent()
@@ -256,7 +255,7 @@ fn write_report(
     let mut workbook = Workbook::new();
     let today = Local::now().format("%Y年%m月%d日").to_string();
     if column(&table.headers, "项目名称").is_some() {
-        let rows = aggregate(table, &selected, "项目名称", is_bank)?;
+        let rows = aggregate(table, selected.iter().copied(), "项目名称", is_bank)?;
         write_summary_sheet(
             &mut workbook,
             "按项目名称汇总",
@@ -266,7 +265,7 @@ fn write_report(
             is_bank,
         )?;
     }
-    let rows = aggregate(table, &selected, "发函单位名称", is_bank)?;
+    let rows = aggregate(table, selected.iter().copied(), "发函单位名称", is_bank)?;
     let summary_rows = rows.len();
     write_summary_sheet(
         &mut workbook,
@@ -278,10 +277,10 @@ fn write_report(
     )?;
     if is_bank {
         let date_index = column(&table.headers, "函证基准日").unwrap();
-        let mut by_date = BTreeMap::<String, Vec<Vec<String>>>::new();
+        let mut by_date = BTreeMap::<String, Vec<&Vec<String>>>::new();
         for row in &selected {
             if let Some(date) = normalized_date(cell(row, date_index)) {
-                by_date.entry(date).or_default().push(row.clone());
+                by_date.entry(date).or_default().push(*row);
             }
         }
         for (date, subset) in by_date {
@@ -290,7 +289,7 @@ fn write_report(
                 if column(&table.headers, group).is_none() {
                     continue;
                 }
-                let rows = aggregate(table, &subset, group, true)?;
+                let rows = aggregate(table, subset.iter().copied(), group, true)?;
                 let suffix = if group == "项目名称" {
                     "按项目名称"
                 } else {
@@ -317,9 +316,9 @@ fn write_report(
     Ok((output, summary_rows))
 }
 
-fn aggregate(
+fn aggregate<'a>(
     table: &Table,
-    rows: &[Vec<String>],
+    rows: impl IntoIterator<Item = &'a Vec<String>>,
     group: &str,
     bank: bool,
 ) -> Result<Vec<SummaryRow>, AppError> {
@@ -345,72 +344,53 @@ fn aggregate(
     let sign_i = get("发函签收时间")?;
     let result_i = get("询证项回函结果")?;
     let template_i = indexes.get("发函模版").copied();
-    let mut groups: BTreeMap<String, Vec<&Vec<String>>> = BTreeMap::new();
+    let mut groups: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    let hit = |value: bool| f64::from(u8::from(value));
     for row in rows {
         let key = cell(row, group_i);
-        if !key.is_empty() {
-            groups.entry(key.to_owned()).or_default().push(row);
+        if key.is_empty() { continue; }
+        let values = groups.entry(key.to_owned()).or_insert_with(|| vec![0.0; if bank { 13 } else { 9 }]);
+        let kind = cell(row, type_i);
+        let status = cell(row, status_i);
+        let response = cell(row, result_i);
+        let sent = hit(matches!(status, "已发出" | "已收回"));
+        let returned = hit(status == "已收回");
+        let matched = hit(response == "相符");
+        let signed = hit(valid_datetime(cell(row, sign_i)));
+        values[0] += hit(!cell(row, id_i).is_empty());
+        if bank {
+            let template = cell(row, template_i.unwrap());
+            let format1 = hit(template.contains("格式一"));
+            let format2 = hit(template.contains("格式二"));
+            values[1] += 1.0;
+            values[2] += hit(kind == "银行");
+            values[3] += hit(kind == "银行-电子函证");
+            values[4] += format1;
+            values[5] += format2;
+            // Preserve the legacy subtraction even if a template contains both names.
+            values[6] += hit(!template.is_empty()) - format1 - format2;
+            values[7] += hit(status == "未发出");
+            values[8] += sent;
+            values[9] += signed;
+            values[10] += returned;
+            values[11] += matched;
+            values[12] += hit(response.contains("不符"));
+        } else {
+            values[1] += hit(kind.contains("往来"));
+            values[2] += hit(kind.contains("其他"));
+            values[3] += hit(status == "未发出");
+            values[4] += sent;
+            values[5] += signed;
+            values[6] += returned;
+            values[7] += matched;
+            values[8] += hit(response.contains("不符"));
         }
     }
     let mut result = Vec::new();
-    for (name, items) in groups {
-        let count_non_empty = |idx: usize| {
-            items
-                .iter()
-                .filter(|row| !cell(row, idx).is_empty())
-                .count() as f64
-        };
-        let count_eq = |idx: usize, value: &str| {
-            items.iter().filter(|row| cell(row, idx) == value).count() as f64
-        };
-        let count_has = |idx: usize, value: &str| {
-            items
-                .iter()
-                .filter(|row| cell(row, idx).contains(value))
-                .count() as f64
-        };
-        let sent = items
-            .iter()
-            .filter(|row| matches!(cell(row, status_i), "已发出" | "已收回"))
-            .count() as f64;
-        let returned = count_eq(status_i, "已收回");
-        let matched = count_eq(result_i, "相符");
-        let signed = items
-            .iter()
-            .filter(|row| valid_datetime(cell(row, sign_i)))
-            .count() as f64;
-        let mut values = if bank {
-            let ti = template_i.unwrap();
-            let format1 = count_has(ti, "格式一");
-            let format2 = count_has(ti, "格式二");
-            vec![
-                count_non_empty(id_i),
-                items.len() as f64,
-                count_eq(type_i, "银行"),
-                count_eq(type_i, "银行-电子函证"),
-                format1,
-                format2,
-                count_non_empty(ti) - format1 - format2,
-                count_eq(status_i, "未发出"),
-                sent,
-                signed,
-                returned,
-                matched,
-                count_has(result_i, "不符"),
-            ]
-        } else {
-            vec![
-                count_non_empty(id_i),
-                count_has(type_i, "往来"),
-                count_has(type_i, "其他"),
-                count_eq(status_i, "未发出"),
-                sent,
-                signed,
-                returned,
-                matched,
-                count_has(result_i, "不符"),
-            ]
-        };
+    for (name, mut values) in groups {
+        let sent = values[if bank { 8 } else { 4 }];
+        let returned = values[if bank { 10 } else { 6 }];
+        let matched = values[if bank { 11 } else { 7 }];
         let denominator = if bank { values[1] } else { values[0] };
         values.push(percent(sent, denominator));
         values.push(percent(returned, denominator));
@@ -808,6 +788,35 @@ fn xlsx_error(e: impl std::fmt::Display) -> AppError {
 mod tests {
     use super::*;
     use std::io::Read;
+    #[test]
+    fn single_pass_counts_keep_bank_and_trade_denominators_and_template_overlap() {
+        let mut table = Table {
+            headers: ["发函单位名称", "函证编号", "函证类型", "函证状态", "发函签收时间", "询证项回函结果", "发函模版"].map(str::to_owned).to_vec(),
+            rows: [
+                ["甲", "1", "银行", "已收回", "2025-01-02", "相符", "格式一格式二"],
+                ["甲", "", "银行-电子函证", "已发出", "无效", "不符-金额", "其他"],
+                ["甲", "3", "银行", "未发出", "", "", ""],
+                ["乙", "4", "银行", "已收回", "2025-01-02 10:20:30", "不符", "格式一"],
+                ["", "5", "银行", "已收回", "2025-01-02", "相符", "格式一"],
+            ].map(|r| r.map(str::to_owned).to_vec()).to_vec(),
+        };
+        let result = aggregate(&table, table.rows.iter(), "发函单位名称", true).unwrap();
+        let a = result.iter().find(|r| r.group == "甲").unwrap();
+        assert_eq!(a.values, vec![2.,3.,2.,1.,1.,1.,0.,1.,2.,1.,1.,1.,1.,66.67,33.33,100.]);
+        assert_eq!(result.last().unwrap().values, vec![3.,4.,3.,1.,2.,1.,0.,1.,3.,2.,2.,1.,2.,75.,50.,50.]);
+        // A template containing both labels keeps the legacy negative remainder.
+        let overlap = aggregate(&table, table.rows.iter().take(1), "发函单位名称", true).unwrap();
+        assert_eq!(overlap[0].values[6], -1.);
+        table.rows.truncate(3);
+        table.rows[0][2] = "往来其他".into();
+        table.rows[1][2] = "其他".into();
+        table.rows[2][0] = "乙".into();
+        table.rows[2][2] = "往来".into();
+        let result = aggregate(&table, table.rows.iter(), "发函单位名称", false).unwrap();
+        let a = result.iter().find(|r| r.group == "甲").unwrap();
+        assert_eq!(a.values, vec![1.,1.,2.,0.,2.,1.,1.,1.,1.,200.,100.,100.]);
+        assert_eq!(result.last().unwrap().values, vec![2.,2.,2.,1.,2.,1.,1.,1.,1.,100.,50.,100.]);
+    }
     #[test]
     fn percentages_match_legacy_rounding() {
         assert_eq!(percent(1.0, 3.0), 33.33);

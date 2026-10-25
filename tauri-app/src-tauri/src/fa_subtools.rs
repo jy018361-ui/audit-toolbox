@@ -640,10 +640,8 @@ fn policy_export(
     let result = fa::merge(&params, progress, &cancel)?;
     pause.wait()?;
     fa::check_cancel(&cancel)?;
-    let policy_rows = fa::build_depreciation_period(&result, &params);
-    result.rows.check()?;
     progress("analyze", 3, 5, "正在分析税法最低折旧年限");
-    let tax_analysis = build_policy_tax_analysis(&policy_rows, &params, &cancel, pause)?;
+    let prepared = prepare_policy_export(&result, &params, &cancel, pause)?;
     pause.wait()?;
     fa::check_cancel(&cancel)?;
     progress("export", 4, 5, "正在生成折旧政策对比与税法参考");
@@ -653,12 +651,11 @@ fn policy_export(
     let header = header_format();
     write_depreciation_period_tax_sheet(
         &mut wb,
-        &result,
         &params,
         &header,
         &cancel,
         "折旧政策对比",
-        &tax_analysis.rows,
+        &prepared,
     )?;
     result.rows.check()?;
     fa::check_cancel(&cancel)?;
@@ -671,7 +668,7 @@ fn policy_export(
     Ok(json!({
         "engine": "rust-fa",
         "message": message,
-        "taxAnalysisCompleted": tax_analysis.completed,
+        "taxAnalysisCompleted": prepared.tax.completed,
         "outputPaths": [output.to_string_lossy()],
     }))
 }
@@ -725,6 +722,19 @@ const TAX_STANDARD_RULES: [TaxStandardRule; 5] = [
 pub(crate) struct PolicyTaxAnalysis {
     pub(crate) rows: Vec<Vec<String>>,
     pub(crate) completed: bool,
+}
+
+pub(crate) struct PreparedPolicyExport {
+    pub(crate) base_rows: Vec<Vec<String>>,
+    pub(crate) tax: PolicyTaxAnalysis,
+}
+
+pub(crate) fn prepare_policy_export(result: &fa::MergeResult, params: &Value, cancel: &AtomicBool, pause: &PauseCheckpoint) -> Result<PreparedPolicyExport, AppError> {
+    fa::check_cancel(cancel)?;
+    let base_rows = fa::build_depreciation_period(result, params)?;
+    result.rows.check()?;
+    let tax = build_policy_tax_analysis(&base_rows, params, cancel, pause)?;
+    Ok(PreparedPolicyExport { base_rows, tax })
 }
 
 const DEFAULT_TAX_RULE_INDEX: usize = 2;
@@ -881,17 +891,16 @@ pub(crate) fn build_policy_tax_analysis(
 
 pub(crate) fn write_depreciation_period_tax_sheet(
     wb: &mut Workbook,
-    result: &fa::MergeResult,
     params: &Value,
     header: &Format,
     cancel: &AtomicBool,
     sheet_name: &str,
-    tax_rows: &[Vec<String>],
+    prepared: &PreparedPolicyExport,
 ) -> Result<(), AppError> {
-    let mut rows = fa::build_depreciation_period(result, params);
+    let mut rows = prepared.base_rows.clone();
     for (index, row) in rows.iter_mut().enumerate() {
         row.extend(
-            tax_rows
+            prepared.tax.rows
                 .get(index)
                 .cloned()
                 .unwrap_or_else(|| vec![String::new(), String::new(), String::new()]),

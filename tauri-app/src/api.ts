@@ -16,6 +16,7 @@ import {
   MeetingRecordStartSchema,
   MeetingRecordStopSchema,
   MeetingStatusSchema,
+  MeetingResultSchema,
   TaskRestoreSchema,
   ToolManifestSchema,
   type HistoryRow,
@@ -398,6 +399,11 @@ export const legacyImport = (path: string) =>
     : Promise.reject(previewUnavailable("导入迁移备份"));
 
 // ===== 会议纪要助手 =====
+
+export const meetingReadMinutes = async (path: string) => {
+  if (!inTauri()) throw previewUnavailable("读取会议纪要");
+  return MeetingResultSchema.parse(await invoke("meeting_read_minutes", { path }));
+};
 
 export const meetingStatus = () =>
   inTauri()

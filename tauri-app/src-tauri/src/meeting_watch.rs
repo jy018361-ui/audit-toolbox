@@ -489,13 +489,7 @@ fn auto_finalize_recording(app: &tauri::AppHandle, state: &Arc<MeetingState>) {
 }
 
 fn auto_minutes_params(summary: &Value) -> Value {
-    let title = summary
-        .get("startedAt")
-        .and_then(Value::as_str)
-        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-        .map(|at| format!("Teams 会议 {}", at.format("%m-%d %H:%M")))
-        .unwrap_or_else(|| "Teams 会议".into());
-    json!({"audioPath": summary["audioPath"], "title": title})
+    json!({"audioPath": summary["audioPath"]})
 }
 
 fn report_processing_error(app: &tauri::AppHandle, state: &MeetingState, message: &str) {
@@ -644,13 +638,13 @@ mod tests {
     }
 
     #[test]
-    fn auto_minutes_uses_finished_audio_and_meeting_start_title() {
+    fn auto_minutes_uses_finished_audio_without_overriding_content_title() {
         assert_eq!(
             auto_minutes_params(&json!({
                 "audioPath": "C:/data/record-1/audio-mix.wav",
                 "startedAt": "2026-10-19T10:23:00+08:00",
             })),
-            json!({"audioPath": "C:/data/record-1/audio-mix.wav", "title": "Teams 会议 10-19 10:23"})
+            json!({"audioPath": "C:/data/record-1/audio-mix.wav"})
         );
     }
 

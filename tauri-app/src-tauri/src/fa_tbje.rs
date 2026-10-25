@@ -209,11 +209,12 @@ pub(crate) fn run_job(
     };
     checkpoint(&cancel, pause)?;
     progress("classify", 2, 4, "正在分类新增、处置、重分类及对方科目…");
-    let mut result = preview_json(&analysis);
+    let views = PreparedAnalysisViews::new(&analysis);
+    let mut result = preview_json_from(&analysis, &views);
     if method == "fa.tbje_export" {
         progress("export", 3, 4, "正在生成固定资产底稿表…");
         let output = output_path(&params)?;
-        write_workbook(&output, &analysis, &cancel)?;
+        write_workbook_from(&output, &analysis, &views, &cancel)?;
         result["outputPaths"] = json!([output.to_string_lossy()]);
     }
     result["entityScopeSelection"] = params
@@ -2245,7 +2246,28 @@ fn classify_method(
     )
 }
 
+type CounterpartMap = BTreeMap<(String, String), (f64, f64)>;
+#[cfg(test)]
+thread_local! { static VIEW_BUILDS: std::cell::Cell<[usize; 3]> = const { std::cell::Cell::new([0; 3]) }; }
+#[cfg(test)]
+fn count_view_build(index: usize) { VIEW_BUILDS.with(|count| { let mut counts=count.get(); counts[index]+=1; count.set(counts); }); }
+
+struct PreparedAnalysisViews {
+    summary: (Vec<String>, Vec<SummaryRowData>),
+    counterparts: (CounterpartMap, CounterpartMap),
+    auxiliary: Vec<Value>,
+}
+impl PreparedAnalysisViews {
+    fn new(a: &Analysis) -> Self {
+        Self { summary: build_summary_rows(a), counterparts: counterpart_pivots(a), auxiliary: auxiliary_reconciliation(a) }
+    }
+}
+
 fn preview_json(a: &Analysis) -> Value {
+    preview_json_from(a, &PreparedAnalysisViews::new(a))
+}
+
+fn preview_json_from(a: &Analysis, views: &PreparedAnalysisViews) -> Value {
     let differences = a
         .totals
         .iter()
@@ -2263,7 +2285,7 @@ fn preview_json(a: &Analysis) -> Value {
         .count();
     // 汇总变动表预览:与导出共享 build_summary_rows 的行定义,零行过滤一致,
     // 前端看到什么,导出的 Excel 里就是什么。
-    let (summary_columns, summary_rows) = build_summary_rows(a);
+    let (summary_columns, summary_rows) = &views.summary;
     let summary_table = json!({
         "columns": summary_columns,
         "rows": summary_rows.iter().map(|row| json!({
@@ -2274,7 +2296,7 @@ fn preview_json(a: &Analysis) -> Value {
     });
     // 对方科目透视（原值／累计折旧）与导出共用 counterpart_pivots 聚合，
     // 前端「对方科目预览」与底稿两张透视表同源；数组顺序＝BTreeMap 顺序。
-    let (cost_pivot, dep_pivot) = counterpart_pivots(a);
+    let (cost_pivot, dep_pivot) = &views.counterparts;
     let pivot_entries = |map: &BTreeMap<(String, String), (f64, f64)>| {
         map.iter()
             .map(|((entity, account), (debit, credit))| {
@@ -2288,7 +2310,7 @@ fn preview_json(a: &Analysis) -> Value {
         "directNetZeroPairs":a.direct_pairs, "crossNetZeroPairs":a.cross_pairs,
         "reconciliationDifferences":differences, "signBasis":a.sign_basis,
         "warnings":a.warnings, "summaryTable": summary_table,
-        "auxiliaryReconciliation": auxiliary_reconciliation(a),
+        "auxiliaryReconciliation": views.auxiliary,
         "counterpartPivots": {
             "cost": pivot_entries(&cost_pivot),
             "depreciation": pivot_entries(&dep_pivot),
@@ -2297,14 +2319,19 @@ fn preview_json(a: &Analysis) -> Value {
 }
 
 fn write_workbook(path: &Path, a: &Analysis, cancel: &AtomicBool) -> Result<(), AppError> {
+    write_workbook_from(path, a, &PreparedAnalysisViews::new(a), cancel)
+}
+
+fn write_workbook_from(path: &Path, a: &Analysis, views: &PreparedAnalysisViews, cancel: &AtomicBool) -> Result<(), AppError> {
     let mut wb = Workbook::new();
-    write_summary(wb.add_worksheet(), a)?;
+    write_summary_from(wb.add_worksheet(), a, &views.summary)?;
     write_movements(wb.add_worksheet(), "新增清单", &a.additions, true)?;
     write_movements(wb.add_worksheet(), "处置清单", &a.disposals, false)?;
     write_je(wb.add_worksheet(), a, cancel)?;
-    write_counterpart_pivots(&mut wb, a)?;
+    write_pivot_sheet(wb.add_worksheet(), "原值透视表", &views.counterparts.0)?;
+    write_pivot_sheet(wb.add_worksheet(), "累计折旧透视表", &views.counterparts.1)?;
     write_tb_hidden(wb.add_worksheet(), a)?;
-    let auxiliary_rows = auxiliary_reconciliation(a);
+    let auxiliary_rows = &views.auxiliary;
     if !auxiliary_rows.is_empty() {
         let sheet = wb.add_worksheet();
         sheet.set_name("辅助核算金额勾稽").map_err(xlsx)?;
@@ -2356,6 +2383,8 @@ fn write_workbook(path: &Path, a: &Analysis, cancel: &AtomicBool) -> Result<(), 
 }
 
 fn auxiliary_reconciliation(a: &Analysis) -> Vec<Value> {
+    #[cfg(test)]
+    count_view_build(2);
     let mut totals = BTreeMap::<(String, String, String), (f64, f64, f64)>::new();
     for line in &a.tb {
         if line.auxiliary.is_empty() {
@@ -2545,6 +2574,8 @@ struct SummaryRowData {
 /// 两边永不漂移。返回 (列标题, 行)。多主体时列标题带「主体-」前缀。
 /// 全零且非主干行(期初/期末/勾稽差异/净值)已过滤。
 fn build_summary_rows(a: &Analysis) -> (Vec<String>, Vec<SummaryRowData>) {
+    #[cfg(test)]
+    count_view_build(0);
     let entities: BTreeSet<&String> = a.totals.keys().map(|(entity, _)| entity).collect();
     let multi_entity = entities.len() > 1;
     let mut columns = Vec::new();
@@ -2823,10 +2854,14 @@ fn build_summary_rows(a: &Analysis) -> (Vec<String>, Vec<SummaryRowData>) {
 /// [`build_summary_rows`]（与前端预览共享）,此处按 [`FormulaKind`] 生成
 /// SUMIFS／行引用公式写入。
 fn write_summary(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
+    write_summary_from(ws, a, &build_summary_rows(a))
+}
+
+fn write_summary_from(ws: &mut Worksheet, a: &Analysis, summary: &(Vec<String>, Vec<SummaryRowData>)) -> Result<(), AppError> {
     ws.set_name("固定资产汇总变动表").map_err(xlsx)?;
     let (header, money, text) = formats();
     let keys: Vec<(String, String)> = a.totals.keys().cloned().collect();
-    let (columns, rows) = build_summary_rows(a);
+    let (columns, rows) = summary;
     let mut headers = vec![String::new(), "变动项目".to_owned(), "合计".to_owned()];
     headers.extend(columns.iter().cloned());
     for (c, h) in headers.iter().enumerate() {
@@ -3097,6 +3132,8 @@ fn counterpart_pivots(
     BTreeMap<(String, String), (f64, f64)>,
     BTreeMap<(String, String), (f64, f64)>,
 ) {
+    #[cfg(test)]
+    count_view_build(1);
     let mut voucher_flags: BTreeMap<(String, String), (bool, bool)> = BTreeMap::new();
     for line in &a.je {
         if line.counterpart || is_net_zero_matched(&line.status) {
@@ -5434,13 +5471,17 @@ mod tests {
         let key = analysis_cache_key(&params);
         let _ = std::fs::remove_file(cache_dir().join(format!("{key}.json")));
         let quiet = |method: &str| {
-            run_job(
+            let before = VIEW_BUILDS.with(|count|count.get());
+            let result = run_job(
                 method,
                 params.clone(),
                 &|_, _, _, _| {},
                 Arc::new(AtomicBool::new(false)),
                 &PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false))),
-            )
+            );
+            let after = VIEW_BUILDS.with(|count|count.get());
+            assert_eq!(std::array::from_fn::<_, 3, _>(|index|after[index] - before[index]), [1, 1, 1]);
+            result
         };
         let preview = quiet("fa.tbje_preview").unwrap();
         assert!(preview["jeRows"].as_u64().unwrap() > 0);

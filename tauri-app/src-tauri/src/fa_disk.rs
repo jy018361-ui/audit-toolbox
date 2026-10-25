@@ -446,7 +446,8 @@ pub(super) fn apply_supplements(
                 .map(|v| (v, disposal))
         })
         .collect::<Vec<_>>();
-    if !configs.is_empty() {
+    let has_configs = !configs.is_empty();
+    if has_configs {
         let tx = conn.transaction().map_err(db_error)?;
         // joined 必须经写事务自己的连接逐批读（与 edit_disk_rows 同款纪律）：
         // 另开连接读时，本事务灌 valid 的缓存溢写要短暂持排他锁，读连接
@@ -500,17 +501,19 @@ pub(super) fn apply_supplements(
         })?;
         tx.commit().map_err(db_error)?;
     }
-    super::disk_rows::edit_disk_rows(&path, |conn, row| {
+    super::disk_rows::edit_disk_rows_if_changed(&path, |conn, row| {
         check_cancel(cancel)?;
+        let previous_extra = row.extra.clone();
         for field in ["新增方式_辅助_文件2","新增时间_辅助_文件2","处置方式_辅助_文件1","处置时间_辅助_文件1","处置原值_辅助_文件1","处置折旧_辅助_文件1"] {row.extra.remove(field);}
+        if !has_configs { return Ok(previous_extra != row.extra); }
         let key=canonical_display_key(&row.match_value);
-        let mut stmt=conn.prepare("SELECT field,GROUP_CONCAT(value,'；') FROM (SELECT field,value FROM supplement_text WHERE k=? ORDER BY id) GROUP BY field").map_err(db_error)?;
+        let mut stmt=conn.prepare_cached("SELECT field,GROUP_CONCAT(value,'；') FROM (SELECT field,value FROM supplement_text WHERE k=? ORDER BY id) GROUP BY field").map_err(db_error)?;
         let texts=stmt.query_map([&key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(db_error)?;
         for value in texts {let (field,value)=value.map_err(db_error)?;row.extra.insert(field,Cell::Text(value));}
-        let mut stmt=conn.prepare("SELECT field,value FROM supplement_amount WHERE k=?").map_err(db_error)?;
+        let mut stmt=conn.prepare_cached("SELECT field,value FROM supplement_amount WHERE k=?").map_err(db_error)?;
         let numbers=stmt.query_map([&key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?))).map_err(db_error)?;
         for value in numbers {let (field,value)=value.map_err(db_error)?;row.extra.insert(field,Cell::Number(value));}
-        Ok(())
+        Ok(previous_extra != row.extra)
     })?;
     conn.execute_batch("DROP TABLE valid;DROP TABLE supplement_text;DROP TABLE supplement_amount;")
         .map_err(db_error)?;
@@ -522,6 +525,27 @@ mod tests {
     use super::*;
     use calamine::Reader;
     const HEAD: &str = "资产编码,类别,名称,原值,累计折旧,入账开始日期,使用年限,残值率,本年折旧";
+    #[test]
+    fn empty_supplements_skip_unchanged_updates_and_clear_stale_values_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = fixture(dir.path(), false);
+        params["__forceDisk"] = json!(true);
+        let cancel = AtomicBool::new(false);
+        let mut result = super::super::merge(&params, &|_, _, _, _| {}, &cancel).unwrap();
+        let path = result.rows.path().unwrap().to_path_buf();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE writes(n INTEGER); CREATE TRIGGER count_updates AFTER UPDATE ON joined BEGIN INSERT INTO writes VALUES(1); END;").unwrap();
+        apply_supplements(&mut result, &params, &cancel).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM writes", [], |r|r.get::<_,usize>(0)).unwrap(), 0);
+        let mut first = true;
+        result.rows.edit(|row| { if first { row.extra.insert("处置原值_辅助_文件1".into(), Cell::Number(123.0)); first=false; } }).unwrap();
+        conn.execute("DELETE FROM writes", []).unwrap();
+        apply_supplements(&mut result, &params, &cancel).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM writes", [], |r|r.get::<_,usize>(0)).unwrap(), 1);
+        assert!(result.rows.iter().all(|row|!row.extra.contains_key("处置原值_辅助_文件1")));
+        apply_supplements(&mut result, &params, &cancel).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM writes", [], |r|r.get::<_,usize>(0)).unwrap(), 1);
+    }
     fn fixture(root: &Path, xlsx: bool) -> Value {
         let begin = [
             "A2,电子,设备乙,200,-20,2024-01-01,5,5,10",
@@ -618,7 +642,11 @@ mod tests {
                 crate::fa_merge_snapshot::save(&params, &result);
                 let loaded = crate::fa_merge_snapshot::load(&params).unwrap();
                 assert_eq!(joined(&result), joined(&loaded.result));
+                let before = super::super::disk_rows::decoded_rows();
                 super::super::export(params.clone(), &|_, _, _, _| {}, Arc::new(AtomicBool::new(false)), &pause).unwrap();
+                // 本小样本的数值取样会覆盖全体行，故为 11 遍完整业务扫描 + 1 遍取样。
+                // 大表取样仍只取前部，不把它误算成全表扫描。
+                assert_eq!(super::super::disk_rows::decoded_rows() - before, result.rows.len() * 12);
             });
             assert_workbooks_equal(&memory_output, &disk_output);
         }
@@ -827,8 +855,8 @@ mod tests {
                 );
                 assert_eq!(match_statistics(&memory), match_statistics(&disk));
                 assert_eq!(
-                    build_depreciation_period(&memory, &params),
-                    build_depreciation_period(&disk, &params)
+                    build_depreciation_period(&memory, &params).unwrap(),
+                    build_depreciation_period(&disk, &params).unwrap()
                 );
                 assert_eq!(
                     build_extended_summary(&memory, &params),
@@ -961,8 +989,8 @@ mod tests {
         assert_eq!(disk.rows.len(), 700);
         assert_eq!(joined(&memory), joined(&disk));
         assert_eq!(
-            build_depreciation_period(&memory, &params),
-            build_depreciation_period(&disk, &params)
+            build_depreciation_period(&memory, &params).unwrap(),
+            build_depreciation_period(&disk, &params).unwrap()
         );
         disk.rows.check().unwrap();
     }

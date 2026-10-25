@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { formatCount } from "@/lib/numberFormat";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,7 +11,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorBox } from "@/components/ErrorBox";
 import { FileDropInput } from "@/components/FileDropInput";
@@ -27,31 +28,29 @@ import {
   meetingRecordStop,
   meetingSetResident,
   meetingStatus,
+  meetingReadMinutes,
   openOutput,
   pickPath,
   runningInDesktopApp,
 } from "./api";
 import { markToolPageLive } from "./toolPageActivity";
-import type { MeetingStatus, ToolManifest } from "./types";
+import {
+  MeetingResultSchema,
+  type MeetingResult,
+  type MeetingStatus,
+  type ToolManifest,
+} from "./types";
 import "./fx-audit.css";
 import "./meeting-minutes.css";
 
-/** 会议纪要结果（meeting.generate / meeting.summarize 任务返回）。 */
-export type MeetingResult = {
-  title?: string;
-  minutesPath?: string | null;
-  transcriptPath?: string;
-  audioPath?: string | null;
-  speakerCount?: number;
-  minutesError?: string | null;
-};
+export type { MeetingResult } from "./types";
 
 const AUDIO_EXTENSIONS = ["wav", "mp3", "m4a", "flac", "aac", "mp4", "webm", "mov"];
 
 const DETAIL_OPTIONS = [
-  { label: "简要（结论与待办）", value: "brief" },
+  { label: "简要（关键要点）", value: "brief" },
   { label: "标准", value: "standard" },
-  { label: "详细（分议题展开）", value: "detailed" },
+  { label: "详细（充分展开）", value: "detailed" },
 ];
 
 /** 文件名显示：完整路径只露出文件名，避免撑破布局。 */
@@ -66,12 +65,12 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   const [recordWarning, setRecordWarning] = useState("");
   const [recordBusy, setRecordBusy] = useState(false);
   const [importPath, setImportPath] = useState("");
-  const [title, setTitle] = useState("");
-  const [participants, setParticipants] = useState("");
   const [detailLevel, setDetailLevel] = useState("standard");
   const [result, setResult] = useState<MeetingResult>();
+  const [selectedKind, setSelectedKind] = useState<"content" | "timeline">();
+  const [previewError, setPreviewError] = useState("");
+  const [readingMinutes, setReadingMinutes] = useState(false);
   const [resident, setResident] = useState(false);
-  const generateParams = useRef<Record<string, unknown>>({});
   const jobVersion = useRef(0);
   // 用户主动换录音/清空录音后置位：后台「最近一次任务」快照属于上一份录音，
   // 不得再回灌成当前结果；直到用户重新发起生成才解除。
@@ -80,7 +79,23 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   const onJobEvent = useCallback((event: { phase: string; result?: unknown }) => {
     jobVersion.current += 1;
     if (event.phase === "completed" && event.result) {
-      setResult(event.result as MeetingResult);
+      const parsed = MeetingResultSchema.safeParse(event.result);
+      if (parsed.success) {
+        setResult((previous) => ({
+          ...parsed.data,
+          minutesMarkdown: parsed.data.minutesMarkdown ??
+            (previous?.minutesPath === parsed.data.minutesPath ? previous?.minutesMarkdown : undefined),
+          minutesVersions: parsed.data.minutesVersions?.map((version) => ({
+            ...version,
+            minutesMarkdown: version.minutesMarkdown ?? previous?.minutesVersions?.find(
+              (old) => old.kind === version.kind && old.minutesPath === version.minutesPath,
+            )?.minutesMarkdown,
+          })),
+        }));
+      } else {
+        setResult(undefined);
+        setError("会议纪要结果格式异常，请从任务历史打开输出文件。");
+      }
     } else if (event.phase !== "completed") {
       setResult(undefined);
     }
@@ -90,6 +105,38 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     onEvent: onJobEvent,
   });
   const busy = !!job && !["completed", "failed", "cancelled"].includes(job.phase);
+
+  // 兼容升级前的任务快照：旧结果只有文件路径，按已授权路径补读正文。
+  const versions = result?.minutesVersions;
+  const activeVersion = versions?.find((version) => version.kind === selectedKind)
+    ?? versions?.find((version) => version.minutesMarkdown || version.minutesPath)
+    ?? versions?.[0];
+  const minutesPath = activeVersion ? activeVersion.minutesPath : result?.minutesPath;
+  const minutesMarkdown = activeVersion ? activeVersion.minutesMarkdown : result?.minutesMarkdown;
+  const previewKind = activeVersion?.kind;
+  useEffect(() => {
+    setPreviewError("");
+    if (!minutesPath || minutesMarkdown != null) return;
+    let disposed = false;
+    void meetingReadMinutes(minutesPath)
+      .then((loaded) => {
+        if (!disposed) {
+          setResult((previous) => {
+            if (previewKind) {
+              return previous ? { ...previous, minutesVersions: previous.minutesVersions?.map((version) =>
+                version.kind === previewKind && version.minutesPath === minutesPath
+                  ? { ...version, minutesMarkdown: loaded.minutesMarkdown } : version) } : previous;
+            }
+            return previous?.minutesPath === minutesPath
+              ? { ...previous, minutesMarkdown: loaded.minutesMarkdown } : previous;
+          });
+        }
+      })
+      .catch((e) => {
+        if (!disposed) setPreviewError(errorText(e));
+      });
+    return () => { disposed = true; };
+  }, [minutesPath, minutesMarkdown, previewKind]);
 
   useEffect(() => {
     markToolPageLive(tool.id);
@@ -166,15 +213,13 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   async function startGenerate(extra: { audioPath?: string; transcriptPath?: string }) {
     setError("");
     setResult(undefined);
+    setSelectedKind(undefined);
     // 新一轮生成开始：此后后台快照与事件都属于当前输入，恢复回灌。
     manualResetRef.current = false;
     const params: Record<string, unknown> = {
       ...extra,
       detailLevel,
     };
-    if (title.trim()) params.title = title.trim();
-    if (participants.trim()) params.participants = participants.trim();
-    generateParams.current = params;
     try {
       await jobStart(
         extra.transcriptPath ? "meeting.summarize" : "meeting.generate",
@@ -192,6 +237,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     manualResetRef.current = true;
     jobVersion.current += 1;
     setResult(undefined);
+    setSelectedKind(undefined);
     setJob(undefined);
     setError("");
   }
@@ -203,6 +249,23 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
         setImportPath(value);
       }
     });
+  }
+
+  async function browseMinutes() {
+    setError("");
+    setReadingMinutes(true);
+    try {
+      const path = await pickPath("file", "选择已有会议纪要", ["md"]);
+      if (typeof path !== "string" || !path) return;
+      resetForNewAudio();
+      const version = jobVersion.current;
+      const loaded = await meetingReadMinutes(path);
+      if (version === jobVersion.current) setResult(loaded);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setReadingMinutes(false);
+    }
   }
 
   const recording = status?.recording;
@@ -361,27 +424,11 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
               </h2>
             </CardTitle>
             <CardDescription>
-              标题与参会人名单可帮助纪要把「说话人N」对应到真实姓名；详细度影响纪要篇幅。
+              一次生成按内容、按时间两个版本，共用所选详细度；标题根据会议内容自动生成。
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="meeting-options-grid">
-              <label>
-                会议标题（可选）
-                <Input
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder="留空自动按时间命名"
-                />
-              </label>
-              <label>
-                参会人名单（可选，逗号分隔）
-                <Input
-                  value={participants}
-                  onChange={(e) => setParticipants(e.target.value)}
-                  placeholder="如：张三，李四，王五"
-                />
-              </label>
               <label>
                 纪要详细度
                 <select
@@ -418,30 +465,74 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
               </h2>
             </CardTitle>
             <CardDescription>
-              会议结束后自动转写并生成；转写与纪要保存在同一会议文件夹。
+              生成后可切换查看按内容、按时间两个版本，文件分别保存在会议文件夹。
             </CardDescription>
           </CardHeader>
           <CardContent>
+            <div className="meeting-result-actions">
+              <Button variant="ghost" disabled={busy || readingMinutes || previewMode}
+                onClick={() => void browseMinutes()}>
+                {readingMinutes ? "正在读取纪要…" : "查看已有纪要"}
+              </Button>
+            </div>
             {result ? (
               <div className="meeting-result-card">
+                {versions && versions.length > 0 && (
+                  <div className="meeting-version-switch" role="group" aria-label="纪要版本">
+                    {versions.map((version) => (
+                      <Button key={version.kind}
+                        variant={activeVersion?.kind === version.kind ? "default" : "secondary"}
+                        aria-pressed={activeVersion?.kind === version.kind}
+                        onClick={() => setSelectedKind(version.kind)}>
+                        {version.label}{!version.minutesMarkdown && !version.minutesPath ? "（未生成）" : ""}
+                      </Button>
+                    ))}
+                  </div>
+                )}
                 <div className="meeting-result-meta">
-                  <span>{result.title || "会议纪要"}</span>
+                  {!minutesMarkdown && <span>{activeVersion ? activeVersion.title || `${activeVersion.label}版会议纪要` : result.title || "会议纪要"}</span>}
                   {typeof result.speakerCount === "number" && result.speakerCount > 0 && (
                     <span>识别出 {formatCount(result.speakerCount)} 位说话人</span>
                   )}
                 </div>
-                {result.minutesError && (
+                {result.minutesError && !activeVersion && (
                   <p role="alert" className="meeting-ask-error">
                     {result.minutesError}
                   </p>
                 )}
+                {activeVersion?.minutesError && (
+                  <p role="alert" className="meeting-ask-error">{activeVersion.minutesError}</p>
+                )}
+                {versions?.some((version) => version.minutesError) && (
+                  <p className="meeting-watch-hint">部分版本生成或保存未完成，可切换查看原因，或从转写稿重新生成两个版本。</p>
+                )}
+                {previewError && <p role="alert" className="meeting-ask-error">{previewError}</p>}
+                {minutesMarkdown ? (
+                  <article className="meeting-minutes-content" aria-label="会议纪要正文">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
+                      h1: ({ children }) => <h3 className="meeting-minutes-title">{children}</h3>,
+                      h2: ({ children }) => <h4>{children}</h4>,
+                      h3: ({ children }) => <h5>{children}</h5>,
+                      h4: ({ children }) => <h6>{children}</h6>,
+                      a: ({ children }) => <span>{children}</span>,
+                      img: () => null,
+                      table: ({ children }) => <div className="meeting-minutes-table"><table>{children}</table></div>,
+                    }}>
+                      {minutesMarkdown}
+                    </ReactMarkdown>
+                  </article>
+                ) : minutesMarkdown === "" ? (
+                  <p role="status">纪要文件暂无正文。</p>
+                ) : minutesPath && !previewError ? (
+                  <p role="status">正在读取纪要正文…</p>
+                ) : null}
                 <div className="meeting-result-actions">
-                  {result.minutesPath && (
+                  {minutesPath && (
                     <Button
                       variant="secondary"
-                      onClick={() => void openOutput(result.minutesPath as string)}
+                      onClick={() => void openOutput(minutesPath)}
                     >
-                      打开会议纪要
+                      {activeVersion ? `打开${activeVersion.label}版纪要` : "打开会议纪要"}
                     </Button>
                   )}
                   {result.transcriptPath && (
@@ -460,7 +551,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                         void startGenerate({ transcriptPath: result.transcriptPath })
                       }
                     >
-                      从转写稿重新生成
+                      {versions ? "从转写稿重新生成两个版本" : "从转写稿重新生成"}
                     </Button>
                   )}
                 </div>

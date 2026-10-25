@@ -1,6 +1,10 @@
 //! FA 合并明细的可重复磁盘游标；每批只解码有限行，不把整张清单重新装入内存。
 use super::{AppError, JoinedRow};
 use rusqlite::{Connection, params};
+#[cfg(test)]
+thread_local! { static DECODED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(super) fn decoded_rows() -> usize { DECODED_ROWS.with(|count| count.get()) }
 use std::{
     borrow::Cow,
     collections::VecDeque,
@@ -161,24 +165,33 @@ pub(crate) fn edit_disk_rows(
     path: &Path,
     mut edit: impl FnMut(&Connection, &mut JoinedRow) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
+    edit_disk_rows_if_changed(path, |conn, row| { edit(conn, row)?; Ok(true) }).map(|_| ())
+}
+
+pub(crate) fn edit_disk_rows_if_changed(
+    path: &Path,
+    mut edit: impl FnMut(&Connection, &mut JoinedRow) -> Result<bool, AppError>,
+) -> Result<usize, AppError> {
     let mut conn = open_with_wait(path)?;
     let tx = conn.transaction().map_err(db_error)?;
     let mut after = 0i64;
+    let mut changed = 0usize;
     loop {
         let batch = read_batch(&tx, after)?;
         if batch.is_empty() {
             break;
         }
         for (id, mut row) in batch {
-            edit(&tx, &mut row)?;
-            let data = serde_json::to_string(&row).map_err(json_error)?;
-            tx.execute("UPDATE joined SET data=? WHERE id=?", params![data, id])
-                .map_err(db_error)?;
+            if edit(&tx, &mut row)? {
+                let data = serde_json::to_string(&row).map_err(json_error)?;
+                tx.execute("UPDATE joined SET data=? WHERE id=?", params![data, id]).map_err(db_error)?;
+                changed += 1;
+            }
             after = id;
         }
     }
     tx.commit().map_err(db_error)?;
-    Ok(())
+    Ok(changed)
 }
 pub(crate) enum RowsIter<'a> {
     Memory(std::slice::Iter<'a, JoinedRow>),
@@ -262,6 +275,8 @@ fn read_batch_limited(
             row.get(0).map_err(db_error)?,
             serde_json::from_str(&data).map_err(json_error)?,
         ));
+        #[cfg(test)]
+        DECODED_ROWS.with(|count| count.set(count.get() + 1));
     }
     Ok(output)
 }

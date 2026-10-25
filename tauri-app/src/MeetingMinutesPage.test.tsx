@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   displayAudioFileName,
@@ -34,6 +34,9 @@ vi.mock("./api", () => ({
     recording: false,
   })),
   meetingSetResident: vi.fn(async () => undefined),
+  meetingReadMinutes: vi.fn(async (path: string) => ({
+    minutesPath: path, minutesMarkdown: "# 已有纪要标题\n\n原有纪要内容。",
+  })),
   openOutput: vi.fn(async () => true),
   pickPath: vi.fn(async () => null),
   listenJobEvents: vi.fn(async () => () => undefined),
@@ -67,6 +70,8 @@ describe("MeetingMinutesPage", () => {
     expect(screen.getByText("1. 会议记录")).toBeInTheDocument();
     expect(screen.getByText("2. 纪要选项")).toBeInTheDocument();
     expect(screen.getByText("3. 结果")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "纪要详细度" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: /会议标题|参会人/ })).not.toBeInTheDocument();
     // 视觉审核 S8：步骤条第 2 步与正文卡片统一叫「纪要选项」。
     expect(
       screen.getByRole("button", { name: "2 纪要选项" }),
@@ -215,6 +220,7 @@ describe("MeetingMinutesPage", () => {
     });
     render(<MeetingMinutesPage tool={tool} />);
     expect(await screen.findByText("项目周会")).toBeInTheDocument();
+    expect(await screen.findByRole("article", { name: "会议纪要正文" })).toHaveTextContent("原有纪要内容。");
     (await screen.findByRole("button", { name: "打开会议纪要" })).click();
     await waitFor(() => expect(openOutput).toHaveBeenCalledWith("C:/data/纪要.md"));
   });
@@ -262,5 +268,148 @@ describe("MeetingMinutesPage", () => {
     });
     render(<MeetingMinutesPage tool={tool} />);
     expect(await screen.findByText(/连接超时，任务编号：task-456/)).toBeInTheDocument();
+  });
+
+  it("完成事件直接渲染正文与待办表格，重新生成只提交详细度和转写路径", async () => {
+    const { meetingStatus, listenJobEvents, jobStart, meetingReadMinutes } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValue({
+      watchEnabled: true, resident: false, inCall: false, logFound: true, recording: false,
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    await waitFor(() => expect(listenJobEvents).toHaveBeenCalled());
+    const listener = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+    await act(async () => listener?.({
+      jobId: "complete-job", toolId: tool.id, phase: "completed", current: 4, total: 4,
+      message: "会议纪要已生成", severity: "success", outputPaths: [],
+      result: { title: "健康课程", minutesPath: "C:/data/纪要.md", transcriptPath: "C:/data/转写.txt",
+        minutesMarkdown: "# 健康课程\n\n## 四、后续事项\n\n| 类型 | 事项 | 责任人 | 截止时间 | 交付结果 |\n| --- | --- | --- | --- | --- |\n| 待办 | 复核材料 | 未提及 | 周三 | 清单 |\n| 待确认 | 确认复核负责人 | 未提及 | 未提及 | 未提及 |\n\n<script>alert(1)</script>\n\n![图片](https://example.com/private.png)\n\n[链接](https://example.com)",
+      },
+    }));
+    const article = screen.getByRole("article", { name: "会议纪要正文" });
+    expect(within(article).getByRole("heading", { name: "健康课程" })).toBeInTheDocument();
+    expect(within(article).getByRole("cell", { name: "复核材料" })).toBeInTheDocument();
+    expect(within(article).getByRole("columnheader", { name: "交付结果" })).toBeInTheDocument();
+    expect(within(article).getByRole("heading", { name: "四、后续事项" })).toBeInTheDocument();
+    expect(within(article).getByRole("cell", { name: /^待确认$/ })).toBeInTheDocument();
+    expect(article.querySelector("script, img, a")).toBeNull();
+    expect(meetingReadMinutes).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("combobox", { name: "纪要详细度" }), { target: { value: "detailed" } });
+    fireEvent.click(screen.getByRole("button", { name: "从转写稿重新生成" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("meeting.summarize", {
+      transcriptPath: "C:/data/转写.txt", detailLevel: "detailed",
+    }));
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+  });
+
+  it("已有纪要可在界面本地查看，无需启动转写任务", async () => {
+    const { meetingStatus, pickPath, meetingReadMinutes, jobStart } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValue({
+      watchEnabled: true, resident: false, inCall: false, logFound: true, recording: false,
+    });
+    vi.mocked(pickPath).mockResolvedValueOnce("C:/data/已有纪要.md");
+    render(<MeetingMinutesPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", { name: "查看已有纪要" }));
+    expect(await screen.findByRole("article", { name: "会议纪要正文" })).toHaveTextContent("原有纪要内容。");
+    expect(meetingReadMinutes).toHaveBeenCalledWith("C:/data/已有纪要.md");
+    expect(jobStart).not.toHaveBeenCalled();
+  });
+
+  it("旧结果正文读取失败时保留打开文件和重试生成入口", async () => {
+    const { meetingStatus, meetingReadMinutes } = await import("./api");
+    vi.mocked(meetingReadMinutes).mockRejectedValueOnce(new Error("文件已被移动"));
+    vi.mocked(meetingStatus).mockResolvedValueOnce({
+      watchEnabled: true, resident: false, inCall: false, logFound: true, recording: false,
+      latestJob: {
+        jobId: "old-job", toolId: tool.id, phase: "completed", current: 4, total: 4,
+        message: "已完成", severity: "success", outputPaths: [],
+        result: { minutesPath: "C:/data/旧纪要.md", transcriptPath: "C:/data/转写.txt" },
+      },
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByText("文件已被移动")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开会议纪要" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "从转写稿重新生成" })).toBeEnabled();
+  });
+
+  it("一次完成事件展示两个版本，切换正文与文件并一次重出两版", async () => {
+    const { meetingStatus, listenJobEvents, openOutput, jobStart } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValue({
+      watchEnabled: true, resident: false, inCall: false, logFound: true, recording: false,
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    await waitFor(() => expect(listenJobEvents).toHaveBeenCalled());
+    const listener = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+    await act(async () => listener?.({
+      jobId: "dual-job", toolId: tool.id, phase: "completed", current: 1, total: 1,
+      message: "已完成", severity: "success", outputPaths: [], result: {
+        transcriptPath: "C:/data/转写.txt",
+        minutesVersions: [
+          { kind: "content", label: "按内容", minutesPath: "C:/data/按内容.md", minutesMarkdown: "# 按内容纪要\n\n合并同类议题。" },
+          { kind: "timeline", label: "按时间", minutesPath: "C:/data/按时间.md", minutesMarkdown: "# 按时间纪要\n\n[00:08] 开场。\n\n[00:25] 调整方案。" },
+        ],
+      },
+    }));
+    expect(screen.getByRole("article")).toHaveTextContent("合并同类议题。");
+    expect(screen.getByRole("button", { name: "按内容", pressed: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "打开按内容版纪要" }));
+    await waitFor(() => expect(openOutput).toHaveBeenCalledWith("C:/data/按内容.md"));
+    fireEvent.click(screen.getByRole("button", { name: "按时间", pressed: false }));
+    expect(screen.getByRole("article")).toHaveTextContent("[00:08] 开场。");
+    expect(screen.getByRole("article")).not.toHaveTextContent("合并同类议题。");
+    fireEvent.click(screen.getByRole("button", { name: "打开按时间版纪要" }));
+    await waitFor(() => expect(openOutput).toHaveBeenCalledWith("C:/data/按时间.md"));
+    fireEvent.change(screen.getByRole("combobox", { name: "纪要详细度" }), { target: { value: "brief" } });
+    fireEvent.click(screen.getByRole("button", { name: "从转写稿重新生成两个版本" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("meeting.summarize", {
+      transcriptPath: "C:/data/转写.txt", detailLevel: "brief",
+    }));
+    expect(jobStart).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("group", { name: "纪要版本" })).not.toBeInTheDocument();
+  });
+
+  it("快照恢复部分成功的两个版本，默认显示成功版并能查看失败原因", async () => {
+    const { meetingStatus } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValueOnce({
+      watchEnabled: true, resident: false, inCall: false, logFound: true, recording: false,
+      latestJob: {
+        jobId: "partial-dual", toolId: tool.id, phase: "completed", current: 1, total: 1,
+        message: "已完成", severity: "success", outputPaths: [], result: {
+          transcriptPath: "C:/data/转写.txt", minutesPath: "C:/data/按时间.md",
+          minutesVersions: [
+            { kind: "content", label: "按内容", minutesError: "按内容版服务超时" },
+            { kind: "timeline", label: "按时间", minutesPath: "C:/data/按时间.md", minutesMarkdown: "# 按时间纪要\n\n成功版本内容。" },
+          ],
+        },
+      },
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByRole("article")).toHaveTextContent("成功版本内容。");
+    expect(screen.getByRole("button", { name: "按时间", pressed: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "按内容（未生成）" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("按内容版服务超时");
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /打开按.*版纪要/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "从转写稿重新生成两个版本" })).toBeEnabled();
+  });
+
+  it("新输入撤下两版正文，后台旧快照不会回填", async () => {
+    const { meetingStatus, pickPath } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValue({
+      watchEnabled: true, resident: false, inCall: false, logFound: true, recording: false,
+      latestJob: { jobId: "old-dual", toolId: tool.id, phase: "completed", current: 1, total: 1,
+        message: "已完成", severity: "success", outputPaths: [], result: {
+          minutesVersions: [
+            { kind: "content", label: "按内容", minutesMarkdown: "# 旧按内容\n正文" },
+            { kind: "timeline", label: "按时间", minutesMarkdown: "# 旧按时间\n正文" },
+          ],
+        },
+      },
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    await screen.findByRole("group", { name: "纪要版本" });
+    vi.mocked(pickPath).mockResolvedValueOnce("C:/data/新会议.wav");
+    fireEvent.click(screen.getByRole("button", { name: /拖放或点击选择已有录音/ }));
+    await waitFor(() => expect(screen.queryByRole("article")).not.toBeInTheDocument());
+    expect(screen.queryByRole("group", { name: "纪要版本" })).not.toBeInTheDocument();
   });
 });

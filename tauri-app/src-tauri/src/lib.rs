@@ -1153,6 +1153,28 @@ fn meeting_status(meeting: State<'_, Arc<meeting_watch::MeetingState>>) -> Value
 }
 
 #[tauri::command]
+fn meeting_read_minutes(allowed: State<'_, AllowedPaths>, path: String) -> Result<Value, AppError> {
+    read_authorized_meeting_minutes(&allowed, Path::new(&path))
+}
+
+fn read_authorized_meeting_minutes(allowed: &AllowedPaths, path: &Path) -> Result<Value, AppError> {
+    if !allowed
+        .0
+        .lock()
+        .iter()
+        .any(|selected| path_is_permitted(path, selected))
+    {
+        return Err(AppError::new(
+            "PATH_NOT_AUTHORIZED",
+            "请先选择要查看的会议纪要文件。",
+            false,
+            None,
+        ));
+    }
+    meeting_minutes::read_minutes(path)
+}
+
+#[tauri::command]
 fn meeting_detect_set_enabled(meeting: State<'_, Arc<meeting_watch::MeetingState>>, enabled: bool) {
     meeting.set_watch_enabled(enabled);
 }
@@ -1909,6 +1931,7 @@ pub fn run() {
             meeting_record_start,
             meeting_record_stop,
             meeting_status,
+            meeting_read_minutes,
             meeting_detect_set_enabled,
             meeting_set_resident,
             meeting_autostart_status,
@@ -2086,6 +2109,35 @@ mod tests {
         let err = secret_delete("arbitrary_secret".into()).unwrap_err();
         assert_eq!(err.code, "SECRET_NAME_DENIED");
         assert_eq!(err.user_message, "不允许删除该类型的凭据。");
+    }
+
+    #[test]
+    fn meeting_minutes_preview_requires_explicit_file_or_directory_authorization() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("选中.md");
+        let sibling = dir.path().join("其他.md");
+        std::fs::write(&selected, "# 选中纪要\n正文").unwrap();
+        std::fs::write(&sibling, "# 其他纪要\n正文").unwrap();
+        let allowed = AllowedPaths(Arc::new(Mutex::new(HashSet::new())));
+        assert_eq!(
+            read_authorized_meeting_minutes(&allowed, &selected)
+                .unwrap_err()
+                .code,
+            "PATH_NOT_AUTHORIZED"
+        );
+        allowed.0.lock().insert(selected.clone());
+        assert_eq!(
+            read_authorized_meeting_minutes(&allowed, &selected).unwrap()["title"],
+            "选中纪要"
+        );
+        assert_eq!(
+            read_authorized_meeting_minutes(&allowed, &sibling)
+                .unwrap_err()
+                .code,
+            "PATH_NOT_AUTHORIZED"
+        );
+        allowed.0.lock().insert(dir.path().to_path_buf());
+        assert!(read_authorized_meeting_minutes(&allowed, &sibling).is_ok());
     }
 
     /// 页面直开常驻开关只应合并 meeting 命名空间的单个键，

@@ -25,6 +25,14 @@ use crate::excel_merger::PauseCheckpoint;
 
 #[path = "fa_disk_rows.rs"]
 mod disk_rows;
+#[path = "fa_export_rows.rs"]
+mod export_rows;
+#[path = "fa_export_projection.rs"]
+mod export_projection;
+use export_projection::{MergedCell, MergedProjection};
+#[cfg(test)]
+#[path = "fa_export_tests.rs"]
+mod export_tests;
 #[cfg(test)]
 #[path = "fa_header_controls_tests.rs"]
 mod header_controls_tests;
@@ -2020,6 +2028,10 @@ fn match_statistics(result: &MergeResult) -> Value {
         }
         acc
     });
+    statistics_from_counts(result, counts)
+}
+
+fn statistics_from_counts(result: &MergeResult, counts: [usize; 3]) -> Value {
     json!({"rows":result.rows.len(),"both":counts[0],"beginOnly":counts[1],"endOnly":counts[2],
         "duplicates":{"hasDuplicates":result.duplicate_values>0,"duplicateValueCount":result.duplicate_values,"duplicateRowCount":result.duplicate_rows},
         "unmatchedAddition":unmatched_count(result,false),"unmatchedDisposal":unmatched_count(result,true)})
@@ -2086,28 +2098,25 @@ fn export(
         .and_then(|v| v.to_str())
         .map(|v| v.eq_ignore_ascii_case("csv"))
         .unwrap_or(false);
+    let (export_columns, source_counts) = result_columns_and_counts(&result, true);
+    result.rows.check()?;
     let tax_started = std::time::Instant::now();
     let tax_analysis = if is_csv {
         None
     } else {
         progress("analyze", 3, 5, "正在分析税法最低折旧年限");
-        let period_rows = build_depreciation_period(&result, &params);
-        Some(crate::fa_subtools::build_policy_tax_analysis(
-            &period_rows,
-            &params,
-            &cancel,
-            pause,
-        )?)
+        Some(crate::fa_subtools::prepare_policy_export(&result, &params, &cancel, pause)?)
     };
     let tax_secs = tax_started.elapsed().as_secs_f64();
     progress("export", 4, 5, "正在生成 FA List、变动清单、汇总与透视表");
     let write_started = std::time::Instant::now();
+    let mut export_timings = Vec::new();
     if is_csv {
         pause.wait()?;
-        write_csv(&output, &result, strings(params.get("selectedColumns")))?;
+        write_csv_with_columns(&output, &result, strings(params.get("selectedColumns")), export_columns.clone())?;
     } else {
         pause.wait()?;
-        write_xlsx_with_tax_analysis(&output, &result, &params, &cancel, tax_analysis.as_ref())?;
+        export_timings = write_xlsx_with_progress(&output, &result, &params, &cancel, tax_analysis.as_ref(), Some(&export_columns), progress)?;
     }
     let write_secs = write_started.elapsed().as_secs_f64();
     let mut export_message = "FA List 导出完成".to_owned();
@@ -2125,10 +2134,14 @@ fn export(
         "（{} {:.1}s｜税法年限分析 {:.1}s｜生成套表 {:.1}s）",
         merge_label, merge_secs, tax_secs, write_secs
     ));
+    if !export_timings.is_empty() {
+        export_message.push_str(&format!("；套表分段：{}", export_timings.iter()
+            .map(|(name, secs)| format!("{name} {secs:.1}s")).collect::<Vec<_>>().join("｜")));
+    }
     let completion_message = export_message.clone();
     let warnings = correction_warnings(&result, &params);
-    let stats = match_statistics(&result);
-    let column_count = result_columns(&result,true).len();
+    let stats = statistics_from_counts(&result, source_counts);
+    let column_count = export_columns.len();
     result.rows.check()?;
     if !warnings.is_empty() {
         export_message.push_str("===CORRECTION_WARNINGS===");
@@ -2138,8 +2151,8 @@ fn export(
     progress("completed", 5, 5, &completion_message);
     Ok(
         json!({"engine":"rust-fa","message":"完全外连接完成。","exportMessage":export_message,
-        "taxAnalysisCompleted":tax_analysis.as_ref().is_some_and(|analysis| analysis.completed),
-        "stats":stats,
+        "taxAnalysisCompleted":tax_analysis.as_ref().is_some_and(|analysis| analysis.tax.completed),
+        "stats":stats,"exportTimings":export_timings,
         "rows":result.rows.len(),"columns":column_count,"outputPaths":[output.to_string_lossy()]}),
     )
 }
@@ -3363,6 +3376,10 @@ fn mapped_display_header(params: &Value, side: u8, role: &str, fallback: &str) -
 }
 
 fn result_columns(r: &MergeResult, formatted: bool) -> Vec<String> {
+    result_columns_and_counts(r, formatted).0
+}
+
+fn result_columns_and_counts(r: &MergeResult, formatted: bool) -> (Vec<String>, [usize; 3]) {
     let left = if formatted { "期初" } else { "文件1" };
     let right = if formatted { "期末" } else { "文件2" };
     let mut columns = r
@@ -3373,11 +3390,12 @@ fn result_columns(r: &MergeResult, formatted: bool) -> Vec<String> {
         .chain(r.end.headers.iter().map(|h| format!("{h}_{right}")))
         .collect::<Vec<_>>();
     columns.extend(["数据来源".into(), "匹配列".into()]);
-    let extras = r
-        .rows
-        .iter()
-        .flat_map(|row| row.extra.keys().cloned().collect::<Vec<_>>())
-        .collect::<BTreeSet<_>>();
+    let mut counts = [0usize; 3];
+    let mut extras = BTreeSet::new();
+    for row in &r.rows {
+        counts[match row.source { "两文件都有" => 0, "仅文件1" => 1, _ => 2 }] += 1;
+        extras.extend(row.extra.keys().cloned());
+    }
     columns.extend(extras.into_iter().map(|v| {
         if formatted {
             v.replace("_文件1", "_期初").replace("_文件2", "_期末")
@@ -3385,7 +3403,7 @@ fn result_columns(r: &MergeResult, formatted: bool) -> Vec<String> {
             v
         }
     }));
-    columns
+    (columns, counts)
 }
 fn row_json(result: &MergeResult, row: &JoinedRow, formatted: bool) -> Value {
     let left = if formatted { "期初" } else { "文件1" };
@@ -3423,8 +3441,12 @@ fn row_json(result: &MergeResult, row: &JoinedRow, formatted: bool) -> Value {
 }
 
 fn write_csv(path: &Path, result: &MergeResult, selected: Vec<String>) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() { fs::create_dir_all(parent).map_err(io_error)?; }
     let all = result_columns(result, true);
+    write_csv_with_columns(path, result, selected, all)
+}
+
+fn write_csv_with_columns(path: &Path, result: &MergeResult, selected: Vec<String>, all: Vec<String>) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent).map_err(io_error)?; }
     let columns = if selected.is_empty() { all } else { all.into_iter().filter(|v| selected.contains(v)).collect() };
     let partial = path.with_extension("csv.partial");
     let write = (|| -> Result<(), AppError> {
@@ -3570,14 +3592,37 @@ fn write_xlsx_with_tax_analysis(
     result: &MergeResult,
     params: &Value,
     cancel: &AtomicBool,
-    tax_analysis: Option<&crate::fa_subtools::PolicyTaxAnalysis>,
+    tax_analysis: Option<&crate::fa_subtools::PreparedPolicyExport>,
 ) -> Result<(), AppError> {
+    write_xlsx_with_progress(path, result, params, cancel, tax_analysis, None, &|_, _, _, _| {}).map(|_| ())
+}
+
+fn write_xlsx_with_progress(
+    path: &Path,
+    result: &MergeResult,
+    params: &Value,
+    cancel: &AtomicBool,
+    tax_analysis: Option<&crate::fa_subtools::PreparedPolicyExport>,
+    prepared_columns: Option<&[String]>,
+    progress: Progress<'_>,
+) -> Result<Vec<(&'static str, f64)>, AppError> {
+    let mut timings = Vec::new();
+    let mut stage_name = "合并明细";
+    let mut stage_started = std::time::Instant::now();
+    progress("export", 80, 100, "正在写入合并明细");
+    let mut advance = |percent, name: &'static str, message| {
+        timings.push((stage_name, stage_started.elapsed().as_secs_f64()));
+        stage_name = name;
+        stage_started = std::time::Instant::now();
+        progress("export", percent, 100, message);
+    };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io_error)?;
     }
     let partial = path.with_extension("xlsx.partial");
     let mut wb = Workbook::new();
-    let columns = result_columns(result, true);
+    let columns = prepared_columns.map(<[String]>::to_vec).unwrap_or_else(|| result_columns(result, true));
+    let projection = MergedProjection::new(result, &columns);
     let header = Format::new()
         .set_bold()
         .set_background_color(LEGACY_HEADER_FILL)
@@ -3639,10 +3684,10 @@ fn write_xlsx_with_tax_analysis(
             .map(|(c, _)| !date_column[c] && !identifier_column[c])
             .collect::<Vec<_>>();
         for row in detail_rows().take(1000) {
-            let value = row_json(result, &row, true);
-            for (c, h) in columns.iter().enumerate() {
+            let value = projection.project(&row);
+            for c in 0..columns.len() {
                 if numeric_column[c] {
-                    if let Some(Value::String(text)) = value.get(h) {
+                    if let MergedCell::Text(text) = value[c] {
                         if !text.trim().is_empty() && numeric_text(text).is_none() {
                             numeric_column[c] = false;
                         }
@@ -3651,18 +3696,23 @@ fn write_xlsx_with_tax_analysis(
             }
         }
         let mut widest = vec![0usize; columns.len()];
+        let mut detail_count = 0usize;
         for (r, row) in detail_rows().enumerate() {
+            detail_count = r + 1;
             check_cancel(cancel)?;
-            let value = row_json(result, &row, true);
+            if r % 4096 == 0 {
+                progress("export", 80 + r * 7 / result.rows.len().max(1), 100, "正在写入合并明细");
+            }
+            let value = projection.project(&row);
             for (c, h) in columns.iter().enumerate() {
-                let cell = value.get(h);
+                let cell = value[c];
                 let excel_row = (r + 2) as u32;
                 // Measure what actually lands in the cell: a date column holds
                 // "2023-06-27" even though the source value is the serial 45104.
                 if r < 10 || numeric_column[c] {
                     let rendered = match cell {
-                        Some(Value::String(text)) if date_column[c] => display_date(text),
-                        other => json_cell(other),
+                        MergedCell::Text(text) if date_column[c] => std::borrow::Cow::Owned(display_date(text)),
+                        other => other.rendered(),
                     };
                     widest[c] = widest[c].max(legacy_display_len(&rendered, h));
                 }
@@ -3676,7 +3726,7 @@ fn write_xlsx_with_tax_analysis(
                     None
                 };
                 match cell {
-                    Some(Value::String(text)) if date_column[c] => {
+                    MergedCell::Text(text) if date_column[c] => {
                         let rendered = display_date(text);
                         match tint {
                             Some(fmt) => {
@@ -3686,7 +3736,7 @@ fn write_xlsx_with_tax_analysis(
                         }
                         .map_err(xlsx_error)?;
                     }
-                    Some(Value::String(text)) if numeric_column[c] => {
+                    MergedCell::Text(text) if numeric_column[c] => {
                         match (numeric_text(text), tint) {
                             (Some(number), Some(fmt)) => {
                                 ws.write_number_with_format(excel_row, c as u16, number, fmt)
@@ -3703,10 +3753,17 @@ fn write_xlsx_with_tax_analysis(
                     }
                     _ => match tint {
                         Some(fmt) => ws
-                            .write_string_with_format(excel_row, c as u16, json_cell(cell), fmt)
+                            .write_string_with_format(excel_row, c as u16, cell.rendered(), fmt)
                             .map(|_| ())
                             .map_err(xlsx_error)?,
-                        None => write_json_cell(ws, excel_row, c as u16, cell)?,
+                        None => {
+                            match cell {
+                                MergedCell::Text(text) => { ws.write_string(excel_row, c as u16, text).map_err(xlsx_error)?; }
+                                MergedCell::Number(number) => { ws.write_number(excel_row, c as u16, number).map_err(xlsx_error)?; }
+                                MergedCell::Null => { ws.write_string(excel_row, c as u16, "null").map_err(xlsx_error)?; }
+                                MergedCell::Missing => {}
+                            }
+                        }
                     },
                 }
             }
@@ -3716,12 +3773,12 @@ fn write_xlsx_with_tax_analysis(
             ws.autofilter(
                 0,
                 0,
-                detail_rows().count() as u32 + 1,
+                detail_count as u32 + 1,
                 columns.len().saturating_sub(1) as u16,
             )
             .map_err(xlsx_error)?;
         }
-        let note_row = detail_rows().count() as u32 + 3;
+        let note_row = detail_count as u32 + 3;
         let info = sheet_explanation(name);
         let note = format!("{} 信息来源：{} 重点关注：{}", info.0, info.1, info.2);
         ws.write_string_with_format(note_row, 0, "本表说明", &header)
@@ -3739,37 +3796,45 @@ fn write_xlsx_with_tax_analysis(
         ws.set_row_height(note_row, 72).map_err(xlsx_error)?;
     }
     // Sheet creation order *is* the tab order in the workbook; see SHEET_ORDER.
+    advance(88, "数据透视", "正在生成数据透视表");
     write_pivot_sheet(&mut wb, result, params, &header, cancel)?;
     check_cancel(cancel)?;
+    advance(89, "变动汇总", "正在生成固定资产变动汇总表");
     write_summary_sheet(&mut wb, result, params, &header)?;
     check_cancel(cancel)?;
+    advance(90, "业务清单", "正在生成 FA List 及新增、处置清单");
     write_business_sheets(&mut wb, result, params, &header, cancel)?;
     check_cancel(cancel)?;
+    advance(94, "折旧期间", "正在生成折旧期间表");
     if let Some(analysis) = tax_analysis {
         crate::fa_subtools::write_depreciation_period_tax_sheet(
             &mut wb,
-            result,
             params,
             &header,
             cancel,
             "折旧期间",
-            &analysis.rows,
+            analysis,
         )?;
     } else {
         write_depreciation_period_sheet(&mut wb, result, params, &header, cancel, "折旧期间")?;
     }
     check_cancel(cancel)?;
+    advance(95, "分析与异常", "正在生成分析与异常清单");
     if fa_llm_enabled(params) {
         write_llm_analysis(&mut wb, result, params)?;
     }
     write_anomaly_sheet(&mut wb, result, params, &header, cancel)?;
     result.rows.check()?;
+    advance(97, "压缩保存", "正在压缩并保存工作簿");
     wb.save(&partial).map_err(xlsx_error)?;
     if let Err(cancelled) = check_cancel(cancel) {
         let _ = fs::remove_file(&partial);
         return Err(cancelled);
     }
-    replace_output(&partial, path)
+    replace_output(&partial, path)?;
+    advance(99, "保存完成", "套表已保存，正在完成导出检查");
+    drop(advance);
+    Ok(timings)
 }
 
 /// Returns the summary-noise rows for `write_noise_backup_sheet` to emit later.
@@ -3779,27 +3844,9 @@ fn write_summary_sheet(
     params: &Value,
     header: &Format,
 ) -> Result<Vec<Vec<String>>, AppError> {
-    let (headers, rows, noise) = build_extended_summary(result, params);
-    let mut begin_categories = BTreeSet::new();
-    let mut end_categories = BTreeSet::new();
-    for row in result
-        .rows
-        .iter()
-        .filter(|row| row_summary_noise_marker(&row).is_none())
-    {
-        let begin = mapped_text(result, &row, params, 1, "category");
-        let end = mapped_text(result, &row, params, 2, "category");
-        if !begin.trim().is_empty()
-            && mapped_number(result, &row, params, 1, "originalValue").abs() > 0.005
-        {
-            begin_categories.insert(begin);
-        }
-        if !end.trim().is_empty()
-            && mapped_number(result, &row, params, 2, "originalValue").abs() > 0.005
-        {
-            end_categories.insert(end);
-        }
-    }
+    let mut category_sources = [BTreeSet::new(), BTreeSet::new()];
+    let (headers, rows, noise) = build_extended_summary_with_sources(result, params, Some(&mut category_sources));
+    let [begin_categories, end_categories] = category_sources;
     let ws = wb.add_worksheet();
     ws.set_name("固定资产变动汇总表").map_err(xlsx_error)?;
     for (c, h) in headers.iter().enumerate() {
@@ -4044,6 +4091,15 @@ fn build_summary_lines(
     params: &Value,
     short_labels: bool,
 ) -> (Vec<String>, Vec<SummaryLine>, Vec<Vec<String>>) {
+    build_summary_lines_with_sources(result, params, short_labels, None)
+}
+
+fn build_summary_lines_with_sources(
+    result: &MergeResult,
+    params: &Value,
+    short_labels: bool,
+    mut category_sources: Option<&mut [BTreeSet<String>; 2]>,
+) -> (Vec<String>, Vec<SummaryLine>, Vec<Vec<String>>) {
     let mut budget = FaAggregateBudget::new(result,"资产变动汇总");
     let mut movements: BTreeMap<String, CategoryMovement> = BTreeMap::new();
     // Legacy preserves the category order in the merged schedule instead of
@@ -4094,6 +4150,14 @@ fn build_summary_lines(
             && begin_category != end_category;
         let begin_original = mapped_number(result, &row, params, 1, "originalValue");
         let end_original = mapped_number(result, &row, params, 2, "originalValue");
+        if let Some(sources) = category_sources.as_mut() {
+            if !begin_category.trim().is_empty() && begin_original.abs() > 0.005 {
+                sources[0].insert(begin_category.clone());
+            }
+            if !end_category.trim().is_empty() && end_original.abs() > 0.005 {
+                sources[1].insert(end_category.clone());
+            }
+        }
         let begin_dep = mapped_number(result, &row, params, 1, "depreciation");
         let end_dep = mapped_number(result, &row, params, 2, "depreciation");
         {
@@ -4346,7 +4410,15 @@ fn build_extended_summary(
     result: &MergeResult,
     params: &Value,
 ) -> (Vec<String>, Vec<Vec<String>>, Vec<Vec<String>>) {
-    let (categories, lines, noise) = build_summary_lines(result, params, false);
+    build_extended_summary_with_sources(result, params, None)
+}
+
+fn build_extended_summary_with_sources(
+    result: &MergeResult,
+    params: &Value,
+    category_sources: Option<&mut [BTreeSet<String>; 2]>,
+) -> (Vec<String>, Vec<Vec<String>>, Vec<Vec<String>>) {
+    let (categories, lines, noise) = build_summary_lines_with_sources(result, params, false, category_sources);
     let mut headers = vec![String::new(), String::new(), "合计".into()];
     headers.extend(categories.iter().cloned());
     let rows = lines
@@ -4392,7 +4464,8 @@ fn write_business_sheets(
         "提足折旧时间",
     ];
     let end_life_scale = life_scale(result, params, 2);
-    let fa_rows=|| result.rows.iter()
+    let mut short_rows = export_rows::PreparedRows::default();
+    let fa_rows = result.rows.iter()
         .filter(|row|row.end.is_some() && row_summary_noise_marker(&row).is_none())
         .filter(|row|!primary_key_segment(&row.match_value).trim().is_empty())
         .map(|row| {
@@ -4411,7 +4484,7 @@ fn write_business_sheets(
         } else {
             "否"
         };
-        Ok(vec![
+        let values = vec![
             mapped_text(result, &row, params, 2, "category"),
             primary_key_segment(&row.match_value),
             mapped_text(result, &row, params, 2, "name"),
@@ -4424,13 +4497,19 @@ fn write_business_sheets(
             display_number(original - depreciation),
             fully.into(),
             depreciation_end_date(&mapped_text(result, &row, params, 2, "startDate"), life),
-        ])
+        ];
+        // Reuse the exact rendered FA row instead of re-reading and computing
+        // every asset a second time just to select the short-life subset.
+        if parse_life_cell(&values[4]).is_some_and(|life| life > 0.0 && life <= 12.0) {
+            short_rows.push(values.clone())?;
+        }
+        Ok(values)
     });
     write_string_sheet_stream(
         wb,
         "FA List",
         &fa_headers,
-        fa_rows,
+        || fa_rows,
         header,
         params.get("balanceSheetDate").and_then(Value::as_str),
         Some(cancel),
@@ -4439,10 +4518,7 @@ fn write_business_sheets(
     // A blank life is "unknown", not "short": legacy required a parsed value
     // before comparing, so cards with no life stayed out of this sheet instead
     // of dragging the whole ledger into it.
-    let short_rows=|| fa_rows().filter(|row| {
-        row.as_ref().map(|row|parse_life_cell(row.get(4).map(String::as_str).unwrap_or("")).is_some_and(|life|life>0.0 && life<=12.0)).unwrap_or(true)
-    });
-    if short_rows().next().is_none() {
+    if short_rows.count == 0 {
         // An empty grid reads as "not computed"; the legacy sheet said so
         // explicitly in a single 提示 column.
         write_string_sheet(
@@ -4457,11 +4533,12 @@ fn write_business_sheets(
             Some(cancel),
         )?;
     } else {
+        let short_rows = short_rows.into_rows()?;
         write_string_sheet_stream(
             wb,
             "≤12月卡片明细",
             &fa_headers,
-            short_rows,
+            || short_rows,
             header,
             None,
             Some(cancel),
@@ -4751,7 +4828,7 @@ pub(crate) fn write_depreciation_period_sheet(
     sheet_name: &str,
 ) -> Result<(), AppError> {
     let headers = depreciation_period_headers(params);
-    let rows = build_depreciation_period(result, params);
+    let rows = build_depreciation_period(result, params)?;
     write_string_sheet_labelled(
         wb,
         sheet_name,
@@ -4791,8 +4868,11 @@ fn write_anomaly_sheet(
     header: &Format,
     cancel: &AtomicBool,
 ) -> Result<(), AppError> {
-    let read=|| result.rows.iter().enumerate().flat_map(|(i,row)|row_anomalies(result,params,i,&row)).map(Ok);
-    if read().next().is_none() { return write_string_sheet(wb,"异常清单",&["异常类型","原始行号","资产类别","资产编码","资产名称","期末原值","处理方式","行内容"],&build_anomalies(result,params),header,None,Some(cancel)); }
+    let mut rows = result.rows.iter().enumerate()
+        .flat_map(|(i,row)|row_anomalies(result,params,i,&row)).map(Ok).peekable();
+    if rows.peek().is_none() {
+        return write_string_sheet(wb,"异常清单",&["异常类型","原始行号","资产类别","资产编码","资产名称","期末原值","处理方式","行内容"],&[no_anomaly_row()],header,None,Some(cancel));
+    }
     write_string_sheet_stream(
         wb,
         "异常清单",
@@ -4806,7 +4886,7 @@ fn write_anomaly_sheet(
             "处理方式",
             "行内容",
         ],
-        read,
+        || rows,
         header,
         None,
         Some(cancel),
@@ -4913,7 +4993,7 @@ fn life_scale(result: &MergeResult, params: &Value, side: u8) -> f64 {
 
 /// One card's useful life in months, 0 when the cell is blank or unparseable.
 fn mapped_life(result: &MergeResult, row: &JoinedRow, params: &Value, side: u8, scale: f64) -> f64 {
-    match parse_life_cell(&mapped_text(result, &row, params, side, "life")) {
+    match parse_life_cell(mapped_text_ref(result, row, params, side, "life")) {
         Some(value) if value > 0.0 => value * scale,
         _ => 0.0,
     }
@@ -5141,7 +5221,7 @@ struct DepGroup {
     end_residual_amount: f64,
 }
 
-pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) -> Vec<Vec<String>> {
+pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) -> Result<Vec<Vec<String>>, AppError> {
     let mut budget = FaAggregateBudget::new(result,"折旧政策对比");
     let begin_life_scale = life_scale(result, params, 1);
     let end_life_scale = life_scale(result, params, 2);
@@ -5156,6 +5236,23 @@ pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) ->
         begin_residual: f64,
         end_residual: f64,
         begin_category_inferred: bool,
+    }
+    impl Input {
+        // Preserve the exact f64 bit patterns across bounded temporary replay.
+        fn stored(self) -> Vec<String> {
+            vec![self.begin_category, self.end_category, self.begin_life.to_string(), self.end_life.to_string(),
+                self.begin_original.to_bits().to_string(), self.end_original.to_bits().to_string(),
+                self.begin_residual.to_bits().to_string(), self.end_residual.to_bits().to_string()]
+        }
+        fn restored(row: Result<Vec<String>, AppError>) -> Result<Self, AppError> {
+            let row = row?;
+            let invalid = || error("FA_POLICY_REPLAY_INVALID", "折旧政策临时数据损坏，请重试。", None);
+            if row.len() != 8 { return Err(invalid()); }
+            let bits = |index: usize| row[index].parse::<u64>().map(f64::from_bits).map_err(|_|invalid());
+            Ok(Self {begin_category:row[0].clone(),end_category:row[1].clone(),
+                begin_life:row[2].parse().map_err(|_|invalid())?,end_life:row[3].parse().map_err(|_|invalid())?,
+                begin_original:bits(4)?,end_original:bits(5)?,begin_residual:bits(6)?,end_residual:bits(7)?,begin_category_inferred:false})
+        }
     }
     let normalize_category = |value: String| {
         let value = value.trim().to_owned();
@@ -5203,16 +5300,21 @@ pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) ->
     // already exists; genuinely new categories remain visible as 未分类 -> 类别.
     let mut start_categories = BTreeSet::new();
     let mut start_category_lives = BTreeSet::new();
-    for input in inputs().filter(|i| !i.begin_category.is_empty() && i.begin_original.abs() > 0.005) {
+    let mut prepared_inputs = export_rows::PreparedRows::default();
+    for input in inputs() {
+        if !input.begin_category.is_empty() && input.begin_original.abs() > 0.005 {
         if !start_categories.contains(&input.begin_category) {
-            if !budget.reserve((256 + input.begin_category.len() * 2) as u64) { return Vec::new(); }
+            if !budget.reserve((256 + input.begin_category.len() * 2) as u64) { result.rows.check()?; return Ok(Vec::new()); }
             start_categories.insert(input.begin_category.clone());
         }
         if input.begin_life != 0 && !start_category_lives.contains(&(input.begin_category.clone(),input.begin_life)) {
-            if !budget.reserve((256 + input.begin_category.len() * 2) as u64) { return Vec::new(); }
-            start_category_lives.insert((input.begin_category,input.begin_life));
+            if !budget.reserve((256 + input.begin_category.len() * 2) as u64) { result.rows.check()?; return Ok(Vec::new()); }
+            start_category_lives.insert((input.begin_category.clone(),input.begin_life));
         }
+        }
+        prepared_inputs.push(input.stored())?;
     }
+    result.rows.check()?;
     let with_opening = |mut input: Input| {
         if input.begin_category.is_empty()
             && !input.end_category.is_empty()
@@ -5232,10 +5334,11 @@ pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) ->
         input
     };
     let mut closing_by_opening = BTreeMap::<(String, i64), (String, i64)>::new();
-    for input in inputs().map(&with_opening) {
+    for input in prepared_inputs.replay()?.map(Input::restored) {
+        let input = with_opening(input?);
         if !input.begin_category.is_empty() && !input.end_category.is_empty() {
             if !closing_by_opening.contains_key(&(input.begin_category.clone(), input.begin_life))
-                && !budget.reserve((512 + (input.begin_category.len() + input.end_category.len()) * 2) as u64) { return Vec::new(); }
+                && !budget.reserve((512 + (input.begin_category.len() + input.end_category.len()) * 2) as u64) { result.rows.check()?; return Ok(Vec::new()); }
             closing_by_opening
                 .entry((input.begin_category.clone(), input.begin_life))
                 .or_insert_with(|| (input.end_category.clone(), input.end_life));
@@ -5260,14 +5363,15 @@ pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) ->
     };
 
     let mut groups: BTreeMap<(String, String, i64, i64), DepGroup> = BTreeMap::new();
-    for input in inputs().map(with_opening).map(with_closing) {
+    for input in prepared_inputs.replay()?.map(Input::restored) {
+        let input = with_closing(with_opening(input?));
         let key = (
             input.begin_category,
             input.end_category,
             input.begin_life,
             input.end_life,
         );
-        if !groups.contains_key(&key) && !budget.reserve((2048 + (key.0.len() + key.1.len()) * 8) as u64) { return Vec::new(); }
+        if !groups.contains_key(&key) && !budget.reserve((2048 + (key.0.len() + key.1.len()) * 8) as u64) { result.rows.check()?; return Ok(Vec::new()); }
         let group = groups.entry(key).or_default();
         group.begin_original += input.begin_original;
         group.end_original += input.end_original;
@@ -5340,7 +5444,7 @@ pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) ->
             }
         }
     }
-    prepared
+    Ok(prepared
         .drain(..)
         .map(
             |(begin_category, end_category, begin_life, end_life, begin_rate, end_rate, g)| {
@@ -5422,7 +5526,7 @@ pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) ->
                 ]
             },
         )
-        .collect()
+        .collect())
 }
 
 fn generic_field_value(
@@ -5754,14 +5858,14 @@ fn row_anomalies(result: &MergeResult, params: &Value, row_index:usize,row:&Join
             let depreciation = mapped_number(result, &row, params, side, "depreciation");
             let category = mapped_text(result, &row, params, side, "category");
             let name = mapped_text(result, &row, params, side, "name");
-            let raw = if side == 1 {
-                row.begin.as_ref()
-            } else {
-                row.end.as_ref()
-            }
-            .map(|values| values.join(" | "))
-            .unwrap_or_default();
+            let mut raw = None;
             let mut push = |kind: &str, action: &str| {
+                // Normal cards need no full-width raw-line copy. Cache only
+                // when this side actually contributes an anomaly row.
+                let raw = raw.get_or_insert_with(|| {
+                    if side == 1 { row.begin.as_ref() } else { row.end.as_ref() }
+                        .map(|values| values.join(" | ")).unwrap_or_default()
+                });
                 rows.push(vec![
                     kind.into(),
                     (row_index + 2).to_string(),
@@ -5803,10 +5907,16 @@ fn row_anomalies(result: &MergeResult, params: &Value, row_index:usize,row:&Join
     rows
 }
 
-fn build_anomalies(result: &MergeResult,params:&Value)->Vec<Vec<String>> {
-    let mut rows=result.rows.iter().enumerate().flat_map(|(i,row)|row_anomalies(result,params,i,&row)).collect::<Vec<_>>();
-    if rows.is_empty() {
-        rows.push(vec![
+#[cfg(test)]
+fn build_anomalies(result: &MergeResult, params: &Value) -> Vec<Vec<String>> {
+    let mut rows = result.rows.iter().enumerate()
+        .flat_map(|(i, row)| row_anomalies(result, params, i, &row)).collect::<Vec<_>>();
+    if rows.is_empty() { rows.push(no_anomaly_row()); }
+    rows
+}
+
+fn no_anomaly_row() -> Vec<String> {
+    vec![
             "未发现异常".into(),
             String::new(),
             String::new(),
@@ -5815,9 +5925,7 @@ fn build_anomalies(result: &MergeResult,params:&Value)->Vec<Vec<String>> {
             String::new(),
             "未发现需要列入异常清单的记录。".into(),
             String::new(),
-        ]);
-    }
-    rows
+    ]
 }
 
 fn write_string_sheet(
@@ -6019,16 +6127,35 @@ pub(crate) fn write_string_sheet_stream<I, F>(
     cancel: Option<&AtomicBool>,
     end_label: Option<&str>,
 ) -> Result<(), AppError>
-where I: Iterator<Item=Result<Vec<String>,AppError>>, F: Fn()->I {
-    let mut sample = Vec::new();
-    let mut row_count=0usize;
-    for row in read() {
-        let row=row?;
-        if sample.len()<10 { sample.push(row); }
-        row_count+=1;
-        if row_count%256==0 { if let Some(cancel)=cancel { check_cancel(cancel)?; } }
-    }
+where I: Iterator<Item=Result<Vec<String>,AppError>>, F: FnOnce()->I {
     let formulas = name=="FA List" || name=="折旧测算" || (name=="处置清单_BKD" && headers.contains(&"处置时间") && headers.contains(&"处置原值") && headers.contains(&"处置折旧"));
+    if let Some(cancel) = cancel { check_cancel(cancel)?; }
+    let mut source = read();
+    let mut sample = Vec::new();
+    for row in source.by_ref().take(10) { sample.push(row?); }
+    let mut row_count = 0usize;
+    let source = sample.clone().into_iter().map(Ok).chain(source);
+    // Formula policy and its notice require the exact final count before row 3
+    // is flushed. Replay compact computed rows instead of recomputing them from
+    // the full-width source. Non-formula sheets stream directly after sampling.
+    let rows: Box<dyn Iterator<Item=Result<Vec<String>, AppError>> + '_> = if formulas {
+        let mut prepared = export_rows::PreparedRows::default();
+        for row in source {
+            prepared.push(row?)?;
+            if prepared.count % 256 == 0 {
+                if let Some(cancel) = cancel { check_cancel(cancel)?; }
+            }
+        }
+        row_count = prepared.count;
+        prepared.into_rows()?
+    } else {
+        Box::new(source)
+    };
+    let formula_limit = if row_count <= DEPRECIATION_FORMULA_ROW_LIMIT {
+        row_count
+    } else {
+        row_count.min(DEPRECIATION_FORMULA_SAMPLE_ROWS)
+    };
     let date=balance_sheet_date.unwrap_or("2099-12-31");
     // Legacy rendered every amount as #,##0 and sized columns off that same
     // rendering.  Keeping two decimals here while measuring widths as integers
@@ -6061,8 +6188,9 @@ where I: Iterator<Item=Result<Vec<String>,AppError>>, F: Fn()->I {
         .map(|c| column_reads_numeric(sample.iter().filter_map(|r| r.get(c)).map(String::as_str)))
         .collect::<Vec<_>>();
     let mut widest = vec![0usize; headers.len()];
-    for (r, row) in read().enumerate() {
+    for (r, row) in rows.enumerate() {
         let row=row?;
+        if !formulas { row_count = r + 1; }
         if r % 256 == 0 {
             if let Some(cancel) = cancel {
                 check_cancel(cancel)?;
@@ -6127,9 +6255,8 @@ where I: Iterator<Item=Result<Vec<String>,AppError>>, F: Fn()->I {
                 }
             }
         }
-        if formulas {
-            let limit=if row_count<=DEPRECIATION_FORMULA_ROW_LIMIT {row_count} else {row_count.min(DEPRECIATION_FORMULA_SAMPLE_ROWS)};
-            append_depreciation_formulas_chunk(ws,name,headers,row_count,date,header,&source_format,None,r..r+1,r==limit)?;
+        if formulas && r <= formula_limit {
+            append_depreciation_formulas_chunk(ws,name,headers,row_count,date,header,&source_format,None,r..r+1,r==formula_limit)?;
         }
     }
     ws.set_freeze_panes(2, 0).map_err(xlsx_error)?;
@@ -6503,6 +6630,10 @@ fn append_depreciation_formulas_chunk(
     Ok(())
 }
 fn mapped_header(params: &Value, side: u8, role: &str) -> Option<String> {
+    mapped_header_ref(params, side, role).map(str::to_owned)
+}
+
+fn mapped_header_ref<'a>(params: &'a Value, side: u8, role: &str) -> Option<&'a str> {
     let key = if side == 1 {
         "beginMapping"
     } else {
@@ -6513,7 +6644,6 @@ fn mapped_header(params: &Value, side: u8, role: &str) -> Option<String> {
         .and_then(Value::as_object)
         .and_then(|m| m.get(role))
         .and_then(Value::as_str)
-        .map(str::to_owned)
         .or_else(|| {
             let key = match (role, side) {
                 ("originalValue", 1) => "beginOriginalValue",
@@ -6522,7 +6652,7 @@ fn mapped_header(params: &Value, side: u8, role: &str) -> Option<String> {
                 ("depreciation", 2) => "endDepreciation",
                 _ => return None,
             };
-            params.get(key).and_then(Value::as_str).map(str::to_owned)
+            params.get(key).and_then(Value::as_str)
         })
 }
 fn mapped_text(
@@ -6532,18 +6662,28 @@ fn mapped_text(
     side: u8,
     role: &str,
 ) -> String {
-    let Some(header) = mapped_header(params, side, role) else {
-        return String::new();
+    mapped_text_ref(result, row, params, side, role).to_owned()
+}
+
+fn mapped_text_ref<'a>(
+    result: &MergeResult,
+    row: &'a JoinedRow,
+    params: &Value,
+    side: u8,
+    role: &str,
+) -> &'a str {
+    let Some(header) = mapped_header_ref(params, side, role) else {
+        return "";
     };
     let (table, data) = if side == 1 {
         (&result.begin, row.begin.as_ref())
     } else {
         (&result.end, row.end.as_ref())
     };
-    let Some(index) = table.headers.iter().position(|h| h == &header) else {
-        return String::new();
+    let Some(index) = table.headers.iter().position(|h| h == header) else {
+        return "";
     };
-    data.map(|r| cell(r, index).to_owned()).unwrap_or_default()
+    data.map(|r| cell(r, index)).unwrap_or_default()
 }
 fn mapped_number(
     result: &MergeResult,
@@ -6552,7 +6692,7 @@ fn mapped_number(
     side: u8,
     role: &str,
 ) -> f64 {
-    number(&mapped_text(result, &row, params, side, role))
+    number(mapped_text_ref(result, row, params, side, role))
 }
 /// Round to fen for sheets that only ever hold money.  Summing 15k floats
 /// leaves noise like 3015186049.229984 and residual rows of 1.1e-05, which read
@@ -9180,7 +9320,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let (result, p) = parity_fixture(&dir);
-        let rows = build_depreciation_period(&result, &p);
+        let rows = build_depreciation_period(&result, &p).unwrap();
         assert!(
             rows.iter()
                 .any(|r| r[0] == "机器" && r[8] == "不一致" && number(&r[9]).abs() > 0.0)
@@ -9904,8 +10044,20 @@ mod tests {
                 {"field":"期末原值","agg":"count"}
             ]
         });
-        let out = test_export(p).unwrap();
+        let events = std::cell::RefCell::new(Vec::new());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let out = export(p, &|stage, current, total, message| {
+            if stage == "export" { events.borrow_mut().push((current * 100 / total.max(1), message.to_owned())); }
+        }, cancel, &pause).unwrap();
         assert_eq!(out["engine"], "rust-fa");
+        let events = events.into_inner();
+        assert!(events.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        assert!(events.iter().any(|(_, message)| message.contains("压缩并保存")));
+        assert_eq!(events.last().unwrap().0, 99);
+        let timings = out["exportTimings"].as_array().unwrap();
+        assert!(timings.iter().any(|entry| entry[0] == "压缩保存"));
+        assert!(timings.iter().all(|entry| entry[1].as_f64().unwrap() >= 0.0));
         let mut wb = open_workbook_auto(dir.join("FA_List.xlsx")).unwrap();
         // Tab order must match the legacy workbook exactly (00_使用说明 was
         // dropped; 汇总备查 is Rust-only and trails the legacy set).

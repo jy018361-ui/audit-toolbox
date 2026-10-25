@@ -808,11 +808,16 @@ fn export_ts(
     let project_fields = string_array(defaults.get("projectRowFields"));
     let agg = job.agg.as_deref().unwrap_or("sum");
     let mode = job.pivot_mode.as_deref().unwrap_or("dual_default");
+    let fields = if mode == "custom" && !job.row_fields.is_empty() { job.row_fields.clone() }
+        else if mode == "manager" { manager_fields.clone() }
+        else if mode == "project" { project_fields.clone() }
+        else { manager_fields.iter().chain(&project_fields).cloned().collect() };
+    let pivot_input = TsPivotInput::new(&table.headers, &filtered, &fields, column_field.as_deref(), &value_field, agg)?;
     let (manager, project) = if mode == "custom" && !job.row_fields.is_empty() {
         (
-            pivot_rows(
+            pivot_rows_from(
                 &table.headers,
-                &filtered,
+                &pivot_input,
                 &job.row_fields,
                 column_field.as_deref(),
                 &value_field,
@@ -822,9 +827,9 @@ fn export_ts(
         )
     } else if mode == "manager" {
         (
-            pivot_rows(
+            pivot_rows_from(
                 &table.headers,
-                &filtered,
+                &pivot_input,
                 &manager_fields,
                 column_field.as_deref(),
                 &value_field,
@@ -834,9 +839,9 @@ fn export_ts(
         )
     } else if mode == "project" {
         (
-            pivot_rows(
+            pivot_rows_from(
                 &table.headers,
-                &filtered,
+                &pivot_input,
                 &project_fields,
                 column_field.as_deref(),
                 &value_field,
@@ -846,17 +851,17 @@ fn export_ts(
         )
     } else {
         (
-            pivot_rows(
+            pivot_rows_from(
                 &table.headers,
-                &filtered,
+                &pivot_input,
                 &manager_fields,
                 column_field.as_deref(),
                 &value_field,
                 agg,
             )?,
-            Some(pivot_rows(
+            Some(pivot_rows_from(
                 &table.headers,
-                &filtered,
+                &pivot_input,
                 &project_fields,
                 column_field.as_deref(),
                 &value_field,
@@ -1415,9 +1420,48 @@ struct LedgerAmounts {
     allow_cross_match: bool,
 }
 
+struct TsPivotInput {
+    columns: BTreeMap<usize, Column>,
+    metric: Column,
+    rows: usize,
+}
+
+impl TsPivotInput {
+    fn new(headers: &[String], rows: &[Vec<String>], fields: &[String], column_field: Option<&str>, value_field: &str, agg: &str) -> Result<Self, AppError> {
+        if !matches!(agg, "sum" | "count") {
+            return Err(error("TS_AGG_INVALID", "汇总方式仅支持 sum 或 count。", Some(agg.to_owned())));
+        }
+        if !fields.iter().any(|field| header_index(headers, field).is_some()) {
+            return Err(error("TS_ROW_FIELDS_MISSING", "没有找到有效的透视行字段。", None));
+        }
+        let value_index = header_index(headers, value_field).ok_or_else(||error("COLUMN_NOT_FOUND", "值字段不存在。", Some(value_field.into())))?;
+        let indexes = fields.iter().filter_map(|field|header_index(headers,field))
+            .chain(column_field.and_then(|field|header_index(headers,field))).collect::<BTreeSet<_>>();
+        let columns = indexes.into_iter().map(|index| (index, Column::new(format!("__source_{index}").into(),
+            rows.iter().map(|row|row.get(index).cloned().unwrap_or_default()).collect::<Vec<_>>() ))).collect();
+        let metrics = rows.iter().map(|row| {
+            let value = row.get(value_index).map(String::as_str).unwrap_or("");
+            if agg == "count" { if value.trim().is_empty() {0.0} else {1.0} } else {parse_number(value)}
+        }).collect::<Vec<_>>();
+        Ok(Self { columns, metric: Column::new("__metric".into(), metrics), rows: rows.len() })
+    }
+}
+
 fn pivot_rows(
     headers: &[String],
     rows: &[Vec<String>],
+    row_fields: &[String],
+    column_field: Option<&str>,
+    value_field: &str,
+    agg: &str,
+) -> Result<PivotResult, AppError> {
+    let prepared = TsPivotInput::new(headers, rows, row_fields, column_field, value_field, agg)?;
+    pivot_rows_from(headers, &prepared, row_fields, column_field, value_field, agg)
+}
+
+fn pivot_rows_from(
+    headers: &[String],
+    prepared: &TsPivotInput,
     row_fields: &[String],
     column_field: Option<&str>,
     value_field: &str,
@@ -1441,7 +1485,7 @@ fn pivot_rows(
             None,
         ));
     }
-    let value_index = header_index(headers, value_field).ok_or_else(|| {
+    let _value_index = header_index(headers, value_field).ok_or_else(|| {
         error(
             "COLUMN_NOT_FOUND",
             "值字段不存在。",
@@ -1458,34 +1502,17 @@ fn pivot_rows(
     }
     let mut columns = Vec::new();
     for (position, (_, index)) in row_indexes.iter().enumerate() {
-        columns.push(Column::new(
-            format!("__row_{position}").into(),
-            rows.iter()
-                .map(|row| row.get(*index).cloned().unwrap_or_default())
-                .collect::<Vec<_>>(),
-        ));
+        let mut column = prepared.columns[index].clone();
+        column.rename(format!("__row_{position}").into());
+        columns.push(column);
     }
     if let Some(index) = column_index {
-        columns.push(Column::new(
-            "__pivot".into(),
-            rows.iter()
-                .map(|row| row.get(index).cloned().unwrap_or_default())
-                .collect::<Vec<_>>(),
-        ));
+        let mut column = prepared.columns[&index].clone();
+        column.rename("__pivot".into());
+        columns.push(column);
     }
-    let metrics = rows
-        .iter()
-        .map(|row| {
-            let value = row.get(value_index).map(String::as_str).unwrap_or("");
-            if agg == "count" {
-                if value.trim().is_empty() { 0.0 } else { 1.0 }
-            } else {
-                parse_number(value)
-            }
-        })
-        .collect::<Vec<_>>();
-    columns.push(Column::new("__metric".into(), metrics));
-    let frame = DataFrame::new(rows.len(), columns).map_err(polars_error)?;
+    columns.push(prepared.metric.clone());
+    let frame = DataFrame::new(prepared.rows, columns).map_err(polars_error)?;
     let mut group_exprs = (0..row_indexes.len())
         .map(|i| col(format!("__row_{i}")))
         .collect::<Vec<_>>();
@@ -7002,6 +7029,27 @@ fn je_mark_batches(job: &JeMarkParams) -> Result<Vec<LedgerBatch>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dual_ts_pivots_share_prepared_metrics_and_dimensions_without_source() {
+        let headers = ["经理", "项目", "月份", "工时"].map(str::to_owned).to_vec();
+        let source = [["甲", "项目一", "一月", "1,200.5"], ["甲", "项目二", "二月", "  "], ["乙", "项目一", "一月", "-20"], ["乙", "项目一", "二月", "abc"]]
+            .map(|row|row.map(str::to_owned).to_vec()).to_vec();
+        let manager = vec!["经理".to_owned()];
+        let project = vec!["项目".to_owned()];
+        for agg in ["sum", "count"] {
+            let expected = [&manager, &project].map(|fields|pivot_rows(&headers, &source, fields, Some("月份"), "工时", agg).unwrap());
+            let mut owned = source.clone();
+            let prepared = TsPivotInput::new(&headers, &owned, &["经理".into(), "项目".into()], Some("月份"), "工时", agg).unwrap();
+            owned.clear();
+            assert_eq!(prepared.columns.len(), 3);
+            for (fields, expected) in [&manager, &project].into_iter().zip(expected) {
+                let actual = pivot_rows_from(&headers, &prepared, fields, Some("月份"), "工时", agg).unwrap();
+                assert_eq!(actual.headers, expected.headers);
+                assert_eq!(actual.rows, expected.rows);
+            }
+        }
+    }
 
     #[test]
     fn prepared_disk_xlsx_keeps_selected_sheet_double_header_and_physical_rows() {

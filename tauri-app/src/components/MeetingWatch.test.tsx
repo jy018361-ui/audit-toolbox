@@ -79,6 +79,22 @@ it("首次挂载从后台快照恢复纪要结果", async () => {
   expect(screen.getByRole("button", { name: "打开转写稿" })).toBeInTheDocument();
 });
 
+it("完成双版本任务后提供两个独立文件入口", async () => {
+  mocks.status.mockResolvedValue({ watchEnabled: true, inCall: false, recording: false,
+    latestJob: { ...completed, result: { minutesPath: "C:/data/按内容.md", transcriptPath: "C:/data/转写.txt",
+      minutesVersions: [
+        { kind: "content", label: "按内容", minutesPath: "C:/data/按内容.md" },
+        { kind: "timeline", label: "按时间", minutesPath: "C:/data/按时间.md" },
+      ],
+    } },
+  });
+  render(<MeetingWatch />);
+  fireEvent.click(await screen.findByRole("button", { name: "打开按内容版纪要" }));
+  fireEvent.click(screen.getByRole("button", { name: "打开按时间版纪要" }));
+  expect(mocks.openOutput).toHaveBeenCalledWith("C:/data/按内容.md");
+  expect(mocks.openOutput).toHaveBeenCalledWith("C:/data/按时间.md");
+});
+
 it("确认退会后立即显示保存录音，收尾完成才显示结果", async () => {
   mocks.status.mockResolvedValue({ watchEnabled: true, inCall: true, recording: true,
     recordingSummary: { startedAt: "2026-10-22T16:22:48+08:00", warnings: [] } });

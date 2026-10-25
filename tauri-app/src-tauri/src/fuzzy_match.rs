@@ -1549,214 +1549,107 @@ type ExportSource<'a> = dyn Fn(&mut ExportVisitor<'_>) -> Result<(), AppError> +
 fn export_workbook_from(rows: &ExportSource<'_>, path: &Path) -> Result<PathBuf, AppError> {
     let mut wb = Workbook::new();
     let header = Format::new()
-        .set_bold()
-        .set_align(FormatAlign::Center)
-        .set_border(FormatBorder::Thin)
-        .set_background_color("#D9EAD3");
-    // Sheet1 全部结果：每个候选一行；无候选的行也占一行（匹配对象留空）。
-    {
+        .set_bold().set_align(FormatAlign::Center)
+        .set_border(FormatBorder::Thin).set_background_color("#D9EAD3");
+    let match_headers = ["序号", "A行号", "A列原始值", "B行号", "B列匹配值", "匹配级别",
+        "总分", "字符相似", "最长公共子序列", "词组重叠", "判定原因", "确认标记"];
+    let unmatched_headers = ["序号", "A行号", "A列原始值", "级别", "原因"];
+    let match_widths = [6, 8, 30, 8, 30, 10, 8, 10, 16, 10, 28, 10];
+    let unmatched_widths = [6, 8, 40, 10, 32];
+    for (name, headers, widths) in [
+        ("全部结果", match_headers.as_slice(), match_widths.as_slice()),
+        ("疑似确认记录", match_headers.as_slice(), match_widths.as_slice()),
+        ("未匹配清单", unmatched_headers.as_slice(), unmatched_widths.as_slice()),
+    ] {
         let ws = wb.add_worksheet_with_constant_memory();
-        ws.set_name("全部结果").map_err(xlsx)?;
-        let headers = [
-            "序号",
-            "A行号",
-            "A列原始值",
-            "B行号",
-            "B列匹配值",
-            "匹配级别",
-            "总分",
-            "字符相似",
-            "最长公共子序列",
-            "词组重叠",
-            "判定原因",
-            "确认标记",
-        ];
+        ws.set_name(name).map_err(xlsx)?;
         for (c, h) in headers.iter().enumerate() {
-            ws.write_string_with_format(0, c as u16, *h, &header)
-                .map_err(xlsx)?;
+            ws.write_string_with_format(0, c as u16, *h, &header).map_err(xlsx)?;
         }
-        // 常量内存模式不支持 autofit，手动设列宽。
-        let widths = [6, 8, 30, 8, 30, 10, 8, 10, 16, 10, 28, 10];
-        for (c, w) in widths.iter().enumerate() {
-            ws.set_column_width(c as u16, *w).map_err(xlsx)?;
+        for (c, width) in widths.iter().enumerate() {
+            ws.set_column_width(c as u16, f64::from(*width)).map_err(xlsx)?;
         }
-        let mut y = 1u32;
-        let mut seq = 0u64;
-        rows(&mut |row| {
-            let a_index = row.get("aIndex").and_then(Value::as_u64).unwrap_or(0);
-            let a_value = row.get("aValue").and_then(Value::as_str).unwrap_or("");
-            let level = row.get("level").and_then(Value::as_str).unwrap_or("");
-            let matches = row
-                .get("matches")
-                .and_then(Value::as_array)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
-            if matches.is_empty() {
-                seq += 1;
-                let reasons = row
-                    .get("reasons")
-                    .and_then(Value::as_array)
-                    .map(|r| {
-                        r.iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join("；")
-                    })
-                    .unwrap_or_default();
-                write_match_row(
-                    ws, y, seq, a_index, a_value, 0, "", level, None, &reasons, "",
-                )?;
-                y += 1;
-                return Ok(());
-            }
-            for m in matches {
-                seq += 1;
-                write_match_row(
-                    ws,
-                    y,
-                    seq,
-                    a_index,
-                    a_value,
-                    m.get("bIndex").and_then(Value::as_u64).unwrap_or(0),
-                    m.get("bValue").and_then(Value::as_str).unwrap_or(""),
-                    m.get("level").and_then(Value::as_str).unwrap_or(""),
-                    m.get("breakdown"),
-                    &m.get("reasons")
-                        .and_then(Value::as_array)
-                        .map(|r| {
-                            r.iter()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join("；")
-                        })
-                        .unwrap_or_default(),
-                    m.get("confirmed").map(confirmed_cn).unwrap_or("未确认"),
-                )?;
-                y += 1;
-            }
-            Ok(())
-        })?;
     }
-    // Sheet2 疑似确认记录：只列 suspect 行的全部 topK 候选（列布局与 Sheet1
-    // 一致，便于并排核对；confirmed 列即确认操作落点）。
-    {
-        let ws = wb.add_worksheet_with_constant_memory();
-        ws.set_name("疑似确认记录").map_err(xlsx)?;
-        let headers = [
-            "序号",
-            "A行号",
-            "A列原始值",
-            "B行号",
-            "B列匹配值",
-            "匹配级别",
-            "总分",
-            "字符相似",
-            "最长公共子序列",
-            "词组重叠",
-            "判定原因",
-            "确认标记",
-        ];
-        for (c, h) in headers.iter().enumerate() {
-            ws.write_string_with_format(0, c as u16, *h, &header)
-                .map_err(xlsx)?;
+    // Each worksheet flushes its own rows. Read/decode saved results only once,
+    // routing each candidate to the applicable sheets in the original order.
+    let [all, suspect, unmatched] = wb.worksheets_mut().as_mut_slice() else { unreachable!() };
+    let mut all_y = 1u32;
+    let mut suspect_y = 1u32;
+    let mut unmatched_y = 1u32;
+    rows(&mut |row| {
+        let a_index = row.get("aIndex").and_then(Value::as_u64).unwrap_or(0);
+        let a_value = row.get("aValue").and_then(Value::as_str).unwrap_or("");
+        let level = row.get("level").and_then(Value::as_str).unwrap_or("");
+        let reasons = |value: &Value| value.get("reasons").and_then(Value::as_array)
+            .map(|r| r.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("；"))
+            .unwrap_or_default();
+        let matches = row.get("matches").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+        if matches.is_empty() {
+            write_match_row(all, all_y, u64::from(all_y), a_index, a_value, 0, "", level, None, &reasons(row), "")?;
+            all_y += 1;
         }
-        let widths = [6, 8, 30, 8, 30, 10, 8, 10, 16, 10, 28, 10];
-        for (c, w) in widths.iter().enumerate() {
-            ws.set_column_width(c as u16, *w).map_err(xlsx)?;
-        }
-        let mut y = 1u32;
-        let mut seq = 0u64;
-        rows(&mut |row| {
-            if row.get("level").and_then(Value::as_str) != Some("suspect") {
-                return Ok(());
+        for candidate in matches {
+            let b_index = candidate.get("bIndex").and_then(Value::as_u64).unwrap_or(0);
+            let b_value = candidate.get("bValue").and_then(Value::as_str).unwrap_or("");
+            let candidate_level = candidate.get("level").and_then(Value::as_str).unwrap_or("");
+            let reason = reasons(candidate);
+            let confirmed = candidate.get("confirmed").map(confirmed_cn).unwrap_or("未确认");
+            write_match_row(all, all_y, u64::from(all_y), a_index, a_value, b_index, b_value,
+                candidate_level, candidate.get("breakdown"), &reason, confirmed)?;
+            all_y += 1;
+            if level == "suspect" {
+                write_match_row(suspect, suspect_y, u64::from(suspect_y), a_index, a_value, b_index, b_value,
+                    "suspect", candidate.get("breakdown"), &reason, confirmed)?;
+                suspect_y += 1;
             }
-            let a_index = row.get("aIndex").and_then(Value::as_u64).unwrap_or(0);
-            let a_value = row.get("aValue").and_then(Value::as_str).unwrap_or("");
-            let matches = row
-                .get("matches")
-                .and_then(Value::as_array)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
-            for m in matches {
-                seq += 1;
-                write_match_row(
-                    ws,
-                    y,
-                    seq,
-                    a_index,
-                    a_value,
-                    m.get("bIndex").and_then(Value::as_u64).unwrap_or(0),
-                    m.get("bValue").and_then(Value::as_str).unwrap_or(""),
-                    "suspect",
-                    m.get("breakdown"),
-                    &m.get("reasons")
-                        .and_then(Value::as_array)
-                        .map(|r| {
-                            r.iter()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join("；")
-                        })
-                        .unwrap_or_default(),
-                    m.get("confirmed").map(confirmed_cn).unwrap_or("未确认"),
-                )?;
-                y += 1;
-            }
-            Ok(())
-        })?;
-    }
-    // Sheet3 未匹配清单：unmatched + invalid 行。
-    {
-        let ws = wb.add_worksheet_with_constant_memory();
-        ws.set_name("未匹配清单").map_err(xlsx)?;
-        let headers = ["序号", "A行号", "A列原始值", "级别", "原因"];
-        for (c, h) in headers.iter().enumerate() {
-            ws.write_string_with_format(0, c as u16, *h, &header)
-                .map_err(xlsx)?;
         }
-        let widths = [6, 8, 40, 10, 32];
-        for (c, w) in widths.iter().enumerate() {
-            ws.set_column_width(c as u16, *w).map_err(xlsx)?;
+        if !matches!(level, "auto" | "suspect") {
+            unmatched.write_number(unmatched_y, 0, f64::from(unmatched_y)).map_err(xlsx)?;
+            unmatched.write_number(unmatched_y, 1, a_index as f64).map_err(xlsx)?;
+            unmatched.write_string(unmatched_y, 2, a_value).map_err(xlsx)?;
+            unmatched.write_string(unmatched_y, 3, level_cn(level)).map_err(xlsx)?;
+            unmatched.write_string(unmatched_y, 4, reasons(row)).map_err(xlsx)?;
+            unmatched_y += 1;
         }
-        let mut y = 1u32;
-        let mut seq = 0u64;
-        rows(&mut |row| {
-            let level = row.get("level").and_then(Value::as_str).unwrap_or("");
-            if matches!(level, "auto" | "suspect") {
-                return Ok(());
-            }
-            seq += 1;
-            let reasons = row
-                .get("reasons")
-                .and_then(Value::as_array)
-                .map(|r| {
-                    r.iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join("；")
-                })
-                .unwrap_or_default();
-            ws.write_number(y, 0, seq as f64).map_err(xlsx)?;
-            ws.write_number(
-                y,
-                1,
-                row.get("aIndex").and_then(Value::as_u64).unwrap_or(0) as f64,
-            )
-            .map_err(xlsx)?;
-            ws.write_string(
-                y,
-                2,
-                row.get("aValue").and_then(Value::as_str).unwrap_or(""),
-            )
-            .map_err(xlsx)?;
-            ws.write_string(y, 3, level_cn(level)).map_err(xlsx)?;
-            ws.write_string(y, 4, &reasons).map_err(xlsx)?;
-            y += 1;
-            Ok(())
-        })?;
-    }
+        Ok(())
+    })?;
     wb.save(path).map_err(xlsx)?;
     Ok(path.to_path_buf())
+}
+
+#[cfg(test)]
+#[test]
+fn export_reads_results_once_and_routes_candidates_in_order() {
+    let calls = std::cell::Cell::new(0);
+    let rows = vec![
+        json!({"aIndex":1,"aValue":"甲","level":"suspect","matches":[
+            {"bIndex":3,"bValue":"甲一","level":"auto","confirmed":true,"reasons":["理由一"]},
+            {"bIndex":4,"bValue":"甲二","level":"suspect","confirmed":false,"reasons":["理由二"]}]}),
+        json!({"aIndex":2,"aValue":"乙","level":"unmatched","reasons":["无候选"]}),
+        json!({"aIndex":3,"aValue":"","level":"invalid","reasons":["空值"]}),
+        json!({"aIndex":4,"aValue":"丙","level":"auto","matches":[{"bIndex":9,"bValue":"丙","level":"auto"}]}),
+    ];
+    let path = std::env::temp_dir().join(format!("fuzzy-once-{}.xlsx",uuid::Uuid::new_v4().simple()));
+    export_workbook_from(&|visitor| {
+        calls.set(calls.get()+1);
+        for row in &rows { visitor(row)?; }
+        Ok(())
+    }, &path).unwrap();
+    assert_eq!(calls.get(), 1);
+    let mut book = calamine::open_workbook_auto(&path).unwrap();
+    let all = book.worksheet_range("全部结果").unwrap();
+    let suspect = book.worksheet_range("疑似确认记录").unwrap();
+    let unmatched = book.worksheet_range("未匹配清单").unwrap();
+    assert_eq!(all.height(), 6);
+    assert_eq!(suspect.height(), 3);
+    assert_eq!(unmatched.height(), 3);
+    assert_eq!(all.get_value((1,5)).unwrap().to_string(), "自动匹配");
+    assert_eq!(suspect.get_value((1,5)).unwrap().to_string(), "疑似匹配");
+    assert_eq!(suspect.get_value((1,11)).unwrap().to_string(), "已确认");
+    assert_eq!(suspect.get_value((2,11)).unwrap().to_string(), "已否决");
+    assert_eq!(unmatched.get_value((2,1)).unwrap().to_string(), "3");
+    drop(book);
+    fs::remove_file(path).unwrap();
 }
 
 #[allow(clippy::too_many_arguments)]

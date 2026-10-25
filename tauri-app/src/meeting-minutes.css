@@ -68,7 +68,7 @@
 
 .meeting-options-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: minmax(0, 320px);
   gap: var(--sp-3);
 }
 
@@ -111,7 +111,52 @@
 .meeting-result-card {
   display: grid;
   gap: var(--sp-3);
+  margin-top: var(--sp-3);
+  min-width: 0;
 }
+
+.meeting-minutes-content {
+  min-width: 0;
+  padding: var(--sp-4);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  line-height: 1.85;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.meeting-minutes-content :is(h3, h4, h5, h6) {
+  margin: var(--sp-4) 0 var(--sp-2);
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.meeting-minutes-content .meeting-minutes-title {
+  margin-top: 0;
+  font-size: var(--fs-lg);
+}
+
+.meeting-minutes-content :is(p, ul, ol, blockquote, pre) {
+  margin: var(--sp-2) 0;
+}
+
+.meeting-minutes-content :is(ul, ol) { padding-left: var(--sp-5); }
+.meeting-minutes-content ul { list-style-type: disc; }
+.meeting-minutes-content ol { list-style-type: decimal; }
+.meeting-minutes-content pre { white-space: pre-wrap; }
+.meeting-minutes-table { max-width: 100%; overflow-x: auto; }
+.meeting-minutes-table table { width: 100%; border-collapse: collapse; }
+.meeting-minutes-table :is(th, td) {
+  min-width: 6em;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-soft);
+  text-align: left;
+  vertical-align: top;
+}
+.meeting-minutes-table th { background: var(--surface-muted); font-weight: 600; }
 
 .meeting-result-meta {
   display: flex;
@@ -122,6 +167,12 @@
 }
 
 .meeting-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.meeting-version-switch {
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-2);

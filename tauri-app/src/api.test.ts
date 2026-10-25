@@ -5,6 +5,7 @@ import {
   historyGet,
   historyClear,
   jobCancel,
+  meetingReadMinutes,
   pickPath,
   settingsGet,
   settingsSet,
@@ -29,6 +30,9 @@ describe("browser preview API fallbacks", () => {
     await expect(pickPath("file", "选择文件")).resolves.toBeNull();
     await expect(updateReleaseNotes()).rejects.toThrow(
       "浏览器预览模式不能读取版本更新说明",
+    );
+    await expect(meetingReadMinutes("C:/data/会议纪要.md")).rejects.toThrow(
+      "浏览器预览模式不能读取会议纪要",
     );
   });
 

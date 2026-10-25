@@ -139,7 +139,7 @@ export function MeetingWatch() {
         const result = event.result as MeetingResult | undefined;
         void notifyDesktop(
           result?.minutesPath ? "会议纪要已生成" : "会议纪要需要处理",
-          result?.minutesError || (result?.minutesPath ? "会议纪要和转写稿已保存，可在工具箱中打开。" : "任务结束但未返回会议纪要，请查看任务结果。"),
+          result?.minutesError || (result?.minutesPath ? (result.minutesVersions ? "按内容、按时间两个版本及转写稿已保存，可在工具箱中查看。" : "会议纪要和转写稿已保存，可在工具箱中打开。") : "任务结束但未返回会议纪要，请查看任务结果。"),
         );
       } else if (event.phase === "failed" || event.phase === "cancelled") {
         void notifyDesktop("会议纪要未生成", terminalJobError(event));
@@ -395,7 +395,9 @@ export function MeetingWatch() {
           <strong>{result?.minutesPath ? "会议纪要已生成" : "会议纪要未生成"}</strong>
           {resultError && <p>{resultError}</p>}
           <div className="meeting-result-actions">
-            {result?.minutesPath && <Button size="sm" onClick={() => void openResult(result.minutesPath!)}>打开会议纪要</Button>}
+            {result?.minutesVersions ? result.minutesVersions.filter((version) => version.minutesPath).map((version) => (
+              <Button key={version.kind} size="sm" onClick={() => void openResult(version.minutesPath!)}>打开{version.label}版纪要</Button>
+            )) : result?.minutesPath && <Button size="sm" onClick={() => void openResult(result.minutesPath!)}>打开会议纪要</Button>}
             {result?.transcriptPath && <Button size="sm" variant="secondary" onClick={() => void openResult(result.transcriptPath!)}>打开转写稿</Button>}
             <Button size="sm" variant="ghost" onClick={() => { setLatestJob(undefined); setProcessingError(""); }}>关闭提示</Button>
           </div>

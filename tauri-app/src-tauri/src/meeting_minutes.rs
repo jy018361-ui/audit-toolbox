@@ -21,6 +21,80 @@ use crate::{AppError, bailian_asr, bailian_plan_asr, excel_merger::PauseCheckpoi
 
 type Progress<'a> = bailian_asr::Progress<'a>;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MinutesKind {
+    Content,
+    Timeline,
+}
+
+impl MinutesKind {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Content => "content",
+            Self::Timeline => "timeline",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Content => "按内容",
+            Self::Timeline => "按时间",
+        }
+    }
+}
+
+struct MinutesDraft {
+    kind: MinutesKind,
+    markdown: Option<String>,
+    error: Option<String>,
+}
+
+/// 两版独立从同一份转写稿生成；单版失败仍继续另一版。
+fn collect_versions(
+    cancel: &Arc<AtomicBool>,
+    mut generate: impl FnMut(MinutesKind) -> Result<String, String>,
+) -> Result<Vec<MinutesDraft>, AppError> {
+    let mut drafts = Vec::new();
+    for kind in [MinutesKind::Content, MinutesKind::Timeline] {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled());
+        }
+        let (markdown, error) = match generate(kind) {
+            Ok(markdown) => (Some(markdown), None),
+            Err(error) => (None, Some(error)),
+        };
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled());
+        }
+        drafts.push(MinutesDraft {
+            kind,
+            markdown,
+            error,
+        });
+    }
+    Ok(drafts)
+}
+
+fn summarize_versions(
+    params: &Value,
+    transcript: &str,
+    progress: Progress,
+    cancel: &Arc<AtomicBool>,
+    start: usize,
+    total: usize,
+) -> Result<Vec<MinutesDraft>, AppError> {
+    let detail = detail_param(params);
+    collect_versions(cancel, |kind| {
+        let index = usize::from(kind == MinutesKind::Timeline);
+        progress(
+            "running",
+            start + index,
+            total,
+            &format!("正在生成{}版会议纪要（{}/2）…", kind.label(), index + 1),
+        );
+        summarize_with_llm(params, detail, transcript, kind)
+    })
+}
+
 fn job_error(code: &str, message: &str, detail: Option<String>) -> AppError {
     AppError::new(code, message, true, detail)
 }
@@ -54,18 +128,6 @@ fn string_param(params: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-}
-
-fn participants_param(params: &Value) -> Vec<String> {
-    string_param(params, "participants")
-        .map(|raw| {
-            raw.split(&[',', '，', '、', ';', '；', '\n'][..])
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
 }
 
 fn detail_param(params: &Value) -> &'static str {
@@ -114,7 +176,7 @@ fn generate(
     } else {
         bailian_plan_asr::transcript_text_plain(&transcription.sentences)
     };
-    let title = string_param(params, "title").unwrap_or_else(default_title);
+    let title = default_title();
     let stamp = output_stamp();
     let output_dir = output_dir_for(&audio_path, &stamp);
     let transcript_path = output_dir.join(format!("转写稿-{stamp}.txt"));
@@ -132,21 +194,14 @@ fn generate(
             Some(e.to_string()),
         )
     })?;
-    progress("running", 2, 4, "转写完成，正在生成会议纪要…");
-    let detail = detail_param(params);
-    let participants = participants_param(params);
-    let (minutes, minutes_error) =
-        match summarize_with_llm(params, detail, &participants, &title, &transcript) {
-            Ok(markdown) => (Some(markdown), None),
-            Err(error) => (None, Some(error)),
-        };
+    let drafts = summarize_versions(params, &transcript, progress, cancel, 2, 5)?;
+    progress("running", 4, 5, "正在保存两个版本的会议纪要…");
     finish_output(
         &output_dir,
         &stamp,
         &title,
         &transcript_path,
-        minutes,
-        minutes_error,
+        drafts,
         transcription.speakers,
         transcription.billed_ms,
         Some(&audio_path),
@@ -171,24 +226,17 @@ fn summarize(
     if cancel.load(Ordering::Relaxed) {
         return Err(cancelled());
     }
-    let title = string_param(params, "title").unwrap_or_else(default_title);
+    let title = default_title();
     let stamp = output_stamp();
     let output_dir = output_dir_for(&transcript_path, &stamp);
-    let detail = detail_param(params);
-    let participants = participants_param(params);
-    progress("running", 0, 2, "正在根据转写稿生成会议纪要…");
-    let (minutes, minutes_error) =
-        match summarize_with_llm(params, detail, &participants, &title, &transcript) {
-            Ok(markdown) => (Some(markdown), None),
-            Err(error) => (None, Some(error)),
-        };
+    let drafts = summarize_versions(params, &transcript, progress, cancel, 0, 3)?;
+    progress("running", 2, 3, "正在保存两个版本的会议纪要…");
     finish_output(
         &output_dir,
         &stamp,
         &title,
         &transcript_path,
-        minutes,
-        minutes_error,
+        drafts,
         0,
         0,
         None,
@@ -228,52 +276,44 @@ fn output_dir_for(source: &Path, stamp: &str) -> PathBuf {
 /// 公共 LLM 请求器对 DeepSeek 会按该词切换 JSON 输出模式，纪要需要 Markdown。
 /// `has_speakers=false` 对应套餐转写通道：转写稿没有说话人标签，
 /// 提示词改为禁止虚构发言人，不得沿用「说话人N」相关规则。
-fn build_minutes_prompt(
-    detail: &str,
-    participants: &[String],
-    title: &str,
-    has_speakers: bool,
-) -> String {
+fn build_minutes_prompt(detail: &str, has_speakers: bool, kind: MinutesKind) -> String {
     let detail_rules = match detail {
         "brief" => {
-            "本纪要为简要档：只输出「三、会议结论」和「四、待办事项」两个栏目，其余栏目省略。"
+            "本纪要为简要档：只输出「二、讨论要点」「三、会议结论」和「四、后续事项」，省略会议信息；讨论要点只保留关键内容。"
         }
         "detailed" => {
-            "本纪要为详细档：「二、讨论要点」按议题分小节详细展开，归纳各方发言立场与理由，可引用关键原话。"
+            "本纪要为详细档：「二、讨论要点」按本版本的组织规则分小节详细展开，归纳各方发言立场与理由，可引用关键原话。"
         }
-        _ => "本纪要为标准档：「二、讨论要点」按议题归纳，每个议题 2-5 条要点。",
+        _ => "本纪要为标准档：「二、讨论要点」按本版本的组织规则归纳，每小节 2-5 条要点。",
     };
-    let participant_rules = match (has_speakers, participants.is_empty()) {
-        (true, true) => "转写稿中的说话人以「说话人1、说话人2」标注，请原样保留。".to_string(),
-        (true, false) => {
-            format!(
-                "本次会议的参会人名单：{}。请结合发言内容把「说话人N」对应到名单中的真实姓名；确实无法判断的保留原标签，不得张冠李戴。",
-                participants.join("、")
-            )
+    let organization_rules = match kind {
+        MinutesKind::Content => {
+            "本次只生成「按内容版」：讨论要点按内容和议题分类，同一议题在不同时段的讨论合并归纳；保留方案变化的先后关系，区分最初建议、后续调整与最终决定。标题末尾标注「（按内容）」。"
         }
-        (false, false) => {
-            format!(
-                "本次会议的参会人名单：{}。转写稿没有区分说话人，名单仅供「会议信息」栏目使用，不要把发言归属到具体个人。",
-                participants.join("、")
-            )
+        MinutesKind::Timeline => {
+            "本次只生成「按时间版」：讨论要点严格按原始转写顺序，以连续的讨论阶段分小节，展现开场、讨论、调整和最终决定的过程；同一议题稍后再次出现时仍在后续位置记录，不得前移合并。只引用转写稿已有的时间戳作为相对定位，不插值或编造起止时间；没有时间戳时用「第一阶段、第二阶段」等顺序标识。此版仍为摘要，不是逐字转写稿。标题末尾标注「（按时间）」。"
         }
-        (false, true) => {
-            "本转写稿没有区分说话人；请用「与会人员提出」等中性表述归纳发言，不得虚构发言人。"
-                .to_string()
-        }
+    };
+    let participant_rules = if has_speakers {
+        "转写稿中的「说话人1、说话人2」标签请原样保留，不得猜测真实姓名；说话人标签不等于完整参会人名单。"
+    } else {
+        "本转写稿没有区分说话人；请用「与会人员提出」等中性表述归纳发言，不得虚构发言人或把发言归属到具体个人。"
     };
     format!(
-        "你是审计团队的会议秘书。请根据下面的会议转写稿，输出一份 Markdown 格式的会议纪要，标题为「# {title}」。\n\n\
+        "你是会议秘书。请根据下面的会议转写稿，输出一份 Markdown 格式的会议纪要。\n\
+        第一行必须为「# 根据内容拟定的会议标题」：自动概括核心议题，具体、简洁，80 字以内；不要使用此占位文字，不要用录音时间或「Teams 会议」作标题。内容不足时可用「会议开场与后续安排」等忠实概括。\n\n\
         必须包含以下栏目（简要档按规则省略）：\n\
-        ## 一、会议信息\n（会议时间与时长、参会人、记录方式）\n\
+        ## 一、会议信息\n（仅记录转写稿明确提及的会议时间、参会人及背景；缺失项标「未提及」）\n\
         ## 二、讨论要点\n\
         ## 三、会议结论\n\
-        ## 四、待办事项\n（用 Markdown 表格，列为：| 事项 | 责任人 | 截止时间 |；没有待办就写「无」）\n\n\
-        {detail_rules}\n{participant_rules}\n\
+        ## 四、后续事项\n（将明确安排的待办和明确存在的未决事项、分歧、待补充信息合并为一张 Markdown 表格，列为：| 类型 | 事项 | 责任人 | 截止时间 | 交付结果 |；类型填「待办」或「待确认」。同一事项只列一次，尚待确认的问题不得写成已安排的待办。不再单列「待办事项」或「待确认问题」栏目；没有后续事项直接写「无」，不要生成全为「无」的表格行）\n\n\
+        {organization_rules}\n{detail_rules}\n{participant_rules}\n\
         其他要求：\n\
         1. 只依据转写稿内容归纳，不得编造未提及的信息；\n\
-        2. 截止时间转写稿中没有提到时填「待定」；\n\
-        3. 直接输出 Markdown 正文，不要任何额外解释或代码块包裹。"
+        2. 责任人、截止时间、交付结果未提及时填「未提及」，不得自行指定；\n\
+        3. 转写时间戳是录音中的相对位置，不得据此推断会议日期、开始时间或完整时长；相对日期（如「下周三」）保留原表述；\n\
+        4. 区分明确形成的会议结论与讨论中的建议，不得把建议写成已决定事项；没有明确结论就写「未形成明确结论」；\n\
+        5. 直接输出 Markdown 正文，不要任何额外解释或代码块包裹。"
     )
 }
 
@@ -283,9 +323,8 @@ const TRANSCRIPT_LIMIT: usize = 100_000;
 fn summarize_with_llm(
     params: &Value,
     detail: &str,
-    participants: &[String],
-    title: &str,
     transcript: &str,
+    kind: MinutesKind,
 ) -> Result<String, String> {
     let llm = params
         .pointer("/__settings/llm")
@@ -312,15 +351,79 @@ fn summarize_with_llm(
     // 套餐通道的转写稿没有说话人标签，重出纪要也要走无说话人提示词分支；
     // 以转写稿里是否出现「说话人」判定，两种通道都成立。
     let has_speakers = transcript.contains("说话人");
-    let prompt = build_minutes_prompt(detail, participants, title, has_speakers);
-    crate::audipick::request_llm(&config, &prompt, &body, None)
-        .map(|markdown| markdown.trim().to_string())
-        .map_err(|error| {
+    let prompt = build_minutes_prompt(detail, has_speakers, kind);
+    let markdown =
+        crate::audipick::request_llm(&config, &prompt, &body, None).map_err(|error| {
             format!(
                 "纪要生成失败：{}（诊断号 {}）",
                 error.user_message, error.diagnostic_id
             )
-        })
+        })?;
+    let markdown = markdown.trim();
+    if minutes_title(markdown).is_none() {
+        return Err("纪要生成结果缺少有效的内容标题，请从转写稿重新生成。".into());
+    }
+    Ok(markdown.to_string())
+}
+
+/// 取正文首个非空行的一级标题，结果卡与文件共用同一个内容标题。
+fn minutes_title(markdown: &str) -> Option<String> {
+    markdown
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .find(|line| !line.trim().is_empty())?
+        .trim()
+        .strip_prefix("# ")
+        .map(str::trim)
+        .filter(|title| !title.is_empty() && title.chars().count() <= 80)
+        .map(str::to_owned)
+}
+
+pub(crate) fn read_minutes(path: &Path) -> Result<Value, AppError> {
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+    {
+        return Err(job_error(
+            "MEETING_MINUTES_FORMAT",
+            "请选择 Markdown 格式的会议纪要（.md）。",
+            None,
+        ));
+    }
+    // 有界读取，避免误选超大文件阻塞页面；文件授权由 Tauri 命令检查。
+    use std::io::Read;
+    const LIMIT: u64 = 2 * 1024 * 1024;
+    let read_error = |e: std::io::Error| {
+        job_error(
+            "MEETING_MINUTES_READ_FAILED",
+            "无法读取会议纪要文件。",
+            Some(e.to_string()),
+        )
+    };
+    let file = fs::File::open(path).map_err(read_error)?;
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(read_error)?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(job_error(
+            "MEETING_MINUTES_TOO_LARGE",
+            "会议纪要超过 2 MB，请使用外部编辑器打开。",
+            None,
+        ));
+    }
+    let markdown = String::from_utf8(bytes).map_err(|_| {
+        job_error(
+            "MEETING_MINUTES_ENCODING",
+            "会议纪要需使用 UTF-8 编码，请转换编码后重试。",
+            None,
+        )
+    })?;
+    Ok(json!({
+        "title": minutes_title(&markdown).unwrap_or_else(|| "会议纪要".into()),
+        "minutesPath": path.to_string_lossy(),
+        "minutesMarkdown": markdown,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -329,41 +432,65 @@ fn finish_output(
     stamp: &str,
     title: &str,
     transcript_path: &Path,
-    minutes: Option<String>,
-    minutes_error: Option<String>,
+    drafts: Vec<MinutesDraft>,
     speakers: usize,
     billed_ms: i64,
     audio_path: Option<&Path>,
 ) -> Result<Value, AppError> {
-    let minutes_path = match &minutes {
-        Some(markdown) => {
-            let path = output_dir.join(format!("会议纪要-{stamp}.md"));
-            fs::write(&path, markdown).map_err(|e| {
-                job_error(
-                    "MEETING_MINUTES_WRITE_FAILED",
-                    "会议纪要写入失败。",
-                    Some(e.to_string()),
-                )
-            })?;
-            Some(path)
-        }
-        None => None,
-    };
     let mut output_paths = vec![transcript_path.to_string_lossy().into_owned()];
-    if let Some(path) = &minutes_path {
-        output_paths.push(path.to_string_lossy().into_owned());
+    let mut versions = Vec::new();
+    let mut errors = Vec::new();
+    for draft in drafts {
+        let version_title = draft.markdown.as_deref().and_then(minutes_title);
+        let mut error = draft.error;
+        let path = if let Some(markdown) = &draft.markdown {
+            let path = output_dir.join(format!("会议纪要-{}-{stamp}.md", draft.kind.label()));
+            match fs::write(&path, markdown) {
+                Ok(()) => {
+                    let path = path.to_string_lossy().into_owned();
+                    output_paths.push(path.clone());
+                    Some(path)
+                }
+                Err(e) => {
+                    error = Some(format!("会议纪要文件保存失败：{e}，正文仍可在界面查看。"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(message) = &error {
+            errors.push(format!("{}版：{message}", draft.kind.label()));
+        }
+        versions.push(json!({
+            "kind": draft.kind.key(), "label": draft.kind.label(),
+            "title": version_title, "minutesPath": path,
+            "minutesMarkdown": draft.markdown, "minutesError": error,
+        }));
     }
+    // 顶层字段兼容旧通知与任务结果消费者；完整结果以 minutesVersions 为准。
+    let primary = versions
+        .iter()
+        .find(|v| v["minutesPath"].is_string())
+        .or_else(|| versions.iter().find(|v| v["minutesMarkdown"].is_string()));
+    let minutes_error = if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join("；"))
+    };
     if let Some(audio) = audio_path {
         output_paths.push(audio.to_string_lossy().into_owned());
     }
     Ok(json!({
-        "title": title,
-        "minutesPath": minutes_path.map(|path| path.to_string_lossy().into_owned()),
+        "title": primary.and_then(|v| v["title"].as_str()).unwrap_or(title),
+        "minutesMarkdown": primary.map(|v| &v["minutesMarkdown"]),
+        "minutesPath": primary.map(|v| &v["minutesPath"]),
         "transcriptPath": transcript_path.to_string_lossy(),
         "audioPath": audio_path.map(|path| path.to_string_lossy().into_owned()),
         "speakerCount": speakers,
         "billedMs": billed_ms,
         "minutesError": minutes_error,
+        "minutesVersions": versions,
         "outputPaths": output_paths,
     }))
 }
@@ -375,18 +502,27 @@ mod tests {
     #[test]
     fn prompt_contains_fixed_sections_and_never_triggers_llm_json_mode() {
         for detail in ["brief", "standard", "detailed"] {
-            let prompt =
-                build_minutes_prompt(detail, &["张三".into(), "李四".into()], "测试会议", true);
-            assert!(prompt.contains("## 一、会议信息"));
-            assert!(prompt.contains("## 二、讨论要点"));
-            assert!(prompt.contains("## 三、会议结论"));
-            assert!(prompt.contains("## 四、待办事项"));
-            assert!(prompt.contains("张三、李四"));
-            // DeepSeek JSON 模式以提示词中的小写 json 为开关，纪要必须避开。
-            assert!(!prompt.to_ascii_lowercase().contains("json"));
+            for kind in [MinutesKind::Content, MinutesKind::Timeline] {
+                let prompt = build_minutes_prompt(detail, true, kind);
+                assert!(prompt.contains("## 一、会议信息"));
+                assert!(prompt.contains("## 二、讨论要点"));
+                assert!(prompt.contains("## 三、会议结论"));
+                assert!(prompt.contains("## 四、后续事项"));
+                assert!(!prompt.contains("## 五、"));
+                assert!(!prompt.contains("## 四、待办事项"));
+                assert!(prompt.contains("| 类型 | 事项 | 责任人 | 截止时间 | 交付结果 |"));
+                assert!(prompt.contains("同一事项只列一次"));
+                assert!(prompt.contains("类型填「待办」或「待确认」"));
+                assert!(prompt.contains("自动概括核心议题"));
+                assert!(prompt.contains("不得猜测真实姓名"));
+                assert!(prompt.contains("不得据此推断会议日期"));
+                assert!(prompt.contains("| 交付结果 |"));
+                // DeepSeek JSON 模式以提示词中的小写 json 为开关，纪要必须避开。
+                assert!(!prompt.to_ascii_lowercase().contains("json"));
+            }
         }
-        let brief = build_minutes_prompt("brief", &[], "测试会议", true);
-        assert!(brief.contains("只输出「三、会议结论」和「四、待办事项」"));
+        let brief = build_minutes_prompt("brief", true, MinutesKind::Content);
+        assert!(brief.contains("只输出「二、讨论要点」「三、会议结论」和「四、后续事项」"));
         assert!(brief.contains("原样保留"));
     }
 
@@ -394,23 +530,270 @@ mod tests {
     /// 且明确禁止虚构发言人——这是该通道纪要质量的底线。
     #[test]
     fn prompt_without_speakers_forbids_invented_attribution() {
-        let no_participants = build_minutes_prompt("standard", &[], "测试会议", false);
+        let no_participants = build_minutes_prompt("standard", false, MinutesKind::Content);
         assert!(no_participants.contains("不得虚构发言人"));
         assert!(!no_participants.contains("原样保留"));
-        let with_participants =
-            build_minutes_prompt("standard", &["张三".into()], "测试会议", false);
-        assert!(with_participants.contains("名单仅供「会议信息」栏目使用"));
-        assert!(with_participants.contains("不要把发言归属到具体个人"));
+        assert!(no_participants.contains("不得虚构发言人或把发言归属到具体个人"));
     }
 
     #[test]
-    fn participants_split_on_common_separators() {
-        let params = json!({"participants": "张三，李四；王五、赵六\n钱七"});
+    fn minutes_output_matches_saved_body_and_content_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("转写稿.txt");
+        fs::write(&transcript, "会议内容").unwrap();
+        let markdown = "# 让家人吃出健康：课程开场与后续安排\n\n## 三、会议结论\n下次周三再见。";
+        let result = finish_output(
+            dir.path(),
+            "test",
+            "旧时间标题",
+            &transcript,
+            collect_versions(&Arc::new(AtomicBool::new(false)), |_| Ok(markdown.into())).unwrap(),
+            1,
+            100,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result["title"], "让家人吃出健康：课程开场与后续安排");
+        assert_eq!(result["minutesMarkdown"], markdown);
+        let versions = result["minutesVersions"].as_array().unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_ne!(versions[0]["minutesPath"], versions[1]["minutesPath"]);
+        for version in versions {
+            let path = version["minutesPath"].as_str().unwrap();
+            assert!(path.contains(version["label"].as_str().unwrap()));
+            assert_eq!(
+                fs::read_to_string(path).unwrap(),
+                version["minutesMarkdown"]
+            );
+            assert!(
+                result["outputPaths"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(path))
+            );
+        }
         assert_eq!(
-            participants_param(&params),
-            vec!["张三", "李四", "王五", "赵六", "钱七"]
+            fs::read_to_string(result["minutesPath"].as_str().unwrap()).unwrap(),
+            markdown
         );
-        assert!(participants_param(&json!({})).is_empty());
+        let failed = finish_output(
+            dir.path(),
+            "failure",
+            "会议纪要",
+            &transcript,
+            collect_versions(&Arc::new(AtomicBool::new(false)), |_| {
+                Err("服务暂时不可用".into())
+            })
+            .unwrap(),
+            0,
+            0,
+            None,
+        )
+        .unwrap();
+        assert!(failed["minutesMarkdown"].is_null());
+        assert!(failed["minutesPath"].is_null());
+        assert!(
+            failed["minutesError"]
+                .as_str()
+                .unwrap()
+                .contains("按内容版：服务暂时不可用")
+        );
+        assert!(
+            failed["minutesError"]
+                .as_str()
+                .unwrap()
+                .contains("按时间版：服务暂时不可用")
+        );
+        assert!(transcript.is_file());
+    }
+
+    #[test]
+    fn prompts_distinguish_topic_grouping_and_chronological_stages_in_all_details() {
+        for detail in ["brief", "standard", "detailed"] {
+            let content = build_minutes_prompt(detail, false, MinutesKind::Content);
+            let timeline = build_minutes_prompt(detail, false, MinutesKind::Timeline);
+            assert!(content.contains("同一议题在不同时段的讨论合并归纳"));
+            assert!(timeline.contains("严格按原始转写顺序"));
+            assert!(timeline.contains("不得前移合并"));
+            assert!(timeline.contains("不插值或编造起止时间"));
+            assert!(timeline.contains("没有时间戳时"));
+            assert!(!timeline.contains("按议题归纳"));
+        }
+    }
+
+    #[test]
+    fn one_version_failure_still_saves_the_other_and_reports_both_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("转写稿.txt");
+        fs::write(&transcript, "原始转写稿").unwrap();
+        for failed_kind in [MinutesKind::Content, MinutesKind::Timeline] {
+            let mut requested = Vec::new();
+            let drafts = collect_versions(&Arc::new(AtomicBool::new(false)), |kind| {
+                requested.push(kind);
+                if kind == failed_kind {
+                    Err("服务暂时不可用".into())
+                } else {
+                    Ok(format!("# 会议主题（{}）\n\n正文", kind.label()))
+                }
+            })
+            .unwrap();
+            assert_eq!(requested, vec![MinutesKind::Content, MinutesKind::Timeline]);
+            let result = finish_output(
+                dir.path(),
+                failed_kind.key(),
+                "会议纪要",
+                &transcript,
+                drafts,
+                0,
+                0,
+                None,
+            )
+            .unwrap();
+            assert!(result["minutesPath"].is_string());
+            assert!(
+                result["minutesError"]
+                    .as_str()
+                    .unwrap()
+                    .contains(failed_kind.label())
+            );
+            assert_eq!(result["outputPaths"].as_array().unwrap().len(), 2);
+            for version in result["minutesVersions"].as_array().unwrap() {
+                if version["kind"] == failed_kind.key() {
+                    assert!(version["minutesPath"].is_null());
+                    assert_eq!(version["minutesError"], "服务暂时不可用");
+                } else {
+                    assert!(Path::new(version["minutesPath"].as_str().unwrap()).is_file());
+                }
+            }
+        }
+        assert_eq!(fs::read_to_string(transcript).unwrap(), "原始转写稿");
+    }
+
+    #[test]
+    fn file_write_failure_keeps_both_bodies_and_other_version_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("转写稿.txt");
+        fs::write(&transcript, "原始转写稿").unwrap();
+        fs::create_dir(dir.path().join("会议纪要-按内容-test.md")).unwrap();
+        let drafts = collect_versions(&Arc::new(AtomicBool::new(false)), |_| {
+            Ok("# 会议主题\n正文".into())
+        })
+        .unwrap();
+        let result = finish_output(
+            dir.path(),
+            "test",
+            "会议纪要",
+            &transcript,
+            drafts,
+            0,
+            0,
+            None,
+        )
+        .unwrap();
+        assert!(result["minutesVersions"][0]["minutesPath"].is_null());
+        assert!(result["minutesVersions"][0]["minutesMarkdown"].is_string());
+        assert!(
+            result["minutesVersions"][0]["minutesError"]
+                .as_str()
+                .unwrap()
+                .contains("保存失败")
+        );
+        assert!(result["minutesVersions"][1]["minutesPath"].is_string());
+        assert_eq!(
+            result["minutesPath"],
+            result["minutesVersions"][1]["minutesPath"]
+        );
+    }
+
+    #[test]
+    fn cancellation_between_versions_stops_second_llm_call() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut calls = 0;
+        let result = collect_versions(&cancel, |_| {
+            calls += 1;
+            cancel.store(true, Ordering::Relaxed);
+            Ok("# 会议主题\n正文".into())
+        });
+        assert_eq!(result.err().unwrap().code, "JOB_CANCELLED");
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn summarize_job_attempts_two_versions_without_retranscribing() {
+        let dir = tempfile::Builder::new()
+            .prefix("record-")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("转写稿.txt");
+        fs::write(&path, "[00:08] 讨论资料准备。\n[00:25] 确认周三再见。").unwrap();
+        let mut progress = Vec::new();
+        let progress = std::sync::Mutex::new(&mut progress);
+        let result = run_job(
+            "meeting.summarize",
+            json!({"transcriptPath": path.to_string_lossy(),
+            "detailLevel": "brief", "__settings": {"llm": {"enabled": false}}}),
+            &|_, current, _, message| {
+                progress
+                    .lock()
+                    .unwrap()
+                    .push((current, message.to_string()))
+            },
+            Arc::new(AtomicBool::new(false)),
+            &test_pause(),
+        )
+        .unwrap();
+        assert_eq!(result["minutesVersions"].as_array().unwrap().len(), 2);
+        assert!(
+            result["minutesError"]
+                .as_str()
+                .unwrap()
+                .contains("按时间版")
+        );
+        let progress = progress.into_inner().unwrap();
+        assert!(
+            progress
+                .iter()
+                .any(|(_, message)| message.contains("按内容"))
+        );
+        assert!(
+            progress
+                .iter()
+                .any(|(_, message)| message.contains("按时间"))
+        );
+        assert_eq!(result["outputPaths"], json!([path.to_string_lossy()]));
+    }
+
+    #[test]
+    fn reads_existing_minutes_and_rejects_invalid_or_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("会议纪要.md");
+        fs::write(&path, "\u{feff}# 原有会议纪要\n\n正文").unwrap();
+        let result = read_minutes(&path).unwrap();
+        assert_eq!(result["title"], "原有会议纪要");
+        assert_eq!(result["minutesMarkdown"], "\u{feff}# 原有会议纪要\n\n正文");
+        assert_eq!(
+            read_minutes(&dir.path().join("录音.wav")).unwrap_err().code,
+            "MEETING_MINUTES_FORMAT"
+        );
+        assert_eq!(
+            read_minutes(&dir.path().join("不存在.md"))
+                .unwrap_err()
+                .code,
+            "MEETING_MINUTES_READ_FAILED"
+        );
+        fs::write(&path, [0xff]).unwrap();
+        assert_eq!(
+            read_minutes(&path).unwrap_err().code,
+            "MEETING_MINUTES_ENCODING"
+        );
+        fs::write(&path, vec![b'a'; 2 * 1024 * 1024 + 1]).unwrap();
+        assert_eq!(
+            read_minutes(&path).unwrap_err().code,
+            "MEETING_MINUTES_TOO_LARGE"
+        );
+        assert!(minutes_title("").is_none());
+        assert!(minutes_title("# \n正文").is_none());
+        assert!(minutes_title("正文\n# 后面的标题").is_none());
     }
 
     #[test]

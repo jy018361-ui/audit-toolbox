@@ -125,3 +125,41 @@ it("取消报告任务显示取消状态而不渲染失败错误框", async () =
   expect(container.querySelector('.error-box')).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "生成进度报告" })).toBeEnabled();
 });
+
+/* UI 审核：报告生成完成后步骤条第 3 步应收尾为已完成（不再是激活态）；
+   「字段检查通过」是第 1 步检查动作的状态，不得继续挂在第 3 步标题旁。 */
+it("报告生成完成后第 3 步显示已完成，检查状态徽章不再挂到后续步骤", async () => {
+  let receive: ((event: JobEvent) => void) | undefined;
+  vi.mocked(listenJobEvents).mockImplementation(async (callback) => {
+    receive = callback;
+    return () => undefined;
+  });
+  vi.mocked(jobStart).mockResolvedValue("confirmation-done-test");
+  vi.mocked(pickPath).mockResolvedValue(inspection.path);
+  vi.mocked(engineCall).mockResolvedValue(inspection);
+  render(<ConfirmationProgressPage tool={tool} />);
+  fireEvent.click(screen.getByText("拖放或点击选择 Excel 函证清单").closest("button") as HTMLButtonElement);
+  await waitFor(() => expect(screen.getByRole("button", { name: "检查数据" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "检查数据" }));
+  await screen.findByText("字段检查通过");
+  fireEvent.click(screen.getByRole("button", { name: "下一步：报告范围" }));
+  fireEvent.click(screen.getByRole("button", { name: "下一步：生成报告" }));
+  fireEvent.click(screen.getByRole("button", { name: "生成进度报告" }));
+  await waitFor(() => expect(jobStart).toHaveBeenCalled());
+  await act(async () => receive?.({
+    jobId: "confirmation-done-test", toolId: tool.id,
+    phase: "completed", current: 2, total: 2,
+    message: "报告已生成", severity: "success",
+    outputPaths: ["C:\\演示数据\\银行函证进度报告.xlsx"],
+    result: {
+      reports: [
+        { type: "bank", label: "银行函证进度报告", status: "done", summaryRows: 12 },
+      ],
+      outputPaths: ["C:\\演示数据\\银行函证进度报告.xlsx"],
+    },
+  }));
+  expect(
+    screen.getByRole("button", { name: "3 生成报告（已完成）" }),
+  ).toBeVisible();
+  expect(screen.queryByText("字段检查通过")).not.toBeInTheDocument();
+});

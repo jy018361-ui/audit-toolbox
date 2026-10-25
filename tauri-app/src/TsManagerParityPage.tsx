@@ -618,7 +618,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   return (
     <div className="ts-manager-page">
       <PageHeader
-        eyebrow="Timesheet 透视"
+        eyebrow="工时透视"
         title={tool.name}
         detail="加载工时表，在预览表头按列勾选筛选值，导出 by经理 与 by项目 默认双 Sheet。"
       />
@@ -660,7 +660,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   ? "加载失败"
                   : headers.length
                     ? "文件已加载"
-                    : "待加载文件"}
+                    : "等待文件"}
             </Badge>}
           </CardHeader>
           <CardContent>
@@ -711,7 +711,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
             {step === 2 && (
               <>
                 <p className="hint">
-                  筛选在下方「文件预览」里做：点表头第一行的 ▼
+                  筛选在下方「数据预览」卡片里做：点表头第一行的 ▼
                   打开取值清单，勾选后点「应用」。
                   同一列勾多个取值是「或」，不同列之间是「且」——和 Excel
                   的自动筛选一致。
@@ -825,6 +825,15 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     </Button>
                   )}
                 </div>
+                {/* 禁用不说原因等于让用户猜（UI 审核）：输出路径未选/文件未加载
+                    时，把不可导出的原因讲明白。 */}
+                {!canStartTsExport(headers, state.outputPath) && !busy && (
+                  <p className="hint" role="status">
+                    {headers.length
+                      ? "请先选择导出文件的保存位置，再导出。"
+                      : "请先加载 Timesheet 文件。"}
+                  </p>
+                )}
               </>
             )}
           </CardContent>

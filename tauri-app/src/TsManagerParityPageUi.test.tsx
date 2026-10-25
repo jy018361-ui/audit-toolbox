@@ -25,7 +25,8 @@ const tool: ToolManifest = {
 };
 it("空文件状态不虚报就绪并显示资料指引", () => {
   render(<TsManagerParityPage tool={tool} />);
-  expect(screen.getByText("待加载文件")).toBeVisible();
+  // 徽标用词与固定资产页统一为「等待文件」（UI 审核）。
+  expect(screen.getByText("等待文件")).toBeVisible();
   expect(screen.queryByText("已就绪")).not.toBeInTheDocument();
   expect(screen.getByRole("region", { name: "准备工时数据" })).toBeVisible();
   expect(screen.getByRole("button", { name: "加载文件" })).toBeDisabled();

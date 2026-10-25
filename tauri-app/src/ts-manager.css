@@ -24,3 +24,15 @@
   gap: var(--sp-2);
   margin-top: var(--sp-4);
 }
+
+/* === UI 审核修复（2026-10-25）：预览表中文伪斜体 ===
+   症状：审核截图里预览表中文（人名、项目名）被渲染成伪斜体、相邻拉丁字符
+   直立。全工程没有任何 italic 作用于表格单元格，斜体来自截图环境的 CJK
+   字体回退链——拉丁字符先命中直立字体，中文落到被倾斜合成的回退字体。
+   修复：本页显式锁定含中文字形的字体栈并钉死正体，中文渲染不再取决于
+   系统回退（正常 Windows 首选仍是全局的 Microsoft YaHei UI，视觉不变）。 */
+.ts-manager-page {
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+    "Noto Sans CJK SC", "Source Han Sans SC", "Segoe UI", system-ui, sans-serif;
+  font-style: normal;
+}

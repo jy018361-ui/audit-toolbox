@@ -384,7 +384,10 @@ export default function FileListDirectoryPage({
             ) : (
               <>
                 <p className="hint">
-                  {scan.fileCount} 个文件 · {scan.maxDepth + 1} 级目录列
+                  {scan.fileCount} 个文件 ·{" "}
+                  {scan.maxDepth > 0
+                    ? `最深 ${scan.maxDepth} 级子目录`
+                    : "无子目录"}
                 </p>
                 <FileListScanTable scan={scan} />
               </>
@@ -410,7 +413,12 @@ export default function FileListDirectoryPage({
                 )}
               </div>
             )}
-            {job && !interrupted && (
+            {/* 扫描完成事件的结果就是预览数据本身：底部再挂一条进度横幅会把
+                「含跳过路径」归一成「部分完成 100%」，与上方「扫描完成」徽标、
+                左侧“扫描完成：N 个文件”文案互相打架（UI 审核）。完成态信息由
+                步骤卡徽标 + 摘要行 + 跳过路径清单承担，横幅只在扫描进行中或
+                导出任务上出现。 */}
+            {job && !interrupted && !isFileListScan(job.result) && (
               <JobProgress
                 job={job}
                 onCancel={() => jobCancel(activeJobId)}
@@ -468,9 +476,9 @@ function FileListScanTable({ scan }: { scan: FileListScan }) {
                 </td>
               ))}
               <td title={row.name}>{row.name}</td>
-              <td title={row.relativePath}>
-                {displayFileName(row.relativePath)}
-              </td>
+              {/* 相对路径列要显示真实相对路径（含各级子目录）；此前取末段
+                  文件名，与「文件名称」列在任何目录层级下都逐行重复（UI 审核）。 */}
+              <td title={row.relativePath}>{row.relativePath}</td>
             </tr>
           ))}
         </tbody>

@@ -282,6 +282,9 @@ export default function ConfirmationProgressPage({
     ? (result.reports as Array<Record<string, unknown>>)
     : [];
   const generateReady = canGenerateConfirmation(inputPath, inspection) && !busy;
+  // 报告已生成（结果带报告行或输出文件）时，步骤条第 3 步打勾收尾——
+  // 否则报告出来了指示条还停在第 3 步「激活」，与实际进度脱节（UI 审核）。
+  const reportsReady = reports.length > 0 || outputPaths.length > 0;
   const scopeSummary = CONFIRMATION_MODE_OPTIONS.find(
     (value) => value.value === mode,
   );
@@ -301,6 +304,7 @@ export default function ConfirmationProgressPage({
             key: "3",
             label: "生成报告",
             disabled: !canGenerateConfirmation(inputPath, inspection),
+            status: reportsReady ? "done" : undefined,
           },
         ]}
         current={step - 1}
@@ -316,26 +320,31 @@ export default function ConfirmationProgressPage({
                   ? "2. 报告范围"
                   : "3. 生成进度报告"}
             </CardTitle>
-            <Badge
-              variant="outline"
-              className={
-                busy
-                  ? "badge-info"
+            {/* 「待检查数据/字段检查通过/字段待补充」是第 1 步「检查数据」的
+                结果状态，跟着第 2/3 步标题挂会张冠李戴（UI 审核）：检查状态
+                只在第 1 步显示；处理中徽章与任务相关，任何步骤都显示。 */}
+            {(step === 1 || busy) && (
+              <Badge
+                variant="outline"
+                className={
+                  busy
+                    ? "badge-info"
+                    : canGenerateConfirmation(inputPath, inspection)
+                      ? "badge-ready"
+                      : inspection
+                        ? "badge-warning"
+                        : "badge-neutral"
+                }
+              >
+                {busy
+                  ? "处理中"
                   : canGenerateConfirmation(inputPath, inspection)
-                    ? "badge-ready"
+                    ? "字段检查通过"
                     : inspection
-                      ? "badge-warning"
-                      : "badge-neutral"
-              }
-            >
-              {busy
-                ? "处理中"
-                : canGenerateConfirmation(inputPath, inspection)
-                  ? "字段检查通过"
-                  : inspection
-                    ? "字段待补充"
-                    : "待检查数据"}
-            </Badge>
+                      ? "字段待补充"
+                      : "待检查数据"}
+              </Badge>
+            )}
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
@@ -505,7 +514,11 @@ export default function ConfirmationProgressPage({
               <EmptyState
                 compact
                 title="准备函证清单"
-                description="选择 Excel 清单并点击“检查数据”，这里将显示函证数量、必需字段和数据预览。"
+                description={
+                  inputPath
+                    ? "清单已选择，点击「检查数据」后，这里将显示函证数量、必需字段和数据预览。"
+                    : "选择 Excel 清单并点击“检查数据”，这里将显示函证数量、必需字段和数据预览。"
+                }
               />
             )}
             {inspection && (

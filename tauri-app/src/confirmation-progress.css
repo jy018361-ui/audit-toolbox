@@ -235,7 +235,10 @@
   border: 1px solid var(--border);
 }
 .confirmation-output-link {
-  max-width: 100%;
+  /* 报告文件名普遍 40 字以上（清单名_类型_进度报告_时间戳.xlsx）：
+     不限宽时两枚按钮并排占满整卡，过重（UI 审核）。限宽后超长名省略号
+     截断，完整路径仍在按钮 title 里。 */
+  max-width: min(100%, 420px);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

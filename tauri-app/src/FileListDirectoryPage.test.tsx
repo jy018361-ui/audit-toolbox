@@ -142,4 +142,49 @@ describe("FileListDirectoryPage", () => {
       expect(screen.getAllByText("已取消").find((node) => node.getAttribute("data-variant") === "warning")).toBeInTheDocument();
     }
   });
+
+  /* UI 审核：扫描完成后底部不得再挂「部分完成 100%」横幅（与「扫描完成」
+     徽标、完成消息互相打架）；摘要要点明子目录深度；相对路径列显示真实
+     相对路径，不再与文件名称列逐行重复。 */
+  it("扫描完成后不残留进度横幅，摘要与相对路径列如实描述", async () => {
+    sessionStorage.clear();
+    render(<FileListDirectoryPage tool={tool} />);
+    const { pickPath } = await import("./api");
+    vi.mocked(pickPath).mockResolvedValueOnce("C:\\客户资料");
+    fireEvent.click(screen.getByRole("button", { name: "源文件夹 *" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("file_list.scan", { sourceDir: "C:\\客户资料" }));
+    const callback = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+    act(() => callback?.({
+      jobId: "job-scan",
+      toolId: "file_list_directory",
+      phase: "completed",
+      current: 1,
+      total: 1,
+      message: "扫描完成：2 个文件，最深 1 级目录。",
+      severity: "success",
+      outputPaths: [],
+      result: {
+        sourceDir: "C:\\客户资料",
+        rootName: "客户资料",
+        fileCount: 2,
+        maxDepth: 1,
+        previewLimit: 50,
+        outputPath: "C:\\客户资料List.xlsx",
+        preview: [
+          {
+            name: "银行日记账.xlsx",
+            relativePath: "底稿\\银行日记账.xlsx",
+            fullPath: "C:\\客户资料\\底稿\\银行日记账.xlsx",
+            levels: ["底稿"],
+          },
+        ],
+        skippedPaths: ["C:\\客户资料\\历史归档"],
+      },
+    }));
+    expect(document.querySelector(".job-progress")).toBeNull();
+    expect(screen.getByText("2 个文件 · 最深 1 级子目录")).toBeVisible();
+    expect(screen.getByTitle("底稿\\银行日记账.xlsx")).toHaveTextContent(
+      "底稿\\银行日记账.xlsx",
+    );
+  });
 });

@@ -311,6 +311,18 @@ export function JobDialogProvider({
               可最小化继续使用。停止后将请求取消任务。
             </DialogDescription>
           </DialogHeader>
+          {/* 并发多任务时先给一条合计进度：此前 8 张卡各自为战，整体
+              完成度无从判断；红「停止」×8 也把危险色稀释成背景噪声。 */}
+          {running.length > 1 && (
+            <div className="job-dialog-aggregate">
+              <span>{running.length} 个任务 · 合计进度 {Math.round(
+                running.reduce((sum, job) => sum + percent(job), 0) / running.length,
+              )}%</span>
+              <progress aria-label="合计进度" max={100} value={Math.round(
+                running.reduce((sum, job) => sum + percent(job), 0) / running.length,
+              )} />
+            </div>
+          )}
           {/* 任务再多也只占限高区域：列表内部滚动（此前 8 个并发任务
               会把弹窗顶出屏幕、末尾任务卡被底边裁半）。 */}
           <ScrollFadeBox maxHeight="min(440px, 52dvh)">

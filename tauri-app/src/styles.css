@@ -3981,7 +3981,7 @@ body:has(.sync-busy-pill) .job-command-notice {
   border-color: var(--brand-accent);
 }
 .sync-busy-pill:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid currentColor;
   outline-offset: 3px;
 }
 .sync-busy-pill .sync-busy-spinner {

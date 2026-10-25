@@ -336,3 +336,9 @@ body:has(.sync-busy-pill) .job-command-notice {
 .job-dialog-pill .job-dialog-pill-text {
   flex: 1 1 auto;
 }
+
+/* 状态条右侧百分比是主进度指标：与左侧消息同层级可读，不再退居小字。 */
+.job-banner .job-pct {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-strong);
+}

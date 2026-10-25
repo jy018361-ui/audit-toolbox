@@ -470,7 +470,7 @@ export function BeginnerTour({
           </div>
           <p className="tour-step-count">{stepCount}</p>
           <h2 className="tour-title">{currentStep.title}</h2>
-          <div className="tour-body">{currentStep.body}</div>
+          <TourBody body={currentStep.body} />
           {actions}
           {dots}
         </div>
@@ -493,11 +493,37 @@ export function BeginnerTour({
             />
             <p className="tour-step-count">{stepCount}</p>
             <h2 className="tour-title">{currentStep.title}</h2>
-            <div className="tour-body">{currentStep.body}</div>
+            <TourBody body={currentStep.body} />
             {actions}
             {dots}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 引导正文：超长步骤文案默认折 6 行 + 「展开全文」，不再让个别长文案把
+ * 引导气泡撑成文字墙（上一轮设计评审最低分屏的根因）。
+ */
+function TourBody({ body }: { body: ReactNode }) {
+  const [expanded, setExpanded] = useState(false);
+  const long = typeof body === "string" && body.length > 120;
+  return (
+    <div>
+      <div className={long && !expanded ? "tour-body tour-body--clamped" : "tour-body"}>
+        {body}
+      </div>
+      {long && (
+        <button
+          type="button"
+          className="tour-body-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "收起" : "展开全文"}
+        </button>
       )}
     </div>
   );

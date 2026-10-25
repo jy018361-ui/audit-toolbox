@@ -404,3 +404,20 @@
     animation: none;
   }
 }
+
+/* 引导正文折行与展开（见 BeginnerTour.TourBody）。 */
+.tour-body--clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  overflow: hidden;
+}
+.tour-body-toggle {
+  margin-top: var(--sp-1);
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--brand-link);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}

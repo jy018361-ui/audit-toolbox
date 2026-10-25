@@ -49,7 +49,9 @@
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-overlay);
-  max-height: calc(100dvh - 16px);
+  /* 引导是「气泡」不是「文章」：限高保持气泡形态，超长内容在卡内滚动
+     （此前上限就是整屏高度，长文案把卡片撑成几乎满屏）。 */
+  max-height: min(600px, calc(100dvh - 32px));
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -121,6 +123,11 @@
   font-weight: var(--fw-strong);
   color: var(--ink-strong);
   line-height: var(--lh-card-title);
+  /* 标题最多两行省略：标题区不应比正文还高。 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .tour-body {

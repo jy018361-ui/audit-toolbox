@@ -20,6 +20,7 @@ import type { JobEvent } from "@/types";
 import { isAudiPickOperationJob, useAudiPickOperations } from "../audipickOperation";
 import { AudiPickOperationPanel } from "./AudiPickOperationPanel";
 import { jobStatusText } from "./JobProgress";
+import { ScrollFadeBox } from "./ScrollFade";
 import "./JobDialog.css";
 
 /** 结束态的三个 phase 由 Rust 侧统一约定（excel_merger.rs）。 */
@@ -103,6 +104,8 @@ type JobRowProps = {
   label: string;
   paused: boolean;
   memoryPaused: boolean;
+  /** 并发任务多时的紧凑形态：描述压成一行，弹窗列表可滚。 */
+  compact?: boolean;
   onTogglePause: () => void;
   onStop: () => void;
   pending?: "pause" | "stop";
@@ -110,7 +113,7 @@ type JobRowProps = {
   operationError?: string;
 };
 
-function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop, pending, stopRequested, operationError }: JobRowProps) {
+function JobRow({ job, label, paused, memoryPaused, compact, onTogglePause, onStop, pending, stopRequested, operationError }: JobRowProps) {
   const [messageExpanded, setMessageExpanded] = useState(false);
   const pct = percent(job);
   const tone = toneOf(job);
@@ -121,7 +124,13 @@ function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop, pendi
         <strong title={label}>{label}</strong>
         <span className="job-pct">{memoryPaused ? "内存等待" : paused ? "已暂停" : job.phase === "queued" ? "排队中" : job.total > 0 ? `${pct}%` : "处理中"}</span>
       </div>
-      <p className={`job-dialog-message ${longMessage && !messageExpanded ? "job-dialog-message--clamped" : ""}`} aria-live="polite" aria-atomic="true">{job.message}</p>
+      <p
+        className={`job-dialog-message ${longMessage && !messageExpanded ? "job-dialog-message--clamped" : ""} ${compact ? "job-dialog-message--compact" : ""}`}
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {job.message}
+      </p>
       {longMessage && (
         <Button
           type="button"
@@ -302,25 +311,30 @@ export function JobDialogProvider({
               可最小化继续使用。停止后将请求取消任务。
             </DialogDescription>
           </DialogHeader>
-          <div className="job-dialog-rows" role="list" aria-label="进行中的任务">
-            {running.map((job) => (
-              <div role="listitem" key={job.jobId}>
-                <JobRow
-                  job={job}
-                  label={nameOf(job.toolId)}
-                  paused={Boolean(paused[job.jobId]) || job.phase === "memory_paused"}
-                  memoryPaused={job.phase === "memory_paused"}
-                  onTogglePause={() => job.phase === "memory_paused"
-                    ? retryAfterMemoryPause(job.jobId)
-                    : togglePause(job.jobId)}
-                  onStop={() => stop(job.jobId)}
-                  pending={pending[job.jobId]}
-                  stopRequested={Boolean(stopRequested[job.jobId])}
-                  operationError={operationErrors[job.jobId]}
-                />
-              </div>
-            ))}
-          </div>
+          {/* 任务再多也只占限高区域：列表内部滚动（此前 8 个并发任务
+              会把弹窗顶出屏幕、末尾任务卡被底边裁半）。 */}
+          <ScrollFadeBox maxHeight="min(440px, 52dvh)">
+            <div className="job-dialog-rows" role="list" aria-label="进行中的任务">
+              {running.map((job) => (
+                <div role="listitem" key={job.jobId}>
+                  <JobRow
+                    job={job}
+                    label={nameOf(job.toolId)}
+                    paused={Boolean(paused[job.jobId]) || job.phase === "memory_paused"}
+                    memoryPaused={job.phase === "memory_paused"}
+                    compact={running.length >= 4}
+                    onTogglePause={() => job.phase === "memory_paused"
+                      ? retryAfterMemoryPause(job.jobId)
+                      : togglePause(job.jobId)}
+                    onStop={() => stop(job.jobId)}
+                    pending={pending[job.jobId]}
+                    stopRequested={Boolean(stopRequested[job.jobId])}
+                    operationError={operationErrors[job.jobId]}
+                  />
+                </div>
+              ))}
+            </div>
+          </ScrollFadeBox>
           <div className="job-dialog-footer">
             <Button
               type="button"

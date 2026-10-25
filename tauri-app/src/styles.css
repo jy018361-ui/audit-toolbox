@@ -3829,24 +3829,22 @@ body:has(.sync-busy-pill) .job-command-notice {
   border-color: var(--brand-accent);
 }
 .job-dialog-pill:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 3px;
+  /* 深色药丸上的品牌色焦点圈会叠成「双环毛边」，改用文字色描边（药丸
+     文字为白色，样式表不允许颜色字面量）。 */
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
 }
+/* 进行中指示与同步等待小条（.sync-busy-spinner）同一语言：旋转圈，
+   不再用纯透明度脉冲圆点（两套指示曾让人以为是两种状态）。 */
 .job-dialog-pill-dot {
-  width: 8px;
-  height: 8px;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
   border-radius: var(--r-pill);
-  background: var(--brand-accent);
-  animation: job-dialog-pulse 1.4s ease-in-out infinite;
-}
-@keyframes job-dialog-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
+  border: 2px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-top-color: currentColor;
+  background: transparent;
+  animation: sync-busy-spin 0.8s linear infinite;
 }
 /* 开发版徽标：开发窗口与安装版界面完全一致，不打标会分不清哪个窗口带着最新代码 */
 .dev-build-badge {
@@ -4010,14 +4008,38 @@ body:has(.sync-busy-pill) .job-command-notice {
   min-height: 0;
   overflow: hidden;
 }
+/* 滚动与限高移入 ScrollFadeBox 的滚动层；这里只管文字观感。 */
 .confirm-dialog-message {
+  overflow-wrap: anywhere;
+}
+/* 共享滚动渐隐（ConfirmDialog / JobDialog 等浮层用，与 DataTable 的
+   data-more-* 同一交互语言）：底缘还有未滚到的内容时渐隐提示。 */
+.scroll-fade {
+  position: relative;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
+  /* 弹窗是 flex 纵列，滚动层必须允许收缩，否则长路径的 min-content
+     会把整个弹窗横向撑爆（曾把 510px 弹窗顶到 3382px）。 */
+  min-width: 0;
+}
+.scroll-fade-scroll {
+  min-height: 0;
+  min-width: 0;
   flex: 1 1 auto;
-  max-height: min(52dvh, 420px);
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding-right: var(--sp-1);
   scrollbar-gutter: stable;
+}
+.scroll-fade--more::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 26px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--card));
 }
 
 @media (max-width: 520px), (max-height: 520px) {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -8,6 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ScrollFadeBox } from "@/components/ScrollFade";
 import { dedupeRepeatedText } from "@/lib/presentationText";
 
 export type ConfirmDialogOptions = {
@@ -80,6 +81,9 @@ export function ConfirmDialogHost() {
   const request = current;
   const danger = request.tone === "danger";
   const message = request.message ? dedupeRepeatedText(request.message) : "";
+  // 超长路径按「\ / 、；」分段断行：默认断行落在任意字符上，UNC 路径
+  // 几乎没法认。分段符后插 <wbr>，让换行优先发生在分隔符之后。
+  const messageSegments = message.split(/(?<=[\\\/、；;])/);
 
   return (
     <Dialog
@@ -100,13 +104,20 @@ export function ConfirmDialogHost() {
           </DialogTitle>
         </DialogHeader>
         {message ? (
-          <div className="confirm-dialog-body min-h-0 overflow-y-auto overscroll-contain px-5 pb-4">
-            <DialogDescription
-              className="confirm-dialog-message whitespace-pre-line text-foreground"
-              style={{ fontSize: "var(--fs-md)", fontWeight: 400 }}
-            >
-              {message}
-            </DialogDescription>
+          <div className="confirm-dialog-body min-h-0 px-5 pb-4">
+            <ScrollFadeBox maxHeight="min(52dvh, 420px)">
+              <DialogDescription
+                className="confirm-dialog-message whitespace-pre-line text-foreground"
+                style={{ fontSize: "var(--fs-md)", fontWeight: 400 }}
+              >
+                {messageSegments.map((segment, index) => (
+                  <Fragment key={index}>
+                    {segment}
+                    {index < messageSegments.length - 1 ? <wbr /> : null}
+                  </Fragment>
+                ))}
+              </DialogDescription>
+            </ScrollFadeBox>
           </div>
         ) : null}
         <DialogFooter className="confirm-dialog-footer shrink-0 border-t bg-card px-5 py-4">

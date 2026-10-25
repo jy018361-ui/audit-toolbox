@@ -19,7 +19,9 @@ const buttonVariants = cva(
         ghost:
           "text-muted-foreground hover:bg-muted hover:text-primary aria-expanded:bg-muted aria-expanded:text-primary",
         destructive:
-          "bg-destructive/10 text-destructive border border-destructive hover:bg-destructive/20 focus-visible:border-destructive focus-visible:ring-destructive",
+          // 危险操作用实心红：视觉分量必须不低于主按钮（停止/删除做错
+          // 代价高，浅色描边此前反而比普通确认按钮更弱）。
+          "bg-destructive text-primary-foreground shadow-[var(--shadow-button)] hover:bg-destructive/85 focus-visible:ring-destructive/40",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {

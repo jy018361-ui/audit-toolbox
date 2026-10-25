@@ -10,6 +10,13 @@
   -webkit-line-clamp: 3;
   overflow: hidden;
 }
+/* 并发任务多时的紧凑形态：描述一行收口，列表里能同时看到更多任务。 */
+.job-dialog .job-dialog-message--compact {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
+}
 
 .job-dialog .job-dialog-expand {
   width: fit-content;

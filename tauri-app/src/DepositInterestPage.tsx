@@ -80,6 +80,7 @@ import {
   type CurrencyFallbackMode,
 } from "@/components/CurrencyFallbackDialog";
 import { MatchingFallbackDialog, type MatchingFallbackMode, type MatchingFallbackGroup } from "@/components/MatchingFallbackDialog";
+import { NoticeStack, type NoticeItem } from "@/components/NoticeStack";
 
 /** 可多列的角色与统一内核一致；`account` 是历史保存映射的旧槽位。 */
 const DEPOSIT_MULTI = new Set([
@@ -817,6 +818,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     Record<string, number>
   >({});
   const [expanded, setExpanded] = useState("");
+  // 结果出来后「测算与底稿」收成摘要条，点「修改」才重新展开表单——
+  // 参数改完一次就不该一直占着半屏。
+  const [runFormOpen, setRunFormOpen] = useState(false);
   const [result, setResult] = useState<Record<string, unknown>>();
   const [outputPath, setOutputPath] = useState("");
   const [sourceStatus, setSourceStatus] = useState("");
@@ -898,6 +902,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     resetCurrencyFallback();
     setAccountCurrencyRows([]);
     setRows([]);
+    setRunFormOpen(false);
     setExpanded("");
     setResult(undefined);
     setJob(undefined);
@@ -3013,6 +3018,82 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       {step === 2 && (
         <>
           {entityScope.panel}
+          {rows.length > 0 && !runFormOpen ? (
+            <section className="deposit-run-summary" aria-label="测算与底稿">
+              {currencyFallbackMode && (
+                <section className="deposit-currency-mode" role="status">
+                  <span>
+                    多币种口径：
+                    <b>
+                      {currencyFallbackMode === "functional"
+                        ? "统一使用本位币匡算"
+                        : "按币种使用年初、年末平均值"}
+                    </b>
+                  </span>
+                  <Button
+                    variant="secondary"
+                    onClick={() => setCurrencyDialogOpen(true)}
+                  >
+                    更改口径
+                  </Button>
+                </section>
+              )}
+              <div className="deposit-run-summary-line">
+                <span>
+                  资产负债表日 <b>{reportEnd}</b>
+                  <span aria-hidden="true"> · </span>
+                  输出：{outputPath ? displayFileName(outputPath) : "源文件目录"}
+                </span>
+                <Button variant="secondary" size="sm" onClick={() => setRunFormOpen(true)}>
+                  修改
+                </Button>
+              </div>
+              <div className="fx-actions">
+                <Button
+                  variant="secondary"
+                  disabled={
+                    busy || reviewingAny || requiredMappingsMissing.length > 0
+                  }
+                  onClick={() => void run("deposit.preview")}
+                >
+                  {busy && <BusySpinner />}测算预览
+                </Button>
+                <Button
+                  disabled={
+                    busy || reviewingAny || requiredMappingsMissing.length > 0
+                  }
+                  onClick={() => void run("deposit.export")}
+                >
+                  {busy && <BusySpinner />}生成 Excel 底稿
+                </Button>
+              </div>
+              {job && (
+                <JobProgress
+                  job={job}
+                  detail={step === 2 && error === terminalJobError(job) ? error : undefined}
+                  onCancel={busy ? (id) => jobCancel(id) : undefined}
+                />
+              )}
+              {((result?.outputPaths ?? []) as string[]).length > 0 && (
+                <div className="deposit-export-done">
+                  <p>
+                    导出的 Excel
+                    中，「测算汇总」黄色“年利率”单元格可直接改写；月度利息、测算利息合计及与
+                    TB 的勾稽差异会即时重算。
+                  </p>
+                  {((result?.outputPaths ?? []) as string[]).map((path) => (
+                    <Button
+                      key={path}
+                      variant="secondary"
+                      onClick={() => void openOutput(path)}
+                    >
+                      打开 Excel 底稿
+                    </Button>
+                  ))}
+                </div>
+              )}
+            </section>
+          ) : (
           <Card>
             <CardHeader>
               <CardTitle>
@@ -3107,18 +3188,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                 >
                   {busy && <BusySpinner />}生成 Excel 底稿
                 </Button>
-                {rows.some((row) => !row.rateResolved) && (
-                  <Button
-                    variant="outline"
-                    onClick={() =>
-                      requestAnimationFrame(() =>
-                        document.querySelector<HTMLInputElement>(".deposit-table input.deposit-rate-missing")?.focus(),
-                      )
-                    }
-                  >
-                    补全利率
-                  </Button>
-                )}
               </div>
               {job && (
                 <JobProgress
@@ -3147,6 +3216,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               )}
             </CardContent>
           </Card>
+          )}
 
           {rows.length > 0 && (
             <Results
@@ -3795,59 +3865,89 @@ export function Results({
         </span>
       </div>
 
-      {missing.length > 0 && (
-        <p className="deposit-stale">
-          <span>
-            {missing.length} 个账户待补实际利率，涉及 {[...new Set(missing.map((row) => row.tierLabel))].join("、")}
-            ，月均余额合计{" "}
-            {amount(missing.reduce((sum, row) => sum + row.averageBalance, 0))}
-            。
-            这些档位的利率是逐笔合同约定的，请按存款协议、银行对账单或利息清单填入实际利率——填之前它们的利息不计入下方合计和与
-            TB 的比较。
-          </span>
-        </p>
-      )}
-      {provisional.length > 0 && (
-        <section className="deposit-notice" aria-label="暂估利率待确认">
-          <h4>{provisional.length} 个账户已采用系统预设利率，请确认</h4>
-        </section>
-      )}
+      {(() => {
+        // 结果页提示聚合：只有「待补利率」是行动条，其余口径说明默认折叠，
+        // 不再让四连黄条把绿色结论挤到第四落点（设计评审 2026-10-25）。
+        const notices: NoticeItem[] = [];
+        if (missing.length > 0) {
+          notices.push({
+            tone: "warning",
+            actionable: true,
+            children: (
+              <>
+                <b>{missing.length} 户利率待补</b>
+                <span>
+                  这些档位的利率逐笔约定，请按存款协议、银行对账单或利息清单填入实际利率；补齐前它们的利息不计入合计和与
+                  TB 的比较。
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    requestAnimationFrame(() =>
+                      document.querySelector<HTMLInputElement>(".deposit-table input.deposit-rate-missing")?.focus(),
+                    )
+                  }
+                >
+                  补充利率
+                </Button>
+              </>
+            ),
+          });
+        }
+        if (provisional.length > 0) {
+          notices.push({
+            tone: "info",
+            children: (
+              <span>
+                {provisional.length} 个账户已采用系统预设利率（市场中枢暂估），已纳入测算；请按协议或对账单确认。
+              </span>
+            ),
+          });
+        }
+        if (jeUncoveredEntities.length > 0) {
+          notices.push({
+            tone: "info",
+            children: (
+              <span>
+                序时账未覆盖核算主体 {jeUncoveredEntities.join("、")}
+                ：这些主体的账户已直接按（期初＋期末）÷2 暂估全年平均余额（共
+                {Number(summary.jeUncoveredAccountCount ?? 0)}
+                户）；如需逐月勾稽，请补充对应主体的序时账。
+              </span>
+            ),
+          });
+        }
+        if (auxiliaryWarnings.length > 0 || auxiliaryFallbackAccounts.length > 0) {
+          notices.push({
+            tone: "info",
+            children: (
+              <details className="deposit-auxiliary-notice" aria-label="辅助核算联动">
+                <summary>
+                  辅助核算联动：{auxiliaryFallbackAccounts.length > 0 ? `${auxiliaryFallbackAccounts.length} 个账户` : "账户"}未按辅助核算拆分，已按主体＋科目测算（查看明细）
+                </summary>
+                <div className="deposit-auxiliary-details">
+                  {auxiliaryWarnings.length > 0 && <ul>
+                    {auxiliaryWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+                  </ul>}
+                  {auxiliaryFallbackAccounts.length > 0 ? <ul className="deposit-auxiliary-accounts">
+                    {auxiliaryFallbackAccounts.map((account) => <li key={account.key}>
+                      <strong>{account.entity === DEFAULT_ENTITY ? "未区分主体" : account.entity} / {account.account} / {account.currency || "未标币种"}</strong>
+                      <p>未拆分原因：{account.reason}</p>
+                      <p>TB 辅助明细（{account.auxiliaries.length} 项）：{account.auxiliaries.join("、")}</p>
+                    </li>)}
+                  </ul> : !auxiliaryDetails.success && <p>此历史结果未记录受影响账户，请重新测算查看明细。</p>}
+                </div>
+              </details>
+            ),
+          });
+        }
+        return <NoticeStack items={notices} />;
+      })()}
       {jeCurrencyAllocationWarning && (
         <p className="deposit-stale" role="alert">
           <b>JE 发生额无法按币种分配</b>
           <span>{jeCurrencyAllocationWarning}</span>
-        </p>
-      )}
-      {(auxiliaryWarnings.length > 0 || auxiliaryFallbackAccounts.length > 0) && (
-        <details className="deposit-notice deposit-auxiliary-notice" aria-label="辅助核算联动">
-          <summary>
-            辅助核算联动：{auxiliaryFallbackAccounts.length > 0 ? `${auxiliaryFallbackAccounts.length} 个账户` : "账户"}未按辅助核算拆分，已按主体＋科目测算（查看明细）
-          </summary>
-          <div className="deposit-auxiliary-details">
-            {auxiliaryWarnings.length > 0 && <ul>
-              {auxiliaryWarnings.map((warning) => <li key={warning}>{warning}</li>)}
-            </ul>}
-            {auxiliaryFallbackAccounts.length > 0 ? <ul className="deposit-auxiliary-accounts">
-              {auxiliaryFallbackAccounts.map((account) => <li key={account.key}>
-                <strong>{account.entity === DEFAULT_ENTITY ? "未区分主体" : account.entity} / {account.account} / {account.currency || "未标币种"}</strong>
-                <p>未拆分原因：{account.reason}</p>
-                <p>TB 辅助明细（{account.auxiliaries.length} 项）：{account.auxiliaries.join("、")}</p>
-              </li>)}
-            </ul> : !auxiliaryDetails.success && <p>此历史结果未记录受影响账户，请重新测算查看明细。</p>}
-          </div>
-        </details>
-      )}
-      {jeUncoveredEntities.length > 0 && (
-        <p className="deposit-stale" role="alert">
-          <b>序时账未覆盖核算主体</b>
-          <span>
-            序时账期间内没有匹配到主体
-            {jeUncoveredEntities.join("、")}
-            的任何发生额，这些主体的账户已直接按（期初＋期末）÷2
-            暂估全年平均余额（共
-            {Number(summary.jeUncoveredAccountCount ?? 0)}
-            户），不推导月末余额；如需逐月勾稽，请补充对应主体的序时账。
-          </span>
         </p>
       )}
       <div className="fx-bridge-step">

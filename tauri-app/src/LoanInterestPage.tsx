@@ -2320,17 +2320,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                   {auxCheckFailed && <Button variant="secondary" onClick={() => { setAuxCheck({ key: auxLinkKey, status: "pending" }); setAuxRetry((value) => value + 1); }}>重试辅助字段校验</Button>}
                 </div>
               )}
-              {!activeKinds.some((kind) => sources[kind].path) && (
+              {/* 台账模式的准备说明已并入拖放区第二行（FileDropInput
+                  description），不再单独立一块帮助区。 */}
+              {mode === "tb" && !activeKinds.some((kind) => sources[kind].path) && (
                 <EmptyState
                   compact
-                  title={
-                    mode === "ledger" ? "准备完整借款台账" : "准备 TB 与 JE"
-                  }
-                  description={
-                    mode === "ledger"
-                      ? "加入包含借款标识、本金或余额、起止日期及利率信息的台账。"
-                      : "同时加入科目余额表（TB）与序时账（JE），用于还原并核对本金变动。"
-                  }
+                  title="准备 TB 与 JE"
+                  description="同时加入科目余额表（TB）与序时账（JE），用于还原并核对本金变动。"
                 />
               )}
             </CardContent>
@@ -2618,7 +2614,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                               </td>
                             )}
                             <td title={ledgerReviewAccountLabel(a.account, a.auxiliary || inline?.auxiliary, a.parentAccountName)}>
-                              {ledgerReviewAccountLabel(a.account, a.auxiliary || inline?.auxiliary, a.parentAccountName)}
+                              <span className="loan-account-ellipsis">
+                                {ledgerReviewAccountLabel(a.account, a.auxiliary || inline?.auxiliary, a.parentAccountName)}
+                              </span>
                             </td>
                             {showCurrencyColumn && <td>{a.currency || "—"}</td>}
                             <td>
@@ -2681,7 +2679,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                             <tr key={`rate-${loanRowKey(detail)}`} className="is-rate-detail">
                               {showSubject && <td>{entityDisplay(detail.entity)}</td>}
                               <td title={ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary, a.parentAccountName)}>
-                                {ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary, a.parentAccountName)}
+                                <span className="loan-account-ellipsis">
+                                  {ledgerReviewAccountLabel([detail.accountCode, detail.accountName || detail.loanId].filter(Boolean).join(" "), detail.auxiliary, a.parentAccountName)}
+                                </span>
                               </td>
                               {showCurrencyColumn && <td>{detail.currency || "—"}</td>}
                               <td>
@@ -2877,6 +2877,18 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                   </span>
                 </label>
               </div>
+              {/* 先承诺后动作：复核确认条紧贴按钮区上方，勾选了才谈导出。 */}
+              {mode === "tb" && (
+                <label className="loan-rate-acknowledgement">
+                  <input
+                    type="checkbox"
+                    checked={ratesConfirmed}
+                    disabled={busy || resultStale || !rows.length}
+                    onChange={(event) => setRatesConfirmed(event.target.checked)}
+                  />
+                  <span>我已根据合同、函证或其他审计证据复核本次全部利率；其中 3.00% 暂估值不会被视为已确认依据。</span>
+                </label>
+              )}
               <div className="fx-actions">
                 <Button
                   variant="secondary"
@@ -2898,17 +2910,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                     : "生成 Excel 底稿"}
                 </Button>
               </div>
-              {mode === "tb" && (
-                <label className="loan-rate-acknowledgement">
-                  <input
-                    type="checkbox"
-                    checked={ratesConfirmed}
-                    disabled={busy || resultStale || !rows.length}
-                    onChange={(event) => setRatesConfirmed(event.target.checked)}
-                  />
-                  <span>我已根据合同、函证或其他审计证据复核本次全部利率；其中 3.00% 暂估值不会被视为已确认依据。</span>
-                </label>
-              )}
               {resultStale && (
                 <section className="loan-warning" role="status">
                   <strong>{result ? "当前展示的是修改前结果" : `${changedCalculationInput}已修改，等待测算`}</strong>
@@ -2974,11 +2975,15 @@ function Upload({
   const name = kind === "ledger" ? "完整借款台账" : kind.toUpperCase();
   return (
     <div className="loan-upload">
-      <b>{name}</b>
       <FileDropInput
         value={source.path}
         disabled={busy}
         placeholder={`选择${name}文件`}
+        description={
+          kind === "ledger" && !source.path
+            ? "加入包含借款标识、本金或余额、起止日期及利率信息的台账。"
+            : undefined
+        }
         onBrowse={browse}
         onClear={clear}
         onDragStateChange={() => {}}

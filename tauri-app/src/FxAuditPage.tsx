@@ -67,6 +67,7 @@ import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation
 import "./fx-audit.css";
 import { AccountConfirmationActions, type ConfirmationRow } from "./AccountConfirmationActions";
 import { displayFileName } from "./fileDisplay";
+import { jobPresentation } from "./jobState";
 
 type Mode = "realized" | "unrealized" | "combined";
 const FX_ACCOUNT_PAGE_SIZE = 250;
@@ -117,8 +118,8 @@ export function fxResultTrustStatus(summary: Record<string, unknown>): {
   }
   return {
     tone: "usable",
-    title: "测算结果可供复核",
-    detail: "关键资料已具备。请核对差异与凭证分类，确认后生成 Excel 底稿。",
+    title: "测算完成 · 已完成 100%",
+    detail: "关键资料已具备；请核对差异与凭证分类，确认后生成 Excel 底稿。",
   };
 }
 type Inspection = {
@@ -3408,35 +3409,62 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 ) : (
                   completedStage === "fx.export" &&
                   outputsFrom(result).length > 0 && (
+                    /* 导出后的唯一绿色层：结果区那条「可用」状态条已并入这里，
+                       行1 报文件＋打开入口，行2 交代结果仍在（视觉评审：两绿条同屏）。 */
                     <div className="fx-export-done" role="status">
-                      <p>
-                        底稿已生成：
-                        {outputsFrom(result).map(fileName).join("、")}
-                        。生成底稿不会清空下方测算结果。
-                      </p>
-                      {outputsFrom(result).map((path) => (
-                        <Button
-                          key={path}
-                          variant="secondary"
-                          onClick={() => void openOutput(path)}
-                        >
-                          打开 Excel 底稿
-                        </Button>
-                      ))}
+                      <div className="fx-export-done-main">
+                        <p>底稿已生成：{outputsFrom(result).map(fileName).join("、")}</p>
+                        {outputsFrom(result).map((path) => (
+                          <Button
+                            key={path}
+                            variant="secondary"
+                            onClick={() => void openOutput(path)}
+                          >
+                            打开 Excel 底稿
+                          </Button>
+                        ))}
+                      </div>
+                      <small>测算结果保留，可继续复核。</small>
                     </div>
                   )
                 )
               ) : (
                 job && (
-                  <JobProgress
-                    job={job}
-                    detail={step === 2 && error === terminalJobError(job) ? error : undefined}
-                    onCancel={busy ? (id) => jobCancel(id) : undefined}
-                  />
+                  jobPresentation(job).state === "completed" ? (
+                    /* 完成条只报状态不复述数字：三组数字只在下方算式出现一次
+                       （设计评审：完成条数字与算式完全重复）。异常完成（没有
+                       结果载荷）时保留引擎消息，用户才知道发生了什么。 */
+                    <div className="fx-job-done" role="status">
+                      <strong className="fx-job-done-copy">
+                        <span className="job-done-check" aria-hidden="true">
+                          <svg viewBox="0 0 16 16">
+                            <path
+                              d="M3 8.5 6.5 12 13 4.5"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                        </span>
+                        测算完成 · 已完成 100%
+                      </strong>
+                      {!job.result && job.message && (
+                        <span>{job.message}</span>
+                      )}
+                    </div>
+                  ) : (
+                    <JobProgress
+                      job={job}
+                      detail={step === 2 && error === terminalJobError(job) ? error : undefined}
+                      onCancel={busy ? (id) => jobCancel(id) : undefined}
+                    />
+                  )
                 )
               )}
               {result && (
-                <FxResult result={result} />
+                <FxResult result={result} exportDone={outputsFrom(result).length > 0} />
               )}
             </CardContent>
           </Card>
@@ -4055,7 +4083,7 @@ function RollforwardIssues({
   );
 }
 
-function FxResult({ result }: { result: Record<string, unknown> }) {
+function FxResult({ result, exportDone }: { result: Record<string, unknown>; exportDone: boolean }) {
   const summary = (result.summary ?? {}) as Record<string, unknown>;
   const formalMeasurementAvailable =
     summary.formalMeasurementAvailable !== false;
@@ -4094,6 +4122,8 @@ function FxResult({ result }: { result: Record<string, unknown> }) {
     ...(entityCoverage.unmatchedJe ?? []).map((name) => `JE：${name}`),
     ...(entityCoverage.unmatchedTb ?? []).map((name) => `TB：${name}`),
   ];
+  const statusFootnote =
+    resultStatus.tone === "usable" && !exportDone ? resultStatus.detail : "";
   const metric = (
     label: string,
     value: unknown,
@@ -4115,14 +4145,18 @@ function FxResult({ result }: { result: Record<string, unknown> }) {
         {/* 打开底稿的入口只在导出成功条里出现一次；标题行不放重复按钮
             （视觉审核 S3：主操作不混进标题行）。 */}
       </div>
-      <div
-        className={`fx-result-status ${resultStatus.tone}`}
-        role="status"
-        aria-live="polite"
-      >
-        <strong>{resultStatus.title}</strong>
-        <span>{resultStatus.detail}</span>
-      </div>
+      {/* 「可用」态不再单独铺一条绿色宣言：导出前降为算式卡下的灰注脚，
+          导出后并入顶部导出成功条（exportDone）——同屏只留一条绿色。 */}
+      {resultStatus.tone === "limited" && (
+        <div
+          className="fx-result-status limited"
+          role="status"
+          aria-live="polite"
+        >
+          <strong>{resultStatus.title}</strong>
+          <span>{resultStatus.detail}</span>
+        </div>
+      )}
       {!formalMeasurementAvailable && (
         <div className="fx-prominent-warnings" role="alert">
           <strong>正式测算结果及 Excel 底稿已阻断</strong>
@@ -4173,6 +4207,7 @@ function FxResult({ result }: { result: Record<string, unknown> }) {
               ))}</tbody>
             </table>
             </div>
+            {statusFootnote && <p className="fx-result-footnote">{statusFootnote}</p>}
           </div>
         </div>
       ) : (<>
@@ -4200,6 +4235,7 @@ function FxResult({ result }: { result: Record<string, unknown> }) {
           )}
         </div>
       </div>
+      {statusFootnote && <p className="fx-result-footnote">{statusFootnote}</p>}
       {formalMeasurementAvailable && bookSplit ? (
         <>
           <div className="fx-bridge-step comparison">

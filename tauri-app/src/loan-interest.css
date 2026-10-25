@@ -95,10 +95,15 @@
 }
 .loan-account-confirm th,
 .loan-account-confirm td {
-  padding: 11px 14px;
+  padding: 8px 14px;
   border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: middle;
+}
+/* 行高统一 48px 左右（曾 68px：大内边距＋36px 控件叠出来），
+   科目列才不用滚两屏就看不见利率列。 */
+.loan-account-confirm td {
+  height: 48px;
 }
 .loan-account-confirm th {
   position: sticky;
@@ -122,8 +127,8 @@
 }
 .loan-account-confirm select {
   min-width: 112px;
-  min-height: 36px;
-  padding: 6px 28px 6px 9px;
+  min-height: 30px;
+  padding: 4px 26px 4px 8px;
   border: 1px solid var(--control-border);
   border-radius: var(--radius-md);
   background: var(--control-bg);
@@ -142,12 +147,21 @@
 /* 选择器不限定 loan-confirm-table：上方「借款汇总利率确认」小表没有挂该类，
    之前的输入框无框无底，看上去像不可编辑的静态文字。 */
 .loan-account-confirm input {
-  min-height: 32px;
+  min-height: 30px;
   padding: 4px 8px;
   border: 1px solid var(--control-border);
   border-radius: 8px;
   background: var(--control-bg);
   color: var(--foreground);
+}
+/* 科目列超长名省略：auto 布局的 td 不认 max-width，包一层定宽块级元素
+   才能截断；全名靠 td 的 title 悬浮查看。 */
+.loan-account-ellipsis {
+  display: block;
+  overflow: hidden;
+  max-width: 300px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .loan-account-confirm input[type="number"] {
   width: 112px;
@@ -248,6 +262,11 @@
   color: var(--muted-foreground);
   font-size: 12px;
 }
+/* 拖放区第二行的准备说明：帮助块已并入这里（13px 灰字）。 */
+.loan-upload .file-input-description {
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
 .loan-run-grid {
   display: grid;
   grid-template-columns: minmax(180px, 240px) minmax(320px, 1fr);
@@ -310,9 +329,22 @@
 .loan-rate-confirmation td,
 .loan-rate-table th,
 .loan-rate-table td {
-  padding: 9px 10px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
+}
+/* 结果表行高统一 44~48px。 */
+.loan-rate-confirmation td,
+.loan-rate-table td {
+  height: 44px;
+}
+/* 表内控件收到 30px：行高压进 48px 内，且控件行与文字行不再差一截。 */
+.loan-rate-confirmation input,
+.loan-rate-confirmation select,
+.loan-rate-table input,
+.loan-rate-table select {
+  min-height: 30px;
+  padding: 4px 8px;
 }
 .loan-rate-confirmation th,
 .loan-rate-table th {
@@ -697,6 +729,8 @@
 .loan-ledger-scroll { overflow: auto; max-height: 68vh; border: 1px solid var(--border); border-radius: 10px; }
 .loan-ledger-table { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; table-layout: fixed; font-size: 13px; }
 .loan-ledger-table > :is(thead,tbody) > tr > :is(th,td) { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; text-align: left; }
+.loan-ledger-table > tbody > tr > td { height: 44px; }
+.loan-ledger-table input, .loan-ledger-table select { min-height: 30px; }
 .loan-ledger-table > thead > tr > th { position: sticky; top: 0; z-index: 3; background: var(--card); font-weight: 600; }
 .loan-ledger-table > :is(thead,tbody) > tr > :is(th,td):first-child { position: sticky; left: 0; z-index: 2; background: var(--card); }
 .loan-ledger-table > :is(thead,tbody) > tr > :is(th,td):nth-child(2) { position: sticky; left: 52px; z-index: 2; background: var(--card); box-shadow: 1px 0 0 var(--border); }

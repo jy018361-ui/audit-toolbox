@@ -110,6 +110,15 @@ export function tbjeCompleteAutomaticReviewKeys(
   );
 }
 
+/** 组卡标题的文件名段：TB 缺席时退回 JE——组名模板「组 N · 文件名」
+ *  让用户不必点开就能把卡片对回桌面上的文件。 */
+export function tbjeGroupFileLabel(
+  group: Pick<PairedGroup, "tb" | "je">,
+): string {
+  const file = group.tb ?? group.je;
+  return file ? fileName(file.path) : "未选文件";
+}
+
 export function tbjeMissingMappings(
   kind: LedgerKind,
   mapping: MappingDict,
@@ -1867,7 +1876,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
             <CardHeader>
               <CardTitle>
                 <h2 id="tbje-files-title" className="tbje-section-title">
-                  1. 添加 TB 与 JE 文件
+                  添加 TB 与 JE 文件
                 </h2>
               </CardTitle>
               <CardDescription>
@@ -1940,7 +1949,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
             <CardHeader>
               <CardTitle>
                 <h2 id="tbje-pairing-title" className="tbje-section-title">
-                  2. 确认配对与字段{" "}
+                  确认配对与字段{" "}
                   <span className="tbje-count">
                     {visibleGroups.length} 组
                     {visibleGroups.some((group) => group.needsReview) &&
@@ -2011,8 +2020,8 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   >
                     <div className="tbje-group-row">
                       <div className="tbje-group-identity">
-                        <strong title={`第 ${group.label} 组`}>
-                          第 {group.label} 组
+                        <strong title={`组 ${group.label} · ${tbjeGroupFileLabel(group)}`}>
+                          组 {group.label} · {tbjeGroupFileLabel(group)}
                         </strong>
                         <span
                           className={`tbje-pair-status${reviewStatusOf(group).attention ? " review" : ""}`}
@@ -2319,7 +2328,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
             <CardHeader>
               <CardTitle>
                 <h2 id="tbje-results-title" className="tbje-section-title">
-                  3. 查看核对结果
+                  查看核对结果
                 </h2>
               </CardTitle>
             </CardHeader>

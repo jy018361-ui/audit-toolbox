@@ -487,6 +487,9 @@
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+.fx-entity-summary td {
+  height: 44px;
+}
 .fx-entity-summary th:first-child,
 .fx-entity-summary th:nth-child(2),
 .fx-entity-summary td:first-child,
@@ -703,13 +706,11 @@
   font-size: 13px;
 }
 /* 导出成功条：与存款利息 .deposit-export-done 同款（视觉审核 S4——汇兑成功
-   提示曾降级为小灰字）。绿色大条 + 打开入口是本页唯一的成功回执。 */
+   提示曾降级为小灰字）。导出后本页唯一的绿色层：行1 报文件＋打开入口，
+   行2 小字交代测算结果仍在——结果区那条「可用」状态宣言已并入这里。 */
 .fx-export-done {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
+  display: grid;
+  gap: 4px;
   margin-top: 12px;
   padding: 11px 14px;
   border: 1px solid var(--success-border);
@@ -717,10 +718,50 @@
   background: var(--success-bg);
   color: var(--success-fg);
 }
-.fx-export-done p {
+.fx-export-done-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.fx-export-done-main p {
   flex: 1 1 320px;
   margin: 0;
   line-height: 1.55;
+}
+.fx-export-done small {
+  color: color-mix(in srgb, var(--success-fg) 82%, transparent);
+  font-size: 12px;
+}
+/* 测算完成条：只报状态不复述数字（数字只在下方算式出现一次）。 */
+.fx-job-done {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--success-fg) 30%, transparent);
+  border-radius: 10px;
+  background: var(--success-bg);
+  color: var(--success-fg);
+  font-size: var(--fs-sm);
+}
+.fx-job-done-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.fx-job-done > span:last-child {
+  color: color-mix(in srgb, var(--success-fg) 82%, transparent);
+  font-size: 12px;
+}
+/* 结果受限等口径说明降级后的注脚：跟在算式卡下一行，13px 灰字。 */
+.fx-result-footnote {
+  margin: -4px 0 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
 }
 .fx-currency-confirm {
   display: flex;
@@ -793,10 +834,13 @@
 }
 .fx-rollforward-table th,
 .fx-rollforward-table td {
-  padding: 6px 10px;
+  padding: 8px 10px;
   text-align: right;
   white-space: nowrap;
   border-bottom: 1px solid var(--border);
+}
+.fx-rollforward-table td {
+  height: 44px;
 }
 .fx-rollforward-table th:nth-child(-n + 5),
 .fx-rollforward-table td:nth-child(-n + 5) {
@@ -862,10 +906,13 @@
 }
 .fx-granularity-table th,
 .fx-granularity-table td {
-  padding: 6px 10px;
+  padding: 8px 10px;
   text-align: left;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
+}
+.fx-granularity-table td {
+  height: 44px;
 }
 .fx-granularity-table thead th {
   position: sticky;
@@ -944,10 +991,13 @@
 }
 .fx-checks-table th,
 .fx-checks-table td {
-  padding: 6px 10px;
+  padding: 8px 10px;
   text-align: left;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
+}
+.fx-checks-table td {
+  height: 44px;
 }
 .fx-checks-table thead th {
   position: sticky;

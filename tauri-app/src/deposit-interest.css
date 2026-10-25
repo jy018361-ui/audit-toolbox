@@ -1,6 +1,46 @@
 .deposit-page {
   padding-bottom: 40px;
 }
+/* 结果态把「测算与底稿」表单收成摘要条：日期与输出位置一行带过，
+   「修改」展开原表单——参数改完一次就不该一直占着半屏。 */
+.deposit-run-summary {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+}
+.deposit-run-summary-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.deposit-run-summary-line b {
+  color: var(--foreground);
+}
+/* NoticeStack 落到本页：行动条一行放下「结论＋说明＋入口」，
+   辅助核算明细这类整块内容独占一行。 */
+.deposit-page .notice-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+.deposit-page .notice-banner > b {
+  flex: none;
+}
+.deposit-page .notice-banner > span {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+.deposit-page .notice-banner > details {
+  flex: 1 1 100%;
+}
 .deposit-page .fx-bridge-equation {
   align-items: stretch;
 }
@@ -89,10 +129,15 @@
 }
 .deposit-account-list th,
 .deposit-account-list td {
-  padding: 11px 14px;
+  padding: 8px 14px;
   border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: middle;
+}
+/* 行高统一 44~48px：height 在表格单元格里按最小高度生效，纯文字行与
+   带控件的行不再一列高一列矮。 */
+.deposit-account-list td {
+  height: 44px;
 }
 .deposit-account-list th {
   position: sticky;
@@ -125,8 +170,8 @@
 }
 .deposit-account-list select {
   width: 100%;
-  min-height: 36px;
-  padding: 6px 28px 6px 9px;
+  min-height: 30px;
+  padding: 4px 26px 4px 8px;
   border: 1px solid var(--control-border);
   border-radius: var(--radius-md);
   background: var(--control-bg);
@@ -334,12 +379,16 @@
 }
 .deposit-table th,
 .deposit-table td {
-  padding: 9px 10px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
   text-align: left;
   white-space: normal;
   font-variant-numeric: tabular-nums;
+}
+/* 逐户表行高统一 44~48px（展开的按月明细行除外）。 */
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td {
+  height: 44px;
 }
 .deposit-table td {
   background: var(--deposit-row-bg, var(--card));
@@ -426,8 +475,8 @@
 }
 .deposit-table select,
 .deposit-table input {
-  min-height: 32px;
-  padding: 5px 8px;
+  min-height: 30px;
+  padding: 4px 8px;
   border: 1px solid var(--control-border);
   border-radius: 7px;
   background: var(--control-bg);
@@ -567,6 +616,9 @@
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+.deposit-tier-table td {
+  height: 44px;
+}
 .deposit-tier-table th {
   background: var(--muted);
   font-size: 12px;
@@ -676,8 +728,8 @@
   min-width: 104px;
 }
 .deposit-stale {
-  /* 视觉审核：结果页曾连排三条同深浅的米黄条，主次不清。任务状态条是
-     主提示；本条与其下的 .deposit-notice 降为次要——小一号、底色变淡。 */
+  /* 视觉审核：结果页曾连排三条同深浅的米黄条。提示墙已收敛进 NoticeStack，
+     本类只剩「JE 发生额无法按币种分配」这条 role=alert 的错误层。 */
   display: grid;
   gap: 4px;
   margin: 0 0 12px;
@@ -869,38 +921,8 @@ span.deposit-rate-missing {
   color: var(--muted-foreground);
   font-size: 12px;
 }
-.deposit-notice {
-  /* 同 .deposit-stale：次要提示，弱于页内主提示（任务状态条）。 */
-  display: grid;
-  gap: 6px;
-  margin: 0 0 12px;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--warning-border) 45%, var(--border));
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--warning-bg) 45%, var(--card));
-  color: var(--warning-fg);
-}
-.deposit-notice h4,
-.deposit-notice p,
-.deposit-notice ul {
-  margin: 0;
-}
-.deposit-notice h4 {
-  font-size: 13px;
-}
-.deposit-notice p,
-.deposit-notice li {
-  font-size: 12px;
-  line-height: 1.6;
-}
-.deposit-notice ul {
-  display: grid;
-  gap: 4px;
-  padding-left: 20px;
-}
-.deposit-auxiliary-notice {
-  display: block;
-}
+/* 辅助核算降级明细收进 NoticeStack 的 info 条里：details 铺满整行，
+   summary 才有点击感。 */
 .deposit-auxiliary-notice summary {
   cursor: pointer;
   font-size: 14px;

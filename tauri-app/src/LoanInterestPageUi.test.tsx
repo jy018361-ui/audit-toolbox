@@ -194,8 +194,9 @@ it.each(["verified", "noMatch", "partialCoverage", "ambiguous", "noAnchors"] as 
 
 it("按资料模式显示空态和可访问的选中状态", () => {
   render(<LoanInterestPage tool={tool} />);
+  // 台账准备说明并入拖放区第二行（13px 灰字），不再单独立帮助块。
   expect(
-    screen.getByRole("region", { name: "准备完整借款台账" }),
+    screen.getByText("加入包含借款标识、本金或余额、起止日期及利率信息的台账。"),
   ).toBeVisible();
   expect(screen.getByRole("button", { name: "完整借款台账" })).toHaveAttribute(
     "aria-pressed",

@@ -120,7 +120,7 @@ describe("TbjeCheckPage", () => {
     expect(buttons[1]).toBeDisabled();
     expect(buttons[2]).toBeDisabled();
     expect(
-      screen.getByRole("heading", { level: 2, name: "1. 添加 TB 与 JE 文件" }),
+      screen.getByRole("heading", { level: 2, name: "添加 TB 与 JE 文件" }),
     ).toBeInTheDocument();
   });
 
@@ -166,7 +166,7 @@ describe("TbjeCheckPage", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+        screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
       ).toBeInTheDocument(),
     );
     const pairingList = container.querySelector(".tbje-pairing-list");
@@ -174,7 +174,7 @@ describe("TbjeCheckPage", () => {
     expect(
       screen.queryByRole("heading", {
         level: 2,
-        name: "1. 添加 TB 与 JE 文件",
+        name: "添加 TB 与 JE 文件",
       }),
     ).not.toBeInTheDocument();
     expect(pairingList).toHaveTextContent("科目余额表 TB");
@@ -225,11 +225,11 @@ describe("TbjeCheckPage", () => {
     ).toBeEnabled();
     fireEvent.click(within(steps).getByRole("button", { name: /添加文件/ }));
     expect(
-      screen.getByRole("heading", { level: 2, name: "1. 添加 TB 与 JE 文件" }),
+      screen.getByRole("heading", { level: 2, name: "添加 TB 与 JE 文件" }),
     ).toBeVisible();
     // 配对区在第一步原样保留，用户回来时仍能看到并管理已导入的文件。
     expect(
-      screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+      screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
     ).toBeVisible();
   });
 
@@ -270,7 +270,7 @@ describe("TbjeCheckPage", () => {
     );
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+        screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
       ).toBeInTheDocument(),
     );
 
@@ -280,7 +280,7 @@ describe("TbjeCheckPage", () => {
       within(steps).getByRole("button", { name: /添加文件/ }),
     );
     expect(
-      screen.getByRole("heading", { level: 2, name: "1. 添加 TB 与 JE 文件" }),
+      screen.getByRole("heading", { level: 2, name: "添加 TB 与 JE 文件" }),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "01TB.xlsx" })).toBeVisible();
     expect(screen.getByRole("button", { name: "01JE.xlsx" })).toBeVisible();
@@ -292,7 +292,7 @@ describe("TbjeCheckPage", () => {
     expect(
       screen.queryByRole("heading", {
         level: 2,
-        name: "1. 添加 TB 与 JE 文件",
+        name: "添加 TB 与 JE 文件",
       }),
     ).not.toBeInTheDocument();
   });
@@ -752,7 +752,7 @@ describe("TbjeCheckPage", () => {
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
 
-    await screen.findByRole("heading", { level: 2, name: "3. 查看核对结果" });
+    await screen.findByRole("heading", { level: 2, name: "查看核对结果" });
     const table = screen.getByRole("table", { name: "TB/JE 完整性核对结果" });
     expect(screen.getByRole("region", { name: "核对结果表，可横向滚动" })).toHaveAttribute("tabindex", "0");
     expect(table.querySelectorAll("colgroup col")).toHaveLength(5);
@@ -1021,7 +1021,7 @@ describe("TbjeCheckPage", () => {
     );
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+        screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
       ).toBeInTheDocument(),
     );
     expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
@@ -1056,7 +1056,7 @@ describe("TbjeCheckPage", () => {
       pairingFileKey({ path: "C:/samples/02JE.xlsx", sheet: "Sheet1" }),
     );
     expect(
-      screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+      screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
     ).toBeInTheDocument();
     expect(
       screen.getAllByRole("button", { name: /查看并调整 JE 映射/ }).length,
@@ -1214,7 +1214,7 @@ describe("TbjeCheckPage", () => {
     );
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+        screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
       ).toBeInTheDocument(),
     );
     expect(classifyCalls).toEqual([

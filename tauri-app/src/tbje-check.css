@@ -350,6 +350,8 @@
   flex-wrap: wrap;
   gap: var(--sp-3);
   margin-top: var(--sp-4);
+  /* 主按钮贴内容区右下：与全站 CTA 落点一致。 */
+  justify-content: flex-end;
 }
 
 .tbje-status {

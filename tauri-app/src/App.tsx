@@ -1547,11 +1547,7 @@ function History({ catalog }: { catalog: ToolManifest[] }) {
         <CardContent className="history-card-content">
           {loading ? (
             <div role="status" aria-live="polite">
-              <EmptyState
-                compact
-                title="正在读取历史记录…"
-                description="正在从本机任务记录中读取。"
-              />
+              <EmptyState compact title="正在读取历史记录…" />
             </div>
           ) : error ? (
             <div className="error-box" role="alert">
@@ -1614,7 +1610,6 @@ function History({ catalog }: { catalog: ToolManifest[] }) {
           ) : (
             <EmptyState
               title="还没有任务记录"
-              description="完成任务后，这里会显示处理状态、时间和输出文件数量。"
               action={
                 <NavLink className="primary empty-state-link" to="/">
                   返回工作台
@@ -2692,7 +2687,7 @@ export function Settings({
           <section className="list-card">
             <h2>界面主题</h2>
             <p className="settings-note">
-              选择后立即生效并自动保存，无需再点击保存配置。
+              选择后立即生效。
             </p>
             <div className="theme-picker">
               {[

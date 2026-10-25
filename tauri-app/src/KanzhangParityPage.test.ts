@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   accountColumns,
   activeAmountScheme,
@@ -1067,5 +1068,48 @@ describe("看账其他交互口径", () => {
     );
     // 没选文件时不猜路径
     expect(defaultKanzhangOutputPath("", "", now)).toBe("");
+  });
+});
+
+describe("看账视觉审核修复（界面防溢出）", () => {
+  const css = readFileSync(
+    new URL("./kanzhang-parity.css", import.meta.url),
+    "utf8",
+  );
+  const tsx = readFileSync(
+    new URL("./KanzhangParityPage.tsx", import.meta.url),
+    "utf8",
+  );
+
+  it("批次标签行允许换行，不再被卡片右缘裁切", () => {
+    // 套用预设后批次多达八九个，横向滚动在 WebView2 下滚动条自动隐藏，
+    // 最右一枚看起来像被裁坏；必须换行而不是滚动。
+    expect(css).toMatch(/\.kz-tabs\s*\{[^}]*flex-wrap:\s*wrap/);
+    expect(css).not.toMatch(/\.kz-tabs\s*\{[^}]*overflow:\s*auto/);
+  });
+
+  it("透视三个多选列表按整行取高，末项不再被容器底边拦腰切半", () => {
+    // CSS 像素高度除不尽原生选项行高就会截断末项，高度必须交给 size 属性。
+    expect(css).not.toMatch(/select\[multiple\][^{]*\{[^}]*min-height/);
+    expect((tsx.match(/multiple size=\{6\}/g) ?? []).length).toBe(3);
+  });
+
+  it("文件预览卡头部在本页垂直居中，覆盖公共的贴底对齐", () => {
+    expect(css).toMatch(
+      /\.kz-page \.mapping-panel > \.loan-map-head\s*\{[^}]*align-items:\s*center/,
+    );
+  });
+
+  // 正负数标记页（JeSignMarkPage）与看账共用样式族；其页面样式断言放这里，
+  // 因为它自己的测试文件跑在 jsdom 下读不了文件。
+  it("正负数的批次与目标科目卡与同栈其余卡片同宽", () => {
+    const jeCss = readFileSync(
+      new URL("./je-sign-mark.css", import.meta.url),
+      "utf8",
+    );
+    const rule = jeCss.match(/\.jm-batches\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(rule).toContain("width: 100%");
+    // 旧的 62rem 上限让批次卡比上下卡片窄约 300px。
+    expect(rule).not.toMatch(/max-width|align-self/);
   });
 });

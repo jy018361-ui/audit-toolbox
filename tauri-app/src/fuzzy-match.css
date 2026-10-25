@@ -149,9 +149,34 @@
   background: var(--accent);
 }
 .fuzzy-table {
+  /* position 给 data-more 渐隐层当定位基准 */
+  position: relative;
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 10px;
+}
+/* 底缘/右缘还有未滚到的内容时渐隐提示（数据属性由 FuzzyMatchPage 的
+   滚动检测 effect 维护）：WebView2 的覆盖式滚动条会自动隐藏，被裁一半的
+   行列看起来像渲染坏了。渐隐收口色对齐本节卡的 --card 底色。 */
+.fuzzy-table[data-more-right="true"]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 34px;
+  pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--card));
+}
+.fuzzy-table[data-more-bottom="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 20px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--card));
 }
 .fuzzy-table table {
   width: 100%;

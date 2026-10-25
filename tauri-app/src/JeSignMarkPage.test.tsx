@@ -94,6 +94,12 @@ describe("JeSignMarkPage", () => {
     // 看账的三步走在这里不该出现，尤其是被剪掉的「科目筛选」独立步骤。
     expect(screen.queryByText("科目筛选")).not.toBeInTheDocument();
     expect(screen.queryByText("透视与导出")).not.toBeInTheDocument();
+
+    // 文件预览必须走公共 DataTable（列按内容取宽 + data-more 滚动渐隐 +
+    // 金额右对齐都在那套容器里）；退回自制表格会把右缘裁列问题带回来。
+    expect(
+      document.querySelector(".mapping-panel .data-table-frame .data-table-scroll table.data-table-table"),
+    ).not.toBeNull();
   });
 
   it("keeps batch naming out of the default view and opens inline rename on demand", () => {
@@ -253,4 +259,7 @@ describe("JeSignMarkPage", () => {
     expect(screen.getByText("文件无法读取")).toBeInTheDocument();
     expect(screen.queryByText("标记结果")).not.toBeInTheDocument();
   });
+
+  // jsdom 环境下 import.meta.url 不是 file 协议，读不了文件；正负数的
+  // 样式断言放在 node 环境的 KanzhangParityPage.test.ts（两页共用样式族）。
 });

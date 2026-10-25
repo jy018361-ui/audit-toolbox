@@ -1110,8 +1110,43 @@ function FuzzyResultTable({
   const resize = useTableColumnResize<HTMLDivElement>({
     storageKey: "fuzzy.results",
   });
+  // 底缘/右缘还有未滚到的内容时给容器挂 data 属性，页面 CSS 据此渲染渐隐
+  // 提示——与公共 DataTable 同一做法，但本表不在 DataTable 体系内，须自带。
+  // WebView2 的覆盖式滚动条会自动隐藏，被裁一半的行列看起来像渲染坏了。
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = frameRef.current;
+    if (!el) return;
+    const update = () => {
+      const beyondRight =
+        el.scrollWidth - el.clientWidth - el.scrollLeft > 4;
+      const beyondBottom =
+        el.scrollHeight - el.clientHeight - el.scrollTop > 4;
+      el.dataset.moreBottom = beyondBottom ? "true" : "false";
+      el.dataset.moreRight = beyondRight ? "true" : "false";
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(update);
+      observer.observe(el);
+    }
+    return () => {
+      el.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+      observer?.disconnect();
+    };
+  }, [rows, statusFilter]);
   return (
-    <div className="fuzzy-table" ref={resize.ref}>
+    <div
+      className="fuzzy-table"
+      ref={(node) => {
+        resize.ref.current = node;
+        frameRef.current = node;
+      }}
+    >
       <table>
         <thead>
           <tr>

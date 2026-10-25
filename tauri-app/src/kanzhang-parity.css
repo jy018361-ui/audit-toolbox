@@ -91,9 +91,11 @@
   /* 控件不再跟着 13px 标签缩小，保持页面控件字号一致。 */
   font-size: var(--fs-md);
 }
-.kz-card select[multiple] {
-  min-height: 105px;
-}
+/*
+ * 多选列表（透视设计的行/列/值字段）高度交给 <select size>：CSS 写死的像素
+ * 高度除不尽原生选项行高时，最后一项会被容器底边拦腰切半。size 属性按整行
+ * 数取高，任何缩放比例下都不会截断，故这里不再设 min-height。
+ */
 .kz-card button:not([data-slot="button"]) {
   border: 0;
   border-radius: var(--r-sm);
@@ -165,8 +167,10 @@
 }
 .kz-tabs {
   display: flex;
+  /* 批次标签允许换行：套用预设后一次可能出现八九枚，WebView2 的滚动条
+     会自动隐藏，横向滚动时最右一枚看起来就像被卡片右缘裁坏了。 */
+  flex-wrap: wrap;
   gap: var(--sp-1);
-  overflow: auto;
   margin: var(--sp-3) 0;
 }
 .kz-source-panel {
@@ -443,4 +447,16 @@
   .kz-assigned-grid .kz-shuttle-list {
     height: 220px;
   }
+}
+
+/*
+ * 「文件预览」卡头部（看账/正负数两页共用 MappingPanel）：公共 .loan-map-head
+ * 按 flex-end 贴底对齐，标题块沉在左下、与右上的 Sheet/标题行/表头层数下拉
+ * 基线错位。这里拉回垂直居中并收拢纵向间距。只作用于 .kz-page（两页根类），
+ * 借款/存款等其他工具的映射面板维持公共样式不动。
+ */
+.kz-page .mapping-panel > .loan-map-head {
+  align-items: center;
+  gap: var(--sp-3) var(--sp-4);
+  padding: var(--sp-4) var(--sp-5) var(--sp-3);
 }

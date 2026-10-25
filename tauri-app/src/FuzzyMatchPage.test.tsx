@@ -279,4 +279,20 @@ describe("FuzzyMatchPage", () => {
       '"aIndex":1',
     );
   });
+
+  it("结果表由滚动检测挂 data-more 渐隐提示，CSS 提供对应渐隐层", async () => {
+    const start = await setupBothSources();
+    fireEvent.click(start);
+    await waitFor(() =>
+      expect(sessionStorage.getItem("fuzzy-match-draft.v1")).toContain("job-1"),
+    );
+    emitJob(doneEvent(matchResult));
+    // jsdom 无布局，两个方向都无未滚内容，属性应为显式 "false"——
+    // 属性缺失说明滚动检测 effect 没有接管容器。
+    const frame = document.querySelector(".fuzzy-table");
+    expect(frame).toHaveAttribute("data-more-bottom", "false");
+    expect(frame).toHaveAttribute("data-more-right", "false");
+    // 渐隐层的 CSS 断言在 node 环境的 FuzzyMatchPage.test.ts 里
+    //（jsdom 下 import.meta.url 非 file 协议，读不了文件）。
+  });
 });

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   DRAFT_KEY,
   autoAcceptList,
@@ -129,5 +130,19 @@ describe("两列模糊匹配纯函数", () => {
 
   it("草稿键名与规格一致", () => {
     expect(DRAFT_KEY).toBe("fuzzy-match-draft.v1");
+  });
+});
+
+describe("两列模糊匹配视觉审核修复（结果表滚动提示）", () => {
+  // 渐隐层与公共 DataTable 的 data-table-frame 同法：滚动条自动隐藏的
+  // WebView2 下，被裁一半的行列看起来像渲染坏了，必须留可视提示。
+  const css = readFileSync(
+    new URL("./fuzzy-match.css", import.meta.url),
+    "utf8",
+  );
+  it("结果表容器按 data-more 属性渲染底缘/右缘渐隐", () => {
+    expect(css).toMatch(/\.fuzzy-table\[data-more-bottom="true"\]::before/);
+    expect(css).toMatch(/\.fuzzy-table\[data-more-right="true"\]::after/);
+    expect(css).toMatch(/\.fuzzy-table\s*\{[^}]*position:\s*relative/);
   });
 });

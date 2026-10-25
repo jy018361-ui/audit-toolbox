@@ -110,6 +110,39 @@ mod tests {
     }
 
     #[test]
+    fn small_file_hard_rule_disables_disk_monitoring_for_every_table_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("期初.xlsx");
+        let b = dir.path().join("期末.xlsx");
+        sparse(&a, 49);
+        sparse(&b, 49);
+        let source = json!({"inputPath":a,"path":a,"sheet":"数据"});
+        let params = json!({"tbSource":source,"jeSource":{"inputPath":b},
+            "sourceA":source,"sourceB":{"path":b},"inputPath":a,"path":a,"sheet":"数据",
+            "beginPath":a,"endPath":b,"beginSheet":"数据","endSheet":"数据",
+            "additionSupplement":{"path":b},"__forceDisk":true,"__largeJeDiskMode":true});
+        with_test_memory(low(), || {
+            for method in ["fx.preview", "fx.export", "deposit.preview", "deposit.export",
+                "fa.tbje_preview", "fa.tbje_export", "tbje_check.run", "tbje_check.export",
+                "fuzzy.match", "fa.match", "fa.preview", "fa.export", "fa.policy_export", "fa.dep_export",
+                "kanzhang.inspect", "kanzhang.export", "kanzhang.mark_inspect", "kanzhang.mark_export"] {
+                assert!(!for_job(method, &params).unwrap().uses_disk(), "{method}");
+                assert!(!super::super::memory_protected_job(method, &params), "{method} 不能开启内存暂停");
+            }
+            let batch = json!({"prepareMappings":true,"groups":[params.clone(),params.clone()]});
+            for method in ["tbje_check.run_batch", "tbje_check.export_batch"] {
+                assert!(!for_job(method, &batch).unwrap().uses_disk(), "{method}");
+            }
+            let loan = json!({"mode":"tb","kind":"tb","source":source,
+                "tbSource":{"source":source},"jeSource":{"source":{"inputPath":b}}});
+            for method in ["loan.inspect_full", "loan.preview", "loan.export"] {
+                assert!(!for_job(method, &loan).unwrap().uses_disk(), "{method}");
+                assert!(!super::super::memory_protected_job(method, &loan), "{method}");
+            }
+        });
+    }
+
+    #[test]
     fn table_job_read_plans_exclude_unselected_sheets_for_all_streaming_tools() {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("多表.xlsx");
@@ -125,6 +158,7 @@ mod tests {
         }
         archive.start_file("xl/worksheets/sheet2.xml", options).unwrap();
         for _ in 0..1024 { archive.write_all(&[b' '; 65536]).unwrap(); }
+        disk_table::pad_policy_test_archive(&mut archive);
         archive.finish().unwrap();
         let source = json!({"inputPath":input,"path":input,"sheet":"本次"});
         let params = json!({"tbSource":source,"jeSource":source,
@@ -151,10 +185,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tb = dir.path().join("tb.csv");
         let je = dir.path().join("je.csv");
-        sparse(&tb, 8);
+        sparse(&tb, 50);
         fs::write(&je, "日期,科目,借方,贷方\n2026-01-01,1002,1,0\n").unwrap();
         let params = json!({"tbSource":{"inputPath":tb},"jeSource":{"inputPath":je}});
-        with_test_memory(low(), || {
+        with_test_memory(MemoryStatus { total:16*GIB, available:31*GIB/10, commit_available:8*GIB }, || {
             assert!(!disk_table::should_use_disk(&[&tb, &je], 2));
             assert!(disk_table::should_use_disk(&[&tb], 4));
             for method in ["fx.preview", "deposit.preview", "tbje_check.run", "fa.tbje_preview"] {
@@ -173,20 +207,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = (0..4).map(|index| {
             let path = dir.path().join(format!("{index}.csv"));
-            sparse(&path, 2);
+            sparse(&path, 50);
             path
         }).collect::<Vec<_>>();
         let params = json!({"prepareMappings":true,"groups":[
             {"tbSource":{"inputPath":paths[0]},"jeSource":{"inputPath":paths[1]}},
             {"tbSource":{"inputPath":paths[2]},"jeSource":{"inputPath":paths[3]}}
         ]});
-        with_test_memory(low(), || {
+        with_test_memory(MemoryStatus { total:16*GIB, available:8*GIB, commit_available:8*GIB }, || {
             assert!(disk_table::should_use_disk(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>(), 4));
             for method in ["tbje_check.run_batch", "tbje_check.export_batch"] {
                 assert!(!for_job(method, &params).unwrap().uses_disk(), "逐组执行不能按整批同时驻留估算");
                 assert!(!super::super::memory_protected_job(method, &params));
             }
-            sparse(&paths[0], 8);
+            sparse(&paths[0], 512);
             assert!(for_job("tbje_check.run_batch", &params).unwrap().uses_disk(), "大表预检继续受暂停恢复控制");
         });
     }
@@ -197,7 +231,7 @@ mod tests {
         let small = dir.path().join("清单.csv");
         let large = dir.path().join("补充.csv");
         fs::write(&small, "编号,名称\n1,电脑\n").unwrap();
-        sparse(&large, 32);
+        sparse(&large, 50);
         let params = json!({"tbSource":{"inputPath":large},"sourceA":{"path":large},
             "beginPath":small,"endPath":small,"additionSupplement":{"path":large}});
         with_test_memory(low(), || {
@@ -208,8 +242,9 @@ mod tests {
             let plan = for_job("fa.match", &params).unwrap();
             assert!(plan.uses_disk());
             let _guard = plan.enter();
-            assert!(disk_table::should_use_disk(&[&small], 12), "补充表过大时整条FA合并走磁盘");
+            assert!(!disk_table::should_use_disk(&[&small], 12), "小文件自身读取仍保持普通模式");
             assert!(disk_table::should_use_disk(&[&large], 1));
+            assert!(crate::fa::resources::pair_uses_disk(&params, crate::fa::resources::Phase::Match), "大补充表仍由磁盘合并完整处理");
         });
         // TS 当前走完整内存表与Parquet缓存，未宣称已有本模块的分批读取分支。
         assert!(for_job("ts.inspect", &params).is_none());

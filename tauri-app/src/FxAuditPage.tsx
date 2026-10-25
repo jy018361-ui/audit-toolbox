@@ -113,7 +113,7 @@ export function fxResultTrustStatus(summary: Record<string, unknown>): {
       tone: "limited",
       title: "结果受限，需人工复核",
       detail:
-        "测算已完成，但仍有差异或待确认事项。请复核下方提示后再生成最终底稿。",
+        "仍有差异或待确认事项，见下方明细。",
     };
   }
   return {
@@ -1823,6 +1823,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     setJob(undefined);
     setCompletedStage(undefined);
     setActiveStage(undefined);
+    // 整组重传也放弃上次手选的保存位置（默认落点跟新文件走），并拒收旧任务迟到事件。
+    activeJob.current = "";
+    setOutputPath("");
     setCustomRates(null);
     setRatesNote("");
     setManualClassifications({});
@@ -1891,11 +1894,21 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
+  /** 任一侧换文件/换 Sheet 重读后调用：新读入的表格才是当前输入，上一轮
+   * 测算结果、完成条与任务事件一律作废，迟到的旧任务事件也拒收。 */
+  function invalidateRunOutputs() {
+    activeJob.current = "";
+    setJob(undefined);
+    setResult(undefined);
+    setCompletedStage(undefined);
+    setActiveStage(undefined);
+  }
   function applyInspection(
     kind: "je" | "tb",
     path: string,
     response: Inspection,
   ) {
+    invalidateRunOutputs();
     // 历史恢复后重新识别同一文件：用存档映射与各口径覆盖顶回建议值，
     // 逐侧一次性消费；换文件照旧用建议值。
     const stash = restoredFxRef.current;
@@ -2037,7 +2050,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     setError("");
     setSourceStatus(`正在按 ${kind.toUpperCase()} 读取 ${fileName(path)}…`);
     setAlignment([]);
-    setResult(undefined);
+    // 更换文件＝换输入数据：旧一轮测算与完成条立即作废，保存位置跟随新文件。
+    invalidateRunOutputs();
+    setOutputPath("");
     try {
       const response = (await engineCall(`fx.inspect_${kind}`, {
         pairedTbJe: kind === "je" && Boolean(tb),
@@ -2068,7 +2083,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
         : `正在更正为 ${to.toUpperCase()}，并重新自动识别标题行、层数和字段…`,
     );
     setAlignment([]);
-    setResult(undefined);
+    // 类型更正后旧口径全部失效：等同换了一侧输入。
+    invalidateRunOutputs();
     try {
       const changed = await correctLedgerSourceKinds(
         from,
@@ -2664,6 +2680,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   setJob(undefined);
                   setCompletedStage(undefined);
                   setActiveStage(undefined);
+                  activeJob.current = "";
+                  setOutputPath("");
                   setReportEnd("");
                   setEarliestDataYears({});
                   setSourceStatus("");
@@ -2687,6 +2705,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   onReplace={() => void replaceSource("je")}
                   onClear={() => {
                     reviews.clearReview("je");
+                    invalidateRunOutputs();
+                    setOutputPath("");
                     setJePath("");
                     setJe(undefined);
                     setJeMapping({});
@@ -2712,7 +2732,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                     <EmptyState
                       compact
                       title="还需要 JE"
-                      description="JE 用于逐笔识别结算与重估事件，是汇兑测算的必需资料；若文件已上传但识别有误，可在已识别卡片上点「更正为 JE」。"
+                      description="JE 必需，用于识别结算与重估。"
                     />
                     <Button
                       type="button"
@@ -2737,6 +2757,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   onReplace={() => void replaceSource("tb")}
                   onClear={() => {
                     reviews.clearReview("tb");
+                    invalidateRunOutputs();
+                    setOutputPath("");
                     setTbPath("");
                     setTb(undefined);
                     setTbMapping({});
@@ -2762,7 +2784,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                     <EmptyState
                       compact
                       title="还需要 TB"
-                      description="TB 提供各科目余额与币种口径，是汇兑测算的必需资料；若文件已上传但识别有误，可在已识别卡片上点「更正为 TB」。"
+                      description="TB 必需，提供余额与币种。"
                     />
                     <Button
                       type="button"
@@ -2873,6 +2895,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
             {je && (
               <FxPreview
                 title="JE 文件预览与字段映射"
+                sourceName={displayFileName(jePath)}
                 kind="je"
                 mode={mode}
                 inspection={je}
@@ -2902,6 +2925,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
             {tb && (
               <FxPreview
                 title="TB 文件预览与字段映射"
+                sourceName={displayFileName(tbPath)}
                 kind="tb"
                 mode={mode}
                 inspection={tb}
@@ -3602,6 +3626,7 @@ export function fxDetachRole(
 
 function FxPreview(props: {
   title: string;
+  sourceName: string;
   kind: "je" | "tb";
   /** JE 与 TB 的原币币种都是必填角色。 */
   mode: Mode;
@@ -3727,6 +3752,7 @@ function FxPreview(props: {
   return (
     <MappingPanel
       title={props.title}
+      sourceName={props.sourceName}
       resizeKey={`fx.mapping-${props.kind}`}
       note={`${formatCount(props.inspection.rowCount)} 行 × ${props.inspection.headers.length} 列`}
       headers={props.inspection.headers}
@@ -3916,7 +3942,7 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
         {warnings.length > 0 && (
           <section>
             <h5>其他提示：{warnings.length} 项</h5>
-            <p>测算已完成；如结果不符合预期，再核对这些来源和映射提示。</p>
+            <p>来源与映射提示</p>
             <details className="fx-checks-evidence">
               <summary>查看原始提示</summary>
               <ul className="fx-checks-list">

@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 
 use crate::AppError;
 use crate::fa::{
-    Table, asset_header_depth, asset_headers, detect_header, finalize_table, normalize_join_key,
+    HeaderOptions, Table, asset_header_depth, asset_headers, detect_header, finalize_table, normalize_join_key,
     sheet_name_affinity, suggest_mapping,
 };
 
@@ -70,6 +70,7 @@ pub(crate) fn auto_sheet_judge(
         sheet: Some(sheet.to_owned()),
         sheets: vec![],
         header_row: hi + 1,
+        header_depth: asset_header_depth(matrix, hi),
         headers,
         rows: vec![],
         row_count: 0,
@@ -204,6 +205,25 @@ fn visible_xlsx_sheets(states: &[(String, String, bool)]) -> Vec<String> {
     } else {
         visible
     }
+}
+
+/// 文件选择阶段只读目录；不解析共享字符串、表体或参照清单。
+pub(crate) fn list_visible_sheets(path: &Path) -> Result<Vec<String>, AppError> {
+    if crate::spreadsheet_input::is_text(path) {
+        return Ok(Vec::new());
+    }
+    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("xlsx") || ext.eq_ignore_ascii_case("xlsm")) {
+        if let Ok(states) = fa_xlsx_sheet_states(path) {
+            return Ok(visible_xlsx_sheets(&states));
+        }
+    }
+    use calamine::Reader as _;
+    let workbook = calamine::open_workbook_auto(path)
+        .map_err(|e| load_error("无法读取工作簿目录。", Some(e.to_string())))?;
+    let sheets = workbook.sheets_metadata().iter()
+        .filter(|sheet| sheet.visible == calamine::SheetVisible::Visible)
+        .map(|sheet| sheet.name.clone()).collect::<Vec<_>>();
+    Ok(if sheets.is_empty() { workbook.sheet_names().to_vec() } else { sheets })
 }
 
 /// 共享字符串表按文件身份只留最近一份：定向抽列会被键预碰撞反复调用，
@@ -521,7 +541,8 @@ pub(crate) fn auto_sheet_candidates(
 
 /// 前缀结构表（表头、样例、行数规模）的磁盘缓存：键为工作簿身份＋表名＋
 /// 标题行，扩展名沿用 `.sheet` 跟随既有清扫。缓存命中时连前缀解压都省掉。
-fn prefix_cache_path(path: &Path, sheet: Option<&str>, header: Option<usize>) -> Option<PathBuf> {
+fn prefix_cache_path(path: &Path, sheet: Option<&str>, header: impl Into<HeaderOptions>) -> Option<PathBuf> {
+    let header = header.into();
     let meta = fs::metadata(path).ok()?;
     let modified = meta
         .modified()
@@ -535,8 +556,9 @@ fn prefix_cache_path(path: &Path, sheet: Option<&str>, header: Option<usize>) ->
     hasher.update(meta.len().to_le_bytes());
     hasher.update(modified.to_le_bytes());
     hasher.update(sheet.unwrap_or("<auto>").as_bytes());
-    hasher.update(header.unwrap_or(0).to_le_bytes());
-    hasher.update(b"fa-prefix-table-v2-physical-origin");
+    hasher.update(header.row.unwrap_or(0).to_le_bytes());
+    hasher.update(header.depth.unwrap_or(0).to_le_bytes());
+    hasher.update(b"fa-prefix-table-v4-bounded");
     hasher.update(crate::header_detection::RULE_VERSION.as_bytes());
     let key = hex::encode(hasher.finalize());
     Some(
@@ -548,7 +570,7 @@ fn prefix_cache_path(path: &Path, sheet: Option<&str>, header: Option<usize>) ->
     )
 }
 
-fn load_prefix_cache(path: &Path, sheet: &str, header: Option<usize>) -> Option<Table> {
+fn load_prefix_cache(path: &Path, sheet: &str, header: HeaderOptions) -> Option<Table> {
     let cache = prefix_cache_path(path, Some(sheet), header)?;
     let text = fs::read_to_string(cache).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
@@ -597,13 +619,14 @@ fn load_prefix_cache(path: &Path, sheet: &str, header: Option<usize>) -> Option<
         sheet: Some(sheet.to_owned()),
         sheets,
         header_row: value.get("headerRow").and_then(Value::as_u64)? as usize,
+        header_depth: value.get("headerDepth").and_then(Value::as_u64)? as usize,
         headers,
         row_count: row_count.max(rows.len()),
         rows,
     })
 }
 
-fn save_prefix_cache(path: &Path, header: Option<usize>, table: &Table) {
+fn save_prefix_cache(path: &Path, header: HeaderOptions, table: &Table) {
     let Some(cache) = prefix_cache_path(path, table.sheet.as_deref(), header) else {
         return;
     };
@@ -611,6 +634,7 @@ fn save_prefix_cache(path: &Path, header: Option<usize>, table: &Table) {
         "sheet": table.sheet,
         "sheets": table.sheets,
         "headerRow": table.header_row,
+        "headerDepth": table.header_depth,
         "headers": table.headers,
         "rows": table.rows,
         "rowCount": table.row_count,
@@ -629,9 +653,11 @@ fn save_prefix_cache(path: &Path, header: Option<usize>, table: &Table) {
 pub(crate) fn load_prefix_table(
     path: &Path,
     requested_sheet: Option<&str>,
-    header: Option<usize>,
+    header: impl Into<HeaderOptions>,
     choose_best: bool,
 ) -> Option<Table> {
+    let options = header.into();
+    let header = options.row;
     if !matches!(
         path.extension().and_then(|v| v.to_str()),
         Some("xlsx") | Some("xlsm")
@@ -659,11 +685,12 @@ pub(crate) fn load_prefix_table(
     if target.is_empty() {
         return None;
     }
-    if let Some(table) = load_prefix_cache(path, &target, header) {
+    if let Some(table) = load_prefix_cache(path, &target, options) {
         return Some(table);
     }
     let (_, entry, _) = states.iter().find(|(name, _, _)| *name == target)?;
-    let prefix = fa_xlsx_prefix(path, entry, PREFIX_ROWS).ok()?;
+    let limit = header.unwrap_or(0).saturating_add(options.depth.unwrap_or(2)).saturating_add(12).max(PREFIX_ROWS);
+    let prefix = fa_xlsx_prefix(path, entry, limit).ok()?;
     let shared = shared_strings_cached(path);
     let matrix = fa_xlsx_prefix_matrix(&prefix, &shared);
     if matrix.is_empty() {
@@ -673,11 +700,12 @@ pub(crate) fn load_prefix_table(
     let hi = header
         .map(|v| v.saturating_sub(1))
         .unwrap_or_else(|| detect_header(&matrix));
-    let depth = asset_header_depth(&matrix, hi);
+    let depth = options.depth.unwrap_or_else(|| asset_header_depth(&matrix, hi));
     let declared = fa_xlsx_dimension_rows(&prefix);
-    let row_count = declared.saturating_sub(hi + depth);
-    let table = finalize_table(path, Some(target), sheets, hi, matrix, row_count);
-    save_prefix_cache(path, header, &table);
+    let extent = declared.max(matrix.len() + usize::from(!prefix.contains("</sheetData>")));
+    let row_count = extent.saturating_sub(hi + depth);
+    let table = finalize_table(path, Some(target), sheets, hi, matrix, row_count, options.depth).ok()?;
+    save_prefix_cache(path, options, &table);
     Some(table)
 }
 
@@ -1062,6 +1090,7 @@ mod tests {
             "sheets": prefix.sheets,
             "headerRow": 1,
             "headers": ["缓存命中"],
+            "headerDepth": 1,
             "rows": [["x"]],
             "rowCount": 1,
         });

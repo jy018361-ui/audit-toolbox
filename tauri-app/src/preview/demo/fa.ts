@@ -209,6 +209,7 @@ const mainSide = (
   selectedSheet: str(params[sheetKey]) || "固定资产清单",
   displayName,
   detectedHeaderRow: 1,
+  headerDepth: Number(params[sheetKey === "beginSheet" ? "beginHeaderDepth" : "endHeaderDepth"]) || 1,
   dimensions: { rows: rows.length, columns: headers.length },
 });
 
@@ -344,6 +345,7 @@ const faSupplementInspect = (params: Record<string, unknown>): unknown => ({
   selectedSheet: str(params.sheet) || "变动清单",
   displayName: "变动清单",
   detectedHeaderRow: 1,
+  headerDepth: Number(params.headerDepth) || 1,
   dimensions: { rows: SUPPLEMENT_ROWS.length, columns: SUPPLEMENT_HEADERS.length },
   suggestedMapping: {
     matchKey: "资产编号",
@@ -433,6 +435,7 @@ const faDepInspect = (params: Record<string, unknown>): unknown => ({
   selectedSheet: str(params.sheet) || "固定资产清单",
   displayName: "期末固定资产清单",
   detectedHeaderRow: 1,
+  headerDepth: Number(params.headerDepth) || 1,
   dimensions: { rows: BOTH.length + ADDED.length, columns: DEP_HEADERS.length },
   suggestedMapping: {
     category: "资产类别",

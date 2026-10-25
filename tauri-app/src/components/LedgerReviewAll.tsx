@@ -326,23 +326,11 @@ export function LedgerReviewAll(props: {
     latestReview.current();
   }, [props.autoReviewKey, props.autoReviewOwner, props.disabled]);
   const reviewingAny = props.present.some((kind) => props.reviewing[kind]);
-  const both = props.present.length > 1;
-  const subject = props.present
-    .map((kind) => props.names[kind])
-    .join(both ? "＋" : "");
+  const subject = props.present.map((kind) => props.names[kind]).join("＋");
   return (
     <section className="fx-review-all" aria-label="字段映射一键复核">
       <div>
         <h2>字段映射一键复核</h2>
-        {props.showDescription !== false && (
-          <p>
-            点击一次，
-            {both
-              ? `同时复核 ${subject} 两个文件的字段映射`
-              : `复核 ${subject} 的字段映射`}
-            。
-          </p>
-        )}
         {props.present.length > 0 && <div className="fx-review-states" aria-live="polite">
           {props.present.map((kind) =>
             (() => {

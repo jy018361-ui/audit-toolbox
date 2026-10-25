@@ -114,10 +114,10 @@ const matchResult = {
 };
 
 /** 选好 A、B 两个来源并各选一列匹配列，返回开始按钮。 */
-async function setupBothSources() {
+async function setupBothSources(sampled = false) {
   const { engineCall, pickPath } = await import("./api");
   vi.mocked(engineCall).mockImplementation(async (method: string) => {
-    if (method === "fuzzy.inspect") return inspection;
+    if (method === "fuzzy.inspect") return { ...inspection, previewOnly: sampled };
     if (method === "fuzzy.get_results") throw new Error("该任务无本地结果");
     return { saved: true };
   });
@@ -160,6 +160,13 @@ describe("FuzzyMatchPage", () => {
     render(<FuzzyMatchPage tool={tool} />);
     expect(screen.getByRole("button", { name: "开始匹配" })).toBeDisabled();
     expect(screen.getByText("尚无可导出的匹配结果")).toBeVisible();
+  });
+
+  it("采样行数不作为完整行数或比较次数展示，仍可开始匹配", async () => {
+    const start = await setupBothSources(true);
+    expect(start).toBeEnabled();
+    expect(screen.getByText("两侧样例已就绪，完整行数和比对次数将在匹配完成后显示。")).toBeVisible();
+    expect(screen.queryByText(/预计候选比对约/)).not.toBeInTheDocument();
   });
 
   it("数据类型切换后说明文案随之变化", async () => {

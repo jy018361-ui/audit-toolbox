@@ -1224,9 +1224,6 @@ impl Cell {
             Cell::Float(value) => value.to_string(),
             Cell::Int(value) => value.to_string(),
             Cell::Bool(value) => value.to_string(),
-            Cell::DateTime(value) if value.time() == NaiveTime::MIN => {
-                value.format("%Y-%m-%d").to_string()
-            }
             Cell::DateTime(value) => value.format("%Y-%m-%d %H:%M:%S").to_string(),
         }
     }
@@ -1529,9 +1526,9 @@ fn inspect(paths: &[PathBuf]) -> Result<Value, AppError> {
         let mut issue = None;
         let text_input = is_text(&path);
         if !text_input {
-            match open_workbook_auto(&path) {
-                Ok(workbook) => sheets = workbook.sheet_names().to_vec(),
-                Err(err) => issue = Some(format!("无法读取工作簿：{err}")),
+            match crate::disk_table::workbook_sheets(&path, None) {
+                Ok((_, names)) => sheets = names,
+                Err(err) => issue = Some(format!("无法读取工作簿：{}", err.user_message)),
             }
         }
         for sheet in &sheets {
@@ -1669,10 +1666,9 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
         }
         "CSV".to_string()
     } else {
-        let workbook = open_workbook_auto(&template_path).map_err(|err| {
-            error("WORKBOOK_READ_FAILED", &format!("无法读取基准工作簿：{err}"), None)
+        let (_, names) = crate::disk_table::workbook_sheets(&template_path, None).map_err(|err| {
+            error("WORKBOOK_READ_FAILED", &format!("无法读取基准工作簿：{}", err.user_message), None)
         })?;
-        let names = workbook.sheet_names();
         match requested_sheet {
             Some(name) if names.iter().any(|sheet| sheet == name) => name.to_string(),
             Some(name) => return Err(error(
@@ -1693,8 +1689,8 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
     if requested_sheet.is_none() && !is_text(&template_path)
         && detect_header_with_merges(&display_rows(&template_rows), &template_merges)
             .is_none_or(|d| d.header_rows_count == 0) {
-        let book = open_workbook_auto(&template_path).map_err(|e| error("WORKBOOK_READ_FAILED", &e.to_string(), None))?;
-        let candidates = if external { book.sheet_names() } else { target_sheet_names(&book.sheet_names(), &probe) };
+        let (_, names) = crate::disk_table::workbook_sheets(&template_path, None)?;
+        let candidates = if external { names } else { target_sheet_names(&names, &probe) };
         for name in candidates {
             let (rows, merges) = read_sheet_preview_rows(&template_path, Some(&name), PREVIEW_ROWS)?;
             if detect_header_with_merges(&display_rows(&rows), &merges).is_some_and(|d| d.header_rows_count > 0) {
@@ -1758,17 +1754,17 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
             }));
             continue;
         }
-        let mut workbook = match open_workbook_auto(path) {
-            Ok(workbook) => workbook,
+        let (_, all_names) = match crate::disk_table::workbook_sheets(path, None) {
+            Ok(names) => names,
             Err(err) => {
                 return Err(error(
                     "WORKBOOK_READ_FAILED",
-                    &format!("无法读取工作簿：{err}"),
+                    &format!("无法读取工作簿：{}", err.user_message),
                     Some(path.display().to_string()),
                 ));
             }
         };
-        let names = target_sheet_names(&workbook.sheet_names(), &probe);
+        let names = target_sheet_names(&all_names, &probe);
         if names.is_empty() {
             return Err(error(
                 "MERGER_NO_TARGET_SHEET",
@@ -1822,47 +1818,54 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
     }))
 }
 
-/// 读一个 Sheet（或文本文件）的前 `limit` 行与横向合并单元格清单（供两层
-/// 表头判定）。`sheet` 为 None 时：文本文件直接读，Excel 取第一张 Sheet
-/// （外部模板场景）。
+/// 只读一个 Sheet（或文本文件）的前 `limit` 个物理行。公共结构判定不再
+/// 需要合并区域，保留空清单以兼容调用形状；省略 Sheet 时沿用首张表。
 fn read_sheet_preview_rows(
     path: &Path,
     sheet: Option<&str>,
     limit: usize,
 ) -> Result<(Vec<Vec<Cell>>, Vec<(u32, u32, u32, u32)>), AppError> {
-    if is_text(path) {
-        // 只读到凑满 limit 行即停：几 GB 的文本台账识别表头不再全文扫描。
-        let (rows, _report) = crate::spreadsheet_input::read_rows_head(path, limit)?;
-        let rows = rows
-            .into_iter()
-            .map(|row| row.into_iter().map(Cell::String).collect())
-            .collect();
-        return Ok((rows, Vec::new()));
-    }
-    let mut workbook = open_workbook_auto(path).map_err(|err| {
-        error(
-            "WORKBOOK_READ_FAILED",
-            &format!("无法读取工作簿：{err}"),
-            Some(path.display().to_string()),
-        )
-    })?;
-    let name = match sheet {
-        Some(name) => name.to_string(),
-        None => workbook
-            .sheet_names()
-            .first()
-            .cloned()
-            .ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿没有 Sheet。", None))?,
-    };
-    let merges = merge_regions(&mut workbook, &name);
-    let range = workbook.worksheet_range(&name).map_err(|err| {
-        error(
-            "SHEET_READ_FAILED",
-            &format!("无法读取 Sheet：{err}"),
-            Some(format!("{} / {name}", path.display())),
-        )
-    })?;
-    Ok((physical_cell_rows(&range, Some(limit)), merges))
+    // 表头判定已统一为公共结构候选，合并区域参数不再参与判断。
+    // 不为尾部的 mergeCells 解析整张表；目录、前部行和同源基准均复用有界缓存。
+    let (_, names) = crate::disk_table::workbook_sheets(path, sheet)?;
+    let selected = sheet.or_else(|| names.first().map(String::as_str));
+    let (_, _, rows) = crate::disk_table::preview_source(path, selected, limit)?;
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let rows = rows.into_iter().map(|mut row| {
+        row.resize(width, String::new());
+        row.into_iter().map(Cell::String).collect()
+    }).collect();
+    Ok((rows, Vec::new()))
+}
+
+#[test]
+fn excel_preview_does_not_parse_tail_or_change_header_cells() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("合并预览.xlsx");
+    crate::table_read_cache::workbook_with_bad_tail(&path, &["资产编号", "资产名称", "原值"]);
+    let (rows, _) = read_sheet_preview_rows(&path, Some("数据"), 34).unwrap();
+    assert_eq!(rows.len(), 34);
+    assert_eq!(display_rows(&rows)[0], ["资产编号", "资产名称", "原值"]);
+    assert!(read_sheet_preview_rows(&path, Some("不存在"), 34).is_err());
+}
+
+#[test]
+fn excel_preview_date_header_matches_export_snapshot_display() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("日期表头.xlsx");
+    let mut workbook = rust_xlsxwriter::Workbook::new();
+    let sheet = workbook.add_worksheet();
+    let date = rust_xlsxwriter::ExcelDateTime::from_ymd(2025, 12, 31).unwrap();
+    sheet.write_datetime_with_format(0, 0, &date,
+        &rust_xlsxwriter::Format::new().set_num_format("yyyy-mm-dd")).unwrap();
+    sheet.write_string(0, 1, "金额").unwrap();
+    sheet.write_string(1, 0, "资产A").unwrap();
+    workbook.save(&path).unwrap();
+    let (preview, _) = read_sheet_preview_rows(&path, None, 34).unwrap();
+    let mut book = open_workbook_auto(&path).unwrap();
+    let range = book.worksheet_range("Sheet1").unwrap();
+    let formal = physical_cell_rows(&range, None);
+    assert_eq!(display_rows(&preview), display_rows(&formal));
 }
 
 /// Calamine 的 range 从首个非空格开始；预览和导出均恢复物理行列。
@@ -1877,24 +1880,6 @@ fn physical_cell_rows(range: &calamine::Range<Data>, limit: Option<usize>) -> Ve
         cells
     }));
     rows
-}
-
-/// XLSX/XLS 的合并单元格清单；XLSB/ODS 读不到就当没有（两层判定退化为
-/// 启发式）。
-fn merge_regions(
-    workbook: &mut calamine::Sheets<std::io::BufReader<std::fs::File>>,
-    name: &str,
-) -> Vec<(u32, u32, u32, u32)> {
-    use calamine::Sheets;
-    let regions = match workbook {
-        Sheets::Xlsx(book) => book.merge_cells_by_sheet_name(name).unwrap_or_default(),
-        Sheets::Xls(book) => book.merge_cells_by_sheet_name(name).unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    regions
-        .iter()
-        .map(|dims| (dims.start.0, dims.start.1, dims.end.0, dims.end.1))
-        .collect()
 }
 
 fn display_rows(rows: &[Vec<Cell>]) -> Vec<Vec<String>> {
@@ -4631,6 +4616,7 @@ mod tests {
             for _ in 0..blocks { archive.write_all(&[b' '; 65536]).unwrap(); }
             archive.write_all(b"</worksheet>").unwrap();
         }
+        crate::disk_table::pad_policy_test_archive(&mut archive);
         archive.finish().unwrap();
         let gib = 1024_u64 * 1024 * 1024;
         let params = json!({"kind":"je","source":{"inputPath":input,"sheet":"序时账"}});
@@ -4682,12 +4668,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tb = dir.path().join("tb.csv");
         let je = dir.path().join("je.csv");
-        // 每份基础估算约24MiB：单份普通，TB+JE乘4的联合工作集进入磁盘。
-        fs::write(&tb, vec![b' '; 4*1024*1024]).unwrap();
-        fs::write(&je, vec![b' '; 4*1024*1024]).unwrap();
+        // 每份恰好50MiB：单份普通，TB+JE乘4的联合工作集进入磁盘。
+        fs::File::create(&tb).unwrap().set_len(50*1024*1024).unwrap();
+        fs::File::create(&je).unwrap().set_len(50*1024*1024).unwrap();
         let gib = 1024_u64 * 1024 * 1024;
         crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
-            total:16*gib, available:gib/8, commit_available:gib/8,
+            total:16*gib, available:45*gib/10, commit_available:8*gib,
         }, || {
             assert!(!crate::disk_table::should_use_disk(&[&tb], 4));
             for method in ["loan.preview", "loan.export"] {
@@ -4722,6 +4708,7 @@ mod tests {
         archive.start_file("xl/worksheets/sheet1.xml", zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)).unwrap();
         for _ in 0..1024 { archive.write_all(&[b' '; 65536]).unwrap(); }
+        crate::disk_table::pad_policy_test_archive(&mut archive);
         archive.finish().unwrap();
         crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
             total: 16 * 1024 * 1024 * 1024, available: 128 * 1024 * 1024, commit_available: 128 * 1024 * 1024,

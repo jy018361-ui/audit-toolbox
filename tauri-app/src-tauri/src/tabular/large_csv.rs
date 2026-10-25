@@ -590,15 +590,16 @@ mod tests {
         let input = root.join("selected-reader.csv");
         let mut writer = csv::Writer::from_path(&input).unwrap();
         writer.write_record(["编码","说明"]).unwrap();
-        for _ in 0..40000 { writer.write_record(["1002",&"X".repeat(1024)]).unwrap(); }
+        // 样本须超过公共 50 MiB 普通模式门槛，才能验证动态磁盘分流。
+        for _ in 0..60000 { writer.write_record(["1002",&"X".repeat(1024)]).unwrap(); }
         writer.flush().unwrap();
         crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
             total: 16 * 1024 * 1024 * 1024, available: 128 * 1024 * 1024, commit_available: 128 * 1024 * 1024,
         }, || {
             assert!(applies(&input)); // 上层仍会自动分流；显式选定的读取器不二次拒绝。
             let table = load_ledger_cached(&input, None, 1, 1).unwrap();
-            assert_eq!(table.rows.len(),40000);
-            assert_eq!(table.rows[39999][1].len(),1024);
+            assert_eq!(table.rows.len(),60000);
+            assert_eq!(table.rows[59999][1].len(),1024);
         });
         fs::remove_dir_all(root).unwrap();
     }

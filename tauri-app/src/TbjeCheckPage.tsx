@@ -1879,9 +1879,6 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   添加 TB 与 JE 文件
                 </h2>
               </CardTitle>
-              <CardDescription>
-                把多组科目余额表和序时账一起加入。系统逐 Sheet 识别类型，优先配对同一工作簿，再按文件名与主体信息配对。
-              </CardDescription>
             </CardHeader>
             <CardContent>
               <div ref={dropRef}>
@@ -1910,7 +1907,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   <EmptyState
                     compact
                     title="准备核对资料"
-                    description="加入至少一份科目余额表（TB）；如需发生额勾稽，再加入对应的序时账（JE）。支持一次拖入多组文件。"
+                    description="TB 必需；发生额勾稽还需对应的 JE。"
                   />
                   {/* 空态也保留与配对页一致的底部主操作栏：禁用占位告诉用户
                       下一步去哪，不至于面对空白表单无从下手。 */}
@@ -1958,7 +1955,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 </h2>
               </CardTitle>
               <CardDescription>
-                识别到 TB 或 JE 任一侧都会显示一组；缺少的一侧可在组内补选 Excel 与 Sheet。只有 TB 的组可先做余额勾稽，只有 JE 的组补齐 TB 后再核对。
+                请确认配对；缺少的文件可在对应组内补选。
               </CardDescription>
               <div className="tbje-llm-action">
                 <Button
@@ -2266,6 +2263,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                             <LedgerMappingPanel
                               key={pairingFileKey(file)}
                               kind={file.kind}
+                              sourceName={fileName(file.path)}
                               inspection={inspects[pairingFileKey(file)]}
                               forms={expanded.kind === "tb" ? tbForms : jeForms}
                               mapping={
@@ -2576,6 +2574,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
  */
 function LedgerMappingPanel(props: {
   kind: LedgerKind;
+  sourceName: string;
   inspection?: Inspection;
   mapping: MappingDict;
   forms: LedgerForm[];
@@ -2599,6 +2598,7 @@ function LedgerMappingPanel(props: {
   return (
     <MappingPanel
       title={props.kind === "tb" ? "科目余额表字段映射" : "序时账字段映射"}
+      sourceName={props.sourceName}
       headers={props.inspection.headers}
       rows={props.inspection.preview ?? []}
       mapping={props.mapping}

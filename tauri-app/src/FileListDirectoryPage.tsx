@@ -319,14 +319,11 @@ export default function FileListDirectoryPage({
                     />
                   </div>
                 </Field>
-                <p className="hint">
-                  选择文件夹后会自动扫描；大目录扫描需要几分钟，可随时取消。
-                </p>
-                <div className="actions">
+                <div className="actions" data-button-size="default">
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     disabled={busy || !sourceDir}
                     onClick={() => void inspect()}
                   >
@@ -357,11 +354,11 @@ export default function FileListDirectoryPage({
                 <p className="hint">
                   默认文件名与旧版一致：“文件夹名List-年月日时分.xlsx”。文件数量多时导出需要几分钟，中途可随时取消。
                 </p>
-                <div className="actions">
+                <div className="actions" data-button-size="default">
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     onClick={() => setStep(1)}
                   >
                     上一步
@@ -370,7 +367,7 @@ export default function FileListDirectoryPage({
                     <Button
                       type="button"
                       variant="secondary"
-                      size="sm"
+                      size="default"
                       onClick={() => void cancelJobWithFeedback(activeJobId)}
                     >
                       取消{job?.phase === "scan" || !scan ? "扫描" : "导出"}

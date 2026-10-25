@@ -1,4 +1,5 @@
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { PreviewSourceHeader } from "./PreviewSourceHeader";
 import { isMultiRole, isSchemeLockedRole, LEDGER_ROLES, missingKanzhangRequiredRoles, type Inspect, type Mapping } from "@/ledgerMapping";
 import { describeForm, formGroups, resolveForm, roleRequirement, useLedgerForms } from "@/ledgerForms";
 
@@ -10,7 +11,7 @@ import { describeForm, formGroups, resolveForm, roleRequirement, useLedgerForms 
  */
 const MULTI = new Set(LEDGER_ROLES.map(([key]) => key).filter((key) => isMultiRole(key)));
 
-export function LedgerMappingPreview({inspect,mapping,setMap,llmBusy,headerExtras,banner,toolbar,sourceNote,maxHeight=380,resizeKey}:{inspect?:Inspect;mapping?:Mapping;setMap?:(key:keyof Mapping,value:string|string[])=>void;llmBusy?:boolean;headerExtras?:(header:string)=>React.ReactNode;banner?:React.ReactNode;toolbar?:React.ReactNode;sourceNote?:React.ReactNode;maxHeight?:number;resizeKey?:string}){
+export function LedgerMappingPreview({inspect,mapping,setMap,llmBusy,headerExtras,banner,toolbar,sourceName,sourceNote,maxHeight=380,resizeKey}:{inspect?:Inspect;mapping?:Mapping;setMap?:(key:keyof Mapping,value:string|string[])=>void;llmBusy?:boolean;headerExtras?:(header:string)=>React.ReactNode;banner?:React.ReactNode;toolbar?:React.ReactNode;sourceName?:string;sourceNote?:React.ReactNode;maxHeight?:number;resizeKey?:string}){
   // 序时账三型的判定：下拉分组与必填标记跟着当前命中的型走。
   // hook 必须在提前 return 之前调用。
   const forms=useLedgerForms("je");
@@ -18,12 +19,13 @@ export function LedgerMappingPreview({inspect,mapping,setMap,llmBusy,headerExtra
   const labelOf=new Map(roles);
   const match=forms.length&&mapping?resolveForm("je",forms,mapping as Record<string,string|string[]|undefined>):undefined;
   if(!inspect)return <section className="kz-card kz-preview mapping-panel">
-    <div className="loan-map-head"><h2>文件预览</h2>{toolbar && <div className="mapping-panel-toolbar">{toolbar}</div>}</div>
+    <PreviewSourceHeader toolbar={toolbar}><h2>文件预览</h2>{sourceName && <strong className="preview-source-name" title={sourceName}>{sourceName}</strong>}</PreviewSourceHeader>
     <div className="source-preview-empty">{sourceNote ?? <p>读取后显示前 50 行。</p>}{banner}</div>
   </section>;
   const editable=Boolean(mapping&&setMap);
   return <MappingPanel
     title="文件预览"
+    sourceName={sourceName}
     note={`${inspect.dimensions?.rows??0} 行 × ${inspect.dimensions?.columns??0} 列`}
     headers={inspect.headers}
     rows={inspect.preview}

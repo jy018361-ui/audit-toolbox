@@ -48,6 +48,7 @@ type DepInspection = {
   selectedSheet?: string;
   displayName?: string;
   detectedHeaderRow?: number;
+  headerDepth?: number;
   dimensions?: { rows: number; columns: number };
   suggestedMapping?: DepMapping;
 };
@@ -65,6 +66,7 @@ type DepDraft = {
   path: string;
   sheet: string;
   headerRow: string;
+  headerDepth?: number;
   inspection?: DepInspection;
   mapping: DepMapping;
   balanceSheetDate: string;
@@ -86,6 +88,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
   const [path, setPath] = useState(draft?.path ?? "");
   const [sheet, setSheet] = useState(draft?.sheet ?? "");
   const [headerRow, setHeaderRow] = useState(draft?.headerRow ?? "");
+  const [headerDepth, setHeaderDepth] = useState(draft?.headerDepth ?? draft?.inspection?.headerDepth ?? 0);
   const [inspection, setInspection] = useState<DepInspection | undefined>(
     draft?.inspection,
   );
@@ -124,6 +127,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
     setPath(value);
     setSheet("");
     setHeaderRow("");
+    setHeaderDepth(0);
     setInspection(undefined);
     setMapping({});
     setLlmReview(undefined);
@@ -159,6 +163,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       path,
       sheet,
       headerRow,
+      headerDepth,
       inspection,
       mapping,
       balanceSheetDate,
@@ -183,6 +188,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       path?: string;
       sheet?: string;
       headerRow?: number;
+      headerDepth?: number;
       mapping?: DepMapping;
       balanceSheetDate?: string;
       outputPath?: string;
@@ -197,6 +203,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
     setPath(p.path);
     setSheet(p.sheet ?? "");
     setHeaderRow(p.headerRow != null ? String(p.headerRow) : "");
+    setHeaderDepth(p.headerDepth ?? 0);
     setInspection(undefined);
     setMapping(
       p.mapping && typeof p.mapping === "object" ? p.mapping : {},
@@ -218,6 +225,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
     path?: string;
     sheet?: string;
     headerRow?: string;
+    headerDepth?: number;
   }) {
     const target = overrides?.path ?? path;
     if (!target) {
@@ -231,11 +239,13 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
         path: target,
         sheet: (overrides?.sheet ?? sheet) || undefined,
         headerRow: Number(overrides?.headerRow ?? headerRow) || undefined,
+        headerDepth: overrides?.headerDepth ?? (overrides?.path ? 0 : headerDepth),
       })) as DepInspection;
       setInspection(value);
       setStep(1);
       setSheet(value.selectedSheet ?? overrides?.sheet ?? sheet);
       setHeaderRow(String(value.detectedHeaderRow ?? ""));
+      setHeaderDepth(value.headerDepth ?? 1);
       // 历史恢复后重新读取同一文件：存档映射顶回建议映射（一次性消费，
       // 换文件照旧用建议值），且不再自动送 LLM 复核——那份映射已确认过。
       const stash = restoredDepMapping.current;
@@ -258,6 +268,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
         value.selectedSheet ?? "",
         value.detectedHeaderRow,
         target,
+        value.headerDepth,
       );
     } catch (e) {
       setError(errorText(e));
@@ -274,6 +285,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
     sheetOverride?: string,
     headerRowOverride?: number,
     pathOverride?: string,
+    headerDepthOverride?: number,
   ) {
     const reviewPath = pathOverride ?? path;
     if (!reviewPath && !mappingOverride) return;
@@ -286,6 +298,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
         path: reviewPath,
         sheet: sheetOverride || sheet || undefined,
         headerRow: headerRowOverride ?? (Number(headerRow) || 1),
+        headerDepth: headerDepthOverride ?? headerDepth,
         mapping: mappingOverride ?? mapping,
       })) as FaLlmReview;
       if (generation !== reviewGeneration.current) return;
@@ -435,6 +448,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
         path,
         sheet: sheet || undefined,
         headerRow: Number(headerRow) || 1,
+        headerDepth,
         mapping,
         balanceSheetDate: balanceSheetDate || undefined,
         outputPath: target,
@@ -568,7 +582,6 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
             <CardHeader className="dep-card-header">
               <div>
                 <CardTitle>导入期末固定资产清单</CardTitle>
-                <p>选择文件后自动识别 Sheet、标题行并启动字段复核。</p>
               </div>
               <Badge variant={inspection ? "success" : "neutral"}>
                 {busy ? "正在读取" : inspection ? "已读取" : "等待文件"}
@@ -596,11 +609,11 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                   支持 Excel、CSV 与文本清单；选择后会立即读取。
                 </small>
               </Field>
-              <div className="actions dep-source-actions">
+              <div className="actions dep-source-actions" data-button-size="default">
                 {inspection && (
                   <Button
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     disabled={busy || llmBusy || !path}
                     onClick={() => void review()}
                   >
@@ -687,31 +700,30 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
               )}
 
               {/* 与借款等账表工具一致：Sheet/标题行跟随映射预览，上传时不出现。 */}
-              <div className="mapping-panel-toolbar dep-map-toolbar">
-                <SourceTableControls
+              <DataTable
+                toolbar={<SourceTableControls
                   sheet={sheet} sheets={inspection.sheets} headerRow={headerRow} editableSheet disabled={busy || llmBusy}
+                  headerDepth={headerDepth} automaticDepth
+                  onHeaderDepthChange={(headerDepth) => void inspect({ headerDepth })}
                   onSheetChange={(sheet) => {
                     setSheet(sheet);
                     setHeaderRow("");
-                    if (inspection.sheets.length) void inspect({ sheet, headerRow: "" });
+                    if (inspection.sheets.length) void inspect({ sheet, headerRow: "", headerDepth: 0 });
                   }}
                   onHeaderRowChange={setHeaderRow}
                   onHeaderRowBlur={() => { if (path && inspection) void inspect(); }}
-                />
-              </div>
-              <DataTable
+                />}
                 columns={inspection.headers}
                 rows={inspection.preview}
                 resizeKey="fa.dep-calc.preview"
                 caption={
                   <div className="fa-table-caption">
-                    <strong>
-                      {inspection.displayName ??
-                        inspection.selectedSheet ??
-                        "清单"}{" "}
+                    <strong className="preview-source-name" title={path}>{displayFileName(path)}</strong>
+                    <p>
+                      {inspection.selectedSheet ?? "清单"}{" "}
                       · {inspection.dimensions?.rows ?? 0} 行 ×{" "}
                       {inspection.dimensions?.columns ?? 0} 列
-                    </strong>
+                    </p>
                     {missing.length > 0 && (
                       <span className="fa-caption-missing">
                         尚未映射：{missing.join("、")}
@@ -730,7 +742,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                 maxHeight={430}
                 headerControls={columnControls}
               />
-              <div className="actions">
+              <div className="actions" data-button-size="default">
                 <Button variant="secondary" onClick={() => setStep(0)}>
                   返回导入
                 </Button>
@@ -792,11 +804,6 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                 </Field>
               </div>
               <div className="dep-export-footer">
-                <p className="dep-output-note">
-                  {outputPathTouched
-                    ? "已使用自定义保存位置。"
-                    : "默认保存到清单所在目录，并按导出时间自动命名。"}
-                </p>
                 <div className="dep-export-actions">
                   <Button
                     variant="secondary"

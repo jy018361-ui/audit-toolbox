@@ -28,6 +28,8 @@ afterEach(() => {
   currentJob = undefined;
   vi.mocked(engineCall).mockReset();
   vi.mocked(pickPath).mockReset();
+  sessionStorage.clear();
+  localStorage.clear();
   cleanup();
 });
 
@@ -46,20 +48,20 @@ function event(phase: JobEvent["phase"]): JobEvent {
   };
 }
 
-it("尚未导出时显示等待结果", () => {
+it("尚未导出时显示等待生成结果", () => {
   renderExport();
-  expect(screen.getByText("等待结果")).toBeVisible();
+  expect(screen.getByText("等待生成结果")).toBeVisible();
 });
 
-it.each(["failed", "cancelled"] as const)("%s 后显示任务状态，不再声称等待结果", (phase) => {
+it.each(["failed", "cancelled"] as const)("%s 后显示任务状态，不再声称等待生成结果", (phase) => {
   const { container } = renderExport(event(phase));
   expect(container.querySelector(`[data-job-state="${phase}"]`)).toBeInTheDocument();
-  expect(screen.queryByText("等待结果")).not.toBeInTheDocument();
+  expect(screen.queryByText("等待生成结果")).not.toBeInTheDocument();
 });
 
 it("导出结束但没有返回文件时给出可执行的下一步", () => {
   renderExport(event("completed"));
-  expect(screen.queryByText("等待结果")).not.toBeInTheDocument();
+  expect(screen.queryByText("等待生成结果")).not.toBeInTheDocument();
   expect(screen.getByText("任务没有返回可打开的结果文件，请检查保存位置。")).toBeVisible();
 });
 
@@ -88,4 +90,31 @@ it("期末 LLM 建议生效后，对应预览表头下拉显示本年折旧", as
   const select = await screen.findByTitle("本年折旧");
   expect(select).toHaveValue("currentYearDep");
   expect(screen.getByText("期末 本年折旧")).toBeVisible();
+});
+
+it("LLM 已复核但没有调整时仍显示明确结论", async () => {
+  vi.mocked(pickPath)
+    .mockResolvedValueOnce("C:\\begin.xlsx")
+    .mockResolvedValueOnce("C:\\end.xlsx");
+  vi.mocked(engineCall).mockImplementation(async (method) => {
+    if (method === "fa.inspect") return {
+      begin: { headers: ["卡片编号"], preview: [["A1"]], sheets: ["Data"], selectedSheet: "Data", detectedHeaderRow: 1, dimensions: { rows: 1, columns: 1 } },
+      end: { headers: ["卡片编号"], preview: [["A1"]], sheets: ["Data"], selectedSheet: "Data", detectedHeaderRow: 1, dimensions: { rows: 1, columns: 1 } },
+      suggestedMapping: { begin: { matchKeys: ["卡片编号"] }, end: { matchKeys: ["卡片编号"] } },
+    } as never;
+    if (method === "fa.review") return {
+      enabled: true, passed: true, message: "LLM 映射复核完成。",
+      autoApplied: [], fieldReviews: [], matchReview: { action: "keep" },
+    } as never;
+    throw new Error(`Unexpected method: ${method}`);
+  });
+  render(<FaPolicyComparePage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: /1 文件与匹配/ }));
+  // 页面会保留上次打开时的草稿，先通过实际清空入口开始一轮新上传。
+  for (const button of screen.queryAllByText("清空")) fireEvent.click(button);
+  fireEvent.click(screen.getByText("拖放或点击选择年初清单"));
+  await screen.findByText("begin.xlsx");
+  fireEvent.click(screen.getByText("拖放或点击选择年末清单"));
+  expect(await screen.findByText("无调整")).toBeVisible();
+  expect(screen.getByText(/现有映射与 LLM 判断一致，未做改动/)).toBeVisible();
 });

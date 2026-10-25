@@ -1689,6 +1689,7 @@ export function FaTbJePage() {
                 <FaTbJeMappingPanel
                   key={kind}
                   kind={kind}
+                  sourceName={fileName(paths[kind])}
                   headers={inspects[kind]!.headers}
                   rows={inspects[kind]!.preview}
                   engineRoles={inspects[kind]!.roles}
@@ -1761,7 +1762,7 @@ export function FaTbJePage() {
             </div>
           </CardHeader>
           <CardContent className="form-stack">
-            <p>确认 TB 科目的资产类别与原值／折旧角色，JE 分录自动承接分类并汇总变动。</p>
+            <p>确认科目角色与资产类别。</p>
             <div className="fa-tbje-account-toolbar">
               <Button
                 type="button"
@@ -2523,6 +2524,7 @@ function FaLedgerSourceCard(props: {
  */
 function FaTbJeMappingPanel(props: {
   kind: Kind;
+  sourceName: string;
   headers: string[];
   rows: string[][];
   /** 引擎随识别结果下发的角色标签（deposit.inspect_* 响应）；未下发时回落本地标签表。 */
@@ -2546,6 +2548,7 @@ function FaTbJeMappingPanel(props: {
   return (
     <MappingPanel
       title={`${props.kind.toUpperCase()} 字段映射`}
+      sourceName={props.sourceName}
       resizeKey={`fa.mapping-${props.kind}`}
       headers={props.headers}
       rows={props.rows}

@@ -28,6 +28,38 @@ export function canApplyFaSupplements(
   );
 }
 
+/// 一张补充清单是否已完成 Sheet 选择并读取（自动与手动复核共用的最小判断）。
+export function faSupplementSideReviewReady(
+  config: { path: string; sheet: string },
+  info?: { sheets: string[]; selectedSheet?: string },
+): boolean {
+  return Boolean(
+    config.path &&
+      info &&
+      (!info.sheets.length ||
+        (config.sheet && info.selectedSheet === config.sheet)),
+  );
+}
+
+/// Whether 步骤2 的「重新复核补充清单」可以点。
+///
+/// 自动复核对新增、处置两张表保持「都就绪后统一触发」，避免单张表抢跑、
+/// 另一张随后加入时重复复核；但手动复核只要求已加载的表都完成读取——
+/// 本期只有处置清单（如资产减少业务查询导出）时同样能手动发起 LLM 复核。
+export function faSupplementManualReviewReady(
+  addition: { path: string; sheet: string },
+  disposal: { path: string; sheet: string },
+  additionInfo?: { sheets: string[]; selectedSheet?: string },
+  disposalInfo?: { sheets: string[]; selectedSheet?: string },
+): boolean {
+  return Boolean(
+    (addition.path || disposal.path) &&
+      (!addition.path ||
+        faSupplementSideReviewReady(addition, additionInfo)) &&
+      (!disposal.path || faSupplementSideReviewReady(disposal, disposalInfo)),
+  );
+}
+
 export function isFaMatchDisabled(
   hasInspection: boolean,
   businessJobBusy: boolean,
@@ -86,15 +118,6 @@ export function faDefaultOutputPath(endPath: string, now = new Date()): string {
   if (!directory) return "";
   const separator = directory.endsWith("\\") || directory.endsWith("/") ? "" : "\\";
   return `${directory}${separator}${faDefaultOutputName(now)}`;
-}
-
-export function shouldShowFaPreviewWorkspace(
-  step: 1 | 2 | 3,
-  _hasMatchResult: boolean,
-): boolean {
-  // 文件配置和补充清单配置都需要随时对照原表。匹配完成不应把预览换走，
-  // 否则用户在继续核对字段时会失去数据上下文；只有导出步骤展示结果区。
-  return step === 1 || step === 2;
 }
 
 export function faHeaderOption(header: string): {
@@ -283,6 +306,12 @@ export const FA_LOW_CONFIDENCE = 0.7;
 export const FA_AUTO_APPLY_MIN = AUTO_ACCEPT_LLM_CONFIDENCE;
 export const shouldAutoApplyFa = (confidence?: number) =>
   shouldAutoAcceptLlmReview(confidence);
+
+/** 清空已有映射使用更高门槛；模型返回的 autoClearSafe 不作为授权依据。 */
+export const shouldAutoApplyFaField = (item: { confidence?: number; action?: string }) =>
+  item.action === "clear"
+    ? item.confidence !== undefined && Number.isFinite(item.confidence) && item.confidence >= 0.9
+    : shouldAutoApplyFa(item.confidence);
 export type FaPendingSuggestion = {
   id: string;
   label: string;
@@ -350,12 +379,13 @@ export type FaLlmPlan = {
   pending: FaPendingSuggestion[];
 };
 
-const faValueText = (value?: string | string[] | boolean): string => {
+const faValueText = (value?: string | string[] | boolean | number): string => {
   if (Array.isArray(value)) {
     const items = value.map((item) => item?.trim()).filter(Boolean);
     return items.length ? items.join(" + ") : "未映射";
   }
   if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "number") return String(value);
   return value?.trim() ? value.trim() : "未映射";
 };
 const sideLabel = (side: FaSide) => (side === "begin" ? "期初" : "期末");
@@ -423,8 +453,7 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
     if (faValueText(before) === faValueText(column)) return;
     if (
       input.autoApply !== false &&
-      shouldAutoApplyFa(item.confidence) &&
-      (item.action !== "clear" || item.autoClearSafe === true)
+      shouldAutoApplyFaField(item)
     ) {
       record(side, key, column, item);
       return;
@@ -549,7 +578,7 @@ export type FaSupplementChange = Omit<FaMappingChange, "restore"> & {
 };
 export type FaSupplementSideState = Record<
   string,
-  string | string[] | boolean | undefined
+  string | string[] | boolean | number | undefined
 > & {
   keys?: string[];
   matchKeysVerified?: boolean;
@@ -624,8 +653,7 @@ export function planFaSupplementChanges(
     if (faValueText(before) === faValueText(column)) return;
     if (
       input.autoApply !== false &&
-      shouldAutoApplyFa(item.confidence) &&
-      (item.action !== "clear" || item.autoClearSafe === true)
+      shouldAutoApplyFaField(item)
     ) {
       record(role, column, item);
       return;

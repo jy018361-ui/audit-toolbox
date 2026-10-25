@@ -189,6 +189,26 @@ describe("JeSignMarkPage", () => {
     expect(screen.queryByRole("button", { name: "已带符号" })).not.toBeInTheDocument();
   });
 
+  it("LLM 已复核但没有调整时仍在映射区显示结论", async () => {
+    seedLoadedDraft();
+    const { engineCall } = await import("./api");
+    vi.mocked(engineCall).mockImplementation(async (method) => {
+      if (method === "kanzhang.llm_mapping") return { reviews: [] };
+      if (method === "kanzhang.mark_sign_report") return {
+        signConvention: {
+          scheme: "single", detected: "signed", basis: "单一金额列。",
+          totalVouchers: 1, balancedVouchers: 0, unbalancedVouchers: 0,
+          oneSidedVouchers: 1, filtered: false, keySuspect: false,
+        },
+      };
+      return { values: [], total: 0 };
+    });
+    render(<JeSignMarkPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", { name: "复核映射" }));
+    expect(await screen.findByText("无调整")).toBeVisible();
+    expect(screen.getByText(/现有字段映射与 LLM 判断一致，未做改动/)).toBeVisible();
+  });
+
   it("omits the selector when a single amount column leaves no ambiguity", async () => {
     seedLoadedDraft();
     const { engineCall } = await import("./api");

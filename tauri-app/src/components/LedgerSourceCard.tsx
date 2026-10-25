@@ -39,7 +39,7 @@ export function LedgerSourceCard({inputPath,dragHover,busy,job,onBrowse,onClear,
   return <section className={`kz-card${className?` ${className}`:""}`}>
     <h2>加载数据</h2>
     <div className="kz-path"><FileDropInput value={inputPath} placeholder="拖放或点击选择凭证文件" onBrowse={onBrowse} onClear={inputPath?onClear:undefined} onDragStateChange={()=>{}} highlight={dragHover} disabled={busy}/></div>
-    <div className="kz-actions"><Button variant="default" disabled={busy} onClick={onInspect}>读取并自动映射</Button>{busy&&job&&onCancel&&<Button variant="secondary" size="sm" onClick={()=>onCancel(job.jobId)}>停止</Button>}</div>
+    <div className="kz-actions" data-button-size="default"><Button variant="default" disabled={busy} onClick={onInspect}>读取并自动映射</Button>{busy&&job&&onCancel&&<Button variant="secondary" size="default" onClick={()=>onCancel(job.jobId)}>停止</Button>}</div>
     {/* 读取几十万行凭证要几十秒，原来这一步只有按钮变灰，用户不知道是在跑还是卡死了。 */}
     {busy&&job&&onCancel&&<JobProgress job={job} onCancel={onCancel} cancelLabel="取消任务"/>}
     {children}

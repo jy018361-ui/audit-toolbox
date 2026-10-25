@@ -1,4 +1,5 @@
 import { DataTable } from "@/components/DataTable";
+import { PreviewSourceHeader } from "./PreviewSourceHeader";
 import { recordManualLedgerMapping } from "../manualLedgerMapping";
 
 /**
@@ -78,6 +79,7 @@ export type MappingPanelProps = {
   headerExtras?: (header: string) => React.ReactNode;
   /** 面板右上角的工具条，如 Sheet 选择、标题行、LLM 复核按钮。 */
   toolbar?: React.ReactNode;
+  sourceName?: string;
   /** 行数与列数之外要补充的说明。 */
   note?: React.ReactNode;
   /**
@@ -385,18 +387,16 @@ export function MappingPanel(props: MappingPanelProps) {
 
   return (
     <section className="kz-card kz-preview mapping-panel">
-      <div className="loan-map-head">
+      <PreviewSourceHeader toolbar={props.toolbar}>
         <div>
           <h2>{props.title}</h2>
+          {props.sourceName && <strong className="preview-source-name" title={props.sourceName}>{props.sourceName}</strong>}
           <p>
             {rows.length ? `${rows.length} 行预览 · ` : ""}
             {headers.length} 列{props.note ? <> · {props.note}</> : null}
           </p>
         </div>
-        {props.toolbar ? (
-          <div className="mapping-panel-toolbar">{props.toolbar}</div>
-        ) : null}
-      </div>
+      </PreviewSourceHeader>
       {(props.formNote || props.requirementOf) && (
         <p className="mapping-meta-row">
           {props.formNote ? (

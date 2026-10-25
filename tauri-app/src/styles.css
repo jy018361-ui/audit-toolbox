@@ -238,7 +238,7 @@ body {
   min-width: 0;
   min-height: 100vh;
 }
-button,
+button:not([data-slot="button"]),
 input,
 select {
   font: inherit;
@@ -769,8 +769,9 @@ summary:focus-visible {
   gap: var(--sp-2);
   margin-top: var(--sp-5);
 }
-.actions button,
-.task-row button {
+/* 旧按钮保留原样；组件按钮的高度、边框与内边距由 Button 自己管理。 */
+.actions button:not([data-slot="button"]),
+.task-row button:not([data-slot="button"]) {
   border: 0;
   border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-4);
@@ -1429,7 +1430,7 @@ summary:focus-visible {
 .actions.compact {
   margin-top: var(--sp-1);
 }
-.actions.compact button {
+.actions.compact button:not([data-slot="button"]) {
   padding: var(--sp-1) var(--sp-2);
   font-size: var(--fs-xs);
 }
@@ -1535,7 +1536,7 @@ summary:focus-visible {
   gap: var(--sp-2);
   margin: var(--sp-2) 0;
 }
-.pdf-toolbar button {
+.pdf-toolbar button:not([data-slot="button"]) {
   border: 0;
   border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-2);
@@ -1985,6 +1986,50 @@ summary:focus-visible {
 }
 .source-preview {
   min-width: 0;
+}
+.preview-source-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-3) var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+.preview-source-identity {
+  flex: 1 1 120px;
+  min-width: 0;
+}
+.preview-source-identity h2 {
+  margin: 0;
+  font-size: var(--fs-md);
+  letter-spacing: 0;
+}
+.preview-source-identity p {
+  margin: var(--sp-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.preview-source-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: var(--sp-1);
+}
+.preview-source-identity .fa-table-caption {
+  display: block;
+  margin: 0;
+}
+.preview-source-identity .fa-table-caption > strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-preview-card-head {
+  padding: 0;
 }
 .source-preview-toolbar {
   padding: var(--sp-3) var(--sp-4);

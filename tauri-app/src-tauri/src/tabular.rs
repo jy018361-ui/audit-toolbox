@@ -88,7 +88,7 @@ struct TsJobParams {
     sheet: Option<String>,
     #[serde(default = "one")]
     header_row: usize,
-    /// TS 不暴露双层表头入口，恒为 1；字段与看账共用读取链路才对齐。
+    /// 与预览、筛选使用同一表头层数，默认 1。
     #[serde(default = "one")]
     header_depth: usize,
     output_path: Option<String>,
@@ -3444,6 +3444,29 @@ fn dedup_strings(values: &[String]) -> Vec<String> {
 // `is_auxiliary_sheet_name`），这里只负责逐张表算「表头分 + 有数行数」两个输入，
 // 口径与 fx.rs 的选择循环一致。
 
+fn is_ooxml(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("xlsx") || ext.eq_ignore_ascii_case("xlsm"))
+}
+
+fn resolve_xlsx_sheet(path: &Path, requested: Option<&str>, names: &[String]) -> Result<String, AppError> {
+    if let Some(name) = requested.filter(|name| names.iter().any(|value| value == name)) {
+        return Ok(name.to_owned());
+    }
+    if names.len() == 1 { return Ok(names[0].clone()); }
+    if let Ok(memo) = auto_sheet_memo_path(path) {
+        if let Some(name) = fs::read_to_string(&memo).ok()
+            .filter(|name| names.iter().any(|value| value == name.trim())) {
+            touch_cache(&memo);
+            return Ok(name.trim().to_owned());
+        }
+    }
+    let selected = crate::table_read_cache::read(path, "ledger-auto-sheet-v1", &(), || {
+        crate::fx::lightweight_xlsx_header_layout(path, None).map(|(name, _, _)| name)
+    })?;
+    remember_auto_sheet(path, &selected);
+    Ok(selected)
+}
+
 /// `open_workbook_auto` 按扩展名分派出来的读取器，选表打分要用它逐张读。
 type AutoWorkbook = Sheets<BufReader<File>>;
 
@@ -3542,7 +3565,7 @@ fn auto_sheet_memo_path(path: &Path) -> Result<PathBuf, AppError> {
     hasher.update(canonical.to_string_lossy().as_bytes());
     hasher.update(meta.len().to_le_bytes());
     hasher.update(modified.to_le_bytes());
-    hasher.update(b"auto-sheet-v1");
+    hasher.update(b"auto-sheet-v2-bounded");
     hasher.update(crate::header_detection::RULE_VERSION.as_bytes());
     let key = hex::encode(hasher.finalize());
     Ok(cache_root()?
@@ -3657,10 +3680,7 @@ fn resolve_auto_header_layout(
         }
     }
     let rows: Vec<Vec<String>> = if crate::spreadsheet_input::is_text(path) {
-        crate::spreadsheet_input::read_rows(path)?
-            .into_iter()
-            .take(31)
-            .collect()
+        crate::spreadsheet_input::read_rows_head(path, 31)?.0
     } else {
         let read_path = local_read_path(path)?;
         let mut workbook = open_workbook_auto(&read_path).map_err(|e| {
@@ -3766,11 +3786,14 @@ fn load_table(
     })?;
     let sheets = workbook.sheet_names().to_vec();
     // 用户指定了表名就照用；没指定（或表名不在工作簿里）才走引擎打分挑正表。
-    let selected = sheet
-        .filter(|name| sheets.iter().any(|value| value == name))
-        .map(str::to_owned)
-        .or_else(|| pick_auto_sheet(path, &mut workbook, &sheets))
-        .ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿中没有 Sheet。", None))?;
+    let selected = if is_ooxml(path) {
+        resolve_xlsx_sheet(path, sheet, &sheets)?
+    } else {
+        sheet.filter(|name| sheets.iter().any(|value| value == name))
+            .map(str::to_owned)
+            .or_else(|| pick_auto_sheet(path, &mut workbook, &sheets))
+            .ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿中没有 Sheet。", None))?
+    };
     let range = workbook.worksheet_range(&selected).map_err(|e| {
         error(
             "WORKBOOK_READ_FAILED",
@@ -4221,6 +4244,10 @@ fn load_ts_cached(
 
     let (selected_sheet, sheets) = if crate::spreadsheet_input::is_text(path.as_ref()) {
         ("CSV".to_owned(), Vec::new())
+    } else if is_ooxml(path) {
+        let (_, names) = crate::disk_table::workbook_sheets(path, None)?;
+        let selected = resolve_xlsx_sheet(path, sheet, &names)?;
+        (selected, names)
     } else {
         let read_path = local_read_path(path)?;
         let mut workbook = open_workbook_auto(&read_path).map_err(|e| {

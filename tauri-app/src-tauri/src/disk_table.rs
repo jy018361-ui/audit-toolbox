@@ -9,6 +9,7 @@ use std::{collections::HashSet, fs, io::Read, path::{Path, PathBuf}, sync::atomi
 
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
+pub(crate) const MEMORY_ONLY_FILE_BYTES: u64 = 50 * MIB;
 const MAX_ROW_BYTES: usize = 8 * 1024 * 1024;
 #[path = "disk_table_xlsx.rs"]
 mod xlsx;
@@ -31,7 +32,8 @@ impl ReadPlan {
     }
 
     pub(crate) fn uses_disk(&self) -> bool {
-        self.sources.iter().any(|(_, disk)| *disk)
+        !files_stay_in_memory(&self.sources.iter().map(|(path, _)| path.as_path()).collect::<Vec<_>>())
+            && self.sources.iter().any(|(_, disk)| *disk)
     }
 
     fn decision(&self, sources: &[(&Path, Option<&str>)]) -> Option<bool> {
@@ -69,6 +71,18 @@ fn check(cancel: &AtomicBool) -> Result<(), AppError> {
     crate::resource_budget::check_available_if_managed()
 }
 
+/// 硬规则：每份有效输入都严格小于 50 MiB 时固定普通模式，不读取预算或展开估算。
+/// 未知/缺失路径不享受豁免，仍由原读取入口报告真实文件错误。
+pub(crate) fn files_stay_in_memory(paths: &[&Path]) -> bool {
+    !paths.is_empty() && paths.iter().all(|path| fs::metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.len() < MEMORY_ONLY_FILE_BYTES))
+}
+
+/// 强制标志只为内部小样本路径对照测试保留；发布程序仍遵守文件大小硬规则。
+pub(crate) fn forced_disk_allowed(paths: &[&Path], requested: bool) -> bool {
+    requested && (cfg!(test) || !files_stay_in_memory(paths))
+}
+
 /// Small working sets retain the ordinary reader independently of host pressure.
 /// Larger/unknown working sets still require the dynamic disk-worker policy.
 pub(crate) fn should_use_disk(paths: &[&Path], working_factor: u64) -> bool {
@@ -78,6 +92,9 @@ pub(crate) fn should_use_disk(paths: &[&Path], working_factor: u64) -> bool {
 
 /// 指定工作表时只估算该表及工作簿共享字符串；未知选表时保守估算整本。
 pub(crate) fn should_use_disk_for_sheets(sources: &[(&Path, Option<&str>)], working_factor: u64) -> bool {
+    if files_stay_in_memory(&sources.iter().map(|(path, _)| *path).collect::<Vec<_>>()) {
+        return false;
+    }
     if let Some(disk) = READ_PLAN.with(|slot| slot.borrow().as_ref().and_then(|plan| plan.decision(sources))) {
         return disk;
     }
@@ -95,11 +112,22 @@ pub(crate) fn should_use_disk_for_sheets(sources: &[(&Path, Option<&str>)], work
     })
 }
 fn decision_with_budget(inputs: &[(u64, u64)], factor: u64, budget: impl FnOnce() -> Option<u64>) -> bool {
+    if !inputs.is_empty() && inputs.iter().all(|(bytes, _)| *bytes < MEMORY_ONLY_FILE_BYTES) {
+        return false;
+    }
     // 小工作集保持普通路径；超过此参考值仅选择磁盘处理，不拒绝任务启动。
     if !decision(inputs, 256 * MIB, factor) {
         return false;
     }
     budget().is_none_or(|worker| decision(inputs, worker, factor))
+}
+
+#[cfg(test)]
+pub(crate) fn pad_policy_test_archive<W: std::io::Write + std::io::Seek>(archive: &mut zip::ZipWriter<W>) {
+    // 保留大文件选表/倍率测试：用不参与读表的 ZIP 条目跨过真实文件大小门槛。
+    archive.start_file("policy-test-padding", zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)).unwrap();
+    for _ in 0..800 { std::io::Write::write_all(archive, &[0; 65536]).unwrap(); }
 }
 fn decision(inputs:&[(u64,u64)],worker:u64,factor:u64)->bool {
     let peak = inputs.iter().fold(0_u64,|total,(_,peak)| total.saturating_add(peak.saturating_mul(factor.max(1))));
@@ -165,6 +193,7 @@ fn estimated_sheet_resident_bytes(path: &Path, sheet: Option<&str>) -> Option<u6
 /// 判定，不受同任务其他大文件的联合读取计划连累——联合任务转入分批时，
 /// 自身不大的 .xls 仍应整本载入再分批建缓存，而不是要求用户手工转存。
 fn legacy_workbook_needs_stream(path: &Path) -> bool {
+    if files_stay_in_memory(&[path]) { return false; }
     let Ok(meta) = fs::metadata(path) else { return true; };
     let Some(estimate) = estimated_sheet_resident_bytes(path, None) else { return true; };
     decision(&[(meta.len(), estimate)], 256 * MIB, 1)
@@ -199,7 +228,7 @@ fn xls_stream_copy(path: &Path) -> Result<PathBuf, AppError> {
     Ok(output)
 }
 
-fn workbook_sheets(path: &Path, sheet: Option<&str>) -> Result<(String, Vec<String>), AppError> {
+pub(crate) fn workbook_sheets(path: &Path, sheet: Option<&str>) -> Result<(String, Vec<String>), AppError> {
     if crate::spreadsheet_input::is_text(path) { return Ok(("CSV".into(), vec!["CSV".into()])); }
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xlsx") || e.eq_ignore_ascii_case("xlsm")) {
         return xlsx::sheets(path, sheet);
@@ -274,7 +303,10 @@ pub(crate) fn for_each_source_row_with_style(
     for index in 0..start.0 as usize { emit(Vec::new(), index + 1)?; }
     for (index, cells) in range.rows().enumerate() {
         let mut values = vec![String::new(); start.1 as usize];
-        values.extend(cells.iter().map(crate::fx::data_text));
+        values.extend(cells.iter().map(|value| match value {
+            calamine::Data::DateTime(value) if preserve_excel_dates => value.to_string(),
+            _ => crate::fx::data_text(value),
+        }));
         emit(values, start.0 as usize + index + 1)?;
     }
     check(cancel)
@@ -284,10 +316,24 @@ pub(crate) fn preview_source(path: &Path, sheet: Option<&str>, limit: usize) -> 
     preview_source_with_cancel(path, sheet, limit, &AtomicBool::new(false))
 }
 fn preview_source_with_cancel(path: &Path, sheet: Option<&str>, limit: usize, cancel: &AtomicBool) -> Result<(String, Vec<String>, Vec<Vec<String>>), AppError> {
+    preview_source_styled(path, sheet, limit, cancel, false)
+}
+pub(crate) fn preview_source_serials(path: &Path, sheet: Option<&str>, limit: usize) -> Result<(String, Vec<String>, Vec<Vec<String>>), AppError> {
+    preview_source_styled(path, sheet, limit, &AtomicBool::new(false), true)
+}
+fn preview_source_styled(path: &Path, sheet: Option<&str>, limit: usize, cancel: &AtomicBool, serial_dates: bool) -> Result<(String, Vec<String>, Vec<Vec<String>>), AppError> {
+    check(cancel)?;
+    let value = crate::table_read_cache::read(path, "physical-preview-v2", &(sheet, limit, serial_dates), || {
+        preview_source_uncached(path, sheet, limit, cancel, serial_dates)
+    })?;
+    check(cancel)?;
+    Ok(value)
+}
+fn preview_source_uncached(path: &Path, sheet: Option<&str>, limit: usize, cancel: &AtomicBool, serial_dates: bool) -> Result<(String, Vec<String>, Vec<Vec<String>>), AppError> {
     let (selected, sheets) = workbook_sheets(path, sheet)?;
     let mut rows = Vec::new();
     if limit > 0 {
-        let result = for_each_source_row(path, Some(&selected), cancel, |row, _| {
+        let result = for_each_source_row_with_style(path, Some(&selected), cancel, serial_dates, |row, _| {
             rows.push(row);
             if rows.len() >= limit { return Err(failure("DISK_PREVIEW_DONE", "预览完成。", "")); }
             Ok(())
@@ -317,6 +363,35 @@ pub(crate) fn fingerprint(path: &Path, sheet: &str, row: usize, depth: usize) ->
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(&identity).map_err(io)?)))
 }
 impl DiskTable {
+    /// 只复用已经完成的 FA 缓存；未命中不触发解析或建库。
+    pub(crate) fn cached_fa(path: &Path, sheet: &str, header_row: usize, header_depth: usize) -> Option<Self> {
+        let key = fingerprint(path, sheet, header_row, header_depth).ok()?;
+        let cache = crate::tabular::cache_root().ok()?.join("tables/v1").join(format!("{key}-fa.sqlite"));
+        Self::read(path, &cache).ok()
+    }
+
+    /// 从已缓存 JSON 行中仅提取所需列，避免反序列化整行的几十个字段。
+    pub(crate) fn visit_columns(&self, columns: &HashSet<usize>, cancel: &AtomicBool,
+        mut visitor: impl FnMut(Vec<String>, usize) -> Result<(), AppError>) -> Result<(), AppError> {
+        check(cancel)?;
+        if columns.is_empty() { return Ok(()); }
+        let mut indexes = columns.iter().copied().collect::<Vec<_>>();
+        indexes.sort_unstable();
+        let fields = indexes.iter().map(|index| format!("json_extract(data,'$[{index}]')")).collect::<Vec<_>>().join(",");
+        let mut statement = self.db.prepare(&format!("SELECT id,{fields} FROM rows ORDER BY id")).map_err(sql)?;
+        let mut rows = statement.query([]).map_err(sql)?;
+        while let Some(row) = rows.next().map_err(sql)? {
+            let physical: usize = row.get(0).map_err(sql)?;
+            if physical % 256 == 0 { check(cancel)?; }
+            let mut values = vec![String::new(); indexes.last().copied().unwrap_or(0) + 1];
+            for (position, index) in indexes.iter().enumerate() {
+                values[*index] = row.get::<_, Option<String>>(position + 1).map_err(sql)?.unwrap_or_default();
+            }
+            visitor(values, physical)?;
+        }
+        check(cancel)
+    }
+
     pub(crate) fn open(path: &Path, sheet: Option<&str>, header_row: usize, header_depth: usize, progress: Progress<'_>, cancel: &AtomicBool) -> Result<Self, AppError> {
         Self::open_style(path, sheet, header_row, header_depth, progress, cancel, false)
     }
@@ -416,6 +491,48 @@ impl DiskTable {
 mod tests {
     use super::*;
     #[test]
+    fn files_under_50_mib_override_expansion_pressure_and_transferred_plans() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("高压缩.xlsx");
+        let b = dir.path().join("第二份.xls");
+        for path in [&a, &b] { fs::File::create(path).unwrap().set_len(MEMORY_ONLY_FILE_BYTES - 1).unwrap(); }
+        let mut plan = ReadPlan::default();
+        plan.add(&a, true);
+        plan.add(&b, true);
+        let plan: ReadPlan = serde_json::from_slice(&serde_json::to_vec(&plan).unwrap()).unwrap();
+        assert!(!plan.uses_disk(), "旧的磁盘计划也不能开启小文件内存监控");
+        let _guard = plan.enter();
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total:16*GIB, available:1, commit_available:1,
+        }, || {
+            assert!(!should_use_disk(&[&a, &b], u64::MAX));
+            assert!(!should_use_disk_for_sheets(&[(&a, Some("未读取估算"))], 12));
+            assert!(!legacy_workbook_needs_stream(&b));
+        });
+        // 50 MiB 本身不享受豁免；这里的无效 XLSX 应交回原估算/读取流程。
+        fs::File::create(&a).unwrap().set_len(MEMORY_ONLY_FILE_BYTES).unwrap();
+        assert!(should_use_disk(&[&a], 1));
+        assert!(files_stay_in_memory(&[&b]));
+        assert!(!files_stay_in_memory(&[&dir.path().join("不存在.xlsx")]));
+        assert!(!files_stay_in_memory(&[dir.path()]));
+        assert!(!files_stay_in_memory(&[]));
+        assert!(!decision_with_budget(&[(MEMORY_ONLY_FILE_BYTES-1, u64::MAX)], u64::MAX,
+            || panic!("低于 50 MiB 不得申请预算")));
+    }
+    #[test]
+    fn preview_stops_before_bad_tail_but_full_read_rejects_it_and_cancel_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preview.xlsx");
+        crate::table_read_cache::workbook_with_bad_tail(&path, &["资产编号", "资产名称"]);
+        let first = preview_source(&path, Some("数据"), 34).unwrap();
+        assert_eq!(first.2.len(), 34);
+        assert_eq!(first.2[1][0], "ID-1-0");
+        assert_eq!(preview_source(&path, Some("数据"), 34).unwrap(), first);
+        assert!(preview_source_with_cancel(&path, Some("数据"), 34, &AtomicBool::new(true)).is_err());
+        assert!(for_each_source_row(&path, Some("数据"), &AtomicBool::new(false), |_, _| Ok(())).is_err());
+        assert!(preview_source(&path, Some("不存在"), 34).is_err());
+    }
+    #[test]
     fn selected_sheet_estimate_excludes_other_sheets_but_keeps_shared_strings() {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
@@ -433,6 +550,7 @@ mod tests {
         }
         archive.start_file("xl/worksheets/sheet2.xml", options).unwrap();
         for _ in 0..256 { archive.write_all(&[b' '; 65536]).unwrap(); }
+        pad_policy_test_archive(&mut archive);
         archive.finish().unwrap();
         let small = estimated_sheet_resident_bytes(&input, Some("资产")).unwrap();
         // 这些表没有 dimension 标签，退回按 XML 4 倍估算；共享字符串只计一次。
@@ -521,8 +639,7 @@ mod tests {
                 assert!(!should_use_disk_for_sheets(&pairs, 4), "{je} 极端低水位不应切磁盘");
             });
         }
-        // 02/03/04 组（23MB–80MB）：16GB 机器内存充裕（可用 8GB）时整表读取，
-        // 真正紧张（可用 2GB）才切磁盘保护。
+        // 02/03/04 组（23MB–80MB）：均小于50MiB时固定普通，其余保留动态规则。
         for (je, tb) in [
             ("02序时账 (2).xlsx", "02科目余额表.xlsx"),
             ("03序时账 (2).xlsx", "03科目余额表.xlsx"),
@@ -538,7 +655,8 @@ mod tests {
             crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
                 total: 16 * GIB, available: 2 * GIB, commit_available: 2 * GIB,
             }, || {
-                assert!(should_use_disk_for_sheets(&pairs, 4), "{je} 可用 2GB 应切磁盘保护");
+                let small = files_stay_in_memory(&pairs.iter().map(|(path, _)| *path).collect::<Vec<_>>());
+                assert_eq!(should_use_disk_for_sheets(&pairs, 4), !small, "{je} 小文件硬规则优先，其余按低水位分流");
             });
         }
     }
@@ -553,7 +671,7 @@ mod tests {
         let mut plan = ReadPlan::default();
         plan.add(&path, true);
         let _guard = plan.enter();
-        assert!(should_use_disk(&[&path], 1), "联合计划确实标记了磁盘");
+        assert!(!should_use_disk(&[&path], 1), "小文件优先于联合磁盘计划");
         let (selected, sheets) = workbook_sheets(&path, None).unwrap();
         assert!(!sheets.is_empty());
         let cancel = AtomicBool::new(false);
@@ -600,22 +718,22 @@ mod tests {
         assert!(!decision_with_budget(&[(MIB, 10 * MIB)], 12, || panic!("小工作集不应申请大文件启动预算")));
         let boundary = 256 * MIB * 65 / 100;
         assert!(!decision_with_budget(&[(MIB, boundary)], 1, || panic!("边界内仍是小工作集")));
-        assert!(decision_with_budget(&[(MIB, boundary + 1)], 1, || None));
+        assert!(!decision_with_budget(&[(MIB, boundary + 1)], 1, || None));
+        assert!(decision_with_budget(&[(MEMORY_ONLY_FILE_BYTES, boundary + 1)], 1, || None));
     }
     #[test]
     fn large_decompressed_or_combined_working_sets_keep_dynamic_protection() {
-        // A tiny compressed XLSX may expand dramatically; raw size alone must
-        // never exempt it. The sum and tool intermediates still count as well.
+        // 达到 50 MiB 后才沿用展开体积、联合工作集与工具倍率的动态规则。
         for (inputs, factor) in [
-            (vec![(MIB, 300 * MIB)], 1),
-            (vec![(MIB, 90 * MIB), (MIB, 90 * MIB)], 1),
-            (vec![(MIB, 20 * MIB)], 12),
+            (vec![(MEMORY_ONLY_FILE_BYTES, 300 * MIB)], 1),
+            (vec![(MEMORY_ONLY_FILE_BYTES, 90 * MIB), (MIB, 90 * MIB)], 1),
+            (vec![(MEMORY_ONLY_FILE_BYTES, 20 * MIB)], 12),
             (vec![(2 * GIB, MIB)], 1),
         ] {
             assert!(decision_with_budget(&inputs, factor, || None));
         }
-        assert!(!decision_with_budget(&[(MIB, 300 * MIB)], 1, || Some(GIB)));
-        assert!(decision_with_budget(&[(MIB, 300 * MIB)], 1, || Some(256 * MIB)));
+        assert!(!decision_with_budget(&[(MEMORY_ONLY_FILE_BYTES, 300 * MIB)], 1, || Some(GIB)));
+        assert!(decision_with_budget(&[(MEMORY_ONLY_FILE_BYTES, 300 * MIB)], 1, || Some(256 * MIB)));
         assert!(decision_with_budget(&[(2 * GIB, MIB)], 1, || Some(64 * GIB)));
     }
     #[test]
@@ -678,6 +796,33 @@ mod tests {
         let second = DiskTable::open(&input, None, 2, 1, &|_,_,_,_|panic!("缓存命中不应重扫"), &cancel).unwrap();
         assert_eq!(first.cache_path, second.cache_path);
         assert_eq!(second.row_count, 3);
+    }
+
+    #[test]
+    fn cached_fa_projection_keeps_columns_stops_early_and_rejects_changed_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("清单.csv");
+        fs::write(&input, "编码,名称,备注\nA1,甲,备注1\nA2,乙,备注2\n").unwrap();
+        assert!(DiskTable::cached_fa(&input, "CSV", 1, 1).is_none());
+        let cancel = AtomicBool::new(false);
+        let _built = DiskTable::open_fa(&input, Some("CSV"), 1, 1, &|_,_,_,_|{}, &cancel).unwrap();
+        let cached = DiskTable::cached_fa(&input, "CSV", 1, 1).unwrap();
+        let columns = HashSet::from([1, 4]);
+        let mut seen = Vec::new();
+        cached.visit_columns(&columns, &cancel, |row, physical| {
+            seen.push((physical, row)); Ok(())
+        }).unwrap();
+        assert_eq!(seen, vec![(2, vec!["", "甲", "", "", ""].into_iter().map(String::from).collect()),
+            (3, vec!["", "乙", "", "", ""].into_iter().map(String::from).collect())]);
+        let mut calls = 0;
+        let stopped = cached.visit_columns(&columns, &cancel, |_, _| {
+            calls += 1; Err(failure("SAMPLE_DONE", "已找到样例。", ""))
+        }).unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(stopped.code, "SAMPLE_DONE");
+        assert!(DiskTable::cached_fa(&input, "CSV", 1, 2).is_none());
+        fs::write(&input, "编码,名称\n新编号,新名称\n").unwrap();
+        assert!(DiskTable::cached_fa(&input, "CSV", 1, 1).is_none());
     }
     #[test]
     fn disk_table_multiline_text_headers_and_source_change_are_not_truncated() {

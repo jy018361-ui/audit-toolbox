@@ -84,6 +84,7 @@ describe("TS legacy filter semantics", () => {
           inputPath: "C:/data/ts.xlsx",
           sheet: "Data",
           headerRow: "2",
+          headerDepth: 2,
         },
         "Department Name",
         "delivery center",
@@ -91,6 +92,7 @@ describe("TS legacy filter semantics", () => {
     ).toMatchObject({
       sheet: "Data",
       headerRow: 2,
+      headerDepth: 2,
       field: "Department Name",
       keyword: "delivery center",
     });

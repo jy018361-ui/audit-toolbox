@@ -6325,7 +6325,9 @@ fn load_ledger_table(spec: &SourceSpec) -> Result<Table, AppError> {
             Some(spec.input_path.clone()),
         ));
     }
-    let (sheet, sheets, all) = if crate::spreadsheet_input::is_text(path.as_ref()) {
+    let (sheet, sheets, all) = crate::table_read_cache::read(
+        &path, "loan-ledger-rows-v1", &spec.sheet, || {
+        let value = if crate::spreadsheet_input::is_text(path.as_ref()) {
         ("CSV".into(), vec!["CSV".into()], read_text(&path)?)
     } else {
         let mut book = open_workbook_auto(&path).map_err(|e| {
@@ -6357,6 +6359,8 @@ fn load_ledger_table(spec: &SourceSpec) -> Result<Table, AppError> {
             crate::fx::physical_range_rows(&range),
         )
     };
+        Ok(value)
+    })?;
     finish_ledger_table(spec, path, sheet, sheets, all)
 }
 

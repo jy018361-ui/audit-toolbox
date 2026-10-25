@@ -232,12 +232,6 @@
   display: grid;
   gap: 4px;
 }
-.deposit-section-kicker {
-  color: var(--primary);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
 .deposit-confirm-heading .deposit-account-summary {
   margin: 0;
 }
@@ -605,7 +599,7 @@
 }
 .deposit-tier-table > table {
   width: 100%;
-  min-width: 1080px;
+  min-width: 800px;
   border-collapse: collapse;
 }
 .deposit-tier-table th,
@@ -637,9 +631,7 @@
   min-width: 72px;
 }
 .deposit-tier-table th:nth-child(-n + 2),
-.deposit-tier-table td:nth-child(-n + 2),
-.deposit-tier-table th:last-child,
-.deposit-tier-table td:last-child {
+.deposit-tier-table td:nth-child(-n + 2) {
   text-align: left;
 }
 .deposit-tier-table input {

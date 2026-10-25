@@ -43,7 +43,7 @@ describe("共享账表复核生命周期", () => {
     const mapping: Record<string, string> = {accountCode: "编码", closingFunctionalAmount: "期末"};
     const {result,rerender} = renderHook(({mapping}) => useLedgerDictReviews(call, {tb:"same.xlsx"}, {tb:mapping}), {initialProps:{mapping}});
     await act(async () => { await result.current.reviewAll({tb:{...slot(),mapping}}); });
-    expect(result.current.status.tb).toContain("无需调整");
+    expect(result.current.status.tb).toContain("无调整");
     rerender({mapping:{accountCode:"编码"}});
     expect(result.current.status.tb).toBe("");
     expect(result.current.results.tb).toBeUndefined();
@@ -63,7 +63,7 @@ describe("共享账表复核生命周期", () => {
     expect(result.current.reviews.results.tb?.applied).toHaveLength(1);
     expect(result.current.reviews.status.tb).toContain("已自动调整");
   });
-  it("TB 与 JE 复核均无需调整时仍分别显示完成提示，再次复核时显示进行中", async () => {
+  it("TB 与 JE 复核均无调整时仍分别显示完成提示，再次复核时显示进行中", async () => {
     const call = vi.fn().mockResolvedValue({ tbChanges: [], jeChanges: [] });
     function Review() {
       const reviews = useLedgerDictReviews(call);
@@ -78,15 +78,15 @@ describe("共享账表复核生命周期", () => {
     }
     render(<Review />);
     fireEvent.click(screen.getByRole("button", { name: "一键复核 TB＋JE" }));
-    await screen.findByText("TB：已复核 · 无需调整");
-    expect(screen.getByText("JE：已复核 · 无需调整")).toBeTruthy();
+    await screen.findByText("TB：已复核 · 无调整");
+    expect(screen.getByText("JE：已复核 · 无调整")).toBeTruthy();
     const next = deferred();
     call.mockReturnValueOnce(next.promise);
     fireEvent.click(screen.getByRole("button", { name: "一键复核 TB＋JE" }));
     expect(screen.getByText("TB：LLM 复核中")).toBeTruthy();
     expect(screen.getByText("JE：LLM 复核中")).toBeTruthy();
     await act(async () => next.resolve({ tbChanges: [], jeChanges: [] }));
-    await screen.findByText("TB：已复核 · 无需调整");
+    await screen.findByText("TB：已复核 · 无调整");
   });
 
   it("每个新来源身份默认自动复核一次", async () => {
@@ -416,7 +416,7 @@ describe("共享账表复核生命周期", () => {
     expect(applied).not.toHaveBeenCalled();
   });
 
-  it("没有建议但必填字段仍缺时，结论不许说无需调整", async () => {
+  it("没有建议但必填字段仍缺时，结论不许说无调整", async () => {
     const request = deferred();
     const { result } = renderHook(() =>
       useLedgerDictReviews(() => request.promise),
@@ -436,7 +436,7 @@ describe("共享账表复核生命周期", () => {
     });
     expect(result.current.status.je).toContain("已复核 · 仍缺 2 项");
     expect(result.current.status.je).toContain("原币币种、原币金额方案");
-    expect(result.current.status.je).not.toContain("无需调整");
+    expect(result.current.status.je).not.toContain("无调整");
   });
 
   it("有待确认建议且仍有缺口的，结论要把两件事一并交代", async () => {

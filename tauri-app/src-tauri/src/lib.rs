@@ -10,6 +10,7 @@ mod confirmation;
 mod covenant_cases;
 mod deposit_interest;
 mod disk_table;
+mod table_read_cache;
 #[cfg(windows)]
 mod excel_com;
 mod excel_header_match;

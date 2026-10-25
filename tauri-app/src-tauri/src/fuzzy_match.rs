@@ -18,11 +18,12 @@
 //! 文件解析失败时降级到本文件内的内置精简词表（见各 `FALLBACK_` 常量），不阻塞任务。
 
 use crate::{AppError, excel_merger::PauseCheckpoint, storage::Storage};
+#[cfg(test)]
 use calamine::{Data, Reader, open_workbook_auto};
 use chrono::{Local, Utc};
 use rusqlite::{Connection, params};
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -1365,12 +1366,9 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
         .ok_or_else(|| error("MISSING_SOURCE", "缺少文件参数。", None))?;
     let spec: SourceSpec = serde_json::from_value(spec_value)
         .map_err(|e| error("INVALID_PARAMS", "文件参数不完整。", Some(e.to_string())))?;
-    let preview_only = crate::disk_table::should_use_disk(&[Path::new(&spec.path)], 2);
-    let table = if preview_only {
-        disk::preview(&spec)?
-    } else {
-        load_table(&spec)?
-    };
+    // 所有格式/文件大小均只读取预览窗口，不用完整行数阻塞选列。
+    let preview_only = true;
+    let table = disk::preview(&spec)?;
     let suggested = suggested_column(&table.headers)
         .map(|h| json!({"column": h}))
         .unwrap_or(Value::Null);
@@ -1385,6 +1383,31 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
         "previewOnly": preview_only,
         "suggestedMapping": suggested,
     }))
+}
+
+#[test]
+fn fuzzy_preview_reads_head_and_formal_column_still_checks_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("模糊匹配.xlsx");
+    crate::table_read_cache::workbook_with_bad_tail(&path, &["资产编号", "资产名称"]);
+    let source = json!({"path": path, "sheet": "数据", "headerRow": 1, "headerDepth": 1, "column": "资产编号"});
+    let result = inspect(&json!({"source": source})).unwrap();
+    assert_eq!(result["previewOnly"], true);
+    assert_eq!(result["preview"].as_array().unwrap().len(), 8);
+    assert!(load_column(&json!({"sourceA": source}), "sourceA").is_err());
+}
+
+#[test]
+fn fuzzy_selected_column_preserves_blank_values_and_header_beyond_default_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("列.csv");
+    fs::write(&path, format!("{}名称,编号\n甲,A1\n乙,\n,,\n丙,A3\n", "\n".repeat(80))).unwrap();
+    let source = json!({"path":path,"headerRow":81,"headerDepth":1,"column":"编号"});
+    let result = inspect(&json!({"source":source})).unwrap();
+    assert_eq!(result["headerRow"], 81);
+    let values = load_column(&json!({"sourceA":source}), "sourceA").unwrap();
+    assert_eq!(values, ["A1", "", "A3"]);
+    assert_eq!(load_column(&json!({"sourceA":source}), "sourceA").unwrap(), values);
 }
 
 /// 建议匹配列：首个含名称类关键词的表头（公司/单位/客户/户名/姓名等）。
@@ -2377,7 +2400,7 @@ fn apply_confirmations(rows: &mut [Value], confirmations: &[Value]) {
 // 表头探测 + 文本表格兜底；不跨模块引用，便于各自演进）
 // ============================================================
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SourceSpec {
     /// 兼容旧字段名 inputPath。
@@ -2416,15 +2439,14 @@ fn load_column(params: &Value, key: &str) -> Result<Vec<String>, AppError> {
         .ok_or_else(|| error("MISSING_SOURCE", format!("缺少 {} 数据源。", key), None))?;
     let spec: SourceSpec = serde_json::from_value(spec_value)
         .map_err(|e| error("INVALID_PARAMS", "数据源参数不完整。", Some(e.to_string())))?;
-    let table = load_table(&spec)?;
-    let idx = pick_column(&spec, &table)?;
-    // 该列为空的行也保留（行序即 aIndex/bIndex 口径：跳过表头后的第 N 个
-    // 数据行）——空值由 prepare_row 归入「无效值」，不能在这里悄悄丢行。
-    Ok(table
-        .rows
-        .iter()
-        .map(|r| r.get(idx).cloned().unwrap_or_default().trim().to_string())
-        .collect())
+    crate::table_read_cache::read(Path::new(&spec.path), "fuzzy-selected-column-v1", &spec, || {
+        let mut values = Vec::new();
+        disk::visit_column(&spec, &AtomicBool::new(false), |_, value| {
+            values.push(value);
+            Ok(())
+        })?;
+        Ok(values)
+    })
 }
 
 /// 选列：先按表头名精确匹配，再按 1 起的列号，缺省取建议列。
@@ -2446,6 +2468,7 @@ fn pick_column(spec: &SourceSpec, table: &Table) -> Result<usize, AppError> {
     Err(error("NO_COLUMN", format!("未找到匹配列「{col}」。"), None))
 }
 
+#[cfg(test)]
 fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
     let path = PathBuf::from(&spec.path);
     if !path.is_file() {
@@ -2547,6 +2570,7 @@ fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
     })
 }
 
+#[cfg(test)]
 fn read_text(path: &Path) -> Result<Vec<Vec<String>>, AppError> {
     crate::spreadsheet_input::read_rows(path)
 }
@@ -2585,6 +2609,7 @@ fn header_cell_hit(v: &str) -> bool {
     !s.is_empty() && s.chars().count() <= 12 && KEYWORDS.iter().any(|k| s.contains(k))
 }
 
+#[cfg(test)]
 fn data_text(v: &Data) -> String {
     match v {
         Data::Empty => String::new(),

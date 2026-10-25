@@ -549,7 +549,7 @@ describe("存款科目手工分类请求", () => {
         },
       }),
     );
-    expect(await screen.findByText("manual-tb.xlsx")).toBeVisible();
+    expect(await screen.findByRole("button", { name: "manual-tb.xlsx" })).toBeVisible();
   });
   it("人工补正科目映射后按确认映射刷新完整科目目录", async () => {
     const added = "100201 新补出的银行账户";
@@ -687,7 +687,7 @@ describe("存款科目手工分类请求", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByText("计息科目 1")).toBeVisible();
     expect(
-      screen.getByText(/页面上限为 20%/),
+      screen.getByText(/默认利率为暂估值/),
     ).toBeVisible();
     fireEvent.change(screen.getByRole("combobox", { name: `${bank}的分类` }), {
       target: { value: "cash_on_hand" },
@@ -1361,7 +1361,7 @@ describe("存款步骤门禁与来源状态", () => {
     goToStep(STEP1);
     mock.pickPath.mockResolvedValueOnce("replacement-tb.xlsx");
     fireEvent.click(screen.getByRole("button", { name: "fixture-tb.xlsx" }));
-    expect(await screen.findByText("replacement-tb.xlsx")).toBeVisible();
+    expect(await screen.findByRole("button", { name: "replacement-tb.xlsx" })).toBeVisible();
     goToStep(STEP2);
     goToStep(STEP3);
     expect(screen.getByLabelText("资产负债表日")).toHaveValue("2024-09-30");

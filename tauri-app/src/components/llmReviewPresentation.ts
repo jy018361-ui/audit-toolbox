@@ -29,7 +29,7 @@ export function llmReviewPresentation(input: {
   if (pending) parts.push(`${pending} 项建议待确认`);
   if (missing) parts.push(`仍缺 ${missing} 项`);
   if (warnings) parts.push(`${warnings} 项映射需核对`);
-  if (!parts.length) parts.push("无需调整");
+  if (!parts.length) parts.push("无调整");
   return {
     label: `已复核 · ${parts.join(" · ")}`,
     attention: pending > 0 || missing > 0 || warnings > 0,

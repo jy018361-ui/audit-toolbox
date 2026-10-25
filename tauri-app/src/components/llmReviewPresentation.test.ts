@@ -15,7 +15,7 @@ describe("LLM 复核展示语义", () => {
     expect(llmReviewPresentation({ applied: 1, pending: 0 }).label).toBe(
       "已复核 · 已自动调整 1 项",
     );
-    expect(llmReviewPresentation({}).label).toBe("已复核 · 无需调整");
+    expect(llmReviewPresentation({}).label).toBe("已复核 · 无调整");
   });
 
   it("模型没有提出修改但当前列全空时仍要求核对", () => {

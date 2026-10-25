@@ -1264,7 +1264,7 @@ it.each([false, true])("连续调整科目分类仅记录，第三步测算时�
   );
   expect(prepareCalls()).toHaveLength(beforeChanges);
   expect(screen.queryByRole("spinbutton", { name: "C银行借款的执行利率" })).not.toBeInTheDocument();
-  expect(screen.getByText("科目分类已记录，将在下一步测算时生效。")).toBeVisible();
+  expect(screen.getByText("科目分类待重算")).toBeVisible();
   expect(screen.queryByRole("button", { name: "应用科目调整" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "下一步：测算与底稿" })).toBeEnabled();
   expect(screen.getByRole("button", { name: /3 测算与底稿/ })).toBeEnabled();

@@ -885,11 +885,13 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
 
   /**
    * 文件身份变化时统一清理全部派生状态。档位字典和用户维护的档位基准利率
-   * 是工具级配置，保留；科目／明细分类、逐户档位与利率都绑定旧文件，必须清空。
+   * 是工具级配置，保留；科目／明细分类、逐户档位与利率都绑定旧文件，必须清空；
+   * 手选的保存位置也一并放弃，默认落点跟新文件走。
    * 历史同源恢复不走这里，由 useTaskRestore 明确回填存档状态。
    */
   function resetFileDerivedState() {
     ++preparationGeneration.current;
+    setOutputPath("");
     setClassificationEdited(false);
     setAccountRoles({});
     setAccountRoleOverrides({});
@@ -2421,6 +2423,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             {tb && (
               <MappingPreview
                 title="TB 文件预览与字段映射"
+                sourceName={fileName(tbPath)}
                 kind="tb"
                 inspection={tb}
                 mapping={tbMapping}
@@ -2459,6 +2462,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             {je && (
               <MappingPreview
                 title="序时账文件预览与字段映射"
+                sourceName={fileName(jePath)}
                 kind="je"
                 inspection={je}
                 mapping={jeMapping}
@@ -2565,7 +2569,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               <CardHeader>
                 <div className="deposit-confirm-heading">
                   <div>
-                    <span className="deposit-section-kicker">第 2 项</span>
                     <CardTitle>科目分类与存款类型</CardTitle>
                   </div>
                   <div className="deposit-account-summary">
@@ -3327,7 +3330,6 @@ function RateTierCard({
         <CardHeader>
           <div className="deposit-confirm-heading">
             <div>
-              <span className="deposit-section-kicker">第 1 项</span>
               <CardTitle>存款利率档位</CardTitle>
             </div>
           </div>
@@ -3346,14 +3348,14 @@ function RateTierCard({
       <CardHeader>
         <div className="deposit-confirm-heading">
           <div>
-            <span className="deposit-section-kicker">第 1 项</span>
             <CardTitle>存款利率档位</CardTitle>
           </div>
         </div>
       </CardHeader>
       <CardContent>
         <p className="deposit-rate-limit-hint">
-          「本次采用」默认取市场中枢暂估利率：活期、保证金维持大行挂牌水平，协定、通知、定期、大额存单取实务常见区间中部（挂牌价接近市场下限，直接套用会低估利息收入）。利率输入单位为百分比，页面上限为 20%；若合同利率确实超过 20%，请先核对是否把小数利率误填成百分数。
+          默认利率为暂估值，请按协议核对。
+          <HelpTip text="活期、保证金取大行挂牌水平；其他类型取实务常见区间中部。输入单位为百分比，上限 20%；超限时请核对是否误将小数利率填成百分数。" />
         </p>
         {/* 容器复用 .deposit-tier-table（CSS 有 > table 直接子选择器，不能在
             表格外再插一层 div）；resize 只接管容器里的 table，折叠按钮不受影响。 */}
@@ -3370,10 +3372,9 @@ function RateTierCard({
                   大行挂牌<small>{tiers.listedDate} · 参考下限</small>
                 </th>
                 <th aria-label="实务常见区间">实务常见区间</th>
-                <th aria-label="本次采用（%，可修改）">
-                  本次采用（%，可修改）<small>默认＝市场中枢</small>
+                <th aria-label="本次采用利率，单位百分比，可修改">
+                  本次采用（%）<small>可修改</small>
                 </th>
-                <th aria-label="实务说明">实务说明</th>
               </tr>
             </thead>
             <tbody id="deposit-rate-tier-rows">
@@ -3387,7 +3388,7 @@ function RateTierCard({
                       applied === undefined ? "deposit-tier-unset" : undefined
                     }
                   >
-                    <td>{tier.categoryLabel}</td>
+                    <td>{tier.categoryLabel} {tier.practiceNote && <HelpTip text={tier.practiceNote} />}</td>
                     <td>{tier.termLabel || "—"}</td>
                     <td>{pct(tier.benchmarkRate, "央行未公布")}</td>
                     <td>{pct(tier.listedRate, "按存款协议")}</td>
@@ -3415,7 +3416,6 @@ function RateTierCard({
                         <b>%</b>
                       </span>
                     </td>
-                    <td className="deposit-tier-note">{tier.practiceNote}</td>
                   </tr>
                 );
               })}
@@ -3445,7 +3445,7 @@ function RateTierCard({
         )}
         <ReferenceLinks tiers={tiers} />
         <p className="deposit-tier-note">
-          利率来源与口径说明
+          利率依据
           <HelpTip
             text={`央行基准：${tiers.benchmarkSource}；大行挂牌：${tiers.listedSource}；实务常见区间：${tiers.practiceSource}；审计依据：${tiers.authority}`}
           />
@@ -3613,6 +3613,7 @@ function SourceCard(props: {
 
 function MappingPreview(props: {
   title: string;
+  sourceName: string;
   kind: "je" | "tb";
   inspection: Inspection;
   mapping: Record<string, string | string[]>;
@@ -3638,6 +3639,7 @@ function MappingPreview(props: {
   return (
     <MappingPanel
       title={props.title}
+      sourceName={props.sourceName}
       headers={props.inspection.headers}
       rows={props.inspection.preview}
       mapping={props.mapping}

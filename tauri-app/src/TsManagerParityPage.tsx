@@ -22,6 +22,7 @@ import { FileInput } from "@/components/FileInput";
 import { displayFileName } from "@/fileDisplay";
 import { DataTable } from "@/components/DataTable";
 import { SourceTableControls } from "@/components/SourceTableControls";
+import { PreviewSourceHeader } from "@/components/PreviewSourceHeader";
 import {
   BLANK_TOKEN,
   ColumnFilterMenu,
@@ -37,6 +38,7 @@ import { EmptyState } from "@/components/EmptyState";
 import "./ts-manager.css";
 
 type TsInspect = {
+  headerDepth?: number;
   headers?: string[];
   sheets?: string[];
   selectedSheet?: string;
@@ -51,6 +53,7 @@ type TsDraft = {
   inputPath: string;
   sheet: string;
   headerRow: string;
+  headerDepth?: number;
   inspect?: TsInspect;
   /** 每列勾选的筛选值：同列多值取「或」，跨列取「与」——与旧版口径一致。 */
   selections: Record<string, string[]>;
@@ -177,7 +180,7 @@ function switchSheetInspect(inspect: TsInspect | undefined, sheet: string) {
 }
 
 function filterLookupParams(
-  state: Pick<TsDraft, "inputPath" | "sheet" | "headerRow">,
+  state: Pick<TsDraft, "inputPath" | "sheet" | "headerRow" | "headerDepth">,
   field: string,
   keyword: string,
 ) {
@@ -185,6 +188,7 @@ function filterLookupParams(
     inputPath: state.inputPath,
     sheet: state.sheet || undefined,
     headerRow: Math.max(1, Number(state.headerRow) || 1),
+    headerDepth: state.headerDepth ?? 1,
     field,
     keyword: keyword.trim(),
     limit: VALUE_LIMIT,
@@ -329,6 +333,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
       inputPath?: string;
       sheet?: string;
       headerRow?: number;
+      headerDepth?: number;
       outputPath?: string;
       filters?: Array<{ field?: unknown; values?: unknown }>;
     };
@@ -355,6 +360,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
           ? String(p.headerRow)
           : "1",
       outputPath: typeof p.outputPath === "string" ? p.outputPath : "",
+      headerDepth: p.headerDepth ?? 1,
     });
     if (Object.keys(selections).length)
       setState((current) => ({ ...current, selections }));
@@ -379,7 +385,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     );
     if (typeof selected !== "string") return;
     rememberLastFolder(selected);
-    resetForNewSource({ inputPath: selected, sheet: "" });
+    resetForNewSource({ inputPath: selected, sheet: "", headerDepth: 1 });
     // 旧版选完文件就直接开始读取（_confirm_selected_file），不需要再点一次「加载文件」。
     await inspect(selected);
   }
@@ -400,6 +406,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
         inputPath,
         sheet: sheet || undefined,
         headerRow: Math.max(1, Number(state.headerRow) || 1),
+        headerDepth: overridePath ? 1 : state.headerDepth ?? 1,
       });
       loadJobIdRef.current = jobId;
     } catch (caught) {
@@ -420,6 +427,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
       ...current,
       inspect: value,
       sheet: value.selectedSheet ?? current.sheet,
+      headerDepth: value.headerDepth ?? current.headerDepth ?? 1,
       selections:
         restored ??
         (defaultField && defaultValue ? { [defaultField]: [defaultValue] } : {}),
@@ -453,7 +461,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
         setValuesLoading(false);
       }
     },
-    [state.inputPath, state.sheet, state.headerRow],
+    [state.inputPath, state.sheet, state.headerRow, state.headerDepth],
   );
 
   function openFilterMenu(field: string, anchor: HTMLElement) {
@@ -476,6 +484,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
         inputPath: state.inputPath,
         sheet: state.sheet || undefined,
         headerRow: Math.max(1, Number(state.headerRow) || 1),
+        headerDepth: state.headerDepth ?? 1,
         filters: applied,
       });
     } catch (caught) {
@@ -532,6 +541,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
         inputPath: state.inputPath,
         sheet: state.sheet || undefined,
         headerRow: Math.max(1, Number(state.headerRow) || 1),
+        headerDepth: state.headerDepth ?? 1,
         pivotMode: "dual_default",
         filters,
         outputPath: state.outputPath,
@@ -687,11 +697,11 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     disabled={busy}
                   />
                 </Field>
-                <div className="actions">
+                <div className="actions" data-button-size="default">
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     disabled={busy || !state.inputPath}
                     onClick={() => void inspect()}
                   >
@@ -710,17 +720,12 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
             )}
             {step === 2 && (
               <>
-                <p className="hint">
-                  筛选在下方「数据预览」卡片里做：点表头第一行的 ▼
-                  打开取值清单，勾选后点「应用」。
-                  同一列勾多个取值是「或」，不同列之间是「且」——和 Excel
-                  的自动筛选一致。
-                </p>
+                <p className="hint">筛选规则：同列取「或」，跨列取「且」。</p>
                 {filters.length === 0 ? (
                   <EmptyState
                     compact
                     title="尚未添加筛选条件"
-                    description={`导出将包含全部 ${totalRows} 行。可在下方预览表头按列筛选，或直接进入导出。`}
+                    description={`未设置筛选，将导出全部 ${totalRows} 行。`}
                   />
                 ) : (
                   <>
@@ -750,11 +755,11 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     </p>
                   </>
                 )}
-                <div className="actions">
+                <div className="actions" data-button-size="default">
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     disabled={!filters.length}
                     onClick={clearAllFilters}
                   >
@@ -763,7 +768,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     onClick={() => setStep(1)}
                   >
                     上一步
@@ -798,11 +803,11 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                 <p className="hint">
                   将按 {filters.length} 个筛选条件导出，命中 {shownRows} 行。
                 </p>
-                <div className="actions">
+                <div className="actions" data-button-size="default">
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     onClick={() => setStep(2)}
                   >
                     上一步
@@ -811,7 +816,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     <Button
                       type="button"
                       variant="secondary"
-                      size="sm"
+                      size="default"
                       onClick={() => void cancelJobWithFeedback(job.jobId)}
                     >
                       取消
@@ -842,13 +847,12 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
         </Card>
 
         <Card>
-          <CardHeader>
-            <CardTitle>数据预览</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {state.inputPath && <div className="mapping-panel-toolbar source-preview-toolbar">
+          <CardHeader className="source-preview-card-head">
+            <PreviewSourceHeader toolbar={state.inputPath && <>
               <SourceTableControls
                 sheet={state.sheet} sheets={state.inspect?.sheets ?? []} headerRow={state.headerRow}
+                headerDepth={state.headerDepth ?? 1}
+                onHeaderDepthChange={(headerDepth) => resetForNewSource({ headerDepth, inspect: switchSheetInspect(state.inspect, state.sheet) })}
                 editableSheet headerRowMax={50} disabled={busy}
                 onSheetChange={(sheet) => {
                   setMenu(undefined);
@@ -859,7 +863,12 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                 onHeaderRowChange={(headerRow) => resetForNewSource({ headerRow, inspect: switchSheetInspect(state.inspect, state.sheet) })}
               />
               {!headers.length && <Button variant="secondary" size="sm" disabled={busy} onClick={() => void inspect()}>重新加载</Button>}
-            </div>}
+            </>}>
+              <h2>数据预览</h2>
+              {state.inputPath && <strong className="preview-source-name" title={state.inputPath}>{displayFileName(state.inputPath)}</strong>}
+            </PreviewSourceHeader>
+          </CardHeader>
+          <CardContent>
             {state.inspect && (
               <StatGrid
                 columns={4}

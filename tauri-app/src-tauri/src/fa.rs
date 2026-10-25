@@ -25,6 +25,9 @@ use crate::excel_merger::PauseCheckpoint;
 
 #[path = "fa_disk_rows.rs"]
 mod disk_rows;
+#[cfg(test)]
+#[path = "fa_header_controls_tests.rs"]
+mod header_controls_tests;
 #[path = "fa_disk.rs"]
 pub(crate) mod disk;
 #[path = "fa_resources.rs"]
@@ -39,6 +42,7 @@ pub(crate) struct Table {
     pub(crate) sheet: Option<String>,
     pub(crate) sheets: Vec<String>,
     pub(crate) header_row: usize,
+    pub(crate) header_depth: usize,
     pub(crate) headers: Vec<String>,
     pub(crate) rows: Vec<Vec<String>>,
     /// 表内数据行的真实总数。整表读取时等于 `rows.len()`；前缀读取时是
@@ -47,19 +51,49 @@ pub(crate) struct Table {
     pub(crate) row_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct HeaderOptions {
+    pub(crate) row: Option<usize>,
+    pub(crate) depth: Option<usize>,
+}
+
+impl From<Option<usize>> for HeaderOptions {
+    fn from(row: Option<usize>) -> Self { Self { row, depth: None } }
+}
+impl From<usize> for HeaderOptions {
+    fn from(row: usize) -> Self { Some(row).into() }
+}
+impl HeaderOptions {
+    pub(crate) fn params(params: &Value, row_key: &str, depth_key: &str) -> Result<Self, AppError> {
+        let depth = match params.get(depth_key) {
+            None | Some(Value::Null) => None,
+            Some(value) => match value.as_u64() {
+                Some(0) => None,
+                Some(depth @ 1..=2) => Some(depth as usize),
+                _ => return Err(error("INVALID_PARAMS", "表头层数只能为自动识别、1层或2层。", None)),
+            },
+        };
+        Ok(Self { row: optional_header(params, row_key)?, depth })
+    }
+    pub(crate) fn resolved(table: &Table) -> Self {
+        Self { row: Some(table.header_row), depth: Some(table.header_depth) }
+    }
+}
+
+type ReviewTableKey = (PathBuf, u64, SystemTime, Option<String>, usize, usize);
 // 只缓存最近一次 inspect 的两张表，复核复用读取结果；worker 导出仍重新读源文件。
-type ReviewTableKey = (PathBuf, u64, SystemTime, Option<String>, usize);
 static REVIEW_TABLES: OnceLock<Mutex<Vec<(ReviewTableKey, Arc<Table>)>>> = OnceLock::new();
 
-fn review_table_key(path: &Path, sheet: Option<&str>, header: usize) -> Option<ReviewTableKey> {
+fn review_table_key(path: &Path, sheet: Option<&str>, header: impl Into<HeaderOptions>) -> Option<ReviewTableKey> {
+    let header = header.into();
     let metadata = fs::metadata(path).ok()?;
-    Some((fs::canonicalize(path).ok()?, metadata.len(), metadata.modified().ok()?, sheet.map(str::to_owned), header))
+    Some((fs::canonicalize(path).ok()?, metadata.len(), metadata.modified().ok()?, sheet.map(str::to_owned), header.row.unwrap_or(0), header.depth.unwrap_or(0)))
 }
 
 fn review_table(params: &Value, side: &str) -> Result<Arc<Table>, AppError> {
     let path = required_path(params, &format!("{side}Path"))?;
     let sheet = params.get(format!("{side}Sheet")).and_then(Value::as_str).filter(|sheet| !sheet.is_empty());
-    let header = optional_header(params, &format!("{side}HeaderRow"))?;
+    let header = HeaderOptions::params(params, &format!("{side}HeaderRow"), &format!("{side}HeaderDepth"))?;
     load_review_table(&path, sheet, header, false)
 }
 
@@ -69,26 +103,48 @@ fn review_table(params: &Value, side: &str) -> Result<Arc<Table>, AppError> {
 fn load_interactive_table(
     path: &Path,
     sheet: Option<&str>,
-    header: Option<usize>,
+    header: impl Into<HeaderOptions>,
     choose_best: bool,
 ) -> Result<Table, AppError> {
+    let header = header.into();
+    // 预览先走前缀。大文件磁盘分流只决定正式任务的读法，不能提前建全表缓存。
+    if let Some(table) = crate::fa_sheet_pick::load_prefix_table(path, sheet, header, choose_best) {
+        return Ok(table);
+    }
     if resources::uses_disk(&[(path, sheet)], resources::Phase::Read) {
-        return disk::load_review(path,sheet,header,choose_best);
+        return disk::load_review(path, sheet, header, choose_best);
     }
-    match crate::fa_sheet_pick::load_prefix_table(path, sheet, header, choose_best) {
-        Some(table) => Ok(table),
-        None => load_table(path, sheet, header, choose_best),
-    }
+    load_table(path, sheet, header, choose_best)
+}
+
+#[test]
+fn fa_disk_preview_does_not_build_full_cache_and_key_evidence_stops_on_hit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("大表预览.xlsx");
+    crate::table_read_cache::workbook_with_bad_tail(&path, &["资产编号", "资产名称", "原值"]);
+    let mut plan = crate::disk_table::ReadPlan::default();
+    plan.add(&path, true);
+    let _guard = plan.enter();
+    let table = load_interactive_table(&path, Some("数据"), HeaderOptions { row: Some(1), depth: Some(1) }, false).unwrap();
+    assert!(table.rows.len() < table.row_count);
+    let disk_preview = disk::load_review(&path, Some("数据"), HeaderOptions { row: Some(1), depth: Some(1) }, false).unwrap();
+    assert_eq!(disk_preview.headers, table.headers);
+    assert!(disk_preview.rows.len() < 300);
+    assert!(crate::disk_table::DiskTable::cached_fa(&path, "数据", 1, 1).is_none());
+    assert!(disk::columns_containing(&table, &[0], &normalize_join_key("ID-300-0"), None).unwrap().contains(&0));
+    // 没有证据时扫描到异常尾部仍须报错，不能缓存成“确实没有这个编号”。
+    assert!(disk::columns_containing(&table, &[0], "missing-id", None).is_err());
 }
 
 pub(crate) fn load_review_table(
     path: &Path,
     sheet: Option<&str>,
-    header: Option<usize>,
+    header: impl Into<HeaderOptions>,
     choose_best: bool,
 ) -> Result<Arc<Table>, AppError> {
+    let header = header.into();
     let sheet = sheet.filter(|sheet| !sheet.is_empty());
-    if let Some(key) = header.and_then(|row| review_table_key(path, sheet, row)) {
+    if let Some(key) = header.row.and_then(|_| review_table_key(path, sheet, header)) {
         if let Some(table) = REVIEW_TABLES.get_or_init(|| Mutex::new(Vec::new()))
             .lock().ok().and_then(|cache| cache.iter().find(|(cached, _)| *cached == key).map(|(_, table)| Arc::clone(table))) {
             return Ok(table);
@@ -98,7 +154,7 @@ pub(crate) fn load_review_table(
     let table = Arc::new(load_interactive_table(path, sheet, header, choose_best)?);
     let after = review_table_key(path, None, 0);
     if before.is_some() && before == after {
-        if let Some(key) = review_table_key(path, table.sheet.as_deref(), table.header_row) {
+        if let Some(key) = review_table_key(path, table.sheet.as_deref(), HeaderOptions { row: Some(table.header_row), ..header }) {
             if let Ok(mut cache) = REVIEW_TABLES.get_or_init(|| Mutex::new(Vec::new())).lock() {
                 cache.retain(|(old, _)| old != &key);
                 cache.push((key, Arc::clone(&table)));
@@ -208,16 +264,16 @@ fn inspect(params: Value) -> Result<Value, AppError> {
     let end_path = required_path(&params, "endPath")?;
     let fingerprints = [review_table_key(&begin_path, None, 0), review_table_key(&end_path, None, 0)];
     let load_started = std::time::Instant::now();
-    let mut begin = Arc::new(load_interactive_table(
+    let begin = Arc::new(load_interactive_table(
         &begin_path,
         params.get("beginSheet").and_then(Value::as_str),
-        optional_header(&params, "beginHeaderRow")?,
+        HeaderOptions::params(&params, "beginHeaderRow", "beginHeaderDepth")?,
         true,
     )?);
-    let mut end = Arc::new(load_interactive_table(
+    let end = Arc::new(load_interactive_table(
         &end_path,
         params.get("endSheet").and_then(Value::as_str),
-        optional_header(&params, "endHeaderRow")?,
+        HeaderOptions::params(&params, "endHeaderRow", "endHeaderDepth")?,
         true,
     )?);
     eprintln!(
@@ -230,7 +286,6 @@ fn inspect(params: Value) -> Result<Value, AppError> {
         end.rows.len(),
         end.row_count,
     );
-    let verify_started = std::time::Instant::now();
     let mut bm = suggest_mapping(&begin);
     let mut em = suggest_mapping(&end);
     // 本年折旧、新增方式和新增日期都是期末（file2）属性。
@@ -249,57 +304,14 @@ fn inspect(params: Value) -> Result<Value, AppError> {
     // 一致，单侧悬空的尾部成员只会挂出恒为未命中的徽章，直接撤掉；首键
     // （主编号）承载选列建议，永不裁剪。
     align_key_members(&mut begin_keys, &mut end_keys);
-    let suggested_begin_keys = begin_keys.clone();
-    let suggested_end_keys = end_keys.clone();
-    let mut key_pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys);
-    // 前缀快验只信“全部直接命中且未动一键”的结论——命中即真。出现未命中、
-    // 纠正或撤键都意味着需要全量数据复核：退回整表重跑同一套判键逻辑
-    // （与整表实现的口径逐字一致），并让后续手工调键/复核也用上整表。
-    let prefix_only = begin.rows.len() < begin.row_count || end.rows.len() < end.row_count;
-    if prefix_only
-        && !resources::uses_disk(&[(&begin.path, begin.sheet.as_deref()), (&end.path, end.sheet.as_deref())], resources::Phase::Read)
-        && (begin_keys != suggested_begin_keys
-            || end_keys != suggested_end_keys
-            || key_pairing
-                .iter()
-                .any(|item| item.get("hit").and_then(Value::as_bool) != Some(true)))
-    {
-        eprintln!(
-            "FA inspect 前缀键校验存疑（{:.1}s），退整表重验",
-            verify_started.elapsed().as_secs_f64()
-        );
-        let reload_started = std::time::Instant::now();
-        let begin_full = Arc::new(crate::fa_table_cache::load_table_cached(
-            &begin.path,
-            begin.sheet.as_deref(),
-            Some(begin.header_row),
-            false,
-        )?);
-        let end_full = Arc::new(crate::fa_table_cache::load_table_cached(
-            &end.path,
-            end.sheet.as_deref(),
-            Some(end.header_row),
-            false,
-        )?);
-        let mut retry_begin = suggested_begin_keys;
-        let mut retry_end = suggested_end_keys;
-        key_pairing =
-            repair_suggested_key_pairing(&begin_full, &end_full, &mut retry_begin, &mut retry_end);
-        begin_keys = retry_begin;
-        end_keys = retry_end;
-        begin = begin_full;
-        end = end_full;
-        eprintln!(
-            "FA inspect 整表重读+重验 {:.1}s",
-            reload_started.elapsed().as_secs_f64()
-        );
-    }
+    let key_pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys)?;
+    // 未命中的样例由定向列扫描确认，不因建议纠正/撤键重读两侧全表。
     let tables = [&begin, &end].into_iter().zip(fingerprints).filter_map(|(table, before)| {
         // 读取过程中源文件被改动时，不把可能跨版本的读取结果加入缓存。
         let before = before?;
         let after = review_table_key(&table.path, None, 0)?;
         if before != after { return None; }
-        review_table_key(&table.path, table.sheet.as_deref(), table.header_row)
+        review_table_key(&table.path, table.sheet.as_deref(), HeaderOptions::resolved(table))
             .map(|key| (key, Arc::clone(table)))
     }).collect();
     if let Ok(mut cache) = REVIEW_TABLES.get_or_init(|| Mutex::new(Vec::new())).lock() {
@@ -336,7 +348,7 @@ fn fa_key_check(params: Value) -> Result<Value, AppError> {
             begin.headers.iter().position(|h| h == &begin_keys[i]),
             end.headers.iter().position(|h| h == &end_keys[i]),
         ) {
-            (Some(bi), Some(ei)) => key_columns_intersect(&begin, bi, &end, ei),
+            (Some(bi), Some(ei)) => key_columns_intersect(&begin, bi, &end, ei)?,
             _ => false,
         };
         pairing.push(json!({"begin": begin_keys[i].clone(), "end": end_keys[i].clone(), "hit": hit}));
@@ -426,51 +438,34 @@ fn first_join_sample(table: &Table, index: usize) -> Option<String> {
 }
 
 /// 样本是否落在该列的归一值集合里（流式扫描，命中即停）。
-fn column_contains(table: &Table, index: usize, sample: &str) -> bool {
-    if sample.is_empty() {
-        return false;
+fn column_contains(table: &Table, index: usize, sample: &str) -> Result<bool, AppError> {
+    if sample.is_empty() { return Ok(false); }
+    if table.rows.iter().any(|row| normalize_join_key(cell(row, index)) == sample) {
+        return Ok(true);
     }
-    if table.rows.len()<table.row_count && resources::uses_disk(&[(&table.path, table.sheet.as_deref())], resources::Phase::Read) {
-        return disk::column_contains(table,index,sample).unwrap_or(false);
+    if table.rows.len() < table.row_count {
+        return disk::column_contains(table, index, sample);
     }
-    table
-        .rows
-        .iter()
-        .map(|row| normalize_join_key(cell(row, index)))
-        .any(|value| value == sample)
+    Ok(false)
 }
 
 /// 键列对应的证据：两侧列的归一值域存在任一方向的交集即算命中（证明这
 /// 两列能连上）。先查已读行；需要补深时优先抽取行数较少的一侧，把整列
 /// 扫描的代价压到低的一侧——首扫结果会进值域缓存，后续调键复验免扫。
-fn key_columns_intersect(begin: &Table, b_index: usize, end: &Table, e_index: usize) -> bool {
+fn key_columns_intersect(begin: &Table, b_index: usize, end: &Table, e_index: usize) -> Result<bool, AppError> {
     let begin_sample = first_join_sample(begin, b_index);
     let end_sample = first_join_sample(end, e_index);
     if let Some(sample) = begin_sample.as_deref() {
-        if column_contains(end, e_index, sample) {
-            return true;
+        if column_contains(end, e_index, sample)? {
+            return Ok(true);
         }
     }
     if let Some(sample) = end_sample.as_deref() {
-        if column_contains(begin, b_index, sample) {
-            return true;
+        if column_contains(begin, b_index, sample)? {
+            return Ok(true);
         }
     }
-    let deep = |table: &Table, index: usize, sample: Option<&str>| -> bool {
-        if table.rows.len()<table.row_count && resources::uses_disk(&[(&table.path, table.sheet.as_deref())], resources::Phase::Read) {
-            return sample.is_some_and(|value|disk::column_contains(table,index,value).unwrap_or(false));
-        }
-        sample
-            .and_then(|value| crate::fa_sheet_pick::xlsx_column_contains(table, index, value))
-            .unwrap_or(false)
-    };
-    if begin.row_count <= end.row_count {
-        deep(begin, b_index, end_sample.as_deref())
-            || deep(end, e_index, begin_sample.as_deref())
-    } else {
-        deep(end, e_index, begin_sample.as_deref())
-            || deep(begin, b_index, end_sample.as_deref())
-    }
+    Ok(false)
 }
 
 /// 序数列（值≈行号 1..N）识别：序数列完全唯一、完全覆盖，在键列打分里
@@ -551,25 +546,25 @@ fn find_column_containing(
     table: &Table,
     sample: &str,
     excluded: &BTreeSet<usize>,
-) -> Option<usize> {
+) -> Result<Option<usize>, AppError> {
     if sample.is_empty() {
-        return None;
+        return Ok(None);
     }
-    for forbidden_pass in [false, true] {
-        for (index, header) in table.headers.iter().enumerate() {
-            if excluded.contains(&index)
-                || is_forbidden_id(header) != forbidden_pass
-                || looks_like_serial_column(table, index)
-                || column_is_constant(table, index)
-            {
-                continue;
-            }
-            if column_contains(table, index, sample) {
-                return Some(index);
-            }
-        }
+    let indexes = [false, true].into_iter().flat_map(|forbidden_pass| {
+        table.headers.iter().enumerate().filter_map(move |(index, header)| {
+            (!excluded.contains(&index)
+                && is_forbidden_id(header) == forbidden_pass
+                && !looks_like_serial_column(table, index)
+                && !column_is_constant(table, index)).then_some(index)
+        })
+    }).collect::<Vec<_>>();
+    if table.rows.len() < table.row_count {
+        return Ok(disk::columns_containing(table, &indexes, sample, None)?.first().copied());
     }
-    None
+    for index in indexes {
+        if column_contains(table, index, sample)? { return Ok(Some(index)); }
+    }
+    Ok(None)
 }
 
 /// 除 `skip` 外当前仍生效的键列在本表的列下标（已撤掉的键位不再占用列）。
@@ -595,7 +590,7 @@ fn repair_suggested_key_pairing(
     end: &Table,
     begin_keys: &mut Vec<String>,
     end_keys: &mut Vec<String>,
-) -> Vec<Value> {
+) -> Result<Vec<Value>, AppError> {
     let paired = begin_keys.len().min(end_keys.len());
     let mut dropped = vec![false; paired];
     let mut pairing = Vec::new();
@@ -619,13 +614,13 @@ fn repair_suggested_key_pairing(
         }
         let mut hit = false;
         if let Some(sample) = begin_sample.as_deref() {
-            if key_columns_intersect(begin, b_index, end, e_index) {
+            if key_columns_intersect(begin, b_index, end, e_index)? {
                 hit = true;
             } else if let Some(fixed) = find_column_containing(
                 end,
                 sample,
                 &occupied_key_indices(end, end_keys, i, &dropped),
-            ) {
+            )? {
                 end_keys[i] = end.headers[fixed].clone();
                 hit = true;
             }
@@ -636,7 +631,7 @@ fn repair_suggested_key_pairing(
                     begin,
                     sample,
                     &occupied_key_indices(begin, begin_keys, i, &dropped),
-                ) {
+                )? {
                     begin_keys[i] = begin.headers[fixed].clone();
                     hit = true;
                 }
@@ -658,15 +653,22 @@ fn repair_suggested_key_pairing(
     };
     *begin_keys = keep_alive(begin_keys);
     *end_keys = keep_alive(end_keys);
-    pairing
+    Ok(pairing)
 }
 
 fn supplement_inspect(params: Value) -> Result<Value, AppError> {
     let path = required_path(&params, "path")?;
+    if params.get("sheetsOnly").and_then(Value::as_bool) == Some(true) {
+        let sheets = crate::fa_sheet_pick::list_visible_sheets(&path)?;
+        if !sheets.is_empty() {
+            return Ok(json!({"path":path,"kind":"excel","sheets":sheets,
+                "headers":[],"preview":[],"suggestedMapping":{},"engine":"rust-fa"}));
+        }
+    }
     let table = load_review_table(
         &path,
         params.get("sheet").and_then(Value::as_str),
-        optional_header(&params, "headerRow")?,
+        HeaderOptions::params(&params, "headerRow", "headerDepth")?,
         false,
     )?;
     let mut mapping = suggest_mapping(&table);
@@ -682,35 +684,13 @@ fn supplement_inspect(params: Value) -> Result<Value, AppError> {
         .filter(|path| !path.trim().is_empty())
         .map(|path| {
             let path = PathBuf::from(path);
-            let mut reference = load_interactive_table(
-                &path,
-                params.get("referenceSheet").and_then(Value::as_str),
-                optional_header(&params, "referenceHeaderRow")?,
-                false,
-            )?;
-            // 键推断要拿参照表键列的全量值做成员证明：前缀表上定向抽列补深，
-            // 补不动（非 xlsx 等）就退整表，证明口径不变。
-            if reference.rows.len() < reference.row_count && !resources::uses_disk(&[(&reference.path, reference.sheet.as_deref())], resources::Phase::Read) {
-                let indexes: Vec<usize> = references
-                    .iter()
-                    .filter_map(|key| {
-                        reference.headers.iter().position(|header| header == key)
-                    })
-                    .collect();
-                if !indexes.is_empty() {
-                    match crate::fa_sheet_pick::deep_patch_columns(&reference, &indexes) {
-                        Some(patched) => reference = patched,
-                        None => {
-                            reference = crate::fa_table_cache::load_table_cached(
-                                &reference.path,
-                                reference.sheet.as_deref(),
-                                Some(reference.header_row),
-                                false,
-                            )?;
-                        }
-                    }
-                }
-            }
+            let sheet = params.get("referenceSheet").and_then(Value::as_str);
+            let header = HeaderOptions::params(&params, "referenceHeaderRow", "referenceHeaderDepth")?;
+            // 此处只需列结构和样例，不为键验证构建全宽整表或磁盘行缓存。
+            let reference = match crate::fa_sheet_pick::load_prefix_table(&path, sheet, header, false) {
+                Some(table) => table,
+                None => load_interactive_table(&path, sheet, header, false)?,
+            };
             Ok(reference)
         })
         .transpose()?;
@@ -718,6 +698,7 @@ fn supplement_inspect(params: Value) -> Result<Value, AppError> {
     let mut keys = reference_table
         .as_ref()
         .map(|reference| infer_supplement_keys_by_samples(&table, reference, &references))
+        .transpose()?
         .unwrap_or_default();
 
     // Compatibility fallback for API callers that do not provide the primary
@@ -784,8 +765,8 @@ fn supplement_inspect(params: Value) -> Result<Value, AppError> {
 /// Establish a one-to-one mapping from the primary ledger's configured keys to
 /// supplement columns using values, not header wording.
 ///
-/// For each candidate supplement column we take exactly three non-blank data
-/// samples.  A candidate is accepted only when all three values occur verbatim
+/// For each candidate supplement column we take one non-blank data sample.
+/// A candidate is accepted only when that value occurs verbatim
 /// (under the same harmless trim/case/Excel-`.0` normalization used by the
 /// merger) in one configured key column of the primary ledger.  Every primary
 /// key must be proved and every supplement column may be used once; otherwise
@@ -794,81 +775,107 @@ fn infer_supplement_keys_by_samples(
     supplement: &Table,
     reference: &Table,
     reference_keys: &[String],
-) -> Vec<String> {
-    if supplement.rows.len() < 3 {
-        return Vec::new();
+) -> Result<Vec<String>, AppError> {
+    if supplement.rows.is_empty() || reference_keys.is_empty() {
+        return Ok(Vec::new());
     }
-    // Use three representative data rows (head/middle/tail).  This is stable
-    // across repeated reviews while avoiding the bias of checking only the
-    // first few records, which are often one batch copied from the same source.
-    let sample_rows = [0usize, supplement.rows.len() / 2, supplement.rows.len() - 1];
     let Some(reference_indexes) = reference_keys
         .iter()
         .map(|key| reference.headers.iter().position(|header| header == key))
         .collect::<Option<Vec<_>>>()
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let disk_reference=resources::uses_disk(&[(&reference.path, reference.sheet.as_deref())], resources::Phase::Read);
-    let reference_values = reference_indexes
+    let samples_by_column = (0..supplement.headers.len()).map(|column| {
+        supplement.rows.iter().map(|row| normalize_key(cell(row, column), true, false))
+            .find(|value| !value.is_empty()).unwrap_or_default()
+    }).collect::<Vec<_>>();
+    let wanted = samples_by_column.iter().filter(|value| !value.is_empty())
+        .cloned().collect::<HashSet<_>>();
+    let mut reference_values = reference_indexes
         .iter()
         .map(|index| {
             reference
                 .rows
                 .iter()
                 .map(|row| normalize_key(cell(row, *index), true, false))
-                .filter(|value| !value.is_empty())
+                .filter(|value| wanted.contains(value))
                 .collect::<HashSet<_>>()
         })
         .collect::<Vec<_>>();
-    let mut used = HashSet::new();
-    let mut result = Vec::with_capacity(reference_keys.len());
-    for (reference_position, reference_key) in reference_keys.iter().enumerate() {
-        let mut candidates = supplement
-            .headers
-            .iter()
-            .enumerate()
-            .filter(|(column, _)| !used.contains(column))
-            .filter_map(|(column, header)| {
-                let samples = supplement
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(row, _)| sample_rows.contains(row))
-                    .map(|(_, row)| normalize_key(cell(row, column), true, false))
-                    .collect::<Vec<_>>();
-                if samples.len() != 3
-                    || !samples
-                        .iter()
-                        .all(|value| reference_values[reference_position].contains(value) || (disk_reference && disk::column_contains_normalized(reference,reference_indexes[reference_position],value,true,false).unwrap_or(false)))
-                {
-                    return None;
-                }
-                let exact_header =
-                    usize::from(normalize_header(header) == normalize_header(reference_key));
-                let semantic_header = usize::from(
-                    (looks_like_id(header) && looks_like_id(reference_key))
-                        || (looks_like_name(header) && looks_like_name(reference_key)),
-                );
-                let distinct_samples = samples.iter().collect::<HashSet<_>>().len();
-                Some((
-                    exact_header,
-                    semantic_header,
-                    distinct_samples,
-                    std::cmp::Reverse(column),
-                    column,
-                    header.clone(),
-                ))
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_unstable_by(|a, b| b.cmp(a));
-        let Some((_, _, _, _, column, header)) = candidates.into_iter().next() else {
-            return Vec::new();
-        };
-        used.insert(column);
-        result.push(header);
+    let choose_keys = |reference_values: &[HashSet<String>]| {
+        let mut used = HashSet::new();
+        let mut result = Vec::with_capacity(reference_keys.len());
+        for (reference_position, reference_key) in reference_keys.iter().enumerate() {
+            let mut candidates = supplement
+                .headers
+                .iter()
+                .enumerate()
+                .filter(|(column, _)| !used.contains(column))
+                .filter_map(|(column, header)| {
+                    let sample = &samples_by_column[column];
+                    if sample.is_empty() || !reference_values[reference_position].contains(sample)
+                    {
+                        return None;
+                    }
+                    let exact_header =
+                        usize::from(normalize_header(header) == normalize_header(reference_key));
+                    let semantic_header = usize::from(
+                        (looks_like_id(header) && looks_like_id(reference_key))
+                            || (looks_like_name(header) && looks_like_name(reference_key)),
+                    );
+                    Some((
+                        exact_header,
+                        semantic_header,
+                        std::cmp::Reverse(column),
+                        column,
+                        header.clone(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_unstable_by(|a, b| b.cmp(a));
+            let Some((_, _, _, column, header)) = candidates.into_iter().next() else {
+                return Vec::new();
+            };
+            used.insert(column);
+            result.push(header);
+        }
+        result
+    };
+    let keys = choose_keys(&reference_values);
+    if !keys.is_empty() || wanted.is_empty() || reference.rows.len() >= reference.row_count {
+        return Ok(keys);
     }
-    result
+    // 先用已加载的样例验证；未命中才单次扫描键列，找到对应关系即停止。
+    // 这里只保留候选样例的命中结果，不物化完整参照表。
+    crate::table_read_cache::read(&reference.path, "fa-supplement-key-evidence-v1",
+        &(reference.sheet.as_deref(), reference.header_row, reference.header_depth,
+            reference_keys, &supplement.headers, &samples_by_column), || {
+        let indexes = reference_indexes.iter().copied().collect::<HashSet<_>>();
+        let visit_sample = |row: Vec<String>, physical_row| {
+            if physical_row >= reference.header_row + reference.header_depth {
+                let mut changed = false;
+                for (position, index) in reference_indexes.iter().enumerate() {
+                    let value = normalize_key(cell(&row, *index), true, false);
+                    if wanted.contains(&value) { changed |= reference_values[position].insert(value); }
+                }
+                if changed && !choose_keys(&reference_values).is_empty() {
+                    return Err(error("FA_SUPPLEMENT_SAMPLE_FOUND", "已找到补充表匹配样例。", None));
+                }
+            }
+            Ok(())
+        };
+        let cancel = AtomicBool::new(false);
+        let sheet = reference.sheet.as_deref().unwrap_or("CSV");
+        let scan = match crate::disk_table::DiskTable::cached_fa(&reference.path, sheet, reference.header_row, reference.header_depth) {
+            Some(cached) => cached.visit_columns(&indexes, &cancel, visit_sample),
+            None => crate::disk_table::for_each_source_row_projected(&reference.path, sheet, &indexes, &cancel, visit_sample),
+        };
+        if let Err(error) = scan {
+            if error.code != "FA_SUPPLEMENT_SAMPLE_FOUND" { return Err(error); }
+        }
+        Ok(choose_keys(&reference_values))
+    })
 }
 
 fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
@@ -926,7 +933,7 @@ fn finalize_llm_review(parsed: Value, payload: Value, supplement: bool) -> Value
         .filter_map(|mut item| {
             sanitize_llm_review_item(&mut item, &payload);
             (llm_review_preserves_normalized_columns(&mut item, &payload)
-                && llm_review_item_is_applicable(&mut item, supplement)).then_some(item)
+                && llm_review_item_is_applicable(&mut item, supplement, &payload)).then_some(item)
         })
         .collect::<Vec<_>>();
     let mut auto = Vec::new();
@@ -940,7 +947,7 @@ fn finalize_llm_review(parsed: Value, payload: Value, supplement: bool) -> Value
         .filter_map(|mut item| {
             sanitize_llm_review_item(&mut item, &payload);
             (llm_review_preserves_normalized_columns(&mut item, &payload)
-                && llm_review_item_is_applicable(&mut item, supplement)).then_some(item)
+                && llm_review_item_is_applicable(&mut item, supplement, &payload)).then_some(item)
         })
         .collect::<Vec<_>>();
     for fallback in local_unmapped_suggestions(&payload) {
@@ -1336,7 +1343,24 @@ fn local_category_code_suspects(
     Vec::new()
 }
 
-pub(crate) const FA_DATE_REVIEW_INSTRUCTION: &str = "日期角色 date/addition_date/disposal_date 的建议必须由样例中的真实年月日或合理 Excel 日期序列值支持。已购、NEW、新建、购入、外购、是否新增、取得方式、资产状态均不是日期；这些状态或方式列不得映射任何日期角色。新增方式 addition_method 与新增日期 addition_date 是独立角色，不得为了补齐未映射字段强行找列；没有可信日期列时保持新增日期未映射。";
+pub(crate) const FA_DATE_REVIEW_INSTRUCTION: &str = "日期角色 date/addition_date/disposal_date 的建议必须由样例中的真实年月日或合理 Excel 日期序列值支持。已购、NEW、新建、购入、外购、是否新增、取得方式、资产状态均不是日期；这些状态或方式列不得映射任何日期角色。同一文件只有一列可信的新增日期、入账日期或开始使用日期时，date 与 addition_date 可以共用该列，按新增日期口径处理；已有共用映射必须保留，不得因为该列已用于另一个日期角色或没有独立日期列而 clear。未映射角色可 fill 到同一列。只有存在两列或更多可信候选日期列时，才结合列名与样例区分新增、入账和开始使用日期；角色候选仍有歧义时不强行猜列。新增方式 addition_method 与新增日期 addition_date 是独立角色，不得为了补齐未映射字段强行找列；没有可信日期列时保持新增日期未映射。";
+
+/// 只在日期表头和真实样例均支持时允许共用，不能把金额的数值当日期序列。
+fn llm_single_shared_date_column(payload: &Value, side: &str) -> Option<String> {
+    let mut candidates = payload_headers(payload, side).into_iter().filter(|column| {
+        let header = normalize_header(column).to_ascii_lowercase();
+        (header.contains("日期") || header.contains("时间") || header.contains("date"))
+            && llm_date_column_is_compatible(payload, side, column)
+    });
+    let column = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    let header = normalize_header(&column).to_ascii_lowercase();
+    (matches!(header.as_str(), "日期" | "时间" | "date")
+        || ["新增", "增加", "入账", "开始", "使用", "启用", "投用", "购置", "取得", "资本化", "addition", "acquisition", "capitalization", "start", "posting", "entry", "book"]
+            .iter().any(|term| header.contains(term))).then_some(column)
+}
 
 fn llm_date_column_is_compatible(payload: &Value, side: &str, column: &str) -> bool {
     let Some(values) = payload.get(side).and_then(|table| table.get("samples"))
@@ -1404,9 +1428,22 @@ pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
         return;
     };
     if object.get("action").and_then(Value::as_str) == Some("clear") {
-        // FA 的本地疑点多数同时携带可信替代列，不能据此自动删映射。
-        // clear 保留下发供人工采纳，但模型无权自行签发自动清除许可。
+        // 清除门槛由前端统一按 confidence >= 0.9 判断，不接受模型自行签发许可。
         object.insert("autoClearSafe".into(), Value::Bool(false));
+        let role = object.get("role").and_then(Value::as_str).unwrap_or("");
+        let side = object.get("file_side").and_then(Value::as_str).unwrap_or("");
+        if matches!(role, "date" | "addition_date") {
+            let key = if role == "date" { "startDate" } else { "additionDate" };
+            let current = payload.get(side).and_then(|table| table.get("mapping"))
+                .and_then(|mapping| mapping.get(key).or_else(|| mapping.get("date")))
+                .and_then(Value::as_str);
+            if llm_single_shared_date_column(payload, side).as_deref()
+                .is_some_and(|column| current == Some(column)) {
+                object.insert("action".into(), json!("keep"));
+                object.remove("suggested_column");
+                object.remove("suggested_mapping");
+            }
+        }
     }
     if let Some(raw) = object.get("suggested_mapping").cloned() {
         object.insert(
@@ -1454,9 +1491,24 @@ pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
     }
 }
 
-fn llm_review_item_is_applicable(item: &mut Value, supplement: bool) -> bool {
+fn llm_review_item_is_applicable(item: &mut Value, supplement: bool, payload: &Value) -> bool {
     let role = item.get("role").and_then(Value::as_str).unwrap_or("");
     if supplement {
+        // 单侧复核只载荷了一侧表头；另一侧没有列名可对照，指向它的建议
+        // 一律丢弃，防止模型对着缺失的文件编造列名。
+        let implied_side = match role {
+            "addition_method" | "addition_date" => "file1",
+            "disposal_method" | "disposal_date" | "disposal_orig" | "disposal_dep" => "file2",
+            _ => "",
+        };
+        let side = item
+            .get("file_side")
+            .and_then(Value::as_str)
+            .filter(|side| !side.is_empty())
+            .unwrap_or(implied_side);
+        if !side.is_empty() && payload.get(side).is_none() {
+            return false;
+        }
         return match role {
             "addition_method" | "addition_date" => item
                 .get("file_side")
@@ -1606,6 +1658,9 @@ fn main_llm_side_payload(
     include_file2_only: bool,
 ) -> Value {
     let suggested = suggest_mapping(table);
+    let samples = review_sample_columns(table);
+    let date_payload = json!({"file2": {"headers": table.headers, "samples": samples}});
+    let shared_date = llm_single_shared_date_column(&date_payload, "file2");
     let roles = [
         ("category", "category", false),
         ("name", "name", false),
@@ -1633,13 +1688,18 @@ fn main_llm_side_payload(
             continue;
         }
         unmapped_roles.push(Value::String(role.to_owned()));
-        if let Some(column) = suggested.get(mapping_key).and_then(Value::as_str) {
+        let column = if matches!(role, "date" | "addition_date") {
+            shared_date.as_deref().or_else(|| suggested.get(mapping_key).and_then(Value::as_str))
+        } else {
+            suggested.get(mapping_key).and_then(Value::as_str)
+        };
+        if let Some(column) = column {
             unmapped_candidates.push(json!({"role": role, "column": column}));
         }
     }
     json!({
         "headers": table.headers,
-        "samples": review_sample_columns(table),
+        "samples": samples,
         "mapping": mapping,
         "keys": keys,
         "unmappedRoles": unmapped_roles,
@@ -1651,7 +1711,7 @@ fn supplement_llm_payload(params: &Value) -> Result<Value, AppError> {
     for (name, label) in [("addition", "file1"), ("disposal", "file2")] {
         if let Some(config) = params.get(name).filter(|v| v.get("path").is_some()) {
             let path = required_path(config, "path")?;
-            let table = load_review_table(&path, config.get("sheet").and_then(Value::as_str), optional_header(config, "headerRow")?, false)?;
+            let table = load_review_table(&path, config.get("sheet").and_then(Value::as_str), HeaderOptions::params(config, "headerRow", "headerDepth")?, false)?;
             payload.insert(label.into(),json!({"headers":table.headers,"samples":review_sample_columns(&table),"mapping":config,"keys":config.get("keys")}));
         }
     }
@@ -2110,7 +2170,8 @@ pub(crate) fn merge(
             None,
         ));
     }
-    if params.get("__forceDisk").and_then(Value::as_bool).unwrap_or(false)
+    if crate::disk_table::forced_disk_allowed(&[&begin_path, &end_path],
+        params.get("__forceDisk").and_then(Value::as_bool).unwrap_or(false))
         || resources::pair_uses_disk(params, resources::Phase::Match) {
         return disk::merge(params, progress, cancel, begin_keys, end_keys);
     }
@@ -2118,7 +2179,7 @@ pub(crate) fn merge(
     let begin = crate::fa_table_cache::load_table_cached(
         &begin_path,
         params.get("beginSheet").and_then(Value::as_str),
-        optional_header(params, "beginHeaderRow")?,
+        HeaderOptions::params(params, "beginHeaderRow", "beginHeaderDepth")?,
         false,
     )?;
     check_cancel(cancel)?;
@@ -2126,7 +2187,7 @@ pub(crate) fn merge(
     let end = crate::fa_table_cache::load_table_cached(
         &end_path,
         params.get("endSheet").and_then(Value::as_str),
-        optional_header(params, "endHeaderRow")?,
+        HeaderOptions::params(params, "endHeaderRow", "endHeaderDepth")?,
         false,
     )?;
     validate_keys(&begin, &begin_keys)?;
@@ -2470,13 +2531,13 @@ fn load_supplement(config: &Value) -> Result<Table, AppError> {
     crate::fa_table_cache::load_table_cached(
         &path,
         config.get("sheet").and_then(Value::as_str),
-        optional_header(config, "headerRow")?,
+        HeaderOptions::params(config, "headerRow", "headerDepth")?,
         false,
     )
 }
 
 pub(crate) fn table_inspection(table: &Table) -> Value {
-    json!({"path":table.path.to_string_lossy(),"kind":if table.sheets.is_empty(){"text"}else{"excel"},"sheets":table.sheets,"selectedSheet":table.sheet,"displayName":match &table.sheet{Some(s)=>format!("{} & {}",table.path.file_name().unwrap_or_default().to_string_lossy(),s),None=>table.path.file_name().unwrap_or_default().to_string_lossy().into_owned()},"detectedHeaderRow":table.header_row,"headerMode":"auto","headers":table.headers,"preview":table.rows.iter().take(12).collect::<Vec<_>>(),"dimensions":{"rows":table.row_count.max(table.rows.len()),"columns":table.headers.len()}})
+    json!({"path":table.path.to_string_lossy(),"kind":if table.sheets.is_empty(){"text"}else{"excel"},"sheets":table.sheets,"selectedSheet":table.sheet,"displayName":match &table.sheet{Some(s)=>format!("{} & {}",table.path.file_name().unwrap_or_default().to_string_lossy(),s),None=>table.path.file_name().unwrap_or_default().to_string_lossy().into_owned()},"detectedHeaderRow":table.header_row,"headerDepth":table.header_depth,"headerMode":"auto","headers":table.headers,"preview":table.rows.iter().take(12).collect::<Vec<_>>(),"dimensions":{"rows":table.row_count.max(table.rows.len()),"columns":table.headers.len()}})
 }
 
 pub(crate) fn suggest_mapping(table: &Table) -> Map<String, Value> {
@@ -2628,9 +2689,12 @@ pub(crate) fn suggest_mapping(table: &Table) -> Map<String, Value> {
         ),
         (
             "disposalMethod",
-            &["处置方式", "减少方式", "disposalmethod"],
+            &["处置方式", "减少方式", "报废方式", "报废类型", "disposalmethod"],
         ),
-        ("disposalDate", &["处置日期", "减少日期", "disposaldate"]),
+        (
+            "disposalDate",
+            &["处置日期", "减少日期", "报废日期", "报废时间", "disposaldate"],
+        ),
         (
             "disposalOriginal",
             &["处置原值", "减少原值", "原值减少", "处置成本"],
@@ -2880,9 +2944,11 @@ pub(crate) fn sheet_name_affinity(path: &Path, sheet: &str) -> i32 {
 pub(crate) fn load_table(
     path: &Path,
     requested_sheet: Option<&str>,
-    header: Option<usize>,
+    header: impl Into<HeaderOptions>,
     choose_best: bool,
 ) -> Result<Table, AppError> {
+    let options = header.into();
+    let header = options.row;
     if !path.is_file() {
         return Err(error(
             "FILE_NOT_FOUND",
@@ -2891,7 +2957,7 @@ pub(crate) fn load_table(
         ));
     }
     if crate::spreadsheet_input::is_text(path.as_ref()) {
-        return load_csv(path, header);
+        return load_csv(path, options);
     }
     let mut workbook = open_workbook_auto(path).map_err(|e| {
         error(
@@ -2952,14 +3018,15 @@ pub(crate) fn load_table(
     }
     let (judgement, sheet, matrix) = best.unwrap();
     crate::header_detection::require_tabular(&matrix, header.is_none())?;
-    Ok(finalize_table(
+    finalize_table(
         path,
         Some(sheet),
         sheets,
         judgement.header_row,
         matrix,
         0,
-    ))
+        options.depth,
+    )
 }
 
 /// 整表与前缀两条读取路径共用的收尾：按标题行与多层表头切数据、去全空
@@ -2971,9 +3038,13 @@ pub(crate) fn finalize_table(
     hi: usize,
     matrix: Vec<Vec<String>>,
     row_count: usize,
-) -> Table {
-    let depth = asset_header_depth(&matrix, hi);
-    let headers = asset_headers(&matrix, hi);
+    requested_depth: Option<usize>,
+) -> Result<Table, AppError> {
+    let depth = requested_depth.unwrap_or_else(|| asset_header_depth(&matrix, hi));
+    if hi >= matrix.len() || hi + depth > matrix.len() {
+        return Err(error("INVALID_PARAMS", "标题行或表头层数超出工作表范围，请重新设置。", None));
+    }
+    let headers = asset_headers_at_depth(&matrix, hi, depth);
     let width = headers.len();
     let rows = matrix
         .into_iter()
@@ -2985,24 +3056,27 @@ pub(crate) fn finalize_table(
             r
         })
         .collect::<Vec<_>>();
-    Table {
+    Ok(Table {
         path: path.into(),
         sheet,
         sheets,
         header_row: hi + 1,
+        header_depth: depth,
         headers,
         row_count: row_count.max(rows.len()),
         rows,
-    }
+    })
 }
 
-fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
+fn load_csv(path: &Path, options: impl Into<HeaderOptions>) -> Result<Table, AppError> {
+    let options = options.into();
+    let header = options.row;
     let matrix = crate::spreadsheet_input::read_rows(path)?;
     crate::header_detection::require_tabular(&matrix, header.is_none())?;
     let hi = header
         .map(|v| v.saturating_sub(1))
         .unwrap_or_else(|| detect_header(&matrix));
-    Ok(finalize_table(path, None, vec![], hi, matrix, 0))
+    finalize_table(path, None, vec![], hi, matrix, 0, options.depth)
 }
 
 pub(crate) fn detect_header(rows: &[Vec<String>]) -> usize {
@@ -3031,6 +3105,9 @@ pub(crate) fn asset_header_depth(rows: &[Vec<String>], start: usize) -> usize {
 }
 pub(crate) fn asset_headers(rows: &[Vec<String>], start: usize) -> Vec<String> {
     let depth = asset_header_depth(rows, start);
+    asset_headers_at_depth(rows, start, depth)
+}
+fn asset_headers_at_depth(rows: &[Vec<String>], start: usize, depth: usize) -> Vec<String> {
     // 流式行尾空单元格可被省略，正文却仍有该列；以实际读取宽度保留列位。
     let width = rows.iter().map(Vec::len).max().unwrap_or(0);
     if depth == 2 {
@@ -3880,7 +3957,7 @@ struct CategoryMovement {
     end_dep: f64,
 }
 
-fn is_summary_noise(value: &str) -> bool {
+pub(crate) fn is_summary_noise(value: &str) -> bool {
     let normalized = value.trim().to_lowercase().replace(' ', "");
     normalized.is_empty()
         || ["合计", "小计", "总计", "subtotal", "total"]
@@ -7040,12 +7117,12 @@ fn write_unmatched(path: &Path, result: &MergeResult, params: &Value, cancel: &A
     let addition_headers = if unmatched_count(result,false)==0 {
         Vec::new()
     } else {
-        disk::load_input(&required_path(&params["additionSupplement"],"path")?,params["additionSupplement"].get("sheet").and_then(Value::as_str),optional_header(&params["additionSupplement"],"headerRow")?,&|_,_,_,_|{},cancel)?.0.headers
+        disk::load_input(&required_path(&params["additionSupplement"],"path")?,params["additionSupplement"].get("sheet").and_then(Value::as_str),HeaderOptions::params(&params["additionSupplement"],"headerRow","headerDepth")?,&|_,_,_,_|{},cancel)?.0.headers
     };
     let disposal_headers = if unmatched_count(result,true)==0 {
         Vec::new()
     } else {
-        disk::load_input(&required_path(&params["disposalSupplement"],"path")?,params["disposalSupplement"].get("sheet").and_then(Value::as_str),optional_header(&params["disposalSupplement"],"headerRow")?,&|_,_,_,_|{},cancel)?.0.headers
+        disk::load_input(&required_path(&params["disposalSupplement"],"path")?,params["disposalSupplement"].get("sheet").and_then(Value::as_str),HeaderOptions::params(&params["disposalSupplement"],"headerRow","headerDepth")?,&|_,_,_,_|{},cancel)?.0.headers
     };
     for (name, headers, disposal) in [
         (
@@ -7396,6 +7473,7 @@ mod tests {
             sheet: None,
             sheets: Vec::new(),
             header_row: 1,
+            header_depth: 1,
             headers: headers.iter().map(|value| (*value).to_owned()).collect(),
             rows: rows
                 .iter()
@@ -7406,7 +7484,7 @@ mod tests {
     }
 
     #[test]
-    fn supplement_keys_are_proved_by_three_exact_samples_in_reference_key_order() {
+    fn supplement_keys_use_one_sample_in_reference_key_order() {
         let reference = in_memory_table(
             &["资产编码", "资产名称", "类别"],
             &[
@@ -7419,7 +7497,7 @@ mod tests {
         // Deliberately misleading headers: the proof must come from values and
         // the returned columns must follow the primary ledger's composite-key
         // order rather than supplement column order.
-        let supplement = in_memory_table(
+        let mut supplement = in_memory_table(
             &["名称备注", "数据列", "资产编码", "金额"],
             &[
                 &["设备甲", "001.0", "X", "10"],
@@ -7432,9 +7510,12 @@ mod tests {
                 &supplement,
                 &reference,
                 &["资产编码".into(), "资产名称".into()]
-            ),
+            ).unwrap(),
             ["数据列", "名称备注"]
         );
+        supplement.rows.truncate(1);
+        assert_eq!(infer_supplement_keys_by_samples(&supplement, &reference,
+            &["资产编码".into(), "资产名称".into()]).unwrap(), ["数据列", "名称备注"]);
     }
 
     #[test]
@@ -7445,7 +7526,7 @@ mod tests {
         );
         let supplement = in_memory_table(
             &["代码", "错误名称"],
-            &[&["A1", "甲"], &["A2", "乙"], &["A3", "不存在"]],
+            &[&["A1", "不存在"], &["A2", "乙"], &["A3", "丙"]],
         );
         assert!(
             infer_supplement_keys_by_samples(
@@ -7453,8 +7534,87 @@ mod tests {
                 &reference,
                 &["编码".into(), "名称".into()]
             )
+            .unwrap()
             .is_empty()
         );
+    }
+
+    #[test]
+    fn supplement_file_selection_reads_only_directory_and_ignores_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("补充.xlsx");
+        let mut workbook = rust_xlsxwriter::Workbook::new();
+        workbook.add_worksheet().set_name("说明").unwrap();
+        workbook.add_worksheet().set_name("处置").unwrap();
+        workbook.add_worksheet().set_name("旧表").unwrap().set_hidden(true);
+        workbook.save(&path).unwrap();
+        // 空白说明表不具备可识别表头；不存在的参照表也不应被打开。
+        let result = supplement_inspect(json!({"path":path,"sheetsOnly":true,
+            "referencePath":dir.path().join("不存在.xlsx"),"referenceKeys":["编码"]})).unwrap();
+        assert_eq!(result["sheets"], json!(["说明","处置"]));
+        assert!(result["headers"].as_array().unwrap().is_empty());
+        assert!(result["selectedSheet"].is_null());
+    }
+
+    #[test]
+    fn supplement_key_proof_reads_beyond_prefix_and_excludes_two_header_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("参照.xlsx");
+        let mut workbook = rust_xlsxwriter::Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.set_name("卡片").unwrap();
+        sheet.write(0, 0, "上层标题").unwrap();
+        sheet.write(1, 0, "下层标题").unwrap();
+        sheet.write(1, 1, "名称").unwrap();
+        for row in 2..302u32 {
+            sheet.write(row, 0, format!("A{row}")).unwrap();
+            if row != 280 { sheet.write(row, 1, format!("设备{row}")).unwrap(); }
+        }
+        workbook.save(&path).unwrap();
+        let reference = Table { path, sheet: Some("卡片".into()), sheets: vec!["卡片".into()],
+            header_row: 1, header_depth: 2, headers: vec!["编码".into(),"名称".into()],
+            rows: vec![vec!["A2".into(),"设备2".into()]], row_count: 300 };
+        let supplement = in_memory_table(&["其他编码", "数据", "名称"], &[
+            &["错误1", " a250 ", "设备250"],
+            &["错误2", "A270.0", "设备270"],
+            &["错误3", "A300", "设备300"],
+        ]);
+        let keys = vec!["编码".into(),"名称".into()];
+        assert_eq!(infer_supplement_keys_by_samples(&supplement, &reference, &keys).unwrap(), ["数据","名称"]);
+        assert_eq!(infer_supplement_keys_by_samples(&supplement, &reference, &keys).unwrap(), ["数据","名称"]);
+        assert_eq!(infer_supplement_keys_by_samples(&supplement, &reference, &["名称".into(), "编码".into()]).unwrap(), ["名称", "数据"]);
+        let header_samples = in_memory_table(&["伪编码"], &[
+            &["上层标题"], &["下层标题"], &["A300"],
+        ]);
+        assert!(infer_supplement_keys_by_samples(&header_samples, &reference, &["编码".into()]).unwrap().is_empty());
+        fs::remove_file(&reference.path).unwrap();
+        assert!(infer_supplement_keys_by_samples(&supplement, &reference, &keys).is_err());
+        let already_loaded = in_memory_table(&["编码", "名称"], &[&["A2", "设备2"]]);
+        assert_eq!(infer_supplement_keys_by_samples(&already_loaded, &reference, &keys).unwrap(), ["编码","名称"]);
+    }
+
+    /// FA_SUPPLEMENT_BENCH_DIR 指向真实清单目录；输出目录读取、选表后读取的耗时。
+    #[test]
+    #[ignore = "需要 FA_SUPPLEMENT_BENCH_DIR 指向本地真实清单"]
+    fn live_fa_supplement_read_bench() {
+        let dir = PathBuf::from(std::env::var_os("FA_SUPPLEMENT_BENCH_DIR").expect("FA_SUPPLEMENT_BENCH_DIR"));
+        let path = dir.join("资产减少业务查询 25年5-10月.xlsx");
+        let reference = dir.join("科技FA存量清单-202412.xlsx");
+        let mut request = json!({"path":path,"sheetsOnly":true,"referencePath":reference,
+            "referenceSheet":"FA241231","referenceHeaderRow":1,"referenceHeaderDepth":1,
+            "referenceKeys":["FA编号","资产说明"]});
+        let started = std::time::Instant::now();
+        let directory = supplement_inspect(request.clone()).unwrap();
+        println!("[补充表基准] 工作表目录 {:.3}s", started.elapsed().as_secs_f64());
+        request["sheetsOnly"] = json!(false);
+        request["sheet"] = directory["sheets"][0].clone();
+        for label in ["首次选表", "重复读取"] {
+            let started = std::time::Instant::now();
+            let result = supplement_inspect(request.clone()).unwrap();
+            println!("[补充表基准] {label} {:.3}s；规模 {}；映射 {}", started.elapsed().as_secs_f64(),
+                result["dimensions"], result["suggestedMapping"]["matchKeys"]);
+            assert!(!result["headers"].as_array().unwrap().is_empty());
+        }
     }
 
     #[test]
@@ -7729,6 +7889,7 @@ mod tests {
             sheet: None,
             sheets: vec![],
             header_row: 1,
+            header_depth: 1,
             headers: headers.iter().map(|v| (*v).to_owned()).collect(),
             rows: vec![],
             row_count: 0,
@@ -7786,7 +7947,7 @@ mod tests {
     #[test]
     fn review_samples_are_compact_without_a_separate_company_role() {
         let table = Table {
-            path: "test.csv".into(), sheet: None, sheets: vec![], header_row: 1,
+            path: "test.csv".into(), sheet: None, sheets: vec![], header_row: 1, header_depth: 1,
             headers: vec!["公司名称".into(), "卡片编号".into(), "资产名称".into()],
             rows: (0..5).map(|index| vec!["测试公司".into(), format!("A{index}"), "长名称".repeat(100)]).collect(),
             row_count: 5,
@@ -7799,6 +7960,50 @@ mod tests {
         assert_eq!(payload["samples"]["卡片编号"].as_array().unwrap().len(), 3);
         assert_eq!(payload["samples"]["资产名称"][0].as_str().unwrap().chars().count(), 120);
         assert!(!payload["unmappedRoles"].as_array().unwrap().contains(&json!("company_name")));
+    }
+
+    #[test]
+    fn suggest_mapping_recognises_scrap_wording_for_disposal_roles() {
+        // 资产减少业务查询导出：处置方式/处置日期两列叫「报废类型」「报废日期」，
+        // 词表必须覆盖「报废」一族叫法，否则必填字段永远映射不上。
+        let table = in_memory_table(
+            &[
+                "资产编号", "资产名称", "报废成本", "转让销售收入", "清理费用", "净损益",
+                "启用日期", "报废日期", "报废类型",
+            ],
+            &[&[
+                "FA001", "机器", "900", "0", "0", "0", "2021-11-22", "2025-05-26", "04 正常报废",
+            ]],
+        );
+        let mapping = suggest_mapping(&table);
+        assert_eq!(mapping["disposalMethod"], "报废类型");
+        assert_eq!(mapping["disposalDate"], "报废日期");
+    }
+
+    #[test]
+    fn supplement_llm_suggestions_for_absent_side_are_dropped() {
+        // 单侧复核（只传处置清单）时载荷里没有 file1：模型对缺失一侧的
+        // 任何建议都必须丢弃，不得落到前端配置上。
+        let payload = json!({
+            "file2": {"headers": ["报废类型", "报废日期"], "samples": {}, "mapping": {}, "keys": []},
+            "beginKeys": [], "endKeys": []
+        });
+        let parsed = json!({
+            "suggestions": [
+                {"role": "disposal_method", "file_side": "file2", "suggested_column": "报废类型",
+                 "confidence": 0.9, "action": "fill", "reason": "唯一可信候选"},
+                {"role": "addition_method", "file_side": "file1", "suggested_column": "编造列",
+                 "confidence": 0.9, "action": "fill", "reason": "载荷里没有 file1"}
+            ],
+            "fieldReviews": []
+        });
+        let result = finalize_llm_review(parsed, payload, true);
+        let auto = result["autoApplied"].as_array().unwrap();
+        let reviews = result["fieldReviews"].as_array().unwrap();
+        assert_eq!(auto.len(), 1);
+        assert_eq!(auto[0]["role"], "disposal_method");
+        assert_eq!(auto[0]["suggested_column"], "报废类型");
+        assert!(reviews.is_empty(), "指向缺失侧的建议不应存活：{reviews:?}");
     }
 
     #[test]
@@ -7815,7 +8020,7 @@ mod tests {
         // 不检查编号是否重复或公司数量；只按表头标识 ID 角色。
         assert!(looks_like_id("公司名称"));
         assert!(looks_like_id("企业名称"));
-        let table = Table { path: begin, sheet: None, sheets: vec![], header_row: 1,
+        let table = Table { path: begin, sheet: None, sheets: vec![], header_row: 1, header_depth: 1,
             headers: vec!["公司名称".into()], rows: vec![vec!["甲公司".into()]], row_count: 1 };
         assert_eq!(suggest_mapping(&table)["matchKey"], "公司名称");
     }
@@ -7864,7 +8069,7 @@ mod tests {
         let slices: Vec<&[&str]> = rows.iter().map(|row| row.as_slice()).collect();
         let end = in_memory_table(&["序号", "公司", "资产编号"], &slices);
         let sample = normalize_join_key("5");
-        let found = find_column_containing(&end, &sample, &BTreeSet::new());
+        let found = find_column_containing(&end, &sample, &BTreeSet::new()).unwrap();
         assert_eq!(
             found.map(|index| end.headers[index].as_str()),
             Some("资产编号")
@@ -7995,6 +8200,49 @@ mod tests {
             let formulas = workbook.worksheet_formula("处置清单_BKD").unwrap();
             assert_eq!(formulas.get_value((2, 8)).unwrap(), "O3-H3");
         }
+    }
+
+    #[test]
+    fn single_date_review_preserves_shared_mapping_and_fills_both_roles() {
+        for header in ["入账日期", "新增日期", "开始使用日期", "日期"] {
+            let table = in_memory_table(&[header, "原值"], &[&["2025-01-02", "45000"]]);
+            let side_payload = main_llm_side_payload(&table, Some(&json!({})), None, true);
+            let payload = json!({"file2": side_payload});
+            let reviewed = finalize_llm_review(json!({}), payload, false);
+            for role in ["date", "addition_date"] {
+                assert!(reviewed["autoApplied"].as_array().unwrap().iter().any(|item|
+                    item["role"] == role && item["suggested_column"] == header));
+            }
+            for (side, role, key) in [("file1", "date", "startDate"), ("file2", "date", "startDate"),
+                ("file2", "addition_date", "additionDate"), ("file1", "addition_date", "date")] {
+                let payload = json!({side: {"headers":[header, "原值"],
+                    "samples":{header:["2025-01-02"], "原值":["45000"]}, "mapping":{key:header}}});
+                let mut item = json!({"role":role, "file_side":side, "action":"clear", "confidence":1.0});
+                sanitize_llm_review_item(&mut item, &payload);
+                assert_eq!(item["action"], "keep", "{side}/{role}/{header}");
+            }
+        }
+    }
+
+    #[test]
+    fn single_date_review_does_not_protect_ambiguous_or_invalid_dates() {
+        for (headers, samples, current) in [
+            (json!(["入账日期", "新增日期"]), json!({"入账日期":["2025-01-02"], "新增日期":["2025-01-03"]}), "入账日期"),
+            (json!(["入账日期"]), json!({"入账日期":["NEW 新建"]}), "入账日期"),
+            (json!(["报废日期"]), json!({"报废日期":["2025-01-02"]}), "报废日期"),
+            (json!(["入账日期", "已购"]), json!({"入账日期":["2025-01-02"], "已购":["NEW 新建"]}), "已购"),
+        ] {
+            let payload = json!({"file2":{"headers":headers, "samples":samples, "mapping":{"additionDate":current}}});
+            let mut item = json!({"role":"addition_date", "file_side":"file2", "action":"clear", "confidence":0.9});
+            sanitize_llm_review_item(&mut item, &payload);
+            assert_eq!(item["action"], "clear");
+        }
+        let table = in_memory_table(&["入账日期", "新增日期"], &[&["2025-01-02", "2025-01-03"]]);
+        let payload = json!({"file2":main_llm_side_payload(&table, Some(&json!({})), None, true)});
+        assert!(llm_single_shared_date_column(&payload, "file2").is_none());
+        let reviewed = finalize_llm_review(json!({"fieldReviews":[{"role":"addition_date", "file_side":"file2",
+            "action":"replace", "suggested_mapping":{"file2":"新增日期"}, "confidence":0.9}]}), payload, false);
+        assert_eq!(reviewed["fieldReviews"][0]["suggested_mapping"]["file2"], "新增日期");
     }
 
     #[test]
@@ -8262,7 +8510,7 @@ mod tests {
         );
         let mut begin_keys = vec!["资产编号".into()];
         let mut end_keys = vec!["资产编码".into()];
-        let pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys);
+        let pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys).unwrap();
         assert_eq!(end_keys, vec!["卡片号".to_string()]);
         assert_eq!(begin_keys, vec!["资产编号".to_string()]);
         assert_eq!(
@@ -8280,7 +8528,7 @@ mod tests {
         );
         let mut begin_keys = vec!["资产编号".into()];
         let mut end_keys = vec!["备注".into()];
-        repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys);
+        repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys).unwrap();
         assert_eq!(end_keys, vec!["标识前".to_string()]);
     }
     #[test]
@@ -8292,7 +8540,7 @@ mod tests {
         let end = in_memory_table(&["资产编码"], &[&["1009"]]);
         let mut begin_keys = vec!["资产编号".into()];
         let mut end_keys = vec!["资产编码".into()];
-        let pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys);
+        let pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys).unwrap();
         assert_eq!(begin_keys, vec!["旧资产编号".to_string()]);
         assert_eq!(end_keys, vec!["资产编码".to_string()]);
         assert_eq!(
@@ -8306,7 +8554,7 @@ mod tests {
         let end = in_memory_table(&["资产编码", "资产名称"], &[&["ZZZ", "甲"]]);
         let mut begin_keys = vec!["资产编号".into(), "资产名称".into()];
         let mut end_keys = vec!["资产编码".into(), "资产名称".into()];
-        let pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys);
+        let pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys).unwrap();
         // 第0位两侧互相找不到：撤；第1位样本一致：留。
         assert_eq!(begin_keys, vec!["资产名称".to_string()]);
         assert_eq!(end_keys, vec!["资产名称".to_string()]);

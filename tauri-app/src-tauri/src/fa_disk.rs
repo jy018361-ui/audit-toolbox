@@ -38,10 +38,12 @@ fn exec_sql(conn: &Connection, sql: &str, cancel: &AtomicBool) -> Result<(), App
 pub(crate) fn load_input(
     path: &Path,
     sheet: Option<&str>,
-    header: Option<usize>,
+    header: impl Into<HeaderOptions>,
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<(Table, crate::disk_table::DiskTable), AppError> {
+    let options = header.into();
+    let header = options.row;
     let (selected, mut sheets, prefix) = crate::disk_table::preview_source(
         path,
         sheet,
@@ -54,7 +56,7 @@ pub(crate) fn load_input(
     let hi = header
         .map(|row| row.saturating_sub(1))
         .unwrap_or_else(|| detect_header(&prefix));
-    let depth = asset_header_depth(&prefix, hi);
+    let depth = options.depth.unwrap_or_else(|| asset_header_depth(&prefix, hi));
     let mut table = finalize_table(
         path,
         (!sheets.is_empty()).then_some(selected.clone()),
@@ -62,7 +64,8 @@ pub(crate) fn load_input(
         hi,
         prefix,
         0,
-    );
+        options.depth,
+    )?;
     let disk = crate::disk_table::DiskTable::open_fa(
         path,
         Some(&selected),
@@ -97,14 +100,14 @@ pub(super) fn merge(
     let (mut begin, b) = load_input(
         &begin_path,
         params.get("beginSheet").and_then(Value::as_str),
-        optional_header(params, "beginHeaderRow")?,
+        HeaderOptions::params(params, "beginHeaderRow", "beginHeaderDepth")?,
         progress,
         cancel,
     )?;
     let (mut end, e) = load_input(
         &end_path,
         params.get("endSheet").and_then(Value::as_str),
-        optional_header(params, "endHeaderRow")?,
+        HeaderOptions::params(params, "endHeaderRow", "endHeaderDepth")?,
         progress,
         cancel,
     )?;
@@ -125,7 +128,7 @@ pub(super) fn merge(
         .unwrap_or(0)
         .saturating_add(crate::disk_table::estimated_resident_bytes(&end_path).unwrap_or(0));
     crate::resource_budget::check_disk_space(&root, estimate)?;
-    let mut conn = Connection::open(&path).map_err(db_error)?;
+    let mut conn = super::disk_rows::open_with_wait(&path)?;
     exec_sql(
         &conn,
         "PRAGMA temp_store=FILE; PRAGMA cache_size=-16384; PRAGMA journal_mode=DELETE; CREATE TABLE source(side INTEGER,seq INTEGER,k TEXT,display TEXT,data TEXT); CREATE TABLE life(side INTEGER,col TEXT,value REAL,PRIMARY KEY(side,col,value)); CREATE TABLE joined(id INTEGER PRIMARY KEY,data TEXT NOT NULL);",
@@ -283,7 +286,7 @@ pub(super) fn merge(
 pub(super) fn life_scale(rows: &JoinedRows, header: &str, side: u8) -> Option<f64> {
     let path = rows.path()?;
     let value = (|| -> Result<f64, AppError> {
-        let conn = Connection::open(path).map_err(db_error)?;
+        let conn = super::disk_rows::open_with_wait(path)?;
         let mut stmt = conn
             .prepare("SELECT value FROM life WHERE side=? AND col=?")
             .map_err(db_error)?;
@@ -428,7 +431,7 @@ pub(super) fn apply_supplements(
     let path = result.rows.path().unwrap().to_path_buf();
     result.unmatched_addition.clear();
     result.unmatched_disposal.clear();
-    let mut conn = Connection::open(&path).map_err(db_error)?;
+    let mut conn = super::disk_rows::open_with_wait(&path)?;
     conn.execute_batch("DROP TABLE IF EXISTS valid; DROP TABLE IF EXISTS supplement_text; DROP TABLE IF EXISTS supplement_amount; DROP TABLE IF EXISTS unmatched; CREATE TABLE unmatched(id INTEGER PRIMARY KEY,side INTEGER,data TEXT); CREATE INDEX unmatched_side ON unmatched(side,id); CREATE TABLE valid(k TEXT PRIMARY KEY); CREATE TABLE supplement_text(id INTEGER PRIMARY KEY,k TEXT,field TEXT,value TEXT,UNIQUE(k,field,value)); CREATE INDEX supplement_text_key ON supplement_text(k,field,id); CREATE TABLE supplement_amount(k TEXT,field TEXT,value REAL,PRIMARY KEY(k,field));").map_err(db_error)?;
     let configs = [("additionSupplement", false), ("disposalSupplement", true)]
         .into_iter()
@@ -445,17 +448,26 @@ pub(super) fn apply_supplements(
         .collect::<Vec<_>>();
     if !configs.is_empty() {
         let tx = conn.transaction().map_err(db_error)?;
-        for (i, row) in result.rows.iter().enumerate() {
-            if i % 256 == 0 {
-                check_cancel(cancel)?;
+        // joined 必须经写事务自己的连接逐批读（与 edit_disk_rows 同款纪律）：
+        // 另开连接读时，本事务灌 valid 的缓存溢写要短暂持排他锁，读连接
+        // 立刻 database is locked，几十万行的大清单必撞，界面即报
+        // 「磁盘匹配结果读取失败，请重新匹配。」
+        let mut after = 0i64;
+        loop {
+            check_cancel(cancel)?;
+            let batch = super::disk_rows::read_batch(&tx, after)?;
+            if batch.is_empty() {
+                break;
             }
-            tx.execute(
-                "INSERT OR IGNORE INTO valid VALUES(?)",
-                [canonical_display_key(&row.match_value)],
-            )
-            .map_err(db_error)?;
+            for (id, row) in batch {
+                tx.execute(
+                    "INSERT OR IGNORE INTO valid VALUES(?)",
+                    [canonical_display_key(&row.match_value)],
+                )
+                .map_err(db_error)?;
+                after = id;
+            }
         }
-        result.rows.check()?;
         tx.commit().map_err(db_error)?;
     }
     for (config, disposal) in configs {
@@ -463,7 +475,7 @@ pub(super) fn apply_supplements(
         let (table, input) = load_input(
             &source,
             config.get("sheet").and_then(Value::as_str),
-            optional_header(config, "headerRow")?,
+            HeaderOptions::params(config, "headerRow", "headerDepth")?,
             &|_, _, _, _| {},
             cancel,
         )?;
@@ -686,6 +698,104 @@ mod tests {
     }
 
     #[test]
+    fn disk_fa_supplement_key_collection_survives_writer_cache_spill() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = fixture(dir.path(), false);
+        // 匹配键带长名称且行数过万：valid 表写入必然溢写 16MB 页缓存（用户
+        // 现场：近 30 万行、键=FA编号+资产说明+公司，必然触发）。旧实现一边
+        // 在写事务里灌 valid、一边另开连接读 joined，撞上排他锁即
+        // 「磁盘匹配结果读取失败，请重新匹配。」
+        let name = "长资产名称".repeat(200);
+        let mut body = format!("{HEAD}\n");
+        for i in 0..8192 {
+            body.push_str(&format!("A{i},机器,{name},100,10,2023-01-01,5,5,1\n"));
+        }
+        for key in ["beginPath", "endPath"] {
+            fs::write(params[key].as_str().unwrap(), &body).unwrap();
+        }
+        params["beginKeys"] = json!(["资产编码", "名称"]);
+        params["endKeys"] = json!(["资产编码", "名称"]);
+        params["__forceDisk"] = json!(true);
+        let cancel = AtomicBool::new(false);
+        let mut result = super::super::merge(&params, &|_, _, _, _| {}, &cancel).unwrap();
+        assert_eq!(result.rows.len(), 8192);
+        let disposal = dir.path().join("处置.csv");
+        fs::write(&disposal, format!("资产编码,名称,方式\nA1,{name},报废\nA8191,{name},出售\n")).unwrap();
+        params["disposalSupplement"] =
+            json!({"path":disposal,"headerRow":1,"keys":["资产编码", "名称"],"method":"方式"});
+        apply_supplements(&mut result, &params, &cancel).unwrap();
+        result.rows.check().unwrap();
+        let rows = result.rows.iter().collect::<Vec<_>>();
+        for (code, method) in [("A1", "报废"), ("A8191", "出售")] {
+            let hit = rows
+                .iter()
+                .find(|row| {
+                    row.begin
+                        .as_ref()
+                        .is_some_and(|cells| cells.first() == Some(&code.to_string()))
+                })
+                .unwrap();
+            assert_eq!(
+                hit.extra.get("处置方式_辅助_文件1"),
+                Some(&Cell::Text(method.into()))
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "真实数据重放：AUDIT_FA_SNAPSHOT_REPLAY=快照sqlite，AUDIT_FA_EXPORT_REPLAY=任务库导出的 fa.export 参数 JSON"]
+    fn fa_export_replay_real_disk_snapshot_with_supplement() {
+        let snapshot = std::path::PathBuf::from(std::env::var("AUDIT_FA_SNAPSHOT_REPLAY").unwrap());
+        let params: Value = serde_json::from_str(&fs::read_to_string(
+            std::env::var("AUDIT_FA_EXPORT_REPLAY").unwrap(),
+        )
+        .unwrap())
+        .unwrap();
+        // 绕过快照键匹配（直接吃现成磁盘结果），只重放出事的那一段：
+        // 大体量磁盘结果 + 处置补充清单的 apply_supplements。
+        let working = std::env::temp_dir().join(format!(
+            "fa-replay-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::copy(&snapshot, &working).unwrap();
+        let empty_table = || Table {
+            path: PathBuf::new(),
+            sheet: None,
+            sheets: Vec::new(),
+            header_row: 0,
+            header_depth: 1,
+            headers: Vec::new(),
+            rows: Vec::new(),
+            row_count: 0,
+        };
+        let mut result = MergeResult {
+            begin: empty_table(),
+            end: empty_table(),
+            rows: super::super::JoinedRows::open(working).unwrap(),
+            begin_keys: Vec::new(),
+            end_keys: Vec::new(),
+            duplicate_values: 0,
+            duplicate_rows: 0,
+            unmatched_addition: Vec::new(),
+            unmatched_disposal: Vec::new(),
+        };
+        assert!(result.rows.len() > 100_000, "真实体量（约 29 万行）");
+        apply_supplements(&mut result, &params, &AtomicBool::new(false))
+            .expect("真实体量下补充清单不得再撞锁");
+        result.rows.check().unwrap();
+        eprintln!(
+            "重放完成：匹配 {} 行，补充未匹配新增 {} / 处置 {} 行",
+            result.rows.len(),
+            result.unmatched_addition.len(),
+            result.unmatched_disposal.len()
+        );
+    }
+
+    #[test]
     fn disk_fa_join_matches_memory_duplicates_order_policy_supplements_and_export() {
         for xlsx in [false, true] {
             let dir = tempfile::tempdir().unwrap();
@@ -893,9 +1003,11 @@ mod tests {
 pub(super) fn load_review(
     path: &Path,
     sheet: Option<&str>,
-    header: Option<usize>,
+    header: impl Into<HeaderOptions>,
     choose_best: bool,
 ) -> Result<Table, AppError> {
+    let options = header.into();
+    let header = options.row;
     let (mut selected, mut sheets, _) = crate::disk_table::preview_source(path, sheet, 0)?;
     if path
         .extension()
@@ -976,18 +1088,24 @@ pub(super) fn load_review(
             selected = name;
         }
     }
-    let (mut table, _) = load_input(
-        path,
-        Some(&selected),
-        header,
-        &|_, _, _, _| {},
-        &AtomicBool::new(false),
+    let (_, _, prefix) = crate::disk_table::preview_source(
+        path, Some(&selected), header.unwrap_or(0).saturating_add(10).max(200),
     )?;
-    if !crate::spreadsheet_input::is_text(path) {
-        table.sheets = sheets;
+    crate::header_detection::require_tabular(&prefix, header.is_none())?;
+    let hi = header.map(|row| row.saturating_sub(1)).unwrap_or_else(|| detect_header(&prefix));
+    let mut table = finalize_table(path, (!crate::spreadsheet_input::is_text(path)).then_some(selected.clone()),
+        if crate::spreadsheet_input::is_text(path) { Vec::new() } else { sheets },
+        hi, prefix, 0, options.depth)?;
+    // 不知道完整行数时以多一行表示“仍可能有后续记录”；正式任务才给精确总数。
+    if table.rows.len() + hi + table.header_depth >= header.unwrap_or(0).saturating_add(10).max(200) {
+        table.row_count = table.rows.len().saturating_add(1);
+    }
+    if let Some(cache) = crate::disk_table::DiskTable::cached_fa(path, &selected, table.header_row, table.header_depth) {
+        table.row_count = cache.row_count;
     }
     Ok(table)
 }
+
 pub(super) fn column_contains(table: &Table, index: usize, sample: &str) -> Result<bool, AppError> {
     column_contains_inner(table, index, sample, None)
 }
@@ -1006,29 +1124,40 @@ fn column_contains_inner(
     sample: &str,
     normalization: Option<(bool, bool)>,
 ) -> Result<bool, AppError> {
-    let (_, disk) = load_input(
-        &table.path,
-        table.sheet.as_deref(),
-        Some(table.header_row),
-        &|_, _, _, _| {},
-        &AtomicBool::new(false),
-    )?;
-    let mut found = false;
-    let result = disk.visit(&AtomicBool::new(false), |row, _| {
-        if match normalization {
-            Some((remove, sensitive)) => normalize_key(cell(row, index), remove, sensitive),
-            None => normalize_join_key(cell(row, index)),
-        } == sample
-        {
-            found = true;
-            return Err(error("FA_SAMPLE_FOUND", "已找到匹配样例。", None));
-        }
-        Ok(())
-    });
-    if let Err(error) = result {
-        if error.code != "FA_SAMPLE_FOUND" {
-            return Err(error);
-        }
-    }
-    Ok(found)
+    Ok(columns_containing(table, &[index], sample, normalization)?.contains(&index))
+}
+
+/// 一次投影扫描判断所有候选列；优先列命中即停，不创建整表缓存。
+pub(super) fn columns_containing(
+    table: &Table, indexes: &[usize], sample: &str, normalization: Option<(bool, bool)>,
+) -> Result<Vec<usize>, AppError> {
+    if indexes.is_empty() || sample.is_empty() { return Ok(Vec::new()); }
+    crate::table_read_cache::read(&table.path, "fa-key-evidence-v1",
+        &(table.sheet.as_deref(), table.header_row, table.header_depth, indexes, sample, normalization), || {
+        let columns: HashSet<usize> = indexes.iter().copied().collect();
+        let mut hits = HashSet::new();
+        let mut visit = |row: Vec<String>, physical: usize| {
+            if physical < table.header_row + table.header_depth { return Ok(()); }
+            for &index in indexes {
+                let value = match normalization {
+                    Some((remove, sensitive)) => normalize_key(cell(&row, index), remove, sensitive),
+                    None => normalize_join_key(cell(&row, index)),
+                };
+                if value == sample { hits.insert(index); }
+            }
+            if hits.contains(&indexes[0]) { return Err(error("FA_SAMPLE_FOUND", "已找到匹配样例。", None)); }
+            Ok(())
+        };
+        let cancel = AtomicBool::new(false);
+        let sheet = table.sheet.as_deref().unwrap_or("CSV");
+        let result = if let Some(cache) = crate::disk_table::DiskTable::cached_fa(
+            &table.path, sheet, table.header_row, table.header_depth,
+        ) {
+            cache.visit_columns(&columns, &cancel, &mut visit)
+        } else {
+            crate::disk_table::for_each_source_row_projected(&table.path, sheet, &columns, &cancel, &mut visit)
+        };
+        if let Err(error) = result { if error.code != "FA_SAMPLE_FOUND" { return Err(error); } }
+        Ok(indexes.iter().copied().filter(|index| hits.contains(index)).collect())
+    })
 }

@@ -37,7 +37,8 @@ impl FxTbRows {
         active: &AtomicBool,
     ) -> Result<Self, AppError> {
         let path = Path::new(&source.input_path);
-        if !force && !crate::disk_table::should_use_disk(&[path], 4) {
+        if !crate::disk_table::forced_disk_allowed(&[path], force)
+            && !crate::disk_table::should_use_disk(&[path], 4) {
             return Ok(Self {
                 table: load_fx_table(source)?,
                 disk: None,

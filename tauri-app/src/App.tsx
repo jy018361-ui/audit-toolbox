@@ -1077,7 +1077,6 @@ function Dashboard({
       <PageHeader
         eyebrow="E点通工具箱 · 工作台"
         title="今天要处理什么？"
-        detail="从最近使用继续，或按作业类型选择工具。"
         actions={
           <Button variant="outline" size="sm" onClick={onStartWorkspaceTour}>
             <Sparkles aria-hidden="true" />
@@ -1541,7 +1540,6 @@ function History({ catalog }: { catalog: ToolManifest[] }) {
       <PageHeader
         eyebrow="可追踪结果"
         title="历史记录"
-        detail="记录任务状态、时间和输出路径；输入参数仅用于「继续任务」恢复现场，不保存客户表格内容。"
       />
       <Card className="history-card">
         <CardContent className="history-card-content">
@@ -2387,9 +2385,6 @@ export function Settings({
         <div className="settings-col">
           <section className="list-card">
             <h2>统一 LLM 配置</h2>
-            <p className="settings-note">
-              供各工具的字段复核与智能分析共用。密钥留空表示保留已保存值。
-            </p>
             <div className="form-grid">
               <label className="field settings-toggle">
                 <span>启用 LLM</span>
@@ -2471,7 +2466,7 @@ export function Settings({
               >
                 {testingLlm ? "正在测试…" : "测试 LLM 连接"}
               </button>
-              <span>留空使用已保存密钥；测试成功后仍需保存配置。</span>
+              <span>测试成功后仍需保存配置。</span>
             </div>
             {llmTestResult && (
               <div

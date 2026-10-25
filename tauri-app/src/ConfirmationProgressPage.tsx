@@ -128,9 +128,15 @@ export default function ConfirmationProgressPage({
   useTaskRestore(tool.id, (restore) => {
     const params = restore.params as { inputPath?: string; mode?: string };
     if (typeof params.inputPath === "string" && params.inputPath) {
-      setInputPath(params.inputPath);
-      setInspection(undefined);
+      // 恢复的是另一个任务＝切换数据现场：旧「本次报告」卡、进度条与步骤
+      // 都属于上一轮，不清掉会顶着新回填的参数继续显示。
+      activeJob.current = "";
+      setBusy(false);
+      setJob(undefined);
       setResult(undefined);
+      setInspection(undefined);
+      setStep(1);
+      setInputPath(params.inputPath);
     }
     if (params.mode === "bank" || params.mode === "trade" || params.mode === "both")
       setMode(params.mode);
@@ -220,7 +226,10 @@ export default function ConfirmationProgressPage({
     }
     setBusy(true);
     setError("");
+    // 重新检查即重置结果现场：上一轮报告卡与输出文件不再对应当前输入，
+    // 否则切换函证类型后旧报告会顶着新口径继续显示。
     setResult(undefined);
+    setJob(undefined);
     try {
       const value = (await engineCall("confirmation.inspect", {
         inputPath,
@@ -236,7 +245,8 @@ export default function ConfirmationProgressPage({
   }
 
   useEffect(() => {
-    if (inspection && inspection.path === inputPath) void inspect();
+    // 生成进行中不自动重查，避免把正在跑的任务显示清掉。
+    if (inspection && inspection.path === inputPath && !busy) void inspect();
     // Mode changes must refresh mode-specific required columns and counts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
@@ -424,11 +434,11 @@ export default function ConfirmationProgressPage({
                   />
                 </Field>
                 <p className="hint">支持 XLSX、XLS。</p>
-                <div className="actions">
+                <div className="actions" data-button-size="default">
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     disabled={!inputPath || busy}
                     onClick={() => void inspect()}
                   >
@@ -472,11 +482,11 @@ export default function ConfirmationProgressPage({
                     {inspection.missingColumns.join("、")}
                   </div>
                 ) : null}
-                <div className="actions">
+                <div className="actions" data-button-size="default">
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     onClick={() => setStep(1)}
                   >
                     上一步
@@ -506,11 +516,11 @@ export default function ConfirmationProgressPage({
                   报告范围：{scopeSummary?.label ?? "银行 + 往来"}。
                   {scopeSummary ? ` ${scopeSummary.detail}。` : ""}
                 </p>
-                <div className="actions">
+                <div className="actions" data-button-size="default">
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     onClick={() => setStep(2)}
                   >
                     上一步
@@ -523,7 +533,7 @@ export default function ConfirmationProgressPage({
                     <Button
                       type="button"
                       variant="secondary"
-                      size="sm"
+                      size="default"
                       onClick={() => void cancelJobWithFeedback(job.jobId)}
                     >
                       停止
@@ -532,7 +542,7 @@ export default function ConfirmationProgressPage({
                     <Button
                       type="button"
                       variant="secondary"
-                      size="sm"
+                      size="default"
                       disabled={!generateReady}
                       onClick={() => void generate()}
                     >
@@ -565,8 +575,8 @@ export default function ConfirmationProgressPage({
                 title="准备函证清单"
                 description={
                   inputPath
-                    ? "清单已选择，点击「检查数据」后，这里将显示函证数量、必需字段和数据预览。"
-                    : "选择 Excel 清单并点击“检查数据”，这里将显示函证数量、必需字段和数据预览。"
+                    ? "尚未检查所选清单。"
+                    : "请添加 Excel 函证清单。"
                 }
               />
             )}

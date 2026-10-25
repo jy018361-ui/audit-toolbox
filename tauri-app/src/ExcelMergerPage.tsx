@@ -727,8 +727,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             )}
           </div>
           <p className="output-hint">
-            {!outputDirectoryTouched && "默认保存到第一个输入文件所在目录。"}
-            文件名自动生成：Excel合并结果_日期_时间.
+            文件名：Excel合并结果_日期_时间.
             {outputMode === "one_workbook" ? "xlsx" : outputFormat}
           </p>
           {error && job?.phase !== "failed" && <div className="error-box">{error}</div>}
@@ -806,7 +805,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
               !paths.length
                 ? undefined
                 : !files.length
-                  ? "先检查文件与 Sheet，确认结构后再设置合并规则。"
+                  ? "文件结构尚未检查。"
                   : undefined
             }
           />

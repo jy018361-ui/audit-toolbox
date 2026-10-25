@@ -345,7 +345,7 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
                 description={
                   job?.phase === "cancelled"
                     ? "工作目录仍保留，可检查输入后重新生成。"
-                    : "选择工作目录后先检查输入，再生成服务方案。检查通过后，这里显示方案数量与核对结果。"
+                    : "尚未检查工作目录。"
                 }
               />
             )}

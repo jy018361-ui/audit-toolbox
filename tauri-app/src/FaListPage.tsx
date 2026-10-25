@@ -14,12 +14,13 @@ import {
   type FaMappingChange,
   type FaPendingSuggestion,
   type FaSupplementChange,
-  canApplyFaSupplements,
   faDefaultOutputName,
   faDefaultOutputPath,
   faKeyPairingAt,
   faMappedRolesForColumn,
   faOutputPathAfterSourceSelection,
+  faSupplementManualReviewReady,
+  faSupplementSideReviewReady,
   normalizeFaKeyPairing,
   faReviewDisplayMessage,
   faSelectColumnRole,
@@ -31,7 +32,6 @@ import {
   sanitizeFaBeginMapping,
   shouldAutoReviewFaInspection,
   shouldShowFaAdditionFields,
-  shouldShowFaPreviewWorkspace,
 } from "./faListUi";
 import type { ToolManifest } from "./types";
 import { useTaskRestore } from "./restore";
@@ -46,7 +46,6 @@ import { JargonTip } from "@/components/JargonTip";
 import { FileInput } from "@/components/FileInput";
 import { FileDropInput } from "@/components/FileDropInput";
 import { StepIndicator } from "@/components/StepIndicator";
-import { StatGrid } from "@/components/StatGrid";
 import { DataTable } from "@/components/DataTable";
 import { SourceTableControls } from "@/components/SourceTableControls";
 import { Button } from "@/components/ui/button";
@@ -88,6 +87,7 @@ type FaInspectSide = {
   selectedSheet?: string;
   displayName?: string;
   detectedHeaderRow?: number;
+  headerDepth?: number;
   headerMode?: "auto" | "manual";
   dimensions?: { rows: number; columns: number };
 };
@@ -152,6 +152,7 @@ type FaSupplementConfig = {
   path: string;
   sheet: string;
   headerRow: string;
+  headerDepth?: string;
   keys: string[];
   matchKeysVerified: boolean;
   method: string;
@@ -163,6 +164,7 @@ const emptyFaSupplement = (): FaSupplementConfig => ({
   path: "",
   sheet: "",
   headerRow: "",
+  headerDepth: "0",
   keys: [],
   matchKeysVerified: false,
   method: "",
@@ -181,6 +183,7 @@ const supplementConfigOf = (value: unknown): FaSupplementConfig => {
     path: typeof v.path === "string" ? v.path : "",
     sheet: typeof v.sheet === "string" ? v.sheet : "",
     headerRow: v.headerRow != null ? String(v.headerRow) : "",
+    headerDepth: String(Number(v.headerDepth) || 0),
     keys: Array.isArray(v.keys) ? (v.keys as string[]) : [],
     matchKeysVerified: Boolean(v.matchKeysVerified),
     method: typeof v.method === "string" ? v.method : "",
@@ -191,13 +194,15 @@ const supplementConfigOf = (value: unknown): FaSupplementConfig => {
 };
 
 type FaListDraft = {
-  step: 1 | 2 | 3;
+  step: 1 | 2;
   beginPath: string;
   endPath: string;
   beginSheet: string;
   endSheet: string;
   beginHeaderRow: string;
   endHeaderRow: string;
+  beginHeaderDepth?: number;
+  endHeaderDepth?: number;
   inspection?: FaInspectResult;
   beginKeys: string[];
   endKeys: string[];
@@ -347,7 +352,9 @@ function FaCardListPage() {
   // 保活到应用退出。
   if (draft) markToolPageLive("fa_list");
   const empty: FaMapping = {};
-  const [step, setStep] = useState<1 | 2 | 3>(draft?.step ?? 1);
+  // 两步式与折旧政策页同构：1 选择文件并配置 → 2 匹配与导出。旧草稿缓存
+  // 里可能存着三步制的 step 3（导出），收敛到第 2 步即可，不丢任何状态。
+  const [step, setStep] = useState<1 | 2>(draft?.step === 2 ? 2 : 1);
   const [beginPath, setBeginPath] = useState(draft?.beginPath ?? "");
   const [endPath, setEndPath] = useState(draft?.endPath ?? "");
   const [beginSheet, setBeginSheet] = useState(draft?.beginSheet ?? "");
@@ -356,6 +363,8 @@ function FaCardListPage() {
     draft?.beginHeaderRow ?? "",
   );
   const [endHeaderRow, setEndHeaderRow] = useState(draft?.endHeaderRow ?? "");
+  const [beginHeaderDepth, setBeginHeaderDepth] = useState(draft?.beginHeaderDepth ?? draft?.inspection?.begin.headerDepth ?? 0);
+  const [endHeaderDepth, setEndHeaderDepth] = useState(draft?.endHeaderDepth ?? draft?.inspection?.end.headerDepth ?? 0);
   const [inspection, setInspection] = useState<FaInspectResult | undefined>(
     draft?.inspection,
   );
@@ -453,6 +462,8 @@ function FaCardListPage() {
       endSheet?: string;
       beginHeaderRow?: number;
       endHeaderRow?: number;
+      beginHeaderDepth?: number;
+      endHeaderDepth?: number;
       beginKeys?: string[];
       endKeys?: string[];
       beginMapping?: FaMapping;
@@ -499,6 +510,8 @@ function FaCardListPage() {
     setEndSheet(p.endSheet ?? "");
     setBeginHeaderRow(p.beginHeaderRow != null ? String(p.beginHeaderRow) : "");
     setEndHeaderRow(p.endHeaderRow != null ? String(p.endHeaderRow) : "");
+    setBeginHeaderDepth(p.beginHeaderDepth ?? restoredInspection?.begin.headerDepth ?? 0);
+    setEndHeaderDepth(p.endHeaderDepth ?? restoredInspection?.end.headerDepth ?? 0);
     setInspection(restoredInspection);
     // 快照里没有 keyPairing：先清空徽章，恢复触发的重新读取（或改键后的
     // fa.key_check 防抖刷新）会带回新结论。
@@ -556,6 +569,8 @@ function FaCardListPage() {
       beginHeaderRow:
         p.beginHeaderRow != null ? String(p.beginHeaderRow) : "",
       endHeaderRow: p.endHeaderRow != null ? String(p.endHeaderRow) : "",
+      beginHeaderDepth: p.beginHeaderDepth ?? 0,
+      endHeaderDepth: p.endHeaderDepth ?? 0,
     }).then((ok) => {
       setRestoreStatus(
         ok
@@ -681,6 +696,8 @@ function FaCardListPage() {
       endSheet,
       beginHeaderRow,
       endHeaderRow,
+      beginHeaderDepth,
+      endHeaderDepth,
       inspection,
       beginKeys,
       endKeys,
@@ -723,6 +740,8 @@ function FaCardListPage() {
             ? Number(beginHeaderRow)
             : undefined,
           endHeaderRow: endHeaderRow.trim() ? Number(endHeaderRow) : undefined,
+          beginHeaderDepth,
+          endHeaderDepth,
           beginKeys,
           endKeys,
         },
@@ -749,30 +768,23 @@ function FaCardListPage() {
     setOutputPath(endPath ? faDefaultOutputPath(endPath) : "");
   }, [endPath, outputPathTouched]);
   useEffect(() => {
-    const inspectedSelectionIsReady = (
-      config: FaSupplementConfig,
-      info: FaSupplementInspect | undefined,
-    ) =>
-      Boolean(
-        config.path &&
-        info &&
-        (!info.sheets.length ||
-          (config.sheet && info.selectedSheet === config.sheet)),
-      );
     // 自动复核只在新增、处置两张补充表都完成 Sheet 人工选择并读取后触发。
-    // 单张表读取完不再抢跑，避免另一张表随后加入时重复复核、重复改映射。
+    // 单张表读取完不再抢跑，避免另一张表随后加入时重复复核、重复改映射；
+    // 只加载了一张表时仍可点「重新复核补充清单」手动发起。
     if (
-      !inspectedSelectionIsReady(addition, additionInspect) ||
-      !inspectedSelectionIsReady(disposal, disposalInspect)
+      !faSupplementSideReviewReady(addition, additionInspect) ||
+      !faSupplementSideReviewReady(disposal, disposalInspect)
     )
       return;
     const key = [
       addition.path,
       addition.sheet,
       addition.headerRow,
+      addition.headerDepth,
       disposal.path,
       disposal.sheet,
       disposal.headerRow,
+      disposal.headerDepth,
     ].join("\u0000");
     if (autoSupplementReviewKey.current === key) return;
     autoSupplementReviewKey.current = key;
@@ -781,10 +793,12 @@ function FaCardListPage() {
     addition.path,
     addition.sheet,
     addition.headerRow,
+    addition.headerDepth,
     additionInspect,
     disposal.path,
     disposal.sheet,
     disposal.headerRow,
+    disposal.headerDepth,
     disposalInspect,
   ]);
   const faStats = faMatchStatsFromResult(result) ?? matchStats;
@@ -828,6 +842,7 @@ function FaCardListPage() {
       setBeginPath(value);
       setBeginSheet("");
       setBeginHeaderRow("");
+      setBeginHeaderDepth(0);
     } else {
       setOutputPath((current) =>
         faOutputPathAfterSourceSelection(current, endPath, value),
@@ -835,6 +850,7 @@ function FaCardListPage() {
       setEndPath(value);
       setEndSheet("");
       setEndHeaderRow("");
+      setEndHeaderDepth(0);
     }
     setInspection(undefined);
     // 换了文件，旧键位的命中结论一并作废；重新读取后会带回新 keyPairing。
@@ -849,11 +865,13 @@ function FaCardListPage() {
     }
     setStep(1);
     // 与补充清单一致：选完文件自动解析。主文件需要两个都选好才解析。
+    // 读取一律回到系统建议映射（与折旧政策页同口径）。
     if (nextBegin && nextEnd) {
       void inspect({
         beginPath: nextBegin,
         endPath: nextEnd,
-        preserveMappings: Boolean(faStats),
+        beginHeaderDepth: side === "begin" ? 0 : beginHeaderDepth,
+        endHeaderDepth: side === "end" ? 0 : endHeaderDepth,
       });
     }
   }
@@ -884,11 +902,13 @@ function FaCardListPage() {
       setBeginSheet("");
       setBeginHeaderRow("");
       setBeginDisplayName("期初");
+      setBeginHeaderDepth(0);
     } else {
       setEndPath("");
       setEndSheet("");
       setEndHeaderRow("");
       setEndDisplayName("期末");
+      setEndHeaderDepth(0);
     }
     llmReviewGeneration.current += 1;
     supplementReviewGeneration.current += 1;
@@ -927,7 +947,8 @@ function FaCardListPage() {
     endSheet?: string;
     beginHeaderRow?: string;
     endHeaderRow?: string;
-    preserveMappings?: boolean;
+    beginHeaderDepth?: number;
+    endHeaderDepth?: number;
   }) {
     const bPath = overrides?.beginPath ?? beginPath;
     const ePath = overrides?.endPath ?? endPath;
@@ -954,6 +975,8 @@ function FaCardListPage() {
           endSheet: eSheet || undefined,
           beginHeaderRow: bHeader.trim() ? Number(bHeader) : undefined,
           endHeaderRow: eHeader.trim() ? Number(eHeader) : undefined,
+          beginHeaderDepth: overrides?.beginHeaderDepth ?? (overrides?.beginPath ? 0 : beginHeaderDepth),
+          endHeaderDepth: overrides?.endHeaderDepth ?? (overrides?.endPath ? 0 : endHeaderDepth),
         },
         `期初 ${displayFileName(bPath)} ＋ 期末 ${displayFileName(ePath)}`,
       )) as FaInspectResult;
@@ -970,6 +993,8 @@ function FaCardListPage() {
       setEndDisplayName(value.end.displayName ?? "期末");
       setBeginHeaderRow(String(value.begin.detectedHeaderRow ?? ""));
       setEndHeaderRow(String(value.end.detectedHeaderRow ?? ""));
+      setBeginHeaderDepth(value.begin.headerDepth ?? 1);
+      setEndHeaderDepth(value.end.headerDepth ?? 1);
       const suggestedBegin: FaMapping = {
         ...(value.suggestedMapping.begin ?? {}),
         currentYearDep: undefined,
@@ -997,9 +1022,11 @@ function FaCardListPage() {
         (value.suggestedMapping.end?.matchKey
           ? [value.suggestedMapping.end.matchKey]
           : []);
-      // 建议映射可能已含 matchKeys；统一补上，保证 mapping 与 keys 影子 state 一致
+      // 建议映射可能已含 matchKeys；统一补上，保证 mapping 与 keys 影子 state 一致。
       // 历史恢复后重新读取同一对文件：存档映射/匹配键顶回建议值（一次性
       // 消费，换文件照旧），且不再自动送 LLM 复核——那份映射已确认过。
+      // 其余读取（换文件/换 Sheet/手动重读）一律回到系统建议，不保留人工
+      // 调整（与折旧政策页同口径，2026-10 用户拍板）。
       const stash = restoredFaCardsRef.current;
       const samePath = (a: string, b: string) =>
         a.trim().toLowerCase() === b.trim().toLowerCase();
@@ -1010,46 +1037,17 @@ function FaCardListPage() {
           ? stash
           : undefined;
       if (match) restoredFaCardsRef.current = null;
-      const keepExisting = overrides?.preserveMappings && !match;
-      const keepValidMapping = (
-        current: FaMapping,
-        suggested: FaMapping,
-        headers: string[],
-      ): FaMapping => {
-        const kept: FaMapping = { ...suggested };
-        for (const [key, raw] of Object.entries(current)) {
-          if (key === "matchKeys") continue;
-          if (typeof raw === "string" && headers.includes(raw))
-            (kept as Record<string, unknown>)[key] = raw;
-        }
-        return kept;
-      };
-      const keptBeginKeys = beginKeys.filter((key) =>
-        value.begin.headers.includes(key),
-      );
-      const keptEndKeys = endKeys.filter((key) => value.end.headers.includes(key));
-      const canKeepKeys =
-        keepExisting &&
-        keptBeginKeys.length > 0 &&
-        keptBeginKeys.length === beginKeys.length &&
-        keptEndKeys.length === endKeys.length;
       const nextBeginKeys = match
         ? match.beginKeys
-        : canKeepKeys
-          ? keptBeginKeys
-          : suggestedBeginKeys;
+        : suggestedBeginKeys;
       const nextEndKeys = match
         ? match.endKeys
-        : canKeepKeys
-          ? keptEndKeys
-          : suggestedEndKeys;
+        : suggestedEndKeys;
       setBeginMapping(
         match
           ? { ...match.beginMapping, matchKeys: match.beginKeys }
           : {
-              ...(keepExisting
-                ? keepValidMapping(beginMapping, suggestedBegin, value.begin.headers)
-                : suggestedBegin),
+              ...suggestedBegin,
               matchKeys: nextBeginKeys,
             },
       );
@@ -1057,25 +1055,20 @@ function FaCardListPage() {
         match
           ? { ...match.endMapping, matchKeys: match.endKeys }
           : {
-              ...(keepExisting
-                ? keepValidMapping(endMapping, suggestedEnd, value.end.headers)
-                : suggestedEnd),
+              ...suggestedEnd,
               matchKeys: nextEndKeys,
             },
       );
       setBeginKeys(nextBeginKeys);
       setEndKeys(nextEndKeys);
-      // 重新读取 Sheet/标题行时保留上一版匹配结果供对照；新的结构单独存入
-      // inspection。首次读取仍在结果区显示文件结构摘要。
-      if (!overrides?.preserveMappings) setResult(value);
-      if (overrides?.preserveMappings) markResultStale();
-      // 自动复核三重门槛：非历史草稿恢复（match）、非 preserveMappings
-      // 重读、两侧可见 Sheet 均 ≤1 张（判定收在 faListUi
-      // 的 shouldAutoReviewFaInspection）。多 Sheet 工作簿自动选表可能
-      // 选错，停下来等用户确认 Sheet 后手动点「读表并复核」。
+      // 每次读取都以 inspection 结构摘要替换结果区；上一版匹配统计由
+      // matchStats 兜底展示并标记待重算（调用方负责 markResultStale）。
+      setResult(value);
+      // 自动复核两重门槛：非历史草稿恢复（match）、两侧可见 Sheet 均 ≤1 张
+      // （判定收在 faListUi 的 shouldAutoReviewFaInspection）。多 Sheet 工作
+      // 簿自动选表可能选错，停下来等用户确认 Sheet 后手动点「LLM 重新复核」。
       if (
         !match &&
-        !overrides?.preserveMappings &&
         shouldAutoReviewFaInspection(
           value.begin.sheets.length,
           value.end.sheets.length,
@@ -1088,6 +1081,8 @@ function FaCardListPage() {
           endSheet: value.end.selectedSheet,
           beginHeaderRow: value.begin.detectedHeaderRow,
           endHeaderRow: value.end.detectedHeaderRow,
+          beginHeaderDepth: value.begin.headerDepth,
+          endHeaderDepth: value.end.headerDepth,
           beginMapping: suggestedBegin,
           endMapping: suggestedEnd,
           beginKeys: suggestedBeginKeys,
@@ -1104,7 +1099,7 @@ function FaCardListPage() {
   }
   async function reinspectMain(
     side: "begin" | "end",
-    next: { sheet?: string; headerRow?: string },
+    next: { sheet?: string; headerRow?: string; headerDepth?: number },
   ) {
     const currentInspection =
       side === "begin" ? inspection?.begin : inspection?.end;
@@ -1115,14 +1110,15 @@ function FaCardListPage() {
       next.headerRow ?? (side === "begin" ? beginHeaderRow : endHeaderRow);
     if (
       candidateSheet === currentSheet &&
-      (candidateHeader || currentHeader) === currentHeader
+      (candidateHeader || currentHeader) === currentHeader &&
+      (next.headerDepth ?? (side === "begin" ? beginHeaderDepth : endHeaderDepth)) === (currentInspection?.headerDepth ?? 1)
     )
       return;
     if (faStats) {
       const accepted = await confirmDialog({
         title: "重新读取清单？",
         message:
-          "更换 Sheet 或标题行会使现有匹配结果待重算。仍存在于新表头中的人工映射会保留；已消失的列将恢复为自动建议。",
+          "更换 Sheet 或标题行会使现有匹配结果待重算，字段映射与匹配列将恢复为系统建议。",
         confirmLabel: "重新读取",
       });
       if (!accepted) {
@@ -1138,8 +1134,8 @@ function FaCardListPage() {
     }
     markResultStale();
     // Sheet/标题行一换，复核对象就变了：A 表的复核结论不能拿来背书 B 表。
-    // 递增代数丢弃在途的复核结果并清空复核状态，由用户确认新表后手动
-    // 重新发起（preserveMappings 重读本身也不再自动复核）。
+    // 递增代数丢弃在途的复核结果并清空复核状态；重读回到系统建议值后，
+    // 多 Sheet 场景仍需用户确认选表再手动点「LLM 重新复核」。
     llmReviewGeneration.current += 1;
     setLlmBusy(false);
     setLlmReview(undefined);
@@ -1164,23 +1160,25 @@ function FaCardListPage() {
       endSheet: nextEndSheet,
       beginHeaderRow: nextBeginHeader,
       endHeaderRow: nextEndHeader,
-      preserveMappings: true,
+      beginHeaderDepth: side === "begin" ? (next.headerDepth ?? beginHeaderDepth) : beginHeaderDepth,
+      endHeaderDepth: side === "end" ? (next.headerDepth ?? endHeaderDepth) : endHeaderDepth,
     });
   }
+  // 第一步的「读取表格 + LLM 复核」：全链路重来（与折旧政策页同构）。
+  // 重读回到系统建议映射，两侧均为单 Sheet 工作簿时自动接着送 LLM 复核；
+  // 多 Sheet 时只读取并提示先确认选表。
   async function rereadMain() {
-    if (!faStats) {
-      await inspect();
-      return;
+    if (faStats) {
+      const accepted = await confirmDialog({
+        title: "重新读取两份清单？",
+        message:
+          "重新读取会使现有匹配结果待重算，字段映射与匹配列将恢复为系统建议值。",
+        confirmLabel: "重新读取",
+      });
+      if (!accepted) return;
+      markResultStale();
     }
-    const accepted = await confirmDialog({
-      title: "重新读取两份清单？",
-      message:
-        "重新读取会使现有匹配结果待重算。仍存在于表头中的人工映射会保留。",
-      confirmLabel: "重新读取",
-    });
-    if (!accepted) return;
-    markResultStale();
-    await inspect({ preserveMappings: true });
+    await inspect();
   }
   // 高于 75% 且满足校验的建议自动采纳，其余建议由用户确认。
   function applyLlmPlan(review: FaLlmReview) {
@@ -1276,6 +1274,8 @@ function FaCardListPage() {
       endSheet: string;
       beginHeaderRow: number;
       endHeaderRow: number;
+      beginHeaderDepth: number;
+      endHeaderDepth: number;
       beginMapping: FaMapping;
       endMapping: FaMapping;
       beginKeys: string[];
@@ -1299,6 +1299,8 @@ function FaCardListPage() {
         beginHeaderRow:
           override.beginHeaderRow ?? (Number(beginHeaderRow) || 1),
         endHeaderRow: override.endHeaderRow ?? (Number(endHeaderRow) || 1),
+        beginHeaderDepth: override.beginHeaderDepth ?? beginHeaderDepth,
+        endHeaderDepth: override.endHeaderDepth ?? endHeaderDepth,
         beginMapping: sanitizeFaBeginMapping(
           override.beginMapping ?? beginMapping,
         ),
@@ -1369,13 +1371,15 @@ function FaCardListPage() {
     try {
       const value = (await engineCall("fa.supplement_inspect", {
         path: config.path,
+        sheetsOnly: requireSheetChoice,
         sheet: config.sheet || undefined,
         headerRow: config.headerRow.trim()
           ? Number(config.headerRow)
           : undefined,
+        headerDepth: Number(config.headerDepth) || 0,
         referenceKeys: kind === "addition" ? endKeys : beginKeys,
-        // 新增清单必须能与期末（file2）卡片的既定匹配键逐值碰撞；
-        // 处置清单则必须能与期初（file1）卡片碰撞。只传列名无法
+        // 新增清单取一个非空样例，与期末（file2）的既定匹配键校验；
+        // 处置清单则与期初（file1）校验。只传列名无法
         // 区分像 `coding` / `资产编码_2` 这类同义列，因此让 Rust 直接
         // 对两张表的真实样本值做精确匹配。
         referencePath: kind === "addition" ? endPath : beginPath,
@@ -1384,6 +1388,7 @@ function FaCardListPage() {
           kind === "addition"
             ? Number(endHeaderRow) || undefined
             : Number(beginHeaderRow) || undefined,
+        referenceHeaderDepth: kind === "addition" ? endHeaderDepth : beginHeaderDepth,
       })) as FaSupplementInspect;
       // For Excel supplements, browsing the workbook only discovers its sheet
       // names.  The user must explicitly choose a sheet before any header or
@@ -1406,6 +1411,7 @@ function FaCardListPage() {
             ...config,
             sheet: value.selectedSheet ?? config.sheet,
             headerRow: String(value.detectedHeaderRow ?? ""),
+            headerDepth: String(value.headerDepth ?? 1),
             keys:
               value.suggestedMapping?.matchKeys ??
               (value.suggestedMapping?.matchKey
@@ -1571,6 +1577,7 @@ function FaCardListPage() {
           path: value.path,
           sheet: value.sheet || undefined,
           headerRow: Number(value.headerRow) || 1,
+          headerDepth: Number(value.headerDepth) || 0,
           keys: value.keys,
           matchKeysVerified: value.matchKeysVerified,
           method: value.method || undefined,
@@ -1586,6 +1593,8 @@ function FaCardListPage() {
     endSheet: endSheet || undefined,
     beginHeaderRow: Number(beginHeaderRow) || 1,
     endHeaderRow: Number(endHeaderRow) || 1,
+    beginHeaderDepth,
+    endHeaderDepth,
     beginKeys,
     endKeys,
     beginMapping,
@@ -2140,14 +2149,21 @@ function FaCardListPage() {
       if (missing.length)
         missingHint = `尚未映射：${missing.map((x) => x.label).join("、")}`;
     }
-    return (
-      <div className="source-preview" aria-label={title}>
-      {supplement && <div className="mapping-panel-toolbar source-preview-toolbar">
+    const sourceToolbar = <>
+      {supplement &&
         <SourceTableControls
           sheet={supplement.config.sheet} sheets={inspect.sheets} headerRow={supplement.config.headerRow}
+          headerDepth={Number(supplement.config.headerDepth) || inspect.headerDepth || 0} automaticDepth
+          onHeaderDepthChange={(headerDepth) => {
+            supplementReviewGeneration.current += 1;
+            autoSupplementReviewKey.current = "";
+            setSupplementLlmReview(undefined);
+            setSupplementLlmBypassed(false);
+            void inspectSupplement(supplement.kind, { ...supplement.config, headerDepth: String(headerDepth) });
+          }}
           sheetPlaceholder="请选择工作表" disabled={busy || supplementLlmBusy}
           onSheetChange={(sheet) => {
-            const next: FaSupplementConfig = { ...supplement.config, sheet, headerRow: "", keys: [], matchKeysVerified: false, method: "", date: "", originalValue: "", depreciation: "" };
+            const next: FaSupplementConfig = { ...supplement.config, sheet, headerRow: "", headerDepth: "0", keys: [], matchKeysVerified: false, method: "", date: "", originalValue: "", depreciation: "" };
             supplementReviewGeneration.current += 1;
             autoSupplementReviewKey.current = "";
             setSupplementLlmBusy(false);
@@ -2167,17 +2183,18 @@ function FaCardListPage() {
             }
           }}
         />
-      </div>}
+      }
       {side && (
-        <div className="mapping-panel-toolbar source-preview-toolbar">
           <SourceTableControls
             sheet={side === "begin" ? beginSheet : endSheet}
             sheets={inspect.sheets}
             headerRow={side === "begin" ? beginHeaderRow : endHeaderRow}
+            headerDepth={side === "begin" ? beginHeaderDepth : endHeaderDepth} automaticDepth
+            onHeaderDepthChange={(headerDepth) => void reinspectMain(side, { headerDepth })}
             editableSheet
             disabled={busy || llmBusy}
             onSheetChange={(sheet) => {
-              if (inspect.sheets.length) void reinspectMain(side, { sheet, headerRow: "" });
+              if (inspect.sheets.length) void reinspectMain(side, { sheet, headerRow: "", headerDepth: 0 });
               else {
                 if (side === "begin") { setBeginSheet(sheet); setBeginHeaderRow(""); }
                 else { setEndSheet(sheet); setEndHeaderRow(""); }
@@ -2187,20 +2204,25 @@ function FaCardListPage() {
             onHeaderRowChange={side === "begin" ? setBeginHeaderRow : setEndHeaderRow}
             onHeaderRowBlur={() => void reinspectMain(side, { headerRow: side === "begin" ? beginHeaderRow : endHeaderRow })}
           />
-        </div>
       )}
+    </>;
+    return (
+      <div className="source-preview" aria-label={title}>
       <DataTable
+        toolbar={sourceToolbar}
         columns={awaitingSheet ? [] : inspect.headers}
         rows={awaitingSheet ? [] : inspect.preview}
         emptyText={awaitingSheet ? "请选择工作表" : "暂无数据"}
         caption={
           <div className="fa-table-caption">
-            <strong>
-              {title} ·{" "}
-              {inspect.displayName ?? inspect.selectedSheet ?? "数据预览"} ·{" "}
+            <strong className="preview-source-name" title={side ? (side === "begin" ? beginPath : endPath) : supplement?.config.path}>
+              {title} · {displayFileName(side ? (side === "begin" ? beginPath : endPath) : supplement?.config.path ?? "")}
+            </strong>
+            <p>
+              {inspect.selectedSheet ?? "数据预览"} ·{" "}
               {inspect.dimensions?.rows ?? 0} 行 ×{" "}
               {inspect.dimensions?.columns ?? 0} 列
-            </strong>
+            </p>
             {missingHint && (
               <span className="fa-caption-missing">{missingHint}</span>
             )}
@@ -2264,146 +2286,75 @@ function FaCardListPage() {
       </div>
     );
   };
-  const renderFaResult = () => {
-    if (!result || typeof result !== "object")
-      return (
-        <EmptyState compact title="等待结果" description="读取文件结构后，可核对资产ID、必选映射和预览结果。" />
-      );
-    const value = result as Record<string, unknown>;
-    if (value.begin && value.end) {
-      // 两份清单的名称/行列数已在第一步预览卡的表注里逐表展示，
-      // 结果卡不再整段复述（设计评审·去重清扫）；只留下一步的预期管理。
-      return (
-        <EmptyState
-          compact
-          title="等待生成底稿"
-          description="期初、期末清单已读取；确认资产 ID 与字段映射后，点击「生成 FA List 底稿」。"
+  // —— 第 2 步结果区（两步式改版，与折旧政策页同构）——
+  // 匹配统计以 faStats 为准（最新一次 fa.match/fa.export 的 stats；
+  // result 被 inspection 结构摘要替换后由 matchStats 兜底并提示待重算）。
+  // 变动汇总预览只认带 stats 的匹配结果；导出结果交给通用 ResultView。
+  const resultObject =
+    result && typeof result === "object"
+      ? (result as Record<string, unknown>)
+      : undefined;
+  const matchSummarySection = (() => {
+    const summary = resultObject?.summary as
+      | { columns?: unknown; rows?: unknown }
+      | undefined;
+    if (
+      resultObject?.outputPaths ||
+      !summary ||
+      !Array.isArray(summary.columns) ||
+      !Array.isArray(summary.rows) ||
+      summary.rows.length === 0
+    )
+      return null;
+    // 明细前 N 行看不出两期勾稽关系，改列变动汇总：与导出的
+    // 「固定资产变动汇总表」同一份数值与版式（类别为列、千分位）。
+    return (
+      <details className="fa-summary-details" open>
+        <summary>固定资产变动汇总表（预览）</summary>
+        <FaSummaryTable
+          columns={summary.columns as string[]}
+          rows={summary.rows as FaSummaryRow[]}
         />
-      );
-    }
-    if (Array.isArray(value.outputPaths) && value.outputPaths.length > 0) {
+      </details>
+    );
+  })();
+  const exportOutcomeSection = (() => {
+    if (!Array.isArray(resultObject?.outputPaths)) return null;
+    // 正常导出带输出路径：交给通用结果视图（含打开结果按钮）。
+    if (resultObject.outputPaths.length > 0)
       return <ResultView value={result} />;
-    }
-    if (value.stats && typeof value.stats === "object") {
-      const stats = value.stats as {
-        rows?: number;
-        both?: number;
-        beginOnly?: number;
-        endOnly?: number;
-        unmatchedAddition?: number;
-        unmatchedDisposal?: number;
-        duplicates?: {
-          hasDuplicates?: boolean;
-          duplicateValueCount?: number;
-          duplicateRowCount?: number;
-        };
-      };
-      return (
-        <>
-          <StatGrid
-            items={[
-              { label: "合并总行数", value: stats.rows ?? 0 },
-              { label: "两期均有", value: stats.both ?? 0 },
-              { label: "仅期初", value: stats.beginOnly ?? 0 },
-              { label: "仅期末", value: stats.endOnly ?? 0 },
-            ]}
-            columns={4}
-          />
-          {/* The engine has always counted duplicate match keys; not showing
-              them left users unaware that cards were paired by occurrence. */}
-          {Boolean(stats.duplicates?.hasDuplicates) && (
-            <div className="warning-box">
-              匹配列存在重复值：{formatCount(stats.duplicates?.duplicateValueCount ?? 0)}{" "}
-              个重复键、
-              {formatCount(stats.duplicates?.duplicateRowCount ?? 0)}{" "}
-              行；已按合并聚合口径计算增减变动，确保合计数无误。
-            </div>
-          )}
-          {(Number(stats.unmatchedAddition || 0) > 0 ||
-            Number(stats.unmatchedDisposal || 0) > 0) && (
-            <div className="warning-box">
-              补充清单未匹配：新增 {stats.unmatchedAddition ?? 0} 条，处置{" "}
-              {stats.unmatchedDisposal ?? 0} 条；导出时将另存未匹配清单。
-            </div>
-          )}
-          {(() => {
-            // 明细前 N 行看不出两期勾稽关系，改列变动汇总：与导出的
-            // 「固定资产变动汇总表」同一份数值与版式（类别为列、千分位）。
-            const summary = (
-              value as { summary?: { columns?: unknown; rows?: unknown } }
-            ).summary;
-            if (
-              !summary ||
-              !Array.isArray(summary.columns) ||
-              !Array.isArray(summary.rows) ||
-              summary.rows.length === 0
-            ) {
-              return null;
-            }
-            return (
-              <details className="fa-summary-details" open>
-                <summary>固定资产变动汇总表（预览）</summary>
-                <FaSummaryTable
-                  columns={summary.columns as string[]}
-                  rows={summary.rows as FaSummaryRow[]}
-                />
-              </details>
-            );
-          })()}
-        </>
-      );
-    }
-    if (Array.isArray(value.outputPaths)) {
-      const message = String(value.exportMessage ?? value.message ?? "");
-      const [mainMessage, warningText = ""] = message.split(
-        "===CORRECTION_WARNINGS===",
-      );
-      const warnings = warningText
-        .split(/\r?\n/)
-        .map((item) => item.trim())
-        .filter(Boolean);
-      return (
-        <div className="fa-result-summary">
-          <strong>FA List 底稿已生成</strong>
-          <span>{mainMessage.trim() || `共导出 ${value.rows ?? 0} 行。`}</span>
-          {(value.outputPaths as string[]).map((path) => (
-            <Button
-              key={path}
-              variant="default"
-              className="fa-output-button"
-              title={path}
-              onClick={() => void openOutput(path)}
-            >
-              打开结果：{displayFileName(path)}
-            </Button>
-          ))}
-          {warnings.map((warning) => (
-            <div className="warning-box" key={warning}>
-              {warning}
-            </div>
-          ))}
-        </div>
-      );
-    }
-    return <ResultView value={result} />;
-  };
-  const showPreviewWorkspace = shouldShowFaPreviewWorkspace(
-    step,
-    Boolean(faStats),
-  );
-  const supplementsReadyForReview = Boolean(
-    addition.path &&
-    disposal.path &&
-    additionInspect &&
-    disposalInspect &&
-    (!additionInspect.sheets.length ||
-      (addition.sheet && additionInspect.selectedSheet === addition.sheet)) &&
-    (!disposalInspect.sheets.length ||
-      (disposal.sheet && disposalInspect.selectedSheet === disposal.sheet)),
+    // 旧版导出可能不带输出路径：至少把导出留言与修正警示亮出来。
+    const message = String(
+      resultObject?.exportMessage ?? resultObject?.message ?? "",
+    );
+    const [mainMessage, warningText = ""] = message.split(
+      "===CORRECTION_WARNINGS===",
+    );
+    const warnings = warningText
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    return (
+      <div className="fa-result-summary">
+        <strong>FA List 底稿已生成</strong>
+        <span>{mainMessage.trim() || `共导出 ${resultObject?.rows ?? 0} 行。`}</span>
+        {warnings.map((warning) => (
+          <div className="warning-box" key={warning}>
+            {warning}
+          </div>
+        ))}
+      </div>
+    );
+  })();
+  const supplementsReadyForReview = faSupplementManualReviewReady(
+    addition,
+    disposal,
+    additionInspect,
+    disposalInspect,
   );
   // —— 多 Sheet 暂停提示 ——
   // 任一侧可见 Sheet 多于 1 张且尚未复核时，inspect 不再自动送 LLM，
-  // 改为提示用户先确认两侧 Sheet，再手动点「读表并复核」发起；复核开始
+  // 改为提示用户先确认两侧 Sheet，再手动点「LLM 重新复核」发起；复核开始
   // （llmBusy）或已有结论（llmReview）后提示不再显示。
   const beginSheetTotal = inspection?.begin.sheets.length ?? 0;
   const endSheetTotal = inspection?.end.sheets.length ?? 0;
@@ -2414,30 +2365,31 @@ function FaCardListPage() {
       !llmBypassed &&
       (beginSheetTotal > 1 || endSheetTotal > 1),
   );
+  // 进入第 2 步（匹配与导出）的门槛：已读取且必填映射齐全。第 1 步的
+  // 「下一步」与步骤指示器共用，替代旧版第 1 步里的「开始匹配」。
+  const readyToMatch =
+    !isFaMatchDisabled(Boolean(inspection), busy) &&
+    missingRoles("begin").length === 0 &&
+    missingRoles("end").length === 0;
   return (
     <>
       <StepIndicator
         steps={[
-          { key: "1", label: "文件与匹配" },
+          { key: "1", label: "文件与映射" },
           {
             key: "2",
-            label: "补充清单",
-            disabled: !faStats || !inspection,
+            label: "匹配与导出",
+            disabled: !readyToMatch,
           },
-          { key: "3", label: "导出", disabled: !faStats || !inspection },
         ]}
         current={step - 1}
-        onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3)}
+        onStepClick={(index) => setStep((index + 1) as 1 | 2)}
       />
       <div className="fa-stack">
         <Card variant="section">
           <CardHeader>
             <CardTitle>
-              {step === 1
-                ? "1. 选择文件并配置"
-                : step === 2
-                  ? "2. 补充清单（可选）"
-                  : "3. 保存并导出"}
+              {step === 1 ? "1. 选择文件并配置" : "2. 匹配与导出"}
             </CardTitle>
             <Badge
               variant={
@@ -2471,9 +2423,9 @@ function FaCardListPage() {
                 {restoreStatus}
               </p>
             )}
-            {/* The result pane only exists on step 3, so a merge started from
-              step 1 used to run with no visible progress at all. */}
-            {step !== 3 && job && job.phase !== "completed" && (
+            {/* 读表/匹配/导出任务在两步式下都发生在主卡内，进度条对两步
+                可见：任务进行中切回第一步也能看到进度与取消入口。 */}
+            {job && job.phase !== "completed" && (
               <JobProgress
                 job={job}
                 onCancel={async (jobId) => {
@@ -2534,53 +2486,37 @@ function FaCardListPage() {
                     </Field>
                   </div>
                 </div>
-                <div className="actions fa-flow-actions">
+                <div className="actions fa-flow-actions" data-button-size="default">
                   <Button
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     disabled={busy}
                     onClick={() => void rereadMain()}
                   >
-                    {busy ? "正在读取表格…" : "重新读取表格"}
+                    {busy ? "正在读取表格…" : "读取表格 + LLM 复核"}
                   </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={!inspection || busy || llmBusy}
-                    onClick={() => void reviewLlm()}
-                  >
-                    {llmBusy
-                      ? "LLM 正在复核…"
-                      : llmReview
-                        ? "LLM 重新复核"
-                        : "读表并复核"}
-                  </Button>
-                  {busy && job ? (
+                  {inspection && (
                     <Button
                       variant="secondary"
-                      size="sm"
-                      onClick={() => void cancelJobWithFeedback(job.jobId)}
+                      size="default"
+                      disabled={busy || llmBusy}
+                      onClick={() => void reviewLlm()}
                     >
-                      停止
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="default"
-                      disabled={
-                        isFaMatchDisabled(Boolean(inspection), busy) ||
-                        missingRoles("begin").length > 0 ||
-                        missingRoles("end").length > 0
-                      }
-                      onClick={() => void start("fa.match")}
-                    >
-                      {resultStale ? "重新开始匹配" : "开始匹配"}
+                      {llmBusy ? "LLM 正在复核…" : "LLM 重新复核"}
                     </Button>
                   )}
+                  <Button
+                    variant="default"
+                    disabled={!readyToMatch}
+                    onClick={() => setStep(2)}
+                  >
+                    下一步
+                  </Button>
                 </div>
                 {multiSheetReviewPending && (
                   <p className="hint" role="status">
                     检测到多张工作表（期初 {beginSheetTotal} 张、期末 {endSheetTotal} 张），自动选表可能选错；请确认两侧 Sheet
-                    与标题行无误后，点击「读表并复核」发起 LLM 复核。
+                    与标题行后，点「LLM 重新复核」发起复核。
                   </p>
                 )}
                 {inspection && (
@@ -2739,7 +2675,38 @@ function FaCardListPage() {
                     )}
                   </>
                 )}
-                {faStats && (
+              </>
+            )}
+            {step === 2 && (
+              <>
+                <div className="actions" data-button-size="default">
+                  <Button
+                    variant="secondary"
+                    size="default"
+                    disabled={busy}
+                    onClick={() => setStep(1)}
+                  >
+                    上一步
+                  </Button>
+                  {busy && job ? (
+                    <Button
+                      variant="secondary"
+                      size="default"
+                      onClick={() => void cancelJobWithFeedback(job.jobId)}
+                    >
+                      停止
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="default"
+                      disabled={!readyToMatch}
+                      onClick={() => void start("fa.match")}
+                    >
+                      {resultStale ? "重新开始匹配" : "开始匹配"}
+                    </Button>
+                  )}
+                </div>
+                {faStats ? (
                   <div className="fa-next-choice" role="status">
                     <strong>匹配统计</strong>
                     <div className="fa-match-metrics" aria-label="匹配统计">
@@ -2750,24 +2717,38 @@ function FaCardListPage() {
                     </div>
                     {faStats.duplicates?.hasDuplicates && (
                       <div className="warning-box">
-                        发现 {formatCount(faStats.duplicates.duplicateValueCount ?? 0)} 个重复匹配键（涉及 {formatCount(faStats.duplicates.duplicateRowCount ?? 0)} 行），请复核后再继续。
+                        匹配列存在重复值：{formatCount(faStats.duplicates.duplicateValueCount ?? 0)}
+                        个重复键、{formatCount(faStats.duplicates.duplicateRowCount ?? 0)}
+                        行；已按合并聚合口径计算增减变动，确保合计数无误。
+                      </div>
+                    )}
+                    {(Number(faStats.unmatchedAddition || 0) > 0 ||
+                      Number(faStats.unmatchedDisposal || 0) > 0) && (
+                      <div className="warning-box">
+                        补充清单未匹配：新增 {faStats.unmatchedAddition ?? 0} 条，处置{" "}
+                        {faStats.unmatchedDisposal ?? 0} 条；导出时将另存未匹配清单。
                       </div>
                     )}
                     {resultStale && (
                       <div className="warning-box">
-                        上述统计为上一次匹配结果，导出也将基于该次匹配生成套表。主文件或其映射有改动时，请回第一步重新匹配；第二步补充清单按当前配置导出。
+                        上述统计为上一次匹配结果，导出也将基于该次匹配生成套表。主文件或其映射有改动时，请点上方「重新开始匹配」刷新；补充清单按当前配置导出。
                       </div>
                     )}
                   </div>
-                )}
-              </>
-            )}
-            {step === 2 && (
-              <>
+                ) : !matchSummarySection && !exportOutcomeSection ? (
+                  <EmptyState
+                    compact
+                    title="等待匹配结果"
+                    description="点击「开始匹配」核对两期清单后，在此查看匹配统计与固定资产变动汇总。"
+                  />
+                ) : null}
+                {matchSummarySection}
+                {exportOutcomeSection}
+                <h3>补充清单（可选）</h3>
                 {supplementLlmBusy && (
                   <p className="hint">
                     补充清单 LLM
-                    复核进行中，匹配键与字段映射已暂时锁定；复核结束或点下方"停止并继续主流程"后即可调整。
+                    复核中，匹配键与字段映射暂不可修改。
                   </p>
                 )}
                 <div className="fa-sides">
@@ -2785,10 +2766,10 @@ function FaCardListPage() {
                   )}
                 </div>
                 {(addition.path || disposal.path) && (
-                  <div className="actions">
+                  <div className="actions" data-button-size="default">
                     <Button
                       variant="secondary"
-                      size="sm"
+                      size="default"
                       disabled={supplementLlmBusy || !supplementsReadyForReview}
                       onClick={() => void reviewSupplements()}
                     >
@@ -2801,52 +2782,32 @@ function FaCardListPage() {
                 {(addition.path || disposal.path) &&
                   !supplementsReadyForReview && (
                     <p className="hint">
-                      请先分别选择新增清单、处置清单及其工作表；两张表都读取完成后，系统才会统一进行一次
-                      LLM 复核。
+                      请先选择清单文件并完成工作表读取；任一清单读取完成后即可点「重新复核补充清单」手动发起
+                      LLM 复核。新增、处置两张表都读取完成后，系统仍会自动统一复核一次。
                     </p>
                   )}
-                <div className="actions">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setStep(1)}
-                  >
-                    上一步
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => {
-                      supplementReviewGeneration.current += 1;
-                      setSupplementLlmBusy(false);
-                      setAddition(emptyFaSupplement());
-                      setDisposal(emptyFaSupplement());
-                      setAdditionInspect(undefined);
-                      setDisposalInspect(undefined);
-                      setSupplementLlmReview(undefined);
-                      setSupplementLlmBypassed(false);
-                      setError("");
-                      setStep(3);
-                    }}
-                  >
-                    无补充清单，跳过
-                  </Button>
-                  <Button
-                    variant="default"
-                    disabled={
-                      supplementLlmBusy ||
-                      !canApplyFaSupplements(
-                        addition.path,
-                        disposal.path,
-                        endMapping.additionMethod,
-                      )
-                    }
-                    onClick={() => setStep(3)}
-                  >
-                    应用补充映射并继续
-                  </Button>
-                </div>
+                {(addition.path || disposal.path) && (
+                  <div className="actions" data-button-size="default">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="default"
+                      onClick={() => {
+                        supplementReviewGeneration.current += 1;
+                        setSupplementLlmBusy(false);
+                        setAddition(emptyFaSupplement());
+                        setDisposal(emptyFaSupplement());
+                        setAdditionInspect(undefined);
+                        setDisposalInspect(undefined);
+                        setSupplementLlmReview(undefined);
+                        setSupplementLlmBypassed(false);
+                        setError("");
+                      }}
+                    >
+                      无补充清单，清空配置
+                    </Button>
+                  </div>
+                )}
                 {(supplementLlmBusy || supplementLlmReview) && (
                   <div
                     className={`fa-llm-review ${
@@ -2949,11 +2910,7 @@ function FaCardListPage() {
                     ))}
                   </div>
                 )}
-              </>
-            )}
-            {step === 3 && (
-              <>
-                <h3>3. 输出</h3>
+                <h3>输出</h3>
                 <div className="form-grid">
                   <Field label="期初显示名称">
                     <Input
@@ -2988,24 +2945,11 @@ function FaCardListPage() {
                     clearLabel="恢复默认"
                   />
                 </Field>
-                {!outputPathTouched && (
-                  <p className="hint">
-                    {"默认保存到期末文件所在目录，文件名为 FA_List_<日期>_<时间>.xlsx（导出时按当前时间生成）。"}
-                  </p>
-                )}
-                <div className="actions">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => setStep(2)}
-                  >
-                    上一步
-                  </Button>
+                <div className="actions" data-button-size="default">
                   {busy && job ? (
                     <Button
                       variant="secondary"
-                      size="sm"
+                      size="default"
                       onClick={() => void cancelJobWithFeedback(job.jobId)}
                     >
                       停止
@@ -3024,8 +2968,7 @@ function FaCardListPage() {
             )}
           </CardContent>
         </Card>
-        {showPreviewWorkspace ? (
-          <aside className="fa-preview-workspace" aria-label="文件预览工作区">
+        <aside className="fa-preview-workspace" aria-label="文件预览工作区">
             <div className="fa-preview-workspace-title">
               <div>
                 <h2>文件预览</h2>
@@ -3123,44 +3066,7 @@ function FaCardListPage() {
               )}
             </div>
           </aside>
-        ) : (
-          <Card variant="workspace" className="fa-result-workspace">
-            <CardHeader>
-              <CardTitle>匹配与导出结果</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {job && (
-                <JobProgress
-                  job={job}
-                  onCancel={async (jobId) => {
-                    const accepted = await jobCancel(jobId);
-                    if (accepted) setBusy(false);
-                    return accepted;
-                  }}
-                  cancelLabel="取消任务"
-                />
-              )}
-              {renderFaResult()}
-            </CardContent>
-          </Card>
-        )}
       </div>
-      {/* 推进动作与 TB+JE 模式一致放页面底部（设计评审）：卡片动作行只留
-          本步的读表/复核/匹配，匹配完成后到页底选择补充清单或直接导出。 */}
-      {step === 1 && faStats && (
-        <div
-          className="actions fa-flow-actions fa-page-flow"
-          role="group"
-          aria-label="匹配完成后的下一步"
-        >
-          <Button variant="secondary" size="sm" onClick={() => setStep(2)}>
-            有，进入补充清单
-          </Button>
-          <Button variant="default" onClick={() => setStep(3)}>
-            没有，直接导出
-          </Button>
-        </div>
-      )}
     </>
   );
 }

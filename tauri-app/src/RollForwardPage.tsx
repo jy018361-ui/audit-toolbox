@@ -409,6 +409,23 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
       ),
     );
   }
+  /** 换输入数据（上年底稿等）后，上一轮检查结果与任务输出不再对应当前
+   * 配置，不能继续当作结果展示；运行中的任务进度条保留给用户看。 */
+  function invalidateRunOutputs() {
+    setValidation(undefined);
+    if (!busy) setJob(undefined);
+  }
+  /** 与 invalidateRunOutputs 配套：把公司状态卡的「已完成/已生成/失败」
+   * 统计一并归零，避免新数据下还顶着旧一轮的完成数字。 */
+  function resetRunCounters(patch: Partial<RollCompany>) {
+    updateCompany({
+      status: "未处理",
+      generated: 0,
+      failed: 0,
+      last_message: "",
+      ...patch,
+    });
+  }
   async function saveProjects(next = projects) {
     await settingsSet({
       rollForwardProjects: { version: 2, projects: next },
@@ -1051,7 +1068,16 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           <PathField
             label="上年底稿目录或单个 XLSX / XLS"
             value={company?.prior_path ?? ""}
-            onChange={(value) => updateCompany({ prior_path: value })}
+            onChange={(value) => {
+              if (!company || value === company.prior_path) {
+                updateCompany({ prior_path: value });
+                return;
+              }
+              // 换了上年底稿＝换了输入数据：旧检查结果、输出文件与统计
+              // 都属于上一轮，不能继续停留造成「已是新数据结果」的误解。
+              invalidateRunOutputs();
+              resetRunCounters({ prior_path: value });
+            }}
             kind="folder"
             allowFile
           />
@@ -1065,7 +1091,14 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
             </Button>
             <Button
               variant="ghost"
-              onClick={() => updateCompany({ prior_path: "", subjects: [] })}
+              onClick={() => {
+                if (company?.prior_path) {
+                  invalidateRunOutputs();
+                  resetRunCounters({ prior_path: "", subjects: [] });
+                } else {
+                  updateCompany({ prior_path: "", subjects: [] });
+                }
+              }}
             >
               清空上年底稿
             </Button>
@@ -1520,7 +1553,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           </>
         )}
         {validation !== undefined && <RollForwardResult value={validation} />}
-        {!job && validation === undefined && <EmptyState compact title="尚未运行检查" description="选择文件与科目并确认风险评估信息后，先运行检查，再开始结转。" />}
+        {!job && validation === undefined && <EmptyState compact title="尚未运行检查" description="请确认文件、科目与风险评估信息。" />}
       </section>
     </>
   );

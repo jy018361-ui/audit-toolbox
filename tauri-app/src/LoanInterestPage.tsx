@@ -575,6 +575,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const [reportEnd, setReportEnd] = useState(defaultBalanceSheetDate());
   const [busy, setBusy] = useState(false);
   const restoreGeneration = useRef(0);
+  // 非零＝该代号的「历史恢复」正在异步重读来源：期间 setSource 不清理
+  // 保存位置，否则重读完成的那次 setSource 会把刚回填的存档路径误清掉。
+  const suppressOutputPathClearRef = useRef(0);
   const sampledJe = mode === "tb" && sources.je.inspection?.sampledPreview === true;
   const sampledLedger = mode === "ledger" && sources.ledger.inspection?.sampledPreview === true;
   const completionKind = sampledJe ? "je" : "ledger";
@@ -834,6 +837,17 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     invalidateResults();
   };
   const setSource = (kind: Kind, next: Partial<Source>) => {
+    // 换了源文件（含整侧清空）就放弃上次手选的保存位置，默认落点跟新文件走；
+    // 只改映射、Sheet 等不动文件路径的调整不在此列，历史恢复重读同路径时豁免。
+    if (
+      !(
+        suppressOutputPathClearRef.current !== 0 &&
+        suppressOutputPathClearRef.current === restoreGeneration.current
+      ) &&
+      typeof next.path === "string" &&
+      next.path !== sources[kind].path
+    )
+      setOutputPath("");
     invalidateResults();
     setAccountChangesPending(false);
     setResultRateEdits({});
@@ -1058,6 +1072,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     // 公共入口代表重新选择整组：先清空旧 TB/JE，再按本轮文件重建。
     // 分批补齐请使用下方待上传单侧卡片，避免“追加”和“换账套”语义混淆。
     setSources((v) => ({ ...v, tb: empty(), je: empty() }));
+    setOutputPath("");
     invalidateResults();
     setBusy(true);
     setError("");
@@ -1482,6 +1497,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       return;
     }
     setBusy(true);
+    // 异步重读期间豁免保存位置清理：存档路径已在上面回填，不能被重读
+    // 完成时的 setSource 冲掉；重读结束后按代号解除。
+    suppressOutputPathClearRef.current = generation;
     void (async () => {
       const failures: string[] = [];
       for (const item of restoreSources) {
@@ -1496,14 +1514,26 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               headerDepth: item.source.headerDepth ?? 0,
             },
           })) as Inspection;
-          if (generation !== restoreGeneration.current) return;
+          if (generation !== restoreGeneration.current) {
+            if (suppressOutputPathClearRef.current === generation)
+              suppressOutputPathClearRef.current = 0;
+            return;
+          }
           applyInspection(item.kind, item.path, inspection);
         } catch (e) {
-          if (generation !== restoreGeneration.current) return;
+          if (generation !== restoreGeneration.current) {
+            if (suppressOutputPathClearRef.current === generation)
+              suppressOutputPathClearRef.current = 0;
+            return;
+          }
           failures.push(`${fileNameOf(item.path)}：${errorText(e)}`);
         }
       }
-      if (generation !== restoreGeneration.current) return;
+      if (generation !== restoreGeneration.current) {
+        if (suppressOutputPathClearRef.current === generation)
+          suppressOutputPathClearRef.current = 0;
+        return;
+      }
       // TB 重新识别会清空依赖该来源的人工分类与利率；历史值在全部来源
       // 成功读回后再覆盖一次，避免“恢复成功”却悄悄丢掉用户确认。
       if (Array.isArray(p.loanAccounts))
@@ -1531,6 +1561,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       );
       setError(failures.join("；"));
       setBusy(false);
+      if (suppressOutputPathClearRef.current === generation)
+        suppressOutputPathClearRef.current = 0;
     })();
   });
   async function run(method: "loan.preview" | "loan.export") {
@@ -2515,12 +2547,12 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       </select>
                     </label>
                   </div>
-                  {accountChangesPending && <p className="fx-hint" role="status">科目分类已记录，将在下一步测算时生效。</p>}
+                  {accountChangesPending && <p className="fx-hint" role="status">科目分类待重算</p>}
                   {!rows.length && (
                     <EmptyState
                       compact
                       title="等待生成利率明细"
-                      description="首次进入自动生成利率明细，可在本表逐笔确认利率。科目分类修改只在此记录，将在下一步测算时生效。"
+                      description="生成后请逐笔确认利率。"
                     />
                   )}
                   {summaryRateRows.length > 0 && (
@@ -3152,6 +3184,7 @@ function Mapping({
   return (
       <MappingPanel
         title={`${name}字段映射`}
+        sourceName={fileNameOf(source.path)}
         headers={x.headers}
         rows={x.preview}
         mapping={source.mapping}
@@ -3195,7 +3228,7 @@ function Mapping({
               disabled={busy || reviewing}
               onSheetChange={(sheet) => header(sheet, 0, 0)}
               onHeaderRowChange={(row) => header(x.sheet, Number(row), x.headerDepth)}
-              onHeaderDepthChange={reviewable ? (depth) => header(x.sheet, x.headerRow, depth) : undefined}
+              onHeaderDepthChange={(depth) => header(x.sheet, x.headerRow, depth)}
             />
           </>
         }

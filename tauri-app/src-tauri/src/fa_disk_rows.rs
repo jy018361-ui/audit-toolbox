@@ -52,7 +52,7 @@ impl std::ops::Index<usize> for JoinedRows {
 }
 impl JoinedRows {
     pub(crate) fn open(path: PathBuf) -> Result<Self, AppError> {
-        let conn = Connection::open(&path).map_err(db_error)?;
+        let conn = open_with_wait(&path)?;
         let count = conn
             .query_row("SELECT COUNT(*) FROM joined", [], |r| r.get::<_, usize>(0))
             .map_err(db_error)?;
@@ -83,9 +83,10 @@ impl JoinedRows {
         match self {
             Self::Memory(rows) => RowsIter::Memory(rows.iter()),
             Self::Disk { path, error, .. } => {
-                let conn = Connection::open(path)
+                let conn = open_with_wait(path)
                     .map_err(|e| {
-                        *error.lock().unwrap() = Some(e.to_string());
+                        *error.lock().unwrap() =
+                            Some(e.detail.clone().unwrap_or(e.user_message.clone()));
                     })
                     .ok();
                 RowsIter::Disk {
@@ -160,7 +161,7 @@ pub(crate) fn edit_disk_rows(
     path: &Path,
     mut edit: impl FnMut(&Connection, &mut JoinedRow) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
-    let mut conn = Connection::open(path).map_err(db_error)?;
+    let mut conn = open_with_wait(path)?;
     let tx = conn.transaction().map_err(db_error)?;
     let mut after = 0i64;
     loop {
@@ -235,7 +236,7 @@ impl<'a> IntoIterator for &'a JoinedRows {
         self.iter()
     }
 }
-fn read_batch(conn: &Connection, after: i64) -> Result<Vec<(i64, JoinedRow)>, AppError> {
+pub(super) fn read_batch(conn: &Connection, after: i64) -> Result<Vec<(i64, JoinedRow)>, AppError> {
     let limit = crate::resource_budget::budget()?.batch_bytes / 4;
     read_batch_limited(conn, after, limit)
 }
@@ -270,6 +271,17 @@ pub(crate) fn db_error(e: rusqlite::Error) -> AppError {
         "固定资产磁盘计算失败。",
         Some(e.to_string()),
     )
+}
+
+/// FA 临时库写事务缓存溢写时会短暂持排他锁；另一个并发连接若无锁等待
+/// 会立刻 SQLITE_BUSY，被游标记成「磁盘匹配结果读取失败」。读侧复用
+/// 写事务连接是根治（见 apply_supplements / edit_disk_rows），这里统一
+/// 加 5 秒锁等待兜底，与 storage.rs 的口径一致。
+const BUSY_WAIT: std::time::Duration = std::time::Duration::from_millis(5000);
+pub(super) fn open_with_wait(path: &Path) -> Result<Connection, AppError> {
+    let conn = Connection::open(path).map_err(db_error)?;
+    conn.busy_timeout(BUSY_WAIT).map_err(db_error)?;
+    Ok(conn)
 }
 fn json_error(e: serde_json::Error) -> AppError {
     super::error(

@@ -24,18 +24,18 @@ fn spec(params: &Value, key: &str) -> Result<SourceSpec, AppError> {
 pub(super) fn applies(params: &Value) -> Result<bool, AppError> {
     let a = spec(params, "sourceA")?;
     let b = spec(params, "sourceB")?;
-    Ok(params
+    Ok(crate::disk_table::forced_disk_allowed(&[Path::new(&a.path), Path::new(&b.path)], params
         .get("__forceDisk")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
+        .unwrap_or(false))
         || crate::disk_table::should_use_disk(&[Path::new(&a.path), Path::new(&b.path)], 2))
 }
 
 pub(super) fn preview(spec: &SourceSpec) -> Result<Table, AppError> {
-    let (sheet, sheets, all) = crate::disk_table::preview_source(
+    let (sheet, sheets, all) = crate::disk_table::preview_source_serials(
         Path::new(&spec.path),
         (!spec.sheet.is_empty()).then_some(spec.sheet.as_str()),
-        64,
+        spec.header_row.saturating_add(spec.header_depth.max(2)).saturating_add(8).max(64),
     )?;
     crate::header_detection::require_tabular(&all, spec.header_row == 0)?;
     let (header_index, inferred_depth) = crate::header_detection::layout(
@@ -94,7 +94,7 @@ pub(super) fn preview(spec: &SourceSpec) -> Result<Table, AppError> {
 }
 
 /// 空白整行跳过，与内存路径相同；选中列为空而其他列非空时保留为无效值。
-fn visit_column(
+pub(super) fn visit_column(
     spec: &SourceSpec,
     cancel: &AtomicBool,
     mut visitor: impl FnMut(usize, String) -> Result<(), AppError>,
@@ -103,10 +103,11 @@ fn visit_column(
     let column = pick_column(spec, &table)?;
     let skip = table.header_row + table.header_depth - 1;
     let mut count = 0;
-    crate::disk_table::for_each_source_row(
+    crate::disk_table::for_each_source_row_with_style(
         Path::new(&spec.path),
         Some(&table.sheet),
         cancel,
+        true,
         |row, physical| {
             if physical <= skip || !row.iter().any(|v| !v.trim().is_empty()) {
                 return Ok(());

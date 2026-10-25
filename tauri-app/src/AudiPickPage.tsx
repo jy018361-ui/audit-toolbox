@@ -1282,6 +1282,8 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     if (preparingRef.current) return;
     preparingRef.current = true;
     setBusy(true); setError(""); setSelectedDocument(id); setPdfText("");
+    // 上一份文档的 AI 模板建议不得带到新文档上，新文档的分类返回后会重新给出。
+    setSuggestedRule(undefined);
     selectedDocumentRef.current = id;
     const projectId = selectedId;
     const existingPdf = pdfDocument;
@@ -3572,6 +3574,10 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           onCreateProject={(values) => create(values)}
           onContinueProject={(project) => {
             const source = dashboardById.get(project.id);
+            // 切项目＝切换数据现场：上一项目的上传状态与错误提示不带过来。
+            setError("");
+            setPreparationStatus("");
+            setSuggestedRule(undefined);
             setSelectedId(project.id);
             setSelectedDocument("");
             setRuleId(source?.project.defaultRuleId ?? "loan_covenant");

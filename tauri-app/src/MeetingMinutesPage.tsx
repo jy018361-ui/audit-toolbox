@@ -73,6 +73,9 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   const [resident, setResident] = useState(false);
   const generateParams = useRef<Record<string, unknown>>({});
   const jobVersion = useRef(0);
+  // 用户主动换录音/清空录音后置位：后台「最近一次任务」快照属于上一份录音，
+  // 不得再回灌成当前结果；直到用户重新发起生成才解除。
+  const manualResetRef = useRef(false);
 
   const onJobEvent = useCallback((event: { phase: string; result?: unknown }) => {
     jobVersion.current += 1;
@@ -99,7 +102,8 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
         setStatus(value);
         setResident(value.resident);
         // 自动任务可能在本页首次打开前已经完成；快照补回结果，新的事件优先。
-        if (version === jobVersion.current) {
+        // manualResetRef 置位期间跳过：那是上一份录音的结果，补回就是旧信息冒充新结果。
+        if (!manualResetRef.current && version === jobVersion.current) {
           if (value.latestJob) {
             setJob(value.latestJob);
             onJobEvent(value.latestJob);
@@ -162,6 +166,8 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   async function startGenerate(extra: { audioPath?: string; transcriptPath?: string }) {
     setError("");
     setResult(undefined);
+    // 新一轮生成开始：此后后台快照与事件都属于当前输入，恢复回灌。
+    manualResetRef.current = false;
     const params: Record<string, unknown> = {
       ...extra,
       detailLevel,
@@ -180,9 +186,22 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
+  /** 换/清录音＝换输入数据：上一轮纪要与转写稿不再属于当前录音，连同
+   * 完成横幅一起撤下，并拦住后台快照把它刷回来。 */
+  function resetForNewAudio() {
+    manualResetRef.current = true;
+    jobVersion.current += 1;
+    setResult(undefined);
+    setJob(undefined);
+    setError("");
+  }
+
   function browseAudio() {
     void pickPath("file", "选择会议录音文件", AUDIO_EXTENSIONS).then((value) => {
-      if (typeof value === "string" && value) setImportPath(value);
+      if (typeof value === "string" && value) {
+        if (value !== importPath) resetForNewAudio();
+        setImportPath(value);
+      }
     });
   }
 
@@ -243,9 +262,6 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                 1. 会议记录
               </h2>
             </CardTitle>
-            <CardDescription>
-              加入 Teams 会议后工具箱会自动询问；也可以在这里手动控制，或导入已有录音。
-            </CardDescription>
           </CardHeader>
           <CardContent>
             <dl className="meeting-status-grid">
@@ -322,7 +338,14 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
               hideFilledLabel
               disabled={busy}
               onBrowse={browseAudio}
-              onClear={importPath && !busy ? () => setImportPath("") : undefined}
+              onClear={
+                importPath && !busy
+                  ? () => {
+                      resetForNewAudio();
+                      setImportPath("");
+                    }
+                  : undefined
+              }
               onDragStateChange={() => undefined}
             />
           </CardContent>
@@ -446,7 +469,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
               <EmptyState
                 compact
                 title="还没有会议纪要"
-                description="结束一场被记录的会议，或从上方导入录音后生成；历史记录页可查看过往任务。"
+                description="结束录音或导入音频后可生成纪要。"
               />
             )}
           </CardContent>

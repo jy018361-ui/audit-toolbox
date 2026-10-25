@@ -37,7 +37,7 @@ const TRADE_REQUIRED: [&str; 6] = [
     "询证项回函结果",
 ];
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Table {
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
@@ -588,6 +588,11 @@ fn write_summary_sheet(
 }
 
 fn load_table(path: &Path) -> Result<Table, AppError> {
+    // 识别必须给出完整银行/往来统计，缓存该次真实解析供处理 worker 复用。
+    crate::table_read_cache::read(path, "confirmation-table-v1", &(), || load_table_uncached(path))
+}
+
+fn load_table_uncached(path: &Path) -> Result<Table, AppError> {
     if !path.is_file() {
         return Err(error(
             "INPUT_NOT_FOUND",

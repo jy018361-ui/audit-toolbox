@@ -849,7 +849,6 @@ describe("FA TB+JE 三步向导（源码契约）", () => {
     expect(source).not.toContain("hasConfirmedJe");
     expect(source).not.toContain("尚未确认 JE 来源科目");
     expect(source).not.toContain("view.sources");
-    expect(source).toContain("JE 分录自动承接分类并汇总变动");
     expect(source).toContain('ariaLabel="筛选科目"');
     expect(source).toContain('placeholder="输入科目编码或名称"');
     expect(source).not.toContain('className="fa-tbje-source-tag"');

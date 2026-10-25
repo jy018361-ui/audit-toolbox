@@ -1,12 +1,14 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { useTableColumnResize } from "./useTableColumnResize";
 import { isNumericCellText } from "@/lib/numberFormat";
+import { PreviewSourceHeader } from "./PreviewSourceHeader";
 
 export type DataTableProps = {
   columns: string[];
   rows: unknown[][];
   /** 折叠标题（对应原 `<summary>` 可折叠预览） */
   caption?: ReactNode;
+  toolbar?: ReactNode;
   maxHeight?: number;
   emptyText?: string;
   /**
@@ -33,6 +35,7 @@ export function DataTable({
   columns,
   rows,
   caption,
+  toolbar,
   maxHeight = 430,
   emptyText = "暂无数据",
   resizeKey,
@@ -72,7 +75,7 @@ export function DataTable({
 
   return (
     <div className="data-table">
-      {caption != null && <div className="data-table-caption">{caption}</div>}
+      {toolbar ? <PreviewSourceHeader toolbar={toolbar}>{caption}</PreviewSourceHeader> : caption != null && <div className="data-table-caption">{caption}</div>}
       <div className="data-table-frame" ref={frameRef}>
         <div
           className="data-table-scroll"

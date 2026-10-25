@@ -18,6 +18,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { Badge } from "@/components/ui/badge";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
 import { SourceTableControls } from "@/components/SourceTableControls";
+import { displayFileName } from "@/fileDisplay";
 import { JargonTip } from "@/components/JargonTip";
 import { Button } from "@/components/ui/button";
 import {
@@ -363,6 +364,9 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   const rowsA = sources.a.inspection?.rowCount ?? 0;
   const rowsB = sources.b.inspection?.rowCount ?? 0;
   const estimate = estimateComparisons(rowsA, rowsB);
+  const sampledSources = Boolean(
+    sources.a.inspection?.previewOnly || sources.b.inspection?.previewOnly,
+  );
 
   const confirmMap = useMemo(
     () => new Map(confirmations.map((c) => [c.aIndex, c])),
@@ -577,7 +581,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
 
   async function inspect(
     kind: Kind,
-    over: { path?: string; sheet?: string; headerRow?: number },
+    over: { path?: string; sheet?: string; headerRow?: number; headerDepth?: number },
   ) {
     const current = sources[kind];
     const path = over.path ?? current.path;
@@ -589,7 +593,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     try {
       const x = (await engineCall("fuzzy.inspect", {
         kind,
-        source: { inputPath: path, sheet, headerRow, headerDepth: headerRow === 0 ? 0 : current.inspection?.headerDepth ?? current.headerDepth ?? 1 },
+        source: { inputPath: path, sheet, headerRow, headerDepth: over.headerDepth ?? (headerRow === 0 ? 0 : current.inspection?.headerDepth ?? current.headerDepth ?? 1) },
       })) as Inspection;
       // 历史恢复后重新读取同一文件：存档的选中列顶回（一次性消费，换文件
       // 照旧清空待选）。
@@ -758,7 +762,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
       <PageHeader
         eyebrow="审计核对"
         title={tool.name}
-        detail="对两列公司名称、人名、地址或通用文本做模糊匹配：高相似度自动采纳，疑似项逐条人工确认，确认进度可续作并导出底稿。"
+        detail="比较两列文本，高相似度自动匹配，疑似项留待确认。"
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
       {job?.phase === "cancelled" && (
@@ -810,6 +814,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                   {s.inspection && (
                     <MappingPanel
                       title={`${SOURCE_LABEL[kind]}匹配列`}
+                      sourceName={displayFileName(s.path)}
                       // 面板头部固定输出「N 行预览 · M 列」，note 只补差量信息
                       // （全量读取时的总行数），不再把同一组数字说两遍（UI 审核）。
                       note={
@@ -831,7 +836,9 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                         <SourceTableControls
                           sheet={s.inspection.sheet} sheets={s.inspection.sheets}
                           headerRow={s.headerRow} disabled={busy}
-                          onSheetChange={(sheet) => void inspect(kind, { sheet })}
+                          headerDepth={s.inspection.headerDepth ?? s.headerDepth ?? 1}
+                          onHeaderDepthChange={(headerDepth) => void inspect(kind, { headerDepth })}
+                          onSheetChange={(sheet) => void inspect(kind, { sheet, headerRow: 0, headerDepth: 0 })}
                           onHeaderRowChange={(row) => void inspect(kind, { headerRow: Number(row) })}
                         />
                       }
@@ -914,12 +921,16 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
           </details>
           {/* 「预估与启动」并入设置卡底部：独立一卡曾多出一整屏滚动（UI 审核）。 */}
           <div className="fuzzy-estimate">
-            <p>
-              A 侧 {formatCount(rowsA)} 行 / B 侧 {formatCount(rowsB)}{" "}
-              行，预计候选比对约 <b>{formatCount(estimate)}</b> 次（A 每行最多与
-              B 侧前 {COMPARISON_CAP} 行精算比对）。
-            </p>
-            {estimate > COMPARISON_WARN_AT && (
+            {sampledSources ? (
+              <p>两侧样例已就绪，完整行数和比对次数将在匹配完成后显示。</p>
+            ) : (
+              <p>
+                A 侧 {formatCount(rowsA)} 行 / B 侧 {formatCount(rowsB)}{" "}
+                行，预计候选比对约 <b>{formatCount(estimate)}</b> 次（A 每行最多与
+                B 侧前 {COMPARISON_CAP} 行精算比对）。
+              </p>
+            )}
+            {!sampledSources && estimate > COMPARISON_WARN_AT && (
               <p className="fuzzy-estimate-warn">
                 预计比对次数超过 50 万，匹配可能耗时较长；建议先按 Sheet
                 或期间拆分文件、分批核对。
@@ -1253,7 +1264,7 @@ function ConfirmQueue(props: {
         <EmptyState
           compact
           title="无需人工确认"
-          description={props.paged ? "确认状态会保存，导出包含所有分页的结果。" : "所有有效结果均已自动归类，可直接复核明细并导出底稿。"}
+          description={props.paged ? "确认状态已保存。" : undefined}
         />
       </section>
     );
@@ -1263,7 +1274,7 @@ function ConfirmQueue(props: {
       <div className="fx-result-heading">
         <div>
           <h3>{props.paged ? "本页疑似确认" : "疑似确认"}</h3>
-          <p>逐条核对候选：点选右侧任一候选即采纳，「都不是」表示拒绝匹配。</p>
+          <p>选中候选即采纳；「都不是」表示拒绝匹配。</p>
         </div>
       </div>
       <div className="fuzzy-confirm-toolbar">

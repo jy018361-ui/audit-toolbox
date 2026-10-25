@@ -3384,7 +3384,8 @@ impl FxJeRows {
     }
     fn open_impl(source: &SourceSpec, mapping: &Map<String, Value>, force_disk: bool) -> Result<Self, AppError> {
         let cancel = replay_cancel();
-        if !force_disk && !crate::disk_table::should_use_disk(&[Path::new(&source.input_path)], 1) {
+        if !crate::disk_table::forced_disk_allowed(&[Path::new(&source.input_path)], force_disk)
+            && !crate::disk_table::should_use_disk(&[Path::new(&source.input_path)], 1) {
             let table = load_fx_table(source)?;
             return Ok(Self { table: forward_filled_je_table(&table, mapping), disk: None });
         }
@@ -3946,11 +3947,11 @@ fn source_spec(params: &Value, source_key: &str) -> Result<Option<SourceSpec>, A
 }
 
 fn je_uses_disk(params: &Value) -> bool {
-    if params.get("__largeJeDiskMode").and_then(Value::as_bool)==Some(true){return true;}
     let paths=[params.pointer("/jeSource/inputPath").and_then(Value::as_str),
         params.pointer("/tbSource/inputPath").and_then(Value::as_str)];
     let paths=paths.iter().filter_map(|value|value.map(Path::new)).collect::<Vec<_>>();
-    !paths.is_empty()&&crate::disk_table::should_use_disk(&paths,2)
+    crate::disk_table::forced_disk_allowed(&paths, params.get("__largeJeDiskMode").and_then(Value::as_bool)==Some(true))
+        || (!paths.is_empty()&&crate::disk_table::should_use_disk(&paths,2))
 }
 
 // 口径比对不需要全量数据：大文件先用识别用的样本表，比对不通过要去找替代列时
@@ -5138,7 +5139,7 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
             let spec: SourceSpec = serde_json::from_value(src.clone())
                 .map_err(|e| error("INVALID_PARAMS", "来源参数无效。", Some(e.to_string())))?;
             let mapping = mapping_obj(params, key);
-            if kind == "JE" && (je_uses_disk(params) || params.get("__largeJeDiskMode").and_then(Value::as_bool) == Some(true)) {
+            if kind == "JE" && je_uses_disk(params) {
                 let input=FxJeRows::open_impl(&spec,&mapping,true)?;
                 disk_replay::validate(&input,&mapping,params,&mut errors,&mut warnings)?;
                 continue;
@@ -10213,10 +10214,7 @@ fn calculate(
     Ok(json!({
         "mode": mode,
         "entityCoverage": params.get("__entityCoverage").cloned().unwrap_or(Value::Null),
-        "largeJeDiskMode": params
-            .get("__largeJeDiskMode")
-            .and_then(Value::as_bool)
-            .unwrap_or_else(|| je_uses_disk(params)),
+        "largeJeDiskMode": je_uses_disk(params),
         "summary": {
             "entitySummaries": entity_summaries,
             "realizedGainLoss": (!multiple_entities).then_some(realized_total),

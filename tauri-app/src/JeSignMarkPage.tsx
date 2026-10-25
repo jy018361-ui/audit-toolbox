@@ -159,6 +159,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   const showReview =
     llmBusy ||
     llmFailed ||
+    Boolean(llmStatus) ||
     changes.length > 0 ||
     pending.length > 0;
   const ready = Boolean(draft.inspect) && missingRequired.length === 0;
@@ -986,6 +987,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       )}
 
       <LedgerMappingPreview
+        sourceName={draft.inputPath.split(/[\\/]/).pop()}
         inspect={draft.inspect}
         mapping={draft.mapping}
         setMap={setMap}
@@ -1118,7 +1120,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             <summary>导出文件格式与列说明</summary>
             <p className="kz-hint">
             {!draft.outputTouched &&
-              "默认保存到凭证文件所在目录，文件名为「正负数标记_源文件名[_工作表]_<时间戳>.csv」（导出时按当前时间生成）。"}
+              "默认保存到凭证文件所在目录。"}
             每个批次单独出一个文件，选 .csv 出 CSV、选 .xlsx
             出工作簿；明细最前面是
             {draft.markLossTransfer ? "【损益结转】" : ""}
@@ -1130,11 +1132,11 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               请先在上方选择至少一个目标科目。
             </p>
           )}
-          <div className="kz-actions">
+          <div className="kz-actions" data-button-size="default">
             {busy && job ? (
               <Button
                 variant="secondary"
-                size="sm"
+                size="default"
                 onClick={() => void cancelJobWithFeedback(job.jobId)}
               >
                 停止

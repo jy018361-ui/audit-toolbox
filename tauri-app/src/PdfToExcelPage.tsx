@@ -251,10 +251,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
               onClick={() => void chooseFiles()}
             >
               <strong>{pdfPaths.length ? "继续添加 PDF 或文件夹" : "拖放回函 PDF 或文件夹到窗口"}</strong>
-              {!pdfPaths.length && <span>
-                可一次拖入多份；拖入文件夹会自动找出其中的全部
-                PDF，也可点击选择文件
-              </span>}
+              {!pdfPaths.length && <span>支持批量 PDF 与文件夹</span>}
             </button>
             <div className="merger-toolbar">
               <Button
@@ -324,7 +321,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                 <EmptyState
                   compact
                   title="尚未添加 PDF 文件"
-                  description="选择回函 PDF 或文件夹后，可在此确认待处理列表。"
+                  description="尚无待处理 PDF。"
                 />
               )}
             </div>
@@ -351,15 +348,14 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
               </div>
             </Field>
             <p className="hint">
-              留空则输出到每份 PDF
-              所在文件夹，文件名自动生成；另会生成一份“处理清单”汇总全部结果。
+              未选输出文件夹时，文件存于各 PDF 原目录；另生成处理清单。
             </p>
-            <div className="actions">
+            <div className="actions" data-button-size="default">
               {busy && job ? (
                 <Button
                   type="button"
                   variant="secondary"
-                  size="sm"
+                  size="default"
                   onClick={() => void cancelJobWithFeedback(job.jobId)}
                 >
                   取消任务

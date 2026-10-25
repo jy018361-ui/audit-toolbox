@@ -29,9 +29,11 @@ const MERGE_PARAM_FIELDS: &[&str] = &[
     "beginPath",
     "beginSheet",
     "beginHeaderRow",
+    "beginHeaderDepth",
     "endPath",
     "endSheet",
     "endHeaderRow",
+    "endHeaderDepth",
     "beginKeys",
     "endKeys",
     "beginMapping",
@@ -237,6 +239,7 @@ fn table_meta(table: &Table) -> Value {
         "path": table.path.to_string_lossy(),
         "sheet": table.sheet,
         "headerRow": table.header_row,
+        "headerDepth": table.header_depth,
         "headers": table.headers,
         "sheets":table.sheets,
         "rowCount":table.row_count,
@@ -283,10 +286,7 @@ fn string_matrix(meta: &Value, field: &str) -> Option<Vec<Vec<String>>> {
 fn load_table_from_meta(meta: &Value) -> Option<Table> {
     let path = Path::new(meta.get("path")?.as_str()?);
     let sheet = meta.get("sheet").and_then(Value::as_str);
-    let header = meta
-        .get("headerRow")
-        .and_then(Value::as_u64)
-        .map(|row| row as usize);
+    let header = crate::fa::HeaderOptions::params(meta, "headerRow", "headerDepth").ok()?;
     let table = crate::fa_table_cache::load_table_cached(path, sheet, header, false).ok()?;
     let headers = string_list(meta, "headers")?;
     if table.headers != headers {
@@ -426,6 +426,7 @@ fn save_disk(params: &Value, result: &MergeResult, dir: &Path, key: &str, print:
 fn disk_table_meta(meta: &Value) -> Option<Table> {
     Some(Table { path:PathBuf::from(meta.get("path")?.as_str()?), sheet:meta.get("sheet").and_then(Value::as_str).map(str::to_owned),
         sheets:string_list(meta,"sheets").unwrap_or_default(), header_row:meta.get("headerRow")?.as_u64()? as usize,
+        header_depth:meta.get("headerDepth")?.as_u64()? as usize,
         headers:string_list(meta,"headers")?,row_count:meta.get("rowCount").and_then(Value::as_u64).unwrap_or(0) as usize,rows:Vec::new() })
 }
 

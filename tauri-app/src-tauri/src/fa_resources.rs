@@ -35,7 +35,12 @@ pub(crate) fn pair_uses_disk(params: &Value, phase: Phase) -> bool {
             ))
         })
         .collect::<Vec<_>>();
-    uses_disk(&sources, phase)
+    let supplements = ["additionSupplement", "disposalSupplement"].into_iter()
+        .filter_map(|key| params.get(key)).filter_map(|source| Some((
+            Path::new(source.get("inputPath").or_else(|| source.get("path"))?.as_str()?),
+            source.get("sheet").and_then(Value::as_str),
+        ))).collect::<Vec<_>>();
+    uses_disk(&sources, phase) || supplements.iter().any(|source| uses_disk(&[*source], Phase::Read))
 }
 
 /// 导出快照无效时仍可能重新匹配；调度保护覆盖这个分支，业务阶段各自分流。
@@ -77,15 +82,15 @@ mod tests {
     fn fa_resource_read_match_and_export_plan_separately() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("清单.csv");
-        // 5 MiB 文本：源表估算 30 MiB，导出 120 MiB，连接 360 MiB。
+        // 50 MiB 文本：源表估算300MiB，导出1200MiB，连接3600MiB。
         std::fs::File::create(&path)
             .unwrap()
-            .set_len(5 * 1024 * 1024)
+            .set_len(50 * 1024 * 1024)
             .unwrap();
         crate::resource_budget::with_test_memory(
             crate::resource_budget::MemoryStatus {
                 total: 16 * GIB,
-                available: 158 * GIB / 100,
+                available: 45 * GIB / 10,
                 commit_available: 8 * GIB,
             },
             || {

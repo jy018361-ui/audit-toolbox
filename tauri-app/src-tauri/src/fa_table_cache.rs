@@ -34,13 +34,12 @@ use std::{
     time::SystemTime,
 };
 
-use calamine::{Reader, open_workbook_auto};
 use polars::prelude::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::AppError;
-use crate::fa::{self, Table};
+use crate::fa::{self, HeaderOptions, Table};
 
 /// fa-tables 缓存的容量红线：写入后超过 2GB 开始淘汰，回到 1.5GB 以下为止。
 const CACHE_SOFT_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
@@ -51,11 +50,13 @@ const CACHE_HARD_TARGET: u64 = 3 * 512 * 1024 * 1024;
 pub(crate) fn load_table_cached(
     path: &Path,
     sheet: Option<&str>,
-    header: Option<usize>,
+    header: impl Into<HeaderOptions>,
     choose_best: bool,
 ) -> Result<Table, AppError> {
+    let options = header.into();
+    let header = options.row;
     if crate::spreadsheet_input::is_text(path) || !path.is_file() {
-        return fa::load_table(path, sheet, header, choose_best);
+        return fa::load_table(path, sheet, options, choose_best);
     }
     // 目标表：参数给了就用（fa::load_table 对同一参数的分流结果唯一确定，
     // 连隐藏表名被回退的场景也自洽）；没给才解析——choose_best 时要求自动
@@ -64,7 +65,7 @@ pub(crate) fn load_table_cached(
         Some(name) => name.to_owned(),
         None => match resolve_target_sheet(path, header, choose_best) {
             Some(name) => name,
-            None => return fa::load_table(path, sheet, header, choose_best),
+            None => return fa::load_table(path, sheet, options, choose_best),
         },
     };
     // 标题行：显式给的直接进键；没给的查自动判定记事。记事缺失（首次读取）
@@ -74,21 +75,22 @@ pub(crate) fn load_table_cached(
         None => match read_header_memo(path, &target, choose_best) {
             Some(row) => row,
             None => {
-                let table = fa::load_table(path, Some(&target), None, choose_best)?;
+                let table = fa::load_table(path, Some(&target), options, choose_best)?;
                 write_header_memo(path, &target, choose_best, table.header_row);
-                store_cache(path, &target, table.header_row, choose_best, &table);
+                store_cache(path, &target, HeaderOptions { row: Some(table.header_row), ..options }, choose_best, &table);
                 return Ok(table);
             }
         },
     };
-    let Some((parquet, sidecar)) = cache_paths(path, &target, header_row, choose_best) else {
-        return fa::load_table(path, sheet, header, choose_best);
+    let resolved = HeaderOptions { row: Some(header_row), ..options };
+    let Some((parquet, sidecar)) = cache_paths(path, &target, resolved, choose_best) else {
+        return fa::load_table(path, sheet, options, choose_best);
     };
     if let Some(table) = read_cache(path, &target, header_row, &parquet, &sidecar) {
         return Ok(table);
     }
-    let table = fa::load_table(path, Some(&target), Some(header_row), choose_best)?;
-    store_cache(path, &target, header_row, choose_best, &table);
+    let table = fa::load_table(path, Some(&target), resolved, choose_best)?;
+    store_cache(path, &target, resolved, choose_best, &table);
     Ok(table)
 }
 
@@ -101,18 +103,7 @@ fn resolve_target_sheet(
     header: Option<usize>,
     choose_best: bool,
 ) -> Option<String> {
-    let mut workbook = open_workbook_auto(path).ok()?;
-    let visible: Vec<String> = workbook
-        .sheets_metadata()
-        .iter()
-        .filter(|sheet| sheet.visible == calamine::SheetVisible::Visible)
-        .map(|sheet| sheet.name.clone())
-        .collect();
-    let sheets = if visible.is_empty() {
-        workbook.sheet_names().to_vec()
-    } else {
-        visible
-    };
+    let sheets = crate::fa_sheet_pick::list_visible_sheets(path).ok()?;
     if sheets.is_empty() {
         return None;
     }
@@ -148,18 +139,20 @@ fn file_identity(path: &Path) -> Option<(PathBuf, u64, u128)> {
 fn cache_key(
     path: &Path,
     sheet: &str,
-    header_row: usize,
+    header: impl Into<HeaderOptions>,
     choose_best: bool,
 ) -> Option<String> {
+    let header = header.into();
     let (canonical, len, modified) = file_identity(path)?;
     let mut hasher = Sha256::new();
     hasher.update(canonical.to_string_lossy().as_bytes());
     hasher.update(len.to_le_bytes());
     hasher.update(modified.to_le_bytes());
     hasher.update(sheet.as_bytes());
-    hasher.update(header_row.to_le_bytes());
+    hasher.update(header.row.unwrap_or(0).to_le_bytes());
+    hasher.update(header.depth.unwrap_or(0).to_le_bytes());
     hasher.update([(choose_best as u8)]);
-    hasher.update(b"fa-table-cache-v3-physical-origin");
+    hasher.update(b"fa-table-cache-v4-header-depth");
     hasher.update(crate::header_detection::RULE_VERSION.as_bytes());
     Some(hex::encode(hasher.finalize()))
 }
@@ -191,10 +184,10 @@ fn cache_dir() -> Option<PathBuf> {
 fn cache_paths(
     path: &Path,
     sheet: &str,
-    header_row: usize,
+    header: impl Into<HeaderOptions>,
     choose_best: bool,
 ) -> Option<(PathBuf, PathBuf)> {
-    let key = cache_key(path, sheet, header_row, choose_best)?;
+    let key = cache_key(path, sheet, header, choose_best)?;
     let dir = cache_dir()?;
     Some((
         dir.join(format!("{key}.parquet")),
@@ -285,6 +278,7 @@ fn read_cache(
             sheet: Some(sheet.to_owned()),
             sheets,
             header_row,
+            header_depth: meta.get("headerDepth").and_then(Value::as_u64)? as usize,
             headers,
             row_count: row_count.max(rows.len()),
             rows,
@@ -319,15 +313,17 @@ fn read_cache(
 fn store_cache(
     source: &Path,
     sheet: &str,
-    header_row: usize,
+    header: impl Into<HeaderOptions>,
     choose_best: bool,
     table: &Table,
 ) {
+    let header = header.into();
+    let header_row = header.row.unwrap_or(table.header_row);
     if table.headers.is_empty() {
         // 空表头没有可缓存的结构（0 列也表达不了行数），直接放弃。
         return;
     }
-    let Some((parquet, sidecar)) = cache_paths(source, sheet, header_row, choose_best) else {
+    let Some((parquet, sidecar)) = cache_paths(source, sheet, header, choose_best) else {
         return;
     };
     let started = std::time::Instant::now();
@@ -357,6 +353,7 @@ fn store_cache(
         "sheet": sheet,
         "sheets": table.sheets,
         "headerRow": header_row,
+        "headerDepth": table.header_depth,
         "rowCount": table.row_count,
     });
     let partial = sidecar.with_extension("json.partial");
@@ -596,6 +593,7 @@ mod tests {
                 "sheet": "FA卡片",
                 "sheets": first.sheets,
                 "headerRow": first.header_row,
+                "headerDepth": first.header_depth,
                 "rowCount": 1,
             })
             .to_string(),

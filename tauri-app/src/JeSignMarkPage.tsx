@@ -834,6 +834,56 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       {draft.inspect && (
         <section className="kz-card jm-batches">
           <h2>批次与目标科目</h2>
+          {/* 目标科目是本卡必做动作，提为首行并挂「必做」徽标；批次 chips 退居其后。 */}
+          <div className="jm-account-block">
+            <span className="jm-account-label">
+              目标科目
+              <Badge variant="warning">必做</Badge>
+            </span>
+            <div className="jm-account-row">
+              <Button
+                type="button"
+                variant={batch.accounts.length ? "outline" : "default"}
+                data-ts-filter-trigger=""
+                className="jm-account-picker"
+                disabled={llmBusy || missingRequired.length > 0}
+                aria-expanded={menu?.field === ACCOUNT_MENU}
+                onClick={(event) => {
+                  if (menu?.field === ACCOUNT_MENU) {
+                    setMenu(undefined);
+                    return;
+                  }
+                  openMenu(ACCOUNT_MENU, event.currentTarget);
+                }}
+              >
+                {llmBusy
+                  ? "正在确定科目字段…"
+                  : batch.accounts.length
+                    ? "修改目标科目"
+                    : "选择目标科目"}
+                <Search size={16} aria-hidden="true" />
+              </Button>
+              <span className="jm-account-summary" title={batch.accounts.join("、")}>
+                {batch.accounts.length
+                  ? `已选 ${batch.accounts.length} 个：${batch.accounts.slice(0, 2).join("、")}${batch.accounts.length > 2 ? "…" : ""}`
+                  : missingRequired.length > 0
+                    ? "请先完成预览表中的科目字段映射"
+                    : "尚未选择"}
+              </span>
+            </div>
+            {filterCount > 0 && (
+              <div className="jm-filter-note">
+                另有 {filterCount} 列设了筛选条件，对所有批次一致生效
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => patch({ columnFilters: {} })}
+                >
+                  清除列筛选
+                </Button>
+              </div>
+            )}
+          </div>
           <div className="jm-batch-row">
             <div className="kz-tabs" aria-label="标记批次">
               {draft.batches.map((value, index) => (
@@ -891,8 +941,6 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               </div>
             ) : (
               <div className="jm-current-batch">
-                <span className="jm-current-batch-label">当前批次</span>
-                <strong title={batch.name}>{batch.name}</strong>
                 <Button
                   type="button"
                   variant="ghost"
@@ -930,52 +978,6 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             >
               {draft.batches.length === 1 ? "清空批次" : "删除批次"}
             </Button>
-          </div>
-          <div className="jm-account-block">
-            <span className="jm-account-label">目标科目</span>
-            <div className="jm-account-row">
-              <Button
-                type="button"
-                variant={batch.accounts.length ? "outline" : "default"}
-                data-ts-filter-trigger=""
-                className="jm-account-picker"
-                disabled={llmBusy || missingRequired.length > 0}
-                aria-expanded={menu?.field === ACCOUNT_MENU}
-                onClick={(event) => {
-                  if (menu?.field === ACCOUNT_MENU) {
-                    setMenu(undefined);
-                    return;
-                  }
-                  openMenu(ACCOUNT_MENU, event.currentTarget);
-                }}
-              >
-                {llmBusy
-                  ? "正在确定科目字段…"
-                  : batch.accounts.length
-                    ? "修改目标科目"
-                    : "选择目标科目"}
-                <Search size={16} aria-hidden="true" />
-              </Button>
-              <span className="jm-account-summary" title={batch.accounts.join("、")}>
-                {batch.accounts.length
-                  ? `已选 ${batch.accounts.length} 个：${batch.accounts.slice(0, 2).join("、")}${batch.accounts.length > 2 ? "…" : ""}`
-                  : missingRequired.length > 0
-                    ? "请先完成预览表中的科目字段映射"
-                    : "尚未选择"}
-              </span>
-            </div>
-            {filterCount > 0 && (
-              <div className="jm-filter-note">
-                另有 {filterCount} 列设了筛选条件，对所有批次一致生效
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => patch({ columnFilters: {} })}
-                >
-                  清除列筛选
-                </Button>
-              </div>
-            )}
           </div>
           <p className="kz-note jm-rule-note">
             标记只应用于所选科目行；表头筛选对整张凭证生效。

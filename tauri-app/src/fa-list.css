@@ -54,3 +54,32 @@
   color: var(--text-muted);
   font-size: var(--fs-sm);
 }
+
+/* === 设计评审落地（2026-10-25）：两期清单模式的推进动作收敛 ===
+   卡片动作行只留本步的读表/复核/匹配；「进入补充清单/直接导出」移到
+   页面底部操作区（与 TB+JE 模式一致，主 CTA 落在画布右下）。 */
+.fa-list-shell .fa-page-flow {
+  justify-content: flex-end;
+  margin-top: 0;
+}
+
+/* 表格行高统一 44px（设计评审·布局 token）：预览表此前只靠全局 padding
+   撑出行高。td 的 height 即最小行高，更长的内容仍可自行撑高。 */
+.fa-list-shell .data-table-table td {
+  height: 44px;
+}
+
+/* === 折旧政策对比页（fa-policy-page）作用域 ===
+   LLM 复核卡右上角药丸已实时显示「已复核 · N 项…」，卡内再渲染一行
+   同文的状态汇总属于同一事实说两遍，页面内隐藏；「采纳/保留当前」
+   是该卡的关键动作，从 xs（28px）提到 32px 与 sm 控件齐平。 */
+.fa-policy-page .llm-review-live-summary {
+  display: none;
+}
+.fa-policy-page .fa-review-item.fa-pending .actions button[data-slot="button"] {
+  height: 32px;
+}
+/* 政策对比预览表行高与全站统一（44px）。 */
+.fa-policy-page .data-table-table td {
+  height: 44px;
+}

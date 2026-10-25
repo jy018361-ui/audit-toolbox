@@ -2271,21 +2271,14 @@ function FaCardListPage() {
       );
     const value = result as Record<string, unknown>;
     if (value.begin && value.end) {
-      const begin = value.begin as FaInspectSide;
-      const end = value.end as FaInspectSide;
+      // 两份清单的名称/行列数已在第一步预览卡的表注里逐表展示，
+      // 结果卡不再整段复述（设计评审·去重清扫）；只留下一步的预期管理。
       return (
-        <div className="fa-result-summary">
-          <strong>文件结构读取完成</strong>
-          <span>
-            期初：{begin.displayName ?? begin.selectedSheet}，标题在第{" "}
-            {begin.detectedHeaderRow} 行，{begin.dimensions?.rows ?? 0} 条数据
-          </span>
-          <span>
-            期末：{end.displayName ?? end.selectedSheet}，标题在第{" "}
-            {end.detectedHeaderRow} 行，{end.dimensions?.rows ?? 0} 条数据
-          </span>
-          <span>请在左侧核对预览、资产ID和必选映射。</span>
-        </div>
+        <EmptyState
+          compact
+          title="等待生成底稿"
+          description="期初、期末清单已读取；确认资产 ID 与字段映射后，点击「生成 FA List 底稿」。"
+        />
       );
     }
     if (Array.isArray(value.outputPaths) && value.outputPaths.length > 0) {
@@ -2570,7 +2563,7 @@ function FaCardListPage() {
                     >
                       停止
                     </Button>
-                  ) : !faStats ? (
+                  ) : (
                     <Button
                       variant="default"
                       disabled={
@@ -2582,19 +2575,6 @@ function FaCardListPage() {
                     >
                       {resultStale ? "重新开始匹配" : "开始匹配"}
                     </Button>
-                  ) : (
-                    <>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => setStep(2)}
-                      >
-                        有，进入补充清单
-                      </Button>
-                      <Button variant="default" onClick={() => setStep(3)}>
-                        没有，直接导出
-                      </Button>
-                    </>
                   )}
                 </div>
                 {multiSheetReviewPending && (
@@ -3165,6 +3145,22 @@ function FaCardListPage() {
           </Card>
         )}
       </div>
+      {/* 推进动作与 TB+JE 模式一致放页面底部（设计评审）：卡片动作行只留
+          本步的读表/复核/匹配，匹配完成后到页底选择补充清单或直接导出。 */}
+      {step === 1 && faStats && (
+        <div
+          className="actions fa-flow-actions fa-page-flow"
+          role="group"
+          aria-label="匹配完成后的下一步"
+        >
+          <Button variant="secondary" size="sm" onClick={() => setStep(2)}>
+            有，进入补充清单
+          </Button>
+          <Button variant="default" onClick={() => setStep(3)}>
+            没有，直接导出
+          </Button>
+        </div>
+      )}
     </>
   );
 }

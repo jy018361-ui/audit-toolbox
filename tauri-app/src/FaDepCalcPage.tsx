@@ -752,9 +752,9 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                 <CardTitle>设置并生成折旧底稿</CardTitle>
                 <p>输出文件保留活公式，便于复核计算过程与后续调整。</p>
               </div>
-              <Badge variant={outputPaths.length ? "success" : "neutral"}>
-                {outputPaths.length ? "已生成" : "待生成"}
-              </Badge>
+              {/*「已生成」只在结果标题里说一遍（设计评审·去重）；未生成时
+                  保留待生成徽标提示当前状态。 */}
+              {!outputPaths.length && <Badge variant="neutral">待生成</Badge>}
             </CardHeader>
             <CardContent>
               <div className="dep-export-grid">
@@ -814,7 +814,9 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                     </Button>
                   ) : (
                     <Button
-                      variant="default"
+                      /* 成功后深色让给「打开结果」，主按钮退为次级「重新生成」
+                         （设计评审·结果页契约：一屏一个深色主按钮）。 */
+                      variant={outputPaths.length ? "secondary" : "default"}
                       disabled={
                         busy ||
                         llmBusy ||
@@ -824,7 +826,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                       }
                       onClick={() => void startExport()}
                     >
-                      生成折旧测算表
+                      {outputPaths.length ? "重新生成" : "生成折旧测算表"}
                     </Button>
                   )}
                 </div>

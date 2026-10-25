@@ -54,16 +54,6 @@
   min-width: 0;
   flex-wrap: wrap;
 }
-.jm-current-batch-label {
-  color: var(--text-muted);
-  font-size: var(--fs-sm);
-}
-.jm-current-batch strong {
-  max-width: 18rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .jm-batches .jm-batch-name {
   display: grid;
   gap: var(--sp-1);
@@ -96,7 +86,21 @@
   gap: var(--sp-3);
 }
 .jm-account-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
   font-weight: 600;
+}
+/* 一屏一深色（设计评审）：文件已读取后「读取并自动映射」是上一步动作，
+   退为次级样式，深色主按钮让给本步的「选择目标科目/标记并导出」。 */
+.jm-source-loaded .kz-actions button[data-variant="default"] {
+  border-color: var(--input);
+  background: var(--surface);
+  color: var(--brand-link);
+  box-shadow: none;
+}
+.jm-source-loaded .kz-actions button[data-variant="default"]:hover:not(:disabled) {
+  background: var(--surface-muted);
 }
 .jm-account-summary {
   min-width: 0;

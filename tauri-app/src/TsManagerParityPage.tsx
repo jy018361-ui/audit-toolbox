@@ -791,6 +791,8 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                         ? () => patch({ outputPath: "" })
                         : undefined
                     }
+                    /* 动词统一（设计评审）：选文件的按钮全站叫「选择」。 */
+                    browseLabel="选择"
                   />
                 </Field>
                 <p className="hint">
@@ -873,22 +875,12 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     value: state.inspect.dimensions?.columns ?? headers.length,
                   },
                   { label: "Sheet", value: state.sheet || "CSV" },
-                  { label: "有效筛选", value: filters.length },
+                  { label: "已设筛选列", value: filters.length },
                 ]}
               />
             )}
-            {/* Legacy forced a sheet picker before loading; silently taking the
-                first sheet reads a cover page as if it were the data. */}
-            {(state.inspect?.sheets?.length ?? 0) > 1 && (
-              /* P3-6a：这是常规信息提示（当前 Sheet 未必有错），用中性蓝的
-                 info-box，不再借用错误级的红底红框。 */
-              <div className="info-box">
-                该工作簿共有 {state.inspect?.sheets?.length}{" "}
-                个工作表，当前使用「
-                {state.sheet || state.inspect?.selectedSheet}」。
-                如果数据不在这一张，请在预览区切换 Sheet 后重新加载。
-              </div>
-            )}
+            {/* Sheet 名已在上方统计瓦片里说一遍（设计评审·去重）：多工作簿
+                的切换入口就在预览区工具栏的 Sheet 下拉，不再重复横幅提醒。 */}
             {preview.length > 0 && (
               <DataTable
                 columns={headers}

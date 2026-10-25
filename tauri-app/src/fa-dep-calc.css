@@ -113,6 +113,12 @@
   margin-top: 0;
 }
 
+/* 表格行高统一 44px（设计评审·布局 token）：预览表此前只靠全局 padding
+   撑出行高。td 的 height 即最小行高，更长的内容仍可自行撑高。 */
+.fa-dep-page .data-table-table td {
+  height: 44px;
+}
+
 .dep-preview-empty [data-slot="card-content"] {
   padding-bottom: var(--sp-5);
 }

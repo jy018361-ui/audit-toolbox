@@ -862,7 +862,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         current={step - 1}
         onStepClick={(index) => setStep((index + 1) as 1 | 2)}
       />
-      <div className="fa-stack">
+      <div className="fa-stack fa-policy-page">
         <Card variant="section">
           <CardHeader>
             <CardTitle>
@@ -1056,11 +1056,13 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                     </Button>
                   ) : (
                     <Button
-                      variant="default"
+                      /* 成功后深色让给「打开结果」，主按钮退为次级「重新生成」
+                         （设计评审·结果页契约：一屏一个深色主按钮）。 */
+                      variant={outputPaths.length ? "secondary" : "default"}
                       disabled={!readyToExport}
                       onClick={() => void startExport()}
                     >
-                      生成折旧政策对比
+                      {outputPaths.length ? "重新生成" : "生成折旧政策对比"}
                     </Button>
                   )}
                 </div>

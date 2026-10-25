@@ -512,3 +512,13 @@
   gap: var(--sp-3) var(--sp-4);
   padding: var(--sp-4) var(--sp-5) var(--sp-3);
 }
+
+/* 选中态必须压过 `.kz-card button` 通用底色：那条是 (0,2,1)、且源序在后，
+   同权重的选中规则会被它吃掉（宽窄屏截图核验过 chip 全灰）。 */
+.kz-grid .kz-tabs button.kz-batch-chip-active,
+.kz-grid .kz-tabs button.active {
+  background: var(--brand);
+  color: var(--ink-inverse);
+  border-color: var(--brand);
+  font-weight: var(--fw-medium);
+}

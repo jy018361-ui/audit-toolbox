@@ -398,7 +398,7 @@ export default function FileListDirectoryPage({
                           children: (
                             <>
                               <strong>清单已生成</strong>
-                              {job.message && job.message !== "处理完成。" && (
+                              {job.message && job.message !== "处理完成。" && !job.message.startsWith("清单已生成") && (
                                 <span>{job.message}</span>
                               )}
                               {exportSkippedCount > 0 && (

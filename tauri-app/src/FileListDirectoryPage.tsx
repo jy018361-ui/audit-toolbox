@@ -29,6 +29,7 @@ import { confirmDialog } from "@/components/ConfirmDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
+import { NoticeStack } from "@/components/NoticeStack";
 import { useTableColumnResize } from "@/components/useTableColumnResize";
 
 const CACHE_KEY = "audit-toolbox:file-list-directory:v1";
@@ -234,6 +235,35 @@ export default function FileListDirectoryPage({
     job && ["completed", "failed", "cancelled"].includes(job.phase);
   const interrupted = job?.phase === "failed" || job?.phase === "cancelled";
   const scanInterrupted = interrupted && !scan;
+  // 导出结果里带 skippedPaths：清单已生成，只是部分路径没读进来。
+  const exportSkippedCount =
+    job?.phase === "completed" && !isFileListScan(job.result)
+      ? ((job.result as { skippedPaths?: unknown })?.skippedPaths as
+          | string[]
+          | undefined)?.length ?? 0
+      : 0;
+  // 徽标只报告当前步的状态：「扫描完成」曾挂在第 2 步卡题上，让生成页
+  // 还在讲扫描的事（UI 审核）。
+  const scanBadge = busy && !scan
+    ? "扫描中"
+    : interrupted
+      ? job.phase === "cancelled"
+        ? "已取消"
+        : "处理失败"
+      : scan
+        ? "扫描完成"
+        : "待选择";
+  const exportBadge = busy
+    ? "生成中"
+    : interrupted
+      ? job.phase === "cancelled"
+        ? "已取消"
+        : "处理失败"
+      : job?.phase === "completed"
+        ? "已完成"
+        : "待生成";
+  const badgeText = step === 1 ? scanBadge : exportBadge;
+  const badgeReady = ["扫描中", "生成中", "扫描完成", "已完成"].includes(badgeText);
   return (
     <>
       <PageHeader
@@ -262,11 +292,10 @@ export default function FileListDirectoryPage({
       <div className="fa-stack">
         <Card>
           <CardHeader>
-            <CardTitle>
-              {step === 1 ? "1. 选择扫描范围" : "2. 确认输出并生成"}
-            </CardTitle>
-            <Badge className={scan && !interrupted ? "badge-ready" : "badge-neutral"}>
-              {busy && !scan ? "扫描中" : interrupted ? job.phase === "cancelled" ? "已取消" : "处理失败" : scan ? "扫描完成" : "待选择"}
+            {/* 步骤条标签与卡题同词：进哪一步，卡片就叫什么（UI 审核）。 */}
+            <CardTitle>{step === 1 ? "选择文件夹" : "确认并生成"}</CardTitle>
+            <Badge className={badgeReady ? "badge-ready" : "badge-neutral"}>
+              {badgeText}
             </Badge>
           </CardHeader>
           <CardContent>
@@ -357,6 +386,34 @@ export default function FileListDirectoryPage({
                     </Button>
                   )}
                 </div>
+                {/* 导出完成的落点放在触发按钮之后：完成是 success 绿——
+                    此前沿用任务条的琥珀色（含跳过路径被判成「部分完成 100%」），
+                    与「清单已生成」同框自相矛盾（UI 审核）。 */}
+                {job?.phase === "completed" && !isFileListScan(job.result) && (
+                  <div className="file-list-export-banner">
+                    <NoticeStack
+                      items={[
+                        {
+                          tone: "success",
+                          children: (
+                            <>
+                              <strong>清单已生成</strong>
+                              {job.message && job.message !== "处理完成。" && (
+                                <span>{job.message}</span>
+                              )}
+                              {exportSkippedCount > 0 && (
+                                <span>
+                                  另有 {exportSkippedCount}{" "}
+                                  个路径无法访问、已跳过，明细见「扫描预览」。
+                                </span>
+                              )}
+                            </>
+                          ),
+                        },
+                      ]}
+                    />
+                  </div>
+                )}
               </>
             )}
           </CardContent>
@@ -413,12 +470,10 @@ export default function FileListDirectoryPage({
                 )}
               </div>
             )}
-            {/* 扫描完成事件的结果就是预览数据本身：底部再挂一条进度横幅会把
-                「含跳过路径」归一成「部分完成 100%」，与上方「扫描完成」徽标、
-                左侧“扫描完成：N 个文件”文案互相打架（UI 审核）。完成态信息由
-                步骤卡徽标 + 摘要行 + 跳过路径清单承担，横幅只在扫描进行中或
-                导出任务上出现。 */}
-            {job && !interrupted && !isFileListScan(job.result) && (
+            {/* 扫描完成事件的结果就是预览数据本身：底部再挂进度横幅会把
+                「含跳过路径」归一成「部分完成 100%」。导出进行中才显示任务条，
+                完成态交给左侧输出卡里的绿色成功横幅（UI 审核）。 */}
+            {job && !terminal && !isFileListScan(job.result) && (
               <JobProgress
                 job={job}
                 onCancel={() => jobCancel(activeJobId)}
@@ -455,30 +510,36 @@ function FileListScanTable({ scan }: { scan: FileListScan }) {
   const resize = useTableColumnResize<HTMLDivElement>({
     storageKey: "file-list.directory",
   });
+  // 屏上预览只留「层级 + 文件名称」：相对路径列与文件名称、层级列逐行
+  // 重复且最宽，导出 Excel 不受影响仍含完整路径（UI 审核）。
+  const allDepths = Array.from({ length: scan.maxDepth + 1 }, (_, index) => index);
+  // 某一级文件夹整列为空（如全部文件都在根目录）时自动隐藏该列，
+  // 一列空壳只会让人怀疑数据丢了。
+  const depthColumns = scan.preview.length
+    ? allDepths.filter((index) =>
+        scan.preview.some((row) => (row.levels[index] ?? "").trim() !== ""),
+      )
+    : allDepths;
   return (
     <div className="file-list-table-wrap" ref={resize.ref}>
       <table className="file-list-table">
         <thead>
           <tr>
-            {Array.from({ length: scan.maxDepth + 1 }, (_, index) => (
+            {depthColumns.map((index) => (
               <th key={index}>{index + 1}级文件夹</th>
             ))}
             <th>文件名称</th>
-            <th>相对路径</th>
           </tr>
         </thead>
         <tbody>
           {scan.preview.map((row) => (
             <tr key={row.fullPath}>
-              {Array.from({ length: scan.maxDepth + 1 }, (_, index) => (
+              {depthColumns.map((index) => (
                 <td key={index} title={row.levels[index] ?? ""}>
                   {row.levels[index] ?? ""}
                 </td>
               ))}
               <td title={row.name}>{row.name}</td>
-              {/* 相对路径列要显示真实相对路径（含各级子目录）；此前取末段
-                  文件名，与「文件名称」列在任何目录层级下都逐行重复（UI 审核）。 */}
-              <td title={row.relativePath}>{row.relativePath}</td>
             </tr>
           ))}
         </tbody>

@@ -14,9 +14,11 @@
   gap: var(--sp-4);
 }
 
+/* 状态砖只放状态（自动检测 / 当前状态）；「后台常驻」是设置，
+   开关移出砖排单独一行（UI 审核：状态与控件混排曾经职责不清）。 */
 .meeting-status-grid {
   display: grid;
-  grid-template-columns: minmax(0, 0.75fr) minmax(0, 0.9fr) minmax(0, 1.7fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--sp-2);
 }
 
@@ -40,10 +42,22 @@
   font-size: var(--fs-sm);
 }
 
-.meeting-resident-cell {
+.meeting-resident-row {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+}
+
+.meeting-resident-row span {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  min-width: 0;
 }
 
 .meeting-watch-hint {
@@ -89,9 +103,9 @@
   margin-top: var(--sp-3);
 }
 
+/* 隐私告知外壳：配色与排版交给 NoticeStack 的琥珀警示条，这里只管节奏。 */
 .meeting-import-note {
   margin: var(--sp-2) 0 var(--sp-3);
-  line-height: var(--lh-body);
 }
 
 .meeting-result-card {

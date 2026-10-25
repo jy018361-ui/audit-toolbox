@@ -147,6 +147,11 @@ describe("真实工具页任务事件状态", () => {
     emit(event("pdf_to_excel", "completed", "转换完成", partial, partial.outputPaths));
     expect(container).toHaveTextContent("成功 1、失败 1");
     expect(screen.getByText("加密文件")).toBeInTheDocument();
+    // 评审决议：结果横幅改绿色成功层、失败整行浅红底；「打开输出」并入横幅。
+    expect(container.querySelector(".pdf-result-callout.pdf-result-toned")).not.toBeNull();
+    expect(container.querySelector("tr.pdf-row-failed")).not.toBeNull();
+    expect(container.querySelector(".pdf-row-failed .pdf-error-text")?.textContent).toBe("加密文件");
+    expect(screen.getByRole("button", { name: "打开输出" }).closest(".pdf-result-callout")).not.toBeNull();
     expect(screen.getByRole("button", { name: "打开输出" })).toHaveAttribute("title", "C:/处理清单.xlsx");
     emit(event("pdf_to_excel", "failed", "转换失败"));
     expect(state("failed")).toHaveTextContent("转换失败");
@@ -188,7 +193,8 @@ describe("真实工具页任务事件状态", () => {
     await waitFor(() => expect(api.jobStart).toHaveBeenCalled());
     emit(event("fuzzy_match", "running", "正在匹配"));
     expect(state("running")).toBeInTheDocument();
-    expect(state("running")?.closest('[data-slot="card"]')).toHaveTextContent("预估与启动");
+    // 评审决议：「预估与启动」并入「匹配设置」卡底部，进度条随迁。
+    expect(state("running")?.closest('[data-slot="card"]')).toHaveTextContent("匹配设置");
     emit(event("fuzzy_match", "failed", "匹配失败"));
     expect(state("failed")).toHaveTextContent("匹配失败");
     emit(event("fuzzy_match", "cancelled", "匹配取消"));

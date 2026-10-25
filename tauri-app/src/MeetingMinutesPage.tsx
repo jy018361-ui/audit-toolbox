@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorBox } from "@/components/ErrorBox";
 import { FileDropInput } from "@/components/FileDropInput";
+import { NoticeStack } from "@/components/NoticeStack";
 import { JobProgress, terminalJobError } from "@/components/JobProgress";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
@@ -262,22 +263,21 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                 <dt>当前状态</dt>
                 <dd>{recording ? "正在录制会议" : status?.inCall ? "会议进行中（未记录）" : "空闲"}</dd>
               </div>
-              <div className="meeting-status-item">
-                <dt>后台常驻</dt>
-                <dd className="meeting-resident-cell">
-                  <SwitchInput
-                    checked={resident}
-                    onChange={changeResident}
-                    ariaLabel="后台常驻"
-                  />
-                  <span>
-                    {resident
-                      ? "关窗后驻留系统托盘继续监控，真正退出请用托盘菜单「退出」。"
-                      : "关窗即退出工具箱，监控同时停止。"}
-                  </span>
-                </dd>
-              </div>
             </dl>
+            {/* 「后台常驻」是设置不是状态：开关曾挤在状态砖里，移出砖排单独一行。 */}
+            <div className="meeting-resident-row">
+              <SwitchInput
+                checked={resident}
+                onChange={changeResident}
+                ariaLabel="后台常驻"
+              />
+              <strong>后台常驻</strong>
+              <span>
+                {resident
+                  ? "关窗后驻留系统托盘继续监控，真正退出请用托盘菜单「退出」。"
+                  : "关窗即退出工具箱，监控同时停止。"}
+              </span>
+            </div>
             {!previewMode && <p className="meeting-watch-hint" role="status">{watchHint}</p>}
             <div className="meeting-actions-row">
               {recording ? (
@@ -298,14 +298,31 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                 </Button>
               )}
             </div>
-            <p className="meeting-import-note" role="note">
-              录音包含系统声音与麦克风两轨，停止时自动混音；录音将上传阿里云百炼转写，请先告知参会人。
-            </p>
+            {/* 隐私告知升级为琥珀提示条：录音要上传云端转写，属于会前必须
+                交代的事项，普通正文曾经毫无提示力（UI 审核）。 */}
+            <div className="meeting-import-note">
+              <NoticeStack
+                items={[
+                  {
+                    tone: "warning",
+                    children: (
+                      <span>
+                        录音包含系统声音与麦克风两轨，停止时自动混音；录音将上传阿里云百炼转写，请先告知参会人。
+                      </span>
+                    ),
+                  },
+                ]}
+              />
+            </div>
+            {/* hideFilledLabel：选中后只留文件名，「已有录音（wav / mp3 / m4a 等）」
+                的格式说明只属于空态占位；清空按钮随槽位出现。 */}
             <FileDropInput
               value={importPath ? displayAudioFileName(importPath) : ""}
               placeholder="拖放或点击选择已有录音（wav / mp3 / m4a 等）"
+              hideFilledLabel
               disabled={busy}
               onBrowse={browseAudio}
+              onClear={importPath && !busy ? () => setImportPath("") : undefined}
               onDragStateChange={() => undefined}
             />
           </CardContent>

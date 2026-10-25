@@ -810,7 +810,15 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                   {s.inspection && (
                     <MappingPanel
                       title={`${SOURCE_LABEL[kind]}匹配列`}
-                      note={`${s.inspection.previewOnly ? "已预览 " : ""}${formatCount(s.inspection.rowCount)} 行 × ${s.inspection.headers.length} 列${s.inspection.previewOnly ? "，正式匹配时统计总行数" : ""}`}
+                      // 面板头部固定输出「N 行预览 · M 列」，note 只补差量信息
+                      // （全量读取时的总行数），不再把同一组数字说两遍（UI 审核）。
+                      note={
+                        s.inspection.previewOnly
+                          ? ""
+                          : s.inspection.rowCount !== s.inspection.preview.length
+                            ? `共 ${formatCount(s.inspection.rowCount)} 行`
+                            : ""
+                      }
                       headers={s.inspection.headers}
                       rows={s.inspection.preview}
                       mapping={s.mapping}
@@ -904,14 +912,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
               <p className="fa-missing-hint">{thresholdProblem}</p>
             )}
           </details>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>预估与启动</CardTitle>
-        </CardHeader>
-        <CardContent>
+          {/* 「预估与启动」并入设置卡底部：独立一卡曾多出一整屏滚动（UI 审核）。 */}
           <div className="fuzzy-estimate">
             <p>
               A 侧 {formatCount(rowsA)} 行 / B 侧 {formatCount(rowsB)}{" "}

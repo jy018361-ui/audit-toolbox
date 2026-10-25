@@ -87,3 +87,10 @@
 .file-list-skipped p {
   margin: var(--sp-2) 0 0;
 }
+
+/* === 设计评审决议（2026-10-25）：导出成功横幅落在生成按钮之后 ===
+   完成语义用 success 绿（NoticeStack 统一色），不再与任务条的琥珀
+   「部分完成」混同；只补外距，配色全部交给共用件。 */
+.file-list-export-banner {
+  margin-top: var(--sp-3);
+}

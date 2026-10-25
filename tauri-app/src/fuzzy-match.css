@@ -57,6 +57,25 @@
 .fuzzy-source-card .kz-preview {
   margin-top: 12px;
 }
+/* 预览内嵌卡去边框只留浅底：外层已有来源卡包着，双层描边互相打架（UI 审核）。
+   三类选择器压过 mapping-panel.kz-card 的公共外壳，不依赖加载顺序。 */
+.fuzzy-source-card .mapping-panel.kz-preview.kz-card {
+  border: 0;
+  box-shadow: none;
+  background: var(--surface-sunken);
+}
+/* 开始匹配就绪态转深色可用态：就绪与禁用曾经同色，分不清能不能点（UI 审核）。
+   禁用保持灰青实底并停用投影，与可用态拉开。 */
+.fuzzy-page .fx-actions button[data-slot="button"][data-variant="default"]:not(:disabled) {
+  background: var(--brand);
+  color: var(--ink-inverse);
+  box-shadow: var(--shadow-button);
+}
+.fuzzy-page .fx-actions button[data-slot="button"][data-variant="default"]:disabled {
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  box-shadow: none;
+}
 .fuzzy-settings-grid {
   display: grid;
   grid-template-columns: minmax(220px, 280px) 1fr;
@@ -102,6 +121,10 @@
 .fuzzy-estimate {
   display: grid;
   gap: 10px;
+  /* 预估并入「匹配设置」卡底部：用分隔线与上方高级设置隔开。 */
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
 }
 .fuzzy-estimate > p:first-child {
   margin: 0;

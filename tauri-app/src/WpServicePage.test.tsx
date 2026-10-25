@@ -78,10 +78,14 @@ describe("WpServicePage", () => {
     expect(screen.getByText(/文件名包含“我的订单”/)).toBeInTheDocument();
     expect(screen.getByText(/每类输入文件只能保留一个/)).toBeInTheDocument();
     expect(screen.getByText("尚未生成结果")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "1 选择目录" })).toHaveAttribute(
+    // 评审决议：步条/卡题/按钮三处同词——第 3 步与按钮都叫「生成服务方案」，
+    // 第 1 步与卡题都叫「选择工作目录」。
+    expect(screen.getByRole("button", { name: "1 选择工作目录" })).toHaveAttribute(
       "aria-current",
       "step",
     );
+    expect(screen.getByRole("button", { name: "生成服务方案" })).toBeDisabled();
+    expect(screen.getByText(/请先选择工作目录/)).toBeInTheDocument();
   });
 
   // P2-004：生成任务失败（如「找不到我的订单…」红色报错）时，
@@ -93,7 +97,7 @@ describe("WpServicePage", () => {
 
     // 目录已选 → 第 1 步保持已完成
     expect(
-      screen.getByRole("button", { name: "1 选择目录（已完成）" }),
+      screen.getByRole("button", { name: "1 选择工作目录（已完成）" }),
     ).toBeInTheDocument();
     // 第 2 步：失败态，既不是 done（无已完成对勾）也不是 active
     const step2 = screen.getByRole("button", { name: "2 检查输入（失败）" });
@@ -104,7 +108,7 @@ describe("WpServicePage", () => {
     expect(step2).not.toHaveAttribute("aria-current", "step");
     // 第 3 步不受影响，仍未开始
     expect(
-      screen.getByRole("button", { name: "3 生成结果" }),
+      screen.getByRole("button", { name: "3 生成服务方案" }),
     ).not.toHaveAttribute("aria-current", "step");
     // 红色报错与步骤条状态一致（真机证据里两者矛盾）
     expect(screen.getByText(/找不到我的订单文件/)).toBeInTheDocument();
@@ -122,13 +126,13 @@ describe("WpServicePage", () => {
     );
 
     expect(
-      screen.getByRole("button", { name: "1 选择目录（已完成）" }),
+      screen.getByRole("button", { name: "1 选择工作目录（已完成）" }),
     ).toBeInTheDocument();
     const step2 = screen.getByRole("button", { name: "2 检查输入（已完成）" });
     expect(step2.className).toContain("done");
     expect(step2.className).not.toContain("error");
     expect(
-      screen.getByRole("button", { name: "3 生成结果" }),
+      screen.getByRole("button", { name: "3 生成服务方案" }),
     ).toHaveAttribute("aria-current", "step");
   });
 

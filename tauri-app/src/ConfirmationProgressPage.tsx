@@ -116,6 +116,8 @@ export default function ConfirmationProgressPage({
   const [result, setResult] = useState<Record<string, unknown>>();
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [dragHover, setDragHover] = useState(false);
+  // 清单检查表默认折叠成一行摘要：报告生成后，长预览表会把结果挤出首屏。
+  const [checklistOpen, setChecklistOpen] = useState(false);
   const activeJob = useRef("");
 
   useEffect(() => {
@@ -311,6 +313,57 @@ export default function ConfirmationProgressPage({
         onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3)}
       />
       <div className="fa-stack">
+        {/* 报告生成后「本次报告」升到步骤条正下方第一位：结果屏先看到结果，
+            输入与检查表靠后（UI 审核：报告曾沉在 1400px 页底）。 */}
+        {(reports.length > 0 || outputPaths.length > 0) && (
+          <Card className="confirmation-report-card">
+            <CardHeader>
+              <CardTitle>本次报告</CardTitle>
+              <Badge
+                variant={reports.some((report) => report.status === "skipped") ? "warning" : "success"}
+              >
+                {reports.some((report) => report.status === "skipped") ? "部分未生成" : "已完成"}
+              </Badge>
+            </CardHeader>
+            <CardContent>
+              {reports.length > 0 && (
+                <div className="confirmation-report-list" role="status">
+                  {reports.map((report, index) => (
+                    <div
+                      key={String(report.type ?? index)}
+                      className={report.status === "skipped" ? "confirmation-report-row is-skipped" : "confirmation-report-row"}
+                    >
+                      <strong>{String(report.label ?? report.type ?? "报告")}</strong>
+                      <span>
+                        {report.status === "skipped"
+                          ? `未生成：${String(report.reason ?? "没有符合类型的数据")}`
+                          : `已生成${typeof report.summaryRows === "number" ? ` · ${report.summaryRows} 行` : ""}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {outputPaths.length > 0 && (
+                <div className="confirmation-output-actions" aria-label="报告文件">
+                  {outputPaths.map((path, index) => (
+                    <Button
+                      type="button"
+                      variant={index === 0 ? "default" : "secondary"}
+                      size="sm"
+                      className="confirmation-output-link"
+                      key={path}
+                      title={path}
+                      onClick={() => void openOutput(path)}
+                    >
+                      {/* 深色主按钮让给交付物入口；其余报告次级排后。 */}
+                      {index === 0 ? "打开报告" : `打开：${displayFileName(path)}`}
+                    </Button>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
         <Card>
           <CardHeader>
             <CardTitle>
@@ -418,14 +471,6 @@ export default function ConfirmationProgressPage({
                     缺少报告必需字段：
                     {inspection.missingColumns.join("、")}
                   </div>
-                ) : inspection ? (
-                  <div
-                    className="confirmation-success"
-                    title={inspection.outputDirectory}
-                  >
-                    报告保存位置：
-                    {displayFileName(inspection.outputDirectory)}
-                  </div>
                 ) : null}
                 <div className="actions">
                   <Button
@@ -456,14 +501,6 @@ export default function ConfirmationProgressPage({
                     缺少报告必需字段：
                     {inspection.missingColumns.join("、")}
                   </div>
-                ) : inspection ? (
-                  <div
-                    className="confirmation-success"
-                    title={inspection.outputDirectory}
-                  >
-                    报告保存位置：
-                    {displayFileName(inspection.outputDirectory)}
-                  </div>
                 ) : null}
                 <p className="hint">
                   报告范围：{scopeSummary?.label ?? "银行 + 往来"}。
@@ -479,7 +516,9 @@ export default function ConfirmationProgressPage({
                     上一步
                   </Button>
                   {/* 运行中主按钮换成"停止"次按钮，与折旧政策对比 / FA List
-                      一致；仅禁用不够醒目，审计（P1-3）仍会误读为可再点。 */}
+                      一致；仅禁用不够醒目，审计（P1-3）仍会误读为可再点。
+                      报告已生成后主按钮转次级「重新生成」，深色让给报告卡里
+                      的「打开报告」（UI 审核）。 */}
                   {busy && job ? (
                     <Button
                       type="button"
@@ -488,6 +527,16 @@ export default function ConfirmationProgressPage({
                       onClick={() => void cancelJobWithFeedback(job.jobId)}
                     >
                       停止
+                    </Button>
+                  ) : reportsReady ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={!generateReady}
+                      onClick={() => void generate()}
+                    >
+                      重新生成
                     </Button>
                   ) : (
                     <Button
@@ -522,85 +571,65 @@ export default function ConfirmationProgressPage({
               />
             )}
             {inspection && (
-              <>
-                <StatGrid
-                  columns={4}
-                  items={[
-                    { label: "总行数", value: inspection.statistics.total },
-                    { label: "银行函证", value: inspection.statistics.bank },
-                    { label: "往来函证", value: inspection.statistics.trade },
-                    {
-                      label: "项目 / 单位",
-                      value: `${formatCount(inspection.statistics.projects)} / ${formatCount(inspection.statistics.units)}`,
-                    },
-                  ]}
-                />
-                {inspection.statistics.baseDates.length > 0 && (
-                  <p className="confirmation-dates">
-                    银行函证基准日：{inspection.statistics.baseDates.join("、")}
-                  </p>
-                )}
-                <DataTable
-                  columns={inspection.headers}
-                  rows={inspection.preview}
-                  resizeKey="confirmation.preview"
-                  caption={
-                    <strong>函证清单前 {inspection.preview.length} 行</strong>
-                  }
-                  maxHeight={430}
-                />
-              </>
+              checklistOpen ? (
+                <>
+                  <StatGrid
+                    columns={4}
+                    items={[
+                      { label: "总行数", value: inspection.statistics.total },
+                      { label: "银行函证", value: inspection.statistics.bank },
+                      { label: "往来函证", value: inspection.statistics.trade },
+                      {
+                        label: "项目 / 单位",
+                        value: `${formatCount(inspection.statistics.projects)} / ${formatCount(inspection.statistics.units)}`,
+                      },
+                    ]}
+                  />
+                  {inspection.statistics.baseDates.length > 0 && (
+                    <p className="confirmation-dates">
+                      银行函证基准日：{inspection.statistics.baseDates.join("、")}
+                    </p>
+                  )}
+                  <DataTable
+                    columns={inspection.headers}
+                    rows={inspection.preview}
+                    resizeKey="confirmation.preview"
+                    caption={
+                      <strong>函证清单前 {inspection.preview.length} 行</strong>
+                    }
+                    maxHeight={430}
+                  />
+                  <div className="confirmation-checklist-toggle-row">
+                    <button
+                      type="button"
+                      className="confirmation-checklist-summary"
+                      aria-expanded="true"
+                      onClick={() => setChecklistOpen(false)}
+                    >
+                      <span>收起检查明细</span>
+                      <span aria-hidden="true">▴ 收起</span>
+                    </button>
+                  </div>
+                </>
+              ) : (
+                /* 折叠成一行摘要：检查数字一眼可查，长表按需展开（UI 审核）。 */
+                <button
+                  type="button"
+                  className="confirmation-checklist-summary"
+                  aria-expanded="false"
+                  onClick={() => setChecklistOpen(true)}
+                >
+                  <span>
+                    {formatCount(inspection.statistics.total)} 行 · 银行{" "}
+                    {formatCount(inspection.statistics.bank)} · 往来{" "}
+                    {formatCount(inspection.statistics.trade)}
+                  </span>
+                  <span aria-hidden="true">▸ 展开</span>
+                </button>
+              )
             )}
           </CardContent>
         </Card>
-        {(reports.length > 0 || outputPaths.length > 0) && (
-          <Card className="confirmation-report-card">
-            <CardHeader>
-              <CardTitle>本次报告</CardTitle>
-              <Badge
-                variant={reports.some((report) => report.status === "skipped") ? "warning" : "success"}
-              >
-                {reports.some((report) => report.status === "skipped") ? "部分未生成" : "已完成"}
-              </Badge>
-            </CardHeader>
-            <CardContent>
-              {reports.length > 0 && (
-                <div className="confirmation-report-list" role="status">
-                  {reports.map((report, index) => (
-                    <div
-                      key={String(report.type ?? index)}
-                      className={report.status === "skipped" ? "confirmation-report-row is-skipped" : "confirmation-report-row"}
-                    >
-                      <strong>{String(report.label ?? report.type ?? "报告")}</strong>
-                      <span>
-                        {report.status === "skipped"
-                          ? `未生成：${String(report.reason ?? "没有符合类型的数据")}`
-                          : `已生成${typeof report.summaryRows === "number" ? ` · ${report.summaryRows} 行` : ""}`}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {outputPaths.length > 0 && (
-                <div className="confirmation-output-actions" aria-label="报告文件">
-                  {outputPaths.map((path) => (
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      className="confirmation-output-link"
-                      key={path}
-                      title={path}
-                      onClick={() => void openOutput(path)}
-                    >
-                      打开：{displayFileName(path)}
-                    </Button>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        )}
       </div>
     </div>
   );

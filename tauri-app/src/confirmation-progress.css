@@ -279,6 +279,31 @@
   gap: var(--sp-2);
   margin-top: var(--sp-4);
 }
+
+/* === 设计评审决议（2026-10-25）：清单检查折叠摘要 ===
+   检查表默认折叠成一行摘要（「N 行 · 银行 x · 往来 y ▸ 展开」），
+   报告生成后不再让长预览表把结果挤出首屏。 */
+.confirmation-checklist-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-muted);
+  color: var(--brand-link);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  text-align: left;
+}
+.confirmation-checklist-summary:hover {
+  border-color: var(--brand-link);
+}
+.confirmation-checklist-toggle-row {
+  margin-top: var(--sp-3);
+}
 @media (max-width: 700px) {
   .confirmation-report-row {
     display: grid;

@@ -31,6 +31,7 @@ import {
   fileStatusPill,
   filterPdfPaths,
   isPdfConvertResult,
+  isSuccessfulFileResult,
   pdfFileName,
   summarizeFileResults,
   summarizeFileResultsText,
@@ -196,8 +197,32 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
         current={currentStep}
       />
       {summary && (
-        <div className="pdf-result-callout" role="status">
-          <strong>转换完成：成功 {formatCount(summary.successCount)} 份，失败 {formatCount(summary.failCount)} 份</strong>
+        /* 结果横幅分色：完成用 success 绿打底，失败份数以红色数字跳出；
+           「打开输出」在成功态并入横幅右侧，不再沉在结果卡底部（UI 审核）。 */
+        <div className="pdf-result-callout pdf-result-toned" role="status">
+          <strong>
+            转换完成：成功 {formatCount(summary.successCount)} 份
+            {summary.failCount > 0 && (
+              <>
+                ，失败{" "}
+                <b className="pdf-result-fail-count">
+                  {formatCount(summary.failCount)}
+                </b>{" "}
+                份
+              </>
+            )}
+          </strong>
+          {openTarget && (
+            <Button
+              type="button"
+              variant="default"
+              size="sm"
+              title={openTarget}
+              onClick={() => void openOutput(openTarget)}
+            >
+              打开输出
+            </Button>
+          )}
         </div>
       )}
       {job?.phase === "cancelled" && (
@@ -350,9 +375,6 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                 </Button>
               )}
             </div>
-            {!pdfPaths.length && (
-              <p className="hint">请先添加回函 PDF，再开始转换。</p>
-            )}
           </CardContent>
         </Card>
 
@@ -372,22 +394,12 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
               <>
                 <p className="hint">{summarizeFileResultsText(summary)}</p>
                 <PdfConvertResultTable files={result.files} />
-                {openTarget && (
-                  <div className="actions">
-                    <Button
-                      type="button"
-                      variant="default"
-                      title={openTarget}
-                      onClick={() => void openOutput(openTarget)}
-                    >
-                      打开输出
-                    </Button>
-                  </div>
-                )}
               </>
             ) : (
               !job && (
+                /* 空态压成单行紧凑块：这里只是等待位，不再撑一整块虚线占位。 */
                 <EmptyState
+                  compact
                   title="等待转换结果"
                   description={
                     pdfPaths.length ? undefined : "先添加回函 PDF，再开始转换。"
@@ -429,7 +441,10 @@ function PdfConvertResultTable({
           </thead>
           <tbody>
             {files.map((row, index) => (
-              <tr key={`${row.outputPath || row.name}#${index}`}>
+              <tr
+                key={`${row.outputPath || row.name}#${index}`}
+                className={!isSuccessfulFileResult(row) ? "pdf-row-failed" : undefined}
+              >
                 <td title={row.name}>{row.name}</td>
                 <td>
                   <span className={fileStatusPill(row)}>
@@ -440,7 +455,11 @@ function PdfConvertResultTable({
                 <td>{formatCount(row.textRows)}</td>
                 <td>{formatCount(row.tables)}</td>
                 <td>{formatCount(row.tableDataRows)}</td>
-                <td title={row.error}>{row.error}</td>
+                {/* 失败原因是关键诊断：整行浅红底、允许两行显示，
+                    不再被单行省略号截断（UI 审核）。 */}
+                <td className="pdf-error-cell" title={row.error}>
+                  <span className="pdf-error-text">{row.error}</span>
+                </td>
               </tr>
             ))}
           </tbody>

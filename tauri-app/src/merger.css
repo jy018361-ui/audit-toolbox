@@ -76,10 +76,35 @@
 .merger-toolbar [data-variant="destructive"] {
   margin-left: auto;
 }
-/* 主按钮（开始合并）统一品牌实底反白，与步骤条激活项同一视觉重量。 */
-.merger-rules .actions button[data-slot="button"][data-variant="default"] {
+/* 主按钮（开始合并/智能匹配并预览/检查文件与 Sheet）统一品牌实底反白，
+   与步骤条激活项同一视觉重量。左右两卡的推进动作都用同一主按钮语言。 */
+.merger-rules .actions button[data-slot="button"][data-variant="default"],
+.merger-source .actions button[data-slot="button"][data-variant="default"] {
   background: var(--brand);
   color: var(--ink-inverse);
+}
+/* 仅 1 个文件时上移/下移都无效：置灰到不可误读为可点（UI 审核）。 */
+.file-item [data-slot="button"]:disabled {
+  opacity: 0.4;
+}
+/* 左右两卡等高：空态时左卡的拖放区撑起主高度，右卡规则区自然贴近。 */
+.merger-source .drop-zone:not(.merger-drop-zone-filled) {
+  min-height: 280px;
+}
+/* 结构检查摘要：替代 ResultView 的「运行结束。」，增量信息是 Sheet 总数。 */
+.merger-inspect-summary {
+  display: grid;
+  gap: var(--sp-1);
+}
+.merger-inspect-summary p {
+  margin: 0;
+}
+.merger-inspect-summary strong {
+  color: var(--success-fg);
+}
+.merger-inspect-detail {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
 }
 .file-queue {
   display: grid;

@@ -424,6 +424,11 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     );
   }
   const currentStep = excelMergerStep(paths.length, files.length, Boolean(job));
+  // 检查结果的增量信息：合并成什么取决于 Sheet 而不是文件个数。
+  const inspectSheetTotal = files.reduce(
+    (sum, file) => sum + file.sheets.length,
+    0,
+  );
   // 智能表头匹配恒定开启：纵向合并成一张大表时必经匹配确认页。
   const headerMatchAvailable =
     outputMode === "one_sheet" && direction === "vertical";
@@ -444,7 +449,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   return (
     <>
       <PageHeader
-        eyebrow="批量 Excel 合并"
+        eyebrow="批量合并"
         title={tool.name}
         detail="批量合并 Excel、CSV 与 TXT，可按 Sheet 范围和拼接方向生成结果。"
       />
@@ -459,7 +464,8 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
       <div className="merger-layout">
         <section className="form-card merger-source">
           <div className="section-title">
-            <h2>1. 文件源</h2>
+            {/* 步骤条已编号，卡题不再重复「1. 2.」（UI 审核）。 */}
+            <h2>文件源</h2>
             <span>{formatCount(paths.length)} 个文件</span>
           </div>
           <button
@@ -549,7 +555,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           </div>
           <div className="actions">
             <Button
-              variant="secondary"
+              variant="default"
               disabled={busy || !paths.length}
               onClick={() => void inspect()}
             >
@@ -559,7 +565,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         </section>
         <section className="form-card merger-rules">
           <div className="section-title">
-            <h2>2. 合并规则</h2>
+            <h2>合并规则</h2>
             <span>
               {files.length
                 ? `已检查 ${formatCount(files.length)} 个文件`
@@ -772,7 +778,20 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             {result && <ResultView value={result} />}
           </>
         ) : result ? (
-          <ResultView value={result} />
+          /* 结构检查的结果不用 ResultView：那里没有动作可宣布时只会说
+             「运行结束。」并把文件数当指标，增量信息其实是 Sheet 总数（UI 审核）。 */
+          <div className="merger-inspect-summary" role="status">
+            <p>
+              <strong>结构检查完成，可配置合并规则。</strong>
+            </p>
+            <p className="merger-inspect-detail">
+              {formatCount(files.length)} 个文件 · 共{" "}
+              {formatCount(inspectSheetTotal)} 个 Sheet
+              {files.some((file) => file.error)
+                ? "；存在读取失败的文件，合并前请先处理"
+                : ""}
+            </p>
+          </div>
         ) : (
           <EmptyState
             compact

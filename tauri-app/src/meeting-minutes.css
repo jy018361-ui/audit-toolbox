@@ -3,6 +3,8 @@
 
 /* ===== 页面 ===== */
 
+.meeting-page { container-type: inline-size; container-name: meeting-page; }
+
 .meeting-page .meeting-section {
   display: grid;
   gap: var(--sp-3);
@@ -12,6 +14,103 @@
    the shared 24px card inset. */
 .meeting-page [data-slot="card"] {
   gap: var(--sp-4);
+}
+
+.meeting-generation-controls {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border-soft);
+}
+
+.meeting-generation-controls .meeting-actions-row { margin-top: 0; }
+.meeting-generation-controls .meeting-options-grid { flex: 0 1 320px; min-width: 0; grid-template-columns: minmax(0, 1fr); }
+.meeting-configuration-summary { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: stretch; gap: var(--sp-3); }
+.meeting-configuration-summary .meeting-resident-row { margin-top: 0; }
+.meeting-input-layout { display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); align-items: center; gap: var(--sp-4); }
+.meeting-record-source { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-2); }
+.meeting-record-source .meeting-actions-row, .meeting-record-source .meeting-watch-hint { margin-top: 0; }
+.meeting-import-source { min-width: 0; }
+
+.meeting-workspace {
+  display: grid;
+  grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--sp-4);
+}
+
+.meeting-workspace > *, .meeting-workspace [data-slot="card"] { min-width: 0; }
+.meeting-history { position: sticky; top: var(--sp-4); }
+.meeting-history-search { display: block; margin-bottom: var(--sp-3); }
+.meeting-history-search input {
+  width: 100%;
+  min-height: 36px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-md);
+  background: var(--control-bg);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+
+.meeting-history-search input:focus-visible,
+.meeting-history-item:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.meeting-history-list { max-height: 65vh; overflow-y: auto; scrollbar-gutter: stable; }
+.meeting-history-day h3 {
+  margin: var(--sp-3) 0 var(--sp-2);
+  color: var(--label);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+.meeting-history-day:first-child h3 { margin-top: 0; }
+.meeting-history-day ul { margin: 0; padding: 0; list-style: none; }
+.meeting-history-day li + li { margin-top: var(--sp-1); }
+.meeting-history-item {
+  display: grid;
+  gap: var(--sp-1);
+  width: 100%;
+  padding: var(--sp-3);
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  color: var(--fg);
+  background: transparent;
+  cursor: pointer;
+}
+.meeting-history-item:hover { background: var(--surface-muted); }
+.meeting-history-item[aria-current="true"] { border-color: var(--primary); background: var(--surface-muted); }
+.meeting-history-item strong { font-size: var(--fs-sm); font-weight: 600; overflow-wrap: anywhere; }
+.meeting-history-time { display: flex; justify-content: space-between; gap: var(--sp-2); font-size: var(--fs-xs); color: var(--label); }
+.meeting-history-time-label { font-size: var(--fs-xs); color: var(--text-muted); }
+.meeting-transcript-content {
+  padding: var(--sp-4);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  font-size: var(--fs-sm);
+  line-height: 1.85;
+  user-select: text;
+}
+.meeting-transcript-content pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; }
+
+@media (max-width: 960px) {
+  .meeting-workspace { grid-template-columns: minmax(0, 1fr); }
+  .meeting-history { position: static; }
+  .meeting-history-list { max-height: 320px; }
+}
+
+@media (max-width: 640px) {
+  .meeting-configuration-summary { grid-template-columns: minmax(0, 1fr); }
+  .meeting-input-layout { grid-template-columns: minmax(0, 1fr); }
+}
+
+@container meeting-page (max-width: 900px) {
+  .meeting-workspace { grid-template-columns: minmax(0, 1fr); }
+  .meeting-history { position: static; }
+  .meeting-history-list { max-height: 240px; }
 }
 
 /* 状态砖只放状态（自动检测 / 当前状态）；「后台常驻」是设置，

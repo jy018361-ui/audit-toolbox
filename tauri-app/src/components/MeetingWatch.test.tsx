@@ -41,6 +41,9 @@ vi.mock("../api", () => ({
   runningInDesktopApp: vi.fn(() => true),
   meetingSetResident: vi.fn(async () => undefined),
   meetingReadMinutes: vi.fn(async () => ({ minutesMarkdown: "# 读入正文" })),
+  meetingHistoryList: vi.fn(async () => []),
+  meetingHistoryGet: vi.fn(async () => ({})),
+  meetingReadTranscript: vi.fn(async () => ""),
   jobCancel: vi.fn(), pickPath: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
@@ -254,7 +257,7 @@ it("已保活的会议页从完成提示切换两版正文并聚焦结果，不�
   render(<Fixture />);
   fireEvent.click(await screen.findByRole("link", { name: "查看按时间版" }));
   expect(await screen.findByRole("article")).toHaveTextContent("时间版标题");
-  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "3. 结果" })));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "会议结果" })));
   expect(screen.queryByRole("link", { name: "查看按内容版" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "按内容" }));
   expect(screen.getByRole("article")).toHaveTextContent("内容版标题");

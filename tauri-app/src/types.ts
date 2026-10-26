@@ -114,6 +114,12 @@ export const MeetingResultSchema = z.object({
 });
 export type MeetingResult = z.infer<typeof MeetingResultSchema>;
 
+export const MeetingHistoryRowSchema = z.object({
+  id: z.string(), jobId: z.string(), title: z.string(), startedAt: z.string(),
+  timeLabel: z.string(), status: z.string(), message: z.string(),
+});
+export type MeetingHistoryRow = z.infer<typeof MeetingHistoryRowSchema>;
+
 export const MeetingRecordStartSchema = z.object({
   startedAt: z.string(),
   recordDir: z.string(),

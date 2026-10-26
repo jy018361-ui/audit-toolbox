@@ -18,6 +18,7 @@ import {
   MeetingRecordStopSchema,
   MeetingStatusSchema,
   MeetingResultSchema,
+  MeetingHistoryRowSchema,
   TaskRestoreSchema,
   ToolManifestSchema,
   type HistoryRow,
@@ -405,6 +406,31 @@ export const legacyImport = (path: string) =>
     : Promise.reject(previewUnavailable("导入迁移备份"));
 
 // ===== 会议纪要助手 =====
+
+export const meetingHistoryList = async () => {
+  if (!inTauri()) return MeetingHistoryRowSchema.array().parse(demoLookup("meeting.history_list")?.({}) ?? []);
+  return MeetingHistoryRowSchema.array().parse(await invoke("meeting_history_list"));
+};
+
+export const meetingHistoryGet = async (id: string) => {
+  if (!inTauri()) {
+    const demo = demoLookup("meeting.history_get");
+    if (demo) return MeetingResultSchema.parse(demo({id}));
+    throw previewUnavailable("读取会议历史");
+  }
+  return MeetingResultSchema.parse(await invoke("meeting_history_get", { id }));
+};
+
+export const meetingReadTranscript = async (path: string) => {
+  if (!inTauri()) {
+    const demo = demoLookup("meeting.read_transcript");
+    if (demo) return String(demo({path}));
+    throw previewUnavailable("读取转写稿");
+  }
+  const value = await invoke("meeting_read_transcript", { path });
+  if (typeof value !== "string") throw new Error("转写稿返回格式异常。");
+  return value;
+};
 
 export const meetingReadMinutes = async (path: string) => {
   if (!inTauri()) throw previewUnavailable("读取会议纪要");

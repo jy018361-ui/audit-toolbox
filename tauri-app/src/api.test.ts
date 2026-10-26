@@ -6,6 +6,9 @@ import {
   historyClear,
   jobCancel,
   meetingReadMinutes,
+  meetingHistoryList,
+  meetingHistoryGet,
+  meetingReadTranscript,
   pickPath,
   settingsGet,
   settingsSet,
@@ -25,6 +28,9 @@ describe("browser preview API fallbacks", () => {
 
   it("returns safe empty states for history and task cancellation", async () => {
     await expect(historyGet()).resolves.toEqual([]);
+    await expect(meetingHistoryList()).resolves.toEqual([]);
+    await expect(meetingHistoryGet("saved-meeting")).rejects.toThrow("浏览器预览模式不能读取会议历史");
+    await expect(meetingReadTranscript("C:/data/转写稿.txt")).rejects.toThrow("浏览器预览模式不能读取转写稿");
     await expect(historyClear()).resolves.toEqual({ removed: 0 });
     await expect(jobCancel("preview-job")).resolves.toBe(false);
     await expect(pickPath("file", "选择文件")).resolves.toBeNull();

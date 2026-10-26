@@ -1189,6 +1189,59 @@ fn meeting_read_minutes(allowed: State<'_, AllowedPaths>, path: String) -> Resul
     read_authorized_meeting_minutes(&allowed, Path::new(&path))
 }
 
+#[tauri::command]
+fn meeting_history_list(storage: State<'_, Storage>) -> Result<Value, AppError> {
+    storage.meeting_history_list()
+}
+
+#[tauri::command]
+fn meeting_history_get(storage: State<'_, Storage>, allowed: State<'_, AllowedPaths>, id: String) -> Result<Value, AppError> {
+    let result = storage.meeting_history_result(&id)?;
+    authorize_meeting_history_files(&allowed, &result);
+    Ok(result)
+}
+
+// 从可信后台归档恢复确切文件授权；不把文件所在目录加入白名单。
+fn authorize_meeting_history_files(allowed: &AllowedPaths, result: &Value) {
+    let mut paths = Vec::new();
+    for key in ["audioPath", "transcriptPath", "minutesPath"] {
+        if let Some(path) = result.get(key).and_then(Value::as_str).filter(|v| !v.is_empty()) {
+            paths.push(PathBuf::from(path));
+        }
+    }
+    if let Some(versions) = result.get("minutesVersions").and_then(Value::as_array) {
+        for version in versions {
+            if let Some(path) = version.get("minutesPath").and_then(Value::as_str).filter(|v| !v.is_empty()) {
+                paths.push(PathBuf::from(path));
+            }
+        }
+    }
+    // 即使记录遭删除或路径后来变成目录，也不能借文件恢复授权扩大到目录。
+    allowed.0.lock().extend(paths.into_iter().filter(|path| path.is_file()));
+}
+
+#[tauri::command]
+fn meeting_read_transcript(allowed: State<'_, AllowedPaths>, path: String) -> Result<String, AppError> {
+    read_authorized_meeting_transcript(&allowed, Path::new(&path))
+}
+
+fn read_authorized_meeting_transcript(allowed: &AllowedPaths, path: &Path) -> Result<String, AppError> {
+    if !allowed.0.lock().iter().any(|selected| path_is_permitted(path, selected)) {
+        return Err(AppError::new("PATH_NOT_AUTHORIZED", "请先选择要查看的会议记录。", false, None));
+    }
+    if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("txt")) {
+        return Err(AppError::new("MEETING_TRANSCRIPT_FORMAT", "转写稿需为 TXT 文本文件。", false, None));
+    }
+    use std::io::Read;
+    let read_error = |error: std::io::Error| AppError::new("MEETING_TRANSCRIPT_READ_FAILED", "无法读取转写稿，文件可能已被移动或删除。", true, Some(error.to_string()));
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).map_err(read_error)?.take(2 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(read_error)?;
+    if bytes.len() > 2 * 1024 * 1024 {
+        return Err(AppError::new("MEETING_TRANSCRIPT_TOO_LARGE", "转写稿超过 2 MB，请使用外部编辑器打开。", false, None));
+    }
+    String::from_utf8(bytes).map_err(|_| AppError::new("MEETING_TRANSCRIPT_ENCODING", "转写稿需使用 UTF-8 编码。", false, None))
+}
+
 fn read_authorized_meeting_minutes(allowed: &AllowedPaths, path: &Path) -> Result<Value, AppError> {
     if !allowed
         .0
@@ -1980,6 +2033,9 @@ pub fn run() {
             meeting_record_stop,
             meeting_status,
             meeting_read_minutes,
+            meeting_history_list,
+            meeting_history_get,
+            meeting_read_transcript,
             meeting_detect_set_enabled,
             meeting_set_resident,
             meeting_autostart_status,
@@ -2198,6 +2254,31 @@ mod tests {
         );
         allowed.0.lock().insert(dir.path().to_path_buf());
         assert!(read_authorized_meeting_minutes(&allowed, &sibling).is_ok());
+    }
+
+    #[test]
+    fn meeting_history_restores_only_exact_files_and_bounds_transcript_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let minutes = dir.path().join("会议纪要.md");
+        let transcript = dir.path().join("转写稿.txt");
+        let sibling = dir.path().join("另一场会议.txt");
+        std::fs::write(&minutes, "# 会议标题").unwrap();
+        std::fs::write(&transcript, "[00:00] 原始发言").unwrap();
+        std::fs::write(&sibling, "未授权正文").unwrap();
+        let allowed = AllowedPaths(Arc::new(Mutex::new(HashSet::new())));
+        authorize_meeting_history_files(&allowed, &json!({"transcriptPath":transcript,
+            "minutesVersions":[{"minutesPath":minutes}],"audioPath":dir.path()}));
+        assert!(!allowed.0.lock().contains(dir.path()));
+        assert!(read_authorized_meeting_minutes(&allowed, &minutes).is_ok());
+        assert_eq!(read_authorized_meeting_transcript(&allowed, &transcript).unwrap(), "[00:00] 原始发言");
+        assert_eq!(read_authorized_meeting_transcript(&allowed, &sibling).unwrap_err().code, "PATH_NOT_AUTHORIZED");
+        assert_eq!(read_authorized_meeting_transcript(&allowed, &minutes).unwrap_err().code, "MEETING_TRANSCRIPT_FORMAT");
+        std::fs::write(&transcript, vec![b'x'; 2 * 1024 * 1024 + 1]).unwrap();
+        assert_eq!(read_authorized_meeting_transcript(&allowed, &transcript).unwrap_err().code, "MEETING_TRANSCRIPT_TOO_LARGE");
+        std::fs::write(&transcript, [0xff, 0xfe]).unwrap();
+        assert_eq!(read_authorized_meeting_transcript(&allowed, &transcript).unwrap_err().code, "MEETING_TRANSCRIPT_ENCODING");
+        std::fs::remove_file(&transcript).unwrap();
+        assert_eq!(read_authorized_meeting_transcript(&allowed, &transcript).unwrap_err().code, "MEETING_TRANSCRIPT_READ_FAILED");
     }
 
     /// 页面直开常驻开关只应合并 meeting 命名空间的单个键，

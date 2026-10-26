@@ -14,6 +14,9 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::AppError;
 
+#[path = "meeting_history.rs"]
+mod meeting_history;
+
 pub struct Storage {
     conn: Mutex<Connection>,
     data_dir: PathBuf,
@@ -41,6 +44,7 @@ impl Storage {
         };
         storage.migrate_task_history_summaries()?;
         storage.migrate_task_history_params()?;
+        storage.initialize_meeting_history()?;
         storage.import_legacy_defaults()?;
         storage.sanitize_roll_forward_settings()?;
         Ok(storage)
@@ -134,6 +138,7 @@ impl Storage {
                 output_paths.to_string()
             ],
         ).map_err(db_error)?;
+        self.record_meeting_history(event)?;
         Ok(())
     }
 
@@ -184,6 +189,13 @@ impl Storage {
                 snapshot.to_string()
             ],
         ).map_err(db_error)?;
+        if tool_id == "meeting_minutes" {
+            let (phase, message): (String, Option<String>) = self.conn.lock().query_row(
+                "SELECT status,message FROM task_history WHERE job_id=?1", [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(db_error)?;
+            self.record_meeting_history(&json!({"jobId":job_id,"toolId":tool_id,"phase":phase,"message":message}))?;
+        }
         Ok(())
     }
 

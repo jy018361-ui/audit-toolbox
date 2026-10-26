@@ -188,17 +188,17 @@ describe("StepTourHint", () => {
     expect(screen.getByText(/按页面提示完成当前操作/)).toBeInTheDocument();
   });
 
-  it("会议纪要按页面实际步骤 key 显示转写与结果提示", () => {
+  it("会议纪要导览文案覆盖历史查询与结果阅读", () => {
     const meetingSteps = [
       { key: "record", label: "会议记录" },
-      { key: "minutes", label: "纪要生成" },
+      { key: "history", label: "历史记录" },
       { key: "result", label: "结果" },
     ];
     const { rerender } = render(
       <ToolTourProvider toolId="meeting_minutes"><StepTourHint steps={meetingSteps} current={0} /></ToolTourProvider>,
     );
     rerender(<ToolTourProvider toolId="meeting_minutes"><StepTourHint steps={meetingSteps} current={1} /></ToolTourProvider>);
-    expect(screen.getByText(/导入录音需点击「生成纪要」/)).toBeInTheDocument();
+    expect(screen.getByText(/历史记录按日期和标题排列，可搜索会议标题/)).toBeInTheDocument();
     rerender(<ToolTourProvider toolId="meeting_minutes"><StepTourHint steps={meetingSteps} current={2} /></ToolTourProvider>);
     expect(screen.getByText(/从转写稿重新生成/)).toBeInTheDocument();
     expect(screen.queryByText(/按页面提示完成当前操作/)).not.toBeInTheDocument();

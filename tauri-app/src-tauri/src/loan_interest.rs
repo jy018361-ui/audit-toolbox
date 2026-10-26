@@ -234,6 +234,7 @@ struct LoanRow {
 }
 
 pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
+    let _tb_analysis = ledger_mapping::disk_tb::AnalysisScope::begin();
     match method {
         "loan.inspect" => inspect(&params),
         "loan.match_rates" => match_rates(&params),
@@ -1552,6 +1553,7 @@ pub(crate) fn run_job(
     cancel: Arc<AtomicBool>,
     pause: &PauseCheckpoint,
 ) -> Result<Value, AppError> {
+    let _tb_analysis = ledger_mapping::disk_tb::AnalysisScope::begin();
     let _tb_cancel=tb_disk::Guard::begin(cancel.clone());
     if method == "loan.inspect_full" {
         checkpoint(&cancel, pause)?;

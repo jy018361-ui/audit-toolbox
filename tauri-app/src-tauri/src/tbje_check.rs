@@ -308,7 +308,7 @@ fn tb_rebuild(
     progress: Progress<'_>,
 ) -> Result<(), AppError> {
     if let Some(disk) = &tb.disk {
-        tb.analysis = Some(ledger_mapping::disk_tb::analyze(
+        tb.analysis = Some(ledger_mapping::disk_tb::analyze_shared(
             disk,
             &|r| columns(map, r),
             false,

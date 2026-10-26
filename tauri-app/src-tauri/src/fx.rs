@@ -652,6 +652,7 @@ impl<'a> RowRecord<'a> {
 }
 
 pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
+    let _tb_analysis = ledger_mapping::disk_tb::AnalysisScope::begin();
     match method {
         "fx.classify_source" => classify_source(&params),
         "fx.inspect_je" => inspect(&params, "je"),
@@ -937,6 +938,7 @@ pub(crate) fn run_job(
     cancel: Arc<AtomicBool>,
     pause: &PauseCheckpoint,
 ) -> Result<Value, AppError> {
+    let _tb_analysis = ledger_mapping::disk_tb::AnalysisScope::begin();
     // Preview/export call many helpers that historically re-created the same
     // cleaned JE. Scope this cache to the single worker request.
     let _table_cache = FxJobTableCacheGuard::begin();

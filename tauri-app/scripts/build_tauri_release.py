@@ -17,7 +17,7 @@ LEGACY_ROOT = ROOT.parent
 BUILD = ROOT / "build"
 DIST = ROOT / "dist"
 TAURI_TARGET = BUILD / "tauri-cargo-target"
-VERSION = "2.0.0-alpha.125"
+VERSION = "2.0.0-alpha.126"
 BUILD_ENV = os.environ.copy()
 
 

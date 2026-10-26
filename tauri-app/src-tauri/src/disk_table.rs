@@ -363,6 +363,50 @@ pub(crate) fn fingerprint(path: &Path, sheet: &str, row: usize, depth: usize) ->
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(&identity).map_err(io)?)))
 }
 impl DiskTable {
+    /// Logical nonblank windows are indexed once, including old source caches.
+    /// Repeated preview pages never decode the remainder merely to count it.
+    pub(crate) fn nonempty_window(&self, offset: usize, limit: usize, cancel: &AtomicBool)
+        -> Result<(Vec<Vec<String>>, usize), AppError> {
+        use rusqlite::OptionalExtension;
+        check(cancel)?;
+        self.db.execute_batch("CREATE TABLE IF NOT EXISTS preview_window_meta(version INTEGER PRIMARY KEY, row_count INTEGER NOT NULL);").map_err(sql)?;
+        let mut count: Option<usize> = self.db.query_row(
+            "SELECT row_count FROM preview_window_meta WHERE version=1", [], |row| row.get(0)
+        ).optional().map_err(sql)?;
+        if count.is_none() {
+            let tx = self.db.unchecked_transaction().map_err(sql)?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS preview_window(position INTEGER PRIMARY KEY,source_id INTEGER NOT NULL); DELETE FROM preview_window;").map_err(sql)?;
+            let mut insert = tx.prepare("INSERT INTO preview_window VALUES(?1,?2)").map_err(sql)?;
+            let mut total = 0usize;
+            self.visit(cancel, |row, physical| {
+                if row.iter().any(|value| !value.trim().is_empty()) {
+                    total += 1;
+                    insert.execute(params![total, physical]).map_err(sql)?;
+                }
+                Ok(())
+            })?;
+            drop(insert);
+            check(cancel)?;
+            tx.execute("INSERT INTO preview_window_meta VALUES(1,?1)", [total]).map_err(sql)?;
+            tx.commit().map_err(sql)?;
+            count = Some(total);
+        }
+        let count = count.unwrap();
+        let mut page = Vec::new();
+        if offset < count && limit > 0 {
+            let mut query = self.db.prepare("SELECT r.data FROM preview_window w JOIN rows r ON r.id=w.source_id WHERE w.position>?1 AND w.position<=?2 ORDER BY w.position").map_err(sql)?;
+            let records = query.query_map(params![offset, offset.saturating_add(limit).min(count)], |row| row.get::<_,String>(0)).map_err(sql)?;
+            for record in records {
+                check(cancel)?;
+                let mut values: Vec<String> = serde_json::from_str(&record.map_err(sql)?).map_err(io)?;
+                values.resize(values.len().max(self.headers.len()), String::new());
+                page.push(values);
+            }
+        }
+        check(cancel)?;
+        Ok((page, count))
+    }
+
     /// 只复用已经完成的 FA 缓存；未命中不触发解析或建库。
     pub(crate) fn cached_fa(path: &Path, sheet: &str, header_row: usize, header_depth: usize) -> Option<Self> {
         let key = fingerprint(path, sheet, header_row, header_depth).ok()?;
@@ -490,6 +534,79 @@ impl DiskTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "合成大表性能探针，显式运行"]
+    fn nonempty_preview_synthetic_bench() {
+        let dir=tempfile::tempdir().unwrap();
+        let path=dir.path().join("台账.csv");
+        let mut writer=csv::Writer::from_path(&path).unwrap();
+        writer.write_record((0..20).map(|i|format!("字段{i}"))).unwrap();
+        for index in 0..50_000 { writer.write_record((0..20).map(|i|format!("记录{index}字段{i}"))).unwrap(); }
+        writer.flush().unwrap();
+        let cancel=AtomicBool::new(false);
+        let source=DiskTable::open(&path,None,1,1,&|_,_,_,_|{},&cancel).unwrap();
+        let started=Instant::now();
+        let mut old_decodes=0usize;
+        for offset in [0,20_000,49_900] {
+            let mut expected=Vec::new();
+            source.visit(&cancel,|row,_| { let at=old_decodes%50_000; if at>=offset && at<offset+100 {expected.push(row.to_vec());} old_decodes+=1;Ok(()) }).unwrap();
+            assert_eq!(expected.len(),100);
+        }
+        let before=started.elapsed().as_secs_f64();
+        let started=Instant::now();
+        let (_,count)=source.nonempty_window(0,100,&cancel).unwrap();
+        let first=started.elapsed().as_secs_f64();
+        assert_eq!(count,50_000);
+        let started=Instant::now();
+        for offset in [0,20_000,49_900] {
+            let (page,count)=source.nonempty_window(offset,100,&cancel).unwrap();
+            assert_eq!(count,50_000); assert_eq!(page.len(),100);
+            assert_eq!(page[0][0],format!("记录{offset}字段0"));
+        }
+        println!("台账分页合成探针：50000行×20列，3页；原解码{old_decodes}行 {:.3}s；首次建索引 {:.3}s，索引后三页仅解码300行 {:.3}s（Debug局部探针）",before,first,started.elapsed().as_secs_f64());
+    }
+    #[test]
+    fn nonempty_preview_pages_reuse_index_keep_count_and_do_not_decode_other_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("分页.csv");
+        fs::write(&path, "编号,金额,备注\nA,1,\n, ,　\nB,2,\nC,3,\n").unwrap();
+        let cancel = AtomicBool::new(false);
+        let table = DiskTable::open(&path,None,1,1,&|_,_,_,_|{},&cancel).unwrap();
+        let (page,count) = table.nonempty_window(1,1,&cancel).unwrap();
+        assert_eq!(count,3);
+        assert_eq!(page[0][0],"B");
+        let plan = table.db.prepare("EXPLAIN QUERY PLAN SELECT r.data FROM preview_window w JOIN rows r ON r.id=w.source_id WHERE w.position>?1 AND w.position<=?2 ORDER BY w.position").unwrap()
+            .query_map([1,2],|row| row.get::<_,String>(3)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        assert!(plan.iter().any(|line|line.contains("SEARCH w USING INTEGER PRIMARY KEY")), "{plan:?}");
+        assert!(plan.iter().all(|line|!line.contains("TEMP B-TREE")), "{plan:?}");
+        // A bad row outside this page must not be decoded by a hidden full scan.
+        table.db.execute("UPDATE rows SET data='INVALID_JSON' WHERE id=(SELECT source_id FROM preview_window WHERE position=3)",[]).unwrap();
+        drop(table);
+        let table = DiskTable::open(&path,None,1,1,&|_,_,_,_|panic!("缓存不能重读文件"),&cancel).unwrap();
+        assert_eq!(table.nonempty_window(0,2,&cancel).unwrap().1,3);
+        assert!(table.nonempty_window(2,1,&cancel).is_err());
+        assert!(table.visit(&cancel,|_,_|Ok(())).is_err());
+        assert!(table.nonempty_window(99,10,&cancel).unwrap().0.is_empty());
+        assert!(table.nonempty_window(0,0,&cancel).unwrap().0.is_empty());
+        cancel.store(true,Ordering::Relaxed);
+        assert_eq!(table.nonempty_window(0,1,&cancel).err().unwrap().code,"JOB_CANCELLED");
+    }
+
+    #[test]
+    fn failed_preview_index_is_not_published_and_can_be_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("失败重试.csv");
+        fs::write(&path,"编号,金额\nA,1\nB,2\n").unwrap();
+        let cancel=AtomicBool::new(false);
+        let table=DiskTable::open(&path,None,1,1,&|_,_,_,_|{},&cancel).unwrap();
+        let last:i64=table.db.query_row("SELECT MAX(id) FROM rows",[],|row|row.get(0)).unwrap();
+        let original:String=table.db.query_row("SELECT data FROM rows WHERE id=?1",[last],|row|row.get(0)).unwrap();
+        table.db.execute("UPDATE rows SET data='INVALID_JSON' WHERE id=?1",[last]).unwrap();
+        assert!(table.nonempty_window(0,1,&cancel).is_err());
+        assert_eq!(table.db.query_row("SELECT COUNT(*) FROM preview_window_meta",[],|row|row.get::<_,usize>(0)).unwrap(),0);
+        table.db.execute("UPDATE rows SET data=?1 WHERE id=?2",params![original,last]).unwrap();
+        assert_eq!(table.nonempty_window(0,10,&cancel).unwrap().1,2);
+    }
     #[test]
     fn files_under_50_mib_override_expansion_pressure_and_transferred_plans() {
         let dir = tempfile::tempdir().unwrap();

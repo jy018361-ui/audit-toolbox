@@ -1,4 +1,56 @@
 use super::*;
+
+#[test]
+fn shared_tb_analysis_reuses_only_same_source_mapping_and_context_within_scope() {
+    use std::rc::Rc;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("复用.csv");
+    std::fs::write(&path, "主体,科目编码,科目名称,期初本位币余额,期末本位币余额\nA,1001,现金,10,20\n").unwrap();
+    let cancel = AtomicBool::new(false);
+    let source = DiskTable::open(&path, None, 1, 1, &|_,_,_,_|{}, &cancel).unwrap();
+    let scope = AnalysisScope::begin();
+    let first = analyze_shared(&source, &columns, false, &|_,_,_,_|{}, &cancel).unwrap();
+    let same = analyze_shared(&source, &columns, false, &|_,_,_,_|panic!("同任务不应重建 TB"), &cancel).unwrap();
+    assert!(Rc::ptr_eq(&first, &same));
+    let nested = AnalysisScope::begin();
+    drop(nested);
+    assert!(Rc::ptr_eq(&first, &analyze_shared(&source, &columns, false, &|_,_,_,_|{}, &cancel).unwrap()));
+    let changed = |role: &str| if role == "openingFunctionalAmount" { vec!["期末本位币余额".into()] } else { columns(role) };
+    let other = analyze_shared(&source, &changed, false, &|_,_,_,_|{}, &cancel).unwrap();
+    assert!(!Rc::ptr_eq(&first, &other));
+    let context = analyze_shared(&source, &columns, true, &|_,_,_,_|{}, &cancel).unwrap();
+    assert!(!Rc::ptr_eq(&first, &context));
+    assert_eq!(context.analysis.keep, first.analysis.keep);
+    cancel.store(true, Ordering::Relaxed);
+    assert_eq!(analyze_shared(&source, &columns, false, &|_,_,_,_|{}, &cancel).err().unwrap().code, "JOB_CANCELLED");
+    cancel.store(false, Ordering::Relaxed);
+    std::fs::write(&path, "主体,科目编码,科目名称,期初本位币余额,期末本位币余额\nA,1001,现金,1000,2000\n").unwrap();
+    let new_source = DiskTable::open(&path, None, 1, 1, &|_,_,_,_|{}, &cancel).unwrap();
+    let fresh = analyze_shared(&new_source, &columns, false, &|_,_,_,_|{}, &cancel).unwrap();
+    assert!(!Rc::ptr_eq(&first, &fresh));
+    drop(scope);
+    let outside = analyze_shared(&source, &columns, false, &|_,_,_,_|{}, &cancel).unwrap();
+    assert!(!Rc::ptr_eq(&first, &outside));
+}
+
+#[test]
+fn shared_tb_analysis_scope_releases_its_temporary_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("生命周期.csv");
+    std::fs::write(&path, "主体,科目编码,科目名称,期初本位币余额,期末本位币余额\nA,1001,现金,10,20\n").unwrap();
+    let cancel = AtomicBool::new(false);
+    let source = DiskTable::open(&path, None, 1, 1, &|_,_,_,_|{}, &cancel).unwrap();
+    let scope = AnalysisScope::begin();
+    let result = analyze_shared(&source, &columns, false, &|_,_,_,_|{}, &cancel).unwrap();
+    let temporary = result.store.as_ref().unwrap()._temp.0.clone();
+    let weak = std::rc::Rc::downgrade(&result);
+    drop(result);
+    assert!(weak.upgrade().is_some());
+    assert!(temporary.exists());
+    drop(scope);
+    assert!(weak.upgrade().is_none());
+    assert!(!temporary.exists());
+}
 fn headers() -> Vec<String> {
     [
         "主体",

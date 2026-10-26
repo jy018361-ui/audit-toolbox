@@ -30,8 +30,7 @@ fn visit(disk:&DiskTable,cancel:&AtomicBool,mut visitor:impl FnMut(&[String],usi
 
 pub(super) fn preview(spec:&SourceSpec,offset:usize,limit:usize,cancel:&AtomicBool)->Result<(Table,usize),AppError>{
     let (mut table,disk)=open(spec,&|_,_,_,_|{},cancel)?;
-    let mut rows=Vec::new();
-    let count=visit(&disk,cancel,|row,index|{ if index>=offset && index<offset.saturating_add(limit){rows.push(row.to_vec());}Ok(())})?;
+    let (rows,count)=disk.nonempty_window(offset,limit,cancel)?;
     table.rows=rows.into();
     Ok((table,count))
 }

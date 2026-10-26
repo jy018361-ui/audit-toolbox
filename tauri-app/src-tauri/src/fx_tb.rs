@@ -11,7 +11,7 @@ impl RowRecord<'_> {
 pub(crate) struct FxTbRows {
     pub(crate) table: Arc<FxTable>,
     pub(crate) disk: Option<DiskTable>,
-    pub(crate) analysis: Option<DiskTbAnalysis>,
+    pub(crate) analysis: Option<Rc<DiskTbAnalysis>>,
 }
 impl FxTbRows {
     pub(crate) fn open(
@@ -141,7 +141,7 @@ impl FxTbRows {
             header_candidates: Vec::new(),
             sampled: true,
         });
-        let analysis = ledger_mapping::disk_tb::analyze(
+        let analysis = ledger_mapping::disk_tb::analyze_shared(
             &disk,
             &|role| mapped_cols(mapping, role),
             collect_context,

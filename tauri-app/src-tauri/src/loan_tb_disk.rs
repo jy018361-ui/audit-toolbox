@@ -325,14 +325,18 @@ impl TbInput {
         mapping: &Map<String, Value>,
     ) -> Result<ledger_mapping::TbLeafAnalysis, AppError> {
         if let Some(disk) = &self.input.disk {
-            Ok(ledger_mapping::disk_tb::analyze(
+            let prepared = ledger_mapping::disk_tb::analyze_shared(
                 disk,
                 &|role| mapped_names(mapping, "tb", role),
                 false,
                 &|_, _, _, _| {},
                 &active(),
-            )?
-            .analysis)
+            )?;
+            Ok(ledger_mapping::TbLeafAnalysis {
+                keep: prepared.analysis.keep.clone(),
+                contexts: prepared.analysis.contexts.clone(),
+                parent_names: prepared.analysis.parent_names.clone(),
+            })
         } else {
             Ok(ledger_mapping::TbLeafAnalysis {
                 keep: ledger_mapping::tb_leaf_mask(&self.headers, &self.rows, &|role| {

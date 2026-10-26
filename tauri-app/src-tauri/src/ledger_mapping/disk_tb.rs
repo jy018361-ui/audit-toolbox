@@ -13,6 +13,8 @@ use std::{
 
 #[cfg(test)]
 mod tests;
+mod reuse;
+pub(crate) use reuse::{AnalysisScope, analyze_shared};
 
 fn failure(message: &str, detail: impl ToString) -> AppError {
     AppError::new(

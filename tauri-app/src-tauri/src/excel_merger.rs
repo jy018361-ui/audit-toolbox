@@ -845,6 +845,7 @@ fn hard_memory_limited_job(method: &str, params: &Value) -> bool {
 }
 
 pub fn worker_main() -> i32 {
+    let _tb_analysis = crate::ledger_mapping::disk_tb::AnalysisScope::begin();
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {
         return 2;

@@ -1448,6 +1448,7 @@ fn engine_role_labels(kind: &str) -> Vec<Value> {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
+    let _tb_analysis = ledger_mapping::disk_tb::AnalysisScope::begin();
     match method {
         "deposit.classify_source" => classify_source(&params),
         "deposit.inspect_je" => inspect(&params, "je"),
@@ -1474,6 +1475,7 @@ pub(crate) fn run_job(
     cancel: Arc<AtomicBool>,
     pause: &PauseCheckpoint,
 ) -> Result<Value, AppError> {
+    let _tb_analysis = ledger_mapping::disk_tb::AnalysisScope::begin();
     if !matches!(method, "deposit.preview" | "deposit.export") {
         return Err(error(
             "METHOD_NOT_FOUND",

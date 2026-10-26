@@ -1,7 +1,8 @@
 //! Shared, repeatable disk table source. Source rows retain their physical row
 //! numbers; consumers own their business rules and never receive a full table.
 use crate::AppError;
-use calamine::{Reader, open_workbook_auto};
+use calamine::{Reader};
+use crate::spreadsheet_input::open_workbook_auto;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -230,6 +231,7 @@ fn xls_stream_copy(path: &Path) -> Result<PathBuf, AppError> {
 
 pub(crate) fn workbook_sheets(path: &Path, sheet: Option<&str>) -> Result<(String, Vec<String>), AppError> {
     if crate::spreadsheet_input::is_text(path) { return Ok(("CSV".into(), vec!["CSV".into()])); }
+    if crate::spreadsheet_input::is_xml_workbook(path) { return crate::spreadsheet_xml::sheets(path, sheet); }
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xlsx") || e.eq_ignore_ascii_case("xlsm")) {
         return xlsx::sheets(path, sheet);
     }
@@ -285,6 +287,15 @@ pub(crate) fn for_each_source_row_with_style(
     if crate::spreadsheet_input::is_text(path) {
         let mut index = 0;
         return crate::spreadsheet_input::for_each_text_row_bounded(path, cancel, MAX_ROW_BYTES, |row| { index += 1; emit(row, index) });
+    }
+    if crate::spreadsheet_input::is_xml_workbook(path) {
+        let (selected, _) = crate::spreadsheet_xml::sheets(path, sheet)?;
+        return crate::spreadsheet_xml::visit(path, &selected, cancel, |values, index| {
+            emit(values.iter().map(|value| match value {
+                calamine::Data::DateTime(value) if preserve_excel_dates => value.to_string(),
+                _ => crate::fx::data_text(value),
+            }).collect(), index)
+        });
     }
     let (selected, _) = workbook_sheets(path, sheet)?;
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xlsx") || e.eq_ignore_ascii_case("xlsm")) {

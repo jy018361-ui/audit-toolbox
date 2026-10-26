@@ -19,7 +19,8 @@
 
 use crate::{AppError, excel_merger::PauseCheckpoint, storage::Storage};
 #[cfg(test)]
-use calamine::{Data, Reader, open_workbook_auto};
+use calamine::{Data, Reader};
+use crate::spreadsheet_input::open_workbook_auto;
 use chrono::{Local, Utc};
 use rusqlite::{Connection, params};
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};

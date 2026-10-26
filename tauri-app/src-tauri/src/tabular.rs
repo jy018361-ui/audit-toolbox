@@ -1,4 +1,5 @@
-use calamine::{Data, Reader, Sheets, open_workbook_auto};
+use calamine::{Data, Reader, Sheets};
+use crate::spreadsheet_input::open_workbook_auto;
 use chrono::Local;
 use directories::ProjectDirs;
 use polars::prelude::*;
@@ -3473,6 +3474,7 @@ fn dedup_strings(values: &[String]) -> Vec<String> {
 
 fn is_ooxml(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("xlsx") || ext.eq_ignore_ascii_case("xlsm"))
+        && !crate::spreadsheet_input::is_xml_workbook(path)
 }
 
 fn resolve_xlsx_sheet(path: &Path, requested: Option<&str>, names: &[String]) -> Result<String, AppError> {

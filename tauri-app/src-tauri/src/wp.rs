@@ -6,7 +6,8 @@
 //! umya-spreadsheet；运行时不启动 Python、PowerShell 或 Excel COM。
 
 use base64::Engine;
-use calamine::{Data, Reader, open_workbook_auto};
+use calamine::{Data, Reader};
+use crate::spreadsheet_input::open_workbook_auto;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use std::{

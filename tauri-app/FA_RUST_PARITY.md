@@ -1,5 +1,10 @@
 # FA List Rust 迁移覆盖矩阵
 
+## 2026-10-26：Excel 2003 XML 输入兼容
+
+接入公共 SpreadsheetML 内容识别、数据读取及模板准备；包括 NetSuite 使用 `.XLS` 后缀的 XML 导出。保留现有字段映射与业务规则；数据读取不依赖 Excel，版式模板转换沿用本机 Excel。格式、缓存、预览／完整读取边界及验证命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。
+
+
 ## 2026-10-26：TB＋JE 分支共享公共完整 TB 分析
 
 公共 `FxTbRows` 接入任务作用域内的依赖感知共享分析，FA TB＋JE 随独立 worker 入口一同受益。相同来源／角色解析／上下文要求复用，变化后重建；不修改分析口径、科目确认、凭证归集、汇总／对方科目结果或页签。该改动不是主 FA 两期清单共享资产事实／取消宽行复制的整体重构。回归完整 `cargo test --manifest-path src-tauri/Cargo.toml --lib` 及 `--lib fa_tbje`；机制见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目。

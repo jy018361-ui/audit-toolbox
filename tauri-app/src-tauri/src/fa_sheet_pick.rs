@@ -212,13 +212,18 @@ pub(crate) fn list_visible_sheets(path: &Path) -> Result<Vec<String>, AppError> 
     if crate::spreadsheet_input::is_text(path) {
         return Ok(Vec::new());
     }
+    if crate::spreadsheet_input::is_xml_workbook(path) {
+        let catalog = crate::spreadsheet_xml::catalog(path)?;
+        let visible = catalog.sheets.iter().filter(|sheet| !sheet.hidden).map(|sheet| sheet.name.clone()).collect::<Vec<_>>();
+        return Ok(if visible.is_empty() { catalog.sheets.into_iter().map(|sheet| sheet.name).collect() } else { visible });
+    }
     if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("xlsx") || ext.eq_ignore_ascii_case("xlsm")) {
         if let Ok(states) = fa_xlsx_sheet_states(path) {
             return Ok(visible_xlsx_sheets(&states));
         }
     }
     use calamine::Reader as _;
-    let workbook = calamine::open_workbook_auto(path)
+    let workbook = crate::spreadsheet_input::open_workbook_auto(path)
         .map_err(|e| load_error("无法读取工作簿目录。", Some(e.to_string())))?;
     let sheets = workbook.sheets_metadata().iter()
         .filter(|sheet| sheet.visible == calamine::SheetVisible::Visible)

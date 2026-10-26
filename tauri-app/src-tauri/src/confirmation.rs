@@ -1,4 +1,5 @@
-use calamine::{Data, Reader, open_workbook_auto};
+use calamine::{Data, Reader};
+use crate::spreadsheet_input::open_workbook_auto;
 use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime};
 use rust_xlsxwriter::{
     ConditionalFormatDataBar, ConditionalFormatType, Format, FormatAlign, FormatBorder, Workbook,

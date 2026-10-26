@@ -3,7 +3,8 @@
 use std::{collections::HashSet, path::Path};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use calamine::{Reader, open_workbook_auto};
+use calamine::{Reader};
+use crate::spreadsheet_input::open_workbook_auto;
 use rust_xlsxwriter::{Color, DataValidation, Format, Workbook};
 use serde::Deserialize;
 use serde_json::{Value, json};

@@ -1,7 +1,8 @@
 use crate::ledger_mapping;
 use crate::lpr;
 use crate::{AppError, excel_merger::PauseCheckpoint};
-use calamine::{Data, Reader, open_workbook_auto};
+use calamine::{Data, Reader};
+use crate::spreadsheet_input::open_workbook_auto;
 use chrono::{Datelike, Local, NaiveDate};
 use regex::Regex;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Url, Workbook};
@@ -1232,7 +1233,10 @@ fn import_rates(params: &Value) -> Result<Value, AppError> {
         .filter(|x| !x.trim().is_empty())
         .map(PathBuf::from)
         .ok_or_else(|| error("INVALID_PARAMS", "请先选择已填写的利率确认表。", None))?;
-    let book = umya_spreadsheet::reader::xlsx::read(&path).map_err(|e| {
+    let read_path = if crate::spreadsheet_input::is_xml_workbook(&path) {
+        crate::spreadsheet_xml::data_copy(&path)?
+    } else { path.clone() };
+    let book = umya_spreadsheet::reader::xlsx::read(&read_path).map_err(|e| {
         error(
             "WORKBOOK_READ_FAILED",
             "无法读取利率确认表。",

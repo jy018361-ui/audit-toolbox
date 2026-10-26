@@ -1,5 +1,10 @@
 # 存款利息上传识别行为与性能回归
 
+## 2026-10-26：Excel 2003 XML 输入兼容
+
+接入公共 SpreadsheetML 内容识别、数据读取及模板准备；包括 NetSuite 使用 `.XLS` 后缀的 XML 导出。保留现有字段映射与业务规则；数据读取不依赖 Excel，版式模板转换沿用本机 Excel。格式、缓存、预览／完整读取边界及验证命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。
+
+
 ## 2026-10-26：同任务共享完整 TB 分析
 
 同步识别及测算／导出的公共 TB 入口按源缓存、实际角色依赖和上下文要求共享已完成分析及临时库，避免同任务不同阶段重复构建。依赖变化、取消与资源检查保留；不改变完整科目目录、金额验证、账户归集、月份余额、计息或工作簿。机制见 `LEDGER_MAPPING_UNIFICATION.md` 同日条目；回归 `cargo test --manifest-path src-tauri/Cargo.toml --lib deposit_interest` 及完整 `--lib`。此次不是删除首次完整目录所需的读取。

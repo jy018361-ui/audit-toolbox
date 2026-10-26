@@ -1,5 +1,10 @@
 # FA List：原版与 Tauri 一比一迁移清单
 
+## 2026-10-26：Excel 2003 XML 输入兼容
+
+接入公共 SpreadsheetML 内容识别、数据读取及模板准备；包括 NetSuite 使用 `.XLS` 后缀的 XML 导出。保留现有字段映射与业务规则；数据读取不依赖 Excel，版式模板转换沿用本机 Excel。格式、缓存、预览／完整读取边界及验证命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。
+
+
 ## 2026-10-26：修复保存后 99% 长时间收尾
 
 - 磁盘原始 source 的分页条件为 `side=? AND seq>? ORDER BY seq LIMIT 256`，原 `(side,k,seq)` 不能满足 seq 范围和排序，每批会重扫该侧并建临时排序。新增 `(side,seq)` 索引；新匹配在构建时创建，旧快照只在本次可删除工作库中按需补齐，保留原快照和原始文件。

@@ -13,7 +13,8 @@ pub(crate) use tb_replay::FxTbRows;
 #[path = "fx_je_catalog.rs"]
 mod je_catalog;
 use crate::{AppError, excel_merger::PauseCheckpoint, tabular};
-use calamine::{Data, DataType, Reader, open_workbook_auto};
+use calamine::{Data, DataType, Reader};
+use crate::spreadsheet_input::open_workbook_auto;
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 use directories::ProjectDirs;
 use reqwest::blocking::Client;

@@ -102,6 +102,79 @@ pub(crate) fn prefer_workbook(path: &Path) -> PathBuf {
     }
 }
 
+/// Excel 2003 XML exports commonly carry an .xls suffix (for example NetSuite).
+/// Keep them out of the delimited-text decoder and route every data consumer here.
+pub(crate) fn is_xml_workbook(path: &Path) -> bool {
+    let Ok((sample, encoding)) = text_sample(path) else { return false; };
+    let (text, _, _) = encoding.decode(&sample);
+    let text = text.trim_start_matches('\u{feff}').trim_start();
+    text.starts_with('<') && text.contains("urn:schemas-microsoft-com:office:spreadsheet")
+        && text.contains("Workbook")
+}
+
+pub(crate) fn open_workbook_auto(path: impl AsRef<Path>)
+    -> Result<calamine::Sheets<BufReader<fs::File>>, calamine::Error> {
+    let path = path.as_ref();
+    if is_xml_workbook(path) {
+        let converted = crate::spreadsheet_xml::data_copy(path)
+            .map_err(|e| std::io::Error::other(format!("{}：{}", e.user_message, e.detail.unwrap_or_default())))?;
+        calamine::open_workbook_auto(converted)
+    } else {
+        calamine::open_workbook_auto(path)
+    }
+}
+
+/// XML encoding declarations/BOMs are authoritative; malformed bytes must not
+/// become replacement characters in accounting identifiers or amounts.
+pub(crate) fn xml_input(path: &Path) -> Result<impl Read, AppError> {
+    let (sample, guessed) = text_sample(path).map_err(io_error)?;
+    let encoding = if sample.starts_with(&[0xff, 0xfe]) || sample.starts_with(&[0xfe, 0xff]) {
+        guessed
+    } else {
+        let head = String::from_utf8_lossy(&sample[..sample.len().min(512)]);
+        let declared = head.split_once("encoding").and_then(|(_, rest)| {
+            let rest = rest.trim_start().strip_prefix('=')?.trim_start();
+            let quote = rest.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+            rest[1..].split(quote).next()
+        });
+        match declared {
+            Some(label) => Encoding::for_label(label.as_bytes()).ok_or_else(||
+                error("XML_ENCODING_UNSUPPORTED", "Excel XML 使用了不支持的字符编码。", Some(label.to_owned())))?,
+            None => UTF_8,
+        }
+    };
+    struct StrictXml(DecodedText);
+    impl Read for StrictXml {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.0.read(output)?;
+            if self.0.replaced.get() > 0 {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Excel XML 含有无效编码字符"));
+            }
+            Ok(count)
+        }
+    }
+    let decoded = StrictXml(DecodedText {
+        input: BufReader::new(fs::File::open(path).map_err(io_error)?),
+        decoder: encoding.new_decoder(), output: [0; 32_768], start: 0, end: 0,
+        finished: false, replaced: Default::default(), bytes_in: Default::default(),
+    });
+    let mut input = BufReader::new(decoded);
+    let mut prefix = Vec::new();
+    Read::by_ref(&mut input).take(6).read_to_end(&mut prefix).map_err(io_error)?;
+    // The stream above is UTF-8 now. Retaining an original UTF-16/GBK
+    // declaration would make quick-xml decode the normalized bytes twice.
+    if prefix.starts_with(b"<?xml") && prefix.get(5).is_some_and(u8::is_ascii_whitespace) {
+        while !prefix.ends_with(b"?>") {
+            if prefix.len() >= 4096 { return Err(error("XML_WORKBOOK_INVALID", "Excel XML 声明过长。", None)); }
+            let mut byte = [0];
+            input.read_exact(&mut byte).map_err(io_error)?;
+            prefix.push(byte[0]);
+        }
+        prefix.clear();
+    }
+    Ok(std::io::Cursor::new(prefix).chain(input))
+}
+
 pub(crate) fn text_range(path: &Path) -> Result<calamine::Range<calamine::Data>, AppError> {
     let rows = read_rows(path)?;
     let width = rows.iter().map(Vec::len).max().unwrap_or(0);
@@ -136,7 +209,7 @@ impl Drop for PreparedWorkbook {
 }
 
 pub(crate) fn prepare_xlsx(path: &Path) -> Result<PreparedWorkbook, AppError> {
-    if !path
+    if !is_xml_workbook(path) && !path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("xls"))
     {

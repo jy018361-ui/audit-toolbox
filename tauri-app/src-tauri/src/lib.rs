@@ -38,6 +38,7 @@ mod pdf_to_excel;
 mod resource_budget;
 mod roll_forward;
 mod spreadsheet_input;
+mod spreadsheet_xml;
 mod storage;
 mod tabular;
 mod tbje_check;

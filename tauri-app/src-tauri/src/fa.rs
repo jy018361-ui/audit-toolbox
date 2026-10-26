@@ -3,7 +3,8 @@
 //! This module deliberately owns the entire deterministic FA workflow.  The
 //! webview passes paths and mappings; files never transit through JSON.
 
-use calamine::{Data, Reader, open_workbook_auto};
+use calamine::{Data, Reader};
+use crate::spreadsheet_input::open_workbook_auto;
 use chrono::{Datelike, Local, Months, NaiveDate};
 use reqwest::blocking::Client;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook};

@@ -1,5 +1,6 @@
 use crate::spreadsheet_input::is_text;
-use calamine::{Data, Reader, open_workbook_auto};
+use calamine::{Data, Reader};
+use crate::spreadsheet_input::open_workbook_auto;
 use chrono::{Local, NaiveDateTime, NaiveTime};
 #[cfg(test)]
 use encoding_rs::GBK;

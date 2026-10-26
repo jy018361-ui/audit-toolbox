@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet" xmlns:x="urn:schemas-microsoft-com:office:excel">
+  <DocumentProperties xmlns="urn:schemas-microsoft-com:office:office"><Author>NetSuite Reports</Author></DocumentProperties>
+  <Styles><Style ss:ID="Default"/><Style ss:ID="date"><NumberFormat ss:Format="Short Date"/></Style></Styles>
+  <Worksheet ss:Name="Data"><Table ss:ExpandedColumnCount="2" ss:ExpandedRowCount="2">
+    <Row><Cell><Data ss:Type="String">编号</Data></Cell><Cell><Data ss:Type="String">金额</Data></Cell></Row>
+    <Row><Cell><Data ss:Type="String">001</Data></Cell><Cell><Data ss:Type="Number">123.5</Data></Cell></Row>
+  </Table></Worksheet>
+  <Worksheet ss:Name="Hidden"><Table><Row><Cell><Data ss:Type="String">说明</Data></Cell></Row></Table><x:WorksheetOptions><x:Visible>SheetHidden</x:Visible></x:WorksheetOptions></Worksheet>
+</Workbook>

@@ -3524,7 +3524,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       filterCovenantScope(currentResults, scope as CovenantScopeFilter).length,
     ]),
   );
-  const ocrDisplayLabel = configStatus.ocr?.engine === "baidu"
+  const ocrDisplayLabel = configStatus.ocr?.engine === "bailian"
+    ? "百炼OCR"
+    : configStatus.ocr?.engine === "baidu"
     ? "百度OCR"
     : configStatus.ocr?.engine === "local"
       ? "本机OCR"

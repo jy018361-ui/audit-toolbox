@@ -5,6 +5,7 @@ mod account_confirmation;
 mod account_classification_tests;
 mod audipick;
 mod bailian_asr;
+mod bailian_ocr;
 mod bailian_plan_asr;
 mod confirmation;
 mod covenant_cases;
@@ -869,6 +870,7 @@ async fn audipick_ocr_test(
     image_base64: String,
     api_key: Option<String>,
     secret_key: Option<String>,
+    ocr_config: Option<Value>,
 ) -> Result<Value, AppError> {
     let settings = storage.settings_get()?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -878,6 +880,7 @@ async fn audipick_ocr_test(
             &image_base64,
             api_key.as_deref(),
             secret_key.as_deref(),
+            ocr_config.as_ref(),
         )
     })
     .await
@@ -1037,6 +1040,7 @@ fn secret_name_allowed(name: &str) -> bool {
             | "dify_api_key"
             | "baidu_ocr_key"
             | "baidu_ocr_secret"
+            | "bailian_ocr_key"
             | "bailian_asr_key"
             | "bailian_plan_asr_key"
             | "audipick_llm_api_key"
@@ -1097,6 +1101,7 @@ fn secret_delete(name: String) -> Result<(), AppError> {
             | "dify_api_key"
             | "baidu_ocr_key"
             | "baidu_ocr_secret"
+            | "bailian_ocr_key"
             | "bailian_asr_key"
             | "bailian_plan_asr_key"
     ) {
@@ -1206,7 +1211,7 @@ fn meeting_detect_set_enabled(meeting: State<'_, Arc<meeting_watch::MeetingState
     meeting.set_watch_enabled(enabled);
 }
 
-/// 连接测试按设置页选中的通道分流：给了套餐参数走 realtime 连接测试，
+/// 连接测试按设置页选中的通道分流：套餐按模型选择 HTTP 样音识别或实时会话测试，
 /// 否则按通用通道验证上传凭证密钥。
 #[tauri::command]
 async fn meeting_asr_test(
@@ -1880,6 +1885,15 @@ pub fn run() {
         // 常驻关闭则放行关闭，应用照旧退出。
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "meeting-ask" {
+                    // 询问窗保持单例：系统关闭也隐藏，避免同标签快速重建留下失效 IPC。
+                    api.prevent_close();
+                    let _ = window.hide();
+                    let _ = window
+                        .app_handle()
+                        .emit("meeting-ask-choice", json!({"accepted": false}));
+                    return;
+                }
                 if window.label() != "main" {
                     return;
                 }
@@ -1890,6 +1904,9 @@ pub fn run() {
                 if resident {
                     api.prevent_close();
                     let _ = window.hide();
+                } else if let Some(ask) = window.app_handle().get_webview_window("meeting-ask") {
+                    // 隐藏询问窗不能阻止「关主窗口即退出」；退出时才真正销毁。
+                    let _ = ask.destroy();
                 }
             }
         })
@@ -2148,6 +2165,7 @@ mod tests {
         assert_eq!(error.code, "SECRET_NAME_DENIED");
         assert_eq!(error.user_message, "不允许读取该类型的凭据。");
         assert!(secret_name_allowed("bailian_asr_key"));
+        assert!(secret_name_allowed("bailian_ocr_key"));
         assert!(secret_name_allowed("bailian_plan_asr_key"));
         assert!(secret_name_allowed("audipick_llm_api_key"));
         assert!(!secret_name_allowed("other_app_key"));

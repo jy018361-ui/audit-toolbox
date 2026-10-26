@@ -516,6 +516,23 @@ it("groups settings into two columns on a single page, preserves draft, and save
   expect(screen.getByRole("button", { name: "重新检查" })).toBeVisible();
 });
 
+it("百炼 OCR 配置可修改、保存、重新加载，其他设置保存保留 OCR 参数", async () => {
+  vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" }, ocr: { engine: "bailian", bailian_base_url: "https://saved.example/v1", bailian_model: "saved-ocr", custom: "keep" } });
+  render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /></MemoryRouter>);
+  await waitFor(() => expect(screen.getByLabelText("百炼 OCR URL")).toHaveValue("https://saved.example/v1"));
+  expect(screen.getByLabelText("百炼 OCR 模型")).toHaveValue("saved-ocr");
+  fireEvent.change(screen.getByLabelText("百炼 OCR URL"), { target: { value: "https://workspace.example/compatible-mode/v1" } });
+  fireEvent.change(screen.getByLabelText("百炼 OCR 模型"), { target: { value: "qwen3.5-ocr" } });
+  fireEvent.change(screen.getByLabelText("百炼 OCR API Key"), { target: { value: "bailian-placeholder" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+  await screen.findByRole("status");
+  expect(settingsSet).toHaveBeenCalledWith(expect.objectContaining({ ocr: { engine: "bailian", bailian_base_url: "https://workspace.example/compatible-mode/v1", bailian_model: "qwen3.5-ocr", custom: "keep" } }));
+  expect(secretSet).toHaveBeenCalledWith("bailian_ocr_key", "bailian-placeholder");
+  expect(screen.getByLabelText("百炼 OCR API Key")).toHaveValue("");
+  cleanup();
+  vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" } });
+});
+
 it("protects unsaved settings on leave", async () => {
   render(
     <MemoryRouter>
@@ -863,6 +880,24 @@ it("通用通道预填地址和模型，未保存的修改用于测试，切换�
   expect(vi.mocked(settingsSet).mock.calls[0][0]).toMatchObject({ meeting: {
     asr_channel: "paraformer", asr_base_url: "https://asr.example.cn/gateway/", asr_model: "custom-file-model",
   } });
+});
+
+it("套餐 ASR Flash 使用当前草稿测试并说明内置样音与额度消耗", async () => {
+  render(<MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>);
+  await screen.findByRole("heading", { name: "设置" });
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  fireEvent.change(screen.getByLabelText("转写通道"), { target: { value: "token_plan" } });
+  fireEvent.change(screen.getByLabelText("套餐地址"), { target: { value: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1" } });
+  fireEvent.change(screen.getByLabelText("套餐转写模型"), { target: { value: " qwen-audio-3.0-asr-flash " } });
+  fireEvent.change(screen.getByLabelText(/^套餐 API 密钥/), { target: { value: "test-only-key" } });
+  expect(screen.getByText(/ASR Flash 测试会发送内置短样音并消耗少量套餐额度/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "测试套餐通道" }));
+  await waitFor(() => expect(meetingAsrTest).toHaveBeenCalledWith("test-only-key", {
+    channel: "token_plan",
+    baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    model: "qwen-audio-3.0-asr-flash",
+  }));
+  expect(settingsSet).not.toHaveBeenCalled();
 });
 
 it("重新打开设置恢复通用通道的自定义配置", async () => {

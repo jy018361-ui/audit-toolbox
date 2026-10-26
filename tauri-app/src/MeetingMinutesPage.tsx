@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { formatCount } from "@/lib/numberFormat";
@@ -34,10 +35,12 @@ import {
   runningInDesktopApp,
 } from "./api";
 import { markToolPageLive } from "./toolPageActivity";
+import { meetingOutputPath } from "./meetingMinutesResult";
 import {
   MeetingResultSchema,
   type MeetingResult,
   type MeetingStatus,
+  type JobEvent,
   type ToolManifest,
 } from "./types";
 import "./fx-audit.css";
@@ -60,6 +63,9 @@ export function displayAudioFileName(path: string) {
 }
 
 export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
+  const location = useLocation();
+  const resultHeading = useRef<HTMLHeadingElement>(null);
+  const pendingResultFocus = useRef(false);
   const [status, setStatus] = useState<MeetingStatus>();
   const [error, setError] = useState("");
   const [recordWarning, setRecordWarning] = useState("");
@@ -106,6 +112,31 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   });
   const busy = !!job && !["completed", "failed", "cancelled"].includes(job.phase);
 
+  // 完成提示携带同一任务结果进入工具页，也适用于已保活、没有重新挂载的页面。
+  useEffect(() => {
+    if (location.pathname !== tool.route) return;
+    const kind = new URLSearchParams(location.search).get("version");
+    if (kind !== "content" && kind !== "timeline") return;
+    const incoming = (location.state as { meetingJob?: JobEvent } | null)?.meetingJob;
+    if (incoming?.toolId === tool.id && incoming.phase === "completed") {
+      manualResetRef.current = false;
+      setJob(incoming);
+      onJobEvent(incoming);
+    }
+    setSelectedKind(kind);
+    pendingResultFocus.current = true;
+  }, [location, tool.id, tool.route, setJob, onJobEvent]);
+
+  useEffect(() => {
+    if (!pendingResultFocus.current || !result || location.pathname !== tool.route) return;
+    const frame = requestAnimationFrame(() => {
+      resultHeading.current?.scrollIntoView?.({ block: "start" });
+      resultHeading.current?.focus({ preventScroll: true });
+      pendingResultFocus.current = false;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [result, selectedKind, location]);
+
   // 兼容升级前的任务快照：旧结果只有文件路径，按已授权路径补读正文。
   const versions = result?.minutesVersions;
   const activeVersion = versions?.find((version) => version.kind === selectedKind)
@@ -113,6 +144,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     ?? versions?.[0];
   const minutesPath = activeVersion ? activeVersion.minutesPath : result?.minutesPath;
   const minutesMarkdown = activeVersion ? activeVersion.minutesMarkdown : result?.minutesMarkdown;
+  const outputPath = meetingOutputPath(result);
   const previewKind = activeVersion?.kind;
   useEffect(() => {
     setPreviewError("");
@@ -449,7 +481,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                 disabled={!importPath || busy || recording || previewMode}
                 onClick={() => void startGenerate({ audioPath: importPath })}
               >
-                从导入录音生成纪要
+                生成纪要
               </Button>
             </div>
           </CardContent>
@@ -460,7 +492,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
         <Card>
           <CardHeader>
             <CardTitle>
-              <h2 id="meeting-result-title" className="meeting-section-title">
+              <h2 id="meeting-result-title" className="meeting-section-title" ref={resultHeading} tabIndex={-1}>
                 3. 结果
               </h2>
             </CardTitle>
@@ -527,20 +559,12 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                   <p role="status">正在读取纪要正文…</p>
                 ) : null}
                 <div className="meeting-result-actions">
-                  {minutesPath && (
+                  {outputPath && (
                     <Button
                       variant="secondary"
-                      onClick={() => void openOutput(minutesPath)}
+                      onClick={() => void openOutput(outputPath).catch((e) => setError(errorText(e)))}
                     >
-                      {activeVersion ? `打开${activeVersion.label}版纪要` : "打开会议纪要"}
-                    </Button>
-                  )}
-                  {result.transcriptPath && (
-                    <Button
-                      variant="secondary"
-                      onClick={() => void openOutput(result.transcriptPath as string)}
-                    >
-                      打开转写稿
+                      打开输出文件夹
                     </Button>
                   )}
                   {result.transcriptPath && (

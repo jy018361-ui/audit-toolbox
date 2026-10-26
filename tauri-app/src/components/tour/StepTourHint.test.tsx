@@ -198,7 +198,7 @@ describe("StepTourHint", () => {
       <ToolTourProvider toolId="meeting_minutes"><StepTourHint steps={meetingSteps} current={0} /></ToolTourProvider>,
     );
     rerender(<ToolTourProvider toolId="meeting_minutes"><StepTourHint steps={meetingSteps} current={1} /></ToolTourProvider>);
-    expect(screen.getByText(/导入录音需点击「从导入录音生成纪要」/)).toBeInTheDocument();
+    expect(screen.getByText(/导入录音需点击「生成纪要」/)).toBeInTheDocument();
     rerender(<ToolTourProvider toolId="meeting_minutes"><StepTourHint steps={meetingSteps} current={2} /></ToolTourProvider>);
     expect(screen.getByText(/从转写稿重新生成/)).toBeInTheDocument();
     expect(screen.queryByText(/按页面提示完成当前操作/)).not.toBeInTheDocument();

@@ -384,10 +384,11 @@ export const audipickLlmTest = (profile: Record<string, unknown>, apiKey?: strin
   inTauri()
     ? invoke<{ message: string; elapsedMs: number }>("audipick_llm_test", { profile, apiKey: apiKey?.trim() || null })
     : Promise.reject(previewUnavailable("测试 AudiPick AI 连接"));
-export const audipickOcrTest = (engine: string, imageBase64: string, apiKey?: string, secretKey?: string) =>
+export const audipickOcrTest = (engine: string, imageBase64: string, apiKey?: string, secretKey?: string, ocrConfig?: { bailian_base_url: string; bailian_model: string }) =>
   inTauri()
     ? invoke<{ message: string; elapsedMs: number }>("audipick_ocr_test", {
         engine, imageBase64, apiKey: apiKey?.trim() || null, secretKey: secretKey?.trim() || null,
+        ocrConfig: ocrConfig ?? null,
       })
     : Promise.reject(previewUnavailable("测试 OCR 连接"));
 export const secretDelete = (name: string) =>
@@ -495,6 +496,12 @@ export const meetingAskChoice = (accepted: boolean) =>
   inTauri()
     ? emit("meeting-ask-choice", { accepted })
     : Promise.resolve();
+
+/** 同一询问窗口隐藏后复用，下次显示前清除上一场的错误和忙碌状态。 */
+export async function listenMeetingAskReset(callback: () => void): Promise<UnlistenFn> {
+  if (!inTauri()) return () => undefined;
+  return listen("meeting-ask-reset", callback);
+}
 
 /** 主窗口监听询问小窗的决定（「本次不记录」要压制当前这场会）。 */
 export async function listenMeetingAskChoice(

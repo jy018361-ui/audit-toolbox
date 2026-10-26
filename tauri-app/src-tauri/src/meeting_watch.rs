@@ -560,6 +560,12 @@ fn poll_once(
 }
 
 fn emit_event(app: &tauri::AppHandle, kind: &str) {
+    // 原生侧先隐藏：即使前端监听未就绪或小窗 IPC 已失效，也不留退会询问窗。
+    if kind == "call_ended" {
+        if let Some(window) = app.get_webview_window("meeting-ask") {
+            let _ = window.hide();
+        }
+    }
     let at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let _ = app.emit("meeting-event", json!({"type": kind, "at": at}));
 }

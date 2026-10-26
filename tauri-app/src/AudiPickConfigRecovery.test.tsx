@@ -114,3 +114,44 @@ it("测试使用草稿密钥和内置图片，不保存草稿；修改后撤销�
   fireEvent.click(screen.getByText("测试 OCR 连接"));
   await screen.findByText("鉴权失败");
 });
+
+it("百炼 OCR 使用独立草稿 URL、模型和密钥测试，切换引擎保留草稿且不串密钥", async () => {
+  await open();
+  fireEvent.click(screen.getByRole("radio", { name: /百炼OCR/ }));
+  expect(screen.getByLabelText("百炼 OCR 模型")).toHaveValue("qwen3.5-ocr");
+  expect(screen.getByLabelText("百炼 OCR URL")).toHaveValue("https://dashscope.aliyuncs.com/compatible-mode/v1");
+  fireEvent.change(screen.getByLabelText("百炼 OCR URL"), { target: { value: "https://workspace.example/compatible-mode/v1" } });
+  fireEvent.change(screen.getByLabelText("百炼 OCR 模型"), { target: { value: "custom-ocr" } });
+  fireEvent.change(screen.getByLabelText("百炼 OCR API Key"), { target: { value: "bailian-draft" } });
+  fireEvent.click(screen.getByText("测试 OCR 连接"));
+  await screen.findByRole("status");
+  expect(api.audipickOcrTest).toHaveBeenLastCalledWith("bailian", "dGVzdA==", "bailian-draft", "", { bailian_base_url: "https://workspace.example/compatible-mode/v1", bailian_model: "custom-ocr" });
+  expect(api.settingsSet).not.toHaveBeenCalled();
+  expect(api.secretSet).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("radio", { name: /AI视觉识别/ }));
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByText("测试 OCR 连接"));
+  await screen.findByRole("status");
+  expect(api.audipickOcrTest).toHaveBeenLastCalledWith("ai", "dGVzdA==", "", "");
+  fireEvent.click(screen.getByRole("radio", { name: /百炼OCR/ }));
+  expect(screen.getByLabelText("百炼 OCR API Key")).toHaveValue("bailian-draft");
+  fireEvent.click(screen.getByText("保存设置"));
+  await screen.findByText(/本次输入已保留/);
+  expect(api.secretSet).toHaveBeenCalledWith("bailian_ocr_key", "bailian-draft");
+  expect(api.settingsSet).toHaveBeenCalledWith({ ocr: { engine: "bailian", custom: "keep", bailian_base_url: "https://workspace.example/compatible-mode/v1", bailian_model: "custom-ocr" } });
+});
+
+it("重入百炼 OCR 恢复 URL、模型和凭据状态，空白密钥继续使用已保存值", async () => {
+  api.settingsGet.mockResolvedValue({ ocr: { engine: "bailian", bailian_base_url: "https://saved.example/v1", bailian_model: "qwen3.5-ocr" } });
+  render(<AudiPickLegacyConfig status={{ ...status, ocr: { engine: "bailian", ready: true }, credentials: { ...status.credentials, bailianOcrKey: true } }} onSaved={vi.fn()} />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "保存设置" })).toBeEnabled());
+  expect(screen.getByLabelText("百炼 OCR URL")).toHaveValue("https://saved.example/v1");
+  expect(screen.getByText(/百炼 OCR API Key：•••••• 已保存/)).toBeInTheDocument();
+  expect(api.secretGet).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByText("测试 OCR 连接"));
+  await screen.findByRole("status");
+  expect(api.audipickOcrTest).toHaveBeenLastCalledWith("bailian", "dGVzdA==", "", "", { bailian_base_url: "https://saved.example/v1", bailian_model: "qwen3.5-ocr" });
+  fireEvent.click(screen.getByText("保存设置"));
+  await screen.findByText(/本次输入已保留/);
+  expect(api.secretSet).not.toHaveBeenCalled();
+});

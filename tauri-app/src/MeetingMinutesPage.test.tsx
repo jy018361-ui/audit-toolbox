@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as renderUi, screen, waitFor, within } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   displayAudioFileName,
@@ -55,6 +57,10 @@ const tool: ToolManifest = {
   capabilities: [],
   migrationStatus: "preview",
 };
+
+function render(ui: ReactElement) {
+  return renderUi(<MemoryRouter initialEntries={[tool.route]}>{ui}</MemoryRouter>);
+}
 
 afterEach(() => {
   cleanup();
@@ -169,7 +175,7 @@ describe("MeetingMinutesPage", () => {
       screen.getByRole("button", { name: "手动开始记录" }),
     ).toBeDisabled();
     expect(
-      screen.getByRole("button", { name: "从导入录音生成纪要" }),
+      screen.getByRole("button", { name: "生成纪要" }),
     ).toBeDisabled();
   });
 
@@ -221,7 +227,7 @@ describe("MeetingMinutesPage", () => {
     render(<MeetingMinutesPage tool={tool} />);
     expect(await screen.findByText("项目周会")).toBeInTheDocument();
     expect(await screen.findByRole("article", { name: "会议纪要正文" })).toHaveTextContent("原有纪要内容。");
-    (await screen.findByRole("button", { name: "打开会议纪要" })).click();
+    (await screen.findByRole("button", { name: "打开输出文件夹" })).click();
     await waitFor(() => expect(openOutput).toHaveBeenCalledWith("C:/data/纪要.md"));
   });
 
@@ -327,7 +333,7 @@ describe("MeetingMinutesPage", () => {
     });
     render(<MeetingMinutesPage tool={tool} />);
     expect(await screen.findByText("文件已被移动")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "打开会议纪要" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "打开输出文件夹" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "从转写稿重新生成" })).toBeEnabled();
   });
 
@@ -351,13 +357,15 @@ describe("MeetingMinutesPage", () => {
     }));
     expect(screen.getByRole("article")).toHaveTextContent("合并同类议题。");
     expect(screen.getByRole("button", { name: "按内容", pressed: true })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "打开按内容版纪要" }));
+    expect(screen.getAllByRole("button", { name: "打开输出文件夹" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "打开转写稿" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "打开输出文件夹" }));
     await waitFor(() => expect(openOutput).toHaveBeenCalledWith("C:/data/按内容.md"));
     fireEvent.click(screen.getByRole("button", { name: "按时间", pressed: false }));
     expect(screen.getByRole("article")).toHaveTextContent("[00:08] 开场。");
     expect(screen.getByRole("article")).not.toHaveTextContent("合并同类议题。");
-    fireEvent.click(screen.getByRole("button", { name: "打开按时间版纪要" }));
-    await waitFor(() => expect(openOutput).toHaveBeenCalledWith("C:/data/按时间.md"));
+    expect(openOutput).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByRole("button", { name: "打开输出文件夹" })).toHaveLength(1);
     fireEvent.change(screen.getByRole("combobox", { name: "纪要详细度" }), { target: { value: "brief" } });
     fireEvent.click(screen.getByRole("button", { name: "从转写稿重新生成两个版本" }));
     await waitFor(() => expect(jobStart).toHaveBeenCalledWith("meeting.summarize", {

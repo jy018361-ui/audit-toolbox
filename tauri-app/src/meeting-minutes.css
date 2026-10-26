@@ -18,6 +18,7 @@
    开关移出砖排单独一行（UI 审核：状态与控件混排曾经职责不清）。 */
 .meeting-status-grid {
   display: grid;
+  margin: 0;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--sp-2);
 }
@@ -44,6 +45,7 @@
 
 .meeting-resident-row {
   display: flex;
+  margin-top: var(--sp-3);
   align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-2) var(--sp-3);
@@ -113,6 +115,15 @@
   gap: var(--sp-3);
   margin-top: var(--sp-3);
   min-width: 0;
+}
+
+.meeting-page #meeting-result-title {
+  scroll-margin-top: var(--sp-5);
+}
+
+.meeting-page #meeting-result-title:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: var(--sp-1);
 }
 
 .meeting-minutes-content {

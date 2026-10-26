@@ -1,9 +1,8 @@
-//! 百炼 Token Plan 套餐转写通道：realtime 模型的 WebSocket 实时协议。
+//! 百炼 Token Plan 套餐转写通道：ASR Flash 使用 HTTP，realtime 使用 WebSocket。
 //!
-//! 套餐专属密钥（`sk-sp-`）只能访问套餐端点，语音识别不在通用文件转写服务里，
-//! 而是走 `wss://{套餐地址}/api-ws/v1/realtime?model=...` 的实时协议：
-//! 建会话 → 逐段喂 WAV → 服务端转写 → `input_audio_transcription.completed`
-//! 事件回传文字（2026-09 用 7 秒样音实测逐字准确）。
+//! 套餐专属密钥（`sk-sp-`）只访问套餐端点。ASR Flash 调用原生 HTTP
+//! multimodal-generation/generation；realtime 模型通过 WebSocket 建会话、
+//! append / commit 音频并等待 input_audio_transcription.completed。
 //!
 //! 与通用通道（`bailian_asr` 的 paraformer-v2 文件转写）的差别：
 //! - token 计费刷套餐额度，不需要按时长付费的通用密钥；
@@ -29,8 +28,20 @@ pub(crate) type Progress<'a> = &'a dyn Fn(&str, usize, usize, &str);
 
 const DEFAULT_BASE_URL: &str = "https://token-plan.cn-beijing.maas.aliyuncs.com";
 const DEFAULT_MODEL: &str = "qwen-audio-3.0-realtime-plus";
-/// 每段喂给实时通道的音频秒数：太长单会话上下文压力大，太短握手开销高。
+const HTTP_ASR_MODEL: &str = "qwen-audio-3.0-asr-flash";
+const HTTP_ASR_PATH: &str = "/api/v1/services/aigc/multimodal-generation/generation";
+// base64 编码后约 8 MiB，低于接口 10 MB 上限（含 WAV 头和 Data URI）。
+const HTTP_ASR_WAV_BYTES: usize = 6 * 1024 * 1024;
+const CONNECTION_SAMPLE: &[u8] = include_bytes!("../../assets/asr/connection-test.wav");
+
+fn uses_http_asr(model: &str) -> bool {
+    model.trim() == HTTP_ASR_MODEL
+}
+/// 未知模型沿用原有分段时长，不将某个模型的缓冲上限套用到其他模型。
 const CHUNK_SECONDS: u32 = 120;
+/// qwen-audio-3.0-realtime-plus 的未提交音频缓冲最多容纳 30 秒。
+/// 按 25 秒切分留出余量；append 分帧不会清空缓冲，必须在整段发送后 commit。
+const REALTIME_PLUS_CHUNK_SECONDS: u32 = 25;
 /// 单段转写上限：正常远快于实时，超时说明通道异常，避免整个任务挂死。
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
 /// 单帧 `input_audio_buffer.append` 的 base64 分片（字符数）。
@@ -85,6 +96,47 @@ pub(crate) fn load_plan_key() -> Result<String, AppError> {
 
 /// 兼容订阅页文本接口地址、服务根地址及完整实时接口，测试和转写共用。
 fn ws_url(base_url: &str, model: &str) -> Result<String, AppError> {
+    let mut url = service_url(base_url)?;
+    let scheme = if matches!(url.scheme(), "https" | "wss") {
+        "wss"
+    } else {
+        "ws"
+    };
+    url.set_scheme(scheme)
+        .map_err(|_| plan_error("PLAN_ASR_URL_INVALID", "套餐转写地址格式不正确。", None))?;
+    url.set_path(&format!(
+        "{}/api-ws/v1/realtime",
+        url.path().trim_end_matches('/')
+    ));
+    let model = model.trim();
+    url.query_pairs_mut().append_pair(
+        "model",
+        if model.is_empty() {
+            DEFAULT_MODEL
+        } else {
+            model
+        },
+    );
+    Ok(url.to_string())
+}
+
+fn http_asr_url(base_url: &str) -> Result<String, AppError> {
+    let mut url = service_url(base_url)?;
+    let scheme = if matches!(url.scheme(), "https" | "wss") {
+        "https"
+    } else {
+        "http"
+    };
+    url.set_scheme(scheme)
+        .map_err(|_| plan_error("PLAN_ASR_URL_INVALID", "套餐转写地址格式不正确。", None))?;
+    url.set_path(&format!(
+        "{}{HTTP_ASR_PATH}",
+        url.path().trim_end_matches('/')
+    ));
+    Ok(url.to_string())
+}
+
+fn service_url(base_url: &str) -> Result<reqwest::Url, AppError> {
     let invalid_url = || {
         plan_error(
             "PLAN_ASR_URL_INVALID",
@@ -99,11 +151,9 @@ fn ws_url(base_url: &str, model: &str) -> Result<String, AppError> {
         base_url
     })
     .map_err(|_| invalid_url())?;
-    let scheme = match url.scheme() {
-        "https" | "wss" => "wss",
-        "http" | "ws" => "ws",
-        _ => return Err(invalid_url()),
-    };
+    if !matches!(url.scheme(), "https" | "wss" | "http" | "ws") {
+        return Err(invalid_url());
+    }
     if url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -113,22 +163,13 @@ fn ws_url(base_url: &str, model: &str) -> Result<String, AppError> {
         return Err(invalid_url());
     }
     let path = url.path().trim_end_matches('/');
+    let path = path.strip_suffix(HTTP_ASR_PATH).unwrap_or(path);
     let path = path.strip_suffix("/api-ws/v1/realtime").unwrap_or(path);
     let path = path.strip_suffix("/compatible-mode/v1").unwrap_or(path);
-    let path = format!("{path}/api-ws/v1/realtime");
-    url.set_scheme(scheme).map_err(|_| invalid_url())?;
+    let path = path.to_owned();
     url.set_path(&path);
     url.set_query(None);
-    let model = model.trim();
-    url.query_pairs_mut().append_pair(
-        "model",
-        if model.is_empty() {
-            DEFAULT_MODEL
-        } else {
-            model
-        },
-    );
-    Ok(url.to_string())
+    Ok(url)
 }
 
 fn connection_error(error: tokio_tungstenite::tungstenite::Error) -> AppError {
@@ -166,7 +207,7 @@ type PlanSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// 使用 Windows 原生证书链校验（包括中间证书补全及系统信任），保留域名和有效期校验。
-async fn connect(url: &str, key: &str) -> Result<PlanSocket, AppError> {
+fn tls_config() -> Result<rustls::ClientConfig, AppError> {
     use rustls_platform_verifier::BuilderVerifierExt;
     let tls_error = |error: rustls::Error| {
         plan_error(
@@ -175,14 +216,18 @@ async fn connect(url: &str, key: &str) -> Result<PlanSocket, AppError> {
             Some(error.to_string()),
         )
     };
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
     .with_safe_default_protocol_versions()
     .map_err(tls_error)?
     .with_platform_verifier()
     .map_err(tls_error)?
-    .with_no_client_auth();
+    .with_no_client_auth())
+}
+
+async fn connect(url: &str, key: &str) -> Result<PlanSocket, AppError> {
+    let config = tls_config()?;
     let request = build_request(url, key)?;
     let (socket, _) = tokio::time::timeout(
         Duration::from_secs(20),
@@ -245,10 +290,18 @@ fn wav_bytes(spec: hound::WavSpec, samples: &[i16]) -> Result<Vec<u8>, AppError>
 }
 
 /// 读取 16 位 WAV 并按 `chunk_seconds` 切成独立的小 WAV（带各自文件头）。
-/// 逐段处理控制内存：两小时录音同一时刻只在内存里保留一段样本。
+/// 读取时只保留一段原始样本；返回值仍会保留各段 base64。
 fn wav_chunks_with(
     path: &Path,
     chunk_seconds: u32,
+) -> Result<(hound::WavSpec, Vec<PlanChunk>), AppError> {
+    wav_chunks_limited(path, chunk_seconds, usize::MAX)
+}
+
+fn wav_chunks_limited(
+    path: &Path,
+    chunk_seconds: u32,
+    max_wav_bytes: usize,
 ) -> Result<(hound::WavSpec, Vec<PlanChunk>), AppError> {
     let mut reader = hound::WavReader::open(path).map_err(|error| {
         plan_error(
@@ -270,6 +323,9 @@ fn wav_chunks_with(
     }
     let samples_per_chunk =
         (spec.sample_rate as u64 * spec.channels as u64 * chunk_seconds as u64).max(1) as usize;
+    let max_samples = max_wav_bytes.saturating_sub(1024) / 2;
+    let samples_per_chunk =
+        samples_per_chunk.min(max_samples) / spec.channels as usize * spec.channels as usize;
     let ms_per_frame = 1000.0 / (spec.sample_rate as f64 * spec.channels as f64);
     let mut chunks: Vec<PlanChunk> = Vec::new();
     let mut pending: Vec<i16> = Vec::with_capacity(samples_per_chunk);
@@ -308,8 +364,15 @@ fn wav_chunks_with(
     Ok((spec, chunks))
 }
 
-fn wav_chunks(path: &Path) -> Result<(hound::WavSpec, Vec<PlanChunk>), AppError> {
-    wav_chunks_with(path, CHUNK_SECONDS)
+fn wav_chunks(path: &Path, model: &str) -> Result<(hound::WavSpec, Vec<PlanChunk>), AppError> {
+    if uses_http_asr(model) {
+        return wav_chunks_limited(path, CHUNK_SECONDS, HTTP_ASR_WAV_BYTES);
+    }
+    let chunk_seconds = match model.trim() {
+        "" | DEFAULT_MODEL => REALTIME_PLUS_CHUNK_SECONDS,
+        _ => CHUNK_SECONDS,
+    };
+    wav_chunks_with(path, chunk_seconds)
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, AppError> {
@@ -358,6 +421,130 @@ async fn wait_cancelled(cancel: &AtomicBool) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn http_asr_payload(model: &str, chunk_b64: &str, sample_rate: u32) -> Value {
+    json!({
+        "model": model.trim(),
+        "input": {"messages": [{"role": "user", "content": [{
+            "type": "input_audio",
+            "input_audio": {"data": format!("data:audio/wav;base64,{chunk_b64}")}
+        }]}]},
+        "parameters": {"format": "wav", "sample_rate": sample_rate.to_string()}
+    })
+}
+
+fn http_asr_response(status: u16, body: &str) -> Result<String, AppError> {
+    let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let output = value.get("output").unwrap_or(&value);
+    let code = value
+        .get("code")
+        .or_else(|| output.get("code"))
+        .and_then(Value::as_str);
+    if !(200..300).contains(&status) || code.is_some_and(|code| !code.is_empty()) {
+        let message = match status {
+            401 | 403 => "套餐语音识别鉴权失败，请核对套餐专用密钥及模型访问权限。",
+            404 => "未找到套餐语音识别接口，请核对套餐地址与模型名称。",
+            429 => "套餐语音识别请求受限，请检查套餐额度或稍后重试。",
+            400 => "套餐语音识别服务拒绝请求，请核对模型及音频格式；静音样音也可能被服务拒绝。",
+            _ => "套餐语音识别服务返回错误，请稍后重试。",
+        };
+        // 不附原始响应或 message：服务可能回显密钥、Data URI 和录音内容。
+        let safe_id = |text: &str| {
+            !text.is_empty()
+                && text.len() <= 80
+                && text
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+                && !text.starts_with("sk-")
+        };
+        let mut detail = format!("HTTP {status}");
+        if let Some(code) = code.filter(|code| safe_id(code)) {
+            detail.push_str(&format!("；错误码 {code}"));
+        }
+        if let Some(id) = value
+            .get("request_id")
+            .and_then(Value::as_str)
+            .filter(|id| safe_id(id))
+        {
+            detail.push_str(&format!("；请求编号 {id}"));
+        }
+        return Err(plan_error("PLAN_ASR_SERVER_ERROR", message, Some(detail)));
+    }
+    // 官方信封 output.text 和套餐网关扁平 text 都可能出现；空字符串是有效的无人声结果。
+    output
+        .get("text")
+        .and_then(Value::as_str)
+        .map(|text| text.trim().to_owned())
+        .ok_or_else(|| {
+            plan_error(
+                "PLAN_ASR_RESPONSE_INVALID",
+                "套餐语音识别返回内容缺少转写文本。",
+                None,
+            )
+        })
+}
+
+fn transcribe_http_chunk(
+    rt: &tokio::runtime::Runtime,
+    url: &str,
+    key: &str,
+    model: &str,
+    chunk_b64: &str,
+    sample_rate: u32,
+    cancel: &AtomicBool,
+) -> Result<String, AppError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(cancelled_error());
+    }
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .use_preconfigured_tls(tls_config()?)
+            .connect_timeout(Duration::from_secs(20))
+            .timeout(CHUNK_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| {
+                plan_error(
+                    "PLAN_ASR_CONNECT_FAILED",
+                    "无法初始化套餐语音识别连接。",
+                    None,
+                )
+            })?;
+        let request = async {
+            let response = client
+                .post(url)
+                .bearer_auth(key.trim())
+                .header("X-DashScope-SSE", "disable")
+                .json(&http_asr_payload(model, chunk_b64, sample_rate))
+                .send()
+                .await
+                .map_err(http_request_error)?;
+            let status = response.status().as_u16();
+            let body = response.text().await.map_err(http_request_error)?;
+            http_asr_response(status, &body)
+        };
+        tokio::select! {
+            result = request => result,
+            _ = wait_cancelled(cancel) => Err(cancelled_error()),
+        }
+    })
+}
+
+fn http_request_error(error: reqwest::Error) -> AppError {
+    if error.is_timeout() {
+        plan_error(
+            "PLAN_ASR_TIMEOUT",
+            "套餐语音识别请求超时，请稍后重试。",
+            None,
+        )
+    } else {
+        plan_error(
+            "PLAN_ASR_CONNECT_FAILED",
+            "套餐语音识别请求未完成，请检查网络、服务地址及 Windows 系统证书。",
+            None,
+        )
     }
 }
 
@@ -466,7 +653,7 @@ fn transcribe_chunk(
     })
 }
 
-/// 套餐转写主入口：切段 → 逐段实时转写 → 汇成无说话人标签的转写结果。
+/// 套餐转写主入口：切段 → 按模型使用 HTTP 或实时转写 → 汇成无说话人标签的转写结果。
 /// `speakers` 恒为 0，纪要侧据此走「无说话人」提示词分支。
 pub(crate) fn transcribe_file(
     path: &Path,
@@ -474,9 +661,24 @@ pub(crate) fn transcribe_file(
     cancel: &Arc<AtomicBool>,
     config: &PlanAsrConfig,
 ) -> Result<TranscriptionResult, AppError> {
-    let url = ws_url(&config.base_url, &config.model)?;
     let key = load_plan_key()?;
-    let (_spec, chunks) = wav_chunks(path)?;
+    transcribe_file_with_key(path, progress, cancel, config, &key)
+}
+
+fn transcribe_file_with_key(
+    path: &Path,
+    progress: Progress,
+    cancel: &Arc<AtomicBool>,
+    config: &PlanAsrConfig,
+    key: &str,
+) -> Result<TranscriptionResult, AppError> {
+    let http_asr = uses_http_asr(&config.model);
+    let url = if http_asr {
+        http_asr_url(&config.base_url)?
+    } else {
+        ws_url(&config.base_url, &config.model)?
+    };
+    let (spec, chunks) = wav_chunks(path, &config.model)?;
     if chunks.is_empty() {
         return Err(plan_error(
             "ASR_EMPTY_TRANSCRIPT",
@@ -498,7 +700,19 @@ pub(crate) fn transcribe_file(
             4,
             &format!("套餐通道转写中：第 {} / {} 段…", index + 1, total),
         );
-        let transcript = transcribe_chunk(&runtime, &url, &key, &chunk.b64, cancel)?;
+        let transcript = if http_asr {
+            transcribe_http_chunk(
+                &runtime,
+                &url,
+                key,
+                &config.model,
+                &chunk.b64,
+                spec.sample_rate,
+                cancel,
+            )?
+        } else {
+            transcribe_chunk(&runtime, &url, key, &chunk.b64, cancel)?
+        };
         if !transcript.is_empty() {
             sentences.push(Sentence {
                 text: transcript,
@@ -539,11 +753,15 @@ pub(crate) struct PlanTestParams {
     pub api_key: Option<String>,
 }
 
-/// 设置页「测试连接」（套餐通道）：建会话等 `session.created` 即可，
-/// 不喂音频、不产生 token 消耗。
+/// 设置页「测试连接」：实时模型仅建会话；HTTP ASR 发送内置短样音并验证返回文本。
 pub(crate) fn test_connection(params: &PlanTestParams) -> Result<Value, AppError> {
     let started = std::time::Instant::now();
-    let url = ws_url(&params.base_url, &params.model)?;
+    let http_asr = uses_http_asr(&params.model);
+    let url = if http_asr {
+        http_asr_url(&params.base_url)?
+    } else {
+        ws_url(&params.base_url, &params.model)?
+    };
     let key = params
         .api_key
         .as_deref()
@@ -552,6 +770,30 @@ pub(crate) fn test_connection(params: &PlanTestParams) -> Result<Value, AppError
         .map(str::to_owned)
         .map_or_else(load_plan_key, Ok)?;
     let runtime = runtime()?;
+    if http_asr {
+        let sample = base64::engine::general_purpose::STANDARD.encode(CONNECTION_SAMPLE);
+        let text = transcribe_http_chunk(
+            &runtime,
+            &url,
+            &key,
+            &params.model,
+            &sample,
+            16_000,
+            &AtomicBool::new(false),
+        )?;
+        if text.is_empty() {
+            return Err(plan_error(
+                "ASR_EMPTY_TRANSCRIPT",
+                "套餐测试样音未识别到文字，请检查模型与服务状态。",
+                None,
+            ));
+        }
+        return Ok(json!({
+            "ok": true,
+            "message": format!("套餐语音识别测试成功（模型 {}，已识别内置短样音，消耗少量套餐额度）。", params.model.trim()),
+            "elapsedMs": started.elapsed().as_millis()
+        }));
+    }
     runtime.block_on(async {
         use futures_util::StreamExt;
         let mut socket = connect(&url, &key).await?;
@@ -602,6 +844,256 @@ pub(crate) fn test_connection(params: &PlanTestParams) -> Result<Value, AppError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_asr_uses_native_endpoint_without_subscription_or_realtime_suffix() {
+        for suffix in [
+            "",
+            "/",
+            "/compatible-mode/v1/",
+            HTTP_ASR_PATH,
+            "/api-ws/v1/realtime?model=old",
+            "/compatible-mode/v1/api-ws/v1/realtime",
+        ] {
+            assert_eq!(
+                http_asr_url(&format!("https://host.cn/gateway{suffix}")).unwrap(),
+                format!("https://host.cn/gateway{HTTP_ASR_PATH}")
+            );
+        }
+        for url in [
+            "https://user:password@host.cn",
+            "https://host.cn?key=private",
+            "file:///tmp/asr",
+            "https://host.cn#secret",
+        ] {
+            let error = http_asr_url(url).unwrap_err();
+            assert_eq!(error.code, "PLAN_ASR_URL_INVALID");
+            assert!(error.detail.is_none());
+        }
+        assert!(uses_http_asr(" qwen-audio-3.0-asr-flash "));
+        assert!(!uses_http_asr(DEFAULT_MODEL));
+        assert!(!uses_http_asr("qwen-audio-3.0-asr-flash-streaming"));
+    }
+
+    #[test]
+    fn http_response_accepts_enveloped_and_flat_results_but_rejects_missing_text() {
+        for body in [
+            json!({"output":{"text":" 测试成功。 "}}),
+            json!({"text":" 测试成功。 "}),
+        ] {
+            assert_eq!(
+                http_asr_response(200, &body.to_string()).unwrap(),
+                "测试成功。"
+            );
+        }
+        assert_eq!(
+            http_asr_response(200, r#"{"output":{"text":""}}"#).unwrap(),
+            ""
+        );
+        for body in [
+            "{}",
+            "not-json",
+            r#"{"output":{"sentence":{"text":"只有末句"}}}"#,
+        ] {
+            assert_eq!(
+                http_asr_response(200, body).unwrap_err().code,
+                "PLAN_ASR_RESPONSE_INVALID"
+            );
+        }
+        for status in [400, 401, 403, 404, 429, 500] {
+            let error = http_asr_response(status, r#"{"message":"sk-private data:audio/wav;base64,private","request_id":"request-test","code":"InvalidInput"}"#).unwrap_err();
+            let serialized = serde_json::to_string(&error).unwrap();
+            assert!(!serialized.contains("private"));
+            assert!(serialized.contains("request-test"));
+            assert!(serialized.contains(&format!("HTTP {status}")));
+        }
+        assert!(http_asr_response(200, r#"{"code":"InvalidInput","output":{"text":""}}"#).is_err());
+    }
+
+    // 本地 HTTP 服务核对真实请求，既用于设置页测试，也用于长录音完整入口。
+    fn http_server(responses: Vec<(u16, Value)>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (status, response) in responses {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "未收到 HTTP 转写请求");
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = std::io::BufReader::new(socket.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                assert_eq!(first.trim(), format!("POST {HTTP_ASR_PATH} HTTP/1.1"));
+                let mut headers = std::collections::HashMap::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    let (name, value) = line.split_once(':').unwrap();
+                    headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
+                }
+                assert_eq!(headers["authorization"], "Bearer test-only-key");
+                assert_eq!(headers["x-dashscope-sse"], "disable");
+                let mut body = vec![0; headers["content-length"].parse::<usize>().unwrap()];
+                reader.read_exact(&mut body).unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["model"], HTTP_ASR_MODEL);
+                assert!(body.get("messages").is_none());
+                assert_eq!(body["parameters"]["format"], "wav");
+                let audio = body
+                    .pointer("/input/messages/0/content/0/input_audio/data")
+                    .and_then(Value::as_str)
+                    .unwrap();
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(audio.strip_prefix("data:audio/wav;base64,").unwrap())
+                    .unwrap();
+                let mut wav = hound::WavReader::new(Cursor::new(bytes)).unwrap();
+                assert_eq!(
+                    body["parameters"]["sample_rate"],
+                    wav.spec().sample_rate.to_string()
+                );
+                assert!(wav.samples::<i16>().any(|s| s.unwrap() != 0));
+                let response = response.to_string();
+                write!(socket, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            }
+        });
+        (format!("http://{address}/compatible-mode/v1"), server)
+    }
+
+    #[test]
+    fn connection_test_for_flash_sends_builtin_speech_over_http() {
+        let (base_url, server) = http_server(vec![(200, json!({"output":{"text":"语音测试"}}))]);
+        let result = test_connection(&PlanTestParams {
+            base_url,
+            model: format!(" {HTTP_ASR_MODEL} "),
+            api_key: Some("test-only-key".into()),
+        })
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(result["ok"], true);
+        assert!(result["message"].as_str().unwrap().contains("内置短样音"));
+        let reader = hound::WavReader::new(Cursor::new(CONNECTION_SAMPLE)).unwrap();
+        assert_eq!(reader.spec().sample_rate, 16_000);
+        assert!(reader.duration() > 16_000 && reader.duration() < 48_000);
+    }
+
+    #[test]
+    fn flash_test_reports_server_rejection_and_empty_recognition() {
+        for (status, body, expected) in [
+            (400, json!({}), "PLAN_ASR_SERVER_ERROR"),
+            (200, json!({"output":{"text":""}}), "ASR_EMPTY_TRANSCRIPT"),
+        ] {
+            let (base_url, server) = http_server(vec![(status, body)]);
+            let error = test_connection(&PlanTestParams {
+                base_url,
+                model: HTTP_ASR_MODEL.into(),
+                api_key: Some("test-only-key".into()),
+            })
+            .unwrap_err();
+            server.join().unwrap();
+            assert_eq!(error.code, expected);
+        }
+    }
+
+    #[test]
+    fn flash_long_recording_runs_http_chunks_and_preserves_timeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long-flash.wav");
+        write_wav(&path, 8_000, 125.0);
+        let (base_url, server) = http_server(vec![
+            (200, json!({"output":{"text":"第一段"}})),
+            (200, json!({"text":"第二段"})),
+        ]);
+        let result = transcribe_file_with_key(
+            &path,
+            &|_, _, _, _| {},
+            &Arc::new(AtomicBool::new(false)),
+            &PlanAsrConfig {
+                base_url,
+                model: HTTP_ASR_MODEL.into(),
+            },
+            "test-only-key",
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.billed_ms, 125_000);
+        assert_eq!(result.speakers, 0);
+        assert_eq!(result.sentences.len(), 2);
+        assert_eq!(result.sentences[0].text, "第一段");
+        assert_eq!(result.sentences[0].end_ms, 120_000);
+        assert_eq!(result.sentences[1].begin_ms, 120_000);
+        assert_eq!(result.sentences[1].end_ms, 125_000);
+    }
+
+    #[test]
+    fn flash_high_rate_stereo_chunks_respect_base64_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stereo.wav");
+        write_wav_with_channels(&path, 48_000, 2, 61.0);
+        let (_, chunks) = wav_chunks(&path, HTTP_ASR_MODEL).unwrap();
+        assert_eq!(chunks.len(), 2);
+        let mut sample_count = 0usize;
+        let mut end_ms = 0;
+        for chunk in chunks {
+            assert!(chunk.b64.len() + 22 < 10_000_000);
+            assert_eq!(chunk.begin_ms, end_ms);
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&chunk.b64)
+                .unwrap();
+            let mut wav = hound::WavReader::new(Cursor::new(bytes)).unwrap();
+            for sample in wav.samples::<i16>() {
+                assert_eq!(sample.unwrap(), (sample_count % 97 * 100) as i16);
+                sample_count += 1;
+            }
+            end_ms = chunk.end_ms;
+        }
+        assert_eq!(sample_count, 48_000 * 2 * 61);
+        assert_eq!(end_ms, 61_000);
+    }
+
+    #[test]
+    fn cancelled_http_chunk_does_not_contact_service() {
+        let error = transcribe_http_chunk(
+            &runtime().unwrap(),
+            "http://127.0.0.1:1",
+            "test-only-key",
+            HTTP_ASR_MODEL,
+            "",
+            16_000,
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "JOB_CANCELLED");
+    }
+
+    #[test]
+    #[ignore = "在线 HTTP 识别测试：需 AUDIT_TOOLBOX_PLAN_ASR_KEY，上传内置短样音并消耗少量套餐额度"]
+    fn online_http_connection_sample() {
+        let key = std::env::var("AUDIT_TOOLBOX_PLAN_ASR_KEY").expect("缺少在线测试密钥环境变量");
+        match test_connection(&PlanTestParams {
+            base_url: format!("{DEFAULT_BASE_URL}/compatible-mode/v1"),
+            model: HTTP_ASR_MODEL.into(),
+            api_key: Some(key),
+        }) {
+            Ok(result) => assert_eq!(result["ok"], true),
+            Err(error) => panic!("在线 HTTP 识别失败：{}；{}", error.code, error.user_message),
+        }
+    }
 
     #[test]
     fn ws_url_converts_scheme_and_appends_realtime_path() {
@@ -767,14 +1259,18 @@ mod tests {
     }
 
     fn write_wav(path: &Path, sample_rate: u32, seconds: f64) {
+        write_wav_with_channels(path, sample_rate, 1, seconds);
+    }
+
+    fn write_wav_with_channels(path: &Path, sample_rate: u32, channels: u16, seconds: f64) {
         let spec = hound::WavSpec {
-            channels: 1,
+            channels,
             sample_rate,
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         };
         let mut writer = hound::WavWriter::create(path, spec).unwrap();
-        for i in 0..(sample_rate as f64 * seconds) as u32 {
+        for i in 0..(sample_rate as f64 * seconds) as u32 * channels as u32 {
             let value = (i % 97 * 100) as i16;
             writer.write_sample(value).unwrap();
         }
@@ -798,6 +1294,151 @@ mod tests {
             .unwrap();
         assert_eq!(&bytes[0..4], b"RIFF");
         assert!(hound::WavReader::new(Cursor::new(bytes)).is_ok());
+    }
+
+    #[test]
+    fn realtime_plus_chunks_stay_below_buffer_limit_without_losing_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        for (sample_rate, channels, seconds) in [
+            (16_000, 1, 24.5),
+            (16_000, 1, 25.0),
+            (16_000, 1, 30.0),
+            (16_000, 1, 120.5),
+            (48_000, 2, 60.25),
+        ] {
+            let path = dir.path().join("buffer-limit.wav");
+            write_wav_with_channels(&path, sample_rate, channels, seconds);
+            let (spec, chunks) = wav_chunks(&path, DEFAULT_MODEL).unwrap();
+            let mut sample_count = 0_u64;
+            let mut previous_end_ms = 0;
+            for chunk in &chunks {
+                assert_eq!(chunk.begin_ms, previous_end_ms);
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&chunk.b64)
+                    .unwrap();
+                let mut reader = hound::WavReader::new(Cursor::new(bytes)).unwrap();
+                assert_eq!(reader.spec(), spec);
+                // 检查 WAV 实际帧数，不能只检查外部时间戳或 append 消息大小。
+                assert!(reader.duration() > 0);
+                assert!(u64::from(reader.duration()) < u64::from(sample_rate) * 30);
+                for sample in reader.samples::<i16>() {
+                    assert_eq!(sample.unwrap(), (sample_count % 97 * 100) as i16);
+                    sample_count += 1;
+                }
+                previous_end_ms = chunk.end_ms;
+            }
+            assert_eq!(
+                sample_count,
+                (sample_rate as f64 * seconds) as u64 * u64::from(channels)
+            );
+            assert_eq!(previous_end_ms, (seconds * 1000.0) as i64);
+            if seconds > 30.0 {
+                assert!(chunks.len() > 1);
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_duration_is_selected_only_for_the_configured_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model-limit.wav");
+        write_wav(&path, 8_000, 125.0);
+        for model in [DEFAULT_MODEL, " qwen-audio-3.0-realtime-plus ", "", " "] {
+            let (_, chunks) = wav_chunks(&path, model).unwrap();
+            assert_eq!(chunks.len(), 5);
+            assert_eq!(chunks[0].end_ms, 25_000);
+            assert_eq!(chunks.last().unwrap().end_ms, 125_000);
+        }
+        for model in ["qwen-audio-3.0-realtime-flash", "custom-model"] {
+            let (_, chunks) = wav_chunks(&path, model).unwrap();
+            assert_eq!(chunks.len(), 2);
+            assert_eq!(chunks[0].end_ms, 120_000);
+            assert_eq!(chunks[1].begin_ms, 120_000);
+            assert_eq!(chunks[1].end_ms, 125_000);
+        }
+    }
+
+    #[test]
+    fn long_recording_commits_each_chunk_within_server_buffer_limit() {
+        use tokio_tungstenite::tungstenite::{Message, accept};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long.wav");
+        write_wav(&path, 16_000, 65.0);
+        let (_, chunks) = wav_chunks(&path, DEFAULT_MODEL).unwrap();
+        let chunk_count = chunks.len();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            for index in 0..chunk_count {
+                let socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "未收到音频分段连接");
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut socket = accept(socket).unwrap();
+                let mut audio = String::new();
+                loop {
+                    let Message::Text(text) = socket.read().unwrap() else {
+                        panic!("预期收到音频协议消息");
+                    };
+                    let event: Value = serde_json::from_str(text.as_str()).unwrap();
+                    match event["type"].as_str().unwrap() {
+                        "session.update" => assert!(event["session"]["turn_detection"].is_null()),
+                        "input_audio_buffer.append" => {
+                            audio.push_str(event["audio"].as_str().unwrap());
+                            // WAV 头已包含完整时长：模拟服务端在 append 阶段拒绝超限缓冲。
+                            let bytes = base64::engine::general_purpose::STANDARD
+                                .decode(&audio)
+                                .unwrap();
+                            let reader = hound::WavReader::new(Cursor::new(bytes)).unwrap();
+                            assert!(
+                                reader.duration() <= reader.spec().sample_rate * 30,
+                                "提交前音频缓冲超过服务端 30 秒上限"
+                            );
+                        }
+                        "input_audio_buffer.commit" => {
+                            let bytes = base64::engine::general_purpose::STANDARD
+                                .decode(&audio)
+                                .unwrap();
+                            let mut reader = hound::WavReader::new(Cursor::new(bytes)).unwrap();
+                            assert!(reader.duration() > 0);
+                            let sample_count = reader.samples::<i16>().map(Result::unwrap).count();
+                            assert_eq!(sample_count, reader.len() as usize);
+                            socket.send(Message::Text(json!({
+                                "type": "conversation.item.input_audio_transcription.completed",
+                                "transcript": format!("第{}段", index + 1)
+                            }).to_string().into())).unwrap();
+                            break;
+                        }
+                        other => panic!("未预期的协议消息：{other}"),
+                    }
+                }
+            }
+        });
+        let runtime = runtime().unwrap();
+        for (index, chunk) in chunks.iter().enumerate() {
+            let text = transcribe_chunk(
+                &runtime,
+                &format!("ws://{address}/api-ws/v1/realtime"),
+                "test-only-key",
+                &chunk.b64,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(text, format!("第{}段", index + 1));
+        }
+        server.join().unwrap();
     }
 
     #[test]
@@ -869,7 +1510,7 @@ mod tests {
             }
         };
         let has_speech = std::env::var("AUDIT_TOOLBOX_PLAN_ASR_WAV").is_ok();
-        let (_spec, chunks) = wav_chunks(&path).unwrap();
+        let (_spec, chunks) = wav_chunks(&path, DEFAULT_MODEL).unwrap();
         assert_eq!(chunks.len(), 1, "样音应短于一个分段");
         let url = ws_url(DEFAULT_BASE_URL, DEFAULT_MODEL).unwrap();
         let runtime = runtime().unwrap();

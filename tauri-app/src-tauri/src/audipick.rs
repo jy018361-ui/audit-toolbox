@@ -37,12 +37,23 @@ pub fn test_ocr_connection(
     image: &str,
     api_key: Option<&str>,
     secret_key: Option<&str>,
+    ocr_config: Option<&Value>,
 ) -> Result<Value, AppError> {
     if image.is_empty() || image.len() > 200_000 {
         return Err(error("OCR_TEST_IMAGE_INVALID", "OCR 测试图片无效。", None));
     }
     let start = std::time::Instant::now();
-    settings["ocr"] = json!({"engine": engine});
+    // Only accept non-secret OCR fields from the unsaved form.
+    if let Some(draft) = ocr_config {
+        for name in ["bailian_base_url", "bailian_model"] {
+            if let Some(value) = draft.get(name).and_then(Value::as_str) {
+                if !settings["ocr"].is_object() { settings["ocr"] = json!({}); }
+                settings["ocr"][name] = json!(value);
+            }
+        }
+    }
+    if !settings["ocr"].is_object() { settings["ocr"] = json!({}); }
+    settings["ocr"]["engine"] = json!(engine);
     let value = if engine == "baidu" {
         let ak = api_key
             .filter(|v| !v.trim().is_empty())
@@ -55,6 +66,8 @@ pub fn test_ocr_connection(
             .or_else(|| secret("baidu_ocr_secret"))
             .ok_or_else(|| error("OCR_KEY_MISSING", "请填写百度 Secret Key。", None))?;
         baidu_ocr_with_keys(image, &ak, &sk)
+    } else if engine == "bailian" {
+        bailian_ocr(image, &settings, api_key)
     } else {
         ocr(&json!({"imageBase64": image}), &settings)
     }
@@ -601,6 +614,8 @@ fn config_status(settings: &Value) -> Result<Value, AppError> {
         "ai" => llm_ready && api_type != "dify_chat",
         "baidu" => secret("baidu_ocr_key").is_some() && secret("baidu_ocr_secret").is_some(),
         "local" => local_ocr_ready(),
+        "bailian" => crate::bailian_ocr::OcrConfig::from_settings(settings).is_ok()
+            && secret("bailian_ocr_key").is_some(),
         _ => false,
     };
     Ok(json!({
@@ -608,6 +623,7 @@ fn config_status(settings: &Value) -> Result<Value, AppError> {
                 "apiType": api_type, "model": llm.get("model").cloned().unwrap_or(Value::Null)},
         "ocr": {"ready": ocr_ready, "engine": ocr_engine},
         "credentials": {"baiduApiKey": secret("baidu_ocr_key").is_some(),
+            "bailianOcrKey": secret("bailian_ocr_key").is_some(),
             "baiduSecretKey": secret("baidu_ocr_secret").is_some(), "llmApiKey": llm_secret.is_some(),
             "audipickOpenaiKey": secret("audipick_llm_api_key").is_some(),
             "audipickDifyKey": secret("audipick_dify_api_key").is_some()}
@@ -2736,10 +2752,13 @@ fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
     if engine == "local" {
         return local_ocr(image);
     }
+    if engine == "bailian" {
+        return bailian_ocr(params["imageBase64"].as_str().unwrap_or(""), settings, None);
+    }
     if engine != "ai" {
         return Err(error(
             "OCR_ENGINE_UNAVAILABLE",
-            "当前仅支持统一 AI 视觉或百度 OCR。",
+            "不支持当前 OCR 引擎，请选择 AI 视觉、百度 OCR、百炼 OCR 或本机 OCR。",
             None,
         ));
     }
@@ -2758,6 +2777,14 @@ fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
         Some(image),
     )?;
     Ok(json!({"text": content, "engine": "ai"}))
+}
+
+fn bailian_ocr(image: &str, settings: &Value, api_key: Option<&str>) -> Result<Value, AppError> {
+    let config = crate::bailian_ocr::OcrConfig::from_settings(settings)?;
+    let key = api_key.filter(|v| !v.trim().is_empty()).map(str::to_owned)
+        .or_else(|| secret("bailian_ocr_key"))
+        .ok_or_else(|| error("OCR_KEY_MISSING", "请填写百炼 OCR API Key。", None))?;
+    config.recognize(image, &key)
 }
 
 fn local_ocr_ready() -> bool {
@@ -3276,7 +3303,7 @@ mod tests {
     #[test]
     fn ocr_test_rejects_invalid_images_without_network() {
         for image in [String::new(), "a".repeat(200_001)] {
-            let failure = test_ocr_connection(json!({}), "baidu", &image, None, None).unwrap_err();
+            let failure = test_ocr_connection(json!({}), "baidu", &image, None, None, None).unwrap_err();
             assert_eq!(failure.code, "OCR_TEST_IMAGE_INVALID");
         }
     }

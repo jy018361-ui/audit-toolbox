@@ -44,6 +44,7 @@ import { useCountUp } from "./lib/useCountUp";
 import { formatCount } from "./lib/numberFormat";
 import { SwitchInput } from "@/components/SwitchInput";
 import { SecretInput } from "@/components/SecretInput";
+import { BAILIAN_OCR_BASE_URL, BAILIAN_OCR_MODEL } from "./ocrConfig";
 import { DateInput } from "@/components/DateInput";
 import { demoDataEnabled } from "./preview/demoRegistry";
 import {
@@ -1703,6 +1704,9 @@ export function Settings({
     ocrEngine: "ai",
     ocrApiKey: "",
     ocrSecret: "",
+    bailianOcrUrl: BAILIAN_OCR_BASE_URL,
+    bailianOcrModel: BAILIAN_OCR_MODEL,
+    bailianOcrKey: "",
     meetingDetectEnabled: true,
     asrApiKey: "",
     asrChannel: "paraformer",
@@ -1925,6 +1929,8 @@ export function Settings({
             timeout: String(llm.timeout ?? x.timeout),
             thinkingEnabled: Boolean(llm.thinking_enabled),
             ocrEngine: String(ocr.engine ?? x.ocrEngine),
+            bailianOcrUrl: String(ocr.bailian_base_url ?? "").trim() || BAILIAN_OCR_BASE_URL,
+            bailianOcrModel: String(ocr.bailian_model ?? "").trim() || BAILIAN_OCR_MODEL,
             meetingDetectEnabled: meeting.detect_enabled !== false,
             asrChannel:
               meeting.asr_channel === "token_plan" ? "token_plan" : "paraformer",
@@ -2115,7 +2121,12 @@ export function Settings({
         llm: {
           ...llmSettings(),
         },
-        ocr: { engine: form.ocrEngine },
+        ocr: { ...(current.ocr as object ?? {}), engine: form.ocrEngine,
+          ...(form.ocrEngine === "bailian" ? {
+            bailian_base_url: form.bailianOcrUrl.trim() || BAILIAN_OCR_BASE_URL,
+            bailian_model: form.bailianOcrModel.trim() || BAILIAN_OCR_MODEL,
+          } : {}),
+        },
         cache: { cleanup: cacheMode },
         meeting: meetingNamespace,
       });
@@ -2128,6 +2139,7 @@ export function Settings({
         );
       if (form.ocrApiKey) await secretSet("baidu_ocr_key", form.ocrApiKey);
       if (form.ocrSecret) await secretSet("baidu_ocr_secret", form.ocrSecret);
+      if (form.bailianOcrKey.trim()) await secretSet("bailian_ocr_key", form.bailianOcrKey.trim());
       if (form.asrApiKey) await secretSet("bailian_asr_key", form.asrApiKey);
       if (form.planApiKey)
         await secretSet("bailian_plan_asr_key", form.planApiKey);
@@ -2136,6 +2148,7 @@ export function Settings({
         apiKey: "",
         ocrApiKey: "",
         ocrSecret: "",
+        bailianOcrKey: "",
         asrApiKey: "",
         planApiKey: "",
       };
@@ -2506,6 +2519,7 @@ export function Settings({
                 >
                   <option value="ai">使用统一 AI</option>
                   <option value="baidu">百度 OCR</option>
+                  <option value="bailian">百炼 OCR</option>
                   <option value="local">本机 OCR 服务</option>
                 </select>
               </label>
@@ -2536,7 +2550,13 @@ export function Settings({
                   </label>
                 </>
               )}
+              {form.ocrEngine === "bailian" && <>
+                <label className="field"><span>百炼 OCR URL</span><input value={form.bailianOcrUrl} onChange={(event) => set("bailianOcrUrl", event.target.value)} placeholder={BAILIAN_OCR_BASE_URL} /></label>
+                <label className="field"><span>百炼 OCR 模型</span><input value={form.bailianOcrModel} onChange={(event) => set("bailianOcrModel", event.target.value)} placeholder={BAILIAN_OCR_MODEL} /></label>
+                <label className="field"><span>百炼 OCR API Key</span><SecretInput key={`bailian-ocr-key-${secretRevision}`} label="百炼 OCR API Key" credentialName="bailian_ocr_key" value={form.bailianOcrKey} onChange={(value) => set("bailianOcrKey", value)} placeholder="留空表示不修改" /></label>
+              </>}
             </div>
+            {form.ocrEngine === "bailian" && <><p className="settings-note">当前 URL：{form.bailianOcrUrl.trim() || BAILIAN_OCR_BASE_URL}</p><p className="settings-note">使用与 API Key 同一业务空间的兼容接口 URL（通常以 /compatible-mode/v1 结尾）。模型和密钥独立于统一 AI；可在 AudiPick 配置页测试内置图片识别。</p></>}
             {form.ocrEngine === "ai" && (
               <p className="settings-note">
                 沿用上方统一 LLM 配置，无需额外密钥。
@@ -2641,10 +2661,12 @@ export function Settings({
                   <label className="field">
                     <span>套餐转写模型</span>
                     <input
+                      aria-label="套餐转写模型"
                       value={form.planModel}
                       onChange={(e) => set("planModel", e.target.value)}
                       placeholder="qwen-audio-3.0-realtime-plus"
                     />
+                    <small>qwen-audio-3.0-asr-flash 使用 HTTP 识别；qwen-audio-3.0-realtime-plus 使用实时接口。</small>
                   </label>
                   <label className="field">
                     <span>套餐 API 密钥（sk-sp- 开头）</span>
@@ -2710,7 +2732,7 @@ export function Settings({
               </button>
               <span>
                 {form.asrChannel === "token_plan"
-                  ? "地址与模型按「我的订阅」页面填写；密钥留空使用已保存密钥。"
+                  ? "地址与模型按「我的订阅」页面填写；ASR Flash 测试会发送内置短样音并消耗少量套餐额度，实时模型仅测试会话。密钥留空使用已保存密钥。"
                   : "按当前地址与模型验证上传凭证；完整转写需实际录音任务验证。密钥留空使用已保存密钥。"}
               </span>
             </div>

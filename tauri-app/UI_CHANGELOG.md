@@ -1,3 +1,25 @@
+## 2026-10-26 · 套餐 ASR Flash 使用 HTTP 语音识别
+
+- 目标：修复填写 `qwen-audio-3.0-asr-flash` 后测试套餐通道一直等待实时会话、最终超时的问题。
+- 设计决策：按模型区分 HTTP ASR 与实时协议，地址继续接受订阅页 `/compatible-mode/v1` 并自动转换。保留现有默认模型及用户配置；模型输入下方说明两种协议。
+- 测试说明：ASR Flash 测试发送内置「语音测试」短样音，成功需返回非空文字；按钮旁明确说明上传内置样音及少量套餐额度消耗，实时模型仍仅验证会话。
+- 验证：`npx vitest run src/AppNavigationSettings.test.tsx`、`npm run build`；Rust 的请求体、响应解析、长录音与体积限制见 `MEETING_MINUTES_PARITY.md`。
+
+## 2026-10-26 · 会议结果入口、卡片间距与询问窗退场
+
+- 目标：完成提示中的两版纪要跳转至工具箱内正文，目录操作只保留一个；修复状态卡与后台常驻贴边、生成按钮文案过长，以及退会再开会时询问窗无法关闭的问题。
+- 结果入口：完成提示使用「查看按内容版／查看按时间版」应用内链接，携带对应任务结果并选中版本，滚动、聚焦结果标题；查看后收起浮层，避免遮住正文。页面和完成提示各自仅保留一个「打开输出文件夹」，沿用已授权文件定位所在目录，不扩大文件权限。
+- 布局：状态砖与后台常驻之间使用独立 12px 间距；导入录音后的按钮简化为「生成纪要」，导览同步。
+- 询问窗：同一 WebView 隐藏复用，打开／隐藏操作串行处理；下一场显示前清空旧错误与忙碌状态。不记录、叉号及 Escape 隐藏不等待事件回传；主窗口收到决定后也隐藏小窗，原生检测退会时再次保证隐藏。系统关闭同样按不记录隐藏；未启用后台常驻时关闭主窗口会真正销毁隐藏询问窗，避免应用无法退出。窗口高度增加以容纳错误提示。
+- 验证：`npx vitest run src/MeetingAskWindow.test.tsx src/MeetingMinutesPage.test.tsx src/components/MeetingWatch.test.tsx src/components/tour/StepTourHint.test.tsx src/api.test.ts src/lib/errors.test.ts --maxWorkers=1 --no-file-parallelism`；`npm run build`；Rust `--lib meeting_`。真实页面使用合成纪要截图和量测，记录在 `artifacts/meeting-ui-20261026/`；未调用云端、未重新录音、未替换安装 EXE。真实 Teams 快速退会／再入会的 Windows 操作仍需安装包验收。
+
+## 2026-10-26 · AudiPick 增加百炼 OCR 与可见 URL
+
+- 目标：支持百炼 `qwen3.5-ocr` 扫描件识别，并在配置界面直接核对、修改 OCR URL。
+- 设计决策：AudiPick 引擎卡和工具箱设置均增加「百炼 OCR」，独立 URL、模型与密钥；URL 输入在 AudiPick 横跨整行，另显示可换行的完整地址，避免长业务空间 URL 被输入框裁切后无法核对。默认模型预填 `qwen3.5-ocr`，密钥使用既有显示／隐藏控件与 Windows 凭据管理器。引擎切换保留草稿；保存其他设置保留 OCR 参数。
+- 测试连接：发送内置示例图，使用当前草稿 URL／模型／密钥，空白密钥读取百炼专用凭据，不保存草稿；已保存配置状态和连接测试结论分开显示。实际 OCR 标签显示百炼引擎，空结果、截断及请求失败不写成识别完成。
+- 验证：`npm test`、`npm run build`；`cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_ocr::`、`--lib audipick::`。按量付费 Key 的直接在线请求返回 200，正确识别合成中英文／数字图片；原生在线补充测试被自动审批阻止，原生请求与 worker 路由采用本地模拟验证。浏览器核对长 URL、模型与密钥输入布局，记录见 `artifacts/bailian-ocr-20261026/`。未打包、未替换安装 EXE、未保存用户真实凭据。
+
 ## 2026-10-26 · 套餐语音地址自动识别与 Windows 证书校验
 
 - 目标：修复用户粘贴订阅页 `/compatible-mode/v1` 地址后错误拼接实时接口，以及 `UnknownIssuer` 仅提示核对地址与密钥的问题。

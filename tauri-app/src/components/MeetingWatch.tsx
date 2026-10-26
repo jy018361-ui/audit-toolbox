@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   getCurrentWebviewWindow,
   WebviewWindow,
@@ -8,7 +9,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -31,6 +32,7 @@ import { terminalJobError } from "./JobProgress";
 import { meetingErrorText as errorText } from "@/lib/errors";
 import type { JobEvent, MeetingEvent, MeetingRecordStart, MeetingRecordStop } from "../types";
 import type { MeetingResult } from "../MeetingMinutesPage";
+import { meetingOutputPath } from "../meetingMinutesResult";
 import "../meeting-minutes.css";
 
 /** Teams 会议检测的全局交互：询问小窗、录音指示、结束后自动出纪要。
@@ -65,40 +67,61 @@ function focusMainWindow() {
 /** 询问改用置顶小窗：不再把整个工具箱主窗口拉到用户面前。
  *  无边框 + 透明底，视觉只剩一张居中卡片；拖拽靠卡片标题区。
  *  小窗创建失败（权限/平台限制）时降级回应用内弹窗。 */
-async function openAskWindow() {
-  const existing = await WebviewWindow.getByLabel("meeting-ask");
-  if (existing) {
-    await existing.show();
-    await existing.setFocus();
-    return;
-  }
-  const ask = new WebviewWindow("meeting-ask", {
-    url: "/#/meeting-ask",
-    title: "会议记录询问",
-    width: 440,
-    height: 260,
-    resizable: false,
-    decorations: false,
-    transparent: true,
-    shadow: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    center: true,
-    focus: true,
-  });
-  await new Promise<void>((resolve, reject) => {
-    void ask.once("tauri://created", () => resolve());
-    void ask.once("tauri://error", (event) => reject(event.payload));
+let askWindowOperations = Promise.resolve();
+
+function queueAskWindow(operation: () => Promise<void>) {
+  const next = askWindowOperations.then(operation, operation);
+  askWindowOperations = next.catch(() => undefined);
+  return next;
+}
+
+function openAskWindow(stillWanted: () => boolean) {
+  return queueAskWindow(async () => {
+    if (!stillWanted()) return;
+    const existing = await WebviewWindow.getByLabel("meeting-ask");
+    if (existing) {
+      if (!stillWanted()) return;
+      await existing.emit("meeting-ask-reset");
+      if (!stillWanted()) return;
+      await existing.show();
+      await existing.setFocus();
+      return;
+    }
+    const ask = new WebviewWindow("meeting-ask", {
+      url: "/#/meeting-ask",
+      title: "会议记录询问",
+      width: 440,
+      height: 340,
+      visible: false,
+      resizable: false,
+      decorations: false,
+      transparent: true,
+      shadow: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      center: true,
+      focus: true,
+    });
+    await new Promise<void>((resolve, reject) => {
+      void ask.once("tauri://created", () => resolve());
+      void ask.once("tauri://error", (event) => reject(event.payload));
+    });
+    if (stillWanted()) {
+      await ask.show();
+      await ask.setFocus();
+    }
   });
 }
 
-async function closeAskWindow() {
-  try {
-    const existing = await WebviewWindow.getByLabel("meeting-ask");
-    await existing?.close();
-  } catch {
-    // 小窗可能已自行关闭。
-  }
+function closeAskWindow() {
+  return queueAskWindow(async () => {
+    try {
+      const existing = await WebviewWindow.getByLabel("meeting-ask");
+      await existing?.hide();
+    } catch {
+      // 退出期间窗口可能已释放。
+    }
+  });
 }
 
 function elapsedText(startedAt: string) {
@@ -176,9 +199,7 @@ export function MeetingWatch() {
           "检测到 Teams 会议",
           "工具箱已就绪，请在弹出的询问窗口确认是否开始记录会议纪要。",
         );
-        openAskWindow().then(() => {
-          if (disposed || generation !== askGeneration.current) void closeAskWindow();
-        }).catch(() => {
+        openAskWindow(() => !disposed && generation === askGeneration.current && !suppressed.current).catch(() => {
           if (disposed || generation !== askGeneration.current) return;
           // 降级：应用内弹窗 + 拉起主窗口，功能不能因为小窗失败而丢失。
           setAskOpen(true);
@@ -277,6 +298,8 @@ export function MeetingWatch() {
     let disposed = false;
     void listenMeetingAskChoice((accepted) => {
       if (!accepted) suppressed.current = true;
+      setAskOpen(false);
+      void closeAskWindow();
     })
       .then((fn) => {
         if (disposed) fn();
@@ -311,6 +334,7 @@ export function MeetingWatch() {
   function declineThisCall() {
     suppressed.current = true;
     setAskOpen(false);
+    void closeAskWindow();
   }
 
   async function stopAndGenerate() {
@@ -332,6 +356,12 @@ export function MeetingWatch() {
   const finished = latestJob && ["completed", "failed", "cancelled"].includes(latestJob.phase);
   const result = latestJob?.phase === "completed" ? latestJob.result as MeetingResult | undefined : undefined;
   const resultError = processingError || terminalJobError(latestJob) || result?.minutesError;
+  const outputPath = meetingOutputPath(result);
+  function viewMinutes() {
+    focusMainWindow();
+    setLatestJob(undefined);
+    setProcessingError("");
+  }
   async function openResult(path: string) {
     try { await openOutput(path); }
     catch (error) { setProcessingError(errorText(error)); }
@@ -339,7 +369,7 @@ export function MeetingWatch() {
 
   return (
     <>
-      <Dialog open={askOpen} onOpenChange={setAskOpen}>
+      <Dialog open={askOpen} onOpenChange={(open) => { if (open) setAskOpen(true); else declineThisCall(); }}>
         <DialogContent className="meeting-ask-dialog">
           <DialogHeader>
             <DialogTitle>检测到 Teams 会议</DialogTitle>
@@ -395,10 +425,10 @@ export function MeetingWatch() {
           <strong>{result?.minutesPath ? "会议纪要已生成" : "会议纪要未生成"}</strong>
           {resultError && <p>{resultError}</p>}
           <div className="meeting-result-actions">
-            {result?.minutesVersions ? result.minutesVersions.filter((version) => version.minutesPath).map((version) => (
-              <Button key={version.kind} size="sm" onClick={() => void openResult(version.minutesPath!)}>打开{version.label}版纪要</Button>
-            )) : result?.minutesPath && <Button size="sm" onClick={() => void openResult(result.minutesPath!)}>打开会议纪要</Button>}
-            {result?.transcriptPath && <Button size="sm" variant="secondary" onClick={() => void openResult(result.transcriptPath!)}>打开转写稿</Button>}
+            {result?.minutesVersions ? result.minutesVersions.filter((version) => version.minutesPath || version.minutesMarkdown).map((version) => (
+              <Link key={version.kind} className={buttonVariants({ size: "sm" })} to={`/tools/meeting_minutes?version=${version.kind}`} state={{ meetingJob: latestJob }} onClick={viewMinutes}>查看{version.label}版</Link>
+            )) : (result?.minutesPath || result?.minutesMarkdown) && <Link className={buttonVariants({ size: "sm" })} to="/tools/meeting_minutes?version=content" state={{ meetingJob: latestJob }} onClick={viewMinutes}>查看会议纪要</Link>}
+            {outputPath && <Button size="sm" variant="secondary" onClick={() => void openResult(outputPath)}>打开输出文件夹</Button>}
             <Button size="sm" variant="ghost" onClick={() => { setLatestJob(undefined); setProcessingError(""); }}>关闭提示</Button>
           </div>
         </div>

@@ -166,7 +166,8 @@ fn generate(
         let config = bailian_plan_asr::PlanAsrConfig::from_settings(&settings);
         bailian_plan_asr::transcribe_file(&audio_path, progress, cancel, &config)?
     } else {
-        bailian_asr::transcribe_file(&audio_path, progress, cancel)?
+        let config = bailian_asr::AsrConfig::from_settings(&settings)?;
+        bailian_asr::transcribe_file(&audio_path, progress, cancel, &config)?
     };
     if cancel.load(Ordering::Relaxed) {
         return Err(cancelled());

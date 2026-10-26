@@ -43,6 +43,7 @@ import { errorText } from "@/lib/errors";
 import { useCountUp } from "./lib/useCountUp";
 import { formatCount } from "./lib/numberFormat";
 import { SwitchInput } from "@/components/SwitchInput";
+import { SecretInput } from "@/components/SecretInput";
 import { DateInput } from "@/components/DateInput";
 import { demoDataEnabled } from "./preview/demoRegistry";
 import {
@@ -1689,6 +1690,7 @@ export function Settings({
 }) {
   const [saving, setSaving] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
+  const [secretRevision, setSecretRevision] = useState(0);
   const [form, setForm] = useState({
     enabled: false,
     apiType: "openai",
@@ -1704,6 +1706,8 @@ export function Settings({
     meetingDetectEnabled: true,
     asrApiKey: "",
     asrChannel: "paraformer",
+    asrBaseUrl: "https://dashscope.aliyuncs.com",
+    asrModel: "paraformer-v2",
     planBaseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com",
     planModel: "qwen-audio-3.0-realtime-plus",
     planApiKey: "",
@@ -1924,6 +1928,8 @@ export function Settings({
             meetingDetectEnabled: meeting.detect_enabled !== false,
             asrChannel:
               meeting.asr_channel === "token_plan" ? "token_plan" : "paraformer",
+            asrBaseUrl: String(meeting.asr_base_url ?? "").trim() || x.asrBaseUrl,
+            asrModel: String(meeting.asr_model ?? "").trim() || x.asrModel,
             planBaseUrl: String(meeting.plan_base_url ?? x.planBaseUrl),
             planModel: String(meeting.plan_model ?? x.planModel),
           };
@@ -2041,12 +2047,16 @@ export function Settings({
     try {
       const result =
         form.asrChannel === "token_plan"
-          ? await meetingAsrTest(undefined, {
+          ? await meetingAsrTest(form.planApiKey, {
+              channel: "token_plan",
               baseUrl: form.planBaseUrl.trim(),
               model: form.planModel.trim(),
-              apiKey: form.planApiKey.trim() || undefined,
             })
-          : await meetingAsrTest(form.asrApiKey);
+          : await meetingAsrTest(form.asrApiKey, {
+              channel: "paraformer",
+              baseUrl: form.asrBaseUrl.trim(),
+              model: form.asrModel.trim(),
+            });
       setAsrTestResult({
         ok: true,
         text: `${result.message} 响应耗时 ${result.elapsedMs} 毫秒。`,
@@ -2096,6 +2106,8 @@ export function Settings({
         ...((current.meeting as Record<string, unknown> | undefined) ?? {}),
         detect_enabled: form.meetingDetectEnabled,
         asr_channel: form.asrChannel,
+        asr_base_url: form.asrBaseUrl.trim(),
+        asr_model: form.asrModel.trim(),
         plan_base_url: form.planBaseUrl.trim(),
         plan_model: form.planModel.trim(),
       };
@@ -2129,6 +2141,7 @@ export function Settings({
       };
       savedSettingsSignature.current = settingsSignature(savedForm, cacheMode);
       setForm(savedForm);
+      setSecretRevision((revision) => revision + 1);
       setMessage("配置已保存，相关工具会使用这些设置。");
     } catch (e) {
       setSaveFailed(true);
@@ -2420,10 +2433,12 @@ export function Settings({
               </label>
               <label className="field">
                 <span>API Key</span>
-                <input
-                  type="password"
+                <SecretInput
+                  key={`${form.apiType}-${secretRevision}`}
+                  label="API Key"
+                  credentialName={form.apiType === "dify_chat" ? "dify_api_key" : "llm_api_key"}
                   value={form.apiKey}
-                  onChange={(e) => set("apiKey", e.target.value)}
+                  onChange={(value) => set("apiKey", value)}
                   placeholder="留空表示不修改"
                 />
               </label>
@@ -2499,19 +2514,23 @@ export function Settings({
                   {" "}
                   <label className="field">
                     <span>百度 API Key</span>
-                    <input
-                      type="password"
+                    <SecretInput
+                      key={`ocr-key-${secretRevision}`}
+                      label="百度 API Key"
+                      credentialName="baidu_ocr_key"
                       value={form.ocrApiKey}
-                      onChange={(e) => set("ocrApiKey", e.target.value)}
+                      onChange={(value) => set("ocrApiKey", value)}
                       placeholder="留空表示不修改"
                     />
                   </label>
                   <label className="field">
                     <span>百度 Secret Key</span>
-                    <input
-                      type="password"
+                    <SecretInput
+                      key={`ocr-secret-${secretRevision}`}
+                      label="百度 Secret Key"
+                      credentialName="baidu_ocr_secret"
                       value={form.ocrSecret}
-                      onChange={(e) => set("ocrSecret", e.target.value)}
+                      onChange={(value) => set("ocrSecret", value)}
                       placeholder="留空表示不修改"
                     />
                   </label>
@@ -2612,10 +2631,12 @@ export function Settings({
                   <label className="field">
                     <span>套餐地址</span>
                     <input
+                      aria-label="套餐地址"
                       value={form.planBaseUrl}
                       onChange={(e) => set("planBaseUrl", e.target.value)}
                       placeholder="https://token-plan.cn-beijing.maas.aliyuncs.com"
                     />
+                    <small>可填服务根地址，或粘贴以 /compatible-mode/v1 结尾的订阅地址。</small>
                   </label>
                   <label className="field">
                     <span>套餐转写模型</span>
@@ -2627,24 +2648,48 @@ export function Settings({
                   </label>
                   <label className="field">
                     <span>套餐 API 密钥（sk-sp- 开头）</span>
-                    <input
-                      type="password"
+                    <SecretInput
+                      key={`plan-key-${secretRevision}`}
+                      label="套餐 API 密钥（sk-sp- 开头）"
+                      credentialName="bailian_plan_asr_key"
                       value={form.planApiKey}
-                      onChange={(e) => set("planApiKey", e.target.value)}
+                      onChange={(value) => set("planApiKey", value)}
                       placeholder="留空表示不修改"
                     />
                   </label>
                 </>
               ) : (
-                <label className="field">
-                  <span>百炼 API 密钥</span>
-                  <input
-                    type="password"
-                    value={form.asrApiKey}
-                    onChange={(e) => set("asrApiKey", e.target.value)}
-                    placeholder="留空表示不修改"
-                  />
-                </label>
+                <>
+                  <label className="field">
+                    <span>通用服务地址</span>
+                    <input
+                      value={form.asrBaseUrl}
+                      onChange={(e) => set("asrBaseUrl", e.target.value)}
+                      placeholder="https://dashscope.aliyuncs.com"
+                    />
+                    <small>填写服务根地址，留空使用默认地址。</small>
+                  </label>
+                  <label className="field">
+                    <span>通用转写模型</span>
+                    <input
+                      value={form.asrModel}
+                      onChange={(e) => set("asrModel", e.target.value)}
+                      placeholder="paraformer-v2"
+                    />
+                    <small>留空使用 paraformer-v2；其他模型需兼容百炼录音文件转写接口。</small>
+                  </label>
+                  <label className="field">
+                    <span>百炼 API 密钥</span>
+                    <SecretInput
+                      key={`asr-key-${secretRevision}`}
+                      label="百炼 API 密钥"
+                      credentialName="bailian_asr_key"
+                      value={form.asrApiKey}
+                      onChange={(value) => set("asrApiKey", value)}
+                      placeholder="留空表示不修改"
+                    />
+                  </label>
+                </>
               )}
             </div>
             <p className="settings-note">
@@ -2666,7 +2711,7 @@ export function Settings({
               <span>
                 {form.asrChannel === "token_plan"
                   ? "地址与模型按「我的订阅」页面填写；密钥留空使用已保存密钥。"
-                  : "密钥请到阿里云百炼控制台创建；留空使用已保存密钥。"}
+                  : "按当前地址与模型验证上传凭证；完整转写需实际录音任务验证。密钥留空使用已保存密钥。"}
               </span>
             </div>
             {asrTestResult && (

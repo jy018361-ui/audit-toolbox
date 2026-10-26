@@ -3,7 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AudiPickLegacyConfig } from "./AudiPickLegacyAuxiliary";
-const api = vi.hoisted(() => ({ settingsGet: vi.fn(), settingsSet: vi.fn(), secretSet: vi.fn(), audipickOcrTest: vi.fn(), audipickLlmTest: vi.fn() }));
+const api = vi.hoisted(() => ({ settingsGet: vi.fn(), settingsSet: vi.fn(), secretSet: vi.fn(), secretGet: vi.fn(), audipickOcrTest: vi.fn(), audipickLlmTest: vi.fn() }));
 vi.mock("./api", () => api);
 const status = { ocr: { engine: "baidu", ready: true }, credentials: { baiduApiKey: true, baiduSecretKey: true, llmApiKey: false } };
 beforeEach(() => {

@@ -12,10 +12,20 @@
 | 录音质量提示 | 初始来源和警告写 `recording-start.json`，最终成品、警告和系统声／麦克风／混音的 `audioStats` 写 `recording-summary.json`；页面提醒不会被转写启动清掉 | `MeetingMinutesPage.test.tsx`、`meeting_record::tests::`；统计含样本数、非零样本数、归一化峰值和 RMS；不把初始化成功等同采集有声，RMS 体检仍只是启发式 |
 | 纯静音上传拦截 | `meeting.generate` 在读取密钥和调用云端之前检查可解析的 16 位 PCM WAV，全零／空数据直接中文报错，保留原文件；通用和套餐通道共用 | `meeting_minutes::tests::`、`meeting_record::tests::`；低音量、包含非零数据或本地不支持解析的导入格式不据此拦截，交由原有云端解码；不宣称可判断是否有人声 |
 | 百炼文件转写 | HTTP 信封读取 `output.results`（兼容扁平快照）；提取结果地址后下载文本 | `bailian_asr::tests::`；真实结构成功、子文件失败、空结果与缺字段分别回归；不再把缺字段误报为无人声 |
+| 通用转写配置 | 设置页预填默认服务根地址与 paraformer-v2，均可编辑；保存到 `meeting.asr_base_url` / `meeting.asr_model`，worker 从 `__settings` 读取；旧设置或空值使用原默认值 | `AppNavigationSettings.test.tsx`、`meetingAsrApi.test.ts`、`bailian_asr::tests::`；自定义模型需兼容百炼文件转写协议；通用／套餐配置及密钥独立 |
+| 通用连接测试 | 使用界面当前未保存的地址、模型、密钥请求上传凭证；密钥空时读取已保存通用凭据 | 本地 HTTP 服务核对连接测试、上传凭证、提交与轮询的实际路径和模型；测试成功仅表示取得上传凭证，不等同实际录音转写成功；不消耗真实云端服务 |
+| 配置页密钥查看 | 点击「显示」按需读取本通道保存的凭据，或直接展示当前输入；隐藏清除读取值，编辑后才成为待保存草稿 | `SecretInput.test.tsx`、`AppNavigationSettings.test.tsx`、`secretApi.test.ts`；读取命令与写入共用凭据名白名单，不读取其他名称；测试仅使用模拟值 |
+| 套餐地址与 TLS | 根地址、订阅页 `/compatible-mode/v1`、完整实时接口及重复后缀统一到正确 WebSocket 路径；测试与转写共用 Windows 原生证书链校验及握手超时 | `bailian_plan_asr::tests::`；本地握手核对路径和鉴权头，错误区分证书／HTTP 状态；域名、有效期与系统信任检查保留，未知查询参数或含账号密码的地址拒绝且不回显 |
 | 转写失败诊断 | 合并顶层、`output` 与子文件的错误码／原因，保留任务与请求编号；子文件明确失败立即退出，缺失／未知状态不再持续轮询 | `bailian_asr::tests::`；覆盖嵌套及扁平响应、空原因、HTTP 错误、本地 HTTP 服务响应；诊断不回显整个响应中的录音地址或签名 |
 | 结束后自动生成 | `meeting_watch.rs` 停录混音后由后台直接调用统一 `job_start` 启动 `meeting.generate`；不依赖前端消费一次性停录事件，前端不重复上传 | 共用原有 worker、设置注入、历史与路径授权；自动参数回归；LLM 失败仍保留转写稿；尚未进行真实 Teams 退会到云端纪要的完整验收 |
 | 退会后收尾状态 | 确认退会后全局录制提示即时切换为「会议已结束，正在保存录音」，成品／失败事件结束收尾态 | `MeetingWatch.test.tsx`；音频会话兜底仍需持续停止十秒，另有封盘混音耗时；日志明确结束时不额外等待该十秒 |
 | 进度、结果与失败可见 | 全局监听会议任务终态，提供桌面通知与应用内打开纪要／转写稿入口；后台快照保留录音摘要、最近任务事件及启动失败原因，晚打开页面或 WebView 重载可恢复 | `MeetingWatch.test.tsx`、`MeetingMinutesPage.test.tsx` 和 `meeting_watch::tests::`；通知不可用时仍显示应用内结果／错误；快照只在当前应用进程内保留，应用重启后仍通过任务历史查找文件 |
+
+## 2026-10-26 · 套餐连接与证书诊断
+
+- 用户提供 `UnknownIssuer` 细节后，确认失败发生在 TLS 校验阶段。Windows 原生 TLS 对官方域名的校验通过，证书链颁发者为 GlobalSign；改为 rustls 使用 Windows 原生证书链校验，而非仅依赖内置根证书。
+- 使用用户授权的套餐密钥对 `qwen-audio-3.0-realtime-plus` 实测连接成功；输入为订阅页 `/compatible-mode/v1` 地址，实际连接归一后的官方实时接口，收到会话事件即关闭。密钥通过不回显输入传入一次性测试进程环境，不写入配置、源码或测试日志。不上传音频；此结果仅验证会话建立，不代表完整会议转写或纪要内容已验收。
+- 本地回归覆盖地址转换、查询编码、错误分类和模拟 WebSocket 握手。新代码尚未替换安装中的 EXE，不能以本次测试结果声称旧安装版已修复。
 
 ## 2026-10-25 · 正文展示与模板调整
 
@@ -39,9 +49,11 @@
 
 ```powershell
 npx vitest run src/api.test.ts src/MeetingMinutesPage.test.tsx src/components/MeetingWatch.test.tsx src/lib/errors.test.ts
+npx vitest run src/AppNavigationSettings.test.tsx src/meetingAsrApi.test.ts src/secretApi.test.ts src/components/SecretInput.test.tsx
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml --lib meeting_
 cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_asr::tests::
+cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_plan_asr::tests::
 # 只读真实设备会话枚举，不录音、不上传
 cargo test --manifest-path src-tauri/Cargo.toml --lib meeting_audio::tests::live_audio_sessions -- --ignored --nocapture
 ```

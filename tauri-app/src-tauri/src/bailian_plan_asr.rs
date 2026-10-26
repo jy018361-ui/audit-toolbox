@@ -83,23 +83,126 @@ pub(crate) fn load_plan_key() -> Result<String, AppError> {
         })
 }
 
-/// 套餐 REST 地址（https://…）转实时 WebSocket 地址（wss://…/api-ws/v1/realtime）。
+/// 兼容订阅页文本接口地址、服务根地址及完整实时接口，测试和转写共用。
 fn ws_url(base_url: &str, model: &str) -> Result<String, AppError> {
-    let trimmed = base_url.trim().trim_end_matches('/');
-    let host = if let Some(rest) = trimmed.strip_prefix("https://") {
-        format!("wss://{rest}")
-    } else if let Some(rest) = trimmed.strip_prefix("http://") {
-        format!("ws://{rest}")
-    } else if trimmed.starts_with("wss://") || trimmed.starts_with("ws://") {
-        trimmed.to_owned()
-    } else {
-        return Err(plan_error(
+    let invalid_url = || {
+        plan_error(
             "PLAN_ASR_URL_INVALID",
-            "套餐转写地址格式不正确，应以 https:// 或 wss:// 开头。",
-            Some(trimmed.to_string()),
-        ));
+            "套餐转写地址格式不正确，请填写 HTTP(S) 服务地址或 WS(S) 实时接口；不能包含账号、密码或其他查询参数。",
+            None,
+        )
     };
-    Ok(format!("{host}/api-ws/v1/realtime?model={model}"))
+    let base_url = base_url.trim();
+    let mut url = reqwest::Url::parse(if base_url.is_empty() {
+        DEFAULT_BASE_URL
+    } else {
+        base_url
+    })
+    .map_err(|_| invalid_url())?;
+    let scheme = match url.scheme() {
+        "https" | "wss" => "wss",
+        "http" | "ws" => "ws",
+        _ => return Err(invalid_url()),
+    };
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.query_pairs().any(|(name, _)| name != "model")
+    {
+        return Err(invalid_url());
+    }
+    let path = url.path().trim_end_matches('/');
+    let path = path.strip_suffix("/api-ws/v1/realtime").unwrap_or(path);
+    let path = path.strip_suffix("/compatible-mode/v1").unwrap_or(path);
+    let path = format!("{path}/api-ws/v1/realtime");
+    url.set_scheme(scheme).map_err(|_| invalid_url())?;
+    url.set_path(&path);
+    url.set_query(None);
+    let model = model.trim();
+    url.query_pairs_mut().append_pair(
+        "model",
+        if model.is_empty() {
+            DEFAULT_MODEL
+        } else {
+            model
+        },
+    );
+    Ok(url.to_string())
+}
+
+fn connection_error(error: tokio_tungstenite::tungstenite::Error) -> AppError {
+    use tokio_tungstenite::tungstenite::Error;
+    if let Error::Http(response) = &error {
+        let status = response.status().as_u16();
+        let message = match status {
+            401 | 403 => "套餐实时语音鉴权失败，请核对套餐专用密钥及该模型的访问权限。",
+            404 => "未找到套餐实时语音接口，请核对套餐服务地址及模型名称。",
+            429 => "套餐实时语音请求受限，请检查套餐额度或稍后重试。",
+            _ => "套餐实时语音服务拒绝连接，请核对地址、模型及套餐权限。",
+        };
+        return plan_error(
+            "PLAN_ASR_CONNECT_FAILED",
+            message,
+            Some(format!("HTTP {status}")),
+        );
+    }
+    let detail = error.to_string();
+    if detail.to_ascii_lowercase().contains("certificate") {
+        return plan_error(
+            "PLAN_ASR_TLS_FAILED",
+            "套餐实时语音证书校验失败，请检查 Windows 系统证书、系统时间及网络代理证书。",
+            Some(detail),
+        );
+    }
+    plan_error(
+        "PLAN_ASR_CONNECT_FAILED",
+        "套餐实时语音连接失败，请检查网络连接并查看详细原因。",
+        Some(detail),
+    )
+}
+
+type PlanSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// 使用 Windows 原生证书链校验（包括中间证书补全及系统信任），保留域名和有效期校验。
+async fn connect(url: &str, key: &str) -> Result<PlanSocket, AppError> {
+    use rustls_platform_verifier::BuilderVerifierExt;
+    let tls_error = |error: rustls::Error| {
+        plan_error(
+            "PLAN_ASR_TLS_FAILED",
+            "无法初始化 Windows 证书校验。",
+            Some(error.to_string()),
+        )
+    };
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(tls_error)?
+    .with_platform_verifier()
+    .map_err(tls_error)?
+    .with_no_client_auth();
+    let request = build_request(url, key)?;
+    let (socket, _) = tokio::time::timeout(
+        Duration::from_secs(20),
+        tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            None,
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(config))),
+        ),
+    )
+    .await
+    .map_err(|_| {
+        plan_error(
+            "PLAN_ASR_TIMEOUT",
+            "套餐实时语音连接超时，请检查网络后重试。",
+            None,
+        )
+    })?
+    .map_err(connection_error)?;
+    Ok(socket)
 }
 
 #[derive(Debug)]
@@ -270,15 +373,7 @@ fn transcribe_chunk(
 ) -> Result<String, AppError> {
     rt.block_on(async {
         use futures_util::{SinkExt, StreamExt};
-        let (mut socket, _response) = tokio_tungstenite::connect_async(build_request(url, key)?)
-            .await
-            .map_err(|error| {
-                plan_error(
-                    "PLAN_ASR_CONNECT_FAILED",
-                    "套餐转写通道连接失败，请核对套餐地址与密钥。",
-                    Some(error.to_string()),
-                )
-            })?;
+        let mut socket = connect(url, key).await?;
         let session_update = json!({
             "type": "session.update",
             "session": {
@@ -379,8 +474,8 @@ pub(crate) fn transcribe_file(
     cancel: &Arc<AtomicBool>,
     config: &PlanAsrConfig,
 ) -> Result<TranscriptionResult, AppError> {
-    let key = load_plan_key()?;
     let url = ws_url(&config.base_url, &config.model)?;
+    let key = load_plan_key()?;
     let (_spec, chunks) = wav_chunks(path)?;
     if chunks.is_empty() {
         return Err(plan_error(
@@ -448,6 +543,7 @@ pub(crate) struct PlanTestParams {
 /// 不喂音频、不产生 token 消耗。
 pub(crate) fn test_connection(params: &PlanTestParams) -> Result<Value, AppError> {
     let started = std::time::Instant::now();
+    let url = ws_url(&params.base_url, &params.model)?;
     let key = params
         .api_key
         .as_deref()
@@ -455,19 +551,10 @@ pub(crate) fn test_connection(params: &PlanTestParams) -> Result<Value, AppError
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .map_or_else(load_plan_key, Ok)?;
-    let url = ws_url(&params.base_url, &params.model)?;
     let runtime = runtime()?;
     runtime.block_on(async {
         use futures_util::StreamExt;
-        let (mut socket, _response) = tokio_tungstenite::connect_async(build_request(&url, &key)?)
-            .await
-            .map_err(|error| {
-                plan_error(
-                    "PLAN_ASR_CONNECT_FAILED",
-                    "套餐转写通道连接失败，请核对套餐地址与密钥。",
-                    Some(error.to_string()),
-                )
-            })?;
+        let mut socket = connect(&url, &key).await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         loop {
             tokio::select! {
@@ -493,7 +580,7 @@ pub(crate) fn test_connection(params: &PlanTestParams) -> Result<Value, AppError
                             let _ = socket.close(None).await;
                             return Ok(json!({
                                 "ok": true,
-                                "message": format!("套餐转写通道连接测试成功（模型 {}）。", params.model),
+                                "message": format!("套餐转写通道连接测试成功（模型 {}）。", if params.model.trim().is_empty() { DEFAULT_MODEL } else { params.model.trim() }),
                                 "elapsedMs": started.elapsed().as_millis()
                             }));
                         }
@@ -535,6 +622,133 @@ mod tests {
             "ws://host.cn/api-ws/v1/realtime?model=m1"
         );
         assert!(ws_url("token-plan.cn-beijing.maas.aliyuncs.com", "m1").is_err());
+    }
+
+    #[test]
+    fn ws_url_accepts_subscription_and_full_realtime_addresses() {
+        let expected = format!(
+            "wss://token-plan.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime?model={DEFAULT_MODEL}"
+        );
+        for suffix in [
+            "",
+            "/compatible-mode/v1",
+            "/compatible-mode/v1/",
+            "/api-ws/v1/realtime",
+            "/api-ws/v1/realtime?model=old",
+            "/compatible-mode/v1/api-ws/v1/realtime",
+        ] {
+            assert_eq!(
+                ws_url(&format!("{DEFAULT_BASE_URL}{suffix}"), DEFAULT_MODEL).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(ws_url(" ", " ").unwrap(), expected);
+        let url = reqwest::Url::parse(
+            &ws_url(
+                "https://proxy.example.cn/voice/compatible-mode/v1",
+                " model&extra=1 ",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(url.path(), "/voice/api-ws/v1/realtime");
+        assert_eq!(
+            url.query_pairs().collect::<Vec<_>>(),
+            vec![("model".into(), "model&extra=1".into())]
+        );
+        for address in [
+            "file:///c:/test",
+            "https://user:secret@host.cn",
+            "https://host.cn?key=secret",
+            "https://host.cn/#secret",
+        ] {
+            let error = ws_url(address, "m1").unwrap_err();
+            assert_eq!(error.code, "PLAN_ASR_URL_INVALID");
+            assert!(error.detail.is_none());
+        }
+    }
+
+    #[test]
+    fn connection_errors_distinguish_certificate_auth_and_endpoint_failures() {
+        use tokio_tungstenite::tungstenite::{Error, http::Response};
+        let error = connection_error(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid peer certificate: UnknownIssuer",
+        )));
+        assert_eq!(error.code, "PLAN_ASR_TLS_FAILED");
+        assert!(error.user_message.contains("证书校验"));
+        for (status, hint) in [(401, "鉴权"), (403, "鉴权"), (404, "接口"), (429, "额度")] {
+            let error = connection_error(Error::Http(
+                Response::builder().status(status).body(None).unwrap(),
+            ));
+            assert_eq!(error.code, "PLAN_ASR_CONNECT_FAILED");
+            assert!(error.user_message.contains(hint));
+            assert_eq!(error.detail.unwrap(), format!("HTTP {status}"));
+        }
+    }
+
+    #[test]
+    fn connection_test_normalizes_subscription_path_before_websocket_handshake() {
+        use tokio_tungstenite::tungstenite::{
+            Message, accept_hdr,
+            handshake::server::{Request, Response},
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline, "未收到本地测试连接");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut socket = accept_hdr(socket, |request: &Request, response: Response| {
+                assert_eq!(request.uri(), "/api-ws/v1/realtime?model=test-model");
+                assert_eq!(request.headers()["authorization"], "Bearer test-only-key");
+                Ok(response)
+            })
+            .unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"type": "session.created"}).to_string().into(),
+                ))
+                .unwrap();
+            // 连接测试只建立会话并关闭，不发送音频。
+            assert!(matches!(socket.read().unwrap(), Message::Close(_)));
+        });
+        let result = test_connection(&PlanTestParams {
+            base_url: format!("http://{address}/compatible-mode/v1"),
+            model: "test-model".into(),
+            api_key: Some("test-only-key".into()),
+        })
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(result["ok"], true);
+    }
+
+    /// 仅建立官方服务会话；不发送音频、不打印密钥或服务端原始响应。
+    #[test]
+    #[ignore = "在线连接测试：需 AUDIT_TOOLBOX_PLAN_ASR_KEY，不上传音频"]
+    fn online_connection_only() {
+        let key = std::env::var("AUDIT_TOOLBOX_PLAN_ASR_KEY").expect("缺少在线测试密钥环境变量");
+        match test_connection(&PlanTestParams {
+            base_url: format!("{DEFAULT_BASE_URL}/compatible-mode/v1"),
+            model: DEFAULT_MODEL.into(),
+            api_key: Some(key),
+        }) {
+            Ok(result) => assert_eq!(result["ok"], true),
+            Err(error) => panic!("在线连接测试失败：{}；{}", error.code, error.user_message),
+        }
     }
 
     #[test]

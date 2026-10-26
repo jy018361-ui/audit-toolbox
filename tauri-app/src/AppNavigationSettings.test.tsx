@@ -20,6 +20,8 @@ import {
   engineCall,
   historyGet,
   historyRestore,
+  meetingAsrTest,
+  secretGet,
   settingsGet,
   settingsSet,
   secretSet,
@@ -32,6 +34,8 @@ vi.mock("./api", async (importOriginal) => ({
   settingsGet: vi.fn().mockResolvedValue({ llm: { model: "saved-model" } }),
   settingsSet: vi.fn().mockResolvedValue({}),
   secretSet: vi.fn().mockResolvedValue(undefined),
+  secretGet: vi.fn().mockResolvedValue("saved-test-key"),
+  meetingAsrTest: vi.fn().mockResolvedValue({ ok: true, message: "测试成功", elapsedMs: 10 }),
   engineCall: vi.fn().mockResolvedValue({ bytes: 0, files: 0 }),
   appBootstrap: vi
     .fn()
@@ -816,7 +820,7 @@ it("语音转写通道可切换为 Token Plan 套餐通道并随保存落库", a
   });
   expect(screen.getByLabelText("套餐地址")).toBeInTheDocument();
   expect(screen.getByLabelText("套餐转写模型")).toBeInTheDocument();
-  expect(screen.getByLabelText(/套餐 API 密钥/)).toBeInTheDocument();
+  expect(screen.getByLabelText(/^套餐 API 密钥/)).toBeInTheDocument();
   expect(screen.queryByLabelText("百炼 API 密钥")).not.toBeInTheDocument();
   expect(
     screen.getByRole("button", { name: "测试套餐通道" }),
@@ -829,4 +833,61 @@ it("语音转写通道可切换为 Token Plan 套餐通道并随保存落库", a
   };
   expect(payload.meeting.asr_channel).toBe("token_plan");
   expect(payload.meeting.plan_model).toBe("qwen-audio-3.0-realtime-plus");
+});
+
+it("通用通道预填地址和模型，未保存的修改用于测试，切换通道后保留并保存", async () => {
+  render(<MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>);
+  await screen.findByRole("heading", { name: "设置" });
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  expect(screen.getByLabelText(/^通用服务地址/)).toHaveValue("https://dashscope.aliyuncs.com");
+  expect(screen.getByLabelText(/^通用转写模型/)).toHaveValue("paraformer-v2");
+  fireEvent.change(screen.getByLabelText(/^通用服务地址/), { target: { value: " https://asr.example.cn/gateway/ " } });
+  fireEvent.change(screen.getByLabelText(/^通用转写模型/), { target: { value: " custom-file-model " } });
+  fireEvent.change(screen.getByLabelText("百炼 API 密钥"), { target: { value: " general-test-key " } });
+  fireEvent.click(screen.getByRole("button", { name: "测试百炼连接" }));
+  await waitFor(() => expect(meetingAsrTest).toHaveBeenCalledWith(" general-test-key ", {
+    channel: "paraformer", baseUrl: "https://asr.example.cn/gateway/", model: "custom-file-model",
+  }));
+  expect(settingsSet).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("转写通道"), { target: { value: "token_plan" } });
+  expect(screen.queryByLabelText(/^通用转写模型/)).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText(/^套餐 API 密钥/), { target: { value: "plan-test-key" } });
+  fireEvent.click(screen.getByRole("button", { name: "测试套餐通道" }));
+  await waitFor(() => expect(meetingAsrTest).toHaveBeenLastCalledWith("plan-test-key", {
+    channel: "token_plan", baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com", model: "qwen-audio-3.0-realtime-plus",
+  }));
+  fireEvent.change(screen.getByLabelText("转写通道"), { target: { value: "paraformer" } });
+  expect(screen.getByLabelText(/^通用转写模型/)).toHaveValue(" custom-file-model ");
+  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+  await waitFor(() => expect(secretSet).toHaveBeenCalledWith("bailian_asr_key", " general-test-key "));
+  expect(vi.mocked(settingsSet).mock.calls[0][0]).toMatchObject({ meeting: {
+    asr_channel: "paraformer", asr_base_url: "https://asr.example.cn/gateway/", asr_model: "custom-file-model",
+  } });
+});
+
+it("重新打开设置恢复通用通道的自定义配置", async () => {
+  vi.mocked(settingsGet).mockResolvedValueOnce({ meeting: {
+    asr_base_url: "https://saved-asr.example.cn", asr_model: "saved-file-model",
+  } });
+  render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /></MemoryRouter>);
+  await waitFor(() => expect(screen.getByLabelText(/^通用服务地址/)).toHaveValue("https://saved-asr.example.cn"));
+  expect(screen.getByLabelText(/^通用转写模型/)).toHaveValue("saved-file-model");
+});
+
+it("设置页可查看已保存密钥，查看不制造草稿也不覆盖已保存密钥", async () => {
+  render(<MemoryRouter initialEntries={["/settings"]}><App /></MemoryRouter>);
+  await screen.findByRole("heading", { name: "设置" });
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  expect(secretGet).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "显示API Key" }));
+  await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue("saved-test-key"));
+  expect(secretGet).toHaveBeenCalledWith("llm_api_key");
+  expect(screen.getByLabelText("API Key")).toHaveAttribute("type", "text");
+  expect(screen.getByRole("button", { name: "保存配置" })).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("模型"), { target: { value: "updated-model" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+  await screen.findByText("配置已保存，相关工具会使用这些设置。");
+  expect(secretSet).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("API Key")).toHaveValue("");
+  expect(screen.getByLabelText("API Key")).toHaveAttribute("type", "password");
 });

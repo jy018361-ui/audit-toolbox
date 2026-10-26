@@ -1,7 +1,7 @@
 //! 阿里云百炼（DashScope）语音转写客户端。
 //!
 //! 流程：本地文件 → 获取上传凭证 → 直传百炼临时 OSS（`oss://` URL，48 小时
-//! 有效）→ 提交异步转写任务（paraformer-v2，开说话人分离）→ 轮询任务 →
+//! 有效）→ 提交异步转写任务（默认 paraformer-v2，开说话人分离）→ 轮询任务 →
 //! 下载转写结果 JSON。转写按语音内容时长计费，非语音部分不计费。
 
 use serde_json::{Value, json};
@@ -16,8 +16,68 @@ use std::{
 
 use crate::AppError;
 
-const BASE: &str = "https://dashscope.aliyuncs.com";
-const MODEL: &str = "paraformer-v2";
+const DEFAULT_BASE_URL: &str = "https://dashscope.aliyuncs.com";
+const DEFAULT_MODEL: &str = "paraformer-v2";
+
+/// 设置页测试与 worker 转写共用配置，旧设置和空值沿用原默认值。
+#[derive(Debug)]
+pub(crate) struct AsrConfig {
+    base_url: String,
+    model: String,
+}
+
+impl AsrConfig {
+    pub(crate) fn new(base_url: Option<&str>, model: Option<&str>) -> Result<Self, AppError> {
+        let base_url = base_url
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_BASE_URL)
+            .trim_end_matches('/');
+        let parsed = reqwest::Url::parse(base_url).map_err(|_| {
+            asr_error(
+                "ASR_URL_INVALID",
+                "通用转写服务地址格式不正确，请填写以 https:// 或 http:// 开头的服务根地址。",
+                None,
+            )
+        })?;
+        if !matches!(parsed.scheme(), "https" | "http")
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(asr_error(
+                "ASR_URL_INVALID",
+                "通用转写服务地址需为 HTTP(S) 服务根地址，不能包含账号、密码、查询参数或片段。",
+                None,
+            ));
+        }
+        Ok(Self {
+            base_url: base_url.to_owned(),
+            model: model
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(DEFAULT_MODEL)
+                .to_owned(),
+        })
+    }
+
+    pub(crate) fn from_settings(settings: &Value) -> Result<Self, AppError> {
+        Self::new(
+            settings
+                .pointer("/meeting/asr_base_url")
+                .and_then(Value::as_str),
+            settings
+                .pointer("/meeting/asr_model")
+                .and_then(Value::as_str),
+        )
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        format!("{}{path}", self.base_url)
+    }
+}
 /// 百炼临时存储单文件上限 1GB；说话人分离建议音频不超过 2 小时。
 const MAX_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -67,7 +127,10 @@ pub(crate) fn load_api_key(param: Option<&str>) -> Result<String, AppError> {
 }
 
 /// 设置页「测试连接」：调上传凭证接口验证密钥有效性。
-pub(crate) fn test_connection(api_key: Option<&str>) -> Result<Value, AppError> {
+pub(crate) fn test_connection(
+    api_key: Option<&str>,
+    config: &AsrConfig,
+) -> Result<Value, AppError> {
     let started = std::time::Instant::now();
     let key = load_api_key(api_key)?;
     let client = reqwest::blocking::Client::builder()
@@ -75,8 +138,8 @@ pub(crate) fn test_connection(api_key: Option<&str>) -> Result<Value, AppError> 
         .build()
         .map_err(network_error)?;
     let response = client
-        .get(format!("{BASE}/api/v1/uploads"))
-        .query(&[("action", "getPolicy"), ("model", MODEL)])
+        .get(config.endpoint("/api/v1/uploads"))
+        .query(&[("action", "getPolicy"), ("model", config.model.as_str())])
         .bearer_auth(&key)
         .send()
         .map_err(network_error)?;
@@ -145,10 +208,14 @@ struct UploadPolicy {
     max_file_size_mb: Option<u64>,
 }
 
-fn get_policy(client: &reqwest::blocking::Client, key: &str) -> Result<UploadPolicy, AppError> {
+fn get_policy(
+    client: &reqwest::blocking::Client,
+    key: &str,
+    config: &AsrConfig,
+) -> Result<UploadPolicy, AppError> {
     let response = client
-        .get(format!("{BASE}/api/v1/uploads"))
-        .query(&[("action", "getPolicy"), ("model", MODEL)])
+        .get(config.endpoint("/api/v1/uploads"))
+        .query(&[("action", "getPolicy"), ("model", config.model.as_str())])
         .bearer_auth(key)
         .send()
         .map_err(network_error)?;
@@ -213,8 +280,9 @@ fn upload_audio(
     key: &str,
     path: &Path,
     progress: Progress,
+    config: &AsrConfig,
 ) -> Result<String, AppError> {
-    let policy = get_policy(client, key)?;
+    let policy = get_policy(client, key, config)?;
     let size = std::fs::metadata(path)
         .map(|meta| meta.len())
         .map_err(|e| {
@@ -283,17 +351,23 @@ fn submit_transcription(
     client: &reqwest::blocking::Client,
     key: &str,
     oss_url: &str,
+    config: &AsrConfig,
 ) -> Result<String, AppError> {
+    let mut parameters = json!({"diarization_enabled": true});
+    // language_hints 仅适用于 paraformer-v2；自定义兼容模型沿用其默认语言识别。
+    if config.model == DEFAULT_MODEL {
+        parameters["language_hints"] = json!(["zh", "en"]);
+    }
     let response = client
-        .post(format!("{BASE}/api/v1/services/audio/asr/transcription"))
+        .post(config.endpoint("/api/v1/services/audio/asr/transcription"))
         .bearer_auth(key)
         .header("X-DashScope-Async", "enable")
         // oss:// 临时地址需要服务端代为解析。
         .header("X-DashScope-OssResourceResolve", "enable")
         .json(&json!({
-            "model": MODEL,
+            "model": config.model,
             "input": {"file_urls": [oss_url]},
-            "parameters": {"language_hints": ["zh", "en"], "diarization_enabled": true}
+            "parameters": parameters
         }))
         .send()
         .map_err(network_error)?;
@@ -317,13 +391,14 @@ fn poll_transcription(
     task_id: &str,
     progress: Progress,
     cancel: &Arc<AtomicBool>,
+    config: &AsrConfig,
 ) -> Result<Value, AppError> {
     let started = std::time::Instant::now();
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(cancelled_error());
         }
-        let value = query_task(client, key, task_id)?;
+        let value = query_task(client, key, task_id, config)?;
         match task_finished(&value, task_id)? {
             true => return Ok(value),
             false => {
@@ -351,9 +426,10 @@ fn query_task(
     client: &reqwest::blocking::Client,
     key: &str,
     task_id: &str,
+    config: &AsrConfig,
 ) -> Result<Value, AppError> {
     let response = client
-        .post(format!("{BASE}/api/v1/tasks/{task_id}"))
+        .post(config.endpoint(&format!("/api/v1/tasks/{task_id}")))
         .bearer_auth(key)
         .send()
         .map_err(network_error)?;
@@ -499,15 +575,16 @@ pub(crate) fn transcribe_file(
     path: &Path,
     progress: Progress,
     cancel: &Arc<AtomicBool>,
+    config: &AsrConfig,
 ) -> Result<TranscriptionResult, AppError> {
     let key = load_api_key(None)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15 * 60))
         .build()
         .map_err(network_error)?;
-    let oss_url = upload_audio(&client, &key, path, progress)?;
-    let task_id = submit_transcription(&client, &key, &oss_url)?;
-    let mut task = poll_transcription(&client, &key, &task_id, progress, cancel)?;
+    let oss_url = upload_audio(&client, &key, path, progress, config)?;
+    let task_id = submit_transcription(&client, &key, &oss_url, config)?;
+    let mut task = poll_transcription(&client, &key, &task_id, progress, cancel, config)?;
     // 任务标记成功后结果地址偶尔滞后一步：补拉几次再判缺失。
     let mut retries = 3u8;
     let transcription_url = loop {
@@ -522,7 +599,7 @@ pub(crate) fn transcribe_file(
         if cancel.load(Ordering::Relaxed) {
             return Err(cancelled_error());
         }
-        task = query_task(&client, &key, &task_id)?;
+        task = query_task(&client, &key, &task_id, config)?;
         task_finished(&task, &task_id)?;
     };
     let download = reqwest::blocking::Client::builder()
@@ -611,6 +688,138 @@ pub(crate) fn format_timestamp(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn general_config_defaults_and_custom_values() {
+        for settings in [
+            json!({}),
+            json!({"meeting": {"asr_base_url": " ", "asr_model": ""}}),
+        ] {
+            let config = AsrConfig::from_settings(&settings).unwrap();
+            assert_eq!(config.base_url, DEFAULT_BASE_URL);
+            assert_eq!(config.model, DEFAULT_MODEL);
+        }
+        let config = AsrConfig::from_settings(&json!({"meeting": {
+            "asr_base_url": " https://example.cn/proxy/// ", "asr_model": " custom-file-model ",
+            "plan_base_url": "https://other.cn", "plan_model": "other-model"
+        }}))
+        .unwrap();
+        assert_eq!(config.base_url, "https://example.cn/proxy");
+        assert_eq!(config.model, "custom-file-model");
+        for address in [
+            "bad",
+            "file:///c:/audio",
+            "wss://example.cn",
+            "https://u:p@example.cn",
+            "https://example.cn?key=hidden",
+            "https://example.cn/#hidden",
+        ] {
+            let error = AsrConfig::new(Some(address), None).unwrap_err();
+            assert_eq!(error.code, "ASR_URL_INVALID");
+            assert!(error.detail.is_none());
+        }
+    }
+
+    #[test]
+    fn custom_config_is_used_for_connection_policy_submission_and_polling() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..4 {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "未收到预期的本地请求");
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut socket);
+                let mut first_line = String::new();
+                reader.read_line(&mut first_line).unwrap();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse().unwrap();
+                        }
+                    }
+                }
+                let mut bytes = vec![0; length];
+                reader.read_exact(&mut bytes).unwrap();
+                let body = if length == 0 {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&bytes).unwrap()
+                };
+                let response = if first_line.contains("/uploads?") {
+                    json!({"data": {"upload_host": "http://127.0.0.1", "upload_dir": "tmp", "oss_access_key_id": "test", "policy": "test", "signature": "test"}})
+                } else if first_line.contains("/transcription ") {
+                    json!({"output": {"task_id": "test-task"}})
+                } else {
+                    json!({"output": {"task_status": "SUCCEEDED"}})
+                }.to_string();
+                requests.push((first_line.trim().to_owned(), body));
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            }
+            requests
+        });
+        let config = AsrConfig::new(
+            Some(&format!("http://{address}/proxy/")),
+            Some("custom-file-model"),
+        )
+        .unwrap();
+        assert_eq!(
+            test_connection(Some("test-only-key"), &config).unwrap()["ok"],
+            true
+        );
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        get_policy(&client, "test-only-key", &config).unwrap();
+        let task_id =
+            submit_transcription(&client, "test-only-key", "oss://test.wav", &config).unwrap();
+        let task = poll_transcription(
+            &client,
+            "test-only-key",
+            &task_id,
+            &|_, _, _, _| {},
+            &Arc::new(AtomicBool::new(false)),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(task["output"]["task_status"], "SUCCEEDED");
+        let requests = server.join().unwrap();
+        for request in &requests[..2] {
+            assert!(request.0.starts_with("GET /proxy/api/v1/uploads?"));
+            assert!(request.0.contains("model=custom-file-model"));
+        }
+        assert_eq!(
+            requests[2].0,
+            "POST /proxy/api/v1/services/audio/asr/transcription HTTP/1.1"
+        );
+        assert_eq!(requests[2].1["model"], "custom-file-model");
+        assert_eq!(requests[2].1["input"]["file_urls"][0], "oss://test.wav");
+        assert_eq!(requests[2].1["parameters"]["diarization_enabled"], true);
+        assert!(requests[2].1["parameters"].get("language_hints").is_none());
+        assert_eq!(requests[3].0, "POST /proxy/api/v1/tasks/test-task HTTP/1.1");
+    }
 
     fn sentence(text: &str, speaker_id: i64, begin_ms: i64) -> Sentence {
         Sentence {

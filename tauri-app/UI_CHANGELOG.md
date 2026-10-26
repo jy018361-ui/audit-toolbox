@@ -1,3 +1,24 @@
+## 2026-10-26 · 套餐语音地址自动识别与 Windows 证书校验
+
+- 目标：修复用户粘贴订阅页 `/compatible-mode/v1` 地址后错误拼接实时接口，以及 `UnknownIssuer` 仅提示核对地址与密钥的问题。
+- 设计决策：套餐地址接受服务根地址、文本兼容接口地址及完整实时接口，统一到 `/api-ws/v1/realtime`；重复的文本接口／实时接口后缀同样收敛，保留自定义代理前缀、端口及模型，模型以查询参数编码，空值沿用默认。设置页在套餐地址下明确提示可粘贴订阅地址。
+- 连接：测试与实际转写共用连接函数，rustls 使用 Windows 原生证书链校验，保留域名、有效期及系统信任检查，连接握手限制二十秒。证书问题、HTTP 鉴权失败、接口不存在及请求受限分别给出中文提示和状态，不再全部归为密钥错误。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_plan_asr::tests::`；本地 WebSocket 服务核对订阅地址归一后的握手路径、鉴权头及仅建立会话即关闭；`npx vitest run src/AppNavigationSettings.test.tsx src/meetingAsrApi.test.ts`、`npm run build`。真实连接测试仅建立官方模型会话，不上传音频，记录见 `artifacts/plan-asr-connection-20261026/`；本次不替换已安装 EXE。
+
+## 2026-10-26 · 密钥支持显示、隐藏与查看已保存值
+
+- 目标：统一 LLM、百度 OCR、通用／套餐语音转写及 AudiPick 专用配置中的密钥均提供可见入口，避免只能输入新值而无法核对已保存值。
+- 设计决策：共用 SecretInput；「显示」优先展示当前草稿，草稿为空时按需读取对应 Windows 凭据，「隐藏」清除本次读取值。查看不修改表单、不触发保存，不把查看的凭据写入设置 JSON；用户编辑后才作为新草稿保存。设置保存成功重置显示状态；通道／接口切换不串用已读取密钥。读取过程中输入新值时忽略迟到的读取结果。
+- 后端：增加 `secret_get`，与 `secret_set` 共用明确的工具箱凭据名白名单，不开放其他应用或任意名称的凭据；不存在返回空值，读取失败给中文提示且不附明文诊断。前端校验返回类型，不缓存到本地存储。
+- 验证：SecretInput 组件、设置页、AudiPick 配置恢复、API 参数与样式守卫定向 Vitest；`npm run build`；Rust 凭据读取拒绝未知名称回归。测试使用模拟凭据，未输出或截图用户真实密钥；本次不更新安装包。
+
+## 2026-10-26 · 通用语音转写预填默认配置并允许修改
+
+- 目标：补齐通用转写通道仅显示密钥、无法查看或修改模型与服务地址的配置缺口。
+- 设计决策：在现有语音转写卡片增加可编辑的「通用服务地址」「通用转写模型」，分别预填 `https://dashscope.aliyuncs.com`、`paraformer-v2`；空值使用原默认值。两条通道各自保留地址、模型和密钥，切换不丢草稿；通用设置与其他设置一起保存，重新打开恢复。测试使用当前未保存的配置与临时密钥，界面说明只验证上传凭证，不代表完整转写已通过。
+- 调用：worker 从注入的 meeting 设置读取通用配置；上传凭证、提交任务、轮询及成功后的结果地址补查共用同一服务地址和模型。自定义模型不再发送仅适用于 paraformer-v2 的语言提示参数，仍需兼容现有百炼录音文件转写协议；不限制用户输入模型名。套餐配置入口和独立凭据继续保留。
+- 验证：`npx vitest run src/AppNavigationSettings.test.tsx src/meetingAsrApi.test.ts src/api.test.ts`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_asr::tests::`、`cargo test --manifest-path src-tauri/Cargo.toml --lib meeting_`；本地模拟 HTTP 服务验证自定义地址与模型传至请求。重编开发 EXE 后，以合成非静音录音和无效地址通过 `--rust-table-worker` 确认读取注入配置，返回 `ASR_URL_INVALID`，在读取凭据和联网前终止；浏览器检查默认值可编辑、通道切换保留草稿和密钥显隐，宽窄窗口截图及记录见 `artifacts/asr-config-20261026/`。未调用真实云端、未上传用户录音，本次不打包安装 EXE。
+
 ## 2026-10-26 · 二轮输入框边框排查：规则存在但没写边框的漏网处
 
 - 目标：用户反馈存款第二步「科目分类与存款类型」的利率格仍然无边框。复盘确认首轮排查方法有漏洞：只核对"该容器链上是否存在边框规则"，没有核对规则体是否真的声明了 border——`.deposit-account-list .deposit-pct input` 只写了宽度、`.ts-filter-menu-search input` 只写了 min-width、`.hmg-detect-input` 只写了宽度对齐，全都漏判。

@@ -10,6 +10,7 @@ import { demoDataEnabled, demoJobLookup, demoLookup, demoPath,
 import "./preview/layoutAudit";
 import {
   BootstrapSchema,
+  SecretValueSchema,
   HistoryRowSchema,
   JobEventSchema,
   MeetingEventSchema,
@@ -375,6 +376,10 @@ export const secretSet = (name: string, value: string) =>
   inTauri()
     ? invoke<void>("secret_set", { name, value })
     : Promise.reject(previewUnavailable("保存密钥"));
+export const secretGet = (name: string) =>
+  inTauri()
+    ? invoke("secret_get", { name }).then((value) => SecretValueSchema.parse(value))
+    : Promise.reject(previewUnavailable("查看已保存密钥"));
 export const audipickLlmTest = (profile: Record<string, unknown>, apiKey?: string) =>
   inTauri()
     ? invoke<{ message: string; elapsedMs: number }>("audipick_llm_test", { profile, apiKey: apiKey?.trim() || null })
@@ -454,22 +459,25 @@ export const meetingRecordStop = () =>
       )
     : Promise.reject(previewUnavailable("停止会议录音"));
 
-/** 语音转写连接测试：传 plan 走套餐通道（realtime 连接测试），
- *  否则按通用通道验证 paraformer 上传凭证密钥。 */
+/** 按当前通道、地址与模型测试连接；不提交录音文件。 */
 export const meetingAsrTest = (
   apiKey?: string,
-  plan?: { baseUrl: string; model: string; apiKey?: string },
+  config?: { channel: "paraformer" | "token_plan"; baseUrl: string; model: string },
 ) =>
   inTauri()
     ? invoke<{ ok: boolean; message: string; elapsedMs: number }>(
         "meeting_asr_test",
-        plan
+        config?.channel === "token_plan"
           ? {
-              planBaseUrl: plan.baseUrl,
-              planModel: plan.model,
-              planApiKey: plan.apiKey?.trim() || null,
+              planBaseUrl: config.baseUrl,
+              planModel: config.model,
+              planApiKey: apiKey?.trim() || null,
             }
-          : { apiKey: apiKey?.trim() || null },
+          : {
+              apiKey: apiKey?.trim() || null,
+              baseUrl: config?.baseUrl ?? null,
+              model: config?.model ?? null,
+            },
       )
     : Promise.reject(previewUnavailable("测试百炼语音转写连接"));
 

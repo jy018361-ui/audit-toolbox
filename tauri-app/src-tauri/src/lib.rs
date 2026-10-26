@@ -1029,10 +1029,9 @@ fn audipick_pdf_bytes(
     ))
 }
 
-#[tauri::command]
-fn secret_set(name: String, value: String) -> Result<(), AppError> {
-    if !matches!(
-        name.as_str(),
+fn secret_name_allowed(name: &str) -> bool {
+    matches!(
+        name,
         "llm_api_key"
             | "dify_api_key"
             | "baidu_ocr_key"
@@ -1041,7 +1040,34 @@ fn secret_set(name: String, value: String) -> Result<(), AppError> {
             | "bailian_plan_asr_key"
             | "audipick_llm_api_key"
             | "audipick_dify_api_key"
-    ) {
+    )
+}
+
+#[tauri::command]
+fn secret_get(name: String) -> Result<Option<String>, AppError> {
+    if !secret_name_allowed(&name) {
+        return Err(AppError::new(
+            "SECRET_NAME_DENIED",
+            "不允许读取该类型的凭据。",
+            false,
+            None,
+        ));
+    }
+    match keyring::Entry::new("AuditToolbox", &name).and_then(|entry| entry.get_password()) {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(_) => Err(AppError::new(
+            "CREDENTIAL_READ_FAILED",
+            "无法读取 Windows 凭据管理器，请稍后重试。",
+            true,
+            None,
+        )),
+    }
+}
+
+#[tauri::command]
+fn secret_set(name: String, value: String) -> Result<(), AppError> {
+    if !secret_name_allowed(&name) {
         return Err(AppError::new(
             "SECRET_NAME_DENIED",
             "不允许保存该类型的凭据。",
@@ -1184,6 +1210,8 @@ fn meeting_detect_set_enabled(meeting: State<'_, Arc<meeting_watch::MeetingState
 #[tauri::command]
 async fn meeting_asr_test(
     api_key: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
     plan_base_url: Option<String>,
     plan_model: Option<String>,
     plan_api_key: Option<String>,
@@ -1197,7 +1225,8 @@ async fn meeting_asr_test(
             };
             bailian_plan_asr::test_connection(&params)
         } else {
-            bailian_asr::test_connection(api_key.as_deref())
+            let config = bailian_asr::AsrConfig::new(base_url.as_deref(), model.as_deref())?;
+            bailian_asr::test_connection(api_key.as_deref(), &config)
         }
     })
     .await
@@ -1924,6 +1953,7 @@ pub fn run() {
             history_restore,
             audipick_pdf_bytes,
             secret_set,
+            secret_get,
             secret_delete,
             legacy_import,
             pick_path,
@@ -2109,6 +2139,17 @@ mod tests {
         let err = secret_delete("arbitrary_secret".into()).unwrap_err();
         assert_eq!(err.code, "SECRET_NAME_DENIED");
         assert_eq!(err.user_message, "不允许删除该类型的凭据。");
+    }
+
+    #[test]
+    fn credential_read_rejects_unknown_names_before_accessing_keyring() {
+        let error = secret_get("arbitrary_secret".into()).unwrap_err();
+        assert_eq!(error.code, "SECRET_NAME_DENIED");
+        assert_eq!(error.user_message, "不允许读取该类型的凭据。");
+        assert!(secret_name_allowed("bailian_asr_key"));
+        assert!(secret_name_allowed("bailian_plan_asr_key"));
+        assert!(secret_name_allowed("audipick_llm_api_key"));
+        assert!(!secret_name_allowed("other_app_key"));
     }
 
     #[test]

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const SecretValueSchema = z.string().nullable();
+
 export const ToolManifestSchema = z.object({
   id: z.string(), name: z.string(), description: z.string(), route: z.string(),
   version: z.string(), capabilities: z.array(z.string()), migrationStatus: z.enum(["ready", "preview", "legacy", "upcoming"])

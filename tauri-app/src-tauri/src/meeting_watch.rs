@@ -45,7 +45,7 @@ const REPLAY_WINDOW: Duration = Duration::from_secs(2 * 60 * 60);
 const START_MARKER: &str = "WindowContentProtectionProvider: SetWindowContentProtection success";
 const END_MARKER: &str = "WindowContentProtectionProvider: UnregisterCall success";
 
-/// 音频会话是兜底信号：需连续占用麦克风 3 秒才询问；开始后双向音频都
+/// 音频会话是兜底信号：需 Teams 采集与播放会话同时活跃 3 秒才询问；开始后双向音频都
 /// 停止 10 秒才收尾，避免短暂静音或设备切换导致提前结束。提示音不触发。
 #[derive(Default)]
 struct AudioCallState {
@@ -67,7 +67,7 @@ impl AudioCallState {
         let pending = if self.active {
             !capture && !render
         } else {
-            capture
+            capture && render
         };
         if !pending {
             self.pending_since = None;
@@ -626,9 +626,9 @@ mod tests {
     fn audio_started_call_can_end_via_log_without_log_start() {
         let mut audio = AudioCallState::default();
         let now = Instant::now();
-        assert_eq!(audio.observe(true, false, now), None);
+        assert_eq!(audio.observe(true, true, now), None);
         assert_eq!(
-            audio.observe(true, false, now + Duration::from_secs(3)),
+            audio.observe(true, true, now + Duration::from_secs(3)),
             Some(CallEvent::Started)
         );
         let dir = tempfile::tempdir().unwrap();
@@ -670,9 +670,9 @@ mod tests {
         let mut state = AudioCallState::default();
         let now = Instant::now();
         assert_eq!(state.observe(false, true, now), None); // Teams 提示音不能触发
-        assert_eq!(state.observe(true, false, now), None);
+        assert_eq!(state.observe(true, true, now), None);
         assert_eq!(
-            state.observe(true, false, now + Duration::from_secs(3)),
+            state.observe(true, true, now + Duration::from_secs(3)),
             Some(CallEvent::Started)
         );
         // 麦克风静音后，播放流仍在，不能提前结束。
@@ -692,6 +692,54 @@ mod tests {
             state.observe(false, false, now + Duration::from_secs(31)),
             Some(CallEvent::Ended)
         );
+    }
+
+    #[test]
+    fn background_teams_with_only_dictation_or_notifications_does_not_start_call() {
+        for (capture, render) in [(true, false), (false, true), (false, false)] {
+            let mut state = AudioCallState::default();
+            let now = Instant::now();
+            for seconds in 0..=30 {
+                assert_eq!(
+                    state.observe(capture, render, now + Duration::from_secs(seconds)),
+                    None
+                );
+            }
+            assert!(!state.active);
+        }
+    }
+
+    #[test]
+    fn audio_start_requires_continuous_duplex_and_resets_when_either_side_stops() {
+        let mut state = AudioCallState::default();
+        let now = Instant::now();
+        assert_eq!(state.observe(true, true, now), None);
+        assert_eq!(
+            state.observe(true, false, now + Duration::from_secs(2)),
+            None
+        );
+        assert_eq!(
+            state.observe(true, true, now + Duration::from_secs(3)),
+            None
+        );
+        assert_eq!(
+            state.observe(true, true, now + Duration::from_secs(5)),
+            None
+        );
+        assert_eq!(
+            state.observe(true, true, now + Duration::from_secs(6)),
+            Some(CallEvent::Started)
+        );
+        // 确认开始后只剩任一路会话也维持会态，不要求双方一直说话。
+        assert_eq!(
+            state.observe(false, true, now + Duration::from_secs(20)),
+            None
+        );
+        assert_eq!(
+            state.observe(true, false, now + Duration::from_secs(40)),
+            None
+        );
+        assert!(state.active);
     }
 
     #[test]

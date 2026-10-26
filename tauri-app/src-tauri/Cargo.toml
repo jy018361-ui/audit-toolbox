@@ -1,6 +1,6 @@
 [package]
 name = "audit-toolbox"
-version = "2.0.0-alpha.129"
+version = "2.0.0-alpha.130"
 description = "统一的 Tauri 审计工具箱"
 authors = ["Audit Toolbox"]
 edition = "2024"
@@ -52,7 +52,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 umya-spreadsheet = "=3.0.1"
 pdfplumber = "0.3"
 regex = "1"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_Diagnostics_ToolHelp"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
 wasapi = "0.24.0"
 hound = "3.5.1"
 # 套餐转写通道：realtime 协议是 WebSocket，用一次性 current-thread runtime

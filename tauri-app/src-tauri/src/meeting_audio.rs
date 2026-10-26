@@ -1,7 +1,7 @@
 //! Teams 音频会话快照：不依赖 SlimCore 日志，也不以音量判定设备是否在用。
 //! 只读取 Windows 会话状态，不启动录音。WebView 媒体进程按 Teams 进程树归属。
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use wasapi::{Device, DeviceEnumerator, Direction, SessionState};
 
 #[derive(Debug, Default)]
@@ -10,7 +10,61 @@ pub(crate) struct TeamsAudio {
     pub rendering: bool,
 }
 
-pub(crate) fn process_table() -> Vec<(u32, u32, String)> {
+#[derive(Debug)]
+struct ProcessEntry {
+    pid: u32,
+    parent: u32,
+    name: String,
+    created_at: Option<u64>,
+}
+
+fn is_teams_executable(name: &str) -> bool {
+    name.eq_ignore_ascii_case("ms-teams.exe")
+}
+
+fn is_teams_media_executable(name: &str) -> bool {
+    is_teams_executable(name) || name.eq_ignore_ascii_case("msedgewebview2.exe")
+}
+
+/// PID 会复用：同时读取当前映像名与创建时间，不能只信 ToolHelp 的父 PID。
+fn process_identity(pid: u32) -> Option<(String, u64)> {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    use windows::core::PWSTR;
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let result = (|| {
+            let mut path = vec![0u16; 32_768];
+            let mut size = path.len() as u32;
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(path.as_mut_ptr()),
+                &mut size,
+            )
+            .ok()?;
+            let path = String::from_utf16_lossy(&path[..size as usize]);
+            let name = path.rsplit(['\\', '/']).next()?.to_string();
+            let mut created = FILETIME::default();
+            let mut exited = FILETIME::default();
+            let mut kernel = FILETIME::default();
+            let mut user = FILETIME::default();
+            GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user).ok()?;
+            Some((
+                name,
+                (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime),
+            ))
+        })();
+        let _ = CloseHandle(handle);
+        result
+    }
+}
+
+fn process_table() -> Vec<ProcessEntry> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -30,11 +84,20 @@ pub(crate) fn process_table() -> Vec<(u32, u32, String)> {
                     .iter()
                     .position(|&ch| ch == 0)
                     .unwrap_or(entry.szExeFile.len());
-                processes.push((
-                    entry.th32ProcessID,
-                    entry.th32ParentProcessID,
-                    String::from_utf16_lossy(&entry.szExeFile[..len]),
-                ));
+                let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                let created_at = if is_teams_media_executable(&name) {
+                    process_identity(entry.th32ProcessID)
+                        .filter(|(actual, _)| actual.eq_ignore_ascii_case(&name))
+                        .map(|(_, created)| created)
+                } else {
+                    None
+                };
+                processes.push(ProcessEntry {
+                    pid: entry.th32ProcessID,
+                    parent: entry.th32ParentProcessID,
+                    name,
+                    created_at,
+                });
                 if Process32NextW(snapshot, &mut entry).is_err() {
                     break;
                 }
@@ -45,17 +108,25 @@ pub(crate) fn process_table() -> Vec<(u32, u32, String)> {
     processes
 }
 
-fn teams_processes(processes: &[(u32, u32, String)]) -> HashSet<u32> {
-    let mut owned: HashSet<u32> = processes
+fn teams_processes(processes: &[ProcessEntry]) -> HashMap<u32, u64> {
+    let mut owned: HashMap<u32, u64> = processes
         .iter()
-        .filter(|(_, _, name)| name.eq_ignore_ascii_case("ms-teams.exe"))
-        .map(|(pid, _, _)| *pid)
+        .filter(|process| is_teams_executable(&process.name))
+        .filter_map(|process| process.created_at.map(|created| (process.pid, created)))
         .collect();
     loop {
         let before = owned.len();
-        for (pid, parent, _) in processes {
-            if owned.contains(parent) {
-                owned.insert(*pid);
+        for process in processes {
+            if !is_teams_media_executable(&process.name) {
+                continue;
+            }
+            if let (Some(created), Some(parent_created)) =
+                (process.created_at, owned.get(&process.parent))
+            {
+                // 真正的子进程不能早于当前父进程创建；无法读取时不猜归属。
+                if created >= *parent_created {
+                    owned.insert(process.pid, created);
+                }
             }
         }
         if owned.len() == before {
@@ -64,17 +135,37 @@ fn teams_processes(processes: &[(u32, u32, String)]) -> HashSet<u32> {
     }
 }
 
-fn has_active_teams_session(device: &Device, owned: &HashSet<u32>) -> Result<bool, String> {
+fn session_is_owned(pid: u32, current: Option<(String, u64)>, owned: &HashMap<u32, u64>) -> bool {
+    current.is_some_and(|(name, created)| {
+        is_teams_media_executable(&name) && owned.get(&pid) == Some(&created)
+    })
+}
+
+fn ownership_uncertain(processes: &[ProcessEntry], owned: &HashMap<u32, u64>) -> bool {
+    processes.iter().any(|process| {
+        process.created_at.is_none()
+            && (is_teams_executable(&process.name)
+                || (is_teams_media_executable(&process.name)
+                    && owned.contains_key(&process.parent)))
+    })
+}
+
+fn has_active_teams_session(device: &Device, owned: &HashMap<u32, u64>) -> Result<bool, String> {
     let sessions = device
         .get_iaudiosessionmanager()
         .and_then(|manager| manager.get_audiosessionenumerator())
         .map_err(|e| format!("{e:?}"))?;
     for index in 0..sessions.get_count().map_err(|e| format!("{e:?}"))? {
         let session = sessions.get_session(index).map_err(|e| format!("{e:?}"))?;
-        if session.get_state().map_err(|e| format!("{e:?}"))? == SessionState::Active
-            && owned.contains(&session.get_process_id().map_err(|e| format!("{e:?}"))?)
-        {
-            return Ok(true);
+        if session.get_state().map_err(|e| format!("{e:?}"))? == SessionState::Active {
+            let pid = session.get_process_id().map_err(|e| format!("{e:?}"))?;
+            if owned.contains_key(&pid) {
+                if session_is_owned(pid, process_identity(pid), owned) {
+                    return Ok(true);
+                }
+                // 进程退出／复用或查询失败都先视作未知，不能据此累计结束防抖。
+                return Err("Teams 音频进程身份暂时无法确认，等待下次检测。".into());
+            }
         }
     }
     Ok(false)
@@ -112,6 +203,9 @@ pub(crate) fn snapshot(enumerator: &DeviceEnumerator) -> Result<TeamsAudio, Stri
         return Err("无法读取 Windows 进程列表。".into());
     }
     let owned = teams_processes(&processes);
+    if ownership_uncertain(&processes, &owned) {
+        return Err("无法校验 Teams 音频进程归属，等待下次检测。".into());
+    }
     let mut audio = TeamsAudio::default();
     if owned.is_empty() {
         return Ok(audio);
@@ -144,13 +238,102 @@ mod tests {
     #[test]
     fn includes_webview_descendants_but_not_unrelated_audio_apps() {
         let processes = vec![
-            (400, 300, "msedgewebview2.exe".into()),
-            (300, 200, "msedgewebview2.exe".into()),
-            (200, 100, "MS-TEAMS.EXE".into()),
-            (500, 100, "msedgewebview2.exe".into()),
+            process(400, 300, "msedgewebview2.exe", Some(30)),
+            process(300, 200, "msedgewebview2.exe", Some(20)),
+            process(200, 100, "MS-TEAMS.EXE", Some(10)),
+            process(500, 100, "msedgewebview2.exe", Some(20)),
+            process(600, 200, "wetype_server.exe", Some(20)),
+            process(700, 600, "msedgewebview2.exe", Some(30)),
         ];
-        assert_eq!(teams_processes(&processes), HashSet::from([200, 300, 400]));
-        assert!(teams_processes(&[(500, 100, "msedge.exe".into())]).is_empty());
+        assert_eq!(
+            teams_processes(&processes),
+            HashMap::from([(200, 10), (300, 20), (400, 30)])
+        );
+        assert!(teams_processes(&[process(500, 100, "msedge.exe", Some(10))]).is_empty());
+    }
+
+    fn process(pid: u32, parent: u32, name: &str, created_at: Option<u64>) -> ProcessEntry {
+        ProcessEntry {
+            pid,
+            parent,
+            name: name.into(),
+            created_at,
+        }
+    }
+
+    #[test]
+    fn recycled_parent_pid_does_not_adopt_older_wechat_webview_or_its_children() {
+        let processes = [
+            process(200, 100, "ms-teams.exe", Some(100)),
+            process(300, 200, "msedgewebview2.exe", Some(20)),
+            process(400, 300, "msedgewebview2.exe", Some(110)),
+            process(500, 200, "msedgewebview2.exe", Some(101)),
+        ];
+        assert_eq!(
+            teams_processes(&processes),
+            HashMap::from([(200, 100), (500, 101)])
+        );
+    }
+
+    #[test]
+    fn unknown_process_identity_does_not_grant_teams_ownership() {
+        let processes = [
+            process(200, 100, "ms-teams.exe", Some(10)),
+            process(300, 200, "msedgewebview2.exe", None),
+            process(400, 300, "msedgewebview2.exe", Some(30)),
+            process(500, 100, "ms-teams.exe", None),
+        ];
+        assert_eq!(teams_processes(&processes), HashMap::from([(200, 10)]));
+        assert!(ownership_uncertain(
+            &processes,
+            &teams_processes(&processes)
+        ));
+    }
+
+    #[test]
+    fn unrelated_unreadable_webviews_do_not_block_teams_enumeration() {
+        let processes = [
+            process(200, 100, "ms-teams.exe", Some(10)),
+            process(300, 200, "msedgewebview2.exe", Some(20)),
+            process(400, 500, "msedgewebview2.exe", None),
+        ];
+        assert!(!ownership_uncertain(
+            &processes,
+            &teams_processes(&processes)
+        ));
+    }
+
+    #[test]
+    fn active_session_must_still_belong_to_same_live_process() {
+        let owned = HashMap::from([(200, 10), (300, 20)]);
+        assert!(session_is_owned(
+            300,
+            Some(("msedgewebview2.exe".into(), 20)),
+            &owned
+        ));
+        assert!(!session_is_owned(
+            300,
+            Some(("wetype_server.exe".into(), 20)),
+            &owned
+        ));
+        assert!(!session_is_owned(
+            300,
+            Some(("msedgewebview2.exe".into(), 21)),
+            &owned
+        ));
+        assert!(!session_is_owned(
+            500,
+            Some(("msedgewebview2.exe".into(), 20)),
+            &owned
+        ));
+        assert!(!session_is_owned(200, None, &owned));
+    }
+
+    #[test]
+    fn current_process_identity_is_readable() {
+        let (name, created) = process_identity(std::process::id()).unwrap();
+        assert!(name.to_ascii_lowercase().ends_with(".exe"));
+        assert!(created > 0);
     }
 
     #[test]

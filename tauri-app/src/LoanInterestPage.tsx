@@ -3099,8 +3099,8 @@ function LoanSourceCard(props: {
 }
 
 /**
- * 条件渲染数据表的列宽调整容器：复用原容器 div（className 不变），只把
- * resize ref 与既有引用一并挂上，DOM 结构与样式完全不动。列宽 hook 在挂载
+ * 条件渲染数据表的列宽调整容器：内层保留原 className、resize ref 与既有引用，
+ * 外框独立绘制渐隐，避免提示随表格滚入内容区。列宽 hook 在挂载
  * 时绑定容器，而本页的表随步骤切换反复卸载重挂，页面级 hook 只在首次挂载时
  * 绑定一次，所以由本组件的每次挂载重新接管。containerRef 供原有的滚动复位
  * 等引用继续指向同一个 div。
@@ -3119,16 +3119,17 @@ function ResizableTableBox({
   const resize = useTableColumnResize<HTMLDivElement>({ storageKey: resizeKey });
   const { ref: fadeRef, ...fadeFlags } = useScrollFadeFlags<HTMLDivElement>();
   return (
-    <div
-      className={cn("scroll-fade-x", className)}
-      ref={(node) => {
-        resize.ref.current = node;
-        fadeRef.current = node;
-        if (containerRef) containerRef.current = node;
-      }}
-      {...fadeFlags}
-    >
-      {children}
+    <div className="scroll-fade-x" {...fadeFlags}>
+      <div
+        className={cn("scroll-fade-x-scroll", className)}
+        ref={(node) => {
+          resize.ref.current = node;
+          fadeRef.current = node;
+          if (containerRef) containerRef.current = node;
+        }}
+      >
+        {children}
+      </div>
     </div>
   );
 }

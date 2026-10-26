@@ -2,6 +2,60 @@ use super::*;
 use std::cell::Cell;
 
 #[test]
+fn correction_check_keeps_original_source_counts_amounts_years_and_noise_exclusion() {
+    let (mut result, mut params) = deep_export_fixture(&["3", "5", "0"]);
+    for table in [&mut result.begin, &mut result.end] {
+        table.headers[5] = "使用年限".into();
+        table.headers[6] = "残值".into();
+    }
+    for side in ["beginMapping", "endMapping"] {
+        params[side]["life"] = json!("使用年限");
+        params[side]["residualRate"] = json!("残值");
+    }
+    for (index, residual) in ["50", "5", "0"].into_iter().enumerate() {
+        result.end.rows[index][6] = residual.into();
+    }
+    result.end.rows[1][3] = "0".into();
+    let mut total = result.end.rows[0].clone();
+    total[1] = "合计".into();
+    result.end.rows.push(total);
+    result.begin.rows = result.end.rows.clone();
+    // JoinedRow 仍是原夹具数据，故这些断言也保证没有错误地改为按匹配后行统计。
+    let warnings = correction_warnings(&result, &params);
+    assert_eq!(warnings.len(), 6, "{warnings:?}");
+    for period in ["期初", "期末"] {
+        let side = warnings.iter().filter(|text|text.contains(period)).collect::<Vec<_>>();
+        assert_eq!(side.len(), 3);
+        assert!(side.iter().any(|text|text.contains("1 张卡片") && text.contains("按残值金额除以原值")));
+        assert!(side.iter().any(|text|text.contains("1 张卡片的残值率大于 1")));
+        assert!(side.iter().any(|text|text.contains("2 张卡片的“使用年限”按年换算为月")));
+    }
+    params["beginMapping"] = json!({});
+    params["endMapping"] = json!({});
+    assert!(correction_warnings(&result, &params).is_empty());
+}
+
+#[test]
+fn correction_check_supports_cancellation_and_monotonic_progress() {
+    let (mut result, params) = deep_export_fixture(&vec!["12"; 6000]);
+    result.begin.rows = result.end.rows.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let last = Cell::new(0usize);
+    let events = Cell::new(0usize);
+    let progress = |phase: &str, current: usize, total: usize, message: &str| {
+        assert_eq!(phase, "check");
+        assert_eq!(total, 100);
+        assert!(current >= last.get());
+        last.set(current); events.set(events.get()+1);
+        if message.contains("4096 / 6000") { cancel.store(true, Ordering::Relaxed); }
+    };
+    let error = correction_warnings_with_progress(&result, &params, &progress, &cancel, &PauseCheckpoint::unpaused(cancel.clone())).unwrap_err();
+    assert_eq!(error.code, "JOB_CANCELLED");
+    assert!(events.get() >= 3);
+    assert!(last.get() < 59);
+}
+
+#[test]
 fn policy_export_decodes_wide_disk_rows_once_and_writer_needs_no_source() {
     let (mut result, params) = deep_export_fixture(&vec!["12"; 6000]);
     let expected = build_depreciation_period(&result, &params).unwrap();

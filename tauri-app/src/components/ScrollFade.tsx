@@ -42,8 +42,8 @@ export function ScrollFadeBox({
 
 /**
  * 双轴滚动检测 hook：给「容器自身就是滚动区」的自定义表格用（如
- * loan-account-confirm）。把返回值展开到外层包装元素上，滚动区作为
- * 其唯一子元素；CSS 侧按 data-more-right / data-more-bottom 渲染渐隐。
+ * loan-account-confirm）。ref 只挂内层滚动区，data-more-* 只展开到
+ * 不滚动的外框；CSS 在外框绘制渐隐，不能把提示层与 ref 挂到同一个元素。
  */
 export function useScrollFadeFlags<T extends HTMLElement>() {
   const ref = useRef<T | null>(null);

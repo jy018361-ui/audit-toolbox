@@ -2100,6 +2100,10 @@ fn export(
         .unwrap_or(false);
     let (export_columns, source_counts) = result_columns_and_counts(&result, true);
     result.rows.check()?;
+    // 纠偏依赖原始两侧资料，在写表前完成；保存后不再隐藏一次原始大表扫描。
+    let check_started = std::time::Instant::now();
+    let warnings = correction_warnings_with_progress(&result, &params, progress, &cancel, pause)?;
+    let check_secs = check_started.elapsed().as_secs_f64();
     let tax_started = std::time::Instant::now();
     let tax_analysis = if is_csv {
         None
@@ -2121,6 +2125,7 @@ fn export(
     let write_secs = write_started.elapsed().as_secs_f64();
     let mut export_message = "FA List 导出完成".to_owned();
     if unmatched_count(&result,false)>0 || unmatched_count(&result,true)>0 {
+        progress("export", 99, 100, "套表已保存，正在保存未匹配资产变动清单");
         let path = output
             .parent()
             .unwrap_or(Path::new("."))
@@ -2131,15 +2136,14 @@ fn export(
     }
     // 各阶段真实耗时进完成消息，用户看得见时间去向。
     export_message.push_str(&format!(
-        "（{} {:.1}s｜税法年限分析 {:.1}s｜生成套表 {:.1}s）",
-        merge_label, merge_secs, tax_secs, write_secs
+        "（{} {:.1}s｜口径检查 {:.1}s｜税法年限分析 {:.1}s｜生成套表 {:.1}s）",
+        merge_label, merge_secs, check_secs, tax_secs, write_secs
     ));
     if !export_timings.is_empty() {
         export_message.push_str(&format!("；套表分段：{}", export_timings.iter()
             .map(|(name, secs)| format!("{name} {secs:.1}s")).collect::<Vec<_>>().join("｜")));
     }
     let completion_message = export_message.clone();
-    let warnings = correction_warnings(&result, &params);
     let stats = statistics_from_counts(&result, source_counts);
     let column_count = export_columns.len();
     result.rows.check()?;
@@ -3832,7 +3836,7 @@ fn write_xlsx_with_progress(
         return Err(cancelled);
     }
     replace_output(&partial, path)?;
-    advance(99, "保存完成", "套表已保存，正在完成导出检查");
+    advance(99, "保存完成", "套表已保存，正在收尾");
     drop(advance);
     Ok(timings)
 }
@@ -5117,12 +5121,26 @@ fn mapped_residual_rate(
 /// becomes `0.05`, `3` years becomes `36` months, a monetary 残值 column is
 /// divided by原值).  Legacy popped a dialog for each of these asking the user to
 /// verify the exported sheets; report them so the change is at least visible.
+#[cfg(test)]
 fn correction_warnings(result: &MergeResult, params: &Value) -> Vec<String> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    correction_warnings_with_progress(result, params, &|_, _, _, _| {}, &cancel, &PauseCheckpoint::unpaused(cancel.clone())).unwrap()
+}
+
+fn correction_warnings_with_progress(
+    result: &MergeResult,
+    params: &Value,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+    pause: &PauseCheckpoint,
+) -> Result<Vec<String>, AppError> {
     let mut warnings = Vec::new();
     // 残值率/寿命纠偏对期初、期末两侧都会发生（折旧期间表两侧都要用），警告
     // 逐侧统计并带上期初/期末前缀——只写「残值率纠偏」用户无从知道该核对
     // 哪份清单。
     for side in [1u8, 2u8] {
+        pause.wait()?;
+        check_cancel(cancel)?;
         let period = if side == 1 { "期初" } else { "期末" };
         let table = if side == 1 {
             &result.begin
@@ -5141,39 +5159,38 @@ fn correction_warnings(result: &MergeResult, params: &Value) -> Vec<String> {
             || normalized_residual.contains("residualvalue")
             || normalized_residual.contains("salvagevalue");
         let life_header = mapped_header(params, side, "life").unwrap_or_default();
+        let field_index = |role: &str| mapped_header(params, side, role)
+            .and_then(|header| table.headers.iter().position(|value| value == &header));
+        let original_index = field_index("originalValue");
+        let residual_index = field_index("residualRate");
+        let life_index = field_index("life");
         // Warn on the same column-level decision the export actually applies, so
         // the message cannot claim a conversion that never happened (or stay silent
         // about one that did).
         let life_in_years = life_scale(result, params, side) > 1.0;
-        let source:Box<dyn Iterator<Item=Result<Vec<String>,AppError>>+'_>=match result.rows.path() {
-            Some(path)=>Box::new(disk::SourceIter::source(path,side)),None=>Box::new(table.rows.iter().cloned().map(Ok)),
+        let start = 50 + (side as usize - 1) * 5;
+        let total = table.row_count.max(table.rows.len());
+        progress("check", start, 100, &format!("正在检查{period}寿命和残值口径，准备读取原始清单…"));
+        let source: Box<dyn Iterator<Item=Result<std::borrow::Cow<'_, [String]>, AppError>> + '_> = match result.rows.path() {
+            Some(path) => Box::new(disk::SourceIter::source_with_cancel(path, side, cancel).map(|row| row.map(std::borrow::Cow::Owned))),
+            None => Box::new(table.rows.iter().map(|row| Ok(std::borrow::Cow::Borrowed(row.as_slice())))),
         };
+        let mut seen = 0usize;
         for values in source {
-            let values=match values {Ok(values)=>values,Err(error)=>{result.rows.record_error(error.user_message);break;}};
+            let values = values.map_err(|error| { result.rows.record_error(error.user_message.clone()); error })?;
+            if seen % 256 == 0 { pause.wait()?; check_cancel(cancel)?; }
+            seen += 1;
+            if seen == 1 || seen % 4096 == 0 {
+                progress("check", start + (seen.saturating_mul(4) / total.max(1)).min(4), 100,
+                    &format!("正在检查{period}寿命和残值口径：{seen} / {total} 行"));
+            }
             if values_are_summary_noise(&values) {
                 continue;
             }
-            let row = JoinedRow {
-                begin: if side == 1 {
-                    Some(values.clone())
-                } else {
-                    None
-                },
-                end: if side == 2 {
-                    Some(values.clone())
-                } else {
-                    None
-                },
-                source: if side == 1 {
-                    "仅文件1"
-                } else {
-                    "仅文件2"
-                },
-                match_value: String::new(),
-                extra: BTreeMap::new(),
-            };
-            let original = mapped_number(result, &row, params, side, "originalValue");
-            let raw_residual = mapped_number(result, &row, params, side, "residualRate");
+            // 按原始源行口径统计，绑定列号后借用单元格；无需复制整行构造 JoinedRow。
+            let raw = |index: Option<usize>| index.and_then(|index|values.get(index)).map(String::as_str).unwrap_or("");
+            let original = number(raw(original_index));
+            let raw_residual = number(raw(residual_index));
             if residual_is_amount
                 && original.abs() > f64::EPSILON
                 && raw_residual.abs() > f64::EPSILON
@@ -5183,7 +5200,7 @@ fn correction_warnings(result: &MergeResult, params: &Value) -> Vec<String> {
                 residual_scaled += 1;
             }
             if life_in_years
-                && parse_life_cell(&mapped_text(result, &row, params, side, "life"))
+                && parse_life_cell(raw(life_index))
                     .is_some_and(|life| life > 0.0)
             {
                 life_converted += 1;
@@ -5209,8 +5226,9 @@ fn correction_warnings(result: &MergeResult, params: &Value) -> Vec<String> {
                 "【{period}·使用寿命纠偏】{life_converted} 张卡片的“{life_header}”按年换算为月（乘以 12），请确认导出的使用寿命是否正确。"
             ));
         }
+        progress("check", start + 4, 100, &format!("{period}寿命和残值口径检查完成：{seen} 行"));
     }
-    warnings
+    Ok(warnings)
 }
 
 #[derive(Default)]

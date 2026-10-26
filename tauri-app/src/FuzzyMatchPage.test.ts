@@ -141,8 +141,8 @@ describe("两列模糊匹配视觉审核修复（结果表滚动提示）", () =
     "utf8",
   );
   it("结果表容器按 data-more 属性渲染底缘/右缘渐隐", () => {
-    expect(css).toMatch(/\.fuzzy-table\[data-more-bottom="true"\]::before/);
-    expect(css).toMatch(/\.fuzzy-table\[data-more-right="true"\]::after/);
-    expect(css).toMatch(/\.fuzzy-table\s*\{[^}]*position:\s*relative/);
+    expect(css).toMatch(/\.fuzzy-table-frame\[data-more-bottom="true"\]::before/);
+    expect(css).toMatch(/\.fuzzy-table-frame\[data-more-right="true"\]::after/);
+    expect(css).toMatch(/\.fuzzy-table-frame\s*\{[^}]*position:\s*relative/);
   });
 });

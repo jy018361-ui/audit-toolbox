@@ -199,7 +199,7 @@ pub(super) fn merge(
         .map_err(db_error)?;
     exec_sql(
         &conn,
-        "CREATE INDEX source_key ON source(side,k,seq); CREATE TABLE keys AS SELECT k,display,side,seq FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY k ORDER BY side,seq) first FROM source) WHERE first=1; CREATE UNIQUE INDEX keys_key ON keys(k);",
+        "CREATE INDEX source_key ON source(side,k,seq); CREATE INDEX source_side_seq ON source(side,seq); CREATE TABLE keys AS SELECT k,display,side,seq FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY k ORDER BY side,seq) first FROM source) WHERE first=1; CREATE UNIQUE INDEX keys_key ON keys(k);",
         cancel,
     )?;
     let (duplicate_values,duplicate_rows)=conn.query_row("SELECT COUNT(*),COALESCE(SUM(n),0) FROM (SELECT k,SUM(n) n FROM (SELECT k,side,COUNT(*) n FROM source GROUP BY k,side) GROUP BY k HAVING MAX(n)>1)",[],|r|Ok((r.get::<_,usize>(0)?,r.get::<_,usize>(1)?))).map_err(db_error)?;
@@ -343,13 +343,25 @@ impl SourceIter {
 }
 impl SourceIter {
     pub(super) fn source(path: &Path, side: u8) -> Self {
+        Self::source_with_cancel(path, side, &AtomicBool::new(false))
+    }
+    pub(super) fn source_with_cancel(path: &Path, side: u8, cancel: &AtomicBool) -> Self {
         let mut iter = Self::open(path);
         iter.side = Some(side);
         iter.after = -1;
+        // 旧快照只有 (side,k,seq)，不能用于 seq 的有序分页；每批会重扫该侧并排序。
+        // 仅在导出工作库／本次匹配临时库补齐索引，原始快照和用户资料不改动。
+        if let Some(conn) = iter.conn.as_ref() {
+            if let Err(error) = check_cancel(cancel).and_then(|_| exec_sql(conn, "CREATE INDEX IF NOT EXISTS source_side_seq ON source(side,seq)", cancel)) {
+                iter.error = Some(error);
+            }
+        }
         iter
     }
     pub(super) fn unmatched(path: &Path, disposal: bool) -> Self {
-        let mut iter = Self::source(path, if disposal { 2 } else { 1 });
+        let mut iter = Self::open(path);
+        iter.side = Some(if disposal { 2 } else { 1 });
+        iter.after = -1;
         iter.unmatched = true;
         iter
     }
@@ -526,6 +538,50 @@ mod tests {
     use calamine::Reader;
     const HEAD: &str = "资产编码,类别,名称,原值,累计折旧,入账开始日期,使用年限,残值率,本年折旧";
     #[test]
+    fn legacy_source_cursor_adds_ordered_index_and_keeps_physical_sequence() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("旧快照.sqlite");
+        let mut conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE source(side INTEGER,seq INTEGER,k TEXT,display TEXT,data TEXT);CREATE INDEX source_key ON source(side,k,seq);").unwrap();
+        let tx = conn.transaction().unwrap();
+        for side in [1, 2] {
+            for seq in (0..600).rev() {
+                tx.execute("INSERT INTO source VALUES(?,?,?,?,?)", params![side,seq,format!("K{}",seq%17),"",serde_json::to_string(&vec![format!("{side}:{seq}")]).unwrap()]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let before = conn.prepare("EXPLAIN QUERY PLAN SELECT seq,data FROM source WHERE side=1 AND seq>? ORDER BY seq LIMIT 256").unwrap()
+            .query_map([0], |row|row.get::<_,String>(3)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        assert!(before.iter().any(|line|line.contains("TEMP B-TREE")));
+        for side in [1, 2] {
+            let source = SourceIter::source(&path, side);
+            let sql = format!("EXPLAIN QUERY PLAN SELECT seq,data FROM source WHERE side={side} AND seq>? ORDER BY seq LIMIT 256");
+            // 检查实际分页游标连接，避免原连接缓存的旧 EXPLAIN 计划。
+            let plan = source.conn.as_ref().unwrap().prepare(&sql).unwrap().query_map([0], |row|row.get::<_,String>(3)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+            assert!(plan.iter().any(|line|line.contains("source_side_seq")), "{plan:?}");
+            assert!(!plan.iter().any(|line|line.contains("TEMP B-TREE") || line.contains("SCAN source")), "{plan:?}");
+            let actual = source.collect::<Result<Vec<_>,_>>().unwrap();
+            assert_eq!(actual, (0..600).map(|seq|vec![format!("{side}:{seq}")]).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn correction_check_reports_tail_corruption_before_export() {
+        let root = tempfile::tempdir().unwrap();
+        let mut params = fixture(root.path(), false);
+        params["__forceDisk"] = json!(true);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result = super::super::merge(&params, &|_,_,_,_|{}, &cancel).unwrap();
+        let mut conn = Connection::open(result.rows.path().unwrap()).unwrap();
+        let data: String = conn.query_row("SELECT data FROM source WHERE side=1 LIMIT 1", [], |row|row.get(0)).unwrap();
+        let tx = conn.transaction().unwrap();
+        for seq in 1000..1600 { tx.execute("INSERT INTO source VALUES(1,?,'tail','',?)",params![seq,data]).unwrap(); }
+        tx.execute("UPDATE source SET data='{broken' WHERE side=1 AND seq=1599", []).unwrap();
+        tx.commit().unwrap();
+        let error = correction_warnings_with_progress(&result, &params, &|_,_,_,_|{}, &cancel, &PauseCheckpoint::unpaused(cancel.clone())).unwrap_err();
+        assert_eq!(error.code, "FA_DISK_DATA_INVALID");
+    }
+    #[test]
     fn empty_supplements_skip_unchanged_updates_and_clear_stale_values_once() {
         let dir = tempfile::tempdir().unwrap();
         let mut params = fixture(dir.path(), false);
@@ -643,7 +699,11 @@ mod tests {
                 let loaded = crate::fa_merge_snapshot::load(&params).unwrap();
                 assert_eq!(joined(&result), joined(&loaded.result));
                 let before = super::super::disk_rows::decoded_rows();
-                super::super::export(params.clone(), &|_, _, _, _| {}, Arc::new(AtomicBool::new(false)), &pause).unwrap();
+                let mut_checks = std::cell::Cell::new(0usize);
+                super::super::export(params.clone(), &|phase, _, _, _| {
+                    if phase == "check" { assert!(!disk_output.exists()); mut_checks.set(mut_checks.get()+1); }
+                }, Arc::new(AtomicBool::new(false)), &pause).unwrap();
+                assert!(mut_checks.get() > 0);
                 // 本小样本的数值取样会覆盖全体行，故为 11 遍完整业务扫描 + 1 遍取样。
                 // 大表取样仍只取前部，不把它误算成全表扫描。
                 assert_eq!(super::super::disk_rows::decoded_rows() - before, result.rows.len() * 12);

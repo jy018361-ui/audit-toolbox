@@ -1126,16 +1126,18 @@ function FuzzyResultTable({
   // 提示——与公共 DataTable 同一做法，但本表不在 DataTable 体系内，须自带。
   // WebView2 的覆盖式滚动条会自动隐藏，被裁一半的行列看起来像渲染坏了。
   const frameRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    const el = frameRef.current;
-    if (!el) return;
+    const frame = frameRef.current;
+    const el = scrollRef.current;
+    if (!frame || !el) return;
     const update = () => {
       const beyondRight =
         el.scrollWidth - el.clientWidth - el.scrollLeft > 4;
       const beyondBottom =
         el.scrollHeight - el.clientHeight - el.scrollTop > 4;
-      el.dataset.moreBottom = beyondBottom ? "true" : "false";
-      el.dataset.moreRight = beyondRight ? "true" : "false";
+      frame.dataset.moreBottom = beyondBottom ? "true" : "false";
+      frame.dataset.moreRight = beyondRight ? "true" : "false";
     };
     update();
     el.addEventListener("scroll", update, { passive: true });
@@ -1152,11 +1154,12 @@ function FuzzyResultTable({
     };
   }, [rows, statusFilter]);
   return (
+    <div className="fuzzy-table-frame" ref={frameRef}>
     <div
       className="fuzzy-table"
       ref={(node) => {
         resize.ref.current = node;
-        frameRef.current = node;
+        scrollRef.current = node;
       }}
     >
       <table>
@@ -1224,6 +1227,7 @@ function FuzzyResultTable({
           )}
         </tbody>
       </table>
+    </div>
     </div>
   );
 }

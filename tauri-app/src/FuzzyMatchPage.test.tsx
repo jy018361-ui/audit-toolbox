@@ -296,9 +296,11 @@ describe("FuzzyMatchPage", () => {
     emitJob(doneEvent(matchResult));
     // jsdom 无布局，两个方向都无未滚内容，属性应为显式 "false"——
     // 属性缺失说明滚动检测 effect 没有接管容器。
-    const frame = document.querySelector(".fuzzy-table");
+    const frame = document.querySelector(".fuzzy-table-frame");
     expect(frame).toHaveAttribute("data-more-bottom", "false");
     expect(frame).toHaveAttribute("data-more-right", "false");
+    expect(frame?.firstElementChild).toHaveClass("fuzzy-table");
+    expect(frame?.firstElementChild).not.toHaveAttribute("data-more-right");
     // 渐隐层的 CSS 断言在 node 环境的 FuzzyMatchPage.test.ts 里
     //（jsdom 下 import.meta.url 非 file 协议，读不了文件）。
   });

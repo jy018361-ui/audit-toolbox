@@ -314,15 +314,57 @@ pub(super) fn detail_counts(id:&str)->Result<HashMap<String,usize>,AppError>{
     let db=detail_db(id)?;let mut query=db.prepare("SELECT voucher,COUNT(*) FROM details GROUP BY voucher").map_err(failure)?;
     query.query_map([],|row|Ok((row.get(0)?,row.get(1)?))).map_err(failure)?.collect::<Result<HashMap<_,_>,_>>().map_err(failure)
 }
-pub(super) fn visit_details(id:&str,voucher:Option<&str>,mut visitor:impl FnMut(Value)->Result<(),AppError>)->Result<(),AppError>{
-    let db=detail_db(id)?;let mut query=db.prepare("SELECT data FROM details WHERE (?1 IS NULL OR voucher=?1) ORDER BY source").map_err(failure)?;
-    let mut rows=query.query([voucher]).map_err(failure)?;
+fn detail_query(voucher: Option<&str>) -> &'static str {
+    // 可选条件的 OR 会阻断 details(voucher,source) 索引；逐凭证导出不能每次全库过滤排序。
+    if voucher.is_some() { "SELECT data FROM details WHERE voucher=?1 ORDER BY source" }
+    else { "SELECT data FROM details ORDER BY source" }
+}
+pub(super) fn visit_details(id:&str,voucher:Option<&str>,visitor:impl FnMut(Value)->Result<(),AppError>)->Result<(),AppError>{
+    visit_details_from(&detail_db(id)?, voucher, visitor)
+}
+fn visit_details_from(db:&Connection,voucher:Option<&str>,mut visitor:impl FnMut(Value)->Result<(),AppError>)->Result<(),AppError>{
+    let mut query=db.prepare(detail_query(voucher)).map_err(failure)?;
+    let mut rows=if let Some(voucher)=voucher { query.query([voucher]) } else { query.query([]) }.map_err(failure)?;
     while let Some(row)=rows.next().map_err(failure)?{if replay_cancel().load(Ordering::Relaxed){return Err(error("JOB_CANCELLED","任务已取消。",None));}let raw:String=row.get(0).map_err(failure)?;visitor(serde_json::from_str(&raw).map_err(failure)?)?;}Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn voucher_detail_export_seeks_index_and_preserves_all_and_single_voucher_order() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE details(voucher TEXT NOT NULL,source INTEGER NOT NULL,data TEXT NOT NULL);CREATE INDEX details_voucher ON details(voucher,source);").unwrap();
+        let tx = db.transaction().unwrap();
+        for source in (0..12000).rev() {
+            let voucher = format!("V{:04}", source % 4000);
+            tx.execute("INSERT INTO details VALUES(?1,?2,?3)",sql_params![voucher,source,json!({"voucherId":voucher,"sourceRow":source}).to_string()]).unwrap();
+        }
+        tx.commit().unwrap();
+        let mut old = db.prepare("SELECT data FROM details WHERE (?1 IS NULL OR voucher=?1) ORDER BY source").unwrap();
+        let expected = old.query_map(["V0007"], |row|row.get::<_,String>(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        let old_steps = old.get_status(rusqlite::StatementStatus::FullscanStep);
+        assert!(old_steps >= 11999);
+        let plan = db.prepare(&format!("EXPLAIN QUERY PLAN {}", detail_query(Some("V0007")))).unwrap()
+            .query_map(["V0007"], |row|row.get::<_,String>(3)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        assert!(plan.iter().any(|line|line.contains("SEARCH details USING INDEX details_voucher")), "{plan:?}");
+        assert!(!plan.iter().any(|line|line.contains("TEMP B-TREE")), "{plan:?}");
+        let mut new = db.prepare(detail_query(Some("V0007"))).unwrap();
+        let actual = new.query_map(["V0007"], |row|row.get::<_,String>(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(new.get_status(rusqlite::StatementStatus::FullscanStep), 0);
+        let mut selected = Vec::new();
+        visit_details_from(&db, Some("V0007"), |row| { selected.push(row["sourceRow"].as_u64().unwrap()); Ok(()) }).unwrap();
+        assert_eq!(selected, vec![7,4007,8007]);
+        let mut all = Vec::new();
+        visit_details_from(&db, None, |row| { all.push(row["sourceRow"].as_u64().unwrap()); Ok(()) }).unwrap();
+        assert_eq!(all, (0..12000).collect::<Vec<_>>());
+        let mut missing = 0;
+        visit_details_from(&db, Some("不存在"), |_| { missing+=1; Ok(()) }).unwrap();
+        assert_eq!(missing, 0);
+        let error = visit_details_from(&db, Some("V0007"), |_| Err(error("DETAIL_VISIT_STOP", "停止读取明细", None))).unwrap_err();
+        assert_eq!(error.code, "DETAIL_VISIT_STOP");
+    }
     #[test]
     fn fx_disk_replay_matches_complete_vouchers_and_chronological_rollforward() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("je.csv");

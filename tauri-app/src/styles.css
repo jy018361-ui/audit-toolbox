@@ -247,6 +247,11 @@ select {
   font-size: var(--fs-md);
   line-height: var(--lh-body);
 }
+/* 固定列宽及手动调窄后，控件边框也必须留在单元格内容区内。
+   只限制最大宽度，保留各工具的默认宽度与自动布局最小列宽。 */
+table :is(input, select, textarea) {
+  max-width: 100%;
+}
 /* 原生单选/勾选框在 Windows 上取系统主题色（本机显示为红色），与品牌主题脱节 */
 input[type="radio"],
 input[type="checkbox"] {
@@ -732,6 +737,11 @@ summary:focus-visible {
   /* 与普通字段输入框等高，避免同一页面上文件选择框矮一截 */
   height: 40px;
   box-sizing: border-box;
+  /* 本组合并不总在 .field 内（设置页旧数据迁移、AudiPick 的 PDF 搜索），
+     边框底色在此自给自足；在 .field 内时取值相同，外观不变。 */
+  border: 1px solid var(--control-border);
+  background: var(--surface-sunken);
+  color: var(--ink-strong);
 }
 /* 焦点圈画在元素内部，避免外扩的 outline 穿过紧邻的浏览按钮，造成"颜色条穿按钮"的割裂感 */
 .input-with-button input:focus-visible {
@@ -2510,6 +2520,12 @@ summary:focus-visible {
 }
 .ts-filter-menu-search input {
   min-width: 0;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--control-bg);
+  color: var(--foreground);
 }
 .ts-filter-all,
 .ts-filter-value {
@@ -4089,11 +4105,14 @@ body:has(.sync-busy-pill) .job-command-notice {
   pointer-events: none;
   background: linear-gradient(to bottom, transparent, var(--card));
 }
-/* 自定义滚动表格（容器自身即滚动区，如 loan-account-confirm）的渐隐：
-   useScrollFadeFlags 在包装元素上挂 data-more-right/-bottom，与 DataTable
-   的 data-table-frame 同一交互语言；z-index 2 盖过粘性表头。 */
+/* 渐隐必须放在不滚动的外框上，否则横向/纵向滚动会把白色提示带进表中。 */
 .scroll-fade-x {
   position: relative;
+  min-width: 0;
+}
+.scroll-fade-x-scroll {
+  min-width: 0;
+  overflow: auto;
 }
 .scroll-fade-x[data-more-right="true"]::after {
   content: "";

@@ -167,6 +167,15 @@
 }
 .deposit-account-list .deposit-pct input {
   width: 84px;
+  /* 全局重置剥掉原生边框后，本规则此前只设了宽度，利率格看起来像静态
+     文字；补齐边框底色，款式与本表存款类型下拉一致。 */
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--control-bg);
+  color: var(--foreground);
+  text-align: right;
 }
 .deposit-account-list select {
   width: 100%;

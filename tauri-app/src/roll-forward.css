@@ -8,8 +8,10 @@
 }
 
 /* CRA 粘贴框与记录行输入框：全局重置会剥掉原生边框，本页输入框又不在
-   .field 内，不补规则会被误读为不可编辑的静态文字。 */
-.roll-setup-layout .form-card textarea {
+   .field 内，不补规则会被误读为不可编辑的静态文字。CRA 粘贴框所在的
+   form-card 是 setup 网格的兄弟节点，用直接子选择器限定，不波及其他
+   页面 form-card 内层套着 label.field 的文本域。 */
+.form-card > textarea {
   border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   padding: var(--sp-2);

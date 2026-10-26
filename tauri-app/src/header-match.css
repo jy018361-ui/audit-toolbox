@@ -388,7 +388,13 @@
 
 .hmg-detect-input {
   width: 42px;
+  min-height: 28px;
+  padding: 2px 4px;
   text-align: center;
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--control-bg);
+  color: var(--foreground);
 }
 
 .hmg-bottombar {

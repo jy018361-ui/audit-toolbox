@@ -24,3 +24,11 @@ it("空白草稿密钥传 null，由 Rust 读取百炼专用凭据", async () =>
     engine: "bailian", imageBase64: "synthetic-image", apiKey: null, secretKey: null, ocrConfig: null,
   });
 });
+
+it("设置页 OCR 测试明确选择全局模型，空白密钥不串用其他通道", async () => {
+  await audipickOcrTest("ai", "synthetic-image", "", "", undefined, true);
+  expect(native.invoke).toHaveBeenCalledExactlyOnceWith("audipick_ocr_test", {
+    engine: "ai", imageBase64: "synthetic-image", apiKey: null, secretKey: null,
+    ocrConfig: null, useGlobalLlm: true,
+  });
+});

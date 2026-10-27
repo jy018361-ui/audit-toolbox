@@ -38,7 +38,9 @@ export async function openOcrSource(document: OcrDocument): Promise<OcrSource> {
         try {
           const viewport = page.getViewport({ scale: 1 });
           const scale = Math.min(
-            2,
+            // Small contract text and ruled cells need more detail than a UI preview.
+            // Keep the existing long-edge cap to bound page memory and request size.
+            3,
             2600 / Math.max(viewport.width, viewport.height),
           );
           const target = page.getViewport({ scale });

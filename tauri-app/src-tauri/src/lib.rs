@@ -891,6 +891,7 @@ async fn audipick_ocr_test(
     api_key: Option<String>,
     secret_key: Option<String>,
     ocr_config: Option<Value>,
+    use_global_llm: Option<bool>,
 ) -> Result<Value, AppError> {
     let settings = storage.settings_get()?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -901,6 +902,7 @@ async fn audipick_ocr_test(
             api_key.as_deref(),
             secret_key.as_deref(),
             ocr_config.as_ref(),
+            use_global_llm.unwrap_or(false),
         )
     })
     .await

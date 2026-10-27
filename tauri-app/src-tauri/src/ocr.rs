@@ -405,9 +405,10 @@ fn recognize_part(
     settings: &Value,
     tag: &str,
     pause: &PauseCheckpoint,
-) -> Result<(String, Vec<Table>, Vec<String>), AppError> {
+) -> Result<(String, Vec<Table>, Vec<String>, Option<String>), AppError> {
     pause.wait()?;
     let result = crate::audipick::toolbox_ocr_page(&json!({"imageBase64":image}), settings)?;
+    let diagnostic = result["diagnosticResponse"].as_str().map(str::to_owned);
     let text = result["text"]
         .as_str()
         .filter(|s| !s.trim().is_empty())
@@ -415,7 +416,7 @@ fn recognize_part(
         .to_owned();
     pause.wait()?;
     if let Some(message) = result["structureError"].as_str() {
-        return Ok((text, vec![], vec![message.into()]));
+        return Ok((text, vec![], vec![message.into()], diagnostic));
     }
     // Preserve a provider's native cell grid if present; otherwise restore from the
     // image using only the global vision model. Failed layout never erases OCR text.
@@ -437,11 +438,12 @@ fn recognize_part(
                 .collect::<Vec<_>>(),
         ))
     }) {
-        Ok((tables, warnings)) => Ok((text, tables, warnings)),
+        Ok((tables, warnings)) => Ok((text, tables, warnings, diagnostic)),
         Err(e) => Ok((
             text,
             vec![],
             vec![format!("表格结构尚待校对：{}", e.user_message)],
+            diagnostic,
         )),
     }
 }
@@ -498,9 +500,10 @@ pub(crate) fn run_job(
             let mut text = vec![];
             let mut tables = vec![];
             let mut warnings = vec![];
+            let mut diagnostics = vec![];
             for (index, segment) in segments.iter().enumerate() {
                 let image = format!("data:image/png;base64,{segment}");
-                let (part, mut part_tables, mut part_warnings) = recognize_part(
+                let (part, mut part_tables, mut part_warnings, diagnostic) = recognize_part(
                     &image,
                     &settings,
                     &format!("p{number}-s{}", index + 1),
@@ -509,6 +512,7 @@ pub(crate) fn run_job(
                 text.push(part);
                 tables.append(&mut part_tables);
                 warnings.append(&mut part_warnings);
+                if let Some(raw) = diagnostic { diagnostics.push(raw); }
             }
             pause.wait()?;
             let page = Page {
@@ -527,6 +531,7 @@ pub(crate) fn run_job(
                 warnings,
             };
             let saved = store.save_page(id, page, expected, true)?;
+            store.save_recognition_diagnostics(id, number, saved.revision, &diagnostics)?;
             progress(
                 "ocr",
                 number as usize,

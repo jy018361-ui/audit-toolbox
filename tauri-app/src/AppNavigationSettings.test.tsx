@@ -17,6 +17,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import App, { Field, Settings } from "./App";
 import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import {
+  audipickOcrTest,
   engineCall,
   historyGet,
   historyRestore,
@@ -36,6 +37,7 @@ vi.mock("./api", async (importOriginal) => ({
   secretSet: vi.fn().mockResolvedValue(undefined),
   secretGet: vi.fn().mockResolvedValue("saved-test-key"),
   meetingAsrTest: vi.fn().mockResolvedValue({ ok: true, message: "测试成功", elapsedMs: 10 }),
+  audipickOcrTest: vi.fn().mockResolvedValue({ message: "OCR 连接及测试图片识别成功。", elapsedMs: 20 }),
   engineCall: vi.fn().mockResolvedValue({ bytes: 0, files: 0 }),
   appBootstrap: vi
     .fn()
@@ -65,8 +67,12 @@ vi.mock("./AudiPickPage", () => ({
     </section>
   ),
 }));
+let restoreCanvasMocks: () => void;
 beforeEach(() => {
   vi.clearAllMocks();
+  const context = vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ fillRect: vi.fn(), fillText: vi.fn() } as unknown as CanvasRenderingContext2D);
+  const dataUrl = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/png;base64,dGVzdA==");
+  restoreCanvasMocks = () => { context.mockRestore(); dataUrl.mockRestore(); };
   vi.stubGlobal("scrollTo", vi.fn());
   vi.mocked(historyGet).mockResolvedValue([]);
   vi.mocked(engineCall).mockResolvedValue({ bytes: 0, files: 0 });
@@ -81,6 +87,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  restoreCanvasMocks();
   vi.unstubAllGlobals();
 });
 
@@ -561,6 +568,79 @@ it("百炼 OCR 配置可修改、保存、重新加载，其他设置保存保�
   expect(screen.getByLabelText("百炼 OCR API Key")).toHaveValue("");
   cleanup();
   vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" } });
+});
+
+it("设置页可直接测试百炼 OCR 草稿，显示耗时且不保存配置或密钥", async () => {
+  vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" }, ocr: { engine: "bailian" } });
+  render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /></MemoryRouter>);
+  await screen.findByLabelText("百炼 OCR URL");
+  expect(screen.getByRole("button", { name: "测试 LLM 连接" })).toBeVisible();
+  expect(audipickOcrTest).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("百炼 OCR URL"), { target: { value: " https://draft.example/compatible-mode/v1 " } });
+  fireEvent.change(screen.getByLabelText("百炼 OCR 模型"), { target: { value: " draft-ocr " } });
+  fireEvent.change(screen.getByLabelText("百炼 OCR API Key"), { target: { value: "ocr-draft-key" } });
+  fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("识别成功。 响应耗时 20 毫秒。");
+  expect(audipickOcrTest).toHaveBeenLastCalledWith("bailian", "dGVzdA==", "ocr-draft-key", "", {
+    bailian_base_url: "https://draft.example/compatible-mode/v1", bailian_model: "draft-ocr",
+  }, true);
+  expect(settingsSet).not.toHaveBeenCalled();
+  expect(secretSet).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("百炼 OCR API Key")).toHaveValue("ocr-draft-key");
+  fireEvent.change(screen.getByLabelText("百炼 OCR API Key"), { target: { value: "" } });
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
+  await screen.findByRole("status");
+  expect(audipickOcrTest).toHaveBeenLastCalledWith("bailian", "dGVzdA==", "", "", expect.any(Object), true);
+});
+
+it.each(["baidu", "ai", "local"])("设置页 %s OCR 测试只传当前引擎的凭据", async (engine) => {
+  vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" }, ocr: { engine: "bailian" } });
+  render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /></MemoryRouter>);
+  await screen.findByLabelText("百炼 OCR API Key");
+  fireEvent.change(screen.getByLabelText("百炼 OCR API Key"), { target: { value: "unrelated-bailian-key" } });
+  fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "unrelated-llm-key" } });
+  fireEvent.change(screen.getByLabelText("OCR 引擎"), { target: { value: engine } });
+  if (engine === "baidu") {
+    fireEvent.change(screen.getByLabelText("百度 API Key"), { target: { value: "baidu-draft-key" } });
+    fireEvent.change(screen.getByLabelText("百度 Secret Key"), { target: { value: "baidu-draft-secret" } });
+  }
+  fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
+  await screen.findByRole("status");
+  expect(audipickOcrTest).toHaveBeenLastCalledWith(engine, "dGVzdA==", engine === "baidu" ? "baidu-draft-key" : "", engine === "baidu" ? "baidu-draft-secret" : "", undefined, true);
+  expect(settingsSet).not.toHaveBeenCalled();
+  expect(secretSet).not.toHaveBeenCalled();
+});
+
+it("OCR 测试失败显示原因并可重试，修改配置清除旧结论", async () => {
+  vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" }, ocr: { engine: "bailian" } });
+  vi.mocked(audipickOcrTest).mockRejectedValueOnce({ userMessage: "OCR 鉴权失败，请核对密钥。" });
+  render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /></MemoryRouter>);
+  await screen.findByLabelText("百炼 OCR URL");
+  fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("OCR 鉴权失败，请核对密钥。");
+  expect(screen.getByRole("status")).toHaveClass("failed");
+  fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
+  await waitFor(() => expect(screen.getByRole("status")).toHaveClass("success"));
+  fireEvent.change(screen.getByLabelText("百炼 OCR 模型"), { target: { value: "new-model" } });
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
+it("OCR 测试期间防止重复点击，切换引擎后不显示迟到的旧成功结果", async () => {
+  vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" }, ocr: { engine: "bailian" } });
+  let finish!: (value: { message: string; elapsedMs: number }) => void;
+  vi.mocked(audipickOcrTest).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /></MemoryRouter>);
+  await screen.findByLabelText("百炼 OCR URL");
+  fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
+  const button = screen.getByRole("button", { name: "正在测试 OCR…" });
+  expect(button).toBeDisabled();
+  fireEvent.click(button);
+  expect(audipickOcrTest).toHaveBeenCalledTimes(1);
+  fireEvent.change(screen.getByLabelText("OCR 引擎"), { target: { value: "local" } });
+  await act(async () => { finish({ message: "旧请求成功", elapsedMs: 20 }); });
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "测试 OCR 连接" })).toBeEnabled();
 });
 
 it("protects unsaved settings on leave", async () => {

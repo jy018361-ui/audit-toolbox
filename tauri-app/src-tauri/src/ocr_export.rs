@@ -105,9 +105,111 @@ fn row(s: &mut Worksheet, index: &mut u32, values: &[String]) -> Result<(), AppE
 fn value_text(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
-        Value::String(s) => s.clone(),
-        _ => v.to_string(),
+        Value::String(s) => {
+            let trimmed = s.trim();
+            // Models sometimes encode an object twice. Interpret only a complete
+            // JSON container in an extraction cell, never the source text itself.
+            if (trimmed.starts_with('{') || trimmed.starts_with('['))
+                && let Ok(parsed @ (Value::Object(_) | Value::Array(_))) =
+                    serde_json::from_str::<Value>(trimmed)
+            {
+                return value_text(&parsed);
+            }
+            s.clone()
+        }
+        Value::Bool(value) => if *value { "是" } else { "否" }.into(),
+        Value::Number(value) => value.to_string(),
+        Value::Array(values) => values
+            .iter()
+            .map(value_text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(fields) => fields
+            .iter()
+            .filter(|(key, _)| visible_field(key))
+            .map(|(key, value)| format!("{}：{}", field_label(key), value_text(value)))
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
+}
+fn visible_field(key: &str) -> bool {
+    !key.starts_with('_') && !matches!(key, "source_document_id" | "evidence_quotes")
+}
+fn field_label(key: &str) -> &str {
+    match key {
+        "amount" => "金额",
+        "currency" => "币种",
+        "date" => "日期",
+        "value" => "内容",
+        "category" => "类别",
+        "name" => "名称",
+        "title" => "事项",
+        "rate" => "利率",
+        "principal" => "本金",
+        "description" => "说明",
+        "condition" | "conditions" => "条件",
+        "frequency" => "频率",
+        "start_date" => "开始日期",
+        "end_date" => "结束日期",
+        "due_date" => "到期日期",
+        "account" | "account_no" => "账号",
+        "quote" | "excerpt" | "contract_excerpt" | "source_excerpt" => "原文摘录",
+        "evidence" => "逐字证据",
+        "sourceFile" | "source_documents" => "来源文件",
+        "sourcePage" | "page" | "pages" | "source_page" => "来源页码",
+        "source_reference" => "原文引用出处",
+        "review_note" => "复核提示",
+        "covenant_category" => "财务契约类型",
+        "trigger_standard" => "限制或触发标准",
+        "clause_ref" => "条款位置",
+        "breach_consequence" => "违约后果",
+        "covenant_scope" => "契约适用范围",
+        "contract_classification" => "合同分类",
+        "is_financial" => "是否为财务约束",
+        "auditor_summary" => "审计提示",
+        _ => key,
+    }
+}
+fn scenario_label(id: &str) -> &str {
+    match id {
+        "loan_covenant" => "借款限制性契约",
+        "loan_general" => "借款合同主表",
+        "revenue" => "收入合同",
+        "procurement" => "采购合同",
+        "invoicing_agreement" => "开票协议",
+        "statement" => "对账单",
+        "invoice" => "发票",
+        "warehouse_io" => "出入库单",
+        "account_opening" => "开户资料",
+        "tax_declaration" => "纳税申报",
+        "credit_report" => "征信报告",
+        "tax_audit_report" => "税务审计报告",
+        "custom" => "自定义摘录",
+        _ => "场景摘录",
+    }
+}
+fn readable_extraction_row(data: &Value) -> Value {
+    let mut row = data.as_object().cloned().unwrap_or_default();
+    // Keep the actionable review reason, while hiding pipeline traces, raw model
+    // links and internal document identifiers from the user's workbook.
+    if let Some(reason) = row.get("_covenant_review_reason").cloned()
+        && !value_text(&reason).trim().is_empty()
+    {
+        row.insert("review_note".into(), reason);
+    }
+    if !["evidence", "excerpt", "contract_excerpt", "source_excerpt"]
+        .iter()
+        .any(|key| {
+            row.get(*key)
+                .is_some_and(|v| !value_text(v).trim().is_empty())
+        })
+        && let Some(quotes) = row.get("evidence_quotes").cloned()
+    {
+        row.insert("evidence".into(), quotes);
+    }
+    row.retain(|key, _| visible_field(key));
+    Value::Object(row)
 }
 fn status_label(status: &str) -> &str {
     match status {
@@ -134,53 +236,34 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
         let mut r = 0;
         s.set_column_width(0, 30).map_err(xlsx_error)?;
         s.set_column_width(1, 8).map_err(xlsx_error)?;
-        s.set_column_width(2, 16).map_err(xlsx_error)?;
-        s.set_column_width(3, 14).map_err(xlsx_error)?;
-        s.set_column_width(4, 100).map_err(xlsx_error)?;
-        s.set_column_format(4, &Format::new().set_text_wrap().set_num_format("@"))
+        s.set_column_width(2, 110).map_err(xlsx_error)?;
+        s.set_column_format(2, &Format::new().set_text_wrap().set_num_format("@"))
             .map_err(xlsx_error)?;
         row(
             s,
             &mut r,
-            &[
-                "来源文件".into(),
-                "页码".into(),
-                "内容类型".into(),
-                "序号/续行".into(),
-                "完整内容（长文本按行无损续写）".into(),
-            ],
+            &["来源文件".into(), "页码".into(), "完整原文".into()],
         )?;
         for page in &pages {
             pause.wait()?;
-            for (para, text) in page.text.split('\n').enumerate() {
-                for (part, chunk) in chunks(text).into_iter().enumerate() {
-                    row(
-                        s,
-                        &mut r,
-                        &[
-                            doc.name.clone(),
-                            page.page.to_string(),
-                            "正文".into(),
-                            format!("{}.{}", para + 1, part + 1),
-                            chunk,
-                        ],
-                    )?;
+            for text in page.text.split('\n') {
+                for chunk in chunks(text) {
+                    row(s, &mut r, &[doc.name.clone(), page.page.to_string(), chunk])?;
                 }
             }
-            for table in &page.tables {
-                for (index, cells) in table.rows.iter().enumerate() {
-                    row(
-                        s,
-                        &mut r,
-                        &[
-                            doc.name.clone(),
-                            page.page.to_string(),
-                            format!("表格：{}", table.title),
-                            format!("{}", index + 1),
-                            cells.join("\t"),
-                        ],
-                    )?;
-                }
+            if !page.tables.is_empty() {
+                row(
+                    s,
+                    &mut r,
+                    &[
+                        doc.name.clone(),
+                        page.page.to_string(),
+                        format!(
+                            "本页另有 {} 张表格，请查看目录中对应的表格工作表。",
+                            page.tables.len()
+                        ),
+                    ],
+                )?;
             }
             for warning in &page.warnings {
                 row(
@@ -189,9 +272,7 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
                     &[
                         doc.name.clone(),
                         page.page.to_string(),
-                        "待校对提示".into(),
-                        String::new(),
-                        warning.clone(),
+                        format!("待校对：{warning}"),
                     ],
                 )?;
             }
@@ -206,6 +287,15 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
                 )?;
                 let table_name = s.name();
                 let mut r = 0;
+                let columns = table.rows.iter().map(Vec::len).max().unwrap_or(1);
+                for column in 0..columns.min(16384) {
+                    s.set_column_width(column as u16, 26).map_err(xlsx_error)?;
+                    s.set_column_format(
+                        column as u16,
+                        &Format::new().set_text_wrap().set_num_format("@"),
+                    )
+                    .map_err(xlsx_error)?;
+                }
                 row(
                     s,
                     &mut r,
@@ -231,7 +321,7 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
         }
         for extraction in store.extractions(&doc.id)? {
             pause.wait()?;
-            let scenario = extraction["scenarioId"].as_str().unwrap_or("摘录");
+            let scenario = scenario_label(extraction["scenarioId"].as_str().unwrap_or(""));
             let s = sheet(
                 &mut book,
                 &format!("{}_摘录_{}", dindex + 1, scenario),
@@ -245,36 +335,46 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
                 &[
                     "来源文件".into(),
                     doc.name.clone(),
-                    "来源版本".into(),
-                    value_text(&extraction["sourceRevision"]),
                     if extraction["stale"] == true {
                         "原文已修改，摘录需要更新".into()
                     } else {
-                        "当前版本".into()
+                        "摘录结果".into()
                     },
                 ],
             )?;
-            row(
-                s,
-                &mut r,
-                &[
-                    "场景规则版本".into(),
-                    value_text(&extraction["scenarioVersion"]),
-                ],
-            )?;
-            let rows = extraction["rows"].as_array().cloned().unwrap_or_default();
+            let rows: Vec<Value> = extraction["rows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(readable_extraction_row)
+                .collect();
             let mut columns: Vec<(String, String)> = extraction["columns"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|v| Some((v["key"].as_str()?.into(), v["label"].as_str()?.into())))
+                .filter_map(|v| {
+                    let key = v["key"].as_str()?;
+                    if !visible_field(key) {
+                        return None;
+                    }
+                    let label = v["label"].as_str().unwrap_or(key);
+                    Some((
+                        key.into(),
+                        if label == key {
+                            field_label(key)
+                        } else {
+                            label
+                        }
+                        .into(),
+                    ))
+                })
                 .collect();
             let mut seen: BTreeSet<String> = columns.iter().map(|v| v.0.clone()).collect();
             for data in &rows {
                 if let Some(object) = data.as_object() {
                     for key in object.keys() {
                         if seen.insert(key.clone()) {
-                            columns.push((key.clone(), key.clone()));
+                            columns.push((key.clone(), field_label(key).into()));
                         }
                     }
                 }
@@ -284,6 +384,14 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
                 &mut r,
                 &columns.iter().map(|v| v.1.clone()).collect::<Vec<_>>(),
             )?;
+            for column in 0..columns.len().min(16384) {
+                s.set_column_width(column as u16, 32).map_err(xlsx_error)?;
+                s.set_column_format(
+                    column as u16,
+                    &Format::new().set_text_wrap().set_num_format("@"),
+                )
+                .map_err(xlsx_error)?;
+            }
             for data in rows {
                 row(
                     s,
@@ -292,14 +400,6 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
                         .iter()
                         .map(|(key, _)| value_text(&data[key]))
                         .collect::<Vec<_>>(),
-                )?;
-            }
-            row(s, &mut r, &["实际使用的提示词".into()])?;
-            for stage in extraction["prompts"].as_array().into_iter().flatten() {
-                row(
-                    s,
-                    &mut r,
-                    &[value_text(&stage["label"]), value_text(&stage["prompt"])],
                 )?;
             }
             entries.push(vec![
@@ -605,8 +705,8 @@ mod tests {
         let restored = text
             .rows()
             .skip(1)
-            .filter(|r| r.get(2) == Some(&Data::String("正文".into())))
-            .filter_map(|r| r.get(4))
+            .take(chunks(&long).len())
+            .filter_map(|r| r.get(2))
             .map(|c| c.to_string())
             .collect::<String>();
         assert_eq!(restored, long);
@@ -616,6 +716,77 @@ mod tests {
                 .rows()
                 .flatten()
                 .any(|c| c.to_string().contains("未完成页：2"))
+        );
+    }
+    #[test]
+    fn extraction_workbook_has_readable_values_without_internal_trace_or_prompts() {
+        use calamine::{Data, Reader};
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("db")).unwrap();
+        let project = store.save_project(&json!({"name":"摘录排版"})).unwrap();
+        let source = dir.path().join("合同.pdf");
+        fs::write(&source, b"synthetic").unwrap();
+        let doc = store
+            .import(project["id"].as_str().unwrap(), &source)
+            .unwrap();
+        store.save_extraction(&json!({
+            "documentId":doc.id,"sourceRevision":doc.revision,"scenarioId":"loan_general",
+            "scenarioVersion":"technical-version-do-not-export",
+            "prompts":[{"id":"extract","label":"内部提示词","prompt":"technical-prompt-do-not-export"}],
+            "columns":[
+                {"key":"amount","label":"借款金额"},
+                {"key":"repayment","label":"还款安排"},
+                {"key":"_covenant_evidence","label":"内部证据"}
+            ],
+            "rows":[{
+                "amount":"00123456789012345678901234567890",
+                "repayment":[{"date":"2026-10-27","amount":"100.00"},{"date":"2027-10-27","amount":"200.00"}],
+                "interest":"{\"rate\":\"3.2%\",\"frequency\":\"每年\"}",
+                "_covenant_evidence":[{"quote":"technical-trace-do-not-export","bbox":[1,2,3,4]}],
+                "_covenant_review_reason":"利率调整日待核对",
+                "source_document_id":"technical-document-id-do-not-export",
+                "evidence_quotes":["第一段逐字证据","第二段逐字证据"],
+                "sourcePage":"1、2"
+            }]
+        })).unwrap();
+        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        let bytes = build(&store, &[doc], &pause).unwrap();
+        let output = dir.path().join("readable.xlsx");
+        fs::write(&output, bytes).unwrap();
+        let mut workbook = calamine::open_workbook_auto(output).unwrap();
+        let result = workbook.worksheet_range("1_摘录_借款合同主表").unwrap();
+        let all = result
+            .rows()
+            .flatten()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "日期：2026-10-27",
+            "金额：100.00",
+            "日期：2027-10-27",
+            "金额：200.00",
+            "利率：3.2%",
+            "频率：每年",
+        ] {
+            assert!(all.contains(expected), "missing {expected}");
+        }
+        assert!(all.contains("复核提示"));
+        assert!(all.contains("利率调整日待核对"));
+        assert!(all.contains("第一段逐字证据\n第二段逐字证据"));
+        assert!(all.contains("来源页码"));
+        assert!(!all.contains("technical-"));
+        assert!(!all.contains("_covenant"));
+        assert!(!all.contains("实际使用的提示词"));
+        assert!(!all.contains("场景规则版本"));
+        assert!(!all.contains("{\""));
+        assert_eq!(
+            result.get((2, 0)),
+            Some(&Data::String("00123456789012345678901234567890".into()))
+        );
+        assert_eq!(
+            value_text(&json!({"condition":{"value":"=1+1","enabled":true}})),
+            "条件：enabled：是\n内容：=1+1"
         );
     }
 }

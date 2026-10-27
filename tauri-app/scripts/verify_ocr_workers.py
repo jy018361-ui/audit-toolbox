@@ -63,17 +63,22 @@ def main() -> None:
             for index in (1, 2):
                 document = {"id": f"d{index}", "projectId": "p", "name": "同名扫描件.pdf", "mimeType": "application/pdf", "totalPages": 2, "revision": 1, "status": "partial", "sha256": "synthetic"}
                 page = {"page": 1, "text": f"合成单证{index}\n账户001234567890123456789\n原始公式字面=1+1", "originalText": "合成初始识别", "tables": [{"id": "t1", "title": "合成表", "rows": [["账号", "金额"], ["001234567890123456789", "=1+1"]]}], "originalTables": [], "revision": 1, "status": "completed", "warnings": []}
+                if index == 2:
+                    legacy_response = '```json\n{"text":"合成旧版正文","rows":[{"text":"合成后续条款"}],"rotate_rect":[12><34]}\n```'
+                    page.update(text=legacy_response, originalText=legacy_response, tables=[], status="needs_review")
                 conn.execute("INSERT INTO ocr_documents VALUES(?,?,?,?)", (document["id"], "p", json.dumps(document, ensure_ascii=False), str(root / "unused-source.pdf")))
                 conn.execute("INSERT INTO ocr_pages VALUES(?,?,?)", (document["id"], 1, json.dumps(page, ensure_ascii=False)))
-            extraction = {"id": "e1", "scenarioId": "custom", "prompts": [{"id": "extract", "label": "用户编辑提示词", "prompt": "仅摘录合成金额，不作推测"}], "sourceRevision": 0, "rows": [{"amount": "100.00"}], "columns": [{"key": "amount", "label": "金额"}], "createdAt": "2026-10-27"}
+            extraction = {"id": "e1", "scenarioId": "custom", "prompts": [{"id": "extract", "label": "用户编辑提示词", "prompt": "仅摘录合成金额，不作推测"}], "sourceRevision": 0, "rows": [{"amount": "100.00", "evidence": {"excerpt": "合成金额100.00", "pages": [1]}, "_internal_diagnostic": {"private_marker": "内部诊断不得导出"}}], "columns": [{"key": "amount", "label": "金额"}, {"key": "evidence", "label": "原文依据"}], "createdAt": "2026-10-27"}
             conn.execute("INSERT INTO ocr_extractions VALUES(?,?,?)", ("e1", "d1", json.dumps(extraction, ensure_ascii=False)))
         params = {"__dbPath": str(db), "__settings": {"llm": {"enabled": False}}, "projectId": "p", "outputDir": str(output)}
         combined = invoke(exe, root, "ocr.export", {**params, "mode": "combined"})
         assert combined["phase"] == "completed", combined
         combined_path = Path(combined["result"]["outputPaths"][0])
         text = workbook_text(combined_path)
-        for expected in ["001234567890123456789", "=1+1", "未完成页：2", "仅摘录合成金额，不作推测", "摘录需要更新"]:
+        for expected in ["001234567890123456789", "=1+1", "未完成页：2", "合成金额100.00", "摘录需要更新", "合成后续条款", "重新识别"]:
             assert expected in text, expected
+        for internal in ["仅摘录合成金额，不作推测", "_internal_diagnostic", "内部诊断不得导出", '"excerpt":', "```json", "rotate_rect", "12><34"]:
+            assert internal not in text, internal
         individual = invoke(exe, root, "ocr.export", {**params, "mode": "individual"})
         assert individual["phase"] == "completed", individual
         paths = individual["result"]["outputPaths"]
@@ -89,7 +94,7 @@ def main() -> None:
         assert failed["result"]["error"]["code"] == "LLM_DISABLED", failed
         with closing(sqlite3.connect(db)) as conn:
             assert conn.execute("SELECT COUNT(*) FROM ocr_pages").fetchone()[0] == 2
-        print("OCR worker 验收通过：项目合并、逐文件导出、原文与账号保真、过期提示词、取消及禁用服务错误。")
+        print("OCR worker 验收通过：项目合并、逐文件导出、原文与账号保真、摘录可读及过期提示、无内部信息、取消及禁用服务错误。")
 
 
 if __name__ == "__main__":

@@ -102,9 +102,9 @@
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 14px 8px;
-  align-self: start;
+  align-self: stretch;
   background: var(--card);
-  max-height: 800px;
+  min-height: 240px;
   overflow: auto;
 }
 .ocr-document-list h2 {
@@ -147,9 +147,13 @@
 }
 .ocr-document span {
   min-width: 0;
+  flex: 1;
 }
 .ocr-document strong {
-  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   font-size: 12px;
   font-weight: 550;
   overflow-wrap: anywhere;
@@ -173,6 +177,10 @@
   justify-content: space-between;
   padding: 20px 20px 0;
   gap: 12px;
+}
+.ocr-file-heading > div {
+  min-width: 0;
+  flex: 1;
 }
 .ocr-file-heading h2 {
   overflow-wrap: anywhere;
@@ -213,20 +221,39 @@
 }
 .ocr-comparison {
   display: grid;
-  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
-  min-height: 500px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  height: clamp(420px, 65vh, 720px);
+  border-bottom: 1px solid var(--border);
+}
+.ocr-source,
+.ocr-original {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
 .ocr-source {
-  background: color-mix(in srgb, var(--muted) 60%, var(--card));
   border-right: 1px solid var(--border);
-  padding: 16px;
-  min-width: 0;
-  max-height: 960px;
-  overflow: auto;
+  background: color-mix(in srgb, var(--muted) 60%, var(--card));
 }
-.ocr-source h3 {
-  margin-bottom: 16px;
+.ocr-pane-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  height: 52px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.ocr-pane-heading > span {
   color: var(--muted-foreground);
+  font-size: 12px;
+}
+.ocr-pane-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+  overscroll-behavior: contain;
 }
 .ocr-source img {
   display: block;
@@ -235,16 +262,22 @@
   background: white;
   box-shadow: var(--shadow-card);
 }
-.ocr-edit {
-  padding: 16px;
+.ocr-original-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.9;
+  user-select: text;
+  font-weight: 400;
+}
+.ocr-original-text:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 4px;
+}
+.ocr-tables {
+  padding: 0 20px 20px;
   min-width: 0;
-  max-height: 960px;
-  overflow: auto;
 }
-.ocr-edit > h3 {
-  margin-bottom: 16px;
-}
-.ocr-edit h3 > span,
 .ocr-extraction-result h3 > span {
   font-size: 11px;
   font-weight: 400;
@@ -465,33 +498,51 @@
   gap: 12px;
   flex-wrap: wrap;
 }
-@media (max-width: 1150px) {
+@media (max-width: 1250px) {
   .ocr-page {
     padding: 20px 16px;
   }
   .ocr-workspace {
-    grid-template-columns: 180px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     gap: 12px;
   }
+  .ocr-document-list {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px;
+    min-height: 0;
+    max-height: 145px;
+    overflow-x: auto;
+  }
+  .ocr-document-list h2 {
+    flex: 0 0 42px;
+    padding: 4px 0;
+    flex-direction: column;
+    justify-content: start;
+    gap: 8px;
+  }
+  .ocr-document {
+    flex: 0 0 220px;
+    width: 220px;
+  }
+}
+@media (max-width: 760px) {
   .ocr-comparison {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+  .ocr-source,
+  .ocr-original {
+    height: 430px;
   }
   .ocr-source {
     border-right: 0;
     border-bottom: 1px solid var(--border);
-    max-height: 520px;
   }
   .ocr-source img {
     max-width: 600px;
     margin-inline: auto;
-  }
-}
-@media (max-width: 700px) {
-  .ocr-workspace {
-    grid-template-columns: 1fr;
-  }
-  .ocr-document-list {
-    max-height: 240px;
   }
   .ocr-document-toolbar,
   .ocr-file-heading,
@@ -510,4 +561,23 @@
   .ocr-extraction {
     margin: 14px;
   }
+  .ocr-tables {
+    padding-inline: 14px;
+  }
+}
+.ocr-steps {
+  margin-bottom: 18px;
+}
+.ocr-extraction-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.ocr-corrected-text {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.ocr-corrected-text .ocr-original-text {
+  padding-top: 12px;
 }

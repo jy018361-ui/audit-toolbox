@@ -15,6 +15,7 @@ import {
 import "./app-shell.css";
 import {
   appBootstrap,
+  audipickOcrTest,
   engineCall,
   historyGet,
   historyClear,
@@ -44,7 +45,7 @@ import { useCountUp } from "./lib/useCountUp";
 import { formatCount } from "./lib/numberFormat";
 import { SwitchInput } from "@/components/SwitchInput";
 import { SecretInput } from "@/components/SecretInput";
-import { BAILIAN_OCR_BASE_URL, BAILIAN_OCR_MODEL } from "./ocrConfig";
+import { BAILIAN_OCR_BASE_URL, BAILIAN_OCR_MODEL, createOcrTestImage } from "./ocrConfig";
 import { DateInput } from "@/components/DateInput";
 import { demoDataEnabled } from "./preview/demoRegistry";
 import {
@@ -1685,6 +1686,9 @@ export function Settings({
   });
   const [message, setMessage] = useState("");
   const [testingLlm, setTestingLlm] = useState(false);
+  const [testingOcr, setTestingOcr] = useState(false);
+  const [ocrTestResult, setOcrTestResult] = useState<{ ok: boolean; text: string }>();
+  const ocrTestRevision = useRef(0);
   const [llmTestResult, setLlmTestResult] = useState<{
     ok: boolean;
     text: string;
@@ -1967,8 +1971,13 @@ export function Settings({
       if (!hasDataRouter) document.removeEventListener("click", confirmLinkNavigation, true);
     };
   }, [dirty, hasDataRouter]);
-  const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) =>
+  const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) => {
+    if (["ocrEngine", "ocrApiKey", "ocrSecret", "bailianOcrUrl", "bailianOcrModel", "bailianOcrKey"].includes(key)) {
+      ocrTestRevision.current += 1;
+      setOcrTestResult(undefined);
+    }
     setForm((x) => ({ ...x, [key]: value }));
+  };
   const llmSettings = () => ({
     enabled: form.enabled,
     api_type: form.apiType,
@@ -2012,6 +2021,32 @@ export function Settings({
       setLlmTestResult({ ok: false, text });
     } finally {
       setTestingLlm(false);
+    }
+  }
+  async function testOcrConnection() {
+    if (testingOcr) return;
+    const revision = ocrTestRevision.current;
+    setOcrTestResult(undefined);
+    setTestingOcr(true);
+    try {
+      const result = await audipickOcrTest(
+        form.ocrEngine,
+        createOcrTestImage(),
+        form.ocrEngine === "bailian" ? form.bailianOcrKey : form.ocrEngine === "baidu" ? form.ocrApiKey : "",
+        form.ocrEngine === "baidu" ? form.ocrSecret : "",
+        form.ocrEngine === "bailian" ? {
+          bailian_base_url: form.bailianOcrUrl.trim() || BAILIAN_OCR_BASE_URL,
+          bailian_model: form.bailianOcrModel.trim() || BAILIAN_OCR_MODEL,
+        } : undefined,
+        true,
+      );
+      if (revision === ocrTestRevision.current) {
+        setOcrTestResult({ ok: true, text: `${result.message} 响应耗时 ${result.elapsedMs} 毫秒。` });
+      }
+    } catch (error) {
+      if (revision === ocrTestRevision.current) setOcrTestResult({ ok: false, text: errorText(error) });
+    } finally {
+      setTestingOcr(false);
     }
   }
   async function testAsrConnection() {
@@ -2067,6 +2102,8 @@ export function Settings({
   }
   async function save() {
     if (saving) return;
+    ocrTestRevision.current += 1;
+    setOcrTestResult(undefined);
     setSaving(true);
     setSaveFailed(false);
     setMessage("");
@@ -2472,10 +2509,9 @@ export function Settings({
             )}
           </section>
           <section className="list-card">
-            <h2>AudiPick 配置</h2>
+            <h2>OCR 配置</h2>
             <p className="settings-note">
-              OCR 仅用于 AudiPick
-              扫描件文字识别，按所选引擎显示配置；旧数据迁移也收在同一张卡片内，按需展开。
+              OCR 与 AudiPick 共用扫描件识别配置，按所选引擎显示；旧 AudiPick 数据迁移可按需展开。
             </p>
             <div className="form-grid">
               <label className="field">
@@ -2523,14 +2559,26 @@ export function Settings({
                 <label className="field"><span>百炼 OCR API Key</span><SecretInput key={`bailian-ocr-key-${secretRevision}`} label="百炼 OCR API Key" credentialName="bailian_ocr_key" value={form.bailianOcrKey} onChange={(value) => set("bailianOcrKey", value)} placeholder="留空表示不修改" /></label>
               </>}
             </div>
-            {form.ocrEngine === "bailian" && <><p className="settings-note">当前 URL：{form.bailianOcrUrl.trim() || BAILIAN_OCR_BASE_URL}</p><p className="settings-note">使用与 API Key 同一业务空间的兼容接口 URL（通常以 /compatible-mode/v1 结尾）。模型和密钥独立于统一 AI；可在 AudiPick 配置页测试内置图片识别。</p></>}
+            {form.ocrEngine === "bailian" && <><p className="settings-note">当前 URL：{form.bailianOcrUrl.trim() || BAILIAN_OCR_BASE_URL}</p><p className="settings-note">使用与 API Key 同一业务空间的兼容接口 URL（通常以 /compatible-mode/v1 结尾）。模型和密钥独立于统一 AI。</p></>}
             {form.ocrEngine === "ai" && (
               <p className="settings-note">
-                沿用上方统一 LLM 配置，无需额外密钥。
+                AI 视觉测试使用已保存的统一 LLM 配置，不使用 AudiPick 专用模型。修改上方 LLM 配置后，请先保存再测试图片识别。
               </p>
             )}
             {form.ocrEngine === "local" && (
               <p className="settings-note">请先启动已配置的本机 OCR 服务。</p>
+            )}
+            <div className="settings-test-row">
+              <button className="secondary" disabled={testingOcr || saving} onClick={() => void testOcrConnection()}>
+                {testingOcr ? "正在测试 OCR…" : "测试 OCR 连接"}
+              </button>
+              <span>测试不会自动保存配置，成功后仍需保存。</span>
+            </div>
+            <p className="settings-note">仅识别内置示例图片，不发送单证或合同；云端测试可能消耗一次额度。百度与百炼使用当前填写的配置，密钥留空时使用对应的已保存密钥。</p>
+            {ocrTestResult && (
+              <div role="status" className={`settings-test-result ${ocrTestResult.ok ? "success" : "failed"}`}>
+                {ocrTestResult.text}
+              </div>
             )}
             <details className="settings-advanced">
               <summary>旧数据迁移（按需使用）</summary>
@@ -2902,7 +2950,7 @@ export function Settings({
         </span>
         <button
           className="primary"
-          disabled={!dirty || saving || testingLlm}
+          disabled={!dirty || saving || testingLlm || testingOcr}
           onClick={() => void save()}
         >
           {saving ? "保存中…" : "保存配置"}

@@ -138,6 +138,151 @@ export interface FilterConditionConfig {
   rules: FilterRuleConfig[];
 }
 
+// ===== 二期节点 config 类型（契约见 DATAFLOW_NODE_SPECS.md 第八节裁定） =====
+
+export interface JoinKeyPair {
+  left: string;
+  right: string;
+}
+
+export interface SortRuleConfig {
+  field: string;
+  direction: "asc" | "desc";
+  nulls: "first" | "last";
+}
+
+export type SummarizeFunc =
+  | "countAll"
+  | "sum"
+  | "countNotNull"
+  | "countDistinct"
+  | "avg"
+  | "min"
+  | "max";
+
+export const SUMMARIZE_FUNCS: { value: SummarizeFunc; label: string }[] = [
+  { value: "countAll", label: "总行数" },
+  { value: "sum", label: "求和" },
+  { value: "countNotNull", label: "非空计数" },
+  { value: "countDistinct", label: "去重计数" },
+  { value: "avg", label: "平均" },
+  { value: "min", label: "最小" },
+  { value: "max", label: "最大" },
+];
+
+export interface SummarizeAggregation {
+  field: string;
+  func: SummarizeFunc;
+  output: string;
+}
+
+export type CheckRuleType = "balance" | "notEmpty" | "unique" | "range" | "expression";
+
+export const CHECK_RULE_TYPES: { value: CheckRuleType; label: string }[] = [
+  { value: "balance", label: "借贷平衡" },
+  { value: "notEmpty", label: "非空" },
+  { value: "unique", label: "唯一" },
+  { value: "range", label: "区间" },
+  { value: "expression", label: "表达式" },
+];
+
+/** 检查规则：type 判别＋各类型自己的字段（序列化时只保留该类型相关字段）。 */
+export interface CheckRuleConfig {
+  type: CheckRuleType;
+  /** balance / unique：分组字段（空＝全表/全表唯一）。 */
+  groupBy?: string[];
+  /** balance。 */
+  debitField?: string;
+  creditField?: string;
+  tolerance?: number;
+  /** notEmpty。 */
+  fields?: string[];
+  /** unique / range。 */
+  field?: string;
+  /** range（null＝未设一边）。 */
+  min?: number | null;
+  max?: number | null;
+  /** expression。 */
+  expression?: string;
+}
+
+export function defaultCheckRule(type: CheckRuleType): CheckRuleConfig {
+  switch (type) {
+    case "balance":
+      return { type, groupBy: [], debitField: "", creditField: "", tolerance: 0 };
+    case "notEmpty":
+      return { type, fields: [] };
+    case "unique":
+      return { type, field: "", groupBy: [] };
+    case "range":
+      return { type, field: "", min: null, max: null };
+    case "expression":
+      return { type, expression: "" };
+  }
+}
+
+const str = (value: unknown, fallback = ""): string =>
+  typeof value === "string" ? value : fallback;
+
+/** 小表单元格：数字等原始值转成文本存储（null/undefined → 空串）。 */
+const strCell = (value: unknown): string => {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  return String(value);
+};
+
+const strArray = (value: unknown): string[] => {
+  if (Array.isArray(value)) return value.map((item) => str(item));
+  // 手工编辑的流程文件可能把单值写成字符串：宽容地视为一项。
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  return [];
+};
+
+const numOrNull = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+/** 规整检查规则：只保留该类型相关字段并纠正类型；无法识别的类型返回 null（丢弃）。 */
+export function normalizeCheckRule(raw: unknown): CheckRuleConfig | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const item = raw as Record<string, unknown>;
+  const type = item.type;
+  switch (type) {
+    case "balance":
+      return {
+        type,
+        groupBy: strArray(item.groupBy),
+        debitField: str(item.debitField),
+        creditField: str(item.creditField),
+        tolerance: numOrNull(item.tolerance) ?? 0,
+      };
+    case "notEmpty":
+      return { type, fields: strArray(item.fields) };
+    case "unique":
+      return { type, field: str(item.field), groupBy: strArray(item.groupBy) };
+    case "range":
+      return { type, field: str(item.field), min: numOrNull(item.min), max: numOrNull(item.max) };
+    case "expression":
+      return { type, expression: str(item.expression) };
+    default:
+      return null;
+  }
+}
+
+export interface ManualColumnConfig {
+  name: string;
+  type: "text" | "int" | "decimal" | "date";
+}
+
+export const MANUAL_COLUMN_TYPES: { value: ManualColumnConfig["type"]; label: string }[] = [
+  { value: "text", label: "文本" },
+  { value: "int", label: "整数" },
+  { value: "decimal", label: "十进制小数" },
+  { value: "date", label: "日期" },
+];
+
 /** 每种节点的默认 config。字段与 Rust 侧契约必须完全一致（camelCase）。 */
 export function defaultConfigFor(type: string): Record<string, unknown> {
   switch (type) {
@@ -201,8 +346,83 @@ export function defaultConfigFor(type: string): Record<string, unknown> {
         delimiter: "comma",
         splitRows: 0,
       };
+    // —— 二期补齐节点（默认值＝DATAFLOW_NODE_SPECS.md 第八节裁定）——
+    case "join_n":
+      return {
+        keys: [{ left: "", right: "" }] as JoinKeyPair[],
+        leftFields: [] as string[],
+        rightFields: [] as string[],
+        sameNameSuffix: "_右",
+      };
+    case "union_n":
+      return {
+        align: "byName",
+        extraFieldPolicy: "keep",
+        typeConflictPolicy: "text",
+        order: [] as string[],
+      };
+    case "unique_n":
+      return {
+        fields: [] as string[],
+        keep: "first",
+      };
+    case "sort_n":
+      return {
+        rules: [{ field: "", direction: "asc", nulls: "last" }] as SortRuleConfig[],
+      };
+    case "summarize":
+      return {
+        groupBy: [] as string[],
+        aggregations: [{ field: "", func: "countAll", output: "" }] as SummarizeAggregation[],
+      };
+    case "crosstab":
+      return {
+        rowField: "",
+        columnField: "",
+        valueField: "",
+        valueFunc: "sum",
+        fill: 0,
+      };
+    case "transpose":
+      return {
+        fixedFields: [] as string[],
+        valueColumns: [] as string[],
+        nameColumn: "项目",
+        valueColumn: "数值",
+      };
+    case "split":
+      return {
+        field: "",
+        mode: "delimiter",
+        delimiter: "",
+        widths: [] as number[],
+        keepOriginal: false,
+        columnPrefix: "",
+      };
+    case "check_n":
+      return {
+        rules: [] as CheckRuleConfig[],
+      };
+    case "manual_in":
+      return {
+        columns: [{ name: "列名", type: "text" }] as ManualColumnConfig[],
+        rows: [[""]] as string[][],
+        onRowError: "stop",
+      };
+    case "db_in":
+      return {
+        path: "",
+        table: "",
+        fields: [] as string[],
+        onRowError: "stop",
+      };
+    case "parquet_in":
+      return {
+        path: "",
+        fields: [] as string[],
+      };
     default:
-      // 二期节点尚未定契约，先给空对象占位，不进入第一期流程文件。
+      // 尚未定契约的节点保持空对象占位，不进入流程文件。
       return {};
   }
 }
@@ -222,6 +442,18 @@ const CONFIG_FIELDS_BY_TYPE: Record<string, string[]> = {
   filter_n: ["condition"],
   excel_out: ["fileName", "sheetName", "overwrite", "splitMode"],
   csv_out: ["fileName", "encoding", "delimiter", "splitRows"],
+  join_n: ["keys", "leftFields", "rightFields", "sameNameSuffix"],
+  union_n: ["align", "extraFieldPolicy", "typeConflictPolicy", "order"],
+  unique_n: ["fields", "keep"],
+  sort_n: ["rules"],
+  summarize: ["groupBy", "aggregations"],
+  crosstab: ["rowField", "columnField", "valueField", "valueFunc", "fill"],
+  transpose: ["fixedFields", "valueColumns", "nameColumn", "valueColumn"],
+  split: ["field", "mode", "delimiter", "widths", "keepOriginal", "columnPrefix"],
+  check_n: ["rules"],
+  manual_in: ["columns", "rows", "onRowError"],
+  db_in: ["path", "table", "fields", "onRowError"],
+  parquet_in: ["path", "fields"],
 };
 
 /**
@@ -242,7 +474,7 @@ export function normalizeConfig(
       coerced[key] = Number.isFinite(value) ? Math.trunc(value) : defaults[key];
     }
   }
-  const booleans = new Set(["attachSourceColumns", "passThroughNewFields", "dropBlankRows", "nullTextToNull"]);
+  const booleans = new Set(["attachSourceColumns", "passThroughNewFields", "dropBlankRows", "nullTextToNull", "keepOriginal"]);
   for (const key of booleans) {
     if (key in coerced) coerced[key] = coerced[key] === true;
   }
@@ -276,6 +508,133 @@ export function normalizeConfig(
       };
     }
   }
+  // —— 二期补齐节点的数组/枚举/嵌套结构规整 ——
+  if (type === "join_n") {
+    coerced.keys = Array.isArray(coerced.keys)
+      ? (coerced.keys as unknown[]).map((item) => {
+          const pair = (item ?? {}) as Record<string, unknown>;
+          return { left: str(pair.left), right: str(pair.right) };
+        })
+      : (defaults.keys as JoinKeyPair[]);
+    coerced.leftFields = strArray(coerced.leftFields);
+    coerced.rightFields = strArray(coerced.rightFields);
+    if (typeof coerced.sameNameSuffix !== "string") {
+      coerced.sameNameSuffix = defaults.sameNameSuffix;
+    }
+  }
+  if (type === "union_n") {
+    if (coerced.align !== "byName" && coerced.align !== "byPosition") coerced.align = defaults.align;
+    if (coerced.extraFieldPolicy !== "keep" && coerced.extraFieldPolicy !== "drop") {
+      coerced.extraFieldPolicy = defaults.extraFieldPolicy;
+    }
+    if (coerced.typeConflictPolicy !== "text" && coerced.typeConflictPolicy !== "stop") {
+      coerced.typeConflictPolicy = defaults.typeConflictPolicy;
+    }
+    coerced.order = strArray(coerced.order);
+  }
+  if (type === "unique_n") {
+    coerced.fields = strArray(coerced.fields);
+    if (coerced.keep !== "first" && coerced.keep !== "last") coerced.keep = defaults.keep;
+  }
+  if (type === "sort_n") {
+    coerced.rules = Array.isArray(coerced.rules)
+      ? (coerced.rules as unknown[]).map((item) => {
+          const rule = (item ?? {}) as Record<string, unknown>;
+          return {
+            field: str(rule.field),
+            direction: rule.direction === "desc" ? ("desc" as const) : ("asc" as const),
+            nulls: rule.nulls === "first" ? ("first" as const) : ("last" as const),
+          };
+        })
+      : (defaults.rules as SortRuleConfig[]);
+  }
+  if (type === "summarize") {
+    coerced.groupBy = strArray(coerced.groupBy);
+    coerced.aggregations = Array.isArray(coerced.aggregations)
+      ? (coerced.aggregations as unknown[]).map((item) => {
+          const agg = (item ?? {}) as Record<string, unknown>;
+          return {
+            field: str(agg.field),
+            func: (SUMMARIZE_FUNCS.some((fn) => fn.value === agg.func)
+              ? agg.func
+              : "countAll") as SummarizeFunc,
+            output: str(agg.output),
+          };
+        })
+      : (defaults.aggregations as SummarizeAggregation[]);
+  }
+  if (type === "crosstab") {
+    if (coerced.fill === null) coerced.fill = null;
+    else if (typeof coerced.fill === "number" && Number.isFinite(coerced.fill)) {
+      // 保留数值（含 0）。
+    } else coerced.fill = defaults.fill;
+    for (const key of ["rowField", "columnField", "valueField"]) {
+      if (typeof coerced[key] !== "string") coerced[key] = "";
+    }
+    if (!SUMMARIZE_FUNCS.some((fn) => fn.value === coerced.valueFunc)) {
+      coerced.valueFunc = defaults.valueFunc;
+    }
+  }
+  if (type === "transpose") {
+    coerced.fixedFields = strArray(coerced.fixedFields);
+    coerced.valueColumns = strArray(coerced.valueColumns);
+    if (typeof coerced.nameColumn !== "string" || !coerced.nameColumn) {
+      coerced.nameColumn = defaults.nameColumn;
+    }
+    if (typeof coerced.valueColumn !== "string" || !coerced.valueColumn) {
+      coerced.valueColumn = defaults.valueColumn;
+    }
+  }
+  if (type === "split") {
+    if (coerced.mode !== "delimiter" && coerced.mode !== "width") coerced.mode = defaults.mode;
+    coerced.widths = Array.isArray(coerced.widths)
+      ? (coerced.widths as unknown[])
+          .map((width) => Math.trunc(Number(width)))
+          .filter((width) => Number.isFinite(width) && width > 0)
+      : [];
+    for (const key of ["field", "delimiter", "columnPrefix"]) {
+      if (typeof coerced[key] !== "string") coerced[key] = "";
+    }
+  }
+  if (type === "check_n") {
+    const rules = Array.isArray(coerced.rules) ? (coerced.rules as unknown[]) : [];
+    coerced.rules = rules
+      .map((rule) => normalizeCheckRule(rule))
+      .filter((rule): rule is CheckRuleConfig => rule !== null);
+  }
+  if (type === "manual_in") {
+    const columnTypes = new Set(MANUAL_COLUMN_TYPES.map((item) => item.value));
+    const columns = Array.isArray(coerced.columns) ? (coerced.columns as unknown[]) : [];
+    coerced.columns = columns.map((item) => {
+      const column = (item ?? {}) as Record<string, unknown>;
+      return {
+        name: str(column.name),
+        type: (columnTypes.has(column.type as ManualColumnConfig["type"])
+          ? column.type
+          : "text") as ManualColumnConfig["type"],
+      };
+    });
+    const rows = Array.isArray(coerced.rows) ? (coerced.rows as unknown[]) : [];
+    coerced.rows = rows.map((row) =>
+      Array.isArray(row) ? row.map((cell) => strCell(cell)) : [],
+    );
+    if (coerced.onRowError !== "stop" && coerced.onRowError !== "skip") {
+      coerced.onRowError = "stop";
+    }
+  }
+  if (type === "db_in") {
+    for (const key of ["path", "table"]) {
+      if (typeof coerced[key] !== "string") coerced[key] = "";
+    }
+    coerced.fields = strArray(coerced.fields);
+    if (coerced.onRowError !== "stop" && coerced.onRowError !== "skip") {
+      coerced.onRowError = "stop";
+    }
+  }
+  if (type === "parquet_in") {
+    if (typeof coerced.path !== "string") coerced.path = "";
+    coerced.fields = strArray(coerced.fields);
+  }
   return coerced;
 }
 
@@ -302,6 +661,26 @@ export function serializeWorkflow(workflow: DataflowWorkflow): string {
 export type ParseWorkflowResult =
   | { ok: true; workflow: DataflowWorkflow }
   | { ok: false; error: string };
+
+/**
+ * 组装运行请求体：工作流本体平铺＋runMode＋paramOverrides；
+ * 「运行到选中节点」时附 uptoNodeId（与 paramOverrides 平级），
+ * 引擎只执行到该节点（含其全部上游）为止。
+ */
+export function dataflowRunRequest(
+  workflow: unknown,
+  runMode: "preview" | "full",
+  paramOverrides: Record<string, string>,
+  uptoNodeId?: string,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    ...(workflow as Record<string, unknown>),
+    runMode,
+    paramOverrides,
+  };
+  if (uptoNodeId) payload.uptoNodeId = uptoNodeId;
+  return payload;
+}
 
 /** 解析流程文件文本。版本不识别时明确报错，绝不静默打开。 */
 export function parseWorkflowFile(text: string): ParseWorkflowResult {

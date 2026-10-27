@@ -73,6 +73,102 @@ const SUMMARY_ROWS: Cell[][] = [
   ["（空）", 7, 286400, null],
 ];
 
+// ===== 二期节点演示数据（行数少，够界面体验即可） =====
+
+/** 手工输入 / db_in / parquet_in：科目对照小表。 */
+const MAPPING_COLUMNS = ["科目编码", "科目名称", "科目层级"];
+const MAPPING_ROWS: Cell[][] = [
+  ["1002", "银行存款", 1],
+  ["1122", "应收账款", 1],
+  ["2202", "应付账款", 1],
+  ["6602", "管理费用", 1],
+  ["22020105", "应付账款－暂估货款", 2],
+];
+
+/** 关联 Join：左＝序时账、右＝科目对照。 */
+const JOIN_J_COLUMNS = ["凭证号", "摘要", "科目编码", "借方金额", "科目名称", "科目层级"];
+const JOIN_J_ROWS: Cell[][] = [
+  ["记-0012", "支付货款", "22020105", 86400, "应付账款－暂估货款", 2],
+  ["记-0018", "收到货款（华东区）", "11220101", null, "应收账款－华东区", 2],
+  ["记-0035", "付设备款", "16010101", 428000, "固定资产－设备", 2],
+];
+const JOIN_L_COLUMNS = ["凭证号", "摘要", "科目编码", "借方金额"];
+const JOIN_L_ROWS: Cell[][] = [
+  ["记-0031", "报销差旅费", "66020501", 3218.5],
+  ["记-0051", "付咨询费－年审", "66020100", 120000],
+];
+const JOIN_R_COLUMNS = ["科目编码", "科目名称", "科目层级"];
+const JOIN_R_ROWS: Cell[][] = [
+  ["10020101", "银行存款－工行基本户", 2],
+  ["66020200", "管理费用－中介服务费", 2],
+];
+
+/** 纵向合并：上下拼接后的表（附来源列语义）。 */
+const UNION_COLUMNS = ["来源", "凭证日期", "凭证号", "借方金额", "贷方金额"];
+const UNION_ROWS: Cell[][] = [
+  ["2026 上半年", "2026-01-03", "记-0012", 86400, null],
+  ["2026 上半年", "2026-01-05", "记-0018", null, 152000],
+  ["2026 下半年", "2026-07-02", "记-0101", 230500, null],
+  ["2026 下半年", "2026-08-14", "记-0118", null, 230500],
+];
+
+/** 去重 Unique：U 保留 / D 重复 两路。 */
+const UNIQUE_U_COLUMNS = ["凭证号", "客商名称", "金额"];
+const UNIQUE_U_ROWS: Cell[][] = [
+  ["记-0012", "汇金贸易有限公司", 86400],
+  ["记-0018", "华信贸易有限公司", 152000],
+];
+const UNIQUE_D_COLUMNS = ["凭证号", "客商名称", "金额"];
+const UNIQUE_D_ROWS: Cell[][] = [
+  ["记-0012", "汇金贸易有限公司", 86400],
+  ["记-0035", "中恒机械设备有限公司", 428000],
+];
+
+/** 排序 Sort：按金额降序后的表。 */
+const SORTED_COLUMNS = ["凭证号", "摘要", "借方金额"];
+const SORTED_ROWS: Cell[][] = [
+  ["记-0035", "付设备款", 428000],
+  ["记-0051", "付咨询费－年审", 120000],
+  ["记-0018", "收到货款（华东区）", null],
+];
+
+/** 透视 Crosstab：客商 × 月份宽表。 */
+const CROSSTAB_COLUMNS = ["客商名称", "202601", "202602", "202603"];
+const CROSSTAB_ROWS: Cell[][] = [
+  ["汇金贸易有限公司", 86400, 0, 96500],
+  ["中恒机械设备有限公司", 0, 428000, 0],
+  ["立信咨询（上海）有限公司", 0, 0, 120000],
+];
+
+/** 宽转长 Transpose：科目余额 → 项目/数值长表。 */
+const TRANSPOSE_COLUMNS = ["科目编码", "项目", "数值"];
+const TRANSPOSE_ROWS: Cell[][] = [
+  ["1002", "期初余额", 1250000],
+  ["1002", "期末余额", 1312500],
+  ["1122", "期初余额", 468200],
+  ["1122", "期末余额", 512400],
+];
+
+/** 分列 Split：科目编码拆为一级/二级。 */
+const SPLIT_COLUMNS = ["凭证号", "科目编码", "科目编码_1", "科目编码_2"];
+const SPLIT_ROWS: Cell[][] = [
+  ["记-0012", "22020105", "2202", "0105"],
+  ["记-0018", "11220101", "1122", "0101"],
+  ["记-0035", "16010101", "1601", "0101"],
+];
+
+/** 检查 Check：P 通过 / NG 未通过 两路（NG 附违规原因列）。 */
+const CHECK_P_COLUMNS = ["凭证号", "摘要", "借方金额", "贷方金额"];
+const CHECK_P_ROWS: Cell[][] = [
+  ["记-0012", "支付货款", 86400, 86400],
+  ["记-0018", "收到货款（华东区）", 152000, 152000],
+];
+const CHECK_NG_COLUMNS = ["凭证号", "摘要", "借方金额", "贷方金额", "违规原因"];
+const CHECK_NG_ROWS: Cell[][] = [
+  ["记-0031", "报销差旅费", 3218.5, 3218.45, "借贷平衡：差额 0.05 超出容差 0.01（按凭证号分组）"],
+  ["记-0044", "暂估入库", null, null, "关键字段非空：借方金额、贷方金额 均为空值"],
+];
+
 function numericTypes(columns: string[], count: number): string[] {
   const numericHint = /金额|合计|借方|贷方|行数|笔数|数$|值$|净额|期间/;
   return Array.from({ length: count }, (_, index) =>
@@ -125,6 +221,26 @@ function tableForNode(
       return { columns: FORMULA_COLUMNS, rows: FORMULA_ROWS };
     case "filter_n":
       return { columns: SUMMARY_COLUMNS, rows: SUMMARY_ROWS };
+    case "manual_in":
+    case "db_in":
+    case "parquet_in":
+      return { columns: MAPPING_COLUMNS, rows: MAPPING_ROWS };
+    case "join_n":
+      return { columns: JOIN_J_COLUMNS, rows: JOIN_J_ROWS };
+    case "union_n":
+      return { columns: UNION_COLUMNS, rows: UNION_ROWS };
+    case "sort_n":
+      return { columns: SORTED_COLUMNS, rows: SORTED_ROWS };
+    case "summarize":
+      return { columns: SUMMARY_COLUMNS, rows: SUMMARY_ROWS };
+    case "crosstab":
+      return { columns: CROSSTAB_COLUMNS, rows: CROSSTAB_ROWS };
+    case "transpose":
+      return { columns: TRANSPOSE_COLUMNS, rows: TRANSPOSE_ROWS };
+    case "split":
+      return { columns: SPLIT_COLUMNS, rows: SPLIT_ROWS };
+    case "check_n":
+      return { columns: CHECK_P_COLUMNS, rows: CHECK_P_ROWS };
     default:
       return {
         columns: ["字段 1", "字段 2", "字段 3"],
@@ -146,9 +262,23 @@ function rowCountFor(type: string, mode: "preview" | "full", seq: number): numbe
     filter_n: 3912,
     excel_out: 156,
     csv_out: 156,
+    join_n: 2841256,
+    union_n: 5694604,
+    unique_n: 12481,
+    sort_n: 2847301,
+    summarize: 6,
+    crosstab: 42,
+    transpose: 1692,
+    split: 2847301,
+    check_n: 2847289,
+    manual_in: 5,
+    db_in: 5214882,
+    parquet_in: 2847392,
   };
   if (mode === "preview") {
-    return type === "excel_in" || type === "csv_in" ? 1000 : 1000 - seq * 3;
+    if (type === "excel_in" || type === "csv_in" || type === "db_in") return 1000;
+    if (type === "manual_in") return 5;
+    return 1000 - seq * 3;
   }
   return (full[type] ?? 1000 + seq * 7) - seq * 13;
 }
@@ -164,18 +294,55 @@ function msFor(type: string, mode: "preview" | "full", seq: number): number {
     filter_n: 2400,
     excel_out: 400,
     csv_out: 350,
+    join_n: 26000,
+    union_n: 4600,
+    unique_n: 9800,
+    sort_n: 15400,
+    summarize: 6200,
+    crosstab: 5100,
+    transpose: 2600,
+    split: 3100,
+    check_n: 7400,
+    manual_in: 40,
+    db_in: 49000,
+    parquet_in: 3600,
   };
   return (base[type] ?? 3000) + seq * 137;
 }
 
+/** uptoNodeId 的上游闭包：目标节点＋其全部（传递）上游。 */
+function upstreamClosure(workflow: DataflowWorkflow, targetId: string): Set<string> {
+  const incoming = new Map<string, string[]>();
+  for (const edge of workflow.edges) {
+    const list = incoming.get(edge.to) ?? [];
+    list.push(edge.from);
+    incoming.set(edge.to, list);
+  }
+  const seen = new Set<string>([targetId]);
+  const stack = [targetId];
+  while (stack.length) {
+    const current = stack.pop() as string;
+    for (const parent of incoming.get(current) ?? []) {
+      if (!seen.has(parent)) {
+        seen.add(parent);
+        stack.push(parent);
+      }
+    }
+  }
+  return seen;
+}
+
 /**
  * 生成演示运行结果。按拓扑序给每个节点编造可解释的行数/耗时/消息；
- * 筛选节点给 T/F 两路；输出节点在预览模式不落盘、全量模式给出输出清单。
+ * 筛选 T/F、去重 U/D、关联 J/L/R、检查 P/NG 多路锚点齐全；
+ * 输出节点在预览模式不落盘、全量模式给出输出清单。
+ * uptoNodeId＝「运行到选中节点」：只返回该节点及其上游的结果，其后节点不出现。
  */
 export function dataflowDemoResult(
   mode: "preview" | "full",
   workflowInput: unknown,
   paramOverrides: Record<string, string> = {},
+  uptoNodeId?: string,
 ): DataflowRunResult {
   const parsed = parseWorkflowFile(JSON.stringify(workflowInput ?? {}));
   if (!parsed.ok) {
@@ -188,21 +355,32 @@ export function dataflowDemoResult(
   }
   const workflow: DataflowWorkflow = parsed.workflow;
   const order = topoOrder(workflow);
+  // 目标节点不在流程中时不截断（页面层已拦截，这里兜底演示）。
+  const uptoValid =
+    uptoNodeId && workflow.nodes.some((node) => node.id === uptoNodeId) ? uptoNodeId : undefined;
+  const allowed = uptoValid ? upstreamClosure(workflow, uptoValid) : null;
   const outcomes: Record<string, NodeOutcome> = {};
   const outputs: DataflowRunResult["outputs"] = [];
   const timestamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
 
   order.forEach((nodeId, seq) => {
+    if (allowed && !allowed.has(nodeId)) return;
     const node = workflow.nodes.find((item) => item.id === nodeId);
     if (!node) return;
     const specInputs: Record<string, string[]> = {
       select_n: ["in"], clean: ["in"], formula: ["in"], filter_n: ["in"],
+      sort_n: ["in"], unique_n: ["in"], summarize: ["in"], crosstab: ["in"],
+      transpose: ["in"], split: ["in"], check_n: ["in"], join_n: ["inL", "inR"],
       excel_out: ["in"], csv_out: ["in"],
     };
+    // 纵向合并允许多条连线，至少要有一条上游。
+    const needsAnyIncoming = node.type === "union_n";
     const needed = specInputs[node.type] ?? [];
-    const hasUpstream = needed.every((key) =>
-      workflow.edges.some((edge) => edge.to === nodeId && edge.toAnchor === key),
-    );
+    const hasUpstream = needsAnyIncoming
+      ? workflow.edges.some((edge) => edge.to === nodeId)
+      : needed.every((key) =>
+          workflow.edges.some((edge) => edge.to === nodeId && edge.toAnchor === key),
+        );
     if (!hasUpstream) {
       outcomes[nodeId] = {
         status: "error",
@@ -305,6 +483,124 @@ export function dataflowDemoResult(
           outcome.messages = [`${timestamp} 写入 D:\\审计输出\\${fileName}${node.type === "excel_out" ? `（Sheet：${sheet}）` : ""}`];
           outcome.stats = [`写入 ${rows.toLocaleString("zh-CN")} 行`];
         }
+        break;
+      }
+      case "join_n": {
+        const leftRows = mode === "preview" ? 1000 : 2847301;
+        const rightRows = mode === "preview" ? 60 : 1842;
+        const lRows = mode === "preview" ? 42 : 6045;
+        const rRows = mode === "preview" ? 3 : 31;
+        outcome.anchors.J = anchorFromTable(JOIN_J_COLUMNS, JOIN_J_ROWS, rows);
+        outcome.anchors.L = anchorFromTable(JOIN_L_COLUMNS, JOIN_L_ROWS, lRows);
+        outcome.anchors.R = anchorFromTable(JOIN_R_COLUMNS, JOIN_R_ROWS, rRows);
+        outcome.messages = [
+          `${timestamp} 按 1 组关联字段匹配：左 ${leftRows.toLocaleString("zh-CN")} 行 × 右 ${rightRows.toLocaleString("zh-CN")} 行`,
+          mode === "preview"
+            ? `${timestamp} 预览样本：各输入独立截样可能遗漏匹配，J 行数不代表全量`
+            : `${timestamp} 匹配完成：J ${rows.toLocaleString("zh-CN")} 行`,
+        ];
+        outcome.stats = [
+          `左输入 ${leftRows.toLocaleString("zh-CN")} 行 · 右输入 ${rightRows.toLocaleString("zh-CN")} 行`,
+          `J ${rows.toLocaleString("zh-CN")} · L ${lRows.toLocaleString("zh-CN")} · R ${rRows.toLocaleString("zh-CN")}`,
+          `行数膨胀提示：左表存在重复键（同一键左 3 条×右 4 条＝12 条组合），J 行数 ${rows.toLocaleString("zh-CN")} ＞ 左输入中参与匹配的行数，属多对多正常组合，未自动去重`,
+        ];
+        break;
+      }
+      case "union_n": {
+        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.messages = [`${timestamp} 按字段名对齐拼接 2 个上游表；多出字段「来源」缺失侧已补空值`];
+        outcome.stats = [
+          `输入 2,847,302 + 2,847,302 行 → 合并 ${rows.toLocaleString("zh-CN")} 行（守恒核对通过）`,
+          "差异报告：表 2 多出字段「来源」；「借方金额」类型不一致，已按配置统一为文本",
+        ];
+        break;
+      }
+      case "unique_n": {
+        const dRows = mode === "preview" ? 208 : 3206;
+        outcome.anchors.U = anchorFromTable(UNIQUE_U_COLUMNS, UNIQUE_U_ROWS, rows);
+        outcome.anchors.D = anchorFromTable(UNIQUE_D_COLUMNS, UNIQUE_D_ROWS, dRows);
+        outcome.messages = [`${timestamp} 按「凭证号＋客商名称」去重，保留首次出现`];
+        outcome.stats = [
+          `U ${rows.toLocaleString("zh-CN")} · D ${dRows.toLocaleString("zh-CN")}（合计＝输入 ${(rows + dRows).toLocaleString("zh-CN")}）`,
+          "空值与空文本视为不同值；依据输入顺序取首次出现",
+        ];
+        break;
+      }
+      case "sort_n": {
+        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.messages = [`${timestamp} 全局排序完成：借方金额 降序，空值排最后`];
+        outcome.stats = ["进出行数相同", "相同排序键按输入到达顺序保持相对次序（稳定排序）"];
+        break;
+      }
+      case "summarize": {
+        outcome.anchors.out = anchorFromTable(SUMMARY_COLUMNS, SUMMARY_ROWS, rows);
+        outcome.messages = [`${timestamp} 按客商名称分组：求和 2 项、总行数 1 项`];
+        outcome.stats = [
+          `输入 ${(rows * 474567).toLocaleString("zh-CN")} 行 → 分组 ${rows.toLocaleString("zh-CN")} 组`,
+          "求和/平均/最小/最大跳过空值；平均以有效值数量为分母",
+        ];
+        break;
+      }
+      case "crosstab": {
+        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.messages = [`${timestamp} 透视完成：行＝客商名称，列＝期间（202601–202612）`];
+        outcome.stats = [
+          `输出 ${rows.toLocaleString("zh-CN")} 行 × ${CROSSTAB_COLUMNS.length} 列（动态生成 12 列）`,
+          "缺失组合填充 0；动态列名＝列字段原值",
+        ];
+        break;
+      }
+      case "transpose": {
+        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.messages = [`${timestamp} 宽转长：期初余额/期末余额 两列转入行（项目/数值）`];
+        outcome.stats = [`输出 ${rows.toLocaleString("zh-CN")} 行 ＝ 输入行数 × 转入列数`, "输出列：科目编码、项目、数值"];
+        break;
+      }
+      case "split": {
+        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.messages = [`${timestamp} 按固定宽度拆分「科目编码」：前 4 位/后 4 位两列，保留原列`];
+        outcome.stats = ["进出行数相同", "拆出 2 列：科目编码_1、科目编码_2；段不足补空值"];
+        break;
+      }
+      case "check_n": {
+        const ngRows = mode === "preview" ? 18 : 12893;
+        outcome.anchors.P = anchorFromTable(CHECK_P_COLUMNS, CHECK_P_ROWS, rows);
+        outcome.anchors.NG = anchorFromTable(CHECK_NG_COLUMNS, CHECK_NG_ROWS, ngRows);
+        outcome.status = "warn";
+        outcome.messages = [
+          `${timestamp} 规则 1 借贷平衡（按凭证号分组，容差 0.01）：未通过 12 组`,
+          `${timestamp} 规则 2 关键字段非空（借方金额、贷方金额）：空值行已进未通过路`,
+        ];
+        outcome.stats = [
+          `P ${rows.toLocaleString("zh-CN")} · NG ${ngRows.toLocaleString("zh-CN")}`,
+          "规则执行摘要：借贷平衡检查 2,847 组，未通过 12 组（容差 0.01）；非空检查未通过 12,881 行；空值遇区间规则判未通过并标注「空值」",
+          "未通过路附违规原因列（规则与实际/预期值）",
+        ];
+        break;
+      }
+      case "manual_in": {
+        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.messages = [`${timestamp} 内嵌小表读取完成：${rows.toLocaleString("zh-CN")} 行 × 3 列（随流程文件保存）`];
+        outcome.stats = [`行数 ${rows.toLocaleString("zh-CN")} · 列数 3`, "列类型：文本、文本、整数"];
+        break;
+      }
+      case "db_in": {
+        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        const table2 = typeof config.table === "string" && config.table ? config.table : "序时账_2026";
+        outcome.messages = [
+          `${timestamp} 识别为 SQLite 数据库，读取表「${table2}」`,
+          `${timestamp} 记录以表名与主键标识；类型按表结构保留`,
+        ];
+        outcome.stats = [
+          `表 ${table2} · ${rows.toLocaleString("zh-CN")} 行`,
+          mode === "preview" ? "预览样本：前 1,000 行" : "全量读取完成",
+        ];
+        break;
+      }
+      case "parquet_in": {
+        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.messages = [`${timestamp} 读取 2 个 Parquet 文件，结构兼容`];
+        outcome.stats = [`文件 2 个 · ${rows.toLocaleString("zh-CN")} 行`, "精度、空值与日期类型保持一致"];
         break;
       }
       default: {

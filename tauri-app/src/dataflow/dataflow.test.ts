@@ -2,9 +2,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  DATAFLOW_PHASE1_TYPES,
+  DATAFLOW_AVAILABLE_TYPES,
   DATAFLOW_CATEGORIES,
   DATAFLOW_NODE_SPECS,
+  anchorAcceptsMultiple,
   nodeSpec,
 } from "./nodeSpecs";
 import {
@@ -13,7 +14,10 @@ import {
   applyParamPlaceholders,
   configKeysWithinContract,
   createEmptyWorkflow,
+  dataflowRunRequest,
+  defaultCheckRule,
   defaultConfigFor,
+  normalizeCheckRule,
   normalizeConfig,
   parseWorkflowFile,
   removeDraft,
@@ -24,6 +28,22 @@ import {
   type DataflowWorkflow,
 } from "./model";
 import { dataflowDemoResult } from "./demoData";
+
+/** 二期补齐的 12 个节点 type（与 Rust 引擎契约一致）。 */
+const PHASE2_NODE_TYPES = [
+  "join_n",
+  "union_n",
+  "unique_n",
+  "sort_n",
+  "summarize",
+  "crosstab",
+  "transpose",
+  "split",
+  "check_n",
+  "manual_in",
+  "db_in",
+  "parquet_in",
+] as const;
 
 function sampleWorkflow(): DataflowWorkflow {
   const workflow = createEmptyWorkflow("序时账清洗合并_2026");
@@ -255,12 +275,66 @@ describe("数据流：锚点连线校验", () => {
     });
     expect(second.ok).toBe(true);
   });
+
+  it("关联节点左右两个输入口各自只允许一条连线", () => {
+    const joinFlow: DataflowWorkflow = {
+      ...createEmptyWorkflow("关联连线"),
+      nodes: [
+        { id: "n1", type: "excel_in", name: "左表", x: 0, y: 0, config: defaultConfigFor("excel_in") },
+        { id: "n2", type: "csv_in", name: "右表", x: 0, y: 200, config: defaultConfigFor("csv_in") },
+        { id: "n3", type: "join_n", name: "关联", x: 300, y: 100, config: defaultConfigFor("join_n") },
+      ],
+      edges: [
+        { from: "n1", fromAnchor: "out", to: "n3", toAnchor: "inL" },
+        { from: "n2", fromAnchor: "out", to: "n3", toAnchor: "inR" },
+      ],
+    };
+    // 左口占用后，另一条线想再进左口应被拒绝。
+    const leftTaken = validateNewEdge(joinFlow, {
+      from: "n2",
+      fromAnchor: "out",
+      to: "n3",
+      toAnchor: "inL",
+    });
+    expect(leftTaken.ok).toBe(false);
+    if (leftTaken.ok) return;
+    expect(leftTaken.reason).toContain("已有连线");
+    expect(anchorAcceptsMultiple("join_n", "inL")).toBe(false);
+    expect(anchorAcceptsMultiple("join_n", "inR")).toBe(false);
+    expect(anchorAcceptsMultiple("union_n", "in")).toBe(true);
+  });
+
+  it("纵向合并输入口允许多条上游连线", () => {
+    const unionFlow: DataflowWorkflow = {
+      ...createEmptyWorkflow("合并连线"),
+      nodes: [
+        { id: "n1", type: "excel_in", name: "表一", x: 0, y: 0, config: defaultConfigFor("excel_in") },
+        { id: "n2", type: "csv_in", name: "表二", x: 0, y: 200, config: defaultConfigFor("csv_in") },
+        { id: "n3", type: "union_n", name: "合并", x: 300, y: 100, config: defaultConfigFor("union_n") },
+      ],
+      edges: [{ from: "n1", fromAnchor: "out", to: "n3", toAnchor: "in" }],
+    };
+    const second = validateNewEdge(unionFlow, {
+      from: "n2",
+      fromAnchor: "out",
+      to: "n3",
+      toAnchor: "in",
+    });
+    expect(second.ok).toBe(true);
+  });
 });
 
-describe("数据流：8 节点目录完整性", () => {
-  it("第一期恰好是约定的 8 个节点", () => {
-    const phase1 = DATAFLOW_NODE_SPECS.filter((spec) => !spec.phase2).map((spec) => spec.type);
-    expect(phase1.sort()).toEqual([...DATAFLOW_PHASE1_TYPES].sort());
+describe("数据流：节点目录完整性（20 个全部可用）", () => {
+  it("全部 20 个节点不再置灰（phase2 = false），与可用集合一致", () => {
+    const enabled = DATAFLOW_NODE_SPECS.filter((spec) => !spec.phase2).map((spec) => spec.type);
+    expect(enabled.sort()).toEqual([...DATAFLOW_AVAILABLE_TYPES].sort());
+    expect(DATAFLOW_NODE_SPECS.every((spec) => spec.phase2 === false)).toBe(true);
+  });
+
+  it("二期补齐的 12 个节点都在目录中", () => {
+    for (const type of PHASE2_NODE_TYPES) {
+      expect(nodeSpec(type), `缺少 ${type} 的目录定义`).toBeDefined();
+    }
   });
 
   it("目录共 20 个节点、7 个分类且顺序固定", () => {
@@ -282,12 +356,27 @@ describe("数据流：8 节点目录完整性", () => {
     expect(count("output")).toBe(2);
   });
 
-  it("第一期节点锚点齐备：筛选 T/F 双路，输出节点无输出口", () => {
-    const filter = nodeSpec("filter_n");
-    expect(filter?.outputs.map((anchor) => anchor.key)).toEqual(["T", "F"]);
+  it("多路输出锚点齐备：筛选 T/F、去重 U/D、关联 J/L/R、检查 P/NG", () => {
+    expect(nodeSpec("filter_n")?.outputs.map((anchor) => anchor.key)).toEqual(["T", "F"]);
+    expect(nodeSpec("unique_n")?.outputs.map((anchor) => anchor.key)).toEqual(["U", "D"]);
+    expect(nodeSpec("unique_n")?.outputs.map((anchor) => anchor.label)).toEqual(["U 保留", "D 重复"]);
+    const join = nodeSpec("join_n");
+    expect(join?.inputs.map((anchor) => anchor.key)).toEqual(["inL", "inR"]);
+    expect(join?.inputs.map((anchor) => anchor.label)).toEqual(["左表", "右表"]);
+    expect(join?.outputs.map((anchor) => anchor.key)).toEqual(["J", "L", "R"]);
+    expect(join?.outputs.map((anchor) => anchor.label)).toEqual([
+      "J 匹配", "L 左未匹配", "R 右未匹配",
+    ]);
+    const check = nodeSpec("check_n");
+    expect(check?.outputs.map((anchor) => anchor.key)).toEqual(["P", "NG"]);
+    expect(check?.outputs.map((anchor) => anchor.label)).toEqual(["P 通过", "NG 未通过"]);
+    // 单输入节点与输出节点锚点保持第一期形态。
+    for (const type of ["sort_n", "summarize", "crosstab", "transpose", "split", "check_n"]) {
+      expect(nodeSpec(type)?.inputs.map((anchor) => anchor.key), type).toEqual(["in"]);
+    }
     expect(nodeSpec("excel_out")?.outputs).toEqual([]);
     expect(nodeSpec("csv_out")?.outputs).toEqual([]);
-    for (const type of DATAFLOW_PHASE1_TYPES) {
+    for (const type of DATAFLOW_AVAILABLE_TYPES) {
       const spec = nodeSpec(type);
       expect(spec, `缺少 ${type} 的目录定义`).toBeDefined();
     }
@@ -350,13 +439,121 @@ describe("数据流：config 序列化", () => {
     expect(normalized.rules[0].value).toBe("500000");
   });
 
-  it("全部第一期节点默认 config 只含契约内字段", () => {
-    for (const type of DATAFLOW_PHASE1_TYPES) {
+  it("二期 12 节点默认 config 与第八节裁定逐字段一致", () => {
+    expect(defaultConfigFor("join_n")).toEqual({
+      keys: [{ left: "", right: "" }],
+      leftFields: [],
+      rightFields: [],
+      sameNameSuffix: "_右",
+    });
+    expect(defaultConfigFor("union_n")).toEqual({
+      align: "byName",
+      extraFieldPolicy: "keep",
+      typeConflictPolicy: "text",
+      order: [],
+    });
+    expect(defaultConfigFor("unique_n")).toEqual({ fields: [], keep: "first" });
+    expect(defaultConfigFor("sort_n")).toEqual({
+      rules: [{ field: "", direction: "asc", nulls: "last" }],
+    });
+    expect(defaultConfigFor("summarize")).toEqual({
+      groupBy: [],
+      aggregations: [{ field: "", func: "countAll", output: "" }],
+    });
+    expect(defaultConfigFor("crosstab")).toEqual({
+      rowField: "",
+      columnField: "",
+      valueField: "",
+      valueFunc: "sum",
+      fill: 0,
+    });
+    expect(defaultConfigFor("transpose")).toEqual({
+      fixedFields: [],
+      valueColumns: [],
+      nameColumn: "项目",
+      valueColumn: "数值",
+    });
+    expect(defaultConfigFor("split")).toEqual({
+      field: "",
+      mode: "delimiter",
+      delimiter: "",
+      widths: [],
+      keepOriginal: false,
+      columnPrefix: "",
+    });
+    expect(defaultConfigFor("check_n")).toEqual({ rules: [] });
+    expect(defaultConfigFor("manual_in")).toEqual({
+      columns: [{ name: "列名", type: "text" }],
+      rows: [[""]],
+      onRowError: "stop",
+    });
+    expect(defaultConfigFor("db_in")).toEqual({
+      path: "",
+      table: "",
+      fields: [],
+      onRowError: "stop",
+    });
+    expect(defaultConfigFor("parquet_in")).toEqual({ path: "", fields: [] });
+  });
+
+  it("全部 20 种节点默认 config 只含契约内字段", () => {
+    for (const type of DATAFLOW_AVAILABLE_TYPES) {
       expect(configKeysWithinContract(type, defaultConfigFor(type)), type).toBe(true);
       expect(
         configKeysWithinContract(type, { ...defaultConfigFor(type), 额外字段: 1 }),
         type,
       ).toBe(false);
+    }
+  });
+
+  it("二期节点编辑后的 config 序列化往返不丢字段", () => {
+    const edited: Record<string, Record<string, unknown>> = {
+      join_n: {
+        keys: [{ left: "科目编码", right: "科目代码" }],
+        leftFields: ["凭证号", "摘要"],
+        rightFields: ["科目名称"],
+        sameNameSuffix: "_右表",
+      },
+      union_n: { align: "byPosition", extraFieldPolicy: "drop", typeConflictPolicy: "stop", order: ["n2", "n3"] },
+      unique_n: { fields: ["凭证号", "客商名称"], keep: "last" },
+      sort_n: { rules: [{ field: "借方金额", direction: "desc", nulls: "first" }] },
+      summarize: {
+        groupBy: ["客商名称"],
+        aggregations: [
+          { field: "借方金额", func: "sum", output: "借方合计" },
+          { field: "", func: "countAll", output: "凭证笔数" },
+        ],
+      },
+      crosstab: { rowField: "客商名称", columnField: "期间", valueField: "借方金额", valueFunc: "sum", fill: null },
+      transpose: { fixedFields: ["科目编码"], valueColumns: ["期初余额", "期末余额"], nameColumn: "项目", valueColumn: "数值" },
+      split: { field: "科目编码", mode: "width", delimiter: "", widths: [4, 4], keepOriginal: true, columnPrefix: "段" },
+      check_n: {
+        rules: [
+          { type: "balance", groupBy: ["凭证号"], debitField: "借方金额", creditField: "贷方金额", tolerance: 0.01 },
+          { type: "notEmpty", fields: ["客商名称"] },
+          { type: "unique", field: "凭证号", groupBy: [] },
+          { type: "range", field: "金额", min: 0, max: 1000000 },
+          { type: "expression", expression: "借方金额 >= 0" },
+        ],
+      },
+      manual_in: {
+        columns: [
+          { name: "科目编码", type: "text" },
+          { name: "金额", type: "decimal" },
+        ],
+        rows: [["1002", "1250.00"], ["1122", "468.20"]],
+        onRowError: "skip",
+      },
+      db_in: { path: "D:\\审计\\账套.db", table: "序时账_2026", fields: ["凭证号", "金额"], onRowError: "stop" },
+      parquet_in: { path: "D:\\缓存\\明细.parquet", fields: [] },
+    };
+    for (const [type, config] of Object.entries(edited)) {
+      const workflow = createEmptyWorkflow("往返");
+      workflow.nodes = [{ id: "n1", type, name: "节点", x: 0, y: 0, config }];
+      const parsed = parseWorkflowFile(serializeWorkflow(workflow));
+      expect(parsed.ok, type).toBe(true);
+      if (!parsed.ok) continue;
+      expect(parsed.workflow.nodes[0].config, type).toEqual(config);
     }
   });
 
@@ -369,6 +566,75 @@ describe("数据流：config 序列化", () => {
     expect(config.headerRow).toBe(3);
     expect(config.attachSourceColumns).toBe(false);
     expect(config.sheetMode).toBe("firstData");
+  });
+
+  it("normalizeConfig 纠正二期节点的数组与枚举（打开旧文件兜底）", () => {
+    expect(normalizeConfig("join_n", { keys: "坏数据", leftFields: "科目" }).keys).toEqual([
+      { left: "", right: "" },
+    ]);
+    expect(normalizeConfig("union_n", { align: "乱写" }).align).toBe("byName");
+    expect(normalizeConfig("unique_n", { keep: "乱写" }).keep).toBe("first");
+    expect(normalizeConfig("sort_n", { rules: [{ field: "金额", direction: "乱写", nulls: "first" }] }).rules).toEqual([
+      { field: "金额", direction: "asc", nulls: "first" },
+    ]);
+    expect(
+      normalizeConfig("summarize", { aggregations: [{ field: "金额", func: "乱写", output: "x" }] })
+        .aggregations,
+    ).toEqual([{ field: "金额", func: "countAll", output: "x" }]);
+    expect(normalizeConfig("crosstab", { fill: "乱写" }).fill).toBe(0);
+    expect(normalizeConfig("crosstab", { fill: null }).fill).toBeNull();
+    expect(normalizeConfig("split", { widths: ["4", 0, 6], keepOriginal: "yes" }).widths).toEqual([4, 6]);
+    expect(normalizeConfig("split", { keepOriginal: 1 }).keepOriginal).toBe(false);
+    expect(normalizeConfig("manual_in", { columns: [{ name: "x", type: "乱写" }], rows: [["a", 1]] })).toMatchObject({
+      columns: [{ name: "x", type: "text" }],
+      rows: [["a", "1"]],
+    });
+    // 无法识别的检查规则被丢弃，可识别的按类型收紧字段。
+    expect(
+      normalizeConfig("check_n", {
+        rules: [{ type: "乱写" }, { type: "balance", groupBy: "凭证号", tolerance: "0.01" }],
+      }).rules,
+    ).toEqual([{ type: "balance", groupBy: ["凭证号"], debitField: "", creditField: "", tolerance: 0.01 }]);
+  });
+
+  it("检查规则默认值按类型给出（容差默认 0＝精确相等）", () => {
+    expect(defaultCheckRule("balance")).toEqual({
+      type: "balance",
+      groupBy: [],
+      debitField: "",
+      creditField: "",
+      tolerance: 0,
+    });
+    expect(defaultCheckRule("range")).toEqual({ type: "range", field: "", min: null, max: null });
+    expect(normalizeCheckRule({ type: "expression", expression: "金额 > 0" })).toEqual({
+      type: "expression",
+      expression: "金额 > 0",
+    });
+    expect(normalizeCheckRule({ type: "不存在" })).toBeNull();
+  });
+});
+
+describe("数据流：运行请求形状（uptoNodeId）", () => {
+  const workflow = sampleWorkflow();
+
+  it("普通全量运行不带 uptoNodeId，runMode 与 paramOverrides 平级", () => {
+    const payload = dataflowRunRequest(workflow, "full", { p1: "2027" });
+    expect(payload.runMode).toBe("full");
+    expect(payload.paramOverrides).toEqual({ p1: "2027" });
+    expect(payload.uptoNodeId).toBeUndefined();
+    expect(payload.nodes).toEqual(workflow.nodes);
+    expect(payload.version).toBe(1);
+  });
+
+  it("运行到选中节点时附 uptoNodeId（与 paramOverrides 平级）", () => {
+    const payload = dataflowRunRequest(workflow, "full", { p1: "2027" }, "n3");
+    expect(payload.uptoNodeId).toBe("n3");
+    expect(payload.runMode).toBe("full");
+    expect(payload.paramOverrides).toEqual({ p1: "2027" });
+  });
+
+  it("uptoNodeId 为空字符串时不附该键", () => {
+    expect(dataflowRunRequest(workflow, "preview", {}, "").uptoNodeId).toBeUndefined();
   });
 });
 
@@ -423,5 +689,57 @@ describe("数据流：浏览器预览演示数据", () => {
     const result = dataflowDemoResult("preview", workflow);
     expect(result.nodes.n1.status).toBe("error");
     expect(result.nodes.n1.messages[0]).toContain("上游连线");
+  });
+
+  it("关联节点演示给出 J/L/R 三路锚点与膨胀统计", () => {
+    const workflow = createEmptyWorkflow("关联演示");
+    workflow.nodes = [
+      { id: "n1", type: "excel_in", name: "左表", x: 0, y: 0, config: defaultConfigFor("excel_in") },
+      { id: "n2", type: "csv_in", name: "右表", x: 0, y: 200, config: defaultConfigFor("csv_in") },
+      { id: "n3", type: "join_n", name: "关联", x: 300, y: 100, config: defaultConfigFor("join_n") },
+    ];
+    workflow.edges = [
+      { from: "n1", fromAnchor: "out", to: "n3", toAnchor: "inL" },
+      { from: "n2", fromAnchor: "out", to: "n3", toAnchor: "inR" },
+    ];
+    const result = dataflowDemoResult("full", workflow);
+    expect(() => DataflowRunResultSchema.parse(result)).not.toThrow();
+    const join = result.nodes.n3;
+    expect(Object.keys(join.anchors).sort()).toEqual(["J", "L", "R"]);
+    expect(join.stats.join("；")).toContain("膨胀");
+    // 左口缺线时关联节点应失败。
+    const broken = dataflowDemoResult("full", {
+      ...workflow,
+      edges: [{ from: "n1", fromAnchor: "out", to: "n3", toAnchor: "inL" }],
+    });
+    expect(broken.nodes.n3.status).toBe("error");
+  });
+
+  it("去重/检查节点演示给出 U/D、P/NG 锚点", () => {
+    const workflow = createEmptyWorkflow("多路演示");
+    workflow.nodes = [
+      { id: "n1", type: "excel_in", name: "输入", x: 0, y: 0, config: defaultConfigFor("excel_in") },
+      { id: "n2", type: "unique_n", name: "去重", x: 300, y: 0, config: defaultConfigFor("unique_n") },
+      { id: "n3", type: "check_n", name: "检查", x: 600, y: 0, config: defaultConfigFor("check_n") },
+    ];
+    workflow.edges = [
+      { from: "n1", fromAnchor: "out", to: "n2", toAnchor: "in" },
+      { from: "n2", fromAnchor: "U", to: "n3", toAnchor: "in" },
+    ];
+    const result = dataflowDemoResult("preview", workflow);
+    expect(Object.keys(result.nodes.n2.anchors).sort()).toEqual(["D", "U"]);
+    expect(Object.keys(result.nodes.n3.anchors).sort()).toEqual(["NG", "P"]);
+    expect(result.nodes.n3.anchors.NG.columns).toContain("违规原因");
+  });
+
+  it("uptoNodeId：演示结果只含目标节点及其上游，其后节点不出现", () => {
+    const workflow = sampleWorkflow(); // n1 → n2 → n3(T) → n4
+    const result = dataflowDemoResult("full", workflow, {}, "n3");
+    expect(() => DataflowRunResultSchema.parse(result)).not.toThrow();
+    expect(Object.keys(result.nodes).sort()).toEqual(["n1", "n2", "n3"]);
+    expect(result.nodes.n4).toBeUndefined();
+    expect(result.outputs).toEqual([]);
+    // 未知节点 id 时全部执行（不截断）。
+    expect(Object.keys(dataflowDemoResult("full", workflow, {}, "nX").nodes)).toHaveLength(4);
   });
 });

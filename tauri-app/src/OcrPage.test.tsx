@@ -75,16 +75,17 @@ vi.mock("./ocrScenarios", () => ({
 }));
 let savedProject: OcrProject;
 let detail: OcrDocumentDetail;
-let pendingSave: ((value?: unknown) => void) | undefined;
-let delaySave: boolean;
 
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.confirm.mockResolvedValue(true);
+  vi.mocked(openOcrSource).mockImplementation(async () => ({
+    totalPages: 2,
+    render: mocks.renderSource,
+    dispose: mocks.dispose,
+  }));
   mocks.renderSource.mockResolvedValue("data:image/png;base64,aW1hZ2U=");
   mocks.openOutput.mockResolvedValue(undefined);
-  pendingSave = undefined;
-  delaySave = false;
   savedProject = {
     id: "p",
     name: "测试项目",
@@ -165,12 +166,6 @@ beforeEach(() => {
       return structuredClone(savedProject);
     }
     if (method === "ocr.page_save") {
-      if (delaySave) {
-        delaySave = false;
-        await new Promise((resolve) => {
-          pendingSave = resolve;
-        });
-      }
       const page = {
         ...structuredClone(params.page),
         revision: params.expectedRevision + 1,
@@ -228,14 +223,14 @@ async function openDocument(showOriginal = true) {
       <OcrPage />
     </MemoryRouter>,
   );
-  const entry = await screen.findByRole("button", { name: /合成扫描件.pdf/ });
+  const entry = await screen.findByRole("button", { name: /^合成扫描件.pdf/ });
   await waitFor(() => expect(entry).toBeEnabled());
   fireEvent.click(entry);
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "开始扫描" })).toBeEnabled(),
   );
   if (showOriginal && detail.pages.length) {
-    fireEvent.click(screen.getByRole("button", { name: "查看原文" }));
+    fireEvent.click(screen.getByRole("button", { name: "原文查看" }));
     await screen.findByRole("region", { name: "全篇初始原文" });
   }
 }
@@ -311,9 +306,11 @@ it("OCR 可直接导出，不要求选择场景或调用摘录", async () => {
   const notice = within(operations).getByRole("status", { name: "导出结果" });
   expect(notice).toHaveTextContent("导出文件成功");
   expect(notice).toHaveTextContent("导出目录：C:/输出");
-  expect(notice.previousElementSibling).toContainElement(
-    screen.getByRole("button", { name: "开始扫描" }),
-  );
+  expect(
+    screen
+      .getByRole("button", { name: "开始扫描" })
+      .compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
   fireEvent.click(within(notice).getByRole("button", { name: "打开导出目录" }));
   await waitFor(() => expect(mocks.openOutput).toHaveBeenCalledWith("C:/输出"));
 });
@@ -367,39 +364,6 @@ it("第二步独立显示所有阶段的完整可编辑提示词，并保存实�
   );
 });
 
-it("表格保存响应迟到时保留新修改，并按新修订号继续保存", async () => {
-  await openDocument();
-  delaySave = true;
-  fireEvent.change(
-    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
-    {
-      target: { value: "第一次校对" },
-    },
-  );
-  await waitFor(() => expect(pendingSave).toBeDefined(), { timeout: 2000 });
-  fireEvent.change(
-    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
-    {
-      target: { value: "第二次校对，不得被旧响应覆盖" },
-    },
-  );
-  pendingSave?.();
-  await waitFor(() =>
-    expect(detail.pages[0].tables[0].rows[1][0]).toBe(
-      "第二次校对，不得被旧响应覆盖",
-    ),
-  );
-  expect(
-    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
-  ).toHaveValue("第二次校对，不得被旧响应覆盖");
-  expect(detail.pages[0].revision).toBe(3);
-  expect(detail.pages[0].originalText).toBe("原始正文");
-  fireEvent.click(screen.getByRole("button", { name: "2 场景摘录" }));
-  await screen.findByLabelText("摘录场景");
-  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
-  expect(screen.getByText("原文已修改，需要重新摘录")).toBeInTheDocument();
-});
-
 it("开始扫描只处理未完成页，横向表格默认不拆页", async () => {
   await openDocument();
   fireEvent.click(screen.getByRole("button", { name: "开始扫描" }));
@@ -430,62 +394,6 @@ it("开始扫描只处理未完成页，横向表格默认不拆页", async () =
     ).toHaveTextContent("第二页完整正文"),
   );
   expect(mocks.dispose).toHaveBeenCalled();
-});
-
-it("可编辑表格并增删行列，保存时保留初始表格与文本前导零", async () => {
-  await openDocument();
-  fireEvent.change(
-    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
-    { target: { value: "0001234567890123456789" } },
-  );
-  fireEvent.click(screen.getByRole("button", { name: "添加行" }));
-  fireEvent.click(screen.getByRole("button", { name: "添加列" }));
-  fireEvent.click(screen.getByRole("button", { name: "表格 1 删除第 1 行" }));
-  await waitFor(
-    () =>
-      expect(detail.pages[0].tables[0].rows).toEqual([
-        ["0001234567890123456789", "100.00", ""],
-        ["", "", ""],
-      ]),
-    { timeout: 2000 },
-  );
-  expect(detail.pages[0].originalTables[0].rows).toEqual([
-    ["账号", "金额"],
-    ["001", "100.00"],
-  ]);
-});
-
-it("保存失败时阻止切页并保留编辑内容", async () => {
-  await openDocument();
-  mocks.call.mockImplementationOnce(async () => {
-    throw new Error("磁盘空间不足");
-  });
-  fireEvent.change(
-    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
-    {
-      target: { value: "尚未保存的修订" },
-    },
-  );
-  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
-  await screen.findByText("磁盘空间不足");
-  expect(
-    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
-  ).toHaveValue("尚未保存的修订");
-  expect(screen.getByLabelText("当前页")).toHaveValue("1");
-});
-
-it("离开工具页时立即保存尚未触发自动保存的校对", async () => {
-  await openDocument();
-  fireEvent.change(
-    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
-    {
-      target: { value: "离开页面前刚输入的修订" },
-    },
-  );
-  cleanup();
-  await waitFor(() =>
-    expect(detail.pages[0].tables[0].rows[1][0]).toBe("离开页面前刚输入的修订"),
-  );
 });
 
 it("切换场景前保存当前提示词，并在重新选择时恢复项目版本", async () => {
@@ -613,7 +521,7 @@ it("多页逐字证据提供独立页码入口", async () => {
   fireEvent.click(screen.getByRole("button", { name: "第 2 页" }));
   await waitFor(() => expect(screen.getByLabelText("当前页")).toHaveValue("2"));
   expect(
-    await screen.findByRole("article", { name: "第 2 页原文" }),
+    await screen.findByRole("region", { name: "本页初始原文" }),
   ).toHaveTextContent("本页尚未扫描");
 });
 
@@ -630,7 +538,9 @@ it.each(["application/pdf", "image/tiff"])(
         <OcrPage />
       </MemoryRouter>,
     );
-    const entry = await screen.findByRole("button", { name: /合成扫描件.pdf/ });
+    const entry = await screen.findByRole("button", {
+      name: /^合成扫描件.pdf/,
+    });
     await waitFor(() => expect(entry).toBeEnabled());
     fireEvent.click(entry);
     await waitFor(() =>
@@ -645,7 +555,9 @@ it.each(["application/pdf", "image/tiff"])(
     await waitFor(() =>
       expect(screen.getByLabelText("当前页")).toHaveValue("2"),
     );
+    fireEvent.click(screen.getByRole("button", { name: "分页查看" }));
     await screen.findByRole("img", { name: "合成扫描件.pdf 第 2 页" });
+    fireEvent.click(screen.getByRole("button", { name: "原文查看" }));
     expect(
       await screen.findByRole("article", { name: "第 2 页原文" }),
     ).toHaveTextContent("本页尚未扫描");
@@ -723,9 +635,7 @@ it("取消自定义范围重扫不调用 OCR，不替换原有表格校对", asy
     expect(mocks.confirm).toHaveBeenCalledWith(
       expect.objectContaining({
         title: "重新扫描所选页面？",
-        message: expect.stringContaining(
-          "替换所选页面现有的识别正文及表格校对内容",
-        ),
+        message: expect.stringContaining("已有页面的识别正文及表格校对内容"),
       }),
     ),
   );
@@ -804,6 +714,7 @@ function prepareConcurrentPages(latePage?: number) {
               structureMs: 0,
               saveMs: 15,
               workerMs: 1275,
+              queueMs: 350,
             },
           });
         },
@@ -847,6 +758,8 @@ it("默认最多五页并发，乱序完成按完成数量推进，失败不阻�
   const table = screen.getByRole("table", { name: "逐页识别耗时" });
   expect(screen.getByText(/最多同时处理 5/)).toBeInTheDocument();
   expect(table).toHaveTextContent("识别请求及解析");
+  expect(table).toHaveTextContent("后台排队");
+  expect(table).toHaveTextContent("0.35 秒");
   expect(table).toHaveTextContent("1.23 秒");
   expect(table).toHaveTextContent("0.03 秒");
   vi.mocked(openOcrSource).mockResolvedValueOnce({
@@ -977,7 +890,7 @@ it.each(["2-five", "0-2", "2-3", "2-1"])(
   },
 );
 
-it("原文默认折叠，可展开收起并复制全部已扫描页的初始版本", async () => {
+it("默认分页查看，可切换全篇模式并复制全部已扫描页的初始版本", async () => {
   detail.document.totalPages = 4;
   vi.mocked(openOcrSource).mockResolvedValueOnce({
     totalPages: 4,
@@ -1001,22 +914,22 @@ it("原文默认折叠，可展开收起并复制全部已扫描页的初始版�
     expect(
       screen.queryByRole("region", { name: "全篇初始原文" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "查看原文" })).toHaveAttribute(
-      "aria-expanded",
+    expect(screen.getByRole("button", { name: "原文查看" })).toHaveAttribute(
+      "aria-pressed",
       "false",
     );
-    fireEvent.click(screen.getByRole("button", { name: "查看原文" }));
+    fireEvent.click(screen.getByRole("button", { name: "原文查看" }));
     await screen.findByRole("region", { name: "全篇初始原文" });
     fireEvent.click(screen.getByRole("button", { name: "复制全部原文" }));
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(
-        "第 1 页\n原始正文\n\n第 4 页\n第四页扫描原文",
+        "合成扫描件.pdf\n第 1 页\n原始正文\n\n第 4 页\n第四页扫描原文",
       ),
     );
     expect(
-      await screen.findByText("已复制本文件已扫描页的全部原文。"),
+      await screen.findByText("已复制所选文件已扫描页的全部原文。"),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "收起原文" }));
+    fireEvent.click(screen.getByRole("button", { name: "分页查看" }));
     expect(
       screen.queryByRole("region", { name: "全篇初始原文" }),
     ).not.toBeInTheDocument();
@@ -1048,11 +961,11 @@ it("文件区默认显示九份文件，支持展开收起，步骤导引在项�
   const files = await screen.findByRole("complementary", { name: "项目文件" });
   await waitFor(() =>
     expect(
-      within(files).getAllByRole("button", { name: /扫描件-\d+\.pdf/ }),
+      within(files).getAllByRole("button", { name: /^扫描件-\d+\.pdf/ }),
     ).toHaveLength(9),
   );
   expect(
-    within(files).queryByRole("button", { name: /扫描件-10\.pdf/ }),
+    within(files).queryByRole("button", { name: /^扫描件-10\.pdf/ }),
   ).not.toBeInTheDocument();
   const expand = within(files).getByRole("button", {
     name: "展开全部 11 份文件",
@@ -1060,13 +973,13 @@ it("文件区默认显示九份文件，支持展开收起，步骤导引在项�
   expect(expand).toHaveAttribute("aria-expanded", "false");
   fireEvent.click(expand);
   expect(
-    within(files).getAllByRole("button", { name: /扫描件-\d+\.pdf/ }),
+    within(files).getAllByRole("button", { name: /^扫描件-\d+\.pdf/ }),
   ).toHaveLength(11);
   const collapse = within(files).getByRole("button", { name: "收起文件" });
   expect(collapse).toHaveAttribute("aria-expanded", "true");
   fireEvent.click(collapse);
   expect(
-    within(files).getAllByRole("button", { name: /扫描件-\d+\.pdf/ }),
+    within(files).getAllByRole("button", { name: /^扫描件-\d+\.pdf/ }),
   ).toHaveLength(9);
   const steps = screen.getByRole("navigation", { name: "OCR 处理步骤" });
   const project = screen.getByLabelText("选择 OCR 项目");
@@ -1094,6 +1007,7 @@ it("自动方向只校正预览，重新扫描提交源图防止二次旋转", a
   expect(
     screen.queryByRole("checkbox", { name: "重新扫描所选范围内已完成页" }),
   ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "分页查看" }));
   const preview = await screen.findByRole("img", {
     name: "合成扫描件.pdf 第 1 页",
   });
@@ -1169,80 +1083,6 @@ it("查看原文按页序展示全篇、保留未扫描页，图片翻页不改�
   ).toHaveLength(4);
 });
 
-it("表格目录按页排列，跨页选择只展开单张表格并保存对应页修改", async () => {
-  detail.pages[0].tables.push({
-    id: "t2",
-    title: "第二明细",
-    rows: [["项目"], ["首页第二表"]],
-  });
-  detail.pages.push({
-    ...structuredClone(detail.pages[0]),
-    page: 2,
-    tables: [
-      {
-        id: "t3",
-        title: "宽表",
-        rows: [
-          Array.from({ length: 12 }, (_, i) => `字段${i + 1}`),
-          Array.from({ length: 12 }, (_, i) => `值${i + 1}`),
-        ],
-      },
-    ],
-  });
-  await openDocument();
-  const directory = screen.getByRole("region", { name: "表格目录" });
-  const entries = within(directory).getAllByRole("button");
-  expect(
-    entries.map((entry) => entry.textContent?.replace(/\s+/g, " ").trim()),
-  ).toEqual([
-    expect.stringContaining("第 1 页"),
-    expect.stringContaining("第 1 页"),
-    expect.stringContaining("第 2 页"),
-  ]);
-  expect(
-    within(directory).getByRole("button", {
-      name: /第 1 页.*明细表.*2 行.*2 列/,
-    }),
-  ).toBeInTheDocument();
-  expect(
-    screen.queryByRole("textbox", { name: "表格 2 名称" }),
-  ).not.toBeInTheDocument();
-  fireEvent.click(
-    within(directory).getByRole("button", {
-      name: /第 1 页.*第二明细.*2 行.*1 列/,
-    }),
-  );
-  await screen.findByRole("textbox", { name: "表格 2 名称" });
-  expect(
-    screen.queryByRole("textbox", { name: "表格 1 名称" }),
-  ).not.toBeInTheDocument();
-  fireEvent.click(
-    within(directory).getByRole("button", {
-      name: /第 2 页.*宽表.*2 行.*12 列/,
-    }),
-  );
-  await waitFor(() => expect(screen.getByLabelText("当前页")).toHaveValue("2"));
-  expect(screen.getByRole("textbox", { name: "表格 1 名称" })).toHaveValue(
-    "宽表",
-  );
-  expect(
-    screen.queryByRole("textbox", { name: "表格 2 名称" }),
-  ).not.toBeInTheDocument();
-  const cell = screen.getByRole("textbox", { name: "表格 1 第 2 行第 12 列" });
-  expect(cell.closest(".ocr-table-scroll")).toBeInTheDocument();
-  fireEvent.change(cell, { target: { value: "跨页修订" } });
-  await waitFor(
-    () =>
-      expect(
-        detail.pages.find((page) => page.page === 2)?.tables[0].rows[1][11],
-      ).toBe("跨页修订"),
-    { timeout: 2000 },
-  );
-  expect(
-    detail.pages.find((page) => page.page === 1)?.tables[0].rows[1][0],
-  ).toBe("001");
-});
-
 it.each(["single_sheet", "per_document", "individual"])(
   "文件区全选包含收起文件，按勾选范围以 %s 导出且不改变查看文件",
   async (mode) => {
@@ -1252,11 +1092,15 @@ it.each(["single_sheet", "per_document", "individual"])(
       id: index ? `d-${index + 1}` : "d",
       name: index ? `批次-${index + 1}.pdf` : detail.document.name,
     }));
-    mocks.call.mockImplementation((method, params) =>
-      method === "ocr.documents"
-        ? { documents: docs }
-        : baseCall(method, params),
-    );
+    mocks.call.mockImplementation((method, params) => {
+      if (method === "ocr.documents") return { documents: docs };
+      if (method === "ocr.document")
+        return {
+          ...structuredClone(detail),
+          document: docs.find((doc) => doc.id === params.documentId),
+        };
+      return baseCall(method, params);
+    });
     await openDocument();
     const all = screen.getByRole("checkbox", { name: "全选项目文件" });
     fireEvent.click(all);
@@ -1271,11 +1115,14 @@ it.each(["single_sheet", "per_document", "individual"])(
     );
     expect(all).toBePartiallyChecked();
     expect(
-      screen.getByRole("heading", { name: "合成扫描件.pdf" }),
+      screen.getByRole("heading", { name: "已选 11 份文件" }),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "导出所选文件" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出文件" }));
     const dialog = await screen.findByRole("dialog", { name: "导出文件" });
-    expect(within(dialog).getByLabelText("导出范围")).toHaveValue("selected");
+    expect(
+      within(dialog).getByText("本次导出：已选 11 份文件"),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("导出范围")).not.toBeInTheDocument();
     const radios = within(dialog).getAllByRole("radio");
     fireEvent.click(
       radios.find((radio) => (radio as HTMLInputElement).value === mode)!,
@@ -1299,9 +1146,14 @@ it.each(["single_sheet", "per_document", "individual"])(
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
-    fireEvent.click(screen.getByRole("button", { name: "清空选择" }));
+    fireEvent.click(all);
+    fireEvent.click(all);
     expect(all).not.toBeChecked();
-    expect(screen.getByRole("button", { name: "导出所选文件" })).toBeDisabled();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "导出文件" }),
+      ).not.toBeInTheDocument(),
+    );
   },
 );
 
@@ -1315,4 +1167,540 @@ it("导出对话框取消不选择目录也不派发任务", async () => {
   );
   expect(mocks.pick).not.toHaveBeenCalled();
   expect(mocks.job).not.toHaveBeenCalled();
+});
+
+/** 多文件必须使用独立、可变的存储夹具，避免把同一份文档伪装成批量。 */
+function batchFixture() {
+  const template = structuredClone(detail.pages[0]);
+  const records = new Map<string, OcrDocumentDetail>([
+    ["d", detail],
+    [
+      "d2",
+      {
+        ...structuredClone(detail),
+        document: { ...detail.document, id: "d2", name: "第二合同.pdf" },
+        pages: [],
+        extractions: [],
+      },
+    ],
+    [
+      "d3",
+      {
+        ...structuredClone(detail),
+        document: { ...detail.document, id: "d3", name: "未勾选合同.pdf" },
+        pages: [],
+        extractions: [],
+      },
+    ],
+  ]);
+  const baseCall = mocks.call.getMockImplementation()!;
+  mocks.call.mockImplementation(async (method, params) => {
+    if (method === "ocr.documents")
+      return {
+        documents: [...records.values()].map((value) =>
+          structuredClone(value.document),
+        ),
+      };
+    const record = records.get(params?.documentId);
+    if (method === "ocr.document") return structuredClone(record);
+    if (method === "ocr.document_prepare") {
+      record!.document.totalPages = params.totalPages;
+      return structuredClone(record!.document);
+    }
+    if (method === "ocr.document_delete") {
+      records.delete(params.documentId);
+      return {};
+    }
+    if (method === "ocr.extraction_save") {
+      const item = {
+        ...params,
+        id: `extraction-${params.documentId}`,
+        createdAt: "2026-10-27",
+      };
+      record!.extractions.push(item);
+      return item;
+    }
+    if (method === "ocr.page_save") {
+      const page = {
+        ...structuredClone(params.page),
+        revision: params.expectedRevision + 1,
+      };
+      record!.pages = record!.pages.map((item) =>
+        item.page === page.page ? page : item,
+      );
+      record!.document.revision++;
+      return page;
+    }
+    return baseCall(method, params);
+  });
+  vi.mocked(openOcrSource).mockImplementation(async (doc) => ({
+    totalPages: doc.totalPages,
+    render: mocks.renderSource,
+    dispose: mocks.dispose,
+  }));
+  const baseJob = mocks.job.getMockImplementation()!;
+  const scanJob = async (
+    method: string,
+    params: any,
+    onJob?: (id: string) => void,
+  ) => {
+    if (method !== "ocr.recognize_page") return baseJob(method, params, onJob);
+    onJob?.(`scan-${params.documentId}-${params.page}`);
+    const record = records.get(params.documentId)!;
+    const page = {
+      ...structuredClone(template),
+      page: params.page,
+      originalText: `${record.document.name}第${params.page}页原文`,
+      text: `${record.document.name}第${params.page}页原文`,
+    };
+    record.pages = [
+      ...record.pages.filter((item) => item.page !== page.page),
+      page,
+    ];
+    return page;
+  };
+  mocks.job.mockImplementation(scanJob);
+  return { records, scanJob };
+}
+async function selectSecond() {
+  fireEvent.click(
+    screen.getByRole("checkbox", { name: "选择文件：第二合同.pdf" }),
+  );
+  await screen.findByRole("heading", { name: "已选 2 份文件" });
+  await waitFor(() =>
+    expect(screen.getByLabelText("当前查看文件")).toHaveValue("d"),
+  );
+}
+
+it("多选开始扫描覆盖全部勾选文件，未选文件不派发，已有完成页跳过", async () => {
+  const { records } = batchFixture();
+  await openDocument(false);
+  await selectSecond();
+  fireEvent.click(screen.getByRole("button", { name: "开始扫描" }));
+  await waitFor(() =>
+    expect(
+      mocks.job.mock.calls.filter(
+        ([method]) => method === "ocr.recognize_page",
+      ),
+    ).toHaveLength(3),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "开始扫描" })).toBeEnabled(),
+  );
+  expect(
+    mocks.job.mock.calls.map(([, params]) => [params.documentId, params.page]),
+  ).toEqual([
+    ["d", 2],
+    ["d2", 1],
+    ["d2", 2],
+  ]);
+  expect(records.get("d2")!.pages).toHaveLength(2);
+  expect(records.get("d3")!.pages).toHaveLength(0);
+  expect(
+    screen.getByRole("heading", { name: "已选 2 份文件" }),
+  ).toBeInTheDocument();
+});
+
+it("一个文件扫描失败仍继续其他所选文件，再扫描只补未完成页", async () => {
+  const { scanJob, records } = batchFixture();
+  let fail = true;
+  mocks.job.mockImplementation(async (method, params, onJob) => {
+    if (fail && params.documentId === "d") {
+      fail = false;
+      throw new Error("合成服务失败");
+    }
+    return scanJob(method, params, onJob);
+  });
+  await openDocument(false);
+  await selectSecond();
+  fireEvent.click(screen.getByRole("button", { name: "开始扫描" }));
+  await screen.findByText(/合成服务失败/);
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "开始扫描" })).toBeEnabled(),
+  );
+  expect(records.get("d2")!.pages).toHaveLength(2);
+  const calls = mocks.job.mock.calls.length;
+  fireEvent.click(screen.getByRole("button", { name: "开始扫描" }));
+  await waitFor(() => expect(mocks.job).toHaveBeenCalledTimes(calls + 1));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "开始扫描" })).toBeEnabled(),
+  );
+  expect(mocks.job.mock.calls.at(-1)![1]).toMatchObject({
+    documentId: "d",
+    page: 2,
+  });
+});
+
+it("批量自定义范围逐份裁剪越界页，仅确认一次覆盖并报告短文件", async () => {
+  const { records } = batchFixture();
+  records.get("d2")!.document.totalPages = 1;
+  await openDocument(false);
+  await selectSecond();
+  fireEvent.change(screen.getByLabelText("扫描范围"), {
+    target: { value: "custom" },
+  });
+  fireEvent.change(screen.getByLabelText("扫描页码"), {
+    target: { value: "1-5" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "开始扫描" }));
+  await waitFor(() => expect(mocks.job).toHaveBeenCalledTimes(3));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "开始扫描" })).toBeEnabled(),
+  );
+  expect(mocks.confirm).toHaveBeenCalledTimes(1);
+  expect(
+    mocks.job.mock.calls.map(([, params]) => [params.documentId, params.page]),
+  ).toEqual([
+    ["d", 1],
+    ["d", 2],
+    ["d2", 1],
+  ]);
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "仅扫描本文件存在的页码",
+  );
+});
+
+it("预览切换不改变批量范围，全篇模式包含所选文件，卡片点击恢复单文件操作", async () => {
+  const { records } = batchFixture();
+  records.get("d2")!.pages = [
+    { ...structuredClone(detail.pages[0]), originalText: "第二合同独立正文" },
+  ];
+  await openDocument(false);
+  await selectSecond();
+  fireEvent.change(screen.getByLabelText("当前查看文件"), {
+    target: { value: "d2" },
+  });
+  await screen.findByRole("img", { name: "第二合同.pdf 第 1 页" });
+  expect(screen.getByText("已选 2 / 3 份")).toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "导出文件" })).toHaveLength(1);
+  expect(
+    within(screen.getByRole("complementary", { name: "项目文件" })).queryByRole(
+      "button",
+      { name: "导出文件" },
+    ),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "原文查看" }));
+  const text = await screen.findByRole("region", { name: "全篇初始原文" });
+  expect(text).toHaveTextContent("原始正文");
+  expect(text).toHaveTextContent("第二合同独立正文");
+  expect(text).not.toHaveTextContent("未勾选合同");
+  fireEvent.click(screen.getByRole("button", { name: "分页查看" }));
+  expect(
+    screen.getByRole("region", { name: "本页初始原文" }),
+  ).toHaveTextContent("第二合同独立正文");
+  fireEvent.click(
+    within(screen.getByRole("complementary", { name: "项目文件" })).getByRole(
+      "button",
+      { name: /^第二合同.pdf/ },
+    ),
+  );
+  await waitFor(() =>
+    expect(screen.queryByLabelText("当前查看文件")).not.toBeInTheDocument(),
+  );
+  expect(screen.getByText("已选 1 / 3 份")).toBeInTheDocument();
+});
+
+it("卡片删除独立于选择，删除后移除范围并切换到剩余文件", async () => {
+  const { records } = batchFixture();
+  await openDocument(false);
+  await selectSecond();
+  fireEvent.click(
+    screen.getByRole("button", { name: "删除文件：合成扫描件.pdf" }),
+  );
+  await waitFor(() => expect(records.has("d")).toBe(false));
+  await screen.findByRole("heading", { name: "第二合同.pdf" });
+  expect(screen.getByText("已选 1 / 2 份")).toBeInTheDocument();
+  expect(screen.queryByLabelText("当前查看文件")).not.toBeInTheDocument();
+  expect(mocks.confirm).toHaveBeenCalledTimes(1);
+});
+
+it("统一上传区内选择文件夹与文件共用原生拖放区域", async () => {
+  await openDocument(false);
+  const upload = screen
+    .getByRole("button", { name: "导入文件" })
+    .closest(".file-drop-input")!;
+  const folder = within(upload as HTMLElement).getByRole("button", {
+    name: "选择文件夹",
+  });
+  mocks.pick.mockResolvedValueOnce("C:/合成扫描目录");
+  fireEvent.click(folder);
+  await waitFor(() =>
+    expect(mocks.call).toHaveBeenCalledWith("ocr.document_import", {
+      projectId: "p",
+      paths: [],
+      folder: "C:/合成扫描目录",
+    }),
+  );
+});
+
+it("批量场景摘录逐文件使用同一提示词快照并分开保存结果，跳过未扫描文件", async () => {
+  const { records } = batchFixture();
+  records.get("d2")!.pages = [
+    {
+      ...structuredClone(detail.pages[0]),
+      originalText: "第二合同证据",
+      text: "第二合同证据",
+    },
+  ];
+  await openDocument(false);
+  await selectSecond();
+  fireEvent.click(
+    screen.getByRole("checkbox", { name: "选择文件：未勾选合同.pdf" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  const scene = await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(scene).toBeEnabled());
+  fireEvent.change(scene, { target: { value: "loan_general" } });
+  const prompt = await screen.findByLabelText("条款提取提示词");
+  await waitFor(() => expect(prompt).toBeEnabled());
+  fireEvent.change(prompt, { target: { value: "逐文件摘录并保留来源页码" } });
+  fireEvent.click(screen.getByRole("button", { name: "开始摘录" }));
+  await waitFor(() => expect(mocks.extract).toHaveBeenCalledTimes(2));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled(),
+  );
+  expect(
+    mocks.extract.mock.calls.map(([params]) => params.document.id),
+  ).toEqual(["d", "d2"]);
+  expect(
+    mocks.extract.mock.calls.every(
+      ([params]) => params.stages[0].prompt === "逐文件摘录并保留来源页码",
+    ),
+  ).toBe(true);
+  expect(records.get("d2")!.extractions).toHaveLength(1);
+  expect(records.get("d3")!.extractions).toHaveLength(0);
+  expect(screen.getByRole("alert")).toHaveTextContent("尚未扫描，已跳过");
+  expect(
+    screen.getByRole("heading", { name: /第二合同.pdf.*借款通用条款/ }),
+  ).toBeInTheDocument();
+});
+
+it("批量摘录来源页定位正确文件，仍保留全部勾选文件", async () => {
+  const { records } = batchFixture();
+  records.get("d2")!.pages = [structuredClone(detail.pages[0])];
+  records.get("d2")!.extractions = [
+    {
+      ...structuredClone(detail.extractions[0]),
+      id: "second-evidence",
+      columns: [{ key: "sourcePage", label: "来源页码" }],
+      rows: [{ sourcePage: "2" }],
+    },
+  ];
+  await openDocument(false);
+  await selectSecond();
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "第 2 页" }));
+  await screen.findByRole("img", { name: "第二合同.pdf 第 2 页" });
+  expect(screen.getByLabelText("当前查看文件")).toHaveValue("d2");
+  expect(
+    screen.getByRole("heading", { name: "已选 2 份文件" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("region", { name: "本页初始原文" }),
+  ).toHaveTextContent("尚未扫描");
+});
+
+it("批量扫描取消不会再派发下一份文件，当前已保存页保留", async () => {
+  batchFixture();
+  let rejectJob: ((reason: unknown) => void) | undefined;
+  mocks.job.mockImplementation(async (_method, _params, onJob) => {
+    onJob?.("batch-active");
+    await new Promise((_resolve, reject) => {
+      rejectJob = reject;
+    });
+  });
+  await openDocument(false);
+  await selectSecond();
+  fireEvent.click(screen.getByRole("button", { name: "开始扫描" }));
+  await screen.findByRole("button", { name: "取消任务" });
+  fireEvent.click(screen.getByRole("button", { name: "取消任务" }));
+  await waitFor(() =>
+    expect(mocks.cancel).toHaveBeenCalledWith("batch-active"),
+  );
+  await act(async () => rejectJob!(new Error("任务已取消")));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "开始扫描" })).toBeEnabled(),
+  );
+  expect(mocks.job).toHaveBeenCalledTimes(1);
+  expect(detail.pages).toHaveLength(1);
+});
+
+it("移除尾部表格目录与编辑器，但保留历史识别表格并继续支持导出", async () => {
+  const storedTables = structuredClone(detail.pages[0].tables);
+  await openDocument(false);
+  expect(
+    screen.queryByRole("region", { name: "表格目录" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("region", { name: "表格编辑器" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("region", { name: "已识别表格校对" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("textbox", { name: /表格.*名称/ }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await waitFor(() => expect(screen.getByLabelText("当前页")).toHaveValue("2"));
+  fireEvent.click(screen.getByRole("button", { name: "导出文件" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "选择目录并导出" }),
+  );
+  await waitFor(() =>
+    expect(mocks.job).toHaveBeenCalledWith(
+      "ocr.export",
+      expect.objectContaining({ documentIds: ["d"] }),
+      expect.any(Function),
+      expect.any(Function),
+    ),
+  );
+  expect(detail.pages[0].tables).toEqual(storedTables);
+  expect(
+    mocks.call.mock.calls.some(([method]) => method === "ocr.page_save"),
+  ).toBe(false);
+});
+
+it("清空文件一次确认删除项目全部文件，包括未勾选项，保留项目和提示词", async () => {
+  const { records } = batchFixture();
+  await openDocument(false);
+  fireEvent.click(screen.getByRole("button", { name: "清空文件" }));
+  await waitFor(() => expect(records.size).toBe(0));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("complementary", { name: "项目文件" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(mocks.confirm).toHaveBeenCalledWith(
+    expect.objectContaining({
+      title: "清空项目内全部 3 份文件？",
+      message: expect.stringContaining("包括未勾选文件"),
+    }),
+  );
+  expect(mocks.confirm).toHaveBeenCalledTimes(1);
+  expect(
+    mocks.call.mock.calls
+      .filter(([method]) => method === "ocr.document_delete")
+      .map(([, params]) => params.documentId),
+  ).toEqual(["d", "d2", "d3"]);
+  expect(
+    mocks.call.mock.calls.some(([method]) => method === "ocr.project_delete"),
+  ).toBe(false);
+  expect(screen.getByLabelText("选择 OCR 项目")).toHaveValue("p");
+  expect(screen.queryByLabelText("当前查看文件")).not.toBeInTheDocument();
+});
+
+it("取消清空文件保留所有文件与勾选状态", async () => {
+  const { records } = batchFixture();
+  mocks.confirm.mockResolvedValue(false);
+  await openDocument(false);
+  fireEvent.click(screen.getByRole("button", { name: "清空文件" }));
+  await waitFor(() => expect(mocks.confirm).toHaveBeenCalled());
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "清空文件" })).toBeEnabled(),
+  );
+  expect(records.size).toBe(3);
+  expect(
+    screen.getByRole("checkbox", { name: "选择文件：合成扫描件.pdf" }),
+  ).toBeChecked();
+  expect(
+    mocks.call.mock.calls.some(([method]) => method === "ocr.document_delete"),
+  ).toBe(false);
+});
+
+it("清空文件部分失败保留失败文件并继续清理其余文件", async () => {
+  const { records } = batchFixture();
+  const baseCall = mocks.call.getMockImplementation()!;
+  mocks.call.mockImplementation(async (method, params) => {
+    if (method === "ocr.document_delete" && params.documentId === "d2")
+      throw new Error("文件占用");
+    return baseCall(method, params);
+  });
+  await openDocument(false);
+  await selectSecond();
+  fireEvent.click(screen.getByRole("button", { name: "清空文件" }));
+  await screen.findByText(/第二合同.pdf：文件占用/);
+  await waitFor(() => expect([...records.keys()]).toEqual(["d2"]));
+  await screen.findByRole("heading", { name: "第二合同.pdf" });
+  expect(
+    screen.getByRole("checkbox", { name: "选择文件：第二合同.pdf" }),
+  ).toBeChecked();
+  expect(screen.getByText("已选 1 / 1 份")).toBeInTheDocument();
+});
+
+it("翻页按钮相邻，工作区不再显示操作范围卡片", async () => {
+  batchFixture();
+  await openDocument(false);
+  await selectSecond();
+  const navigation = screen.getByRole("group", { name: "分页导航" });
+  const previous = within(navigation).getByRole("button", { name: "上一页" });
+  expect(previous.nextElementSibling).toBe(
+    within(navigation).getByRole("button", { name: "下一页" }),
+  );
+  expect(screen.queryByText(/^操作范围：/)).not.toBeInTheDocument();
+  const files = screen.getByRole("complementary", { name: "项目文件" });
+  expect(
+    within(files).getByText(/扫描、导出和场景摘录均针对勾选文件/),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "清空选择" }),
+  ).not.toBeInTheDocument();
+});
+
+it("未上传时只显示完整拖入区，导入后才显示文件列表和预览工作区", async () => {
+  let imported = false;
+  const baseCall = mocks.call.getMockImplementation()!;
+  mocks.call.mockImplementation(async (method, params) => {
+    if (method === "ocr.documents")
+      return { documents: imported ? [structuredClone(detail.document)] : [] };
+    if (method === "ocr.document_import") imported = true;
+    return baseCall(method, params);
+  });
+  render(
+    <MemoryRouter>
+      <OcrPage />
+    </MemoryRouter>,
+  );
+  const upload = await screen.findByRole("button", { name: "导入文件" });
+  expect(screen.getByText("拖入扫描件或文件夹")).toBeInTheDocument();
+  expect(screen.getByText("或点击选择文件，支持多选")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "选择文件夹" })).toBeEnabled();
+  expect(
+    screen.queryByRole("complementary", { name: "项目文件" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("heading", { name: "选择需要处理的文件" }),
+  ).not.toBeInTheDocument();
+  mocks.pick.mockResolvedValueOnce(["C:/扫描件/新文件.pdf"]);
+  fireEvent.click(upload);
+  await screen.findByRole("complementary", { name: "项目文件" });
+  await screen.findByRole("button", { name: "开始扫描" });
+  expect(screen.queryByText("拖入扫描件或文件夹")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "导入文件" })).toHaveTextContent(
+    "已导入 1 份文件",
+  );
+});
+
+it("在摘录步骤删除最后一份文件后，回到完整上传区且不显示空列表和空预览", async () => {
+  const { records } = batchFixture();
+  records.delete("d2");
+  records.delete("d3");
+  await openDocument(false);
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  const scene = await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(scene).toBeEnabled());
+  fireEvent.click(
+    screen.getByRole("button", { name: "删除文件：合成扫描件.pdf" }),
+  );
+  await screen.findByText("拖入扫描件或文件夹");
+  expect(
+    screen.queryByRole("complementary", { name: "项目文件" }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("摘录场景")).not.toBeInTheDocument();
+  expect(screen.queryByRole("main")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "1 原文识别" })).toHaveAttribute(
+    "aria-current",
+    "step",
+  );
 });

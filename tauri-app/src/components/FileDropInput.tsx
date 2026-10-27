@@ -16,6 +16,8 @@ export type FileDropInputProps = {
   hideFilledLabel?: boolean;
   disabled?: boolean;
   placeholder?: string;
+  /** 空状态的图标与上传引导，仍使用同一个可点击、可聚焦的选择入口。 */
+  emptyContent?: ReactNode;
   /** 点击选择文件 */
   onBrowse: () => void;
   /** 悬停状态由父组件的原生拖放监听同步；本框也提供 DOM 事件回调。 */
@@ -27,6 +29,8 @@ export type FileDropInputProps = {
   /** DOM ref used by multi-slot pages to hit-test the native drop coordinates. */
   containerRef?: Ref<HTMLDivElement>;
   description?: ReactNode;
+  /** 与主文件选择入口同属一个拖放区域的辅助操作。 */
+  actions?: ReactNode;
   invalid?: ReactNode;
   ariaLabel?: string;
   className?: string;
@@ -79,18 +83,22 @@ export function FileDropInput({
   hideFilledLabel,
   disabled,
   placeholder,
+  emptyContent,
   onBrowse,
   onDragStateChange,
   highlight,
   onClear,
   containerRef,
   description,
+  actions,
   invalid,
   ariaLabel,
   className,
 }: FileDropInputProps) {
   const generatedId = useId();
-  const helpId = description ? `file-drop-${generatedId}-description` : undefined;
+  const helpId = description
+    ? `file-drop-${generatedId}-description`
+    : undefined;
   const errorId = invalid ? `file-drop-${generatedId}-error` : undefined;
   const describedBy = [helpId, errorId].filter(Boolean).join(" ") || undefined;
   return (
@@ -109,7 +117,12 @@ export function FileDropInput({
       onDrop={() => onDragStateChange(false)}
     >
       {value ? (
-        <div className={cn("file-drop-slot filled", hideFilledLabel && "without-label")}>
+        <div
+          className={cn(
+            "file-drop-slot filled",
+            hideFilledLabel && "without-label",
+          )}
+        >
           {!hideFilledLabel && (
             <span className="file-drop-slot-label">
               {filledSlotLabel(placeholder)}
@@ -149,11 +162,20 @@ export function FileDropInput({
           aria-describedby={describedBy}
           aria-invalid={Boolean(invalid) || undefined}
         >
-          <strong>{placeholder ?? "拖放文件到窗口"}</strong>
+          {emptyContent ?? <strong>{placeholder ?? "拖放文件到窗口"}</strong>}
         </button>
       )}
-      {description ? <p id={helpId} className="file-input-description">{description}</p> : null}
-      {invalid ? <p id={errorId} className="file-input-error" role="alert">{invalid}</p> : null}
+      {actions ? <div className="file-drop-actions">{actions}</div> : null}
+      {description ? (
+        <p id={helpId} className="file-input-description">
+          {description}
+        </p>
+      ) : null}
+      {invalid ? (
+        <p id={errorId} className="file-input-error" role="alert">
+          {invalid}
+        </p>
+      ) : null}
     </div>
   );
 }

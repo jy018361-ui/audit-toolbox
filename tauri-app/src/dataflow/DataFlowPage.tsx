@@ -36,7 +36,8 @@ function timeNow(): string {
 
 /**
  * 数据流 DataFlow 工作区：顶部分类工具栏＋画布＋左侧配置区＋底部结果区。
- * 第一期提供 8 个节点（输入 2、整理 3、筛选 1、输出 2），预览/全量运行经
+ * 第一期 8 个节点＋二期补齐 12 个（关联/合并/去重/排序/汇总/透视/宽转长/分列/
+ * 检查/手工输入/数据库输入/Parquet 输入）全部可用；预览/全量/运行到选中节点经
  * engine_call 的 dataflow_preview / dataflow_run 与 Rust 引擎交互。
  */
 export function DataFlowPage({ tool }: { tool: ToolManifest }) {
@@ -47,6 +48,8 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   const [selection, setSelection] = useState<DataflowSelection>(null);
   const [runResult, setRunResult] = useState<DataflowRunResult | null>(null);
   const [lastRunMode, setLastRunMode] = useState<"preview" | "full" | null>(null);
+  /** 「运行到选中节点」时记录目标节点 id，其余运行方式为 null。 */
+  const [ranUpTo, setRanUpTo] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [statusText, setStatusText] = useState("就绪 · 编辑过程会自动保存草稿到本机。");
   const [error, setError] = useState("");
@@ -207,22 +210,30 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   });
 
-  async function runFlow(mode: "preview" | "full") {
+  async function runFlow(mode: "preview" | "full", uptoNodeId?: string) {
     if (running) return;
     const wf = workflowRef.current;
     if (!wf.nodes.length) {
       setStatusText("画布还没有节点，请先从上方分类菜单添加。");
       return;
     }
+    if (uptoNodeId && !wf.nodes.some((node) => node.id === uptoNodeId)) return;
     setRunning(true);
     setError("");
-    setStatusText(mode === "preview" ? "正在预览运行（样本数据）…" : "正在全量运行…");
+    setRanUpTo(null);
+    setStatusText(
+      uptoNodeId
+        ? `正在运行到所选节点（全量数据，只执行到该节点为止）…`
+        : mode === "preview"
+          ? "正在预览运行（样本数据）…"
+          : "正在全量运行…",
+    );
     const overrides = Object.fromEntries(wf.params.map((param) => [param.id, param.value]));
     try {
       const raw =
         mode === "preview"
           ? await dataflowPreview(wf, overrides)
-          : await dataflowRun(wf, overrides);
+          : await dataflowRun(wf, overrides, uptoNodeId);
       const parsed = DataflowRunResultSchema.safeParse(raw);
       if (!parsed.success) {
         setError("引擎返回的数据不符合数据流契约，请更新应用后重试。");
@@ -231,14 +242,17 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
       }
       setRunResult(parsed.data);
       setLastRunMode(mode);
+      if (uptoNodeId) setRanUpTo(uptoNodeId);
       if (parsed.data.error) setError(errorText(parsed.data.error));
       const statuses = Object.values(parsed.data.nodes);
       const warns = statuses.filter((item) => item.status === "warn").length;
       const errors = statuses.filter((item) => item.status === "error").length;
       setStatusText(
-        mode === "preview"
-          ? `上次运行：预览运行（样本数据）· 警告 ${warns} 项、失败 ${errors} 项`
-          : `上次运行：全量运行 · 警告 ${warns} 项、失败 ${errors} 项、输出 ${parsed.data.outputs.length} 个文件`,
+        uptoNodeId
+          ? `上次运行：全量运行到「${wf.nodes.find((node) => node.id === uptoNodeId)?.name ?? uptoNodeId}」· 警告 ${warns} 项、失败 ${errors} 项`
+          : mode === "preview"
+            ? `上次运行：预览运行（样本数据）· 警告 ${warns} 项、失败 ${errors} 项`
+            : `上次运行：全量运行 · 警告 ${warns} 项、失败 ${errors} 项、输出 ${parsed.data.outputs.length} 个文件`,
       );
     } catch (caught) {
       setError(errorText(caught));
@@ -278,6 +292,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     setSelection(null);
     setRunResult(null);
     setLastRunMode(null);
+    setRanUpTo(null);
     setError("");
     setStatusText(`已打开流程《${parsed.workflow.name}》（来自 ${picked.fileName}）。`);
     if (parsed.workflow.params.length) setParamsDialog("confirm");
@@ -302,6 +317,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     setSelection(null);
     setRunResult(null);
     setLastRunMode(null);
+    setRanUpTo(null);
     setStatusText(`已恢复草稿《${draftPrompt.name}》（保存于 ${draftPrompt.savedAt.replace("T", " ").slice(0, 19)}）。`);
     setDraftPrompt(null);
   }
@@ -366,6 +382,10 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
           onOpen={() => void handleOpen()}
           onPreviewRun={() => void runFlow("preview")}
           onFullRun={() => void runFlow("full")}
+          onRunToNode={() => {
+            if (selection?.kind === "node") void runFlow("full", selection.id);
+          }}
+          canRunToNode={selection?.kind === "node"}
           running={running}
         />
         <div className="df-main">
@@ -400,13 +420,17 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
           {runResult && lastRunMode && (
             <div
               className={`df-banner ${
-                lastRunMode === "preview" ? "df-banner-preview" : "df-banner-full"
+                lastRunMode === "preview" && !ranUpTo ? "df-banner-preview" : "df-banner-full"
               }`}
               role="status"
             >
-              {lastRunMode === "preview"
-                ? "预览模式 · 样本数据（每输入前 1,000 行）——预览不写输出文件，结果不代表全量"
-                : "全量运行完成 · 输出已写入文件（详见输出节点与消息页签）"}
+              {ranUpTo
+                ? `已运行到所选节点「${
+                    workflow.nodes.find((node) => node.id === ranUpTo)?.name ?? ranUpTo
+                  }」，其后节点未执行`
+                : lastRunMode === "preview"
+                  ? "预览模式 · 样本数据（每输入前 1,000 行）——预览不写输出文件，结果不代表全量"
+                  : "全量运行完成 · 输出已写入文件（详见输出节点与消息页签）"}
             </div>
           )}
           <DataflowCanvas

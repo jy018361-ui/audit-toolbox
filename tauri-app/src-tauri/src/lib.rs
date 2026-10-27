@@ -59,6 +59,7 @@ mod xls_sample;
 
 use directories::ProjectDirs;
 use parking_lot::Mutex;
+mod job_dispatch;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -609,6 +610,35 @@ async fn engine_call(
                 Some(e.to_string()),
             )
         })?
+    } else if method == "dataflow_db_tables" {
+        let target = params
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if !allowed
+            .0
+            .lock()
+            .iter()
+            .any(|path| path_is_permitted(&PathBuf::from(&target), path))
+        {
+            return Err(AppError::new(
+                "PATH_NOT_AUTHORIZED",
+                "请先在工具中选择该数据库文件。",
+                false,
+                None,
+            ));
+        }
+        tauri::async_runtime::spawn_blocking(move || dataflow::db_tables(&target))
+            .await
+            .map_err(|e| {
+                AppError::new(
+                    "RUST_TASK_FAILED",
+                    "数据库表清单读取异常结束。",
+                    true,
+                    Some(e.to_string()),
+                )
+            })?
     } else {
         Err(AppError::new(
             "METHOD_NOT_FOUND",

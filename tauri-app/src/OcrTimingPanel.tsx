@@ -46,7 +46,7 @@ export function OcrTimingPanel({ run }: { run: OcrTimingRun }) {
       <p className="ocr-muted">
         最多同时处理 {OCR_CONCURRENCY}{" "}
         页；总耗时为实际经过时间，包含暂停。各页耗时会重叠，不能相加作为总耗时。
-        任务往返包含提交、进程启动和后端处理；任务提交与后端阶段也可能重叠。表格处理可能包含额外的
+        任务往返包含后台排队、提交、进程启动和后端处理；后台排队与后端识别分开计时，任务提交与后端阶段也可能重叠。表格处理可能包含额外的
         AI 请求。失败或旧版后端未返回的阶段显示“—”。
       </p>
       <div className="ocr-timing-scroll">
@@ -60,6 +60,7 @@ export function OcrTimingPanel({ run }: { run: OcrTimingRun }) {
                 "渲染",
                 "任务往返",
                 "任务提交",
+                "后台排队",
                 "准备数据",
                 "图片处理",
                 "识别请求及解析",
@@ -89,6 +90,7 @@ export function OcrTimingPanel({ run }: { run: OcrTimingRun }) {
                 <td>{seconds(page.renderMs)}</td>
                 <td>{seconds(page.taskMs)}</td>
                 <td>{seconds(page.startMs)}</td>
+                <td>{seconds(page.worker?.queueMs)}</td>
                 <td>{seconds(page.worker?.setupMs)}</td>
                 <td>{seconds(page.worker?.imageMs)}</td>
                 <td>{seconds(page.worker?.recognitionMs)}</td>

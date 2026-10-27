@@ -85,6 +85,10 @@ it("reports elapsed time when submission fails and rejects invalid stage timings
   const timings = { setupMs: 1, imageMs: 2, recognitionMs: 30, structureMs: 0, saveMs: 3, workerMs: 40 };
   mocks.engineCall.mockResolvedValueOnce({ ...page, timings });
   await expect(ocrCall("ocr.recognize_page", {})).resolves.toEqual({ ...page, timings });
+  mocks.engineCall.mockResolvedValueOnce({ ...page, timings: { ...timings, queueMs: 125 } });
+  await expect(ocrCall("ocr.recognize_page", {})).resolves.toEqual({ ...page, timings: { ...timings, queueMs: 125 } });
+  mocks.engineCall.mockResolvedValueOnce({ ...page, timings: { ...timings, queueMs: -1 } });
+  await expect(ocrCall("ocr.recognize_page", {})).rejects.toThrow("数据格式不完整");
   mocks.engineCall.mockResolvedValueOnce({ ...page, timings: { ...timings, recognitionMs: -1 } });
   await expect(ocrCall("ocr.recognize_page", {})).rejects.toThrow("数据格式不完整");
 });

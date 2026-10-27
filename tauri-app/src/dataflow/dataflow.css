@@ -850,3 +850,28 @@ textarea.df-in {
   font-size: var(--fs-xs);
   color: var(--danger-fg);
 }
+
+/* ===== 二期节点配置表单补充 ===== */
+/* 手工输入内嵌小表编辑器（列定义 + 数据网格）。 */
+.df-mini-grid {
+  display: grid;
+  gap: 2px;
+}
+.df-mini-row {
+  display: flex;
+  gap: var(--sp-1);
+  align-items: center;
+}
+.df-mini-row .df-in {
+  flex: 1;
+  min-width: 0;
+}
+/* db_in 表下拉的加载/失败状态行。 */
+.df-db-status {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  padding: var(--sp-1) 0;
+}
+.df-db-status.df-db-err {
+  color: var(--danger-fg);
+}

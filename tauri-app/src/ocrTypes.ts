@@ -61,6 +61,7 @@ export const OcrWorkerTimingSchema = z.object({
   structureMs: durationMs,
   saveMs: durationMs,
   workerMs: durationMs,
+  queueMs: durationMs.optional(),
 });
 export type OcrWorkerTiming = z.infer<typeof OcrWorkerTimingSchema>;
 export const OcrRecognitionResultSchema = OcrPageDataSchema.extend({

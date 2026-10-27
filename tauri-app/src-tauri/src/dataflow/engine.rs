@@ -3,6 +3,9 @@
 //! - `run_workflow("dataflow_preview", 工作流JSON)`：预览运行，每个输入节点
 //!   只取前 1000 行，输出节点不写文件（锚点正常返回）；
 //! - `run_workflow("dataflow_run", 工作流JSON)`：全量运行并写输出文件；
+//! - 请求体可选 `uptoNodeId`（与 paramOverrides 平级）：只执行该节点及其
+//!   全部上游（按 edges 反向闭包），未执行节点不出现在响应 nodes 中，
+//!   其余契约不变（设计文档第 7 节「运行到选中节点」）；
 //! - 结构性错误（文件缺失、字段缺失、配置无效）停止整次运行：已执行节点的
 //!   状态保留在 `nodes`，失败信息写入 `error`（中文 userMessage）；
 //! - 行级错误（转换失败、除零）按节点 onRowError 停止（默认）或跳过并记录。
@@ -15,14 +18,15 @@ use crate::dataflow::nodes::transform;
 use crate::dataflow::nodes::{
     sample_json, NodeOutcome, RunContext, RunMode, Table, ANCHOR_SAMPLE_ROWS, PREVIEW_ROWS,
 };
+use crate::dataflow::nodes::{aggregate, check, combine, inputs2, join, split};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
 /// 引擎入口。method 只接受 "dataflow_preview" / "dataflow_run"，
 /// params 为完整工作流 JSON（顶层 {version,name,params,nodes,edges,notes}，
-/// 可选 paramOverrides 覆盖参数默认值）。
+/// 可选 paramOverrides 覆盖参数默认值、uptoNodeId 指定「运行到选中节点」）。
 pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppError> {
     let mode = match method {
         "dataflow_preview" => RunMode::Preview,
@@ -85,6 +89,18 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
     };
 
     let order = topological_order(&request)?;
+    // 「运行到选中节点」：只执行该节点及其全部上游（按 edges 反向闭包），
+    // 未执行节点不出现在响应 nodes 中（其余契约不变）。
+    let order = match &request.upto_node_id {
+        None => order,
+        Some(upto) => {
+            let closure = upstream_closure(&request, upto)?;
+            order
+                .into_iter()
+                .filter(|node_id| closure.contains(node_id.as_str()))
+                .collect()
+        }
+    };
     let node_name = |id: &str| -> String {
         request
             .nodes
@@ -153,9 +169,84 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
                     Err(error) => Err(error),
                 }
             }
+            // ---------- 第二期节点 ----------
+            "join" | "join_n" => {
+                let (left, right) = dual_input(&incoming, &anchors, &|id| node_name(id), &display_name)?;
+                join::run_join(&display_name, &node.config, &left, &right)
+            }
+            "union" | "union_n" => {
+                let tables = collect_inputs_with_ids(&incoming, &anchors, &|id| node_name(id), &display_name)?;
+                if tables.is_empty() {
+                    Err(AppError::new(
+                        "DATAFLOW_CONFIG_INVALID",
+                        format!("节点「{display_name}」（纵向合并）缺少输入连线。"),
+                        false,
+                        None,
+                    ))
+                } else {
+                    combine::run_union(&display_name, &node.config, &tables)
+                }
+            }
+            "unique" | "unique_n" => single_input(&incoming, &anchors, &display_name, "去重", |table| {
+                combine::run_unique(&display_name, &node.config, table)
+            }),
+            "sort" | "sort_n" => single_input(&incoming, &anchors, &display_name, "排序", |table| {
+                combine::run_sort(&display_name, &node.config, table)
+            }),
+            "summarize" => single_input(&incoming, &anchors, &display_name, "汇总", |table| {
+                aggregate::run_summarize(&display_name, &node.config, table)
+            }),
+            "crosstab" => single_input(&incoming, &anchors, &display_name, "透视", |table| {
+                aggregate::run_crosstab(&display_name, &node.config, table)
+            }),
+            "transpose" => single_input(&incoming, &anchors, &display_name, "宽转长", |table| {
+                aggregate::run_transpose(&display_name, &node.config, table)
+            }),
+            "split" => single_input(&incoming, &anchors, &display_name, "分列", |table| {
+                split::run_split(&display_name, &node.config, table)
+            }),
+            "check" | "check_n" => single_input(&incoming, &anchors, &display_name, "检查", |table| {
+                check::run_check(&display_name, &node.config, table, &context)
+            }),
+            "manual_in" => {
+                if !incoming.is_empty() {
+                    Err(AppError::new(
+                        "DATAFLOW_CONFIG_INVALID",
+                        format!("输入节点「{display_name}」不应有输入连线。"),
+                        false,
+                        None,
+                    ))
+                } else {
+                    inputs2::run_manual_in(&display_name, &node.config, &context)
+                }
+            }
+            "db_in" => {
+                if !incoming.is_empty() {
+                    Err(AppError::new(
+                        "DATAFLOW_CONFIG_INVALID",
+                        format!("输入节点「{display_name}」不应有输入连线。"),
+                        false,
+                        None,
+                    ))
+                } else {
+                    inputs2::run_db_in(&display_name, &node.config, &context)
+                }
+            }
+            "parquet_in" => {
+                if !incoming.is_empty() {
+                    Err(AppError::new(
+                        "DATAFLOW_CONFIG_INVALID",
+                        format!("输入节点「{display_name}」不应有输入连线。"),
+                        false,
+                        None,
+                    ))
+                } else {
+                    inputs2::run_parquet_in(&display_name, &node.config, &context)
+                }
+            }
             other => Err(AppError::new(
                 "DATAFLOW_NODE_UNKNOWN",
-                format!("节点「{display_name}」的类型“{other}”未实现（第一期支持 8 类节点）。"),
+                format!("节点「{display_name}」的类型“{other}”未实现（第一期＋第二期共支持 20 类节点）。"),
                 false,
                 None,
             )),
@@ -239,6 +330,148 @@ fn collect_inputs(
         }
     }
     Ok(tables)
+}
+
+/// 同 collect_inputs，但附带上游节点 id（纵向合并按 order 配置重排时用 id 匹配）。
+fn collect_inputs_with_ids(
+    incoming: &[&crate::dataflow::model::Edge],
+    anchors: &HashMap<(String, String), Table>,
+    node_name: &dyn Fn(&str) -> String,
+    display_name: &str,
+) -> Result<Vec<(String, String, Table)>, AppError> {
+    let mut tables = Vec::new();
+    for edge in incoming {
+        let anchor = edge.from_anchor.as_deref().unwrap_or("output");
+        match anchors.get(&(edge.from.clone(), anchor.to_owned())) {
+            Some(table) => tables.push((edge.from.clone(), node_name(&edge.from), table.clone())),
+            None => {
+                return Err(AppError::new(
+                    "DATAFLOW_ANCHOR_MISSING",
+                    format!(
+                        "节点「{display_name}」的输入连线引用了上游“{}”的锚点“{anchor}”，该锚点不存在。",
+                        node_name(&edge.from)
+                    ),
+                    false,
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(tables)
+}
+
+/// 关联节点的双输入：按 edge.toAnchor 区分 inL / inR；未标注锚点的连线按
+/// 连线顺序前左后右补位；锚点冲突或数量不是 2 条为结构性错误。
+fn dual_input(
+    incoming: &[&crate::dataflow::model::Edge],
+    anchors: &HashMap<(String, String), Table>,
+    node_name: &dyn Fn(&str) -> String,
+    display_name: &str,
+) -> Result<(Table, Table), AppError> {
+    if incoming.len() != 2 {
+        return Err(AppError::new(
+            "DATAFLOW_CONFIG_INVALID",
+            format!(
+                "节点「{display_name}」（关联）需要恰好 2 条输入连线（当前 {} 条，左表 inL、右表 inR）。",
+                incoming.len()
+            ),
+            false,
+            None,
+        ));
+    }
+    let fetch = |edge: &crate::dataflow::model::Edge| -> Result<Table, AppError> {
+        let anchor = edge.from_anchor.as_deref().unwrap_or("output");
+        anchors
+            .get(&(edge.from.clone(), anchor.to_owned()))
+            .cloned()
+            .ok_or_else(|| {
+                AppError::new(
+                    "DATAFLOW_ANCHOR_MISSING",
+                    format!(
+                        "节点「{display_name}」的输入连线引用了上游“{}”的锚点“{anchor}”，该锚点不存在。",
+                        node_name(&edge.from)
+                    ),
+                    false,
+                    None,
+                )
+            })
+    };
+    #[derive(Clone, Copy, PartialEq)]
+    enum Slot {
+        Left,
+        Right,
+    }
+    let mut slots: [Option<&crate::dataflow::model::Edge>; 2] = [None, None];
+    for edge in incoming {
+        let slot = match edge.to_anchor.as_deref().unwrap_or_default() {
+            "inL" => Slot::Left,
+            "inR" => Slot::Right,
+            _ => {
+                // 缺省按连线顺序：先占左，后占右。
+                if slots[0].is_none() {
+                    Slot::Left
+                } else {
+                    Slot::Right
+                }
+            }
+        };
+        let position = match slot {
+            Slot::Left => 0,
+            Slot::Right => 1,
+        };
+        if slots[position].is_some() {
+            return Err(AppError::new(
+                "DATAFLOW_CONFIG_INVALID",
+                format!(
+                    "节点「{display_name}」（关联）的输入锚点冲突：{}侧已有连线，\
+                     请检查连线上的 inL / inR 标注。",
+                    if position == 0 { "左（inL）" } else { "右（inR）" }
+                ),
+                false,
+                None,
+            ));
+        }
+        slots[position] = Some(edge);
+    }
+    let (Some(left_edge), Some(right_edge)) = (slots[0], slots[1]) else {
+        return Err(AppError::new(
+            "DATAFLOW_CONFIG_INVALID",
+            format!("节点「{display_name}」（关联）缺少左表或右表输入连线。"),
+            false,
+            None,
+        ));
+    };
+    Ok((fetch(left_edge)?, fetch(right_edge)?))
+}
+
+/// 「运行到选中节点」的反向闭包：目标节点 + 其全部上游（沿 edges 反向）。
+fn upstream_closure(request: &RunRequest, upto: &str) -> Result<HashSet<String>, AppError> {
+    let known: HashSet<&str> = request.nodes.iter().map(|node| node.id.as_str()).collect();
+    if !known.contains(upto) {
+        return Err(AppError::new(
+            "DATAFLOW_UPTO_NODE_MISSING",
+            format!("「运行到选中节点」的目标节点“{upto}”不存在，请检查节点 id。"),
+            false,
+            None,
+        ));
+    }
+    let mut upstream: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in &request.edges {
+        upstream.entry(edge.to.as_str()).or_default().push(edge.from.as_str());
+    }
+    let mut closure = HashSet::new();
+    closure.insert(upto.to_owned());
+    let mut queue = vec![upto.to_owned()];
+    while let Some(current) = queue.pop() {
+        if let Some(parents) = upstream.get(current.as_str()) {
+            for parent in parents {
+                if closure.insert((*parent).to_owned()) {
+                    queue.push((*parent).to_owned());
+                }
+            }
+        }
+    }
+    Ok(closure)
 }
 
 fn stringify_param(value: Option<&Value>) -> Option<String> {

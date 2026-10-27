@@ -2,9 +2,10 @@
  * 数据流 DataFlow 节点目录。
  *
  * 全部 20 个首版设计节点（DATAFLOW_DESIGN.md 第 4 节）都在这里登记，
- * 第一期仅 8 个节点可拖入画布（phase2 = false），其余在工具栏置灰并标「二期」。
- * 节点命名规范「中文＋英文」；锚点：输入口在节点左侧、输出口在右侧，
- * 多路输出垂直排列（筛选 T/F 等），分支节点的多路输出必须保留。
+ * 第一期 8 个＋二期补齐的 12 个均已可拖入画布（phase2 = false）；
+ * phase2 字段保留给后续候选节点置灰用。节点命名规范「中文＋英文」；
+ * 锚点：输入口在节点左侧、输出口在右侧，多路输出垂直排列
+ * （筛选 T/F、去重 U/D、关联 J/L/R、检查 P/NG），分支节点的多路输出必须保留。
  */
 
 export type DataflowCategory =
@@ -57,8 +58,8 @@ export const DATAFLOW_CATEGORIES: DataflowCategorySpec[] = [
 const SINGLE_IN: DataflowAnchorSpec[] = [{ key: "in", label: "输入" }];
 const SINGLE_OUT: DataflowAnchorSpec[] = [{ key: "out", label: "数据" }];
 
-/** 第一期可用节点的 type 集合（与 Rust 引擎契约一致）。 */
-export const DATAFLOW_PHASE1_TYPES = [
+/** 当前可用节点的 type 集合（第一期 8 个＋二期补齐 12 个，与 Rust 引擎契约一致）。 */
+export const DATAFLOW_AVAILABLE_TYPES = [
   "excel_in",
   "csv_in",
   "select_n",
@@ -67,9 +68,21 @@ export const DATAFLOW_PHASE1_TYPES = [
   "filter_n",
   "excel_out",
   "csv_out",
+  "join_n",
+  "union_n",
+  "unique_n",
+  "sort_n",
+  "summarize",
+  "crosstab",
+  "transpose",
+  "split",
+  "check_n",
+  "manual_in",
+  "db_in",
+  "parquet_in",
 ] as const;
 
-export type DataflowPhase1Type = (typeof DATAFLOW_PHASE1_TYPES)[number];
+export type DataflowAvailableType = (typeof DATAFLOW_AVAILABLE_TYPES)[number];
 
 export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
   // —— 输入类（5 个）——
@@ -98,7 +111,7 @@ export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
     cn: "数据库文件输入",
     en: "Input",
     category: "input",
-    phase2: true,
+    phase2: false,
     icon: "database",
     inputs: [],
     outputs: SINGLE_OUT,
@@ -108,7 +121,7 @@ export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
     cn: "Parquet 输入",
     en: "Input",
     category: "input",
-    phase2: true,
+    phase2: false,
     icon: "database",
     inputs: [],
     outputs: SINGLE_OUT,
@@ -118,7 +131,7 @@ export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
     cn: "手工输入",
     en: "Input",
     category: "input",
-    phase2: true,
+    phase2: false,
     icon: "table",
     inputs: [],
     outputs: SINGLE_OUT,
@@ -159,7 +172,7 @@ export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
     cn: "分列",
     en: "Split",
     category: "transform",
-    phase2: true,
+    phase2: false,
     icon: "columns",
     inputs: SINGLE_IN,
     outputs: SINGLE_OUT,
@@ -183,7 +196,7 @@ export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
     cn: "排序",
     en: "Sort",
     category: "filtersort",
-    phase2: true,
+    phase2: false,
     icon: "arrowDownUp",
     inputs: SINGLE_IN,
     outputs: SINGLE_OUT,
@@ -193,7 +206,7 @@ export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
     cn: "去重",
     en: "Unique",
     category: "filtersort",
-    phase2: true,
+    phase2: false,
     icon: "copy",
     inputs: SINGLE_IN,
     outputs: [
@@ -207,7 +220,7 @@ export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
     cn: "关联",
     en: "Join",
     category: "join",
-    phase2: true,
+    phase2: false,
     icon: "link",
     inputs: [
       { key: "inL", label: "左表" },
@@ -224,7 +237,7 @@ export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
     cn: "纵向合并",
     en: "Union",
     category: "join",
-    phase2: true,
+    phase2: false,
     icon: "rows3",
     inputs: [{ key: "in", label: "输入（可多条）" }],
     outputs: SINGLE_OUT,
@@ -236,7 +249,7 @@ export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
     cn: "汇总",
     en: "Summarize",
     category: "aggregate",
-    phase2: true,
+    phase2: false,
     icon: "sigma",
     inputs: SINGLE_IN,
     outputs: SINGLE_OUT,
@@ -246,7 +259,7 @@ export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
     cn: "透视",
     en: "Crosstab",
     category: "aggregate",
-    phase2: true,
+    phase2: false,
     icon: "grid3x3",
     inputs: SINGLE_IN,
     outputs: SINGLE_OUT,
@@ -256,7 +269,7 @@ export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
     cn: "宽转长",
     en: "Transpose",
     category: "aggregate",
-    phase2: true,
+    phase2: false,
     icon: "flipHorizontal",
     inputs: SINGLE_IN,
     outputs: SINGLE_OUT,
@@ -267,12 +280,12 @@ export const DATAFLOW_NODE_SPECS: DataflowNodeSpec[] = [
     cn: "检查",
     en: "Check",
     category: "check",
-    phase2: true,
+    phase2: false,
     icon: "flag",
     inputs: SINGLE_IN,
     outputs: [
-      { key: "OK", label: "通过" },
-      { key: "NG", label: "未通过" },
+      { key: "P", label: "P 通过" },
+      { key: "NG", label: "NG 未通过" },
     ],
   },
   // —— 输出类（2 个）——

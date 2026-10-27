@@ -7,6 +7,7 @@ import {
   Redo2,
   Save,
   Settings2,
+  SkipForward,
   Undo2,
 } from "lucide-react";
 
@@ -31,10 +32,14 @@ export interface DataflowToolbarProps {
   onOpen: () => void;
   onPreviewRun: () => void;
   onFullRun: () => void;
+  /** 运行到选中节点（全量数据只执行到该节点含上游为止）。 */
+  onRunToNode: () => void;
+  /** 画布上有选中节点时才可用。 */
+  canRunToNode: boolean;
   running: boolean;
 }
 
-/** 顶部工具栏：7 个分类菜单（第一期 8 节点可选，其余置灰标「二期」）＋右侧操作按钮。 */
+/** 顶部工具栏：7 个分类菜单（20 节点全部可选）＋右侧操作按钮。 */
 export function DataflowToolbar({
   flowName,
   onFlowNameChange,
@@ -49,6 +54,8 @@ export function DataflowToolbar({
   onOpen,
   onPreviewRun,
   onFullRun,
+  onRunToNode,
+  canRunToNode,
   running,
 }: DataflowToolbarProps) {
   const [openCategory, setOpenCategory] = useState<DataflowCategory | null>(null);
@@ -163,6 +170,16 @@ export function DataflowToolbar({
         <button type="button" className="df-tool" disabled={running} onClick={onFullRun}>
           <Play size={13} />
           全量运行
+        </button>
+        <button
+          type="button"
+          className="df-tool"
+          disabled={running || !canRunToNode}
+          title={canRunToNode ? "全量数据运行到当前选中节点（含其全部上游）为止" : "先在画布中选中一个节点"}
+          onClick={onRunToNode}
+        >
+          <SkipForward size={13} />
+          运行到选中节点
         </button>
       </div>
     </div>

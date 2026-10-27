@@ -645,16 +645,17 @@ export async function listenPositionedFileDrops(
   });
 }
 
-// ===== 数据流 DataFlow（可视化数据处理工作流，第一期 8 节点） =====
+// ===== 数据流 DataFlow（可视化数据处理工作流，第一期 8 节点＋二期 12 节点） =====
 // import 声明置于文件末尾同样生效（ES 模块静态导入会被提升），
 // 以满足「api.ts 只在末尾追加、改动最小化」的约定。
 import { dataflowDemoResult } from "./dataflow/demoData";
+import { dataflowRunRequest } from "./dataflow/model";
 
 export type DataflowRunMode = "preview" | "full";
 
 /**
  * 数据流预览运行：每个输入节点取样本快速试跑，不写输出文件。
- * 请求：engine_call("dataflow_preview", 工作流JSON本体 + paramOverrides)。
+ * 请求：engine_call("dataflow_preview", 工作流JSON本体 + runMode + paramOverrides)。
  * 浏览器预览模式返回内置中文审计示例数据，供 npm run dev 完整体验界面。
  */
 export async function dataflowPreview(
@@ -664,23 +665,48 @@ export async function dataflowPreview(
   if (!inTauri()) return dataflowDemoResult("preview", workflow, paramOverrides);
   return engineCall(
     "dataflow_preview",
-    { ...(workflow as Record<string, unknown>), runMode: "preview", paramOverrides },
+    dataflowRunRequest(workflow, "preview", paramOverrides),
     "数据流预览运行（样本数据）",
   );
 }
 
 /**
  * 数据流全量运行：完整数据处理，输出节点落盘。
- * 请求：engine_call("dataflow_run", 工作流JSON本体 + paramOverrides)。
+ * 请求：engine_call("dataflow_run", 工作流JSON本体 + runMode + paramOverrides)。
+ * 可选 uptoNodeId＝「运行到选中节点」：全量数据只执行到该节点（含全部上游）为止，
+ * 其后节点不执行；与 paramOverrides 平级传入。
  */
 export async function dataflowRun(
   workflow: unknown,
   paramOverrides: Record<string, string> = {},
+  uptoNodeId?: string,
 ): Promise<unknown> {
-  if (!inTauri()) return dataflowDemoResult("full", workflow, paramOverrides);
+  if (!inTauri()) return dataflowDemoResult("full", workflow, paramOverrides, uptoNodeId);
   return engineCall(
     "dataflow_run",
-    { ...(workflow as Record<string, unknown>), runMode: "full", paramOverrides },
-    "数据流全量运行",
+    dataflowRunRequest(workflow, "full", paramOverrides, uptoNodeId),
+    uptoNodeId ? "数据流运行到选中节点" : "数据流全量运行",
   );
+}
+
+/** 数据库文件输入的内置示例表名（浏览器预览模式 dataflowDbTables 返回）。 */
+export const DATAFLOW_DB_DEMO_TABLES = ["序时账_2026", "科目余额表", "辅助余额表"];
+
+/**
+ * 列出 .db 数据库文件内的数据表名（数据库文件输入节点的表下拉数据源）。
+ * 请求：engine_call("dataflow_db_tables", { path })，引擎返回 [{name}]，
+ * 这里展开为表名字符串数组；非 SQLite／加密／损坏文件由引擎返回中文诊断。
+ * 浏览器预览模式返回内置示例表名列表。
+ */
+export async function dataflowDbTables(path: string): Promise<string[]> {
+  if (!inTauri()) return [...DATAFLOW_DB_DEMO_TABLES];
+  const result = await engineCall("dataflow_db_tables", { path }, "读取数据库表清单");
+  if (Array.isArray(result)) {
+    return result
+      .map((table): string | undefined =>
+        typeof table === "string" ? table : table?.name,
+      )
+      .filter((name): name is string => typeof name === "string" && name.length > 0);
+  }
+  return [];
 }

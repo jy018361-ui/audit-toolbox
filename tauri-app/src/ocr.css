@@ -236,7 +236,7 @@
   display: grid;
   gap: 16px;
   min-width: 0;
-  padding: 0 20px 24px;
+  padding: 20px 20px 24px;
 }
 .ocr-operation-area > .ocr-progress,
 .ocr-operation-area > .ocr-export-notice,
@@ -284,9 +284,9 @@
   height: auto;
 }
 .ocr-page-navigation {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
   gap: 12px;
   margin: 0 20px;
   padding: 16px 0;
@@ -299,8 +299,8 @@
   gap: 6px;
 }
 .ocr-page-navigation select {
-  min-width: 52px;
-  height: 32px;
+  min-width: 64px;
+  height: 36px;
   padding-left: 9px;
 }
 .ocr-comparison {
@@ -328,8 +328,8 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   flex-shrink: 0;
-  height: 80px;
-  min-height: 80px;
+  height: 88px;
+  min-height: 88px;
   gap: 8px 12px;
   padding: 10px 14px;
   background: var(--card);
@@ -365,10 +365,6 @@
 .ocr-original-text:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 4px;
-}
-.ocr-tables {
-  padding: 0 20px 20px;
-  min-width: 0;
 }
 .ocr-extraction-result h3 > span {
   font-size: 11px;
@@ -412,22 +408,12 @@
   max-height: 360px;
   overflow: auto;
 }
-.ocr-table-heading,
 .ocr-prompt-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   margin: 20px 0 12px;
-}
-.ocr-edit-table {
-  margin-top: 14px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-.ocr-edit-table > input {
-  margin-bottom: 12px;
 }
 .ocr-table-scroll {
   max-width: 100%;
@@ -464,22 +450,6 @@
   margin-left: 8px;
   padding: 0 3px;
   cursor: pointer;
-}
-.ocr-edit-table td {
-  padding: 0;
-}
-.ocr-edit-table td:last-child {
-  min-width: 62px;
-  text-align: center;
-  padding-top: 6px;
-}
-.ocr-edit-table textarea {
-  min-height: 64px;
-  border: none;
-  border-radius: 0;
-  padding: 8px;
-  min-width: 110px;
-  font-size: 12px;
 }
 .ocr-table-actions {
   display: flex;
@@ -645,9 +615,6 @@
   .ocr-extraction {
     margin: 14px;
   }
-  .ocr-tables {
-    padding-inline: 14px;
-  }
   .ocr-document-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -674,6 +641,13 @@
   gap: 4px;
   min-width: 0;
 }
+.ocr-pane-title > .ocr-muted {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
 .ocr-document-text {
   scroll-behavior: smooth;
 }
@@ -697,79 +671,12 @@
 .ocr-text-page-heading button {
   flex-shrink: 0;
 }
-.ocr-table-heading {
-  flex-wrap: wrap;
-}
-.ocr-table-search {
-  max-width: 320px;
-  margin-bottom: 12px;
-}
-.ocr-table-directory {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  max-height: 240px;
-  overflow: auto;
-  padding: 2px;
-}
-.ocr-table-directory > button {
-  display: block;
-  text-align: left;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 12px;
-  font-size: 12px;
-  background: var(--card);
-  min-width: 0;
-  overflow-wrap: anywhere;
-  cursor: pointer;
-  line-height: 1.8;
-}
-.ocr-table-directory > button[aria-pressed="true"] {
-  border-color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 8%, var(--card));
-}
-.ocr-table-directory > button:disabled {
-  cursor: wait;
-  opacity: 0.6;
-}
-.ocr-table-directory strong {
-  font-weight: 550;
-}
-.ocr-table-page {
-  color: var(--muted-foreground);
-}
-.ocr-table-editor-heading {
-  font-size: 13px;
-  margin: 0 0 12px;
-  overflow-wrap: anywhere;
-}
-.ocr-edit-table {
-  min-width: 0;
-}
-.ocr-edit-table table {
-  min-width: 100%;
-  width: max-content;
-}
-.ocr-edit-table th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-}
-.ocr-edit-table textarea {
-  width: 180px;
-  max-width: 320px;
-}
 .ocr-pane-heading button {
   max-width: 100%;
   white-space: normal;
   height: auto;
 }
-@media (max-width: 1000px) {
-  .ocr-table-directory {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
+
 @media (max-width: 760px) {
   .ocr-operation-area {
     padding-inline: 14px;
@@ -914,4 +821,288 @@
   font-size: 12px;
   line-height: 1.8;
   overflow-wrap: anywhere;
+}
+/* 文件选择定义操作范围；阅读焦点只控制当前扫描页。 */
+.ocr-upload {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 16px;
+  border: 1px dashed var(--input);
+  border-radius: 10px;
+  background: var(--card);
+  margin-bottom: 16px;
+}
+.ocr-upload.drag-hover {
+  border-color: var(--primary);
+  background: var(--muted);
+}
+.ocr-upload .file-drop-slot,
+.ocr-upload .file-drop-zone {
+  border: 0;
+  background: transparent;
+  margin: 0;
+  padding: 4px 0;
+  min-width: 0;
+}
+.ocr-upload .file-drop-slot-value {
+  padding: 4px 0;
+  text-align: left;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.ocr-upload .file-input-description {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.ocr-upload .file-drop-actions {
+  justify-self: end;
+}
+.ocr-document-card > .ocr-document {
+  padding-right: 44px;
+}
+.ocr-document-card > .ocr-file-delete {
+  position: absolute;
+  right: 7px;
+  top: 8px;
+  width: 28px;
+  height: 28px;
+  z-index: 1;
+  color: var(--muted-foreground);
+}
+.ocr-document-card > .ocr-file-delete:hover {
+  color: var(--destructive);
+}
+.ocr-operation-buttons > .ocr-export-action {
+  margin-inline-start: 0;
+}
+.ocr-operation-buttons > .ocr-next-action {
+  margin-inline-start: auto;
+}
+.ocr-page-navigation .ocr-focus-selector {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+}
+.ocr-focus-selector select {
+  width: 100%;
+  text-overflow: ellipsis;
+}
+.ocr-reading-modes {
+  justify-self: end;
+  height: 36px;
+  margin-inline-start: 0;
+  display: flex;
+  flex-shrink: 0;
+  gap: 3px;
+  border-radius: 8px;
+  padding: 3px;
+  background: var(--muted);
+  border: 1px solid var(--border);
+}
+.ocr-reading-modes button {
+  padding: 0 12px;
+  border-radius: 5px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 12px;
+  transition:
+    background-color 150ms,
+    color 150ms;
+}
+.ocr-reading-modes button[aria-pressed="true"] {
+  color: var(--primary-foreground);
+  background: var(--primary);
+}
+.ocr-fulltext-view {
+  grid-template-columns: minmax(0, 1fr);
+}
+.ocr-text-document > h3 {
+  margin-bottom: 18px;
+  overflow-wrap: anywhere;
+}
+.ocr-text-document + .ocr-text-document {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 2px solid var(--border);
+}
+.ocr-copy-notice {
+  margin: 12px 20px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+@media (max-width: 760px) {
+  .ocr-upload {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ocr-upload .file-drop-actions {
+    justify-self: start;
+  }
+  .ocr-reading-modes {
+    margin-inline-start: 0;
+  }
+  .ocr-page-navigation .ocr-focus-selector {
+    max-width: 100%;
+    flex-basis: 100%;
+  }
+}
+
+/* 文件、页码和阅读模式按控件底边对齐，文件标签独占上方一行。 */
+.ocr-page-navigation.has-file-selector {
+  grid-template-columns: minmax(200px, 360px) minmax(0, 1fr) auto;
+}
+.ocr-pagination-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.ocr-pagination-controls > button {
+  height: 36px;
+}
+.ocr-pagination-controls > label {
+  white-space: nowrap;
+}
+.ocr-page-navigation .ocr-focus-selector select {
+  height: 36px;
+}
+.ocr-pane-title {
+  align-content: center;
+  grid-template-rows: 22px 36px;
+}
+.ocr-pane-title > .ocr-muted {
+  line-height: 18px;
+  max-height: 36px;
+}
+@media (max-width: 1100px) {
+  .ocr-page-navigation.has-file-selector {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .ocr-page-navigation .ocr-focus-selector {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 760px) {
+  .ocr-page-navigation,
+  .ocr-page-navigation.has-file-selector {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ocr-reading-modes {
+    justify-self: end;
+  }
+  .ocr-source {
+    border-right: 1px solid var(--border);
+  }
+}
+
+.ocr-files-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-bottom: 14px;
+}
+.ocr-document-list .ocr-files-heading h2 {
+  padding: 0;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.ocr-files-heading p {
+  margin: 0;
+}
+.ocr-scan-toolbar {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  min-width: 0;
+}
+.ocr-scan-toolbar .ocr-scan-settings {
+  padding: 0;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.ocr-scan-toolbar .ocr-scan-settings > label {
+  flex: 0 1 170px;
+  min-width: 150px;
+}
+.ocr-scan-toolbar .ocr-scan-settings input {
+  width: 180px;
+}
+.ocr-scan-toolbar .ocr-scan-settings select,
+.ocr-scan-toolbar .ocr-scan-settings input {
+  height: 40px;
+}
+.ocr-scan-toolbar .ocr-operation-buttons {
+  flex: 1 1 380px;
+  align-items: end;
+}
+.ocr-scan-toolbar .ocr-operation-buttons > button {
+  height: 40px;
+  padding-block: 0;
+  white-space: nowrap;
+}
+.ocr-scan-hint {
+  line-height: 1.6;
+}
+@media (max-width: 760px) {
+  .ocr-scan-toolbar .ocr-scan-settings {
+    flex-wrap: wrap;
+  }
+  .ocr-scan-toolbar .ocr-scan-settings input {
+    max-width: 100%;
+  }
+  .ocr-scan-toolbar .ocr-operation-buttons {
+    flex-basis: 100%;
+  }
+}
+
+/* 空项目使用完整上传区，已有文件后收为紧凑的继续添加入口。 */
+.ocr-upload.is-empty {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 24px;
+  border: 2px dashed color-mix(in srgb, var(--primary) 45%, var(--border));
+  background: color-mix(in srgb, var(--primary) 3%, var(--card));
+}
+.ocr-upload.is-empty .file-drop-zone {
+  min-height: 132px;
+  padding: 16px;
+  gap: 10px;
+}
+.ocr-upload.is-empty .file-drop-zone > svg {
+  color: var(--primary);
+  flex-shrink: 0;
+}
+.ocr-upload.is-empty .file-drop-zone > strong {
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--primary);
+}
+.ocr-upload.is-empty .file-drop-zone > span {
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.ocr-upload.is-empty .file-drop-actions {
+  justify-self: center;
+}
+.ocr-upload.is-empty .file-input-description {
+  text-align: center;
+  line-height: 1.6;
+}
+.ocr-upload.is-empty:has(.file-drop-zone:hover),
+.ocr-upload.is-empty.drag-hover {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, var(--card));
+}
+.ocr-upload.is-empty.drag-hover .file-drop-zone {
+  box-shadow: none;
+  transform: none;
+  background: transparent;
 }

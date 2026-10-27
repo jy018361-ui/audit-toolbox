@@ -2,3 +2,11 @@
 # 禁止为单个会话另设 CARGO_TARGET_DIR 子目录：缓存成倍叠加，一天可产生上百 GB 废料
 [build]
 target-dir = "target"
+
+# 依赖图中的对话框实现（rfd/muda 的 TaskDialogIndirect）要求 comctl32 v6。
+# tauri_build 只为正式 EXE 内嵌清单；cargo 生成的测试可执行文件没有清单时，
+# 加载器绑定 comctl32 v5，进程启动即报 STATUS_ENTRYPOINT_NOT_FOUND，全部
+# --lib 测试无法运行。这里为所有原生链接产物声明 Common-Controls 6 清单
+# 依赖（与 tauri 内嵌清单内容一致，不冲突）。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'"]

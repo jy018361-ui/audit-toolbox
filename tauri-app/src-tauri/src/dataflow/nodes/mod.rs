@@ -1,9 +1,20 @@
-//! 数据流（DataFlow）第一期的 8 个节点实现：
-//! 输入（excel_in / csv_in）、整理（select / clean / formula）、
-//! 筛选（filter）、输出（excel_out / csv_out）。
+//! 数据流（DataFlow）节点实现：
+//! 第一期 8 类——输入（excel_in / csv_in）、整理（select / clean / formula）、
+//! 筛选（filter）、输出（excel_out / csv_out）；
+//! 第二期 12 类——关联（join_n）、合并（union_n）、去重（unique_n）、
+//! 排序（sort_n）、汇总（summarize）、透视（crosstab）、宽转长（transpose）、
+//! 分列（split）、检查（check_n）、手工输入（manual_in）、数据库文件输入
+//! （db_in）、Parquet 输入（parquet_in），以及数据库表清单 db_tables。
 
+pub(crate) mod aggregate;
+pub(crate) mod check;
+pub(crate) mod combine;
 pub(crate) mod input;
+pub(crate) mod inputs2;
+pub(crate) mod join;
+pub(crate) mod keys;
 pub(crate) mod output;
+pub(crate) mod split;
 pub(crate) mod transform;
 
 use super::value::{ColType, Value};

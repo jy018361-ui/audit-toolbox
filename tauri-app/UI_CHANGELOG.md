@@ -1,3 +1,10 @@
+## 2026-10-27 · 设置页补齐 OCR 连接测试
+
+- 目标：设置页填写 OCR 参数后即可测试，无需返回 AudiPick 配置页。
+- 设计决策：OCR 配置卡内增加「测试 OCR 连接」，沿用 LLM 测试的按钮、耗时与成功／失败反馈；百度、百炼使用当前草稿及各自凭据，统一 AI 视觉使用已保存的全局 LLM，本机服务使用现有地址。只发送内置合成图片，测试不保存配置；旁边说明调用及保存方式。
+- 状态：测试期间禁用重复点击与保存；改地址、模型、密钥或引擎立即清除旧结论，迟到请求不覆盖新配置。设置页明确区分全局模型和 AudiPick 专用模型，保留原 AudiPick 测试行为。
+- 验证：`npx vitest run src/AppNavigationSettings.test.tsx src/AudiPickConfigRecovery.test.tsx src/audipickOcrApi.test.ts`、`npm run build`；Rust `--lib ocr_test` 与 `--lib bailian_ocr::`。使用模拟响应与合成图片，不调用真实付费服务；本地 `main` 的已有修改保持原样。
+
 ## 2026-10-27 · Dev 预发布验收
 
 - 目标：将本轮 OCR 和界面改进提交到 `dev`，使用独立 Dev 预发布与更新通道，不合并到 `main`。

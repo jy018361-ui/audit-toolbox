@@ -6,6 +6,7 @@
 
 | 能力 | 本次实现 | 对应验收 |
 | --- | --- | --- |
+| 配置测试 | 设置页直接测试所选引擎；百度／百炼可使用草稿，AI 视觉仅使用已保存全局 LLM；内置图片、不保存草稿、显示耗时及失败原因 | `AppNavigationSettings.test.tsx`、`audipickOcrApi.test.ts`、`audipick::tests::toolbox_ocr_test_never_uses_audipick_dedicated_model` |
 | 项目与文件 | 独立 SQLite 项目、按项目保存提示词、PDF/PNG/JPEG/BMP/多页 TIFF、文件夹递归导入，保存源文件副本 | `ocr_store::tests`、`OcrPage.test.tsx` |
 | 识别 | AI 视觉与百炼一次请求返回全文/表格；纯文本 OCR 可由全局 AI 辅助还原；仅全局配置，不继承 AudiPick 专用模型 | `audipick::tests::toolbox_`、`bailian_ocr::tests` |
 | 版面 | 默认整页；左右双页由用户选择，同一物理页按左、右顺序合并后保存，不按横向比例误切表格 | `ocr::tests`、`OcrPage.test.tsx` |

@@ -304,6 +304,7 @@ mod tests {
             json!({"llm":{"enabled":false},"ocr":{"engine":"baidu","bailian_base_url":"invalid-saved-url","bailian_model":"saved-model"}}),
             "bailian", PNG, Some("synthetic-draft-key"), None,
             Some(&json!({"bailian_base_url":base,"bailian_model":"qwen3.5-ocr"})),
+            false,
         ).unwrap();
         assert!(result["message"].as_str().unwrap().contains("识别成功"));
         let request = server.join().unwrap();
@@ -378,6 +379,7 @@ mod tests {
             request["apiKey"].as_str(),
             None,
             Some(&request["ocr"]),
+            false,
         )
         .unwrap_or_else(|error| panic!("{}：{}", error.code, error.user_message));
         println!("{}", result);

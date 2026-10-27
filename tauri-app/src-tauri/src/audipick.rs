@@ -38,11 +38,15 @@ pub fn test_ocr_connection(
     api_key: Option<&str>,
     secret_key: Option<&str>,
     ocr_config: Option<&Value>,
+    use_global_llm: bool,
 ) -> Result<Value, AppError> {
     if image.is_empty() || image.len() > 200_000 {
         return Err(error("OCR_TEST_IMAGE_INVALID", "OCR 测试图片无效。", None));
     }
     let start = std::time::Instant::now();
+    if use_global_llm {
+        settings["audipickLlm"] = json!({"mode": "inherit"});
+    }
     // Only accept non-secret OCR fields from the unsaved form.
     if let Some(draft) = ocr_config {
         for name in ["bailian_base_url", "bailian_model"] {
@@ -3423,9 +3427,21 @@ mod tests {
     #[test]
     fn ocr_test_rejects_invalid_images_without_network() {
         for image in [String::new(), "a".repeat(200_001)] {
-            let failure = test_ocr_connection(json!({}), "baidu", &image, None, None, None).unwrap_err();
+            let failure = test_ocr_connection(json!({}), "baidu", &image, None, None, None, false).unwrap_err();
             assert_eq!(failure.code, "OCR_TEST_IMAGE_INVALID");
         }
+    }
+
+    #[test]
+    fn toolbox_ocr_test_never_uses_audipick_dedicated_model() {
+        let settings = json!({
+            "llm": {"enabled": false},
+            "audipickLlm": {"mode": "dedicated", "enabled": true, "api_type": "dify_chat"}
+        });
+        let failure = test_ocr_connection(settings.clone(), "ai", "test-image", None, None, None, true).unwrap_err();
+        assert_eq!(failure.code, "LLM_DISABLED");
+        let failure = test_ocr_connection(settings, "ai", "test-image", None, None, None, false).unwrap_err();
+        assert_eq!(failure.code, "OCR_MODEL_UNSUPPORTED");
     }
 
     #[test]

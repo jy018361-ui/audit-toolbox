@@ -1,3 +1,9 @@
+## 2026-10-27 · 设置页 OCR 测试入口
+
+- 设置页直接调用现有 OCR 图片连接测试，支持当前百度／百炼草稿及空密钥读取各自已保存凭据；测试不写配置和密钥。
+- 原生命令增加可选 `useGlobalLlm`，设置页显式使用全局模型，避免误用 AudiPick 专用模型；旧 AudiPick 未传此参数，仍按原有模型来源选择。
+- 合成测试图由共用函数生成；前端回归见 `AppNavigationSettings.test.tsx`、`AudiPickConfigRecovery.test.tsx`、`audipickOcrApi.test.ts`，Rust 见 `--lib ocr_test` 和 `--lib bailian_ocr::`。未用真实合同或线上服务替代离线回归。
+
 ## 2026-10-27 · 独立 OCR 共用能力及可编辑提示词
 
 - 新 OCR 工具独立保存项目、扫描件、分页结果和场景提示词，不迁移或改写 AudiPick 项目。复用维护中的场景和启用案例库，不复制收入底稿套用等专用工作流，范围见 `OCR_PARITY.md`。

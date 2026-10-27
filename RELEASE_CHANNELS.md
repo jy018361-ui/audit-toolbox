@@ -42,6 +42,10 @@
 
 ## 验证
 
+若安装包已签名并通过打包程序验收，但公开预发布后的 Dev 更新清单同步失败，可在 `dev` 手动运行 **Build and publish E点通工具箱**，输入原 Dev 标签并勾选 **repair_published_dev**。修复只接受已公开的 Dev 预发布；根据该版本的实际 EXE 与签名附件核验并规范化清单，再同步 `dev-channel`，不会重新编译、替换安装包或更新正式 Latest。相同版本且清单一致时可重复执行，旧版本不能覆盖较新的通道。
+
+打包工具可能返回 GitHub 附件 API 地址。发布脚本仅把精确匹配该版本附件 ID 的地址转换为对应公开下载地址；其他版本或未知附件一律拒绝。
+
 ```powershell
 python tauri-app/scripts/test_release_channels.py
 node --test tauri-app/scripts/publish_channel_release.check.cjs

@@ -9,6 +9,11 @@ on:
         description: "版本标签：main 用 v2.0.0-alpha.132 等；dev 用 v2.0.0-dev.1 等"
         required: true
         type: string
+      repair_published_dev:
+        description: "仅修复已签名验收的 Dev 预发布更新清单，不重新打包"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -19,6 +24,7 @@ concurrency:
 
 jobs:
   release:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.repair_published_dev != true }}
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -139,3 +145,24 @@ jobs:
           script: |
             const publish = require('./tauri-app/scripts/publish_channel_release.cjs');
             await publish({github, context, fetch});
+
+  repair_dev_channel:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_published_dev == true }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Dev publishing tools
+        uses: actions/checkout@v4
+
+      - name: Test publishing tools
+        run: node --test tauri-app/scripts/publish_channel_release.check.cjs
+
+      - name: Validate Dev ref and restore its published update manifest
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_CHANNEL: dev
+        with:
+          script: |
+            if (context.ref !== 'refs/heads/dev') throw new Error('仅允许从 dev 分支修复开发更新通道。');
+            const publish = require('./tauri-app/scripts/publish_channel_release.cjs');
+            await publish.repairDevChannel({github, context, fetch});

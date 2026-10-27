@@ -2583,7 +2583,7 @@ export function Settings({
             </p>
             <details className="settings-note">
               <summary>查看通道差异与计费方式</summary>
-              <p>通用通道按录音时长计费，可区分说话人；套餐通道消耗 Token Plan 套餐额度，不区分说话人，仅支持 WAV 录音。</p>
+              <p>通用通道按录音时长计费，是否区分说话人取决于模型与接入方式；套餐通道消耗 Token Plan 套餐额度，不区分说话人，仅支持 WAV 录音。</p>
             </details>
             <div className="form-grid">
               <label className="field">
@@ -2592,7 +2592,7 @@ export function Settings({
                   value={form.asrChannel}
                   onChange={(e) => set("asrChannel", e.target.value)}
                 >
-                  <option value="paraformer">通用通道（区分说话人）</option>
+                  <option value="paraformer">通用通道（按模型支持说话人）</option>
                   <option value="token_plan">Token Plan 套餐通道</option>
                 </select>
               </label>
@@ -2665,7 +2665,7 @@ export function Settings({
                       onChange={(e) => set("asrModel", e.target.value)}
                       placeholder="paraformer-v2"
                     />
-                    <small>留空使用 paraformer-v2；其他模型需兼容百炼录音文件转写接口。</small>
+                    <small>长会议可用 qwen-audio-3.1-asr-flash-filetrans（区分说话人）；留空使用 paraformer-v2。qwen-audio-3.0-asr-flash / qwen-audio-3.1-asr-flash 使用 HTTP 识别，当前输出不区分说话人。</small>
                   </label>
                   <label className="field">
                     <span>百炼 API 密钥</span>
@@ -2700,7 +2700,7 @@ export function Settings({
               <span>
                 {form.asrChannel === "token_plan"
                   ? "地址与模型按「我的订阅」页面填写；ASR Flash 测试会发送内置短样音并消耗少量套餐额度，实时模型仅测试会话。密钥留空使用已保存密钥。"
-                  : "按当前地址与模型验证上传凭证；完整转写需实际录音任务验证。密钥留空使用已保存密钥。"}
+                  : "ASR Flash 测试会识别内置短样音并产生少量费用；文件转写模型仅验证上传凭证，完整转写需实际录音任务验证。密钥留空使用已保存密钥。"}
               </span>
             </div>
             {asrTestResult && (

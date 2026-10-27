@@ -34,8 +34,8 @@ const HTTP_ASR_PATH: &str = "/api/v1/services/aigc/multimodal-generation/generat
 const HTTP_ASR_WAV_BYTES: usize = 6 * 1024 * 1024;
 const CONNECTION_SAMPLE: &[u8] = include_bytes!("../../assets/asr/connection-test.wav");
 
-fn uses_http_asr(model: &str) -> bool {
-    model.trim() == HTTP_ASR_MODEL
+pub(crate) fn uses_http_asr(model: &str) -> bool {
+    matches!(model.trim(), HTTP_ASR_MODEL | "qwen-audio-3.1-asr-flash")
 }
 /// 未知模型沿用原有分段时长，不将某个模型的缓冲上限套用到其他模型。
 const CHUNK_SECONDS: u32 = 120;
@@ -675,7 +675,7 @@ pub(crate) fn transcribe_file(
     transcribe_file_with_key(path, progress, cancel, config, &key)
 }
 
-fn transcribe_file_with_key(
+pub(crate) fn transcribe_file_with_key(
     path: &Path,
     progress: Progress,
     cancel: &Arc<AtomicBool>,
@@ -877,6 +877,8 @@ mod tests {
             assert!(error.detail.is_none());
         }
         assert!(uses_http_asr(" qwen-audio-3.0-asr-flash "));
+        assert!(uses_http_asr("qwen-audio-3.1-asr-flash"));
+        assert!(!uses_http_asr("qwen-audio-3.1-asr-flash-filetrans"));
         assert!(!uses_http_asr(DEFAULT_MODEL));
         assert!(!uses_http_asr("qwen-audio-3.0-asr-flash-streaming"));
     }

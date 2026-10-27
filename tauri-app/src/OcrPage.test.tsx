@@ -20,7 +20,9 @@ const mocks = vi.hoisted(() => ({
   pause: vi.fn(),
   extract: vi.fn(),
   dispose: vi.fn(),
+  confirm: vi.fn(),
 }));
+vi.mock("@/components/ConfirmDialog", () => ({ confirmDialog: mocks.confirm }));
 vi.mock("./ocrApi", () => ({ ocrCall: mocks.call, runOcrJob: mocks.job }));
 vi.mock("./api", () => ({
   jobCancel: mocks.cancel,
@@ -69,6 +71,7 @@ let delaySave: boolean;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.confirm.mockResolvedValue(true);
   pendingSave = undefined;
   delaySave = false;
   savedProject = {
@@ -213,7 +216,7 @@ async function openDocument() {
   const entry = await screen.findByRole("button", { name: /合成扫描件.pdf/ });
   await waitFor(() => expect(entry).toBeEnabled());
   fireEvent.click(entry);
-  await screen.findByRole("textbox", { name: "本页完整正文" });
+  await screen.findByRole("region", { name: "本页初始原文" });
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "继续识别" })).toBeEnabled(),
   );
@@ -233,9 +236,11 @@ it("OCR 可直接导出，不要求选择场景或调用摘录", async () => {
   expect(mocks.extract).not.toHaveBeenCalled();
 });
 
-it("展开后显示所有阶段的完整可编辑提示词，并保存实际使用版本", async () => {
+it("第二步独立显示所有阶段的完整可编辑提示词，并保存实际使用版本", async () => {
   await openDocument();
-  fireEvent.click(screen.getByRole("button", { name: "场景摘录（可选）" }));
+  fireEvent.click(screen.getByRole("button", { name: "2 判断摘录" }));
+  await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "loan_general" },
   });
@@ -280,26 +285,36 @@ it("展开后显示所有阶段的完整可编辑提示词，并保存实际使�
   );
 });
 
-it("保存响应迟到时保留新修改，并按新修订号继续保存", async () => {
+it("表格保存响应迟到时保留新修改，并按新修订号继续保存", async () => {
   await openDocument();
   delaySave = true;
-  fireEvent.change(screen.getByRole("textbox", { name: "本页完整正文" }), {
-    target: { value: "第一次校对" },
-  });
+  fireEvent.change(
+    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
+    {
+      target: { value: "第一次校对" },
+    },
+  );
   await waitFor(() => expect(pendingSave).toBeDefined(), { timeout: 2000 });
-  fireEvent.change(screen.getByRole("textbox", { name: "本页完整正文" }), {
-    target: { value: "第二次校对，不得被旧响应覆盖" },
-  });
+  fireEvent.change(
+    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
+    {
+      target: { value: "第二次校对，不得被旧响应覆盖" },
+    },
+  );
   pendingSave?.();
   await waitFor(() =>
-    expect(detail.pages[0].text).toBe("第二次校对，不得被旧响应覆盖"),
+    expect(detail.pages[0].tables[0].rows[1][0]).toBe(
+      "第二次校对，不得被旧响应覆盖",
+    ),
   );
-  expect(screen.getByRole("textbox", { name: "本页完整正文" })).toHaveValue(
-    "第二次校对，不得被旧响应覆盖",
-  );
+  expect(
+    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
+  ).toHaveValue("第二次校对，不得被旧响应覆盖");
   expect(detail.pages[0].revision).toBe(3);
   expect(detail.pages[0].originalText).toBe("原始正文");
-  fireEvent.click(screen.getByRole("button", { name: "场景摘录（可选）" }));
+  fireEvent.click(screen.getByRole("button", { name: "2 判断摘录" }));
+  await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
   expect(screen.getByText("原文已修改，需要重新摘录")).toBeInTheDocument();
 });
 
@@ -326,9 +341,9 @@ it("继续识别只处理未完成页，横向表格默认不拆页", async () =
   );
   fireEvent.click(screen.getByRole("button", { name: "下一页" }));
   await waitFor(() =>
-    expect(screen.getByRole("textbox", { name: "本页完整正文" })).toHaveValue(
-      "第二页完整正文",
-    ),
+    expect(
+      screen.getByRole("region", { name: "本页初始原文" }),
+    ).toHaveTextContent("第二页完整正文"),
   );
   expect(mocks.dispose).toHaveBeenCalled();
 });
@@ -361,31 +376,39 @@ it("保存失败时阻止切页并保留编辑内容", async () => {
   mocks.call.mockImplementationOnce(async () => {
     throw new Error("磁盘空间不足");
   });
-  fireEvent.change(screen.getByRole("textbox", { name: "本页完整正文" }), {
-    target: { value: "尚未保存的修订" },
-  });
+  fireEvent.change(
+    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
+    {
+      target: { value: "尚未保存的修订" },
+    },
+  );
   fireEvent.click(screen.getByRole("button", { name: "下一页" }));
   await screen.findByText("磁盘空间不足");
-  expect(screen.getByRole("textbox", { name: "本页完整正文" })).toHaveValue(
-    "尚未保存的修订",
-  );
+  expect(
+    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
+  ).toHaveValue("尚未保存的修订");
   expect(screen.getByLabelText("当前页")).toHaveValue("1");
 });
 
 it("离开工具页时立即保存尚未触发自动保存的校对", async () => {
   await openDocument();
-  fireEvent.change(screen.getByRole("textbox", { name: "本页完整正文" }), {
-    target: { value: "离开页面前刚输入的修订" },
-  });
+  fireEvent.change(
+    screen.getByRole("textbox", { name: "表格 1 第 2 行第 1 列" }),
+    {
+      target: { value: "离开页面前刚输入的修订" },
+    },
+  );
   cleanup();
   await waitFor(() =>
-    expect(detail.pages[0].text).toBe("离开页面前刚输入的修订"),
+    expect(detail.pages[0].tables[0].rows[1][0]).toBe("离开页面前刚输入的修订"),
   );
 });
 
 it("切换场景前保存当前提示词，并在重新选择时恢复项目版本", async () => {
   await openDocument();
-  fireEvent.click(screen.getByRole("button", { name: "场景摘录（可选）" }));
+  fireEvent.click(screen.getByRole("button", { name: "2 判断摘录" }));
+  await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "loan_general" },
   });
@@ -416,7 +439,9 @@ it("切换场景前保存当前提示词，并在重新选择时恢复项目版�
 
 it("离开工具页时保留编辑后的提示词", async () => {
   await openDocument();
-  fireEvent.click(screen.getByRole("button", { name: "场景摘录（可选）" }));
+  fireEvent.click(screen.getByRole("button", { name: "2 判断摘录" }));
+  await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "loan_general" },
   });
@@ -455,9 +480,9 @@ it("暂停和取消传到当前页任务，取消后仍可查看已完成页", a
   await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith("slow-page"));
   rejectPage?.(new Error("已取消，已完成页保留"));
   await waitFor(() =>
-    expect(screen.getByRole("textbox", { name: "本页完整正文" })).toHaveValue(
-      "原始正文",
-    ),
+    expect(
+      screen.getByRole("region", { name: "本页初始原文" }),
+    ).toHaveTextContent("原始正文"),
   );
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "继续识别" })).toBeEnabled(),
@@ -467,7 +492,9 @@ it("暂停和取消传到当前页任务，取消后仍可查看已完成页", a
 
 it("提示词保存失败时保留当前场景和未保存编辑", async () => {
   await openDocument();
-  fireEvent.click(screen.getByRole("button", { name: "场景摘录（可选）" }));
+  fireEvent.click(screen.getByRole("button", { name: "2 判断摘录" }));
+  await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "loan_general" },
   });
@@ -495,7 +522,9 @@ it("多页逐字证据提供独立页码入口", async () => {
   detail.extractions[0].columns = [{ key: "sourcePage", label: "核实页码" }];
   detail.extractions[0].rows = [{ sourcePage: "1、2" }];
   await openDocument();
-  fireEvent.click(screen.getByRole("button", { name: "场景摘录（可选）" }));
+  fireEvent.click(screen.getByRole("button", { name: "2 判断摘录" }));
+  await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
   expect(screen.getByRole("button", { name: "第 1 页" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "第 2 页" }));
   await waitFor(() => expect(screen.getByLabelText("当前页")).toHaveValue("2"));
@@ -537,3 +566,104 @@ it.each(["application/pdf", "image/tiff"])(
     expect(mocks.extract).not.toHaveBeenCalled();
   },
 );
+
+it("原文只读显示初始识别版本，已有校对内容继续保留但不提供编辑框", async () => {
+  detail.pages[0].text = "此前保存的人工校对正文";
+  await openDocument();
+  expect(
+    screen.getByRole("region", { name: "本页初始原文" }),
+  ).toHaveTextContent("原始正文");
+  expect(
+    screen.queryByRole("textbox", { name: "本页完整正文" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByText("此前保存的人工校对正文")).toBeInTheDocument();
+  expect(screen.getByText(/导出和摘录继续使用此版本/)).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "新增表格" }),
+  ).not.toBeInTheDocument();
+  expect(
+    mocks.call.mock.calls.some(([method]) => method === "ocr.page_save"),
+  ).toBe(false);
+});
+
+it("两步导引独立切换，第二步不混入识别工作区或新增表格入口", async () => {
+  await openDocument();
+  expect(screen.getByRole("button", { name: "1 原文识别" })).toHaveAttribute(
+    "aria-current",
+    "step",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "下一步：判断摘录" }));
+  await screen.findByLabelText("摘录场景");
+  expect(
+    screen.queryByRole("region", { name: "本页初始原文" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "继续识别" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "导入文件" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "返回原文识别" }));
+  await screen.findByRole("region", { name: "本页初始原文" });
+  expect(screen.queryByLabelText("摘录场景")).not.toBeInTheDocument();
+});
+
+it("摘录单元格中的对象按可读内容呈现，不向用户显示 JSON", async () => {
+  detail.extractions[0].columns = [{ key: "evidence", label: "证据" }];
+  detail.extractions[0].rows = [{ evidence: { text: "合同约定", page: 1 } }];
+  await openDocument();
+  fireEvent.click(screen.getByRole("button", { name: "2 判断摘录" }));
+  await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
+  await screen.findByText(/内容：合同约定/);
+  expect(screen.getByText(/页码：1/)).toBeInTheDocument();
+  expect(screen.queryByText(/\{"text"/)).not.toBeInTheDocument();
+});
+
+it("取消全文重识别不调用 OCR，不替换原有表格校对", async () => {
+  mocks.confirm.mockResolvedValue(false);
+  detail.pages[0].tables[0].rows[1][0] = "已人工校对的账号";
+  await openDocument();
+  fireEvent.click(screen.getByRole("button", { name: "重新识别全文" }));
+  await waitFor(() =>
+    expect(mocks.confirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "重新识别全文？",
+        message: expect.stringContaining("替换现有识别正文及表格校对内容"),
+      }),
+    ),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "重新识别全文" })).toBeEnabled(),
+  );
+  expect(mocks.job).not.toHaveBeenCalled();
+  expect(detail.pages[0].tables[0].rows[1][0]).toBe("已人工校对的账号");
+});
+
+it("确认全文重识别只处理当前文件的全部页面，并携带各页已存修订号", async () => {
+  detail.pages[0].revision = 4;
+  detail.pages.push({
+    ...structuredClone(detail.pages[0]),
+    page: 2,
+    revision: 7,
+  });
+  await openDocument();
+  fireEvent.click(screen.getByRole("button", { name: "重新识别全文" }));
+  await waitFor(() =>
+    expect(
+      mocks.job.mock.calls.filter(
+        ([method]) => method === "ocr.recognize_page",
+      ),
+    ).toHaveLength(2),
+  );
+  const requests = mocks.job.mock.calls
+    .filter(([method]) => method === "ocr.recognize_page")
+    .map(([, params]) => params);
+  expect(requests).toEqual([
+    expect.objectContaining({ documentId: "d", page: 1, expectedRevision: 4 }),
+    expect.objectContaining({ documentId: "d", page: 2, expectedRevision: 7 }),
+  ]);
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "重新识别全文" })).toBeEnabled(),
+  );
+});

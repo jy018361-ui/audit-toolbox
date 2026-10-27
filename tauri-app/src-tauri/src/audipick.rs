@@ -665,15 +665,12 @@ pub(crate) fn toolbox_ocr_page(params: &Value, settings: &Value) -> Result<Value
 }
 
 fn structured_ocr_result(raw: &str, engine: &str) -> Value {
-    let parsed = parse_json_content(raw);
-    if parsed["text"].as_str().is_some_and(|text| !text.trim().is_empty()) {
-        let mut result = parsed;
-        result["engine"] = json!(engine);
-        if !result["tables"].is_array() { result["structureError"] = json!("模型未返回有效的表格列表，原文已保留。"); }
-        result
-    } else {
-        json!({"text": raw, "engine": engine, "structureError": "模型未返回有效的完整原文结构，原始响应已保留，请校对后重试。"})
-    }
+    let mut result = crate::bailian_ocr::readable_ocr_content(raw);
+    result["engine"] = json!(engine);
+    // Kept for internal diagnostics only; callers persist it separately from
+    // page text and the normal user/export payload.
+    result["diagnosticResponse"] = json!(raw);
+    result
 }
 
 pub(crate) fn toolbox_llm_request(prompt: &str, text: &str, image: Option<&str>, settings: &Value) -> Result<String, AppError> {
@@ -3322,7 +3319,8 @@ mod tests {
         assert!(valid["structureError"].is_null());
         let invalid = structured_ocr_result("原始模型输出", "bailian");
         assert_eq!(invalid["text"], "原始模型输出");
-        assert!(invalid["structureError"].as_str().is_some());
+        assert!(invalid["structureError"].is_null());
+        assert_eq!(invalid["diagnosticResponse"], "原始模型输出");
     }
 
     #[test]

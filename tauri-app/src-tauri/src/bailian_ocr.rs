@@ -5,10 +5,17 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 use crate::AppError;
+#[path = "ocr_content.rs"]
+mod ocr_content;
+pub(crate) use ocr_content::{looks_like_ocr_payload, readable_ocr_content};
 
 const DEFAULT_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const DEFAULT_MODEL: &str = "qwen3.5-ocr";
 pub(crate) const STRUCTURED_PROMPT: &str = "请逐字识别整张扫描件的全部文字，保留阅读顺序、段落及全部表格内容。同时逐格恢复所有表格的原始行列。不要总结、补写、改写数字、日期、账号或金额，所有单元格均为字符串。合并单元格仅在左上格写文字，其余空串。text 必须含正文和全部表格文字，不能因 tables 已有而省略。仅输出完整 JSON：{\"text\":\"完整原文\",\"tables\":[{\"title\":\"原表名\",\"rows\":[[\"单元格\"]]}],\"warnings\":[\"无法确认的内容及位置\"]}。无表格返回空 tables。";
+// The provider's default text-recognition prompt preserves complete prose and
+// may include native Markdown tables. Forcing HTML lost cover headings in live
+// acceptance; recover any returned table markup locally without changing task.
+const TEXT_PROMPT: &str = "Please output only the text content from the image without any additional descriptions or formatting.";
 
 pub(crate) struct OcrConfig {
     endpoint: reqwest::Url,
@@ -62,11 +69,11 @@ impl OcrConfig {
     }
 
     pub(crate) fn recognize(&self, image: &str, key: &str) -> Result<Value, AppError> {
-        self.recognize_with_prompt(image, key, "请逐字识别图片中的中文和数字，保留段落、表格内容和阅读顺序，只返回识别文字，不要解释、总结或补写。")
+        self.recognize_with_prompt(image, key, TEXT_PROMPT)
     }
 
     pub(crate) fn recognize_structured(&self, image: &str, key: &str) -> Result<Value, AppError> {
-        self.recognize_with_prompt(image, key, STRUCTURED_PROMPT)
+        self.recognize(image, key)
     }
 
     fn recognize_with_prompt(&self, image: &str, key: &str, prompt: &str) -> Result<Value, AppError> {
@@ -263,15 +270,17 @@ mod tests {
 
     #[test]
     fn standalone_structured_mode_is_one_request_with_complete_text_and_cells() {
-        let output=json!({"text":"发票 00123","tables":[{"title":"明细","rows":[["金额","00123"]]}],"warnings":[]}).to_string();
+        let output="合同标题\n\n| 金额 | 账号 |\n| --- | --- |\n| 6.00 | 00123 |\n\n合同尾页";
         let (base,server)=server("200 OK",json!({"choices":[{"finish_reason":"stop","message":{"content":output}}]}));
         let config=OcrConfig::from_settings(&json!({"ocr":{"bailian_base_url":base}})).unwrap();
         let result=config.recognize_structured(PNG,"synthetic-key").unwrap();
-        let parsed:Value=serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
-        assert_eq!(parsed["tables"][0]["rows"][0][1],"00123");
+        let parsed=readable_ocr_content(result["text"].as_str().unwrap());
+        assert_eq!(parsed["tables"][0]["rows"][1][1],"00123");
+        assert!(parsed["text"].as_str().unwrap().contains("合同标题"));
+        assert!(parsed["text"].as_str().unwrap().contains("合同尾页"));
         let request=server.join().unwrap();
         let body:Value=serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
-        assert_eq!(body["messages"][0]["content"][1]["text"],STRUCTURED_PROMPT);
+        assert_eq!(body["messages"][0]["content"][1]["text"],TEXT_PROMPT);
     }
 
     #[test]
@@ -383,5 +392,57 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("{}：{}", error.code, error.user_message));
         println!("{}", result);
+    }
+
+    /// Manual acceptance only: requires an explicitly authorized document,
+    /// selected rendered page paths, and the user's existing Dev OCR credential.
+    #[test]
+    #[ignore]
+    fn live_document_sample_from_stdin() {
+        use std::{fs, path::Path, sync::{Arc, atomic::AtomicBool}};
+        use crate::{ocr_store::{Store, Page, Table}, excel_merger::PauseCheckpoint};
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        let request: Value = serde_json::from_str(&input).expect("需提供明确授权的测试文件参数");
+        let output = Path::new(request["outputDir"].as_str().unwrap());
+        fs::create_dir_all(output).unwrap();
+        let key = keyring::Entry::new("AuditToolboxDev", "bailian_ocr_key")
+            .and_then(|entry| entry.get_password()).expect("Dev OCR 密钥未保存");
+        let config = OcrConfig::from_settings(&json!({"ocr": request["ocr"]})).unwrap();
+        let mut store = Store::open(&output.join("test.sqlite")).unwrap();
+        let project = store.save_project(&json!({"name":"合同 OCR 实测"})).unwrap();
+        let doc = store.import(project["id"].as_str().unwrap(), Path::new(request["sourcePath"].as_str().unwrap())).unwrap();
+        store.prepare(&doc.id, request["totalPages"].as_u64().unwrap() as u32).unwrap();
+        let mut summary = vec![];
+        for item in request["pages"].as_array().unwrap() {
+            let number = item["page"].as_u64().unwrap() as u32;
+            let old = store.pages(&doc.id).unwrap().into_iter().find(|p|p.page == number);
+            let image = STANDARD.encode(fs::read(item["imagePath"].as_str().unwrap()).unwrap());
+            let response = match request["prompt"].as_str() {
+                Some(prompt) => config.recognize_with_prompt(&image, &key, prompt),
+                None => config.recognize_structured(&image, &key),
+            }
+                .unwrap_or_else(|error| panic!("第{number}页：{}", error.user_message));
+            let raw = response["text"].as_str().unwrap();
+            fs::write(output.join(format!("page-{number:02}-response.txt")),raw).unwrap();
+            let parsed = readable_ocr_content(raw);
+            let text = parsed["text"].as_str().unwrap().to_owned();
+            assert!(!text.trim().is_empty(), "第{number}页没有可读原文");
+            let tables: Vec<Table> = parsed["tables"].as_array().unwrap().iter().enumerate().map(|(i,t)|{
+                let mut t=t.clone();t["id"]=json!(format!("p{number}-t{i}"));serde_json::from_value(t).unwrap()
+            }).collect();
+            let warnings:Vec<String> = parsed["warnings"].as_array().unwrap().iter().filter_map(Value::as_str).map(str::to_owned).collect();
+            summary.push(json!({"page":number,"characters":text.chars().count(),"tables":tables.len(),"warnings":warnings}));
+            fs::write(output.join(format!("page-{number:02}-parsed.json")),serde_json::to_vec_pretty(&parsed).unwrap()).unwrap();
+            let page=Page{page:number,text,original_text:String::new(),tables,original_tables:vec![],revision:0,status:if warnings.is_empty(){"completed"}else{"needs_review"}.into(),warnings};
+            let saved=store.save_page(&doc.id,page,old.map_or(0,|p|p.revision),true).unwrap();
+            store.save_recognition_diagnostics(&doc.id,number,saved.revision,&[raw.to_owned()]).unwrap();
+            println!("第{number}页实测完成。");
+        }
+        let pause=PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        let exported=crate::ocr_export::export(&store,&json!({"projectId":project["id"],"outputDir":output.to_str().unwrap(),"mode":"combined"}),&|_,_,_,_|{},&pause).unwrap();
+        let report=json!({"model":request["ocr"]["bailian_model"],"pages":summary,"export":exported});
+        fs::write(output.join("live-report.json"),serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        println!("实测及原生导出完成。");
     }
 }

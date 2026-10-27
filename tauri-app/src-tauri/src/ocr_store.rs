@@ -60,6 +60,39 @@ pub(crate) struct Page {
     #[serde(default)]
     pub warnings: Vec<String>,
 }
+
+/// Read-only projection of legacy provider payloads. The database and its raw
+/// original remain untouched. A prior human correction always takes precedence.
+fn readable_page(mut page: Page) -> Page {
+    let unedited = !page.original_text.is_empty() && page.text == page.original_text;
+    let unedited_tables = serde_json::to_value(&page.tables).ok() == serde_json::to_value(&page.original_tables).ok();
+    let is_payload = crate::bailian_ocr::looks_like_ocr_payload(&page.original_text)
+        || page.original_text.to_ascii_lowercase().contains("<table");
+    if is_payload {
+        let parsed = crate::bailian_ocr::readable_ocr_content(&page.original_text);
+        let parsed_text = parsed["text"].as_str().unwrap_or("").to_owned();
+        let recovered: Vec<Table> = parsed["tables"].as_array().into_iter().flatten().enumerate().filter_map(|(index, table)| {
+            let mut table = table.clone();
+            table["id"] = json!(format!("p{}-legacy-{}", page.page, index + 1));
+            serde_json::from_value(table).ok()
+        }).collect();
+        page.original_text = parsed_text.clone();
+        if page.original_tables.is_empty() { page.original_tables = recovered.clone(); }
+        if unedited {
+            page.text = parsed_text;
+            if page.tables.is_empty() && unedited_tables { page.tables = recovered; }
+            page.warnings.extend(parsed["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned));
+            page.warnings.push("历史识别结果已转为可读文字；旧结构可能缺少内容，请重新识别后核对。".into());
+            page.status = "needs_review".into();
+        }
+    }
+    if page.warnings.iter().any(|w| w.contains("表格单元格数据无效") || w.contains("表格行数据无效")) {
+        page.warnings.push("旧版未能保存部分表格内容，无法从现有文字恢复，请重新识别本页。".into());
+        page.status = "needs_review".into();
+    }
+    page.warnings.sort(); page.warnings.dedup();
+    page
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Document {
@@ -85,7 +118,8 @@ impl Store {
           CREATE TABLE IF NOT EXISTS ocr_projects(id TEXT PRIMARY KEY, data TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS ocr_documents(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES ocr_projects(id) ON DELETE CASCADE, data TEXT NOT NULL, source TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS ocr_pages(document_id TEXT NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE, page INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(document_id,page));
-          CREATE TABLE IF NOT EXISTS ocr_extractions(id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE, data TEXT NOT NULL);").map_err(db_error)?;
+          CREATE TABLE IF NOT EXISTS ocr_extractions(id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE, data TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS ocr_recognition_diagnostics(document_id TEXT NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE, page INTEGER NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(document_id,page,revision));").map_err(db_error)?;
         Ok(Self {
             conn,
             root: db.parent().unwrap_or(Path::new(".")).join("ocr-files"),
@@ -200,8 +234,14 @@ impl Store {
             Some(id),
         )?
         .into_iter()
-        .map(|v| serde_json::from_value(v).map_err(|_| failure("OCR_DATA", "分页数据无效。")))
+        .map(|v| serde_json::from_value(v).map(readable_page).map_err(|_| failure("OCR_DATA", "分页数据无效。")))
         .collect()
+    }
+    pub fn save_recognition_diagnostics(&self, id: &str, page: u32, revision: u64, responses: &[String]) -> Result<(), AppError> {
+        if !responses.is_empty() {
+            self.conn.execute("INSERT OR REPLACE INTO ocr_recognition_diagnostics(document_id,page,revision,data) VALUES(?,?,?,?)", params![id,page,revision,encode(&responses)?]).map_err(db_error)?;
+        }
+        Ok(())
     }
     pub fn extractions(&self, id: &str) -> Result<Vec<Value>, AppError> {
         let rev = self.document(id)?.revision;
@@ -376,17 +416,18 @@ impl Store {
                 "页面已被修改，本次结果未覆盖人工修订，请刷新后重试。",
             ));
         }
-        if let Some(old) = old {
-            if recognition && old.original_text.is_empty() {
-                page.original_text = page.text.clone();
-                page.original_tables = page.tables.clone();
-            } else {
-                page.original_text = old.original_text;
-                page.original_tables = old.original_tables;
+        if recognition {
+            if let Some(old) = old.as_ref().filter(|old| !old.original_text.is_empty()) {
+                // Explicit recognition starts a new source baseline. Keep the
+                // previous raw/original internally before replacing the view.
+                // An existing provider-response diagnostic is more complete.
+                tx.execute("INSERT OR IGNORE INTO ocr_recognition_diagnostics(document_id,page,revision,data) VALUES(?,?,?,?)",params![id,page.page,old.revision,encode(&vec![old.original_text.clone()])?]).map_err(db_error)?;
             }
-        } else if recognition {
             page.original_text = page.text.clone();
             page.original_tables = page.tables.clone();
+        } else if let Some(old) = old {
+            page.original_text = old.original_text;
+            page.original_tables = old.original_tables;
         } else {
             page.original_text.clear();
             page.original_tables.clear();
@@ -481,6 +522,61 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_projection_does_not_restore_a_table_the_user_deleted() {
+        let original_table = Table { id: "t".into(), title: String::new(), rows: vec![vec!["00123".into()]] };
+        let raw = r#"{"text":"原文","tables":[{"rows":[["00123"]]}]}"#;
+        let page = Page { page: 1, text: raw.into(), original_text: raw.into(), tables: vec![], original_tables: vec![original_table], revision: 2, status: "needs_review".into(), warnings: vec![] };
+        let projected = readable_page(page);
+        assert!(projected.tables.is_empty());
+        assert!(projected.text.contains("原文"));
+    }
+    #[test]
+    fn legacy_payload_projection_preserves_human_edits_and_raw_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("db")).unwrap();
+        let project = store.save_project(&json!({"name":"测试"})).unwrap();
+        let source = dir.path().join("x.png"); fs::write(&source, b"synthetic").unwrap();
+        let doc = store.import(project["id"].as_str().unwrap(), &source).unwrap();
+        let raw = r#"{"text":"标题","tables":[{"rows":[{"text":"后续条款"}]}]}"#;
+        let page = Page { page:1, text:raw.into(), original_text:String::new(), tables:vec![], original_tables:vec![], revision:0, status:"completed".into(), warnings:vec![] };
+        store.save_page(&doc.id, page, 0, true).unwrap();
+        let mut projected = store.pages(&doc.id).unwrap().remove(0);
+        assert_eq!(projected.text, "标题\n\n后续条款");
+        assert_eq!(projected.status, "needs_review");
+        let persisted:String = store.conn.query_row("SELECT data FROM ocr_pages WHERE document_id=?",[&doc.id],|row|row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&persisted).unwrap()["text"], raw);
+        projected.text = "用户已校对的完整原文".into();
+        store.save_page(&doc.id, projected, 1, false).unwrap();
+        assert_eq!(store.pages(&doc.id).unwrap()[0].text, "用户已校对的完整原文");
+        store.save_recognition_diagnostics(&doc.id, 1, 2, &[raw.into()]).unwrap();
+        let diagnostics:String = store.conn.query_row("SELECT data FROM ocr_recognition_diagnostics WHERE document_id=?",[&doc.id],|row|row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&diagnostics).unwrap()[0], raw);
+        assert!(!serde_json::to_string(&store.pages(&doc.id).unwrap()).unwrap().contains("diagnosticResponse"));
+    }
+    #[test]
+    fn explicit_retry_refreshes_source_baseline_but_manual_save_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("db")).unwrap();
+        let project = store.save_project(&json!({"name":"测试"})).unwrap();
+        let source = dir.path().join("x.png"); fs::write(&source, b"synthetic").unwrap();
+        let doc = store.import(project["id"].as_str().unwrap(), &source).unwrap();
+        let raw = r#"{"text":"旧内容","rotate_rect":[1><2]}"#;
+        let page = Page { page:1, text:raw.into(), original_text:String::new(), tables:vec![], original_tables:vec![], revision:0, status:"needs_review".into(), warnings:vec![] };
+        let mut retry = store.save_page(&doc.id, page, 0, true).unwrap();
+        retry.text = "重新识别后的完整原文".into();
+        retry.tables = vec![Table{id:"p1-table".into(),title:"原表".into(),rows:vec![vec!["00123".into()]]}];
+        let mut current = store.save_page(&doc.id, retry, 1, true).unwrap();
+        assert_eq!(current.original_text, "重新识别后的完整原文");
+        assert_eq!(current.original_tables[0].rows[0][0], "00123");
+        current.tables[0].rows[0][0] = "人工校对".into();
+        current.text = "人工校对正文".into();
+        let saved = store.save_page(&doc.id, current, 2, false).unwrap();
+        assert_eq!(saved.original_text, "重新识别后的完整原文");
+        assert_eq!(saved.original_tables[0].rows[0][0], "00123");
+        let previous:String = store.conn.query_row("SELECT data FROM ocr_recognition_diagnostics WHERE document_id=? AND revision=1",[&doc.id],|row|row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&previous).unwrap()[0], raw);
+    }
     #[test]
     fn revisions_preserve_original_and_invalidate_extractions() {
         let dir = tempfile::tempdir().unwrap();

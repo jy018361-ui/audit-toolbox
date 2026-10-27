@@ -644,3 +644,43 @@ export async function listenPositionedFileDrops(
     });
   });
 }
+
+// ===== 数据流 DataFlow（可视化数据处理工作流，第一期 8 节点） =====
+// import 声明置于文件末尾同样生效（ES 模块静态导入会被提升），
+// 以满足「api.ts 只在末尾追加、改动最小化」的约定。
+import { dataflowDemoResult } from "./dataflow/demoData";
+
+export type DataflowRunMode = "preview" | "full";
+
+/**
+ * 数据流预览运行：每个输入节点取样本快速试跑，不写输出文件。
+ * 请求：engine_call("dataflow_preview", 工作流JSON本体 + paramOverrides)。
+ * 浏览器预览模式返回内置中文审计示例数据，供 npm run dev 完整体验界面。
+ */
+export async function dataflowPreview(
+  workflow: unknown,
+  paramOverrides: Record<string, string> = {},
+): Promise<unknown> {
+  if (!inTauri()) return dataflowDemoResult("preview", workflow, paramOverrides);
+  return engineCall(
+    "dataflow_preview",
+    { ...(workflow as Record<string, unknown>), runMode: "preview", paramOverrides },
+    "数据流预览运行（样本数据）",
+  );
+}
+
+/**
+ * 数据流全量运行：完整数据处理，输出节点落盘。
+ * 请求：engine_call("dataflow_run", 工作流JSON本体 + paramOverrides)。
+ */
+export async function dataflowRun(
+  workflow: unknown,
+  paramOverrides: Record<string, string> = {},
+): Promise<unknown> {
+  if (!inTauri()) return dataflowDemoResult("full", workflow, paramOverrides);
+  return engineCall(
+    "dataflow_run",
+    { ...(workflow as Record<string, unknown>), runMode: "full", paramOverrides },
+    "数据流全量运行",
+  );
+}

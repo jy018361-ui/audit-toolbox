@@ -243,6 +243,10 @@ def apply_dirty(rows, plan, answers, file_label):
         elif kind == "前导零流水号":
             r["流水号"] = "0" + f"{idx:017d}"
             rec(kind, idx, f"流水号={r['流水号']}（前导零变体）")
+        elif kind == "前导零科目编码":
+            r["科目编码"] = "0101"
+            r["科目名称"] = "待摊费用"
+            rec(kind, idx, "科目编码=0101（前导零，锁文本读入）")
         elif kind == "多位小数":
             r[side] = f"{kw['value']:.4f}"
             rec(kind, idx, f"{side}={r[side]} 四位小数（金额不统一截两位）")
@@ -453,9 +457,10 @@ def fmt_answers(answers):
     for kind in sorted(answers):
         val = answers[kind]
         if kind in ("前导零科目编码行", "斜杠短写日期行"):
+            hint = ("回读时按科目编码 0101/0102 识别" if kind == "前导零科目编码行"
+                    else "回读时按凭证日期含「/」识别")
             if len(val) > 30:
-                lines.append(f"- {kind}：{len(val)} 行（行号略，回读时按科目编码 0101/0102、"
-                             f"日期含「/」识别）")
+                lines.append(f"- {kind}：{len(val)} 行（行号略，{hint}）")
             else:
                 lines.append(f"- {kind}：{len(val)} 行（行号 {'、'.join(map(str, val))}）")
         else:
@@ -665,6 +670,7 @@ def main():
             (60, "客商空值", {}),
             (65, "前导零流水号", {}),
             (70, "全角破折号摘要", {}),
+            (33, "前导零科目编码", {}),
         ], answers, f_xlsx)
         write_xlsx(OUT_DIR / f_xlsx, xr)
 
@@ -722,7 +728,8 @@ def main():
     ]
     if xlsx_ok:
         file_table.append((f_xlsx, "（xlsx 二进制）", "单 Sheet「序时账」", f"{args.xlsx_rows} 行",
-                           "流水号/科目编码/凭证号列文本格式；日期列前 60% 文本（含斜杠短写）、后 40% 真日期单元格；"
+                           "流水号/科目编码/凭证号列文本格式（第 33 行固定为前导零科目 0101）；"
+                           "日期列前 60% 文本（含斜杠短写）、后 40% 真日期单元格；"
                            "千分位文本金额、带单位金额、全角括号客商、首尾空格客商、空客商、前导零流水号、全角破折号摘要",
                            "Excel 输入节点：类型保真（18 位文本流水号不损、前导零科目编码）、"
                            "文本日期与真日期混排的类型判定（设计文档第 9 节「编号与大数保护」「Excel 数字单元格与文本需区分」）"))
@@ -788,7 +795,7 @@ def main():
     readme.append("")
     readme.append("## 三、既有仓库样例盘点（只读复用，勿改动）")
     readme.append("")
-    readme.append("以下为 `tests/fixtures/` 下（不含本目录）既有的表格样例清单，可直接用于 DataFlow 的"
+    readme.append("以下为 `tests/fixtures/` 下（不含本目录）既有的表格样例清单，可直接用于 DataFlow 的 "
                   "xlsx/xls 读取测试；本脚本未改动其中任何文件。")
     for rel in existing:
         note = notes.get(rel, "")

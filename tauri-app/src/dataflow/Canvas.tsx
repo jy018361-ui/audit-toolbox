@@ -1,0 +1,468 @@
+import { useEffect, useRef, useState } from "react";
+import { RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
+
+import { DataflowIcon } from "./icons";
+import type {
+  DataflowEdge,
+  DataflowNode,
+  DataflowNodeResult,
+  DataflowWorkflow,
+} from "./model";
+import { nodeSpec, type DataflowNodeSpec } from "./nodeSpecs";
+
+/** 画布几何常量：节点宽度与默认高度，锚点纵向分布按此计算。 */
+const NODE_W = 156;
+const NODE_H = 78;
+
+export type NodeRunStatus = "idle" | "run" | "ok" | "warn" | "error";
+
+export type DataflowSelection =
+  | { kind: "node"; id: string }
+  | { kind: "edge"; edge: DataflowEdge }
+  | null;
+
+export function anchorOffsetY(count: number, index: number): number {
+  return NODE_H * (0.28 + (0.44 * index) / Math.max(1, count - 1));
+}
+
+function anchorPos(
+  node: DataflowNode,
+  spec: DataflowNodeSpec,
+  side: "in" | "out",
+  key: string,
+): { x: number; y: number } {
+  const anchors = side === "in" ? spec.inputs : spec.outputs;
+  const index = Math.max(0, anchors.findIndex((anchor) => anchor.key === key));
+  return {
+    x: node.x + (side === "in" ? 0 : NODE_W),
+    y: node.y + anchorOffsetY(anchors.length, index),
+  };
+}
+
+function bezierPath(a: { x: number; y: number }, b: { x: number; y: number }): string {
+  const dx = Math.min(120, Math.max(40, Math.abs(b.x - a.x) * 0.5));
+  return `M${a.x} ${a.y} C${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;
+}
+
+const CATEGORY_COLOR: Record<string, string> = {
+  input: "var(--df-cat-input)",
+  transform: "var(--df-cat-transform)",
+  filtersort: "var(--df-cat-filtersort)",
+  join: "var(--df-cat-join)",
+  aggregate: "var(--df-cat-aggregate)",
+  check: "var(--df-cat-check)",
+  output: "var(--df-cat-output)",
+};
+
+function statusClass(status: NodeRunStatus): string {
+  if (status === "error") return "err";
+  return status;
+}
+
+function badgeText(spec: DataflowNodeSpec, result: DataflowNodeResult | undefined): string {
+  if (!result) return "";
+  if (spec.outputs.length > 1) {
+    return spec.outputs
+      .map((anchor) => {
+        const rows = result.anchors[anchor.key]?.rowCount;
+        return `${anchor.key} ${rows !== undefined ? rows.toLocaleString("zh-CN") : "—"}`;
+      })
+      .join(" · ");
+  }
+  const elapsed =
+    result.ms >= 1000 ? `${(result.ms / 1000).toFixed(1)} 秒` : `${result.ms} 毫秒`;
+  return `${result.rows.toLocaleString("zh-CN")} 行 · ${elapsed}`;
+}
+
+type DragState =
+  | { mode: "pan"; moved: number; lastX: number; lastY: number }
+  | {
+      mode: "node";
+      id: string;
+      dx: number;
+      dy: number;
+      moved: number;
+      snapshotted: boolean;
+    }
+  | { mode: "connect"; from: string; fromAnchor: string; moved: number }
+  | null;
+
+export interface DataflowCanvasProps {
+  workflow: DataflowWorkflow;
+  selection: DataflowSelection;
+  statusOf: (nodeId: string) => NodeRunStatus;
+  resultOf: (nodeId: string) => DataflowNodeResult | undefined;
+  onSelect: (selection: DataflowSelection) => void;
+  onMoveNode: (id: string, x: number, y: number) => void;
+  /** 节点真正开始被拖动前调用一次（撤销栈快照）。 */
+  onNodeDragStart: () => void;
+  onConnect: (edge: DataflowEdge) => void;
+}
+
+/** 数据流画布：拖动/连线/平移/缩放/点选，原生 DOM + SVG 实现。 */
+export function DataflowCanvas({
+  workflow,
+  selection,
+  statusOf,
+  resultOf,
+  onSelect,
+  onMoveNode,
+  onNodeDragStart,
+  onConnect,
+}: DataflowCanvasProps) {
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const [camera, setCamera] = useState({ x: 24, y: 16, zoom: 1 });
+  const dragRef = useRef<DragState>(null);
+  const cameraRef = useRef(camera);
+  cameraRef.current = camera;
+  // 连线临时路径：渲染用 state、判定用 ref——快速拖动时 pointerup 可能先于
+  // React 重渲染到达，读 state 会拿到旧值而丢线。
+  const [tempEdge, setTempEdge] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  const tempEdgeRef = useRef<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+
+  const capturePointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // 合成指针事件没有活动指针 id，捕获失败不阻断拖动逻辑。
+    }
+  };
+
+  // 滚轮缩放：以指针为锚点，clamp 0.35–2.2。需要 non-passive 才能阻止页面滚动。
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const mx = event.clientX - rect.left;
+      const my = event.clientY - rect.top;
+      const current = cameraRef.current;
+      const nextZoom = Math.max(0.35, Math.min(2.2, current.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
+      setCamera({
+        zoom: nextZoom,
+        x: mx - ((mx - current.x) * nextZoom) / current.zoom,
+        y: my - ((my - current.y) * nextZoom) / current.zoom,
+      });
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, []);
+
+  function worldFromEvent(event: React.PointerEvent): { x: number; y: number } {
+    const rect = (canvasRef.current as HTMLDivElement).getBoundingClientRect();
+    const cameraNow = cameraRef.current;
+    return {
+      x: (event.clientX - rect.left - cameraNow.x) / cameraNow.zoom,
+      y: (event.clientY - rect.top - cameraNow.y) / cameraNow.zoom,
+    };
+  }
+
+  function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    const target = event.target as HTMLElement;
+    const outAnchor = target.closest(".df-a-out") as HTMLElement | null;
+    if (outAnchor) {
+      const nodeEl = outAnchor.closest(".df-node") as HTMLElement | null;
+      if (nodeEl) {
+        dragRef.current = {
+          mode: "connect",
+          from: nodeEl.dataset.id ?? "",
+          fromAnchor: outAnchor.dataset.key ?? "out",
+          moved: 0,
+        };
+        capturePointer(event);
+        return;
+      }
+    }
+    const edgeEl = target.closest(".df-edge") as HTMLElement | null;
+    if (edgeEl) {
+      onSelect({
+        kind: "edge",
+        edge: {
+          from: edgeEl.dataset.from ?? "",
+          fromAnchor: edgeEl.dataset.fromAnchor ?? "",
+          to: edgeEl.dataset.to ?? "",
+          toAnchor: edgeEl.dataset.toAnchor ?? "",
+        },
+      });
+      return;
+    }
+    const nodeEl = target.closest(".df-node") as HTMLElement | null;
+    if (nodeEl && nodeEl.dataset.id) {
+      const node = workflow.nodes.find((item) => item.id === nodeEl.dataset.id);
+      if (node) {
+        const world = worldFromEvent(event);
+        dragRef.current = {
+          mode: "node",
+          id: node.id,
+          dx: world.x - node.x,
+          dy: world.y - node.y,
+          moved: 0,
+          snapshotted: false,
+        };
+        capturePointer(event);
+        return;
+      }
+    }
+    dragRef.current = { mode: "pan", moved: 0, lastX: event.clientX, lastY: event.clientY };
+    capturePointer(event);
+  }
+
+  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    if (drag.mode === "pan") {
+      drag.moved += 1;
+      setCamera((current) => ({
+        ...current,
+        x: current.x + (event.clientX - drag.lastX),
+        y: current.y + (event.clientY - drag.lastY),
+      }));
+      drag.lastX = event.clientX;
+      drag.lastY = event.clientY;
+      return;
+    }
+    if (drag.mode === "node") {
+      drag.moved += 1;
+      if (!drag.snapshotted && drag.moved >= 3) {
+        drag.snapshotted = true;
+        onNodeDragStart();
+      }
+      if (!drag.snapshotted) return;
+      const world = worldFromEvent(event);
+      onMoveNode(
+        drag.id,
+        Math.max(4, Math.min(4600, world.x - drag.dx)),
+        Math.max(4, Math.min(3600, world.y - drag.dy)),
+      );
+      return;
+    }
+    // 连线拖动：临时虚线跟随指针。ref 同步写，保证快速拖动时 pointerup
+    // 立即可读到最新路径。
+    drag.moved += 1;
+    if (drag.moved < 3) return;
+    const fromNode = workflow.nodes.find((item) => item.id === drag.from);
+    const fromSpec = fromNode ? nodeSpec(fromNode.type) : undefined;
+    if (!fromNode || !fromSpec) return;
+    const start = anchorPos(fromNode, fromSpec, "out", drag.fromAnchor);
+    const world = worldFromEvent(event);
+    const next = { x1: start.x, y1: start.y, x2: world.x, y2: world.y };
+    tempEdgeRef.current = next;
+    setTempEdge(next);
+  }
+
+  function finishDrag(event: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (!drag) return;
+    if (drag.mode === "connect") {
+      if (tempEdgeRef.current) {
+        const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+        const inAnchor = element?.closest(".df-a-in") as HTMLElement | null;
+        const targetNode = inAnchor?.closest(".df-node") as HTMLElement | null;
+        if (inAnchor && targetNode?.dataset.id) {
+          onConnect({
+            from: drag.from,
+            fromAnchor: drag.fromAnchor,
+            to: targetNode.dataset.id,
+            toAnchor: inAnchor.dataset.key ?? "in",
+          });
+        }
+      }
+      setTempEdge(null);
+      tempEdgeRef.current = null;
+      return;
+    }
+    if (drag.mode === "node" && drag.moved < 3) {
+      onSelect({ kind: "node", id: drag.id });
+      return;
+    }
+    if (drag.mode === "pan" && drag.moved < 3) {
+      onSelect(null);
+    }
+  }
+
+  const nodeById = new Map(workflow.nodes.map((node) => [node.id, node]));
+
+  return (
+    <div className="df-canvas-wrap">
+      <div
+        className="df-canvas"
+        ref={canvasRef}
+        data-tour="dataflow-canvas"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={finishDrag}
+        onPointerCancel={() => {
+          dragRef.current = null;
+          setTempEdge(null);
+        }}
+      >
+        <div
+          className="df-world"
+          style={{
+            transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})`,
+          }}
+        >
+          <svg className="df-edges" aria-hidden="true">
+            <defs>
+              <marker
+                id="df-edge-arrow"
+                viewBox="0 0 10 10"
+                refX="8.5"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M0 0L10 5L0 10z" fill="context-stroke" />
+              </marker>
+            </defs>
+            {workflow.edges.map((edge) => {
+              const from = nodeById.get(edge.from);
+              const to = nodeById.get(edge.to);
+              const fromSpec = from ? nodeSpec(from.type) : undefined;
+              const toSpec = to ? nodeSpec(to.type) : undefined;
+              if (!from || !to || !fromSpec || !toSpec) return null;
+              const selected =
+                selection?.kind === "edge" &&
+                selection.edge.from === edge.from &&
+                selection.edge.fromAnchor === edge.fromAnchor &&
+                selection.edge.to === edge.to &&
+                selection.edge.toAnchor === edge.toAnchor;
+              return (
+                <path
+                  key={`${edge.from}:${edge.fromAnchor}->${edge.to}:${edge.toAnchor}`}
+                  className={`df-edge${selected ? " df-edge-selected" : ""}`}
+                  d={bezierPath(
+                    anchorPos(from, fromSpec, "out", edge.fromAnchor),
+                    anchorPos(to, toSpec, "in", edge.toAnchor),
+                  )}
+                  markerEnd="url(#df-edge-arrow)"
+                  data-from={edge.from}
+                  data-from-anchor={edge.fromAnchor}
+                  data-to={edge.to}
+                  data-to-anchor={edge.toAnchor}
+                />
+              );
+            })}
+            {tempEdge && (
+              <path
+                className="df-temp-edge"
+                d={`M${tempEdge.x1} ${tempEdge.y1} L${tempEdge.x2} ${tempEdge.y2}`}
+              />
+            )}
+          </svg>
+          {workflow.nodes.map((node) => {
+            const spec = nodeSpec(node.type);
+            if (!spec) return null;
+            const status = statusOf(node.id);
+            const result = resultOf(node.id);
+            const badge = status === "run" ? "运行中…" : badgeText(spec, result);
+            const selected = selection?.kind === "node" && selection.id === node.id;
+            return (
+              <div
+                key={node.id}
+                className={`df-node${selected ? " df-selected" : ""}${
+                  status !== "idle" ? ` df-st-${statusClass(status)}` : ""
+                }`}
+                data-id={node.id}
+                onClick={() => onSelect({ kind: "node", id: node.id })}
+                style={{
+                  left: node.x,
+                  top: node.y,
+                  ["--df-cat" as string]: CATEGORY_COLOR[spec.category],
+                }}
+              >
+                <div className="df-node-head">
+                  <DataflowIcon icon={spec.icon} />
+                  <div className="df-node-names">
+                    <b>{node.name}</b>
+                    <span>
+                      {spec.cn} {spec.en}
+                    </span>
+                  </div>
+                </div>
+                <div
+                  className={`df-node-badge df-b-${statusClass(status)}${
+                    badge ? " df-badge-show" : ""
+                  }`}
+                >
+                  {badge}
+                </div>
+                {spec.inputs.map((anchor, index) => (
+                  <span key={anchor.key}>
+                    <span
+                      className="df-a df-a-in"
+                      data-key={anchor.key}
+                      style={{ top: anchorOffsetY(spec.inputs.length, index) - 5.5 }}
+                    />
+                    {spec.inputs.length > 1 && (
+                      <span
+                        className="df-a-lbl df-a-lbl-in"
+                        style={{ top: anchorOffsetY(spec.inputs.length, index) - 7 }}
+                      >
+                        {anchor.label}
+                      </span>
+                    )}
+                  </span>
+                ))}
+                {spec.outputs.map((anchor, index) => (
+                  <span key={anchor.key}>
+                    <span
+                      className="df-a df-a-out"
+                      data-key={anchor.key}
+                      style={{ top: anchorOffsetY(spec.outputs.length, index) - 5.5 }}
+                    />
+                    {spec.outputs.length > 1 && (
+                      <span
+                        className="df-a-lbl df-a-lbl-out"
+                        style={{ top: anchorOffsetY(spec.outputs.length, index) - 7 }}
+                      >
+                        {anchor.label}
+                      </span>
+                    )}
+                  </span>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+        <div className="df-canvas-tools">
+          <button
+            type="button"
+            className="df-tool"
+            aria-label="放大"
+            onClick={() =>
+              setCamera((current) => ({ ...current, zoom: Math.min(2.2, current.zoom * 1.15) }))
+            }
+          >
+            <ZoomIn size={13} />
+          </button>
+          <button
+            type="button"
+            className="df-tool"
+            aria-label="缩小"
+            onClick={() =>
+              setCamera((current) => ({ ...current, zoom: Math.max(0.35, current.zoom / 1.15) }))
+            }
+          >
+            <ZoomOut size={13} />
+          </button>
+          <button
+            type="button"
+            className="df-tool"
+            onClick={() => setCamera({ x: 24, y: 16, zoom: 1 })}
+          >
+            <RotateCcw size={13} />
+            重置视图
+          </button>
+        </div>
+        <span className="df-hint">
+          空白处拖动平移 · 滚轮缩放 · 从节点右侧圆点拖到左侧圆点连线 · Delete 删除选中
+        </span>
+      </div>
+    </div>
+  );
+}

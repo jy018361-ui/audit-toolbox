@@ -427,7 +427,7 @@ pub(crate) struct SplitConfig {
 
 /// 检查 Check 的规则（按 kind 区分五种形态；name 可选自定义规则名）。
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub(crate) enum CheckRule {
     /// 借贷合计一致（groupBy 空 = 全表）。
     Balance {

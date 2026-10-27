@@ -1164,5 +1164,414 @@ mod tests {
         let error = run_workflow("dataflow_preview", flow).unwrap_err();
         assert_eq!(error.code, "DATAFLOW_CYCLE");
     }
+
+    // ---------- 第二期：12 个节点与运行到选中 ----------
+
+    fn col(result: &Value, node: &str, anchor: &str, name: &str) -> usize {
+        let columns = result
+            .pointer(&format!("/nodes/{node}/anchors/{anchor}/columns"))
+            .and_then(Value::as_array)
+            .expect("列清单应存在");
+        columns
+            .iter()
+            .position(|value| value.as_str() == Some(name))
+            .unwrap_or_else(|| panic!("列「{name}」应存在"))
+    }
+
+    fn stats_of(result: &Value, node: &str) -> Vec<String> {
+        result
+            .pointer(&format!("/nodes/{node}/stats"))
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .map(|value| value.as_str().unwrap_or_default().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn edge(from: &str, to: &str, to_anchor: &str) -> Value {
+        json!({"from": from, "fromAnchor": "output", "to": to, "toAnchor": to_anchor})
+    }
+
+    #[test]
+    fn join_many_to_many_null_keys_and_suffix() {
+        let root = tempfile::tempdir().unwrap();
+        let left = root.path().join("l.csv");
+        let right = root.path().join("r.csv");
+        fs::write(&left, "k,w\na,1\na,2\nb,3\n,4\n").unwrap();
+        fs::write(&right, "k,z\na,X\na,Y\nc,Z\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("l", &left, json!({})),
+                csv_in_node("r", &right, json!({})),
+                {"id": "j", "type": "join_n", "name": "关联", "config": {
+                    "keys": [{"left": "k", "right": "k"}],
+                    "leftFields": [], "rightFields": [], "sameNameSuffix": "_右"
+                }}
+            ]),
+            json!([edge("l", "j", "inL"), edge("r", "j", "inR")]),
+        );
+        let result = run("dataflow_preview", flow);
+        // 左 a×2 与右 a×2 组合 4 条；b 与空键进 L；c 进 R。
+        assert_eq!(row_count(&result, "j", "J"), 4);
+        assert_eq!(row_count(&result, "j", "L"), 2);
+        assert_eq!(row_count(&result, "j", "R"), 1);
+        let columns = result
+            .pointer("/nodes/j/anchors/J/columns")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(columns.iter().any(|name| name.as_str() == Some("k_右")));
+        assert!(stats_of(&result, "j").iter().any(|line| line.contains("膨胀")));
+    }
+
+    #[test]
+    fn join_key_type_mismatch_reports_in_chinese() {
+        let root = tempfile::tempdir().unwrap();
+        let left = root.path().join("l.csv");
+        let right = root.path().join("r.csv");
+        fs::write(&left, "k\n1\n").unwrap();
+        fs::write(&right, "k\nx\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("l", &left, json!({})),
+                csv_in_node("r", &right, json!({})),
+                {"id": "j", "type": "join_n", "name": "关联", "config": {
+                    "keys": [{"left": "k", "right": "k"}],
+                    "leftFields": [], "rightFields": [], "sameNameSuffix": "_右"
+                }}
+            ]),
+            json!([edge("l", "j", "inL"), edge("r", "j", "inR")]),
+        );
+        let result = run("dataflow_preview", flow);
+        let error = result.pointer("/error").expect("应返回结构性错误");
+        assert!(error.get("userMessage").and_then(Value::as_str).unwrap_or("").contains("类型"));
+    }
+
+    #[test]
+    fn union_by_name_union_columns_and_diff_report() {
+        let root = tempfile::tempdir().unwrap();
+        let u1 = root.path().join("u1.csv");
+        let u2 = root.path().join("u2.csv");
+        fs::write(&u1, "a,b\n1,x\n2,y\n").unwrap();
+        fs::write(&u2, "a,c\n3,z\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("u1", &u1, json!({})),
+                csv_in_node("u2", &u2, json!({})),
+                {"id": "u", "type": "union_n", "name": "合并", "config": {
+                    "align": "byName", "extraFieldPolicy": "keep",
+                    "typeConflictPolicy": "text", "order": []
+                }}
+            ]),
+            json!([edge("u1", "u", "in"), edge("u2", "u", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(row_count(&result, "u", "output"), 3);
+        let c = col(&result, "u", "output", "c");
+        assert_eq!(cell(&result, "u", "output", 0, c), Value::Null);
+        assert!(stats_of(&result, "u").iter().any(|line| line.contains("差异")));
+    }
+
+    #[test]
+    fn unique_keeps_first_by_default_and_null_keys_group() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("d.csv");
+        fs::write(&file, "id,v\n1,a\n2,b\n1,c\n,d\n,e\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "u", "type": "unique_n", "name": "去重", "config": {"fields": ["id"], "keep": "first"}}
+            ]),
+            json!([edge("i", "u", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(row_count(&result, "u", "U"), 3);
+        assert_eq!(row_count(&result, "u", "D"), 2);
+        assert_eq!(cell(&result, "u", "U", 0, 1), json!("a"));
+    }
+
+    #[test]
+    fn sort_is_stable_and_nulls_last_by_default() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("s.csv");
+        fs::write(&file, "v\n3\n1\n\n2\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "s", "type": "sort_n", "name": "排序", "config": {
+                    "rules": [{"field": "v", "direction": "asc", "nulls": "last"}]
+                }}
+            ]),
+            json!([edge("i", "s", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(row_count(&result, "s", "output"), 4);
+        assert_eq!(cell(&result, "s", "output", 0, 0), json!(1));
+        assert_eq!(cell(&result, "s", "output", 3, 0), Value::Null);
+    }
+
+    #[test]
+    fn summarize_null_group_distinct_count_and_average() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("g.csv");
+        fs::write(&file, "g,v\nA,1\nA,2\nB,\n,5\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "m", "type": "summarize", "name": "汇总", "config": {
+                    "groupBy": ["g"],
+                    "aggregations": [
+                        {"field": "", "func": "countAll", "output": ""},
+                        {"field": "v", "func": "countNonEmpty", "output": ""},
+                        {"field": "v", "func": "distinctCount", "output": ""},
+                        {"field": "v", "func": "avg", "output": ""}
+                    ]
+                }}
+            ]),
+            json!([edge("i", "m", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(row_count(&result, "m", "output"), 3);
+        let group = col(&result, "m", "output", "g");
+        let count_all = col(&result, "m", "output", "总行数");
+        let avg = col(&result, "m", "output", "v_平均");
+        assert_eq!(cell(&result, "m", "output", 0, group), json!("A"));
+        assert_eq!(cell(&result, "m", "output", 0, count_all), json!(2));
+        assert_eq!(cell(&result, "m", "output", 0, avg), json!("1.5"));
+        // 空值键归入「（空）」组：countAll=1。
+        let mut null_group_seen = false;
+        for row in 0..3 {
+            if cell(&result, "m", "output", row, group) == json!("（空）") {
+                assert_eq!(cell(&result, "m", "output", row, count_all), json!(1));
+                null_group_seen = true;
+            }
+        }
+        assert!(null_group_seen, "应存在「（空）」分组");
+    }
+
+    #[test]
+    fn crosstab_fills_missing_combination_with_zero() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("p.csv");
+        fs::write(&file, "r,c,v\nA,X,1\nA,Y,2\nB,X,3\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "p", "type": "crosstab", "name": "透视", "config": {
+                    "rowField": "r", "columnField": "c", "valueField": "v",
+                    "valueFunc": "sum", "fill": 0
+                }}
+            ]),
+            json!([edge("i", "p", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(row_count(&result, "p", "output"), 2);
+        let y = col(&result, "p", "output", "Y");
+        assert_eq!(cell(&result, "p", "output", 1, y), json!(0));
+    }
+
+    #[test]
+    fn transpose_melts_columns_with_default_names() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("t.csv");
+        fs::write(&file, "name,一月,二月\n甲,10,20\n乙,30,40\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "t", "type": "transpose", "name": "宽转长", "config": {
+                    "fixedFields": ["name"], "valueColumns": ["一月", "二月"],
+                    "nameColumn": "月份", "valueColumn": "金额"
+                }}
+            ]),
+            json!([edge("i", "t", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(row_count(&result, "t", "output"), 4);
+        let month = col(&result, "t", "output", "月份");
+        let amount = col(&result, "t", "output", "金额");
+        assert_eq!(cell(&result, "t", "output", 0, month), json!("一月"));
+        assert_eq!(cell(&result, "t", "output", 0, amount), json!(10));
+    }
+
+    #[test]
+    fn split_by_delimiter_names_columns_with_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("sp.csv");
+        fs::write(&file, "s\na-b-c\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "sp", "type": "split", "name": "分列", "config": {
+                    "field": "s", "mode": "delimiter", "delimiter": "-",
+                    "keepOriginal": false, "columnPrefix": "段", "widths": []
+                }}
+            ]),
+            json!([edge("i", "sp", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(cell(&result, "sp", "output", 0, col(&result, "sp", "output", "段_1")), json!("a"));
+        assert_eq!(cell(&result, "sp", "output", 0, col(&result, "sp", "output", "段_3")), json!("c"));
+    }
+
+    #[test]
+    fn check_balance_sends_whole_group_to_ng() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("b.csv");
+        fs::write(&file, "凭,d,c\nP1,100,100\nP1,50,50.01\nP2,10,9\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "k", "type": "check_n", "name": "检查", "config": {
+                    "rules": [{"kind": "balance", "groupBy": "凭", "debitField": "d", "creditField": "c", "tolerance": 0.01}]
+                }}
+            ]),
+            json!([edge("i", "k", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(row_count(&result, "k", "P"), 2);
+        assert_eq!(row_count(&result, "k", "NG"), 1);
+    }
+
+    #[test]
+    fn check_not_empty_treats_blank_as_empty_and_unique_sends_group() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("n.csv");
+        fs::write(&file, "id,name\n1,甲\n1,乙\n2, \n3,丙\n").unwrap();
+        // 纯空格算空 → 第 3 行 NG；编号 1 重复 → 整组（两行）NG。
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "k", "type": "check_n", "name": "检查", "config": {
+                    "rules": [
+                        {"kind": "notEmpty", "fields": ["name"]},
+                        {"kind": "unique", "field": "id"}
+                    ]
+                }}
+            ]),
+            json!([edge("i", "k", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(row_count(&result, "k", "NG"), 3);
+        assert_eq!(row_count(&result, "k", "P"), 1);
+    }
+
+    #[test]
+    fn check_empty_input_summarizes_instead_of_passing_silently() {
+        // 列类型由手工表显式声明（空 CSV 无样本会被保守推断为文本，走不进本路径）。
+        let flow = workflow(
+            json!([
+                {"id": "m", "type": "manual_in", "name": "手工", "config": {
+                    "columns": [{"name": "id", "type": "text"}, {"name": "amt", "type": "decimal"}],
+                    "rows": []
+                }},
+                {"id": "k", "type": "check_n", "name": "检查", "config": {
+                    "rules": [{"kind": "range", "field": "amt", "min": 0, "max": 100}]
+                }}
+            ]),
+            json!([edge("m", "k", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(row_count(&result, "k", "P"), 0);
+        assert!(!stats_of(&result, "k").is_empty(), "空输入必须在规则摘要中说明");
+    }
+
+    #[test]
+    fn manual_in_converts_types_and_skips_bad_rows() {
+        let flow = workflow(
+            json!([
+                {"id": "m", "type": "manual_in", "name": "手工", "config": {
+                    "columns": [{"name": "k", "type": "text"}, {"name": "v", "type": "int"}],
+                    "rows": [["a", "1"], ["b", "x"]],
+                    "onRowError": "skip"
+                }}
+            ]),
+            json!([]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "m"), "warn");
+        assert_eq!(row_count(&result, "m", "output"), 1);
+        assert_eq!(cell(&result, "m", "output", 0, 1), json!(1));
+    }
+
+    #[test]
+    fn db_in_reads_sqlite_and_diagnoses_non_sqlite() {
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("t.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE 台账(编码 TEXT, 金额 REAL);
+             INSERT INTO 台账 VALUES ('a', 1.5), ('b', 2);",
+        )
+        .unwrap();
+        drop(conn);
+        let flow = workflow(
+            json!([
+                {"id": "d", "type": "db_in", "name": "数据库", "config": {
+                    "path": db.to_string_lossy(), "table": "台账", "fields": [], "onRowError": "stop"
+                }}
+            ]),
+            json!([]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(row_count(&result, "d", "output"), 2);
+        assert_eq!(cell(&result, "d", "output", 0, 0), json!("a"));
+        assert!(stats_of(&result, "d").iter().any(|line| line.contains("浮点")));
+
+        let bad = root.path().join("bad.db");
+        fs::write(&bad, "这不是一个数据库文件").unwrap();
+        let flow = workflow(
+            json!([
+                {"id": "d", "type": "db_in", "name": "数据库", "config": {
+                    "path": bad.to_string_lossy(), "table": "x", "fields": [], "onRowError": "stop"
+                }}
+            ]),
+            json!([]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert!(result.pointer("/error").is_some(), "非 SQLite 文件应给出诊断");
+    }
+
+    #[test]
+    fn parquet_in_roundtrip_reads_written_file() {
+        use polars::prelude::*;
+        let root = tempfile::tempdir().unwrap();
+        let pq = root.path().join("t.parquet");
+        let mut frame = df! {"编码" => ["a", "b"], "数量" => [1i64, 2]}.unwrap();
+        ParquetWriter::new(fs::File::create(&pq).unwrap())
+            .finish(&mut frame)
+            .unwrap();
+        let flow = workflow(
+            json!([
+                {"id": "p", "type": "parquet_in", "name": "Parquet", "config": {
+                    "path": pq.to_string_lossy(), "fields": []
+                }}
+            ]),
+            json!([]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(row_count(&result, "p", "output"), 2);
+        assert_eq!(cell(&result, "p", "output", 0, 0), json!("a"));
+    }
+
+    #[test]
+    fn upto_node_id_runs_only_upstream_closure() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("c.csv");
+        fs::write(&file, "v\n1\n").unwrap();
+        let mut flow = workflow(
+            json!([
+                csv_in_node("a", &file, json!({})),
+                {"id": "b", "type": "clean", "name": "B", "config": {"actions": []}},
+                {"id": "c", "type": "clean", "name": "C", "config": {"actions": []}}
+            ]),
+            json!([edge("a", "b", "in"), edge("b", "c", "in")]),
+        );
+        flow["uptoNodeId"] = json!("b");
+        let result = run("dataflow_run", flow);
+        assert!(result.pointer("/nodes/a").is_some());
+        assert!(result.pointer("/nodes/b").is_some());
+        assert!(result.pointer("/nodes/c").is_none(), "目标节点之后不应执行");
+    }
 }
 

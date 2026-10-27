@@ -161,6 +161,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_CHANNEL: dev
+          RELEASE_SHA: ${{ github.sha }}
         with:
           script: |
             if (context.ref !== 'refs/heads/dev') throw new Error('仅允许从 dev 分支修复开发更新通道。');

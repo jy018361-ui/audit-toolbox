@@ -1,0 +1,2783 @@
+{
+  "results": [
+    {
+      "tag": "1600-fa_list-initial",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions fa-flow-actions",
+          "buttons": [
+            {
+              "text": "重新读取表格",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "读表并复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "开始匹配",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-fa_list-loaded",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions fa-flow-actions",
+          "buttons": [
+            {
+              "text": "重新读取表格",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "读表并复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "开始匹配",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-fa_list-matched",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions fa-flow-actions",
+          "buttons": [
+            {
+              "text": "重新读取表格",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "读表并复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "开始匹配",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        },
+        {
+          "expected": "default",
+          "className": "actions fa-flow-actions fa-page-flow",
+          "buttons": [
+            {
+              "text": "有，进入补充清单",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "没有，直接导出",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-fa_list-supplement",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "无补充清单，跳过",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "应用补充映射并继续",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-fa_list-export",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "生成 FA List 底稿",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-fa_dep_calc-initial",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions dep-source-actions",
+          "buttons": [
+            {
+              "text": "读取并复核字段",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-fa_dep_calc-loaded",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "返回导入",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：生成底稿",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-fa_dep_calc-return-to-import",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions dep-source-actions",
+          "buttons": [
+            {
+              "text": "重新复核映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：核对映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "重新读取表格",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-fa_policy_compare-initial",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions fa-flow-actions",
+          "buttons": [
+            {
+              "text": "读取表格 + LLM 复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "下一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-fa_policy_compare-loaded",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions fa-flow-actions",
+          "buttons": [
+            {
+              "text": "读取表格 + LLM 复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "LLM 重新复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-fa_policy_compare-export",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "生成折旧政策对比",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-fa_policy_compare-completed",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "重新生成",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-kanzhang-initial",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-kanzhang-loaded",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-kanzhang-mapping",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        },
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "重新进行 LLM 复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：科目筛选",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-kanzhang-accounts",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "sm",
+          "className": "kz-source-actions",
+          "buttons": [
+            {
+              "text": "全选当前结果",
+              "height": 32,
+              "padding": "0px 12px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "sm",
+              "disabled": false
+            },
+            {
+              "text": "清除选择",
+              "height": 32,
+              "padding": "0px 12px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "sm",
+              "disabled": true
+            },
+            {
+              "text": "加入目标批次",
+              "height": 32,
+              "padding": "0px 12px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "sm",
+              "disabled": true
+            },
+            {
+              "text": "加入下一批次",
+              "height": 32,
+              "padding": "0px 12px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "sm",
+              "disabled": true
+            },
+            {
+              "text": "加入剔除/例外",
+              "height": 32,
+              "padding": "0px 12px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "sm",
+              "disabled": true
+            }
+          ]
+        },
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "返回映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "筛选预览",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：透视与导出",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-kanzhang-export",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "返回筛选",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "导出结果",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-ts_manager-initial",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "加载文件",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "下一步：条件筛选",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-ts_manager-loaded",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "加载文件",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：条件筛选",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-ts_manager-filter",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "清除全部筛选",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：导出",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-ts_manager-export",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "导出默认双 Sheet",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-confirmation_progress-initial",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "检查数据",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "下一步：报告范围",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-confirmation_progress-loaded",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "检查数据",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：报告范围",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-confirmation_progress-scope",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：生成报告",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-confirmation_progress-export",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "生成进度报告",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-confirmation_progress-completed",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "重新生成",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-file_list_directory-initial",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "重新扫描",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "下一步：输出文件",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-file_list_directory-loaded",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "重新扫描",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：输出文件",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-file_list_directory-export",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "生成文件清单",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-je_sign_mark-initial",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-je_sign_mark-loaded",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-je_sign_mark-running",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "停止",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-je_sign_mark-paused",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "停止",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-je_sign_mark-cancelled",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-pdf_to_excel-initial",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "开始转换",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-pdf_to_excel-loaded",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "开始转换",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-pdf_to_excel-running",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "取消任务",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-pdf_to_excel-paused",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "取消任务",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1600-pdf_to_excel-cancelled",
+      "viewport": {
+        "width": 1600,
+        "height": 900
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "开始转换",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-fa_list-initial",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions fa-flow-actions",
+          "buttons": [
+            {
+              "text": "重新读取表格",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "读表并复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "开始匹配",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-fa_list-loaded",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions fa-flow-actions",
+          "buttons": [
+            {
+              "text": "重新读取表格",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "读表并复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "开始匹配",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-fa_list-matched",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions fa-flow-actions",
+          "buttons": [
+            {
+              "text": "重新读取表格",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "读表并复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "开始匹配",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        },
+        {
+          "expected": "default",
+          "className": "actions fa-flow-actions fa-page-flow",
+          "buttons": [
+            {
+              "text": "有，进入补充清单",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "没有，直接导出",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-fa_list-supplement",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "无补充清单，跳过",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "应用补充映射并继续",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-fa_list-export",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "生成 FA List 底稿",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-fa_dep_calc-initial",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions dep-source-actions",
+          "buttons": [
+            {
+              "text": "读取并复核字段",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-fa_dep_calc-loaded",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "返回导入",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：生成底稿",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-fa_dep_calc-return-to-import",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions dep-source-actions",
+          "buttons": [
+            {
+              "text": "重新复核映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：核对映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "重新读取表格",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-fa_policy_compare-initial",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions fa-flow-actions",
+          "buttons": [
+            {
+              "text": "读取表格 + LLM 复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "下一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-fa_policy_compare-loaded",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions fa-flow-actions",
+          "buttons": [
+            {
+              "text": "读取表格 + LLM 复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "LLM 重新复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-fa_policy_compare-export",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "生成折旧政策对比",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-fa_policy_compare-completed",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "重新生成",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-kanzhang-initial",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-kanzhang-loaded",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-kanzhang-mapping",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        },
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "重新进行 LLM 复核",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：科目筛选",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-kanzhang-accounts",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "sm",
+          "className": "kz-source-actions",
+          "buttons": [
+            {
+              "text": "全选当前结果",
+              "height": 32,
+              "padding": "0px 12px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "sm",
+              "disabled": false
+            },
+            {
+              "text": "清除选择",
+              "height": 32,
+              "padding": "0px 12px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "sm",
+              "disabled": true
+            },
+            {
+              "text": "加入目标批次",
+              "height": 32,
+              "padding": "0px 12px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "sm",
+              "disabled": true
+            },
+            {
+              "text": "加入下一批次",
+              "height": 32,
+              "padding": "0px 12px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "sm",
+              "disabled": true
+            },
+            {
+              "text": "加入剔除/例外",
+              "height": 32,
+              "padding": "0px 12px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "sm",
+              "disabled": true
+            }
+          ]
+        },
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "返回映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "筛选预览",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：透视与导出",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-kanzhang-export",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "返回筛选",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "导出结果",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-ts_manager-initial",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "加载文件",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "下一步：条件筛选",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-ts_manager-loaded",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "加载文件",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：条件筛选",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-ts_manager-filter",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "清除全部筛选",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：导出",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-ts_manager-export",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "导出默认双 Sheet",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-confirmation_progress-initial",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "检查数据",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "下一步：报告范围",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-confirmation_progress-loaded",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "检查数据",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：报告范围",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-confirmation_progress-scope",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：生成报告",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-confirmation_progress-export",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "生成进度报告",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-confirmation_progress-completed",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "重新生成",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-file_list_directory-initial",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "重新扫描",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "下一步：输出文件",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-file_list_directory-loaded",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "重新扫描",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "下一步：输出文件",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-file_list_directory-export",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "上一步",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            },
+            {
+              "text": "生成文件清单",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-je_sign_mark-initial",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-je_sign_mark-loaded",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-je_sign_mark-running",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "停止",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-je_sign_mark-paused",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            },
+            {
+              "text": "停止",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-je_sign_mark-cancelled",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "kz-actions",
+          "buttons": [
+            {
+              "text": "读取并自动映射",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-pdf_to_excel-initial",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "开始转换",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": true
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-pdf_to_excel-loaded",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "开始转换",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-pdf_to_excel-running",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "取消任务",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-pdf_to_excel-paused",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "取消任务",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    },
+    {
+      "tag": "1000-pdf_to_excel-cancelled",
+      "viewport": {
+        "width": 1000,
+        "height": 680
+      },
+      "groups": [
+        {
+          "expected": "default",
+          "className": "actions",
+          "buttons": [
+            {
+              "text": "开始转换",
+              "height": 40,
+              "padding": "0px 16px",
+              "fontSize": "14px",
+              "borderWidth": "1px",
+              "size": "default",
+              "disabled": false
+            }
+          ]
+        }
+      ],
+      "issues": []
+    }
+  ],
+  "failures": []
+}

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -20,13 +21,14 @@ const mocks = vi.hoisted(() => ({
   pause: vi.fn(),
   extract: vi.fn(),
   dispose: vi.fn(),
+  nativeDrag: vi.fn(async (_callback: (event: {type: string; paths?: string[]}) => void) => () => {}),
 }));
 vi.mock("./ocrApi", () => ({ ocrCall: mocks.call, runOcrJob: mocks.job }));
 vi.mock("./api", () => ({
   jobCancel: mocks.cancel,
   jobPause: mocks.pause,
   pickPath: mocks.pick,
-  listenFileDrops: vi.fn(async () => () => {}),
+  listenNativeFileDragEvents: mocks.nativeDrag,
   openOutput: vi.fn(),
 }));
 vi.mock("./ocrSource", () => ({
@@ -218,6 +220,33 @@ async function openDocument() {
     expect(screen.getByRole("button", { name: "继续识别" })).toBeEnabled(),
   );
 }
+
+it("OCR 复用上传槽，点击选择与原生拖入文件/文件夹走相同导入流程", async () => {
+  await openDocument();
+  mocks.pick.mockResolvedValueOnce(["C:/扫描件/一.pdf", "C:/扫描件/二.png"]);
+  fireEvent.click(screen.getByRole("button", {name: "导入文件"}));
+  await waitFor(() => expect(mocks.call).toHaveBeenCalledWith("ocr.document_import", {
+    projectId: "p", paths: ["C:/扫描件/一.pdf", "C:/扫描件/二.png"], folder: undefined,
+  }));
+  await waitFor(() => expect(screen.getByRole("button", {name: "导入文件"})).toBeEnabled());
+  const receive = mocks.nativeDrag.mock.calls[0][0];
+  await act(async () => receive({type: "enter"}));
+  expect(screen.getByRole("button", {name: "导入文件"}).closest(".file-drop-input")).toHaveClass("drag-hover");
+  await act(async () => receive({type: "drop", paths: ["C:/扫描目录", "C:/额外.tiff"]}));
+  await waitFor(() => expect(mocks.call).toHaveBeenCalledWith("ocr.document_import", {
+    projectId: "p", paths: ["C:/扫描目录", "C:/额外.tiff"], folder: undefined,
+  }));
+  expect(screen.getByRole("button", {name: "导入文件"}).closest(".file-drop-input")).not.toHaveClass("drag-hover");
+});
+
+it("OCR 保活隐藏页不导入其他工具收到的文件", async () => {
+  await openDocument();
+  const upload = screen.getByRole("button", {name: "导入文件"});
+  const page = upload.closest(".ocr-page")!;
+  page.setAttribute("hidden", "");
+  await act(async () => mocks.nativeDrag.mock.calls[0][0]({type: "drop", paths: ["C:/会议.mp4"]}));
+  expect(mocks.call).not.toHaveBeenCalledWith("ocr.document_import", expect.anything());
+});
 
 it("OCR 可直接导出，不要求选择场景或调用摘录", async () => {
   await openDocument();

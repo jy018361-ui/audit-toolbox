@@ -10,8 +10,11 @@
 | 会议系统声 | `meeting_record.rs` 优先按 Teams 活跃播放会话选实际播放设备回环，设备不可用才回退 Teams 进程树，最后默认通信／播放设备；备用来源明确提醒 | 来源优先级及失败回退回归；设备回环会包含同一设备上其他应用的声音，开录提醒；多账户、多个独立 Teams 根进程及录音中途切换设备尚未全部验收 |
 | 麦克风 | 优先选 Teams 活跃采集会话设备；其次音量峰值；最终默认通信麦克风并告警 | 与 Windows 会话共用归属逻辑；设备临时切换后自动重连尚未实现 |
 | 录音质量提示 | 初始来源和警告写 `recording-start.json`，最终成品、警告和系统声／麦克风／混音的 `audioStats` 写 `recording-summary.json`；页面提醒不会被转写启动清掉 | `MeetingMinutesPage.test.tsx`、`meeting_record::tests::`；统计含样本数、非零样本数、归一化峰值和 RMS；不把初始化成功等同采集有声，RMS 体检仍只是启发式 |
-| 纯静音上传拦截 | `meeting.generate` 在读取密钥和调用云端之前检查可解析的 16 位 PCM WAV，全零／空数据直接中文报错，保留原文件；通用和套餐通道共用 | `meeting_minutes::tests::`、`meeting_record::tests::`；低音量、包含非零数据或本地不支持解析的导入格式不据此拦截，交由原有云端解码；不宣称可判断是否有人声 |
+| 本地音视频解码 | `meeting_media.rs` 使用 Windows Media Foundation Source Reader，只选择首条音轨，转为临时 16 位 PCM WAV 后交给通用或套餐转写；原生录音／已有 16 位 PCM WAV 原样复用 | `meeting_minutes::media::tests::`；必跑合成 H.264＋AAC 的 MP4/MOV、WMV＋WMA、MJPEG＋PCM 的 AVI 及 MP3/M4A/AAC；WebM（VP8＋Opus）与 FLAC 独立 ignored 测试，仅在已安装对应媒体解码器的系统显式执行；Windows 解码能力仍依赖系统可用媒体组件，特殊编码或受保护文件友好报错，不宣称任意编码都兼容；应用运行／测试不依赖 FFmpeg、Python 或额外 EXE |
+| 音轨隐私、取消与来源 | 视频画面不上传；逐音频缓冲检查取消，结束／失败／取消时清理本任务 WAV 与空临时目录；结果、历史、输出目录均继续关联用户原文件，不登记临时音轨 | 合成样例断言原文件字节不变、临时路径清理；无音轨、损坏文件、预先取消和已写入部分音轨后的中途取消均本地报中文错误并验证清理，无真实云调用；强制结束进程后的临时文件回收未覆盖 |
+| 纯静音上传拦截 | `meeting.generate` 在读取密钥和调用云端之前检查解码后的 16 位 PCM WAV，全零／空数据直接中文报错，保留原文件；通用和套餐通道共用 | `meeting_minutes::tests::`、`meeting_record::tests::`；低音量、包含非零数据不据此拦截，不宣称可判断是否有人声；解码失败不再向套餐入口直接传入不兼容压缩文件 |
 | 百炼文件转写 | HTTP 信封读取 `output.results`（兼容扁平快照）；提取结果地址后下载文本 | `bailian_asr::tests::`；真实结构成功、子文件失败、空结果与缺字段分别回归；不再把缺字段误报为无人声 |
+| 原生 worker 音视频验收 | `scripts/verify_meeting_media_workers.py --exe` 启动指定 EXE 的 `--rust-table-worker`，MP4/WMV/AVI 分别经过两条转写通道；在原生解码后故意以无效地址结束 | 验证已读取声音、返回对应通道 URL 配置错误、原文件字节不变、独立 TEMP 中无残留；另验无音轨、损坏、预先取消；通用和套餐的配置校验均先于凭据读取，不调用真实服务，不等同云端转写内容验收 |
 | 通用转写配置 | 设置页预填默认服务根地址与 paraformer-v2，均可编辑；保存到 `meeting.asr_base_url` / `meeting.asr_model`，worker 从 `__settings` 读取；旧设置或空值使用原默认值 | `AppNavigationSettings.test.tsx`、`meetingAsrApi.test.ts`、`bailian_asr::tests::`；自定义模型需兼容百炼文件转写协议；通用／套餐配置及密钥独立 |
 | 通用连接测试 | 使用界面当前未保存的地址、模型、密钥请求上传凭证；密钥空时读取已保存通用凭据 | 本地 HTTP 服务核对连接测试、上传凭证、提交与轮询的实际路径和模型；测试成功仅表示取得上传凭证，不等同实际录音转写成功；不消耗真实云端服务 |
 | 配置页密钥查看 | 点击「显示」按需读取本通道保存的凭据，或直接展示当前输入；隐藏清除读取值，编辑后才成为待保存草稿 | `SecretInput.test.tsx`、`AppNavigationSettings.test.tsx`、`secretApi.test.ts`；读取命令与写入共用凭据名白名单，不读取其他名称；测试仅使用模拟值 |
@@ -96,6 +99,9 @@ npx vitest run src/api.test.ts src/MeetingMinutesPage.test.tsx src/components/Me
 npx vitest run src/AppNavigationSettings.test.tsx src/meetingAsrApi.test.ts src/secretApi.test.ts src/components/SecretInput.test.tsx
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml --lib meeting_
+# 仅在已安装 WebM 和 FLAC 系统解码器时
+cargo test --manifest-path src-tauri/Cargo.toml --lib meeting_minutes::media::tests::optional_windows_codecs -- --ignored
+python scripts/verify_meeting_media_workers.py --exe <待验收EXE路径>
 cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_asr::tests::
 cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_plan_asr::tests::
 # 只读真实设备会话枚举，不录音、不上传

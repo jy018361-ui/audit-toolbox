@@ -61,6 +61,14 @@ pub(crate) struct PlanAsrConfig {
 }
 
 impl PlanAsrConfig {
+    fn endpoint(&self) -> Result<String, AppError> {
+        if uses_http_asr(&self.model) {
+            http_asr_url(&self.base_url)
+        } else {
+            ws_url(&self.base_url, &self.model)
+        }
+    }
+
     /// 从注入的 `__settings.meeting` 命名空间读取，缺省值与设置页占位一致。
     pub(crate) fn from_settings(settings: &Value) -> Self {
         let meeting = settings.get("meeting").cloned().unwrap_or(Value::Null);
@@ -661,6 +669,8 @@ pub(crate) fn transcribe_file(
     cancel: &Arc<AtomicBool>,
     config: &PlanAsrConfig,
 ) -> Result<TranscriptionResult, AppError> {
+    // 错误配置先报错，避免无效地址仍触达凭据管理器。
+    config.endpoint()?;
     let key = load_plan_key()?;
     transcribe_file_with_key(path, progress, cancel, config, &key)
 }
@@ -673,11 +683,7 @@ fn transcribe_file_with_key(
     key: &str,
 ) -> Result<TranscriptionResult, AppError> {
     let http_asr = uses_http_asr(&config.model);
-    let url = if http_asr {
-        http_asr_url(&config.base_url)?
-    } else {
-        ws_url(&config.base_url, &config.model)?
-    };
+    let url = config.endpoint()?;
     let (spec, chunks) = wav_chunks(path, &config.model)?;
     if chunks.is_empty() {
         return Err(plan_error(
@@ -1092,6 +1098,24 @@ mod tests {
         }) {
             Ok(result) => assert_eq!(result["ok"], true),
             Err(error) => panic!("在线 HTTP 识别失败：{}；{}", error.code, error.user_message),
+        }
+    }
+
+    #[test]
+    fn invalid_url_is_rejected_before_credentials_or_reading_audio() {
+        for model in [DEFAULT_MODEL, HTTP_ASR_MODEL] {
+            let config = PlanAsrConfig {
+                base_url: "invalid-local-validation-address".into(),
+                model: model.into(),
+            };
+            let error = transcribe_file(
+                Path::new("does-not-exist.wav"),
+                &|_, _, _, _| {},
+                &Arc::new(AtomicBool::new(false)),
+                &config,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "PLAN_ASR_URL_INVALID");
         }
     }
 

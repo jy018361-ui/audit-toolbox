@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../api", () => ({
+  listenNativeFileDragEvents: vi.fn(async () => () => undefined),
   listenMeetingEvents: vi.fn(async (listener: (event: MeetingEvent) => void) => {
     mocks.listener = listener;
     return () => undefined;

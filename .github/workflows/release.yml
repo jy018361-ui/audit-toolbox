@@ -133,6 +133,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -X utf8 scripts/verify_ocr_workers.py --exe $exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -X utf8 scripts/verify_meeting_media_workers.py --exe $exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish to the selected update channel
         uses: actions/github-script@v7

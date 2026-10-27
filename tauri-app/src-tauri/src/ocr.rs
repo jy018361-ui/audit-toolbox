@@ -101,52 +101,86 @@ fn is_reparse(path: &Path) -> bool {
             .unwrap_or(true)
     }
 }
+fn collect_import_folder(
+    folder: &Path,
+    paths: &mut Vec<PathBuf>,
+    failed: &mut Vec<Value>,
+) -> Result<(), AppError> {
+    if is_reparse(folder) {
+        return Err(failure(
+            "OCR_IMPORT_FOLDER",
+            "无法导入链接或重解析点文件夹，请选择实际文件夹。",
+        ));
+    }
+    let root = folder.canonicalize().map_err(io_error)?;
+    if !root.is_dir() {
+        return Err(failure("OCR_IMPORT_FOLDER", "请选择有效的导入文件夹。"));
+    }
+    let before = paths.len();
+    for entry in walkdir::WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| !is_reparse(e.path()))
+    {
+        match entry {
+            Ok(entry) if entry.file_type().is_file() => {
+                let ext = entry
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if matches!(ext.as_str(), "pdf" | "png" | "jpg" | "jpeg" | "bmp" | "tif" | "tiff") {
+                    if let Ok(canonical) = entry.path().canonicalize() {
+                        if canonical.starts_with(&root) {
+                            paths.push(canonical);
+                        }
+                    }
+                }
+            }
+            Err(_) => failed.push(json!({"name":folder.to_string_lossy(),"message":"部分子目录无法读取，已继续处理其他文件。"})),
+            _ => {}
+        }
+    }
+    if paths.len() == before {
+        failed.push(json!({"name":folder.to_string_lossy(),"message":"文件夹内没有可导入的 PDF、PNG、JPEG、BMP 或 TIFF 文件。"}));
+    }
+    Ok(())
+}
 fn import_documents(store: &Store, p: &Value) -> Result<Value, AppError> {
     let project = required(p, "projectId")?;
     store.project(project)?;
-    let mut paths: Vec<PathBuf> = p["paths"]
+    let mut inputs: Vec<PathBuf> = p["paths"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
         .map(PathBuf::from)
         .collect();
+    inputs.sort();
+    inputs.dedup();
+    let mut paths = vec![];
     let mut failed = vec![];
+    for input in inputs {
+        let result = if is_reparse(&input) {
+            Err(failure(
+                "OCR_IMPORT_PATH",
+                "无法导入链接、重解析点或不可读取的路径，请选择实际文件或文件夹。",
+            ))
+        } else if input.is_dir() {
+            collect_import_folder(&input, &mut paths, &mut failed)
+        } else {
+            input
+                .canonicalize()
+                .map(|path| paths.push(path))
+                .map_err(io_error)
+        };
+        if let Err(error) = result {
+            failed.push(json!({"name":input.to_string_lossy(),"message":error.user_message}));
+        }
+    }
     if let Some(folder) = p["folder"].as_str().filter(|v| !v.is_empty()) {
-        let root = Path::new(folder).canonicalize().map_err(io_error)?;
-        if !root.is_dir() {
-            return Err(failure("OCR_IMPORT_FOLDER", "请选择有效的导入文件夹。"));
-        }
-        for entry in walkdir::WalkDir::new(&root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| !is_reparse(e.path()))
-        {
-            match entry {
-                Ok(entry) if entry.file_type().is_file() => {
-                    let ext = entry
-                        .path()
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_ascii_lowercase();
-                    if matches!(
-                        ext.as_str(),
-                        "pdf" | "png" | "jpg" | "jpeg" | "bmp" | "tif" | "tiff"
-                    ) {
-                        if let Ok(canonical) = entry.path().canonicalize() {
-                            if canonical.starts_with(&root) {
-                                paths.push(canonical);
-                            }
-                        }
-                    }
-                }
-                Err(_) => failed.push(
-                    json!({"name":folder,"message":"部分子目录无法读取，已继续处理其他文件。"}),
-                ),
-                _ => {}
-            }
-        }
+        collect_import_folder(Path::new(folder), &mut paths, &mut failed)?;
     }
     paths.sort();
     paths.dedup();
@@ -522,6 +556,123 @@ pub(crate) fn run_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn import_mixed_directories_and_files_filters_formats_and_deduplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("data.sqlite")).unwrap();
+        let project = store.save_project(&json!({"name":"混合拖放"})).unwrap();
+        let first = dir.path().join("first");
+        let nested = first.join("nested");
+        let second = dir.path().join("second");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        for extension in ["PDF", "png", "jpg", "jpeg", "bmp", "tif", "tiff"] {
+            fs::write(nested.join(format!("sample.{extension}")), b"synthetic").unwrap();
+        }
+        fs::write(nested.join("ignored.docx"), b"ignored").unwrap();
+        fs::write(second.join("other.pdf"), b"synthetic").unwrap();
+        let loose = dir.path().join("loose.png");
+        fs::write(&loose, b"synthetic").unwrap();
+        let result = import_documents(
+            &store,
+            &json!({
+                "projectId":project["id"],
+                "paths":[first, second, loose, first, nested.join("sample.PDF")],
+                "folder":nested
+            }),
+        )
+        .unwrap();
+        let documents = result["documents"].as_array().unwrap();
+        assert_eq!(documents.len(), 9);
+        assert_eq!(result["failed"], json!([]));
+        assert!(documents.iter().all(|doc| doc["name"] != "ignored.docx"));
+        assert_eq!(
+            store
+                .documents(project["id"].as_str().unwrap())
+                .unwrap()
+                .len(),
+            9
+        );
+    }
+    #[test]
+    fn import_empty_directory_reports_reason_and_continues_with_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("data.sqlite")).unwrap();
+        let project = store.save_project(&json!({"name":"空目录"})).unwrap();
+        let empty = dir.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        fs::write(empty.join("unsupported.mp4"), b"ignored").unwrap();
+        let valid = dir.path().join("valid.pdf");
+        fs::write(&valid, b"synthetic").unwrap();
+        let result = import_documents(
+            &store,
+            &json!({"projectId":project["id"],"paths":[empty,valid]}),
+        )
+        .unwrap();
+        assert_eq!(result["documents"].as_array().unwrap().len(), 1);
+        assert_eq!(result["failed"].as_array().unwrap().len(), 1);
+        assert!(
+            result["failed"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("没有可导入")
+        );
+        let folder_result =
+            import_documents(&store, &json!({"projectId":project["id"],"folder":empty})).unwrap();
+        assert_eq!(folder_result["documents"], json!([]));
+        assert!(
+            folder_result["failed"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("没有可导入")
+        );
+    }
+    #[cfg(windows)]
+    #[test]
+    fn import_directory_never_follows_junctions_or_accepts_junction_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("data.sqlite")).unwrap();
+        let project = store.save_project(&json!({"name":"重解析点边界"})).unwrap();
+        let selected = dir.path().join("selected");
+        let outside = dir.path().join("outside");
+        fs::create_dir(&selected).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(selected.join("allowed.pdf"), b"synthetic").unwrap();
+        fs::write(outside.join("forbidden.pdf"), b"synthetic").unwrap();
+        let junction = selected.join("linked");
+        let output = std::process::Command::new("pwsh")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$null = New-Item -ItemType Junction -Path $env:OCR_TEST_LINK -Target $env:OCR_TEST_TARGET -ErrorAction Stop"])
+            .env("OCR_TEST_LINK", &junction)
+            .env("OCR_TEST_TARGET", &outside)
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(is_reparse(&junction));
+        let result = import_documents(
+            &store,
+            &json!({"projectId":project["id"],"paths":[selected,junction]}),
+        )
+        .unwrap();
+        assert_eq!(result["documents"].as_array().unwrap().len(), 1);
+        assert_eq!(result["documents"][0]["name"], "allowed.pdf");
+        assert_eq!(result["failed"].as_array().unwrap().len(), 1);
+        assert!(
+            result["failed"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("重解析点")
+        );
+        let folder_error = import_documents(
+            &store,
+            &json!({"projectId":project["id"],"folder":junction}),
+        )
+        .unwrap_err();
+        assert_eq!(folder_error.code, "OCR_IMPORT_FOLDER");
+        fs::remove_dir(&junction).unwrap();
+    }
     #[test]
     fn structure_preserves_text_and_rejects_numeric_cells() {
         let table=parse_tables(&json!({"tables":[{"title":"票据","rows":[["001234567890123456789","2026-01-02","1,234.00"]]}]}),"p1").unwrap();

@@ -6,7 +6,8 @@
 
 | 能力 | 本次实现 | 对应验收 |
 | --- | --- | --- |
-| 项目与文件 | 独立 SQLite 项目、按项目保存提示词、PDF/PNG/JPEG/BMP/多页 TIFF、文件夹递归导入，保存源文件副本 | `ocr_store::tests`、`OcrPage.test.tsx` |
+| 项目与文件 | 独立 SQLite 项目、按项目保存提示词、PDF/PNG/JPEG/BMP/多页 TIFF；选择或拖入的多个文件夹与文件混合递归导入，按实际规范路径去重、跳过不支持格式，空目录明确提示；保存源文件副本 | `ocr_store::tests`、`ocr::tests::import_`、`OcrPage.test.tsx` |
+| 上传交互 | 复用工具箱 `FileDropInput`，点击选择与桌面原生拖放共用导入，悬停高亮；已有文件时可继续添加，忙碌和保活隐藏页不接收文件 | `OcrPage.test.tsx`、`useNativeFileDropZone.test.tsx`、`nativeFileDragApi.test.ts`；浏览器预览不冒充本机文件操作 |
 | 识别 | AI 视觉与百炼一次请求返回全文/表格；纯文本 OCR 可由全局 AI 辅助还原；仅全局配置，不继承 AudiPick 专用模型 | `audipick::tests::toolbox_`、`bailian_ocr::tests` |
 | 版面 | 默认整页；左右双页由用户选择，同一物理页按左、右顺序合并后保存，不按横向比例误切表格 | `ocr::tests`、`OcrPage.test.tsx` |
 | 图片 | BMP 转 PNG；TIFF 每帧按顺序解码为 PNG；PDF 使用内嵌 PDF.js 渲染，不引入 Python 运行时 | `ocr::tests::tiff_decodes_every_frame_in_order` |
@@ -16,7 +17,7 @@
 | 长文摘录 | 分段并重算证据页码；借款通用场景有独立可编辑汇总阶段；无逐字证据的表格结果明确标记具体出处待核对 | `ocrScenarios.test.ts` |
 | Excel | 每文件一份及项目合并；目录、完整原文、独立表格、各次摘录和实际提示词；单元格按文本保存，长内容无损续行，过期摘录和缺页显式标记 | `ocr_export::tests` |
 | 任务 | worker 独立进程，暂停/取消/继续；失败页保留待重试，空响应和截断不冒充完成；识别图片与摘录正文不保存到通用任务参数 | `ocrApi.test.ts`、Rust worker 路由及存储测试 |
-| 安全 | 导入和导出均检查用户选中路径；原生拖放事件授予实际投递路径；内部存储路径由主进程注入 | `ocr_import_and_export_require_selected_paths_without_parent_grants` |
+| 安全 | 导入和导出均检查用户选中路径；原生拖放事件授予实际投递路径；导入目录不跟随重解析点/链接，投递的重解析点根路径也拒绝；内部存储路径由主进程注入 | `ocr_import_and_export_require_selected_paths_without_parent_grants`、`ocr::tests::import_directory_never_follows_junctions_or_accepts_junction_roots` |
 
 ## 不包含的既有专用工作流
 
@@ -42,3 +43,4 @@ python scripts/verify_ocr_workers.py --exe src-tauri/target/debug/audit-toolbox.
 - 新编译 debug EXE 通过 `verify_ocr_workers.py`：项目合并、逐文件导出、同名不覆盖、长账号与公式字面保真、未完成页和过期摘录标记、实际提示词、取消前不发布及禁用 AI 的明确错误。仅使用临时 SQLite 和合成资料。
 - 浏览器合成演示在 1440 和 1000 像素宽度通过原扫描页/表格预览、完整提示词编辑与项目保存、切换场景恢复及实际摘录流程；无页面横向溢出、无未标注输入框和页面异常。截图及检查记录位于 `artifacts/ocr-20261027/`。
 - 新导入的多页 PDF/TIFF 在预览中确认并保存真实页数，识别前即可翻页；相应页面回归通过。当前未更新应用版本或替换已安装程序。
+- 原生拖放传入的 `paths` 同时接受文件和目录，与选择文件夹共用递归导入逻辑；回归夹具覆盖多目录与文件混合、重复路径、格式过滤、空目录提示及 Windows junction 拒绝，路径授权仍由原主进程入口校验。

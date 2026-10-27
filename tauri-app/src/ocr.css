@@ -72,6 +72,9 @@
   outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
+.ocr-upload {
+  margin-bottom: 12px;
+}
 .ocr-import-bar {
   display: flex;
   flex-wrap: wrap;

@@ -18,7 +18,7 @@ export type FileDropInputProps = {
   placeholder?: string;
   /** 点击选择文件 */
   onBrowse: () => void;
-  /** 拖入本框时回调（路径由父组件统一经 listenFileDrops 分发） */
+  /** 悬停状态由父组件的原生拖放监听同步；本框也提供 DOM 事件回调。 */
   onDragStateChange: (active: boolean) => void;
   /** 拖放悬停时是否高亮（父组件根据拖放位置判断） */
   highlight?: boolean;
@@ -69,9 +69,9 @@ function filledSlotLabel(placeholder?: string): string {
  * 拖拽 + 点击双通道文件输入框（单个槽位）。
  *
  * 参考 Excel 批量合并的 drop-zone：点击弹文件选择，或把文件拖到窗口。
- * 本组件不直接监听拖放事件——拖放到窗口由 Tauri 的 listenFileDrops 统一
- * 接收（它拿不到 DOM 目标）；本组件通过原生 dragenter/dragleave 上报
- * 「当前是否悬停在本框」，由父组件据此把拖入的文件分配到正确的框。
+ * 本组件不直接接收文件路径。单上传区可配合 useNativeFileDropZone 监听
+ * Tauri 原生拖放；多槽页面由父组件按原生坐标分配。本框的 DOM 事件仅
+ * 辅助反馈悬停，Windows WebView 接管文件拖放时不能依赖 DOM drop。
  */
 export function FileDropInput({
   value,

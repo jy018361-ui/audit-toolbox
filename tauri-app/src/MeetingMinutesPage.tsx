@@ -20,6 +20,7 @@ import { JobProgress, terminalJobError } from "@/components/JobProgress";
 import { PageHeader } from "@/components/PageHeader";
 import { SwitchInput } from "@/components/SwitchInput";
 import { useJobEvents } from "@/hooks/useJobEvents";
+import { useNativeFileDropZone } from "@/hooks/useNativeFileDropZone";
 import { meetingErrorText as errorText } from "@/lib/errors";
 import {
   jobCancel,
@@ -51,7 +52,7 @@ import "./meeting-minutes.css";
 
 export type { MeetingResult } from "./types";
 
-const AUDIO_EXTENSIONS = [
+const MEDIA_EXTENSIONS = [
   "wav",
   "mp3",
   "m4a",
@@ -60,6 +61,8 @@ const AUDIO_EXTENSIONS = [
   "mp4",
   "webm",
   "mov",
+  "wmv",
+  "avi",
 ];
 
 const DETAIL_OPTIONS = [
@@ -120,6 +123,9 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   const [generationStarting, setGenerationStarting] = useState(false);
   const generationStartingRef = useRef(false);
   const [importPath, setImportPath] = useState("");
+  const importDropRef = useRef<HTMLDivElement>(null);
+  const importSelectionRef = useRef(0);
+  const importInputStateRef = useRef({ enabled: false, path: "" });
   const [detailLevel, setDetailLevel] = useState("standard");
   const [result, setResult] = useState<MeetingResult>();
   const [selectedKind, setSelectedKind] = useState<
@@ -535,15 +541,36 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     setError("");
   }
 
-  function browseAudio() {
-    void pickPath("file", "选择会议录音文件", AUDIO_EXTENSIONS).then(
-      (value) => {
-        if (typeof value === "string" && value) {
-          if (value !== importPath) resetForNewAudio();
-          setImportPath(value);
-        }
-      },
-    );
+  function acceptMediaPaths(paths: string[]) {
+    if (!importInputStateRef.current.enabled || !paths.length) return;
+    if (paths.length !== 1) {
+      setError("每次只支持导入一个会议音频或视频文件，请重新选择。");
+      return;
+    }
+    const value = paths[0];
+    const extension = value.split(/[\\/]/).pop()?.split(".").pop()?.toLowerCase();
+    if (!extension || !MEDIA_EXTENSIONS.includes(extension)) {
+      setError("请选择支持的会议音频或视频文件：WAV、MP3、M4A、FLAC、AAC、MP4、WebM、MOV、WMV、AVI。");
+      return;
+    }
+    importSelectionRef.current += 1;
+    if (value !== importInputStateRef.current.path) resetForNewAudio();
+    setError("");
+    setImportPath(value);
+    markToolPageLive(tool.id);
+  }
+
+  async function browseAudio() {
+    if (!importInputStateRef.current.enabled) return;
+    const selection = ++importSelectionRef.current;
+    try {
+      const value = await pickPath("file", "选择会议音频或视频", MEDIA_EXTENSIONS);
+      if (selection !== importSelectionRef.current) return;
+      if (typeof value === "string" && value) acceptMediaPaths([value]);
+    } catch (e) {
+      if (selection === importSelectionRef.current && importInputStateRef.current.enabled)
+        setError(errorText(e));
+    }
   }
 
   async function browseMinutes() {
@@ -581,6 +608,18 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
       .includes(historyQuery.trim().toLocaleLowerCase()),
   );
   const previewMode = !runningInDesktopApp();
+  const importEnabled = !busy && !recordBusy && !recording && !previewMode;
+  importInputStateRef.current = { enabled: importEnabled, path: importPath };
+  const { highlight: importHighlight, onDragStateChange: onImportDragStateChange } =
+    useNativeFileDropZone({
+      containerRef: importDropRef,
+      enabled: importEnabled,
+      onDrop: acceptMediaPaths,
+      onError: (e) => setError(errorText(e)),
+    });
+  useEffect(() => () => {
+    importSelectionRef.current += 1;
+  }, []);
   const watchHint = previewMode
     ? "浏览器预览模式：界面仅供查看，会议检测与录音请在桌面应用中使用。"
     : !status
@@ -598,7 +637,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
       <PageHeader
         eyebrow="运营支持"
         title={tool.name}
-        detail="记录会议或导入录音，转写后生成结构化纪要。"
+        detail="记录会议或导入音视频，转写后生成结构化纪要。"
       />
       {error && <ErrorBox error={error} onDismiss={() => setError("")} />}
       {recordWarning && (
@@ -694,23 +733,26 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
               </p>
             )}
             <div className="meeting-import-source">
-              {/* hideFilledLabel：选中后只留文件名，「已有录音（wav / mp3 / m4a 等）」
-                的格式说明只属于空态占位；清空按钮随槽位出现。 */}
+              {/* 已选文件沿用工具箱统一文件槽，音视频格式只在下方说明一次。 */}
               <FileDropInput
                 value={importPath ? displayAudioFileName(importPath) : ""}
-                placeholder="拖放或点击选择已有录音（wav / mp3 / m4a 等）"
+                placeholder="拖放或点击选择会议音频或视频"
+                description="支持 WAV、MP3、M4A、FLAC、AAC、MP4、WebM、MOV、WMV、AVI，每次一个文件。视频将提取音轨后转写。"
                 hideFilledLabel
-                disabled={busy}
-                onBrowse={browseAudio}
+                disabled={!importEnabled}
+                onBrowse={() => void browseAudio()}
                 onClear={
-                  importPath && !busy
+                  importPath && importEnabled
                     ? () => {
+                        importSelectionRef.current += 1;
                         resetForNewAudio();
                         setImportPath("");
                       }
                     : undefined
                 }
-                onDragStateChange={() => undefined}
+                containerRef={importDropRef}
+                highlight={importHighlight}
+                onDragStateChange={onImportDragStateChange}
               />
             </div>
             <div className="meeting-generation-controls">

@@ -604,6 +604,24 @@ export async function listenFileDrops(
   );
 }
 
+export type NativeFileDragEvent = {
+  type: "enter" | "over" | "leave" | "drop";
+  paths?: string[];
+};
+
+/** Windows WebView 接管文件拖放，HTML dragenter/drop 不能代替原生事件。 */
+export async function listenNativeFileDragEvents(
+  callback: (event: NativeFileDragEvent) => void,
+): Promise<UnlistenFn> {
+  if (!inTauri()) return () => undefined;
+  return getCurrentWebview().onDragDropEvent(({ payload }) => {
+    callback({
+      type: payload.type,
+      ...(payload.type === "drop" ? { paths: payload.paths } : {}),
+    });
+  });
+}
+
 export type PositionedFileDrop = {
   paths: string[];
   /** Logical CSS-pixel coordinates relative to the webview. */

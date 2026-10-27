@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   FileScan,
-  FilePlus2,
   FolderOpen,
   ScanText,
   Download,
@@ -13,7 +12,6 @@ import {
 import {
   jobCancel,
   jobPause,
-  listenFileDrops,
   openOutput,
   pickPath,
 } from "./api";
@@ -37,6 +35,9 @@ import type {
 } from "./ocrTypes";
 import type { ToolManifest } from "./types";
 import { PageHeader } from "@/components/PageHeader";
+import { FileDropInput } from "@/components/FileDropInput";
+import { useNativeFileDropZone } from "@/hooks/useNativeFileDropZone";
+import { markToolPageLive } from "./toolPageActivity";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -104,6 +105,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   const busyRef = useRef(false);
   const loadSequence = useRef(0);
   const mounted = useRef(true);
+  const uploadRef = useRef<HTMLDivElement>(null);
   const scenario = scenarios.find((item) => item.id === scenarioId);
   promptSnapshot.current = { project, scenarioId, stages };
 
@@ -395,21 +397,15 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     if (result.documents[0] && projectRef.current === projectId)
       await loadDocument(result.documents[0].id);
   }
-  useEffect(() => {
-    let disposed = false;
-    let off: (() => void) | undefined;
-    void listenFileDrops((paths) => {
-      if (projectRef.current && !busyRef.current)
-        void run(() => importPaths(paths));
-    }).then((stop) => {
-      if (disposed) stop();
-      else off = stop;
-    });
-    return () => {
-      disposed = true;
-      off?.();
-    };
-  }, [run]);
+  const uploadDrop = useNativeFileDropZone({
+    containerRef: uploadRef,
+    enabled: !!project && !busy,
+    onDrop: (paths) => {
+      markToolPageLive(tool?.id ?? "ocr");
+      return run(() => importPaths(paths));
+    },
+    onError: (reason) => setError(errorText(reason)),
+  });
 
   async function chooseImport(folder: boolean) {
     const paths = await pickPath(
@@ -821,15 +817,22 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
         </div>
       ) : (
         <>
+          <FileDropInput
+            containerRef={uploadRef}
+            className="ocr-upload"
+            value={documents[0]?.name ?? ""}
+            displayValue={`已导入 ${documents.length} 份文件 · 点击继续添加`}
+            hideFilledLabel
+            ariaLabel="导入文件"
+            placeholder="拖放或点击选择扫描件"
+            description="支持 PDF、PNG、JPEG、BMP、TIFF，可拖入多个文件或文件夹。"
+            disabled={busy}
+            highlight={uploadDrop.highlight}
+            onDragStateChange={uploadDrop.onDragStateChange}
+            onBrowse={() => void run(() => chooseImport(false))}
+          />
           <div className="ocr-import-bar">
             <div>
-              <Button
-                disabled={busy}
-                onClick={() => void run(() => chooseImport(false))}
-              >
-                <FilePlus2 />
-                导入文件
-              </Button>
               <Button
                 variant="outline"
                 disabled={busy}
@@ -839,9 +842,6 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                 导入文件夹
               </Button>
             </div>
-            <span>
-              支持 PDF、PNG、JPEG、BMP、TIFF，可拖入多个文件或文件夹。
-            </span>
             <div>
               <Button
                 variant="outline"

@@ -9,6 +9,7 @@ mod bailian_ocr;
 mod bailian_plan_asr;
 mod confirmation;
 mod covenant_cases;
+mod dataflow;
 mod deposit_interest;
 mod disk_table;
 mod table_read_cache;
@@ -36,6 +37,7 @@ mod meeting_minutes;
 mod meeting_record;
 mod meeting_watch;
 mod ocr;
+mod ocr_orientation;
 mod ocr_store;
 mod ocr_export;
 mod pdf_to_excel;
@@ -555,6 +557,58 @@ async fn engine_call(
                     Some(e.to_string()),
                 )
             })?
+    } else if method == "dataflow_preview" || method == "dataflow_run" {
+        // 数据流：注入本会话已授权路径，引擎对输入/输出路径执行与
+        // pick_path 相同语义的授权检查（选中目录授权后代、文件仅自身）。
+        let allowed_list: Vec<Value> = allowed
+            .0
+            .lock()
+            .iter()
+            .map(|path| Value::String(path.display().to_string()))
+            .collect();
+        params["__allowedPaths"] = Value::Array(allowed_list);
+        tauri::async_runtime::spawn_blocking(move || dataflow::run_workflow(&method, params))
+            .await
+            .map_err(|e| {
+                AppError::new(
+                    "RUST_TASK_FAILED",
+                    "数据流任务异常结束。",
+                    true,
+                    Some(e.to_string()),
+                )
+            })?
+    } else if method == "dataflow_save_workflow" {
+        let target = PathBuf::from(params.get("path").and_then(Value::as_str).unwrap_or(""));
+        let content = params
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if !allowed
+            .0
+            .lock()
+            .iter()
+            .any(|path| path_is_permitted(&target, path))
+        {
+            return Err(AppError::new(
+                "PATH_NOT_AUTHORIZED",
+                "请先通过保存对话框选择流程文件位置。",
+                false,
+                None,
+            ));
+        }
+        tauri::async_runtime::spawn_blocking(move || {
+            dataflow::save_workflow(&target.display().to_string(), &content)
+        })
+        .await
+        .map_err(|e| {
+            AppError::new(
+                "RUST_TASK_FAILED",
+                "流程文件保存异常结束。",
+                true,
+                Some(e.to_string()),
+            )
+        })?
     } else {
         Err(AppError::new(
             "METHOD_NOT_FOUND",
@@ -2253,7 +2307,7 @@ mod tests {
     fn bundled_catalog_contains_unique_tools() {
         let catalog = tool_catalog().unwrap();
         let rows = catalog.as_array().unwrap();
-        assert_eq!(rows.len(), 20);
+        assert_eq!(rows.len(), 21);
         let ids: HashSet<_> = rows.iter().filter_map(|row| row["id"].as_str()).collect();
         assert_eq!(ids.len(), rows.len());
         assert!(ids.contains("ocr"));

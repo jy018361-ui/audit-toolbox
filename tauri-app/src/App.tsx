@@ -106,6 +106,9 @@ const TsManagerParityPage = lazy(() =>
 const TbjeCheckPage = lazy(() =>
   import("./TbjeCheckPage").then((m) => ({ default: m.TbjeCheckPage })),
 );
+const DataFlowPage = lazy(() =>
+  import("./dataflow/DataFlowPage").then((m) => ({ default: m.DataFlowPage })),
+);
 const ConfirmationProgressPage = lazy(
   () => import("./ConfirmationProgressPage"),
 );
@@ -174,6 +177,7 @@ const DEDICATED_TOOL_PAGES: Record<
   ocr: OcrPage,
   ts_manager: TsManagerParityPage,
   tbje_check: TbjeCheckPage,
+  dataflow: DataFlowPage,
   confirmation_progress: ConfirmationProgressPage,
   file_list_directory: FileListDirectoryPage,
   pdf_to_excel: PdfToExcelPage,
@@ -319,7 +323,7 @@ const TOOL_GROUPS = [
   },
   {
     label: "效率工具",
-    ids: ["ocr", "Excel_Merger", "file_list_directory", "pdf_to_excel", "fuzzy_match"],
+    ids: ["dataflow", "ocr", "Excel_Merger", "file_list_directory", "pdf_to_excel", "fuzzy_match"],
   },
   {
     label: "运营工具",

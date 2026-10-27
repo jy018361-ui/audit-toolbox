@@ -345,7 +345,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   }
 
   return (
-    <>
+    <div className="df-page">
       <PageHeader
         eyebrow="数据流"
         title={tool.name}
@@ -454,26 +454,38 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
           onToggleCollapse={() => setResultsCollapsed((value) => !value)}
         />
         <div className="df-statusbar">
-          <span className={error ? "df-status-error" : undefined} title={error || statusText}>
+          <span
+            className={`df-status-text${error ? " df-status-error" : ""}`}
+            title={error || statusText}
+          >
             {error || statusText}
           </span>
-          <span className="df-legend" aria-hidden="true">
+          <span className="df-status-meta">
             <span>
-              <i className="df-dot" />未运行
+              {workflow.nodes.length} 个节点 · {workflow.edges.length} 条连线
             </span>
-            <span>
-              <i className="df-dot df-dot-run" />运行中
-            </span>
-            <span>
-              <i className="df-dot df-dot-ok" />成功
-            </span>
-            <span>
-              <i className="df-dot df-dot-warn" />警告
-            </span>
-            <span>
-              <i className="df-dot df-dot-err" />失败
-            </span>
-            <span>{workflow.nodes.length} 个节点 · {workflow.edges.length} 条连线</span>
+            {runResult && (
+              <>
+                <span className="df-vr" aria-hidden="true" />
+                <span className="df-legend" aria-hidden="true">
+                  <span>
+                    <i className="df-dot" />未运行
+                  </span>
+                  <span>
+                    <i className="df-dot df-dot-run" />运行中
+                  </span>
+                  <span>
+                    <i className="df-dot df-dot-ok" />成功
+                  </span>
+                  <span>
+                    <i className="df-dot df-dot-warn" />警告
+                  </span>
+                  <span>
+                    <i className="df-dot df-dot-err" />失败
+                  </span>
+                </span>
+              </>
+            )}
           </span>
         </div>
       </div>
@@ -491,6 +503,6 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
           }}
         />
       )}
-    </>
+    </div>
   );
 }

@@ -44,7 +44,8 @@ function bezierPath(a: { x: number; y: number }, b: { x: number; y: number }): s
   return `M${a.x} ${a.y} C${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;
 }
 
-const CATEGORY_COLOR: Record<string, string> = {
+/** 节点分类色（画布与配置区共用；色值定义在 dataflow.css .df-shell）。 */
+export const CATEGORY_COLOR: Record<string, string> = {
   input: "var(--df-cat-input)",
   transform: "var(--df-cat-transform)",
   filtersort: "var(--df-cat-filtersort)",
@@ -429,6 +430,16 @@ export function DataflowCanvas({
             );
           })}
         </div>
+        {!workflow.nodes.length && (
+          <div className="df-canvas-empty">
+            <DataflowIcon icon="grid3x3" size={30} />
+            <b>画布还是空的</b>
+            <span>从上方分类菜单添加第一个节点</span>
+            <span className="df-canvas-empty-hint">
+              连线：从节点右侧圆点拖到左侧圆点 · Delete 删除选中
+            </span>
+          </div>
+        )}
         <div className="df-canvas-tools">
           <button
             type="button"

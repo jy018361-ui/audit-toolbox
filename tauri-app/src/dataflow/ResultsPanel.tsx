@@ -62,44 +62,46 @@ function SampleTable({
   }
   return (
     <>
-      <table className="df-table">
-        <thead>
-          <tr>
-            {columns.map((column, index) => (
-              <th
-                key={column + index}
-                className={columnNumeric(index, column, types) ? "df-num" : undefined}
-                scope="col"
-              >
-                {column}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {slice.map((row, rowIndex) => (
-            <tr key={rowIndex}>
-              {row.map((cell, cellIndex) => {
-                const { text, empty } = formatCell(
-                  cell ?? null,
-                );
-                return (
-                  <td
-                    key={cellIndex}
-                    className={
-                      columnNumeric(cellIndex, columns[cellIndex] ?? "", types)
-                        ? "df-num"
-                        : undefined
-                    }
-                  >
-                    {empty ? <span className="df-cell-empty">{text}</span> : text}
-                  </td>
-                );
-              })}
+      <div className="df-table-wrap">
+        <table className="df-table">
+          <thead>
+            <tr>
+              {columns.map((column, index) => (
+                <th
+                  key={column + index}
+                  className={columnNumeric(index, column, types) ? "df-num" : undefined}
+                  scope="col"
+                >
+                  {column}
+                </th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {slice.map((row, rowIndex) => (
+              <tr key={rowIndex}>
+                {row.map((cell, cellIndex) => {
+                  const { text, empty } = formatCell(
+                    cell ?? null,
+                  );
+                  return (
+                    <td
+                      key={cellIndex}
+                      className={
+                        columnNumeric(cellIndex, columns[cellIndex] ?? "", types)
+                          ? "df-num"
+                          : undefined
+                      }
+                    >
+                      {empty ? <span className="df-cell-empty">{text}</span> : text}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       {pageCount > 1 && (
         <div className="df-pager">
           <button type="button" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>
@@ -266,26 +268,28 @@ export function ResultsPanel({
               <div className="df-note df-note-warn">预览运行不写输出文件，以下为样本预览。</div>
             )}
             {nodeOutputs.length ? (
-              <table className="df-table">
-                <thead>
-                  <tr>
-                    <th scope="col">写入文件</th>
-                    <th scope="col">Sheet</th>
-                    <th scope="col" className="df-num">
-                      行数
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {nodeOutputs.map((item, index) => (
-                    <tr key={index}>
-                      <td>{item.path}</td>
-                      <td>{item.sheet || "—"}</td>
-                      <td className="df-num">{item.rows.toLocaleString("zh-CN")}</td>
+              <div className="df-table-wrap">
+                <table className="df-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">写入文件</th>
+                      <th scope="col">Sheet</th>
+                      <th scope="col" className="df-num">
+                        行数
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {nodeOutputs.map((item, index) => (
+                      <tr key={index}>
+                        <td>{item.path}</td>
+                        <td>{item.sheet || "—"}</td>
+                        <td className="df-num">{item.rows.toLocaleString("zh-CN")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             ) : lastRunMode === "preview" ? (
               result.anchors.out ? (
                 <SampleTable

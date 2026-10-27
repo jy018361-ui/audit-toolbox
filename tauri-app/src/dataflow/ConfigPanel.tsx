@@ -1,9 +1,10 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { SwitchInput } from "@/components/SwitchInput";
 import { errorText } from "@/lib/errors";
 import { dataflowDbTables } from "../api";
+import { CATEGORY_COLOR } from "./Canvas";
 import {
   CHECK_RULE_TYPES,
   FILTER_OPERATORS,
@@ -545,55 +546,61 @@ export function ConfigPanel({
       const dataStartRow = Number(config.dataStartRow ?? 2);
       form = (
         <>
-          {sourceTypeField()}
-          {pathField(["xlsx", "xls", "xlsm", "xlsb", "ods", "csv"])}
-          {config.sourceType === "folder" && (
-            <>
-              <Field label="文件匹配模式">
-                <TextIn
-                  value={String(config.filePattern ?? "")}
-                  onChange={(value) => setKey("filePattern", value)}
-                />
-              </Field>
-              <Note>重跑时会在结果区报告文件清单变化：新增/缺失文件逐项列出。</Note>
-            </>
-          )}
-          <Field label="Sheet">
-            <Sel
-              value={sheetMode}
-              options={[
-                { value: "firstData", label: "自动：每个文件第一个有数据的 Sheet" },
-                { value: "byName", label: "按名称指定" },
-              ]}
-              onChange={(value) => setKey("sheetMode", value)}
-            />
-          </Field>
-          {sheetMode === "byName" && (
-            <Field label="Sheet 名称">
-              <TextIn
-                value={String(config.sheetName ?? "")}
-                onChange={(value) => setKey("sheetName", value)}
+          <div className="df-group">
+            {sourceTypeField()}
+            {pathField(["xlsx", "xls", "xlsm", "xlsb", "ods", "csv"])}
+            {config.sourceType === "folder" && (
+              <>
+                <Field label="文件匹配模式">
+                  <TextIn
+                    value={String(config.filePattern ?? "")}
+                    onChange={(value) => setKey("filePattern", value)}
+                  />
+                </Field>
+                <Note>重跑时会在结果区报告文件清单变化：新增/缺失文件逐项列出。</Note>
+              </>
+            )}
+          </div>
+          <div className="df-group">
+            <Field label="Sheet">
+              <Sel
+                value={sheetMode}
+                options={[
+                  { value: "firstData", label: "自动：每个文件第一个有数据的 Sheet" },
+                  { value: "byName", label: "按名称指定" },
+                ]}
+                onChange={(value) => setKey("sheetMode", value)}
               />
             </Field>
-          )}
-          <div className="df-row2">
-            <Field label="表头行">
-              <NumIn value={headerRow} onChange={(value) => setKey("headerRow", value)} />
-            </Field>
-            <Field label="数据起始行">
-              <NumIn value={dataStartRow} onChange={(value) => setKey("dataStartRow", value)} />
-            </Field>
+            {sheetMode === "byName" && (
+              <Field label="Sheet 名称">
+                <TextIn
+                  value={String(config.sheetName ?? "")}
+                  onChange={(value) => setKey("sheetName", value)}
+                />
+              </Field>
+            )}
+            <div className="df-row2">
+              <Field label="表头行">
+                <NumIn value={headerRow} onChange={(value) => setKey("headerRow", value)} />
+              </Field>
+              <Field label="数据起始行">
+                <NumIn value={dataStartRow} onChange={(value) => setKey("dataStartRow", value)} />
+              </Field>
+            </div>
+            {dataStartRow <= headerRow && (
+              <Note warn>数据起始行须位于表头行之后。</Note>
+            )}
+            <Swt
+              checked={config.attachSourceColumns === true}
+              onChange={(value) => setKey("attachSourceColumns", value)}
+              label="附加来源列（来源文件/Sheet/行号）"
+            />
           </div>
-          {dataStartRow <= headerRow && (
-            <Note warn>数据起始行须位于表头行之后。</Note>
-          )}
-          <Swt
-            checked={config.attachSourceColumns === true}
-            onChange={(value) => setKey("attachSourceColumns", value)}
-            label="附加来源列（来源文件/Sheet/行号）"
-          />
-          {columnTypesField()}
-          {onRowErrorField()}
+          <div className="df-group">
+            {columnTypesField()}
+            {onRowErrorField()}
+          </div>
         </>
       );
       break;
@@ -601,48 +608,54 @@ export function ConfigPanel({
     case "csv_in": {
       form = (
         <>
-          {sourceTypeField()}
-          {pathField(["csv", "txt", "tsv"])}
-          <Field label="编码">
-            <Sel
-              value={String(config.encoding ?? "auto")}
-              options={[
-                { value: "auto", label: "自动识别（默认）" },
-                { value: "gbk", label: "GBK" },
-                { value: "utf8", label: "UTF-8" },
-                { value: "utf8bom", label: "UTF-8（带 BOM）" },
-                { value: "utf16", label: "UTF-16" },
-              ]}
-              onChange={(value) => setKey("encoding", value)}
+          <div className="df-group">
+            {sourceTypeField()}
+            {pathField(["csv", "txt", "tsv"])}
+          </div>
+          <div className="df-group">
+            <Field label="编码">
+              <Sel
+                value={String(config.encoding ?? "auto")}
+                options={[
+                  { value: "auto", label: "自动识别（默认）" },
+                  { value: "gbk", label: "GBK" },
+                  { value: "utf8", label: "UTF-8" },
+                  { value: "utf8bom", label: "UTF-8（带 BOM）" },
+                  { value: "utf16", label: "UTF-16" },
+                ]}
+                onChange={(value) => setKey("encoding", value)}
+              />
+            </Field>
+            <Field label="分隔符">
+              <Sel
+                value={String(config.delimiter ?? "auto")}
+                options={[
+                  { value: "auto", label: "自动识别（默认）" },
+                  { value: "comma", label: "逗号" },
+                  { value: "tab", label: "Tab" },
+                  { value: "semicolon", label: "分号" },
+                  { value: "pipe", label: "竖线" },
+                ]}
+                onChange={(value) => setKey("delimiter", value)}
+              />
+            </Field>
+            <Field label="表头行（首行为表头填 1）">
+              <NumIn
+                value={Number(config.headerRow ?? 1)}
+                onChange={(value) => setKey("headerRow", value)}
+              />
+            </Field>
+            <Swt
+              checked={config.attachSourceColumns === true}
+              onChange={(value) => setKey("attachSourceColumns", value)}
+              label="附加来源列（来源文件/记录序号）"
             />
-          </Field>
-          <Field label="分隔符">
-            <Sel
-              value={String(config.delimiter ?? "auto")}
-              options={[
-                { value: "auto", label: "自动识别（默认）" },
-                { value: "comma", label: "逗号" },
-                { value: "tab", label: "Tab" },
-                { value: "semicolon", label: "分号" },
-                { value: "pipe", label: "竖线" },
-              ]}
-              onChange={(value) => setKey("delimiter", value)}
-            />
-          </Field>
-          <Field label="表头行（首行为表头填 1）">
-            <NumIn
-              value={Number(config.headerRow ?? 1)}
-              onChange={(value) => setKey("headerRow", value)}
-            />
-          </Field>
-          <Swt
-            checked={config.attachSourceColumns === true}
-            onChange={(value) => setKey("attachSourceColumns", value)}
-            label="附加来源列（来源文件/记录序号）"
-          />
-          <Note>文本编号保留前导零；超 15 位整数默认按文本（保底规则）。</Note>
-          {columnTypesField()}
-          {onRowErrorField()}
+            <Note>文本编号保留前导零；超 15 位整数默认按文本（保底规则）。</Note>
+          </div>
+          <div className="df-group">
+            {columnTypesField()}
+            {onRowErrorField()}
+          </div>
         </>
       );
       break;
@@ -1787,8 +1800,16 @@ export function ConfigPanel({
       <Field label="节点名称">
         <TextIn value={node.name} onChange={(value) => onRename(value || node.name)} />
       </Field>
-      <p className="df-type-line">
-        {spec ? `${spec.cn} ${spec.en} · ${categoryCn(spec.category)} · ${node.id}` : node.type}
+      <p
+        className="df-type-line"
+        style={spec ? ({ ["--df-cat" as string]: CATEGORY_COLOR[spec.category] } as CSSProperties) : undefined}
+      >
+        <i className="df-type-dot" aria-hidden="true" />
+        <span className="df-type-text">
+          {spec
+            ? `${spec.cn} ${spec.en} · ${categoryCn(spec.category)} · ${node.id}`
+            : node.type}
+        </span>
       </p>
       {form}
       <div className="df-cfg-foot">

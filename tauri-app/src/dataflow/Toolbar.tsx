@@ -78,57 +78,76 @@ export function DataflowToolbar({
 
   return (
     <div className="df-toolbar">
-      <span className="df-flow-name">
-        <input
-          value={flowName}
-          aria-label="流程名称"
-          title={flowName}
-          onChange={(event) => onFlowNameChange(event.target.value)}
-        />
-        {autosaveNote && <span className="df-autosave">{autosaveNote}</span>}
-      </span>
-      <div className="df-cats" ref={catsRef}>
-        {DATAFLOW_CATEGORIES.map((category) => (
-          <div className="df-cat" key={category.id}>
-            <button
-              type="button"
-              className="df-cat-btn"
-              aria-expanded={openCategory === category.id}
-              aria-haspopup="true"
-              onClick={() =>
-                setOpenCategory((current) => (current === category.id ? null : category.id))
-              }
-            >
-              {category.cn}
-              <ChevronDown size={12} />
-            </button>
-            {openCategory === category.id && (
-              <div className="df-menu" role="menu">
-                {categoryNodes(category.id).map((spec) =>
-                  spec.phase2 ? (
-                    <button key={spec.type} type="button" role="menuitem" disabled>
-                      <DataflowIcon icon={spec.icon} />
-                      {spec.cn} {spec.en}
-                      <span className="df-menu-tag">二期</span>
-                    </button>
-                  ) : (
-                    <button
-                      key={spec.type}
-                      type="button"
-                      role="menuitem"
-                      onClick={() => addNode(spec.type)}
-                    >
-                      <DataflowIcon icon={spec.icon} />
-                      {spec.cn} {spec.en}
-                    </button>
-                  ),
-                )}
-              </div>
-            )}
-          </div>
-        ))}
+      {/* 第一行：流程名＋自动保存＋文件操作。 */}
+      <div className="df-tb-row">
+        <span className="df-flow-name">
+          <input
+            value={flowName}
+            aria-label="流程名称"
+            title={flowName}
+            onChange={(event) => onFlowNameChange(event.target.value)}
+          />
+          {autosaveNote && <span className="df-autosave">{autosaveNote}</span>}
+        </span>
+        <div className="df-tb-right">
+          <button type="button" className="df-tool" onClick={onParams}>
+            <Settings2 size={13} />
+            参数
+          </button>
+          <button type="button" className="df-tool" onClick={onSave}>
+            <Save size={13} />
+            保存
+          </button>
+          <button type="button" className="df-tool" onClick={onOpen}>
+            <FolderOpen size={13} />
+            打开
+          </button>
+        </div>
       </div>
-      <div className="df-tb-right">
+      {/* 第二行：分类菜单（新增节点入口）＋撤销重做＋运行组。 */}
+      <div className="df-tb-row">
+        <div className="df-cats" ref={catsRef}>
+          {DATAFLOW_CATEGORIES.map((category) => (
+            <div className="df-cat" key={category.id}>
+              <button
+                type="button"
+                className="df-cat-btn"
+                aria-expanded={openCategory === category.id}
+                aria-haspopup="true"
+                onClick={() =>
+                  setOpenCategory((current) => (current === category.id ? null : category.id))
+                }
+              >
+                {category.cn}
+                <ChevronDown size={12} />
+              </button>
+              {openCategory === category.id && (
+                <div className="df-menu" role="menu">
+                  {categoryNodes(category.id).map((spec) =>
+                    spec.phase2 ? (
+                      <button key={spec.type} type="button" role="menuitem" disabled>
+                        <DataflowIcon icon={spec.icon} />
+                        {spec.cn} {spec.en}
+                        <span className="df-menu-tag">二期</span>
+                      </button>
+                    ) : (
+                      <button
+                        key={spec.type}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => addNode(spec.type)}
+                      >
+                        <DataflowIcon icon={spec.icon} />
+                        {spec.cn} {spec.en}
+                      </button>
+                    ),
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        <span className="df-vr" aria-hidden="true" />
         <button
           type="button"
           className="df-tool"
@@ -149,38 +168,27 @@ export function DataflowToolbar({
         >
           <Redo2 size={13} />
         </button>
-        <span className="df-vr" aria-hidden="true" />
-        <button type="button" className="df-tool" onClick={onParams}>
-          <Settings2 size={13} />
-          参数
-        </button>
-        <button type="button" className="df-tool" onClick={onSave}>
-          <Save size={13} />
-          保存
-        </button>
-        <button type="button" className="df-tool" onClick={onOpen}>
-          <FolderOpen size={13} />
-          打开
-        </button>
-        <span className="df-vr" aria-hidden="true" />
-        <button type="button" className="df-tool" disabled={running} onClick={onPreviewRun}>
-          <Eye size={13} />
-          预览运行
-        </button>
-        <button type="button" className="df-tool" disabled={running} onClick={onFullRun}>
-          <Play size={13} />
-          全量运行
-        </button>
-        <button
-          type="button"
-          className="df-tool"
-          disabled={running || !canRunToNode}
-          title={canRunToNode ? "全量数据运行到当前选中节点（含其全部上游）为止" : "先在画布中选中一个节点"}
-          onClick={onRunToNode}
-        >
-          <SkipForward size={13} />
-          运行到选中节点
-        </button>
+        <div className="df-tb-run">
+          <span className="df-vr" aria-hidden="true" />
+          <button type="button" className="df-tool df-tool-accent" disabled={running} onClick={onPreviewRun}>
+            <Eye size={13} />
+            预览运行
+          </button>
+          <button type="button" className="df-tool df-tool-primary" disabled={running} onClick={onFullRun}>
+            <Play size={13} />
+            全量运行
+          </button>
+          <button
+            type="button"
+            className="df-tool"
+            disabled={running || !canRunToNode}
+            title={canRunToNode ? "全量数据运行到当前选中节点（含其全部上游）为止" : "先在画布中选中一个节点"}
+            onClick={onRunToNode}
+          >
+            <SkipForward size={13} />
+            运行到选中节点
+          </button>
+        </div>
       </div>
     </div>
   );

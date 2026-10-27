@@ -5,6 +5,23 @@
  * 新增变量在此定义，取中明度、深浅主题下均可辨识。
  */
 
+/* 页面纵向骨架：页头/草稿条不参与伸缩，壳体吃掉剩余高度。
+   .main 的上下留白（--sp-6 上 / --sp-7 下，见 styles.css .main）就是本页之外
+   的全部垂直开销——引用同一组间距 token 撑满内容区，替代原先对页头高度的
+   216px 估算；草稿条出现时壳体自动收缩，状态栏自然贴到内容区底部。 */
+.df-page {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - var(--sp-6) - var(--sp-7));
+}
+/* 无边框窗口顶部为窗口按钮组预留 44px（styles.css .frameless .main），同步引用。 */
+.frameless .df-page {
+  min-height: calc(100vh - 44px - var(--sp-7));
+}
+.df-page > * {
+  flex: none;
+}
+
 .df-shell {
   /* 分类功能色（新增变量，仅用于节点识别，不用于面板与文字） */
   --df-cat-input: #3d6fb4;
@@ -17,9 +34,10 @@
   /* 运行中（蓝）：全局主题没有对应变量，取两种主题下都清晰的中蓝 */
   --df-run: #3d7fd6;
 
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 216px);
+  height: auto;
   min-height: 560px;
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
@@ -28,14 +46,20 @@
 }
 
 /* —— 顶部工具栏 —— */
+/* 两行结构：第一行流程名＋文件操作，第二行分类菜单＋撤销重做＋运行组。 */
 .df-toolbar {
   flex: none;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: var(--sp-1);
-  padding: var(--sp-1) var(--sp-2);
+  padding: var(--sp-2);
   background: var(--surface-sunken);
   border-bottom: 1px solid var(--border-soft);
+}
+.df-tb-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   flex-wrap: wrap;
 }
 .df-flow-name {
@@ -67,21 +91,22 @@
 }
 .df-cats {
   display: flex;
-  gap: 1px;
+  gap: var(--sp-1);
   flex-wrap: wrap;
 }
 .df-cat {
   position: relative;
 }
+/* 默认态就有描边与沉底：分类菜单是新增节点的唯一入口，不能看起来像静态文字。 */
 .df-cat-btn {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
   height: var(--control-height-sm);
   padding: 0 var(--sp-2);
-  border: 1px solid transparent;
+  border: 1px solid var(--border-soft);
   border-radius: var(--r-sm);
-  background: none;
+  background: var(--surface-sunken);
   color: var(--ink);
   font-size: var(--fs-sm);
   cursor: pointer;
@@ -145,11 +170,66 @@
   gap: var(--sp-1);
   flex-wrap: wrap;
 }
+/* 第二行右侧的运行组：与撤销重做之间留出弹性空隙。 */
+.df-tb-run {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
 .df-vr {
   width: 1px;
-  height: 20px;
+  height: 22px;
   margin: 0 var(--sp-1);
   background: var(--border);
+}
+
+/* 工具栏三档层级：主操作「全量运行」品牌实底反白，「预览运行」品牌描边次级，
+   其余保持 ghost——主 CTA 不再埋没在同级灰白按钮里（对照 merger 主按钮语言）。 */
+.df-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  min-width: 26px;
+  height: 26px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.df-tool:hover {
+  background: var(--surface-muted);
+}
+.df-tool.df-tool-accent {
+  color: var(--brand-link);
+  border-color: var(--border-strong);
+}
+.df-tool.df-tool-accent:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--brand-accent) 14%, var(--surface));
+  border-color: var(--brand-link);
+}
+.df-tool.df-tool-primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--ink-inverse);
+}
+.df-tool.df-tool-primary:hover:not(:disabled) {
+  background: var(--brand-link);
+}
+.df-tool:disabled {
+  opacity: var(--disabled-opacity);
+  cursor: default;
+}
+.df-tool:disabled:hover {
+  background: var(--surface);
+}
+.df-tool.df-tool-primary:disabled:hover {
+  background: var(--brand);
 }
 
 /* —— 主体三栏 —— */
@@ -186,11 +266,15 @@
   padding-bottom: var(--sp-2);
   border-bottom: 1px solid var(--border-soft);
 }
+/* 面板标题升一档并加品牌色左锚点，与全站分区标题语言对齐；
+   避免从页头 30px 直接跌到与表单文字同大。 */
 .df-panel-title h3 {
   margin: 0;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   font-weight: var(--fw-medium);
   color: var(--ink-strong);
+  border-left: 3px solid var(--brand);
+  padding-left: var(--sp-2);
 }
 .df-collapse-btn {
   display: inline-flex;
@@ -208,17 +292,46 @@
   background: var(--surface-muted);
   color: var(--ink);
 }
+/* 当前节点类型：带分类色点的类型胶囊（与 .df-menu-tag 同一语言），
+   让用户一眼看出节点属于哪一类。 */
 .df-type-line {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  max-width: 100%;
   margin: 0 0 var(--sp-3);
-  font-size: var(--fs-xs);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--surface-muted);
   color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.df-type-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--df-cat, var(--muted-soft));
+}
+.df-type-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* 长表单按语义分组：分隔线让十几个字段的表单分层可扫读
+   （对照 merger.css fieldset+legend 的分层语言）。 */
+.df-group {
+  border-top: 1px solid var(--border-soft);
+  padding-top: var(--sp-2);
+  margin-top: var(--sp-2);
 }
 .df-f {
-  margin-bottom: var(--sp-2);
+  margin-bottom: var(--sp-3);
 }
 .df-f > label {
   display: grid;
-  gap: 2px;
+  gap: var(--sp-1);
 }
 .df-f .df-f-label {
   font-size: var(--fs-xs);
@@ -342,8 +455,10 @@ textarea.df-in {
   font-size: var(--fs-sm);
   cursor: pointer;
 }
+/* 深浅主题都可感知的 hover：brightness 在深色主题下不可见，改用
+   危险色自身混底色加深。 */
 .df-btn-danger:hover {
-  filter: brightness(0.97);
+  background: color-mix(in srgb, var(--danger-fg) 12%, var(--danger-bg));
 }
 .df-placeholder {
   padding: var(--sp-6) var(--sp-3);
@@ -390,8 +505,44 @@ textarea.df-in {
   overflow: hidden;
   touch-action: none;
   background-color: var(--surface-page);
-  background-image: radial-gradient(var(--border-soft) 1px, transparent 1px);
+  /* 点阵与底色拉开一档对比（原 --border-soft 与底色只差一档，形同虚设） */
+  background-image: radial-gradient(
+    color-mix(in srgb, var(--muted-soft) 55%, transparent) 1px,
+    transparent 1px
+  );
   background-size: 22px 22px;
+}
+/* 空流程引导：复用 .df-placeholder 的语言放大版，指明新增节点的入口；
+   pointer-events:none 不影响画布空白处拖动平移。 */
+.df-canvas-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  padding: var(--sp-5);
+  pointer-events: none;
+  text-align: center;
+  color: var(--text-muted);
+}
+.df-canvas-empty > svg {
+  margin-bottom: var(--sp-2);
+  color: var(--muted-soft);
+}
+.df-canvas-empty b {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+  color: var(--ink-strong);
+}
+.df-canvas-empty span {
+  font-size: var(--fs-sm);
+}
+.df-canvas-empty .df-canvas-empty-hint {
+  font-size: var(--fs-xs);
+  color: var(--muted-soft);
 }
 .df-world {
   position: absolute;
@@ -449,10 +600,6 @@ textarea.df-in {
 .df-node:active {
   cursor: grabbing;
 }
-.df-node.df-selected {
-  outline: 2px solid var(--brand);
-  outline-offset: 1px;
-}
 .df-node-head {
   display: flex;
   gap: var(--sp-2);
@@ -469,7 +616,7 @@ textarea.df-in {
 }
 .df-node-names b {
   display: block;
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   line-height: 1.3;
   font-weight: var(--fw-medium);
   color: var(--ink-strong);
@@ -478,14 +625,18 @@ textarea.df-in {
   white-space: nowrap;
 }
 .df-node-names span {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   white-space: nowrap;
 }
+/* 运行状态徽标：彩色胶囊（currentColor 12% 混面板底），沿用各状态前景色。 */
 .df-node-badge {
   display: none;
   margin-top: var(--sp-1);
-  font-size: 11px;
+  padding: 1px var(--sp-1);
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, currentColor 12%, var(--surface));
+  font-size: var(--fs-xs);
   line-height: 1.3;
   white-space: nowrap;
   overflow: hidden;
@@ -493,15 +644,37 @@ textarea.df-in {
   font-variant-numeric: tabular-nums;
 }
 .df-node-badge.df-badge-show {
-  display: block;
+  display: inline-block;
+  width: fit-content;
+  max-width: 100%;
 }
 .df-node-badge.df-b-ok { color: var(--success-fg); }
 .df-node-badge.df-b-warn { color: var(--warning-fg); }
 .df-node-badge.df-b-err { color: var(--danger-fg); }
 .df-node-badge.df-b-run { color: var(--df-run); }
-.df-node.df-st-ok { box-shadow: 0 0 0 2px var(--success-dot); }
-.df-node.df-st-warn { box-shadow: 0 0 0 2px var(--warning-dot); }
-.df-node.df-st-err { box-shadow: 0 0 0 2px var(--danger-fg); }
+/* 选中圈（品牌色）在前、状态圈在后：两者同时存在时状态色作内圈，
+   品牌色经 box-shadow 作外圈，两圈各表其意，不再互相顶掉。 */
+.df-node.df-selected {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+.df-node.df-st-ok {
+  outline: 2px solid var(--success-dot);
+  outline-offset: 1px;
+}
+.df-node.df-st-warn {
+  outline: 2px solid var(--warning-dot);
+  outline-offset: 1px;
+}
+.df-node.df-st-err {
+  outline: 2px solid var(--danger-fg);
+  outline-offset: 1px;
+}
+.df-node.df-selected.df-st-ok,
+.df-node.df-selected.df-st-warn,
+.df-node.df-selected.df-st-err {
+  box-shadow: var(--shadow-card), 0 0 0 5px var(--brand);
+}
 .df-node.df-st-run {
   animation: df-run-pulse 1.1s infinite;
 }
@@ -535,7 +708,7 @@ textarea.df-in {
 }
 .df-a-lbl {
   position: absolute;
-  font-size: 10px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   pointer-events: none;
   white-space: nowrap;
@@ -543,7 +716,7 @@ textarea.df-in {
 .df-a-lbl.df-a-lbl-out { right: 11px; }
 .df-a-lbl.df-a-lbl-in { left: 11px; }
 
-/* 画布工具与提示 */
+/* 画布工具与提示（按钮基础样式见顶部工具栏 .df-tool） */
 .df-canvas-tools {
   position: absolute;
   right: var(--sp-2);
@@ -551,24 +724,6 @@ textarea.df-in {
   z-index: 40;
   display: flex;
   gap: var(--sp-1);
-}
-.df-tool {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--sp-1);
-  min-width: 26px;
-  height: 26px;
-  padding: 0 var(--sp-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface);
-  color: var(--ink);
-  font-size: var(--fs-xs);
-  cursor: pointer;
-}
-.df-tool:hover {
-  background: var(--surface-muted);
 }
 .df-hint {
   position: absolute;
@@ -581,7 +736,7 @@ textarea.df-in {
   border-radius: var(--r-sm);
   background: var(--surface);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -609,9 +764,11 @@ textarea.df-in {
   flex-wrap: wrap;
 }
 .df-results-title {
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   font-weight: var(--fw-medium);
   color: var(--ink-strong);
+  border-left: 3px solid var(--brand);
+  padding-left: var(--sp-2);
   white-space: nowrap;
 }
 .df-chip {
@@ -650,8 +807,19 @@ textarea.df-in {
 .df-results-body {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow: auto;
   padding: var(--sp-2) var(--sp-3);
+}
+/* 表格圆角外框：滚动放在容器上，sticky 表头随之贴容器顶（对照 tbje 结果表）。 */
+.df-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
 }
 .df-table {
   width: 100%;
@@ -664,17 +832,20 @@ textarea.df-in {
   z-index: 1;
   text-align: left;
   font-weight: var(--fw-medium);
-  color: var(--label);
-  background: var(--surface);
+  color: var(--ink-strong);
+  background: var(--surface-sunken);
   border-bottom: 1px solid var(--border);
-  padding: var(--sp-1) var(--sp-3) var(--sp-1) 0;
+  padding: var(--sp-1) var(--sp-3) var(--sp-1) var(--sp-2);
   white-space: nowrap;
 }
 .df-table td {
   border-bottom: 1px solid var(--border-soft);
-  padding: var(--sp-1) var(--sp-3) var(--sp-1) 0;
+  padding: var(--sp-1) var(--sp-3) var(--sp-1) var(--sp-2);
   white-space: nowrap;
   color: var(--ink);
+}
+.df-table tbody tr:hover td {
+  background: var(--surface-sunken);
 }
 .df-table th.df-num,
 .df-table td.df-num {
@@ -732,8 +903,22 @@ textarea.df-in {
   font-size: var(--fs-xs);
   color: var(--text-muted);
 }
+/* 左端状态文字：长错误信息省略，不把状态栏顶爆。 */
+.df-status-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .df-statusbar .df-status-error {
   color: var(--danger-fg);
+}
+.df-status-meta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  white-space: nowrap;
 }
 .df-legend {
   display: flex;
@@ -842,8 +1027,11 @@ textarea.df-in {
   border-color: var(--brand);
   color: var(--on-brand, var(--ink-inverse));
 }
+/* hover 用 --brand-link：深浅主题下都比品牌底更亮一档
+   （原 --brand-soft 在 classic-dark 下比品牌底更暗，hover 反而变暗）。 */
 .df-modal-btns .df-modal-primary:hover {
-  background: var(--brand-soft);
+  background: var(--brand-link);
+  border-color: var(--brand-link);
 }
 .df-param-error {
   margin: 0 0 var(--sp-2);

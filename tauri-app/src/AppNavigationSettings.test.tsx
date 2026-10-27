@@ -1001,7 +1001,7 @@ it("套餐 ASR Flash 使用当前草稿测试并说明内置样音与额度消�
   fireEvent.change(screen.getByLabelText("套餐地址"), { target: { value: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1" } });
   fireEvent.change(screen.getByLabelText("套餐转写模型"), { target: { value: " qwen-audio-3.0-asr-flash " } });
   fireEvent.change(screen.getByLabelText(/^套餐 API 密钥/), { target: { value: "test-only-key" } });
-  expect(screen.getByText(/ASR Flash 测试会发送内置短样音并消耗少量套餐额度/)).toBeInTheDocument();
+  expect(screen.getByText(/样音测试消耗少量套餐额度/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "测试套餐通道" }));
   await waitFor(() => expect(meetingAsrTest).toHaveBeenCalledWith("test-only-key", {
     channel: "token_plan",
@@ -1032,7 +1032,7 @@ it("设置页可查看已保存密钥，查看不制造草稿也不覆盖已保�
   expect(screen.getByRole("button", { name: "保存配置" })).toBeDisabled();
   fireEvent.change(screen.getByLabelText("模型"), { target: { value: "updated-model" } });
   fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
-  await screen.findByText("配置已保存，相关工具会使用这些设置。");
+  await screen.findByText("配置已保存。");
   expect(secretSet).not.toHaveBeenCalled();
   expect(screen.getByLabelText("API Key")).toHaveValue("");
   expect(screen.getByLabelText("API Key")).toHaveAttribute("type", "password");

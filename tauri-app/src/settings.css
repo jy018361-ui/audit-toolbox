@@ -435,6 +435,21 @@
   margin-top: var(--sp-4);
 }
 
+.settings-page .settings-help {
+  margin-top: var(--sp-3);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.settings-page .settings-help > summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.settings-page .settings-help p {
+  margin: var(--sp-2) 0 0;
+}
+
 .settings-advanced[open] > summary {
   margin-bottom: var(--sp-4);
 }
@@ -468,7 +483,7 @@
 
 .settings-save-bar {
   position: static;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: var(--sp-4);
   padding-bottom: max(var(--sp-4), env(safe-area-inset-bottom));
   background: var(--surface);
@@ -484,6 +499,7 @@
 }
 
 .settings-save-bar.is-dirty > span {
+  margin-right: auto;
   color: var(--ink-strong);
   font-weight: 600;
 }

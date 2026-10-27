@@ -72,7 +72,7 @@ jobs:
         working-directory: tauri-app
         shell: pwsh
         run: |
-          node --test scripts/publish_channel_release.test.cjs
+          node --test scripts/publish_channel_release.check.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/check_import_case.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

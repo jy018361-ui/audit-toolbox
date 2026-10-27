@@ -43,7 +43,7 @@ jobs:
         run: |
           python tauri-app/scripts/test_release_channels.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test tauri-app/scripts/publish_channel_release.test.cjs
+          node --test tauri-app/scripts/publish_channel_release.check.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tauri-app/scripts/check_import_case.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

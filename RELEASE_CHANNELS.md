@@ -44,7 +44,7 @@
 
 ```powershell
 python tauri-app/scripts/test_release_channels.py
-node --test tauri-app/scripts/publish_channel_release.test.cjs
+node --test tauri-app/scripts/publish_channel_release.check.cjs
 ```
 
 PR 会运行前端测试、前端构建和 Rust 测试；实际发布也在签名打包前运行检查。正式验收需发布两个递增的 Dev 版本，在 Windows 同时安装正式版和 Dev，确认 Dev 仅收到 Dev 更新，正式版更新目标及设置不变。Dev 更新清单替换期间或网络故障时可能短暂检查失败，重试即可，不会回退读取正式通道。

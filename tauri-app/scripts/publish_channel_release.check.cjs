@@ -98,6 +98,17 @@ test('Dev draft API URLs and signatures are validated and rewritten before it is
   }
 });
 
+test('draft temporary download URLs become final tag URLs before publication', async () => {
+  const draftInstaller = {...installer, browser_download_url:
+    'https://github.com/example/toolbox/releases/download/untagged-temporary/setup.exe'};
+  const s = scenario({apiUrl: true, release: {assets: [draftInstaller,
+    {id: 11, name: 'setup.exe.sig'}, {id: 12, name: 'latest.json'}]}});
+  await s.run();
+  const uploaded = s.calls.filter(([method]) => method === 'upload');
+  assert.equal(uploaded.length, 2);
+  for (const [, args] of uploaded) assert.deepEqual(JSON.parse(args.data.toString()), manifest(version));
+});
+
 test('invalid source URL or signature leaves the draft untouched', async () => {
   const bad = manifest(version);
   bad.platforms['windows-x86_64'].url = installer.url + '999';

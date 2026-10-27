@@ -23,6 +23,10 @@ function validateManifest(manifest, tag, repo) {
   }
 }
 
+function installerUrl(asset, tag, repo) {
+  return `https://github.com/${repo.owner}/${repo.repo}/releases/download/${tag}/${encodeURIComponent(asset.name)}`;
+}
+
 function normalizeManifest(manifest, release, tag, repo) {
   const normalized = JSON.parse(JSON.stringify(manifest));
   for (const platform of Object.values(normalized.platforms || {})) {
@@ -30,7 +34,13 @@ function normalizeManifest(manifest, release, tag, repo) {
     const asset = release.assets.find(a => a.name.endsWith('.exe') &&
       (platform.url === a.url || platform.url === a.browser_download_url));
     if (!asset) throw new Error('更新清单引用的安装包不属于本次发布。');
-    platform.url = asset.browser_download_url;
+    const draftPrefix = `https://github.com/${repo.owner}/${repo.repo}/releases/download/untagged-`;
+    if (asset.browser_download_url !== installerUrl(asset, tag, repo) &&
+        !(release.draft && asset.browser_download_url.startsWith(draftPrefix))) {
+      throw new Error('安装包下载地址不属于本次发布仓库。');
+    }
+    // Draft assets can expose temporary untagged URLs until publication.
+    platform.url = installerUrl(asset, tag, repo);
   }
   validateManifest(normalized, tag, repo);
   return normalized;
@@ -52,7 +62,7 @@ async function loadManifest(github, repo, release, tag) {
   const original = JSON.parse(await assetText(github, repo, asset));
   const manifest = normalizeManifest(original, release, tag, repo);
   for (const platform of Object.values(manifest.platforms)) {
-    const installer = release.assets.find(a => a.browser_download_url === platform.url && a.name.endsWith('.exe'));
+    const installer = release.assets.find(a => a.name.endsWith('.exe') && installerUrl(a, tag, repo) === platform.url);
     const signature = release.assets.find(a => a.name === `${installer.name}.sig`);
     if (!signature || (await assetText(github, repo, signature)).trim() !== platform.signature.trim()) {
       throw new Error('更新清单签名与本次安装包签名附件不一致。');

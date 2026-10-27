@@ -892,58 +892,60 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
             ]}
             onStepClick={(next) => void run(() => changeStep(next))}
           />
-          {step === 0 && (<>
-          <FileDropInput
-            containerRef={uploadRef}
-            className="ocr-upload"
-            value={documents[0]?.name ?? ""}
-            displayValue={`已导入 ${documents.length} 份文件 · 点击继续添加`}
-            hideFilledLabel
-            ariaLabel="导入文件"
-            placeholder="拖放或点击选择扫描件"
-            description="支持 PDF、PNG、JPEG、BMP、TIFF，可拖入多个文件或文件夹。"
-            disabled={busy}
-            highlight={uploadDrop.highlight}
-            onDragStateChange={uploadDrop.onDragStateChange}
-            onBrowse={() => void run(() => chooseImport(false))}
-          />
-          <div className="ocr-import-bar">
-            <div>
-              <Button
-                variant="outline"
+          {step === 0 && (
+            <>
+              <FileDropInput
+                containerRef={uploadRef}
+                className="ocr-upload"
+                value={documents[0]?.name ?? ""}
+                displayValue={`已导入 ${documents.length} 份文件 · 点击继续添加`}
+                hideFilledLabel
+                ariaLabel="导入文件"
+                placeholder="拖放或点击选择扫描件"
+                description="支持 PDF、PNG、JPEG、BMP、TIFF，可拖入多个文件或文件夹。"
                 disabled={busy}
-                onClick={() => void run(() => chooseImport(true))}
-              >
-                <FolderOpen />
-                导入文件夹
-              </Button>
-            </div>
-            <div>
-              <Button
-                variant="outline"
-                disabled={busy || !documents.length}
-                onClick={() => void run(() => recognize(false, true))}
-              >
-                <ScanText />
-                识别全部未完成页
-              </Button>
-              <Button
-                variant="outline"
-                disabled={busy || !documents.length}
-                onClick={() => void run(() => exportExcel("individual"))}
-              >
-                逐文件导出
-              </Button>
-              <Button
-                variant="outline"
-                disabled={busy || !documents.length}
-                onClick={() => void run(() => exportExcel("combined"))}
-              >
-                项目合并导出
-              </Button>
-            </div>
-          </div>
-          </>)}
+                highlight={uploadDrop.highlight}
+                onDragStateChange={uploadDrop.onDragStateChange}
+                onBrowse={() => void run(() => chooseImport(false))}
+              />
+              <div className="ocr-import-bar">
+                <div>
+                  <Button
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => void run(() => chooseImport(true))}
+                  >
+                    <FolderOpen />
+                    导入文件夹
+                  </Button>
+                </div>
+                <div>
+                  <Button
+                    variant="outline"
+                    disabled={busy || !documents.length}
+                    onClick={() => void run(() => recognize(false, true))}
+                  >
+                    <ScanText />
+                    识别全部未完成页
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={busy || !documents.length}
+                    onClick={() => void run(() => exportExcel("individual"))}
+                  >
+                    逐文件导出
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={busy || !documents.length}
+                    onClick={() => void run(() => exportExcel("combined"))}
+                  >
+                    项目合并导出
+                  </Button>
+                </div>
+              </div>
+            </>
+          )}
           {message && (
             <div role="status" className="ocr-progress">
               <div>

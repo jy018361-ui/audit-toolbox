@@ -67,6 +67,62 @@ vi.mock("./AudiPickPage", () => ({
     </section>
   ),
 }));
+async function flushSettingsChanges() {
+  fireEvent.blur(screen.getByRole("heading", { name: "设置" }));
+  await waitFor(() => expect(document.querySelector(".settings-auto-status")).toHaveTextContent("已自动保存"));
+}
+
+it("autosaves text after typing pauses, applies selects, and removes help and save controls", async () => {
+  render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  expect(settingsSet).not.toHaveBeenCalled();
+  expect(screen.queryByText("配置帮助")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", {name:"保存配置"})).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("模型"), {target:{value:"first"}});
+  fireEvent.change(screen.getByLabelText("模型"), {target:{value:"latest-model"}});
+  expect(settingsSet).not.toHaveBeenCalled();
+  await waitFor(() => expect(settingsSet).toHaveBeenCalledWith(expect.objectContaining({llm:expect.objectContaining({model:"latest-model"})})));
+  expect(settingsSet).toHaveBeenCalledTimes(1);
+  fireEvent.change(screen.getByLabelText("自动清理"), {target:{value:"off"}});
+  await waitFor(() => expect(settingsSet).toHaveBeenLastCalledWith(expect.objectContaining({cache:expect.objectContaining({cleanup:"off"})})));
+});
+
+it("failed autosave keeps the current input and retries without a save button", async () => {
+  vi.mocked(settingsSet).mockRejectedValueOnce({userMessage:"磁盘暂不可写"});
+  render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  fireEvent.change(screen.getByLabelText("模型"), {target:{value:"retry-model"}});
+  fireEvent.blur(screen.getByLabelText("模型"));
+  expect(await screen.findByRole("alert")).toHaveTextContent("自动保存失败：磁盘暂不可写");
+  expect(screen.getByLabelText("模型")).toHaveValue("retry-model");
+  expect(document.querySelector(".settings-auto-status")).not.toHaveTextContent("已自动保存");
+  fireEvent.click(screen.getByRole("button", {name:"重试"}));
+  await waitFor(() => expect(document.querySelector(".settings-auto-status")).toHaveTextContent("已自动保存"));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("does not overwrite settings before a failed initial read is retried", async () => {
+  vi.mocked(settingsGet).mockRejectedValueOnce({userMessage:"配置读取异常"});
+  render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("配置读取失败：配置读取异常");
+  expect(screen.getByLabelText("模型")).toBeDisabled();
+  expect(settingsSet).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", {name:"重试"}));
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  expect(screen.getByLabelText("模型")).toBeEnabled();
+  expect(settingsSet).not.toHaveBeenCalled();
+});
+
+it("switching LLM providers saves typed credentials to their original provider only", async () => {
+  render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  fireEvent.change(screen.getByLabelText("API Key"), {target:{value:"openai-only"}});
+  fireEvent.change(screen.getByLabelText("接口类型"), {target:{value:"dify_chat"}});
+  await flushSettingsChanges();
+  expect(secretSet).toHaveBeenCalledWith("llm_api_key", "openai-only");
+  expect(secretSet).not.toHaveBeenCalledWith("dify_api_key", "openai-only");
+  expect(screen.getByLabelText("API Key")).toHaveValue("");
+});
 let restoreCanvasMocks: () => void;
 beforeEach(() => {
   vi.clearAllMocks();
@@ -85,8 +141,9 @@ beforeEach(() => {
     warnings: [],
   });
 });
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await act(async () => {});
   restoreCanvasMocks();
   vi.unstubAllGlobals();
 });
@@ -493,14 +550,14 @@ it("redirects the legacy AudiPick window hash to the main-window tool route", as
   );
 });
 
-it("groups settings into two columns on a single page, preserves draft, and saves via the existing APIs", async () => {
+it("groups settings into two columns on a single page, automatically applies changes via the existing APIs", async () => {
   render(
     <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />,
   );
   await waitFor(() =>
     expect(screen.getByLabelText("模型")).toHaveValue("saved-model"),
   );
-  expect(screen.getByRole("button", { name: "保存配置" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
   expect(settingsGet).toHaveBeenCalled();
   expect(screen.getByLabelText(/^超时秒数/)).toHaveValue("120");
   expect(screen.getByRole("heading", { name: "统一 LLM 配置" })).toBeVisible();
@@ -511,7 +568,7 @@ it("groups settings into two columns on a single page, preserves draft, and save
   fireEvent.change(screen.getByLabelText("模型"), {
     target: { value: "draft-model" },
   });
-  expect(screen.getByRole("button", { name: "保存配置" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("OCR 引擎"), {
     target: { value: "baidu" },
   });
@@ -531,20 +588,19 @@ it("groups settings into two columns on a single page, preserves draft, and save
     target: { value: "off" },
   });
   expect(screen.getByLabelText("模型")).toHaveValue("draft-model");
-  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
-  await screen.findByRole("status");
+  await flushSettingsChanges();
   expect(settingsSet).toHaveBeenCalledWith(
     expect.objectContaining({
       llm: expect.objectContaining({ model: "draft-model", timeout: 120 }),
       cache: { cleanup: "off" },
-      ocr: { engine: "baidu" },
+      ocr: expect.objectContaining({ engine: "baidu" }),
     }),
   );
   expect(secretSet).toHaveBeenCalledWith("baidu_ocr_key", "test-placeholder");
-  expect(screen.getByLabelText("百度 API Key")).toHaveValue("");
-  expect(screen.getByRole("button", { name: "保存配置" })).toBeDisabled();
+  expect(screen.getByLabelText("百度 API Key")).toHaveValue("test-placeholder");
+  expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "深绿" })).toBeVisible();
-  expect(screen.getByRole("button", { name: "保存配置" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
   const updateButton = screen.getByRole("button", { name: "软件更新" });
   expect(updateButton.closest(".page-header-actions")).not.toBeNull();
   fireEvent.click(updateButton);
@@ -562,16 +618,15 @@ it("百炼 OCR 配置可修改、保存、重新加载，其他设置保存保�
   fireEvent.change(screen.getByLabelText("百炼 OCR URL"), { target: { value: "https://workspace.example/compatible-mode/v1" } });
   fireEvent.change(screen.getByLabelText("百炼 OCR 模型"), { target: { value: "qwen3.5-ocr" } });
   fireEvent.change(screen.getByLabelText("百炼 OCR API Key"), { target: { value: "bailian-placeholder" } });
-  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
-  await screen.findByRole("status");
+  await flushSettingsChanges();
   expect(settingsSet).toHaveBeenCalledWith(expect.objectContaining({ ocr: { engine: "bailian", bailian_base_url: "https://workspace.example/compatible-mode/v1", bailian_model: "qwen3.5-ocr", custom: "keep" } }));
   expect(secretSet).toHaveBeenCalledWith("bailian_ocr_key", "bailian-placeholder");
-  expect(screen.getByLabelText("百炼 OCR API Key")).toHaveValue("");
+  expect(screen.getByLabelText("百炼 OCR API Key")).toHaveValue("bailian-placeholder");
   cleanup();
   vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" } });
 });
 
-it("设置页可直接测试百炼 OCR 草稿，显示耗时且不保存配置或密钥", async () => {
+it("设置页测试前自动同步百炼 OCR 参数和密钥，并显示耗时", async () => {
   vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" }, ocr: { engine: "bailian" } });
   render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /></MemoryRouter>);
   await screen.findByLabelText("百炼 OCR URL");
@@ -585,8 +640,8 @@ it("设置页可直接测试百炼 OCR 草稿，显示耗时且不保存配置�
   expect(audipickOcrTest).toHaveBeenLastCalledWith("bailian", "dGVzdA==", "ocr-draft-key", "", {
     bailian_base_url: "https://draft.example/compatible-mode/v1", bailian_model: "draft-ocr",
   }, true);
-  expect(settingsSet).not.toHaveBeenCalled();
-  expect(secretSet).not.toHaveBeenCalled();
+  expect(settingsSet).toHaveBeenCalled();
+  expect(secretSet).toHaveBeenCalled();
   expect(screen.getByLabelText("百炼 OCR API Key")).toHaveValue("ocr-draft-key");
   fireEvent.change(screen.getByLabelText("百炼 OCR API Key"), { target: { value: "" } });
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
@@ -609,8 +664,8 @@ it.each(["baidu", "ai", "local"])("设置页 %s OCR 测试只传当前引擎的�
   fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
   await screen.findByRole("status");
   expect(audipickOcrTest).toHaveBeenLastCalledWith(engine, "dGVzdA==", engine === "baidu" ? "baidu-draft-key" : "", engine === "baidu" ? "baidu-draft-secret" : "", undefined, true);
-  expect(settingsSet).not.toHaveBeenCalled();
-  expect(secretSet).not.toHaveBeenCalled();
+  expect(settingsSet).toHaveBeenCalled();
+  expect(secretSet).toHaveBeenCalled();
 });
 
 it("OCR 测试失败显示原因并可重试，修改配置清除旧结论", async () => {
@@ -637,80 +692,34 @@ it("OCR 测试期间防止重复点击，切换引擎后不显示迟到的旧成
   const button = screen.getByRole("button", { name: "正在测试 OCR…" });
   expect(button).toBeDisabled();
   fireEvent.click(button);
-  expect(audipickOcrTest).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(audipickOcrTest).toHaveBeenCalledTimes(1));
   fireEvent.change(screen.getByLabelText("OCR 引擎"), { target: { value: "local" } });
   await act(async () => { finish({ message: "旧请求成功", elapsedMs: 20 }); });
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "测试 OCR 连接" })).toBeEnabled();
 });
 
-it("protects unsaved settings on leave", async () => {
-  render(
-    <MemoryRouter>
-      <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />
-      <ConfirmDialogHost />
-    </MemoryRouter>,
-  );
-  await waitFor(() =>
-    expect(screen.getByLabelText("模型")).toHaveValue("saved-model"),
-  );
-  fireEvent.change(screen.getByLabelText("Base URL"), {
-    target: { value: "https://llm.internal" },
-  });
-  expect(screen.getByText(/有未保存的配置修改/)).toBeVisible();
-
-  const beforeUnload = new Event("beforeunload", { cancelable: true });
-  window.dispatchEvent(beforeUnload);
-  expect(beforeUnload.defaultPrevented).toBe(true);
-
-  const link = document.createElement("a");
-  link.href = "#/history";
-  link.textContent = "离开设置";
-  document.body.appendChild(link);
-  fireEvent.click(link);
-  expect(
-    screen.getByText("设置尚未保存，确定离开并放弃这些修改吗？"),
-  ).toBeVisible();
-  expect(window.location.hash).not.toBe("#/history");
-  fireEvent.click(screen.getByRole("button", { name: "取消" }));
-  await waitFor(() =>
-    expect(
-      screen.queryByText("设置尚未保存，确定离开并放弃这些修改吗？"),
-    ).toBeNull(),
-  );
-  expect(window.location.hash).not.toBe("#/history");
-  fireEvent.click(link);
-  fireEvent.click(screen.getByRole("button", { name: "离开" }));
-  // 确认离开后补发的合成点击应被放行：对话框不再出现，也不需要再次确认
-  await waitFor(() =>
-    expect(
-      screen.queryByText("设置尚未保存，确定离开并放弃这些修改吗？"),
-    ).toBeNull(),
-  );
+it("leaving settings flushes text edits without a discard dialog", async () => {
+  const view = render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /><ConfirmDialogHost /></MemoryRouter>);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://llm.internal" } });
+  view.unmount();
+  await waitFor(() => expect(settingsSet).toHaveBeenCalledWith(expect.objectContaining({llm: expect.objectContaining({base_url:"https://llm.internal"})})));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
-it("protects unsaved settings when browser history navigates backward", async () => {
+it("browser back applies changes without asking the user to save", async () => {
   const router = createMemoryRouter([
-    { path: "/history", element: <p>历史页</p> },
-    { path: "/settings", element: <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /> },
-  ], { initialEntries: ["/history", "/settings"], initialIndex: 1 });
+    {path:"/history",element:<p>历史页</p>},
+    {path:"/settings",element:<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />},
+  ], {initialEntries:["/history","/settings"],initialIndex:1});
   render(<><RouterProvider router={router} /><ConfirmDialogHost /></>);
   await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
-  fireEvent.change(screen.getByLabelText("Base URL"), {
-    target: { value: "https://llm.internal" },
-  });
-
-  await act(async () => { await router.navigate(-1); });
-  expect(router.state.location.pathname).toBe("/settings");
-  expect(screen.getByText("设置尚未保存，确定离开并放弃这些修改吗？")).toBeVisible();
-  fireEvent.click(screen.getByRole("button", { name: "取消" }));
-  await waitFor(() => expect(screen.queryByText("设置尚未保存，确定离开并放弃这些修改吗？")).toBeNull());
-  expect(router.state.location.pathname).toBe("/settings");
-
-  await act(async () => { await router.navigate(-1); });
-  fireEvent.click(screen.getByRole("button", { name: "离开" }));
-  await waitFor(() => expect(router.state.location.pathname).toBe("/history"));
-  expect(screen.getByText("历史页")).toBeVisible();
+  fireEvent.change(screen.getByLabelText("Base URL"), {target:{value:"https://llm.internal"}});
+  await act(async () => {await router.navigate(-1);});
+  expect(router.state.location.pathname).toBe("/history");
+  await waitFor(() => expect(settingsSet).toHaveBeenCalledWith(expect.objectContaining({llm:expect.objectContaining({base_url:"https://llm.internal"})})));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
 it("requires confirmation before clearing local cache", async () => {
@@ -954,7 +963,7 @@ it("语音转写通道可切换为 Token Plan 套餐通道并随保存落库", a
     screen.getByRole("button", { name: "测试套餐通道" }),
   ).toBeInTheDocument();
   // 保存后通道选择写入 meeting 命名空间，供转写任务读取。
-  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+  await flushSettingsChanges();
   await waitFor(() => expect(vi.mocked(settingsSet)).toHaveBeenCalled());
   const payload = vi.mocked(settingsSet).mock.calls[0][0] as {
     meeting: Record<string, unknown>;
@@ -976,7 +985,7 @@ it("通用通道预填地址和模型，未保存的修改用于测试，切换�
   await waitFor(() => expect(meetingAsrTest).toHaveBeenCalledWith(" general-test-key ", {
     channel: "paraformer", baseUrl: "https://asr.example.cn/gateway/", model: "custom-file-model",
   }));
-  expect(settingsSet).not.toHaveBeenCalled();
+  expect(settingsSet).toHaveBeenCalled();
   fireEvent.change(screen.getByLabelText("转写通道"), { target: { value: "token_plan" } });
   expect(screen.queryByLabelText(/^通用转写模型/)).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText(/^套餐 API 密钥/), { target: { value: "plan-test-key" } });
@@ -986,7 +995,7 @@ it("通用通道预填地址和模型，未保存的修改用于测试，切换�
   }));
   fireEvent.change(screen.getByLabelText("转写通道"), { target: { value: "paraformer" } });
   expect(screen.getByLabelText(/^通用转写模型/)).toHaveValue(" custom-file-model ");
-  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+  await flushSettingsChanges();
   await waitFor(() => expect(secretSet).toHaveBeenCalledWith("bailian_asr_key", " general-test-key "));
   expect(vi.mocked(settingsSet).mock.calls[0][0]).toMatchObject({ meeting: {
     asr_channel: "paraformer", asr_base_url: "https://asr.example.cn/gateway/", asr_model: "custom-file-model",
@@ -1008,7 +1017,7 @@ it("套餐 ASR Flash 使用当前草稿测试并说明内置样音与额度消�
     baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     model: "qwen-audio-3.0-asr-flash",
   }));
-  expect(settingsSet).not.toHaveBeenCalled();
+  expect(settingsSet).toHaveBeenCalled();
 });
 
 it("重新打开设置恢复通用通道的自定义配置", async () => {
@@ -1029,11 +1038,12 @@ it("设置页可查看已保存密钥，查看不制造草稿也不覆盖已保�
   await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue("saved-test-key"));
   expect(secretGet).toHaveBeenCalledWith("llm_api_key");
   expect(screen.getByLabelText("API Key")).toHaveAttribute("type", "text");
-  expect(screen.getByRole("button", { name: "保存配置" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("模型"), { target: { value: "updated-model" } });
-  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
-  await screen.findByText("配置已保存。");
+  await flushSettingsChanges();
+  await waitFor(() => expect(document.querySelector(".settings-auto-status")).toHaveTextContent("已自动保存"));
   expect(secretSet).not.toHaveBeenCalled();
-  expect(screen.getByLabelText("API Key")).toHaveValue("");
+  expect(screen.getByLabelText("API Key")).toHaveValue("saved-test-key");
+  fireEvent.click(screen.getByRole("button", { name: "隐藏API Key" }));
   expect(screen.getByLabelText("API Key")).toHaveAttribute("type", "password");
 });

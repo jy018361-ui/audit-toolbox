@@ -143,5 +143,9 @@ export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
       {key:"projectName",label:"项目名称",kind:"text",required:true},{key:"pdfPaths",label:"合同 PDF",kind:"files",extensions:["pdf"]},
       {key:"ruleId",label:"审阅规则",kind:"select",options:[{label:"贷款契约",value:"loan_covenant"},{label:"收入合同底稿",value:"revenue_workpaper"}]}
     ], actions:[{label:"读取项目状态",method:"audipick.projects",mode:"call",tone:"primary"}]
-  }
+  },
+  dataflow: {
+    intro: "通过节点流程读取、整理、计算、筛选并输出表格数据。",
+    fields: [], actions: [{label:"运行数据流",method:"dataflow_run",mode:"call",tone:"primary"}]
+  },
 };

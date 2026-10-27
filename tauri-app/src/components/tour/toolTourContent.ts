@@ -29,6 +29,12 @@ export type ToolTourScript = {
 };
 
 export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
+  dataflow: {
+    purpose: "用可视化节点把表格读取、整理、公式计算、筛选和输出串成可重复运行的流程。",
+    prepare: "准备待处理的 Excel 或 CSV 文件；需要写出结果时，先选择允许保存的位置。",
+    flow: "从画布添加节点并连线，逐项配置输入与处理规则，先预览结果，再运行并保存流程。",
+    result: "运行后可检查各节点结果并导出文件；保存流程后，可换数据或调整参数再次运行。",
+  },
   fa_list: {
     purpose:
       "按资料选择固定资产底稿：用 TB＋JE 生成固定资产变动表，或将期初、期末资产清单逐卡匹配，生成 FA List 与变动汇总。",

@@ -24,6 +24,7 @@ export const TASK_STATE_TOOL_IDS = [
   "fuzzy_match",
   "tbje_check",
   "meeting_minutes",
+  "dataflow",
 ] as const;
 
 export const TASK_STATE_SCENARIOS = [

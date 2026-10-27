@@ -8,7 +8,7 @@ describe("tool definitions", () => {
   });
 
   it("uses only allow-listed engine method namespaces", () => {
-    const allowed = new Set(["file_list", "wp", "confirmation", "excel_merger", "fa", "ts", "kanzhang", "roll_forward", "audipick", "ocr", "fx", "loan", "deposit", "pdf2excel", "fuzzy", "tbje_check", "meeting"]);
+    const allowed = new Set(["file_list", "wp", "confirmation", "excel_merger", "fa", "ts", "kanzhang", "roll_forward", "audipick", "ocr", "fx", "loan", "deposit", "pdf2excel", "fuzzy", "tbje_check", "meeting", "dataflow_run"]);
     for (const definition of Object.values(TOOL_DEFINITIONS)) {
       for (const action of definition.actions) {
         expect(allowed.has(action.method.split(".")[0])).toBe(true);

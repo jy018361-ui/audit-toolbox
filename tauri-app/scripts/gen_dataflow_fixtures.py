@@ -8,7 +8,7 @@
   - 第 5 节为远期规模验收方案，本次仅生成小/中规模（约 200 行/文件 与 约 5 万行）。
 
 仅使用 Python 标准库；唯一的可选用依赖是 openpyxl（用于生成一个小 xlsx 样例，
-未安装时自动跳过并在 README 中说明）。
+未安装时自动跳过并在 README 中说明）。重跑会覆盖本目录内同名文件，不改动仓库其他文件。
 
 用法：
   python scripts/gen_dataflow_fixtures.py
@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OUT_DIR = REPO_ROOT / "tests" / "fixtures" / "DataFlow"
+DEFAULT_OUT = REPO_ROOT / "tests" / "fixtures" / "DataFlow"
 
 HEADERS = ["凭证日期", "凭证号", "摘要", "科目编码", "科目名称", "借方金额", "贷方金额", "客商名称", "流水号"]
 
@@ -81,7 +81,7 @@ VENDORS = [
     "银河设备租赁有限公司",
     "青山包装材料厂",
 ]
-VENDOR_FULLWIDTH = "华信咨询（上海）有限公司"  # 全角括号脏写法（与华信咨询(上海)有限公司归一）
+VENDOR_FULLWIDTH = "华信咨询（上海）有限公司"  # 全角括号脏写法（清洗后应与半角写法归一）
 
 ABSTRACTS = [
     "支付货款", "收到货款", "报销差旅费", "支付办公用品采购款", "支付办公室租金",
@@ -90,46 +90,40 @@ ABSTRACTS = [
     "支付水电费", "计提坏账准备", "支付审计费用",
 ]
 
+
 # ---------------------------------------------------------------------------
 # 基础行生成
 # ---------------------------------------------------------------------------
 
 
 class SerialGen:
-    """18 位银行流水号生成器：普通号以 62 开头，少量前导零变体。"""
+    """18 位银行流水号生成器：普通号以 62 开头；前导零变体由埋点计划单独写入。"""
 
-    def __init__(self, rng: random.Random, lead_zero_every: int = 5000):
-        self.rng = rng
+    def __init__(self):
         self.count = 0
-        self.lead_zero_every = lead_zero_every
-        self.lead_zero_count = 0
 
     def next(self) -> str:
         self.count += 1
-        if self.count % self.lead_zero_every == 0:
-            self.lead_zero_count += 1
-            return "0" + f"{self.count:017d}"
         return "62" + f"{self.count:016d}"
 
 
-def make_voucher_rows(rng, month, voucher_no, date_style_ratio, serial: SerialGen):
+def make_voucher_rows(rng: random.Random, month: int, voucher_no: str,
+                      slash_date_ratio: float, serial: SerialGen):
     """生成一张借贷平衡的凭证（2~4 行），返回行列表（dict）。
 
-    date_style_ratio: 使用斜杠短写日期（如 2026/1/3）的概率，其余用 2026-01-03。
+    slash_date_ratio: 使用斜杠短写日期（如 2026/1/3）的概率，其余用 2026-01-03。
     """
     day = rng.randint(1, 28)
-    if rng.random() < date_style_ratio:
+    if rng.random() < slash_date_ratio:
         date_str = f"2026/{month}/{day}"
     else:
         date_str = f"2026-{month:02d}-{day:02d}"
     n_lines = rng.choice([2, 2, 2, 3, 3, 4])
     total = round(rng.uniform(500, 400000), 2)
     debit_first = rng.random() < 0.5
-    rows = []
-    # 金额切分：一条主线整额，其余行拆分
     splits = [round(total / (n_lines - 1), 2)] * (n_lines - 1)
     splits[-1] = round(total - sum(splits[:-1]), 2)
-    lines = []
+    rows = []
     for i in range(n_lines):
         code, name, _ = ACCOUNTS[rng.randrange(len(ACCOUNTS))]
         vendor = VENDORS[rng.randrange(len(VENDORS))]
@@ -138,8 +132,6 @@ def make_voucher_rows(rng, month, voucher_no, date_style_ratio, serial: SerialGe
             amount, is_debit = total, debit_first
         else:
             amount, is_debit = splits[i - 1], not debit_first
-        lines.append((code, name, abstract, vendor, amount, is_debit))
-    for code, name, abstract, vendor, amount, is_debit in lines:
         rows.append({
             "凭证日期": date_str,
             "凭证号": voucher_no,
@@ -154,35 +146,48 @@ def make_voucher_rows(rng, month, voucher_no, date_style_ratio, serial: SerialGe
     return rows
 
 
-def build_month_rows(rng, month, n_rows, date_style_ratio, serial: SerialGen,
-                     voucher_fmt):
-    """生成某月 n_rows 行（含到行为止的凭证整行），返回 (rows, 凭证号列表)。"""
+def build_month_rows(rng, month, n_rows, slash_date_ratio, serial, voucher_fmt):
+    """生成某月 n_rows 行（截断到最后一张凭证的多余行），返回行列表。"""
     rows = []
-    voucher_nos = []
     idx = 0
     while len(rows) < n_rows:
         idx += 1
-        voucher_no = voucher_fmt(idx)
-        voucher_nos.append(voucher_no)
-        rows.extend(make_voucher_rows(rng, month, voucher_no, date_style_ratio, serial))
-    return rows[:n_rows], voucher_nos
+        rows.extend(make_voucher_rows(rng, month, voucher_fmt(idx),
+                                      slash_date_ratio, serial))
+    return rows[:n_rows]
 
 
 # ---------------------------------------------------------------------------
-# 脏数据埋点（固定行号，多数放在文件后半段：预览采样取不到的位置）
+# 脏数据埋点（固定行号，集中在文件后半段：预览采样取不到的位置）
 # ---------------------------------------------------------------------------
 
 
 def apply_dirty(rows, plan, answers, file_label):
-    """按计划把脏数据写进行列表。plan: list of (row_index_1based, kind, kwargs)。
+    """按计划把脏数据写进行列表，并把每类落位行号记入 answers（构造侧已知答案）。
 
-    同时把每类脏数据的落位行号记入 answers[file_label]，作为构造侧已知答案。
+    每行至多埋一类；「全角括号负数」在计划行号附近自适应寻找一张恰好两行、
+    两侧金额相等的凭证，把借贷两侧同时写成「（1,000.00）」——这样无论清洗时
+    按去括号取正还是按括号转负，该凭证自身都保持平衡。
     """
+    fixed = {i for i, kind, _ in plan if kind != "全角括号负数"}
+    used = set()
 
     def rec(kind, idx, note=""):
         answers.setdefault(file_label, {}).setdefault(kind, []).append((idx, note))
 
     for idx, kind, kw in plan:
+        if kind == "全角括号负数":
+            pos = _find_pair_voucher(rows, idx, fixed | used)
+            a_i, b_i = pos
+            rows[a_i - 1]["借方金额"] = "（1,000.00）"
+            rows[b_i - 1]["贷方金额"] = "（1,000.00）"
+            used.update(pos)
+            rec(kind, a_i, "借方金额=（1,000.00）")
+            rec(kind, b_i, "贷方金额=（1,000.00）配平行（同一凭证，两种清洗口径下该凭证均平衡）")
+            continue
+        if idx in used:
+            raise RuntimeError(f"{file_label}: 第 {idx} 行被两种埋点占用")
+        used.add(idx)
         r = rows[idx - 1]
         side = kw.get("side", "借方金额")
         if kind == "千分位":
@@ -190,27 +195,16 @@ def apply_dirty(rows, plan, answers, file_label):
             r[side] = f"{val:,.2f}"
             rec(kind, idx, f"{side}={r[side]}")
         elif kind == "金额带单位":
-            val = kw["value"]
-            r[side] = f"{val}元"
+            r[side] = f"{kw['value']}元"
             rec(kind, idx, f"{side}={r[side]}")
         elif kind == "全角数字金额":
             half = f"{kw['value']:.2f}"
-            r[side] = "".join(ch.translate(str.maketrans("0123456789.", "０１２３４５６７８９．")) for ch in half)
+            table = str.maketrans("0123456789.", "０１２３４５６７８９．")
+            r[side] = half.translate(table)
             rec(kind, idx, f"{side}={r[side]}")
-        elif kind == "全角括号负数":
-            r[side] = "（1,000.00）"
-            # 同凭证配平行也写成同一形式，两种清洗口径下该凭证仍平衡
-            pair_no = r["凭证号"]
-            for j, other in enumerate(rows, start=1):
-                if other is not r and other["凭证号"] == pair_no and other[side] == "":
-                    other_side = "贷方金额" if side == "借方金额" else "借方金额"
-                    other[other_side] = "（1,000.00）"
-                    rec(kind, j, f"{other_side}=（1,000.00）配平行")
-                    break
-            rec(kind, idx, f"{side}=（1,000.00）")
         elif kind == "全角括号客商":
             r["客商名称"] = VENDOR_FULLWIDTH
-            rec(kind, idx)
+            rec(kind, idx, f"客商名称={VENDOR_FULLWIDTH}")
         elif kind == "首尾空格":
             field = kw.get("field", "客商名称")
             r[field] = "  " + r[field] + "  "
@@ -220,12 +214,11 @@ def apply_dirty(rows, plan, answers, file_label):
             field = kw.get("field", "客商名称")
             pos = len(r[field]) // 2
             r[field] = r[field][:pos] + ch + r[field][pos:]
-            desc = kw["desc"]
-            rec(kind, idx, f"{field} 内嵌{desc} U+{ord(ch):04X}")
+            rec(kind, idx, f"{field} 内嵌{kw['desc']} U+{ord(ch):04X}")
         elif kind == "金额空值":
             r["借方金额"] = ""
             r["贷方金额"] = ""
-            rec(kind, idx, "借贷两侧均空")
+            rec(kind, idx, "借贷两侧均为空值")
         elif kind == "客商空值":
             r["客商名称"] = ""
             rec(kind, idx)
@@ -234,44 +227,66 @@ def apply_dirty(rows, plan, answers, file_label):
             rec(kind, idx)
         elif kind == "纯空格文本":
             r["客商名称"] = kw["spaces"]
-            rec(kind, idx, f"{len(kw['spaces'])} 个空格" + ("（全角）" if kw["spaces"][0] == "\u3000" else "（半角）"))
+            width = "全角" if kw["spaces"][0] == "\u3000" else "半角"
+            rec(kind, idx, f"客商名称为 {len(kw['spaces'])} 个{width}空格（空文本之外的第三种形态）")
         elif kind == "重复凭证号":
             target = kw["dup_of"]
             r["凭证号"] = rows[target - 1]["凭证号"]
-            rec(kind, idx, f"与第 {target} 行凭证号重复")
+            rec(kind, idx, f"凭证号与第 {target} 行重复（不做拦截，仅供行数守恒核对）")
         elif kind == "全角破折号摘要":
             r["摘要"] = "支付华信咨询－咨询服务费"
-            rec(kind, idx)
+            rec(kind, idx, "摘要含全角破折号 U+FF0D")
         elif kind == "整行空记录":
             for h in HEADERS:
                 r[h] = ""
-            rec(kind, idx, "9 列全部为空")
+            rec(kind, idx, "9 列全部为空（供「删除整行空记录」动作测试）")
         elif kind == "前导零流水号":
             r["流水号"] = "0" + f"{idx:017d}"
-            rec(kind, idx, f"流水号={r['流水号']}")
+            rec(kind, idx, f"流水号={r['流水号']}（前导零变体）")
         elif kind == "多位小数":
-            val = kw["value"]
-            r[side] = f"{val:.4f}"
-            rec(kind, idx, f"{side}={r[side]} 四位小数")
+            r[side] = f"{kw['value']:.4f}"
+            rec(kind, idx, f"{side}={r[side]} 四位小数（金额不统一截两位）")
         else:
             raise ValueError(kind)
-    # 前导零科目编码（0101/0102）自然出现的行也统计为已知答案
+
     lead_rows = [i for i, r in enumerate(rows, start=1)
                  if r["科目编码"] in ("0101", "0102")]
     answers.setdefault(file_label, {})["前导零科目编码行"] = lead_rows
+    slash_rows = [i for i, r in enumerate(rows, start=1)
+                  if r["凭证日期"].startswith("2026/")]
+    answers.setdefault(file_label, {})["斜杠短写日期行"] = slash_rows
     return rows
+
+
+def _find_pair_voucher(rows, start_idx, exclude):
+    """从 start_idx 起找一张恰好两行、两侧纯数字金额相等的凭证，返回两个行号（1 起）。"""
+    for p in range(max(start_idx, 1), len(rows) + 1):
+        if p in exclude:
+            continue
+        no = rows[p - 1]["凭证号"]
+        group = [j for j, r in enumerate(rows, start=1) if r["凭证号"] == no]
+        if len(group) != 2:
+            continue
+        if any(j in exclude for j in group):
+            continue
+        a, b = rows[group[0] - 1], rows[group[1] - 1]
+        if a["借方金额"] and b["贷方金额"] and a["借方金额"] == b["贷方金额"]:
+            return group[0], group[1]
+        if b["借方金额"] and a["贷方金额"] and b["借方金额"] == a["贷方金额"]:
+            return group[1], group[0]
+    raise RuntimeError("未找到可用于全角括号负数的两行平衡凭证")
 
 
 def small_file_plan(offset=110):
     """小文件统一埋点计划：从第 offset 行（默认 110，文件后半段）开始铺脏数据。"""
-    plan = [
+    return [
         (offset + 2, "千分位", {"side": "借方金额", "value": 1234567.89}),
         (offset + 9, "千分位", {"side": "贷方金额", "value": 98765.43}),
         (offset + 17, "千分位", {"side": "借方金额", "value": 2345678.12}),
         (offset + 4, "金额带单位", {"side": "贷方金额", "value": 5000}),
         (offset + 20, "金额带单位", {"side": "借方金额", "value": 300}),
         (offset + 3, "全角数字金额", {"side": "借方金额", "value": 1234.56}),
-        (offset + 24, "全角括号负数", {"side": "借方金额"}),
+        (offset + 24, "全角括号负数", {}),
         (offset + 1, "全角括号客商", {}),
         (offset + 12, "全角括号客商", {}),
         (offset + 25, "全角括号客商", {}),
@@ -298,14 +313,13 @@ def small_file_plan(offset=110):
         (offset + 13, "多位小数", {"side": "借方金额", "value": 83333.3333}),
         (offset + 21, "多位小数", {"side": "贷方金额", "value": 100000.1234}),
     ]
-    return plan
 
 
 def medium_file_plan(n_rows):
-    """中规模文件埋点：全部放在 60% 行以后（预览 1000 条采样取不到处）。"""
+    """中规模文件埋点：全部放在 60% 行以后（预览采样前 1000 条取不到处）。"""
     base = int(n_rows * 0.6)
     plan = []
-    plan += [(base + i * 7, "千分位", {"side": "借方金额", "value": 1000000 + i * 1111.11})
+    plan += [(base + 10 + i * 7, "千分位", {"side": "借方金额", "value": 1000000 + i * 1111.11})
              for i in range(20)]
     plan += [(base + 500 + i * 11, "全角括号客商", {}) for i in range(5)]
     plan += [(base + 1000 + i * 13, "首尾空格", {"field": "客商名称"}) for i in range(5)]
@@ -323,12 +337,8 @@ def medium_file_plan(n_rows):
 
 
 # ---------------------------------------------------------------------------
-# 写文件
+# 写文件与已知答案
 # ---------------------------------------------------------------------------
-
-
-def rows_to_dicts_flat(rows):
-    return [[r[h] for h in HEADERS] for r in rows]
 
 
 def write_delimited(path, rows, encoding, delimiter, bom=False):
@@ -336,35 +346,40 @@ def write_delimited(path, rows, encoding, delimiter, bom=False):
     with io.open(path, "w", encoding=enc, newline="") as f:
         w = csv.writer(f, delimiter=delimiter, lineterminator="\r\n")
         w.writerow(HEADERS)
-        w.writerows(rows_to_dicts_flat(rows))
+        for r in rows:
+            w.writerow([r[h] for h in HEADERS])
 
 
 def numeric_totals(rows):
-    """构造侧已知答案：仅统计纯数字金额行（文本脏金额/空值行单列）。"""
+    """构造侧已知答案：仅统计纯数字金额（文本脏金额与空值不计入）。"""
 
     def num(s):
-        if s == "":
-            return None
         try:
             return float(s)
-        except ValueError:
+        except (TypeError, ValueError):
             return None
 
-    debit = sum(v for v in (num(r["借方金额"]) for r in rows) if v is not None)
-    credit = sum(v for v in (num(r["贷方金额"]) for r in rows) if v is not None)
-    n_debit = sum(1 for v in (num(r["借方金额"]) for r in rows) if v is not None)
-    n_credit = sum(1 for v in (num(r["贷方金额"]) for r in rows) if v is not None)
-    return round(debit, 2), round(credit, 2), n_debit, n_credit
+    dv = [v for v in (num(r["借方金额"]) for r in rows) if v is not None]
+    cv = [v for v in (num(r["贷方金额"]) for r in rows) if v is not None]
+    return round(sum(dv), 2), round(sum(cv), 2), len(dv), len(cv)
 
 
-def l_path_rows(rows):
-    """明细中科目编码不在映射表的行数（已知答案：6801 / 1601）。"""
+def totals_from_flat(rows9):
+    """回读自检用：与 numeric_totals 同口径，但输入是 9 列列表。"""
+
+    def num(s):
+        try:
+            return float(s)
+        except (TypeError, ValueError):
+            return None
+
+    dv = [v for v in (num(r[5]) for r in rows9) if v is not None]
+    cv = [v for v in (num(r[6]) for r in rows9) if v is not None]
+    return round(sum(dv), 2), round(sum(cv), 2), len(dv), len(cv)
+
+
+def l_path_count(rows):
     return sum(1 for r in rows if r["科目编码"] in MAPPING_MISSING)
-
-
-# ---------------------------------------------------------------------------
-# 主流程
-# ---------------------------------------------------------------------------
 
 
 def build_mapping_rows():
@@ -374,91 +389,61 @@ def build_mapping_rows():
             continue
         rows.append([code, name, cat])
         if code == MAPPING_DUP:
-            rows.append([code, name, "费用－其他"])  # 重复键：第二次挂不同费用类别
+            rows.append([code, name, "费用－其他"])
     rows.append(list(MAPPING_EXTRA))
     return rows
 
 
-def build_fake_xls_rows(rng, n_rows, serial):
-    rows, _ = build_month_rows(rng, 7, n_rows, 0.5, serial, lambda i: f"记-{i:04d}")
-    plan = [
-        (40, "千分位", {"side": "借方金额", "value": 1234567.89}),
-        (52, "全角括号客商", {}),
-    ]
-    answers = {}
-    apply_dirty(rows, plan, answers, "fakexls")
-    return rows, answers
-
-
-def build_xlsx_rows(rng, n_rows, serial):
-    rows, _ = build_month_rows(rng, 5, n_rows, 0.35, serial, lambda i: f"记-{i:04d}")
-    plan = [
-        (30, "千分位", {"side": "借方金额", "value": 1234567.89}),
-        (45, "金额带单位", {"side": "贷方金额", "value": 5000}),
-        (50, "全角括号客商", {}),
-        (55, "首尾空格", {"field": "客商名称"}),
-        (60, "客商空值", {}),
-        (65, "前导零流水号", {}),
-        (70, "全角破折号摘要", {}),
-    ]
-    answers = {}
-    apply_dirty(rows, plan, answers, "xlsx")
-    return rows, answers
-
-
 def write_xlsx(path, rows):
-    """用 openpyxl 写小 xlsx：流水号/科目编码/凭证号列锁定文本格式，日期混排真日期与文本。"""
+    """用 openpyxl 写小 xlsx：流水号/科目编码/凭证号列文本格式；日期前 60% 文本、后 40% 真日期。"""
     from openpyxl import Workbook
-    from openpyxl.styles import Alignment
 
     wb = Workbook()
     ws = wb.active
     ws.title = "序时账"
     ws.append(HEADERS)
-    text_cols = (1, 2, 4, 9)  # 凭证日期(文本部分)/凭证号/科目编码/流水号
-    for i, r in enumerate(rows, start=2):
-        if i - 1 <= len(rows) * 0.6:
-            date_cell = r["凭证日期"]  # 文本日期
+    n_text_date = int(len(rows) * 0.6)
+    for i, r in enumerate(rows, start=1):
+        if i <= n_text_date:
+            date_cell = r["凭证日期"]  # 文本日期（含斜杠短写）
         else:
             m, d = r["凭证日期"].replace("/", "-").split("-")[1:]
             date_cell = dt.date(2026, int(m), int(d))  # 真日期单元格
-        ws.append([date_cell, r["凭证号"], r["摘要"], r["科目编码"], r["科目名称"],
-                   r["借方金额"] or None, r["贷方金额"] or None, r["客商名称"], r["流水号"]])
-        for col in text_cols:
-            c = ws.cell(row=i, column=col)
-            c.number_format = "@"
-        # 金额为纯数字文本时写成数值单元格，其余（千分位/带单位）保留文本
+        row_vals = [date_cell, r["凭证号"], r["摘要"], r["科目编码"], r["科目名称"],
+                    r["借方金额"] or None, r["贷方金额"] or None, r["客商名称"], r["流水号"]]
+        ws.append(row_vals)
+        excel_row = i + 1
+        # 文本锁定列：凭证号(2)/科目编码(4)/流水号(9)；日期列(1)仅文本日期锁文本格式
+        for col in (2, 4, 9):
+            ws.cell(row=excel_row, column=col).number_format = "@"
+        if isinstance(date_cell, str):
+            ws.cell(row=excel_row, column=1).number_format = "@"
+        # 金额：纯数字写数值单元格（>2 位小数保留 4 位格式），千分位/带单位保留文本
         for col, key in ((6, "借方金额"), (7, "贷方金额")):
-            c = ws.cell(row=i, column=col)
+            c = ws.cell(row=excel_row, column=col)
             v = r[key]
             if v and re.fullmatch(r"-?\d+(\.\d+)?", v):
                 c.value = float(v)
-                if "." in v and len(v.split(".")[1]) > 2:
-                    c.number_format = "0.0000"
-                else:
-                    c.number_format = "0.00"
+                c.number_format = "0.0000" if ("." in v and len(v.split(".")[1]) > 2) else "0.00"
             else:
                 c.number_format = "@"
-        ws.cell(row=i, column=9).alignment = Alignment(horizontal="left")
     wb.save(path)
 
 
 def scan_existing_fixtures():
-    """盘点 tests/fixtures/ 下（不含本目录）既有的 xlsx/xls/xlsm 样例，供读取测试复用。"""
+    """只读盘点 tests/fixtures/ 下（不含本目录）既有 xlsx/xls/xlsm 样例，供读取测试复用。"""
     fixtures = REPO_ROOT / "tests" / "fixtures"
     notes = {
         "Excel Merger/simple-biff8.xls": "真二进制 BIFF8 工作簿（OLE2），Sheet「明细」，含文本 001 与数字 123.5",
         "Excel Merger/formatted-biff8.xls": "真二进制 BIFF8，含公式、加粗、合并单元格与自定义列宽",
-        "Excel Merger/spreadsheetml.xml.xls": "Excel 2003 XML（SpreadsheetML）伪装 .xls 后缀",
-        "借款台账测试集/07-裕丰农业发展有限公司-贷款台账.csv": "CSV 样例（本盘点仅附注，非 xlsx/xls）",
+        "Excel Merger/spreadsheetml.xml.xls": "Excel 2003 XML（SpreadsheetML）内容、.xls 后缀",
     }
     found = []
     for dirpath, dirnames, filenames in os.walk(fixtures):
         dirnames[:] = [d for d in dirnames if d not in ("DataFlow", "__pycache__")]
         for fn in sorted(filenames):
-            rel = (Path(dirpath) / fn).relative_to(fixtures).as_posix()
             if fn.lower().endswith((".xlsx", ".xls", ".xlsm")):
-                found.append(rel)
+                found.append((Path(dirpath) / fn).relative_to(fixtures).as_posix())
     found.sort()
     return found, notes
 
@@ -467,153 +452,148 @@ def fmt_answers(answers):
     lines = []
     for kind in sorted(answers):
         val = answers[kind]
-        if isinstance(val, list) and val and isinstance(val[0], tuple):
+        if kind in ("前导零科目编码行", "斜杠短写日期行"):
+            if len(val) > 30:
+                lines.append(f"- {kind}：{len(val)} 行（行号略，回读时按科目编码 0101/0102、"
+                             f"日期含「/」识别）")
+            else:
+                lines.append(f"- {kind}：{len(val)} 行（行号 {'、'.join(map(str, val))}）")
+        else:
             rows_txt = "、".join(str(i) for i, _ in val)
             extra = "；".join(n for _, n in val if n)
-            lines.append(f"- {kind}：{len(val)} 行（行号 {rows_txt}）{('——' + extra) if extra else ''}")
-        else:
-            lines.append(f"- {kind}：{len(val)} 行（行号 {'、'.join(map(str, val))}）")
+            lines.append(f"- {kind}：{len(val)} 行（行号 {rows_txt}）"
+                         + (f"——{extra}" if extra else ""))
     return lines
 
 
-def run_selfchecks(expected, answers):
-    """生成后回读自检，返回 (全部通过, 检查结果列表)。"""
+# ---------------------------------------------------------------------------
+# 自检（生成后立即回读核对）
+# ---------------------------------------------------------------------------
+
+
+def parse_delimited_file(path, encoding, delimiter, bom):
+    raw = path.read_bytes()
+    if encoding == "gbk":
+        text = raw.decode("gbk")  # strict：解码失败即抛错
+    elif bom:
+        text = raw.decode("utf-8-sig")
+    else:
+        text = raw.decode("utf-8")
+    return [r for r in csv.reader(io.StringIO(text), delimiter=delimiter) if r]
+
+
+def run_selfchecks(expected):
     checks = []
 
     def add(name, ok, detail=""):
         checks.append((name, bool(ok), detail))
 
-    import json  # noqa: F401  (未用，仅保持标准库声明清晰)
-    # 1) GBK 文件严格解码 + 行数
-    p = OUT_DIR / expected["gbk"]["name"]
-    raw = p.read_bytes()
-    try:
-        text = raw.decode("gbk")  # strict
-        add("GBK 文件按 gbk 严格解码", True, f"{len(raw)} 字节")
-    except UnicodeDecodeError as e:
-        add("GBK 文件按 gbk 严格解码", False, str(e))
-        text = raw.decode("gbk", "replace")
-    lines = [ln for ln in text.split("\r\n") if ln != ""]
-    add("GBK 文件行数与参数一致", len(lines) - 1 == expected["gbk"]["rows"],
-        f"数据行 {len(lines) - 1} / 期望 {expected['gbk']['rows']}")
-    add("GBK 文件字段数恒为 9（分号分隔）",
-        all(len(ln.split(";")) == 9 for ln in lines))
-
-    # 2) UTF-8 无 BOM 文件
-    p = OUT_DIR / expected["utf8"]["name"]
-    raw = p.read_bytes()
-    add("UTF-8 文件无 BOM", not raw.startswith(b"\xef\xbb\xbf"))
-    text = raw.decode("utf-8")
-    lines = [ln for ln in text.split("\r\n") if ln != ""]
-    add("UTF-8 文件行数与参数一致", len(lines) - 1 == expected["utf8"]["rows"],
-        f"数据行 {len(lines) - 1} / 期望 {expected['utf8']['rows']}")
-
-    # 3) UTF-8 BOM + Tab 文件：列数一致
-    p = OUT_DIR / expected["tsv"]["name"]
-    raw = p.read_bytes()
-    add("TSV 文件带 UTF-8 BOM", raw.startswith(b"\xef\xbb\xbf"))
-    text = raw.decode("utf-8-sig")
-    rows = list(csv.reader(io.StringIO(text), delimiter="\t"))
-    rows = [r for r in rows if r]
-    add("TSV 文件行数与参数一致", len(rows) - 1 == expected["tsv"]["rows"],
-        f"数据行 {len(rows) - 1} / 期望 {expected['tsv']['rows']}")
-    add("TSV 每行列数恒为 9", all(len(r) == 9 for r in rows))
-
-    # 4) 中规模文件
-    p = OUT_DIR / expected["medium"]["name"]
-    text = p.read_bytes().decode("utf-8")
-    rows = [r for r in csv.reader(io.StringIO(text)) if r]
-    add("中规模文件行数与参数一致", len(rows) - 1 == expected["medium"]["rows"],
-        f"数据行 {len(rows) - 1} / 期望 {expected['medium']['rows']}")
-    add("中规模文件每行 9 列", all(len(r) == 9 for r in rows))
-
-    # 5) 流水号列回读：18 位纯数字、前导零未损
+    parsed = {}
+    # 1) 三个小文件 + 中规模：编码、BOM、行数、列数
     for key in ("utf8", "gbk", "tsv", "medium"):
         spec = expected[key]
         p = OUT_DIR / spec["name"]
-        if spec.get("encoding") == "gbk":
-            t = p.read_bytes().decode("gbk")
-        elif spec.get("bom"):
-            t = p.read_bytes().decode("utf-8-sig")
+        raw = p.read_bytes()
+        if spec.get("bom"):
+            add(f"{spec['name']} 带 UTF-8 BOM", raw.startswith(b"\xef\xbb\xbf"))
         else:
-            t = p.read_bytes().decode("utf-8")
-        rr = [r for r in csv.reader(io.StringIO(t), delimiter=spec["delim"]) if r]
-        serials = [r[8] for r in rr[1:] if len(r) == 9 and r[8] != ""]
+            add(f"{spec['name']} 无 BOM", not raw.startswith(b"\xef\xbb\xbf"))
+        try:
+            rows = parse_delimited_file(p, spec["encoding"], spec["delim"], spec.get("bom", False))
+            if spec["encoding"] == "gbk":
+                add(f"{spec['name']} 按 gbk 严格解码通过", True, f"{len(raw)} 字节")
+            parsed[key] = rows
+        except UnicodeDecodeError as e:
+            add(f"{spec['name']} 解码", False, str(e))
+            parsed[key] = []
+            continue
+        add(f"{spec['name']} 数据行数与参数一致", len(rows) - 1 == spec["rows"],
+            f"实际 {len(rows) - 1} / 期望 {spec['rows']}")
+        add(f"{spec['name']} 每行列数恒为 9（分隔符「{spec['delim'] if spec['delim'] != chr(9) else 'Tab'}」）",
+            all(len(r) == 9 for r in rows))
+
+    # 2) 流水号列：18 位纯数字、前导零未损（编号大数保护，设计文档第 9 节）
+    for key in ("utf8", "gbk", "tsv", "medium"):
+        spec = expected[key]
+        serials = [r[8] for r in parsed[key][1:] if len(r) == 9 and r[8] != ""]
         ok18 = all(re.fullmatch(r"\d{18}", s) for s in serials)
         lead0 = [s for s in serials if s.startswith("0")]
-        add(f"{spec['name']} 流水号全部 18 位纯数字文本", ok18, f"{len(serials)} 个")
+        add(f"{spec['name']} 流水号全部 18 位纯数字文本", ok18, f"共 {len(serials)} 个")
         add(f"{spec['name']} 前导零流水号保留", len(lead0) == spec["lead_zero"],
-            f"{len(lead0)} 个 / 期望 {spec['lead_zero']}")
+            f"实际 {len(lead0)} 个 / 期望 {spec['lead_zero']}")
 
-    # 6) 伪 xls：UTF-8 文本 + 逗号分隔 + 9 列
+    # 3) 伪 xls：UTF-8 逗号分隔文本 + .xls 后缀
     p = OUT_DIR / expected["fakexls"]["name"]
-    text = p.read_bytes().decode("utf-8")
-    rows = [r for r in csv.reader(io.StringIO(text)) if r]
-    add("伪 xls 内容为 UTF-8 逗号分隔文本", all(len(r) == 9 for r in rows),
+    rows = [r for r in csv.reader(io.StringIO(p.read_bytes().decode("utf-8"))) if r]
+    add("伪 xls 内容为 UTF-8 逗号分隔文本且每行 9 列", all(len(r) == 9 for r in rows),
         f"数据行 {len(rows) - 1}")
-    add("伪 xls 后缀为 .xls", p.suffix == ".xls")
+    add("伪 xls 后缀为 .xls（内容识别测试）", p.suffix == ".xls")
 
-    # 7) 映射表：20 行、6602 重复、9900 存在、6801/1601 缺失
+    # 4) 映射表：行数、重复键、多余科目、缺失科目
     p = OUT_DIR / expected["mapping"]["name"]
-    text = p.read_bytes().decode("utf-8-sig")
-    rows = [r for r in csv.reader(io.StringIO(text)) if r]
+    rows = [r for r in csv.reader(io.StringIO(p.read_bytes().decode("utf-8-sig"))) if r]
     codes = [r[0] for r in rows[1:]]
-    add("映射表行数与参数一致", len(rows) - 1 == 20, f"{len(rows) - 1} 行")
-    add("映射表 6602 出现两次", codes.count("6602") == 2)
-    add("映射表含明细未用科目 9900", "9900" in codes)
-    add("映射表缺失 6801/1601（L 路测试）",
-        all(c not in codes for c in MAPPING_MISSING))
+    add("映射表数据行数与参数一致", len(rows) - 1 == 20, f"实际 {len(rows) - 1} 行")
+    add("映射表 6602 出现两次（关联键重复膨胀）", codes.count("6602") == 2)
+    add("映射表含明细未用科目 9900（右未匹配）", "9900" in codes)
+    add("映射表缺失 6801/1601（左未匹配）", all(c not in codes for c in MAPPING_MISSING))
+    add("映射表前导零科目编码 0101 为文本保留", "0101" in codes)
 
-    # 8) xlsx 类型保真（若已生成）
+    # 5) xlsx 类型保真（若已生成）
     xp = OUT_DIR / expected["xlsx"]["name"]
-    if xp.exists():
-        try:
-            from openpyxl import load_workbook
-            wb = load_workbook(xp, data_only=False)
-            ws = wb.active
-            serial_ok = True
-            n_serial = 0
-            for row in ws.iter_rows(min_row=2):
-                c = row[8]
-                if c.value is None or c.value == "":
-                    continue
-                n_serial += 1
-                if not (isinstance(c.value, str) and re.fullmatch(r"\d{18}", c.value)):
-                    serial_ok = False
-            add("xlsx 流水号列回读为文本且 18 位完整", serial_ok, f"{n_serial} 个")
-            codes = [row[3].value for row in ws.iter_rows(min_row=2)]
-            add("xlsx 前导零科目编码 0101 未损", any(c == "0101" for c in codes if isinstance(c, str)))
-        except ImportError:
-            add("xlsx 回读（openpyxl 不可用）", False, "跳过")
+    if expected["xlsx"]["name"] and xp.exists():
+        from openpyxl import load_workbook
+        wb = load_workbook(xp)
+        ws = wb.active
+        serial_ok, n_serial = True, 0
+        code0101 = False
+        for row in ws.iter_rows(min_row=2):
+            c = row[8]
+            if c.value in (None, ""):
+                continue
+            n_serial += 1
+            if not (isinstance(c.value, str) and re.fullmatch(r"\d{18}", c.value)):
+                serial_ok = False
+            if isinstance(row[3].value, str) and row[3].value == "0101":
+                code0101 = True
+        add("xlsx 流水号列回读为文本且 18 位完整", serial_ok, f"共 {n_serial} 个")
+        add("xlsx 前导零科目编码 0101 未损", code0101)
     else:
-        add("xlsx 生成（openpyxl 缺失）", False, "已跳过，见 README 说明")
+        add("xlsx 生成（openpyxl 缺失，已跳过）", False, "详见 README openpyxl 说明")
 
-    # 9) 构造侧已知答案核对：纯数字借贷合计与生成时一致
+    # 6) 借贷合计与构造侧一致（纯数字行口径，回读 vs 生成时已知答案）
     for key in ("utf8", "gbk", "tsv", "medium"):
-        totals = expected[key]["totals"]
-        add(f"{expected[key]['name']} 借贷合计与构造侧一致",
-            totals[0] == totals[1] or True,  # 小文件含脏行/空行，口径见 README
-            f"借 {totals[0]:,.2f} / 贷 {totals[1]:,.2f}（纯数字行 借 {totals[2]} 笔 / 贷 {totals[3]} 笔）")
+        spec = expected[key]
+        got = totals_from_flat(parsed[key][1:])
+        exp = spec["totals"]
+        add(f"{spec['name']} 纯数字金额合计与构造侧一致", got == exp,
+            f"借 {got[0]:,.2f}（{got[2]} 笔）/ 贷 {got[1]:,.2f}（{got[3]} 笔）")
 
     return all(ok for _, ok, _ in checks), checks
 
 
+# ---------------------------------------------------------------------------
+# 主流程
+# ---------------------------------------------------------------------------
+
+
 def main():
-    ap = argparse.ArgumentParser(description="生成 DataFlow 合成测试数据")
-    ap.add_argument("--small-rows", type=int, default=200)
-    ap.add_argument("--medium-rows", type=int, default=50000)
+    global OUT_DIR
+    ap = argparse.ArgumentParser(description="生成 DataFlow 合成测试数据（第一阶段小/中规模）")
+    ap.add_argument("--small-rows", type=int, default=200, help="三个月度小文件各自的数据行数")
+    ap.add_argument("--medium-rows", type=int, default=50000, help="全年中规模文件数据行数")
     ap.add_argument("--fakexls-rows", type=int, default=60)
     ap.add_argument("--xlsx-rows", type=int, default=80)
     ap.add_argument("--seed", type=int, default=20261027)
-    ap.add_argument("--out", default=str(OUT_DIR))
+    ap.add_argument("--out", default=str(DEFAULT_OUT))
     args = ap.parse_args()
 
-    global OUT_DIR
     OUT_DIR = Path(args.out)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     answers = {}
     rng = random.Random(args.seed)
+    serial = SerialGen()
 
     f_utf8 = "序时账_2026-01_小_UTF8无BOM_逗号.csv"
     f_gbk = "序时账_2026-02_小_GBK_分号.csv"
@@ -623,16 +603,18 @@ def main():
     f_map = "科目映射表.csv"
     f_xlsx = "序时账_2026-05_小.xlsx"
 
-    serial = SerialGen(rng, lead_zero_every=1000000)  # 埋点版前导零流水号单独控制
-    # --- 三个小文件 ---
-    rows1, _ = build_month_rows(rng, 1, args.small_rows, 0.25, serial, lambda i: f"记-{i:04d}")
-    rows2, _ = build_month_rows(rng, 2, args.small_rows, 0.25, serial, lambda i: f"{i:04d}")
-    rows3, _ = build_month_rows(rng, 3, args.small_rows, 0.30, serial, lambda i: f"记-{i:04d}")
+    # --- 三个小文件：格式差异 + 十二类埋点 ---
+    rows1 = build_month_rows(rng, 1, args.small_rows, 0.25, serial, lambda i: f"记-{i:04d}")
+    rows2 = build_month_rows(rng, 2, args.small_rows, 0.25, serial, lambda i: f"{i:04d}")
+    rows3 = build_month_rows(rng, 3, args.small_rows, 0.30, serial, lambda i: f"记-{i:04d}")
 
     plan = small_file_plan()
-    # GBK 文件不能包含 U+00A0/U+200B（GBK 无法编码），其不可见字符行改用全角空格 U+3000
-    plan_gbk = [(idx, kind, dict(kw, char="\u3000", desc="全角空格") if kind == "不可见字符" and kw.get("char") in ("\u00A0", "\u200B") else kw)
-                for idx, kind, kw in plan]
+    # GBK 无法编码 U+00A0/U+200B，该文件不可见字符行改用全角空格 U+3000
+    plan_gbk = [
+        (idx, kind, dict(kw, char="\u3000", desc="全角空格")
+         if kind == "不可见字符" and kw.get("char") in ("\u00A0", "\u200B") else kw)
+        for idx, kind, kw in plan
+    ]
     apply_dirty(rows1, plan, answers, f_utf8)
     apply_dirty(rows2, plan_gbk, answers, f_gbk)
     apply_dirty(rows3, plan, answers, f_tsv)
@@ -641,20 +623,23 @@ def main():
     write_delimited(OUT_DIR / f_gbk, rows2, "gbk", ";")
     write_delimited(OUT_DIR / f_tsv, rows3, "utf-8", "\t", bom=True)
 
-    # --- 中规模文件（全年 12 个月）---
+    # --- 全年中规模文件 ---
     med_rows = []
-    med_nos = []
     for m in range(1, 13):
-        mr, nos = build_month_rows(rng, m, args.medium_rows // 12 + 6, 0.25, serial,
-                                   lambda i, m=m: f"记-{m:02d}{i:04d}")
-        med_rows.extend(mr)
-        med_nos.append(len(mr))
+        med_rows.extend(build_month_rows(
+            rng, m, args.medium_rows // 12 + 6, 0.25, serial,
+            lambda i, m=m: f"记-{m:02d}{i:04d}"))
     med_rows = med_rows[:args.medium_rows]
     apply_dirty(med_rows, medium_file_plan(args.medium_rows), answers, f_med)
     write_delimited(OUT_DIR / f_med, med_rows, "utf-8", ",")
 
-    # --- 伪 xls ---
-    fk_rows, _ = build_fake_xls_rows(rng, args.fakexls_rows, serial)
+    # --- 伪 xls（财务系统导出兼容样例）---
+    fk_rows = build_month_rows(rng, 7, args.fakexls_rows, 0.5, serial,
+                               lambda i: f"记-{i:04d}")
+    apply_dirty(fk_rows, [
+        (40, "千分位", {"side": "借方金额", "value": 1234567.89}),
+        (52, "全角括号客商", {}),
+    ], answers, f_fake)
     write_delimited(OUT_DIR / f_fake, fk_rows, "utf-8", ",")
 
     # --- 科目映射表（UTF-8 BOM，Excel 友好）---
@@ -671,9 +656,17 @@ def main():
     except ImportError:
         xlsx_ok = False
     if xlsx_ok:
-        xr, _ = build_xlsx_rows(rng, args.xlsx_rows, serial)
+        xr = build_month_rows(rng, 5, args.xlsx_rows, 0.35, serial, lambda i: f"记-{i:04d}")
+        apply_dirty(xr, [
+            (30, "千分位", {"side": "借方金额", "value": 1234567.89}),
+            (45, "金额带单位", {"side": "贷方金额", "value": 5000}),
+            (50, "全角括号客商", {}),
+            (55, "首尾空格", {"field": "客商名称"}),
+            (60, "客商空值", {}),
+            (65, "前导零流水号", {}),
+            (70, "全角破折号摘要", {}),
+        ], answers, f_xlsx)
         write_xlsx(OUT_DIR / f_xlsx, xr)
-        answers[f_xlsx] = answers.pop("xlsx", {})
 
     expected = {
         "utf8": {"name": f_utf8, "rows": args.small_rows, "encoding": "utf-8",
@@ -689,103 +682,114 @@ def main():
         "xlsx": {"name": f_xlsx if xlsx_ok else ""},
     }
 
-    # --- 自检 ---
-    all_ok, checks = run_selfchecks(expected, answers)
+    all_ok, checks = run_selfchecks(expected)
 
     # --- README ---
     existing, notes = scan_existing_fixtures()
     today = dt.date.today().isoformat()
     cmd = "python " + " ".join([sys.argv[0].replace("\\", "/")] + sys.argv[1:])
+    if len(sys.argv) == 1:
+        cmd += "  #（默认参数：小文件各 200 行、中规模 50000 行）"
 
-    def file_table():
-        rows = [
-            (f_utf8, "UTF-8 无 BOM", "逗号", f"{args.small_rows} 行",
-             "十二类埋点全集（详见下节）", "CSV/文本输入节点：编码自动识别、分隔符识别；字段清洗/公式节点去千分位、全半角归一"),
-            (f_gbk, "GBK", "分号", f"{args.small_rows} 行",
-             "同上，但不可见字符行为全角空格 U+3000（GBK 无法编码 U+00A0/U+200B）",
-             "编码自动识别（GBK）；分号分隔识别；伪 xls 之外的编码兼容"),
-            (f_tsv, "UTF-8 带 BOM", "Tab", f"{args.small_rows} 行",
-             "同「UTF-8 无 BOM」全集", "BOM 处理；tsv 后缀；Tab 分隔识别"),
-            (f_med, "UTF-8 无 BOM", "逗号", f"{args.medium_rows} 行",
-             "轻量埋点（千分位 20、全角括号客商 5、首尾空格 5、不可见字符 5、金额空值 10、"
-             "纯空格客商 5、全角破折号摘要 5、整行空 2、前导零流水号 2、多位小数 10、重复凭证号 1），"
-             "全部埋在 60% 行以后",
-             "性能 sanity（约 5 万行）；预览采样（前 1000 条）看不到埋错，验证「预览通过不代表全量正确」"),
-            (f_fake, "UTF-8 无 BOM", "逗号（后缀 .xls）", f"{args.fakexls_rows} 行",
-             "千分位金额 1 行、全角括号客商 1 行",
-             "伪 xls 按内容识别、不从后缀推断（设计文档第 9 节特殊兼容、第 10 节格式边界）"),
-            (f_map, "UTF-8 带 BOM", "逗号", f"{len(map_rows)} 行",
-             "6602 管理费用重复出现两次（费用－办公/费用－其他）；9900 为明细未用科目；"
-             "刻意缺失 6801/1601 两个明细在用科目",
-             "关联 Join 节点：J 路膨胀（6602 行翻倍）、L 路（6801/1601）、R 路（9900）"),
-        ]
-        if xlsx_ok:
-            rows.append((f_xlsx, "（xlsx）", "单 Sheet「序时账」", f"{args.xlsx_rows} 行",
-                         "流水号列/科目编码/凭证号锁定文本格式；日期列前 60% 文本、后 40% 真日期单元格混排；"
-                         "千分位文本金额、带单位金额、全角括号客商、首尾空格、空客商、前导零流水号、全角破折号摘要",
-                         "Excel 输入节点：类型保真（文本流水号 18 位不损、前导零科目编码）、"
-                         "文本日期与真日期混排识别"))
-        return rows
+    small_dirty_desc = ("千分位金额 3、金额带单位 2、全角数字金额 1、全角括号负数 1（两行配对）、"
+                        "全角括号客商 3、首尾空格 3、不可见字符 3、金额空值 2、客商空值 1、摘要空值 1、"
+                        "纯空格客商 2（半角/全角各 1）、重复凭证号 1、全角破折号摘要 3、整行空记录 2、"
+                        "前导零流水号 2、四位小数金额 2；前导零科目编码（0101/0102）与斜杠短写日期"
+                        "（2026/1/3）自然散布全文件")
+
+    file_table = [
+        (f_utf8, "UTF-8 无 BOM", "逗号", f"{args.small_rows} 行", small_dirty_desc,
+         "CSV/文本输入节点：编码与分隔符识别；字段清洗（去千分位、去单位、全半角归一、去不可见字符、去首尾空格）；"
+         "公式（文本转十进制）；「预览采样取不到后半段埋错」"),
+        (f_gbk, "GBK", "分号", f"{args.small_rows} 行",
+         small_dirty_desc.replace("不可见字符 3", "不可见字符 3（因 GBK 无法编码 U+00A0/U+200B，改用全角空格 U+3000）"),
+         "编码自动识别（GBK）＋分号分隔识别；其余同上"),
+        (f_tsv, "UTF-8 带 BOM", "Tab（.tsv 后缀）", f"{args.small_rows} 行", small_dirty_desc,
+         "BOM 处理；tsv 后缀与 Tab 分隔识别；其余同上"),
+        (f_med, "UTF-8 无 BOM", "逗号", f"{args.medium_rows} 行",
+         "轻量埋点（全部在 60% 行以后）：千分位 20、全角括号客商 5、首尾空格 5、不可见字符 5、"
+         "金额空值 10、纯空格客商 5、全角破折号摘要 5、整行空记录 2、前导零流水号 2、四位小数 10、重复凭证号 1",
+         "性能 sanity（约 5 万行，对应设计文档 13.3 性能标定的入门档）；预览采样（前 1000 条）看不到埋错，"
+         "验证「预览通过不代表全量正确」"),
+        (f_fake, "UTF-8 无 BOM", "逗号（后缀 .xls）", f"{args.fakexls_rows} 行",
+         "千分位金额 1 行、全角括号客商 1 行",
+         "伪 xls 按内容识别、不从后缀推断（设计文档第 9 节「特殊兼容」、第 10 节格式边界表）"),
+        (f_map, "UTF-8 带 BOM", "逗号", f"{len(map_rows)} 行",
+         "6602 管理费用重复出现两次（费用－办公 / 费用－其他，费用类别不同）；"
+         "9900 为明细未用科目；刻意缺失 6801、1601 两个明细在用科目",
+         "关联 Join 节点：J 路键重复膨胀（6602 的明细行应×2）、L 路左未匹配（6801/1601 的明细行）、"
+         "R 路右未匹配（9900 一行）"),
+    ]
+    if xlsx_ok:
+        file_table.append((f_xlsx, "（xlsx 二进制）", "单 Sheet「序时账」", f"{args.xlsx_rows} 行",
+                           "流水号/科目编码/凭证号列文本格式；日期列前 60% 文本（含斜杠短写）、后 40% 真日期单元格；"
+                           "千分位文本金额、带单位金额、全角括号客商、首尾空格客商、空客商、前导零流水号、全角破折号摘要",
+                           "Excel 输入节点：类型保真（18 位文本流水号不损、前导零科目编码）、"
+                           "文本日期与真日期混排的类型判定（设计文档第 9 节「编号与大数保护」「Excel 数字单元格与文本需区分」）"))
 
     readme = []
     readme.append("# DataFlow 合成测试数据（第一阶段：小/中规模）")
     readme.append("")
-    readme.append(f"- 生成日期：{today}；生成命令：`{cmd}`；随机种子：{args.seed}（结果可重现）。")
-    readme.append("- 本目录全部为脚本合成的虚构数据，不含任何真实业务数据；客商、科目、金额均为随机生成。")
+    readme.append(f"- 生成日期：{today}；生成命令：`{cmd}`；随机种子：{args.seed}（同参数重跑结果一致）。")
+    readme.append("- 本目录全部为脚本合成的虚构数据，不含任何真实业务数据；客商、科目、金额均随机生成。")
+    readme.append("- 生成脚本：`scripts/gen_dataflow_fixtures.py`（仅 Python 标准库；xlsx 样例可选依赖 openpyxl）。"
+                  "重跑会覆盖本目录同名文件，不改动仓库其他任何文件。")
     readme.append("- 设计依据：`DATAFLOW_DESIGN.md` 第 9 节（数据规则）、第 10 节（输入输出格式边界）；"
-                  "`DATAFLOW_ACCEPTANCE_FLOWS.md` 第 2 节（流程一埋错设计）。"
-                  "第 5 节的规模验收（千万行级）为远期目标，本目录不含。")
-    readme.append("- 埋错位置遵循验收文档 1.4 节原则：小文件脏数据集中在第 110 行以后（文件后半段），"
-                  "中规模文件埋在 60% 行以后，预览采样（前 1000 条）取不到。")
+                  "`DATAFLOW_ACCEPTANCE_FLOWS.md` 第 2 节（流程一·批量清洗合并的埋错设计）。"
+                  "验收文档第 5 节的千万行级规模数据为远期目标，本目录不含。")
+    readme.append("- 埋错位置遵循验收文档 1.4 节总原则：小文件脏数据集中在第 110 行以后（文件后半段），"
+                  "中规模文件埋在 60% 行以后——预览采样（前 1000 条）取不到。")
     readme.append("")
     readme.append("## 一、文件清单")
     readme.append("")
     readme.append("| 文件 | 编码 | 分隔符 | 数据行数 | 埋入的问题数据 | 测试用途（对应设计文档规则/节点） |")
     readme.append("| --- | --- | --- | --- | --- | --- |")
-    for name, enc, d, n, dirty, use in file_table():
-        readme.append(f"| {name} | {enc} | {d} | {n} | {dirty} | {use} |")
+    for t in file_table:
+        readme.append("| " + " | ".join(t) + " |")
     readme.append("")
-    readme.append("字段统一为 9 列：凭证日期、凭证号、摘要、科目编码、科目名称、借方金额、贷方金额、客商名称、流水号。"
-                  "凭证号在 01/03 号小文件为「记-0001」样式（可供分列 Split 节点测试），"
-                  "02 号小文件为纯数字前导零「0001」样式。")
+    readme.append("序时账字段统一为 9 列：凭证日期、凭证号、摘要、科目编码、科目名称、借方金额、贷方金额、客商名称、流水号。"
+                  "凭证号在 01/03 号小文件与 xlsx 为「记-0001」样式（可供分列 Split 节点测试），"
+                  "02 号小文件为纯数字前导零「0001」样式（编号前导零保留）。"
+                  "三种格式属性（UTF-8 无 BOM 逗号 / GBK 分号 / UTF-8 BOM Tab）按任务约定由三个小文件分摊覆盖，"
+                  "其中「分号分隔」并入 GBK 文件。")
     readme.append("")
-    readme.append("## 二、构造侧已知答案（小文件逐类落位）")
+    readme.append("## 二、构造侧已知答案")
     readme.append("")
-    readme.append("行号均为数据行序号（不含表头）。同一文件同一行可能只命中一类。")
-    for label in (f_utf8, f_gbk, f_tsv):
+    readme.append("行号为数据行序号（不含表头）；每行至多埋一类问题数据（全角括号负数的两行配对视为一组）。")
+    key_map = {f_utf8: ("utf8", rows1), f_gbk: ("gbk", rows2), f_tsv: ("tsv", rows3)}
+    for label, (key, rows_obj) in key_map.items():
         readme.append("")
         readme.append(f"### {label}")
         readme.extend(fmt_answers(answers.get(label, {})))
-        t = expected["utf8" if label == f_utf8 else ("gbk" if label == f_gbk else "tsv")]["totals"]
-        readme.append(f"- 纯数字金额行合计：借方 {t[0]:,.2f}（{t[2]} 笔）/ 贷方 {t[1]:,.2f}（{t[3]} 笔）；"
-                      "千分位/带单位/全角数字/全角括号负数为文本金额，清洗后应计入；金额空值与整行空记录行不计入。")
-        l_cnt = l_path_rows(rows1 if label == f_utf8 else (rows2 if label == f_gbk else rows3))
-        readme.append(f"- 科目编码不在映射表（L 路）的行数：{l_cnt}（科目 6801/1601）。")
+        t = expected[key]["totals"]
+        readme.append(f"- 纯数字金额行合计：借方 {t[0]:,.2f}（{t[2]} 笔）/ 贷方 {t[1]:,.2f}（{t[3]} 笔）。"
+                      "千分位、带单位、全角数字、全角括号负数为文本金额，清洗转数后应计入；"
+                      "金额空值行与整行空记录行不计入（后者应被「删除整行空记录」动作删除并计入统计）。")
+        readme.append(f"- 科目编码不在映射表（Join 左未匹配 L 路）的行数：{l_path_count(rows_obj)}（科目 6801/1601）。")
     readme.append("")
     readme.append(f"### {f_med}")
-    med_answers = answers.get(f_med, {})
-    for kind in sorted(med_answers):
-        val = med_answers[kind]
+    for kind in sorted(answers.get(f_med, {})):
+        val = answers[f_med][kind]
         readme.append(f"- {kind}：{len(val)} 行")
     t = expected["medium"]["totals"]
     readme.append(f"- 纯数字金额行合计：借方 {t[0]:,.2f}（{t[2]} 笔）/ 贷方 {t[1]:,.2f}（{t[3]} 笔）。")
-    readme.append(f"- 科目编码不在映射表（L 路）的行数：{l_path_rows(med_rows)}。")
+    readme.append(f"- 科目编码不在映射表（Join 左未匹配 L 路）的行数：{l_path_count(med_rows)}。")
     readme.append("")
     readme.append(f"### {f_map}")
     readme.append(f"- 共 {len(map_rows)} 行：明细在用科目 {len(MAPPING_CODES)} 个；6602 重复 1 次"
-                  f"（关联后其明细行数应×2，膨胀测试）；9900 为右路独有（R 路 1 行）；"
-                  f"缺失 6801/1601（左未匹配 L 路）。")
+                  "（关联后其全部明细行数×2，膨胀测试）；9900 为右路独有（R 路 1 行）；"
+                  "缺失 6801/1601（左未匹配 L 路，行数见上文各文件）。")
     readme.append("")
-    readme.append("### 关于借贷平衡口径")
-    readme.append("基础数据按凭证生成时借贷相等；脏数据只改写金额的表现形式（千分位/单位/全角/括号），"
-                  "清洗转数后平衡仍成立。全角括号负数「（1,000.00）」的两行配对出现在同一凭证的借贷两侧，"
-                  "无论按「去括号取正」还是「括号转负」口径清洗，该凭证自身保持平衡。"
-                  "金额空值行与整行空记录行不参与合计（后者应被「删除整行空记录」动作删除并计入统计）。")
+    readme.append("### 借贷平衡口径")
+    readme.append("基础数据按凭证生成，每张凭证借贷相等；脏数据只改写金额表现形式（千分位/带单位/全角），"
+                  "清洗转数后平衡仍成立。全角括号负数「（1,000.00）」的两行出现在同一凭证的借贷两侧且金额相等，"
+                  "无论按「去括号取正」还是「按括号转负」口径清洗，该凭证自身均保持平衡。"
+                  "金额空值行与整行空记录行不参与合计。")
     readme.append("")
-    readme.append("## 三、既有仓库样例盘点（可直接复用，勿改动）")
+    readme.append("## 三、既有仓库样例盘点（只读复用，勿改动）")
     readme.append("")
-    readme.append("以下为 `tests/fixtures/` 下（不含本目录）既有的表格样例，可直接用于 DataFlow 的"
-                  "xlsx/xls 读取测试；本脚本不改动其中任何文件。")
+    readme.append("以下为 `tests/fixtures/` 下（不含本目录）既有的表格样例清单，可直接用于 DataFlow 的"
+                  "xlsx/xls 读取测试；本脚本未改动其中任何文件。")
     for rel in existing:
         note = notes.get(rel, "")
         readme.append(f"- `tests/fixtures/{rel}`" + (f"——{note}" if note else ""))
@@ -803,14 +807,14 @@ def main():
     readme.append(f"- 生成日期：{today}；命令：`{cmd}`")
     readme.append("")
     for name, ok, detail in checks:
-        flag = "通过" if ok else "未通过"
-        line = f"- [{flag}] {name}"
+        line = f"- [{'通过' if ok else '未通过'}] {name}"
         if detail:
             line += f"（{detail}）"
         readme.append(line)
+    n_ok = sum(1 for _, ok, _ in checks if ok)
     readme.append("")
-    readme.append(f"- 总结：{sum(1 for _, ok, _ in checks if ok)}/{len(checks)} 项通过"
-                  + ("。" if all_ok else "；存在未通过项，请检查生成环境。"))
+    readme.append(f"- 总结：{n_ok}/{len(checks)} 项通过"
+                  + ("。" if all_ok else "；存在未通过项，请检查生成环境后再用。"))
     readme.append("")
 
     (OUT_DIR / "README.md").write_text("\n".join(readme), encoding="utf-8")
@@ -820,12 +824,12 @@ def main():
         if spec.get("name"):
             print(f"  - {spec['name']}")
     if not xlsx_ok:
-        print("  -（openpyxl 不可用，xlsx 样例已跳过，见 README）")
-    print(f"自检：{sum(1 for _, ok, _ in checks if ok)}/{len(checks)} 项通过")
+        print("  -（openpyxl 不可用，xlsx 样例已跳过，见 README 说明）")
+    print(f"自检：{n_ok}/{len(checks)} 项通过")
     if not all_ok:
         for name, ok, detail in checks:
             if not ok:
-                print(f"  [未通过] {name} {detail}")
+                print(f"  [未通过] {name}（{detail}）")
         sys.exit(1)
 
 

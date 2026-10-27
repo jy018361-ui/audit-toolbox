@@ -55,6 +55,8 @@ regex = "1"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
 wasapi = "0.24.0"
 hound = "3.5.1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
+tiff = "0.10"
 # 套餐转写通道：realtime 协议是 WebSocket，用一次性 current-thread runtime
 # 驱动 tokio-tungstenite（TLS 后端与 reqwest 同为 rustls）。
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

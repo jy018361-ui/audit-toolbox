@@ -191,7 +191,7 @@ describe("MeetingMinutesPage", () => {
     expect(api.jobStart).not.toHaveBeenCalled();
   });
 
-  it("合并配置与生成按钮，历史与结果并列且不再显示步骤条", async () => {
+  it("合并配置与生成按钮，按配置、历史、结果排列且不再显示步骤条", async () => {
     render(<MeetingMinutesPage tool={tool} />);
     expect(
       screen.getByRole("heading", { level: 1, name: tool.name }),

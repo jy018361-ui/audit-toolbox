@@ -1,0 +1,575 @@
+//! Standalone general OCR: toolbox configuration, revision-safe pages and optional extracts.
+use crate::{
+    AppError,
+    excel_merger::PauseCheckpoint,
+    ocr_store::{Page, Store, Table, failure, io_error},
+};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use image::{DynamicImage, ImageDecoder, ImageFormat};
+use serde_json::{Value, json};
+use std::{
+    fs,
+    io::Cursor,
+    path::{Path, PathBuf},
+    sync::{Arc, atomic::AtomicBool},
+};
+
+fn required<'a>(p: &'a Value, key: &str) -> Result<&'a str, AppError> {
+    p.get(key)
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| failure("OCR_INPUT_REQUIRED", &format!("缺少必要参数：{key}。")))
+}
+fn to_value<T: serde::Serialize>(v: T) -> Result<Value, AppError> {
+    serde_json::to_value(v).map_err(|_| failure("OCR_DATA", "OCR 数据无法序列化。"))
+}
+fn u32_param(p: &Value, key: &str) -> Result<u32, AppError> {
+    p[key]
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v > 0)
+        .ok_or_else(|| failure("OCR_PAGE_INVALID", "页码和总页数必须为有效正整数。"))
+}
+fn revision(p: &Value) -> Result<u64, AppError> {
+    p["expectedRevision"]
+        .as_u64()
+        .ok_or_else(|| failure("OCR_REVISION_REQUIRED", "缺少页面版本，请刷新后重试。"))
+}
+
+pub(crate) fn call(
+    method: &str,
+    params: Value,
+    db_path: &Path,
+    settings: &Value,
+) -> Result<Value, AppError> {
+    if method == "ocr.config_status" {
+        return crate::audipick::toolbox_ocr_status(settings);
+    }
+    let mut store = Store::open(db_path)?;
+    match method {
+        "ocr.projects" => Ok(json!({"projects":store.projects()?})),
+        "ocr.project_save" => store.save_project(&params),
+        "ocr.project_delete" => store.delete_project(required(&params, "id")?),
+        "ocr.documents" => {
+            Ok(json!({"documents":store.documents(required(&params,"projectId")?)?}))
+        }
+        "ocr.document_import" => import_documents(&store, &params),
+        "ocr.document" => {
+            let id = required(&params, "documentId")?;
+            Ok(
+                json!({"document":store.document(id)?,"pages":store.pages(id)?,"extractions":store.extractions(id)?}),
+            )
+        }
+        "ocr.document_delete" => store.delete_document(required(&params, "documentId")?),
+        "ocr.document_prepare" => to_value(store.prepare(
+            required(&params, "documentId")?,
+            u32_param(&params, "totalPages")?,
+        )?),
+        "ocr.document_bytes" => {
+            let id = required(&params, "documentId")?;
+            let doc = store.document(id)?;
+            let bytes = fs::read(store.source(id)?).map_err(io_error)?;
+            Ok(json!({"mimeType":doc.mime_type,"dataBase64":STANDARD.encode(bytes)}))
+        }
+        "ocr.image_pages" => image_pages(&mut store, required(&params, "documentId")?),
+        "ocr.page_save" => {
+            let page: Page = serde_json::from_value(params["page"].clone())
+                .map_err(|_| failure("OCR_PAGE_INVALID", "页面内容格式无效。"))?;
+            to_value(store.save_page(
+                required(&params, "documentId")?,
+                page,
+                revision(&params)?,
+                false,
+            )?)
+        }
+        "ocr.extraction_save" => store.save_extraction(&params),
+        _ => Err(failure("METHOD_NOT_FOUND", "未找到对应的 OCR 接口。")),
+    }
+}
+fn is_reparse(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        fs::symlink_metadata(path)
+            .map(|m| m.file_attributes() & 0x400 != 0)
+            .unwrap_or(true)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::symlink_metadata(path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true)
+    }
+}
+fn import_documents(store: &Store, p: &Value) -> Result<Value, AppError> {
+    let project = required(p, "projectId")?;
+    store.project(project)?;
+    let mut paths: Vec<PathBuf> = p["paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(PathBuf::from)
+        .collect();
+    let mut failed = vec![];
+    if let Some(folder) = p["folder"].as_str().filter(|v| !v.is_empty()) {
+        let root = Path::new(folder).canonicalize().map_err(io_error)?;
+        if !root.is_dir() {
+            return Err(failure("OCR_IMPORT_FOLDER", "请选择有效的导入文件夹。"));
+        }
+        for entry in walkdir::WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !is_reparse(e.path()))
+        {
+            match entry {
+                Ok(entry) if entry.file_type().is_file() => {
+                    let ext = entry
+                        .path()
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if matches!(
+                        ext.as_str(),
+                        "pdf" | "png" | "jpg" | "jpeg" | "bmp" | "tif" | "tiff"
+                    ) {
+                        if let Ok(canonical) = entry.path().canonicalize() {
+                            if canonical.starts_with(&root) {
+                                paths.push(canonical);
+                            }
+                        }
+                    }
+                }
+                Err(_) => failed.push(
+                    json!({"name":folder,"message":"部分子目录无法读取，已继续处理其他文件。"}),
+                ),
+                _ => {}
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    let mut docs = vec![];
+    for path in paths {
+        match store.import(project,&path){Ok(doc)=>docs.push(doc),Err(e)=>failed.push(json!({"name":path.file_name().unwrap_or_default().to_string_lossy(),"message":e.user_message}))}
+    }
+    Ok(json!({"documents":docs,"failed":failed}))
+}
+fn image_error(_: impl std::fmt::Display) -> AppError {
+    failure(
+        "OCR_IMAGE_DECODE",
+        "图片无法解码或格式不受支持，请转换为 PNG/JPEG 后重试。",
+    )
+}
+fn png(image: &DynamicImage) -> Result<String, AppError> {
+    let mut output = Cursor::new(Vec::new());
+    image
+        .write_to(&mut output, ImageFormat::Png)
+        .map_err(image_error)?;
+    Ok(STANDARD.encode(output.into_inner()))
+}
+fn decode_base64(data: &str) -> Result<Vec<u8>, AppError> {
+    STANDARD
+        .decode(data.split_once(",").map_or(data, |(_, b)| b))
+        .map_err(|_| failure("OCR_IMAGE_INVALID", "页面图片编码无效。"))
+}
+fn decode_image(bytes: &[u8]) -> Result<DynamicImage, AppError> {
+    let mut decoder = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(image_error)?
+        .into_decoder()
+        .map_err(image_error)?;
+    let orientation = decoder.orientation().map_err(image_error)?;
+    let mut image = DynamicImage::from_decoder(decoder).map_err(image_error)?;
+    image.apply_orientation(orientation);
+    Ok(image)
+}
+fn image_pages(store: &mut Store, id: &str) -> Result<Value, AppError> {
+    let doc = store.document(id)?;
+    let bytes = fs::read(store.source(id)?).map_err(io_error)?;
+    if doc.mime_type == "application/pdf" {
+        return Err(failure(
+            "OCR_PDF_RENDER",
+            "PDF 页面请使用内置预览渲染后识别。",
+        ));
+    }
+    let images = if doc.mime_type == "image/tiff" {
+        decode_tiff(&bytes)?
+    } else {
+        vec![decode_image(&bytes)?]
+    };
+    let pages = images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| Ok(json!({"page":index+1,"imageBase64":png(image)?})))
+        .collect::<Result<Vec<_>, AppError>>()?;
+    store.prepare(
+        id,
+        pages
+            .len()
+            .try_into()
+            .map_err(|_| failure("OCR_PAGE_COUNT", "图片页数过多。"))?,
+    )?;
+    Ok(json!({"pages":pages}))
+}
+fn decode_tiff(bytes: &[u8]) -> Result<Vec<DynamicImage>, AppError> {
+    use tiff::ColorType;
+    use tiff::decoder::{Decoder, DecodingResult};
+    let mut decoder = Decoder::new(Cursor::new(bytes)).map_err(image_error)?;
+    let mut pages = vec![];
+    loop {
+        let (width, height) = decoder.dimensions().map_err(image_error)?;
+        let color = decoder.colortype().map_err(image_error)?;
+        let orientation = decoder
+            .get_tag_unsigned::<u8>(tiff::tags::Tag::Orientation)
+            .unwrap_or(1);
+        let data = decoder.read_image().map_err(image_error)?;
+        let pixels: Vec<u8> = match data {
+            DecodingResult::U8(v) => v,
+            DecodingResult::U16(v) => v.into_iter().map(|n| (n >> 8) as u8).collect(),
+            DecodingResult::F32(v) => v
+                .into_iter()
+                .map(|n| (n.clamp(0.0, 1.0) * 255.0).round() as u8)
+                .collect(),
+            _ => {
+                return Err(failure(
+                    "OCR_TIFF_FORMAT",
+                    "TIFF 像素格式不受支持，请转换为 PNG 后重试。",
+                ));
+            }
+        };
+        let pixels = match color {
+            ColorType::Gray(bits) if bits < 8 => unpack_gray(&pixels, width, height, bits)?,
+            _ => pixels,
+        };
+        let mut image = match color {
+            ColorType::Gray(_) => {
+                image::GrayImage::from_raw(width, height, pixels).map(DynamicImage::ImageLuma8)
+            }
+            ColorType::GrayA(_) => image::GrayAlphaImage::from_raw(width, height, pixels)
+                .map(DynamicImage::ImageLumaA8),
+            ColorType::RGB(_) => {
+                image::RgbImage::from_raw(width, height, pixels).map(DynamicImage::ImageRgb8)
+            }
+            ColorType::RGBA(_) => {
+                image::RgbaImage::from_raw(width, height, pixels).map(DynamicImage::ImageRgba8)
+            }
+            ColorType::CMYK(_) => {
+                let rgb = pixels
+                    .chunks_exact(4)
+                    .flat_map(|v| {
+                        let k = v[3] as u16;
+                        [
+                            (((255 - v[0] as u16) * (255 - k)) / 255) as u8,
+                            (((255 - v[1] as u16) * (255 - k)) / 255) as u8,
+                            (((255 - v[2] as u16) * (255 - k)) / 255) as u8,
+                        ]
+                    })
+                    .collect();
+                image::RgbImage::from_raw(width, height, rgb).map(DynamicImage::ImageRgb8)
+            }
+            _ => {
+                return Err(failure(
+                    "OCR_TIFF_FORMAT",
+                    "TIFF 颜色格式不受支持，请转换为 PNG 后重试。",
+                ));
+            }
+        }
+        .ok_or_else(|| failure("OCR_TIFF_FORMAT", "TIFF 页面像素数据不完整。"))?;
+        if let Some(orientation) = image::metadata::Orientation::from_exif(orientation) {
+            image.apply_orientation(orientation);
+        }
+        pages.push(image);
+        if !decoder.more_images() {
+            break;
+        }
+        decoder.next_image().map_err(image_error)?;
+    }
+    Ok(pages)
+}
+fn unpack_gray(packed: &[u8], width: u32, height: u32, bits: u8) -> Result<Vec<u8>, AppError> {
+    if !matches!(bits, 1 | 2 | 4) {
+        return Err(failure(
+            "OCR_TIFF_FORMAT",
+            "TIFF 灰度位深不受支持，请转换为 PNG 后重试。",
+        ));
+    }
+    let stride = (width as usize * bits as usize).div_ceil(8);
+    if packed.len() != stride * height as usize {
+        return Err(failure("OCR_TIFF_FORMAT", "TIFF 灰度像素数据不完整。"));
+    }
+    let max = (1u16 << bits) - 1;
+    let mut pixels = Vec::with_capacity(width as usize * height as usize);
+    for row in packed.chunks_exact(stride) {
+        for x in 0..width as usize {
+            let shift = 8 - bits as usize - (x * bits as usize % 8);
+            let value = ((row[x * bits as usize / 8] as u16) >> shift) & max;
+            pixels.push((value * 255 / max) as u8);
+        }
+    }
+    Ok(pixels)
+}
+fn parse_json(raw: &str) -> Result<Value, AppError> {
+    let clean = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    serde_json::from_str(clean).map_err(|_| {
+        failure(
+            "OCR_STRUCTURE_INVALID",
+            "模型未返回完整的表格结构，原文已保留，请校对或重试。",
+        )
+    })
+}
+fn parse_tables(v: &Value, tag: &str) -> Result<Vec<Table>, AppError> {
+    let tables = v["tables"].as_array().ok_or_else(|| {
+        failure(
+            "OCR_STRUCTURE_INVALID",
+            "结构结果缺少表格列表，原文已保留。",
+        )
+    })?;
+    tables
+        .iter()
+        .enumerate()
+        .map(|(index, t)| {
+            let rows = t["rows"]
+                .as_array()
+                .ok_or_else(|| failure("OCR_STRUCTURE_INVALID", "表格行数据无效，原文已保留。"))?;
+            let rows = rows
+                .iter()
+                .map(|row| {
+                    row.as_array()
+                        .ok_or_else(|| {
+                            failure("OCR_STRUCTURE_INVALID", "表格单元格数据无效，原文已保留。")
+                        })?
+                        .iter()
+                        .map(|cell| {
+                            cell.as_str().map(str::to_owned).ok_or_else(|| {
+                                failure(
+                                    "OCR_STRUCTURE_INVALID",
+                                    "表格单元格必须是原始文本，原文已保留。",
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, AppError>>()?;
+            Ok(Table {
+                id: format!("{tag}-{}", index + 1),
+                title: t["title"].as_str().unwrap_or("").into(),
+                rows,
+            })
+        })
+        .collect()
+}
+const STRUCTURE_PROMPT: &str = "你是扫描件表格还原器。逐格读取图片中的全部表格，保持原始行列顺序，合并单元格文字只写入左上格，其余保留空串。不要概括、补写、改写数字、日期、账号或金额，所有单元格均为字符串。无表格返回空 tables。仅输出完整 JSON：{\"tables\":[{\"title\":\"原表名\",\"rows\":[[\"单元格\"]]}],\"warnings\":[\"无法确认的内容及位置\"]}。参考 OCR 原文用于校验，不能将原文中的不同位置拼成新表格。";
+fn recognize_part(
+    image: &str,
+    settings: &Value,
+    tag: &str,
+    pause: &PauseCheckpoint,
+) -> Result<(String, Vec<Table>, Vec<String>), AppError> {
+    pause.wait()?;
+    let result = crate::audipick::toolbox_ocr_page(&json!({"imageBase64":image}), settings)?;
+    let text = result["text"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| failure("OCR_EMPTY", "服务未返回识别文字，该页尚未完成，请重试。"))?
+        .to_owned();
+    pause.wait()?;
+    if let Some(message) = result["structureError"].as_str() {
+        return Ok((text, vec![], vec![message.into()]));
+    }
+    // Preserve a provider's native cell grid if present; otherwise restore from the
+    // image using only the global vision model. Failed layout never erases OCR text.
+    let structure = if result["tables"].is_array() {
+        Ok(result.clone())
+    } else {
+        crate::audipick::toolbox_llm_request(STRUCTURE_PROMPT, &text, Some(image), settings)
+            .and_then(|raw| parse_json(&raw))
+    };
+    match structure.and_then(|v| {
+        Ok((
+            parse_tables(&v, tag)?,
+            v["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        ))
+    }) {
+        Ok((tables, warnings)) => Ok((text, tables, warnings)),
+        Err(e) => Ok((
+            text,
+            vec![],
+            vec![format!("表格结构尚待校对：{}", e.user_message)],
+        )),
+    }
+}
+pub(crate) fn run_job(
+    method: &str,
+    params: Value,
+    progress: &dyn Fn(&str, usize, usize, &str),
+    _cancel: Arc<AtomicBool>,
+    pause: &PauseCheckpoint,
+) -> Result<Value, AppError> {
+    pause.wait()?;
+    let settings = params.get("__settings").cloned().unwrap_or(json!({}));
+    match method {
+        "ocr.recognize_page" => {
+            let db = Path::new(required(&params, "__dbPath")?);
+            let mut store = Store::open(db)?;
+            let id = required(&params, "documentId")?;
+            let number = u32_param(&params, "page")?;
+            let expected = revision(&params)?;
+            let doc = store.document(id)?;
+            let old = store.pages(id)?.into_iter().find(|p| p.page == number);
+            if old.as_ref().map_or(0, |p| p.revision) != expected {
+                return Err(failure(
+                    "OCR_REVISION_CONFLICT",
+                    "页面已修改，请刷新后重试。",
+                ));
+            }
+            progress(
+                "ocr",
+                number.saturating_sub(1) as usize,
+                doc.total_pages as usize,
+                &format!("正在识别第 {number} 页并还原表格"),
+            );
+            let input = required(&params, "imageBase64")?;
+            let bytes = decode_base64(input)?;
+            let image = decode_image(&bytes)?;
+            let segments = match params["layout"].as_str().unwrap_or("full") {
+                "full" => vec![png(&image)?],
+                "spread" => {
+                    if image.width() < 2 {
+                        return Err(failure(
+                            "OCR_IMAGE_INVALID",
+                            "图片宽度不足，无法拆分左右页。",
+                        ));
+                    }
+                    let half = image.width() / 2;
+                    vec![
+                        png(&image.crop_imm(0, 0, half, image.height()))?,
+                        png(&image.crop_imm(half, 0, image.width() - half, image.height()))?,
+                    ]
+                }
+                _ => return Err(failure("OCR_LAYOUT_INVALID", "请选择整页或左右双页。")),
+            };
+            let mut text = vec![];
+            let mut tables = vec![];
+            let mut warnings = vec![];
+            for (index, segment) in segments.iter().enumerate() {
+                let image = format!("data:image/png;base64,{segment}");
+                let (part, mut part_tables, mut part_warnings) = recognize_part(
+                    &image,
+                    &settings,
+                    &format!("p{number}-s{}", index + 1),
+                    pause,
+                )?;
+                text.push(part);
+                tables.append(&mut part_tables);
+                warnings.append(&mut part_warnings);
+            }
+            pause.wait()?;
+            let page = Page {
+                page: number,
+                text: text.join("\n\n"),
+                original_text: String::new(),
+                tables,
+                original_tables: vec![],
+                revision: 0,
+                status: if warnings.is_empty() {
+                    "completed"
+                } else {
+                    "needs_review"
+                }
+                .into(),
+                warnings,
+            };
+            let saved = store.save_page(id, page, expected, true)?;
+            progress(
+                "ocr",
+                number as usize,
+                doc.total_pages as usize,
+                "页面识别结果已保存",
+            );
+            to_value(saved)
+        }
+        "ocr.extract" => {
+            progress("extract", 0, 1, "正在按当前提示词摘录");
+            let prompt = required(&params, "prompt")?;
+            let text = required(&params, "text")?;
+            let raw = crate::audipick::toolbox_llm_request(prompt, text, None, &settings)?;
+            pause.wait()?;
+            let parsed = parse_json(&raw).ok();
+            progress("extract", 1, 1, "本阶段摘录完成");
+            Ok(json!({"parsed":parsed,"raw":raw}))
+        }
+        "ocr.export" => {
+            let store = Store::open(Path::new(required(&params, "__dbPath")?))?;
+            crate::ocr_export::export(&store, &params, progress, pause)
+        }
+        _ => Err(failure("JOB_NOT_FOUND", "未找到对应的 OCR 任务。")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn structure_preserves_text_and_rejects_numeric_cells() {
+        let table=parse_tables(&json!({"tables":[{"title":"票据","rows":[["001234567890123456789","2026-01-02","1,234.00"]]}]}),"p1").unwrap();
+        assert_eq!(table[0].rows[0][0], "001234567890123456789");
+        assert!(parse_tables(&json!({"tables":[{"rows":[[123]]}]}), "p1").is_err());
+    }
+    #[test]
+    fn tiff_decodes_every_frame_in_order() {
+        use tiff::encoder::{TiffEncoder, colortype};
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut encoder = TiffEncoder::new(&mut cursor).unwrap();
+            encoder
+                .write_image::<colortype::RGB8>(1, 1, &[255, 0, 0])
+                .unwrap();
+            encoder
+                .write_image::<colortype::RGB8>(1, 1, &[0, 255, 0])
+                .unwrap();
+        }
+        let pages = decode_tiff(&cursor.into_inner()).unwrap();
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].to_rgb8().get_pixel(0, 0).0, [255, 0, 0]);
+        assert_eq!(pages[1].to_rgb8().get_pixel(0, 0).0, [0, 255, 0]);
+    }
+    #[test]
+    fn packed_fax_grayscale_preserves_row_padding_and_black_white() {
+        assert_eq!(
+            unpack_gray(&[0b10100000, 0b01000000], 3, 2, 1).unwrap(),
+            vec![255, 0, 255, 0, 255, 0]
+        );
+        assert_eq!(
+            unpack_gray(&[0b00011011], 4, 1, 2).unwrap(),
+            vec![0, 85, 170, 255]
+        );
+        assert!(unpack_gray(&[], 8, 1, 1).is_err());
+    }
+    #[test]
+    fn unrecognized_methods_fail_before_network() {
+        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        assert!(
+            run_job(
+                "ocr.unknown",
+                json!({}),
+                &|_, _, _, _| {},
+                Arc::new(AtomicBool::new(false)),
+                &pause
+            )
+            .is_err()
+        );
+    }
+}

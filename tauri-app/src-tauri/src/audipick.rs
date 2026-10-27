@@ -630,6 +630,66 @@ fn config_status(settings: &Value) -> Result<Value, AppError> {
     }))
 }
 
+/// Independent OCR always uses toolbox credentials, never AudiPick's profile.
+pub(crate) fn toolbox_ocr_status(settings: &Value) -> Result<Value, AppError> {
+    let mut global = settings.clone();
+    global["audipickLlm"] = json!({"mode":"inherit"});
+    let mut status = config_status(&global)?;
+    status["llm"]["visionReady"] = json!(status["llm"]["ready"] == true && status["llm"]["apiType"] != "dify_chat");
+    Ok(status)
+}
+
+pub(crate) fn toolbox_ocr_page(params: &Value, settings: &Value) -> Result<Value, AppError> {
+    let mut global = settings.clone();
+    global["audipickLlm"] = json!({"mode":"inherit"});
+    // Truncated text must not be saved as a completed page.
+    global["llm"]["__rejectTruncated"] = json!(true);
+    let engine = settings.pointer("/ocr/engine").and_then(Value::as_str).unwrap_or("ai");
+    let image = params["imageBase64"].as_str().filter(|s| !s.is_empty())
+        .ok_or_else(|| error("OCR_IMAGE_REQUIRED", "没有收到需要识别的页面图片。", None))?;
+    if engine == "ai" {
+        let content = toolbox_llm_request(crate::bailian_ocr::STRUCTURED_PROMPT, "", Some(image), &global)?;
+        return Ok(structured_ocr_result(&content, "ai"));
+    }
+    if engine == "bailian" {
+        let config = crate::bailian_ocr::OcrConfig::from_settings(&global)?;
+        let key = secret("bailian_ocr_key").ok_or_else(||error("OCR_KEY_MISSING", "请填写百炼 OCR API Key。", None))?;
+        let response = config.recognize_structured(image, &key)?;
+        return Ok(structured_ocr_result(response["text"].as_str().unwrap_or(""), "bailian"));
+    }
+    ocr(params, &global)
+}
+
+fn structured_ocr_result(raw: &str, engine: &str) -> Value {
+    let parsed = parse_json_content(raw);
+    if parsed["text"].as_str().is_some_and(|text| !text.trim().is_empty()) {
+        let mut result = parsed;
+        result["engine"] = json!(engine);
+        if !result["tables"].is_array() { result["structureError"] = json!("模型未返回有效的表格列表，原文已保留。"); }
+        result
+    } else {
+        json!({"text": raw, "engine": engine, "structureError": "模型未返回有效的完整原文结构，原始响应已保留，请校对后重试。"})
+    }
+}
+
+pub(crate) fn toolbox_llm_request(prompt: &str, text: &str, image: Option<&str>, settings: &Value) -> Result<String, AppError> {
+    let mut global = settings.clone();
+    global["audipickLlm"] = json!({"mode":"inherit"});
+    global["llm"]["__rejectTruncated"] = json!(true);
+    let llm = audipick_llm_config(&global);
+    if !llm["enabled"].as_bool().unwrap_or(false) {
+        return Err(error("LLM_DISABLED", "工具箱全局 AI 尚未启用，请在设置中配置。", None));
+    }
+    if image.is_some() && llm["api_type"] == "dify_chat" {
+        return Err(error("OCR_MODEL_UNSUPPORTED", "当前全局 AI 接口不支持页面图片。", None));
+    }
+    let content = request_llm(&llm, prompt, text, image)?;
+    if content.trim().is_empty() {
+        return Err(error("OCR_MODEL_EMPTY", "模型未返回正文，请缩短摘录范围或检查模型设置。", None));
+    }
+    Ok(content)
+}
+
 fn llm_text(params: &Value, settings: &Value) -> Result<Value, AppError> {
     let llm = require_audipick_llm(settings)?;
     let prompt = params.get("prompt").and_then(Value::as_str).unwrap_or("");
@@ -2774,7 +2834,7 @@ fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
         &llm,
         "请逐字识别图片中的中文和数字，只返回识别文字，不要解释。",
         "",
-        Some(image),
+        Some(params["imageBase64"].as_str().unwrap_or(image)),
     )?;
     Ok(json!({"text": content, "engine": "ai"}))
 }
@@ -2844,10 +2904,15 @@ fn local_ocr(image: &str) -> Result<Value, AppError> {
             Some(message.into()),
         ));
     }
-    Ok(json!({
+    let mut result = json!({
         "text": value.get("text").and_then(Value::as_str).unwrap_or(""),
         "engine": "local",
-    }))
+    });
+    if value["tables"].is_array() {
+        result["tables"] = value["tables"].clone();
+        result["warnings"] = value.get("warnings").cloned().unwrap_or(json!([]));
+    }
+    Ok(result)
 }
 
 pub(crate) fn request_llm(
@@ -2995,7 +3060,8 @@ fn request_llm_with_key(
         format!("{base}/chat/completions")
     };
     let user_content = if let Some(data) = image {
-        json!([{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":format!("data:image/jpeg;base64,{data}")}}])
+        let image_url = if data.starts_with("data:image/") { data.to_owned() } else { format!("data:image/jpeg;base64,{data}") };
+        json!([{"type":"text","text":format!("{prompt}\n\n{text}")},{"type":"image_url","image_url":{"url":image_url}}])
     } else {
         Value::String(text.to_string())
     };
@@ -3020,6 +3086,9 @@ fn request_llm_with_key(
     }
     let response = request.json(&body).send().map_err(network_error)?;
     let value = read_llm_response(response, "LLM 提取请求失败。")?;
+    if config["__rejectTruncated"] == true && value.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length") {
+        return Err(error("OCR_MODEL_TRUNCATED", "模型输出被截断，请拆分页面或缩短摘录范围后重试。", None));
+    }
     let content = value
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -3237,6 +3306,57 @@ fn error(code: &str, message: &str, detail: Option<String>) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn independent_ocr_uses_global_profile_and_keeps_failed_structure() {
+        let settings = json!({"llm":{"enabled":false},"audipickLlm":{"mode":"dedicated","enabled":true,"model":"must-not-use"}});
+        let failure = toolbox_ocr_page(&json!({"imageBase64":"synthetic"}), &settings).unwrap_err();
+        assert_eq!(failure.code, "LLM_DISABLED");
+        let settings = json!({"llm":{"enabled":true,"base_url":"invalid-global-url"},"audipickLlm":{"mode":"dedicated","enabled":false}});
+        assert_eq!(toolbox_llm_request("p", "t", None, &settings).unwrap_err().code, "LLM_URL_INVALID");
+        let valid = structured_ocr_result(r#"{"text":"原文 00123","tables":[],"warnings":[]}"#, "ai");
+        assert_eq!(valid["text"], "原文 00123");
+        assert!(valid["structureError"].is_null());
+        let invalid = structured_ocr_result("原始模型输出", "bailian");
+        assert_eq!(invalid["text"], "原始模型输出");
+        assert!(invalid["structureError"].as_str().is_some());
+    }
+
+    #[test]
+    fn strict_ocr_rejects_truncation_and_preserves_png_and_reference_text() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let size = stream.read(&mut buffer).unwrap();
+                assert!(size > 0);
+                bytes.extend_from_slice(&buffer[..size]);
+                if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&bytes[..end]);
+                    let length: usize = header.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
+                    }).unwrap();
+                    if bytes.len() >= end + 4 + length { break; }
+                }
+            }
+            let body = json!({"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}).to_string();
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            String::from_utf8(bytes).unwrap()
+        });
+        let config = json!({"base_url":format!("http://{address}/v1"),"model":"synthetic","__rejectTruncated":true});
+        let failure = request_llm_with_key(&config,"逐字识别","参考文字",Some("data:image/png;base64,synthetic"),Some("synthetic-key")).unwrap_err();
+        assert_eq!(failure.code,"OCR_MODEL_TRUNCATED");
+        let request = server.join().unwrap();
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["messages"][1]["content"][1]["image_url"]["url"],"data:image/png;base64,synthetic");
+        assert!(body["messages"][1]["content"][0]["text"].as_str().unwrap().contains("参考文字"));
+    }
+
     #[test]
     fn audipick_profile_priority_and_credentials_are_isolated() {
         let settings = json!({"llm":{"enabled":false,"model":"global","api_type":"openai"},

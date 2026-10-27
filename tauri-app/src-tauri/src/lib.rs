@@ -35,6 +35,9 @@ mod meeting_audio;
 mod meeting_minutes;
 mod meeting_record;
 mod meeting_watch;
+mod ocr;
+mod ocr_store;
+mod ocr_export;
 mod pdf_to_excel;
 mod release_channel;
 mod resource_budget;
@@ -198,6 +201,13 @@ async fn engine_call(
                     Some(e.to_string()),
                 )
             })?
+    } else if method.starts_with("ocr.") {
+        validate_ocr_paths(&allowed, &method, &params)?;
+        let db_path = storage.db_path();
+        let settings = storage.settings_get()?;
+        tauri::async_runtime::spawn_blocking(move || ocr::call(&method, params, &db_path, &settings))
+            .await
+            .map_err(|_| AppError::new("OCR_TASK_FAILED", "OCR 处理异常结束，请重试。", true, None))?
     } else if method == "audipick.projects" {
         storage.audipick_projects()
     } else if method == "audipick.backup_export" {
@@ -562,6 +572,7 @@ async fn engine_call(
 /// `file_list.scan` 与 `tbje_check.*` 都这么栽过。测试里有一致性断言。
 fn is_direct_job_method(method: &str) -> bool {
     method == "wp.generate"
+        || matches!(method, "ocr.recognize_page" | "ocr.extract" | "ocr.export")
         || method == "audipick.extract"
         || method == "audipick.ocr_page"
         || method == "confirmation.process"
@@ -596,9 +607,11 @@ fn is_direct_job_method(method: &str) -> bool {
 async fn job_start(
     excel_merger: State<'_, ExcelMergerService>,
     storage: State<'_, Storage>,
+    allowed: State<'_, AllowedPaths>,
     method: String,
     params: Value,
 ) -> Result<String, AppError> {
+    validate_ocr_paths(&allowed, &method, &params)?;
     // 历史记录「继续任务」要能还原现场：在注入 __settings/__llmOptions/
     // __dbPath/textPath 之前克隆用户原始参数存档。存档失败不拦任务本身，
     // 只是该条历史记录没有恢复按钮。
@@ -610,7 +623,7 @@ async fn job_start(
     let job_id = job_start_inner(excel_merger, &storage, &method, worker_params).await?;
     // 上传读取与敏感 OCR/合同抽取均不写入可恢复任务历史。
     if method != "loan.inspect_full"
-        && !matches!(method.as_str(), "audipick.ocr_page" | "audipick.extract")
+        && !matches!(method.as_str(), "audipick.ocr_page" | "audipick.extract" | "ocr.recognize_page" | "ocr.extract")
     {
         let _ = storage.record_job_params(
             &job_id,
@@ -628,6 +641,12 @@ async fn job_start_inner(
     method: &str,
     mut params: Value,
 ) -> Result<String, AppError> {
+    if matches!(method, "ocr.recognize_page" | "ocr.extract" | "ocr.export") {
+        let object = params.as_object_mut().ok_or_else(|| AppError::new("INVALID_ARGUMENT", "OCR 任务参数不完整。", false, None))?;
+        object.insert("__dbPath".into(), json!(storage.db_path()));
+        object.insert("__settings".into(), storage.settings_get()?);
+        return excel_merger.start(method, params);
+    }
     if method == "audipick.batch_extract" {
         if let Value::Object(ref mut map) = params {
             map.insert("__settings".into(), storage.settings_get()?);
@@ -1591,6 +1610,31 @@ fn dialog_start_directory(requested: Option<&str>) -> Option<&str> {
 /// A selected directory authorizes its descendants, while a selected/generated
 /// file only authorizes that exact file.  In particular, an authorized file
 /// must never authorize one of its ancestor directories (for example `C:\`).
+fn validate_ocr_paths(allowed: &AllowedPaths, method: &str, params: &Value) -> Result<(), AppError> {
+    let mut paths = Vec::new();
+    if method == "ocr.document_import" {
+        if let Some(items) = params.get("paths").and_then(Value::as_array) {
+            for item in items {
+                let path = item.as_str().filter(|v| !v.trim().is_empty()).ok_or_else(|| AppError::new("INVALID_ARGUMENT", "请选择有效的单证文件。", false, None))?;
+                paths.push(PathBuf::from(path));
+            }
+        }
+        if let Some(folder) = params.get("folder").and_then(Value::as_str).filter(|v| !v.is_empty()) {
+            paths.push(PathBuf::from(folder));
+        }
+    } else if method == "ocr.export" {
+        let output = params.get("outputDir").and_then(Value::as_str).filter(|v| !v.is_empty()).ok_or_else(|| AppError::new("INVALID_ARGUMENT", "请选择 Excel 保存文件夹。", false, None))?;
+        let output = PathBuf::from(output);
+        if !output.is_dir() { return Err(AppError::new("INVALID_ARGUMENT", "Excel 保存位置必须是文件夹。", false, None)); }
+        paths.push(output);
+    }
+    let granted = allowed.0.lock();
+    if paths.iter().any(|path| !granted.iter().any(|selected| path_is_permitted(path, selected))) {
+        return Err(AppError::new("PATH_NOT_AUTHORIZED", "请先选择需要导入的文件或 Excel 保存文件夹。", false, None));
+    }
+    Ok(())
+}
+
 fn path_is_permitted(requested: &Path, allowed: &Path) -> bool {
     let requested = requested
         .canonicalize()
@@ -1938,6 +1982,12 @@ pub fn run() {
         // 后台常驻开启时，关闭主窗口只是隐藏到托盘；检测与录音继续。
         // 常驻关闭则放行关闭，应用照旧退出。
         .on_window_event(|window, event| {
+            // Only native file-drop events grant paths; front-end JSON cannot grant itself access.
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                if let Some(allowed) = window.app_handle().try_state::<AllowedPaths>() {
+                    allowed.0.lock().extend(paths.iter().cloned());
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "meeting-ask" {
                     // 询问窗保持单例：系统关闭也隐藏，避免同标签快速重建留下失效 IPC。
@@ -2201,10 +2251,40 @@ mod tests {
     fn bundled_catalog_contains_unique_tools() {
         let catalog = tool_catalog().unwrap();
         let rows = catalog.as_array().unwrap();
-        assert_eq!(rows.len(), 19);
+        assert_eq!(rows.len(), 20);
         let ids: HashSet<_> = rows.iter().filter_map(|row| row["id"].as_str()).collect();
-        assert_eq!(ids.len(), 19);
+        assert_eq!(ids.len(), rows.len());
+        assert!(ids.contains("ocr"));
         assert!(rows.iter().all(|row| row["route"].as_str().is_some()));
+    }
+
+    #[test]
+    fn ocr_import_and_export_require_selected_paths_without_parent_grants() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().join("已选.png");
+        let sibling = root.path().join("未选.png");
+        std::fs::write(&selected, b"synthetic").unwrap();
+        std::fs::write(&sibling, b"synthetic").unwrap();
+        let allowed = AllowedPaths(Arc::new(Mutex::new(HashSet::new())));
+        allowed.0.lock().insert(selected.clone());
+        assert!(validate_ocr_paths(&allowed, "ocr.document_import", &json!({"paths":[selected]})).is_ok());
+        assert_eq!(validate_ocr_paths(&allowed, "ocr.document_import", &json!({"paths":[sibling]})).unwrap_err().code, "PATH_NOT_AUTHORIZED");
+        assert!(validate_ocr_paths(&allowed, "ocr.document_import", &json!({"folder":root.path()})).is_err());
+        assert!(validate_ocr_paths(&allowed, "ocr.export", &json!({"outputDir":root.path()})).is_err());
+        allowed.0.lock().insert(root.path().to_path_buf());
+        assert!(validate_ocr_paths(&allowed, "ocr.export", &json!({"outputDir":root.path()})).is_ok());
+        assert!(validate_ocr_paths(&allowed, "ocr.document_import", &json!({"folder":root.path()})).is_ok());
+    }
+
+    #[test]
+    fn ocr_jobs_have_consistent_routing_and_reject_unknown_methods() {
+        for method in ["ocr.recognize_page", "ocr.extract", "ocr.export"] {
+            assert!(is_direct_job_method(method));
+            assert!(excel_merger::SUPPORTED_JOB_METHODS.contains(&method));
+            assert_eq!(excel_merger::tool_id(method), "ocr");
+        }
+        assert!(!is_direct_job_method("ocr.unknown"));
+        assert!(!excel_merger::SUPPORTED_JOB_METHODS.contains(&"ocr.unknown"));
     }
 
     /// 凭据写入有四名白名单，删除此前可对任意名字调用 keyring——

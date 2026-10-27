@@ -1,3 +1,16 @@
+## 2026-10-27 · 独立 OCR 共用能力及可编辑提示词
+
+- 新 OCR 工具独立保存项目、扫描件、分页结果和场景提示词，不迁移或改写 AudiPick 项目。复用维护中的场景和启用案例库，不复制收入底稿套用等专用工作流，范围见 `OCR_PARITY.md`。
+- `extractFinancialMetrics` 增加可选 `promptOverride`；旧调用省略时沿用原提示词，新 OCR 可显示、编辑并保存实际提示词。逐字证据核验、行号回填及分类校验继续执行。
+- Rust 增加仅使用工具箱全局设置的 OCR/模型包装；百炼结构化识别为新增入口，原 AudiPick 逐字文字接口保持默认行为。共享图片请求按实际 PNG/JPEG MIME 声明，允许携带校验原文；原不带校验文字的调用保持原请求内容。
+- 回归命令：`npx vitest run src/ocrScenarios.test.ts src/audipickPreviewFinancialCovenant.test.ts`；`cargo test --manifest-path src-tauri/Cargo.toml --lib audipick::`、`--lib bailian_ocr::`。本地模拟服务验证协议，不等同真实扫描件识别质量验收。
+
+## 2026-10-26 · 桌面侧栏入口与主窗口专注模式统一
+
+- 用户反馈点击 AudiPick 时弹出会议纪要询问。检查发现侧栏残留仅在 Tauri 生效的 `new WebviewWindow("audipick")` 分支，与现行主窗口专注模式不一致；旧地址又重定向回 App，使新 WebView 再次挂载全局会议监听，后台会中快照可引发重复询问。
+- 移除旧窗口创建／查找／聚焦分支，桌面与浏览器侧栏均使用同一 NavLink 进入主窗口 AudiPick 页；旧 `#/audipick-window` 继续重定向，重复点击复用页面。未修改摘录业务、会议检测门槛和录音行为。
+- 回归：`npx vitest run src/AppNavigationSettings.test.tsx src/components/MeetingWatch.test.tsx`，桌面标记下检查侧栏导航不调用原生新窗口 API、不重新读取会议快照、返回后再次点击只有一个页面实例；`npm run build`。未在用户现场真实复现误询问，未替换安装 EXE。
+
 ## 2026-10-26 · 百炼 OCR 独立引擎与可见 URL
 
 - 增加 `bailian` OCR 引擎，默认模型 `qwen3.5-ocr`，使用 OpenAI 兼容 `/chat/completions` 图片协议；独立 URL、模型和 Windows 凭据 `bailian_ocr_key`，不依赖合同提取 LLM 是否启用。默认使用公共百炼兼容地址，业务空间地址由用户填写；不内置个人密钥或工作空间。

@@ -117,6 +117,17 @@ jobs:
           updaterJsonPreferNsis: true
           tauriScript: npm run tauri --
 
+      - name: Verify packaged native workers before publication
+        working-directory: tauri-app
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD 'src-tauri/target/release/audit-toolbox.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw '未找到本次打包的原生程序。' }
+          python -X utf8 -c "import sys; from pathlib import Path; sys.path.insert(0, 'scripts'); from build_tauri_release import smoke_test_desktop; smoke_test_desktop(Path(sys.argv[1]))" $exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -X utf8 scripts/verify_ocr_workers.py --exe $exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Publish to the selected update channel
         uses: actions/github-script@v7
         env:

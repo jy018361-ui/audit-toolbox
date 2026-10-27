@@ -366,7 +366,8 @@ def smoke_test_desktop(target: Path) -> None:
         print("FA/WP/Roll Forward Rust worker 冷启动验收通过")
 
     local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    runtime_root = local_app_data / "AuditToolbox" / "AuditToolbox" / "data" / "runtime"
+    namespace = "AuditToolboxDev" if "-dev." in VERSION else "AuditToolbox"
+    runtime_root = local_app_data / namespace / namespace / "data" / "runtime"
     before_runtime = runtime_snapshot(runtime_root)
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW

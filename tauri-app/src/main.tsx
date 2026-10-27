@@ -2,7 +2,6 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { createHashRouter, RouterProvider } from "react-router-dom";
 import App from "./App";
-import AudiPickWindow from "./AudiPickWindow";
 import MeetingAskWindow from "./MeetingAskWindow";
 import "./styles.css";
 import "./settings.css";

@@ -440,6 +440,36 @@ it("opens AudiPick in focus mode without leaving clickable toolbox navigation un
   expect(screen.getAllByTestId("audipick-main-window-page")).toHaveLength(1);
 });
 
+it("桌面环境点击侧栏 AudiPick 仍在主窗口导航，不调用原生新窗口接口", async () => {
+  localStorage.setItem("audit-toolbox.newbie-tour.v2", JSON.stringify({ newbieMode: false, workspaceDone: true }));
+  render(<MemoryRouter initialEntries={["/"]}><App /></MemoryRouter>);
+  await screen.findByRole("heading", {name:"今天要处理什么？"});
+  const api = await import("./api");
+  const meetingSnapshot = vi.spyOn(api,"meetingStatus");
+  // 在工具箱挂载后开启桌面标记，精确覆盖原来只在 EXE 中触发的侧栏分支。
+  const nativeInvoke = vi.fn(async () => undefined);
+  vi.stubGlobal("__TAURI_INTERNALS__", {invoke:nativeInvoke});
+  const alert = vi.spyOn(window,"alert").mockImplementation(() => undefined);
+  try {
+    const sidebar = within(document.querySelector("aside.sidebar")! as HTMLElement);
+    fireEvent.click(sidebar.getByRole("link", {name:/AudiPick/}));
+    expect(await screen.findByTestId("audipick-main-window-page")).toBeVisible();
+    expect(document.querySelector(".app-shell")).toHaveClass("audipick-focus-mode");
+    expect(nativeInvoke.mock.calls.some((args: unknown[]) => /(?:create_webview_window|get_all_webviews)/.test(String(args[0])))).toBe(false);
+    expect(alert).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("link",{name:"返回工具箱"}));
+    await screen.findByRole("heading",{name:"今天要处理什么？"});
+    fireEvent.click(within(document.querySelector("aside.sidebar")! as HTMLElement).getByRole("link",{name:/AudiPick/}));
+    expect(await screen.findByTestId("audipick-main-window-page")).toBeVisible();
+    expect(screen.getAllByTestId("audipick-main-window-page")).toHaveLength(1);
+    expect(meetingSnapshot).not.toHaveBeenCalled();
+  } finally {
+    meetingSnapshot.mockRestore();
+    alert.mockRestore();
+    localStorage.removeItem("audit-toolbox.newbie-tour.v2");
+  }
+});
+
 it("redirects the legacy AudiPick window hash to the main-window tool route", async () => {
   render(
     <MemoryRouter initialEntries={["/audipick-window"]}>

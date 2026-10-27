@@ -728,6 +728,9 @@ pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
     "audipick.extract",
     "audipick.batch_extract",
     "audipick.ocr_page",
+    "ocr.recognize_page",
+    "ocr.extract",
+    "ocr.export",
     "fa.match",
     "fa.preview",
     "fa.export",
@@ -855,9 +858,9 @@ pub fn worker_main() -> i32 {
         Ok(value) => value,
         Err(_) => return 2,
     };
-    let cancel = Arc::new(AtomicBool::new(false));
-    let watch = cancel.clone();
     let cancel_path = PathBuf::from(&request.cancel_path);
+    let cancel = Arc::new(AtomicBool::new(cancel_path.exists()));
+    let watch = cancel.clone();
     thread::spawn(move || {
         while !watch.load(Ordering::Relaxed) {
             if cancel_path.exists() {
@@ -899,7 +902,9 @@ pub fn worker_main() -> i32 {
             None,
         ));
     };
-    let running_message = if request.method == "audipick.ocr_page" {
+    let running_message = if request.method.starts_with("ocr.") {
+        "OCR 工具正在处理…"
+    } else if request.method == "audipick.ocr_page" {
         "正在识别合同扫描页…"
     } else if request.method == "audipick.extract" {
         "正在提取合同条款…"
@@ -937,7 +942,9 @@ pub fn worker_main() -> i32 {
         Vec::new(),
         None,
     ));
-    let result = if request.method == "wp.generate" {
+    let result = if request.method.starts_with("ocr.") {
+        crate::ocr::run_job(&request.method, request.params, &progress, cancel, &pause)
+    } else if request.method == "wp.generate" {
         crate::wp::run_job(&request.method, request.params, &progress, cancel, &pause)
     } else if request.method == "confirmation.process" {
         crate::confirmation::run_job(&request.method, request.params, &progress, cancel, &pause)
@@ -1091,6 +1098,8 @@ pub(crate) fn tool_id(method: &str) -> &'static str {
         "kanzhang"
     } else if method.starts_with("audipick.") {
         "audipick"
+    } else if method.starts_with("ocr.") {
+        "ocr"
     } else if method.starts_with("tbje_check.") {
         "tbje_check"
     } else if method.starts_with("fa.dep_") {

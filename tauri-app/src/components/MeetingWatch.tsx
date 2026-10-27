@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { X } from "lucide-react";
 import {
   getCurrentWebviewWindow,
   WebviewWindow,
@@ -422,14 +423,18 @@ export function MeetingWatch() {
       )}
       {!recording && !finalizing && (processingError || finished) && (
         <div className="meeting-processing-card" role={resultError ? "alert" : "status"}>
-          <strong>{result?.minutesPath ? "会议纪要已生成" : "会议纪要未生成"}</strong>
+          <div className="meeting-processing-header">
+            <strong>{result?.minutesPath ? "会议纪要已生成" : "会议纪要未生成"}</strong>
+            <Button size="icon-sm" variant="ghost" aria-label="关闭提示" title="关闭提示" onClick={() => { setLatestJob(undefined); setProcessingError(""); }}>
+              <X aria-hidden="true" />
+            </Button>
+          </div>
           {resultError && <p>{resultError}</p>}
           <div className="meeting-result-actions">
             {result?.minutesVersions ? result.minutesVersions.filter((version) => version.minutesPath || version.minutesMarkdown).map((version) => (
               <Link key={version.kind} className={buttonVariants({ size: "sm" })} to={`/tools/meeting_minutes?version=${version.kind}`} state={{ meetingJob: latestJob }} onClick={viewMinutes}>查看{version.label}版</Link>
             )) : (result?.minutesPath || result?.minutesMarkdown) && <Link className={buttonVariants({ size: "sm" })} to="/tools/meeting_minutes?version=content" state={{ meetingJob: latestJob }} onClick={viewMinutes}>查看会议纪要</Link>}
             {outputPath && <Button size="sm" variant="secondary" onClick={() => void openResult(outputPath)}>打开输出文件夹</Button>}
-            <Button size="sm" variant="ghost" onClick={() => { setLatestJob(undefined); setProcessingError(""); }}>关闭提示</Button>
           </div>
         </div>
       )}

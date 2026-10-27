@@ -1056,6 +1056,8 @@ export async function extractFinancialMetrics(options: {
   extract: (request: CovenantExtractRequest) => Promise<CovenantExtractResponse>;
   onProgress?: (message: string) => void;
   caseLibrary?: CovenantCaseLibrary;
+  /** OCR projects may edit the extraction instructions; evidence checks remain mandatory. */
+  promptOverride?: string;
 }) {
   const library=options.caseLibrary ?? DEFAULT_CASE_LIBRARY;
   const items: Row[] = [];
@@ -1072,7 +1074,7 @@ export async function extractFinancialMetrics(options: {
       const candidateText=lines.slice(first,last).join("\n");
       const examples=retrieveCovenantCases(candidateText,library,4).map(e=>({case_id:e.case_id,category_id:e.category_id,subtype:e.subtype,excerpt:e.excerpt,rule:e.normalized_rule}));
       const input=`[来源文件：${document.name}]\n`+lines.slice(first,last).map((line,index)=>`[L${first+index+1}]${line}`).join("\n");
-      const prompt=FINANCIAL_METRICS_PROMPT+`\n本轮启用案例库版本：${library.metadata.version}。以下仅为分类示例，不能作为合同证据：\n${JSON.stringify(examples)}`;
+      const prompt=(options.promptOverride ?? FINANCIAL_METRICS_PROMPT)+`\n本轮启用案例库版本：${library.metadata.version}。以下仅为分类示例，不能作为合同证据：\n${JSON.stringify(examples)}`;
       const rows=parseItems(await options.extract({stage:"candidates",prompt,text:input}),"财务契约摘录");
       for(const row of rows){
         if(!Array.isArray(row.evidence)||!row.evidence.length) throw new Error("财务契约摘录缺少原文行号，请重试。");

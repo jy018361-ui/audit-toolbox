@@ -93,10 +93,7 @@ import { NewbieModeToggle } from "@/components/tour/NewbieModeToggle";
 import { Sparkles } from "lucide-react";
 import { setSavedTheme } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
-import {
-  getCurrentWebviewWindow,
-  WebviewWindow,
-} from "@tauri-apps/api/webviewWindow";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
@@ -130,6 +127,7 @@ const ExcelMergerPage = lazy(() =>
 const AudiPickPage = lazy(() =>
   import("./AudiPickPage").then((m) => ({ default: m.AudiPickPage })),
 );
+const OcrPage = lazy(() => import("./OcrPage").then((m) => ({ default: m.OcrPage })));
 const WpServicePage = lazy(() =>
   import("./WpServicePage").then((m) => ({ default: m.WpServicePage })),
 );
@@ -172,6 +170,7 @@ const DEDICATED_TOOL_PAGES: Record<
   wp_service_generator: WpServicePage,
   fa_list: FaListPage,
   audipick: AudiPickPage,
+  ocr: OcrPage,
   ts_manager: TsManagerParityPage,
   tbje_check: TbjeCheckPage,
   confirmation_progress: ConfirmationProgressPage,
@@ -272,6 +271,7 @@ const TOOL_BADGE: Record<string, string> = {
   file_list_directory: "夹",
   pdf_to_excel: "PDF",
   audipick: "AP",
+  ocr: "OCR",
   audit_roll_forward: "RF",
   wp_service_generator: "WP",
   fx_audit: "汇",
@@ -318,7 +318,7 @@ const TOOL_GROUPS = [
   },
   {
     label: "效率工具",
-    ids: ["Excel_Merger", "file_list_directory", "pdf_to_excel", "fuzzy_match"],
+    ids: ["ocr", "Excel_Merger", "file_list_directory", "pdf_to_excel", "fuzzy_match"],
   },
   {
     label: "运营工具",
@@ -345,31 +345,6 @@ function toolStatusLabel(status: ToolManifest["migrationStatus"]) {
   return undefined;
 }
 
-async function openAudiPickWindow(): Promise<void> {
-  const existing = await WebviewWindow.getByLabel("audipick");
-  if (existing) {
-    await existing.show();
-    await existing.setFocus();
-    return;
-  }
-  const popup = new WebviewWindow("audipick", {
-    url: "/#/audipick-window",
-    title: "AudiPick 合同摘录",
-    width: 1480,
-    height: 920,
-    minWidth: 1080,
-    minHeight: 700,
-    center: true,
-    decorations: false,
-    resizable: true,
-    focus: true,
-  });
-  await new Promise<void>((resolve, reject) => {
-    void popup.once("tauri://created", () => resolve());
-    void popup.once("tauri://error", (event) => reject(event.payload));
-  });
-}
-
 /**
  * 侧边栏工具入口统一消费清单里的 migrationStatus。
  * preview/upcoming 工具仍可进入，但必须在点击前让用户知道它未到正式版；
@@ -394,14 +369,6 @@ function SidebarToolLink({
       className={className}
       title={statusLabel ? statusHint : undefined}
       aria-label={accessibleName}
-      onClick={(event) => {
-        if (tool.id !== "audipick" || !("__TAURI_INTERNALS__" in window))
-          return;
-        event.preventDefault();
-        void openAudiPickWindow().catch((error) => {
-          window.alert(`无法打开 AudiPick 独立窗口：${appErrorText(error)}`);
-        });
-      }}
     >
       <span className="tool-badge">
         {TOOL_BADGE[tool.id] ?? tool.name.slice(0, 1)}

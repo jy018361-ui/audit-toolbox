@@ -74,26 +74,14 @@ export function displayAudioFileName(path: string) {
   return name || path;
 }
 
-export function historyDateLabel(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "日期未知";
-  const today = new Date();
-  const yesterday = new Date(today);
-  yesterday.setDate(today.getDate() - 1);
-  if (date.toDateString() === today.toDateString()) return "今天";
-  if (date.toDateString() === yesterday.toDateString()) return "昨天";
-  return date.toLocaleDateString("zh-CN", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-}
-
-function historyTime(value: string) {
+function historyTimestamp(value: string) {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? "—"
-    : date.toLocaleTimeString("zh-CN", {
+    : date.toLocaleString("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
         hour: "2-digit",
         minute: "2-digit",
         hour12: false,
@@ -592,11 +580,6 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
       .toLocaleLowerCase()
       .includes(historyQuery.trim().toLocaleLowerCase()),
   );
-  const historyGroups = new Map<string, MeetingHistoryRow[]>();
-  for (const row of visibleHistory) {
-    const group = historyDateLabel(row.startedAt);
-    historyGroups.set(group, [...(historyGroups.get(group) ?? []), row]);
-  }
   const previewMode = !runningInDesktopApp();
   const watchHint = previewMode
     ? "浏览器预览模式：界面仅供查看，会议检测与录音请在桌面应用中使用。"
@@ -705,53 +688,30 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                 ]}
               />
             </div>
-            <div className="meeting-input-layout">
-              <div className="meeting-record-source">
-                {!previewMode && (
-                  <p className="meeting-watch-hint" role="status">
-                    {watchHint}
-                  </p>
-                )}
-                <div className="meeting-actions-row">
-                  {recording ? (
-                    <Button
-                      variant="default"
-                      onClick={() => void stopRecordingAndGenerate()}
-                      disabled={recordBusy || busy}
-                    >
-                      停止并生成纪要
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="default"
-                      onClick={() => void startRecording()}
-                      disabled={recordBusy || busy || previewMode}
-                    >
-                      手动开始记录
-                    </Button>
-                  )}
-                </div>
-              </div>
-              <div className="meeting-import-source">
-                {/* hideFilledLabel：选中后只留文件名，「已有录音（wav / mp3 / m4a 等）」
+            {!previewMode && (
+              <p className="meeting-watch-hint" role="status">
+                {watchHint}
+              </p>
+            )}
+            <div className="meeting-import-source">
+              {/* hideFilledLabel：选中后只留文件名，「已有录音（wav / mp3 / m4a 等）」
                 的格式说明只属于空态占位；清空按钮随槽位出现。 */}
-                <FileDropInput
-                  value={importPath ? displayAudioFileName(importPath) : ""}
-                  placeholder="拖放或点击选择已有录音（wav / mp3 / m4a 等）"
-                  hideFilledLabel
-                  disabled={busy}
-                  onBrowse={browseAudio}
-                  onClear={
-                    importPath && !busy
-                      ? () => {
-                          resetForNewAudio();
-                          setImportPath("");
-                        }
-                      : undefined
-                  }
-                  onDragStateChange={() => undefined}
-                />
-              </div>
+              <FileDropInput
+                value={importPath ? displayAudioFileName(importPath) : ""}
+                placeholder="拖放或点击选择已有录音（wav / mp3 / m4a 等）"
+                hideFilledLabel
+                disabled={busy}
+                onBrowse={browseAudio}
+                onClear={
+                  importPath && !busy
+                    ? () => {
+                        resetForNewAudio();
+                        setImportPath("");
+                      }
+                    : undefined
+                }
+                onDragStateChange={() => undefined}
+              />
             </div>
             <div className="meeting-generation-controls">
               <div className="meeting-options-grid">
@@ -770,6 +730,21 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                 </label>
               </div>
               <div className="meeting-actions-row">
+                {recording ? (
+                  <Button
+                    onClick={() => void stopRecordingAndGenerate()}
+                    disabled={recordBusy || busy}
+                  >
+                    停止并生成纪要
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={() => void startRecording()}
+                    disabled={recordBusy || busy || previewMode}
+                  >
+                    手动开始记录
+                  </Button>
+                )}
                 <Button
                   variant="secondary"
                   disabled={!importPath || busy || recording || previewMode}
@@ -840,12 +815,34 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                 {historyLoading ? (
                   <p role="status">正在加载历史记录…</p>
                 ) : visibleHistory.length ? (
-                  [...historyGroups].map(([date, rows]) => (
-                    <div className="meeting-history-day" key={date}>
-                      <h3>{date}</h3>
-                      <ul>
-                        {rows.map((row) => (
-                          <li key={row.id}>
+                  <table
+                    className="meeting-history-table"
+                    aria-label="会议历史"
+                  >
+                    <colgroup>
+                      <col />
+                      <col className="meeting-history-date-col" />
+                      <col className="meeting-history-type-col" />
+                      <col className="meeting-history-status-col" />
+                    </colgroup>
+                    <thead>
+                      <tr>
+                        <th scope="col">会议标题</th>
+                        <th scope="col">日期与时间</th>
+                        <th scope="col">时间类型</th>
+                        <th scope="col">状态</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleHistory.map((row) => (
+                        <tr
+                          key={row.id}
+                          data-selected={
+                            selectedHistory?.id === row.id || undefined
+                          }
+                          onClick={() => void selectHistory(row)}
+                        >
+                          <td>
                             <button
                               type="button"
                               className="meeting-history-item"
@@ -854,29 +851,27 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                                   ? "true"
                                   : undefined
                               }
-                              onClick={() => void selectHistory(row)}
+                              title={row.title}
                             >
-                              <span className="meeting-history-time">
-                                <time dateTime={row.startedAt}>
-                                  {historyTime(row.startedAt)}
-                                </time>
-                                <span>
-                                  {historyStatus(
-                                    row.status,
-                                    busy && job?.jobId === row.jobId,
-                                  )}
-                                </span>
-                              </span>
-                              <strong>{row.title}</strong>
-                              <span className="meeting-history-time-label">
-                                {row.timeLabel}
-                              </span>
+                              {row.title}
                             </button>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ))
+                          </td>
+                          <td>
+                            <time dateTime={row.startedAt}>
+                              {historyTimestamp(row.startedAt)}
+                            </time>
+                          </td>
+                          <td>{row.timeLabel}</td>
+                          <td>
+                            {historyStatus(
+                              row.status,
+                              busy && job?.jobId === row.jobId,
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 ) : (
                   <EmptyState
                     compact
@@ -1159,7 +1154,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                   description={
                     selectedHistory
                       ? "这场会议尚未生成可阅读的结果，请查看处理状态或重新导入录音。"
-                      : "从左侧选择历史会议，或在上方记录、导入录音生成纪要。"
+                      : "从上方选择历史会议，或记录、导入录音生成纪要。"
                   }
                 />
               ) : null}

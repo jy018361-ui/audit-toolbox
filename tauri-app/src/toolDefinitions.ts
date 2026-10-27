@@ -133,6 +133,10 @@ export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
       {key:"companyName",label:"公司名称",kind:"text",required:true},{key:"bsDate",label:"资产负债表日",kind:"date",required:true}
     ], actions:[{label:"检查模板与底稿",method:"roll_forward.validate",mode:"call",tone:"secondary"},{label:"开始结转",method:"roll_forward.process",mode:"job",tone:"primary"}]
   },
+  ocr: {
+    intro: "按项目识别扫描单证和合同，校对原文与表格并导出可编辑 Excel；需要时选择场景、编辑提示词后摘录。",
+    fields: [], actions: [{ label: "读取 OCR 项目", method: "ocr.projects", mode: "call", tone: "primary" }]
+  },
   audipick: {
     intro: "统一管理合同、PDF、OCR、条款规则、文件关联及收入合同审阅底稿。",
     fields:[

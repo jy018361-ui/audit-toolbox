@@ -226,6 +226,7 @@ const DEMO_JOB_TOOL_ID_RULES: Array<[prefix: string, toolId: string]> = [
   ["kanzhang.mark_", "je_sign_mark"],
   ["kanzhang.", "kanzhang"],
   ["audipick.", "audipick"],
+  ["ocr.", "ocr"],
   ["tbje_check.", "tbje_check"],
   ["fa.dep_", "fa_dep_calc"],
   ["fa.policy_", "fa_policy_compare"],

@@ -8,6 +8,7 @@ use crate::AppError;
 
 const DEFAULT_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const DEFAULT_MODEL: &str = "qwen3.5-ocr";
+pub(crate) const STRUCTURED_PROMPT: &str = "请逐字识别整张扫描件的全部文字，保留阅读顺序、段落及全部表格内容。同时逐格恢复所有表格的原始行列。不要总结、补写、改写数字、日期、账号或金额，所有单元格均为字符串。合并单元格仅在左上格写文字，其余空串。text 必须含正文和全部表格文字，不能因 tables 已有而省略。仅输出完整 JSON：{\"text\":\"完整原文\",\"tables\":[{\"title\":\"原表名\",\"rows\":[[\"单元格\"]]}],\"warnings\":[\"无法确认的内容及位置\"]}。无表格返回空 tables。";
 
 pub(crate) struct OcrConfig {
     endpoint: reqwest::Url,
@@ -61,6 +62,14 @@ impl OcrConfig {
     }
 
     pub(crate) fn recognize(&self, image: &str, key: &str) -> Result<Value, AppError> {
+        self.recognize_with_prompt(image, key, "请逐字识别图片中的中文和数字，保留段落、表格内容和阅读顺序，只返回识别文字，不要解释、总结或补写。")
+    }
+
+    pub(crate) fn recognize_structured(&self, image: &str, key: &str) -> Result<Value, AppError> {
+        self.recognize_with_prompt(image, key, STRUCTURED_PROMPT)
+    }
+
+    fn recognize_with_prompt(&self, image: &str, key: &str, prompt: &str) -> Result<Value, AppError> {
         if key.trim().is_empty() {
             return Err(failure(
                 "OCR_KEY_MISSING",
@@ -79,7 +88,7 @@ impl OcrConfig {
             "model": self.model,
             "messages": [{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": image_url}},
-                {"type": "text", "text": "请逐字识别图片中的中文和数字，保留段落、表格内容和阅读顺序，只返回识别文字，不要解释、总结或补写。"}
+                {"type": "text", "text": prompt}
             ]}],
             "stream": false
         })).send().map_err(|_| failure("BAILIAN_OCR_NETWORK", "百炼 OCR 请求未完成，请检查网络和 URL 后重试。", true))?;
@@ -250,6 +259,19 @@ mod tests {
         ] {
             assert!(OcrConfig::from_settings(&json!({"ocr":{"bailian_base_url":base}})).is_err());
         }
+    }
+
+    #[test]
+    fn standalone_structured_mode_is_one_request_with_complete_text_and_cells() {
+        let output=json!({"text":"发票 00123","tables":[{"title":"明细","rows":[["金额","00123"]]}],"warnings":[]}).to_string();
+        let (base,server)=server("200 OK",json!({"choices":[{"finish_reason":"stop","message":{"content":output}}]}));
+        let config=OcrConfig::from_settings(&json!({"ocr":{"bailian_base_url":base}})).unwrap();
+        let result=config.recognize_structured(PNG,"synthetic-key").unwrap();
+        let parsed:Value=serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed["tables"][0]["rows"][0][1],"00123");
+        let request=server.join().unwrap();
+        let body:Value=serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["messages"][0]["content"][1]["text"],STRUCTURED_PROMPT);
     }
 
     #[test]

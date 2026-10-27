@@ -98,8 +98,11 @@ describe("TbjeCheckPage", () => {
     fireEvent.click(within(steps).getByRole("button", {name:/确认配对/}));
     expect(select()).toHaveValue(manual ? "auxiliary" : "");
   });
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
+    const { pickPath } = await import("./api");
+    // Clear queued one-shot picker responses as well as call counts.
+    vi.mocked(pickPath).mockReset().mockResolvedValue(null);
     vi.clearAllMocks();
   });
 
@@ -160,9 +163,8 @@ describe("TbjeCheckPage", () => {
     );
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
 
     await waitFor(() =>
       expect(
@@ -265,9 +267,8 @@ describe("TbjeCheckPage", () => {
     );
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await waitFor(() =>
       expect(
         screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
@@ -356,9 +357,8 @@ describe("TbjeCheckPage", () => {
     );
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await screen.findByText("03科目余额表.xlsx");
     fireEvent.click(
       screen.getByRole("button", { name: "LLM 一键联合复核 1 组" }),
@@ -473,9 +473,8 @@ describe("TbjeCheckPage", () => {
     );
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await screen.findByText("09科目余额表.xlsx");
     expect(screen.getByRole("button", { name: /JE 缺少 1 项必填映射/ })).toBeVisible();
 
@@ -538,6 +537,7 @@ describe("TbjeCheckPage", () => {
       return () => {};
     });
     const { container } = render(<TbjeCheckPage tool={tool} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await screen.findByRole("button", { name: "开始核对 3 组" });
     await waitFor(() => expect(screen.getByRole("button", { name: "开始核对 3 组" })).toBeEnabled());
@@ -653,9 +653,8 @@ describe("TbjeCheckPage", () => {
       return () => {};
     });
     render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await screen.findByText("02科目余额表.xlsx");
     fireEvent.click(screen.getByRole("button", { name: "开始核对 2 组" }));
 
@@ -821,9 +820,8 @@ describe("TbjeCheckPage", () => {
     });
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await screen.findByText("01TB.xlsx");
     await waitFor(() => expect(emit).toBeTypeOf("function"));
     act(() => {
@@ -950,9 +948,8 @@ describe("TbjeCheckPage", () => {
         <ConfirmDialogHost />
       </>,
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await screen.findByRole("button", { name: "移除全部" });
 
     // 取消路径：对话框出现后点「取消」，分组保持原样。
@@ -1016,9 +1013,8 @@ describe("TbjeCheckPage", () => {
     );
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await waitFor(() =>
       expect(
         screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
@@ -1035,9 +1031,8 @@ describe("TbjeCheckPage", () => {
     // 回到第 1 步，二次添加另一组文件。
     const steps = container.querySelector(".step-indicator") as HTMLElement;
     fireEvent.click(within(steps).getByRole("button", { name: /添加文件/ }));
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
 
     await waitFor(() =>
       expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(3),
@@ -1125,6 +1120,7 @@ describe("TbjeCheckPage", () => {
     fireEvent.change(subjectSelect(), { target: { value: "accountCode" } });
     fireEvent.change(subjectSelect(), { target: { value: "accountName" } });
     expect(subjectSelect().querySelector("option")?.textContent).toBe("科目编码 ＋ 科目名称");
+    await waitFor(() => expect(screen.getByRole("button", { name: "选择 JE Excel" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "选择 JE Excel" }));
     await screen.findByRole("button", { name: "4800_JE.xlsx" });
     fireEvent.click(screen.getByRole("button", { name: "查看并调整 JE 映射" }));
@@ -1153,6 +1149,7 @@ describe("TbjeCheckPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看并调整 TB 映射" }));
     const tb = await screen.findByLabelText("余额表使用的工作表");
     expect(tb).toBeDisabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "选择 JE Excel" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "选择 JE Excel" }));
     await screen.findByRole("button", { name: "01JE.xlsx" });
     fireEvent.click(screen.getByRole("button", { name: "查看并调整 JE 映射" }));
@@ -1195,9 +1192,8 @@ describe("TbjeCheckPage", () => {
     );
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await waitFor(() =>
       expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1),
     );
@@ -1209,9 +1205,8 @@ describe("TbjeCheckPage", () => {
     // 重复选入同一份 TB：不再重新识别，配对原样保留。
     const steps = container.querySelector(".step-indicator") as HTMLElement;
     fireEvent.click(within(steps).getByRole("button", { name: /添加文件/ }));
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await waitFor(() =>
       expect(
         screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),

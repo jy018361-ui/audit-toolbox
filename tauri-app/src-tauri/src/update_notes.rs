@@ -87,6 +87,12 @@ fn collect_notes(
             let Ok(v) = version(tag) else {
                 continue;
             };
+            // Keep release notes on the same channel as the installed version.
+            if crate::release_channel::is_dev_version(&v.to_string())
+                != crate::release_channel::is_dev_version(current)
+            {
+                continue;
+            }
             if v.cmp_precedence(&current_v).is_eq() {
                 base_tag = tag.to_string();
             }
@@ -272,6 +278,21 @@ mod tests {
     use serde_json::json;
     fn release(v: &str, body: &str) -> Value {
         json!({"tag_name":v,"body":body,"draft":false})
+    }
+
+    #[test]
+    fn update_notes_never_mix_release_channels() {
+        for (current, target, expected) in [
+            ("2.0.0-alpha.131", "2.0.0", "正式版"),
+            ("2.0.0-dev.1", "2.0.0-dev.2", "开发版"),
+        ] {
+            let notes = collect_notes(current, target, |_| Ok(json!([
+                release("v2.0.0", "正式版"),
+                release("v2.0.0-dev.2", "开发版")
+            ]))).unwrap();
+            assert_eq!(notes.releases.len(), 1);
+            assert_eq!(notes.releases[0].body, expected);
+        }
     }
 
     #[test]

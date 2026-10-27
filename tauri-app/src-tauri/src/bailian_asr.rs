@@ -113,7 +113,7 @@ pub(crate) fn load_api_key(param: Option<&str>) -> Result<String, AppError> {
     if let Some(key) = param.filter(|key| !key.trim().is_empty()) {
         return Ok(key.trim().to_string());
     }
-    keyring::Entry::new("AuditToolbox", "bailian_asr_key")
+    keyring::Entry::new(crate::release_channel::credential_service(), "bailian_asr_key")
         .and_then(|entry| entry.get_password())
         .ok()
         .filter(|key| !key.trim().is_empty())

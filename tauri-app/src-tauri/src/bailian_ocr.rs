@@ -434,7 +434,7 @@ mod tests {
             let warnings:Vec<String> = parsed["warnings"].as_array().unwrap().iter().filter_map(Value::as_str).map(str::to_owned).collect();
             summary.push(json!({"page":number,"characters":text.chars().count(),"tables":tables.len(),"warnings":warnings}));
             fs::write(output.join(format!("page-{number:02}-parsed.json")),serde_json::to_vec_pretty(&parsed).unwrap()).unwrap();
-            let page=Page{page:number,text,original_text:String::new(),tables,original_tables:vec![],revision:0,status:if warnings.is_empty(){"completed"}else{"needs_review"}.into(),warnings};
+            let page=Page{metadata:Default::default(),page:number,text,original_text:String::new(),tables,original_tables:vec![],revision:0,status:if warnings.is_empty(){"completed"}else{"needs_review"}.into(),warnings};
             let saved=store.save_page(&doc.id,page,old.map_or(0,|p|p.revision),true).unwrap();
             store.save_recognition_diagnostics(&doc.id,number,saved.revision,&[raw.to_owned()]).unwrap();
             println!("第{number}页实测完成。");

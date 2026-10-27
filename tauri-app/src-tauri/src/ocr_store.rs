@@ -45,6 +45,18 @@ pub(crate) struct Table {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PageMetadata {
+    /// Clockwise correction after source/PDF orientation has been applied.
+    pub auto_rotation: u16,
+    pub auto_orientation_status: String,
+}
+impl Default for PageMetadata {
+    fn default() -> Self {
+        Self { auto_rotation: 0, auto_orientation_status: "unknown".into() }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct Page {
     pub page: u32,
     pub text: String,
@@ -59,6 +71,8 @@ pub(crate) struct Page {
     pub status: String,
     #[serde(default)]
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub metadata: PageMetadata,
 }
 
 /// Read-only projection of legacy provider payloads. The database and its raw
@@ -428,6 +442,7 @@ impl Store {
         } else if let Some(old) = old {
             page.original_text = old.original_text;
             page.original_tables = old.original_tables;
+            page.metadata = old.metadata;
         } else {
             page.original_text.clear();
             page.original_tables.clear();
@@ -526,7 +541,7 @@ mod tests {
     fn legacy_projection_does_not_restore_a_table_the_user_deleted() {
         let original_table = Table { id: "t".into(), title: String::new(), rows: vec![vec!["00123".into()]] };
         let raw = r#"{"text":"原文","tables":[{"rows":[["00123"]]}]}"#;
-        let page = Page { page: 1, text: raw.into(), original_text: raw.into(), tables: vec![], original_tables: vec![original_table], revision: 2, status: "needs_review".into(), warnings: vec![] };
+        let page = Page { metadata: Default::default(), page: 1, text: raw.into(), original_text: raw.into(), tables: vec![], original_tables: vec![original_table], revision: 2, status: "needs_review".into(), warnings: vec![] };
         let projected = readable_page(page);
         assert!(projected.tables.is_empty());
         assert!(projected.text.contains("原文"));
@@ -539,7 +554,7 @@ mod tests {
         let source = dir.path().join("x.png"); fs::write(&source, b"synthetic").unwrap();
         let doc = store.import(project["id"].as_str().unwrap(), &source).unwrap();
         let raw = r#"{"text":"标题","tables":[{"rows":[{"text":"后续条款"}]}]}"#;
-        let page = Page { page:1, text:raw.into(), original_text:String::new(), tables:vec![], original_tables:vec![], revision:0, status:"completed".into(), warnings:vec![] };
+        let page = Page { metadata: Default::default(), page:1, text:raw.into(), original_text:String::new(), tables:vec![], original_tables:vec![], revision:0, status:"completed".into(), warnings:vec![] };
         store.save_page(&doc.id, page, 0, true).unwrap();
         let mut projected = store.pages(&doc.id).unwrap().remove(0);
         assert_eq!(projected.text, "标题\n\n后续条款");
@@ -562,7 +577,7 @@ mod tests {
         let source = dir.path().join("x.png"); fs::write(&source, b"synthetic").unwrap();
         let doc = store.import(project["id"].as_str().unwrap(), &source).unwrap();
         let raw = r#"{"text":"旧内容","rotate_rect":[1><2]}"#;
-        let page = Page { page:1, text:raw.into(), original_text:String::new(), tables:vec![], original_tables:vec![], revision:0, status:"needs_review".into(), warnings:vec![] };
+        let page = Page { metadata: Default::default(), page:1, text:raw.into(), original_text:String::new(), tables:vec![], original_tables:vec![], revision:0, status:"needs_review".into(), warnings:vec![] };
         let mut retry = store.save_page(&doc.id, page, 0, true).unwrap();
         retry.text = "重新识别后的完整原文".into();
         retry.tables = vec![Table{id:"p1-table".into(),title:"原表".into(),rows:vec![vec!["00123".into()]]}];
@@ -588,7 +603,7 @@ mod tests {
         let doc = store
             .import(project["id"].as_str().unwrap(), &source)
             .unwrap();
-        let page = Page {
+        let page = Page { metadata: PageMetadata { auto_rotation: 90, auto_orientation_status: "detected".into() },
             page: 1,
             text: "原文 001234567890123456789".into(),
             original_text: String::new(),
@@ -601,9 +616,13 @@ mod tests {
         let mut page = store.save_page(&doc.id, page, 0, true).unwrap();
         store.save_extraction(&json!({"documentId":doc.id,"scenarioId":"custom","prompts":[],"sourceRevision":1,"rows":[{"金额":"001"}]})).unwrap();
         page.text = "修订".into();
+        // Clients cannot erase the recognition direction while editing a table.
+        page.metadata = Default::default();
         assert!(store.save_page(&doc.id, page.clone(), 0, false).is_err());
         let edited = store.save_page(&doc.id, page, 1, false).unwrap();
         assert!(edited.original_text.starts_with("原文"));
+        assert_eq!(edited.metadata.auto_rotation, 90);
+        assert_eq!(store.pages(&doc.id).unwrap()[0].metadata.auto_orientation_status, "detected");
         assert_eq!(store.document(&doc.id).unwrap().revision, 2);
         assert_eq!(store.extractions(&doc.id).unwrap()[0]["stale"], true);
         assert!(store.save_extraction(&json!({"documentId":doc.id,"scenarioId":"custom","prompts":[],"sourceRevision":1,"rows":[]})).is_err());

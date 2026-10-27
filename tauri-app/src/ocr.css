@@ -4,6 +4,40 @@
   padding: 24px 28px 40px;
   color: var(--foreground);
 }
+.ocr-timings {
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  font-size: 12px;
+  min-width: 0;
+}
+.ocr-timings summary {
+  cursor: pointer;
+  line-height: 1.8;
+}
+.ocr-timing-scroll {
+  max-height: 320px;
+  overflow: auto;
+}
+.ocr-timings table {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: nowrap;
+}
+.ocr-timings th,
+.ocr-timings td {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.ocr-timings tbody th {
+  white-space: normal;
+  min-width: 150px;
+  overflow-wrap: anywhere;
+}
 .ocr-page h2 {
   font-size: 17px;
   font-weight: 650;
@@ -20,19 +54,6 @@
 .ocr-muted {
   color: var(--muted-foreground);
   font-size: 12px;
-}
-.ocr-service-bar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px 20px;
-  font-size: 12px;
-  padding: 0 0 16px;
-}
-.ocr-service-bar a {
-  color: var(--primary);
-  text-decoration: underline;
-  text-underline-offset: 3px;
 }
 .ocr-project-bar {
   margin-bottom: 16px;
@@ -95,17 +116,24 @@
 }
 .ocr-workspace {
   display: grid;
-  grid-template-columns: 230px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }
 .ocr-document-list {
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 14px 8px;
-  align-self: stretch;
+  padding: 16px;
+  align-self: start;
   background: var(--card);
-  min-height: 240px;
-  overflow: auto;
+  min-width: 0;
+}
+.ocr-document-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.ocr-document-list > button {
+  margin-top: 10px;
 }
 .ocr-document-list h2 {
   padding: 0 7px 14px;
@@ -122,9 +150,10 @@
   width: 100%;
   text-align: left;
   gap: 8px;
-  border: 1px solid transparent;
+  border: 1px solid var(--border);
   border-radius: 7px;
-  padding: 11px 8px;
+  padding: 14px 12px;
+  min-height: 78px;
   background: transparent;
   cursor: pointer;
   color: var(--foreground);
@@ -190,23 +219,78 @@
   color: var(--muted-foreground);
   margin: 7px 0 0;
 }
-.ocr-document-toolbar {
+.ocr-scan-settings {
   display: flex;
   align-items: end;
   flex-wrap: wrap;
-  gap: 9px;
-  padding: 16px 20px;
+  gap: 12px 16px;
+  padding: 20px;
 }
-.ocr-document-toolbar label {
-  margin-right: 6px;
+.ocr-scan-settings > label {
+  min-width: 160px;
+}
+.ocr-scan-settings input {
+  max-width: 260px;
+}
+.ocr-operation-area {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  padding: 0 20px 24px;
+}
+.ocr-operation-area > .ocr-progress,
+.ocr-operation-area > .ocr-export-notice,
+.ocr-operation-area > .ocr-timings {
+  margin: 0;
+}
+.ocr-scan-settings > .ocr-muted {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  min-width: 0;
+}
+.ocr-operation-buttons > button {
+  min-height: 40px;
+  height: auto;
+  max-width: 100%;
+  white-space: normal;
+  padding-block: 9px;
+}
+.ocr-operation-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.ocr-export-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 12px 14px;
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.ocr-export-notice > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ocr-export-notice button {
+  max-width: 100%;
+  white-space: normal;
+  height: auto;
 }
 .ocr-page-navigation {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
-  padding: 12px 20px;
-  border-block: 1px solid var(--border);
+  gap: 12px;
+  margin: 0 20px;
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
 }
 .ocr-page-navigation label {
   flex-direction: row;
@@ -216,14 +300,15 @@
 }
 .ocr-page-navigation select {
   min-width: 52px;
-  height: 30px;
+  height: 32px;
   padding-left: 9px;
 }
 .ocr-comparison {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  height: clamp(420px, 65vh, 720px);
-  border-bottom: 1px solid var(--border);
+  gap: 16px;
+  height: clamp(480px, 70vh, 760px);
+  padding: 0 20px 20px;
 }
 .ocr-source,
 .ocr-original {
@@ -231,18 +316,23 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
 }
 .ocr-source {
-  border-right: 1px solid var(--border);
   background: color-mix(in srgb, var(--muted) 60%, var(--card));
 }
 .ocr-pane-heading {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   flex-shrink: 0;
-  height: 52px;
-  padding: 8px 16px;
+  height: 80px;
+  min-height: 80px;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  background: var(--card);
   border-bottom: 1px solid var(--border);
 }
 .ocr-pane-heading > span {
@@ -250,9 +340,11 @@
   font-size: 12px;
 }
 .ocr-pane-body {
+  flex: 1;
+  min-width: 0;
   min-height: 0;
   overflow: auto;
-  padding: 18px;
+  padding: 16px;
   overscroll-behavior: contain;
 }
 .ocr-source img {
@@ -339,7 +431,11 @@
 }
 .ocr-table-scroll {
   max-width: 100%;
+  max-height: 520px;
   overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 .ocr-page table {
   border-collapse: collapse;
@@ -449,15 +545,23 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 15px;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: 12px;
   margin-bottom: 16px;
   padding: 13px 16px;
   background: var(--muted);
   border-radius: 8px;
   font-size: 13px;
 }
-.ocr-progress > div:last-child {
+.ocr-progress > div:first-child {
+  flex: 1 1 260px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ocr-progress > div:nth-child(2) {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 .ocr-progress progress {
@@ -506,26 +610,6 @@
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
   }
-  .ocr-document-list {
-    display: flex;
-    align-items: stretch;
-    gap: 8px;
-    padding: 10px;
-    min-height: 0;
-    max-height: 145px;
-    overflow-x: auto;
-  }
-  .ocr-document-list h2 {
-    flex: 0 0 42px;
-    padding: 4px 0;
-    flex-direction: column;
-    justify-content: start;
-    gap: 8px;
-  }
-  .ocr-document {
-    flex: 0 0 220px;
-    width: 220px;
-  }
 }
 @media (max-width: 760px) {
   .ocr-comparison {
@@ -544,13 +628,13 @@
     max-width: 600px;
     margin-inline: auto;
   }
-  .ocr-document-toolbar,
+  .ocr-scan-settings,
   .ocr-file-heading,
   .ocr-page-navigation {
     padding-inline: 14px;
   }
   .ocr-project-bar [data-slot="card-content"] {
-    align-items: stretch;
+    align-items: end;
   }
   .ocr-project-bar label,
   .ocr-project-bar [data-slot="input"] {
@@ -563,6 +647,9 @@
   }
   .ocr-tables {
     padding-inline: 14px;
+  }
+  .ocr-document-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 .ocr-steps {
@@ -580,4 +667,251 @@
 }
 .ocr-corrected-text .ocr-original-text {
   padding-top: 12px;
+}
+
+.ocr-pane-title {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.ocr-document-text {
+  scroll-behavior: smooth;
+}
+.ocr-text-page + .ocr-text-page {
+  border-top: 1px solid var(--border);
+  margin-top: 20px;
+  padding-top: 20px;
+}
+.ocr-text-page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.ocr-text-page-heading h4 {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  margin: 0;
+}
+.ocr-text-page-heading button {
+  flex-shrink: 0;
+}
+.ocr-table-heading {
+  flex-wrap: wrap;
+}
+.ocr-table-search {
+  max-width: 320px;
+  margin-bottom: 12px;
+}
+.ocr-table-directory {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 2px;
+}
+.ocr-table-directory > button {
+  display: block;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 12px;
+  font-size: 12px;
+  background: var(--card);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  line-height: 1.8;
+}
+.ocr-table-directory > button[aria-pressed="true"] {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, var(--card));
+}
+.ocr-table-directory > button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+.ocr-table-directory strong {
+  font-weight: 550;
+}
+.ocr-table-page {
+  color: var(--muted-foreground);
+}
+.ocr-table-editor-heading {
+  font-size: 13px;
+  margin: 0 0 12px;
+  overflow-wrap: anywhere;
+}
+.ocr-edit-table {
+  min-width: 0;
+}
+.ocr-edit-table table {
+  min-width: 100%;
+  width: max-content;
+}
+.ocr-edit-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.ocr-edit-table textarea {
+  width: 180px;
+  max-width: 320px;
+}
+.ocr-pane-heading button {
+  max-width: 100%;
+  white-space: normal;
+  height: auto;
+}
+@media (max-width: 1000px) {
+  .ocr-table-directory {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 760px) {
+  .ocr-operation-area {
+    padding-inline: 14px;
+  }
+  .ocr-page-navigation {
+    margin-inline: 14px;
+    padding-inline: 0;
+  }
+  .ocr-comparison {
+    padding-inline: 14px;
+  }
+  .ocr-scan-settings > label {
+    flex: 1 1 160px;
+    min-width: 0;
+  }
+  .ocr-scan-settings input {
+    max-width: none;
+  }
+  .ocr-project-bar select {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
+.ocr-operation-buttons > .ocr-export-action,
+.ocr-extraction-toolbar > .ocr-export-action {
+  margin-inline-start: auto;
+}
+
+.ocr-file-selection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  margin-bottom: 14px;
+}
+.ocr-file-selection > label {
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+}
+.ocr-file-selection input,
+.ocr-file-checkbox {
+  accent-color: var(--primary);
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+.ocr-file-selection > .ocr-export-action {
+  margin-inline-start: auto;
+}
+.ocr-document-card {
+  position: relative;
+  min-width: 0;
+}
+.ocr-document-card > .ocr-file-checkbox {
+  position: absolute;
+  top: 17px;
+  left: 12px;
+  z-index: 1;
+  margin: 0;
+}
+.ocr-document-card > .ocr-document {
+  padding-left: 38px;
+  height: 100%;
+}
+.ocr-document-card > .ocr-file-checkbox:checked + .ocr-document {
+  border-color: var(--primary);
+}
+.ocr-batch-status:empty {
+  display: none;
+}
+.ocr-batch-status {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.ocr-export-dialog > label {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+}
+.ocr-export-dialog select {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  border: 1px solid var(--input);
+  border-radius: 7px;
+  padding: 6px 10px;
+  background: var(--background);
+  color: var(--foreground);
+}
+.ocr-export-dialog fieldset {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.ocr-export-dialog legend {
+  font-size: 13px;
+  font-weight: 550;
+  margin-bottom: 8px;
+}
+.ocr-export-mode {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.ocr-export-mode:has(input:checked) {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 6%, var(--card));
+}
+.ocr-export-mode input {
+  margin-top: 4px;
+  flex-shrink: 0;
+  accent-color: var(--primary);
+}
+.ocr-export-mode span {
+  min-width: 0;
+}
+.ocr-export-mode strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 550;
+}
+.ocr-export-mode small {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  line-height: 1.6;
+}
+.ocr-export-file-list {
+  max-height: 120px;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--muted);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
 }

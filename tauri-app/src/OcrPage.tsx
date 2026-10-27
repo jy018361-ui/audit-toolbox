@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
 import {
   FileScan,
   FolderOpen,
@@ -11,26 +10,29 @@ import {
   Copy,
   ArrowRight,
 } from "lucide-react";
-import {
-  jobCancel,
-  jobPause,
-  openOutput,
-  pickPath,
-} from "./api";
+import { jobCancel, jobPause, openOutput, pickPath } from "./api";
 import { ocrCall, runOcrJob } from "./ocrApi";
+import { OcrOperation, runOcrPool, OCR_CONCURRENCY } from "./ocrBatch";
+import {
+  OcrTimingPanel,
+  type OcrPageTiming,
+  type OcrTimingRun,
+} from "./OcrTimingPanel";
 import {
   extractOcrScenario,
   getOcrPromptStages,
   loadOcrScenarios,
   type OcrScenario,
 } from "./ocrScenarios";
-import { openOcrSource, type OcrSource } from "./ocrSource";
+import { openOcrSource, type OcrSource, type OcrRotation } from "./ocrSource";
+import { parseOcrScanRange } from "./ocrScanRange";
 import type {
   OcrConfigStatus,
   OcrDocument,
   OcrDocumentDetail,
   OcrExtraction,
   OcrPageData,
+  OcrRecognitionResult,
   OcrProject,
   OcrPromptStage,
   OcrTable,
@@ -44,6 +46,14 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { errorText } from "@/lib/errors";
 import "./ocr.css";
@@ -54,12 +64,7 @@ type Draft = {
   generation: number;
   dirty: boolean;
 };
-type Operation = {
-  cancelled: boolean;
-  paused: boolean;
-  jobId?: string;
-  wake?: () => void;
-};
+type Operation = OcrOperation;
 const statusLabels: Record<string, string> = {
   pending: "待识别",
   imported: "待识别",
@@ -106,18 +111,64 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   const [saveState, setSaveState] = useState("");
   const [sourceImage, setSourceImage] = useState("");
   const [sourceError, setSourceError] = useState("");
-  const [config, setConfig] = useState<OcrConfigStatus>();
   const [scenarios, setScenarios] = useState<OcrScenario[]>([]);
   const [scenarioId, setScenarioId] = useState("");
   const [stages, setStages] = useState<OcrPromptStage[]>([]);
   const [step, setStep] = useState(0);
-  const [layout, setLayout] = useState<"full" | "spread">("full");
+  const [filesExpanded, setFilesExpanded] = useState(false);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportScope, setExportScope] = useState<
+    "selected" | "current" | "all"
+  >("current");
+  const [exportMode, setExportMode] = useState<
+    "single_sheet" | "per_document" | "individual"
+  >("per_document");
+  const selectedDocuments = documents.filter((document) =>
+    selectedDocumentIds.includes(document.id),
+  );
+  const exportDocuments =
+    exportScope === "all"
+      ? documents
+      : exportScope === "selected"
+        ? selectedDocuments
+        : documents.filter((document) => document.id === detail?.document.id);
+  const [scanScope, setScanScope] = useState("all");
+  const [scanPages, setScanPages] = useState("");
+  const [showOriginal, setShowOriginal] = useState(false);
+  const [selectedTableKey, setSelectedTableKey] = useState("");
+  const [tableSearch, setTableSearch] = useState("");
+  const [exportDirectory, setExportDirectory] = useState("");
+  const [copyNotice, setCopyNotice] = useState("");
+  const currentRotation: OcrRotation =
+    detail?.pages.find((page) => page.page === pageNumber)?.metadata
+      ?.autoRotation ?? 0;
+  const documentPages = (detail?.pages ?? [])
+    .map((page) => (draft?.page === page.page ? draft : page))
+    .sort((a, b) => a.page - b.page);
+  const tableEntries = documentPages.flatMap((page) =>
+    page.tables.map((table, tableIndex) => ({
+      page: page.page,
+      table,
+      tableIndex,
+      key: `${page.page}:${table.id}`,
+    })),
+  );
+  const activeTable =
+    tableEntries.find((entry) => entry.key === selectedTableKey) ??
+    tableEntries.find((entry) => entry.page === pageNumber);
+  const visibleTableEntries = tableEntries.filter((entry) =>
+    `第 ${entry.page} 页 ${entry.table.title}`.includes(tableSearch.trim()),
+  );
   const [busy, setBusy] = useState(false);
   const [paused, setPaused] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [outputs, setOutputs] = useState<string[]>([]);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
+  const [timingRun, setTimingRun] = useState<OcrTimingRun>();
+  const [controlling, setControlling] = useState(false);
+  const controllingRef = useRef(false);
   const projectRef = useRef<string | undefined>(undefined);
   const documentRef = useRef<string | undefined>(undefined);
   const draftRef = useRef<Draft | undefined>(undefined);
@@ -160,13 +211,11 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     mounted.current = true;
     void Promise.all([
       ocrCall<{ projects: OcrProject[] }>("ocr.projects", {}),
-      ocrCall<OcrConfigStatus>("ocr.config_status", {}),
       loadOcrScenarios(),
     ])
-      .then(([saved, status, available]) => {
+      .then(([saved, available]) => {
         if (!mounted.current) return;
         setProjects(saved.projects);
-        setConfig(status);
         setScenarios(available);
         if (saved.projects[0]) {
           projectRef.current = saved.projects[0].id;
@@ -182,7 +231,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       if (active) {
         active.cancelled = true;
         active.wake?.();
-        if (active.jobId) void jobCancel(active.jobId).catch(() => {});
+        for (const id of active.jobIds) void jobCancel(id).catch(() => {});
       }
     };
   }, []);
@@ -198,6 +247,8 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   }, []);
   useEffect(() => {
     if (!project) return;
+    setTimingRun(undefined);
+    setFilesExpanded(false);
     setDocuments([]);
     setDetail(undefined);
     setDraft(undefined);
@@ -323,6 +374,18 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   }
   async function loadDocument(id: string, page = 1) {
     const sequence = ++loadSequence.current;
+    const changed = documentRef.current !== id;
+    if (changed) {
+      setScanScope("all");
+      setScanPages("");
+      setShowOriginal(false);
+      setSelectedTableKey("");
+      setTableSearch("");
+      setOutputs([]);
+      setExportDirectory("");
+      setCopyNotice("");
+      setMessage("");
+    }
     documentRef.current = id;
     setDetail(undefined);
     setPageDraft(undefined);
@@ -345,6 +408,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   async function selectPage(number: number) {
     await saveCurrent();
     setPageNumber(number);
+    setSelectedTableKey("");
     setPageDraft(detail?.pages.find((item) => item.page === number));
   }
   async function changeStep(next: number) {
@@ -367,7 +431,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
         source = opened;
         const documentId = detail.document.id;
         if (!active || documentRef.current !== documentId) return;
-        const image = await opened.render(pageNumber);
+        const image = await opened.render(pageNumber, currentRotation);
         if (!active || documentRef.current !== documentId) return;
         setSourceImage(image);
         // Import cannot count PDF/TIFF pages without opening the source. Persist
@@ -408,7 +472,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     return () => {
       active = false;
     };
-  }, [detail?.document.id, pageNumber]);
+  }, [detail?.document.id, pageNumber, currentRotation]);
 
   async function importPaths(paths: string[], folder?: string) {
     const projectId = projectRef.current;
@@ -453,52 +517,32 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       );
   }
   async function checkpoint(active: Operation) {
-    if (active.cancelled)
-      throw new Error("任务已取消，已完成内容已保存，可稍后继续。");
-    while (active.paused && !active.cancelled)
-      await new Promise<void>((resolve) => {
-        active.wake = resolve;
-      });
-    if (active.cancelled)
-      throw new Error("任务已取消，已完成内容已保存，可稍后继续。");
+    await active.checkpoint();
   }
   function attachJob(active: Operation, id: string) {
-    active.jobId = id;
+    active.jobIds.add(id);
     if (active.cancelled)
       void jobCancel(id).catch((reason) => setError(errorText(reason)));
     else if (active.paused)
       void jobPause(id, true).catch((reason) => setError(errorText(reason)));
   }
-  async function recognize(
-    onlyCurrent = false,
-    allDocuments = false,
-    forceAllDocument = false,
-  ) {
-    if (
-      forceAllDocument &&
-      !(await confirmDialog({
-        title: "重新识别全文？",
-        message:
-          "将重新识别当前文件的全部页面，替换现有识别正文及表格校对内容，并重新调用 OCR 服务。原扫描文件不受影响。",
-        confirmLabel: "重新识别全文",
-      }))
-    )
-      return;
+  async function recognize() {
+    if (!detail) return;
+    // Reject malformed ranges before any OCR request or paid model call.
+    if (scanScope === "custom" && detail.document.totalPages > 0)
+      parseOcrScanRange(scanPages, detail.document.totalPages);
     await saveCurrent();
+    setOutputs([]);
+    setExportDirectory("");
+    setCopyNotice("");
     const status = await ocrCall<OcrConfigStatus>("ocr.config_status", {});
-    setConfig(status);
-    if (!status.ocr.ready) throw new Error("请先在全局设置中配置 OCR 服务。");
-    const targets = forceAllDocument
-      ? detail
-        ? [detail.document]
-        : []
-      : allDocuments
-        ? documents
-        : detail
-          ? [detail.document]
-          : [];
-    const active: Operation = { cancelled: false, paused: false };
+    if (!status.ocr.ready)
+      throw new Error("请先在设置中配置 OCR 服务；AI 识别使用统一 LLM 配置。");
+    const targets = [detail.document];
+    const active = new OcrOperation();
     operation.current = active;
+    const started = performance.now();
+    setTimingRun({ started, pages: [] });
     const failed: string[] = [];
     try {
       for (const target of targets) {
@@ -513,49 +557,120 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
           const saved = await ocrCall<OcrDocumentDetail>("ocr.document", {
             documentId: target.id,
           });
-          const numbers = onlyCurrent
-            ? [pageNumber]
-            : Array.from(
-                { length: source.totalPages },
-                (_, index) => index + 1,
-              ).filter(
-                (number) =>
-                  forceAllDocument ||
-                  !saved.pages.some((item) => item.page === number),
-              );
+          const requested =
+            scanScope === "custom"
+              ? parseOcrScanRange(scanPages, source.totalPages)
+              : Array.from(
+                  { length: source.totalPages },
+                  (_, index) => index + 1,
+                );
+          const numbers =
+            scanScope === "custom"
+              ? requested
+              : requested.filter(
+                  (number) => !saved.pages.some((item) => item.page === number),
+                );
+          if (
+            scanScope === "custom" &&
+            numbers.some((number) =>
+              saved.pages.some((page) => page.page === number),
+            ) &&
+            !(await confirmDialog({
+              title: "重新扫描所选页面？",
+              message:
+                "将替换所选页面现有的识别正文及表格校对内容，并重新调用 OCR 服务。原扫描文件不受影响。",
+              confirmLabel: "开始扫描",
+            }))
+          )
+            return;
           setProgress({ current: 0, total: numbers.length });
-          for (let index = 0; index < numbers.length; index++) {
-            await checkpoint(active);
-            const number = numbers[index];
+          let finished = 0;
+          const inFlight = new Set<number>();
+          const updateMessage = () =>
             setMessage(
-              `正在识别 ${target.name} · 第 ${number} / ${source.totalPages} 页`,
+              active.cancelled
+                ? "正在取消，已完成内容会保留…"
+                : `正在识别 ${target.name} · 已处理 ${finished} / ${numbers.length} 页 · 最多 ${OCR_CONCURRENCY} 页并发${inFlight.size ? ` · 在途页码 ${[...inFlight].sort((a, b) => a - b).join("、")}` : ""}`,
             );
+          await runOcrPool(numbers, async (number) => {
+            await checkpoint(active);
+            inFlight.add(number);
+            updateMessage();
+            const pageStarted = performance.now();
+            const timing: OcrPageTiming = {
+              documentId: target.id,
+              documentName: target.name,
+              page: number,
+              status: "failed",
+              renderMs: 0,
+              totalMs: 0,
+            };
+            let id: string | undefined;
             try {
-              const image = await source.render(number);
+              const renderStarted = performance.now();
+              let image: string;
+              try {
+                // The worker detects orientation from the original pixels once.
+                image = await source!.render(number, 0);
+              } finally {
+                timing.renderMs = performance.now() - renderStarted;
+              }
               await checkpoint(active);
-              await runOcrJob<OcrPageData>(
-                "ocr.recognize_page",
-                {
-                  documentId: target.id,
-                  page: number,
-                  imageBase64: image.replace(/^data:[^,]+,/, ""),
-                  layout,
-                  expectedRevision:
-                    saved.pages.find((item) => item.page === number)
-                      ?.revision ?? 0,
-                },
-                (id) => attachJob(active, id),
-              );
+              const taskStarted = performance.now();
+              let result: OcrRecognitionResult;
+              try {
+                result = await runOcrJob<OcrRecognitionResult>(
+                  "ocr.recognize_page",
+                  {
+                    documentId: target.id,
+                    page: number,
+                    imageBase64: image.replace(/^data:[^,]+,/, ""),
+                    layout: "full",
+                    expectedRevision:
+                      saved.pages.find((item) => item.page === number)
+                        ?.revision ?? 0,
+                  },
+                  (jobId) => {
+                    id = jobId;
+                    attachJob(active, jobId);
+                  },
+                  undefined,
+                  (jobTiming) => {
+                    timing.startMs = jobTiming.startMs;
+                  },
+                );
+              } finally {
+                timing.taskMs = performance.now() - taskStarted;
+              }
+              timing.worker = result.timings;
+              timing.status = "completed";
             } catch (reason) {
-              if (active.cancelled) throw reason;
+              if (active.cancelled) {
+                timing.status = "cancelled";
+                throw reason;
+              }
               failed.push(
                 `${target.name} 第 ${number} 页：${errorText(reason)}`,
               );
             } finally {
-              active.jobId = undefined;
+              if (id) active.jobIds.delete(id);
+              timing.totalMs = performance.now() - pageStarted;
+              if (mounted.current) {
+                setTimingRun(
+                  (current) =>
+                    current && {
+                      ...current,
+                      pages: [...current.pages, timing],
+                    },
+                );
+                finished++;
+                inFlight.delete(number);
+                setProgress({ current: finished, total: numbers.length });
+                updateMessage();
+              }
             }
-            setProgress({ current: index + 1, total: numbers.length });
-          }
+          });
+          if (active.cancelled) await checkpoint(active);
         } catch (reason) {
           if (active.cancelled) throw reason;
           failed.push(`${target.name}：${errorText(reason)}`);
@@ -565,6 +680,9 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       }
     } finally {
       if (mounted.current) {
+        setTimingRun(
+          (current) => current && { ...current, ended: performance.now() },
+        );
         if (projectRef.current) await refreshDocuments(projectRef.current);
         const selected = documentRef.current;
         if (selected) await loadDocument(selected, pageNumber);
@@ -572,26 +690,41 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     }
     setMessage(
       failed.length
-        ? "识别完成，部分页面失败。已完成页已保存，可继续识别或重试本页。"
-        : "识别完成。校对后即可导出 Excel，也可以按需摘录。",
+        ? "识别完成，部分页面失败。已完成页已保存，可再次开始扫描以补齐失败页。"
+        : "扫描完成。可导出文件、查看原文，或进入场景摘录。",
     );
     if (failed.length) setError(failed.join("\n"));
   }
   async function setOperationPaused() {
     const active = operation.current;
-    if (!active) return;
+    if (!active || active.cancelled || controllingRef.current) return;
+    controllingRef.current = true;
+    setControlling(true);
     const next = !active.paused;
     active.paused = next;
     setPaused(next);
     try {
-      if (active.jobId && !(await jobPause(active.jobId, next)))
-        throw new Error("暂停或继续未成功，请重试。");
+      const results = await Promise.allSettled(
+        [...active.jobIds].map(async (id) => {
+          if (!(await jobPause(id, next)) && active.jobIds.has(id))
+            throw new Error("暂停或继续未成功，请重试。");
+        }),
+      );
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
     } catch (reason) {
-      active.paused = !next;
-      setPaused(!next);
+      if (!active.cancelled) {
+        active.paused = !next;
+        setPaused(!next);
+        await Promise.allSettled(
+          [...active.jobIds].map((id) => jobPause(id, !next)),
+        );
+      }
       throw reason;
     } finally {
       active.wake?.();
+      controllingRef.current = false;
+      if (mounted.current) setControlling(false);
     }
   }
   async function cancelOperation() {
@@ -602,7 +735,11 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     active.wake?.();
     setPaused(false);
     setMessage("正在取消，已完成内容会保留…");
-    if (active.jobId) await jobCancel(active.jobId);
+    const results = await Promise.allSettled(
+      [...active.jobIds].map((id) => jobCancel(id)),
+    );
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
   }
   async function persistPrompts(next: OcrPromptStage[]) {
     if (!project || !scenario) return;
@@ -649,7 +786,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       documentId: detail.document.id,
     });
     if (!current.pages.length) throw new Error("请先识别文件，再执行摘录。");
-    const active: Operation = { cancelled: false, paused: false };
+    const active = new OcrOperation();
     operation.current = active;
     const result = await extractOcrScenario({
       scenario,
@@ -660,12 +797,14 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       onProgress: (text) => setMessage(text),
       request: async (params) => {
         await checkpoint(active);
+        let jobId: string | undefined;
         try {
-          return await runOcrJob("ocr.extract", params, (id) =>
-            attachJob(active, id),
-          );
+          return await runOcrJob("ocr.extract", params, (id) => {
+            jobId = id;
+            attachJob(active, id);
+          });
         } finally {
-          active.jobId = undefined;
+          if (jobId) active.jobIds.delete(jobId);
         }
       },
     });
@@ -682,29 +821,122 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       await loadDocument(current.document.id, pageNumber);
     setMessage("摘录已保存。可查看原文证据，或导出 Excel。");
   }
+  function beginExport() {
+    setExportScope(selectedDocuments.length ? "selected" : "current");
+    setError("");
+    setExportDialogOpen(true);
+  }
+  useEffect(() => {
+    setSelectedDocumentIds([]);
+    setExportDialogOpen(false);
+  }, [project?.id]);
   async function exportExcel(
-    mode: "individual" | "combined",
-    currentOnly = false,
+    mode: "single_sheet" | "per_document" | "individual",
+    ids: string[],
   ) {
-    if (!project) return;
+    if (!project || !ids.length) throw new Error("请先选择需要导出的文件。");
     await saveCurrent();
     const outputDir = await pickPath("folder", "选择 Excel 输出文件夹");
-    if (!outputDir || Array.isArray(outputDir)) return;
-    const active: Operation = { cancelled: false, paused: false };
+    if (!outputDir || Array.isArray(outputDir)) return false;
+    setOutputs([]);
+    setExportDirectory("");
+    const active = new OcrOperation();
     operation.current = active;
     const result = await runOcrJob<{ outputPaths: string[] }>(
       "ocr.export",
       {
         projectId: project.id,
-        documentIds: currentOnly && detail ? [detail.document.id] : undefined,
+        documentIds: ids,
         mode,
         outputDir,
       },
       (id) => attachJob(active, id),
       (event) => setMessage(event.message),
     );
+    if (!result.outputPaths.length) throw new Error("未生成导出文件，请重试。");
     setOutputs(result.outputPaths);
-    setMessage("Excel 已导出，目录中列出了未完成文件和页面。");
+    setExportDirectory(outputDir);
+    setMessage("");
+    return true;
+  }
+  function renderTaskProgress() {
+    return (
+      message && (
+        <div role="status" className="ocr-progress">
+          <div>
+            {message}
+            {busy && progress.total > 0 && (
+              <progress
+                max={progress.total}
+                value={progress.current}
+                aria-label="识别进度"
+              />
+            )}
+          </div>
+          {busy && operation.current && (
+            <div>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={controlling || operation.current.cancelled}
+                onClick={() =>
+                  void setOperationPaused().catch((reason) =>
+                    setError(errorText(reason)),
+                  )
+                }
+              >
+                {paused ? "继续" : "暂停"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  void cancelOperation().catch((reason) =>
+                    setError(errorText(reason)),
+                  )
+                }
+              >
+                取消任务
+              </Button>
+            </div>
+          )}
+        </div>
+      )
+    );
+  }
+  function renderExportNotice() {
+    if (!outputs.length) return null;
+    return (
+      <div className="ocr-export-notice" role="status" aria-label="导出结果">
+        <strong>导出文件成功</strong>
+        <span>导出目录：{exportDirectory}</span>
+        <Button
+          size="sm"
+          variant="link"
+          onClick={() =>
+            void openOutput(exportDirectory).catch((reason) =>
+              setError(errorText(reason)),
+            )
+          }
+        >
+          打开导出目录
+        </Button>
+        {outputs.map((path) => (
+          <Button
+            key={path}
+            size="sm"
+            variant="link"
+            onClick={() =>
+              void openOutput(path).catch((reason) =>
+                setError(errorText(reason)),
+              )
+            }
+          >
+            {path.split(/[\\/]/).at(-1)}
+          </Button>
+        ))}
+      </div>
+    );
   }
   function editTable(id: string, update: (table: OcrTable) => OcrTable) {
     editPage((page) => ({
@@ -737,6 +969,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                   void run(async () => {
                     await selectPage(number);
                     await changeStep(0);
+                    setShowOriginal(true);
                   })
                 }
               >
@@ -756,23 +989,6 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
         title={tool?.name ?? "OCR"}
         detail="把单证、合同和扫描表格转成可编辑的 Excel；需要时再做场景摘录。"
       />
-      <div className="ocr-service-bar">
-        <span>
-          OCR：
-          {config
-            ? config.ocr.ready
-              ? `已配置 ${config.ocr.engine}`
-              : "未配置"
-            : "检查中"}
-        </span>
-        <span>
-          AI：{config ? (config.llm.ready ? "已配置" : "未配置") : "检查中"}
-        </span>
-        <Link to="/settings">全局设置</Link>
-        <span className="ocr-muted">
-          结构恢复可能使用全局 AI；单纯识别无需选择场景。
-        </span>
-      </div>
       {error && (
         <div role="alert" className="ocr-alert">
           <span>{error}</span>
@@ -781,6 +997,21 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
           </Button>
         </div>
       )}
+      <StepIndicator
+        className="ocr-steps"
+        ariaLabel="OCR 处理步骤"
+        current={step}
+        showCompleted={false}
+        steps={[
+          { key: "recognize", label: "原文识别", disabled: busy },
+          {
+            key: "extract",
+            label: "场景摘录",
+            disabled: busy || !detail?.pages.length,
+          },
+        ]}
+        onStepClick={(next) => void run(() => changeStep(next))}
+      />
       <Card className="ocr-project-bar">
         <CardContent>
           <label>
@@ -877,21 +1108,6 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
         </div>
       ) : (
         <>
-          <StepIndicator
-            className="ocr-steps"
-            ariaLabel="OCR 处理步骤"
-            current={step}
-            showCompleted={false}
-            steps={[
-              { key: "recognize", label: "原文识别", disabled: busy },
-              {
-                key: "extract",
-                label: "判断摘录",
-                disabled: busy || !detail?.pages.length,
-              },
-            ]}
-            onStepClick={(next) => void run(() => changeStep(next))}
-          />
           {step === 0 && (
             <>
               <FileDropInput
@@ -919,113 +1135,138 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                     导入文件夹
                   </Button>
                 </div>
-                <div>
-                  <Button
-                    variant="outline"
-                    disabled={busy || !documents.length}
-                    onClick={() => void run(() => recognize(false, true))}
-                  >
-                    <ScanText />
-                    识别全部未完成页
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={busy || !documents.length}
-                    onClick={() => void run(() => exportExcel("individual"))}
-                  >
-                    逐文件导出
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={busy || !documents.length}
-                    onClick={() => void run(() => exportExcel("combined"))}
-                  >
-                    项目合并导出
-                  </Button>
-                </div>
               </div>
             </>
-          )}
-          {message && (
-            <div role="status" className="ocr-progress">
-              <div>
-                {message}
-                {busy && progress.total > 0 && (
-                  <progress
-                    max={progress.total}
-                    value={progress.current}
-                    aria-label="识别进度"
-                  />
-                )}
-              </div>
-              {busy && operation.current && (
-                <div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      void setOperationPaused().catch((reason) =>
-                        setError(errorText(reason)),
-                      )
-                    }
-                  >
-                    {paused ? "继续" : "暂停"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      void cancelOperation().catch((reason) =>
-                        setError(errorText(reason)),
-                      )
-                    }
-                  >
-                    取消任务
-                  </Button>
-                </div>
-              )}
-            </div>
           )}
           <div className="ocr-workspace">
             <aside className="ocr-document-list" aria-label="项目文件">
               <h2>
                 文件 <span>{documents.length}</span>
               </h2>
+              <div className="ocr-file-selection">
+                <label>
+                  <input
+                    type="checkbox"
+                    aria-label="全选项目文件"
+                    disabled={busy || !documents.length}
+                    checked={
+                      documents.length > 0 &&
+                      selectedDocuments.length === documents.length
+                    }
+                    ref={(element) => {
+                      if (element)
+                        element.indeterminate =
+                          selectedDocuments.length > 0 &&
+                          selectedDocuments.length < documents.length;
+                    }}
+                    onChange={(event) =>
+                      setSelectedDocumentIds(
+                        event.target.checked
+                          ? documents.map((document) => document.id)
+                          : [],
+                      )
+                    }
+                  />
+                  全选
+                </label>
+                <span className="ocr-muted" aria-live="polite">
+                  已选 {selectedDocuments.length} / {documents.length} 份
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy || !selectedDocuments.length}
+                  onClick={() => setSelectedDocumentIds([])}
+                >
+                  清空选择
+                </Button>
+                <Button
+                  className="ocr-export-action"
+                  aria-label="导出所选文件"
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !selectedDocuments.length}
+                  onClick={beginExport}
+                >
+                  <Download />
+                  导出文件
+                </Button>
+              </div>
+              {!detail && (
+                <div className="ocr-batch-status">
+                  {renderExportNotice()}
+                  {renderTaskProgress()}
+                </div>
+              )}
               {!documents.length && (
                 <p className="ocr-muted">导入扫描件后开始识别。</p>
               )}
-              {documents.map((item) => (
-                <button
-                  key={item.id}
-                  disabled={busy}
-                  className={`ocr-document ${detail?.document.id === item.id ? "is-selected" : ""}`}
-                  title={item.name}
-                  onClick={() =>
-                    void run(async () => {
-                      await saveCurrent();
-                      await savePromptEdits();
-                      await loadDocument(item.id);
-                      setStep(0);
-                    })
-                  }
+              <div className="ocr-document-grid" id="ocr-project-files">
+                {(filesExpanded ? documents : documents.slice(0, 9)).map(
+                  (item) => (
+                    <div className="ocr-document-card" key={item.id}>
+                      <input
+                        type="checkbox"
+                        className="ocr-file-checkbox"
+                        aria-label={`选择文件：${item.name}`}
+                        disabled={busy}
+                        checked={selectedDocumentIds.includes(item.id)}
+                        onChange={(event) =>
+                          setSelectedDocumentIds((ids) =>
+                            event.target.checked
+                              ? [...ids, item.id]
+                              : ids.filter((id) => id !== item.id),
+                          )
+                        }
+                      />
+                      <button
+                        disabled={busy}
+                        className={`ocr-document ${detail?.document.id === item.id ? "is-selected" : ""}`}
+                        title={item.name}
+                        onClick={() =>
+                          void run(async () => {
+                            await saveCurrent();
+                            await savePromptEdits();
+                            await loadDocument(item.id);
+                            setStep(0);
+                          })
+                        }
+                      >
+                        <FileScan size={18} />
+                        <span>
+                          <strong>{item.name}</strong>
+                          <small>
+                            {statusLabels[item.status] ?? "待处理"}
+                            {item.totalPages > 0
+                              ? ` · ${item.totalPages} 页`
+                              : ""}
+                          </small>
+                        </span>
+                      </button>
+                    </div>
+                  ),
+                )}
+              </div>
+              {documents.length > 9 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-expanded={filesExpanded}
+                  aria-controls="ocr-project-files"
+                  onClick={() => setFilesExpanded((value) => !value)}
                 >
-                  <FileScan size={18} />
-                  <span>
-                    <strong>{item.name}</strong>
-                    <small>
-                      {statusLabels[item.status] ?? "待处理"}
-                      {item.totalPages > 0 ? ` · ${item.totalPages} 页` : ""}
-                    </small>
-                  </span>
-                </button>
-              ))}
+                  {filesExpanded
+                    ? "收起文件"
+                    : `展开全部 ${documents.length} 份文件`}
+                </Button>
+              )}
             </aside>
             <main className="ocr-document-workspace">
               {!detail ? (
                 <div className="ocr-empty">
                   <ScanText size={36} />
                   <h2>选择一份文件</h2>
-                  <p>左侧选择文件，识别后对照扫描件校对正文和表格。</p>
+                  <p>从上方选择文件，设置页码范围后开始扫描。</p>
                 </div>
               ) : (
                 <>
@@ -1069,389 +1310,590 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                   </div>
                   {step === 0 && (
                     <>
-                      <div className="ocr-document-toolbar">
+                      <div className="ocr-scan-settings">
                         <label>
-                          扫描布局
+                          扫描范围
                           <select
-                            aria-label="扫描布局"
-                            value={layout}
+                            aria-label="扫描范围"
+                            value={scanScope}
                             disabled={busy}
                             onChange={(event) =>
-                              setLayout(event.target.value as "full" | "spread")
+                              setScanScope(event.target.value)
                             }
                           >
-                            <option value="full">整页（含横向表格）</option>
-                            <option value="spread">左右双页</option>
+                            <option value="all">全部扫描</option>
+                            <option value="custom">自定义扫描页码</option>
                           </select>
                         </label>
-                        <Button
-                          disabled={busy}
-                          onClick={() => void run(() => recognize())}
-                        >
-                          <ScanText />
-                          {detail.pages.length ? "继续识别" : "开始识别"}
-                        </Button>
-                        <Button
-                          variant="outline"
-                          disabled={busy}
-                          onClick={() => void run(() => recognize(true))}
-                        >
-                          重试本页
-                        </Button>
-                        <Button
-                          variant="outline"
-                          disabled={busy || !detail.pages.length}
-                          onClick={() =>
-                            void run(() => recognize(false, false, true))
-                          }
-                        >
-                          重新识别全文
-                        </Button>
-                        <Button
-                          variant="outline"
-                          disabled={busy || !detail.pages.length}
-                          onClick={() =>
-                            void run(() => exportExcel("individual", true))
-                          }
-                        >
-                          <Download />
-                          导出本文件
-                        </Button>
-                        <Button
-                          variant="outline"
-                          disabled={busy || !detail.pages.length}
-                          onClick={() => void run(() => changeStep(1))}
-                        >
-                          下一步：判断摘录 <ArrowRight />
-                        </Button>
-                      </div>
-                      <div className="ocr-page-navigation">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={busy || pageNumber <= 1}
-                          onClick={() =>
-                            void run(() => selectPage(pageNumber - 1))
-                          }
-                        >
-                          上一页
-                        </Button>
-                        <label>
-                          第
-                          <select
-                            aria-label="当前页"
-                            value={pageNumber}
-                            disabled={busy}
-                            onChange={(event) =>
-                              void run(() =>
-                                selectPage(Number(event.target.value)),
-                              )
-                            }
-                          >
-                            {Array.from(
-                              {
-                                length: Math.max(1, detail.document.totalPages),
-                              },
-                              (_, index) => (
-                                <option key={index} value={index + 1}>
-                                  {index + 1}
-                                </option>
-                              ),
-                            )}
-                          </select>
-                          页 / {Math.max(1, detail.document.totalPages)}
-                        </label>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={
-                            busy || pageNumber >= detail.document.totalPages
-                          }
-                          onClick={() =>
-                            void run(() => selectPage(pageNumber + 1))
-                          }
-                        >
-                          下一页
-                        </Button>
-                        <span className="ocr-muted" aria-live="polite">
-                          {saveState}
-                        </span>
-                        {saveState.startsWith("保存失败") && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() =>
-                              void saveCurrent().catch((reason) =>
-                                setError(errorText(reason)),
-                              )
-                            }
-                          >
-                            重试保存
-                          </Button>
+                        {scanScope === "custom" && (
+                          <label>
+                            扫描页码
+                            <Input
+                              aria-label="扫描页码"
+                              placeholder="例如：2-5 或 1,3-5"
+                              value={scanPages}
+                              disabled={busy}
+                              onChange={(event) =>
+                                setScanPages(event.target.value)
+                              }
+                            />
+                          </label>
                         )}
+                        <span className="ocr-muted">
+                          共 {detail.document.totalPages || "待读取"} 页 ·
+                          {scanScope === "custom"
+                            ? "重扫所选页，覆盖前确认"
+                            : "已完成页默认跳过"}
+                        </span>
                       </div>
-                      <div className="ocr-comparison">
-                        <section className="ocr-source">
-                          <div className="ocr-pane-heading">
-                            <h3>原扫描件</h3>
-                            <span>第 {pageNumber} 页</span>
-                          </div>
-                          <div className="ocr-pane-body">
-                            {sourceImage ? (
-                              <img
-                                src={sourceImage}
-                                alt={`${detail.document.name} 第 ${pageNumber} 页`}
-                              />
-                            ) : (
-                              <p className="ocr-muted">
-                                {sourceError || "正在加载扫描页…"}
-                              </p>
-                            )}
-                          </div>
-                        </section>
-                        <section className="ocr-original">
-                          <div className="ocr-pane-heading">
-                            <h3>初始原文</h3>
+                      <section
+                        className="ocr-operation-area"
+                        aria-label="扫描操作"
+                      >
+                        <div className="ocr-operation-buttons">
+                          <Button
+                            disabled={busy}
+                            onClick={() => void run(recognize)}
+                          >
+                            <ScanText />
+                            开始扫描
+                          </Button>
+                          {!!detail.pages.length && (
+                            <>
+                              <Button
+                                variant="outline"
+                                disabled={busy}
+                                aria-expanded={showOriginal}
+                                onClick={() =>
+                                  setShowOriginal((value) => !value)
+                                }
+                              >
+                                {showOriginal ? "收起原文" : "查看原文"}
+                              </Button>
+                              <Button
+                                variant="outline"
+                                disabled={busy}
+                                onClick={() => void run(() => changeStep(1))}
+                              >
+                                下一步：场景摘录 <ArrowRight />
+                              </Button>
+                              <Button
+                                className="ocr-export-action"
+                                variant="outline"
+                                disabled={busy}
+                                onClick={beginExport}
+                              >
+                                <Download />
+                                导出文件
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                        {renderExportNotice()}
+                        {renderTaskProgress()}
+                        {timingRun && <OcrTimingPanel run={timingRun} />}
+                      </section>
+                      {(!detail.pages.length || showOriginal) && (
+                        <>
+                          <div className="ocr-page-navigation">
                             <Button
                               size="sm"
-                              variant="ghost"
-                              disabled={!draft}
+                              variant="outline"
+                              disabled={busy || pageNumber <= 1}
                               onClick={() =>
-                                void navigator.clipboard
-                                  .writeText(draft?.originalText ?? "")
-                                  .then(
-                                    () => setMessage("已复制本页初始原文。"),
-                                    (reason) => setError(errorText(reason)),
-                                  )
+                                void run(() => selectPage(pageNumber - 1))
                               }
                             >
-                              <Copy />
-                              复制原文
+                              上一页
                             </Button>
-                          </div>
-                          <div className="ocr-pane-body">
-                            {!draft ? (
-                              <div className="ocr-empty">
-                                <p>
-                                  本页尚未识别。点击「开始识别」，或继续处理未完成页。
-                                </p>
-                              </div>
-                            ) : (
-                              <>
-                                <div
-                                  className="ocr-original-text"
-                                  role="region"
-                                  aria-label="本页初始原文"
-                                  tabIndex={0}
-                                >
-                                  {draft.originalText || "本页未识别到正文。"}
-                                </div>
-                                {draft.warnings.map((warning, index) => (
-                                  <p className="ocr-warning" key={index}>
-                                    {warning}
-                                  </p>
-                                ))}
-                                {draft.text !== draft.originalText && (
-                                  <details className="ocr-corrected-text">
-                                    <summary>
-                                      查看此前保存的校对正文（导出和摘录继续使用此版本）
-                                    </summary>
-                                    <div className="ocr-original-text">
-                                      {draft.text}
-                                    </div>
-                                  </details>
+                            <label>
+                              扫描件第
+                              <select
+                                aria-label="当前页"
+                                value={pageNumber}
+                                disabled={busy}
+                                onChange={(event) =>
+                                  void run(() =>
+                                    selectPage(Number(event.target.value)),
+                                  )
+                                }
+                              >
+                                {Array.from(
+                                  {
+                                    length: Math.max(
+                                      1,
+                                      detail.document.totalPages,
+                                    ),
+                                  },
+                                  (_, index) => (
+                                    <option key={index} value={index + 1}>
+                                      {index + 1}
+                                    </option>
+                                  ),
                                 )}
-                              </>
+                              </select>
+                              页 / {Math.max(1, detail.document.totalPages)}
+                            </label>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={
+                                busy || pageNumber >= detail.document.totalPages
+                              }
+                              onClick={() =>
+                                void run(() => selectPage(pageNumber + 1))
+                              }
+                            >
+                              下一页
+                            </Button>
+                            <span className="ocr-muted" aria-live="polite">
+                              {saveState}
+                            </span>
+                            {saveState.startsWith("保存失败") && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() =>
+                                  void saveCurrent().catch((reason) =>
+                                    setError(errorText(reason)),
+                                  )
+                                }
+                              >
+                                重试保存
+                              </Button>
                             )}
                           </div>
-                        </section>
-                      </div>
-                      {draft && (
-                        <section
-                          className="ocr-tables"
-                          aria-label="已识别表格校对"
-                        >
-                          <div className="ocr-table-heading">
-                            <h3>表格 · {draft.tables.length}</h3>
-                            <span className="ocr-muted">
-                              仅校对已识别表格；修改自动保存
-                            </span>
-                          </div>
-                          {draft.tables.map((table, tableIndex) => (
-                            <div className="ocr-edit-table" key={table.id}>
-                              <Input
-                                aria-label={`表格 ${tableIndex + 1} 名称`}
-                                disabled={busy}
-                                value={table.title}
-                                onChange={(event) =>
-                                  editTable(table.id, (item) => ({
-                                    ...item,
-                                    title: event.target.value,
-                                  }))
-                                }
-                              />
-                              <div className="ocr-table-scroll">
-                                <table>
-                                  <thead>
-                                    <tr>
-                                      {Array.from(
-                                        {
-                                          length: Math.max(
-                                            1,
-                                            ...table.rows.map(
-                                              (row) => row.length,
-                                            ),
+                          <div className="ocr-comparison">
+                            <section className="ocr-source">
+                              <div className="ocr-pane-heading">
+                                <h3>原扫描件</h3>
+                                <span>第 {pageNumber} 页</span>
+                              </div>
+                              <div className="ocr-pane-body">
+                                {sourceImage ? (
+                                  <img
+                                    src={sourceImage}
+                                    alt={`${detail.document.name} 第 ${pageNumber} 页`}
+                                  />
+                                ) : (
+                                  <p className="ocr-muted">
+                                    {sourceError || "正在加载扫描页…"}
+                                  </p>
+                                )}
+                              </div>
+                            </section>
+                            <section className="ocr-original">
+                              <div className="ocr-pane-heading">
+                                <div className="ocr-pane-title">
+                                  <h3>全篇原文</h3>
+                                  <span className="ocr-muted">
+                                    已扫描 {detail.pages.length} /{" "}
+                                    {detail.document.totalPages || "?"} 页
+                                  </span>
+                                </div>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={!detail.pages.length}
+                                  onClick={() =>
+                                    void navigator.clipboard
+                                      .writeText(
+                                        [...detail.pages]
+                                          .sort((a, b) => a.page - b.page)
+                                          .map(
+                                            (page) =>
+                                              `第 ${page.page} 页\n${page.originalText}`,
+                                          )
+                                          .join("\n\n"),
+                                      )
+                                      .then(
+                                        () =>
+                                          setCopyNotice(
+                                            "已复制本文件已扫描页的全部原文。",
                                           ),
-                                        },
-                                        (_, column) => (
-                                          <th key={column}>
-                                            第 {column + 1} 列{" "}
-                                            <button
-                                              disabled={busy}
-                                              aria-label={`表格 ${tableIndex + 1} 删除第 ${column + 1} 列`}
-                                              onClick={() =>
-                                                editTable(table.id, (item) => ({
-                                                  ...item,
-                                                  rows: item.rows.map((row) =>
-                                                    row.filter(
-                                                      (_, index) =>
-                                                        index !== column,
-                                                    ),
-                                                  ),
-                                                }))
-                                              }
-                                            >
-                                              ×
-                                            </button>
-                                          </th>
-                                        ),
-                                      )}
-                                      <th>行操作</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {table.rows.map((row, rowIndex) => (
-                                      <tr key={rowIndex}>
-                                        {row.map((cell, columnIndex) => (
-                                          <td key={columnIndex}>
-                                            <textarea
-                                              rows={2}
-                                              disabled={busy}
-                                              aria-label={`表格 ${tableIndex + 1} 第 ${rowIndex + 1} 行第 ${columnIndex + 1} 列`}
-                                              value={cell}
-                                              onChange={(event) =>
-                                                editTable(table.id, (item) => ({
-                                                  ...item,
-                                                  rows: item.rows.map(
-                                                    (values, index) =>
-                                                      index === rowIndex
-                                                        ? values.map(
-                                                            (value, column) =>
-                                                              column ===
-                                                              columnIndex
-                                                                ? event.target
-                                                                    .value
-                                                                : value,
-                                                          )
-                                                        : values,
-                                                  ),
-                                                }))
-                                              }
-                                            />
-                                          </td>
-                                        ))}
-                                        <td>
+                                        (reason) => setError(errorText(reason)),
+                                      )
+                                  }
+                                >
+                                  <Copy />
+                                  复制全部原文
+                                </Button>
+                              </div>
+                              <div
+                                className="ocr-pane-body ocr-document-text"
+                                role="region"
+                                aria-label="全篇初始原文"
+                                tabIndex={0}
+                              >
+                                {copyNotice && (
+                                  <p role="status" className="ocr-muted">
+                                    {copyNotice}
+                                  </p>
+                                )}
+                                {Array.from(
+                                  {
+                                    length: Math.max(
+                                      1,
+                                      detail.document.totalPages,
+                                      ...documentPages.map((page) => page.page),
+                                    ),
+                                  },
+                                  (_, index) => {
+                                    const number = index + 1;
+                                    const page = documentPages.find(
+                                      (item) => item.page === number,
+                                    );
+                                    return (
+                                      <article
+                                        key={number}
+                                        className="ocr-text-page"
+                                        aria-label={`第 ${number} 页原文`}
+                                      >
+                                        <div className="ocr-text-page-heading">
+                                          <h4>第 {number} 页</h4>
                                           <Button
                                             size="xs"
                                             variant="ghost"
                                             disabled={busy}
-                                            aria-label={`表格 ${tableIndex + 1} 删除第 ${rowIndex + 1} 行`}
                                             onClick={() =>
-                                              editTable(table.id, (item) => ({
-                                                ...item,
-                                                rows: item.rows.filter(
-                                                  (_, index) =>
-                                                    index !== rowIndex,
-                                                ),
-                                              }))
+                                              void run(() => selectPage(number))
                                             }
                                           >
-                                            删行
+                                            定位扫描页
                                           </Button>
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
+                                        </div>
+                                        {page ? (
+                                          <>
+                                            <div className="ocr-original-text">
+                                              {page.originalText ||
+                                                "本页未识别到正文。"}
+                                            </div>
+                                            {page.warnings.map(
+                                              (warning, index) => (
+                                                <p
+                                                  className="ocr-warning"
+                                                  key={index}
+                                                >
+                                                  {warning}
+                                                </p>
+                                              ),
+                                            )}
+                                            {page.text !==
+                                              page.originalText && (
+                                              <details className="ocr-corrected-text">
+                                                <summary>
+                                                  查看此前保存的校对正文（导出和摘录继续使用此版本）
+                                                </summary>
+                                                <div className="ocr-original-text">
+                                                  {page.text}
+                                                </div>
+                                              </details>
+                                            )}
+                                          </>
+                                        ) : (
+                                          <p className="ocr-muted">
+                                            本页尚未扫描，扫描后将显示原文。
+                                          </p>
+                                        )}
+                                      </article>
+                                    );
+                                  },
+                                )}
                               </div>
-                              <div className="ocr-table-actions">
-                                <Button
-                                  size="xs"
-                                  variant="outline"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    editTable(table.id, (item) => ({
-                                      ...item,
-                                      rows: [
-                                        ...item.rows,
-                                        Array(
-                                          Math.max(
-                                            1,
-                                            ...item.rows.map(
-                                              (row) => row.length,
-                                            ),
-                                          ),
-                                        ).fill(""),
-                                      ],
-                                    }))
-                                  }
-                                >
-                                  添加行
-                                </Button>
-                                <Button
-                                  size="xs"
-                                  variant="outline"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    editTable(table.id, (item) => ({
-                                      ...item,
-                                      rows: item.rows.length
-                                        ? item.rows.map((row) => [...row, ""])
-                                        : [[""]],
-                                    }))
-                                  }
-                                >
-                                  添加列
-                                </Button>
-                                <Button
-                                  size="xs"
-                                  variant="ghost"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    editPage((page) => ({
-                                      ...page,
-                                      tables: page.tables.filter(
-                                        (item) => item.id !== table.id,
-                                      ),
-                                    }))
-                                  }
-                                >
-                                  删除表格
-                                </Button>
-                              </div>
+                            </section>
+                          </div>
+                          <section
+                            className="ocr-tables"
+                            aria-label="已识别表格校对"
+                          >
+                            <div className="ocr-table-heading">
+                              <h3>表格 · {tableEntries.length}</h3>
+                              <span className="ocr-muted">
+                                按来源页选择表格；一次编辑一张，修改自动保存
+                              </span>
                             </div>
-                          ))}
-                          {!draft.tables.length && (
-                            <p className="ocr-muted">本页未识别到表格。</p>
-                          )}
-                        </section>
+                            {tableEntries.length > 0 && (
+                              <>
+                                <Input
+                                  className="ocr-table-search"
+                                  aria-label="筛选表格"
+                                  placeholder="按表名或页码查找"
+                                  value={tableSearch}
+                                  onChange={(event) =>
+                                    setTableSearch(event.target.value)
+                                  }
+                                />
+                                <div
+                                  className="ocr-table-directory"
+                                  role="region"
+                                  aria-label="表格目录"
+                                >
+                                  {visibleTableEntries.map((entry) => {
+                                    const columns = Math.max(
+                                      0,
+                                      ...entry.table.rows.map(
+                                        (row) => row.length,
+                                      ),
+                                    );
+                                    return (
+                                      <button
+                                        type="button"
+                                        key={entry.key}
+                                        aria-pressed={
+                                          activeTable?.key === entry.key
+                                        }
+                                        disabled={busy}
+                                        onClick={() =>
+                                          void run(async () => {
+                                            if (entry.page !== pageNumber)
+                                              await selectPage(entry.page);
+                                            setSelectedTableKey(entry.key);
+                                          })
+                                        }
+                                      >
+                                        <span className="ocr-table-page">
+                                          第 {entry.page} 页
+                                        </span>{" "}
+                                        ·{" "}
+                                        <strong>
+                                          {entry.table.title ||
+                                            `表格 ${entry.tableIndex + 1}`}
+                                        </strong>{" "}
+                                        ·{" "}
+                                        <span>
+                                          {entry.table.rows.length} 行 ×{" "}
+                                          {columns} 列
+                                        </span>
+                                      </button>
+                                    );
+                                  })}
+                                  {!visibleTableEntries.length && (
+                                    <p className="ocr-muted">
+                                      没有匹配的表格。
+                                    </p>
+                                  )}
+                                </div>
+                              </>
+                            )}
+                            {tableEntries.length > 0 && !activeTable && (
+                              <p className="ocr-muted">
+                                从目录选择一张表格查看或校对。
+                              </p>
+                            )}
+                            {draft?.tables.map(
+                              (table, tableIndex) =>
+                                activeTable?.key ===
+                                  `${pageNumber}:${table.id}` && (
+                                  <div
+                                    className="ocr-edit-table"
+                                    key={`${pageNumber}:${table.id}`}
+                                    role="region"
+                                    aria-label="表格编辑器"
+                                  >
+                                    <h4 className="ocr-table-editor-heading">
+                                      第 {pageNumber} 页 ·{" "}
+                                      {table.title || `表格 ${tableIndex + 1}`}
+                                    </h4>
+                                    <Input
+                                      aria-label={`表格 ${tableIndex + 1} 名称`}
+                                      disabled={busy}
+                                      value={table.title}
+                                      onChange={(event) =>
+                                        editTable(table.id, (item) => ({
+                                          ...item,
+                                          title: event.target.value,
+                                        }))
+                                      }
+                                    />
+                                    <div
+                                      className="ocr-table-scroll"
+                                      role="region"
+                                      aria-label="表格内容，可横向和纵向滚动"
+                                      tabIndex={0}
+                                    >
+                                      <table>
+                                        <thead>
+                                          <tr>
+                                            {Array.from(
+                                              {
+                                                length: Math.max(
+                                                  1,
+                                                  ...table.rows.map(
+                                                    (row) => row.length,
+                                                  ),
+                                                ),
+                                              },
+                                              (_, column) => (
+                                                <th key={column}>
+                                                  第 {column + 1} 列{" "}
+                                                  <button
+                                                    disabled={busy}
+                                                    aria-label={`表格 ${tableIndex + 1} 删除第 ${column + 1} 列`}
+                                                    onClick={() =>
+                                                      editTable(
+                                                        table.id,
+                                                        (item) => ({
+                                                          ...item,
+                                                          rows: item.rows.map(
+                                                            (row) =>
+                                                              row.filter(
+                                                                (_, index) =>
+                                                                  index !==
+                                                                  column,
+                                                              ),
+                                                          ),
+                                                        }),
+                                                      )
+                                                    }
+                                                  >
+                                                    ×
+                                                  </button>
+                                                </th>
+                                              ),
+                                            )}
+                                            <th>行操作</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {table.rows.map((row, rowIndex) => (
+                                            <tr key={rowIndex}>
+                                              {row.map((cell, columnIndex) => (
+                                                <td key={columnIndex}>
+                                                  <textarea
+                                                    rows={2}
+                                                    disabled={busy}
+                                                    aria-label={`表格 ${tableIndex + 1} 第 ${rowIndex + 1} 行第 ${columnIndex + 1} 列`}
+                                                    value={cell}
+                                                    onChange={(event) =>
+                                                      editTable(
+                                                        table.id,
+                                                        (item) => ({
+                                                          ...item,
+                                                          rows: item.rows.map(
+                                                            (values, index) =>
+                                                              index === rowIndex
+                                                                ? values.map(
+                                                                    (
+                                                                      value,
+                                                                      column,
+                                                                    ) =>
+                                                                      column ===
+                                                                      columnIndex
+                                                                        ? event
+                                                                            .target
+                                                                            .value
+                                                                        : value,
+                                                                  )
+                                                                : values,
+                                                          ),
+                                                        }),
+                                                      )
+                                                    }
+                                                  />
+                                                </td>
+                                              ))}
+                                              <td>
+                                                <Button
+                                                  size="xs"
+                                                  variant="ghost"
+                                                  disabled={busy}
+                                                  aria-label={`表格 ${tableIndex + 1} 删除第 ${rowIndex + 1} 行`}
+                                                  onClick={() =>
+                                                    editTable(
+                                                      table.id,
+                                                      (item) => ({
+                                                        ...item,
+                                                        rows: item.rows.filter(
+                                                          (_, index) =>
+                                                            index !== rowIndex,
+                                                        ),
+                                                      }),
+                                                    )
+                                                  }
+                                                >
+                                                  删行
+                                                </Button>
+                                              </td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                    <div className="ocr-table-actions">
+                                      <Button
+                                        size="xs"
+                                        variant="outline"
+                                        disabled={busy}
+                                        onClick={() =>
+                                          editTable(table.id, (item) => ({
+                                            ...item,
+                                            rows: [
+                                              ...item.rows,
+                                              Array(
+                                                Math.max(
+                                                  1,
+                                                  ...item.rows.map(
+                                                    (row) => row.length,
+                                                  ),
+                                                ),
+                                              ).fill(""),
+                                            ],
+                                          }))
+                                        }
+                                      >
+                                        添加行
+                                      </Button>
+                                      <Button
+                                        size="xs"
+                                        variant="outline"
+                                        disabled={busy}
+                                        onClick={() =>
+                                          editTable(table.id, (item) => ({
+                                            ...item,
+                                            rows: item.rows.length
+                                              ? item.rows.map((row) => [
+                                                  ...row,
+                                                  "",
+                                                ])
+                                              : [[""]],
+                                          }))
+                                        }
+                                      >
+                                        添加列
+                                      </Button>
+                                      <Button
+                                        size="xs"
+                                        variant="ghost"
+                                        disabled={busy}
+                                        onClick={() =>
+                                          editPage((page) => ({
+                                            ...page,
+                                            tables: page.tables.filter(
+                                              (item) => item.id !== table.id,
+                                            ),
+                                          }))
+                                        }
+                                      >
+                                        删除表格
+                                      </Button>
+                                    </div>
+                                  </div>
+                                ),
+                            )}
+                            {!tableEntries.length && (
+                              <p className="ocr-muted">
+                                本文件已扫描页中未识别到表格。
+                              </p>
+                            )}
+                          </section>
+                        </>
                       )}
                     </>
                   )}
                   {step === 1 && (
                     <Card className="ocr-extraction">
                       <CardHeader>
-                        <CardTitle>判断摘录</CardTitle>
+                        <CardTitle>场景摘录</CardTitle>
                         <div className="ocr-extraction-toolbar">
                           <Button
                             variant="outline"
@@ -1462,17 +1904,18 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                             返回原文识别
                           </Button>
                           <Button
+                            className="ocr-export-action"
                             variant="outline"
                             size="sm"
                             disabled={busy || !detail.pages.length}
-                            onClick={() =>
-                              void run(() => exportExcel("individual", true))
-                            }
+                            onClick={beginExport}
                           >
                             <Download />
-                            导出本文件
+                            导出文件
                           </Button>
                         </div>
+                        {renderExportNotice()}
+                        {renderTaskProgress()}
                         <p className="ocr-muted">
                           选择场景，查看并编辑完整提示词。修改只在当前项目保存。
                         </p>
@@ -1626,28 +2069,120 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
               )}
             </main>
           </div>
-          {outputs.length > 0 && (
-            <Card className="ocr-outputs">
-              <CardContent>
-                <h3>导出文件</h3>
-                {outputs.map((path) => (
-                  <Button
-                    key={path}
-                    variant="link"
-                    onClick={() =>
-                      void openOutput(path).catch((reason) =>
-                        setError(errorText(reason)),
-                      )
-                    }
-                  >
-                    {path.split(/[\\/]/).at(-1)}
-                  </Button>
-                ))}
-              </CardContent>
-            </Card>
-          )}
         </>
       )}
+      <Dialog
+        open={exportDialogOpen}
+        onOpenChange={(open) => {
+          if (!busy) setExportDialogOpen(open);
+        }}
+      >
+        <DialogContent className="ocr-export-dialog" showCloseButton={!busy}>
+          <DialogHeader>
+            <DialogTitle>导出文件</DialogTitle>
+            <DialogDescription>
+              按文件区的勾选结果导出，也可切换范围和 Excel 排列方式。
+            </DialogDescription>
+          </DialogHeader>
+          <label>
+            导出范围
+            <select
+              aria-label="导出范围"
+              value={exportScope}
+              disabled={busy}
+              onChange={(event) =>
+                setExportScope(event.target.value as typeof exportScope)
+              }
+            >
+              <option value="selected" disabled={!selectedDocuments.length}>
+                已勾选的 {selectedDocuments.length} 份文件
+              </option>
+              <option value="current" disabled={!detail}>
+                当前查看的文件
+              </option>
+              <option value="all">项目全部 {documents.length} 份文件</option>
+            </select>
+          </label>
+          <div className="ocr-export-file-list" aria-label="本次导出文件">
+            {exportDocuments.map((document) => (
+              <div key={document.id}>{document.name}</div>
+            ))}
+          </div>
+          <fieldset disabled={busy}>
+            <legend>导出方式</legend>
+            {(
+              [
+                [
+                  "single_sheet",
+                  "一个 Excel，一个 Sheet",
+                  "按文件和页码分区，依次保留全文、表格和摘录；各表格保留原行列。",
+                ],
+                [
+                  "per_document",
+                  "一个 Excel，多个 Sheet",
+                  "每份文件一个 Sheet，页内原文、表格和摘录按顺序排列。",
+                ],
+                [
+                  "individual",
+                  "多个 Excel",
+                  "每份文件一个 Excel，原文、表格及摘录分别建工作表。",
+                ],
+              ] as const
+            ).map(([value, label, description]) => (
+              <label className="ocr-export-mode" key={value}>
+                <input
+                  type="radio"
+                  name="ocr-export-mode"
+                  value={value}
+                  checked={exportMode === value}
+                  onChange={() => setExportMode(value)}
+                />
+                <span>
+                  <strong>{label}</strong>
+                  <small>{description}</small>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+          {exportDocuments.some(
+            (document) => document.status !== "completed",
+          ) && (
+            <p className="ocr-muted">
+              包含未完成扫描或待校对的文件，导出会保留相应提示；尚未扫描的页不会冒充识别结果。
+            </p>
+          )}
+          {error && (
+            <p role="alert" className="ocr-warning">
+              {error}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={busy}
+              onClick={() => setExportDialogOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={busy || !exportDocuments.length}
+              onClick={() =>
+                void run(async () => {
+                  if (
+                    await exportExcel(
+                      exportMode,
+                      exportDocuments.map((document) => document.id),
+                    )
+                  )
+                    setExportDialogOpen(false);
+                })
+              }
+            >
+              选择目录并导出
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

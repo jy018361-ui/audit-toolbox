@@ -3,6 +3,8 @@ import { ocrResponseSchemas } from "./ocrTypes";
 import { errorText } from "./lib/errors";
 import type { JobEvent } from "./types";
 
+export type OcrJobTiming = { startMs: number; totalMs: number };
+
 function parseOcrResponse<T>(method: string, value: unknown): T {
   const schema = ocrResponseSchemas[method];
   if (!schema) throw new Error("未找到对应的 OCR 接口。");
@@ -20,9 +22,12 @@ export async function ocrCall<T>(method: string, params: Record<string, unknown>
 export async function runOcrJob<T>(
   method: string, params: Record<string, unknown>,
   onJob?: (id: string) => void, onEvent?: (event: JobEvent) => void,
+  onTiming?: (timing: OcrJobTiming) => void,
 ): Promise<T> {
   if (!["ocr.recognize_page", "ocr.extract", "ocr.export"].includes(method)) throw new Error("未找到对应的 OCR 任务。");
   let jobId: string | undefined;
+  const started = performance.now();
+  let startMs = 0;
   const early: JobEvent[] = [];
   let settle: (event: JobEvent) => void = () => {};
   const off = await listenJobEvents((event) => {
@@ -33,6 +38,7 @@ export async function runOcrJob<T>(
   try {
     // Construct after job_start succeeds, so a start rejection cannot orphan a rejected promise.
     jobId = await jobStart(method, params);
+    startMs = performance.now() - started;
     return await new Promise<T>((resolve, reject) => {
       settle = (event) => {
         onEvent?.(event);
@@ -46,5 +52,8 @@ export async function runOcrJob<T>(
       onJob?.(jobId!);
       early.filter((event) => event.jobId === jobId).forEach(settle);
     });
-  } finally { off(); }
+  } finally {
+    off();
+    onTiming?.({ startMs: jobId ? startMs : performance.now() - started, totalMs: performance.now() - started });
+  }
 }

@@ -679,10 +679,10 @@ pub(crate) fn toolbox_llm_request(prompt: &str, text: &str, image: Option<&str>,
     global["llm"]["__rejectTruncated"] = json!(true);
     let llm = audipick_llm_config(&global);
     if !llm["enabled"].as_bool().unwrap_or(false) {
-        return Err(error("LLM_DISABLED", "工具箱全局 AI 尚未启用，请在设置中配置。", None));
+        return Err(error("LLM_DISABLED", "统一 LLM 尚未启用，请在设置中配置。", None));
     }
     if image.is_some() && llm["api_type"] == "dify_chat" {
-        return Err(error("OCR_MODEL_UNSUPPORTED", "当前全局 AI 接口不支持页面图片。", None));
+        return Err(error("OCR_MODEL_UNSUPPORTED", "当前统一 LLM 接口不支持页面图片。", None));
     }
     let content = request_llm(&llm, prompt, text, image)?;
     if content.trim().is_empty() {

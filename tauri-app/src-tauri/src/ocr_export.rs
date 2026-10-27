@@ -220,6 +220,221 @@ fn status_label(status: &str) -> &str {
         _ => "状态待确认",
     }
 }
+fn section_row(s: &mut Worksheet, index: &mut u32, values: &[String]) -> Result<(), AppError> {
+    let first = *index;
+    row(s, index, values)?;
+    s.set_row_format(
+        first,
+        &Format::new().set_bold().set_background_color(0xEAF2F1),
+    )
+    .map_err(xlsx_error)?;
+    Ok(())
+}
+
+/// Keep unlike table schemas in separate blocks. All content is written as
+/// strings, including long identifiers and text starting with an Excel formula.
+fn document_blocks(
+    store: &Store,
+    doc: &Document,
+    s: &mut Worksheet,
+    r: &mut u32,
+    pause: &PauseCheckpoint,
+) -> Result<(), AppError> {
+    pause.wait()?;
+    section_row(
+        s,
+        r,
+        &[
+            "来源文件".into(),
+            doc.name.clone(),
+            "状态".into(),
+            status_label(&doc.status).into(),
+        ],
+    )?;
+    let pages = store.pages(&doc.id)?;
+    let total = doc
+        .total_pages
+        .max(pages.iter().map(|page| page.page).max().unwrap_or(0));
+    if total == 0 {
+        row(s, r, &["页数待准备，尚未扫描".into()])?;
+    }
+    for number in 1..=total {
+        pause.wait()?;
+        let Some(page) = pages.iter().find(|page| page.page == number) else {
+            section_row(
+                s,
+                r,
+                &[
+                    "来源文件".into(),
+                    doc.name.clone(),
+                    "来源页码".into(),
+                    number.to_string(),
+                    "尚未扫描".into(),
+                ],
+            )?;
+            continue;
+        };
+        section_row(
+            s,
+            r,
+            &[
+                "来源文件".into(),
+                doc.name.clone(),
+                "来源页码".into(),
+                number.to_string(),
+                "完整原文".into(),
+            ],
+        )?;
+        for text in page.text.split('\n') {
+            pause.wait()?;
+            row(s, r, &[text.into()])?;
+        }
+        for warning in &page.warnings {
+            row(s, r, &[format!("待校对：{warning}")])?;
+        }
+        for (index, table) in page.tables.iter().enumerate() {
+            pause.wait()?;
+            section_row(
+                s,
+                r,
+                &[
+                    "表格".into(),
+                    if table.title.is_empty() {
+                        format!("表格 {}", index + 1)
+                    } else {
+                        table.title.clone()
+                    },
+                    "来源页码".into(),
+                    number.to_string(),
+                ],
+            )?;
+            let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0);
+            if columns > 16384 {
+                return Err(failure(
+                    "OCR_EXPORT_COLUMNS",
+                    "表格超过 Excel 列数限制，请拆分表格后导出。",
+                ));
+            }
+            for column in 0..columns {
+                s.set_column_width(column as u16, 26).map_err(xlsx_error)?;
+                s.set_column_format(
+                    column as u16,
+                    &Format::new().set_text_wrap().set_num_format("@"),
+                )
+                .map_err(xlsx_error)?;
+            }
+            for cells in &table.rows {
+                pause.wait()?;
+                row(s, r, cells)?;
+            }
+            row(s, r, &[])?;
+        }
+    }
+    for extraction in store.extractions(&doc.id)? {
+        pause.wait()?;
+        section_row(
+            s,
+            r,
+            &[
+                "场景摘录".into(),
+                scenario_label(extraction["scenarioId"].as_str().unwrap_or("")).into(),
+                if extraction["stale"] == true {
+                    "原文已修改，摘录需要更新".into()
+                } else {
+                    "摘录结果".into()
+                },
+            ],
+        )?;
+        let rows: Vec<Value> = extraction["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(readable_extraction_row)
+            .collect();
+        let mut columns: Vec<(String, String)> = extraction["columns"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|column| {
+                let key = column["key"].as_str()?;
+                if !visible_field(key) {
+                    return None;
+                }
+                let label = column["label"].as_str().unwrap_or(key);
+                Some((
+                    key.into(),
+                    if label == key {
+                        field_label(key)
+                    } else {
+                        label
+                    }
+                    .into(),
+                ))
+            })
+            .collect();
+        let mut seen: BTreeSet<String> = columns.iter().map(|column| column.0.clone()).collect();
+        for data in &rows {
+            if let Some(object) = data.as_object() {
+                for key in object.keys() {
+                    if seen.insert(key.clone()) {
+                        columns.push((key.clone(), field_label(key).into()));
+                    }
+                }
+            }
+        }
+        row(
+            s,
+            r,
+            &columns
+                .iter()
+                .map(|column| column.1.clone())
+                .collect::<Vec<_>>(),
+        )?;
+        for data in rows {
+            pause.wait()?;
+            row(
+                s,
+                r,
+                &columns
+                    .iter()
+                    .map(|(key, _)| value_text(&data[key]))
+                    .collect::<Vec<_>>(),
+            )?;
+        }
+    }
+    row(s, r, &[])?;
+    Ok(())
+}
+
+fn build_sectioned(
+    store: &Store,
+    docs: &[Document],
+    single_sheet: bool,
+    pause: &PauseCheckpoint,
+) -> Result<Vec<u8>, AppError> {
+    let mut book = Workbook::new();
+    let mut names = BTreeSet::new();
+    if single_sheet {
+        let s = sheet(&mut book, "OCR汇总", &mut names)?;
+        let mut r = 0;
+        for doc in docs {
+            document_blocks(store, doc, s, &mut r, pause)?;
+        }
+    } else {
+        for doc in docs {
+            let name = Path::new(&doc.name)
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy();
+            let s = sheet(&mut book, &name, &mut names)?;
+            let mut r = 0;
+            document_blocks(store, doc, s, &mut r, pause)?;
+        }
+    }
+    pause.wait()?;
+    book.save_to_buffer().map_err(xlsx_error)
+}
+
 fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Vec<u8>, AppError> {
     let mut book = Workbook::new();
     let mut names = BTreeSet::new();
@@ -579,15 +794,18 @@ pub(crate) fn export(
     if !dir.is_dir() {
         return Err(failure("OCR_OUTPUT_DIR", "请选择有效的输出目录。"));
     }
-    let combined = match p["mode"].as_str() {
-        Some("combined") => true,
-        Some("individual") => false,
-        _ => return Err(failure("OCR_EXPORT_MODE", "请选择按文件或项目合并导出。")),
-    };
+    let mode = p["mode"].as_str().unwrap_or("");
+    if !matches!(mode, "combined" | "individual" | "single_sheet" | "per_document") {
+        return Err(failure("OCR_EXPORT_MODE", "请选择一个工作表、按文件分工作表或分别导出 Excel。"));
+    }
     let mut outputs = vec![];
-    if combined {
+    if mode != "individual" {
         progress("export", 0, 1, "正在生成项目 Excel");
-        let bytes = build(store, &docs, pause)?;
+        let bytes = match mode {
+            "single_sheet" => build_sectioned(store, &docs, true, pause)?,
+            "per_document" => build_sectioned(store, &docs, false, pause)?,
+            _ => build(store, &docs, pause)?,
+        };
         outputs.push(publish(
             dir,
             &format!("{}_OCR", project_data["name"].as_str().unwrap_or("项目")),
@@ -663,6 +881,7 @@ mod tests {
             .save_page(
                 &doc.id,
                 Page {
+                    metadata: Default::default(),
                     page: 1,
                     text: long.clone(),
                     original_text: String::new(),
@@ -717,6 +936,115 @@ mod tests {
                 .flatten()
                 .any(|c| c.to_string().contains("未完成页：2"))
         );
+    }
+    #[test]
+    fn selected_documents_support_single_sheet_per_document_and_individual_workbooks() {
+        use crate::ocr_store::{Page, Table};
+        use calamine::{Data, Reader};
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("db")).unwrap();
+        let project = store.save_project(&json!({"name":"十二份扫描件"})).unwrap();
+        let mut docs = Vec::new();
+        let long = "长".repeat(70000);
+        for index in 1..=12 {
+            let source = dir.path().join(format!("单证{index}.pdf"));
+            fs::write(&source, b"synthetic").unwrap();
+            let doc = store
+                .import(project["id"].as_str().unwrap(), &source)
+                .unwrap();
+            store
+                .prepare(&doc.id, if index == 1 { 2 } else { 1 })
+                .unwrap();
+            store
+                .save_page(
+                    &doc.id,
+                    Page {
+                        page: 1,
+                        text: if index == 1 {
+                            long.clone()
+                        } else {
+                            format!("第{index}份专属正文")
+                        },
+                        original_text: String::new(),
+                        revision: 0,
+                        status: "completed".into(),
+                        warnings: vec![],
+                        metadata: Default::default(),
+                        tables: vec![Table {
+                            id: "table".into(),
+                            title: format!("表{index}"),
+                            rows: vec![vec![
+                                "00012345678901234567890".into(),
+                                "=1+2".into(),
+                                format!("来自{index}"),
+                            ]],
+                        }],
+                        original_tables: vec![],
+                    },
+                    0,
+                    true,
+                )
+                .unwrap();
+            docs.push(doc);
+        }
+        store.save_extraction(&json!({"documentId":docs[0].id,"sourceRevision":1,"scenarioId":"custom","columns":[{"key":"amount","label":"金额"}],"rows":[{"amount":"00100","_trace":"不可导出内部字段"}],"prompts":[{"id":"x","label":"内部","prompt":"不可导出提示词"}]})).unwrap();
+        let selected = vec![docs[0].id.clone(), docs[11].id.clone()];
+        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        for mode in ["single_sheet", "per_document", "individual"] {
+            let result = export(&store, &json!({"projectId":project["id"],"documentIds":selected,"mode":mode,"outputDir":dir.path()}), &|_,_,_,_|{}, &pause).unwrap();
+            assert_eq!(result["documentCount"], 2);
+            assert_eq!(result["partial"], true);
+            let outputs = result["outputPaths"].as_array().unwrap();
+            assert_eq!(outputs.len(), if mode == "individual" { 2 } else { 1 });
+            let mut all = String::new();
+            for output in outputs {
+                let mut book = calamine::open_workbook_auto(output.as_str().unwrap()).unwrap();
+                let names = book.sheet_names();
+                if mode == "single_sheet" {
+                    assert_eq!(names.len(), 1);
+                }
+                if mode == "per_document" {
+                    assert_eq!(names.len(), 2);
+                }
+                let mut literal_formula = false;
+                let mut identifier = false;
+                let mut restored_long = String::new();
+                for name in names {
+                    let range = book.worksheet_range(&name).unwrap();
+                    for cells in range.rows() {
+                        for cell in cells {
+                            if cell == &Data::String("=1+2".into()) {
+                                literal_formula = true;
+                            }
+                            if cell == &Data::String("00012345678901234567890".into()) {
+                                identifier = true;
+                            }
+                            let text = cell.to_string();
+                            if mode != "individual"
+                                && text.starts_with('长')
+                                && text.chars().all(|ch| ch == '长')
+                            {
+                                restored_long.push_str(&text);
+                            }
+                            all.push_str(&text);
+                            all.push('\n');
+                        }
+                    }
+                }
+                assert!(literal_formula && identifier);
+                if mode != "individual" {
+                    assert_eq!(restored_long, long);
+                }
+            }
+            assert!(all.contains("第12份专属正文"));
+            assert!(!all.contains("第2份专属正文"));
+            assert!(all.contains("00100"));
+            assert!(!all.contains("不可导出"));
+            assert!(all.contains("未完成页：2") || all.contains("尚未扫描"));
+        }
+        assert!(export(&store, &json!({"projectId":project["id"],"documentIds":[],"mode":"single_sheet","outputDir":dir.path()}), &|_,_,_,_|{}, &pause).is_err());
+        let other = store.save_project(&json!({"name":"其他项目"})).unwrap();
+        assert!(export(&store, &json!({"projectId":other["id"],"documentIds":selected,"mode":"single_sheet","outputDir":dir.path()}), &|_,_,_,_|{}, &pause).is_err());
     }
     #[test]
     fn extraction_workbook_has_readable_values_without_internal_trace_or_prompts() {

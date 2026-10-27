@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { extractOcrScenario, getOcrPromptStages, loadOcrScenarios } from "./ocrScenarios";
 import { extractFinancialMetrics, FINANCIAL_METRICS_PROMPT } from "./audipickCovenantExtraction";
 import type { OcrPageData } from "./ocrTypes";
-import { OcrDocumentDetailSchema, OcrProjectSchema } from "./ocrTypes";
+import { OcrDocumentDetailSchema, OcrProjectSchema, ocrResponseSchemas } from "./ocrTypes";
 import { handlers as demoHandlers, jobHandlers as demoJobHandlers } from "./preview/demo/ocr";
 
 vi.mock("./audipickCaseLibrary", async (original) => {
@@ -11,12 +11,14 @@ vi.mock("./audipickCaseLibrary", async (original) => {
 });
 
 describe("OCR 浏览器演示契约", () => {
-  it("预置可解码 PNG、两份单证、表格、人工修订和失效摘录", () => {
+  it("预置可解码 PNG、已扫描单证、待扫描队列、表格、人工修订和失效摘录", () => {
     const saved = demoHandlers["ocr.projects"]({}) as { projects: unknown[] };
     const project = OcrProjectSchema.parse(saved.projects[0]);
     const listing = demoHandlers["ocr.documents"]({ projectId: project.id }) as { documents: { id: string }[] };
-    expect(listing.documents).toHaveLength(2);
+    expect(listing.documents.length).toBeGreaterThan(9);
     const docs = listing.documents.map((document) => OcrDocumentDetailSchema.parse(demoHandlers["ocr.document"]({ documentId: document.id })));
+    expect(docs.filter(item => item.document.status === "pending")).toHaveLength(9);
+    expect(docs.filter(item => item.document.status === "pending").every(item => !item.pages.length)).toBe(true);
     expect(docs[0].pages[0].tables[0].rows[1][1]).toBe("00123456789012345678");
     expect(docs[1].document.revision).toBeGreaterThan(docs[1].extractions[0].sourceRevision);
     const image = demoHandlers["ocr.document_bytes"]({ documentId: docs[0].document.id }) as { mimeType: string; dataBase64: string };
@@ -38,6 +40,29 @@ describe("OCR 浏览器演示契约", () => {
     expect(OcrDocumentDetailSchema.parse(demoHandlers["ocr.document"]({ documentId })).pages).toHaveLength(1);
     demoHandlers["ocr.project_delete"]({ id: created.id });
     expect(() => demoHandlers["ocr.document"]({ documentId })).toThrow("不存在");
+  });
+
+  it("多页多表演示返回同步可解码的逐页图片及十二张跨页表格", () => {
+    const documentId = "ocr-demo-multipage";
+    const document = OcrDocumentDetailSchema.parse(demoHandlers["ocr.document"]({ documentId }));
+    const images = ocrResponseSchemas["ocr.image_pages"].parse(demoHandlers["ocr.image_pages"]({ documentId })) as { pages: { page: number; imageBase64: string }[] };
+    expect(document.pages.map(page => page.page)).toEqual([1, 2, 3]);
+    expect(document.pages.flatMap(page => page.tables)).toHaveLength(12);
+    expect(images.pages.map(page => page.page)).toEqual([1, 2, 3]);
+    for (const page of images.pages) {
+      expect(Array.from(atob(page.imageBase64.replace(/^data:[^,]+,/, "")).slice(0, 8), value => value.charCodeAt(0))).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    }
+  });
+
+  it("演示导出按选择范围及三种方式返回实际选定目录中的文件清单", () => {
+    const selected = ["ocr-demo-voucher", "ocr-demo-multipage"];
+    for (const mode of ["single_sheet", "per_document", "individual"]) {
+      const events = demoJobHandlers["ocr.export"]({ projectId: "ocr-demo-general", documentIds: selected, mode, outputDir: "C:/合成输出" });
+      const result = events.at(-1)!.result as { documentCount: number; outputPaths: string[] };
+      expect(result.documentCount).toBe(2);
+      expect(result.outputPaths).toHaveLength(mode === "individual" ? 2 : 1);
+      expect(result.outputPaths.every(path => path.startsWith("C:/合成输出\\"))).toBe(true);
+    }
   });
 });
 

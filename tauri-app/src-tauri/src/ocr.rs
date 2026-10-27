@@ -12,7 +12,22 @@ use std::{
     io::Cursor,
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
+    time::Instant,
 };
+
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecognitionTimings {
+    setup_ms: f64,
+    image_ms: f64,
+    recognition_ms: f64,
+    structure_ms: f64,
+    save_ms: f64,
+    worker_ms: f64,
+}
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1000.0
+}
 
 fn required<'a>(p: &'a Value, key: &str) -> Result<&'a str, AppError> {
     p.get(key)
@@ -405,9 +420,12 @@ fn recognize_part(
     settings: &Value,
     tag: &str,
     pause: &PauseCheckpoint,
+    timings: &mut RecognitionTimings,
 ) -> Result<(String, Vec<Table>, Vec<String>, Option<String>), AppError> {
     pause.wait()?;
+    let recognition_started = Instant::now();
     let result = crate::audipick::toolbox_ocr_page(&json!({"imageBase64":image}), settings)?;
+    timings.recognition_ms += elapsed_ms(recognition_started);
     let diagnostic = result["diagnosticResponse"].as_str().map(str::to_owned);
     let text = result["text"]
         .as_str()
@@ -418,6 +436,7 @@ fn recognize_part(
     if let Some(message) = result["structureError"].as_str() {
         return Ok((text, vec![], vec![message.into()], diagnostic));
     }
+    let structure_started = Instant::now();
     // Preserve a provider's native cell grid if present; otherwise restore from the
     // image using only the global vision model. Failed layout never erases OCR text.
     let structure = if result["tables"].is_array() {
@@ -426,7 +445,7 @@ fn recognize_part(
         crate::audipick::toolbox_llm_request(STRUCTURE_PROMPT, &text, Some(image), settings)
             .and_then(|raw| parse_json(&raw))
     };
-    match structure.and_then(|v| {
+    let result = match structure.and_then(|v| {
         Ok((
             parse_tables(&v, tag)?,
             v["warnings"]
@@ -445,7 +464,9 @@ fn recognize_part(
             vec![format!("表格结构尚待校对：{}", e.user_message)],
             diagnostic,
         )),
-    }
+    };
+    timings.structure_ms += elapsed_ms(structure_started);
+    result
 }
 pub(crate) fn run_job(
     method: &str,
@@ -458,6 +479,8 @@ pub(crate) fn run_job(
     let settings = params.get("__settings").cloned().unwrap_or(json!({}));
     match method {
         "ocr.recognize_page" => {
+            let worker_started = Instant::now();
+            let mut timings = RecognitionTimings::default();
             let db = Path::new(required(&params, "__dbPath")?);
             let mut store = Store::open(db)?;
             let id = required(&params, "documentId")?;
@@ -477,9 +500,14 @@ pub(crate) fn run_job(
                 doc.total_pages as usize,
                 &format!("正在识别第 {number} 页并还原表格"),
             );
+            timings.setup_ms = elapsed_ms(worker_started);
+            let image_started = Instant::now();
             let input = required(&params, "imageBase64")?;
             let bytes = decode_base64(input)?;
-            let image = decode_image(&bytes)?;
+            let decoded = decode_image(&bytes)?;
+            let correction = crate::ocr_orientation::correct(&decoded);
+            let image = correction.image;
+            pause.wait()?;
             let segments = match params["layout"].as_str().unwrap_or("full") {
                 "full" => vec![png(&image)?],
                 "spread" => {
@@ -497,9 +525,10 @@ pub(crate) fn run_job(
                 }
                 _ => return Err(failure("OCR_LAYOUT_INVALID", "请选择整页或左右双页。")),
             };
+            timings.image_ms = elapsed_ms(image_started);
             let mut text = vec![];
             let mut tables = vec![];
-            let mut warnings = vec![];
+            let mut warnings: Vec<String> = correction.warning.into_iter().collect();
             let mut diagnostics = vec![];
             for (index, segment) in segments.iter().enumerate() {
                 let image = format!("data:image/png;base64,{segment}");
@@ -508,6 +537,7 @@ pub(crate) fn run_job(
                     &settings,
                     &format!("p{number}-s{}", index + 1),
                     pause,
+                    &mut timings,
                 )?;
                 text.push(part);
                 tables.append(&mut part_tables);
@@ -529,16 +559,22 @@ pub(crate) fn run_job(
                 }
                 .into(),
                 warnings,
+                metadata: correction.metadata,
             };
+            let save_started = Instant::now();
             let saved = store.save_page(id, page, expected, true)?;
             store.save_recognition_diagnostics(id, number, saved.revision, &diagnostics)?;
+            timings.save_ms = elapsed_ms(save_started);
+            timings.worker_ms = elapsed_ms(worker_started);
             progress(
                 "ocr",
                 number as usize,
                 doc.total_pages as usize,
                 "页面识别结果已保存",
             );
-            to_value(saved)
+            let mut result = to_value(saved)?;
+            result["timings"] = to_value(timings)?;
+            Ok(result)
         }
         "ocr.extract" => {
             progress("extract", 0, 1, "正在按当前提示词摘录");

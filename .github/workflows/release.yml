@@ -2,12 +2,20 @@ name: Build and publish E点通工具箱
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "版本标签：main 用 v2.0.0-alpha.132 等；dev 用 v2.0.0-dev.1 等"
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+concurrency:
+  group: publish-release-channels
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -15,6 +23,31 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check channel build configuration
+        run: python tauri-app/scripts/test_release_channels.py
+
+      - name: Validate channel and synchronize build identity
+        id: channel
+        shell: pwsh
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: python tauri-app/scripts/prepare_channel_release.py
+
+      - name: Refuse to replace an already published release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.channel.outputs.tag }}
+        with:
+          script: |
+            try {
+              const {data} = await github.rest.repos.getReleaseByTag({...context.repo, tag: process.env.RELEASE_TAG});
+              if (!data.draft) throw new Error('该版本已发布，请使用新的版本标签。');
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -23,38 +56,35 @@ jobs:
           cache: npm
           cache-dependency-path: tauri-app/package-lock.json
 
-      - name: Check filename and import casing
-        working-directory: tauri-app
-        run: node scripts/check_import_case.mjs
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tauri-app/src-tauri
 
       - name: Install frontend dependencies
         working-directory: tauri-app
         run: npm ci
 
-      - name: Sync version from Git tag
+      - name: Check release isolation and frontend
+        working-directory: tauri-app
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $root = Join-Path $env:GITHUB_WORKSPACE 'tauri-app'
-          $package = Join-Path $root 'package.json'
-          $cargo = Join-Path $root 'src-tauri/Cargo.toml'
-          $config = Join-Path $root 'src-tauri/tauri.conf.json'
-          $script = Join-Path $root 'scripts/build_tauri_release.py'
-          $json = Get-Content $package -Raw | ConvertFrom-Json
-          $json.version = $version
-          $json | ConvertTo-Json -Depth 20 | Set-Content $package -Encoding utf8
-          $cargoText = Get-Content $cargo -Raw -Encoding utf8
-          $cargoText = [regex]::Replace($cargoText, '(?m)^version = "[^"]+"', "version = `"$version`"", 1)
-          Set-Content $cargo $cargoText -Encoding utf8
-          $configText = Get-Content $config -Raw -Encoding utf8
-          $configText = [regex]::Replace($configText, '"version": "[^"]+"', "`"version`": `"$version`"", 1)
-          Set-Content $config $configText -Encoding utf8
-          $scriptText = Get-Content $script -Raw -Encoding utf8
-          $scriptText = [regex]::Replace($scriptText, '(?m)^VERSION = "[^"]+"', "VERSION = `"$version`"", 1)
-          Set-Content $script $scriptText -Encoding utf8
+          node --test scripts/publish_channel_release.check.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check_import_case.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+
+      - name: Run Rust tests
+        working-directory: tauri-app
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
       - name: Verify updater signing secret
         shell: pwsh
@@ -62,27 +92,39 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
-            throw '缺少仓库级 Actions Secret：TAURI_SIGNING_PRIVATE_KEY。请在 Settings → Secrets and variables → Actions → Repository secrets 中添加。'
+            throw '缺少仓库级 Actions Secret：TAURI_SIGNING_PRIVATE_KEY。'
           }
-          Write-Host 'Updater signing private key is configured.'
 
-      - name: Build and publish NSIS updater artifacts
+      - name: Build signed installer and updater artifacts as a draft
+        id: build
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # 首次云端测试发布优先保证可用性；正式版可移除该覆盖以恢复最小体积。
           CARGO_PROFILE_RELEASE_LTO: "false"
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
         with:
           projectPath: tauri-app
-          tagName: ${{ github.ref_name }}
-          releaseName: E点通工具箱 ${{ github.ref_name }}
+          tagName: ${{ steps.channel.outputs.tag }}
+          releaseCommitish: ${{ steps.channel.outputs.sha }}
+          releaseName: E点通工具箱 ${{ steps.channel.outputs.tag }}
           generateReleaseNotes: true
-          releaseDraft: false
-          prerelease: false
+          releaseDraft: true
+          prerelease: ${{ steps.channel.outputs.channel == 'dev' }}
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
           updaterJsonPreferNsis: true
           tauriScript: npm run tauri --
+
+      - name: Publish to the selected update channel
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ steps.build.outputs.releaseId }}
+          RELEASE_TAG: ${{ steps.channel.outputs.tag }}
+          RELEASE_CHANNEL: ${{ steps.channel.outputs.channel }}
+          RELEASE_SHA: ${{ steps.channel.outputs.sha }}
+        with:
+          script: |
+            const publish = require('./tauri-app/scripts/publish_channel_release.cjs');
+            await publish({github, context, fetch});

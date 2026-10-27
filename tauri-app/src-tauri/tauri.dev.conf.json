@@ -1,0 +1,29 @@
+{
+  "productName": "E点通工具箱 Dev",
+  "identifier": "com.audittoolbox.desktop.dev",
+  "app": {
+    "windows": [{
+      "label": "main",
+      "title": "E点通工具箱 Dev",
+      "width": 1440,
+      "height": 900,
+      "minWidth": 1000,
+      "minHeight": 680,
+      "center": true,
+      "resizable": true,
+      "visible": false,
+      "decorations": false,
+      "dragDropEnabled": true
+    }]
+  },
+  "bundle": {
+    "windows": { "nsis": { "startMenuFolder": "E点通工具箱 Dev" } }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/jy018361-ui/audit-toolbox/releases/download/dev-channel/latest.json"
+      ]
+    }
+  }
+}

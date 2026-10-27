@@ -235,7 +235,7 @@ fn normalized_preview_params(params: &Value) -> Value {
 }
 
 fn preview_cache_dir() -> Option<PathBuf> {
-    let dirs = ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")?;
+    let dirs = ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name())?;
     let path = dirs.cache_dir().join("fx_preview");
     fs::create_dir_all(&path).ok()?;
     Some(path)
@@ -9202,7 +9202,7 @@ fn rate_import_cell_number(cell: &Data) -> Option<f64> {
 }
 
 fn rate_cache_dir() -> Result<PathBuf, AppError> {
-    let dirs = ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
+    let dirs = ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name())
         .ok_or_else(|| error("DATA_DIR_UNAVAILABLE", "无法确定汇率缓存目录。", None))?;
     let path = dirs.cache_dir().join("fx_rates");
     fs::create_dir_all(&path).map_err(|e| {

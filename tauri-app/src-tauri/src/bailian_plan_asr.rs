@@ -81,7 +81,7 @@ impl PlanAsrConfig {
 }
 
 pub(crate) fn load_plan_key() -> Result<String, AppError> {
-    keyring::Entry::new("AuditToolbox", "bailian_plan_asr_key")
+    keyring::Entry::new(crate::release_channel::credential_service(), "bailian_plan_asr_key")
         .and_then(|entry| entry.get_password())
         .ok()
         .filter(|key| !key.trim().is_empty())

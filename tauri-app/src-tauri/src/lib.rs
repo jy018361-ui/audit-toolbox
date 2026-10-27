@@ -36,6 +36,7 @@ mod meeting_minutes;
 mod meeting_record;
 mod meeting_watch;
 mod pdf_to_excel;
+mod release_channel;
 mod resource_budget;
 mod roll_forward;
 mod spreadsheet_input;
@@ -105,7 +106,7 @@ impl AppError {
 }
 
 fn project_dirs() -> Result<ProjectDirs, AppError> {
-    ProjectDirs::from("com", "AuditToolbox", "AuditToolbox").ok_or_else(|| {
+    ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name()).ok_or_else(|| {
         AppError::new(
             "DATA_DIR_UNAVAILABLE",
             "无法确定本机数据目录。",
@@ -769,7 +770,7 @@ fn inject_roll_forward_llm(storage: &Storage, params: &mut Value) -> Result<(), 
     } else {
         "llm_api_key"
     };
-    let api_key = keyring::Entry::new("AuditToolbox", secret_name)
+    let api_key = keyring::Entry::new(crate::release_channel::credential_service(), secret_name)
         .and_then(|entry| entry.get_password())
         .unwrap_or_default();
     if let Value::Object(map) = params {
@@ -1058,7 +1059,7 @@ fn secret_get(name: String) -> Result<Option<String>, AppError> {
             None,
         ));
     }
-    match keyring::Entry::new("AuditToolbox", &name).and_then(|entry| entry.get_password()) {
+    match keyring::Entry::new(crate::release_channel::credential_service(), &name).and_then(|entry| entry.get_password()) {
         Ok(value) => Ok(Some(value)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(_) => Err(AppError::new(
@@ -1080,7 +1081,7 @@ fn secret_set(name: String, value: String) -> Result<(), AppError> {
             None,
         ));
     }
-    keyring::Entry::new("AuditToolbox", &name)
+    keyring::Entry::new(crate::release_channel::credential_service(), &name)
         .and_then(|entry| entry.set_password(&value))
         .map_err(|e| {
             AppError::new(
@@ -1112,7 +1113,7 @@ fn secret_delete(name: String) -> Result<(), AppError> {
             None,
         ));
     }
-    keyring::Entry::new("AuditToolbox", &name)
+    keyring::Entry::new(crate::release_channel::credential_service(), &name)
         .and_then(|entry| entry.delete_credential())
         .map_err(|e| {
             AppError::new(

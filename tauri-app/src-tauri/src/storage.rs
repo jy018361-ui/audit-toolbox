@@ -993,6 +993,9 @@ impl Storage {
         Ok(json!({"deleted":deleted>0,"documentId":id}))
     }
     pub fn legacy_paths_exist() -> bool {
+        if crate::release_channel::is_dev() {
+            return false;
+        }
         let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
         appdata.is_some_and(|p| {
             p.join("AuditToolbox/llm_settings.json").exists()
@@ -1162,6 +1165,10 @@ impl Storage {
         Ok(report)
     }
     fn import_legacy_defaults(&self) -> Result<(), AppError> {
+        // Dev starts with an empty store and never imports production credentials.
+        if crate::release_channel::is_dev() {
+            return Ok(());
+        }
         let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) else {
             return Ok(());
         };
@@ -1211,7 +1218,7 @@ impl Storage {
                         } else {
                             "llm_api_key"
                         };
-                    let _ = keyring::Entry::new("AuditToolbox", secret_name)
+                    let _ = keyring::Entry::new(crate::release_channel::credential_service(), secret_name)
                         .and_then(|entry| entry.set_password(secret));
                 }
                 if let Value::Object(ref mut map) = value {

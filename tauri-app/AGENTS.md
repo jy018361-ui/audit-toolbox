@@ -53,6 +53,8 @@ Tauri capability 只有 `core:default`，前端无任何直接文件权限，所
 
 ## 版本与发布
 
+- 双通道发布规则见 `../RELEASE_CHANNELS.md`。`-dev.N` 版本使用 Dev 安装身份及独立数据/凭据命名空间；其他既有版本继续使用正式通道。CI 通过 `scripts/prepare_channel_release.py` 同步版本并合并 Dev 配置，不要只修改安装标识而遗漏 Cargo 版本。
+
 - 版本号**四处必须同步**：`package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`scripts/build_tauri_release.py` 顶部 `VERSION`（产物 EXE 文件名由脚本里的 VERSION 决定）。
 - 分发只能走 Tauri CLI（`npm run tauri:build` / 发布脚本）——直接 `cargo build --release` 出来的 EXE 指向 localhost:1420，离开开发机就是白屏。发布脚本不覆盖已有 dist EXE，每版本单独产出并附 `.sha256`。
 - 发布门禁：构建后用发布 EXE 自身的 worker 入口做冷启动验收（样例在 `tests/fixtures/`），并断言无 `audit-engine.exe` 子进程、无新增 Python runtime；改业务模块要保证 worker 路径可跑通，否则打包失败。

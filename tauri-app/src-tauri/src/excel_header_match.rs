@@ -478,7 +478,7 @@ fn bigram_dice(a: &[char], b: &[char]) -> f64 {
 /// 的人工配对，下次匹配直接按机器绿采信。任何读写失败都静默降级——对照表
 /// 是锦上添花，不能拖垮主流程。
 pub(crate) fn alias_file_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
+    directories::ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name())
         .map(|dirs| dirs.data_local_dir().join("header_aliases.json"))
 }
 

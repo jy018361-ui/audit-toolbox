@@ -4339,7 +4339,7 @@ fn local_read_path(path: &Path) -> Result<PathBuf, AppError> {
     hasher.update(metadata.len().to_le_bytes());
     hasher.update(modified.to_le_bytes());
     let identity = hex::encode(hasher.finalize());
-    let dirs = ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
+    let dirs = ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name())
         .ok_or_else(|| error("DATA_DIR_UNAVAILABLE", "无法确定缓存目录。", None))?;
     let directory = dirs.cache_dir().join("ts").join("source");
     fs::create_dir_all(&directory).map_err(io_error)?;
@@ -6121,7 +6121,7 @@ fn fingerprint(
 }
 /// 缓存根目录：`%LOCALAPPDATA%/AuditToolbox/AuditToolbox/cache`。
 pub(crate) fn cache_root() -> Result<PathBuf, AppError> {
-    let dirs = ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
+    let dirs = ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name())
         .ok_or_else(|| error("DATA_DIR_UNAVAILABLE", "无法确定缓存目录。", None))?;
     Ok(dirs.cache_dir().to_path_buf())
 }
@@ -6247,7 +6247,7 @@ fn cache_sweep(params: Value) -> Result<Value, AppError> {
 }
 
 fn cache_path(tool: &str, key: &str) -> Result<PathBuf, AppError> {
-    let dirs = ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
+    let dirs = ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name())
         .ok_or_else(|| error("DATA_DIR_UNAVAILABLE", "无法确定缓存目录。", None))?;
     Ok(dirs
         .cache_dir()

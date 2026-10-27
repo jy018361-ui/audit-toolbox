@@ -1807,7 +1807,7 @@ fn request_fa_llm_inner(config: &Value, prompt: &str, text: &str) -> Result<Stri
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
         .or_else(|| {
-            keyring::Entry::new("AuditToolbox", secret_name)
+            keyring::Entry::new(crate::release_channel::credential_service(), secret_name)
                 .ok()
                 .and_then(|e| e.get_password().ok())
         })
@@ -7830,7 +7830,7 @@ mod tests {
     #[test]
     #[ignore = "requires the machine's configured LLM endpoint, credentials and network"]
     fn live_fa_review_completes_within_configured_timeout() {
-        let dirs = directories::ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
+        let dirs = directories::ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name())
             .expect("data directory");
         let db = dirs.data_local_dir().join("audit-toolbox.db");
         let connection = rusqlite::Connection::open(&db).expect("open settings database");

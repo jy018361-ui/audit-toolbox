@@ -3132,7 +3132,7 @@ fn baidu_ocr_with_keys(image: &str, ak: &str, sk: &str) -> Result<Value, AppErro
 }
 
 fn secret(name: &str) -> Option<String> {
-    keyring::Entry::new("AuditToolbox", name)
+    keyring::Entry::new(crate::release_channel::credential_service(), name)
         .ok()?
         .get_password()
         .ok()

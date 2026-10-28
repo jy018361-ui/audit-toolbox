@@ -2,7 +2,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::AppError;
 #[path = "ocr_content.rs"]
@@ -84,6 +84,7 @@ impl OcrConfig {
                 false,
             ));
         }
+        let prepared = Instant::now();
         let image_url = image_data_url(image)?;
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(20))
@@ -91,15 +92,27 @@ impl OcrConfig {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| failure("BAILIAN_OCR_NETWORK", "无法建立百炼 OCR 连接。", true))?;
-        let response = client.post(self.endpoint.clone()).bearer_auth(key.trim()).json(&json!({
+        let body = serde_json::to_vec(&json!({
             "model": self.model,
             "messages": [{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": image_url}},
                 {"type": "text", "text": prompt}
             ]}],
             "stream": false
-        })).send().map_err(|_| failure("BAILIAN_OCR_NETWORK", "百炼 OCR 请求未完成，请检查网络和 URL 后重试。", true))?;
+        })).map_err(|_| failure("BAILIAN_OCR_REQUEST", "无法准备百炼 OCR 请求。", false))?;
+        let request_bytes = body.len();
+        let request = client.post(self.endpoint.clone()).bearer_auth(key.trim())
+            .header(reqwest::header::CONTENT_TYPE, "application/json").body(body).build()
+            .map_err(|_| failure("BAILIAN_OCR_REQUEST", "无法准备百炼 OCR 请求。", false))?;
+        let prepare_ms = prepared.elapsed().as_secs_f64() * 1000.0;
+        let sent = Instant::now();
+        // Blocking reqwest returns after response headers. This interval includes
+        // DNS/TCP/TLS, upload and server work; it is NOT pure server processing.
+        let response = client.execute(request).map_err(|_| failure("BAILIAN_OCR_NETWORK", "百炼 OCR 请求未完成，请检查网络和 URL 后重试。", true))?;
+        let headers_ms = sent.elapsed().as_secs_f64() * 1000.0;
         let status = response.status();
+        let request_id = ["x-request-id", "x-dashscope-request-id"].iter()
+            .find_map(|name| response.headers().get(*name).and_then(|v| v.to_str().ok()).and_then(safe_request_id));
         if !status.is_success() {
             // 服务端错误可能回显请求、令牌或图片，不附原始响应。
             let (message, retryable) = match status.as_u16() {
@@ -126,13 +139,18 @@ impl OcrConfig {
             };
             return Err(failure("BAILIAN_OCR_HTTP", message, retryable));
         }
-        let value: Value = response.json().map_err(|_| {
+        let received = Instant::now();
+        let bytes = response.bytes().map_err(|_| failure("BAILIAN_OCR_NETWORK", "百炼 OCR 响应未接收完整，请重试。", true))?;
+        let body_ms = received.elapsed().as_secs_f64() * 1000.0;
+        let parsed = Instant::now();
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
             failure(
                 "BAILIAN_OCR_RESPONSE_INVALID",
                 "百炼 OCR 返回内容不是有效 JSON。",
                 true,
             )
         })?;
+        let parse_ms = parsed.elapsed().as_secs_f64() * 1000.0;
         if value
             .pointer("/choices/0/finish_reason")
             .and_then(Value::as_str)
@@ -155,8 +173,18 @@ impl OcrConfig {
                     true,
                 )
             })?;
-        Ok(json!({"text": text, "engine": "bailian"}))
+        let request_id = request_id.or_else(|| value["request_id"].as_str().and_then(safe_request_id));
+        Ok(json!({"text": text, "engine": "bailian", "httpTiming": {
+            "prepareMs": prepare_ms, "headersMs": headers_ms, "bodyMs": body_ms, "parseMs": parse_ms,
+            "requestBytes": request_bytes, "responseBytes": bytes.len(), "httpStatus": status.as_u16(),
+            "requestId": request_id, "model": self.model, "host": self.endpoint.host_str().unwrap_or("")
+        }}))
     }
+}
+
+fn safe_request_id(value: &str) -> Option<String> {
+    (!value.is_empty() && value.len() <= 128 && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)))
+        .then(|| value.to_owned())
 }
 
 fn image_data_url(image: &str) -> Result<String, AppError> {
@@ -199,6 +227,10 @@ mod tests {
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
 
     fn server(status: &str, body: Value) -> (String, thread::JoinHandle<String>) {
+        delayed_server(status, body, Duration::ZERO, Duration::ZERO)
+    }
+
+    fn delayed_server(status: &str, body: Value, headers_delay: Duration, body_delay: Duration) -> (String, thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let status = status.to_owned();
@@ -229,7 +261,11 @@ mod tests {
                 }
             }
             let body = body.to_string();
-            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            thread::sleep(headers_delay);
+            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nX-Request-Id: synthetic-request-123\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            stream.flush().unwrap();
+            thread::sleep(body_delay);
+            stream.write_all(body.as_bytes()).unwrap();
             String::from_utf8(bytes).unwrap()
         });
         (format!("http://{address}/compatible-mode/v1"), handle)
@@ -281,6 +317,29 @@ mod tests {
         let request=server.join().unwrap();
         let body:Value=serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["messages"][0]["content"][1]["text"],TEXT_PROMPT);
+    }
+
+    #[test]
+    fn http_timing_separates_headers_from_body_without_credentials_or_content() {
+        let (base, server) = delayed_server("200 OK", json!({"choices":[{"message":{"content":"私密合同 00123"}}]}),
+            Duration::from_millis(140), Duration::from_millis(140));
+        let result = OcrConfig::from_settings(&json!({"ocr":{"bailian_base_url":base}})).unwrap()
+            .recognize(PNG, "private-api-key").unwrap();
+        let request = server.join().unwrap();
+        let timing = &result["httpTiming"];
+        assert!(timing["headersMs"].as_f64().unwrap() >= 120.0);
+        assert!(timing["bodyMs"].as_f64().unwrap() >= 120.0);
+        assert!(timing["parseMs"].as_f64().unwrap() >= 0.0);
+        assert_eq!(timing["requestBytes"].as_u64().unwrap() as usize, request.split_once("\r\n\r\n").unwrap().1.len());
+        assert_eq!(timing["requestId"], "synthetic-request-123");
+        assert_eq!(timing["httpStatus"], 200);
+        assert_eq!(timing["model"], DEFAULT_MODEL);
+        let serialized = timing.to_string();
+        for private in ["private-api-key", PNG, "私密合同", "Authorization", "messages"] {
+            assert!(!serialized.contains(private));
+        }
+        assert!(safe_request_id("rejected secret or content").is_none());
+        assert!(safe_request_id(&"x".repeat(129)).is_none());
     }
 
     #[test]
@@ -432,7 +491,7 @@ mod tests {
                 let mut t=t.clone();t["id"]=json!(format!("p{number}-t{i}"));serde_json::from_value(t).unwrap()
             }).collect();
             let warnings:Vec<String> = parsed["warnings"].as_array().unwrap().iter().filter_map(Value::as_str).map(str::to_owned).collect();
-            summary.push(json!({"page":number,"characters":text.chars().count(),"tables":tables.len(),"warnings":warnings}));
+            summary.push(json!({"page":number,"characters":text.chars().count(),"tables":tables.len(),"warnings":warnings,"httpTiming":response["httpTiming"]}));
             fs::write(output.join(format!("page-{number:02}-parsed.json")),serde_json::to_vec_pretty(&parsed).unwrap()).unwrap();
             let page=Page{metadata:Default::default(),page:number,text,original_text:String::new(),tables,original_tables:vec![],revision:0,status:if warnings.is_empty(){"completed"}else{"needs_review"}.into(),warnings};
             let saved=store.save_page(&doc.id,page,old.map_or(0,|p|p.revision),true).unwrap();

@@ -12,6 +12,7 @@ import {
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import OcrPage from "./OcrPage";
+import { JobDialogProvider } from "./components/JobDialog";
 import { openOcrSource } from "./ocrSource";
 import type { OcrDocumentDetail, OcrProject } from "./ocrTypes";
 
@@ -222,10 +223,16 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
-async function openDocument(showOriginal = true) {
+async function openDocument(showOriginal = true, managed = false) {
   render(
     <MemoryRouter>
-      <OcrPage />
+      {managed ? (
+        <JobDialogProvider jobs={[]} nameOf={() => "OCR"}>
+          <OcrPage />
+        </JobDialogProvider>
+      ) : (
+        <OcrPage />
+      )}
     </MemoryRouter>,
   );
   const entry = await screen.findByRole("button", { name: /^合成扫描件.pdf/ });
@@ -382,7 +389,7 @@ it("开始扫描只处理未完成页，横向表格默认不拆页", async () =
         imageBase64: "aW1hZ2U=",
       }),
       expect.any(Function),
-      undefined,
+      expect.any(Function),
       expect.any(Function),
     ),
   );
@@ -704,6 +711,38 @@ function prepareConcurrentPages(latePage?: number) {
   return pending;
 }
 
+it("扫描总进度统一暂停所有页和后续派发，恢复后继续，完成前始终只有一组控制", async () => {
+  await openDocument(false, true);
+  const pending = prepareConcurrentPages();
+  fireEvent.click(screen.getByRole("button", { name: "开始扫描" }));
+  await waitFor(() => expect(pending.size).toBe(5));
+  await screen.findByRole("dialog");
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(screen.getAllByRole("button", { name: /^暂停$/ })).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: /^暂停$/ }));
+  await screen.findByRole("button", { name: "继续扫描" });
+  expect(mocks.pause).toHaveBeenCalledTimes(5);
+  await act(async () => {
+    for (const number of [2, 3, 4, 5, 6]) pending.get(number)!.finish();
+  });
+  await waitFor(() =>
+    expect(screen.getByLabelText("本文件扫描进度")).toHaveAttribute(
+      "value",
+      "5",
+    ),
+  );
+  expect(pending.has(7)).toBe(false);
+  expect(screen.queryByLabelText("识别进度")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "继续扫描" }));
+  await waitFor(() => expect(pending.has(8)).toBe(true));
+  await act(async () => {
+    pending.get(7)!.finish();
+    pending.get(8)!.finish();
+  });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByRole("button", { name: "开始扫描" })).toBeEnabled();
+});
+
 it("默认最多五页并发，乱序完成按完成数量推进，失败不阻塞其他页并显示分段耗时", async () => {
   await openDocument();
   const pending = prepareConcurrentPages();
@@ -1012,7 +1051,7 @@ it("自动方向只校正预览，重新扫描提交源图防止二次旋转", a
       layout: "full",
     }),
     expect.any(Function),
-    undefined,
+    expect.any(Function),
     expect.any(Function),
   );
   await waitFor(() =>
@@ -1461,6 +1500,48 @@ it("批量场景摘录逐文件使用同一提示词快照并分开保存结果�
   expect(screen.getByRole("status", { name: "导出结果" })).toHaveTextContent(
     "C:/输出",
   );
+});
+
+it("摘录全部失败就近列出逐文件原因和超时建议，保留原文且重试成功后清除旧错误", async () => {
+  const { records } = batchFixture();
+  records.get("d2")!.pages = [structuredClone(detail.pages[0])];
+  mocks.extract.mockRejectedValueOnce(
+    new Error("网络请求失败，请检查地址、代理和网络连接。"),
+  );
+  mocks.extract.mockRejectedValueOnce(
+    new Error("网络请求失败，请检查地址、代理和网络连接。"),
+  );
+  await openDocument(false);
+  await selectSecond();
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  const scene = await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(scene).toBeEnabled());
+  fireEvent.change(scene, { target: { value: "loan_general" } });
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "开始摘录" }));
+  const failure = await screen.findByRole("alert", {
+    name: "场景摘录失败详情",
+  });
+  expect(failure).toHaveTextContent("合成扫描件.pdf：网络请求失败");
+  expect(failure).toHaveTextContent("第二合同.pdf：网络请求失败");
+  expect(failure).toHaveTextContent("已扫描的原文仍然保留，无需重新扫描");
+  expect(failure).toHaveTextContent("统一 LLM 的连接及请求超时设置");
+  expect(
+    screen.queryByText("没有生成新的摘录结果，请检查文件扫描状态和错误提示。"),
+  ).not.toBeInTheDocument();
+  expect(mocks.job).not.toHaveBeenCalled();
+  expect(records.get("d")!.pages.length).toBeGreaterThan(0);
+  expect(records.get("d2")!.pages.length).toBeGreaterThan(0);
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "开始摘录" }));
+  await screen.findByRole("status", { name: "导出结果" });
+  expect(
+    screen.queryByRole("alert", { name: "场景摘录失败详情" }),
+  ).not.toBeInTheDocument();
 });
 
 it("批量扫描取消不会再派发下一份文件，当前已保存页保留", async () => {

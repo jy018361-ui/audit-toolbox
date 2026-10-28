@@ -13,6 +13,12 @@ import { jobCancel, jobPause, openOutput, pickPath } from "./api";
 import { ocrCall, runOcrJob } from "./ocrApi";
 import { OcrOperation, runOcrPool, OCR_CONCURRENCY } from "./ocrBatch";
 import {
+  useOcrScanProgressDialog,
+  registerOcrScanJob,
+  type OcrScanProgress,
+  type OcrScanPageState,
+} from "./ocrProgress";
+import {
   OcrTimingPanel,
   type OcrPageTiming,
   type OcrTimingRun,
@@ -86,6 +92,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     documentIds: string[];
     extractionIds: string[];
   }>();
+  const [extractionFailures, setExtractionFailures] = useState<string[]>([]);
   const [stages, setStages] = useState<OcrPromptStage[]>([]);
   const [step, setStep] = useState(0);
   useEffect(() => {
@@ -135,6 +142,16 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [timingRun, setTimingRun] = useState<OcrTimingRun>();
   const [controlling, setControlling] = useState(false);
+  const [scanView, setScanView] =
+    useState<
+      Pick<
+        OcrScanProgress,
+        "fileName" | "fileIndex" | "fileCount" | "phase" | "pages"
+      >
+    >();
+  const [scanControlError, setScanControlError] = useState("");
+  const scanDialog = useOcrScanProgressDialog();
+  const scanControls = useRef({ pause: () => {}, cancel: () => {} });
   const controllingRef = useRef(false);
   const projectRef = useRef<string | undefined>(undefined);
   const documentRef = useRef<string | undefined>(undefined);
@@ -162,6 +179,8 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     busyRef.current = true;
     setBusy(true);
     setError("");
+    setScanView(undefined);
+    setScanControlError("");
     try {
       await action();
     } catch (reason) {
@@ -441,6 +460,14 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     }
     const active = new OcrOperation();
     operation.current = active;
+    setProgress({ current: 0, total: 0 });
+    setScanView({
+      fileName: targets[0].name,
+      fileIndex: 1,
+      fileCount: targets.length,
+      phase: "preparing",
+      pages: [],
+    });
     const started = performance.now();
     setTimingRun({ started, pages: [] });
     const failed: string[] = [];
@@ -450,6 +477,14 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       for (const target of targets) {
         fileIndex++;
         await checkpoint(active);
+        setScanView({
+          fileName: target.name,
+          fileIndex,
+          fileCount: targets.length,
+          phase: "preparing",
+          pages: [],
+        });
+        setProgress({ current: 0, total: 0 });
         let source: OcrSource | undefined;
         try {
           source = await openOcrSource(target);
@@ -489,6 +524,24 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
               );
           }
           setProgress({ current: 0, total: numbers.length });
+          setScanView({
+            fileName: target.name,
+            fileIndex,
+            fileCount: targets.length,
+            phase: "scanning",
+            pages: [],
+          });
+          const updatePageState = (page: number, state: OcrScanPageState) =>
+            setScanView(
+              (view) =>
+                view && {
+                  ...view,
+                  pages: [
+                    ...view.pages.filter((item) => item.page !== page),
+                    { page, state },
+                  ].sort((a, b) => a.page - b.page),
+                },
+            );
           let finished = 0;
           const inFlight = new Set<number>();
           const updateMessage = () =>
@@ -500,6 +553,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
           await runOcrPool(numbers, async (number) => {
             await checkpoint(active);
             inFlight.add(number);
+            updatePageState(number, "preparing");
             updateMessage();
             const pageStarted = performance.now();
             const timing: OcrPageTiming = {
@@ -537,9 +591,20 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                   },
                   (jobId) => {
                     id = jobId;
+                    registerOcrScanJob(jobId);
                     attachJob(active, jobId);
+                    updatePageState(number, "running");
                   },
-                  undefined,
+                  (event) => {
+                    if (["queued", "memory_paused"].includes(event.phase))
+                      updatePageState(number, event.phase as OcrScanPageState);
+                    else if (
+                      !["completed", "failed", "cancelled"].includes(
+                        event.phase,
+                      )
+                    )
+                      updatePageState(number, "running");
+                  },
                   (jobTiming) => {
                     timing.startMs = jobTiming.startMs;
                   },
@@ -549,11 +614,14 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
               }
               timing.worker = result.timings;
               timing.status = "completed";
+              updatePageState(number, "completed");
             } catch (reason) {
               if (active.cancelled) {
                 timing.status = "cancelled";
+                updatePageState(number, "cancelled");
                 throw reason;
               }
+              updatePageState(number, "failed");
               failed.push(
                 `${target.name} 第 ${number} 页：${errorText(reason)}`,
               );
@@ -576,6 +644,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
             }
           });
           if (active.cancelled) await checkpoint(active);
+          setScanView((view) => view && { ...view, phase: "saving" });
           const updated = await ocrCall<OcrDocumentDetail>("ocr.document", {
             documentId: target.id,
           });
@@ -667,6 +736,50 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     const failure = results.find((result) => result.status === "rejected");
     if (failure?.status === "rejected") throw failure.reason;
   }
+  scanControls.current = {
+    pause: () => {
+      setScanControlError("");
+      void setOperationPaused().catch((reason) => {
+        setScanControlError(errorText(reason));
+        setError(errorText(reason));
+      });
+    },
+    cancel: () => {
+      setScanControlError("");
+      void cancelOperation().catch((reason) => {
+        setScanControlError(errorText(reason));
+        setError(errorText(reason));
+      });
+    },
+  };
+  const presentScan = scanDialog.setProgress;
+  useEffect(() => {
+    presentScan(
+      busy && scanView
+        ? {
+            ...scanView,
+            ...progress,
+            completed: progress.current,
+            paused,
+            controlling,
+            stopping: Boolean(operation.current?.cancelled),
+            error: scanControlError,
+            onPause: () => scanControls.current.pause(),
+            onCancel: () => scanControls.current.cancel(),
+          }
+        : undefined,
+    );
+  }, [
+    presentScan,
+    busy,
+    scanView,
+    progress,
+    paused,
+    controlling,
+    scanControlError,
+    message,
+  ]);
+  useEffect(() => () => presentScan(undefined), [presentScan]);
   async function persistPrompts(next: OcrPromptStage[]) {
     if (!project || !scenario) return;
     const pending = promptSavePending.current
@@ -700,6 +813,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     const next = availableScenarios.find((item) => item.id === id);
     setScenarioId(id);
     setPendingExtractionExport(undefined);
+    setExtractionFailures([]);
     setStages(next ? getOcrPromptStages(next, project?.prompts) : []);
     promptDirty.current = false;
   }
@@ -750,6 +864,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     setMessage(`场景“${name}”已保存，可从摘录场景下拉框选择。`);
   }
   async function extract() {
+    setExtractionFailures([]);
     if (!selectedDocuments.length || !scenario) return;
     if (stages.some((item) => !item.prompt.trim()))
       throw new Error("请填写每个阶段的提示词。");
@@ -830,6 +945,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
         await loadDocument(documentRef.current, pageNumber);
     }
     await checkpoint(active);
+    setExtractionFailures(failures);
     if (completedIds.length) {
       setPendingExtractionExport({ documentIds: completedIds, extractionIds });
       await exportExcel("single_sheet", completedIds, {
@@ -839,8 +955,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       setMessage(
         `已完成 ${completed} 份文件的场景摘录，Excel 已保存到目标目录。`,
       );
-    } else setMessage("没有生成新的摘录结果，请检查文件扫描状态和错误提示。");
-    if (failures.length) setError(failures.join("\n"));
+    } else setMessage("");
   }
   function beginExport() {
     if (!selectedDocuments.length) return;
@@ -880,6 +995,10 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       active = false;
     };
   }, [selectedDocumentIds, project?.id]);
+  useEffect(
+    () => setExtractionFailures([]),
+    [selectedDocumentIds, project?.id],
+  );
   useEffect(() => {
     if (detail)
       setDetailCache((values) => ({ ...values, [detail.document.id]: detail }));
@@ -991,6 +1110,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     return true;
   }
   function renderTaskProgress() {
+    if (busy && scanView && scanDialog.available) return null;
     return (
       message && (
         <div role="status" className="ocr-progress">
@@ -1711,6 +1831,33 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                           )}
                           {renderTaskProgress()}
                           {renderExportNotice()}
+                          {extractionFailures.length > 0 && (
+                            <div
+                              className="ocr-extraction-failure"
+                              role="alert"
+                              aria-label="场景摘录失败详情"
+                            >
+                              <strong>
+                                {outputs.length
+                                  ? "部分文件未完成摘录"
+                                  : "场景摘录未完成"}
+                              </strong>
+                              <ul>
+                                {extractionFailures.map((failure, index) => (
+                                  <li key={index}>{failure}</li>
+                                ))}
+                              </ul>
+                              <p>已扫描的原文仍然保留，无需重新扫描。</p>
+                              {extractionFailures.some((failure) =>
+                                /网络|超时|连接/.test(failure),
+                              ) && (
+                                <p>
+                                  请检查统一 LLM
+                                  的连接及请求超时设置；长文摘录可延长超时时间后重试。
+                                </p>
+                              )}
+                            </div>
+                          )}
                           {pendingExtractionExport && (
                             <Button
                               variant="outline"

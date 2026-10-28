@@ -7,6 +7,7 @@ import { loadTourState } from "./tourState";
 import { TOUR_COPY, formatTourText } from "./tourCopy";
 import "./success-nudge.css";
 import { isAudiPickOperationJob } from "../../audipickOperation";
+import { isOcrScanJob } from "../../ocrProgress";
 
 type SuccessNudgeProps = {
   /** App 收集到的全部任务事件（含已结束的，这里只关心 completed 的那些）。 */
@@ -47,6 +48,7 @@ export function SuccessNudge({
           // 完整读取等后台准备任务结束，不代表整个工具已完成。
           !job.background &&
           !isAudiPickOperationJob(job.jobId) &&
+          !isOcrScanJob(job.jobId) &&
           !celebratedIds.current.has(job.jobId),
       );
     if (!next) return;

@@ -9,6 +9,7 @@
 | 项目与文件 | 独立 SQLite 项目、按项目保存提示词、PDF/PNG/JPEG/BMP/多页 TIFF；选择或拖入的多个文件夹与文件混合递归导入，按实际规范路径去重、跳过不支持格式，空目录明确提示；保存源文件副本 | `ocr_store::tests`、`ocr::tests::import_`、`OcrPage.test.tsx` |
 | 上传交互 | 复用工具箱 `FileDropInput`，点击选择文件、框内选择文件夹与桌面原生拖放共用导入，悬停高亮；已有文件时可继续添加，忙碌和保活隐藏页不接收文件 | `OcrPage.test.tsx`、`useNativeFileDropZone.test.tsx`、`nativeFileDragApi.test.ts`；浏览器预览不冒充本机文件操作 |
 | 识别 | AI 视觉与百炼一次请求返回全文/表格；纯文本 OCR 可由统一 LLM 辅助还原；仅统一 LLM 配置，不继承 AudiPick 专用模型 | `audipick::tests::toolbox_`、`bailian_ocr::tests` |
+| 统一 LLM 超时 | 设置表单初值、空值保存回退及通用原生请求缺省超时为120秒；显式自定义timeout优先。用户本机Dev既有30秒值已获授权调整为120，其他配置/凭据与正式通道不变 | `AppNavigationSettings.test.tsx` 设置保存回归、本机Dev配置回读 |
 | 配置测试 | 设置页直接测试所选引擎；百度／百炼可使用草稿，AI 视觉仅使用已保存统一 LLM；内置图片、不保存草稿、显示耗时及失败原因 | `AppNavigationSettings.test.tsx`、`audipickOcrApi.test.ts`、`audipick::tests::toolbox_ocr_test_never_uses_audipick_dedicated_model` |
 | 项目与文件 | 独立 SQLite 项目、按项目保存提示词、PDF/PNG/JPEG/BMP/多页 TIFF、文件夹递归导入，保存源文件副本 | `ocr_store::tests`、`OcrPage.test.tsx` |
 | 识别 | 百炼兼容接口使用官方默认纯文字识别提示词，本地解析其返回的 Markdown／HTML 表格，不强迫模型生成 JSON；统一 AI 兼容结构结果；纯文本 OCR 可由统一 LLM 辅助还原。损坏 JSON 仅恢复确定内容并提示重试；仅统一 LLM 配置，不继承 AudiPick 专用模型 | `audipick::tests::toolbox_`、`bailian_ocr::ocr_content::tests`、`bailian_ocr::tests` |
@@ -23,6 +24,7 @@
 | Excel | 文件区多选、全选包含收起文件，选择状态与查看文件独立；仅工作区保留一个导出入口，导出弹窗列明勾选范围，不再另设当前/全部范围。支持一个 Excel 一个 Sheet（按文件/页码分区）、一个 Excel 多 Sheet（每文件一张）、多个 Excel（每文件单独、内部原文/表格/摘录分表）。保留旧合并 API，不按未知表头自动拼列。原文/原行列表格/可读摘录完整输出，缺页及过期摘录显式标记，不导出提示词或内部追踪。长内容无损续行、账号和公式字面按文本保存，不覆盖同名文件 | `OcrPage.test.tsx`、`ocr_export::tests`、`scripts/verify_ocr_workers.py`（旧合并兼容） |
 | 任务 | worker 独立进程，暂停/取消/继续；失败页保留待重试，空响应和截断不冒充完成；识别图片与摘录正文不保存到通用任务参数 | `ocrApi.test.ts`、Rust worker 路由及存储测试 |
 | 并发与耗时 | 同文件前端默认最多 5 页在途，后台 OCR 独立通道最多 5 个 worker，不经过其他重任务的串行锁；乱序完成按已处理数量推进，失败不阻塞其他页；暂停／取消覆盖全部在途任务及迟到编号，恢复唤醒全部等待者，退出后再释放文件。逐页展示渲染、提交／往返、后台排队及后端处理分段耗时，总时间包含暂停；并发耗时不相加，不混入正文和 Excel | `job_dispatch::tests`、`excel_merger::tests::ocr_dispatch_queue_time_is_attached_without_changing_other_results`、`ocrBatch.test.ts`、`ocrApi.test.ts`、`OcrPage.test.tsx`、`scripts/verify_ocr_dispatch.py` |
+| 百炼请求诊断 | 成功页返回每次请求的准备、等待响应头、接收响应及 JSON 解析耗时，请求/响应字节、HTTP 状态、模型、主机和受限格式请求编号。等待响应头包含 DNS/TCP/TLS、上传、网络返回与服务处理，不标作纯服务计算。只进入本轮 timings，不写入原文、表格或 Excel；其他引擎、旧结果和失败页不估算缺失阶段 | `bailian_ocr::tests::http_timing_separates_headers_from_body_without_credentials_or_content`、`OcrTimingPanel.test.tsx`、`ocrApi.test.ts`、`scripts/test_probe_ocr_network.py` |
 | 默认输出与命名 | `ocr.output_directory` 复用项目成功导出的授权目录，也兼容既有完成任务中的显式输出目录；无历史时使用下载目录下“审计工具箱/OCR”。后端创建并仅授予目标目录，项目保存请求不能注入任意目录；不从源文件或生成文件推导祖先授权。每次导出文件名包含时间戳，仍保留原子防覆盖保护 | `ocr::tests::output_directory_reuses_successful_export_without_source_parent_grants`、`ocr_store::tests::previous_output_directory_only_reuses_explicit_successful_export_directory`、`ocr_export::tests` |
 | 本次摘录输出 | `extractionsOnly` 配合 `extractionIds` 仅输出指定的本次已保存摘录，不带全文、表格或历史摘录。保留来源文件/页码，缺页、过期及零匹配显式标注；文件名为项目名、场景摘录及时间戳 | `ocr_export::tests::only_current_extractions_are_exported_with_sources_empty_results_and_timestamp` |
 | 命名场景存储 | 项目 `customScenarios` 保存名称、基础场景、规则版本、字段及完整提示词阶段；缺失字段的旧项目兼容读取和保存，不覆盖已有命名场景；无效和重复场景标识拒绝保存 | `ocr_store::tests::named_scenarios_round_trip_and_survive_old_project_saves` |
@@ -46,6 +48,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib audipick::
 cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_ocr::
 cargo test --manifest-path src-tauri/Cargo.toml --lib job_dispatch::
 cargo test --manifest-path src-tauri/Cargo.toml --lib ocr_dispatch_queue_time
+python -m unittest discover -s scripts -p test_probe_ocr_network.py
 python scripts/verify_ocr_workers.py --exe src-tauri/target/debug/audit-toolbox.exe
 python scripts/verify_ocr_concurrency.py --exe src-tauri/target/debug/audit-toolbox.exe
 python scripts/verify_ocr_dispatch.py --test-exe <本次编译的lib测试EXE> --worker-exe <原生程序EXE>
@@ -56,6 +59,25 @@ python scripts/verify_ocr_dispatch.py --test-exe <本次编译的lib测试EXE> -
 并发 worker 验收会临时监听 `127.0.0.1:8765`，利用同步屏障确认三个识别请求同时在途，再以不同延迟返回；若已有本机 OCR 服务占用该端口，先自行选择合适的验收时间，不终止或覆盖已有服务。前端默认五页上限及控制行为由 `ocrBatch.test.ts`、`OcrPage.test.tsx` 验收。逐页耗时是当前任务的诊断数据，失败页仅有前端已测阶段，未返回的后端阶段不估算；本轮统计不跨页面重载保存。实际服务可能限流，增加并发不保证线性提速。
 
 上述旧 `verify_ocr_concurrency.py` 和此前真实服务档位测速直接启动 worker，绕过了父进程调度，不能证明安装版界面已经并发。新增 `verify_ocr_dispatch.py` 通过实际 `ExcelMergerService::start → monitor → worker`，本机屏障要求五个请求全部到达才返回，同时检查分页保存及排队耗时。它同样使用临时数据库和本机端口，不调用付费服务。当前机器的 lib 测试 EXE 因缺少 Common Controls v6 清单在进入测试前报 `0xC0000139`；本轮对测试 EXE 的本机副本用 Windows SDK `mt.exe` 嵌入 v6 清单后运行，未修改系统运行库或已安装程序。
+
+## 2026-10-28 网络分段诊断
+
+后续路由核实与结论纠正：用户要求继续统一交给 Clash 分流，未要求强制走境外节点或在工具内硬编码国内直连。只读查询正在运行的 Mihomo 控制器确认 `mode=rule`、混合端口 7897；对百炼域名做一次不带凭据的 HEAD 连通性请求，并从 `/connections` 观察到 `host=dashscope.aliyuncs.com`、`type=HTTPS`、`rule=RuleSet`、`rulePayload=direct`、`chains=[DIRECT]`。本机同时启用 TUN，因此 curl `--noproxy` 只代表绕过 HTTP 代理入口，不能保证绕过 Clash/TUN，之前默认入口与跳过入口的耗时对比不能用来证明“境外代理节点拖慢百炼”。该 HEAD 检查没有调用模型、没有更改配置，只证明检查当时此域名的规则及出口，不反推早前每次连接的路由。生产 LLM/OCR/语义 HTTP 请求保留默认代理继承，未新增强制直连；代码中既有 `no_proxy` 仅出现在百炼 ASR 本机测试夹具。
+
+用户反馈 Dev.6 扫描时单页识别调用约 23–41 秒，后台排队接近零。只读确认模型仍为 `qwen3.5-ocr`，本机同时配置系统代理及 HTTP/HTTPS/ALL_PROXY 环境变量，代理地址 `127.0.0.1:7897`。未据此断言 GUI 的实际路由；后续网络探针的默认 curl 路径使用现有代理环境。
+
+`probe_ocr_network.py` 在随机本机回环端口接收原生 worker 的真实标准化图片请求，用隔离数据库与合成响应取样；凭据仅留在内存与 curl 标准输入，不写命令行、报告或磁盘。真实请求体在临时目录内供 curl 读取，退出后清除。使用 Windows curl 8.10+ 的累计计时拆分 DNS、TCP、TLS、上传、上传后等待及接收；早于上传结束的响应不生成虚假的负等待时间。此工具仅供开发诊断，运行会产生真实 OCR 费用，不是应用依赖。默认不重试；`--route direct` 仅对单次 curl 请求跳过代理，不改系统或应用设置。分段定义参见 [curl 官方手册](https://curl.se/docs/manpage.html)。
+
+手工命令（仅用于已授权图片；先等待用户其他识别任务结束）：
+
+```text
+python scripts/probe_ocr_network.py --worker-exe <已配置百炼凭据的原生程序EXE> --settings-db <该通道SQLite路径> --image <已授权页面PNG> --output <新的本机报告目录> --levels 1,5 --repeats 2
+python scripts/probe_ocr_network.py --worker-exe <原生程序EXE> --settings-db <该通道SQLite路径> --image <同一页面PNG> --output <另一新目录> --levels 1,5 --repeats 2 --route direct
+```
+
+本次以可孚合同第 2 页测默认代理、直连各两轮单请求与五并发，再追加一轮代理五并发。各路由捕获的请求体 SHA256 相同，约 1.8 MiB，不改图像、提示词或模型；所有请求成功且无 429。代理五并发批次耗时 13.44／9.49／8.26 秒，直连 10.02／6.94 秒。五并发样本的上传中位数代理 4.462 秒、直连 2.607 秒；上传后等待中位数分别 3.826／3.995 秒，接收结果约毫秒级。两路径均波动，测试顺序为代理两轮→直连两轮→代理复查，不是随机交错严格基准；不能认定代理是唯一原因，更不能将上传后等待全部算作服务端计算。curl 与应用分别使用 Schannel 与 reqwest/rustls，探针用来检查传输链路，不能冒充安装版完整端到端耗时。
+
+另用本次编译的原生适配器对同页原 PNG 做一次真实调用：准备请求 50.60 毫秒、等响应头 7918.80 毫秒、收响应 0.16 毫秒、JSON 解析 0.28 毫秒，验证新增计时实际返回并保留服务请求编号。网络探针及原生适配器共三十次付费请求；原图、响应和报告仅存忽略目录 `artifacts/ocr-network-20261028/`。前端 OCR/API/耗时面板回归及构建、Rust 百炼/OCR/存储回归、Python 探针边界与凭据保护测试通过。lib 测试 EXE 沿用本机副本嵌入 Common Controls v6 清单方式运行，未替换安装程序、改网络设置或真实项目。
 
 ## 2026-10-28 限制性契约复核
 

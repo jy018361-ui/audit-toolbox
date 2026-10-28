@@ -290,11 +290,10 @@ summary:focus-visible {
   --scrollbar-thumb: color-mix(in srgb, var(--on-dark-muted) 54%, transparent);
   --scrollbar-thumb-hover: color-mix(in srgb, var(--on-dark) 74%, transparent);
   color: var(--on-brand-deep, var(--ink-inverse));
-  /* 只允许纵向滚动：内容过宽时横向滚动条会出现在深色侧栏底部，
-     可截断的文字项（.tool-nav-label）自带省略号，横向溢出直接裁掉 */
-  overflow-y: auto;
-  overflow-x: hidden;
+  /* 设置及以上固定，只有下方工具列表占用剩余高度并独立滚动。 */
+  overflow: hidden;
 }
+.sidebar > * { flex-shrink: 0; }
 .brand span,
 .nav-caption {
   font-size: var(--fs-xs);
@@ -465,6 +464,13 @@ summary:focus-visible {
 }
 .tool-nav {
   margin-top: var(--sp-5);
+  flex: 1 1 0;
+  min-height: 0;
+  align-content: start;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
 }
 /* 一级分组标题要"退后"：压暗颜色、缩小字号，让人一眼看出它是分区标签
    而不是可点击的工具行。上方共享的 accent 绿只留给品牌区/页头用。 */

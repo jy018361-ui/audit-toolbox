@@ -502,6 +502,7 @@ it("groups settings into two columns on a single page, preserves draft, and save
   );
   expect(screen.getByRole("button", { name: "保存配置" })).toBeDisabled();
   expect(settingsGet).toHaveBeenCalled();
+  expect(screen.getByLabelText(/^超时秒数/)).toHaveValue("120");
   expect(screen.getByRole("heading", { name: "统一 LLM 配置" })).toBeVisible();
   expect(
     screen.queryByRole("heading", { name: "软件更新" }),
@@ -534,7 +535,7 @@ it("groups settings into two columns on a single page, preserves draft, and save
   await screen.findByRole("status");
   expect(settingsSet).toHaveBeenCalledWith(
     expect.objectContaining({
-      llm: expect.objectContaining({ model: "draft-model" }),
+      llm: expect.objectContaining({ model: "draft-model", timeout: 120 }),
       cache: { cleanup: "off" },
       ocr: { engine: "baidu" },
     }),

@@ -87,6 +87,11 @@ it("reports elapsed time when submission fails and rejects invalid stage timings
   await expect(ocrCall("ocr.recognize_page", {})).resolves.toEqual({ ...page, timings });
   mocks.engineCall.mockResolvedValueOnce({ ...page, timings: { ...timings, queueMs: 125 } });
   await expect(ocrCall("ocr.recognize_page", {})).resolves.toEqual({ ...page, timings: { ...timings, queueMs: 125 } });
+  const http = { prepareMs: 1, headersMs: 25, bodyMs: 2, parseMs: 1, requestBytes: 200, responseBytes: 100, httpStatus: 200, requestId: "request-123", model: "qwen3.5-ocr", host: "example.test" };
+  mocks.engineCall.mockResolvedValueOnce({ ...page, timings: { ...timings, httpRequests: [http] } });
+  await expect(ocrCall("ocr.recognize_page", {})).resolves.toEqual({ ...page, timings: { ...timings, httpRequests: [http] } });
+  mocks.engineCall.mockResolvedValueOnce({ ...page, timings: { ...timings, httpRequests: [{ ...http, headersMs: -1 }] } });
+  await expect(ocrCall("ocr.recognize_page", {})).rejects.toThrow("数据格式不完整");
   mocks.engineCall.mockResolvedValueOnce({ ...page, timings: { ...timings, queueMs: -1 } });
   await expect(ocrCall("ocr.recognize_page", {})).rejects.toThrow("数据格式不完整");
   mocks.engineCall.mockResolvedValueOnce({ ...page, timings: { ...timings, recognitionMs: -1 } });

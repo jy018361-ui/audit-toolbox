@@ -659,7 +659,9 @@ pub(crate) fn toolbox_ocr_page(params: &Value, settings: &Value) -> Result<Value
         let config = crate::bailian_ocr::OcrConfig::from_settings(&global)?;
         let key = secret("bailian_ocr_key").ok_or_else(||error("OCR_KEY_MISSING", "请填写百炼 OCR API Key。", None))?;
         let response = config.recognize_structured(image, &key)?;
-        return Ok(structured_ocr_result(response["text"].as_str().unwrap_or(""), "bailian"));
+        let mut result = structured_ocr_result(response["text"].as_str().unwrap_or(""), "bailian");
+        result["httpTiming"] = response["httpTiming"].clone();
+        return Ok(result);
     }
     ocr(params, &global)
 }
@@ -3020,7 +3022,7 @@ fn request_llm_with_key(
     let timeout = config
         .get("timeout")
         .and_then(Value::as_u64)
-        .unwrap_or(60)
+        .unwrap_or(120)
         .clamp(10, 300);
     let client = Client::builder()
         .timeout(Duration::from_secs(timeout))

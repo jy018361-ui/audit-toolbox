@@ -24,6 +24,8 @@ struct RecognitionTimings {
     structure_ms: f64,
     save_ms: f64,
     worker_ms: f64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    http_requests: Vec<Value>,
 }
 fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
@@ -441,6 +443,9 @@ fn recognize_part(
     let recognition_started = Instant::now();
     let result = crate::audipick::toolbox_ocr_page(&json!({"imageBase64":image}), settings)?;
     timings.recognition_ms += elapsed_ms(recognition_started);
+    if let Some(http) = result.get("httpTiming").filter(|v| v.is_object()) {
+        timings.http_requests.push(http.clone());
+    }
     let diagnostic = result["diagnosticResponse"].as_str().map(str::to_owned);
     let text = result["text"]
         .as_str()

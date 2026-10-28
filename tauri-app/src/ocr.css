@@ -278,6 +278,22 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
+
+.ocr-extraction-failure {
+  display: grid;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-md);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+.ocr-extraction-failure ul { margin: 0; padding-left: var(--sp-4); list-style: disc; }
+.ocr-extraction-failure li + li { margin-top: var(--sp-1); }
+.ocr-extraction-failure p { margin: 0; }
 .ocr-export-notice button {
   max-width: 100%;
   white-space: normal;

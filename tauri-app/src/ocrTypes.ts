@@ -65,6 +65,12 @@ export const OcrPageDataSchema = z.object({
 });
 export type OcrPageData = z.infer<typeof OcrPageDataSchema>;
 const durationMs = z.number().finite().nonnegative();
+export const OcrHttpTimingSchema = z.object({
+  prepareMs: durationMs, headersMs: durationMs, bodyMs: durationMs, parseMs: durationMs,
+  requestBytes: z.number().int().nonnegative(), responseBytes: z.number().int().nonnegative(),
+  httpStatus: z.number().int().min(100).max(599), requestId: z.string().max(128).nullable(),
+  model: z.string(), host: z.string(),
+});
 export const OcrWorkerTimingSchema = z.object({
   setupMs: durationMs,
   imageMs: durationMs,
@@ -73,6 +79,7 @@ export const OcrWorkerTimingSchema = z.object({
   saveMs: durationMs,
   workerMs: durationMs,
   queueMs: durationMs.optional(),
+    httpRequests: z.array(OcrHttpTimingSchema).optional(),
 });
 export type OcrWorkerTiming = z.infer<typeof OcrWorkerTimingSchema>;
 export const OcrRecognitionResultSchema = OcrPageDataSchema.extend({

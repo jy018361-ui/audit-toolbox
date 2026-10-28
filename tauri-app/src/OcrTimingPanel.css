@@ -1,0 +1,8 @@
+.ocr-http-timing[open] {
+  width: 320px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.ocr-http-timing p {
+  margin-block: 6px;
+}

@@ -1670,7 +1670,7 @@ export function Settings({
     baseUrl: "https://api.openai.com/v1",
     model: "",
     authMode: "bearer",
-    timeout: "30",
+    timeout: "120",
     thinkingEnabled: false,
     apiKey: "",
     ocrEngine: "ai",
@@ -1988,7 +1988,7 @@ export function Settings({
     base_url: form.baseUrl.trim(),
     model: form.model.trim(),
     auth_mode: form.authMode,
-    timeout: Number(form.timeout) || 30,
+    timeout: Number(form.timeout) || 120,
     thinking_enabled: form.thinkingEnabled,
   });
   async function testConnection() {

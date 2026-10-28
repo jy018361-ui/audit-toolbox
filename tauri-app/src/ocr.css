@@ -1106,3 +1106,18 @@
   transform: none;
   background: transparent;
 }
+
+.ocr-document-workspace.is-extraction {
+  border: 0;
+  background: transparent;
+  overflow: visible;
+}
+.ocr-document-workspace.is-extraction .ocr-extraction {
+  margin: 0;
+  border-radius: 12px;
+  padding-block: 24px;
+}
+.ocr-extraction .ocr-progress,
+.ocr-extraction .ocr-export-notice {
+  margin-top: 16px;
+}

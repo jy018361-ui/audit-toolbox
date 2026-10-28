@@ -173,7 +173,8 @@ fn field_label(key: &str) -> &str {
 }
 fn scenario_label(id: &str) -> &str {
     match id {
-        "loan_covenant" => "借款限制性契约",
+        "loan_restrictive" => "借款限制性契约（含非财务）",
+        "loan_covenant" => "借款财务契约",
         "loan_general" => "借款合同主表",
         "revenue" => "收入合同",
         "procurement" => "采购合同",
@@ -690,6 +691,87 @@ fn filename(s: &str) -> String {
         clean.into()
     }
 }
+
+fn build_extractions(store: &Store, docs: &[Document], ids: &BTreeSet<String>, single_sheet: bool, pause: &PauseCheckpoint) -> Result<Vec<u8>, AppError> {
+    let mut book = Workbook::new();
+    let mut names = BTreeSet::new();
+    let mut found = BTreeSet::new();
+    let mut shared_name = String::new();
+    let mut shared_row = 0;
+    for doc in docs {
+        pause.wait()?;
+        let extractions: Vec<Value> = store.extractions(&doc.id)?.into_iter()
+            .filter(|entry| entry["id"].as_str().is_some_and(|id| ids.contains(id))).collect();
+        if extractions.is_empty() {
+            return Err(failure("OCR_EXTRACTION_NOT_FOUND", "本次摘录结果与所选文件不一致，请重新摘录后导出。"));
+        }
+        let target = if single_sheet && !shared_name.is_empty() {
+            book.worksheet_from_name(&shared_name).map_err(xlsx_error)?
+        } else {
+            let target = sheet(&mut book, if single_sheet { "场景摘录" } else { &doc.name }, &mut names)?;
+            if single_sheet { shared_name = target.name(); }
+            target
+        };
+        let mut r = if single_sheet { shared_row } else { 0 };
+        let pages = store.pages(&doc.id)?;
+        let completed: BTreeSet<u32> = pages.iter().map(|page| page.page).collect();
+        let missing = (1..=doc.total_pages).filter(|page| !completed.contains(page)).map(|page| page.to_string()).collect::<Vec<_>>().join("、");
+        section_row(target, &mut r, &["来源文件".into(), doc.name.clone()])?;
+        row(target, &mut r, &[if doc.total_pages == 0 { "页数尚未确认，不能认定已完整检查".into() }
+            else if !missing.is_empty() { format!("已扫描 {} / {} 页；尚未扫描页：{missing}，摘录仅基于已扫描内容", pages.len(), doc.total_pages) }
+            else { format!("已扫描 {} / {} 页", pages.len(), doc.total_pages) }])?;
+        for page in &pages {
+            if page.status == "needs_review" || !page.warnings.is_empty() || !page.text.chars().any(char::is_alphanumeric) {
+                row(target, &mut r, &[format!("第{}页待校对，不能认定原扫描内容完整识别", page.page)])?;
+                for warning in &page.warnings { row(target, &mut r, &[format!("第{}页：{warning}",page.page)])?; }
+            }
+        }
+        let project = store.project(&doc.project_id)?;
+        for extraction in extractions {
+            found.insert(extraction["id"].as_str().unwrap_or("").to_owned());
+            let scenario_id = extraction["scenarioId"].as_str().unwrap_or("");
+            let scenario_name = project["customScenarios"].as_array().into_iter().flatten()
+                .find(|entry| entry["id"] == scenario_id).and_then(|entry| entry["name"].as_str()).unwrap_or_else(|| scenario_label(scenario_id));
+            section_row(target, &mut r, &["场景摘录".into(), scenario_name.into(),
+                if extraction["stale"] == true { "原文已修改，摘录需要更新".into() } else { "本次摘录结果".into() }])?;
+            let rows: Vec<Value> = extraction["rows"].as_array().into_iter().flatten().map(readable_extraction_row).collect();
+            if rows.is_empty() {
+                row(target, &mut r, &["未发现符合场景事项".into(), "仅代表上述已扫描范围的摘录结果".into()])?;
+                continue;
+            }
+            let mut columns = vec![("sourceFile".to_string(), "来源文件".to_string())];
+            for column in extraction["columns"].as_array().into_iter().flatten() {
+                if let Some(key) = column["key"].as_str().filter(|key| visible_field(key) && *key != "sourceFile") {
+                    columns.push((key.into(), column["label"].as_str().unwrap_or_else(|| field_label(key)).into()));
+                }
+            }
+            let mut seen: BTreeSet<String> = columns.iter().map(|column| column.0.clone()).collect();
+            for data in &rows {
+                if let Some(object) = data.as_object() {
+                    for key in object.keys().filter(|key| visible_field(key)) {
+                        if seen.insert(key.clone()) { columns.push((key.clone(), field_label(key).into())); }
+                    }
+                }
+            }
+            if !seen.contains("sourcePage") { columns.push(("sourcePage".into(), "来源页码".into())); }
+            row(target, &mut r, &columns.iter().map(|column| column.1.clone()).collect::<Vec<_>>())?;
+            for data in rows {
+                pause.wait()?;
+                row(target, &mut r, &columns.iter().map(|(key, _)| if key == "sourceFile" { doc.name.clone() }
+                    else if key == "sourcePage" && data[key].is_null() { "具体出处待核对".into() }
+                    else { value_text(&data[key]) }).collect::<Vec<_>>())?;
+            }
+            for column in 0..columns.len().min(16384) {
+                target.set_column_width(column as u16, if column == 0 { 36 } else { 45 }).map_err(xlsx_error)?;
+                target.set_column_format(column as u16, &Format::new().set_text_wrap().set_num_format("@")).map_err(xlsx_error)?;
+            }
+        }
+        row(target, &mut r, &[])?;
+        if single_sheet { shared_row = r; }
+    }
+    if found != *ids { return Err(failure("OCR_EXTRACTION_NOT_FOUND", "本次摘录列表包含其他文件或不存在的记录。")); }
+    book.save_to_buffer().map_err(xlsx_error)
+}
 /// Compatibility publication for volumes without hard links. Returns false on
 /// an existing name; any failed or cancelled new file is removed.
 fn write_new_target(
@@ -799,16 +881,29 @@ pub(crate) fn export(
         return Err(failure("OCR_EXPORT_MODE", "请选择一个工作表、按文件分工作表或分别导出 Excel。"));
     }
     let mut outputs = vec![];
+    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f").to_string();
+    let extractions_only = p["extractionsOnly"] == true;
+    let extraction_ids: BTreeSet<String> = p["extractionIds"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+    if extractions_only && (extraction_ids.is_empty() || p["extractionIds"].as_array().is_none_or(|ids| ids.len() != extraction_ids.len())) {
+        return Err(failure("OCR_EXTRACTION_NOT_FOUND", "请指定本次保存的摘录结果。"));
+    }
+    if extractions_only {
+        let mut available = BTreeSet::new();
+        for doc in &docs {
+            available.extend(store.extractions(&doc.id)?.iter().filter_map(|entry| entry["id"].as_str()).filter(|id| extraction_ids.contains(*id)).map(str::to_owned));
+        }
+        if available != extraction_ids { return Err(failure("OCR_EXTRACTION_NOT_FOUND", "本次摘录列表包含其他文件或不存在的记录。")); }
+    }
     if mode != "individual" {
         progress("export", 0, 1, "正在生成项目 Excel");
-        let bytes = match mode {
+        let bytes = if extractions_only { build_extractions(store, &docs, &extraction_ids, mode == "single_sheet", pause)? } else { match mode {
             "single_sheet" => build_sectioned(store, &docs, true, pause)?,
             "per_document" => build_sectioned(store, &docs, false, pause)?,
             _ => build(store, &docs, pause)?,
-        };
+        }};
         outputs.push(publish(
             dir,
-            &format!("{}_OCR", project_data["name"].as_str().unwrap_or("项目")),
+            &format!("{}_{}_{stamp}", project_data["name"].as_str().unwrap_or("项目"), if extractions_only { "场景摘录" } else { "OCR" }),
             &bytes,
             pause,
         )?);
@@ -816,15 +911,18 @@ pub(crate) fn export(
         for (index, doc) in docs.iter().enumerate() {
             pause.wait()?;
             progress("export", index, docs.len(), "正在生成文件 Excel");
-            let bytes = build(store, std::slice::from_ref(doc), pause)?;
+            let document_ids: BTreeSet<String> = store.extractions(&doc.id)?.iter().filter_map(|entry| entry["id"].as_str()).filter(|id| extraction_ids.contains(*id)).map(str::to_owned).collect();
+            let bytes = if extractions_only { build_extractions(store, std::slice::from_ref(doc), &document_ids, true, pause)? }
+                else { build(store, std::slice::from_ref(doc), pause)? };
             let stem = Path::new(&doc.name)
                 .file_stem()
                 .unwrap_or_default()
                 .to_string_lossy();
-            outputs.push(publish(dir, &format!("{stem}_OCR"), &bytes, pause)?);
+            outputs.push(publish(dir, &format!("{stem}_{}_{stamp}", if extractions_only { "场景摘录" } else { "OCR" }), &bytes, pause)?);
         }
     }
     progress("export", docs.len(), docs.len(), "Excel 导出完成");
+    store.remember_output_directory(project, dir)?;
     Ok(
         json!({"outputPaths":outputs.iter().map(|p|p.to_string_lossy().into_owned()).collect::<Vec<_>>(),"documentCount":docs.len(),"partial":docs.iter().any(|d|d.status!="completed")}),
     )
@@ -833,6 +931,55 @@ pub(crate) fn export(
 mod tests {
     use super::*;
     use std::sync::{Arc, atomic::AtomicBool};
+    /// Explicitly invoked manual acceptance against an isolated fixture store.
+    /// No model configuration or credentials are read by this export probe.
+    #[test]
+    #[ignore = "需 OCR_EXPORT_PROBE_REQUEST 指向已授权的隔离数据库导出请求"]
+    fn fixture_export_from_request_file() {
+        let request_file = std::env::var("OCR_EXPORT_PROBE_REQUEST").expect("缺少导出验收请求文件");
+        let request: Value = serde_json::from_slice(&fs::read(request_file).unwrap()).unwrap();
+        let store = Store::open(Path::new(request["dbPath"].as_str().unwrap())).unwrap();
+        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        let result = export(&store, &request["params"], &|_,_,_,_|{}, &pause)
+            .unwrap_or_else(|error| panic!("{}：{}", error.code, error.user_message));
+        fs::write(request["resultPath"].as_str().unwrap(), serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+        println!("隔离数据库的本次摘录导出完成。");
+    }
+    #[test]
+    fn only_current_extractions_are_exported_with_sources_empty_results_and_timestamp() {
+        use crate::ocr_store::Page;
+        use calamine::Reader;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("db")).unwrap();
+        let project = store.save_project(&json!({"name":"本次摘录","customScenarios":[{"id":"saved-covenant","name":"我的财务限制","baseScenarioId":"loan_covenant","version":"1","fields":[],"stages":[{"id":"extract","label":"摘录","prompt":"保留原文"}]}]})).unwrap();
+        let source = dir.path().join("合同.pdf");
+        fs::write(&source, b"synthetic").unwrap();
+        let doc = store.import(project["id"].as_str().unwrap(), &source).unwrap();
+        store.prepare(&doc.id, 2).unwrap();
+        store.save_page(&doc.id, Page { metadata: Default::default(), page:1, text:"不得导出整篇正文".into(), original_text:"不得导出整篇正文".into(), tables:vec![], original_tables:vec![], revision:0,status:"needs_review".into(),warnings:vec!["方向待复核".into()] },0,true).unwrap();
+        let data = json!({"documentId":doc.id,"sourceRevision":1,"scenarioId":"saved-covenant","columns":[{"key":"excerpt","label":"合同原文摘录"},{"key":"sourcePage","label":"来源页码"}],"prompts":[]});
+        let mut historical = data.clone(); historical["rows"] = json!([{"excerpt":"不得包含历史结果"}]);
+        store.save_extraction(&historical).unwrap();
+        let mut current = data.clone(); current["rows"] = json!([{"excerpt":"借款人负债率不得超过65%","sourcePage":"1"}]);
+        let saved = store.save_extraction(&current).unwrap();
+        let mut empty = data; empty["rows"] = json!([]);
+        let zero = store.save_extraction(&empty).unwrap();
+        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        let params = json!({"projectId":project["id"],"documentIds":[doc.id],"outputDir":dir.path(),"mode":"single_sheet","extractionsOnly":true,"extractionIds":[saved["id"],zero["id"]]});
+        let result = export(&store,&params,&|_,_,_,_|{},&pause).unwrap();
+        let output = result["outputPaths"][0].as_str().unwrap();
+        assert!(Path::new(output).file_name().unwrap().to_string_lossy().starts_with("本次摘录_场景摘录_"));
+        let mut book = calamine::open_workbook_auto(output).unwrap();
+        assert_eq!(book.sheet_names().len(),1);
+        let range = book.worksheet_range("场景摘录").unwrap();
+        let text = range.rows().flat_map(|row| row.iter()).map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        for expected in ["合同.pdf","来源页码","不得超过65%","未发现符合场景事项","尚未扫描页：2","第1页待校对","方向待复核","我的财务限制"] { assert!(text.contains(expected),"缺少 {expected}"); }
+        assert!(!text.contains("不得导出整篇正文"));
+        assert!(!text.contains("不得包含历史结果"));
+        let mut invalid = params; invalid["extractionIds"] = json!(["other-project-id"]);
+        assert!(export(&store,&invalid,&|_,_,_,_|{},&pause).is_err());
+        assert_eq!(store.project(project["id"].as_str().unwrap()).unwrap()["outputDirectory"],json!(dir.path().to_string_lossy()));
+    }
     #[test]
     fn unicode_chunks_are_lossless_and_within_excel_limit() {
         let source = "😀长文本".repeat(10000);

@@ -37,6 +37,21 @@ pub(crate) struct PromptStage {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct CustomScenario {
+    pub id: String,
+    pub name: String,
+    pub base_scenario_id: String,
+    pub version: String,
+    pub fields: Vec<ScenarioField>,
+    pub stages: Vec<PromptStage>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct ScenarioField {
+    pub key: String,
+    pub label: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct Table {
     pub id: String,
     #[serde(default)]
@@ -190,9 +205,43 @@ impl Store {
             prompts.clone(),
         )
         .map_err(|_| failure("OCR_PROMPT_INVALID", "场景提示词格式无效。"))?;
-        let value = json!({"id":id,"name":name,"prompts":prompts,"createdAt":existing.as_ref().map(|v|v["createdAt"].clone()).unwrap_or(json!(now())),"updatedAt":now()});
+        let scenarios = p.get("customScenarios").cloned()
+            .or_else(|| existing.as_ref().and_then(|v| v.get("customScenarios").cloned()))
+            .unwrap_or(json!([]));
+        let parsed: Vec<CustomScenario> = serde_json::from_value(scenarios.clone())
+            .map_err(|_| failure("OCR_SCENARIO_INVALID", "保存的场景格式无效。"))?;
+        let mut scenario_ids = std::collections::BTreeSet::new();
+        if parsed.iter().any(|s| s.id.trim().is_empty() || s.name.trim().is_empty()
+            || s.base_scenario_id.trim().is_empty() || s.version.trim().is_empty()
+            || s.stages.is_empty() || s.stages.iter().any(|stage| stage.id.trim().is_empty() || stage.prompt.trim().is_empty())
+            || !scenario_ids.insert(s.id.clone())) {
+            return Err(failure("OCR_SCENARIO_INVALID", "请输入有效且不重复的场景、来源场景和提示词。"));
+        }
+        // Output directories can only be remembered by the validated export
+        // path, never injected via a project_save payload.
+        let output_directory = existing.as_ref().and_then(|v| v.get("outputDirectory")).cloned().unwrap_or(Value::Null);
+        let value = json!({"id":id,"name":name,"prompts":prompts,"customScenarios":scenarios,"outputDirectory":output_directory,"createdAt":existing.as_ref().map(|v|v["createdAt"].clone()).unwrap_or(json!(now())),"updatedAt":now()});
         self.conn.execute("INSERT INTO ocr_projects(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![id,encode(&value)?]).map_err(db_error)?;
         Ok(value)
+    }
+    pub fn remember_output_directory(&self, project: &str, directory: &Path) -> Result<(), AppError> {
+        self.project(project)?;
+        self.conn.execute("UPDATE ocr_projects SET data=json_set(data,'$.outputDirectory',?) WHERE id=?", params![directory.to_string_lossy().as_ref(), project]).map_err(db_error)?;
+        Ok(())
+    }
+    pub fn previous_output_directory(&self, project: &str) -> Result<Option<PathBuf>, AppError> {
+        let data = self.project(project)?;
+        if let Some(directory) = data["outputDirectory"].as_str().filter(|value| !value.trim().is_empty()) {
+            return Ok(Some(PathBuf::from(directory)));
+        }
+        let history_exists: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_history')", [], |row| row.get(0)).map_err(db_error)?;
+        if !history_exists { return Ok(None); }
+        // Migration of the user's explicit outputDir from a completed export.
+        // Never infer/grant an ancestor from imported or generated file paths.
+        let previous: Option<String> = self.conn.query_row(
+            "SELECT json_extract(params_json,'$.outputDir') FROM task_history WHERE method='ocr.export' AND status='completed' AND json_extract(params_json,'$.projectId')=? AND LENGTH(COALESCE(json_extract(params_json,'$.outputDir'),''))>0 ORDER BY finished_at DESC LIMIT 1",
+            [project], |row| row.get(0)).optional().map_err(db_error)?;
+        Ok(previous.map(PathBuf::from))
     }
     pub fn delete_project(&self, id: &str) -> Result<Value, AppError> {
         // Remove rows first. Unreferenced copies can be safely cleaned without affecting another project.
@@ -537,6 +586,34 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn named_scenarios_round_trip_and_survive_old_project_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("test.db")).unwrap();
+        let scenario = json!({"id":"saved-one","name":"我的限制性契约","baseScenarioId":"loan_covenant","version":"1","fields":[{"key":"excerpt","label":"原文"}],"stages":[{"id":"financial_metrics","label":"摘录","prompt":"保留65%门槛"}]});
+        let project = store.save_project(&json!({"name":"测试","customScenarios":[scenario]})).unwrap();
+        let updated = store.save_project(&json!({"id":project["id"],"name":"旧客户端改名","prompts":{}})).unwrap();
+        assert_eq!(updated["customScenarios"], json!([scenario]));
+        assert!(store.save_project(&json!({"id":project["id"],"name":"测试","customScenarios":[scenario,scenario]})).is_err());
+        assert!(store.save_project(&json!({"name":"测试","customScenarios":[{"id":"x","name":""}]})).is_err());
+        let legacy = store.save_project(&json!({"name":"旧项目"})).unwrap();
+        assert_eq!(legacy["customScenarios"], json!([]));
+    }
+    #[test]
+    fn previous_output_directory_only_reuses_explicit_successful_export_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("test.db")).unwrap();
+        let project = store.save_project(&json!({"name":"历史目录"})).unwrap();
+        let id = project["id"].as_str().unwrap();
+        store.conn.execute_batch("CREATE TABLE task_history(method TEXT,status TEXT,params_json TEXT,finished_at TEXT);").unwrap();
+        for (method,status,params,stamp) in [
+            ("ocr.export","completed",json!({"projectId":id,"outputDir":"C:\\已授权输出目录"}),"1"),
+            ("ocr.export","failed",json!({"projectId":id,"outputDir":"C:\\失败目录"}),"2"),
+            ("ocr.document_import","completed",json!({"projectId":id,"paths":["C:\\源目录\\合同.pdf"]}),"3"),
+            ("ocr.export","completed",json!({"projectId":"other","outputDir":"C:\\其他项目目录"}),"4"),
+        ] { store.conn.execute("INSERT INTO task_history VALUES(?,?,?,?)",params![method,status,params.to_string(),stamp]).unwrap(); }
+        assert_eq!(store.previous_output_directory(id).unwrap(), Some(PathBuf::from("C:\\已授权输出目录")));
+    }
     #[test]
     fn legacy_projection_does_not_restore_a_table_the_user_deleted() {
         let original_table = Table { id: "t".into(), title: String::new(), rows: vec![vec!["00123".into()]] };

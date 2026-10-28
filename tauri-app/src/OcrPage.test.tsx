@@ -69,6 +69,10 @@ vi.mock("./ocrScenarios", () => ({
       ],
     },
   ],
+  withSavedOcrScenarios: (defaults: any[], saved: any[] = []) => [
+    ...defaults,
+    ...saved.map((item) => ({ ...item, defaultPrompts: item.stages })),
+  ],
   getOcrPromptStages: (scenario: any, overrides?: any) =>
     structuredClone(overrides?.[scenario.id] ?? scenario.defaultPrompts),
   extractOcrScenario: mocks.extract,
@@ -149,6 +153,7 @@ beforeEach(() => {
   mocks.call.mockImplementation(async (method, params) => {
     if (method === "ocr.projects")
       return { projects: [structuredClone(savedProject)] };
+    if (method === "ocr.output_directory") return { outputDir: "C:/输出" };
     if (method === "ocr.config_status")
       return {
         ocr: { ready: true, engine: "测试" },
@@ -292,7 +297,7 @@ it("OCR 可直接导出，不要求选择场景或调用摘录", async () => {
   expect(screen.queryByLabelText("摘录场景")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "导出文件" }));
   fireEvent.click(
-    await screen.findByRole("button", { name: "选择目录并导出" }),
+    await screen.findByRole("button", { name: "导出到目标目录" }),
   );
   await screen.findByRole("button", { name: "合成扫描件.xlsx" });
   expect(mocks.job).toHaveBeenCalledWith(
@@ -510,21 +515,6 @@ it("提示词保存失败时保留当前场景和未保存编辑", async () => {
   );
 });
 
-it("多页逐字证据提供独立页码入口", async () => {
-  detail.extractions[0].columns = [{ key: "sourcePage", label: "核实页码" }];
-  detail.extractions[0].rows = [{ sourcePage: "1、2" }];
-  await openDocument();
-  fireEvent.click(screen.getByRole("button", { name: "2 场景摘录" }));
-  await screen.findByLabelText("摘录场景");
-  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
-  expect(screen.getByRole("button", { name: "第 1 页" })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "第 2 页" }));
-  await waitFor(() => expect(screen.getByLabelText("当前页")).toHaveValue("2"));
-  expect(
-    await screen.findByRole("region", { name: "本页初始原文" }),
-  ).toHaveTextContent("本页尚未扫描");
-});
-
 it.each(["application/pdf", "image/tiff"])(
   "%s 未识别文件预览时保存真实页数，支持在 OCR 前翻页",
   async (mimeType) => {
@@ -603,21 +593,9 @@ it("两步导引独立切换，第二步不混入识别工作区或新增表格�
   expect(
     screen.queryByRole("button", { name: "导入文件" }),
   ).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "返回原文识别" }));
+  fireEvent.click(screen.getByRole("button", { name: "1 原文识别" }));
   await screen.findByRole("region", { name: "全篇初始原文" });
   expect(screen.queryByLabelText("摘录场景")).not.toBeInTheDocument();
-});
-
-it("摘录单元格中的对象按可读内容呈现，不向用户显示 JSON", async () => {
-  detail.extractions[0].columns = [{ key: "evidence", label: "证据" }];
-  detail.extractions[0].rows = [{ evidence: { text: "合同约定", page: 1 } }];
-  await openDocument();
-  fireEvent.click(screen.getByRole("button", { name: "2 场景摘录" }));
-  await screen.findByLabelText("摘录场景");
-  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
-  await screen.findByText(/内容：合同约定/);
-  expect(screen.getByText(/页码：1/)).toBeInTheDocument();
-  expect(screen.queryByText(/\{"text"/)).not.toBeInTheDocument();
 });
 
 it("取消自定义范围重扫不调用 OCR，不替换原有表格校对", async () => {
@@ -1128,7 +1106,7 @@ it.each(["single_sheet", "per_document", "individual"])(
       radios.find((radio) => (radio as HTMLInputElement).value === mode)!,
     );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "选择目录并导出" }),
+      within(dialog).getByRole("button", { name: "导出到目标目录" }),
     );
     await waitFor(() =>
       expect(mocks.job).toHaveBeenCalledWith(
@@ -1470,36 +1448,19 @@ it("批量场景摘录逐文件使用同一提示词快照并分开保存结果�
   expect(records.get("d2")!.extractions).toHaveLength(1);
   expect(records.get("d3")!.extractions).toHaveLength(0);
   expect(screen.getByRole("alert")).toHaveTextContent("尚未扫描，已跳过");
-  expect(
-    screen.getByRole("heading", { name: /第二合同.pdf.*借款通用条款/ }),
-  ).toBeInTheDocument();
-});
-
-it("批量摘录来源页定位正确文件，仍保留全部勾选文件", async () => {
-  const { records } = batchFixture();
-  records.get("d2")!.pages = [structuredClone(detail.pages[0])];
-  records.get("d2")!.extractions = [
-    {
-      ...structuredClone(detail.extractions[0]),
-      id: "second-evidence",
-      columns: [{ key: "sourcePage", label: "来源页码" }],
-      rows: [{ sourcePage: "2" }],
-    },
-  ];
-  await openDocument(false);
-  await selectSecond();
-  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
-  await screen.findByLabelText("摘录场景");
-  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "第 2 页" }));
-  await screen.findByRole("img", { name: "第二合同.pdf 第 2 页" });
-  expect(screen.getByLabelText("当前查看文件")).toHaveValue("d2");
-  expect(
-    screen.getByRole("heading", { name: "已选 2 份文件" }),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByRole("region", { name: "本页初始原文" }),
-  ).toHaveTextContent("尚未扫描");
+  expect(mocks.job).toHaveBeenCalledWith(
+    "ocr.export",
+    expect.objectContaining({
+      extractionsOnly: true,
+      extractionIds: ["extraction-d", "extraction-d2"],
+      documentIds: ["d", "d2"],
+    }),
+    expect.any(Function),
+    expect.any(Function),
+  );
+  expect(screen.getByRole("status", { name: "导出结果" })).toHaveTextContent(
+    "C:/输出",
+  );
 });
 
 it("批量扫描取消不会再派发下一份文件，当前已保存页保留", async () => {
@@ -1546,7 +1507,7 @@ it("移除尾部表格目录与编辑器，但保留历史识别表格并继续�
   await waitFor(() => expect(screen.getByLabelText("当前页")).toHaveValue("2"));
   fireEvent.click(screen.getByRole("button", { name: "导出文件" }));
   fireEvent.click(
-    await screen.findByRole("button", { name: "选择目录并导出" }),
+    await screen.findByRole("button", { name: "导出到目标目录" }),
   );
   await waitFor(() =>
     expect(mocks.job).toHaveBeenCalledWith(
@@ -1703,4 +1664,148 @@ it("在摘录步骤删除最后一份文件后，回到完整上传区且不显�
     "aria-current",
     "step",
   );
+});
+
+it("第二步仅保留文件区与提示词表单，切换文件仍留在第二步", async () => {
+  batchFixture();
+  await openDocument(false);
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  const scene = await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(scene).toBeEnabled());
+  expect(screen.queryByLabelText("选择 OCR 项目")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("新项目名称")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "导出文件" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "返回原文识别" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("heading", { name: "合成扫描件.pdf" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(
+    within(screen.getByRole("complementary", { name: "项目文件" })).getByRole(
+      "button",
+      { name: /^第二合同.pdf/ },
+    ),
+  );
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
+  expect(
+    screen.queryByRole("button", { name: "开始扫描" }),
+  ).not.toBeInTheDocument();
+});
+
+it("保存提示词需要命名，命名场景可重选并在重新打开项目后恢复", async () => {
+  await openDocument(false);
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("摘录场景"), {
+    target: { value: "loan_general" },
+  });
+  const prompt = await screen.findByLabelText("条款提取提示词");
+  await waitFor(() => expect(prompt).toBeEnabled());
+  fireEvent.change(prompt, {
+    target: { value: "只摘录我关注的条款，逐字保留来源" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存提示词" }));
+  const dialog = await screen.findByRole("dialog", { name: "保存为场景" });
+  expect(
+    within(dialog).getByRole("button", { name: "保存场景" }),
+  ).toBeDisabled();
+  fireEvent.change(within(dialog).getByLabelText("场景名称"), {
+    target: { value: "银行条款专用场景" },
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "保存场景" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  const saved = savedProject.customScenarios![0];
+  expect(saved).toMatchObject({
+    name: "银行条款专用场景",
+    baseScenarioId: "loan_general",
+  });
+  expect(saved.stages[0].prompt).toBe("只摘录我关注的条款，逐字保留来源");
+  fireEvent.change(screen.getByLabelText("摘录场景"), {
+    target: { value: "custom" },
+  });
+  await screen.findByLabelText("自定义提示词");
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("摘录场景"), {
+    target: { value: saved.id },
+  });
+  expect(await screen.findByLabelText("条款提取提示词")).toHaveValue(
+    saved.stages[0].prompt,
+  );
+  cleanup();
+  await openDocument(false);
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  await screen.findByRole("option", { name: "银行条款专用场景" });
+});
+
+it("摘录成功自动将本次结果导出到目标目录，不弹目录选择，也不显示历史结果表", async () => {
+  await openDocument(false);
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("摘录场景"), {
+    target: { value: "loan_general" },
+  });
+  await screen.findByLabelText("条款提取提示词");
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "开始摘录" }));
+  const result = await screen.findByRole("status", { name: "导出结果" });
+  expect(result).toHaveTextContent("导出目录：C:/输出");
+  expect(mocks.pick).not.toHaveBeenCalled();
+  expect(mocks.call).toHaveBeenCalledWith("ocr.output_directory", {
+    projectId: "p",
+  });
+  expect(mocks.job).toHaveBeenCalledWith(
+    "ocr.export",
+    expect.objectContaining({
+      mode: "single_sheet",
+      documentIds: ["d"],
+      extractionIds: ["new"],
+      extractionsOnly: true,
+      outputDir: "C:/输出",
+    }),
+    expect.any(Function),
+    expect.any(Function),
+  );
+  expect(screen.queryByRole("table")).not.toBeInTheDocument();
+});
+
+it("自动导出失败保留摘录，重试导出不重复调用模型", async () => {
+  const baseJob = mocks.job.getMockImplementation()!;
+  let fail = true;
+  mocks.job.mockImplementation(async (method, ...args) => {
+    if (method === "ocr.export" && fail) {
+      fail = false;
+      throw new Error("目标目录暂不可写");
+    }
+    return baseJob(method, ...args);
+  });
+  await openDocument(false);
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  await screen.findByLabelText("摘录场景");
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("摘录场景"), {
+    target: { value: "loan_general" },
+  });
+  await screen.findByLabelText("条款提取提示词");
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "开始摘录" }));
+  await screen.findByText("目标目录暂不可写");
+  const retry = await screen.findByRole("button", { name: "重试导出" });
+  await waitFor(() => expect(retry).toBeEnabled());
+  fireEvent.click(retry);
+  await screen.findByRole("status", { name: "导出结果" });
+  expect(mocks.extract).toHaveBeenCalledTimes(1);
+  expect(
+    screen.queryByRole("button", { name: "重试导出" }),
+  ).not.toBeInTheDocument();
 });

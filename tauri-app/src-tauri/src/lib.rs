@@ -208,7 +208,16 @@ async fn engine_call(
         validate_ocr_paths(&allowed, &method, &params)?;
         let db_path = storage.db_path();
         let settings = storage.settings_get()?;
-        tauri::async_runtime::spawn_blocking(move || ocr::call(&method, params, &db_path, &settings))
+        let grants = allowed.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let result = ocr::call(&method, params, &db_path, &settings)?;
+            if method == "ocr.output_directory" {
+                if let Some(directory) = result["outputDir"].as_str() {
+                    grants.0.lock().insert(PathBuf::from(directory));
+                }
+            }
+            Ok(result)
+        })
             .await
             .map_err(|_| AppError::new("OCR_TASK_FAILED", "OCR 处理异常结束，请重试。", true, None))?
     } else if method == "audipick.projects" {
@@ -726,9 +735,7 @@ async fn job_start_inner(
     mut params: Value,
 ) -> Result<String, AppError> {
     if matches!(method, "ocr.recognize_page" | "ocr.extract" | "ocr.export") {
-        let object = params.as_object_mut().ok_or_else(|| AppError::new("INVALID_ARGUMENT", "OCR 任务参数不完整。", false, None))?;
-        object.insert("__dbPath".into(), json!(storage.db_path()));
-        object.insert("__settings".into(), storage.settings_get()?);
+        let params = ocr::worker_params(params, &storage.db_path(), storage.settings_get()?)?;
         return excel_merger.start(method, params);
     }
     if method == "audipick.batch_extract" {

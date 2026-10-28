@@ -6,6 +6,15 @@ export const OcrPromptStageSchema = z.object({
   prompt: z.string(),
 });
 export type OcrPromptStage = z.infer<typeof OcrPromptStageSchema>;
+export const OcrCustomScenarioSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  baseScenarioId: z.string().min(1),
+  version: z.string().min(1),
+  fields: z.array(z.object({ key: z.string(), label: z.string() })),
+  stages: z.array(OcrPromptStageSchema).min(1),
+});
+export type OcrCustomScenario = z.infer<typeof OcrCustomScenarioSchema>;
 export const OcrTableSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -16,6 +25,8 @@ export const OcrProjectSchema = z.object({
   id: z.string(),
   name: z.string(),
   prompts: z.record(z.string(), z.array(OcrPromptStageSchema)).default({}),
+  customScenarios: z.array(OcrCustomScenarioSchema).optional(),
+  outputDirectory: z.string().nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -98,6 +109,7 @@ export const ocrResponseSchemas: Record<string, z.ZodType> = {
   "ocr.projects": z.object({ projects: z.array(OcrProjectSchema) }),
   "ocr.project_save": OcrProjectSchema,
   "ocr.project_delete": z.unknown(),
+  "ocr.output_directory": z.object({ outputDir: z.string().min(1) }),
   "ocr.documents": z.object({ documents: z.array(OcrDocumentSchema) }),
   "ocr.document_import": z.object({
     documents: z.array(OcrDocumentSchema),

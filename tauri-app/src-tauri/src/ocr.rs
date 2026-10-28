@@ -64,6 +64,13 @@ pub(crate) fn call(
     match method {
         "ocr.projects" => Ok(json!({"projects":store.projects()?})),
         "ocr.project_save" => store.save_project(&params),
+        "ocr.output_directory" => {
+            let fallback = directories::UserDirs::new()
+                .and_then(|dirs| dirs.download_dir().or_else(|| dirs.document_dir()).map(Path::to_path_buf))
+                .unwrap_or_else(|| db_path.parent().unwrap_or(Path::new(".")).to_path_buf())
+                .join("审计工具箱").join("OCR");
+            output_directory(&store, required(&params, "projectId")?, &fallback)
+        }
         "ocr.project_delete" => store.delete_project(required(&params, "id")?),
         "ocr.documents" => {
             Ok(json!({"documents":store.documents(required(&params,"projectId")?)?}))
@@ -100,6 +107,14 @@ pub(crate) fn call(
         "ocr.extraction_save" => store.save_extraction(&params),
         _ => Err(failure("METHOD_NOT_FOUND", "未找到对应的 OCR 接口。")),
     }
+}
+
+/// Only persisted, previously validated export locations or the fixed
+/// application-owned fallback are returned; source-file parents are unrelated.
+fn output_directory(store: &Store, project: &str, fallback: &Path) -> Result<Value, AppError> {
+    let directory = store.previous_output_directory(project)?.unwrap_or_else(|| fallback.to_path_buf());
+    fs::create_dir_all(&directory).map_err(io_error)?;
+    Ok(json!({"outputDir":directory.canonicalize().map_err(io_error)?.to_string_lossy()}))
 }
 fn is_reparse(path: &Path) -> bool {
     #[cfg(windows)]
@@ -468,6 +483,13 @@ fn recognize_part(
     timings.structure_ms += elapsed_ms(structure_started);
     result
 }
+pub(crate) fn worker_params(mut params: Value, db_path: &Path, settings: Value) -> Result<Value, AppError> {
+    let object = params.as_object_mut().ok_or_else(|| failure("INVALID_ARGUMENT", "OCR 任务参数不完整。"))?;
+    object.insert("__dbPath".into(), json!(db_path));
+    object.insert("__settings".into(), settings);
+    Ok(params)
+}
+
 pub(crate) fn run_job(
     method: &str,
     params: Value,
@@ -597,6 +619,33 @@ pub(crate) fn run_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn output_directory_reuses_successful_export_without_source_parent_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("test.db")).unwrap();
+        let project = store.save_project(&json!({"name":"目录"})).unwrap();
+        let id = project["id"].as_str().unwrap();
+        let fallback = dir.path().join("default-ocr");
+        assert_eq!(output_directory(&store, id, &fallback).unwrap()["outputDir"], json!(fallback.canonicalize().unwrap().to_string_lossy()));
+        let selected = dir.path().join("authorized-target");
+        fs::create_dir_all(&selected).unwrap();
+        store.remember_output_directory(id, &selected).unwrap();
+        store.save_project(&json!({"id":id,"name":"改名","outputDirectory":dir.path()})).unwrap();
+        assert_eq!(output_directory(&store, id, &fallback).unwrap()["outputDir"], json!(selected.canonicalize().unwrap().to_string_lossy()));
+    }
+    #[test]
+    fn worker_settings_survive_transport_and_unified_llm_enabled_is_respected() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        for (enabled, expected) in [(true, "LLM_URL_INVALID"), (false, "LLM_DISABLED")] {
+            let params = worker_params(json!({"prompt":"提示","text":"原文","__settings":{"llm":{"enabled":!enabled}}}), Path::new("synthetic.db"),
+                json!({"llm":{"enabled":enabled,"base_url":"invalid-unified-url"},"audipickLlm":{"mode":"dedicated","enabled":!enabled}})).unwrap();
+            let transported: Value = serde_json::from_str(&serde_json::to_string(&params).unwrap()).unwrap();
+            assert_eq!(transported["__settings"]["llm"]["enabled"], enabled);
+            let error = run_job("ocr.extract", transported, &|_,_,_,_|{}, cancel.clone(), &pause).unwrap_err();
+            assert_eq!(error.code, expected);
+        }
+    }
     #[test]
     fn import_mixed_directories_and_files_filters_formats_and_deduplicates() {
         let dir = tempfile::tempdir().unwrap();

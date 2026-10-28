@@ -60,7 +60,7 @@ export const handlers: Record<string, DemoHandler> = {
   "ocr.config_status": () => ({ ocr: { ready: true, engine: "演示（不调用外部服务）" }, llm: { ready: true, visionReady: true } }),
   "ocr.project_save": (params) => {
     const existing = params.id ? project(params.id) : undefined;
-    const saved: OcrProject = { id: existing?.id ?? id(), name: String(params.name ?? existing?.name ?? "演示项目"), prompts: clone((params.prompts ?? existing?.prompts ?? {}) as OcrProject["prompts"]), createdAt: existing?.createdAt ?? now(), updatedAt: now() };
+    const saved: OcrProject = { id: existing?.id ?? id(), name: String(params.name ?? existing?.name ?? "演示项目"), prompts: clone((params.prompts ?? existing?.prompts ?? {}) as OcrProject["prompts"]), customScenarios: clone((params.customScenarios ?? existing?.customScenarios ?? []) as NonNullable<OcrProject["customScenarios"]>), outputDirectory: existing?.outputDirectory, createdAt: existing?.createdAt ?? now(), updatedAt: now() };
     if (existing) projects.splice(projects.indexOf(existing), 1, saved); else projects.unshift(saved);
     return clone(saved);
   },
@@ -69,6 +69,7 @@ export const handlers: Record<string, DemoHandler> = {
     for (let index = documents.length - 1; index >= 0; index--) if (documents[index].document.projectId === params.id) documents.splice(index, 1);
     return { deleted: true };
   },
+  "ocr.output_directory": (params) => ({ outputDir: project(params.projectId).outputDirectory ?? "C:\\演示数据\\OCR" }),
   "ocr.documents": (params) => ({ documents: clone(documents.filter((entry) => entry.document.projectId === params.projectId).map((entry) => entry.document)) }),
   "ocr.document": (params) => {
     const result = clone(detail(params.documentId));
@@ -147,7 +148,13 @@ export const jobHandlers: Record<string, DemoJobHandler> = {
     if (!selected.length) return failure("请先选择需要导出的文件。");
     if (!["single_sheet", "per_document", "individual", "combined"].includes(String(params.mode))) return failure("请选择有效的导出方式。");
     const outputDir = String(params.outputDir ?? "C:\\演示数据").replace(/[\\/]$/, "");
-    const outputPaths = params.mode === "individual" ? selected.map((document, index) => `${outputDir}\\${index + 1}_${document.document.name.replace(/\.[^.]+$/, "")}_OCR.xlsx`) : [`${outputDir}\\OCR演示结果.xlsx`];
-    return events("导出 Excel", () => ({outputPaths, documentCount: selected.length, partial: selected.some(document => document.document.status !== "completed")}), outputPaths);
+    if (params.extractionsOnly === true) {
+      const ids = Array.isArray(params.extractionIds) ? params.extractionIds : [];
+      if (!ids.length || ids.some(id => !selected.some(document => document.extractions.some(extraction => extraction.id === id)))) return failure("请指定本次保存的摘录结果。");
+    }
+    const stamp = now().replace(/[-:TZ.]/g, "");
+    const label = params.extractionsOnly === true ? "场景摘录" : "OCR";
+    const outputPaths = params.mode === "individual" ? selected.map((document, index) => `${outputDir}\\${index + 1}_${document.document.name.replace(/\.[^.]+$/, "")}_${label}_${stamp}.xlsx`) : [`${outputDir}\\${project(params.projectId).name}_${label}_${stamp}.xlsx`];
+    return events("导出 Excel", () => { project(params.projectId).outputDirectory = outputDir; return {outputPaths, documentCount: selected.length, partial: selected.some(document => document.document.status !== "completed")}; }, outputPaths);
   },
 };

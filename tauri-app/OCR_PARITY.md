@@ -16,13 +16,17 @@
 | 图片 | BMP 转 PNG；TIFF 每帧按顺序解码为 PNG；PDF 使用内嵌 PDF.js 渲染，不引入 Python 运行时 | `ocr::tests::tiff_decodes_every_frame_in_order` |
 | 校对与恢复 | 本次识别原文只读可复制，不再显示表格目录及编辑器，识别表格和历史行列校对数据保留用于 Excel 导出，无新增空表格；旧人工正文折叠保留并继续用于导出/摘录。重试更新当前原文基线，旧原始响应保留在独立诊断表；页版本防止迟到覆盖，文档版本判断摘录是否过期 | `ocr_store::tests`、`OcrPage.test.tsx` |
 | 流程与扫描范围 | 步骤条在项目信息上方；三列九格可展开。扫描和摘录使用文件勾选范围；卡片点击单选，复选框多选，逐卡片确认删除；清空文件一次确认清理项目全部文件（含未选项），失败项保留并报告，原文件/项目/提示词保留。全部扫描逐文件跳过完成页，失败继续后续文件，自定义范围按各文件页数裁剪并报告，覆盖前统一确认。当前查看文件切换器只改变阅读焦点；原文查看按文件/页序展示所选范围全文，未扫页占位，可一次复制，分页查看恢复本页原文与扫描图对照。不再渲染尾部表格目录与编辑器；文件/分页/阅读模式控件等高底边对齐，翻页按钮相邻，扫描范围与操作按钮同排，范围说明位于文件标题旁，左右预览使用同构标题栏，宽长表内部滚动。导出成功及目录紧邻操作区，证据返回第一步，完整可编辑提示词放第二步 | `OcrPage.test.tsx`、`ocrScanRange.test.ts`、浏览器三页十二表合成资料验收 |
-| 场景与提示词 | 手动选择 AudiPick 既有单证/合同场景及自定义；显示实际默认提示词并允许逐阶段编辑、恢复默认、按项目保存；多选逐文件使用相同提示词快照，分别保存与显示来源，未扫描项跳过并报告 | `ocrScenarios.test.ts`、`OcrPage.test.tsx` |
+| 场景与提示词 | 第二步仅保留文件选择与场景表单；手动选择 AudiPick 既有单证/合同场景及自定义，实际默认提示词允许逐阶段编辑、恢复默认；保存时命名，当前项目下拉框可重选并保留基础场景执行方式。多选逐文件使用相同提示词快照，未扫描项跳过并报告；完成后自动导出本次结果，失败可单独重试导出，不展示历史结果表格 | `ocrScenarios.test.ts`、`OcrPage.test.tsx` |
 | 财务契约 | 调用与 AudiPick 页面相同的 `extractFinancialMetrics` 及启用案例库；提示词可覆写，原文继续按行号回填和核验 | `ocrScenarios.test.ts`、`audipickPreviewFinancialCovenant.test.ts` |
+| 广义限制性契约 | 独立“借款·限制性契约（含非财务）”场景，覆盖无量化门槛的贷款用途、经营行为限制及报送/检查附带义务，不使用财务专项排除器。提示词区分主体、条件例外及明确后果，模型返回分段内行号和 obligation/consequence 角色，程序回填逐字原文并跨页定位；无义务证据、越界及无出处的明确后果拒绝保存。命名场景保留该执行方式 | `ocrScenarios.test.ts`、原生导出回读 |
 | 长文摘录 | 分段并重算证据页码；借款通用场景有独立可编辑汇总阶段；无逐字证据的表格结果明确标记具体出处待核对 | `ocrScenarios.test.ts` |
 | Excel | 文件区多选、全选包含收起文件，选择状态与查看文件独立；仅工作区保留一个导出入口，导出弹窗列明勾选范围，不再另设当前/全部范围。支持一个 Excel 一个 Sheet（按文件/页码分区）、一个 Excel 多 Sheet（每文件一张）、多个 Excel（每文件单独、内部原文/表格/摘录分表）。保留旧合并 API，不按未知表头自动拼列。原文/原行列表格/可读摘录完整输出，缺页及过期摘录显式标记，不导出提示词或内部追踪。长内容无损续行、账号和公式字面按文本保存，不覆盖同名文件 | `OcrPage.test.tsx`、`ocr_export::tests`、`scripts/verify_ocr_workers.py`（旧合并兼容） |
 | 任务 | worker 独立进程，暂停/取消/继续；失败页保留待重试，空响应和截断不冒充完成；识别图片与摘录正文不保存到通用任务参数 | `ocrApi.test.ts`、Rust worker 路由及存储测试 |
 | 并发与耗时 | 同文件前端默认最多 5 页在途，后台 OCR 独立通道最多 5 个 worker，不经过其他重任务的串行锁；乱序完成按已处理数量推进，失败不阻塞其他页；暂停／取消覆盖全部在途任务及迟到编号，恢复唤醒全部等待者，退出后再释放文件。逐页展示渲染、提交／往返、后台排队及后端处理分段耗时，总时间包含暂停；并发耗时不相加，不混入正文和 Excel | `job_dispatch::tests`、`excel_merger::tests::ocr_dispatch_queue_time_is_attached_without_changing_other_results`、`ocrBatch.test.ts`、`ocrApi.test.ts`、`OcrPage.test.tsx`、`scripts/verify_ocr_dispatch.py` |
-| 安全 | 导入和导出均检查用户选中路径；原生拖放事件授予实际投递路径；导入目录不跟随重解析点/链接，投递的重解析点根路径也拒绝；内部存储路径由主进程注入 | `ocr_import_and_export_require_selected_paths_without_parent_grants`、`ocr::tests::import_directory_never_follows_junctions_or_accepts_junction_roots` |
+| 默认输出与命名 | `ocr.output_directory` 复用项目成功导出的授权目录，也兼容既有完成任务中的显式输出目录；无历史时使用下载目录下“审计工具箱/OCR”。后端创建并仅授予目标目录，项目保存请求不能注入任意目录；不从源文件或生成文件推导祖先授权。每次导出文件名包含时间戳，仍保留原子防覆盖保护 | `ocr::tests::output_directory_reuses_successful_export_without_source_parent_grants`、`ocr_store::tests::previous_output_directory_only_reuses_explicit_successful_export_directory`、`ocr_export::tests` |
+| 本次摘录输出 | `extractionsOnly` 配合 `extractionIds` 仅输出指定的本次已保存摘录，不带全文、表格或历史摘录。保留来源文件/页码，缺页、过期及零匹配显式标注；文件名为项目名、场景摘录及时间戳 | `ocr_export::tests::only_current_extractions_are_exported_with_sources_empty_results_and_timestamp` |
+| 命名场景存储 | 项目 `customScenarios` 保存名称、基础场景、规则版本、字段及完整提示词阶段；缺失字段的旧项目兼容读取和保存，不覆盖已有命名场景；无效和重复场景标识拒绝保存 | `ocr_store::tests::named_scenarios_round_trip_and_survive_old_project_saves` |
+| 安全 | 导入和显式导出均检查授权路径，默认输出使用上述受信目录 API；原生拖放事件授予实际投递路径；导入目录不跟随重解析点/链接，投递的重解析点根路径也拒绝；内部存储路径与统一 LLM 设置由主进程覆盖注入，传输后仍尊重统一配置的启用状态，不回落 AudiPick 专用配置 | `ocr_import_and_export_require_selected_paths_without_parent_grants`、`ocr::tests::import_directory_never_follows_junctions_or_accepts_junction_roots`、`ocr::tests::worker_settings_survive_transport_and_unified_llm_enabled_is_respected` |
 
 ## 不包含的既有专用工作流
 
@@ -53,7 +57,15 @@ python scripts/verify_ocr_dispatch.py --test-exe <本次编译的lib测试EXE> -
 
 上述旧 `verify_ocr_concurrency.py` 和此前真实服务档位测速直接启动 worker，绕过了父进程调度，不能证明安装版界面已经并发。新增 `verify_ocr_dispatch.py` 通过实际 `ExcelMergerService::start → monitor → worker`，本机屏障要求五个请求全部到达才返回，同时检查分页保存及排队耗时。它同样使用临时数据库和本机端口，不调用付费服务。当前机器的 lib 测试 EXE 因缺少 Common Controls v6 清单在进入测试前报 `0xC0000139`；本轮对测试 EXE 的本机副本用 Windows SDK `mt.exe` 嵌入 v6 清单后运行，未修改系统运行库或已安装程序。
 
+## 2026-10-28 限制性契约复核
+
+用户指出东风合同存在限制性契约后，复核确认原“零项”是量化财务专项口径过窄，不能作为广义限制性契约结论。新增广义场景后，使用当前生产源码、既有 Dev Qwen 配置及原生摘录 worker 对同两份既有 OCR 文本实测：各检出五项用途约束、提前还款同意约束及报送/检查附带义务。逐项保留适用主体、用途范围和明确后果，没有把提前收回权改写为自动到期。原生导出至用户目标目录后逐单元格回读类型、条款、主体、后果、页码和原文，末页待校对提醒保留；场景/页面/API回归、前端构建、Rust OCR及手动导出探针通过。初次模型抄写错字被原文校验拒绝，最终改为来源行号回填后通过；本轮未重做OCR、改真实项目或修改设置、凭据。私有资料与输出路径记录在 `artifacts/ocr-restrictive-20261028/`；未打包、发布或替换安装版。
+
 ## 2026-10-27 验收记录
+
+- 命名场景及自动导出：页面、场景及 API 定向回归和前端构建通过；Rust OCR 定向回归通过。用户明确授权启用 Dev 已保存的 Qwen 配置，仅修改 Dev 的启用开关，不改正式通道和凭据。以用户提供工作簿中的两份合同（共十二页既有 OCR 文本）调用生产财务契约流程与案例库，真实 Qwen 返回均无符合量化财务门槛的事项；人工复核一致，但该负样例不能证明复杂正样例的召回能力。原生导出器将本次结果写入用户指定目标目录，带时间戳并回读、渲染核对；第二份合同末页 OCR 极少，原扫描件为印章透印及空白背面，输出仍保留待复核提醒。详细私有资料仅存忽略目录 `artifacts/ocr-scenarios-20261027/`；没有重新识别、打包、发布或替换安装版。
+
+  2026-10-28 口径更正：上条“零项”只适用于量化财务契约，不能推导为合同没有广义限制性契约。用户指出后复核，来源含禁止贷款资金投资等明确约束；新增上述广义场景单独验收，不改财务专项原口径。此前零项文件保留为财务专项历史结果，不作为广义限制性契约成果。
 
 - 多选统一范围：页面回归覆盖多文件扫描、失败续扫、取消不派发后续文件、自定义范围裁剪和一次覆盖确认、焦点切换不改变范围、跨文件校对保存、单入口导出、卡片删除、同区文件夹选择、批量独立摘录及正确来源页定位。所选文件的全篇阅读与分页对照并存。定向前端回归通过；日志和浏览器截图位于 `artifacts/ocr-scope-20261027/`。没有新增真实服务调用或替换安装版。
 

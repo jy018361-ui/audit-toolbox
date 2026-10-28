@@ -21,12 +21,14 @@ import {
   extractOcrScenario,
   getOcrPromptStages,
   loadOcrScenarios,
+  withSavedOcrScenarios,
   type OcrScenario,
 } from "./ocrScenarios";
 import { openOcrSource, type OcrSource, type OcrRotation } from "./ocrSource";
 import { parseOcrScanRange } from "./ocrScanRange";
 import type {
   OcrConfigStatus,
+  OcrCustomScenario,
   OcrDocument,
   OcrDocumentDetail,
   OcrExtraction,
@@ -41,7 +43,7 @@ import { useNativeFileDropZone } from "@/hooks/useNativeFileDropZone";
 import { markToolPageLive } from "./toolPageActivity";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
@@ -67,31 +69,6 @@ const statusLabels: Record<string, string> = {
   failed: "识别失败",
 };
 
-function readableValue(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (Array.isArray(value))
-    return value.map(readableValue).filter(Boolean).join("\n");
-  if (typeof value === "object") {
-    const labels: Record<string, string> = {
-      text: "内容",
-      value: "内容",
-      evidence: "原文证据",
-      sourcePage: "来源页码",
-      sourceFile: "来源文件",
-      description: "说明",
-      label: "项目",
-      name: "名称",
-      page: "页码",
-      quote: "原文证据",
-      reason: "判断依据",
-    };
-    return Object.entries(value)
-      .map(([key, item]) => `${labels[key] ?? key}：${readableValue(item)}`)
-      .join("\n");
-  }
-  return String(value);
-}
-
 export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   const [projects, setProjects] = useState<OcrProject[]>([]);
   const [project, setProject] = useState<OcrProject>();
@@ -103,6 +80,12 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   const [sourceError, setSourceError] = useState("");
   const [scenarios, setScenarios] = useState<OcrScenario[]>([]);
   const [scenarioId, setScenarioId] = useState("");
+  const [promptSaveDialogOpen, setPromptSaveDialogOpen] = useState(false);
+  const [savedScenarioName, setSavedScenarioName] = useState("");
+  const [pendingExtractionExport, setPendingExtractionExport] = useState<{
+    documentIds: string[];
+    extractionIds: string[];
+  }>();
   const [stages, setStages] = useState<OcrPromptStage[]>([]);
   const [step, setStep] = useState(0);
   useEffect(() => {
@@ -167,7 +150,11 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   const loadSequence = useRef(0);
   const mounted = useRef(true);
   const uploadRef = useRef<HTMLDivElement>(null);
-  const scenario = scenarios.find((item) => item.id === scenarioId);
+  const availableScenarios = withSavedOcrScenarios(
+    scenarios,
+    project?.customScenarios,
+  );
+  const scenario = availableScenarios.find((item) => item.id === scenarioId);
   promptSnapshot.current = { project, scenarioId, stages };
 
   const run = useCallback(async (action: () => Promise<void>) => {
@@ -710,10 +697,57 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   }
   async function chooseScenario(id: string) {
     await savePromptEdits();
-    const next = scenarios.find((item) => item.id === id);
+    const next = availableScenarios.find((item) => item.id === id);
     setScenarioId(id);
+    setPendingExtractionExport(undefined);
     setStages(next ? getOcrPromptStages(next, project?.prompts) : []);
     promptDirty.current = false;
+  }
+  async function saveNamedScenario() {
+    if (!project || !scenario) return;
+    const name = savedScenarioName.trim();
+    if (!name) throw new Error("请输入场景名称。");
+    if (name.length > 80) throw new Error("场景名称不能超过 80 个字。");
+    if (stages.some((stage) => !stage.prompt.trim()))
+      throw new Error("请填写每个阶段的提示词。");
+    const existing = (project.customScenarios ?? []).find(
+      (item) => item.id === scenario.id,
+    );
+    if (
+      availableScenarios.some(
+        (item) => item.name === name && item.id !== existing?.id,
+      )
+    )
+      throw new Error("已有同名场景，请使用其他名称。");
+    const saved: OcrCustomScenario = {
+      id: existing?.id ?? `saved-${crypto.randomUUID()}`,
+      name,
+      baseScenarioId: scenario.baseScenarioId ?? scenario.id,
+      version: scenario.version,
+      fields: structuredClone(scenario.fields),
+      stages: structuredClone(stages),
+    };
+    await promptSavePending.current.catch(() => {});
+    const updated = await ocrCall<OcrProject>("ocr.project_save", {
+      id: project.id,
+      name: project.name,
+      prompts: { ...project.prompts, [saved.id]: stages },
+      customScenarios: [
+        ...(project.customScenarios ?? []).filter(
+          (item) => item.id !== saved.id,
+        ),
+        saved,
+      ],
+    });
+    if (!mounted.current || projectRef.current !== updated.id) return;
+    setProject(updated);
+    setProjects((items) =>
+      items.map((item) => (item.id === updated.id ? updated : item)),
+    );
+    setScenarioId(saved.id);
+    promptDirty.current = false;
+    setPromptSaveDialogOpen(false);
+    setMessage(`场景“${name}”已保存，可从摘录场景下拉框选择。`);
   }
   async function extract() {
     if (!selectedDocuments.length || !scenario) return;
@@ -722,11 +756,16 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
 
     await persistPrompts(stages);
     const targets = [...selectedDocuments];
+    setPendingExtractionExport(undefined);
     const promptStages = structuredClone(stages);
     const active = new OcrOperation();
     operation.current = active;
     const failures: string[] = [];
     let completed = 0;
+    const completedIds: string[] = [];
+    const extractionIds: string[] = [];
+    setOutputs([]);
+    setExportDirectory("");
     try {
       for (const [index, target] of targets.entries()) {
         await checkpoint(active);
@@ -762,20 +801,25 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
             },
           });
           await checkpoint(active);
-          await ocrCall<OcrExtraction>("ocr.extraction_save", {
-            documentId: current.document.id,
-            scenarioId: scenario.id,
-            scenarioVersion: scenario.version,
-            prompts: promptStages,
-            sourceRevision: current.document.revision,
-            ...result,
-          });
+          const extraction = await ocrCall<OcrExtraction>(
+            "ocr.extraction_save",
+            {
+              documentId: current.document.id,
+              scenarioId: scenario.id,
+              scenarioVersion: scenario.version,
+              prompts: promptStages,
+              sourceRevision: current.document.revision,
+              ...result,
+            },
+          );
           const updated = await ocrCall<OcrDocumentDetail>("ocr.document", {
             documentId: target.id,
           });
           if (mounted.current)
             setDetailCache((values) => ({ ...values, [target.id]: updated }));
           completed++;
+          completedIds.push(target.id);
+          extractionIds.push(extraction.id);
         } catch (reason) {
           if (active.cancelled) throw reason;
           failures.push(`${target.name}：${errorText(reason)}`);
@@ -785,9 +829,17 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       if (mounted.current && documentRef.current)
         await loadDocument(documentRef.current, pageNumber);
     }
-    setMessage(
-      `已分别保存 ${completed} 份文件的摘录。可查看原文证据，或导出 Excel。`,
-    );
+    await checkpoint(active);
+    if (completedIds.length) {
+      setPendingExtractionExport({ documentIds: completedIds, extractionIds });
+      await exportExcel("single_sheet", completedIds, {
+        active,
+        extractionIds,
+      });
+      setMessage(
+        `已完成 ${completed} 份文件的场景摘录，Excel 已保存到目标目录。`,
+      );
+    } else setMessage("没有生成新的摘录结果，请检查文件扫描状态和错误提示。");
     if (failures.length) setError(failures.join("\n"));
   }
   function beginExport() {
@@ -798,6 +850,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   // Selection is the sole operation scope. Preview navigation never changes it.
   useEffect(() => {
     let active = true;
+    setPendingExtractionExport(undefined);
     const projectId = projectRef.current;
     void Promise.all(
       selectedDocumentIds.map(async (id) => {
@@ -903,15 +956,19 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   async function exportExcel(
     mode: "single_sheet" | "per_document" | "individual",
     ids: string[],
+    extraction?: { active: Operation; extractionIds: string[] },
   ) {
     if (!project || !ids.length) throw new Error("请先选择需要导出的文件。");
 
-    const outputDir = await pickPath("folder", "选择 Excel 输出文件夹");
-    if (!outputDir || Array.isArray(outputDir)) return false;
+    const { outputDir } = await ocrCall<{ outputDir: string }>(
+      "ocr.output_directory",
+      { projectId: project.id },
+    );
     setOutputs([]);
     setExportDirectory("");
-    const active = new OcrOperation();
+    const active = extraction?.active ?? new OcrOperation();
     operation.current = active;
+    await checkpoint(active);
     const result = await runOcrJob<{ outputPaths: string[] }>(
       "ocr.export",
       {
@@ -919,12 +976,16 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
         documentIds: ids,
         mode,
         outputDir,
+        ...(extraction
+          ? { extractionsOnly: true, extractionIds: extraction.extractionIds }
+          : {}),
       },
       (id) => attachJob(active, id),
       (event) => setMessage(event.message),
     );
     if (!result.outputPaths.length) throw new Error("未生成导出文件，请重试。");
     setOutputs(result.outputPaths);
+    if (extraction) setPendingExtractionExport(undefined);
     setExportDirectory(outputDir);
     setMessage("");
     return true;
@@ -979,7 +1040,12 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     return (
       <div className="ocr-export-notice" role="status" aria-label="导出结果">
         <strong>导出文件成功</strong>
-        <span>导出目录：{exportDirectory}</span>
+        <span>
+          导出目录：
+          {exportDirectory
+            .replace(/^\\\\\?\\UNC\\/, "\\\\")
+            .replace(/^\\\\\?\\/, "")}
+        </span>
         <Button
           size="sm"
           variant="link"
@@ -1008,46 +1074,6 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       </div>
     );
   }
-  function extractionCell(key: string, value: unknown, documentId: string) {
-    if (
-      key === "sourcePage" &&
-      typeof value === "string" &&
-      /^[\d、,，;；\s]+$/.test(value)
-    ) {
-      const pages = [
-        ...new Set((value.match(/\d+/g) ?? []).map(Number)),
-      ].filter(
-        (number) =>
-          number >= 1 &&
-          number <=
-            (scopeDetails.find((value) => value.document.id === documentId)
-              ?.document.totalPages ?? 0),
-      );
-      if (pages.length)
-        return (
-          <span className="ocr-evidence-pages">
-            {pages.map((number) => (
-              <button
-                key={number}
-                className="ocr-page-link"
-                disabled={busy}
-                onClick={() =>
-                  void run(async () => {
-                    await loadDocument(documentId, number);
-                    await changeStep(0);
-                    setShowOriginal(false);
-                  })
-                }
-              >
-                第 {number} 页
-              </button>
-            ))}
-          </span>
-        );
-    }
-    return readableValue(value);
-  }
-
   return (
     <div className="ocr-page">
       <PageHeader
@@ -1078,92 +1104,99 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
         ]}
         onStepClick={(next) => void run(() => changeStep(next))}
       />
-      <Card className="ocr-project-bar">
-        <CardContent>
-          <label>
-            项目
-            <select
-              aria-label="选择 OCR 项目"
-              value={project?.id ?? ""}
-              disabled={busy}
-              onChange={(event) => {
-                const id = event.target.value;
-                void run(async () => {
-                  await savePromptEdits();
-                  projectRef.current = id;
-                  setProject(projects.find((item) => item.id === id));
-                });
-              }}
-            >
-              <option value="" disabled>
-                选择或新建项目
-              </option>
-              {projects.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <Input
-            aria-label="新项目名称"
-            placeholder="新项目名称"
-            value={projectName}
-            disabled={busy}
-            onChange={(event) => setProjectName(event.target.value)}
-          />
-          <Button
-            variant="outline"
-            disabled={busy || !projectName.trim()}
-            onClick={() =>
-              void run(async () => {
-                await savePromptEdits();
-                const created = await ocrCall<OcrProject>("ocr.project_save", {
-                  name: projectName.trim(),
-                });
-                setProjects((items) => [created, ...items]);
-                projectRef.current = created.id;
-                setProject(created);
-                setProjectName("");
-              })
-            }
-          >
-            <Plus />
-            新建项目
-          </Button>
-          {project && (
-            <Button
-              variant="ghost"
-              disabled={busy}
-              onClick={() =>
-                void run(async () => {
-                  if (
-                    !(await confirmDialog({
-                      title: "删除 OCR 项目？",
-                      message:
-                        "项目中的导入副本、识别和摘录结果将删除。原文件不受影响。",
-                      tone: "danger",
-                    }))
-                  )
-                    return;
+      {step === 0 && (
+        <>
+          <Card className="ocr-project-bar">
+            <CardContent>
+              <label>
+                项目
+                <select
+                  aria-label="选择 OCR 项目"
+                  value={project?.id ?? ""}
+                  disabled={busy}
+                  onChange={(event) => {
+                    const id = event.target.value;
+                    void run(async () => {
+                      await savePromptEdits();
+                      projectRef.current = id;
+                      setProject(projects.find((item) => item.id === id));
+                    });
+                  }}
+                >
+                  <option value="" disabled>
+                    选择或新建项目
+                  </option>
+                  {projects.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <Input
+                aria-label="新项目名称"
+                placeholder="新项目名称"
+                value={projectName}
+                disabled={busy}
+                onChange={(event) => setProjectName(event.target.value)}
+              />
+              <Button
+                variant="outline"
+                disabled={busy || !projectName.trim()}
+                onClick={() =>
+                  void run(async () => {
+                    await savePromptEdits();
+                    const created = await ocrCall<OcrProject>(
+                      "ocr.project_save",
+                      {
+                        name: projectName.trim(),
+                      },
+                    );
+                    setProjects((items) => [created, ...items]);
+                    projectRef.current = created.id;
+                    setProject(created);
+                    setProjectName("");
+                  })
+                }
+              >
+                <Plus />
+                新建项目
+              </Button>
+              {project && (
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() =>
+                    void run(async () => {
+                      if (
+                        !(await confirmDialog({
+                          title: "删除 OCR 项目？",
+                          message:
+                            "项目中的导入副本、识别和摘录结果将删除。原文件不受影响。",
+                          tone: "danger",
+                        }))
+                      )
+                        return;
 
-                  await ocrCall("ocr.project_delete", { id: project.id });
-                  const rest = projects.filter(
-                    (item) => item.id !== project.id,
-                  );
-                  setProjects(rest);
-                  projectRef.current = rest[0]?.id;
-                  setProject(rest[0]);
-                  setDetail(undefined);
-                  setDocuments([]);
-                })
-              }
-            >
-              删除项目
-            </Button>
-          )}
-        </CardContent>
-      </Card>
+                      await ocrCall("ocr.project_delete", { id: project.id });
+                      const rest = projects.filter(
+                        (item) => item.id !== project.id,
+                      );
+                      setProjects(rest);
+                      projectRef.current = rest[0]?.id;
+                      setProject(rest[0]);
+                      setDetail(undefined);
+                      setDocuments([]);
+                    })
+                  }
+                >
+                  删除项目
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+        </>
+      )}
       {!project ? (
         <div className="ocr-empty">
           <FileScan size={44} />
@@ -1215,7 +1248,9 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                     文件 <span>{documents.length}</span>
                   </h2>
                   <p className="ocr-muted">
-                    扫描、导出和场景摘录均针对勾选文件；当前查看文件仅切换预览。
+                    {step === 0
+                      ? "扫描、导出和场景摘录均针对勾选文件；当前查看文件仅切换预览。"
+                      : "场景摘录针对勾选文件，完成后自动导出到目标目录。"}
                   </p>
                 </div>
                 <div className="ocr-file-selection">
@@ -1292,7 +1327,6 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                               await savePromptEdits();
                               setSelectedDocumentIds([item.id]);
                               await loadDocument(item.id);
-                              setStep(0);
                             })
                           }
                         >
@@ -1337,7 +1371,9 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                   </Button>
                 )}
               </aside>
-              <main className="ocr-document-workspace">
+              <main
+                className={`ocr-document-workspace ${step === 1 ? "is-extraction" : ""}`}
+              >
                 {!detail || !selectedDocuments.length ? (
                   <div className="ocr-empty">
                     <ScanText size={36} />
@@ -1346,20 +1382,24 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                   </div>
                 ) : (
                   <>
-                    <div className="ocr-file-heading">
-                      <div>
-                        <h2>
-                          {selectedDocuments.length > 1
-                            ? `已选 ${selectedDocuments.length} 份文件`
-                            : detail.document.name}
-                        </h2>
-                        <p>
-                          {step === 0
-                            ? "对照扫描件阅读初始原文；识别正文和表格可直接导出 Excel。"
-                            : "按场景判断和摘录内容，提示词可修改并保存在当前项目。"}
-                        </p>
-                      </div>
-                    </div>
+                    {step === 0 && (
+                      <>
+                        <div className="ocr-file-heading">
+                          <div>
+                            <h2>
+                              {selectedDocuments.length > 1
+                                ? `已选 ${selectedDocuments.length} 份文件`
+                                : detail.document.name}
+                            </h2>
+                            <p>
+                              {step === 0
+                                ? "对照扫描件阅读初始原文；识别正文和表格可直接导出 Excel。"
+                                : "按场景判断和摘录内容，提示词可修改并保存在当前项目。"}
+                            </p>
+                          </div>
+                        </div>
+                      </>
+                    )}
                     {step === 0 && (
                       <>
                         <section
@@ -1581,34 +1621,6 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                     )}
                     {step === 1 && (
                       <Card className="ocr-extraction">
-                        <CardHeader>
-                          <CardTitle>场景摘录</CardTitle>
-                          <div className="ocr-extraction-toolbar">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={busy}
-                              onClick={() => void run(() => changeStep(0))}
-                            >
-                              返回原文识别
-                            </Button>
-                            <Button
-                              className="ocr-export-action"
-                              variant="outline"
-                              size="sm"
-                              disabled={busy || !hasResults}
-                              onClick={beginExport}
-                            >
-                              <Download />
-                              导出文件
-                            </Button>
-                          </div>
-                          {renderExportNotice()}
-                          {renderTaskProgress()}
-                          <p className="ocr-muted">
-                            选择场景，查看并编辑完整提示词。修改只在当前项目保存。
-                          </p>
-                        </CardHeader>
                         <CardContent>
                           <label>
                             摘录场景
@@ -1622,7 +1634,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                               }}
                             >
                               <option value="">请选择场景</option>
-                              {scenarios.map((item) => (
+                              {availableScenarios.map((item) => (
                                 <option key={item.id} value={item.id}>
                                   {item.name}
                                 </option>
@@ -1676,12 +1688,15 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                                 <Button
                                   variant="outline"
                                   disabled={busy}
-                                  onClick={() =>
-                                    void run(async () => {
-                                      await persistPrompts(stages);
-                                      setMessage("提示词已保存到当前项目。");
-                                    })
-                                  }
+                                  onClick={() => (
+                                    setError(""),
+                                    setSavedScenarioName(
+                                      scenario.baseScenarioId
+                                        ? scenario.name
+                                        : "",
+                                    ),
+                                    setPromptSaveDialogOpen(true)
+                                  )}
                                 >
                                   保存提示词
                                 </Button>
@@ -1694,75 +1709,32 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                               </div>
                             </>
                           )}
-                          {scopeDetails
-                            .flatMap((value) =>
-                              value.extractions.map((item) => ({
-                                ...item,
-                                sourceDocument: value.document,
-                              })),
-                            )
-                            .map((item) => (
-                              <section
-                                className="ocr-extraction-result"
-                                key={`${item.sourceDocument.id}:${item.id}`}
-                              >
-                                <h3>
-                                  {item.sourceDocument.name} ·{" "}
-                                  {scenarios.find(
-                                    (value) => value.id === item.scenarioId,
-                                  )?.name ?? item.scenarioId}{" "}
-                                  <span>
-                                    {item.stale ||
-                                    item.sourceRevision !==
-                                      item.sourceDocument.revision
-                                      ? "原文已修改，需要重新摘录"
-                                      : "已保存"}
-                                  </span>
-                                </h3>
-                                <details>
-                                  <summary>查看本次使用的提示词</summary>
-                                  {item.prompts.map((stage) => (
-                                    <div key={stage.id}>
-                                      <h4>{stage.label}</h4>
-                                      <pre>{stage.prompt}</pre>
-                                    </div>
-                                  ))}
-                                </details>
-                                <div className="ocr-table-scroll">
-                                  <table>
-                                    <thead>
-                                      <tr>
-                                        {item.columns.map((column) => (
-                                          <th key={column.key}>
-                                            {column.label}
-                                          </th>
-                                        ))}
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {item.rows.map((row, index) => (
-                                        <tr key={index}>
-                                          {item.columns.map((column) => (
-                                            <td key={column.key}>
-                                              {extractionCell(
-                                                column.key,
-                                                row[column.key],
-                                                item.sourceDocument.id,
-                                              )}
-                                            </td>
-                                          ))}
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-                                {!item.rows.length && (
-                                  <p className="ocr-muted">
-                                    未找到符合本次提示词的内容。
-                                  </p>
-                                )}
-                              </section>
-                            ))}
+                          {renderTaskProgress()}
+                          {renderExportNotice()}
+                          {pendingExtractionExport && (
+                            <Button
+                              variant="outline"
+                              disabled={busy}
+                              onClick={() =>
+                                void run(async () => {
+                                  await exportExcel(
+                                    "single_sheet",
+                                    pendingExtractionExport.documentIds,
+                                    {
+                                      active: new OcrOperation(),
+                                      extractionIds:
+                                        pendingExtractionExport.extractionIds,
+                                    },
+                                  );
+                                  setMessage(
+                                    "本次摘录 Excel 已保存到目标目录。",
+                                  );
+                                })
+                              }
+                            >
+                              重试导出
+                            </Button>
+                          )}
                         </CardContent>
                       </Card>
                     )}
@@ -1773,6 +1745,53 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
           )}
         </>
       )}
+      <Dialog
+        open={promptSaveDialogOpen}
+        onOpenChange={(open) => {
+          if (!busy) setPromptSaveDialogOpen(open);
+        }}
+      >
+        <DialogContent showCloseButton={!busy}>
+          <DialogHeader>
+            <DialogTitle>保存为场景</DialogTitle>
+            <DialogDescription>
+              命名后可从当前项目的摘录场景下拉框直接选择。
+            </DialogDescription>
+          </DialogHeader>
+          <label>
+            场景名称
+            <Input
+              aria-label="场景名称"
+              autoFocus
+              maxLength={80}
+              value={savedScenarioName}
+              disabled={busy}
+              placeholder="例如：银行借款限制性契约"
+              onChange={(event) => setSavedScenarioName(event.target.value)}
+            />
+          </label>
+          {error && (
+            <p role="alert" className="ocr-warning">
+              {error}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={busy}
+              onClick={() => setPromptSaveDialogOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={busy || !savedScenarioName.trim()}
+              onClick={() => void run(saveNamedScenario)}
+            >
+              保存场景
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={exportDialogOpen}
         onOpenChange={(open) => {
@@ -1862,7 +1881,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                 })
               }
             >
-              选择目录并导出
+              导出到目标目录
             </Button>
           </DialogFooter>
         </DialogContent>

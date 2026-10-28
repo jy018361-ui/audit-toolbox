@@ -229,6 +229,14 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     return () => window.clearInterval(timer);
   }, [running]);
 
+  /** 路径未授权是安全设计的预期拦截（恢复/分享的流程不自动获得文件访问权），
+   *  报错时附上怎么办，而不是让用户猜。 */
+  function withPathHint(message: string): string {
+    return message.includes("路径未授权")
+      ? `${message}（安全设计：恢复或打开的流程不会自动获得文件访问权，请在对应输入节点的配置里重新选择一次文件或文件夹。）`
+      : message;
+  }
+
   async function runFlow(mode: "preview" | "full", uptoNodeId?: string) {
     if (running) return;
     const wf = workflowRef.current;
@@ -262,7 +270,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
       setRunResult(parsed.data);
       setLastRunMode(mode);
       if (uptoNodeId) setRanUpTo(uptoNodeId);
-      if (parsed.data.error) setError(errorText(parsed.data.error));
+      if (parsed.data.error) setError(withPathHint(errorText(parsed.data.error)));
       const statuses = Object.values(parsed.data.nodes);
       const warns = statuses.filter((item) => item.status === "warn").length;
       const errors = statuses.filter((item) => item.status === "error").length;
@@ -274,7 +282,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
             : `上次运行：全量运行 · 警告 ${warns} 项、失败 ${errors} 项、输出 ${parsed.data.outputs.length} 个文件`,
       );
     } catch (caught) {
-      setError(errorText(caught));
+      setError(withPathHint(errorText(caught)));
       setStatusText("运行失败，详见左下提示。");
     } finally {
       setRunning(false);

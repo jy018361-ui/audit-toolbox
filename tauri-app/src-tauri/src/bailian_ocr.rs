@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 use crate::AppError;
 #[path = "ocr_content.rs"]
 mod ocr_content;
-pub(crate) use ocr_content::{looks_like_ocr_payload, readable_ocr_content};
+pub(crate) use ocr_content::{has_latex_layout, looks_like_ocr_payload, readable_ocr_content};
 
 const DEFAULT_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const DEFAULT_MODEL: &str = "qwen3.5-ocr";
 pub(crate) const STRUCTURED_PROMPT: &str = "请逐字识别整张扫描件的全部文字，保留阅读顺序、段落及全部表格内容。同时逐格恢复所有表格的原始行列。不要总结、补写、改写数字、日期、账号或金额，所有单元格均为字符串。合并单元格仅在左上格写文字，其余空串。text 必须含正文和全部表格文字，不能因 tables 已有而省略。仅输出完整 JSON：{\"text\":\"完整原文\",\"tables\":[{\"title\":\"原表名\",\"rows\":[[\"单元格\"]]}],\"warnings\":[\"无法确认的内容及位置\"]}。无表格返回空 tables。";
-// The provider's default text-recognition prompt preserves complete prose and
-// may include native Markdown tables. Forcing HTML lost cover headings in live
-// acceptance; recover any returned table markup locally without changing task.
+// Compatibility gateways keep the provider's basic text task. On the official
+// Qwen3.5 service, use its native document parser rather than prompting the
+// basic task to emulate a layout parser (which omitted cover text in testing).
 const TEXT_PROMPT: &str = "Please output only the text content from the image without any additional descriptions or formatting.";
 
 pub(crate) struct OcrConfig {
@@ -73,10 +73,17 @@ impl OcrConfig {
     }
 
     pub(crate) fn recognize_structured(&self, image: &str, key: &str) -> Result<Value, AppError> {
-        self.recognize(image, key)
+        match native_document_endpoint(&self.endpoint, &self.model) {
+            Some(endpoint) => self.request(image, key, &endpoint, None),
+            None => self.recognize(image, key),
+        }
     }
 
     fn recognize_with_prompt(&self, image: &str, key: &str, prompt: &str) -> Result<Value, AppError> {
+        self.request(image, key, &self.endpoint, Some(prompt))
+    }
+
+    fn request(&self, image: &str, key: &str, endpoint: &reqwest::Url, prompt: Option<&str>) -> Result<Value, AppError> {
         if key.trim().is_empty() {
             return Err(failure(
                 "OCR_KEY_MISSING",
@@ -92,16 +99,25 @@ impl OcrConfig {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| failure("BAILIAN_OCR_NETWORK", "无法建立百炼 OCR 连接。", true))?;
-        let body = serde_json::to_vec(&json!({
+        let payload = if let Some(prompt) = prompt { json!({
             "model": self.model,
             "messages": [{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": image_url}},
                 {"type": "text", "text": prompt}
             ]}],
             "stream": false
-        })).map_err(|_| failure("BAILIAN_OCR_REQUEST", "无法准备百炼 OCR 请求。", false))?;
+        }) } else { json!({
+            "model": self.model,
+            "input": {"messages": [{"role": "user", "content": [{
+                "image": image_url, "min_pixels": 3072, "max_pixels": 8388608,
+                // The worker already corrected cardinal direction locally.
+                "enable_rotate": false
+            }]}]},
+            "parameters": {"ocr_options": {"task": "document_parsing"}}
+        }) };
+        let body = serde_json::to_vec(&payload).map_err(|_| failure("BAILIAN_OCR_REQUEST", "无法准备百炼 OCR 请求。", false))?;
         let request_bytes = body.len();
-        let request = client.post(self.endpoint.clone()).bearer_auth(key.trim())
+        let request = client.post(endpoint.clone()).bearer_auth(key.trim())
             .header(reqwest::header::CONTENT_TYPE, "application/json").body(body).build()
             .map_err(|_| failure("BAILIAN_OCR_REQUEST", "无法准备百炼 OCR 请求。", false))?;
         let prepare_ms = prepared.elapsed().as_secs_f64() * 1000.0;
@@ -151,8 +167,9 @@ impl OcrConfig {
             )
         })?;
         let parse_ms = parsed.elapsed().as_secs_f64() * 1000.0;
-        if value
-            .pointer("/choices/0/finish_reason")
+        let choice = if prompt.is_some() { &value["choices"][0] } else { &value["output"]["choices"][0] };
+        if choice
+            .get("finish_reason")
             .and_then(Value::as_str)
             == Some("length")
         {
@@ -162,9 +179,15 @@ impl OcrConfig {
                 false,
             ));
         }
-        let text = value
-            .pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
+        let content = &choice["message"]["content"];
+        let text = if prompt.is_some() { content.as_str().map(str::to_owned) } else {
+            // `text` contains the provider's assembled document body (including
+            // tables). Do not recursively walk layouts/blocks: the native API
+            // repeats those structures and would duplicate every paragraph.
+            content.as_array().map(|parts| parts.iter().filter_map(|part| part["text"].as_str())
+                .filter(|text| !text.trim().is_empty()).collect::<Vec<_>>().join("\n\n"))
+        };
+        let text = text
             .filter(|v| !v.trim().is_empty())
             .ok_or_else(|| {
                 failure(
@@ -177,9 +200,22 @@ impl OcrConfig {
         Ok(json!({"text": text, "engine": "bailian", "httpTiming": {
             "prepareMs": prepare_ms, "headersMs": headers_ms, "bodyMs": body_ms, "parseMs": parse_ms,
             "requestBytes": request_bytes, "responseBytes": bytes.len(), "httpStatus": status.as_u16(),
-            "requestId": request_id, "model": self.model, "host": self.endpoint.host_str().unwrap_or("")
+            "requestId": request_id, "model": self.model, "host": endpoint.host_str().unwrap_or("")
         }}))
     }
+}
+
+fn native_document_endpoint(compatible: &reqwest::Url, model: &str) -> Option<reqwest::Url> {
+    let host = compatible.host_str()?;
+    let official_host = matches!(host, "dashscope.aliyuncs.com" | "dashscope-intl.aliyuncs.com" | "dashscope-us.aliyuncs.com")
+        || host.ends_with(".maas.aliyuncs.com");
+    if model != "qwen3.5-ocr" || !official_host || compatible.scheme() != "https"
+        || compatible.port().is_some() || compatible.path() != "/compatible-mode/v1/chat/completions" {
+        return None;
+    }
+    let mut endpoint = compatible.clone();
+    endpoint.set_path("/api/v1/services/aigc/multimodal-generation/generation");
+    Some(endpoint)
 }
 
 fn safe_request_id(value: &str) -> Option<String> {
@@ -304,6 +340,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn native_document_task_only_uses_known_official_qwen35_routes() {
+        for host in ["dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com", "workspace.cn-beijing.maas.aliyuncs.com"] {
+            let url = reqwest::Url::parse(&format!("https://{host}/compatible-mode/v1/chat/completions")).unwrap();
+            let native = native_document_endpoint(&url, "qwen3.5-ocr").unwrap();
+            assert_eq!(native.host_str(), Some(host));
+            assert_eq!(native.path(), "/api/v1/services/aigc/multimodal-generation/generation");
+            assert!(native_document_endpoint(&url, "custom-model").is_none());
+        }
+        for url in ["https://example.test/compatible-mode/v1/chat/completions", "https://dashscope.aliyuncs.com.example.test/compatible-mode/v1/chat/completions",
+            "https://dashscope.aliyuncs.com:8443/compatible-mode/v1/chat/completions", "http://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "https://dashscope.aliyuncs.com/proxy/compatible-mode/v1/chat/completions"] {
+            assert!(native_document_endpoint(&reqwest::Url::parse(url).unwrap(), "qwen3.5-ocr").is_none());
+        }
+    }
+    #[test]
+    fn native_document_parser_preserves_cover_body_and_cells_without_repeating_layouts() {
+        let body = "流动资金借款合同\n\n交通银行股份有限公司\n<table><tr><td>账号</td><td>金额</td></tr><tr><td>00123</td><td>6.00</td></tr></table>合同尾页";
+        let (base, server) = server("200 OK", json!({"output":{"choices":[{"finish_reason":"stop","message":{"content":[
+            {"text":body,"ocr_result":{"layouts":[{"text":"不能再加一遍的正文"}]}}, {"text":"第二内容块"}
+        ]}}]},"request_id":"native-test-123"}));
+        let config = OcrConfig::from_settings(&json!({"ocr":{"bailian_base_url":base}})).unwrap();
+        let native = reqwest::Url::parse(&format!("{base}/native")).unwrap();
+        let result = config.request(PNG, "private-api-key", &native, None).unwrap();
+        let parsed = readable_ocr_content(result["text"].as_str().unwrap());
+        assert!(parsed["text"].as_str().unwrap().contains("流动资金借款合同"));
+        assert!(parsed["text"].as_str().unwrap().contains("交通银行股份有限公司"));
+        assert!(parsed["text"].as_str().unwrap().contains("合同尾页"));
+        assert!(parsed["text"].as_str().unwrap().contains("第二内容块"));
+        assert!(!parsed["text"].as_str().unwrap().contains("不能再加一遍"));
+        assert_eq!(parsed["tables"][0]["rows"][1], json!(["00123", "6.00"]));
+        let request = server.join().unwrap();
+        let payload: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(payload["parameters"]["ocr_options"]["task"], "document_parsing");
+        assert_eq!(payload["input"]["messages"][0]["content"][0]["image"], format!("data:image/png;base64,{PNG}"));
+        assert_eq!(payload["input"]["messages"][0]["content"][0]["enable_rotate"], false);
+        assert!(payload.get("messages").is_none());
+        assert!(!payload.to_string().contains("private-api-key"));
+    }
+    #[test]
+    fn native_empty_truncated_and_error_responses_are_not_saved_as_success() {
+        for (payload, code) in [
+            (json!({"output":{"choices":[{"finish_reason":"length","message":{"content":[{"text":"未完成"}]}}]}}), "BAILIAN_OCR_TRUNCATED"),
+            (json!({"output":{"choices":[{"finish_reason":"stop","message":{"content":[{"ocr_result":{"layouts":[{"text":"诊断元数据"}]}}]}}]}}), "BAILIAN_OCR_EMPTY"),
+            (json!({"code":"Error","message":"private-key or document"}), "BAILIAN_OCR_EMPTY"),
+        ] {
+            let (base, server) = server("200 OK", payload);
+            let config = OcrConfig::from_settings(&json!({"ocr":{"bailian_base_url":base}})).unwrap();
+            let error = config.request(PNG, "synthetic-key", &config.endpoint, None).unwrap_err();
+            assert_eq!(error.code, code);
+            assert!(!error.user_message.contains("private-key"));
+            server.join().unwrap();
+        }
+    }
     #[test]
     fn standalone_structured_mode_is_one_request_with_complete_text_and_cells() {
         let output="合同标题\n\n| 金额 | 账号 |\n| --- | --- |\n| 6.00 | 00123 |\n\n合同尾页";

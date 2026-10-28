@@ -4,6 +4,8 @@ import { StepTourHint } from "./tour/StepTourHint";
 export type Step = {
   key: string;
   label: string;
+  /** 步骤名称旁的状态标签，同时作为辅助技术的描述。 */
+  badge?: string;
   disabled?: boolean;
   /** 该步骤执行失败：显示警示标记而非序号/对勾，优先级高于 active/done。 */
   status?: "error" | "done";
@@ -66,6 +68,7 @@ export function StepIndicator({
                 )}
                 aria-current={active ? "step" : undefined}
                 aria-label={`${index + 1} ${step.label}${done ? "（已完成）" : ""}${failed ? "（失败）" : ""}`}
+                aria-description={step.badge}
                 disabled={disabled}
                 onClick={() => onStepClick?.(index)}
               >
@@ -89,6 +92,7 @@ export function StepIndicator({
                   )}
                 </span>
                 <span className="step-indicator-label">{step.label}</span>
+                {step.badge && <span className="step-indicator-badge">{step.badge}</span>}
                 {done ? <span className="sr-only">（已完成）</span> : null}
                 {failed ? <span className="sr-only">（失败）</span> : null}
               </button>

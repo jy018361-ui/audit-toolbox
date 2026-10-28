@@ -21,6 +21,73 @@ pub(crate) fn looks_like_ocr_payload(raw: &str) -> bool {
             .any(|key| raw.contains(key))
 }
 
+pub(crate) fn has_latex_layout(raw: &str) -> bool {
+    [r"\text", r"\boxed", r"\begin{", r"\mbox", r"\displaylines", r"\underline", r"\(", r"\["].iter().any(|tag| raw.contains(tag))
+}
+
+// Decode only complete prose wrappers. This is deliberately not a TeX renderer:
+// unknown commands, mathematical expressions and multi-column arrays survive
+// verbatim, so cleaning layout can never silently erase a financial formula.
+fn prose_layout(raw: &str, depth: usize) -> Option<String> {
+    if depth > 32 { return None; }
+    fn group(raw: &str) -> Option<(&str, &str)> {
+        let raw = raw.trim_start().strip_prefix('{')?;
+        let mut depth = 1usize;
+        let mut escaped = false;
+        for (index, ch) in raw.char_indices() {
+            if escaped { escaped = false; continue; }
+            if ch == '\\' { escaped = true; continue; }
+            if ch == '{' { depth += 1; }
+            if ch == '}' { depth -= 1; }
+            if depth == 0 { return Some((&raw[..index], &raw[index + 1..])); }
+        }
+        None
+    }
+    let mut remaining = raw.trim();
+    let mut out = String::new();
+    let mut found = false;
+    while !remaining.is_empty() {
+        if let Some(array) = remaining.strip_prefix(r"\begin{array}") {
+            let (alignment, array) = group(array)?;
+            if !matches!(alignment.trim(), "l" | "c" | "r") { return None; }
+            let body = array.trim_end().strip_suffix(r"\end{array}")?;
+            out.push_str(&prose_layout(body, depth + 1)?);
+            remaining = "";
+        } else if let Some(rest) = remaining.strip_prefix(r"\\") {
+            out.push('\n');
+            remaining = rest.trim_start();
+        } else {
+            let command = [r"\textbf", r"\textrm", r"\text", r"\mbox", r"\boxed", r"\underline"]
+                .into_iter().find(|command| remaining.starts_with(command))?;
+            let (body, rest) = group(&remaining[command.len()..])?;
+            if command == r"\boxed" {
+                out.push_str(&prose_layout(body, depth + 1)?);
+            } else {
+                // Braces/backslashes in text can be escapes, nested formatting
+                // or real document symbols. Preserve ambiguous cases intact.
+                if body.contains(['{', '}', '\\', '$', '^', '_']) { return None; }
+                out.push_str(body.trim());
+            }
+            remaining = rest.trim_start();
+        }
+        found = true;
+    }
+    found.then_some(out)
+}
+
+fn readable_latex(raw: &str, warnings: &mut Vec<String>) -> String {
+    if !has_latex_layout(raw) { return raw.to_owned(); }
+    let spans = Regex::new(r"(?s)\$\$([^$]+)\$\$|\$([^$]+)\$|\\\((.*?)\\\)|\\\[(.*?)\\\]").unwrap();
+    let result = spans.replace_all(raw, |captures: &regex::Captures<'_>| {
+        let body = (1..=4).find_map(|i| captures.get(i)).unwrap().as_str();
+        prose_layout(body, 0).unwrap_or_else(|| captures[0].to_owned())
+    }).into_owned();
+    if has_latex_layout(&result) {
+        warnings.push("本页含未能安全还原的排版或公式标记，已保留原内容，请对照扫描件核对。".into());
+    }
+    result
+}
+
 fn push_text(out: &mut String, text: &str) {
     let text = text.trim();
     if !text.is_empty() {
@@ -366,10 +433,24 @@ pub(crate) fn readable_ocr_content(raw: &str) -> Value {
     } else if !structured {
         text = markdown_tables(&text, &mut tables);
     }
+    text = readable_latex(&text, &mut warnings);
+    for table in &mut tables {
+        if let Some(title) = table.get("title").and_then(Value::as_str).map(str::to_owned) {
+            table["title"] = json!(readable_latex(&title, &mut warnings));
+        }
+        if let Some(rows) = table.get_mut("rows").and_then(Value::as_array_mut) {
+            for cell in rows.iter_mut().filter_map(Value::as_array_mut).flatten() {
+                if let Some(raw) = cell.as_str() { *cell = json!(readable_latex(raw, &mut warnings)); }
+            }
+        }
+    }
+    if text.contains('\u{fffd}') {
+        warnings.push("本页含无法解码的字符，未猜测替换，请重新识别并核对原扫描件。".into());
+    }
     if text.contains("［无法辨认］") || text.contains("[无法辨认]") {
         warnings.push("本页包含无法辨认的文字，请对照扫描件核对。".into());
     }
-    if text.contains("公式") || text.contains("\\frac") {
+    if text.contains("公式") || text.contains("\\frac") || text.contains(r"\(") || text.contains(r"\[") {
         warnings.push("本页涉及公式，请对照扫描件核对上下标、分数线和运算符；识别文字不作为可计算公式。".into());
     }
     warnings.sort();
@@ -380,6 +461,39 @@ pub(crate) fn readable_ocr_content(raw: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prose_latex_wrappers_are_readable_without_altering_contract_symbols() {
+        let raw = r"$\text { 编号：000123 }$
+
+$\boxed{\begin{array}{l}\text { 重要提示 } \\\text { 先决条件：负债率≤65%，金额1,000.00元。 } \\\text { 同意后方可转让▲▲。 }\end{array}}$";
+        let result = readable_ocr_content(raw);
+        assert_eq!(result["text"], "编号：000123\n\n重要提示\n先决条件：负债率≤65%，金额1,000.00元。\n同意后方可转让▲▲。");
+        assert_eq!(result["warnings"], json!([]));
+        assert_eq!(readable_ocr_content(r"\(\text{标题}\)")["text"], "标题");
+        assert_eq!(readable_ocr_content(r"$$\boxed{\text{条款}}$$")["text"], "条款");
+        assert_eq!(readable_ocr_content(r"投资限额人民币\(\underline{50000}\)万元，\(\underline{15}\)日内报送。")["text"], "投资限额人民币50000万元，15日内报送。");
+    }
+    #[test]
+    fn mathematical_and_ambiguous_latex_is_not_deleted_or_guessed() {
+        for raw in [r"$\frac{1}{2}\text{万元}$", r"$\text{利率}x^2$", r"$\text{未闭合$",
+            r"$\boxed{\begin{array}{lr}\text{A}&\text{B}\end{array}}$",
+            r"$\text{实付\$100}$", r"$\text{嵌套{括号}}$", r"$\unknown{未知内容}$", r"\(\underline{x^2}\)", r"\(\therefore(2i)^{6}i\)"] {
+            let result = readable_ocr_content(raw);
+            assert_eq!(result["text"], raw);
+        }
+        let malformed = readable_ocr_content(r"$\text{未闭合$");
+        assert!(malformed["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("排版")));
+        assert_eq!(readable_ocr_content("保费$100，余额$200；原文{A}\\路径")["text"], "保费$100，余额$200；原文{A}\\路径");
+    }
+    #[test]
+    fn table_text_and_plain_text_use_identical_layout_decoding() {
+        let result = readable_ocr_content(r#"{"text":"$\\text{金额}$","tables":[{"title":"$\\text{还款表}$","rows":[["$\\text{000123}$","$\\frac{1}{2}$"]]}]}"#);
+        assert!(result["text"].as_str().unwrap().starts_with("金额"));
+        assert_eq!(result["tables"][0]["title"], "还款表");
+        assert_eq!(result["tables"][0]["rows"][0][0], "000123");
+        assert_eq!(result["tables"][0]["rows"][0][1], r"$\frac{1}{2}$");
+        assert!(!readable_ocr_content("无法解码：\u{fffd}")["warnings"].as_array().unwrap().is_empty());
+    }
     #[test]
     fn formulas_are_preserved_verbatim_and_flagged_for_visual_review() {
         let raw = "还款公式：每期本息=本金 × (1+期利率)还款期数\n(1+期利率)还款期数 - 1";

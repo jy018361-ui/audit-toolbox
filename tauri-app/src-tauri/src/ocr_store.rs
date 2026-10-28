@@ -96,7 +96,8 @@ fn readable_page(mut page: Page) -> Page {
     let unedited = !page.original_text.is_empty() && page.text == page.original_text;
     let unedited_tables = serde_json::to_value(&page.tables).ok() == serde_json::to_value(&page.original_tables).ok();
     let is_payload = crate::bailian_ocr::looks_like_ocr_payload(&page.original_text)
-        || page.original_text.to_ascii_lowercase().contains("<table");
+        || page.original_text.to_ascii_lowercase().contains("<table")
+        || crate::bailian_ocr::has_latex_layout(&page.original_text);
     if is_payload {
         let parsed = crate::bailian_ocr::readable_ocr_content(&page.original_text);
         let parsed_text = parsed["text"].as_str().unwrap_or("").to_owned();
@@ -613,6 +614,20 @@ mod tests {
             ("ocr.export","completed",json!({"projectId":"other","outputDir":"C:\\其他项目目录"}),"4"),
         ] { store.conn.execute("INSERT INTO task_history VALUES(?,?,?,?)",params![method,status,params.to_string(),stamp]).unwrap(); }
         assert_eq!(store.previous_output_directory(id).unwrap(), Some(PathBuf::from("C:\\已授权输出目录")));
+    }
+    #[test]
+    fn legacy_latex_is_readable_without_rewriting_storage_or_human_corrections() {
+        let raw = r"$\text { 编号：000123 }$";
+        let baseline = Page { metadata: Default::default(), page: 1, text: raw.into(), original_text: raw.into(), tables: vec![], original_tables: vec![], revision: 2, status: "completed".into(), warnings: vec![] };
+        let projected = readable_page(baseline.clone());
+        assert_eq!(projected.text, "编号：000123");
+        assert_eq!(projected.original_text, "编号：000123");
+        assert_eq!(projected.revision, 2);
+        assert_eq!(projected.status, "needs_review");
+        let mut corrected = baseline.clone();
+        corrected.text = "人工校对：00123".into();
+        assert_eq!(readable_page(corrected).text, "人工校对：00123");
+        assert_eq!(baseline.text, raw);
     }
     #[test]
     fn legacy_projection_does_not_restore_a_table_the_user_deleted() {

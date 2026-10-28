@@ -638,6 +638,9 @@
 .ocr-steps {
   margin-bottom: 18px;
 }
+.ocr-steps .step-indicator-item {
+  flex-wrap: wrap;
+}
 .ocr-extraction-toolbar {
   display: flex;
   flex-wrap: wrap;

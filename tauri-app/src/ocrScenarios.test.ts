@@ -175,6 +175,261 @@ const scenario = async (id: string) =>
   (await loadOcrScenarios()).find((item) => item.id === id)!;
 
 describe("OCR 场景默认提示词与逐字来源", () => {
+  it("所有内置场景均有完整返回封装、行号回填与严格失败回归", async () => {
+    const all = await loadOcrScenarios();
+    const source = "借款人资产负债率不得超过65%。\n合同金额为001234元。";
+    for (const selected of all) {
+      const financial = selected.id === "loan_covenant";
+      const request = vi.fn(
+        async ({ prompt, text }: { prompt: string; text: string }) => {
+          expect(prompt).toContain("coverage_complete");
+          const line = Number(
+            text.match(/\[L(\d+)\](?:\[PDF第8页\])?借款人资产负债率/)?.[1],
+          );
+          expect(line).toBeGreaterThan(0);
+          return response([
+            {
+              title: "资产负债率",
+              excerpt: "不应保存的模型改写",
+              pages: "999",
+              [financial ? "evidence" : "evidence_refs"]: [
+                { line_start: line, line_end: line, role: "obligation" },
+              ],
+            },
+          ]);
+        },
+      );
+      const options = {
+        scenario: selected,
+        stages: getOcrPromptStages(selected),
+        document,
+        pages: [page(source, 8)],
+      };
+      const result = await extractOcrScenario({ ...options, request });
+      expect(result.rows[0], selected.id).toMatchObject({
+        sourcePage: "8",
+        evidence: source.split("\n")[0],
+      });
+      expect(result.rows[0].excerpt, selected.id).not.toContain("模型改写");
+      const invalid = vi.fn(async () => ({
+        parsed: { coverage_complete: false, items: [] },
+      }));
+      await expect(
+        extractOcrScenario({ ...options, request: invalid }),
+        selected.id,
+      ).rejects.toThrow("检查完整");
+      expect(invalid).toHaveBeenCalledTimes(2);
+      await expect(
+        extractOcrScenario({
+          ...options,
+          request: async () =>
+            response([
+              {
+                [financial ? "evidence" : "evidence_refs"]: [
+                  { line_start: 9999, line_end: 9999, role: "obligation" },
+                ],
+              },
+            ]),
+        }),
+        selected.id,
+      ).rejects.toThrow("超出");
+    }
+  });
+
+  it("旧编辑提示词补齐返回协议，修复一次后仍须重新通过证据校验，网络错误不重试", async () => {
+    const selected = await scenario("loan_general");
+    const options = {
+      scenario: selected,
+      stages: [
+        {
+          ...selected.defaultPrompts[0],
+          prompt: '旧规则：只返回 {"items":[]}',
+        },
+        selected.defaultPrompts[1],
+      ],
+      document,
+      pages: [page("本金600万元。", 2)],
+    };
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({
+        parsed: { items: [{ excerpt: "本金600万元" }] },
+      })
+      .mockResolvedValueOnce(
+        response([
+          { excerpt: "", evidence_refs: [{ line_start: 1, line_end: 1 }] },
+        ]),
+      );
+    const result = await extractOcrScenario({ ...options, request });
+    expect(result.rows[0]).toMatchObject({
+      evidence: "本金600万元。",
+      sourcePage: "2",
+    });
+    expect(request.mock.calls[0][0].prompt).toContain("只返回");
+    expect(request.mock.calls[0][0].prompt).toContain("此前模板");
+    expect(request.mock.calls[1][0].prompt).toContain("本轮校验修复");
+    const network = vi.fn(async () => {
+      throw new Error("服务超时");
+    });
+    await expect(
+      extractOcrScenario({ ...options, request: network }),
+    ).rejects.toThrow("服务超时");
+    expect(network).toHaveBeenCalledTimes(1);
+  });
+
+  it("跨段借款按证据编号汇总，不重抄非连续原文，未知编号严格拒绝", async () => {
+    const selected = await scenario("loan_general");
+    const options = {
+      scenario: selected,
+      stages: getOcrPromptStages(selected),
+      document,
+      pages: [
+        page("本金600万元。\n" + "普通说明。".repeat(5000), 2),
+        page("期限24个月。", 3),
+      ],
+    };
+    const request = vi.fn(
+      async ({ prompt, text }: { prompt: string; text: string }) => {
+        if (prompt.includes("【汇总返回契约】")) {
+          const input = JSON.parse(text.slice(text.indexOf("\n") + 1));
+          expect(input.records.length).toBeGreaterThan(1);
+          expect(
+            input.evidence.map((item: { text: string }) => item.text),
+          ).toEqual(["本金600万元。", "期限24个月。"]);
+          return response([
+            { contract_no: "A001", excerpt: "", evidence_ids: ["E1", "E2"] },
+          ]);
+        }
+        const matches = [
+          ...text.matchAll(
+            /\[L(\d+)\]\[PDF第\d+页\](本金600万元。|期限24个月。)/g,
+          ),
+        ];
+        return response(
+          matches.map((match) => ({
+            contract_no: "A001",
+            excerpt: "",
+            evidence_refs: [
+              { line_start: Number(match[1]), line_end: Number(match[1]) },
+            ],
+          })),
+        );
+      },
+    );
+    const result = await extractOcrScenario({ ...options, request });
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]).toMatchObject({
+      sourcePage: "2、3",
+      evidence: "本金600万元。\n\n期限24个月。",
+    });
+    expect(result.columns.map((column) => column.key)).not.toContain(
+      "evidence_ids",
+    );
+    await expect(
+      extractOcrScenario({
+        ...options,
+        request: async (params) =>
+          params.prompt.includes("【汇总返回契约】")
+            ? response([{ evidence_ids: ["E999"] }])
+            : request(params),
+      }),
+    ).rejects.toThrow("证据编号无效");
+    await expect(
+      extractOcrScenario({
+        ...options,
+        request: async (params) =>
+          params.prompt.includes("【汇总返回契约】")
+            ? response([
+                { contract_no: "A001", evidence_ids: ["E1", "E2"] },
+                { contract_no: "A001", evidence_ids: ["E2"] },
+              ])
+            : request(params),
+      }),
+    ).rejects.toThrow("同一合同编号");
+    await expect(
+      extractOcrScenario({
+        ...options,
+        request: async (params) =>
+          params.prompt.includes("【汇总返回契约】")
+            ? response([{ contract_no: "A001", evidence_ids: ["E1"] }])
+            : request(params),
+      }),
+    ).rejects.toThrow("遗漏本轮已核验证据");
+  });
+
+  it("借款主表不得省略本段单笔期限、限额及报送义务证据，缺失时明确修复", async () => {
+    const selected = await scenario("loan_general");
+    const lines = [
+      "合同编号A001。",
+      "19.1 本合同下每笔贷款期限不长于12月，全部贷款的到期日不迟于2025年12月30日。",
+      "19.4 借款人须在贷款发放后15日内汇总报告支付情况。",
+      "20.1 借款人对外投资限额为人民币50000万元。",
+    ];
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response([
+          {
+            contract_no: "A001",
+            evidence_refs: [{ line_start: 1, line_end: 1 }],
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        response([
+          {
+            contract_no: "A001",
+            evidence_refs: [{ line_start: 1, line_end: 4 }],
+          },
+        ]),
+      );
+    const result = await extractOcrScenario({
+      scenario: selected,
+      stages: getOcrPromptStages(selected),
+      document,
+      pages: [page(lines.join("\n"), 21)],
+      request,
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[1][0].prompt).toContain("L2、L3、L4");
+    expect(result.rows[0].evidence).toBe(lines.join("\n"));
+    expect(result.rows[0].sourcePage).toBe("21");
+  });
+
+  it("同一原文行三项量化限制不能合为一条，修复后保留三个独立财务事项", async () => {
+    const selected = await scenario("loan_covenant");
+    const text =
+      "20.1 借款人对外投资限额为人民币50000万元；对外提供担保限额为人民币50000万元；增加债务融资限额为人民币50000万元。";
+    const evidence = [{ line_start: 2, line_end: 2, role: "obligation" }];
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response([{ title: "对外投资、担保及融资限额", evidence }]),
+      )
+      .mockResolvedValueOnce(
+        response(
+          ["对外投资限额", "对外担保限额", "增加债务融资限额"].map((title) => ({
+            title,
+            evidence,
+          })),
+        ),
+      );
+    const result = await extractOcrScenario({
+      scenario: selected,
+      stages: getOcrPromptStages(selected),
+      document,
+      pages: [page(text, 21)],
+      request,
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(result.rows).toHaveLength(3);
+    expect(
+      result.rows.every(
+        (row) => row.sourcePage === "21" && row.evidence === text,
+      ),
+    ).toBe(true);
+  });
+
   it("读取所有维护中的通用场景及完整默认 prompt，排除收入底稿专门流程", async () => {
     const all = await loadOcrScenarios();
     expect(all.map((item) => item.id)).toEqual([
@@ -231,8 +486,8 @@ describe("OCR 场景默认提示词与逐字来源", () => {
     });
     expect(request.mock.calls[0]).toEqual([
       {
-        prompt: "用户编辑后的完整 prompt",
-        text: expect.stringContaining("---PDF第7页---"),
+        prompt: expect.stringContaining("用户编辑后的完整 prompt"),
+        text: expect.stringContaining("[L1][PDF第7页]金额：001234"),
       },
     ]);
     expect(result.rows[0]).toMatchObject({
@@ -248,26 +503,43 @@ describe("OCR 场景默认提示词与逐字来源", () => {
     expect(selected.defaultPrompts[0].prompt).toContain("通用单证摘录助手");
   });
 
-  it("不会使用模型伪造页码或为无证据表格杜撰原文", async () => {
+  it("不会使用模型伪造页码，无证据表格也须修复后重新验证", async () => {
     const selected = await scenario("invoice");
-    const result = await extractOcrScenario({
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response([{ invoice_no: "001234", pages: "第999页" }]),
+      )
+      .mockResolvedValueOnce(
+        response([
+          {
+            invoice_no: "001234",
+            pages: "第999页",
+            evidence_refs: [{ line_start: 1, line_end: 1 }],
+          },
+        ]),
+      );
+    const options = {
       scenario: selected,
       stages: getOcrPromptStages(selected),
       document,
       pages: [page("发票号码：001234", 4)],
-      request: async () =>
-        response([{ invoice_no: "001234", pages: "第999页" }]),
-    });
+    };
+    const result = await extractOcrScenario({ ...options, request });
     expect(result.rows[0]).toMatchObject({
       invoice_no: "001234",
-      pages: "",
-      sourcePage: "",
-      evidence: "",
+      pages: "4",
+      sourcePage: "4",
+      evidence: "发票号码：001234",
     });
-    expect(result.rows[0].source_reference).toContain(
-      "未提供逐字证据，具体出处待核对",
-    );
-    expect(result.rows[0].source_reference).toContain("第4页");
+    expect(request).toHaveBeenCalledTimes(2);
+    await expect(
+      extractOcrScenario({
+        ...options,
+        request: async () =>
+          response([{ invoice_no: "001234", pages: "第999页" }]),
+      }),
+    ).rejects.toThrow("缺少原文行号");
   });
 
   it("拒绝改写或虚构的引用，非连续真实证据逐段验证后定位", async () => {
@@ -489,6 +761,67 @@ describe("OCR 场景默认提示词与逐字来源", () => {
     expect(result.rows[0].sourcePage).toBe("4");
   });
 
+  it("两个场景共用义务口径：量化通知归附带义务，独立限制归财务指标约束", async () => {
+    const selected = await scenario("loan_restrictive");
+    const texts = [
+      "▲8.6 借款人应当在下列事项发生之日起7日内书面通知贷款人：\n(1) 修改章程；",
+      "(10) 发生关联交易，且交易金额达到或超过最近经审计的净资产的10%；\n8.7 关联交易超过净资产20%须取得贷款人事先同意。\n8.8 借款人的财务指标始终符合合同约定。",
+    ];
+    const result = await extractOcrScenario({
+      scenario: selected,
+      stages: getOcrPromptStages(selected),
+      document,
+      pages: [page(texts[0], 12), page(texts[1], 13)],
+      request: async () =>
+        response([
+          {
+            category: "财务指标约束",
+            evidence_refs: [{ line_start: 3, line_end: 3, role: "obligation" }],
+          },
+          {
+            category: "须经同意的约束",
+            evidence_refs: [{ line_start: 4, line_end: 4, role: "obligation" }],
+          },
+          {
+            category: "财务指标约束",
+            evidence_refs: [{ line_start: 5, line_end: 5, role: "obligation" }],
+          },
+        ]),
+    });
+    expect(result.rows.map((row) => row.category)).toEqual([
+      "报送/检查等附带义务",
+      "财务指标约束",
+      "一般财务承诺（具体指标待核对）",
+    ]);
+    expect(result.rows[0].sourcePage).toBe("13");
+    expect(result.rows[0].excerpt).toBe(texts[1].split("\n")[0]);
+    const financial = await scenario("loan_covenant");
+    expect(financial.name).toBe("借款·财务指标契约");
+    expect(financial.fields[0].label).toBe("财务指标契约类型");
+    const narrow = await extractOcrScenario({
+      scenario: financial,
+      stages: getOcrPromptStages(financial),
+      document,
+      pages: [page(texts[0], 12), page(texts[1], 13)],
+      request: async ({ text }) =>
+        response(
+          ["\\(10\\)", "8\\.7", "8\\.8"].map((pattern) => ({
+            evidence: [
+              {
+                line_start: Number(
+                  text.match(new RegExp(`\\[L(\\d+)\\]${pattern}`))?.[1],
+                ),
+                role: "obligation",
+              },
+            ],
+          })),
+        ),
+    });
+    expect(narrow.rows).toHaveLength(1);
+    expect(narrow.rows[0].covenant_category_id).toBe("C03");
+    expect(narrow.rows[0].excerpt).toBe(texts[1].split("\n")[1]);
+  });
+
   it("财务契约使用用户 prompt 和启用案例，但原文仍按行号回填", async () => {
     const selected = await scenario("loan_covenant");
     const stages = getOcrPromptStages(selected);
@@ -545,7 +878,7 @@ describe("OCR 场景默认提示词与逐字来源", () => {
                 {
                   contract_no: "A001",
                   excerpt: "合同编号A001。",
-                  ...(prompt === stages[1].prompt
+                  ...(prompt.startsWith(stages[1].prompt)
                     ? { auditor_summary: "已核对整份合同" }
                     : {}),
                 },
@@ -557,10 +890,10 @@ describe("OCR 场景默认提示词与逐字来源", () => {
       scenario: selected,
       stages,
       document,
-      pages: [page("合同编号A001。" + "普通说明。".repeat(3_000))],
+      pages: [page("合同编号A001。" + "普通说明。".repeat(5_000))],
       request,
     });
-    expect(request.mock.calls.at(-1)![0].prompt).toBe(stages[1].prompt);
+    expect(request.mock.calls.at(-1)![0].prompt).toContain(stages[1].prompt);
     expect(result.rows).toHaveLength(1);
     expect(result.rows[0].auditor_summary).toBe("已核对整份合同");
   });

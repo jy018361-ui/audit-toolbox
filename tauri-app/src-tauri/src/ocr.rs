@@ -488,6 +488,15 @@ fn recognize_part(
     timings.structure_ms += elapsed_ms(structure_started);
     result
 }
+
+// A local count is a warning signal only, never alternative contract evidence.
+// Restrict it to very sparse cloud output: intentional watermark suppression
+// and ordinary OCR differences must not trigger a fabricated accuracy score.
+fn sparse_recognition_warning(text: &str, local_characters: usize) -> Option<String> {
+    let count = text.chars().filter(|c| !c.is_whitespace()).count();
+    (local_characters >= 80 && count < 40 && count.saturating_mul(4) < local_characters)
+        .then(|| "本页识别文字明显少于本机检测到的文字，可能遗漏标题或正文；请对照扫描件重新识别，不能仅以请求成功判断内容完整。".into())
+}
 pub(crate) fn worker_params(mut params: Value, db_path: &Path, settings: Value) -> Result<Value, AppError> {
     let object = params.as_object_mut().ok_or_else(|| failure("INVALID_ARGUMENT", "OCR 任务参数不完整。"))?;
     object.insert("__dbPath".into(), json!(db_path));
@@ -572,9 +581,13 @@ pub(crate) fn run_job(
                 if let Some(raw) = diagnostic { diagnostics.push(raw); }
             }
             pause.wait()?;
+            let full_text = text.join("\n\n");
+            if let Some(warning) = sparse_recognition_warning(&full_text, correction.reference_characters) {
+                warnings.push(warning);
+            }
             let page = Page {
                 page: number,
-                text: text.join("\n\n"),
+                text: full_text,
                 original_text: String::new(),
                 tables,
                 original_tables: vec![],
@@ -623,6 +636,13 @@ pub(crate) fn run_job(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sparse_cloud_text_gets_review_warning_without_guessing_missing_content() {
+        assert!(super::sparse_recognition_warning("编号：ABC000123", 180).is_some());
+        assert!(super::sparse_recognition_warning("编号：ABC000123", 0).is_none());
+        assert!(super::sparse_recognition_warning("编号：ABC000123", 15).is_none());
+        assert!(super::sparse_recognition_warning(&"正文".repeat(50), 1200).is_none());
+    }
     use super::*;
     #[test]
     fn output_directory_reuses_successful_export_without_source_parent_grants() {

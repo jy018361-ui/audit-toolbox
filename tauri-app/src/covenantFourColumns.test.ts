@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { covenantExportRows, covenantUserView, FINANCIAL_METRIC_LABELS, isFormalCovenantRow } from "./audipickCovenant";
 
-describe("广义财务契约四列结果", () => {
+describe("财务指标契约四列结果", () => {
   const row = {
     _financial_metrics_only: true, covenant_scope: "repayment",
     covenant_category: "C03 财务行为和交易限制", trigger_standard: "未经同意不得分红",
@@ -13,9 +13,9 @@ describe("广义财务契约四列结果", () => {
   };
   it("界面及导出统一四列，保留类别、触发条件及共同后果出处", () => {
     const result = covenantExportRows([row], () => "合同.pdf")[0];
-    expect(Object.values(FINANCIAL_METRIC_LABELS)).toEqual(["财务契约类型", "限制或触发标准", "合同原文摘录", "原文引用出处"]);
+    expect(Object.values(FINANCIAL_METRIC_LABELS)).toEqual(["财务指标契约类型", "限制或触发标准", "合同原文摘录", "原文引用出处"]);
     expect(Object.keys(result)).toEqual(Object.values(FINANCIAL_METRIC_LABELS));
-    expect(result.财务契约类型).toBe(row.covenant_category);
+    expect(result.财务指标契约类型).toBe(row.covenant_category);
     expect(result.限制或触发标准).toBe(row.trigger_standard);
     expect(result.合同原文摘录).toBe(row.excerpt);
     expect(result.原文引用出处).toContain("法律后果：文件：合同.pdf；页码：5；条款：10");

@@ -2847,7 +2847,7 @@ fn bailian_ocr(image: &str, settings: &Value, api_key: Option<&str>) -> Result<V
     let key = api_key.filter(|v| !v.trim().is_empty()).map(str::to_owned)
         .or_else(|| secret("bailian_ocr_key"))
         .ok_or_else(|| error("OCR_KEY_MISSING", "请填写百炼 OCR API Key。", None))?;
-    config.recognize(image, &key)
+    config.recognize_structured(image, &key)
 }
 
 fn local_ocr_ready() -> bool {

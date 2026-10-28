@@ -8,12 +8,14 @@ use image::DynamicImage;
 struct Candidate {
     rotation: u16,
     score: f64,
+    characters: usize,
 }
 
 pub(crate) struct Correction {
     pub image: DynamicImage,
     pub metadata: PageMetadata,
     pub warning: Option<String>,
+    pub reference_characters: usize,
 }
 
 fn rotate(image: &DynamicImage, clockwise: u16) -> DynamicImage {
@@ -67,12 +69,14 @@ pub(crate) fn correct(image: &DynamicImage) -> Correction {
                 image: rotate(image, rotation),
                 metadata: PageMetadata { auto_rotation: rotation, auto_orientation_status: status.into() },
                 warning: (status == "uncertain").then(|| "页面方向判断不充分，已保留原方向；请结合原扫描件核对识别结果。".into()),
+                reference_characters: candidates.iter().find(|c| c.rotation == rotation).map_or(0, |c| c.characters),
             }
         }
         Err(()) => Correction {
             image: image.clone(),
             metadata: PageMetadata { auto_rotation: 0, auto_orientation_status: "unavailable".into() },
             warning: Some("本机自动方向检测不可用（可能缺少 Windows OCR 语言包），已按原方向识别，请核对结果。".into()),
+            reference_characters: 0,
         },
     }
 }
@@ -120,7 +124,8 @@ fn native_candidates(image: &DynamicImage) -> Result<[Candidate; 4], ()> {
             let mut lines = Vec::new();
             for line in result.Lines()? { lines.push(line.Text()?.to_string()); }
             let angle = result.TextAngle().and_then(|value| value.Value()).ok();
-            candidates[index] = Candidate { rotation, score: text_score(&lines, angle) };
+            candidates[index] = Candidate { rotation, score: text_score(&lines, angle),
+                characters: lines.iter().flat_map(|line| line.chars()).filter(|c| !c.is_whitespace()).count() };
             bitmap.Close()?;
             writer.Close()?;
         }
@@ -140,7 +145,7 @@ mod tests {
         for (index, expected) in [0, 90, 180, 270].into_iter().enumerate() {
             let mut scores = [Candidate::default(); 4];
             for (i, rotation) in [0, 90, 180, 270].into_iter().enumerate() {
-                scores[i] = Candidate { rotation, score: if i == index { 80.0 } else { 12.0 } };
+                scores[i] = Candidate { rotation, score: if i == index { 80.0 } else { 12.0 }, ..Default::default() };
             }
             assert_eq!(select(&scores), (expected, "detected"));
         }
@@ -148,7 +153,7 @@ mod tests {
     #[test]
     fn blank_number_only_and_ambiguous_pages_keep_original_direction() {
         for scores in [[0.0; 4], [4.0, 9.0, 3.0, 2.0], [80.0, 86.0, 0.0, 0.0], [80.0, 94.0, 0.0, 0.0]] {
-            let candidates = std::array::from_fn(|index| Candidate { rotation: index as u16 * 90, score: scores[index] });
+            let candidates = std::array::from_fn(|index| Candidate { rotation: index as u16 * 90, score: scores[index], ..Default::default() });
             assert_eq!(select(&candidates), (0, "uncertain"));
         }
         assert!(text_score(&["12345678901234567890".into()], None) < 18.0);

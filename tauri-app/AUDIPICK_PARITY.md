@@ -1,3 +1,10 @@
+## 2026-10-28 · 财务指标契约口径及命名
+
+- 内置财务场景更名为“借款·财务指标契约”，四列字段、执行进度、待确认项及独立 OCR 导出的场景标题同步；`loan_covenant` 和既有持久化字段保留，旧“财务契约类型”列继续识别为财务专用底稿。
+- 共用 `isNotificationOnlyCovenant` 和 `governingCovenantText` 读取实际义务：列表中的金额/净资产比例若仅决定何时通知/报送，不纳入财务指标契约；跨页、跨模型分段仍读取完整原文主句。事先同意、具体比例限制、客观指标及具体金额型违约条件仍按 C01—C05 和启用案例库判断；共同违约后果不能独自把通知事项变成财务限制。
+- 更新默认提示词和规则版本，不改写用户已编辑提示词。即使使用旧提示词，保存前仍执行分类校验；历史结果不自动覆写，需基于已保存原文重新摘录。
+- 回归：`npx vitest run src/covenantObligationContext.test.ts src/financialMetrics.test.ts src/ocrScenarios.test.ts src/audipickPreviewFinancialCovenant.test.ts src/covenantFourColumns.test.ts src/audipickCovenantExtraction.test.ts`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml --lib ocr_export::tests`。真实本机合同的旧模型候选仅做离线回放，不提交客户资料、不调用线上模型，不能据此保证不存在其他未识别条款。
+
 ## 2026-10-27 · 独立 OCR 模型响应与用户正文分离
 
 - 独立 OCR 百炼路径保留兼容接口、地址、模型和独立密钥，提示改为逐字正文及 HTML 表格；本地解析支持行列空位、嵌套/旧版损坏结构的确定文字。没有切换成 DashScope 内置任务，也不额外发起表格识别请求。

@@ -1219,6 +1219,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
           {
             key: "extract",
             label: "场景摘录",
+            badge: "测试中 / 可试用",
             disabled: busy || !hasResults,
           },
         ]}

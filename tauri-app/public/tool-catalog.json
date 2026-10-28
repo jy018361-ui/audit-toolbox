@@ -19,5 +19,5 @@
   {"id":"fuzzy_match","name":"两列模糊匹配","description":"两列公司名称/人名/地址/通用文本的模糊匹配核对，支持人工确认与底稿导出","route":"/tools/fuzzy_match","version":"1.0","capabilities":["模糊匹配","人工确认","Excel导出"],"migrationStatus":"ready"},
   {"id":"tbje_check","name":"TBJE 完整性核对","description":"上传科目余额表与序时账，自动核对勾稽关系、发生额一致性与会计恒等式","route":"/tools/tbje_check","version":"1.0","capabilities":["inspect_tb","inspect_je","map","run","export"],"migrationStatus":"ready"},
   {"id":"meeting_minutes","name":"会议纪要助手","description":"检测 Teams 会议或导入录音，完成转写并生成结构化会议纪要","route":"/tools/meeting_minutes","version":"1.0","capabilities":["record","transcribe","summarize","export"],"migrationStatus":"ready"},
-  {"id":"dataflow","name":"DataFlow","description":"拖拽节点搭建数据处理流程：读取、整理、公式、筛选与输出，保存流程文件换数据改参数重跑","route":"/tools/dataflow","version":"1.0","capabilities":["canvas","nodes","formula","preview","run","save","open"],"migrationStatus":"ready"}
+  {"id":"dataflow","name":"DataFlow","description":"拖拽节点搭建数据处理流程：读取、整理、公式、筛选与输出，保存流程文件换数据改参数重跑","route":"/tools/dataflow","version":"1.0","capabilities":["canvas","nodes","formula","preview","run","save","open"],"migrationStatus":"upcoming"}
 ]

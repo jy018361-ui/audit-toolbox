@@ -160,7 +160,7 @@ fn field_label(key: &str) -> &str {
         "sourcePage" | "page" | "pages" | "source_page" => "来源页码",
         "source_reference" => "原文引用出处",
         "review_note" => "复核提示",
-        "covenant_category" => "财务契约类型",
+        "covenant_category" => "财务指标契约类型",
         "trigger_standard" => "限制或触发标准",
         "clause_ref" => "条款位置",
         "breach_consequence" => "违约后果",
@@ -174,7 +174,7 @@ fn field_label(key: &str) -> &str {
 fn scenario_label(id: &str) -> &str {
     match id {
         "loan_restrictive" => "借款限制性契约（含非财务）",
-        "loan_covenant" => "借款财务契约",
+        "loan_covenant" => "借款财务指标契约",
         "loan_general" => "借款合同主表",
         "revenue" => "收入合同",
         "procurement" => "采购合同",
@@ -944,6 +944,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("{}：{}", error.code, error.user_message));
         fs::write(request["resultPath"].as_str().unwrap(), serde_json::to_vec_pretty(&result).unwrap()).unwrap();
         println!("隔离数据库的本次摘录导出完成。");
+    }
+    #[test]
+    fn financial_metric_scenario_and_column_names_match_the_ui() {
+        assert_eq!(scenario_label("loan_covenant"), "借款财务指标契约");
+        assert_eq!(field_label("covenant_category"), "财务指标契约类型");
     }
     #[test]
     fn only_current_extractions_are_exported_with_sources_empty_results_and_timestamp() {

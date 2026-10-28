@@ -459,6 +459,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
           nodeStatus={selectedNode ? statusOf(selectedNode.id) : "idle"}
           lastRunMode={lastRunMode}
           outputs={runResult?.outputs ?? []}
+          runError={error}
           collapsed={resultsCollapsed}
           onToggleCollapse={() => setResultsCollapsed((value) => !value)}
         />

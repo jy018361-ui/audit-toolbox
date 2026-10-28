@@ -123,6 +123,17 @@ function SampleTable({
   );
 }
 
+/** 运行整体失败（引擎报错/路径未授权）时结果区的显眼错误卡，取代「尚未运行」占位。 */
+function RunErrorCard({ message }: { message: string }) {
+  return (
+    <div className="df-run-error" role="alert">
+      <b>运行失败</b>
+      <span>{message}</span>
+      <span className="df-run-error-hint">完整错误同时显示在左下角状态栏；处理后再点「预览运行」或「全量运行」。</span>
+    </div>
+  );
+}
+
 export interface ResultsPanelProps {
   node: DataflowNode | null;
   /** 引擎返回的该节点结果；undefined 表示尚未运行过。 */
@@ -130,6 +141,9 @@ export interface ResultsPanelProps {
   nodeStatus: "idle" | "run" | "ok" | "warn" | "error";
   lastRunMode: "preview" | "full" | null;
   outputs: DataflowRunResult["outputs"];
+  /** 本次运行的整体失败信息（路径未授权等）：失败原因必须出现在结果区，
+   *  只写在状态栏小字里，用户会以为点了没反应。 */
+  runError?: string;
   collapsed: boolean;
   onToggleCollapse: () => void;
 }
@@ -144,6 +158,7 @@ export function ResultsPanel({
   nodeStatus,
   lastRunMode,
   outputs,
+  runError,
   collapsed,
   onToggleCollapse,
 }: ResultsPanelProps) {
@@ -190,7 +205,11 @@ export function ResultsPanel({
           </button>
         </div>
         <div className="df-results-body">
-          <div className="df-placeholder">点击画布中的节点查看运行结果。</div>
+          {runError ? (
+            <RunErrorCard message={runError} />
+          ) : (
+            <div className="df-placeholder">点击画布中的节点查看运行结果。</div>
+          )}
         </div>
       </section>
     );
@@ -239,9 +258,13 @@ export function ResultsPanel({
       </div>
       <div className="df-results-body">
         {!result ? (
-          <div className="df-placeholder">
-            尚未运行——点击工具栏「预览运行」用样本数据试跑，或「全量运行」处理完整数据。
-          </div>
+          runError ? (
+            <RunErrorCard message={runError} />
+          ) : (
+            <div className="df-placeholder">
+              尚未运行——点击工具栏「预览运行」用样本数据试跑，或「全量运行」处理完整数据。
+            </div>
+          )
         ) : current === "__msg" ? (
           result.messages.length ? (
             <ul className="df-msg">

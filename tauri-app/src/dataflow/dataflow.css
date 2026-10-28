@@ -470,6 +470,29 @@ textarea.df-in {
   color: var(--text-muted);
   font-size: var(--fs-sm);
 }
+/* 运行整体失败时结果区的错误卡：失败原因必须比状态栏小字更显眼，
+   否则用户以为点了运行没反应。 */
+.df-run-error {
+  display: grid;
+  gap: var(--sp-1);
+  justify-items: center;
+  margin: var(--sp-4) auto;
+  max-width: 560px;
+  padding: var(--sp-4) var(--sp-3);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-md);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+.df-run-error b {
+  font-size: var(--fs-md);
+}
+.df-run-error-hint {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
 
 /* 画布（中） */
 .df-canvas-wrap {

@@ -1,4 +1,5 @@
 import registrySource from "../assets/audipick/rules/registry.js?raw";
+import { naturalRequirement, readableFieldLabel, readableLegacyRequirement, naturalOutputContract, responseColumns } from "./ocrRequirements";
 import { loadCaseLibraryState } from "./audipickCaseLibrary";
 import { classifyCovenant } from "./audipickCaseMatching";
 import {
@@ -23,6 +24,8 @@ export interface OcrScenario {
   version: string;
   fields: { key: string; label: string }[];
   defaultPrompts: OcrPromptStage[];
+  /** Maintained protocol/business guide, never shown as editable requirements. */
+  internalPrompts?: OcrPromptStage[];
 }
 
 // Bundle the maintained rule sources without loading AudiPick's mutable global registry.
@@ -229,7 +232,15 @@ export async function loadOcrScenarios(): Promise<OcrScenario[]> {
       },
     ],
   });
-  return scenarios;
+  return scenarios.map(scenario => ({
+    ...scenario,
+    version: `${scenario.version}-natural-v1`,
+    fields: scenario.fields.map(field => ({ ...field, label: readableFieldLabel(field.label) })),
+    internalPrompts: scenario.id === "custom"
+      ? [{ ...scenario.defaultPrompts[0], prompt: `根据用户的自然语言要求从资料中摘录信息，自行选择适合的行粒度和业务字段。未指定列名时组织清晰的中文业务列，不预设成信息类别/摘录内容两列，也不把整份资料塞进一个单元格。${OUTPUT_CONTRACT}` }]
+      : structuredClone(scenario.defaultPrompts),
+    defaultPrompts: [{ ...scenario.defaultPrompts[0], label: "摘录要求", prompt: naturalRequirement(scenario.id, scenario.fields) }],
+  }));
 }
 
 /** Saved names retain the original extraction pipeline, including financial evidence checks. */
@@ -244,8 +255,9 @@ export function withSavedOcrScenarios(
       name: item.name,
       baseScenarioId: item.baseScenarioId,
       version: item.version,
-      fields: structuredClone(item.fields),
+      fields: item.fields.map(field => ({ ...field, label: readableFieldLabel(field.label) })),
       defaultPrompts: structuredClone(item.stages),
+      internalPrompts: structuredClone(defaults.find(base => base.id === item.baseScenarioId)?.internalPrompts),
     })),
   ];
 }
@@ -256,11 +268,14 @@ export function getOcrPromptStages(
   projectOverrides?: Record<string, OcrPromptStage[]>,
 ): OcrPromptStage[] {
   const overrides = projectOverrides?.[scenario.id];
-  return scenario.defaultPrompts.map((stage) => ({
+  const visible = scenario.defaultPrompts.filter(stage => stage.id !== "consolidate").map((stage) => ({
     ...stage,
     prompt:
-      overrides?.find((entry) => entry.id === stage.id)?.prompt ?? stage.prompt,
+      readableLegacyRequirement(overrides?.find((entry) => entry?.id === stage.id)?.prompt ?? stage.prompt,
+        naturalRequirement(scenario.baseScenarioId ?? scenario.id, scenario.fields), scenario.fields),
   }));
+  const consolidate = overrides?.find(stage => stage?.id === "consolidate") ?? scenario.defaultPrompts.find(stage => stage.id === "consolidate");
+  return consolidate ? [...visible, { ...consolidate }] : visible;
 }
 
 type Row = Record<string, unknown>;
@@ -576,7 +591,7 @@ function resolveRestrictiveEvidence(
   return { ...values, excerpt: "", evidence_quotes: [...new Set(quotes)] };
 }
 
-function parseRows(response: Response): Row[] {
+function parsedResponse(response: Response): unknown {
   if (/length|max_tokens|incomplete/i.test(response.finish_reason ?? ""))
     throw new Error(
       "摘录输出被截断，本轮没有保存为完整结果，请减少单次范围或提高输出额度。",
@@ -592,6 +607,10 @@ function parseRows(response: Response): Row[] {
       throw new Error("摘录未返回有效 JSON，不能将错误当作未发现内容。");
     }
   }
+  return parsed;
+}
+function parseRows(response: Response): Row[] {
+  const parsed = parsedResponse(response);
   if (
     !isObject(parsed) ||
     !Array.isArray(parsed.items) ||
@@ -673,15 +692,28 @@ export async function extractOcrScenario(options: {
 }): Promise<{ rows: Row[]; columns: { key: string; label: string }[] }> {
   const { scenario, document } = options;
   const kind = scenario.baseScenarioId ?? scenario.id;
-  const stages = getOcrPromptStages(scenario, {
+  const requirements = getOcrPromptStages(scenario, {
     [scenario.id]: options.stages,
   });
-  if (stages.some((stage) => !stage.prompt.trim()))
-    throw new Error("摘录提示词不能为空，请填写或恢复默认版本。");
+  if (requirements.filter(stage => stage.id !== "consolidate").some(stage => !stage.prompt.trim()))
+    throw new Error("摘录要求不能为空，请填写或恢复默认版本。");
+  const stages = requirements.filter(stage => stage.id !== "consolidate").map(stage => ({
+    ...stage,
+    prompt: scenario.internalPrompts
+      ? `${scenario.internalPrompts.find(item => item.id === stage.id)?.prompt ?? scenario.internalPrompts[0]?.prompt ?? ""}\n【用户摘录要求】\n${stage.prompt}`
+      : stage.prompt,
+  }));
+  if (kind === "loan_general") stages.push({ id: "consolidate", label: "内部汇总",
+    prompt: requirements.find(stage => stage.id === "consolidate")?.prompt.trim() ||
+      scenario.internalPrompts?.find(stage => stage.id === "consolidate")?.prompt || LOAN_CONSOLIDATION_PROMPT,
+  });
+  const fullScope = !scenario.internalPrompts || requirements[0].prompt.trim() === naturalRequirement(kind, scenario.fields).trim();
   const pages = currentSource(options.pages);
   if (!pages.length || pages.every((page) => !page.text.trim()))
     throw new Error("请先完成 OCR 或填写可编辑内容，再执行摘录。");
   const rows: Row[] = [];
+  const generatedColumns: { key: string; label: string }[][] = [];
+  let requestNumber = 0;
   async function requestVerified(
     prompt: string,
     text: string,
@@ -698,9 +730,11 @@ export async function extractOcrScenario(options: {
       await options.checkpoint?.();
       // A transport failure is not a malformed model response. Do not repeat
       // expensive timed-out requests or retry user cancellation here.
+      const requestIndex = requestNumber++;
       const response = await options.request({
         prompt:
           prompt +
+          (scenario.internalPrompts ? naturalOutputContract(kind === "custom" ? [] : scenario.fields) : "") +
           (attempt
             ? `\n【本轮校验修复】\n上次返回未通过校验：${failure}\n` +
               (rowRepair instanceof RestrictiveCoverageRepair ? "本轮是定点补漏。其他记录已通过证据校验并由程序保留，不要重新输出；items仅返回上述遗漏义务的新增记录，仍用同一本轮原文L行号。coverage_complete只表示此次补漏是否完成。" : rowRepair ? `本轮是定点修复。其他记录已通过证据校验，不要重新输出。仅修复以下记录，仍用同一本轮原文L行号：${JSON.stringify(rowRepair.invalid.map((index) => rowRepair!.original[index]))}。不得原样返回已报错记录。若错误为后果缺证，应为同一来源行另加role为consequence的引用；没有具体后果则仅填“本条未明确”，不能在括号中补充无证据后果。items仅返回修复后的这些记录，保留义务，不因后果缺证而删掉真实义务。coverage_complete只表示本次定点修复是否完成，不要求再生成其他已通过记录。` : "请重新检查同一本轮来源后返回完整结果。") +
@@ -712,6 +746,11 @@ export async function extractOcrScenario(options: {
       else if (attempt && rowRepair) rowRepairUsed = true;
       try {
         let returned = parseRows(response);
+        const columns = responseColumns(parsedResponse(response));
+        const derivedFinancial = new Set(kind === "loan_covenant" ? ["covenant_category", "trigger_standard", "clause_ref"] : []);
+        const missingKeys = columns?.filter(column => !derivedFinancial.has(column.key) && returned.length &&
+          !returned.some(row => Object.hasOwn(row, column.key)));
+        if (missingKeys?.length) throw new Error(`表格列与记录字段不一致：${missingKeys.map(column => column.label).join("、")}。请在每条items中按columns的key填写数据，没有明确内容的字段写未明确，不能把数据放到其他字段后只返回空列。`);
         if (attempt && rowRepair) {
           if (!(rowRepair instanceof RestrictiveCoverageRepair) && returned.length > rowRepair.invalid.length) {
             const canonical = (value: unknown) => String(value ?? "").replace(/[\s，。；：,.;:]/g, "");
@@ -731,7 +770,9 @@ export async function extractOcrScenario(options: {
             return start(a) - start(b);
           });
         }
-        return validate(returned);
+        const validated = validate(returned);
+        if (columns?.length) generatedColumns[requestIndex] = columns;
+        return validated;
       } catch (error) {
         if (rowRepair && !(error instanceof RestrictiveRowRepair)) throw error;
         if (error instanceof RestrictiveCoverageRepair) {
@@ -935,7 +976,7 @@ export async function extractOcrScenario(options: {
             }
           });
           if (invalid.length) throw new RestrictiveRowRepair(rowErrors.join("\n"), items, invalid);
-          if (kind === "loan_general") {
+          if (kind === "loan_general" && fullScope) {
             const evidence = result.map((row) => row.evidence).join("\n\n");
             const missing = sourceLines
               .map((line, index) => ({ ...line, index }))
@@ -950,7 +991,7 @@ export async function extractOcrScenario(options: {
                 `借款主表遗漏期限、经营限额或报送义务的关键原文行：${missing.map((line) => `L${line.index + 1}`).join("、")}，请补充这些行的证据及对应字段，不能仅保留封面/签署页。`,
               );
           }
-          if (kind === "loan_restrictive") {
+          if (kind === "loan_restrictive" && fullScope) {
             const duties = result.map((row) => `${String(row.requirement ?? "")}；${String(row.trigger ?? "")}`).join("\n");
             const required = [
               { source: /(?:应|须|必须|确保).{0,15}账户状态正常/, result: /账户.{0,15}(?:状态正常|未.{0,4}冻结)/, name: "账户状态正常" },
@@ -1094,6 +1135,7 @@ export async function extractOcrScenario(options: {
       options.onProgress?.("合并整份借款合同的分段摘录");
       const verified = await requestVerified(
         stages.find((stage) => stage.id === "consolidate")!.prompt +
+          (scenario.internalPrompts ? `\n【用户摘录要求】\n${requirements[0].prompt}` : "") +
           CONSOLIDATION_CONTRACT +
           LOAN_SOURCE_LIMITS,
         `[来源文件：${document.name}]\n${input}`,
@@ -1138,19 +1180,22 @@ export async function extractOcrScenario(options: {
     options.onWorkProgress?.({ completed: workTotal, total: workTotal });
   }
   await options.checkpoint?.();
-  const fields =
-    kind === "custom" ? fieldsFromPrompt(stages[0].prompt) : scenario.fields;
-  const columns = [...fields, ...SOURCE_FIELDS].filter(
+  const internalFields = new Set(["pages", "page", "excerpt", "contract_excerpt", "source_excerpt", "evidence_quotes", "source_document_id", "source_documents", "covenant_category_id", "contract_classification", "is_financial", "covenant_scope"]);
+  const sourceKeys = new Set(SOURCE_FIELDS.map(field => field.key));
+  const labels = new Map([...scenario.fields, { key: "title", label: "事项" }, { key: "trigger_standard", label: "限制或触发标准" }, { key: "clause_ref", label: "条款位置" }].map(field => [field.key, field.label]));
+  const inferred = [...new Set(rows.flatMap(row => Object.keys(row)))].filter(key => !key.startsWith("_") && !internalFields.has(key) && !sourceKeys.has(key));
+  const declared = generatedColumns.flat();
+  const fields = declared.length ? declared : inferred.map(key => ({ key, label: labels.get(key) ?? key }));
+  const columns = [...fields.filter(field => !internalFields.has(field.key)), ...SOURCE_FIELDS].filter(
     (field, index, all) =>
       all.findIndex((candidate) => candidate.key === field.key) === index,
   );
-  for (const row of rows)
-    for (const key of Object.keys(row))
-      if (
-        !key.startsWith("_") &&
-        key !== "evidence_quotes" &&
-        !columns.some((column) => column.key === key)
-      )
-        columns.push({ key, label: key });
-  return { rows, columns };
+  if (!declared.length) return { rows, columns };
+  // The native exporter appends any undeclared row keys. Project after all
+  // semantic/evidence checks so unwanted internal/business columns do not
+  // reappear in the user's Excel. Keep hidden audit metadata for replay.
+  return { rows: rows.map(row => Object.fromEntries([
+    ...columns.map(column => [column.key, row[column.key] ?? (sourceKeys.has(column.key) ? "" : "未明确")]),
+    ...Object.entries(row).filter(([key]) => key.startsWith("_") || key === "evidence_quotes"),
+  ])), columns };
 }

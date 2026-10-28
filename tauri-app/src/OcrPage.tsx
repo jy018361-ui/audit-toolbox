@@ -835,8 +835,8 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     const name = savedScenarioName.trim();
     if (!name) throw new Error("请输入场景名称。");
     if (name.length > 80) throw new Error("场景名称不能超过 80 个字。");
-    if (stages.some((stage) => !stage.prompt.trim()))
-      throw new Error("请填写每个阶段的提示词。");
+    if (stages.some((stage) => stage.id !== "consolidate" && !stage.prompt.trim()))
+      throw new Error("请填写摘录要求。");
     const existing = (project.customScenarios ?? []).find(
       (item) => item.id === scenario.id,
     );
@@ -879,8 +879,8 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   async function extract() {
     setExtractionFailures([]);
     if (!selectedDocuments.length || !scenario) return;
-    if (stages.some((item) => !item.prompt.trim()))
-      throw new Error("请填写每个阶段的提示词。");
+    if (stages.some((item) => item.id !== "consolidate" && !item.prompt.trim()))
+      throw new Error("请填写摘录要求。");
 
     const targets = [...selectedDocuments];
     setPendingExtractionExport(undefined);
@@ -895,7 +895,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       fileCount: targets.length,
       completed: 0,
       total: targets.length,
-      message: "正在保存提示词并准备场景摘录…",
+      message: "正在保存摘录要求并准备场景摘录…",
     });
     const failures: string[] = [];
     let completed = 0;
@@ -1079,7 +1079,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       !(await confirmDialog({
         title: `清空项目内全部 ${targets.length} 份文件？`,
         message:
-          "将删除当前项目中全部文件的导入副本、识别和摘录结果，包括未勾选文件。原始文件、项目及提示词保留。",
+          "将删除当前项目中全部文件的导入副本、识别和摘录结果，包括未勾选文件。原始文件、项目及摘录要求保留。",
         confirmLabel: "清空文件",
         tone: "danger",
       }))
@@ -1411,7 +1411,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
         <div className="ocr-empty">
           <FileScan size={44} />
           <h2>从一个项目开始</h2>
-          <p>按批次整理扫描件，识别进度、校对和提示词会保存在项目中。</p>
+          <p>按批次整理扫描件，识别进度、校对和摘录要求会保存在项目中。</p>
         </div>
       ) : (
         <>
@@ -1604,7 +1604,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                             <p>
                               {step === 0
                                 ? "对照扫描件阅读初始原文；识别正文和表格可直接导出 Excel。"
-                                : "按场景判断和摘录内容，提示词可修改并保存在当前项目。"}
+                                : "按摘录要求整理内容，完成后自动导出到目标目录。"}
                             </p>
                           </div>
                         </div>
@@ -1852,7 +1852,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                           {scenario && (
                             <>
                               <div className="ocr-prompt-heading">
-                                <h3>提示词</h3>
+                                <h3>摘录要求</h3>
                                 <Button
                                   size="sm"
                                   variant="ghost"
@@ -1866,14 +1866,19 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                                   恢复默认
                                 </Button>
                               </div>
-                              {stages.map((stage, index) => (
+                              <p className="ocr-muted" id="ocr-requirements-help">
+                                用自然语言说明想摘录什么；可指定列名和每行内容，未指定时自动安排合适的列并导出可编辑 Excel。
+                              </p>
+                              {stages.map((stage, index) => stage.id === "consolidate" ? null : (
                                 <label
                                   className="ocr-prompt-stage"
                                   key={stage.id}
                                 >
-                                  {stage.label}
+                                  {stage.label === "摘录要求" ? null : stage.label}
                                   <textarea
-                                    aria-label={`${stage.label}提示词`}
+                                    aria-label={stage.label === "摘录要求" ? "摘录要求" : `${stage.label}摘录要求`}
+                                    aria-describedby="ocr-requirements-help"
+                                    placeholder="例如：整理每份合同的借款人、金额、期限和利率，每份合同一行；未明确的信息不要推测。"
                                     disabled={busy}
                                     value={stage.prompt}
                                     onChange={(event) => {
@@ -1906,7 +1911,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                                     setPromptSaveDialogOpen(true)
                                   )}
                                 >
-                                  保存提示词
+                                  保存为场景
                                 </Button>
                                 <Button
                                   disabled={busy || !hasResults}

@@ -44,7 +44,24 @@ const { randomUUID } = require('node:crypto');
           },
         };
       }, { defaults });
-      await page.goto(`${process.env.MEETING_VOCABULARY_UI_URL || 'http://localhost:5173'}/#/tools/meeting_minutes/vocabulary`, { waitUntil: 'networkidle' });
+      await page.goto(`${process.env.MEETING_VOCABULARY_UI_URL || 'http://localhost:5173'}/#/tools/meeting_minutes`, { waitUntil: 'domcontentloaded' });
+      const menu = page.locator('.meeting-nav-toggle');
+      await menu.waitFor({ state: 'attached' });
+      if (!await menu.isVisible()) await page.getByRole('button', { name: '打开工具导航' }).click();
+      await menu.scrollIntoViewIfNeeded();
+      assert.equal(await menu.getAttribute('aria-expanded'), 'true');
+      const menuGeometry = await menu.evaluate(button => {
+        const rect = button.getBoundingClientRect();
+        const nav = button.closest('.tool-nav');
+        const bounds = nav.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        return { left: rect.left, right: rect.right, width: rect.width, clipLeft: bounds.left, clipRight: bounds.left + nav.clientWidth, scrollLeft: nav.scrollLeft, clickable: button === hit || button.contains(hit) };
+      });
+      assert(menuGeometry.width >= 32 && menuGeometry.left >= menuGeometry.clipLeft && menuGeometry.right <= menuGeometry.clipRight + 1 && menuGeometry.scrollLeft === 0 && menuGeometry.clickable, JSON.stringify(menuGeometry));
+      await menu.click();
+      assert.equal(await page.getByRole('link', { name: /专有词库/ }).count(), 0);
+      await menu.click();
+      await page.getByRole('link', { name: /专有词库/ }).click();
       await page.getByRole('button', { name: '编辑 CSDC', exact: true }).waitFor();
       if (width > 1000) await page.getByRole('button', { name: '会议纪要子菜单' }).scrollIntoViewIfNeeded();
       assert.equal(await page.locator('.meeting-vocabulary-word').count(), defaults.length);
@@ -82,7 +99,7 @@ const { randomUUID } = require('node:crypto');
         await page.screenshot({ path: path.join(output, 'dark-1000.png'), fullPage: true });
       }
       assert.deepEqual(errors, []);
-      reports.push({ width, defaults: defaults.length, crud: 'passed', errors, geometry });
+      reports.push({ width, defaults: defaults.length, crud: 'passed', errors, geometry, menuGeometry });
       await page.close();
     }
   } finally { await browser.close(); }

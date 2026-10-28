@@ -190,19 +190,30 @@
   gap: var(--sp-2);
   margin-left: auto;
 }
+.tool-nav {
+  grid-template-columns: minmax(0, 1fr);
+}
+.tool-nav > .tool-group {
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
 .meeting-nav-heading {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--control-height-sm);
+  min-width: 0;
   align-items: stretch;
 }
 .meeting-nav-heading > a {
-  flex: 1;
   min-width: 0;
 }
 .meeting-nav-toggle {
   display: flex;
   align-items: center;
-  padding: var(--sp-2);
-  color: var(--on-dark-muted);
+  justify-content: center;
+  width: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding: 0;
+  color: var(--on-dark);
   background: transparent;
   border: 0;
   border-radius: var(--r-sm);
@@ -215,6 +226,8 @@
 .meeting-nav-toggle:focus-visible {
   outline: 2px solid var(--primary);
 }
+.meeting-nav-chevron { width: 16px; height: 16px; transition: transform 120ms; }
+.meeting-nav-chevron.open { transform: rotate(90deg); }
 @media (max-width: 640px) {
   .meeting-vocabulary-count {
     margin-left: 0;
@@ -224,7 +237,7 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .meeting-vocabulary-word {
+  .meeting-vocabulary-word, .meeting-nav-chevron {
     transition: none;
   }
 }

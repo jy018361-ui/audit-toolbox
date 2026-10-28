@@ -428,7 +428,7 @@ it("OCR 可直接导出，不要求选择场景或调用摘录", async () => {
   await waitFor(() => expect(mocks.openOutput).toHaveBeenCalledWith("C:/输出"));
 });
 
-it("第二步独立显示所有阶段的完整可编辑提示词，并保存实际使用版本", async () => {
+it("第二步只展示自然语言摘录要求，保留内部汇总并保存实际使用版本", async () => {
   await openDocument();
   fireEvent.click(screen.getByRole("button", { name: "2 场景摘录" }));
   await screen.findByLabelText("摘录场景");
@@ -436,17 +436,17 @@ it("第二步独立显示所有阶段的完整可编辑提示词，并保存实�
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "loan_general" },
   });
-  await screen.findByLabelText("条款提取提示词");
+  await screen.findByLabelText("条款提取摘录要求");
   await waitFor(() =>
-    expect(screen.getByLabelText("条款提取提示词")).toBeEnabled(),
+    expect(screen.getByLabelText("条款提取摘录要求")).toBeEnabled(),
   );
-  expect(screen.getByLabelText("条款提取提示词")).toHaveValue(
+  expect(screen.getByLabelText("条款提取摘录要求")).toHaveValue(
     "默认完整提取提示词",
   );
-  expect(screen.getByLabelText("分段汇总提示词")).toHaveValue(
-    "默认完整汇总提示词",
-  );
-  fireEvent.change(screen.getByLabelText("条款提取提示词"), {
+  expect(screen.queryByLabelText("分段汇总摘录要求")).not.toBeInTheDocument();
+  expect(screen.getByText(/用自然语言说明想摘录什么/)).toHaveTextContent("未指定时自动安排合适的列");
+  expect(screen.getAllByRole("textbox")).toHaveLength(1);
+  fireEvent.change(screen.getByLabelText("条款提取摘录要求"), {
     target: { value: "只提取借款利率，附逐字证据" },
   });
   fireEvent.click(screen.getByRole("button", { name: "开始摘录" }));
@@ -457,6 +457,7 @@ it("第二步独立显示所有阶段的完整可编辑提示词，并保存实�
   expect(savedProject.prompts.loan_general[0].prompt).toBe(
     "只提取借款利率，附逐字证据",
   );
+  expect(mocks.extract.mock.calls[0][0].stages[1]).toMatchObject({ id: "consolidate", prompt: "默认完整汇总提示词" });
   await waitFor(() =>
     expect(mocks.call).toHaveBeenCalledWith(
       "ocr.extraction_save",
@@ -472,9 +473,31 @@ it("第二步独立显示所有阶段的完整可编辑提示词，并保存实�
     expect(screen.getByRole("button", { name: "恢复默认" })).toBeEnabled(),
   );
   fireEvent.click(screen.getByRole("button", { name: "恢复默认" }));
-  expect(screen.getByLabelText("条款提取提示词")).toHaveValue(
+  expect(screen.getByLabelText("条款提取摘录要求")).toHaveValue(
     "默认完整提取提示词",
   );
+});
+
+it("旧项目隐藏汇总为空时仍使用自然语言要求直接摘录导出，不要求确认列名", async () => {
+  savedProject.prompts.loan_general = [
+    { id: "extract", label: "条款提取", prompt: "列出借款人、金额和利率，每份合同一行。" },
+    { id: "consolidate", label: "分段汇总", prompt: "" },
+  ];
+  await openDocument(false);
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("摘录场景"), { target: { value: "loan_general" } });
+  const requirement = await screen.findByLabelText("条款提取摘录要求");
+  expect(requirement).toHaveValue("列出借款人、金额和利率，每份合同一行。");
+  expect(requirement).toHaveAccessibleDescription(/未指定时自动安排合适的列/);
+  expect(screen.queryByLabelText("分段汇总摘录要求")).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "开始摘录" }));
+  const notice = await screen.findByRole("status", { name: "导出结果" });
+  expect(notice).toHaveTextContent("导出文件成功");
+  expect(mocks.extract.mock.calls[0][0].stages[0].prompt).toBe("列出借款人、金额和利率，每份合同一行。");
+  expect(mocks.pick).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
 it("开始扫描只处理未完成页，横向表格默认不拆页", async () => {
@@ -517,17 +540,17 @@ it("切换场景前保存当前提示词，并在重新选择时恢复项目版�
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "loan_general" },
   });
-  await screen.findByLabelText("条款提取提示词");
+  await screen.findByLabelText("条款提取摘录要求");
   await waitFor(() =>
-    expect(screen.getByLabelText("条款提取提示词")).toBeEnabled(),
+    expect(screen.getByLabelText("条款提取摘录要求")).toBeEnabled(),
   );
-  fireEvent.change(screen.getByLabelText("条款提取提示词"), {
+  fireEvent.change(screen.getByLabelText("条款提取摘录要求"), {
     target: { value: "项目专用利率提示词" },
   });
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "custom" },
   });
-  await screen.findByLabelText("自定义提示词");
+  await screen.findByLabelText("自定义摘录要求");
   expect(savedProject.prompts.loan_general[0].prompt).toBe(
     "项目专用利率提示词",
   );
@@ -536,7 +559,7 @@ it("切换场景前保存当前提示词，并在重新选择时恢复项目版�
     target: { value: "loan_general" },
   });
   await waitFor(() =>
-    expect(screen.getByLabelText("条款提取提示词")).toHaveValue(
+    expect(screen.getByLabelText("条款提取摘录要求")).toHaveValue(
       "项目专用利率提示词",
     ),
   );
@@ -550,11 +573,11 @@ it("离开工具页时保留编辑后的提示词", async () => {
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "loan_general" },
   });
-  await screen.findByLabelText("条款提取提示词");
+  await screen.findByLabelText("条款提取摘录要求");
   await waitFor(() =>
-    expect(screen.getByLabelText("条款提取提示词")).toBeEnabled(),
+    expect(screen.getByLabelText("条款提取摘录要求")).toBeEnabled(),
   );
-  fireEvent.change(screen.getByLabelText("条款提取提示词"), {
+  fireEvent.change(screen.getByLabelText("条款提取摘录要求"), {
     target: { value: "离开前的提示词编辑" },
   });
   cleanup();
@@ -603,11 +626,11 @@ it("提示词保存失败时保留当前场景和未保存编辑", async () => {
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "loan_general" },
   });
-  await screen.findByLabelText("条款提取提示词");
+  await screen.findByLabelText("条款提取摘录要求");
   await waitFor(() =>
-    expect(screen.getByLabelText("条款提取提示词")).toBeEnabled(),
+    expect(screen.getByLabelText("条款提取摘录要求")).toBeEnabled(),
   );
-  fireEvent.change(screen.getByLabelText("条款提取提示词"), {
+  fireEvent.change(screen.getByLabelText("条款提取摘录要求"), {
     target: { value: "尚未保存的提示词" },
   });
   mocks.call.mockImplementationOnce(async () => {
@@ -618,7 +641,7 @@ it("提示词保存失败时保留当前场景和未保存编辑", async () => {
   });
   await screen.findByText("提示词写入失败");
   expect(screen.getByLabelText("摘录场景")).toHaveValue("loan_general");
-  expect(screen.getByLabelText("条款提取提示词")).toHaveValue(
+  expect(screen.getByLabelText("条款提取摘录要求")).toHaveValue(
     "尚未保存的提示词",
   );
 });
@@ -1473,9 +1496,9 @@ it("批量自定义范围逐份裁剪越界页，仅确认一次覆盖并报告�
     ["d", 2],
     ["d2", 1],
   ]);
-  expect(screen.getByRole("status")).toHaveTextContent(
-    "仅扫描本文件存在的页码",
-  );
+  expect(screen.getAllByRole("status").some(element =>
+    element.textContent?.includes("仅扫描本文件存在的页码"),
+  )).toBe(true);
 });
 
 it("预览切换不改变批量范围，全篇模式包含所选文件，卡片点击恢复单文件操作", async () => {
@@ -1569,7 +1592,7 @@ it("批量场景摘录逐文件使用同一提示词快照并分开保存结果�
   const scene = await screen.findByLabelText("摘录场景");
   await waitFor(() => expect(scene).toBeEnabled());
   fireEvent.change(scene, { target: { value: "loan_general" } });
-  const prompt = await screen.findByLabelText("条款提取提示词");
+  const prompt = await screen.findByLabelText("条款提取摘录要求");
   await waitFor(() => expect(prompt).toBeEnabled());
   fireEvent.change(prompt, { target: { value: "逐文件摘录并保留来源页码" } });
   fireEvent.click(screen.getByRole("button", { name: "开始摘录" }));
@@ -1885,12 +1908,12 @@ it("保存提示词需要命名，命名场景可重选并在重新打开项目�
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "loan_general" },
   });
-  const prompt = await screen.findByLabelText("条款提取提示词");
+  const prompt = await screen.findByLabelText("条款提取摘录要求");
   await waitFor(() => expect(prompt).toBeEnabled());
   fireEvent.change(prompt, {
     target: { value: "只摘录我关注的条款，逐字保留来源" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存提示词" }));
+  fireEvent.click(screen.getByRole("button", { name: "保存为场景" }));
   const dialog = await screen.findByRole("dialog", { name: "保存为场景" });
   expect(
     within(dialog).getByRole("button", { name: "保存场景" }),
@@ -1911,12 +1934,12 @@ it("保存提示词需要命名，命名场景可重选并在重新打开项目�
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "custom" },
   });
-  await screen.findByLabelText("自定义提示词");
+  await screen.findByLabelText("自定义摘录要求");
   await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: saved.id },
   });
-  expect(await screen.findByLabelText("条款提取提示词")).toHaveValue(
+  expect(await screen.findByLabelText("条款提取摘录要求")).toHaveValue(
     saved.stages[0].prompt,
   );
   cleanup();
@@ -1933,7 +1956,7 @@ it("摘录成功自动将本次结果导出到目标目录，不弹目录选择�
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "loan_general" },
   });
-  await screen.findByLabelText("条款提取提示词");
+  await screen.findByLabelText("条款提取摘录要求");
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled(),
   );
@@ -1976,7 +1999,7 @@ it("自动导出失败保留摘录，重试导出不重复调用模型", async (
   fireEvent.change(screen.getByLabelText("摘录场景"), {
     target: { value: "loan_general" },
   });
-  await screen.findByLabelText("条款提取提示词");
+  await screen.findByLabelText("条款提取摘录要求");
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled(),
   );

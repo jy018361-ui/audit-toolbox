@@ -159,6 +159,15 @@ it("switching LLM providers saves typed credentials to their original provider o
   expect(screen.getByLabelText("API Key")).toHaveValue("");
 });
 let restoreCanvasMocks: () => void;
+it("进入会议纪要时自动展开词库入口，仍可手动收起", async () => {
+  render(<MemoryRouter initialEntries={["/tools/meeting_minutes"]}><App /></MemoryRouter>);
+  const toggle = await screen.findByRole("button", { name: "会议纪要子菜单" });
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+  expect(screen.getByRole("link", { name: /专有词库/ })).toBeVisible();
+  fireEvent.click(toggle);
+  expect(screen.queryByRole("link", { name: /专有词库/ })).not.toBeInTheDocument();
+});
+
 it("会议词库只在会议纪要二级菜单提供，独立路由可打开并返回", async () => {
   render(<MemoryRouter initialEntries={["/"]}><App /></MemoryRouter>);
   const toggle = await screen.findByRole("button", { name: "会议纪要子菜单" });

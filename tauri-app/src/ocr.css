@@ -370,6 +370,34 @@
   background: white;
   box-shadow: var(--shadow-card);
 }
+.ocr-preview-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: 4px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+}
+.ocr-preview-controls output {
+  min-width: 46px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.ocr-preview-canvas {
+  margin-inline: auto;
+}
+.ocr-source .ocr-preview-canvas img {
+  max-width: none;
+}
+.ocr-preview-viewport:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
 .ocr-original-text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

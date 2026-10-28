@@ -91,7 +91,7 @@ import {
 } from "@/components/tour/tourState";
 import { ToolTourProvider } from "@/components/tour/ToolTourContext";
 import { NewbieModeToggle } from "@/components/tour/NewbieModeToggle";
-import { Sparkles } from "lucide-react";
+import { ChevronRight, Sparkles } from "lucide-react";
 import { setSavedTheme } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -454,7 +454,7 @@ export default function App() {
     kanzhang: true,
   });
   useEffect(() => {
-    if (location.pathname.startsWith("/tools/meeting_minutes/")) {
+    if (location.pathname === "/tools/meeting_minutes" || location.pathname.startsWith("/tools/meeting_minutes/")) {
       setSubgroupOpen((current) => ({ ...current, meeting: true }));
     }
   }, [location.pathname]);
@@ -802,8 +802,8 @@ export default function App() {
                       return <div key={tool.id} className="tool-subgroup">
                         <div className="meeting-nav-heading">
                           <SidebarToolLink tool={tool} />
-                          <button type="button" className="meeting-nav-toggle" aria-label="会议纪要子菜单" aria-expanded={open} aria-controls="meeting-submenu" onClick={() => setSubgroupOpen((current) => ({ ...current, meeting: !open }))}>
-                            <span className={`tool-subgroup-chevron${open ? " open" : ""}`} aria-hidden="true">▸</span>
+                          <button type="button" className="meeting-nav-toggle" aria-label="会议纪要子菜单" title={open ? "收起词库菜单" : "展开词库菜单"} aria-expanded={open} aria-controls="meeting-submenu" onClick={() => setSubgroupOpen((current) => ({ ...current, meeting: !open }))}>
+                            <ChevronRight className={`meeting-nav-chevron${open ? " open" : ""}`} aria-hidden="true" />
                           </button>
                         </div>
                         {open && <div id="meeting-submenu" className="tool-subgroup-items"><NavLink to="/tools/meeting_minutes/vocabulary" className="tool-subgroup-link"><span className="tool-badge">词</span><span>专有词库</span></NavLink></div>}

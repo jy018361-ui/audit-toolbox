@@ -1250,14 +1250,14 @@ describe("OCR 场景默认提示词与逐字来源", () => {
       expect(item.defaultPrompts[0].prompt.length).toBeGreaterThan(150);
     }
     expect(
-      all.find((item) => item.id === "loan_covenant")!.defaultPrompts[0].prompt,
+      all.find((item) => item.id === "loan_covenant")!.internalPrompts![0].prompt,
     ).toBe(FINANCIAL_METRICS_PROMPT);
     expect(
       all.find((item) => item.id === "invoice")!.defaultPrompts[0].prompt,
-    ).toContain("invoice_no: 发票号码");
+    ).toContain("发票号码");
     expect(
       all.find((item) => item.id === "loan_general")!.defaultPrompts,
-    ).toHaveLength(2);
+    ).toHaveLength(1);
   });
 
   it("项目 prompt 覆写用于实际请求，恢复默认不受其他项目修改影响", async () => {
@@ -1293,9 +1293,9 @@ describe("OCR 场景默认提示词与逐字来源", () => {
     });
     edited[0].prompt = "再次修改";
     expect(getOcrPromptStages(selected)[0].prompt).toContain(
-      "通用单证摘录助手",
+      "没有指定列名",
     );
-    expect(selected.defaultPrompts[0].prompt).toContain("通用单证摘录助手");
+    expect(selected.defaultPrompts[0].prompt).toContain("没有指定列名");
   });
 
   it("不会使用模型伪造页码，无证据表格也须修复后重新验证", async () => {
@@ -1490,7 +1490,7 @@ describe("OCR 场景默认提示词与逐字来源", () => {
       "没有金额、比例或财务门槛也必须检查和摘录",
     );
     expect(request.mock.calls[0][0].prompt).not.toContain("本轮启用案例库版本");
-    expect((await scenario("loan_covenant")).defaultPrompts[0].prompt).toBe(
+    expect((await scenario("loan_covenant")).internalPrompts![0].prompt).toBe(
       FINANCIAL_METRICS_PROMPT,
     );
   });
@@ -1664,7 +1664,7 @@ describe("OCR 场景默认提示词与逐字来源", () => {
   it("借款长文汇总阶段可编辑并实际合并分段，不按页新增借款", async () => {
     const selected = await scenario("loan_general");
     const stages = getOcrPromptStages(selected);
-    stages[1].prompt = "用户修改的整份主表合并规则";
+    stages.push({ id: "consolidate", label: "旧保存汇总规则", prompt: "用户修改的整份主表合并规则" });
     const request = vi.fn(
       async ({ prompt, text }: { prompt: string; text: string }) =>
         response(
@@ -1771,5 +1771,5 @@ it("命名财务契约场景仍走案例库和行号证据核验，且不会修�
     sourcePage: "6",
     excerpt: "借款人资产负债率不得超过65%。",
   });
-  expect(base.defaultPrompts[0].prompt).toBe(FINANCIAL_METRICS_PROMPT);
+  expect(base.internalPrompts![0].prompt).toBe(FINANCIAL_METRICS_PROMPT);
 });

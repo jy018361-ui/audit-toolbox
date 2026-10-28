@@ -1,6 +1,55 @@
+import { useEffect, useRef, useState } from "react";
 import type { OcrDocumentDetail, OcrPageData } from "./ocrTypes";
 import { Button } from "./components/ui/button";
-import { Copy } from "lucide-react";
+import { Copy, ZoomIn, ZoomOut, Maximize } from "lucide-react";
+
+function OcrScanPreview({ name, pageNumber, sourceImage, sourceError }: {
+  name: string;
+  pageNumber: number;
+  sourceImage: string;
+  sourceError: string;
+}) {
+  const [zoom, setZoom] = useState(100);
+  const viewport = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (viewport.current) {
+      viewport.current.scrollTop = 0;
+      viewport.current.scrollLeft = 0;
+    }
+  }, [pageNumber]);
+  function fitWidth() {
+    setZoom(100);
+    if (viewport.current) {
+      viewport.current.scrollTop = 0;
+      viewport.current.scrollLeft = 0;
+    }
+  }
+  return (
+    <section className="ocr-source" aria-label="扫描件预览">
+      <div className="ocr-pane-heading">
+        <div className="ocr-pane-title">
+          <h3>原扫描件</h3>
+          <span className="ocr-muted" title={name}>{name} · 第 {pageNumber} 页</span>
+        </div>
+      </div>
+      <div className="ocr-preview-controls" role="group" aria-label="扫描件缩放">
+        <Button size="icon-sm" variant="ghost" aria-label="缩小扫描件" title="缩小" disabled={!sourceImage || zoom <= 50}
+          onClick={() => setZoom(value => Math.max(50, value - 25))}><ZoomOut /></Button>
+        <output aria-label="扫描件缩放比例" aria-live="polite">{zoom}%</output>
+        <Button size="icon-sm" variant="ghost" aria-label="放大扫描件" title="放大" disabled={!sourceImage || zoom >= 400}
+          onClick={() => setZoom(value => Math.min(400, value + 25))}><ZoomIn /></Button>
+        <Button size="sm" variant="ghost" onClick={fitWidth} disabled={!sourceImage}><Maximize />适应宽度</Button>
+      </div>
+      <div className="ocr-pane-body ocr-preview-viewport" ref={viewport} role="region" aria-label="扫描件图片" tabIndex={0}>
+        {sourceImage ? (
+          <div className="ocr-preview-canvas" style={{ width: `${zoom}%` }}>
+            <img src={sourceImage} alt={`${name} 第 ${pageNumber} 页`} draggable={false} />
+          </div>
+        ) : <p className="ocr-muted">{sourceError || "正在加载扫描页…"}</p>}
+      </div>
+    </section>
+  );
+}
 
 export function OcrReadingView({
   documents,
@@ -51,26 +100,8 @@ export function OcrReadingView({
   return (
     <div className={`ocr-comparison ${fullText ? "ocr-fulltext-view" : ""}`}>
       {!fullText && (
-        <section className="ocr-source">
-          <div className="ocr-pane-heading">
-            <div className="ocr-pane-title">
-              <h3>原扫描件</h3>
-              <span className="ocr-muted" title={current.document.name}>
-                {current.document.name} · 第 {pageNumber} 页
-              </span>
-            </div>
-          </div>
-          <div className="ocr-pane-body">
-            {sourceImage ? (
-              <img
-                src={sourceImage}
-                alt={`${current.document.name} 第 ${pageNumber} 页`}
-              />
-            ) : (
-              <p className="ocr-muted">{sourceError || "正在加载扫描页…"}</p>
-            )}
-          </div>
-        </section>
+        <OcrScanPreview key={current.document.id} name={current.document.name} pageNumber={pageNumber}
+          sourceImage={sourceImage} sourceError={sourceError} />
       )}
       <section className="ocr-original">
         <div className="ocr-pane-heading">

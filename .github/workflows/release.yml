@@ -35,7 +35,8 @@ jobs:
         working-directory: tauri-app
         run: npm ci
 
-      - name: Build and publish installer and updater
+      - name: Build installer and updater as a draft
+        id: build
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -49,9 +50,21 @@ jobs:
           releaseCommitish: ${{ steps.release.outputs.sha }}
           releaseName: E点通工具箱 ${{ steps.release.outputs.tag }}
           generateReleaseNotes: true
-          releaseDraft: false
+          releaseDraft: true
           prerelease: ${{ steps.release.outputs.channel == 'dev' }}
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
           updaterJsonPreferNsis: true
           tauriScript: npm run tauri --
+
+      - name: Publish release and sync Dev update channel
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ steps.build.outputs.releaseId }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_CHANNEL: ${{ steps.release.outputs.channel }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        with:
+          script: |
+            const publish = require('./tauri-app/scripts/publish_channel_release.cjs');
+            await publish({github, context, fetch});

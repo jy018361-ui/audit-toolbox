@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
 import { OcrTimingPanel } from "./OcrTimingPanel";
 
 afterEach(cleanup);
@@ -25,4 +25,17 @@ it("兼容旧版结果及没有服务请求编号的响应", () => {
   }] }} />);
   expect(screen.queryByText("查看请求")).toBeNull();
   expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+});
+
+it("失败数旁仅在存在失败页时显示重试，点击不展开耗时明细，忙碌时禁用", () => {
+  const retry = vi.fn();
+  const run = { started: 0, ended: 1000, pages: [{ documentId: "d", documentName: "失败.pdf", page: 2, status: "failed" as const, renderMs: 1, totalMs: 1000 }] };
+  const { rerender, container } = render(<OcrTimingPanel run={run} retryFailedCount={1} onRetryFailed={retry} />);
+  fireEvent.click(screen.getByRole("button", { name: "重试失败页（1）" }));
+  expect(retry).toHaveBeenCalledOnce();
+  expect(container.querySelector("details")?.open).toBe(false);
+  rerender(<OcrTimingPanel run={run} retryFailedCount={1} retryDisabled onRetryFailed={retry} />);
+  expect((screen.getByRole("button", { name: "重试失败页（1）" }) as HTMLButtonElement).disabled).toBe(true);
+  rerender(<OcrTimingPanel run={run} retryFailedCount={0} onRetryFailed={retry} />);
+  expect(screen.queryByRole("button", { name: /重试失败页/ })).toBeNull();
 });

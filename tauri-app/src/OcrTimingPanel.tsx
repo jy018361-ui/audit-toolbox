@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { OcrWorkerTiming } from "./ocrTypes";
 import { OCR_CONCURRENCY } from "./ocrBatch";
+import { Button } from "./components/ui/button";
 import "./OcrTimingPanel.css";
 
 export type OcrPageTiming = {
@@ -22,7 +23,12 @@ export type OcrTimingRun = {
 const seconds = (ms?: number) =>
   ms === undefined ? "—" : `${(ms / 1000).toFixed(2)} 秒`;
 
-export function OcrTimingPanel({ run }: { run: OcrTimingRun }) {
+export function OcrTimingPanel({ run, retryFailedCount = 0, retryDisabled = false, onRetryFailed }: {
+  run: OcrTimingRun;
+  retryFailedCount?: number;
+  retryDisabled?: boolean;
+  onRetryFailed?: () => void;
+}) {
   const [now, setNow] = useState(performance.now());
   useEffect(() => {
     if (run.ended !== undefined) return;
@@ -43,6 +49,14 @@ export function OcrTimingPanel({ run }: { run: OcrTimingRun }) {
         {seconds(Math.max(0, (run.ended ?? now) - run.started))}
         {` · 成功 ${succeeded} 页 · 失败 ${failed} 页`}
         {cancelled > 0 && ` · 取消 ${cancelled} 页`}
+        {retryFailedCount > 0 && onRetryFailed && (
+          <Button size="sm" variant="outline" className="ocr-retry-failed"
+            disabled={retryDisabled} title={`仅重试所选文件的 ${retryFailedCount} 个失败页，保留其他页面`}
+            onKeyDown={event => event.stopPropagation()}
+            onClick={event => { event.preventDefault(); event.stopPropagation(); onRetryFailed(); }}>
+            重试失败页（{retryFailedCount}）
+          </Button>
+        )}
       </summary>
       <p className="ocr-muted">
         最多同时处理 {OCR_CONCURRENCY}{" "}

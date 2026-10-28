@@ -1689,16 +1689,19 @@ fn open_output(
         })
 }
 
-/// Opens one of the built-in official rate-lookup entry points in the system
-/// browser.  The URL must be on `deposit_interest::REFERENCE_LINKS`; the
-/// frontend cannot use this command to reach an arbitrary address, mirroring
-/// the AllowedPaths rule that governs local files.
+fn is_builtin_reference_url(url: &str) -> bool {
+    deposit_interest::is_reference_url(url)
+        || url == include_str!("../../assets/roll-forward/download-url.txt").trim()
+}
+
+/// Opens a built-in reference or tool download URL in the system browser.
+/// Only exact matches are allowed; arbitrary addresses remain forbidden.
 #[tauri::command]
 fn open_reference_url(app: tauri::AppHandle, url: String) -> Result<(), AppError> {
-    if !deposit_interest::is_reference_url(&url) {
+    if !is_builtin_reference_url(&url) {
         return Err(AppError::new(
             "URL_NOT_ALLOWED",
-            "只能打开工具内置的官方利率查询入口。",
+            "只能打开工具内置的参考或下载链接。",
             false,
             Some(url),
         ));
@@ -2232,6 +2235,17 @@ pub fn run_excel_merger_worker() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_reference_urls_require_exact_matches() {
+        let download = include_str!("../../assets/roll-forward/download-url.txt").trim();
+        assert!(is_builtin_reference_url(download));
+        assert!(is_builtin_reference_url("https://www.chinamoney.com.cn/"));
+        assert!(!is_builtin_reference_url(&format!("{download}&other=1")));
+        assert!(!is_builtin_reference_url("https://eychinamanaged.sharepoint.cn/"));
+        assert!(!is_builtin_reference_url("https://example.com/"));
+        assert!(!is_builtin_reference_url(""));
+    }
 
     #[test]
     fn collect_path_like_only_takes_absolute_windows_paths() {

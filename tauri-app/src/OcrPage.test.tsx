@@ -1501,6 +1501,64 @@ it("批量自定义范围逐份裁剪越界页，仅确认一次覆盖并报告�
   )).toBe(true);
 });
 
+it("失败页可继续摘录导出，重试只扫实际失败页，不扫成功页或尚未扫描页", async () => {
+  const { records, scanJob } = batchFixture();
+  let fail = true;
+  mocks.job.mockImplementation(async (method, params, onJob) => {
+    if (method === "ocr.recognize_page" && params.documentId === "d2" && params.page === 2 && fail) {
+      fail = false;
+      throw new Error("第二合同页2暂时失败");
+    }
+    return scanJob(method, params, onJob);
+  });
+  await openDocument(false);
+  await selectSecond();
+  fireEvent.change(screen.getByLabelText("扫描范围"), { target: { value: "custom" } });
+  fireEvent.change(screen.getByLabelText("扫描页码"), { target: { value: "2" } });
+  fireEvent.click(screen.getByRole("button", { name: "开始扫描" }));
+  await screen.findByText(/第二合同页2暂时失败/);
+  await waitFor(() => expect(screen.getByRole("button", { name: "开始扫描" })).toBeEnabled());
+  expect(screen.getByRole("button", { name: "导出文件" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
+  expect(screen.queryByText(/识别完成，部分页面失败/)).not.toBeInTheDocument();
+  expect(screen.getByRole("note", { name: "摘录来源范围" })).toHaveTextContent("已扫描 2 / 4 页");
+  fireEvent.change(screen.getByLabelText("摘录场景"), { target: { value: "custom" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "1 原文识别" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "开始扫描" })).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("扫描页码"), { target: { value: "无效范围" } });
+  const calls = mocks.job.mock.calls.length;
+  fireEvent.click(screen.getByRole("button", { name: "重试失败页（1）" }));
+  await waitFor(() => expect(mocks.job).toHaveBeenCalledTimes(calls + 1));
+  await waitFor(() => expect(screen.getByRole("button", { name: "开始扫描" })).toBeEnabled());
+  expect(mocks.job.mock.calls.at(-1)![1]).toMatchObject({ documentId: "d2", page: 2 });
+  expect(records.get("d2")!.pages.map(page => page.page)).toEqual([2]);
+  expect(screen.queryByRole("button", { name: /重试失败页/ })).not.toBeInTheDocument();
+});
+
+it("切换到其他单文件不残留扫描错误与计时，切回失败文件仍可单独重试", async () => {
+  const { scanJob } = batchFixture();
+  mocks.job.mockImplementation(async (method, params, onJob) => {
+    if (method === "ocr.recognize_page" && params.documentId === "d") throw new Error("第一合同第2页失败");
+    return scanJob(method, params, onJob);
+  });
+  await openDocument(false);
+  fireEvent.click(screen.getByRole("button", { name: "开始扫描" }));
+  await screen.findByText(/第一合同第2页失败/);
+  await waitFor(() => expect(screen.getByRole("button", { name: "开始扫描" })).toBeEnabled());
+  const files = () => within(screen.getByRole("complementary", { name: "项目文件" }));
+  fireEvent.click(files().getByRole("button", { name: /^第二合同.pdf/ }));
+  await screen.findByRole("heading", { name: "第二合同.pdf" });
+  expect(screen.queryByText(/第一合同第2页失败/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/识别完成，部分页面失败/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/本次识别耗时/)).not.toBeInTheDocument();
+  fireEvent.click(files().getByRole("button", { name: /^合成扫描件.pdf/ }));
+  await screen.findByRole("heading", { name: "合成扫描件.pdf" });
+  expect(screen.getByText(/成功 0 页 · 失败 1 页/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "重试失败页（1）" })).toBeEnabled();
+});
+
 it("预览切换不改变批量范围，全篇模式包含所选文件，卡片点击恢复单文件操作", async () => {
   const { records } = batchFixture();
   records.get("d2")!.pages = [

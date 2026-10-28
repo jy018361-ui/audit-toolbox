@@ -560,7 +560,8 @@ export default function App() {
     const state = loadTourState();
     if (state.newbieMode === false) return;
     if (playedToolRef.current === activeToolId) return;
-    if (!catalog.some((tool) => tool.id === activeToolId)) return;
+    const activeTool = catalog.find((tool) => tool.id === activeToolId);
+    if (!activeTool || activeTool.capabilities.includes("download")) return;
     // 延迟触发给懒加载页面留出首绘时间；引擎内部还会轮询等待目标元素。
     const timer = setTimeout(() => {
       playedToolRef.current = activeToolId;

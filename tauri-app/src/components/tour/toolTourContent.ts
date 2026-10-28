@@ -295,19 +295,9 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
   },
 
   audit_roll_forward: {
-    purpose:
-      "把上年度标准底稿按公司/科目批量「结转」成本年度底稿：期初数、公式、标黄措辞、CRA 风险评估信息自动迁移，免去逐科目手工复制。",
-    prepare:
-      "准备标准模板目录、上年底稿目录（或单个 xlsx）及输出目录；可选导入 PMTE 文件。CRA 在页面粘贴文本后解析，无需上传 CRA 文件。",
-    flow: "四步：第 1 步建项目加公司；第 2 步选目录并勾选科目；第 3 步解析确认 CRA；第 4 步运行前检查后开始结转。",
-    result:
-      "输出目录里每个科目一份本年度底稿 xlsx，结果逐科目显示成功/失败和复制、标黄、CRA 写入等计数。",
-    stepHints: {
-      "1": "新建项目（名称、年度），添加公司并填资产负债表日、记账本位币、适用准则和 PM/TE/SAD。",
-      "2": "选标准模板目录、上年底稿位置和输出目录，点「从文件名自动识别科目」或手动勾选；按需勾选结转措辞、Summary 和 AI 辅助选项。",
-      "3": "粘贴 CRA 文本→「解析 CRA」→逐条核对科目匹配、认定和比例，勾「写入底稿」；本次不用 CRA 就明确选择，否则会弹确认。",
-      "4": "先「运行前检查」确认每个科目的模板和上年底稿就绪，再「开始结转」；结果里逐科目复核迁移计数和待处理项。",
-    },
+    purpose: "通过指定的 SharePoint 页面获取 RollForward 小工具。",
+    prepare: "点击页面中的「点击获取RollForward小工具」链接即可打开获取页面。",
+    result: "在 SharePoint 获取页面中按说明下载并使用 RollForward 小工具。",
   },
 
   wp_service_generator: {

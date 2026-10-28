@@ -73,13 +73,6 @@ describe("任务型页面纵向布局契约", () => {
     expect(fileList).toContain("<FileInput");
     expect(fileList).not.toContain("title={outputPath}");
 
-    const rollForward = readFileSync(
-      new URL("./RollForwardPage.tsx", import.meta.url),
-      "utf8",
-    );
-    expect(rollForward).toContain("<FileInput");
-    expect(rollForward).not.toContain("<Input title={value} value={value}");
-
     const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
     expect(app).toContain("value={displayFileName(backupPath)}");
   });

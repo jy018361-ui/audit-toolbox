@@ -394,6 +394,13 @@
 .ocr-source .ocr-preview-canvas img {
   max-width: none;
 }
+.ocr-preview-draggable {
+  cursor: grab;
+  user-select: none;
+}
+.ocr-preview-draggable.is-panning {
+  cursor: grabbing;
+}
 .ocr-preview-viewport:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: -2px;

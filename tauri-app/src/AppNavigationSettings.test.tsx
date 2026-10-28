@@ -484,7 +484,7 @@ it.each(["/tasks", "/diagnostics"])(
   },
 );
 
-it("marks preview tools as trials in the sidebar without disabling them", async () => {
+it("marks upcoming tools in the sidebar and exposes Roll Forward as a ready download", async () => {
   render(
     <MemoryRouter initialEntries={["/"]}>
       <App />
@@ -495,14 +495,20 @@ it("marks preview tools as trials in the sidebar without disabling them", async 
     document.querySelector("aside.sidebar")! as HTMLElement,
   );
 
-  for (const name of ["AudiPick 智能合同审阅", "WP Roll Forward"]) {
-    const link = sidebar.getByRole("link", {
-      name: new RegExp(`${name}.*即将上线.*即将正式上线`),
-    });
-    expect(link).toBeVisible();
-    expect(link).toHaveAttribute("title", "功能完善中，即将正式上线。");
-    expect(within(link).getByText("即将上线")).toBeVisible();
-  }
+  const audipick = sidebar.getByRole("link", {
+    name: /AudiPick 智能合同审阅.*即将上线.*即将正式上线/,
+  });
+  expect(audipick).toBeVisible();
+  expect(audipick).toHaveAttribute("title", "功能完善中，即将正式上线。");
+  expect(within(audipick).getByText("即将上线")).toBeVisible();
+
+  const rollForward = sidebar.getByRole("link", { name: /WP Roll Forward/ });
+  expect(rollForward).toBeVisible();
+  expect(rollForward).not.toHaveAttribute("title");
+  fireEvent.click(rollForward);
+  const downloadLink = await screen.findByRole("link", { name: "点击获取RollForward小工具" });
+  expect(downloadLink).toHaveAttribute("href", expect.stringContaining("sharepoint.cn"));
+  expect(screen.getByText("有疑问请联系Dana D Li")).toBeVisible();
 
   expect(
     sidebar.getByRole("link", { name: /汇兑损益测算/ }),

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent } from "react";
 import type { OcrDocumentDetail, OcrPageData } from "./ocrTypes";
 import { Button } from "./components/ui/button";
 import { Copy, ZoomIn, ZoomOut, Maximize } from "lucide-react";
@@ -10,14 +10,46 @@ function OcrScanPreview({ name, pageNumber, sourceImage, sourceError }: {
   sourceError: string;
 }) {
   const [zoom, setZoom] = useState(100);
+  const [panning, setPanning] = useState(false);
   const viewport = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ id: number; x: number; y: number; left: number; top: number } | null>(null);
+  function endPan() {
+    const active = drag.current;
+    drag.current = null;
+    setPanning(false);
+    if (active && viewport.current?.hasPointerCapture?.(active.id)) {
+      viewport.current.releasePointerCapture(active.id);
+    }
+  }
+  function startPan(event: PointerEvent<HTMLDivElement>) {
+    if (!sourceImage || event.button !== 0 || event.pointerType !== "mouse") return;
+    const element = event.currentTarget;
+    // Keep native scrollbar interactions available along both edges.
+    if (event.clientX >= element.getBoundingClientRect().left + element.clientLeft + element.clientWidth
+      || event.clientY >= element.getBoundingClientRect().top + element.clientTop + element.clientHeight) return;
+    drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, left: element.scrollLeft, top: element.scrollTop };
+    element.setPointerCapture(event.pointerId);
+    element.focus({ preventScroll: true });
+    setPanning(true);
+    event.preventDefault();
+  }
+  function movePan(event: PointerEvent<HTMLDivElement>) {
+    const active = drag.current;
+    if (!active || event.pointerId !== active.id) return;
+    if (!(event.buttons & 1)) { endPan(); return; }
+    event.currentTarget.scrollLeft = active.left + active.x - event.clientX;
+    event.currentTarget.scrollTop = active.top + active.y - event.clientY;
+    event.preventDefault();
+  }
   useEffect(() => {
+    endPan();
     if (viewport.current) {
       viewport.current.scrollTop = 0;
       viewport.current.scrollLeft = 0;
     }
   }, [pageNumber]);
   function fitWidth() {
+    endPan();
     setZoom(100);
     if (viewport.current) {
       viewport.current.scrollTop = 0;
@@ -40,7 +72,10 @@ function OcrScanPreview({ name, pageNumber, sourceImage, sourceError }: {
           onClick={() => setZoom(value => Math.min(400, value + 25))}><ZoomIn /></Button>
         <Button size="sm" variant="ghost" onClick={fitWidth} disabled={!sourceImage}><Maximize />适应宽度</Button>
       </div>
-      <div className="ocr-pane-body ocr-preview-viewport" ref={viewport} role="region" aria-label="扫描件图片" tabIndex={0}>
+      <div className={`ocr-pane-body ocr-preview-viewport${sourceImage ? " ocr-preview-draggable" : ""}${panning ? " is-panning" : ""}`}
+        ref={viewport} role="region" aria-label="扫描件图片" tabIndex={0}
+        onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan}
+        onPointerCancel={endPan} onLostPointerCapture={endPan}>
         {sourceImage ? (
           <div className="ocr-preview-canvas" style={{ width: `${zoom}%` }}>
             <img src={sourceImage} alt={`${name} 第 ${pageNumber} 页`} draggable={false} />

@@ -80,6 +80,13 @@ pages: 页码
 const LOAN_CONSOLIDATION_PROMPT = `请把同一来源文件的分段借款摘录合并成完整的借款主表。分段只是读取范围，不是独立借款。同一主合同默认一行；只有独立合同号或借据号且本金、到期日或执行利率可区分才拆行。合并同一合同分散的金额、期限、利率、还款与担保，不把不同页或附属协议制造成新借款。字段沿用输入；未知保持未明确，冲突写入 auditor_summary，不自行补造。补充协议修改关系不明确时提示复核。
 输入 records 是已核验的分段结果，evidence 是逐字证据目录。每行 evidence_ids 必须列出支持该行的输入证据编号，合并时取相关证据的并集；excerpt 留空，不重抄或改写证据。输入的文件页码元数据仅供定位，不是合同事实。
 只输出完整 JSON {"coverage_complete":true,"items":[...]}，未合并检查完返回 coverage_complete:false。`;
+const CUSTOM_CONSOLIDATION_PROMPT = `把同一来源文件已经核验的分段摘录整理成用户需要的最终表格。分段只是阅读范围，不是独立业务记录。
+遵守用户的行粒度：主体、本金、期限等同一合同的互补字段应合并在同一行；不同合同、账户、单据、交易或明细必须分行，不能只因来源文件相同就合为一行。只合并确属同一业务对象的互补字段及同一事实的重复记录。不确定是否同一对象时分别保留，不能猜测关系。
+同一主合同的正文、通用/专用条款、附件和还款计划属于同一合同资料，默认合并；除非明确出现独立合同或借据且业务对象可区分，不把还款计划或附件另造为一笔借款。不因本金暂缺或不同分段来源而拆成新合同。还款日期只属于还款计划，不能推断成借款期限或实际起止日；项目建设期/运营期、授信期与单笔借款期限分别保留原口径。已核验分段引用中若只有“参见其他条款”，不能把该引用当成具体期限事实。
+本轮只能使用输入records中的已核验字段和evidence证据，不新增合同事实。按用户要求统一列名并组织清晰的中文业务列；没有事实支持的字段保留未明确，冲突明确列示并提示复核。保留每条输入记录的实际信息和证据，合并后的evidence_ids取对应记录证据的并集；不同独立记录可共享相同证据。`;
+const NATURAL_FACT_LIMITS = `\n【自然语言事实边界】
+默认摘录的字段必须直接由本轮原文支持，不能依据还本计划、最早/最晚日期或常识推断借款期限、提款日、本金等字段后当作合同事实。仅当用户明确要求计算/推算时，才允许使用提供的事实计算，并在计算结果中说明依据或计算口径，不能冒充原文约定。还本计划不是新的借款，项目建设/运营期限不是借款期限；授信期、每笔期限上限、实际单笔期限分别表达。额度金额不冒充已实际提款本金，实际本金未提供时标未明确，并可单独列示原文确有的授信额度。
+无关段及仅转引缺失条款、仅有还款计划但没有目标事实的段，应在完整检查后返回items:[]。有部分实际目标事实时保留实际部分及证据，未知字段标未明确；不要生成纯缺失说明或据此推断的新业务记录。不能用无效证据记录或虚构值填满表格。`;
 const CONSOLIDATION_CONTRACT = `
 【汇总返回契约】
 只依据输入 records 和 evidence，返回完整 JSON 对象 {"coverage_complete":true,"items":[{"excerpt":"","evidence_ids":["E1"]}]}，沿用业务字段。每条记录必须引用实际存在的 evidence 编号，不抄写原文。未检查完返回 coverage_complete:false，不得用空数组伪装完整。此前不同输出示例以本段为准。`;
@@ -680,6 +687,72 @@ function verifyRow(
   };
 }
 
+/** A line may contain several independent financial limits. Keep its full
+ * source evidence, but do not repeat the whole list as every row's standard.
+ * Only semicolon-separated, independently quantified subjects are narrowed;
+ * shared conditions and unfamiliar structures are left intact. */
+function focusedFinancialStandard(row: Row): Row {
+  const title = String(row.title ?? "");
+  const source = String(row.trigger_standard ?? "");
+  const subjects = [/对外投资/, /对外(?:提供)?担保/, /(?:增加|新增)?债务融资/];
+  const selected = subjects.filter(pattern => pattern.test(title));
+  const parts = source.split(/[；;]/).map(part => part.trim()).filter(Boolean);
+  if (selected.length !== 1 || parts.length < 2) return row;
+  // Each part must itself state a subject and a cap. Otherwise a suffix may
+  // contain a shared condition whose removal would change the obligation.
+  if (!parts.every(part => subjects.filter(pattern => pattern.test(part)).length === 1 &&
+    /限额|不(?:得)?超过|不高于|最高/.test(part) && /\d/.test(part))) return row;
+  const matching = parts.filter(part => selected[0].test(part));
+  if (matching.length !== 1) return row;
+  return { ...row, trigger_standard: matching[0] };
+}
+
+class NaturalFactError extends Error {}
+function validateNaturalFacts(rows: Row[], columns: { key: string; label: string }[] | undefined, requirement: string): void {
+  const labels = new Map(columns?.map(column => [column.key, column.label]) ?? []);
+  const calculationRequest = requirement.replace(/(?:不要|不得|不能|无需|不允许|不应|禁止|不必|不)\s*(?:自行|自动|擅自)?(?:计算|推算|推断|估算|测算)/g, "");
+  const derivedRequested = /计算|推算|推断|估算|测算|算出|算一下/.test(calculationRequest);
+  const loanFocus = /借款|贷款|本金|借据|授信/.test(requirement);
+  for (const row of rows) {
+    const evidence = String(row.evidence ?? "");
+    const unknown = (value: unknown) => typeof value === "string" &&
+      /^(?:未明确|未提供|不详|未知|无法确认|不适用|无相关信息)(?:[（(].*[）)])?[。；;]?$/s.test(value.trim());
+    const target = (key: string) => /本金|principal|借款期限|贷款期限|loan_term|contract_term/.test(`${key} ${labels.get(key) ?? ""}`);
+    const explanatory = (key: string) => /备注|说明|提示|note|comment|missing|summary/.test(`${key} ${labels.get(key) ?? ""}`);
+    const business = Object.entries(row).filter(([key]) => !key.startsWith("_") &&
+      !/^(?:evidence|source|excerpt|contract_excerpt)/.test(key));
+    const targets = business.filter(([key]) => target(key));
+    const note = business.filter(([key]) => explanatory(key)).map(([, value]) => String(value ?? "")).join("\n");
+    const noTarget = /(?:本段|本轮|当前段|提供.{0,8}资料).{0,100}(?:未直接|未明确|未提(?:供|及)|不含|没有).{0,50}(?:借款本金|本金总额|借款.{0,8}期限|目标信息)|(?:还本计划|还款计划).{0,80}(?:不等同|不是|不代表).{0,30}(?:期限|本金)/s.test(note);
+    const hasOtherFact = business.some(([key, value]) => !target(key) && !explanatory(key) &&
+      typeof value === "string" && value.trim() && !unknown(value));
+    const wantsAbsenceRecords = /(?:即使|包括|保留|列出).{0,15}(?:未明确|未命中|未提供|空记录|缺失)|每份文件.{0,10}(?:一行|保留)/.test(requirement);
+    // Require a fresh, bounded model check instead of dropping a source row.
+    // An identified independent contract with missing fields remains a valid
+    // record; a note explicitly saying this window has no requested facts is
+    // not a new business object or evidence that must burden consolidation.
+    if (loanFocus && !wantsAbsenceRecords && targets.length && targets.every(([, value]) => unknown(value)) &&
+      noTarget && !hasOtherFact)
+      throw new NaturalFactError("本段记录只有目标字段未明确及未命中说明，没有实际摘录的目标事实。请重新检查本轮来源：有实际本金或期限等目标信息时保留该事实及证据；确实无匹配时返回items:[]，不能用大段无关还本计划生成占位业务记录。不要删除已识别的独立合同或其他实际目标信息。");
+    for (const [key, content] of Object.entries(row)) {
+      if (typeof content !== "string" || !content.trim() || key.startsWith("_") ||
+        /^(?:evidence|source|excerpt|contract_excerpt|auditor_summary|missing_information)/.test(key)) continue;
+      if (/^(?:未明确|未提供|无法确认|未知|不适用)/.test(content.trim())) continue;
+      const field = `${key} ${labels.get(key) ?? ""}`;
+      if (!derivedRequested && /(?:依据|根据|基于|由|按).{0,40}(?:推断|推算|估算|推测)|(?:推断|推算|估算|推测)(?:得|为|[:：])/.test(content))
+        throw new NaturalFactError(`字段「${labels.get(key) ?? key}」含推断值，不能当作合同事实。请只保留本轮明确支持的目标信息；无匹配时完整检查后返回空items。`);
+      if (loanFocus && !derivedRequested && /借款期限|贷款期限|loan_term|contract_term|借款起|提款日|loan_start|maturity_date/.test(field) &&
+        /\d|[一二三四五六七八九十百零〇壹贰叁肆伍陆柒捌玖拾]/.test(content) &&
+        !/借款期限|贷款期限|授信期限|额度有效期|期限.{0,5}(?:为|自|从|至)|(?:借款|贷款).{0,8}(?:起始日|到期日)|提款日|起息日|自[^\n]{0,40}起?至[^\n]{0,40}(?:日|止)/.test(evidence))
+        throw new NaturalFactError(`字段「${labels.get(key) ?? key}」缺少对应期限条款证据；还款计划或其他日期不能推断为借款期限。请引用明确的期限条款；本段没有该事实则不要生成该记录。`);
+      if (loanFocus && !derivedRequested && /本金|principal/.test(field) && /额度|授信金额/.test(evidence) &&
+        !/借款本金|借款金额|借款人民币|实际(?:提款|本金|借款)|发放.{0,10}(?:贷款|借款)/.test(evidence) &&
+        !/额度|授信|本金.{0,5}(?:未明确|未提供)/.test(content))
+        throw new NaturalFactError(`字段「${labels.get(key) ?? key}」的证据仅支持额度，不能列成已实际提款本金；请明确标注授信额度口径，实际本金未提供时保留未明确。`);
+    }
+  }
+}
+
 export async function extractOcrScenario(options: {
   scenario: OcrScenario;
   stages: OcrPromptStage[];
@@ -703,9 +776,10 @@ export async function extractOcrScenario(options: {
       ? `${scenario.internalPrompts.find(item => item.id === stage.id)?.prompt ?? scenario.internalPrompts[0]?.prompt ?? ""}\n【用户摘录要求】\n${stage.prompt}`
       : stage.prompt,
   }));
-  if (kind === "loan_general") stages.push({ id: "consolidate", label: "内部汇总",
+  if (kind === "loan_general" || kind === "custom") stages.push({ id: "consolidate", label: "内部汇总",
     prompt: requirements.find(stage => stage.id === "consolidate")?.prompt.trim() ||
-      scenario.internalPrompts?.find(stage => stage.id === "consolidate")?.prompt || LOAN_CONSOLIDATION_PROMPT,
+      scenario.internalPrompts?.find(stage => stage.id === "consolidate")?.prompt ||
+      (kind === "loan_general" ? LOAN_CONSOLIDATION_PROMPT : CUSTOM_CONSOLIDATION_PROMPT),
   });
   const fullScope = !scenario.internalPrompts || requirements[0].prompt.trim() === naturalRequirement(kind, scenario.fields).trim();
   const pages = currentSource(options.pages);
@@ -713,6 +787,7 @@ export async function extractOcrScenario(options: {
     throw new Error("请先完成 OCR 或填写可编辑内容，再执行摘录。");
   const rows: Row[] = [];
   const generatedColumns: { key: string; label: string }[][] = [];
+  let consolidatedColumns: { key: string; label: string }[] | undefined;
   let requestNumber = 0;
   async function requestVerified(
     prompt: string,
@@ -724,9 +799,10 @@ export async function extractOcrScenario(options: {
     let wholeRepairUsed = false;
     let rowRepairUsed = false;
     let coverageRepairUsed = false;
+    let factRepairUsed = false;
     // Each failure class has one repair budget. Fixing an invalid row does not
     // consume the missing-duty budget; neither may repeat indefinitely.
-    for (let attempt = 0; attempt < (kind === "loan_restrictive" ? 4 : 2); attempt++) {
+    for (let attempt = 0; attempt < (kind === "loan_restrictive" ? 4 : kind === "custom" ? 3 : 2); attempt++) {
       await options.checkpoint?.();
       // A transport failure is not a malformed model response. Do not repeat
       // expensive timed-out requests or retry user cancellation here.
@@ -771,11 +847,17 @@ export async function extractOcrScenario(options: {
           });
         }
         const validated = validate(returned);
-        if (columns?.length) generatedColumns[requestIndex] = columns;
+        if (kind === "custom") validateNaturalFacts(validated, columns, requirements[0].prompt);
+        // Empty source windows cannot declare unrelated blank result columns.
+        if (columns?.length && validated.length) generatedColumns[requestIndex] = columns;
         return validated;
       } catch (error) {
         if (rowRepair && !(error instanceof RestrictiveRowRepair)) throw error;
-        if (error instanceof RestrictiveCoverageRepair) {
+        if (error instanceof NaturalFactError) {
+          if (factRepairUsed) throw error;
+          factRepairUsed = true;
+          rowRepair = undefined;
+        } else if (error instanceof RestrictiveCoverageRepair) {
           if (coverageRepairUsed) throw error;
           rowRepair = error;
         } else if (error instanceof RestrictiveRowRepair) {
@@ -876,7 +958,7 @@ export async function extractOcrScenario(options: {
         : [];
       rows.push(
         verifyRow(
-          { ...row, evidence_quotes: evidence },
+          { ...focusedFinancialStandard(row), evidence_quotes: evidence },
           document.name,
           pages,
           pages.map((page) => page.text).join("\n\n"),
@@ -896,9 +978,10 @@ export async function extractOcrScenario(options: {
     // larger files still use the same bounded, verified consolidation path.
     const chunks = sourceChunks(
       pages,
-      kind === "loan_general" ? 24_000 : kind === "loan_restrictive" ? 4_000 : 12_000,
+      kind === "loan_general" ? 24_000 : kind === "loan_restrictive" ? 4_000 : kind === "custom" ? 6_000 : 12_000,
     );
-    const workTotal = chunks.length + (kind === "loan_general" && chunks.length > 1 ? 1 : 0);
+    let needsConsolidation = (kind === "loan_general" || kind === "custom") && chunks.length > 1;
+    let workTotal = chunks.length + (needsConsolidation ? 1 : 0);
     options.onWorkProgress?.({ completed: 0, total: workTotal });
     const chunkRows: Row[][] = Array.from({ length: chunks.length }, () => []);
     let completedChunks = 0;
@@ -918,7 +1001,9 @@ export async function extractOcrScenario(options: {
       const chunkContract =
         kind === "loan_general" && chunks.length > 1
           ? `\n【当前执行阶段：第${index + 1}/${chunks.length}段的主表草稿，不是整份主表定稿】\n本轮只核对下面给出的L行号范围。上面“最终结论基于整份合同”的要求将在后续汇总阶段执行。现在完整检查本轮行号范围就返回 coverage_complete:true，尚未提供的其他段不是本轮待检查范围。缺少主合同/申请书/签章页或业务字段时仍保留本段实际条款，缺失字段填未明确，不得因缺后续段返回 false。`
-          : "";
+          : kind === "custom"
+            ? `\n【当前执行阶段：第${index + 1}/${chunks.length}段的字段草稿】\n只检查本轮实际给出的L行号范围，完整读完本段即如实返回coverage_complete:true。用户要求的信息可能只出现在其他段，不能据此返回false；确实没读完则仍返回false。仅摘录本段实际支持的目标字段，不补写其他段。若本段没有任何目标信息，返回items:[]，不要生成全部字段为未明确且evidence_refs为空的占位记录。若本段仅支持本金或仅支持期限，保留该部分事实和有效行号，其他段将在最终汇总阶段合并；不能因另一字段缺失而丢弃该部分事实。`
+            : "";
       const context = kind === "loan_restrictive"
         ? governingCovenantText(source, sourceLines[0]?.start ?? 0).trim().slice(0, 1200)
         : "";
@@ -930,6 +1015,7 @@ export async function extractOcrScenario(options: {
           !stages[0].prompt.includes(LOAN_SOURCE_LIMITS)
             ? LOAN_SOURCE_LIMITS
             : "") +
+          (kind === "custom" ? NATURAL_FACT_LIMITS : "") +
           chunkContract,
         `[来源文件：${document.name}；分段 ${index + 1}/${chunks.length}]\n` +
           (context ? `【前文主句，仅供理解，不是本轮新增事项或证据行】\n${context}\n【本轮可引用原文】\n` : "") +
@@ -1011,8 +1097,13 @@ export async function extractOcrScenario(options: {
         // A model that explicitly cannot finish a large segment gets smaller
         // source windows once. Keep the exact text and original offsets;
         // never reinterpret coverage=false as success.
-        if (kind !== "loan_restrictive" || !canSplit || chunk.text.length < 2000 ||
+        if (!["loan_restrictive", "custom"].includes(kind) || !canSplit || chunk.text.length < 2000 ||
           !(error instanceof Error) || !error.message.includes("模型未确认本段检查完整")) throw error;
+        if (kind === "custom" && !needsConsolidation) {
+          needsConsolidation = true;
+          workTotal++;
+          options.onWorkProgress?.({ completed: completedChunks, total: workTotal });
+        }
         options.onProgress?.(`第 ${index + 1}/${chunks.length} 段未检查完整，拆为两个较小范围核验`);
         const half = sourceLines.reduce((n, line) => n + line.text.length + 1, 0) / 2;
         let size = 0;
@@ -1085,7 +1176,7 @@ export async function extractOcrScenario(options: {
           rows.splice(index, 1, ...separate.map(part => ({ ...row, requirement: part.trim() })));
       }
     }
-    if (kind === "loan_general" && chunks.length > 1 && rows.length) {
+    if (needsConsolidation && rows.length && (kind === "loan_general" || rows.length > 1)) {
       const evidence = new Map<string, string>();
       const quoteIds = new Map<string, string>();
       const records = rows.map((row) => {
@@ -1129,15 +1220,16 @@ export async function extractOcrScenario(options: {
       });
       if (input.length > 60_000)
         throw new Error(
-          "借款主表分段结果过长，无法完整汇总；请减少文件范围或精简摘录字段后重试，本轮结果未保存。",
+          "分段摘录结果过长，无法完整汇总；请减少文件范围或精简摘录字段后重试，本轮结果未保存。",
         );
       await options.checkpoint?.();
-      options.onProgress?.("合并整份借款合同的分段摘录");
+      options.onProgress?.(kind === "loan_general" ? "合并整份借款合同的分段摘录" : "合并同一业务对象的分段字段，保留独立明细");
+      const consolidationStart = requestNumber;
       const verified = await requestVerified(
         stages.find((stage) => stage.id === "consolidate")!.prompt +
           (scenario.internalPrompts ? `\n【用户摘录要求】\n${requirements[0].prompt}` : "") +
           CONSOLIDATION_CONTRACT +
-          LOAN_SOURCE_LIMITS,
+          (kind === "loan_general" ? LOAN_SOURCE_LIMITS : NATURAL_FACT_LIMITS),
         `[来源文件：${document.name}]\n${input}`,
         (items) => {
           const result = items.map((row) =>
@@ -1155,7 +1247,7 @@ export async function extractOcrScenario(options: {
                 ? row.contract_no.replace(/\s+/g, "").trim()
                 : "";
             if (!no || /^(未明确|无|不适用)$/.test(no)) continue;
-            if (contractNos.has(no))
+            if (kind === "loan_general" && contractNos.has(no))
               throw new Error(
                 `借款汇总仍把同一合同编号${no}拆成多条，请合并同一主合同分散字段和证据；仅有明确独立借据号时才可拆行。`,
               );
@@ -1170,11 +1262,12 @@ export async function extractOcrScenario(options: {
           );
           if ([...evidence.values()].some((quote) => !retained.has(quote)))
             throw new Error(
-              "借款汇总遗漏本轮已核验证据，请保留支持输入主记录的证据编号，合并时取并集。",
+              "分段汇总遗漏本轮已核验证据，请保留支持输入记录的证据编号，合并时取并集。",
             );
           return result;
         },
       );
+      consolidatedColumns = generatedColumns.slice(consolidationStart).filter(Boolean).at(-1);
       rows.splice(0, rows.length, ...verified);
     }
     options.onWorkProgress?.({ completed: workTotal, total: workTotal });
@@ -1184,7 +1277,7 @@ export async function extractOcrScenario(options: {
   const sourceKeys = new Set(SOURCE_FIELDS.map(field => field.key));
   const labels = new Map([...scenario.fields, { key: "title", label: "事项" }, { key: "trigger_standard", label: "限制或触发标准" }, { key: "clause_ref", label: "条款位置" }].map(field => [field.key, field.label]));
   const inferred = [...new Set(rows.flatMap(row => Object.keys(row)))].filter(key => !key.startsWith("_") && !internalFields.has(key) && !sourceKeys.has(key));
-  const declared = generatedColumns.flat();
+  const declared = consolidatedColumns ?? generatedColumns.flat();
   const fields = declared.length ? declared : inferred.map(key => ({ key, label: labels.get(key) ?? key }));
   const columns = [...fields.filter(field => !internalFields.has(field.key)), ...SOURCE_FIELDS].filter(
     (field, index, all) =>

@@ -99,7 +99,8 @@ fn readable_page(mut page: Page) -> Page {
         || page.original_text.to_ascii_lowercase().contains("<table");
     let is_payload = is_structure
         || crate::bailian_ocr::has_latex_layout(&page.original_text)
-        || crate::bailian_ocr::has_markdown_heading(&page.original_text);
+        || crate::bailian_ocr::has_markdown_heading(&page.original_text)
+        || crate::bailian_ocr::has_image_markup(&page.original_text);
     if is_payload {
         let parsed = crate::bailian_ocr::readable_ocr_content(&page.original_text);
         let parsed_text = parsed["text"].as_str().unwrap_or("").to_owned();
@@ -150,7 +151,8 @@ fn readable_table(table: &mut Table, baseline: Option<&Table>) -> Vec<String> {
     let mut warnings = vec![];
     let mut convert = |text: &mut String, original: Option<&str>| {
         if original.is_some_and(|original| original != text.as_str()) { return; }
-        if !crate::bailian_ocr::has_latex_layout(text) && !crate::bailian_ocr::has_markdown_heading(text) { return; }
+        if !crate::bailian_ocr::has_latex_layout(text) && !crate::bailian_ocr::has_markdown_heading(text)
+            && !crate::bailian_ocr::has_image_markup(text) { return; }
         let parsed = crate::bailian_ocr::readable_ocr_content(text);
         *text = parsed["text"].as_str().unwrap_or(text).to_owned();
         warnings.extend(parsed["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned));
@@ -679,6 +681,23 @@ mod tests {
             ("ocr.export","completed",json!({"projectId":"other","outputDir":"C:\\其他项目目录"}),"4"),
         ] { store.conn.execute("INSERT INTO task_history VALUES(?,?,?,?)",params![method,status,params.to_string(),stamp]).unwrap(); }
         assert_eq!(store.previous_output_directory(id).unwrap(), Some(PathBuf::from("C:\\已授权输出目录")));
+    }
+    #[test]
+    fn saved_image_markup_projects_without_overwriting_human_text_or_cells() {
+        let image = "![0123456789abcdef.jpeg](https://example.com/crop.png?security-token=SYNTHETIC)";
+        let raw = format!("{image}\n\n服务请求报告\nSR编号：S000271646");
+        let table = Table { id: "t".into(), title: "服务报告".into(), rows: vec![vec![image.into(), r"\(\underline{4.35}\%\)".into()]] };
+        let mut page = Page { metadata: Default::default(), page: 1, text: raw.clone(), original_text: raw.clone(), tables: vec![table.clone()], original_tables: vec![table], revision: 8, status: "completed".into(), warnings: vec![] };
+        page.tables[0].rows[0][1] = "人工校对4.36%".into();
+        let projected = readable_page(page.clone());
+        assert_eq!(projected.text, "服务请求报告\nSR编号：S000271646");
+        assert_eq!(projected.original_text, projected.text);
+        assert_eq!(projected.tables[0].rows[0], vec!["", "人工校对4.36%"]);
+        assert_eq!(projected.original_tables[0].rows[0], vec!["", "4.35%"]);
+        assert_eq!(projected.revision, 8);
+        page.text = "人工校对：![业务符号](保留原样)".into();
+        assert_eq!(readable_page(page.clone()).text, page.text);
+        assert_eq!(page.original_text, raw);
     }
     #[test]
     fn legacy_latex_is_readable_without_rewriting_storage_or_human_corrections() {

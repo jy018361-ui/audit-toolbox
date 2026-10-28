@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 const MAX_ENTRIES: usize = 200;
 const MAX_CONTEXT_CHARS: usize = 20_000;
+const DEFINITIONS_MIGRATION: &str = "confirmed-definitions-20261028-v1";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -99,24 +100,90 @@ fn list(conn: &Connection) -> Result<Vec<VocabularyEntry>, AppError> {
         .collect()
 }
 
+fn default_entries() -> Result<Vec<VocabularyEntry>, AppError> {
+    let entries: Vec<VocabularyEntry> = serde_json::from_str(include_str!(
+        "../../assets/meeting/vocabulary-defaults.json"
+    ))
+    .map_err(db_error)?;
+    let entries = entries
+        .into_iter()
+        .map(normalize)
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_collection(&entries)?;
+    Ok(entries)
+}
+
+/// 旧版首次导入的词条均为行业分类、启用、空解释、无别名。
+/// 只对仍保留这组原始值的词条做一次补充，不重建已删除或更名的条目。
+fn backfill_confirmed_definitions(
+    entries: &mut [VocabularyEntry],
+    defaults: &[VocabularyEntry],
+) -> Vec<usize> {
+    let mut changed = Vec::new();
+    for index in 0..entries.len() {
+        let entry = &entries[index];
+        if entry.category != "industry"
+            || !entry.enabled
+            || !entry.definition.is_empty()
+            || !entry.aliases.is_empty()
+        {
+            continue;
+        }
+        let Some(default) = defaults.iter().find(|default| default.term == entry.term) else {
+            continue;
+        };
+        if default.definition.is_empty() && default.aliases.is_empty() {
+            continue;
+        }
+        let mut candidate = entry.clone();
+        candidate.definition = default.definition.clone();
+        // 用户已有同名词条/别名时，保留用户数据，仍可补全解释。
+        candidate.aliases = default
+            .aliases
+            .iter()
+            .filter(|alias| {
+                let name = alias.to_lowercase();
+                !entries.iter().any(|other| {
+                    std::iter::once(&other.term)
+                        .chain(other.aliases.iter())
+                        .any(|word| word.to_lowercase() == name)
+                })
+            })
+            .cloned()
+            .collect();
+        let original = std::mem::replace(&mut entries[index], candidate);
+        // 补充不能让原本处于容量上限附近的用户词库变为不可用。
+        if validate_collection(entries).is_ok() {
+            changed.push(index);
+        } else {
+            entries[index] = original;
+        }
+    }
+    changed
+}
+
 impl Storage {
     pub(super) fn initialize_meeting_vocabulary(&self) -> Result<(), AppError> {
         let mut conn = self.conn.lock();
-        let tx = conn.transaction().map_err(db_error)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(db_error)?;
         let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meeting_vocabulary')", [], |row| row.get(0)).map_err(db_error)?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS meeting_vocabulary(id TEXT PRIMARY KEY, entry_json TEXT NOT NULL)").map_err(db_error)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meeting_vocabulary_migrations(version TEXT PRIMARY KEY)",
+        )
+        .map_err(db_error)?;
+        let migrated: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM meeting_vocabulary_migrations WHERE version=?1)",
+                [DEFINITIONS_MIGRATION],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
         // 只在首次建表时提供行业起始词；用户删掉的词不能在重启后复活。
         if !exists {
-            let entries: Vec<VocabularyEntry> = serde_json::from_str(include_str!(
-                "../../assets/meeting/vocabulary-defaults.json"
-            ))
-            .map_err(db_error)?;
-            let entries = entries
-                .into_iter()
-                .map(normalize)
-                .collect::<Result<Vec<_>, _>>()?;
-            validate_collection(&entries)?;
-            for mut entry in entries {
+            for mut entry in default_entries()? {
                 entry.id = uuid::Uuid::new_v4().to_string();
                 tx.execute(
                     "INSERT INTO meeting_vocabulary(id,entry_json) VALUES(?1,?2)",
@@ -124,6 +191,23 @@ impl Storage {
                 )
                 .map_err(db_error)?;
             }
+        } else if !migrated {
+            let mut entries = list(&tx)?;
+            for index in backfill_confirmed_definitions(&mut entries, &default_entries()?) {
+                let entry = &entries[index];
+                tx.execute(
+                    "UPDATE meeting_vocabulary SET entry_json=?2 WHERE id=?1",
+                    params![entry.id, json!(entry).to_string()],
+                )
+                .map_err(db_error)?;
+            }
+        }
+        if !migrated {
+            tx.execute(
+                "INSERT INTO meeting_vocabulary_migrations(version) VALUES(?1)",
+                [DEFINITIONS_MIGRATION],
+            )
+            .map_err(db_error)?;
         }
         tx.commit().map_err(db_error)
     }
@@ -259,9 +343,20 @@ mod tests {
             assert!(seed.iter().any(|row| row.term == term));
         }
         assert_eq!(seed.iter().filter(|row| row.term == "TRDA").count(), 1);
+        assert!(seed.iter().all(|row| row.enabled));
+        assert_eq!(
+            seed.iter()
+                .find(|row| row.term == "FIC")
+                .unwrap()
+                .definition,
+            "现场负责人。"
+        );
         assert!(
             seed.iter()
-                .all(|row| row.enabled && row.definition.is_empty())
+                .find(|row| row.term == "PIFEE")
+                .unwrap()
+                .definition
+                .is_empty()
         );
         storage.meeting_vocabulary_delete(&seed[0].id).unwrap();
         let saved = storage
@@ -310,6 +405,201 @@ mod tests {
         assert_eq!(hotwords(&json!({})).unwrap(), json!({}));
         assert_eq!(minutes_context(&json!({})).unwrap(), "");
         assert!(hotwords(&json!({"__meetingVocabulary":{}})).is_err());
+    }
+
+    fn legacy_entries() -> Vec<VocabularyEntry> {
+        default_entries()
+            .unwrap()
+            .into_iter()
+            .map(|mut entry| {
+                entry.id = uuid::Uuid::new_v4().to_string();
+                entry.definition.clear();
+                entry.aliases.clear();
+                entry
+            })
+            .collect()
+    }
+
+    fn write_legacy_database(path: &std::path::Path, entries: &[VocabularyEntry]) {
+        let conn = Connection::open(path.join("audit-toolbox.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meeting_vocabulary(id TEXT PRIMARY KEY, entry_json TEXT NOT NULL)",
+        )
+        .unwrap();
+        for entry in entries {
+            conn.execute(
+                "INSERT INTO meeting_vocabulary(id,entry_json) VALUES(?1,?2)",
+                params![entry.id, json!(entry).to_string()],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn confirmed_defaults_reach_minutes_context_and_hotwords() {
+        let defaults = default_entries().unwrap();
+        let definition = |term| {
+            defaults
+                .iter()
+                .find(|entry| entry.term == term)
+                .unwrap()
+                .definition
+                .as_str()
+        };
+        for term in ["EDC", "CSDC"] {
+            assert!(definition(term).contains("安永交付中心"));
+        }
+        assert_eq!(definition("FIC"), "现场负责人。");
+        assert_eq!(definition("FDE"), "现场部署工程师。");
+        assert_eq!(definition("A3"), "试算平衡表。");
+        assert_eq!(definition("SWP"), "标准审计工作底稿。");
+        assert!(definition("CCP").contains("PBC 收发存管理门户"));
+        assert!(definition("TRDA").contains("安永数字化团队"));
+        assert!(definition("TR").contains("TRDA 的简称"));
+        assert!(definition("UT").contains("工时利用率"));
+        assert!(definition("AI").contains("审计指令"));
+        assert!(definition("AI").contains("人工智能"));
+        assert!(definition("PMTE").contains("两项概念"));
+        for term in ["PIFEE", "EYC", "CA", "ca tie"] {
+            assert!(definition(term).is_empty());
+        }
+        let params = json!({"__meetingVocabulary":defaults});
+        let words = hotwords(&params).unwrap();
+        for term in ["skywind", "天风", "TR", "TRDA", "FIC", "A3"] {
+            assert_eq!(words[term], 4);
+        }
+        let context = minutes_context(&params).unwrap();
+        assert!(context.contains("现场负责人"));
+        assert!(context.contains("天风"));
+        assert!(context.contains("综合风险评估"));
+    }
+
+    #[test]
+    fn legacy_definitions_backfill_once_without_overwriting_user_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut old = legacy_entries();
+        let fic_id = old
+            .iter()
+            .find(|entry| entry.term == "FIC")
+            .unwrap()
+            .id
+            .clone();
+        old.retain(|entry| entry.term != "EDC");
+        old.iter_mut()
+            .find(|entry| entry.term == "FDE")
+            .unwrap()
+            .definition = "人工维护的解释".into();
+        old.iter_mut()
+            .find(|entry| entry.term == "A3")
+            .unwrap()
+            .enabled = false;
+        old.iter_mut()
+            .find(|entry| entry.term == "TB")
+            .unwrap()
+            .category = "company".into();
+        old.iter_mut()
+            .find(|entry| entry.term == "TR")
+            .unwrap()
+            .aliases
+            .push("团队自定简称".into());
+        old.iter_mut()
+            .find(|entry| entry.term == "UT")
+            .unwrap()
+            .term = "改名后的UT".into();
+        let original = json!(old);
+        write_legacy_database(dir.path(), &old);
+        let storage = Storage::new(dir.path()).unwrap();
+        let rows = storage.meeting_vocabulary_list().unwrap();
+        assert_eq!(rows.len(), old.len());
+        assert!(
+            !rows
+                .iter()
+                .any(|entry| entry.term == "EDC" || entry.term == "UT")
+        );
+        for term in ["FDE", "A3", "TB", "TR", "改名后的UT"] {
+            assert_eq!(
+                json!(rows.iter().find(|entry| entry.term == term).unwrap()),
+                *original
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|value| value["term"] == term)
+                    .unwrap()
+            );
+        }
+        let mut fic = rows
+            .iter()
+            .find(|entry| entry.term == "FIC")
+            .unwrap()
+            .clone();
+        assert_eq!(fic.id, fic_id);
+        assert_eq!(fic.definition, "现场负责人。");
+        assert_eq!(
+            rows.iter()
+                .find(|entry| entry.term == "skywind")
+                .unwrap()
+                .aliases,
+            vec!["天风"]
+        );
+        fic.definition.clear();
+        storage.meeting_vocabulary_save(fic).unwrap();
+        let skywind = rows.iter().find(|entry| entry.term == "skywind").unwrap();
+        storage.meeting_vocabulary_delete(&skywind.id).unwrap();
+        let persisted = json!(storage.meeting_vocabulary_list().unwrap());
+        drop(storage);
+        let reopened = Storage::new(dir.path()).unwrap();
+        assert_eq!(
+            json!(reopened.meeting_vocabulary_list().unwrap()),
+            persisted
+        );
+    }
+
+    #[test]
+    fn backfill_skips_alias_collisions_and_respects_total_context_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut old = legacy_entries();
+        let mut custom = entry("天风");
+        custom.id = uuid::Uuid::new_v4().to_string();
+        old.push(custom);
+        write_legacy_database(dir.path(), &old);
+        let storage = Storage::new(dir.path()).unwrap();
+        let rows = storage.meeting_vocabulary_list().unwrap();
+        let skywind = rows.iter().find(|entry| entry.term == "skywind").unwrap();
+        assert!(skywind.aliases.is_empty());
+        assert_eq!(skywind.definition, "天风。");
+        assert!(validate_collection(&rows).is_ok());
+        assert_eq!(
+            rows.iter()
+                .find(|entry| entry.term == "天风")
+                .unwrap()
+                .definition,
+            "集团业务系统"
+        );
+
+        let mut full = legacy_entries();
+        full.retain(|entry| entry.term == "FIC");
+        let mut used = 3;
+        for index in 0..110 {
+            let term = format!("自定义{index}");
+            let definition_length = (MAX_CONTEXT_CHARS - used - term.chars().count()).min(200);
+            let mut custom = entry(&term);
+            custom.aliases.clear();
+            custom.definition = "释".repeat(definition_length);
+            used += term.chars().count() + definition_length;
+            full.push(custom);
+            if MAX_CONTEXT_CHARS - used < 10 {
+                break;
+            }
+        }
+        // 把最后一个词条补齐，精确到总容量上限。
+        let remaining = MAX_CONTEXT_CHARS - used;
+        if remaining > 0 {
+            full[1].aliases.push("补".repeat(remaining));
+        }
+        validate_collection(&full).unwrap();
+        let before = json!(full);
+        assert!(backfill_confirmed_definitions(&mut full, &default_entries().unwrap()).is_empty());
+        assert_eq!(json!(full), before);
     }
 
     #[test]

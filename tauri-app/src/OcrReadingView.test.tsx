@@ -49,3 +49,36 @@ it("扫描页未加载时禁用缩放，全篇模式仅展示和复制完整原�
   fireEvent.click(screen.getByRole("button", { name: "复制全部原文" }));
   expect(props.onCopy).toHaveBeenLastCalledWith("测试扫描件.pdf\n第 1 页\n第1页原文\n\n第 2 页\n第2页原文");
 });
+
+it("左键拖动平移原扫描件，抬起或丢失捕获立即停止且右键不移动", () => {
+  render(<OcrReadingView {...props} />);
+  const viewport = screen.getByRole("region", { name: "扫描件图片" });
+  Object.defineProperties(viewport, { clientWidth: { value: 600 }, clientHeight: { value: 400 } });
+  let captured = false;
+  viewport.setPointerCapture = vi.fn(() => { captured = true; });
+  viewport.hasPointerCapture = vi.fn(() => captured);
+  viewport.releasePointerCapture = vi.fn(() => { captured = false; });
+  function pointer(type: string, x: number, y: number, button = 0, buttons = 1) {
+    const event = new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button, buttons });
+    Object.defineProperties(event, { pointerId: { value: 5 }, pointerType: { value: "mouse" } });
+    fireEvent(viewport, event);
+  }
+  viewport.scrollLeft = 220; viewport.scrollTop = 300;
+  pointer("pointerdown", 300, 200);
+  pointer("pointermove", 250, 150);
+  expect(viewport.scrollLeft).toBe(270); expect(viewport.scrollTop).toBe(350);
+  expect(viewport).toHaveClass("is-panning");
+  pointer("pointerup", 250, 150, 0, 0);
+  pointer("pointermove", 200, 100, 0, 0);
+  expect(viewport.scrollLeft).toBe(270); expect(viewport.scrollTop).toBe(350);
+  expect(viewport).not.toHaveClass("is-panning");
+  pointer("pointerdown", 300, 200, 2, 2);
+  pointer("pointermove", 100, 50, 2, 2);
+  expect(viewport.scrollLeft).toBe(270);
+  pointer("pointerdown", 300, 200);
+  fireEvent(viewport, new Event("lostpointercapture", { bubbles: true }));
+  pointer("pointermove", 100, 50);
+  expect(viewport.scrollLeft).toBe(270);
+  expect(viewport).not.toHaveClass("is-panning");
+  expect(screen.getByRole("img")).toHaveAttribute("src", props.sourceImage);
+});

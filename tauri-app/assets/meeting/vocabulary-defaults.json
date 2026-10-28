@@ -3,7 +3,7 @@
     "term": "CSDC",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "安永交付中心。与 EDC 均指安永交付中心，具体交付范围按会议上下文确定。",
     "enabled": true
   },
   {
@@ -17,7 +17,7 @@
     "term": "workshop",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "围绕特定议题开展的研讨、培训或实操讨论，具体形式由上下文判断。",
     "enabled": true
   },
   {
@@ -31,28 +31,28 @@
     "term": "FDE",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "现场部署工程师。",
     "enabled": true
   },
   {
     "term": "AI",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "按语境指人工智能，或 Audit Instructions（审计指令）；不能仅凭缩写固定解释为人工智能。",
     "enabled": true
   },
   {
     "term": "EDC",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "安永交付中心。与 CSDC 均指安永交付中心，具体交付范围按会议上下文确定。",
     "enabled": true
   },
   {
     "term": "working paper",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "审计工作底稿，记录执行的程序、取得的证据和形成的结论。",
     "enabled": true
   },
   {
@@ -66,21 +66,21 @@
     "term": "DA",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "Data Analytics，数据分析；是否特指团队或工具，按上下文判断。",
     "enabled": true
   },
   {
     "term": "TRDA",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "安永数字化团队，TR 为其简称。",
     "enabled": true
   },
   {
     "term": "ECL",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "Expected Credit Loss，预期信用损失，通常涉及相关金融资产的信用减值评估。",
     "enabled": true
   },
   {
@@ -101,14 +101,14 @@
     "term": "timesheet",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "工时表，记录人员在各项目或工作事项上的投入时间。",
     "enabled": true
   },
   {
     "term": "CCP",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "PBC 收发存管理门户，用于管理客户资料的接收、发送和存储。",
     "enabled": true
   },
   {
@@ -129,7 +129,7 @@
     "term": "拉通",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "让相关人员对齐信息、口径、分工或进度，不一定表示已经达成一致。",
     "enabled": true
   },
   {
@@ -143,168 +143,170 @@
     "term": "SWP",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "标准审计工作底稿。",
     "enabled": true
   },
   {
     "term": "A3",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "试算平衡表。",
     "enabled": true
   },
   {
     "term": "TB",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "Trial Balance，试算平衡表；日常工作中也可能泛指科目余额表，按上下文判断。",
     "enabled": true
   },
   {
     "term": "JE",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "Journal Entry，会计分录；提供 JE 数据时通常指提供序时账或凭证明细。",
     "enabled": true
   },
   {
     "term": "PMTE",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "通常是 PM、TE 两项概念的连读：PM 指计划重要性，TE 指可容忍错报，不作为单一缩写展开。",
     "enabled": true
   },
   {
     "term": "CRA",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "Combined Risk Assessment，综合风险评估。",
     "enabled": true
   },
   {
     "term": "ARP",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "分析性复核。",
     "enabled": true
   },
   {
     "term": "LEAD",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "审计科目的主表或汇总底稿，用于汇总余额、调整及索引；更新 LEAD 指更新这份底稿。",
     "enabled": true
   },
   {
     "term": "breakdown",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "明细拆分表，例如将某科目余额按客户、供应商、项目等拆分；BKD 为其简称。",
     "enabled": true
   },
   {
     "term": "BKD",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "breakdown 的简称，指明细拆分表，例如按客户、供应商或项目拆分某科目余额。",
     "enabled": true
   },
   {
     "term": "TOD",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "Test of Details，细节测试；出现其他明确语境时按上下文判断。",
     "enabled": true
   },
   {
     "term": "skywind",
     "category": "industry",
-    "aliases": [],
-    "definition": "",
+    "aliases": [
+      "天风"
+    ],
+    "definition": "天风。",
     "enabled": true
   },
   {
     "term": "EIC",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "Engagement in Charge，项目执行负责人。",
     "enabled": true
   },
   {
     "term": "PIC",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "Partner in Charge，项目负责合伙人。",
     "enabled": true
   },
   {
     "term": "FIC",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "现场负责人。",
     "enabled": true
   },
   {
     "term": "prepare",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "编制或执行底稿，包括整理资料、执行程序和记录结论。",
     "enabled": true
   },
   {
     "term": "review",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "复核底稿或工作成果，检查程序、证据及结论是否恰当。",
     "enabled": true
   },
   {
     "term": "清Q",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "回复并处理复核问题，补充资料或修改底稿；是否已关闭仍需看复核人的确认。",
     "enabled": true
   },
   {
     "term": "出Q",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "对底稿或事项提出复核问题、疑问或待补充要求；Q 指 question 或复核意见。",
     "enabled": true
   },
   {
     "term": "supporting",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "支持性资料，例如合同、发票、回单等，用于支持底稿中的金额或结论；不表示资料已经充分、有效。",
     "enabled": true
   },
   {
     "term": "PBC",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "客户准备或提供的资料；PBC list 指向客户索取的资料清单。",
     "enabled": true
   },
   {
     "term": "refer",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "引用或交叉索引，指向相关底稿、附件或证据；refer 到某处不等于重新执行程序。",
     "enabled": true
   },
   {
     "term": "REF",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "引用或交叉索引，指向相关底稿、附件或证据。",
     "enabled": true
   },
   {
     "term": "DDL",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "截止时间；只有明确提及日期或时间时，纪要才写具体期限。",
     "enabled": true
   },
   {
@@ -339,21 +341,21 @@
     "term": "TR",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "TRDA 的简称，指安永数字化团队。",
     "enabled": true
   },
   {
     "term": "UT",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "工时利用率；具体计算口径按会议明确内容或适用制度确定。",
     "enabled": true
   },
   {
     "term": "FAIT",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "Financial Audit IT，财务报表审计相关的信息技术审计工作，例如评估与财务报告相关的 IT 控制。",
     "enabled": true
   },
   {
@@ -381,14 +383,14 @@
     "term": "TIE",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "核对一致、勾稽；具体核对对象按上下文确定。",
     "enabled": true
   },
   {
     "term": "JET",
     "category": "industry",
     "aliases": [],
-    "definition": "",
+    "definition": "Journal Entry Testing，会计分录测试。",
     "enabled": true
   }
 ]

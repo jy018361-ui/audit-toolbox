@@ -17,7 +17,8 @@ describe("tool definitions", () => {
   });
 
   it("gives every tool a runnable primary action", () => {
-    for (const definition of Object.values(TOOL_DEFINITIONS)) {
+    for (const [id, definition] of Object.entries(TOOL_DEFINITIONS)) {
+      if (catalog.find(tool => tool.id === id)?.capabilities.includes("download")) continue;
       expect(definition.actions.some(action => action.tone === "primary")).toBe(true);
     }
   });

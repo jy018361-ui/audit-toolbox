@@ -139,10 +139,22 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   const [busy, setBusy] = useState(false);
   const [paused, setPaused] = useState(false);
   const [message, setMessage] = useState("");
+  const [messageKind, setMessageKind] = useState<"scan" | "other">("other");
   const [error, setError] = useState("");
   const [outputs, setOutputs] = useState<string[]>([]);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
-  const [timingRun, setTimingRun] = useState<OcrTimingRun>();
+  const [scanRuns, setScanRuns] = useState<Record<string, OcrTimingRun>>({});
+  const [failedScanPages, setFailedScanPages] = useState<Record<string, number[]>>({});
+  const selectedRuns = selectedDocumentIds.flatMap(id => scanRuns[id] ? [scanRuns[id]] : []);
+  const latestScanStart = Math.max(...selectedRuns.map(value => value.started));
+  const latestRuns = selectedRuns.filter(value => value.started === latestScanStart);
+  const timingRun: OcrTimingRun | undefined = latestRuns.length ? {
+    started: latestScanStart,
+    ended: latestRuns.every(value => value.ended !== undefined)
+      ? Math.max(...latestRuns.map(value => value.ended!)) : undefined,
+    pages: latestRuns.flatMap(value => value.pages),
+  } : undefined;
+  const retryFailedCount = selectedDocumentIds.reduce((sum, id) => sum + (failedScanPages[id]?.length ?? 0), 0);
   const [controlling, setControlling] = useState(false);
   const [scanView, setScanView] =
     useState<
@@ -188,6 +200,8 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     busyRef.current = true;
     setBusy(true);
     setError("");
+    setMessageKind("other");
+    setMessage("");
     setScanView(undefined);
     setTaskView(undefined);
     setScanControlError("");
@@ -245,7 +259,10 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   }, []);
   useEffect(() => {
     if (!project) return;
-    setTimingRun(undefined);
+    setScanRuns({});
+    setFailedScanPages({});
+    setMessage("");
+    setError("");
     setFilesExpanded(false);
     setDocuments([]);
     setDetailCache({});
@@ -423,10 +440,10 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     else if (active.paused)
       void jobPause(id, true).catch((reason) => setError(errorText(reason)));
   }
-  async function recognize() {
+  async function recognize(retryFailedOnly = false) {
     if (!selectedDocuments.length) return;
     // Validate syntax without enumerating unbounded user-supplied ranges.
-    if (scanScope === "custom")
+    if (!retryFailedOnly && scanScope === "custom")
       parseOcrScanRange(
         scanPages,
         selectedDocuments.length === 1
@@ -441,8 +458,10 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     const status = await ocrCall<OcrConfigStatus>("ocr.config_status", {});
     if (!status.ocr.ready)
       throw new Error("请先在设置中配置 OCR 服务；AI 识别使用统一 LLM 配置。");
-    const targets = [...selectedDocuments];
-    if (scanScope === "custom") {
+    const retryPages = structuredClone(failedScanPages);
+    const targets = selectedDocuments.filter(target => !retryFailedOnly || retryPages[target.id]?.length);
+    if (!targets.length) return;
+    if (!retryFailedOnly && scanScope === "custom") {
       const savedTargets = await Promise.all(
         targets.map((target) =>
           ocrCall<OcrDocumentDetail>("ocr.document", { documentId: target.id }),
@@ -469,6 +488,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
         return;
     }
     const active = new OcrOperation();
+    setMessageKind("scan");
     operation.current = active;
     setProgress({ current: 0, total: 0 });
     setScanView({
@@ -479,7 +499,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       pages: [],
     });
     const started = performance.now();
-    setTimingRun({ started, pages: [] });
+    setScanRuns(values => ({ ...values, ...Object.fromEntries(targets.map(target => [target.id, { started, pages: [] }])) }));
     const failed: string[] = [];
     const skipped: string[] = [];
     let fileIndex = 0;
@@ -505,8 +525,9 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
           const saved = await ocrCall<OcrDocumentDetail>("ocr.document", {
             documentId: target.id,
           });
-          const requested =
-            scanScope === "custom"
+          const requested = retryFailedOnly
+            ? (retryPages[target.id] ?? []).filter(page => page >= 1 && page <= source!.totalPages)
+            : scanScope === "custom"
               ? parseOcrScanRange(
                   scanPages,
                   source.totalPages,
@@ -517,12 +538,12 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                   (_, index) => index + 1,
                 );
           const numbers =
-            scanScope === "custom"
+            retryFailedOnly || scanScope === "custom"
               ? requested
               : requested.filter(
                   (number) => !saved.pages.some((item) => item.page === number),
                 );
-          if (scanScope === "custom" && targets.length > 1) {
+          if (!retryFailedOnly && scanScope === "custom" && targets.length > 1) {
             if (
               (scanPages.match(/\d+/g) ?? []).some(
                 (number) => Number(number) > source!.totalPages,
@@ -624,6 +645,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
               }
               timing.worker = result.timings;
               timing.status = "completed";
+              setFailedScanPages(values => ({ ...values, [target.id]: (values[target.id] ?? []).filter(page => page !== number) }));
               updatePageState(number, "completed");
             } catch (reason) {
               if (active.cancelled) {
@@ -632,6 +654,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                 throw reason;
               }
               updatePageState(number, "failed");
+              setFailedScanPages(values => ({ ...values, [target.id]: [...new Set([...(values[target.id] ?? []), number])].sort((a, b) => a - b) }));
               failed.push(
                 `${target.name} 第 ${number} 页：${errorText(reason)}`,
               );
@@ -639,13 +662,9 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
               if (id) active.jobIds.delete(id);
               timing.totalMs = performance.now() - pageStarted;
               if (mounted.current) {
-                setTimingRun(
-                  (current) =>
-                    current && {
-                      ...current,
-                      pages: [...current.pages, timing],
-                    },
-                );
+                setScanRuns(values => ({ ...values, [target.id]: {
+                  ...values[target.id], pages: [...(values[target.id]?.pages ?? []), timing],
+                } }));
                 finished++;
                 inFlight.delete(number);
                 setProgress({ current: finished, total: numbers.length });
@@ -669,9 +688,8 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       }
     } finally {
       if (mounted.current) {
-        setTimingRun(
-          (current) => current && { ...current, ended: performance.now() },
-        );
+        const ended = performance.now();
+        setScanRuns(values => ({ ...values, ...Object.fromEntries(targets.map(target => [target.id, { ...values[target.id], ended }])) }));
         if (projectRef.current) await refreshDocuments(projectRef.current);
         const refreshed = await Promise.all(
           targets.map((target) =>
@@ -693,7 +711,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     }
     setMessage(
       failed.length
-        ? "识别完成，部分页面失败。已完成页已保存，可再次开始扫描以补齐失败页。"
+        ? "识别完成，部分页面失败。已完成页已保存，可继续导出或场景摘录，也可重试失败页。"
         : "扫描完成。可导出文件、查看原文，或进入场景摘录。",
     );
     if (skipped.length)
@@ -1015,6 +1033,8 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   // Selection is the sole operation scope. Preview navigation never changes it.
   useEffect(() => {
     let active = true;
+    setMessage("");
+    if (messageKind === "scan") setError("");
     setPendingExtractionExport(undefined);
     const projectId = projectRef.current;
     void Promise.all(
@@ -1108,7 +1128,8 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     }
     setOutputs([]);
     setExportDirectory("");
-    setTimingRun(undefined);
+    setScanRuns({});
+    setFailedScanPages({});
     setStep(0);
     if (projectRef.current) await refreshDocuments(projectRef.current);
     setMessage(
@@ -1199,6 +1220,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     return true;
   }
   function renderTaskProgress() {
+    if (step === 1 && messageKind === "scan") return null;
     if (busy && (scanView || taskView) && scanDialog.available) return null;
     return (
       message && (
@@ -1684,7 +1706,9 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                           </span>
                           {renderExportNotice()}
                           {renderTaskProgress()}
-                          {timingRun && <OcrTimingPanel run={timingRun} />}
+                          {timingRun && <OcrTimingPanel run={timingRun}
+                            retryFailedCount={retryFailedCount} retryDisabled={busy}
+                            onRetryFailed={() => void run(() => recognize(true))} />}
                         </section>
                         {
                           <>
@@ -1849,6 +1873,12 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                               ))}
                             </select>
                           </label>
+                          {scopeDetails.some(value => value.document.totalPages > value.pages.length) && (
+                            <p className="ocr-muted" role="note" aria-label="摘录来源范围">
+                              已扫描 {scopeDetails.reduce((sum, value) => sum + value.pages.length, 0)} / {scopeDetails.reduce((sum, value) => sum + value.document.totalPages, 0)} 页，
+                              可继续使用已扫描原文摘录；缺失页可返回原文识别补扫或重试。
+                            </p>
+                          )}
                           {scenario && (
                             <>
                               <div className="ocr-prompt-heading">

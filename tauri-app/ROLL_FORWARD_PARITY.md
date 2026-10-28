@@ -1,5 +1,9 @@
 # Audit Roll Forward Tauri 源码对照验收矩阵
 
+## 2026-10-28 · 前端改为外部工具获取入口
+
+当前 WP Roll Forward 页面显示「点击获取RollForward小工具」超链接，使用指定的 SharePoint 地址，下一行显示「有疑问请联系Dana D Li」；已移除项目、公司、配置、CRA、执行及结果界面，不再从页面发起结转或恢复旧项目。以下迁移矩阵记录此前实现，不能作为当前页面能力说明；Rust 结转内核及已有本机数据保留。下载地址与桌面端精确白名单共用 `assets/roll-forward/download-url.txt`；存款参考链接继续可用，其他地址拒绝。验证：`npm run build`、相关前端回归、在 `src-tauri/` 下运行 `cargo test --lib builtin_reference_urls_require_exact_matches`（使该目录的 Common Controls 6 清单配置生效）。
+
 ## 2026-09-04 · XLS 输入统一
 
 已接入共享 XLS 内容识别/文本读取或模板准备路径。保留本工具的字段映射和业务规则；格式、模板依赖、已覆盖与未覆盖范围及回归命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。不将文件格式兼容表述为旧版全部业务行为等价。

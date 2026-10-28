@@ -29,6 +29,46 @@ pub(crate) fn has_markdown_heading(raw: &str) -> bool {
     Regex::new(r"(?m)^ {0,3}#{1,6}[\t ]+[^\r\n]+").unwrap().is_match(raw)
 }
 
+pub(crate) fn has_image_markup(raw: &str) -> bool {
+    raw.contains("![")
+}
+
+// Document parsing returns cropped figures as Markdown images whose targets
+// may contain signed transport credentials. They are not recognized document
+// text. Keep descriptive alt text, but do not expose generated hash filenames.
+// Ordinary links and URLs in the business text are deliberately untouched.
+fn readable_images(raw: &str) -> String {
+    if !has_image_markup(raw) { return raw.to_owned(); }
+    let starts = Regex::new(r"!\[((?:\\.|[^\]\\\r\n])*)\]\(").unwrap();
+    let generated = Regex::new(r"(?i)^[a-f0-9]{16,64}\.(?:jpe?g|png|gif|bmp|tiff?|webp)$").unwrap();
+    let mut out = String::new();
+    let mut previous = 0;
+    for capture in starts.captures_iter(raw) {
+        let found = capture.get(0).unwrap();
+        if found.start() < previous { continue; }
+        let mut depth = 1usize;
+        let mut escaped = false;
+        let mut end = None;
+        for (offset, ch) in raw[found.end()..].char_indices() {
+            if matches!(ch, '\r' | '\n') { break; }
+            if escaped { escaped = false; continue; }
+            if ch == '\\' { escaped = true; continue; }
+            if ch == '(' { depth += 1; }
+            if ch == ')' {
+                depth -= 1;
+                if depth == 0 { end = Some(found.end() + offset + 1); break; }
+            }
+        }
+        let Some(end) = end else { continue; };
+        out.push_str(&raw[previous..found.start()]);
+        let alt = capture[1].trim();
+        if !generated.is_match(alt) { out.push_str(alt); }
+        previous = end;
+    }
+    out.push_str(&raw[previous..]);
+    out.trim().to_owned()
+}
+
 // Decode only complete prose wrappers. This is deliberately not a TeX renderer:
 // unknown commands, mathematical expressions and multi-column arrays survive
 // verbatim, so cleaning layout can never silently erase a financial formula.
@@ -64,7 +104,9 @@ fn layout_sequence(raw: &str, depth: usize, literal_text: bool) -> Option<String
         } else if let Some(rest) = remaining.strip_prefix(r"\\") {
             out.push('\n');
             remaining = if literal_text { rest } else { rest.trim_start() };
-        } else if literal_text && remaining.starts_with('\\') && remaining.chars().nth(1).is_some_and(|c| "%&#_${}".contains(c)) {
+        } else if remaining.starts_with('\\') && remaining.chars().nth(1).is_some_and(|c| {
+            (literal_text && "%&#_${}".contains(c)) || (found && c == '%')
+        }) {
             // TeX's escaped printable characters carry no mathematical
             // operation; retain their literal character in prose leaves.
             let escaped = remaining.chars().nth(1)?;
@@ -116,7 +158,7 @@ fn readable_headings(raw: &str) -> String {
 /// Formatting-only projection for saved business fields. Unlike the provider
 /// parser this never interprets JSON containers or changes their field keys.
 pub(crate) fn readable_ocr_text(raw: &str) -> String {
-    readable_headings(&readable_latex(raw, &mut vec![]))
+    readable_headings(&readable_latex(&readable_images(raw), &mut vec![]))
 }
 
 fn push_text(out: &mut String, text: &str) {
@@ -454,6 +496,7 @@ pub(crate) fn readable_ocr_content(raw: &str) -> Value {
     } else {
         text = clean.to_owned();
     }
+    text = readable_images(&text);
     if text.to_ascii_lowercase().contains("<table") {
         text = html_tables(&text, &mut tables, &mut warnings);
     } else if Regex::new(r"(?i)<(?:html|body|p|div|br|h[1-6]|section)\b")
@@ -467,11 +510,11 @@ pub(crate) fn readable_ocr_content(raw: &str) -> Value {
     text = readable_headings(&readable_latex(&text, &mut warnings));
     for table in &mut tables {
         if let Some(title) = table.get("title").and_then(Value::as_str).map(str::to_owned) {
-            table["title"] = json!(readable_latex(&title, &mut warnings));
+            table["title"] = json!(readable_headings(&readable_latex(&readable_images(&title), &mut warnings)));
         }
         if let Some(rows) = table.get_mut("rows").and_then(Value::as_array_mut) {
             for cell in rows.iter_mut().filter_map(Value::as_array_mut).flatten() {
-                if let Some(raw) = cell.as_str() { *cell = json!(readable_latex(raw, &mut warnings)); }
+                if let Some(raw) = cell.as_str() { *cell = json!(readable_headings(&readable_latex(&readable_images(raw), &mut warnings))); }
             }
         }
     }
@@ -492,6 +535,36 @@ pub(crate) fn readable_ocr_content(raw: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn numeric_underline_with_escaped_percentage_is_readable_but_math_survives() {
+        let raw = r"一、本合同项下委托贷款年利率为\(\underline{4.35}\%\)。账号\(\underline{00123}\)，期限\(\underline{15}\)日。";
+        let expected = "一、本合同项下委托贷款年利率为4.35%。账号00123，期限15日。";
+        let parsed = readable_ocr_content(raw);
+        assert_eq!(parsed["text"], expected);
+        assert_eq!(parsed["warnings"], json!([]));
+        assert_eq!(readable_ocr_text(raw), expected);
+        for math in [r"\(\underline{x^2}\%\)", r"\(\underline{4.35}\%+x\)", r"\(\underline{4.35}\frac{1}{2}\)"] {
+            assert_eq!(readable_ocr_text(math), math);
+        }
+        let parsed = readable_ocr_content(&json!({"tables":[{"title":raw,"rows":[[raw]]}]}).to_string());
+        assert_eq!(parsed["tables"][0]["title"], expected);
+        assert_eq!(parsed["tables"][0]["rows"][0][0], expected);
+    }
+    #[test]
+    fn cropped_image_assets_do_not_become_business_text_or_drop_descriptive_alts() {
+        // Minimal shape captured from Dev service report page 1; identifiers
+        // and all signed resource values are synthetic, never live secrets.
+        let image = "![f45ea213decf917ad56fbd384140eb47.jpeg](http://docmind-api-cn-hangzhou.oss-cn-hangzhou.aliyuncs.com/publicDocStreamStructure/sample/0.png?security-token=SYNTHETIC%2BVALUE&Signature=SYNTHETIC)";
+        let raw = format!("{image}  \n\n{image}  \n\n服务请求报告\nSR编号：S000271646\n币种：CNY\n[业务网址](https://example.com/query?token=00123)\nhttps://example.com/contract/00123\n![合同还款计划（单位：元）](https://example.com/image(1).png)\n![合同签署页.png](relative/page.png)");
+        let expected = "服务请求报告\nSR编号：S000271646\n币种：CNY\n[业务网址](https://example.com/query?token=00123)\nhttps://example.com/contract/00123\n合同还款计划（单位：元）\n合同签署页.png";
+        assert_eq!(readable_ocr_content(&raw)["text"], expected);
+        assert_eq!(readable_ocr_text(&raw), expected);
+        assert_eq!(readable_ocr_text(expected), expected);
+        assert_eq!(readable_ocr_text("![未闭合](https://example.com/x"), "![未闭合](https://example.com/x");
+        let parsed = readable_ocr_content(&json!({"tables":[{"title":image,"rows":[[image,"00123"]]}]}).to_string());
+        assert_eq!(parsed["tables"][0]["title"], "");
+        assert_eq!(parsed["tables"][0]["rows"][0], json!(["", "00123"]));
+    }
     #[test]
     fn nested_prose_styles_keep_amounts_dates_and_internal_word_spacing() {
         for (raw, expected) in [

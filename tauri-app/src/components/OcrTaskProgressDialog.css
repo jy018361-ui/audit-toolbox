@@ -1,0 +1,67 @@
+.ocr-task-file-count {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+.ocr-task-file-count > span,
+.ocr-task-activity > span,
+.ocr-task-wait-note {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.ocr-task-activity {
+  min-height: 72px;
+  overflow-wrap: anywhere;
+}
+.ocr-task-activity p,
+.ocr-task-wait-note {
+  margin: 0;
+  line-height: 1.6;
+}
+.ocr-task-track {
+  position: relative;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+.ocr-task-track > progress {
+  display: block;
+  width: 100%;
+  height: 100%;
+  appearance: none;
+  background: var(--border);
+}
+.ocr-task-track:has(.is-working)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, var(--primary), transparent);
+  opacity: 0.55;
+  pointer-events: none;
+  animation: ocr-task-wait 1.6s linear infinite;
+}
+.ocr-scan-pill .ocr-task-track {
+  height: 4px;
+}
+.ocr-task-wait:indeterminate::-webkit-progress-bar {
+  background: var(--border);
+}
+@keyframes ocr-task-wait {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ocr-task-track:has(.is-working)::after {
+    animation: none;
+    transform: translateX(75%);
+  }
+}

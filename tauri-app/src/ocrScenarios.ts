@@ -579,6 +579,7 @@ export async function extractOcrScenario(options: {
   pages: OcrPageData[];
   request: (params: { prompt: string; text: string }) => Promise<Response>;
   onProgress?: (message: string) => void;
+  onWorkProgress?: (progress: { completed: number; total: number }) => void;
   checkpoint?: () => Promise<void>;
 }): Promise<{ rows: Row[]; columns: { key: string; label: string }[] }> {
   const { scenario, document } = options;
@@ -638,6 +639,7 @@ export async function extractOcrScenario(options: {
       caseLibrary: active!.library,
       promptOverride: stages[0].prompt,
       onProgress: options.onProgress,
+      onWorkProgress: options.onWorkProgress,
       extract: async ({ prompt, text }) => {
         await options.checkpoint?.();
         return {
@@ -725,6 +727,8 @@ export async function extractOcrScenario(options: {
       pages,
       kind === "loan_general" ? 24_000 : 12_000,
     );
+    const workTotal = chunks.length + (kind === "loan_general" && chunks.length > 1 ? 1 : 0);
+    options.onWorkProgress?.({ completed: 0, total: workTotal });
     for (const [index, chunk] of chunks.entries()) {
       await options.checkpoint?.();
       options.onProgress?.(
@@ -802,6 +806,7 @@ export async function extractOcrScenario(options: {
         )
           rows.push(verified);
       }
+      options.onWorkProgress?.({ completed: index + 1, total: workTotal });
     }
     if (kind === "loan_general" && chunks.length > 1 && rows.length) {
       const evidence = new Map<string, string>();
@@ -894,6 +899,7 @@ export async function extractOcrScenario(options: {
       );
       rows.splice(0, rows.length, ...verified);
     }
+    options.onWorkProgress?.({ completed: workTotal, total: workTotal });
   }
   await options.checkpoint?.();
   const fields =

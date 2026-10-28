@@ -2,6 +2,21 @@ import { describe,it,expect } from "vitest";
 import {extractFinancialMetrics,isExplicitFinancialMetric} from "./audipickCovenantExtraction";
 import {covenantExportRows,isFormalCovenantRow} from "./audipickCovenant";
 describe("仅财务指标摘录",()=>{
+ it("跨文件分段进度按真实重叠窗口计数，完成前不提前递增",async()=>{
+  const work: {completed:number;total:number}[]=[];
+  let calls=0;
+  await extractFinancialMetrics({
+   documents:[160,161].map((count,index)=>({id:`progress-${index}`,name:`合成${index}.pdf`,text:Array.from({length:count},()=>"普通合同文字").join("\n")})),
+   onWorkProgress:value=>work.push(value),
+   extract:async()=>{
+    expect(work.at(-1)).toEqual({completed:calls,total:3});
+    calls++;
+    return {parsed:{coverage_complete:true,items:[]}};
+   },
+  });
+  expect(calls).toBe(3);
+  expect(work).toEqual([0,1,2,3].map(completed=>({completed,total:3})));
+ });
  it("同一OCR行的投资、担保和新增融资限额分别保留，同义标题不制造重复",async()=>{
   const text="20.1 借款人对外投资限额为人民币50000万元；对外提供担保限额为人民币50000万元；增加债务融资限额为人民币50000万元。";
   const result=await extractFinancialMetrics({documents:[{id:"d",name:"合同.pdf",text}],extract:async()=>({parsed:{coverage_complete:true,items:[

@@ -21,12 +21,26 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: tauri.invokeMock }));
 
 import { engineCall, syncBusyAbortAll } from "@/api";
 import { SyncBusyDialog } from "./SyncBusyDialog";
+import { OcrScanProgressContext } from "../ocrProgress";
 
 function flush() {
   return act(async () => {});
 }
 
 describe("同步操作等待弹窗", () => {
+  it("OCR 整批进度接管后，读取与保存不再额外弹同步等待窗，其他工具仍提示", async () => {
+    render(<OcrScanProgressContext.Provider value={{ available: true, active: true, setProgress: () => {} }}>
+      <SyncBusyDialog />
+    </OcrScanProgressContext.Provider>);
+    let pending: Promise<unknown>;
+    act(() => { pending = engineCall("ocr.extraction_save", {}); });
+    act(() => vi.advanceTimersByTime(1500));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await act(async () => { tauri.state.resolvers[0]({}); await pending; });
+    act(() => { pending = engineCall("loan.inspect", {}); });
+    act(() => vi.advanceTimersByTime(1500));
+    expect(screen.getByText("正在读取借款数据")).toBeTruthy();
+  });
   beforeEach(() => {
     vi.useFakeTimers();
     vi.stubGlobal("__TAURI_INTERNALS__", {});

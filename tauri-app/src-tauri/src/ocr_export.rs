@@ -1,4 +1,6 @@
 //! Text-only XLSX output: no inferred numeric coercion, truncation or overwrite.
+//! Recognition/extraction sheets contain source content, not per-page pipeline
+//! warnings. Those remain in the store/UI and in the export's `partial` result.
 use crate::{
     AppError,
     excel_merger::PauseCheckpoint,
@@ -115,7 +117,7 @@ fn value_text(v: &Value) -> String {
             {
                 return value_text(&parsed);
             }
-            s.clone()
+            crate::bailian_ocr::readable_ocr_text(s)
         }
         Value::Bool(value) => if *value { "是" } else { "否" }.into(),
         Value::Number(value) => value.to_string(),
@@ -134,7 +136,35 @@ fn value_text(v: &Value) -> String {
     }
 }
 fn visible_field(key: &str) -> bool {
-    !key.starts_with('_') && !matches!(key, "source_document_id" | "evidence_quotes")
+    !key.starts_with('_') && !matches!(key,
+        "source_document_id" | "evidence_quotes" | "covenant_category_id"
+        | "covenant_scope" | "contract_classification" | "is_financial")
+}
+fn canonical_field(key: &str) -> &str {
+    match key {
+        "source_documents" => "sourceFile",
+        "pages" => "sourcePage",
+        _ => key,
+    }
+}
+fn extraction_columns(extraction: &Value, source_file_first: bool) -> Vec<(String, String)> {
+    let mut columns = Vec::new();
+    let mut seen = BTreeSet::new();
+    if source_file_first {
+        columns.push(("sourceFile".into(), "来源文件".into()));
+        seen.insert("sourceFile".to_string());
+    }
+    for column in extraction["columns"].as_array().into_iter().flatten() {
+        let Some(original_key) = column["key"].as_str().filter(|key| visible_field(key)) else { continue; };
+        let key = canonical_field(original_key);
+        if !seen.insert(key.to_string()) { continue; }
+        let label = column["label"].as_str().unwrap_or(original_key);
+        let label = if label == original_key || matches!(key, "sourceFile" | "sourcePage") {
+            field_label(key)
+        } else { label };
+        columns.push((key.into(), label.into()));
+    }
+    columns
 }
 fn field_label(key: &str) -> &str {
     match key {
@@ -192,6 +222,15 @@ fn scenario_label(id: &str) -> &str {
 }
 fn readable_extraction_row(data: &Value) -> Value {
     let mut row = data.as_object().cloned().unwrap_or_default();
+    // Old model output duplicates provenance under aliases. Prefer the already
+    // verified canonical value; otherwise retain the alias's source information.
+    for (alias, canonical) in [("source_documents", "sourceFile"), ("pages", "sourcePage")] {
+        if let Some(value) = row.remove(alias)
+            && row.get(canonical).is_none_or(|v| value_text(v).trim().is_empty())
+        {
+            row.insert(canonical.into(), value);
+        }
+    }
     // Keep the actionable review reason, while hiding pipeline traces, raw model
     // links and internal document identifiers from the user's workbook.
     if let Some(reason) = row.get("_covenant_review_reason").cloned()
@@ -211,15 +250,6 @@ fn readable_extraction_row(data: &Value) -> Value {
     }
     row.retain(|key, _| visible_field(key));
     Value::Object(row)
-}
-fn status_label(status: &str) -> &str {
-    match status {
-        "pending" => "未识别",
-        "partial" => "部分完成",
-        "needs_review" => "待校对",
-        "completed" => "已完成",
-        _ => "状态待确认",
-    }
 }
 fn section_row(s: &mut Worksheet, index: &mut u32, values: &[String]) -> Result<(), AppError> {
     let first = *index;
@@ -248,33 +278,12 @@ fn document_blocks(
         &[
             "来源文件".into(),
             doc.name.clone(),
-            "状态".into(),
-            status_label(&doc.status).into(),
         ],
     )?;
     let pages = store.pages(&doc.id)?;
-    let total = doc
-        .total_pages
-        .max(pages.iter().map(|page| page.page).max().unwrap_or(0));
-    if total == 0 {
-        row(s, r, &["页数待准备，尚未扫描".into()])?;
-    }
-    for number in 1..=total {
+    for page in &pages {
         pause.wait()?;
-        let Some(page) = pages.iter().find(|page| page.page == number) else {
-            section_row(
-                s,
-                r,
-                &[
-                    "来源文件".into(),
-                    doc.name.clone(),
-                    "来源页码".into(),
-                    number.to_string(),
-                    "尚未扫描".into(),
-                ],
-            )?;
-            continue;
-        };
+        let number = page.page;
         section_row(
             s,
             r,
@@ -289,9 +298,6 @@ fn document_blocks(
         for text in page.text.split('\n') {
             pause.wait()?;
             row(s, r, &[text.into()])?;
-        }
-        for warning in &page.warnings {
-            row(s, r, &[format!("待校对：{warning}")])?;
         }
         for (index, table) in page.tables.iter().enumerate() {
             pause.wait()?;
@@ -339,11 +345,7 @@ fn document_blocks(
             &[
                 "场景摘录".into(),
                 scenario_label(extraction["scenarioId"].as_str().unwrap_or("")).into(),
-                if extraction["stale"] == true {
-                    "原文已修改，摘录需要更新".into()
-                } else {
-                    "摘录结果".into()
-                },
+                "摘录结果".into(),
             ],
         )?;
         let rows: Vec<Value> = extraction["rows"]
@@ -352,27 +354,7 @@ fn document_blocks(
             .flatten()
             .map(readable_extraction_row)
             .collect();
-        let mut columns: Vec<(String, String)> = extraction["columns"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|column| {
-                let key = column["key"].as_str()?;
-                if !visible_field(key) {
-                    return None;
-                }
-                let label = column["label"].as_str().unwrap_or(key);
-                Some((
-                    key.into(),
-                    if label == key {
-                        field_label(key)
-                    } else {
-                        label
-                    }
-                    .into(),
-                ))
-            })
-            .collect();
+        let mut columns = extraction_columns(&extraction, false);
         let mut seen: BTreeSet<String> = columns.iter().map(|column| column.0.clone()).collect();
         for data in &rows {
             if let Some(object) = data.as_object() {
@@ -467,31 +449,6 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
                     row(s, &mut r, &[doc.name.clone(), page.page.to_string(), chunk])?;
                 }
             }
-            if !page.tables.is_empty() {
-                row(
-                    s,
-                    &mut r,
-                    &[
-                        doc.name.clone(),
-                        page.page.to_string(),
-                        format!(
-                            "本页另有 {} 张表格，请查看目录中对应的表格工作表。",
-                            page.tables.len()
-                        ),
-                    ],
-                )?;
-            }
-            for warning in &page.warnings {
-                row(
-                    s,
-                    &mut r,
-                    &[
-                        doc.name.clone(),
-                        page.page.to_string(),
-                        format!("待校对：{warning}"),
-                    ],
-                )?;
-            }
         }
         for page in &pages {
             for (tindex, table) in page.tables.iter().enumerate() {
@@ -528,7 +485,6 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
                 }
                 entries.push(vec![
                     doc.name.clone(),
-                    status_label(&doc.status).into(),
                     page.page.to_string(),
                     "表格".into(),
                     table_name,
@@ -551,11 +507,7 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
                 &[
                     "来源文件".into(),
                     doc.name.clone(),
-                    if extraction["stale"] == true {
-                        "原文已修改，摘录需要更新".into()
-                    } else {
-                        "摘录结果".into()
-                    },
+                    "摘录结果".into(),
                 ],
             )?;
             let rows: Vec<Value> = extraction["rows"]
@@ -564,27 +516,7 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
                 .flatten()
                 .map(readable_extraction_row)
                 .collect();
-            let mut columns: Vec<(String, String)> = extraction["columns"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|v| {
-                    let key = v["key"].as_str()?;
-                    if !visible_field(key) {
-                        return None;
-                    }
-                    let label = v["label"].as_str().unwrap_or(key);
-                    Some((
-                        key.into(),
-                        if label == key {
-                            field_label(key)
-                        } else {
-                            label
-                        }
-                        .into(),
-                    ))
-                })
-                .collect();
+            let mut columns = extraction_columns(&extraction, false);
             let mut seen: BTreeSet<String> = columns.iter().map(|v| v.0.clone()).collect();
             for data in &rows {
                 if let Some(object) = data.as_object() {
@@ -620,32 +552,14 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
             }
             entries.push(vec![
                 doc.name.clone(),
-                if extraction["stale"] == true {
-                    "需要更新".into()
-                } else {
-                    "已摘录".into()
-                },
                 String::new(),
                 "摘录".into(),
                 extract_name,
             ]);
         }
-        let completed: BTreeSet<u32> = pages.iter().map(|p| p.page).collect();
-        let missing = (1..=doc.total_pages)
-            .filter(|p| !completed.contains(p))
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join("、");
         entries.push(vec![
             doc.name.clone(),
-            status_label(&doc.status).into(),
-            if doc.total_pages == 0 {
-                "页数待准备".into()
-            } else if missing.is_empty() {
-                format!("共 {} 页", doc.total_pages)
-            } else {
-                format!("未完成页：{missing}")
-            },
+            pages.iter().map(|page| page.page.to_string()).collect::<Vec<_>>().join("、"),
             "完整原文".into(),
             text_name,
         ]);
@@ -657,8 +571,7 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
         &mut r,
         &[
             "来源文件".into(),
-            "状态".into(),
-            "页码/未完成部分".into(),
+            "页码".into(),
             "内容类型".into(),
             "工作表".into(),
         ],
@@ -713,38 +626,20 @@ fn build_extractions(store: &Store, docs: &[Document], ids: &BTreeSet<String>, s
             target
         };
         let mut r = if single_sheet { shared_row } else { 0 };
-        let pages = store.pages(&doc.id)?;
-        let completed: BTreeSet<u32> = pages.iter().map(|page| page.page).collect();
-        let missing = (1..=doc.total_pages).filter(|page| !completed.contains(page)).map(|page| page.to_string()).collect::<Vec<_>>().join("、");
         section_row(target, &mut r, &["来源文件".into(), doc.name.clone()])?;
-        row(target, &mut r, &[if doc.total_pages == 0 { "页数尚未确认，不能认定已完整检查".into() }
-            else if !missing.is_empty() { format!("已扫描 {} / {} 页；尚未扫描页：{missing}，摘录仅基于已扫描内容", pages.len(), doc.total_pages) }
-            else { format!("已扫描 {} / {} 页", pages.len(), doc.total_pages) }])?;
-        for page in &pages {
-            if page.status == "needs_review" || !page.warnings.is_empty() || !page.text.chars().any(char::is_alphanumeric) {
-                row(target, &mut r, &[format!("第{}页待校对，不能认定原扫描内容完整识别", page.page)])?;
-                for warning in &page.warnings { row(target, &mut r, &[format!("第{}页：{warning}",page.page)])?; }
-            }
-        }
         let project = store.project(&doc.project_id)?;
         for extraction in extractions {
             found.insert(extraction["id"].as_str().unwrap_or("").to_owned());
             let scenario_id = extraction["scenarioId"].as_str().unwrap_or("");
             let scenario_name = project["customScenarios"].as_array().into_iter().flatten()
                 .find(|entry| entry["id"] == scenario_id).and_then(|entry| entry["name"].as_str()).unwrap_or_else(|| scenario_label(scenario_id));
-            section_row(target, &mut r, &["场景摘录".into(), scenario_name.into(),
-                if extraction["stale"] == true { "原文已修改，摘录需要更新".into() } else { "本次摘录结果".into() }])?;
+            section_row(target, &mut r, &["场景摘录".into(), scenario_name.into(), "本次摘录结果".into()])?;
             let rows: Vec<Value> = extraction["rows"].as_array().into_iter().flatten().map(readable_extraction_row).collect();
             if rows.is_empty() {
-                row(target, &mut r, &["未发现符合场景事项".into(), "仅代表上述已扫描范围的摘录结果".into()])?;
+                row(target, &mut r, &["未发现符合场景事项".into()])?;
                 continue;
             }
-            let mut columns = vec![("sourceFile".to_string(), "来源文件".to_string())];
-            for column in extraction["columns"].as_array().into_iter().flatten() {
-                if let Some(key) = column["key"].as_str().filter(|key| visible_field(key) && *key != "sourceFile") {
-                    columns.push((key.into(), column["label"].as_str().unwrap_or_else(|| field_label(key)).into()));
-                }
-            }
+            let mut columns = extraction_columns(&extraction, true);
             let mut seen: BTreeSet<String> = columns.iter().map(|column| column.0.clone()).collect();
             for data in &rows {
                 if let Some(object) = data.as_object() {
@@ -951,6 +846,26 @@ mod tests {
         assert_eq!(field_label("covenant_category"), "财务指标契约类型");
     }
     #[test]
+    fn extraction_columns_hide_pipeline_fields_and_merge_provenance_without_losing_business() {
+        let extraction = json!({"columns":[
+            {"key":"sourceFile","label":"来源文件"},{"key":"source_documents","label":"source_documents"},
+            {"key":"sourcePage","label":"核实页码"},{"key":"pages","label":"pages"},
+            {"key":"title","label":"title"},{"key":"clause_ref","label":"clause_ref"},
+            {"key":"covenant_category_id"},{"key":"covenant_scope"},{"key":"contract_classification"},{"key":"is_financial"},
+            {"key":"auditor_summary","label":"审计提示"},{"key":"client_field","label":"自定义业务列"}
+        ]});
+        for with_source in [false, true] {
+            assert_eq!(extraction_columns(&extraction, with_source), vec![
+                ("sourceFile".into(), "来源文件".into()), ("sourcePage".into(), "来源页码".into()),
+                ("title".into(), "事项".into()), ("clause_ref".into(), "条款位置".into()),
+                ("auditor_summary".into(), "审计提示".into()), ("client_field".into(), "自定义业务列".into())
+            ]);
+        }
+        let row = readable_extraction_row(&json!({"sourceFile":"当前文件.pdf","source_documents":"重复文件.pdf","sourcePage":"21","pages":"22","title":"投资限额","clause_ref":"第二十条","covenant_category_id":"C03","covenant_scope":"repayment","contract_classification":"财务指标契约","is_financial":true,"auditor_summary":"履约情况需复核","client_field":"客户自定义内容"}));
+        assert_eq!(row, json!({"sourceFile":"当前文件.pdf","sourcePage":"21","title":"投资限额","clause_ref":"第二十条","auditor_summary":"履约情况需复核","client_field":"客户自定义内容"}));
+        assert_eq!(readable_extraction_row(&json!({"source_documents":["甲.pdf","乙.pdf"],"pages":[1,3]})),json!({"sourceFile":["甲.pdf","乙.pdf"],"sourcePage":[1,3]}));
+    }
+    #[test]
     fn only_current_extractions_are_exported_with_sources_empty_results_and_timestamp() {
         use crate::ocr_store::Page;
         use calamine::Reader;
@@ -970,17 +885,25 @@ mod tests {
         let mut empty = data; empty["rows"] = json!([]);
         let zero = store.save_extraction(&empty).unwrap();
         let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
-        let params = json!({"projectId":project["id"],"documentIds":[doc.id],"outputDir":dir.path(),"mode":"single_sheet","extractionsOnly":true,"extractionIds":[saved["id"],zero["id"]]});
+        // Updating the source also makes both saved extractions stale. That
+        // state belongs to the UI, not to repeated rows in the business output.
+        store.save_page(&doc.id, Page { metadata: Default::default(), page:1, text:"不得导出整篇正文".into(), original_text:"不得导出整篇正文".into(), tables:vec![], original_tables:vec![], revision:1,status:"needs_review".into(),warnings:vec!["方向待复核".into()] },1,true).unwrap();
+        let mut params = json!({"projectId":project["id"],"documentIds":[doc.id],"outputDir":dir.path(),"mode":"single_sheet","extractionsOnly":true,"extractionIds":[saved["id"],zero["id"]]});
+        for mode in ["single_sheet", "per_document", "individual", "combined"] {
+        params["mode"] = json!(mode);
         let result = export(&store,&params,&|_,_,_,_|{},&pause).unwrap();
         let output = result["outputPaths"][0].as_str().unwrap();
-        assert!(Path::new(output).file_name().unwrap().to_string_lossy().starts_with("本次摘录_场景摘录_"));
+        if mode != "individual" { assert!(Path::new(output).file_name().unwrap().to_string_lossy().starts_with("本次摘录_场景摘录_")); }
         let mut book = calamine::open_workbook_auto(output).unwrap();
         assert_eq!(book.sheet_names().len(),1);
-        let range = book.worksheet_range("场景摘录").unwrap();
+        let range = book.worksheet_range(&book.sheet_names()[0]).unwrap();
         let text = range.rows().flat_map(|row| row.iter()).map(ToString::to_string).collect::<Vec<_>>().join("\n");
-        for expected in ["合同.pdf","来源页码","不得超过65%","未发现符合场景事项","尚未扫描页：2","第1页待校对","方向待复核","我的财务限制"] { assert!(text.contains(expected),"缺少 {expected}"); }
+        for expected in ["合同.pdf","来源页码","不得超过65%","未发现符合场景事项","我的财务限制"] { assert!(text.contains(expected),"缺少 {expected}"); }
+        for unwanted in ["尚未扫描页", "第1页待校对", "方向待复核", "不能认定", "已扫描", "摘录需要更新"] { assert!(!text.contains(unwanted), "不应插入诊断：{unwanted}"); }
+        assert_eq!(result["partial"], true);
         assert!(!text.contains("不得导出整篇正文"));
         assert!(!text.contains("不得包含历史结果"));
+        }
         let mut invalid = params; invalid["extractionIds"] = json!(["other-project-id"]);
         assert!(export(&store,&invalid,&|_,_,_,_|{},&pause).is_err());
         assert_eq!(store.project(project["id"].as_str().unwrap()).unwrap()["outputDirectory"],json!(dir.path().to_string_lossy()));
@@ -1082,12 +1005,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(restored, long);
         let directory = workbook.worksheet_range("目录").unwrap();
-        assert!(
-            directory
-                .rows()
-                .flatten()
-                .any(|c| c.to_string().contains("未完成页：2"))
-        );
+        assert!(!directory.rows().flatten().any(|c| c.to_string().contains("未完成页")));
     }
     #[test]
     fn selected_documents_support_single_sheet_per_document_and_individual_workbooks() {
@@ -1115,12 +1033,12 @@ mod tests {
                         text: if index == 1 {
                             long.clone()
                         } else {
-                            format!("第{index}份专属正文")
+                            format!("第{index}份专属正文，合同原文包含待校对字样")
                         },
                         original_text: String::new(),
                         revision: 0,
-                        status: "completed".into(),
-                        warnings: vec![],
+                        status: "needs_review".into(),
+                        warnings: vec!["本页含未能安全还原的排版或公式标记，已保留原内容，请对照扫描件核对。".into()],
                         metadata: Default::default(),
                         tables: vec![Table {
                             id: "table".into(),
@@ -1139,10 +1057,10 @@ mod tests {
                 .unwrap();
             docs.push(doc);
         }
-        store.save_extraction(&json!({"documentId":docs[0].id,"sourceRevision":1,"scenarioId":"custom","columns":[{"key":"amount","label":"金额"}],"rows":[{"amount":"00100","_trace":"不可导出内部字段"}],"prompts":[{"id":"x","label":"内部","prompt":"不可导出提示词"}]})).unwrap();
+        store.save_extraction(&json!({"documentId":docs[0].id,"sourceRevision":1,"scenarioId":"custom","columns":[{"key":"amount","label":"金额"}],"rows":[{"amount":"00100","auditor_summary":"履约情况需结合回单复核","_trace":"不可导出内部字段"}],"prompts":[{"id":"x","label":"内部","prompt":"不可导出提示词"}]})).unwrap();
         let selected = vec![docs[0].id.clone(), docs[11].id.clone()];
         let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
-        for mode in ["single_sheet", "per_document", "individual"] {
+        for mode in ["single_sheet", "per_document", "individual", "combined"] {
             let result = export(&store, &json!({"projectId":project["id"],"documentIds":selected,"mode":mode,"outputDir":dir.path()}), &|_,_,_,_|{}, &pause).unwrap();
             assert_eq!(result["documentCount"], 2);
             assert_eq!(result["partial"], true);
@@ -1189,10 +1107,14 @@ mod tests {
                 }
             }
             assert!(all.contains("第12份专属正文"));
+            assert!(all.contains("合同原文包含待校对字样"));
             assert!(!all.contains("第2份专属正文"));
             assert!(all.contains("00100"));
+            assert!(all.contains("履约情况需结合回单复核"));
             assert!(!all.contains("不可导出"));
-            assert!(all.contains("未完成页：2") || all.contains("尚未扫描"));
+            for unwanted in ["未完成页：2", "尚未扫描", "待校对：", "本页含未能安全还原", "摘录需要更新", "本页另有"] {
+                assert!(!all.contains(unwanted), "{mode} 不应插入技术状态：{unwanted}");
+            }
         }
         assert!(export(&store, &json!({"projectId":project["id"],"documentIds":[],"mode":"single_sheet","outputDir":dir.path()}), &|_,_,_,_|{}, &pause).is_err());
         let other = store.save_project(&json!({"name":"其他项目"})).unwrap();
@@ -1216,16 +1138,31 @@ mod tests {
             "columns":[
                 {"key":"amount","label":"借款金额"},
                 {"key":"repayment","label":"还款安排"},
+                {"key":"title","label":"title"},
+                {"key":"clause_ref","label":"clause_ref"},
+                {"key":"covenant_scope","label":"covenant_scope"},
+                {"key":"source_documents","label":"source_documents"},
+                {"key":"pages","label":"pages"},
                 {"key":"_covenant_evidence","label":"内部证据"}
             ],
             "rows":[{
                 "amount":"00123456789012345678901234567890",
-                "repayment":[{"date":"2026-10-27","amount":"100.00"},{"date":"2027-10-27","amount":"200.00"}],
+                "repayment":[{"date":r"\(\underline{\text{2026-10-27}}\)","amount":r"\(\underline{\text{100.00}}\)"},{"date":"2027-10-27","amount":"200.00"}],
                 "interest":"{\"rate\":\"3.2%\",\"frequency\":\"每年\"}",
                 "_covenant_evidence":[{"quote":"technical-trace-do-not-export","bbox":[1,2,3,4]}],
                 "_covenant_review_reason":"利率调整日待核对",
                 "source_document_id":"technical-document-id-do-not-export",
-                "evidence_quotes":["第一段逐字证据","第二段逐字证据"],
+                "evidence_quotes":[r"\(\underline{\text{第一段逐字证据}}\)","第二段逐字证据"],
+                "literal":"=1+1",
+                "formula":r"\(\frac{a}{b}\)",
+                "title":"独立投资限额",
+                "clause_ref":"第二十条",
+                "covenant_scope":"repayment",
+                "covenant_category_id":"C03",
+                "contract_classification":"财务指标契约",
+                "is_financial":true,
+                "source_documents":"合同.pdf",
+                "pages":"重复页码不可导出",
                 "sourcePage":"1、2"
             }]
         })).unwrap();
@@ -1254,7 +1191,16 @@ mod tests {
         assert!(all.contains("复核提示"));
         assert!(all.contains("利率调整日待核对"));
         assert!(all.contains("第一段逐字证据\n第二段逐字证据"));
+        assert!(!all.contains(r"\underline"));
+        assert!(!all.contains(r"\text{"));
+        assert!(result.rows().flatten().any(|cell| cell == &Data::String("=1+1".into())));
+        assert!(all.contains(r"\frac{a}{b}"));
         assert!(all.contains("来源页码"));
+        assert!(all.contains("事项"));
+        assert!(all.contains("条款位置"));
+        assert!(all.contains("独立投资限额"));
+        assert!(all.contains("第二十条"));
+        for hidden in ["covenant_category_id", "covenant_scope", "contract_classification", "is_financial", "source_documents", "pages", "C03", "repayment", "重复页码不可导出"] { assert!(!all.contains(hidden), "不应出现内部字段 {hidden}"); }
         assert!(!all.contains("technical-"));
         assert!(!all.contains("_covenant"));
         assert!(!all.contains("实际使用的提示词"));

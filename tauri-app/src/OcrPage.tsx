@@ -15,7 +15,9 @@ import { OcrOperation, runOcrPool, OCR_CONCURRENCY } from "./ocrBatch";
 import {
   useOcrScanProgressDialog,
   registerOcrScanJob,
+  registerOcrOperationJob,
   type OcrScanProgress,
+  type OcrTaskProgress,
   type OcrScanPageState,
 } from "./ocrProgress";
 import {
@@ -150,6 +152,13 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
       >
     >();
   const [scanControlError, setScanControlError] = useState("");
+  const [taskView, setTaskView] =
+    useState<
+      Omit<
+        OcrTaskProgress,
+        "paused" | "stopping" | "controlling" | "error" | "onPause" | "onCancel"
+      >
+    >();
   const scanDialog = useOcrScanProgressDialog();
   const scanControls = useRef({ pause: () => {}, cancel: () => {} });
   const controllingRef = useRef(false);
@@ -180,6 +189,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     setBusy(true);
     setError("");
     setScanView(undefined);
+    setTaskView(undefined);
     setScanControlError("");
     try {
       await action();
@@ -755,11 +765,13 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   const presentScan = scanDialog.setProgress;
   useEffect(() => {
     presentScan(
-      busy && scanView
+      busy && (scanView || taskView)
         ? {
-            ...scanView,
-            ...progress,
-            completed: progress.current,
+            ...(taskView ?? {
+              ...scanView!,
+              ...progress,
+              completed: progress.current,
+            }),
             paused,
             controlling,
             stopping: Boolean(operation.current?.cancelled),
@@ -773,6 +785,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     presentScan,
     busy,
     scanView,
+    taskView,
     progress,
     paused,
     controlling,
@@ -869,12 +882,21 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     if (stages.some((item) => !item.prompt.trim()))
       throw new Error("请填写每个阶段的提示词。");
 
-    await persistPrompts(stages);
     const targets = [...selectedDocuments];
     setPendingExtractionExport(undefined);
     const promptStages = structuredClone(stages);
     const active = new OcrOperation();
     operation.current = active;
+    setTaskView({
+      kind: "task",
+      phase: "preparing",
+      fileName: scenario.name,
+      fileIndex: 1,
+      fileCount: targets.length,
+      completed: 0,
+      total: targets.length,
+      message: "正在保存提示词并准备场景摘录…",
+    });
     const failures: string[] = [];
     let completed = 0;
     const completedIds: string[] = [];
@@ -882,8 +904,20 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     setOutputs([]);
     setExportDirectory("");
     try {
+      await persistPrompts(stages);
       for (const [index, target] of targets.entries()) {
         await checkpoint(active);
+        setTaskView(
+          (view) =>
+            view && {
+              ...view,
+              phase: "extracting",
+              fileName: target.name,
+              fileIndex: index + 1,
+              message: "正在读取已扫描原文…",
+              activity: undefined,
+            },
+        );
         try {
           const current = await ocrCall<OcrDocumentDetail>("ocr.document", {
             documentId: target.id,
@@ -898,16 +932,21 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
             document: current.document,
             pages: current.pages,
             checkpoint: () => checkpoint(active),
-            onProgress: (text) =>
+            onProgress: (text) => {
               setMessage(
                 `${index + 1} / ${targets.length} 份 · ${target.name} · ${text}`,
-              ),
+              );
+              setTaskView((view) => view && { ...view, message: text });
+            },
+            onWorkProgress: (activity) =>
+              setTaskView((view) => view && { ...view, activity }),
             request: async (params) => {
               await checkpoint(active);
               let jobId: string | undefined;
               try {
                 return await runOcrJob("ocr.extract", params, (id) => {
                   jobId = id;
+                  registerOcrOperationJob(id);
                   attachJob(active, id);
                 });
               } finally {
@@ -916,6 +955,14 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
             },
           });
           await checkpoint(active);
+          setTaskView(
+            (view) =>
+              view && {
+                ...view,
+                phase: "saving",
+                message: "正在保存本文件摘录结果…",
+              },
+          );
           const extraction = await ocrCall<OcrExtraction>(
             "ocr.extraction_save",
             {
@@ -938,6 +985,9 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
         } catch (reason) {
           if (active.cancelled) throw reason;
           failures.push(`${target.name}：${errorText(reason)}`);
+        } finally {
+          if (!active.cancelled)
+            setTaskView((view) => view && { ...view, completed: index + 1 });
         }
       }
     } finally {
@@ -1078,30 +1128,69 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     extraction?: { active: Operation; extractionIds: string[] },
   ) {
     if (!project || !ids.length) throw new Error("请先选择需要导出的文件。");
-
+    const active = extraction?.active ?? new OcrOperation();
+    operation.current = active;
+    setTaskView((view) => ({
+      kind: "task",
+      fileName: `${ids.length} 份文件`,
+      fileIndex: ids.length,
+      fileCount: ids.length,
+      completed: 0,
+      total: ids.length,
+      ...(extraction ? view : undefined),
+      phase: "exporting",
+      message: "正在准备 Excel 导出目录…",
+      activity: undefined,
+    }));
+    await checkpoint(active);
     const { outputDir } = await ocrCall<{ outputDir: string }>(
       "ocr.output_directory",
       { projectId: project.id },
     );
     setOutputs([]);
     setExportDirectory("");
-    const active = extraction?.active ?? new OcrOperation();
-    operation.current = active;
     await checkpoint(active);
-    const result = await runOcrJob<{ outputPaths: string[] }>(
-      "ocr.export",
-      {
-        projectId: project.id,
-        documentIds: ids,
-        mode,
-        outputDir,
-        ...(extraction
-          ? { extractionsOnly: true, extractionIds: extraction.extractionIds }
-          : {}),
-      },
-      (id) => attachJob(active, id),
-      (event) => setMessage(event.message),
-    );
+    let exportJobId: string | undefined;
+    let result: { outputPaths: string[] };
+    try {
+      result = await runOcrJob<{ outputPaths: string[] }>(
+        "ocr.export",
+        {
+          projectId: project.id,
+          documentIds: ids,
+          mode,
+          outputDir,
+          ...(extraction
+            ? { extractionsOnly: true, extractionIds: extraction.extractionIds }
+            : {}),
+        },
+        (id) => {
+          exportJobId = id;
+          registerOcrOperationJob(id);
+          attachJob(active, id);
+        },
+        (event) => {
+          setMessage(event.message);
+          setTaskView(
+            (view) =>
+              view && {
+                ...view,
+                message: event.message,
+                activity:
+                  event.total > 0 &&
+                  (event.current < event.total || event.phase === "completed")
+                    ? {
+                        completed: event.current,
+                        total: event.total,
+                      }
+                    : undefined,
+              },
+          );
+        },
+      );
+    } finally {
+      if (exportJobId) active.jobIds.delete(exportJobId);
+    }
     if (!result.outputPaths.length) throw new Error("未生成导出文件，请重试。");
     setOutputs(result.outputPaths);
     if (extraction) setPendingExtractionExport(undefined);
@@ -1110,7 +1199,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     return true;
   }
   function renderTaskProgress() {
-    if (busy && scanView && scanDialog.available) return null;
+    if (busy && (scanView || taskView) && scanDialog.available) return null;
     return (
       message && (
         <div role="status" className="ocr-progress">
@@ -1567,7 +1656,6 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                                 开始扫描
                               </Button>
                               <Button
-                                variant="outline"
                                 disabled={busy || !hasResults}
                                 onClick={beginExport}
                               >
@@ -1577,7 +1665,6 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                               {hasResults && (
                                 <Button
                                   className="ocr-next-action"
-                                  variant="outline"
                                   disabled={busy}
                                   onClick={() => void run(() => changeStep(1))}
                                 >
@@ -2019,6 +2106,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
               disabled={busy || !exportDocuments.length}
               onClick={() =>
                 void run(async () => {
+                  setExportDialogOpen(false);
                   if (
                     await exportExcel(
                       exportMode,

@@ -6,6 +6,7 @@
 
 | 能力 | 本次实现 | 对应验收 |
 | --- | --- | --- |
+| 摘录与导出进度 | 整批摘录、逐文件保存和自动导出共用持续进度窗，后台运行跨分段/阶段保留；文件按处理完成推进，分段仅在核验后计数，财务指标总数使用实际重叠窗口。模型等待显示动态状态与总耗时，未知导出进度不估百分比。暂停/取消同时覆盖当前任务、迟到编号与后续分段，单独导出关闭参数框后展示进度；失败保留已存结果与重试入口 | `OcrPage.test.tsx`、`ocrScenarios.test.ts`、`financialMetrics.test.ts`、`OcrTaskProgressDialog.test.tsx`、`SyncBusyDialog.test.tsx`、`OcrScanProgressDialog.test.tsx`；合成浏览器夹具 `artifacts/ocr-task-progress-20261028/`，不等于真实模型或安装版验收 |
 | 项目与文件 | 独立 SQLite 项目、按项目保存提示词、PDF/PNG/JPEG/BMP/多页 TIFF；选择或拖入的多个文件夹与文件混合递归导入，按实际规范路径去重、跳过不支持格式，空目录明确提示；保存源文件副本 | `ocr_store::tests`、`ocr::tests::import_`、`OcrPage.test.tsx` |
 | 上传交互 | 复用工具箱 `FileDropInput`，点击选择文件、框内选择文件夹与桌面原生拖放共用导入，悬停高亮；已有文件时可继续添加，忙碌和保活隐藏页不接收文件 | `OcrPage.test.tsx`、`useNativeFileDropZone.test.tsx`、`nativeFileDragApi.test.ts`；浏览器预览不冒充本机文件操作 |
 | 识别 | AI 视觉与百炼一次请求返回全文/表格；纯文本 OCR 可由统一 LLM 辅助还原；仅统一 LLM 配置，不继承 AudiPick 专用模型 | `audipick::tests::toolbox_`、`bailian_ocr::tests` |
@@ -22,12 +23,12 @@
 | 广义限制性契约 | 独立“借款·限制性契约（含非财务）”场景，覆盖无量化门槛的贷款用途、经营行为限制及报送/检查附带义务，不使用财务专项排除器。财务边界与财务指标契约共用同一校验；比例通知归附带义务，泛泛财务承诺标记具体指标待核对。提示词区分主体、条件例外及明确后果，模型返回分段内行号和 obligation/consequence 角色，程序回填逐字原文并跨页定位；无义务证据、越界及无出处的明确后果拒绝保存。命名场景保留该执行方式 | `ocrScenarios.test.ts`、原生导出回读 |
 | 长文摘录与返回契约 | 普通场景、旧保存及用户编辑的提示词统一补齐布尔完整性和证据协议；正文提供本轮L行号，程序逐字回填证据和页码，不要求模型重抄非连续正文。模型缺少出处、越界、改写、截断或未确认检查完整时最多修复一次，仍失败则不保存；网络和取消不自动重试。旧提示词仍可返回真实逐字引用并须严格核验。财务专项保留原案例库和角色核验 | `ocrScenarios.test.ts`、`audipickPreviewFinancialCovenant.test.ts` |
 | 借款通用主表 | 普通合同采用有界24000字符分段阈值，减少通用条款与商业要素被过早拆开；更长文件仍逐段读取、单独可编辑汇总。coverage只表示本轮已提供来源已检查，不表示附件/业务字段齐全；缺失和冲突保留在业务提示字段，OCR年份/编号不按常识改正。汇总以已核验证据编号引用、程序回填原文，拒绝同一主合同编号重复拆行、未知编号及遗漏已核验证据，最多修复一次，不以模型自报成功替代来源检查 | `ocrScenarios.test.ts`、真实Dev模型隔离验证见下文 |
-| Excel | 文件区多选、全选包含收起文件，选择状态与查看文件独立；仅工作区保留一个导出入口，导出弹窗列明勾选范围，不再另设当前/全部范围。支持一个 Excel 一个 Sheet（按文件/页码分区）、一个 Excel 多 Sheet（每文件一张）、多个 Excel（每文件单独、内部原文/表格/摘录分表）。保留旧合并 API，不按未知表头自动拼列。原文/原行列表格/可读摘录完整输出，缺页及过期摘录显式标记，不导出提示词或内部追踪。长内容无损续行、账号和公式字面按文本保存，不覆盖同名文件 | `OcrPage.test.tsx`、`ocr_export::tests`、`scripts/verify_ocr_workers.py`（旧合并兼容） |
+| Excel | 文件区多选、全选包含收起文件，选择状态与查看文件独立；仅工作区保留一个导出入口，导出弹窗列明勾选范围，不再另设当前/全部范围。支持一个 Excel 一个 Sheet（按文件/页码分区）、一个 Excel 多 Sheet（每文件一张）、多个 Excel（每文件单独、内部原文/表格/摘录分表）。保留旧合并 API，不按未知表头自动拼列。原文/原行列表格/可读摘录完整输出；技术警告、待校对/缺页/过期状态仅保留项目和界面，不往正文/场景工作表追加诊断行，目录只列来源文件、实际页码、内容类型与工作表。不导出提示词或内部追踪；隐藏已知契约分类编号/范围/内部判断字段，合并来源别名、中文化事项与条款列，其他自定义字段保留；业务审计提示、复核理由和零匹配保留。长内容无损续行、账号和公式字面按文本保存，不覆盖同名文件 | `OcrPage.test.tsx`、`ocr_export::tests`、`scripts/verify_ocr_workers.py`（旧合并兼容） |
 | 任务 | worker 独立进程，暂停/取消/继续；失败页保留待重试，空响应和截断不冒充完成；识别图片与摘录正文不保存到通用任务参数 | `ocrApi.test.ts`、Rust worker 路由及存储测试 |
 | 并发与耗时 | 同文件前端默认最多 5 页在途，后台 OCR 独立通道最多 5 个 worker，不经过其他重任务的串行锁；乱序完成按已处理数量推进，失败不阻塞其他页；暂停／取消覆盖全部在途任务及迟到编号，恢复唤醒全部等待者，退出后再释放文件。逐页展示渲染、提交／往返、后台排队及后端处理分段耗时，总时间包含暂停；并发耗时不相加，不混入正文和 Excel | `job_dispatch::tests`、`excel_merger::tests::ocr_dispatch_queue_time_is_attached_without_changing_other_results`、`ocrBatch.test.ts`、`ocrApi.test.ts`、`OcrPage.test.tsx`、`scripts/verify_ocr_dispatch.py` |
 | 百炼请求诊断 | 成功页返回每次请求的准备、等待响应头、接收响应及 JSON 解析耗时，请求/响应字节、HTTP 状态、模型、主机和受限格式请求编号。等待响应头包含 DNS/TCP/TLS、上传、网络返回与服务处理，不标作纯服务计算。只进入本轮 timings，不写入原文、表格或 Excel；其他引擎、旧结果和失败页不估算缺失阶段 | `bailian_ocr::tests::http_timing_separates_headers_from_body_without_credentials_or_content`、`OcrTimingPanel.test.tsx`、`ocrApi.test.ts`、`scripts/test_probe_ocr_network.py` |
 | 默认输出与命名 | `ocr.output_directory` 复用项目成功导出的授权目录，也兼容既有完成任务中的显式输出目录；无历史时使用下载目录下“审计工具箱/OCR”。后端创建并仅授予目标目录，项目保存请求不能注入任意目录；不从源文件或生成文件推导祖先授权。每次导出文件名包含时间戳，仍保留原子防覆盖保护 | `ocr::tests::output_directory_reuses_successful_export_without_source_parent_grants`、`ocr_store::tests::previous_output_directory_only_reuses_explicit_successful_export_directory`、`ocr_export::tests` |
-| 本次摘录输出 | `extractionsOnly` 配合 `extractionIds` 仅输出指定的本次已保存摘录，不带全文、表格或历史摘录。保留来源文件/页码，缺页、过期及零匹配显式标注；文件名为项目名、场景摘录及时间戳 | `ocr_export::tests::only_current_extractions_are_exported_with_sources_empty_results_and_timestamp` |
+| 本次摘录输出 | `extractionsOnly` 配合 `extractionIds` 仅输出指定的本次已保存摘录，不带全文、表格或历史摘录。保留来源文件/页码和零匹配，不插入逐页技术警告、扫描计数、缺页/过期状态行；不按关键词删除实际业务文本。界面仍可查看技术状态，导出接口 partial 标记保留；文件名为项目名、场景摘录及时间戳 | `ocr_export::tests::only_current_extractions_are_exported_with_sources_empty_results_and_timestamp` |
 | 命名场景存储 | 项目 `customScenarios` 保存名称、基础场景、规则版本、字段及完整提示词阶段；缺失字段的旧项目兼容读取和保存，不覆盖已有命名场景；无效和重复场景标识拒绝保存 | `ocr_store::tests::named_scenarios_round_trip_and_survive_old_project_saves` |
 | 安全 | 导入和显式导出均检查授权路径，默认输出使用上述受信目录 API；原生拖放事件授予实际投递路径；导入目录不跟随重解析点/链接，投递的重解析点根路径也拒绝；内部存储路径与统一 LLM 设置由主进程覆盖注入，传输后仍尊重统一配置的启用状态，不回落 AudiPick 专用配置 | `ocr_import_and_export_require_selected_paths_without_parent_grants`、`ocr::tests::import_directory_never_follows_junctions_or_accepts_junction_roots`、`ocr::tests::worker_settings_survive_transport_and_unified_llm_enabled_is_respected` |
 
@@ -133,3 +134,19 @@ python scripts/probe_ocr_network.py --worker-exe <原生程序EXE> --settings-db
 交通银行373万合同的封面、第2页、第21页已以同一原图对照原始响应：原通用任务遗漏封面标题/机构及第21页绝大部分内容；原生任务恢复主要标题、编号、银行、定义文字和投资/担保/新增融资限额50000万元。第21页空白划线仍可能被识别为字母或数学符号，不能声称无误识别。旧结果不能凭清理补回丢失内容，需要重新扫描。真实项目、设置、模型与凭据不改，诊断及实测文件仅存忽略目录。
 
 定向验证：`cargo test --manifest-path src-tauri/Cargo.toml --lib ocr`；真实验收使用 ignored 的 `bailian_ocr::tests::live_document_sample_from_stdin`，隔离存储与原生 Excel 导出，不替换用户原结果。
+
+## 2026-10-28 · 嵌套排版与历史内容回放
+
+安全解包支持嵌套 `underline{text{...}}`、`textbf`、`textrm`、`mbox` 与单列文字数组；只解完整且可确认的纯文字结构。文字中的 TeX 转义百分号、货币符号、井号及连接号按字面恢复；真正数学表达、不支持命令、缺括号和超过深度限制的表达整体保留，不半截删除。标准 Markdown 标题转成纯标题，文中账号井号及 C# 等保留。表格与原文共用解析，历史单元格逐格比较基线，人工校对优先。旧技术排版告警仅在对应原文重新投影时重算，其他方向/识别告警保留。
+
+`ocr_store::tests::replay_saved_results_from_stdin` 为默认忽略的离线验收：只接受显式提供的隔离快照、导出参数和报告路径，不发模型请求、不修改真实项目；用于原文/复制数据源、表格、历史摘录字段和 Excel 的一致性回读。原始30页响应作为本机忽略目录夹具，不能以格式清理通过宣称逐字准确。公式与模糊字仍需人工核对。
+
+## 2026-10-28 · 官方文档解析网络分段与无损上传优化
+
+网络手工探针在本机隔离 listener 捕获当前 worker 已校正图像后，根据实际官方标准地址选择原生 `document_parsing` 请求；自定义网关和其他模型仍保持兼容协议。原生响应读取组装后的 `output.choices.message.content[].text`，不递归统计重复版面块，截断和空文字不冒充成功。API Key 只留内存并经 curl stdin 传入，不进入 argv、报告或磁盘；私有图片请求和响应仅在临时目录中使用，报告仅留请求ID、字节和时间，不改用户设置。
+
+上海电气第2页同一完整像素、同一模型和现有网络的一轮对比：单请求9.27秒，五并发批次19.36秒，各页13.41–19.27秒；五并发上传5.19–14.27秒，上传后等待首字节3.95–8.73秒。该等待含远端处理及回程网络，代理链路DNS/TCP也不能当作直达官方的时间。历史首批20.9–70.3秒缺少持久化HTTP分段，不能事后精确归因；本轮未证明降低并发或改变模型/代理必要。
+
+本机PNG默认Fast重编码扩大上传内容，现采用Balanced无损DEFLATE压缩，不减少像素、通道或位深。常规`ocr::tests::upload_png_preserves_scan_dimensions_channels_and_pixels`验证RGB、RGBA及16位灰度解码逐像素相同；默认忽略的`ocr::tests::benchmark_lossless_upload_png_on_local_scan`接受显式本机图片，输出实际编码字节与CPU时间，禁止作为自动付费请求。探针回归：`python -m unittest discover -s scripts -p test_probe_ocr_network.py -v`。实际记录在`artifacts/ocr-latency-20261028/verification-summary.json`；无损压缩不能保证模型逐字无误，也不能保证网络或服务在其他时间不变。
+
+实际Rust样本基准（1841×2600）：Fast PNG 2472779字节，Balanced 2150176字节，解码像素完全相同；请求体3297285降至2867149字节（13.05%）。debug测试CPU分别1295/2419毫秒，不能代表release绝对时间。随后相同像素与参数五并发请求全部成功，批次22.58秒、各页15.21–22.38秒，上传7.65–15.73秒、上传后等待6.18–9.74秒；较先前19.36秒批次更慢，因此本轮仅证明上传字节减少，**未证明端到端提速**，不按单轮结果归因模型或代理。总计11次原生真实请求均成功，未自动重试；保留原图与用户网络/模型设置，完整对照见上述本机验证报告。

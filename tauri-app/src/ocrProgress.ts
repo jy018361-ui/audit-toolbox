@@ -23,16 +23,25 @@ export type OcrScanProgress = {
   onPause: () => void;
   onCancel: () => void;
 };
+export type OcrTaskProgress = Omit<OcrScanProgress, "phase" | "pages"> & {
+  kind: "task";
+  phase: "preparing" | "extracting" | "saving" | "exporting";
+  message: string;
+  activity?: { completed: number; total: number };
+};
+export type OcrProgress = OcrScanProgress | OcrTaskProgress;
 export const OcrScanProgressContext = createContext({
   available: false,
-  setProgress: (_value: OcrScanProgress | undefined) => {},
+  active: false,
+  setProgress: (_value: OcrProgress | undefined) => {},
 });
 export const useOcrScanProgressDialog = () =>
   useContext(OcrScanProgressContext);
 
-// Page workers remain part of a scan even when their terminal events arrive late.
+// Keep ownership across gaps and late events for the whole OCR operation.
 const scanJobs = new Set<string>();
-export const registerOcrScanJob = (jobId: string) => {
+export const registerOcrOperationJob = (jobId: string) => {
   scanJobs.add(jobId);
 };
+export const registerOcrScanJob = registerOcrOperationJob;
 export const isOcrScanJob = (jobId: string) => scanJobs.has(jobId);

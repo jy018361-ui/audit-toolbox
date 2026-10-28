@@ -5,10 +5,33 @@ import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from probe_ocr_network import endpoint, measure, request_id, stages
+from probe_ocr_network import endpoint, measure, production_request, request_id, response_text, stages
 
 
 class NetworkProbeTests(unittest.TestCase):
+    def test_official_qwen35_probe_uses_production_native_task_and_exact_image(self):
+        captured = json.dumps({"messages": [{"content": [{"image_url": {"url": "data:image/png;base64,original"}}]}]}).encode()
+        url, body = production_request("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.5-ocr", captured)
+        value = json.loads(body)
+        self.assertTrue(url.endswith("/api/v1/services/aigc/multimodal-generation/generation"))
+        self.assertEqual(value["input"]["messages"][0]["content"][0]["image"], "data:image/png;base64,original")
+        self.assertFalse(value["input"]["messages"][0]["content"][0]["enable_rotate"])
+        self.assertEqual(value["parameters"]["ocr_options"]["task"], "document_parsing")
+        explicit_port_url, explicit_port_body = production_request("https://dashscope.aliyuncs.com:443/compatible-mode/v1", "qwen3.5-ocr", captured)
+        self.assertTrue(explicit_port_url.endswith("/api/v1/services/aigc/multimodal-generation/generation"))
+        self.assertEqual(json.loads(explicit_port_body), value)
+        for base, model in [("https://gateway.example/v1", "qwen3.5-ocr"),
+                            ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-vl-ocr")]:
+            _, body = production_request(base, model, captured)
+            self.assertEqual(body, captured)
+
+    def test_native_response_counts_assembled_text_once_and_preserves_truncation(self):
+        text, finish = response_text({"output": {"choices": [{"finish_reason": "length", "message": {"content": [
+            {"text": "正文", "blocks": [{"text": "正文"}]}, {"layout": "metadata"}, {"text": "尾部"},
+        ]}}]}})
+        self.assertEqual(text, "正文\n\n尾部")
+        self.assertEqual(finish, "length")
+
     def test_stage_boundaries_do_not_double_count_upload_as_service_wait(self):
         result = stages({"time_namelookup": .01, "time_connect": .03, "time_appconnect": .08,
                          "time_pretransfer": .09, "time_posttransfer": 1.09,

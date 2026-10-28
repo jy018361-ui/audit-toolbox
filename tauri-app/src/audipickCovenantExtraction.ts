@@ -1071,12 +1071,17 @@ export async function extractFinancialMetrics(options: {
   documents: CovenantDocument[];
   extract: (request: CovenantExtractRequest) => Promise<CovenantExtractResponse>;
   onProgress?: (message: string) => void;
+  onWorkProgress?: (progress: { completed: number; total: number }) => void;
   caseLibrary?: CovenantCaseLibrary;
   /** OCR projects may edit the extraction instructions; evidence checks remain mandatory. */
   promptOverride?: string;
 }) {
   const library=options.caseLibrary ?? DEFAULT_CASE_LIBRARY;
   const items: Row[] = [];
+  const segmentCount = (text: string) => Math.max(1, Math.ceil((text.split("\n").length - 160) / 140) + 1);
+  const totalSegments = options.documents.reduce((total, document) => total + segmentCount(document.text), 0);
+  let completedSegments = 0;
+  options.onWorkProgress?.({ completed: 0, total: totalSegments });
   for (const document of options.documents) {
     if (!document.id || !document.text.trim()) throw new Error("财务指标契约摘录：缺少完整合同文字。");
     const lines=document.text.split("\n");
@@ -1086,7 +1091,7 @@ export async function extractFinancialMetrics(options: {
     const width=160;
     for(let first=0;first<lines.length;first+=140){
       const last=Math.min(lines.length,first+width);
-      options.onProgress?.(`摘录财务指标契约：${document.name} 第 ${Math.floor(first/140)+1}/${Math.ceil(lines.length/140)} 段`);
+      options.onProgress?.(`摘录财务指标契约：${document.name} 第 ${Math.floor(first/140)+1}/${segmentCount(document.text)} 段`);
       const candidateText=lines.slice(first,last).join("\n");
       const examples=retrieveCovenantCases(candidateText,library,4).map(e=>({case_id:e.case_id,category_id:e.category_id,subtype:e.subtype,excerpt:e.excerpt,rule:e.normalized_rule}));
       const input=`[来源文件：${document.name}]\n`+lines.slice(first,last).map((line,index)=>`[L${first+index+1}]${line}`).join("\n");
@@ -1122,6 +1127,7 @@ export async function extractFinancialMetrics(options: {
           _covenant_pending_case:pending,_covenant_review_reason:classified.reason,_covenant_case_ids:classified.caseIds,
           _covenant_case_library_version:library.metadata.version});
       }
+      options.onWorkProgress?.({ completed: ++completedSegments, total: totalSegments });
       if(last===lines.length) break;
     }
     // A source-explicit universal default provides the shared link. Keep this source

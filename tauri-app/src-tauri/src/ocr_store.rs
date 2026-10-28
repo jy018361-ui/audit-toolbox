@@ -95,9 +95,11 @@ pub(crate) struct Page {
 fn readable_page(mut page: Page) -> Page {
     let unedited = !page.original_text.is_empty() && page.text == page.original_text;
     let unedited_tables = serde_json::to_value(&page.tables).ok() == serde_json::to_value(&page.original_tables).ok();
-    let is_payload = crate::bailian_ocr::looks_like_ocr_payload(&page.original_text)
-        || page.original_text.to_ascii_lowercase().contains("<table")
-        || crate::bailian_ocr::has_latex_layout(&page.original_text);
+    let is_structure = crate::bailian_ocr::looks_like_ocr_payload(&page.original_text)
+        || page.original_text.to_ascii_lowercase().contains("<table");
+    let is_payload = is_structure
+        || crate::bailian_ocr::has_latex_layout(&page.original_text)
+        || crate::bailian_ocr::has_markdown_heading(&page.original_text);
     if is_payload {
         let parsed = crate::bailian_ocr::readable_ocr_content(&page.original_text);
         let parsed_text = parsed["text"].as_str().unwrap_or("").to_owned();
@@ -111,9 +113,24 @@ fn readable_page(mut page: Page) -> Page {
         if unedited {
             page.text = parsed_text;
             if page.tables.is_empty() && unedited_tables { page.tables = recovered; }
+            // A known formatting wrapper may now be readable after an upgrade.
+            // Recompute only formatting warnings, preserving OCR quality,
+            // orientation and missing-structure warnings from the scan.
+            page.warnings.retain(|warning| !format_warning(warning));
             page.warnings.extend(parsed["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned));
-            page.warnings.push("历史识别结果已转为可读文字；旧结构可能缺少内容，请重新识别后核对。".into());
-            page.status = "needs_review".into();
+            if is_structure {
+                page.warnings.push("历史识别结果已转为可读文字；旧结构可能缺少内容，请重新识别后核对。".into());
+            }
+            if !page.warnings.is_empty() { page.status = "needs_review".into(); }
+        }
+    }
+    // Table cells have the same source baseline as prose. Normalize only cells
+    // still equal to that baseline; individually corrected cells stay intact.
+    let baseline = page.original_tables.clone();
+    for table in &mut page.original_tables { readable_table(table, None); }
+    for table in &mut page.tables {
+        if let Some(original) = baseline.iter().find(|source| source.id == table.id) {
+            page.warnings.extend(readable_table(table, Some(original)));
         }
     }
     if page.warnings.iter().any(|w| w.contains("表格单元格数据无效") || w.contains("表格行数据无效")) {
@@ -122,6 +139,30 @@ fn readable_page(mut page: Page) -> Page {
     }
     page.warnings.sort(); page.warnings.dedup();
     page
+}
+
+fn format_warning(warning: &str) -> bool {
+    warning.starts_with("本页含未能安全还原的排版或公式标记")
+        || warning.starts_with("本页涉及公式")
+}
+
+fn readable_table(table: &mut Table, baseline: Option<&Table>) -> Vec<String> {
+    let mut warnings = vec![];
+    let mut convert = |text: &mut String, original: Option<&str>| {
+        if original.is_some_and(|original| original != text.as_str()) { return; }
+        if !crate::bailian_ocr::has_latex_layout(text) && !crate::bailian_ocr::has_markdown_heading(text) { return; }
+        let parsed = crate::bailian_ocr::readable_ocr_content(text);
+        *text = parsed["text"].as_str().unwrap_or(text).to_owned();
+        warnings.extend(parsed["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned));
+    };
+    convert(&mut table.title, baseline.map(|source| source.title.as_str()));
+    for (r, row) in table.rows.iter_mut().enumerate() {
+        for (c, cell) in row.iter_mut().enumerate() {
+            if baseline.is_some() && baseline.and_then(|table| table.rows.get(r)).and_then(|row| row.get(c)).is_none() { continue; }
+            convert(cell, baseline.and_then(|table| table.rows.get(r)).and_then(|row| row.get(c)).map(String::as_str));
+        }
+    }
+    warnings
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -586,6 +627,30 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    /// Offline acceptance of saved OCR/extractions in an explicitly supplied
+    /// isolated snapshot. No model calls or writes to the live application DB.
+    #[test]
+    #[ignore]
+    fn replay_saved_results_from_stdin() {
+        use crate::excel_merger::PauseCheckpoint;
+        use std::sync::{Arc, atomic::AtomicBool};
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        let request: Value = serde_json::from_str(&input).unwrap();
+        let store = Store::open(Path::new(request["snapshotPath"].as_str().unwrap())).unwrap();
+        let mut projected = vec![];
+        for id in request["documentIds"].as_array().unwrap() {
+            projected.push(json!({"documentId":id,"pages":store.pages(id.as_str().unwrap()).unwrap()}));
+        }
+        let mut fields = vec![];
+        for value in request["formatStrings"].as_array().into_iter().flatten() {
+            fields.push(crate::bailian_ocr::readable_ocr_text(value.as_str().unwrap()));
+        }
+        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        let export = crate::ocr_export::export(&store, &request["export"], &|_,_,_,_|{}, &pause).unwrap();
+        std::fs::write(request["reportPath"].as_str().unwrap(), serde_json::to_vec_pretty(&json!({"documents":projected,"formattedStrings":fields,"export":export})).unwrap()).unwrap();
+        println!("已保存结果离线回放与导出完成。");
+    }
     use super::*;
     #[test]
     fn named_scenarios_round_trip_and_survive_old_project_saves() {
@@ -623,11 +688,30 @@ mod tests {
         assert_eq!(projected.text, "编号：000123");
         assert_eq!(projected.original_text, "编号：000123");
         assert_eq!(projected.revision, 2);
-        assert_eq!(projected.status, "needs_review");
+        assert_eq!(projected.status, "completed");
         let mut corrected = baseline.clone();
         corrected.text = "人工校对：00123".into();
         assert_eq!(readable_page(corrected).text, "人工校对：00123");
         assert_eq!(baseline.text, raw);
+    }
+    #[test]
+    fn nested_layout_projection_keeps_human_cells_and_recomputes_format_warnings() {
+        let raw = r"# 借款金额
+\(\underline{\text{金额大写壹仟元}}\)";
+        let table = Table { id: "t1".into(), title: "# 金额表".into(), rows: vec![vec![r"\(\underline{\text{00123}}\)".into(), r"\(\text{1000.00}\)".into()]] };
+        let mut page = Page { metadata: Default::default(), page: 2, text: raw.into(), original_text: raw.into(), tables: vec![table.clone()], original_tables: vec![table], revision: 3, status: "needs_review".into(), warnings: vec!["本页含未能安全还原的排版或公式标记，已保留原内容，请对照扫描件核对。".into(), "页面方向判断不充分".into()] };
+        page.tables[0].rows[0][1] = "人工校对999.00".into();
+        let projected = readable_page(page.clone());
+        assert_eq!(projected.text, "借款金额\n金额大写壹仟元");
+        assert_eq!(projected.tables[0].title, "金额表");
+        assert_eq!(projected.tables[0].rows[0], vec!["00123", "人工校对999.00"]);
+        assert_eq!(projected.original_tables[0].rows[0], vec!["00123", "1000.00"]);
+        assert_eq!(projected.warnings, vec!["页面方向判断不充分"]);
+        assert_eq!(projected.revision, 3);
+        assert_eq!(page.text, raw);
+        let math = r"\(\underline{\frac{1}{2}}\)";
+        page.text = math.into(); page.original_text = math.into();
+        assert!(readable_page(page).warnings.iter().any(|w| w.contains("排版")));
     }
     #[test]
     fn legacy_projection_does_not_restore_a_table_the_user_deleted() {

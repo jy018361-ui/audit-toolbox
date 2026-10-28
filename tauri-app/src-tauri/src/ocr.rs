@@ -5,7 +5,7 @@ use crate::{
     ocr_store::{Page, Store, Table, failure, io_error},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use image::{DynamicImage, ImageDecoder, ImageFormat};
+use image::{DynamicImage, ImageDecoder};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -229,11 +229,18 @@ fn image_error(_: impl std::fmt::Display) -> AppError {
     )
 }
 fn png(image: &DynamicImage) -> Result<String, AppError> {
-    let mut output = Cursor::new(Vec::new());
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    let mut output = Vec::new();
+    // `write_to(Png)` uses Fast compression. These full-resolution scans are
+    // uploaded over the same connection bandwidth by several workers, so use
+    // balanced DEFLATE compression. Dimensions, channels and every decoded
+    // pixel remain unchanged; do not trade OCR detail for smaller JPEGs.
     image
-        .write_to(&mut output, ImageFormat::Png)
+        .write_with_encoder(PngEncoder::new_with_quality(
+            &mut output, CompressionType::Default, FilterType::Adaptive,
+        ))
         .map_err(image_error)?;
-    Ok(STANDARD.encode(output.into_inner()))
+    Ok(STANDARD.encode(output))
 }
 fn decode_base64(data: &str) -> Result<Vec<u8>, AppError> {
     STANDARD
@@ -644,6 +651,50 @@ mod tests {
         assert!(super::sparse_recognition_warning(&"正文".repeat(50), 1200).is_none());
     }
     use super::*;
+    #[test]
+    fn upload_png_preserves_scan_dimensions_channels_and_pixels() {
+        let rgb = DynamicImage::ImageRgb8(image::RgbImage::from_fn(123, 75, |x, y| {
+            image::Rgb([(x * 3) as u8, (y * 5) as u8, (x ^ y) as u8])
+        }));
+        let rgba = DynamicImage::ImageRgba8(image::RgbaImage::from_fn(71, 47, |x, y| {
+            image::Rgba([x as u8, y as u8, 241, ((x * 7 + y) % 256) as u8])
+        }));
+        let gray16 = DynamicImage::ImageLuma16(image::ImageBuffer::from_fn(17, 29, |x, y| {
+            image::Luma([((x * 257 + y * 123) % 65536) as u16])
+        }));
+        for input in [rgb, rgba, gray16] {
+            let encoded = STANDARD.decode(png(&input).unwrap()).unwrap();
+            let decoded = image::load_from_memory(&encoded).unwrap();
+            assert_eq!(decoded.width(), input.width());
+            assert_eq!(decoded.height(), input.height());
+            assert_eq!(decoded.color(), input.color());
+            assert_eq!(decoded.as_bytes(), input.as_bytes());
+        }
+    }
+
+    #[test]
+    #[ignore = "手动上传优化验收，需要 OCR_PNG_BENCH_IMAGE 指向本机样本；不联网"]
+    fn benchmark_lossless_upload_png_on_local_scan() {
+        use image::ImageFormat;
+        let path = std::env::var_os("OCR_PNG_BENCH_IMAGE").expect("请设置 OCR_PNG_BENCH_IMAGE");
+        let input = decode_image(&fs::read(PathBuf::from(path)).unwrap()).unwrap();
+        let fast_started = Instant::now();
+        let mut fast = Cursor::new(Vec::new());
+        input.write_to(&mut fast, ImageFormat::Png).unwrap();
+        let fast_ms = elapsed_ms(fast_started);
+        let balanced_started = Instant::now();
+        let balanced = STANDARD.decode(png(&input).unwrap()).unwrap();
+        let balanced_ms = elapsed_ms(balanced_started);
+        assert_eq!(image::load_from_memory(&balanced).unwrap().as_bytes(), input.as_bytes());
+        if let Some(output) = std::env::var_os("OCR_PNG_BENCH_OUTPUT") {
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new().write(true).create_new(true).open(PathBuf::from(output)).unwrap();
+            file.write_all(&balanced).unwrap();
+        }
+        eprintln!("{}", json!({"fastBytes":fast.get_ref().len(),"balancedBytes":balanced.len(),
+            "fastMs":fast_ms,"balancedMs":balanced_ms,"pixelsEqual":true,
+            "width":input.width(),"height":input.height()}));
+    }
     #[test]
     fn output_directory_reuses_successful_export_without_source_parent_grants() {
         let dir = tempfile::tempdir().unwrap();

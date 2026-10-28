@@ -25,10 +25,18 @@ pub(crate) fn has_latex_layout(raw: &str) -> bool {
     [r"\text", r"\boxed", r"\begin{", r"\mbox", r"\displaylines", r"\underline", r"\(", r"\["].iter().any(|tag| raw.contains(tag))
 }
 
+pub(crate) fn has_markdown_heading(raw: &str) -> bool {
+    Regex::new(r"(?m)^ {0,3}#{1,6}[\t ]+[^\r\n]+").unwrap().is_match(raw)
+}
+
 // Decode only complete prose wrappers. This is deliberately not a TeX renderer:
 // unknown commands, mathematical expressions and multi-column arrays survive
 // verbatim, so cleaning layout can never silently erase a financial formula.
 fn prose_layout(raw: &str, depth: usize) -> Option<String> {
+    layout_sequence(raw, depth, false)
+}
+
+fn layout_sequence(raw: &str, depth: usize, literal_text: bool) -> Option<String> {
     if depth > 32 { return None; }
     fn group(raw: &str) -> Option<(&str, &str)> {
         let raw = raw.trim_start().strip_prefix('{')?;
@@ -55,29 +63,39 @@ fn prose_layout(raw: &str, depth: usize) -> Option<String> {
             remaining = "";
         } else if let Some(rest) = remaining.strip_prefix(r"\\") {
             out.push('\n');
-            remaining = rest.trim_start();
-        } else {
+            remaining = if literal_text { rest } else { rest.trim_start() };
+        } else if literal_text && remaining.starts_with('\\') && remaining.chars().nth(1).is_some_and(|c| "%&#_${}".contains(c)) {
+            // TeX's escaped printable characters carry no mathematical
+            // operation; retain their literal character in prose leaves.
+            let escaped = remaining.chars().nth(1)?;
+            out.push(escaped);
+            remaining = &remaining[1 + escaped.len_utf8()..];
+        } else if remaining.starts_with('\\') {
             let command = [r"\textbf", r"\textrm", r"\text", r"\mbox", r"\boxed", r"\underline"]
                 .into_iter().find(|command| remaining.starts_with(command))?;
             let (body, rest) = group(&remaining[command.len()..])?;
-            if command == r"\boxed" {
-                out.push_str(&prose_layout(body, depth + 1)?);
-            } else {
-                // Braces/backslashes in text can be escapes, nested formatting
-                // or real document symbols. Preserve ambiguous cases intact.
-                if body.contains(['{', '}', '\\', '$', '^', '_']) { return None; }
-                out.push_str(body.trim());
-            }
-            remaining = rest.trim_start();
+            // Each known formatting wrapper may contain more wrappers. Only
+            // their literal text leaves are emitted; unknown commands or math
+            // make the whole expression survive verbatim, not a partial edit.
+            out.push_str(&layout_sequence(body, depth + 1, command != r"\boxed")?);
+            remaining = if literal_text { rest } else { rest.trim_start() };
+        } else if literal_text {
+            let end = remaining.find('\\').unwrap_or(remaining.len());
+            let literal = &remaining[..end];
+            if literal.contains(['{', '}', '$', '^', '_']) { return None; }
+            out.push_str(literal);
+            remaining = &remaining[end..];
+        } else {
+            return None;
         }
         found = true;
     }
-    found.then_some(out)
+    found.then(|| out.trim().to_owned())
 }
 
 fn readable_latex(raw: &str, warnings: &mut Vec<String>) -> String {
     if !has_latex_layout(raw) { return raw.to_owned(); }
-    let spans = Regex::new(r"(?s)\$\$([^$]+)\$\$|\$([^$]+)\$|\\\((.*?)\\\)|\\\[(.*?)\\\]").unwrap();
+    let spans = Regex::new(r"(?s)\$\$((?:\\.|[^$\\])+)\$\$|\$((?:\\.|[^$\\])+)\$|\\\((.*?)\\\)|\\\[(.*?)\\\]").unwrap();
     let result = spans.replace_all(raw, |captures: &regex::Captures<'_>| {
         let body = (1..=4).find_map(|i| captures.get(i)).unwrap().as_str();
         prose_layout(body, 0).unwrap_or_else(|| captures[0].to_owned())
@@ -86,6 +104,19 @@ fn readable_latex(raw: &str, warnings: &mut Vec<String>) -> String {
         warnings.push("本页含未能安全还原的排版或公式标记，已保留原内容，请对照扫描件核对。".into());
     }
     result
+}
+
+fn readable_headings(raw: &str) -> String {
+    // Recognize only standard, line-leading Markdown headings. An account's
+    // literal '#', C# or a price containing '#' must not change.
+    Regex::new(r"(?m)^ {0,3}#{1,6}[\t ]+([^\r\n]+)").unwrap()
+        .replace_all(raw, "$1").into_owned()
+}
+
+/// Formatting-only projection for saved business fields. Unlike the provider
+/// parser this never interprets JSON containers or changes their field keys.
+pub(crate) fn readable_ocr_text(raw: &str) -> String {
+    readable_headings(&readable_latex(raw, &mut vec![]))
 }
 
 fn push_text(out: &mut String, text: &str) {
@@ -433,7 +464,7 @@ pub(crate) fn readable_ocr_content(raw: &str) -> Value {
     } else if !structured {
         text = markdown_tables(&text, &mut tables);
     }
-    text = readable_latex(&text, &mut warnings);
+    text = readable_headings(&readable_latex(&text, &mut warnings));
     for table in &mut tables {
         if let Some(title) = table.get("title").and_then(Value::as_str).map(str::to_owned) {
             table["title"] = json!(readable_latex(&title, &mut warnings));
@@ -462,6 +493,42 @@ pub(crate) fn readable_ocr_content(raw: &str) -> Value {
 mod tests {
     use super::*;
     #[test]
+    fn nested_prose_styles_keep_amounts_dates_and_internal_word_spacing() {
+        for (raw, expected) in [
+            (r"鉴于\(\underline{\text{甲方项目（一期）建设需要}}\)，订立合同。", "鉴于甲方项目（一期）建设需要，订立合同。"),
+            (r"金额\(\underline{\text{壹亿伍仟伍佰万元整}}\)。", "金额壹亿伍仟伍佰万元整。"),
+            (r"\(\underline{\text{玖拾肆个月}}\)，从\(\text{\underline{2022年9月5}}\)日起。", "玖拾肆个月，从2022年9月5日起。"),
+            (r"$\text{Borrower \textbf{Alpha} Company}$", "Borrower Alpha Company"),
+            (r"$\text{利率\underline{3.5}\%，账号\textbf{00123}}$", "利率3.5%，账号00123"),
+            (r"$\text{实付\$100，A\&B，编号\#001，路径A\_B}$", "实付$100，A&B，编号#001，路径A_B"),
+        ] {
+            let parsed = readable_ocr_content(raw);
+            assert_eq!(parsed["text"], expected);
+            assert_eq!(parsed["warnings"], json!([]));
+            assert_eq!(readable_ocr_content(expected)["text"], expected);
+        }
+        let table = readable_ocr_content(r#"{"text":"正文","tables":[{"rows":[["\\(\\underline{\\text{00123}}\\)","\\(\\text{\\underline{50000}}\\)"]]}]}"#);
+        assert_eq!(table["tables"][0]["rows"][0], json!(["00123", "50000"]));
+    }
+    #[test]
+    fn headings_are_plain_text_without_touching_contract_hash_characters() {
+        let raw = "# 第一条 借款金额\n\n## 账号#001\nC#项目：#001\n####### 非标题\n金额为#100";
+        assert_eq!(readable_ocr_content(raw)["text"], "第一条 借款金额\n\n账号#001\nC#项目：#001\n####### 非标题\n金额为#100");
+        assert!(has_markdown_heading(raw));
+        assert!(!has_markdown_heading("C#项目：#001"));
+    }
+    #[test]
+    fn nested_formula_and_unbalanced_wrappers_survive_whole() {
+        for raw in [r"\(\underline{\text{利率}\frac{1}{2}}\)", r"\(\text{\underline{x^2}}\)",
+            r"\(\underline{\text{未闭合}\)", r"\(\underline{\text{正文}\unknown{内容}}\)"] {
+            let parsed = readable_ocr_content(raw);
+            assert_eq!(parsed["text"], raw);
+            assert!(!parsed["warnings"].as_array().unwrap().is_empty());
+        }
+        let nested = format!("\\({}文字{}\\)", r"\underline{".repeat(40), "}".repeat(40));
+        assert_eq!(readable_ocr_content(&nested)["text"], nested);
+    }
+    #[test]
     fn prose_latex_wrappers_are_readable_without_altering_contract_symbols() {
         let raw = r"$\text { 编号：000123 }$
 
@@ -477,7 +544,7 @@ $\boxed{\begin{array}{l}\text { 重要提示 } \\\text { 先决条件：负债�
     fn mathematical_and_ambiguous_latex_is_not_deleted_or_guessed() {
         for raw in [r"$\frac{1}{2}\text{万元}$", r"$\text{利率}x^2$", r"$\text{未闭合$",
             r"$\boxed{\begin{array}{lr}\text{A}&\text{B}\end{array}}$",
-            r"$\text{实付\$100}$", r"$\text{嵌套{括号}}$", r"$\unknown{未知内容}$", r"\(\underline{x^2}\)", r"\(\therefore(2i)^{6}i\)"] {
+            r"$\text{嵌套{括号}}$", r"$\unknown{未知内容}$", r"\(\underline{x^2}\)", r"\(\therefore(2i)^{6}i\)"] {
             let result = readable_ocr_content(raw);
             assert_eq!(result["text"], raw);
         }

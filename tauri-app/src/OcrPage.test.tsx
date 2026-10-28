@@ -223,6 +223,59 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
+
+it("分段摘录、保存与自动导出共用持续进度，暂停阻止下一段且后台状态不被重开", async () => {
+  const requests: { method: string; resolve: (value: any) => void; event: (value: any) => void }[] = [];
+  mocks.job.mockImplementation((method, _params, onJob, onEvent) => {
+    onJob?.(`batch-progress-${requests.length}`);
+    return new Promise((resolve) => requests.push({ method, resolve, event: onEvent }));
+  });
+  mocks.extract.mockImplementation(async (options) => {
+    for (let index = 0; index < 2; index++) {
+      options.onProgress(`正在核对第 ${index + 1}/2 段`);
+      options.onWorkProgress({ completed: index, total: 2 });
+      await options.request({ prompt: "合成提示词", text: "合成原文" });
+      options.onWorkProgress({ completed: index + 1, total: 2 });
+    }
+    return { rows: [], columns: [] };
+  });
+  await openDocument(false, true);
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("摘录场景"), { target: { value: "loan_general" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "开始摘录" }));
+  await waitFor(() => expect(requests).toHaveLength(1));
+  const dialog = screen.getByRole("dialog", { name: "OCR 摘录与导出" });
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "暂停" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "继续" })).toBeEnabled());
+  await act(async () => requests[0].resolve({}));
+  expect(requests).toHaveLength(1);
+  expect(screen.getByRole("progressbar", { name: "分段摘录进度" })).toHaveAttribute("value", "1");
+  fireEvent.click(screen.getByRole("button", { name: "继续" }));
+  await waitFor(() => expect(requests).toHaveLength(2));
+  expect(screen.getByRole("dialog")).toBe(dialog);
+  fireEvent.click(screen.getByRole("button", { name: "后台运行" }));
+  await act(async () => requests[1].resolve({}));
+  await waitFor(() => expect(requests).toHaveLength(3));
+  expect(requests[2].method).toBe("ocr.export");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "展开 OCR 摘录与导出进度" }));
+  expect(screen.getByText("正在导出")).toBeInTheDocument();
+  expect(screen.getByText("已处理 1 / 1 份文件")).toBeInTheDocument();
+  expect(screen.getByRole("progressbar", { name: "导出进度" })).not.toHaveAttribute("value");
+  mocks.pause.mockClear();
+  fireEvent.click(screen.getByRole("button", { name: "暂停" }));
+  await waitFor(() => expect(mocks.pause).toHaveBeenCalledWith("batch-progress-2", true));
+  expect(mocks.pause).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(screen.getByRole("button", { name: "继续" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "继续" }));
+  await act(async () => requests[2].resolve({ outputPaths: ["C:/输出/合同.xlsx"] }));
+  await screen.findByRole("status", { name: "导出结果" });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
 async function openDocument(showOriginal = true, managed = false) {
   render(
     <MemoryRouter>
@@ -246,6 +299,54 @@ async function openDocument(showOriginal = true, managed = false) {
     await screen.findByRole("region", { name: "全篇初始原文" });
   }
 }
+
+it("整批摘录取消通知当前请求，阻止保存与自动导出并关闭进度窗", async () => {
+  let rejectRequest!: (error: Error) => void;
+  mocks.job.mockImplementation((_method, _params, onJob) => {
+    onJob?.("cancel-extraction-progress");
+    return new Promise((_resolve, reject) => { rejectRequest = reject; });
+  });
+  mocks.extract.mockImplementation(async (options) => {
+    await options.request({ prompt: "合成提示词", text: "合成原文" });
+    return { rows: [], columns: [] };
+  });
+  await openDocument(false, true);
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  await waitFor(() => expect(screen.getByLabelText("摘录场景")).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("摘录场景"), { target: { value: "loan_general" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "开始摘录" }));
+  await waitFor(() => expect(mocks.job).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("button", { name: "取消任务" }));
+  await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith("cancel-extraction-progress"));
+  expect(screen.getByRole("button", { name: "正在取消…" })).toBeDisabled();
+  await act(async () => rejectRequest(new Error("合成摘录任务已取消")));
+  await screen.findByText("合成摘录任务已取消");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(mocks.job).toHaveBeenCalledTimes(1);
+  expect(mocks.call.mock.calls.some(([method]) => method === "ocr.extraction_save")).toBe(false);
+});
+
+it("单独导出仅显示一个进度窗，未知进度动态等待，失败后可重新导出", async () => {
+  let rejectExport!: (error: Error) => void;
+  mocks.job.mockImplementation((_method, _params, onJob, onEvent) => {
+    onJob?.("standalone-export-progress");
+    onEvent?.({ phase: "export", current: 0, total: 1, message: "正在生成项目 Excel" });
+    return new Promise((_resolve, reject) => { rejectExport = reject; });
+  });
+  await openDocument(false, true);
+  fireEvent.click(screen.getByRole("button", { name: "导出文件" }));
+  fireEvent.click(screen.getByRole("button", { name: "导出到目标目录" }));
+  await screen.findByRole("dialog", { name: "OCR 摘录与导出" });
+  await waitFor(() => expect(mocks.job).toHaveBeenCalledTimes(1));
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(screen.getByText("正在生成项目 Excel")).toBeInTheDocument();
+  expect(screen.getByRole("progressbar", { name: "导出进度" })).toHaveClass("is-working");
+  await act(async () => rejectExport(new Error("合成导出失败")));
+  await screen.findByText("合成导出失败");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "导出文件" })).toBeEnabled();
+});
 
 it("OCR 复用上传槽，点击选择与原生拖入文件/文件夹走相同导入流程", async () => {
   await openDocument();

@@ -175,6 +175,23 @@ const scenario = async (id: string) =>
   (await loadOcrScenarios()).find((item) => item.id === id)!;
 
 describe("OCR 场景默认提示词与逐字来源", () => {
+  it("分段结果核验完成才推进计数，校验修复不增加完成数", async () => {
+    const selected = await scenario("custom");
+    const work: { completed: number; total: number }[] = [];
+    let calls = 0;
+    await extractOcrScenario({
+      scenario: selected, stages: selected.defaultPrompts, document,
+      pages: [page("合成合同原文")],
+      onWorkProgress: (value) => work.push(value),
+      request: async () => {
+        expect(work.at(-1)).toEqual({ completed: 0, total: 1 });
+        calls++;
+        return calls === 1 ? response([], { parsed: { coverage_complete: false, items: [] } }) : response([]);
+      },
+    });
+    expect(calls).toBe(2);
+    expect(work.at(-1)).toEqual({ completed: 1, total: 1 });
+  });
   it("所有内置场景均有完整返回封装、行号回填与严格失败回归", async () => {
     const all = await loadOcrScenarios();
     const source = "借款人资产负债率不得超过65%。\n合同金额为001234元。";

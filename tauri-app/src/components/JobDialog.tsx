@@ -29,9 +29,10 @@ import "./JobDialog.css";
 import {
   OcrScanProgressContext,
   isOcrScanJob,
-  type OcrScanProgress,
+  type OcrProgress,
 } from "../ocrProgress";
 import { OcrScanProgressDialog } from "./OcrScanProgressDialog";
+import { OcrTaskProgressDialog } from "./OcrTaskProgressDialog";
 
 /** 结束态的三个 phase 由 Rust 侧统一约定（excel_merger.rs）。 */
 const FINISHED = ["completed", "failed", "cancelled"];
@@ -247,10 +248,10 @@ export function JobDialogProvider({
   const [operationErrors, setOperationErrors] = useState<
     Record<string, string>
   >({});
-  const [ocrScan, setOcrScan] = useState<OcrScanProgress>();
+  const [ocrScan, setOcrScan] = useState<OcrProgress>();
   const ocrProgressApi = useMemo(
-    () => ({ available: true, setProgress: setOcrScan }),
-    [],
+    () => ({ available: true, active: Boolean(ocrScan), setProgress: setOcrScan }),
+    [Boolean(ocrScan)],
   );
   const running = jobs.filter(
     (job) =>
@@ -370,7 +371,12 @@ export function JobDialogProvider({
         {children}
         <AudiPickOperationPanel raised={running.length > 0} />
         <OcrScanProgressDialog
-          progress={ocrScan}
+          progress={ocrScan && !("kind" in ocrScan) ? ocrScan : undefined}
+          obscured={open}
+          raised={running.length > 0}
+        />
+        <OcrTaskProgressDialog
+          progress={ocrScan && "kind" in ocrScan ? ocrScan : undefined}
           obscured={open}
           raised={running.length > 0}
         />

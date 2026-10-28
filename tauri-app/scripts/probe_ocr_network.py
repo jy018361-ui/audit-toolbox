@@ -36,6 +36,43 @@ def endpoint(base: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
+def production_request(base: str, model: str, captured: bytes) -> tuple[str, bytes]:
+    """Mirror official-endpoint selection after local credential capture.
+
+    The capture listener intentionally has a loopback URL, so the worker uses
+    its compatibility protocol there. Replaying it unchanged to the official
+    Qwen3.5 service would measure a different OCR task than production.
+    """
+    url = endpoint(base)
+    parsed = urlsplit(url)
+    host = parsed.hostname or ""
+    official = host in {"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com"} or host.endswith(".maas.aliyuncs.com")
+    # reqwest::Url normalizes an explicit HTTPS default port to None.
+    if model != "qwen3.5-ocr" or not official or parsed.scheme != "https" or parsed.port not in {None, 443} or parsed.path != "/compatible-mode/v1/chat/completions":
+        return url, captured
+    value = json.loads(captured)
+    image = value["messages"][0]["content"][0]["image_url"]["url"]
+    native = {
+        "model": model,
+        "input": {"messages": [{"role": "user", "content": [{
+            "image": image, "min_pixels": 3072, "max_pixels": 8388608, "enable_rotate": False,
+        }]}]},
+        "parameters": {"ocr_options": {"task": "document_parsing"}},
+    }
+    return urlunsplit((parsed.scheme, parsed.netloc, "/api/v1/services/aigc/multimodal-generation/generation", "", "")), json.dumps(native, ensure_ascii=False).encode()
+
+
+def response_text(value: dict) -> tuple[str, str | None]:
+    """Accept the actual native assembled text; never count repeated blocks."""
+    choice = (value.get("output", value))["choices"][0]
+    content = choice["message"]["content"]
+    if isinstance(content, list):
+        content = "\n\n".join(part["text"] for part in content if isinstance(part.get("text"), str))
+    if not isinstance(content, str):
+        raise ValueError("缺少识别正文。")
+    return content, choice.get("finish_reason")
+
+
 def stages(metrics: dict, https: bool) -> dict | None:
     """Cumulative curl times become disjoint intervals; reject early responses.
     Waiting after upload still contains network return and remote processing.
@@ -140,9 +177,9 @@ def measure(curl: str, url: str, body_file: Path, authorization: str, root: Path
     if completed.returncode == 0 and metrics["http_code"] == 200 and response_file.exists():
         try:
             value = json.loads(response_file.read_bytes())
-            choice = value["choices"][0]
-            result["success"] = bool(choice["message"]["content"].strip()) and choice.get("finish_reason") != "length"
-            result["characters"] = len(choice["message"]["content"])
+            content, finish = response_text(value)
+            result["success"] = bool(content.strip()) and finish != "length"
+            result["characters"] = len(content)
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             pass
     return result
@@ -173,7 +210,9 @@ def main() -> None:
         ocr = json.loads(row[0])
     if ocr.get("engine") != "bailian":
         parser.error("当前 OCR 引擎不是百炼，不改动现有引擎。")
-    url = endpoint(ocr.get("bailian_base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    base = ocr.get("bailian_base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model = (ocr.get("bailian_model") or "qwen3.5-ocr").strip() or "qwen3.5-ocr"
+    url = endpoint(base)
     args.output.mkdir(parents=True, exist_ok=False)
     report = {"curl": version, "host": urlsplit(url).hostname, "model": ocr.get("bailian_model") or "qwen3.5-ocr", "route": args.route,
               "proxyEnvironmentConfigured": any(value for key, value in os.environ.items() if key.lower() in {"https_proxy", "http_proxy", "all_proxy"}),
@@ -181,6 +220,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="audit-ocr-network-") as temporary:
         root = Path(temporary)
         body, authorization = capture(args.worker_exe.resolve(strict=True), args.image.resolve(strict=True), ocr, root)
+        url, body = production_request(base, model, body)
+        report["protocol"] = "native-document-parsing" if "/multimodal-generation/" in url else "compatible"
         report["bodySha256"] = hashlib.sha256(body).hexdigest()
         report["requestBytes"] = len(body)
         body_file = root / "body.json"

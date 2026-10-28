@@ -13,6 +13,7 @@ import {
   type SyncBusyEntry,
 } from "@/api";
 import { isAudiPickBusyManaged, subscribeAudiPickOperations } from "../audipickOperation";
+import { useOcrScanProgressDialog } from "../ocrProgress";
 
 /** 短于这个时间的调用不弹窗：快操作弹一下就关只会闪。 */
 const SHOW_DELAY_MS = 1000;
@@ -146,6 +147,7 @@ export function SyncBusyDialog({
   /** 仅供开发态几何夹具直接呈现「最小化后的小条」形态。 */
   fixtureMinimized?: boolean;
 } = {}) {
+  const { active: ocrManaged } = useOcrScanProgressDialog();
   const [visible, setVisible] = useState(
     () => Boolean(fixtureEntries?.length) && !fixtureMinimized,
   );
@@ -178,7 +180,8 @@ export function SyncBusyDialog({
       }
       let latest: SyncBusyEntry[] = [];
       const refresh = () => {
-        const next = latest.filter((entry) => !isAudiPickBusyManaged(entry.method));
+        const next = latest.filter((entry) => !isAudiPickBusyManaged(entry.method)
+          && !(ocrManaged && entry.method.startsWith("ocr.")));
         const wasIdle = entriesRef.current.length === 0;
         entriesRef.current = next;
         setEntries(next);
@@ -213,7 +216,7 @@ export function SyncBusyDialog({
       const offOperation = subscribeAudiPickOperations(refresh);
       return () => { offBusy(); offOperation(); };
     },
-    [fixtureEntries, fixtureMinimized],
+    [fixtureEntries, fixtureMinimized, ocrManaged],
   );
 
   // 卸载时清掉计时器，避免测试环境泄漏。

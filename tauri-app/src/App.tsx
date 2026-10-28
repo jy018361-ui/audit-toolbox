@@ -2118,7 +2118,6 @@ export function Settings({
       <PageHeader
         eyebrow="本机配置"
         title="设置"
-        detail="按用途管理工具箱配置；密钥保存在本机凭据管理器。"
         actions={
           <div className="settings-header-actions">
           <span className="settings-auto-status" aria-live="polite">
@@ -2433,7 +2432,6 @@ export function Settings({
                     value={form.timeout}
                     onChange={(e) => set("timeout", e.target.value)}
                   />
-                  <small>字段复核可能耗时较长，建议设置为 120 秒以上。</small>
                 </label>
                 <label className="field settings-toggle">
                   <span>思考模式</span>
@@ -2452,7 +2450,6 @@ export function Settings({
               >
                 {testingLlm ? "正在测试…" : "测试 LLM 连接"}
               </button>
-              <span>测试成功后仍需保存配置。</span>
             </div>
             {llmTestResult && (
               <div
@@ -2464,9 +2461,6 @@ export function Settings({
           </section>
           <section className="list-card">
             <h2>OCR 配置</h2>
-            <p className="settings-note">
-              OCR 与 AudiPick 共用扫描件识别配置，按所选引擎显示；旧 AudiPick 数据迁移可按需展开。
-            </p>
             <div className="form-grid">
               <label className="field">
                 <span>OCR 引擎</span>
@@ -2513,35 +2507,25 @@ export function Settings({
                 <label className="field"><span>百炼 OCR API Key</span><SecretInput autoSave key={`bailian-ocr-key-${secretRevision}`} label="百炼 OCR API Key" credentialName="bailian_ocr_key" value={form.bailianOcrKey} onChange={(value) => set("bailianOcrKey", value)} placeholder="留空表示不修改" /></label>
               </>}
             </div>
-            {form.ocrEngine === "bailian" && <><p className="settings-note">当前 URL：{form.bailianOcrUrl.trim() || BAILIAN_OCR_BASE_URL}</p><p className="settings-note">使用与 API Key 同一业务空间的兼容接口 URL（通常以 /compatible-mode/v1 结尾）。模型和密钥独立于统一 AI。</p></>}
-            {form.ocrEngine === "ai" && (
-              <p className="settings-note">
-                AI 视觉测试使用已保存的统一 LLM 配置，不使用 AudiPick 专用模型。修改上方 LLM 配置后，请先保存再测试图片识别。
-              </p>
-            )}
-            {form.ocrEngine === "local" && (
-              <p className="settings-note">请先启动已配置的本机 OCR 服务。</p>
-            )}
             <div className="settings-test-row">
               <button className="secondary" disabled={testingOcr} onClick={() => void testOcrConnection()}>
                 {testingOcr ? "正在测试 OCR…" : "测试 OCR 连接"}
               </button>
-              <span>测试不会自动保存配置，成功后仍需保存。</span>
+              {form.ocrEngine !== "local" && <span>云端测试可能计费</span>}
             </div>
-            <p className="settings-note">仅识别内置示例图片，不发送单证或合同；云端测试可能消耗一次额度。百度与百炼使用当前填写的配置，密钥留空时使用对应的已保存密钥。</p>
             {ocrTestResult && (
               <div role="status" className={`settings-test-result ${ocrTestResult.ok ? "success" : "failed"}`}>
                 {ocrTestResult.text}
               </div>
             )}
             <details className="settings-advanced">
-              <summary>旧数据迁移（按需使用）</summary>
+              <summary>旧数据迁移</summary>
               <p>
-                先在旧 AudiPick 配置页导出迁移备份，再在这里导入。导入按项目 ID
-                去重，不会删除旧数据。
+                导入旧 AudiPick 的迁移备份，按项目去重。
               </p>
               <div className="input-with-button">
                 <input
+                  aria-label="迁移备份文件"
                   value={displayFileName(backupPath)}
                   readOnly
                   placeholder="选择 AudiPick迁移备份.json"
@@ -2580,13 +2564,6 @@ export function Settings({
           </section>
           <section className="list-card">
             <h2>语音转写（百炼）</h2>
-            <p className="settings-note">
-              会议录音会发送至你配置的百炼转写服务；纪要整理使用上方的大模型配置。
-            </p>
-            <details className="settings-note">
-              <summary>查看通道差异与计费方式</summary>
-              <p>通用通道按录音时长计费，是否区分说话人取决于模型与接入方式；套餐通道消耗 Token Plan 套餐额度，不区分说话人，仅支持 WAV 录音。</p>
-            </details>
             <div className="form-grid">
               <label className="field">
                 <span>转写通道</span>
@@ -2608,7 +2585,7 @@ export function Settings({
                 />
               </label>
               <label className="field settings-toggle">
-                <span>开机自启（登录后驻留托盘监控）</span>
+                <span>开机自启</span>
                 <SwitchInput
                   checked={autostartEnabled}
                   disabled={autostartBusy}
@@ -2625,7 +2602,6 @@ export function Settings({
                       onChange={(e) => set("planBaseUrl", e.target.value)}
                       placeholder="https://token-plan.cn-beijing.maas.aliyuncs.com"
                     />
-                    <small>可填服务根地址，或粘贴以 /compatible-mode/v1 结尾的订阅地址。</small>
                   </label>
                   <label className="field">
                     <span>套餐转写模型</span>
@@ -2635,7 +2611,6 @@ export function Settings({
                       onChange={(e) => set("planModel", e.target.value)}
                       placeholder="qwen-audio-3.0-realtime-plus"
                     />
-                    <small>qwen-audio-3.0-asr-flash 使用 HTTP 识别；qwen-audio-3.0-realtime-plus 使用实时接口。</small>
                   </label>
                   <label className="field">
                     <span>套餐 API 密钥（sk-sp- 开头）</span>
@@ -2658,7 +2633,6 @@ export function Settings({
                       onChange={(e) => set("asrBaseUrl", e.target.value)}
                       placeholder="https://dashscope.aliyuncs.com"
                     />
-                    <small>填写服务根地址，留空使用默认地址。</small>
                   </label>
                   <label className="field">
                     <span>通用转写模型</span>
@@ -2667,7 +2641,6 @@ export function Settings({
                       onChange={(e) => set("asrModel", e.target.value)}
                       placeholder="paraformer-v2"
                     />
-                    <small>长会议可用 qwen-audio-3.1-asr-flash-filetrans（区分说话人）；留空使用 paraformer-v2。qwen-audio-3.0-asr-flash / qwen-audio-3.1-asr-flash 使用 HTTP 识别，当前输出不区分说话人。</small>
                   </label>
                   <label className="field">
                     <span>百炼 API 密钥</span>
@@ -2683,10 +2656,6 @@ export function Settings({
                 </>
               )}
             </div>
-            <p className="settings-note">
-              「开机自启」勾选后立即生效：登录 Windows
-              后工具箱自动在系统托盘启动会议监控，不弹窗口；取消「后台常驻」会同时取消开机自启。
-            </p>
             <div className="settings-test-row">
               <button
                 className="secondary"
@@ -2713,9 +2682,6 @@ export function Settings({
         <div className="settings-col">
           <section className="list-card">
             <h2>界面主题</h2>
-            <p className="settings-note">
-              选择后立即生效。
-            </p>
             <div className="theme-picker">
               {[
                 {
@@ -2784,12 +2750,9 @@ export function Settings({
           
           <section className="list-card">
             <h2>本地缓存</h2>
-            <p>
-              缓存读过的科目余额表与序时账，再次打开同一份文件直接命中，不必重新解析。
-            </p>
             {cacheStatError ? (
               <div className="cache-stat-error" role="alert">
-                <span>缓存占用读取失败，请重新读取后再决定是否清理。</span>
+                <span>缓存读取失败，请重试。</span>
                 <Button type="button" variant="outline" size="sm" onClick={() => void refreshCacheStat()}>
                   重新读取
                 </Button>

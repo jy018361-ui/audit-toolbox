@@ -87,6 +87,41 @@ it("autosaves text after typing pauses, applies selects, and removes help and sa
   await waitFor(() => expect(settingsSet).toHaveBeenLastCalledWith(expect.objectContaining({cache:expect.objectContaining({cleanup:"off"})})));
 });
 
+it("设置页在切换 OCR 和语音通道后仍保持精简文案", async () => {
+  render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+
+  const expectConciseCopy = () => {
+    expect(screen.queryByText(/仍需保存|先保存|测试不会自动保存/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/当前 URL：|OCR 与 AudiPick 共用|仅识别内置示例图片/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/缓存读过的科目余额表|按用途管理工具箱配置/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/字段复核可能耗时较长|会议录音会发送至|长会议可用/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/查看通道差异与计费方式|配置帮助|选择后立即生效/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("API Key")).toHaveAttribute("placeholder", "留空表示不修改");
+  };
+
+  expectConciseCopy();
+  for (const engine of ["bailian", "baidu", "local", "ai"]) {
+    fireEvent.change(screen.getByLabelText("OCR 引擎"), { target: { value: engine } });
+    expectConciseCopy();
+    if (engine === "local") {
+      expect(screen.queryByText("云端测试可能计费")).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByText("云端测试可能计费")).toBeInTheDocument();
+    }
+  }
+  expect(screen.getByText("旧数据迁移").closest("details")).not.toHaveAttribute("open");
+  expect(screen.getByLabelText("迁移备份文件")).toBeInTheDocument();
+  expect(screen.getByLabelText("开机自启")).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText("转写通道"), { target: { value: "token_plan" } });
+  fireEvent.change(screen.getByLabelText("套餐转写模型"), { target: { value: "qwen-audio-3.0-asr-flash" } });
+  expectConciseCopy();
+  expect(screen.getByText("样音测试消耗少量套餐额度")).toBeInTheDocument();
+  await flushSettingsChanges();
+});
+
 it("failed autosave keeps the current input and retries without a save button", async () => {
   vi.mocked(settingsSet).mockRejectedValueOnce({userMessage:"磁盘暂不可写"});
   render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);

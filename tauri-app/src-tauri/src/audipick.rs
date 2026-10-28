@@ -38,11 +38,15 @@ pub fn test_ocr_connection(
     api_key: Option<&str>,
     secret_key: Option<&str>,
     ocr_config: Option<&Value>,
+    use_global_llm: bool,
 ) -> Result<Value, AppError> {
     if image.is_empty() || image.len() > 200_000 {
         return Err(error("OCR_TEST_IMAGE_INVALID", "OCR 测试图片无效。", None));
     }
     let start = std::time::Instant::now();
+    if use_global_llm {
+        settings["audipickLlm"] = json!({"mode": "inherit"});
+    }
     // Only accept non-secret OCR fields from the unsaved form.
     if let Some(draft) = ocr_config {
         for name in ["bailian_base_url", "bailian_model"] {
@@ -628,6 +632,65 @@ fn config_status(settings: &Value) -> Result<Value, AppError> {
             "audipickOpenaiKey": secret("audipick_llm_api_key").is_some(),
             "audipickDifyKey": secret("audipick_dify_api_key").is_some()}
     }))
+}
+
+/// Independent OCR always uses toolbox credentials, never AudiPick's profile.
+pub(crate) fn toolbox_ocr_status(settings: &Value) -> Result<Value, AppError> {
+    let mut global = settings.clone();
+    global["audipickLlm"] = json!({"mode":"inherit"});
+    let mut status = config_status(&global)?;
+    status["llm"]["visionReady"] = json!(status["llm"]["ready"] == true && status["llm"]["apiType"] != "dify_chat");
+    Ok(status)
+}
+
+pub(crate) fn toolbox_ocr_page(params: &Value, settings: &Value) -> Result<Value, AppError> {
+    let mut global = settings.clone();
+    global["audipickLlm"] = json!({"mode":"inherit"});
+    // Truncated text must not be saved as a completed page.
+    global["llm"]["__rejectTruncated"] = json!(true);
+    let engine = settings.pointer("/ocr/engine").and_then(Value::as_str).unwrap_or("ai");
+    let image = params["imageBase64"].as_str().filter(|s| !s.is_empty())
+        .ok_or_else(|| error("OCR_IMAGE_REQUIRED", "没有收到需要识别的页面图片。", None))?;
+    if engine == "ai" {
+        let content = toolbox_llm_request(crate::bailian_ocr::STRUCTURED_PROMPT, "", Some(image), &global)?;
+        return Ok(structured_ocr_result(&content, "ai"));
+    }
+    if engine == "bailian" {
+        let config = crate::bailian_ocr::OcrConfig::from_settings(&global)?;
+        let key = secret("bailian_ocr_key").ok_or_else(||error("OCR_KEY_MISSING", "请填写百炼 OCR API Key。", None))?;
+        let response = config.recognize_structured(image, &key)?;
+        let mut result = structured_ocr_result(response["text"].as_str().unwrap_or(""), "bailian");
+        result["httpTiming"] = response["httpTiming"].clone();
+        return Ok(result);
+    }
+    ocr(params, &global)
+}
+
+fn structured_ocr_result(raw: &str, engine: &str) -> Value {
+    let mut result = crate::bailian_ocr::readable_ocr_content(raw);
+    result["engine"] = json!(engine);
+    // Kept for internal diagnostics only; callers persist it separately from
+    // page text and the normal user/export payload.
+    result["diagnosticResponse"] = json!(raw);
+    result
+}
+
+pub(crate) fn toolbox_llm_request(prompt: &str, text: &str, image: Option<&str>, settings: &Value) -> Result<String, AppError> {
+    let mut global = settings.clone();
+    global["audipickLlm"] = json!({"mode":"inherit"});
+    global["llm"]["__rejectTruncated"] = json!(true);
+    let llm = audipick_llm_config(&global);
+    if !llm["enabled"].as_bool().unwrap_or(false) {
+        return Err(error("LLM_DISABLED", "统一 LLM 尚未启用，请在设置中配置。", None));
+    }
+    if image.is_some() && llm["api_type"] == "dify_chat" {
+        return Err(error("OCR_MODEL_UNSUPPORTED", "当前统一 LLM 接口不支持页面图片。", None));
+    }
+    let content = request_llm(&llm, prompt, text, image)?;
+    if content.trim().is_empty() {
+        return Err(error("OCR_MODEL_EMPTY", "模型未返回正文，请缩短摘录范围或检查模型设置。", None));
+    }
+    Ok(content)
 }
 
 fn llm_text(params: &Value, settings: &Value) -> Result<Value, AppError> {
@@ -2774,7 +2837,7 @@ fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
         &llm,
         "请逐字识别图片中的中文和数字，只返回识别文字，不要解释。",
         "",
-        Some(image),
+        Some(params["imageBase64"].as_str().unwrap_or(image)),
     )?;
     Ok(json!({"text": content, "engine": "ai"}))
 }
@@ -2784,7 +2847,7 @@ fn bailian_ocr(image: &str, settings: &Value, api_key: Option<&str>) -> Result<V
     let key = api_key.filter(|v| !v.trim().is_empty()).map(str::to_owned)
         .or_else(|| secret("bailian_ocr_key"))
         .ok_or_else(|| error("OCR_KEY_MISSING", "请填写百炼 OCR API Key。", None))?;
-    config.recognize(image, &key)
+    config.recognize_structured(image, &key)
 }
 
 fn local_ocr_ready() -> bool {
@@ -2844,10 +2907,15 @@ fn local_ocr(image: &str) -> Result<Value, AppError> {
             Some(message.into()),
         ));
     }
-    Ok(json!({
+    let mut result = json!({
         "text": value.get("text").and_then(Value::as_str).unwrap_or(""),
         "engine": "local",
-    }))
+    });
+    if value["tables"].is_array() {
+        result["tables"] = value["tables"].clone();
+        result["warnings"] = value.get("warnings").cloned().unwrap_or(json!([]));
+    }
+    Ok(result)
 }
 
 pub(crate) fn request_llm(
@@ -2954,7 +3022,7 @@ fn request_llm_with_key(
     let timeout = config
         .get("timeout")
         .and_then(Value::as_u64)
-        .unwrap_or(60)
+        .unwrap_or(120)
         .clamp(10, 300);
     let client = Client::builder()
         .timeout(Duration::from_secs(timeout))
@@ -2977,8 +3045,8 @@ fn request_llm_with_key(
             format!("{base}/chat-messages")
         };
         let query = format!("{prompt}\n\n{text}");
-        let response = client.post(url).bearer_auth(key).json(&json!({"inputs":{},"query":query,"response_mode":"blocking","user":"audit-toolbox"})).send().map_err(network_error)?;
-        let value = read_llm_response(response, "Dify 提取请求失败。")?;
+        let response = client.post(url).bearer_auth(key).json(&json!({"inputs":{},"query":query,"response_mode":"blocking","user":"audit-toolbox"})).send().map_err(|failure| llm_request_error(failure, timeout))?;
+        let value = read_llm_response(response, "Dify 提取请求失败。", timeout)?;
         return Ok(value
             .get("answer")
             .and_then(Value::as_str)
@@ -2995,7 +3063,8 @@ fn request_llm_with_key(
         format!("{base}/chat/completions")
     };
     let user_content = if let Some(data) = image {
-        json!([{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":format!("data:image/jpeg;base64,{data}")}}])
+        let image_url = if data.starts_with("data:image/") { data.to_owned() } else { format!("data:image/jpeg;base64,{data}") };
+        json!([{"type":"text","text":format!("{prompt}\n\n{text}")},{"type":"image_url","image_url":{"url":image_url}}])
     } else {
         Value::String(text.to_string())
     };
@@ -3015,11 +3084,15 @@ fn request_llm_with_key(
         "messages": [{"role":"system","content":system_prompt},{"role":"user","content":user_content}],
         "thinking": {"type": if thinking_enabled(config) { "enabled" } else { "disabled" }},
     });
+    apply_provider_thinking(&mut body, base, config);
     if json_prompt.is_some() {
         body["response_format"] = json!({"type": "json_object"});
     }
-    let response = request.json(&body).send().map_err(network_error)?;
-    let value = read_llm_response(response, "LLM 提取请求失败。")?;
+    let response = request.json(&body).send().map_err(|failure| llm_request_error(failure, timeout))?;
+    let value = read_llm_response(response, "LLM 提取请求失败。", timeout)?;
+    if config["__rejectTruncated"] == true && value.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length") {
+        return Err(error("OCR_MODEL_TRUNCATED", "模型输出被截断，请拆分页面或缩短摘录范围后重试。", None));
+    }
     let content = value
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -3166,6 +3239,36 @@ fn thinking_enabled(config: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The official Bailian Qwen API controls hybrid thinking with a top-level
+/// boolean, not the MiniMax/DeepSeek-shaped `thinking.type` object. Preserve
+/// the saved user preference without changing provider, model or settings.
+/// https://help.aliyun.com/en/model-studio/deep-thinking
+/// Unknown gateways/models retain their existing wire protocol.
+fn apply_provider_thinking(body: &mut Value, base: &str, config: &Value) {
+    let Ok(url) = reqwest::Url::parse(base) else { return; };
+    let host = url.host_str().unwrap_or("");
+    if url.scheme() != "https" || url.port().is_some()
+        || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some()
+        || !matches!(url.path().trim_end_matches('/'), "/compatible-mode/v1" | "/compatible-mode/v1/chat/completions")
+        || !(matches!(host, "dashscope.aliyuncs.com" | "dashscope-intl.aliyuncs.com" | "dashscope-us.aliyuncs.com")
+            || host.ends_with(".maas.aliyuncs.com"))
+    { return; }
+    let model = config["model"].as_str().unwrap_or("");
+    // Explicit known capabilities avoid sending false to thinking-only models.
+    let hybrid = matches!(model,
+        "qwen3.8-flash" | "qwen3.8-max" | "qwen3.8-max-0902" | "qwen3.8-27b"
+        | "qwen3.7-max" | "qwen3.7-max-2026-05-20" | "qwen3.7-max-2026-06-08"
+        | "qwen3.7-plus" | "qwen3.7-plus-2026-05-26" | "qwen3.7-flash" | "qwen3.7-flash-2026-07-15"
+        | "qwen3.6-plus" | "qwen3.6-plus-2026-04-02" | "qwen3.6-flash" | "qwen3.6-flash-2026-04-16"
+        | "qwen3.5-plus" | "qwen3.5-plus-2026-02-15" | "qwen3.5-flash" | "qwen3.5-flash-2026-02-23"
+        | "qwen3.5-397b-a17b" | "qwen3.5-122b-a10b" | "qwen3.5-27b" | "qwen3.5-35b-a3b");
+    let thinking_only = matches!(model, "qwen3.8-2.4t-a95b" | "qwen3.7-max-preview" | "qwen3.7-max-2026-05-17");
+    if hybrid || thinking_only {
+        if let Some(object) = body.as_object_mut() { object.remove("thinking"); }
+        if hybrid { body["enable_thinking"] = json!(thinking_enabled(config)); }
+    }
+}
+
 fn wants_json_response(base: &str) -> bool {
     base.to_ascii_lowercase().contains("api.deepseek.com")
 }
@@ -3193,9 +3296,10 @@ fn body_snippet(body: &str) -> String {
 fn read_llm_response(
     response: reqwest::blocking::Response,
     label: &str,
+    timeout: u64,
 ) -> Result<Value, AppError> {
     let status = response.status();
-    let body = response.text().map_err(network_error)?;
+    let body = response.text().map_err(|failure| llm_request_error(failure, timeout))?;
     if !status.is_success() {
         let detail = serde_json::from_str::<Value>(&body)
             .as_ref()
@@ -3214,6 +3318,14 @@ fn read_llm_response(
             Some(format!("{e}；响应开头：{}", body_snippet(&body))),
         )
     })
+}
+
+fn llm_request_error(failure: reqwest::Error, timeout: u64) -> AppError {
+    if failure.is_timeout() {
+        error("LLM_REQUEST_TIMEOUT", &format!("模型请求已达到配置的 {timeout} 秒时限，本段尚未获得完整响应。原文已保留，请减少单次摘录范围后重试。"), None)
+    } else {
+        network_error(failure)
+    }
 }
 
 fn network_error(error: impl std::fmt::Display) -> AppError {
@@ -3237,6 +3349,58 @@ fn error(code: &str, message: &str, detail: Option<String>) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn independent_ocr_uses_global_profile_and_keeps_failed_structure() {
+        let settings = json!({"llm":{"enabled":false},"audipickLlm":{"mode":"dedicated","enabled":true,"model":"must-not-use"}});
+        let failure = toolbox_ocr_page(&json!({"imageBase64":"synthetic"}), &settings).unwrap_err();
+        assert_eq!(failure.code, "LLM_DISABLED");
+        let settings = json!({"llm":{"enabled":true,"base_url":"invalid-global-url"},"audipickLlm":{"mode":"dedicated","enabled":false}});
+        assert_eq!(toolbox_llm_request("p", "t", None, &settings).unwrap_err().code, "LLM_URL_INVALID");
+        let valid = structured_ocr_result(r#"{"text":"原文 00123","tables":[],"warnings":[]}"#, "ai");
+        assert_eq!(valid["text"], "原文 00123");
+        assert!(valid["structureError"].is_null());
+        let invalid = structured_ocr_result("原始模型输出", "bailian");
+        assert_eq!(invalid["text"], "原始模型输出");
+        assert!(invalid["structureError"].is_null());
+        assert_eq!(invalid["diagnosticResponse"], "原始模型输出");
+    }
+
+    #[test]
+    fn strict_ocr_rejects_truncation_and_preserves_png_and_reference_text() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let size = stream.read(&mut buffer).unwrap();
+                assert!(size > 0);
+                bytes.extend_from_slice(&buffer[..size]);
+                if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&bytes[..end]);
+                    let length: usize = header.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
+                    }).unwrap();
+                    if bytes.len() >= end + 4 + length { break; }
+                }
+            }
+            let body = json!({"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}).to_string();
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            String::from_utf8(bytes).unwrap()
+        });
+        let config = json!({"base_url":format!("http://{address}/v1"),"model":"synthetic","__rejectTruncated":true});
+        let failure = request_llm_with_key(&config,"逐字识别","参考文字",Some("data:image/png;base64,synthetic"),Some("synthetic-key")).unwrap_err();
+        assert_eq!(failure.code,"OCR_MODEL_TRUNCATED");
+        let request = server.join().unwrap();
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["messages"][1]["content"][1]["image_url"]["url"],"data:image/png;base64,synthetic");
+        assert!(body["messages"][1]["content"][0]["text"].as_str().unwrap().contains("参考文字"));
+    }
+
     #[test]
     fn audipick_profile_priority_and_credentials_are_isolated() {
         let settings = json!({"llm":{"enabled":false,"model":"global","api_type":"openai"},
@@ -3303,9 +3467,21 @@ mod tests {
     #[test]
     fn ocr_test_rejects_invalid_images_without_network() {
         for image in [String::new(), "a".repeat(200_001)] {
-            let failure = test_ocr_connection(json!({}), "baidu", &image, None, None, None).unwrap_err();
+            let failure = test_ocr_connection(json!({}), "baidu", &image, None, None, None, false).unwrap_err();
             assert_eq!(failure.code, "OCR_TEST_IMAGE_INVALID");
         }
+    }
+
+    #[test]
+    fn toolbox_ocr_test_never_uses_audipick_dedicated_model() {
+        let settings = json!({
+            "llm": {"enabled": false},
+            "audipickLlm": {"mode": "dedicated", "enabled": true, "api_type": "dify_chat"}
+        });
+        let failure = test_ocr_connection(settings.clone(), "ai", "test-image", None, None, None, true).unwrap_err();
+        assert_eq!(failure.code, "LLM_DISABLED");
+        let failure = test_ocr_connection(settings, "ai", "test-image", None, None, None, false).unwrap_err();
+        assert_eq!(failure.code, "OCR_MODEL_UNSUPPORTED");
     }
 
     #[test]
@@ -3959,6 +4135,119 @@ mod tests {
             json_response_prompt("https://example.com/v1", "只输出严格 JSON").is_none(),
             "未知兼容端点不得贸然发送 response_format"
         );
+    }
+    #[test]
+    #[ignore = "手动真实服务验收，仅在用户明确授权同一份资料实测时运行"]
+    fn live_dev_text_request_from_stdin() {
+        // Credentials remain in this process; the caller passes only the
+        // already authorized prompt/text and non-secret Dev model settings.
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        let request: Value = serde_json::from_str(&input).expect("需要单行 JSON 实测请求");
+        let mut config = request["llm"].clone();
+        config["__rejectTruncated"] = json!(true);
+        let started = std::time::Instant::now();
+        let key = keyring::Entry::new("AuditToolboxDev", "llm_api_key")
+            .and_then(|entry| entry.get_password());
+        let result = match key.as_ref() {
+            Ok(key) => request_llm_with_key(&config, request["prompt"].as_str().unwrap_or(""),
+                request["text"].as_str().unwrap_or(""), None, Some(key)),
+            Err(_) => Err(error("LLM_KEY_MISSING", "未找到 Dev 统一 LLM 密钥。", None)),
+        };
+        let elapsed = started.elapsed().as_secs_f64();
+        let value = match result {
+            Ok(raw) => json!({"ok":true,"elapsedSeconds":elapsed,"model":config["model"],
+                "result":{"parsed":serde_json::from_str::<Value>(&raw).ok(),"raw":raw}}),
+            Err(mut failure) => {
+                // A gateway error can echo authorization data. Never propagate
+                // those details through even this local acceptance protocol.
+                failure.detail = None;
+                if let Ok(key) = key { failure.user_message = failure.user_message.replace(&key, "[已隐去]"); }
+                json!({"ok":false,"elapsedSeconds":elapsed,"model":config["model"],"error":failure})
+            }
+        };
+        println!("{}", value);
+    }
+    #[test]
+    fn llm_timeout_is_named_for_slow_headers_and_slow_body_without_waiting_real_limits() {
+        use std::io::{Read, Write};
+        for delay_body in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut bytes = [0; 1024];
+                let _ = stream.read(&mut bytes);
+                if delay_body {
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n");
+                    let _ = stream.flush();
+                }
+                thread::sleep(Duration::from_millis(650));
+            });
+            let client = Client::builder().no_proxy().timeout(Duration::from_millis(250)).build().unwrap();
+            let request = client.get(format!("http://{address}/v1")).send();
+            let failure = if delay_body {
+                read_llm_response(request.unwrap(), "合成失败", 120).unwrap_err()
+            } else { llm_request_error(request.unwrap_err(), 120) };
+            assert_eq!(failure.code, "LLM_REQUEST_TIMEOUT");
+            assert!(failure.user_message.contains("120 秒时限"));
+            assert!(failure.user_message.contains("原文已保留"));
+            assert!(!failure.user_message.contains("代理"));
+            assert!(failure.detail.is_none());
+            server.join().unwrap();
+        }
+        let invalid = Client::new().get("not a URL").send().unwrap_err();
+        assert_eq!(llm_request_error(invalid, 120).code, "NETWORK_ERROR");
+    }
+    #[test]
+    fn official_qwen_hybrid_thinking_follows_the_saved_switch_with_the_correct_parameter() {
+        for base in ["https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "https://dashscope-us.aliyuncs.com:443/compatible-mode/v1"] {
+            for enabled in [false, true] {
+                let config = json!({"model":"qwen3.8-flash","thinking_enabled":enabled});
+                let mut body = json!({"model":"qwen3.8-flash","messages":[{"role":"user","content":"合成资料"}],"thinking":{"type":"disabled"}});
+                apply_provider_thinking(&mut body, base, &config);
+                assert_eq!(body["enable_thinking"], enabled);
+                assert!(body.get("thinking").is_none());
+                assert_eq!(body["messages"][0]["content"], "合成资料");
+                assert_eq!(config["thinking_enabled"], enabled);
+            }
+        }
+        let mut absent = json!({"thinking":{"type":"disabled"}});
+        apply_provider_thinking(&mut absent, "https://dashscope.aliyuncs.com/compatible-mode/v1", &json!({"model":"qwen3.8-flash"}));
+        assert_eq!(absent["enable_thinking"], false);
+        let mut camel_case = json!({"thinking":{"type":"enabled"}});
+        apply_provider_thinking(&mut camel_case, "https://dashscope.aliyuncs.com/compatible-mode/v1", &json!({"model":"qwen3.8-flash","thinkingEnabled":true}));
+        assert_eq!(camel_case["enable_thinking"], true);
+    }
+    #[test]
+    fn thinking_only_qwen_never_receives_an_unsupported_false_switch() {
+        for model in ["qwen3.8-2.4t-a95b", "qwen3.7-max-preview", "qwen3.7-max-2026-05-17"] {
+            let mut body = json!({"thinking":{"type":"disabled"}});
+            apply_provider_thinking(&mut body, "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", &json!({"model":model,"thinking_enabled":false}));
+            assert!(body.get("enable_thinking").is_none());
+            assert!(body.get("thinking").is_none());
+        }
+    }
+    #[test]
+    fn other_providers_models_and_proxy_routes_keep_the_existing_protocol() {
+        for (base, model) in [
+            ("https://api.deepseek.com/v1", "deepseek-chat"),
+            ("https://gateway.example/v1", "qwen3.8-flash"),
+            ("http://127.0.0.1:8765/compatible-mode/v1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com.evil.example/compatible-mode/v1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com:8443/compatible-mode/v1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com/proxy/v1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com/compatible-mode/v1?query=1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.8-unknown"),
+            ("https://dashscope.aliyuncs.com/compatible-mode/v1", "glm-5.3"),
+        ] {
+            let mut body = json!({"thinking":{"type":"disabled"},"model":model});
+            let original = body.clone();
+            apply_provider_thinking(&mut body, base, &json!({"model":model,"thinking_enabled":false}));
+            assert_eq!(body, original, "不应改写 {base} / {model}");
+        }
     }
     #[test]
     fn batch_keeps_per_document_failures() {

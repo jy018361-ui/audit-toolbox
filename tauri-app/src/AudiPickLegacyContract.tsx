@@ -466,7 +466,7 @@ function ContractDetail(props: AudiPickLegacyContractProps) {
 
 function WorkpaperView(props: AudiPickLegacyContractProps) {
   const { workpaper } = props;
-  const financialOnly = workpaper.ruleId === "loan_covenant" && workpaper.columns.some(column => ["财务指标", "财务契约类型"].includes(column.label));
+  const financialOnly = workpaper.ruleId === "loan_covenant" && workpaper.columns.some(column => ["财务指标", "财务契约类型", "财务指标契约类型"].includes(column.label));
   const covenant = workpaper.ruleId === "loan_covenant" && !financialOnly;
   const displayedRows = covenant
     ? workpaper.rows.filter((row) => isFormalCovenantRow(row.values))
@@ -580,7 +580,7 @@ function WorkpaperView(props: AudiPickLegacyContractProps) {
           />
           <span>{displayedRows.length} 条</span>
         </label>
-        {financialOnly && <p>按案例库摘录 C01—C05 广义财务契约；仅呈现合同约定，不判断实际履约或流动负债分类。</p>}
+        {financialOnly && <p>按案例库摘录 C01—C05 财务指标契约；仅呈现合同约定，不判断实际履约或流动负债分类。</p>}
         {covenant && (
           <div className="aplc-procedure-controls">
             <label>结果范围
@@ -605,7 +605,7 @@ function WorkpaperView(props: AudiPickLegacyContractProps) {
         <h3>待新增案例（{workpaper.pendingCases.length}）</h3>
         <p>以下客观限制尚未匹配当前案例库，请人工确认后补充 Excel 案例、导入启用并重新提取；本区域不计入正式结果或导出。</p>
         {workpaper.pendingCases.map((item) => <details key={item.id}>
-          <summary>{valueText(item.values.title) || "待确认的财务契约"}</summary>
+          <summary>{valueText(item.values.title) || "待确认的财务指标契约"}</summary>
           <p>{valueText(item.values._covenant_review_reason)}</p>
           <pre style={{ whiteSpace: "pre-wrap" }}>{valueText(item.values.excerpt)}</pre>
           <p>{valueText(item.values.source_reference)}</p>

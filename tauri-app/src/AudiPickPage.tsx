@@ -2211,7 +2211,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         const supplementaryItems = filterCovenantScope(outcome.items, "supplementary").length;
         const diagnostic = outcome.unresolvedCount ? `（原始失败记录 ${outcome.unresolvedRecordCount} 条，原因见底稿诊断）` : "";
         const pendingCount = outcome.items.filter(row => row._covenant_pending_case === true).length;
-        const message = `已保存财务契约 ${repaymentItems} 项${pendingCount ? `，待新增案例 ${pendingCount} 项` : ""}。${diagnostic}`;
+        const message = `已保存财务指标契约 ${repaymentItems} 项${pendingCount ? `，待新增案例 ${pendingCount} 项` : ""}。${diagnostic}`;
         setResult({ items: outcome.items.length, repaymentItems, supplementaryItems, unresolvedItems: outcome.unresolvedCount });
         addLog(bundle[0].name, "契约关联提取", message, outcome.unresolvedCount ? "warn" : "done");
         operation.finish(outcome.unresolvedCount ? "failed" : "completed", message);
@@ -2637,7 +2637,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               addLog(
                 anchor.name,
                 "批量契约关联提取",
-                `已保存财务契约 ${repaymentItems} 项，待新增案例 ${outcome.items.filter(row => row._covenant_pending_case === true).length} 项${outcome.unresolvedCount ? `（原始失败记录 ${outcome.unresolvedRecordCount} 条，原因见底稿诊断）` : ""}`,
+                `已保存财务指标契约 ${repaymentItems} 项，待新增案例 ${outcome.items.filter(row => row._covenant_pending_case === true).length} 项${outcome.unresolvedCount ? `（原始失败记录 ${outcome.unresolvedRecordCount} 条，原因见底稿诊断）` : ""}`,
                 outcome.unresolvedCount ? "warn" : "done",
               );
               if (outcome.unresolvedCount) throw new Error(`${anchor.name} 已保存可核实结果，但有 ${outcome.unresolvedCount} 组关联未完成（原始失败记录 ${outcome.unresolvedRecordCount} 条），请查看底稿诊断。`);

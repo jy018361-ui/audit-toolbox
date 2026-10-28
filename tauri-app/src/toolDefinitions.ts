@@ -125,13 +125,12 @@ export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
     ], actions:[{label:"读取并自动映射",method:"kanzhang.mark_inspect",mode:"job",tone:"secondary"},{label:"标记并导出",method:"kanzhang.mark_export",mode:"job",tone:"primary"}]
   },
   audit_roll_forward: {
-    intro: "将上年度标准底稿结转到本年度，迁移期初、公式、措辞和 CRA 信息。",
-    fields:[
-      {key:"templateDir",label:"模板目录",kind:"folder",required:true},{key:"priorDir",label:"上年底稿目录",kind:"folder",required:true},
-      {key:"pmtePath",label:"PMTE/CRA 文件",kind:"file",extensions:excel},{key:"outputDir",label:"输出目录",kind:"folder",required:true},
-      {key:"subjectCodes",label:"科目代码",kind:"text",required:true,placeholder:"例如 C,J1,K1"},
-      {key:"companyName",label:"公司名称",kind:"text",required:true},{key:"bsDate",label:"资产负债表日",kind:"date",required:true}
-    ], actions:[{label:"检查模板与底稿",method:"roll_forward.validate",mode:"call",tone:"secondary"},{label:"开始结转",method:"roll_forward.process",mode:"job",tone:"primary"}]
+    intro: "点击获取RollForward小工具",
+    fields: [], actions: []
+  },
+  ocr: {
+    intro: "按项目识别扫描单证和合同，校对原文与表格并导出可编辑 Excel；需要时选择场景、编辑提示词后摘录。",
+    fields: [], actions: [{ label: "读取 OCR 项目", method: "ocr.projects", mode: "call", tone: "primary" }]
   },
   audipick: {
     intro: "统一管理合同、PDF、OCR、条款规则、文件关联及收入合同审阅底稿。",
@@ -139,5 +138,9 @@ export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
       {key:"projectName",label:"项目名称",kind:"text",required:true},{key:"pdfPaths",label:"合同 PDF",kind:"files",extensions:["pdf"]},
       {key:"ruleId",label:"审阅规则",kind:"select",options:[{label:"贷款契约",value:"loan_covenant"},{label:"收入合同底稿",value:"revenue_workpaper"}]}
     ], actions:[{label:"读取项目状态",method:"audipick.projects",mode:"call",tone:"primary"}]
-  }
+  },
+  dataflow: {
+    intro: "通过节点流程读取、整理、计算、筛选并输出表格数据。",
+    fields: [], actions: [{label:"运行数据流",method:"dataflow_run",mode:"call",tone:"primary"}]
+  },
 };

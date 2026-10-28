@@ -18,11 +18,13 @@ export const TASK_STATE_TOOL_IDS = [
   "file_list_directory",
   "pdf_to_excel",
   "audipick",
+  "ocr",
   "audit_roll_forward",
   "wp_service_generator",
   "fuzzy_match",
   "tbje_check",
   "meeting_minutes",
+  "dataflow",
 ] as const;
 
 export const TASK_STATE_SCENARIOS = [

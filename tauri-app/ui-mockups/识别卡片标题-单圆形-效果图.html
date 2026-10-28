@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>已识别卡片 · 单圆形背景效果图</title>
+<style>
+  /*
+   * 需求收敛（v3）：只要一个正圆——不椭圆、不胶囊、不叠圆，整体尺寸比上一轮明显收小。
+   * 三个画法：A 圆衬在开头几字后面 / B 圆衬在标题正中 / C 圆形印章（标题两行折进圆里）。
+   */
+  :root {
+    --ink: #182626;
+    --brand: #1e6267;
+    --success-bg: #dcf3e7;
+    --success-fg: #176642;
+    --danger-fg: #983d2f;
+    --border: #cbd7d2;
+    --border-soft: #e4e9e7;
+    --surface-page: #edf1ee;
+    --pill-border: #99b7aa;
+    --pill-bg: #e8f7ef;
+    --card-border: #afccc5;
+    --bar-bg: #ebf8f1;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    background: var(--surface-page);
+    color: var(--ink);
+    padding: 44px 48px 64px;
+  }
+  .page { max-width: 1400px; margin: 0 auto; }
+  h1 { font-size: 24px; font-weight: 700; color: #173a3e; }
+  .lede { margin-top: 8px; font-size: 13px; color: #5d706d; line-height: 1.7; }
+
+  /* ===== 放大对照区 ===== */
+  .zoom-row {
+    display: flex;
+    gap: 28px;
+    margin-top: 24px;
+    padding: 26px 32px 22px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: #fff;
+  }
+  .zoom-cell { flex: 1; min-width: 0; }
+  .zoom-stage { height: 150px; display: flex; align-items: center; }
+  .zoom-stage .demo { transform: scale(1.5); transform-origin: left center; }
+  .zoom-cell.big .demo { transform: scale(1.2); transform-origin: left center; }
+  .zoom-cell > p { margin-top: 10px; font-size: 12px; color: #5d706d; line-height: 1.6; }
+  .zoom-cell > b { display: block; font-size: 13px; color: #173a3e; margin-top: 12px; }
+
+  /* ===== 变体区 ===== */
+  .variant { margin-top: 38px; }
+  .variant-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  .variant-tag {
+    flex: none;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: var(--brand);
+    color: #eef6f2;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+  }
+  .variant-tag.ghost { background: #83908e; }
+  .variant-tag.reco { background: #176642; }
+  .variant-head b { font-size: 16px; color: #173a3e; }
+  .variant-desc { font-size: 13px; color: #5d706d; margin-bottom: 16px; line-height: 1.7; }
+
+  .fx-source-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    align-items: stretch;
+  }
+  .fx-card {
+    position: relative;
+    background: #fff;
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    box-shadow: 0 10px 28px rgba(30, 98, 103, 0.07);
+    padding: 24px;
+    overflow: hidden;
+  }
+  .fx-card-header { position: relative; z-index: 1; display: flex; align-items: center; }
+  .fx-card-title { position: relative; z-index: 1; font-size: 16px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+  .fx-card-content { position: relative; z-index: 1; margin-top: 22px; }
+
+  /* 现状 */
+  .fx-card.bar .fx-card-header {
+    margin: 0 -24px;
+    padding: 9px 24px;
+    background: var(--bar-bg);
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .fx-detected-file {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 13px 16px;
+    border: 1px solid var(--pill-border);
+    border-radius: 11px;
+    background: var(--pill-bg);
+  }
+  .fx-detected-file .name {
+    flex: 1;
+    min-width: 0;
+    color: var(--success-fg);
+    font-weight: 650;
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .fx-detected-file .acts { display: flex; gap: 22px; flex: none; }
+  .fx-detected-file button {
+    border: 0;
+    background: none;
+    padding: 0;
+    font: inherit;
+    font-size: 14px;
+    color: var(--danger-fg);
+    cursor: pointer;
+  }
+  .fx-meta { margin-top: 16px; font-size: 14px; color: var(--ink); }
+  .fx-meta + .fx-meta { margin-top: 12px; }
+
+  /* ===== A · 圆衬在开头几字后面 ===== */
+  .dot-head { position: relative; display: inline-block; }
+  .dot-head::before {
+    content: "";
+    position: absolute;
+    left: -12px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    background: var(--success-bg);
+  }
+
+  /* ===== B · 圆衬在标题正中 ===== */
+  .mid-dot { position: relative; display: inline-block; padding: 6px 2px; }
+  .mid-dot::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 54px;
+    height: 54px;
+    border-radius: 50%;
+    background: var(--success-bg);
+  }
+
+  /* ===== C · 圆形印章：标题两行折进一个正圆 ===== */
+  .seal {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 108px;
+    height: 108px;
+    border-radius: 50%;
+    background: var(--success-bg);
+    text-align: center;
+  }
+  .seal b { font-size: 15px; font-weight: 600; color: var(--ink); line-height: 1.55; }
+
+  .footnote {
+    margin-top: 44px;
+    padding: 16px 20px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: #fff;
+    font-size: 13px;
+    color: #5d706d;
+    line-height: 1.9;
+  }
+  .footnote b { color: #173a3e; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>「已识别」卡片 · 单圆形背景效果图</h1>
+  <p class="lede">
+    只保留一个正圆：没有椭圆、没有叠圆，尺寸也比上一轮收小。
+    上排是放大的局部对照，方便先挑形状；下面再看整张卡片的实际效果。
+  </p>
+
+  <!-- 放大对照 -->
+  <div class="zoom-row">
+    <div class="zoom-cell">
+      <div class="zoom-stage">
+        <div class="demo"><span class="dot-head"><span class="fx-card-title">已识别：JE 序时账</span></span></div>
+      </div>
+      <b>A · 圆衬在开头</b>
+      <p>一个 46px 的圆垫在「已识别」三个字后面，文字压在圆上。</p>
+    </div>
+    <div class="zoom-cell">
+      <div class="zoom-stage">
+        <div class="demo"><span class="mid-dot"><span class="fx-card-title">已识别：JE 序时账</span></span></div>
+      </div>
+      <b>B · 圆衬在正中</b>
+      <p>一个 54px 的圆垫在标题正中间，两端文字露在圆外。</p>
+    </div>
+    <div class="zoom-cell big">
+      <div class="zoom-stage">
+        <div class="demo"><span class="seal"><b>已识别：<br>JE 序时账</b></span></div>
+      </div>
+      <b>C · 圆形印章</b>
+      <p>标题折成两行装进一个 108px 的正圆，像一个绿色印章。</p>
+    </div>
+  </div>
+
+  <!-- 现状 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag ghost">现状</span>
+      <b>绿色横条（对照用）</b>
+    </div>
+    <div class="fx-source-grid">
+      <div class="fx-card bar">
+        <div class="fx-card-header"><span class="fx-card-title">已识别：JE 序时账</span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card bar">
+        <div class="fx-card-header"><span class="fx-card-title">已识别：TB 科目余额表</span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- A -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag reco">方案 A · 推荐</span>
+      <b>圆衬在开头几字后面</b>
+    </div>
+    <p class="variant-desc">圆形最小、最不抢空间：46px 的圆刚好垫起「已识别」三个字，后面的文字照常排在白底上。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header"><span class="dot-head"><span class="fx-card-title">已识别：JE 序时账</span></span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header"><span class="dot-head"><span class="fx-card-title">已识别：TB 科目余额表</span></span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- B -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag">方案 B</span>
+      <b>圆衬在标题正中</b>
+    </div>
+    <p class="variant-desc">圆在标题正中央，左右对称，看起来更像「标题的背景」；两端文字露在圆外是它的特点。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header"><span class="mid-dot"><span class="fx-card-title">已识别：JE 序时账</span></span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header"><span class="mid-dot"><span class="fx-card-title">已识别：TB 科目余额表</span></span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- C -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag">方案 C</span>
+      <b>圆形印章 · 标题装进圆里</b>
+    </div>
+    <p class="variant-desc">标题折成两行放进一个完整的圆，文字全部在圆内、四周留白均匀；
+      卡片会比现在高一些，但「一个圆」的形状最完整。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="seal"><b>已识别：<br>JE 序时账</b></span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="seal"><b>已识别：<br>TB 科目余额表</b></span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="footnote">
+    <b>说明</b><br>
+    ① 三个方案都只有一个正圆，颜色同为主题浅绿；选定后圆的大小、颜色深浅还可以再微调。<br>
+    ② 同样是一次改动，借款利息 / 存款利息 / 汇兑损益三个页面同时生效。
+  </div>
+</div>
+</body>
+</html>

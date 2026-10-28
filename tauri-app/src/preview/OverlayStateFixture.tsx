@@ -12,6 +12,44 @@ import { ColumnFilterMenu } from "@/components/ColumnFilterMenu";
 import { CurrencyFallbackDialog } from "@/components/CurrencyFallbackDialog";
 import type { JobEvent } from "@/types";
 import "./OverlayStateFixture.css";
+import { OcrScanProgressDialog } from "@/components/OcrScanProgressDialog";
+
+function OcrScanFixture() {
+  const [paused, setPaused] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  return (
+    <main className="overlay-state-fixture">
+      <h1>OCR 扫描进度预览</h1>
+      <p>合成演示数据，不调用识别服务。</p>
+      <OcrScanProgressDialog
+        progress={{
+          fileName: "项目贷款合同_2026.pdf",
+          fileIndex: 1,
+          fileCount: 2,
+          completed: 8,
+          total: 30,
+          phase: "scanning",
+          paused,
+          stopping,
+          controlling: false,
+          pages: Array.from({ length: 13 }, (_, index) => ({
+            page: index + 1,
+            state:
+              index < 8
+                ? index === 3
+                  ? "failed"
+                  : "completed"
+                : index === 12
+                  ? "queued"
+                  : "running",
+          })),
+          onPause: () => setPaused(!paused),
+          onCancel: () => setStopping(true),
+        }}
+      />
+    </main>
+  );
+}
 
 const longText = "超长项目名称与网络路径".repeat(18);
 const longPath = String.raw`\\审计共享盘\集团客户\2026年度审计\未分类底稿\${"非常长的客户名称_".repeat(16)}\最终复核版本_请勿覆盖.xlsx`;
@@ -45,13 +83,17 @@ function ConfirmFixture() {
         ref={triggerRef}
         type="button"
         data-fixture-return-focus="confirm"
-        onClick={() => void confirmDialog({
-        title: longText,
-        message: Array.from({ length: 18 }, (_, index) =>
-          `第 ${index + 1} 项：${index % 2 ? longError : longPath}`,
-        ).join("\n"),
-        tone: "danger",
-        })}
+        onClick={() =>
+          void confirmDialog({
+            title: longText,
+            message: Array.from(
+              { length: 18 },
+              (_, index) =>
+                `第 ${index + 1} 项：${index % 2 ? longError : longPath}`,
+            ).join("\n"),
+            tone: "danger",
+          })
+        }
       >
         打开长错误确认框
       </button>
@@ -125,19 +167,32 @@ function JobPillConfirmFixture() {
   const triggerRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      const minimize = document.querySelector<HTMLButtonElement>(".job-dialog-footer button");
+      const minimize = document.querySelector<HTMLButtonElement>(
+        ".job-dialog-footer button",
+      );
       minimize?.click();
       window.setTimeout(() => triggerRef.current?.click(), 0);
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
   return (
-    <JobDialogProvider jobs={[job("job-pill", "后台工具", 37)]} nameOf={(toolId) => toolId}>
-      <button ref={triggerRef} type="button" onClick={() => void confirmDialog({
-        title: "停止后台任务并清空记录？",
-        message: longError,
-        tone: "danger",
-      })}>打开任务条上方确认框</button>
+    <JobDialogProvider
+      jobs={[job("job-pill", "后台工具", 37)]}
+      nameOf={(toolId) => toolId}
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() =>
+          void confirmDialog({
+            title: "停止后台任务并清空记录？",
+            message: longError,
+            tone: "danger",
+          })
+        }
+      >
+        打开任务条上方确认框
+      </button>
       <ConfirmDialogHost />
     </JobDialogProvider>
   );
@@ -146,14 +201,21 @@ function JobPillConfirmFixture() {
 function DualPillFixture() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      document.querySelector<HTMLButtonElement>(".job-dialog-footer button")?.click();
+      document
+        .querySelector<HTMLButtonElement>(".job-dialog-footer button")
+        ?.click();
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
   return (
-    <JobDialogProvider jobs={[job("job-dual", "文件处理", 37)]} nameOf={(toolId) => toolId}>
+    <JobDialogProvider
+      jobs={[job("job-dual", "文件处理", 37)]}
+      nameOf={(toolId) => toolId}
+    >
       <SyncBusyDialog
-        fixtureEntries={[{ id: 1, method: "fx.inspect_je", detail: "01序时账.xlsx" }]}
+        fixtureEntries={[
+          { id: 1, method: "fx.inspect_je", detail: "01序时账.xlsx" },
+        ]}
         fixtureMinimized
       />
     </JobDialogProvider>
@@ -164,25 +226,41 @@ function FilterFixture({ withConfirm = false }: { withConfirm?: boolean }) {
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
   useEffect(() => {
     if (!anchor || !withConfirm) return;
-    const timer = window.setTimeout(() => void confirmDialog({
-      title: "确认当前筛选？",
-      message: longError,
-    }), 0);
+    const timer = window.setTimeout(
+      () =>
+        void confirmDialog({
+          title: "确认当前筛选？",
+          message: longError,
+        }),
+      0,
+    );
     return () => window.clearTimeout(timer);
   }, [anchor, withConfirm]);
   return (
     <>
-      <button ref={setAnchor} type="button">列筛选触发器</button>
-      {anchor && <ColumnFilterMenu
-        field="超长科目名称"
-        anchor={anchor}
-        loading={false}
-        data={{ values: Array.from({ length: 30 }, (_, index) => `${longText}${index}`), total: 30, truncated: false, keyword: "" }}
-        selected={[]}
-        onSearch={() => undefined}
-        onApply={() => undefined}
-        onClose={() => undefined}
-      />}
+      <button ref={setAnchor} type="button">
+        列筛选触发器
+      </button>
+      {anchor && (
+        <ColumnFilterMenu
+          field="超长科目名称"
+          anchor={anchor}
+          loading={false}
+          data={{
+            values: Array.from(
+              { length: 30 },
+              (_, index) => `${longText}${index}`,
+            ),
+            total: 30,
+            truncated: false,
+            keyword: "",
+          }}
+          selected={[]}
+          onSearch={() => undefined}
+          onApply={() => undefined}
+          onClose={() => undefined}
+        />
+      )}
       {withConfirm && <ConfirmDialogHost />}
     </>
   );
@@ -190,33 +268,58 @@ function FilterFixture({ withConfirm = false }: { withConfirm?: boolean }) {
 
 function CurrencyFixture() {
   const [open, setOpen] = useState(true);
-  const [value, setValue] = useState<"" | "functional" | "twoPointByCurrency">("");
-  return <CurrencyFallbackDialog
-    open={open}
-    affectedGroupCount={37}
-    missingCurrencies={["USD", "EUR", "JPY", longText]}
-    value={value}
-    onChange={setValue}
-    onCancel={() => setOpen(false)}
-    onContinue={() => setOpen(false)}
-  />;
+  const [value, setValue] = useState<"" | "functional" | "twoPointByCurrency">(
+    "",
+  );
+  return (
+    <CurrencyFallbackDialog
+      open={open}
+      affectedGroupCount={37}
+      missingCurrencies={["USD", "EUR", "JPY", longText]}
+      value={value}
+      onChange={setValue}
+      onCancel={() => setOpen(false)}
+      onContinue={() => setOpen(false)}
+    />
+  );
 }
 
 /** Development-only state matrix used by scripts/overlay-layout-audit.cjs. */
 export function OverlayStateFixture() {
-  const scenario = new URLSearchParams(window.location.search).get("overlay-fixture") ?? "confirm";
-  const jobs = scenario === "job-multi"
-    ? Array.from({ length: 8 }, (_, index) => job(`job-${index}`, `工具${index}${longText}`, index * 12))
-    : [job("job-1", `Excel 合并${longText}`, 37)];
-  const combinedJobs = [...jobs, { ...job("done", "完成工具", 100), phase: "completed" as const, outputPaths: [longPath] }];
+  const scenario =
+    new URLSearchParams(window.location.search).get("overlay-fixture") ??
+    "confirm";
+  if (scenario === "ocr-scan") return <OcrScanFixture />;
+  const jobs =
+    scenario === "job-multi"
+      ? Array.from({ length: 8 }, (_, index) =>
+          job(`job-${index}`, `工具${index}${longText}`, index * 12),
+        )
+      : [job("job-1", `Excel 合并${longText}`, 37)];
+  const combinedJobs = [
+    ...jobs,
+    {
+      ...job("done", "完成工具", 100),
+      phase: "completed" as const,
+      outputPaths: [longPath],
+    },
+  ];
 
   return (
     <MemoryRouter>
       <main className="overlay-state-fixture" data-scenario={scenario}>
         <h1>浮层状态几何夹具</h1>
-        <p className="overlay-fixture-long-content">{longPath} · {longError}</p>
-        <button type="button" data-overlay-tour-target="true">被引导的长文案目标按钮</button>
-        <div className="window-controls"><button type="button" aria-label="关闭窗口">×</button></div>
+        <p className="overlay-fixture-long-content">
+          {longPath} · {longError}
+        </p>
+        <button type="button" data-overlay-tour-target="true">
+          被引导的长文案目标按钮
+        </button>
+        <div className="window-controls">
+          <button type="button" aria-label="关闭窗口">
+            ×
+          </button>
+        </div>
         {scenario === "confirm" && <ConfirmFixture />}
         {scenario === "sync" && (
           <SyncBusyDialog
@@ -229,12 +332,18 @@ export function OverlayStateFixture() {
         {scenario === "sync-pill" && (
           <SyncBusyDialog
             fixtureEntries={[
-              { id: 0, method: "fx.inspect_je", detail: `${longText}.xlsx / 序时账` },
+              {
+                id: 0,
+                method: "fx.inspect_je",
+                detail: `${longText}.xlsx / 序时账`,
+              },
             ]}
             fixtureMinimized
           />
         )}
-        {(scenario === "job-single" || scenario === "job-multi" || scenario === "job-success-stack") && (
+        {(scenario === "job-single" ||
+          scenario === "job-multi" ||
+          scenario === "job-success-stack") && (
           <JobDialogProvider jobs={jobs} nameOf={(toolId) => toolId}>
             {scenario === "job-success-stack" && (
               <SuccessNudge
@@ -249,17 +358,28 @@ export function OverlayStateFixture() {
         {scenario === "tour" && (
           <BeginnerTour steps={tourSteps} onFinish={() => undefined} />
         )}
-        {(scenario === "step" || scenario === "step-confirm-stack") && <StepFixture />}
+        {(scenario === "step" || scenario === "step-confirm-stack") && (
+          <StepFixture />
+        )}
         {scenario === "step-confirm-stack" && <ConfirmFixture />}
         {scenario === "success" && (
           <SuccessNudge
             autoDismissMs={60_000}
             toolNameOf={() => longText}
-            jobs={[{ ...job("done", "done", 100), phase: "completed", outputPaths: ["C:\\输出\\结果.xlsx"] }]}
+            jobs={[
+              {
+                ...job("done", "done", 100),
+                phase: "completed",
+                outputPaths: ["C:\\输出\\结果.xlsx"],
+              },
+            ]}
           />
         )}
         {scenario === "jargon" && (
-          <p>资产ID <JargonTip term={longText} text={`${longText}。${longText}。`} /></p>
+          <p>
+            资产ID{" "}
+            <JargonTip term={longText} text={`${longText}。${longText}。`} />
+          </p>
         )}
         {scenario === "fuzzy" && <FuzzyFixture />}
         {scenario === "currency" && <CurrencyFixture />}
@@ -268,7 +388,10 @@ export function OverlayStateFixture() {
         {scenario === "job-pill-confirm-stack" && <JobPillConfirmFixture />}
         {scenario === "dual-pill" && <DualPillFixture />}
         {scenario === "jargon-confirm-stack" && (
-          <div><JargonTip term={longText} text={`${longPath}。${longError}`} /><ConfirmFixture /></div>
+          <div>
+            <JargonTip term={longText} text={`${longPath}。${longError}`} />
+            <ConfirmFixture />
+          </div>
         )}
       </main>
     </MemoryRouter>

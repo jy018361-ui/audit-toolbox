@@ -465,6 +465,7 @@ fn auto_finalize_recording(app: &tauri::AppHandle, state: &Arc<MeetingState>) {
                 if let Err(error) = crate::job_start(
                     app.state::<crate::ExcelMergerService>(),
                     app.state::<crate::storage::Storage>(),
+                    app.state::<crate::AllowedPaths>(),
                     "meeting.generate".into(),
                     params,
                 )

@@ -1,3 +1,44 @@
+## 2026-10-28 · 官方 Qwen 思考开关参数适配
+
+- 问题：统一模型请求此前仅发送 `thinking.type`。本机 Dev 已保存 `thinking_enabled=false`，但官方 Qwen Chat 接口使用顶层 `enable_thinking`；`qwen3.8-flash` 为默认启用思考、可切换的混合思考模型。因此旧请求不能据其发送了 `thinking.type=disabled` 就认定服务已关闭思考。
+- 实现：仅在标准 HTTPS 百炼域名、标准 compatible-mode 路径、已知支持切换的 Qwen 模型上，按原有用户开关发送 `enable_thinking` 布尔值，并移除错误的 `thinking` 对象。已知只支持思考的 Qwen 模型不发送不支持的 false 开关。其他模型、未知网关、非标准端口和代理路径继续原协议，不推断能力、不改用户配置或凭据，不切换模型或代理。
+- 超时反馈：统一模型 OpenAI/Dify 的响应头等待和响应体读取超时均返回 `LLM_REQUEST_TIMEOUT`，说明实际配置秒数、本段未获得完整响应且原文保留；不再把达到时限一律归为地址/代理错误。其他网络失败继续原错误类型。仅缩小范围建议，不自动延长设置或重发付费请求。
+- 边界：修复协议参数不等同证明某次历史延迟全部由思考引起；真实端到端耗时及完整条款覆盖需由本次合同实测另行验证。
+- 官方依据：[深度思考支持模型及默认值](https://help.aliyun.com/en/model-studio/deep-thinking)、[Chat 参数规范](https://help.aliyun.com/en/model-studio/qwen-api-via-openai-chat-completions)。
+- 定向回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib official_qwen_hybrid_thinking`、`cargo test --manifest-path src-tauri/Cargo.toml --lib thinking_only_qwen`、`cargo test --manifest-path src-tauri/Cargo.toml --lib other_providers_models_and_proxy_routes`、`cargo test --manifest-path src-tauri/Cargo.toml --lib llm_timeout_is_named`。测试覆盖已有开关、默认关闭、只支持思考模型以及未知网关保持原请求；不调用付费服务。
+
+## 2026-10-28 · 财务指标契约口径及命名
+
+- 内置财务场景更名为“借款·财务指标契约”，四列字段、执行进度、待确认项及独立 OCR 导出的场景标题同步；`loan_covenant` 和既有持久化字段保留，旧“财务契约类型”列继续识别为财务专用底稿。
+- 共用 `isNotificationOnlyCovenant` 和 `governingCovenantText` 读取实际义务：列表中的金额/净资产比例若仅决定何时通知/报送，不纳入财务指标契约；跨页、跨模型分段仍读取完整原文主句。事先同意、具体比例限制、客观指标及具体金额型违约条件仍按 C01—C05 和启用案例库判断；共同违约后果不能独自把通知事项变成财务限制。
+- 更新默认提示词和规则版本，不改写用户已编辑提示词。即使使用旧提示词，保存前仍执行分类校验；历史结果不自动覆写，需基于已保存原文重新摘录。
+- 回归：`npx vitest run src/covenantObligationContext.test.ts src/financialMetrics.test.ts src/ocrScenarios.test.ts src/audipickPreviewFinancialCovenant.test.ts src/covenantFourColumns.test.ts src/audipickCovenantExtraction.test.ts`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml --lib ocr_export::tests`。真实本机合同的旧模型候选仅做离线回放，不提交客户资料、不调用线上模型，不能据此保证不存在其他未识别条款。
+
+## 2026-10-27 · 独立 OCR 模型响应与用户正文分离
+
+- 独立 OCR 百炼路径保留兼容接口、地址、模型和独立密钥，提示改为逐字正文及 HTML 表格；本地解析支持行列空位、嵌套/旧版损坏结构的确定文字。没有切换成 DashScope 内置任务，也不额外发起表格识别请求。
+- 不再将解析失败的模型原始响应当正文，原始响应保存在 OCR 独立诊断表中；旧版丢失正文仅提示重新识别，不补写。AudiPick 原有逐字识别入口及专用模型来源不变。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib ocr`，覆盖结构解析、文字完整性、坐标隔离、旧项目人工校对保护和 Excel 回读；真实合同输出只用于本地排查，没有提交到测试夹具或上传在线模型。
+
+## 2026-10-27 · 设置页 OCR 测试入口
+
+- 设置页直接调用现有 OCR 图片连接测试，支持当前百度／百炼草稿及空密钥读取各自已保存凭据；测试不写配置和密钥。
+- 原生命令增加可选 `useGlobalLlm`，设置页显式使用全局模型，避免误用 AudiPick 专用模型；旧 AudiPick 未传此参数，仍按原有模型来源选择。
+- 合成测试图由共用函数生成；前端回归见 `AppNavigationSettings.test.tsx`、`AudiPickConfigRecovery.test.tsx`、`audipickOcrApi.test.ts`，Rust 见 `--lib ocr_test` 和 `--lib bailian_ocr::`。未用真实合同或线上服务替代离线回归。
+
+## 2026-10-27 · 独立 OCR 共用能力及可编辑提示词
+
+- 新 OCR 工具独立保存项目、扫描件、分页结果和场景提示词，不迁移或改写 AudiPick 项目。复用维护中的场景和启用案例库，不复制收入底稿套用等专用工作流，范围见 `OCR_PARITY.md`。
+- `extractFinancialMetrics` 增加可选 `promptOverride`；旧调用省略时沿用原提示词，新 OCR 可显示、编辑并保存实际提示词。逐字证据核验、行号回填及分类校验继续执行。
+- Rust 增加仅使用工具箱全局设置的 OCR/模型包装；百炼结构化识别为新增入口，原 AudiPick 逐字文字接口保持默认行为。共享图片请求按实际 PNG/JPEG MIME 声明，允许携带校验原文；原不带校验文字的调用保持原请求内容。
+- 回归命令：`npx vitest run src/ocrScenarios.test.ts src/audipickPreviewFinancialCovenant.test.ts`；`cargo test --manifest-path src-tauri/Cargo.toml --lib audipick::`、`--lib bailian_ocr::`。本地模拟服务验证协议，不等同真实扫描件识别质量验收。
+
+## 2026-10-26 · 桌面侧栏入口与主窗口专注模式统一
+
+- 用户反馈点击 AudiPick 时弹出会议纪要询问。检查发现侧栏残留仅在 Tauri 生效的 `new WebviewWindow("audipick")` 分支，与现行主窗口专注模式不一致；旧地址又重定向回 App，使新 WebView 再次挂载全局会议监听，后台会中快照可引发重复询问。
+- 移除旧窗口创建／查找／聚焦分支，桌面与浏览器侧栏均使用同一 NavLink 进入主窗口 AudiPick 页；旧 `#/audipick-window` 继续重定向，重复点击复用页面。未修改摘录业务、会议检测门槛和录音行为。
+- 回归：`npx vitest run src/AppNavigationSettings.test.tsx src/components/MeetingWatch.test.tsx`，桌面标记下检查侧栏导航不调用原生新窗口 API、不重新读取会议快照、返回后再次点击只有一个页面实例；`npm run build`。未在用户现场真实复现误询问，未替换安装 EXE。
+
 ## 2026-10-26 · 百炼 OCR 独立引擎与可见 URL
 
 - 增加 `bailian` OCR 引擎，默认模型 `qwen3.5-ocr`，使用 OpenAI 兼容 `/chat/completions` 图片协议；独立 URL、模型和 Windows 凭据 `bailian_ocr_key`，不依赖合同提取 LLM 是否启用。默认使用公共百炼兼容地址，业务空间地址由用户填写；不内置个人密钥或工作空间。

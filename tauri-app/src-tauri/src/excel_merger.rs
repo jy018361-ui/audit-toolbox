@@ -28,6 +28,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use walkdir::WalkDir;
 
 use crate::{AllowedPaths, AppError, storage::Storage};
+use crate::job_dispatch::WorkerLanes;
 
 const SUPPORTED: &[&str] = &["xlsx", "xls", "xlsm", "csv", "txt"];
 const EXCEL_MAX_ROWS: usize = 1_048_576;
@@ -42,13 +43,22 @@ mod read_plan;
 
 #[derive(Clone)]
 pub(crate) struct ExcelMergerService {
-    app: AppHandle,
+    events: JobEventTarget,
     allowed: AllowedPaths,
     jobs: Arc<Mutex<HashMap<String, (PathBuf, PathBuf, String, bool)>>>,
     /// 每个任务的启动时刻，终态事件到达时用于计算「执行任务」统计的耗时。
     job_starts: Arc<Mutex<HashMap<String, Instant>>>,
-    heavy: Arc<Mutex<()>>,
+    lanes: Arc<WorkerLanes>,
     cancel_root: PathBuf,
+    #[cfg(test)]
+    worker_exe: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+enum JobEventTarget {
+    App(AppHandle),
+    #[cfg(test)]
+    Test(Arc<dyn Fn(Value) + Send + Sync>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -122,12 +132,14 @@ impl ExcelMergerService {
             .join("rust-job-cancel");
         let _ = fs::create_dir_all(&cancel_root);
         Self {
-            app,
+            events: JobEventTarget::App(app),
             allowed,
             jobs: Arc::new(Mutex::new(HashMap::new())),
             job_starts: Arc::new(Mutex::new(HashMap::new())),
-            heavy: Arc::new(Mutex::new(())),
+            lanes: Arc::new(WorkerLanes::new()),
             cancel_root,
+            #[cfg(test)]
+            worker_exe: None,
         }
     }
 
@@ -252,6 +264,7 @@ impl ExcelMergerService {
         memory_protected: bool,
         read_plan: Option<crate::disk_table::ReadPlan>,
     ) {
+        let queued_at = Instant::now();
         let worker_tool_id = tool_id(&method);
         self.emit(event_for(
             worker_tool_id,
@@ -264,7 +277,8 @@ impl ExcelMergerService {
             Vec::new(),
             None,
         ));
-        let _guard = self.heavy.lock();
+        let _guard = self.lanes.acquire(&method, &cancel_path);
+        let queue_ms = queued_at.elapsed().as_secs_f64() * 1000.0;
         if cancel_path.exists() {
             self.emit(event_for(
                 worker_tool_id,
@@ -353,7 +367,7 @@ impl ExcelMergerService {
             memory_protected: monitored,
             read_plan,
         };
-        let mut command = match std::env::current_exe() {
+        let mut command = match self.worker_executable() {
             // 重任务靠"再启动一份自己"来跑。程序文件在运行期间被移走或重新构建过时
             // （开发机上很常见），这里会失败——直接说清楚该怎么办，
             // 否则用户只看到"无法启动"，无从下手。
@@ -491,7 +505,7 @@ impl ExcelMergerService {
                     .get("phase")
                     .and_then(Value::as_str)
                     .is_some_and(|phase| matches!(phase, "completed" | "failed" | "cancelled"));
-                self.emit(payload);
+                self.emit_worker_event(payload, queue_ms);
             }
             if monitored && !terminal {
                 if let Ok(memory) = crate::resource_budget::memory_status() {
@@ -595,7 +609,7 @@ impl ExcelMergerService {
                                 .is_some_and(|phase| {
                                     matches!(phase, "completed" | "failed" | "cancelled")
                                 });
-                        self.emit(payload);
+                        self.emit_worker_event(payload, queue_ms);
                         if terminal {
                             break;
                         }
@@ -648,6 +662,19 @@ impl ExcelMergerService {
         self.finish(&job_id, &cancel_path);
     }
 
+    fn worker_executable(&self) -> std::io::Result<PathBuf> {
+        #[cfg(test)]
+        if let Some(exe) = &self.worker_exe { return Ok(exe.clone()); }
+        std::env::current_exe()
+    }
+
+    fn emit_worker_event(&self, mut payload: Value, queue_ms: f64) {
+        if let Some(timings) = payload.pointer_mut("/result/timings").and_then(Value::as_object_mut) {
+            timings.insert("queueMs".into(), json!(queue_ms));
+        }
+        self.emit(payload);
+    }
+
     fn emit(&self, mut payload: Value) {
         let background = payload.get("jobId").and_then(Value::as_str)
             .and_then(|id| self.jobs.lock().get(id).map(|(_, _, method, _)| method == "loan.inspect_full"))
@@ -658,7 +685,12 @@ impl ExcelMergerService {
                 self.allowed.0.lock().insert(PathBuf::from(path));
             }
         }
-        if !background { let _ = self.app.state::<Storage>().record_job_event(&payload); }
+        let app = match &self.events {
+            JobEventTarget::App(app) => app,
+            #[cfg(test)]
+            JobEventTarget::Test(sink) => { sink(payload); return; }
+        };
+        if !background { let _ = app.state::<Storage>().record_job_event(&payload); }
         // 使用统计：任务首次到达终态时记一条 job_run（取消/失败都算未成功）。
         // 从 job_starts 里取走时刻天然去重——同一任务重复的终态事件不会重复上报。
         let phase = payload.get("phase").and_then(Value::as_str);
@@ -668,7 +700,7 @@ impl ExcelMergerService {
                 payload.get("jobId").and_then(Value::as_str),
             ) {
                 if let Some(started) = self.job_starts.lock().remove(job_id) {
-                    if let Some(telemetry) = self.app.try_state::<crate::telemetry::Telemetry>() {
+                    if let Some(telemetry) = app.try_state::<crate::telemetry::Telemetry>() {
                         telemetry.track(
                             "job_run",
                             Some(tool_id),
@@ -681,12 +713,12 @@ impl ExcelMergerService {
             }
         }
         if payload.get("toolId").and_then(Value::as_str) == Some("meeting_minutes") {
-            if let Some(meeting) = self.app.try_state::<Arc<crate::meeting_watch::MeetingState>>() {
+            if let Some(meeting) = app.try_state::<Arc<crate::meeting_watch::MeetingState>>() {
                 // 页面晚打开、WebView 重载时也能从快照取回进度与完整结果。
                 meeting.update_job(&payload);
             }
         }
-        let _ = self.app.emit("job-event", payload);
+        let _ = app.emit("job-event", payload);
     }
 
     fn finish(&self, job_id: &str, cancel_path: &Path) {
@@ -728,6 +760,9 @@ pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
     "audipick.extract",
     "audipick.batch_extract",
     "audipick.ocr_page",
+    "ocr.recognize_page",
+    "ocr.extract",
+    "ocr.export",
     "fa.match",
     "fa.preview",
     "fa.export",
@@ -855,9 +890,9 @@ pub fn worker_main() -> i32 {
         Ok(value) => value,
         Err(_) => return 2,
     };
-    let cancel = Arc::new(AtomicBool::new(false));
-    let watch = cancel.clone();
     let cancel_path = PathBuf::from(&request.cancel_path);
+    let cancel = Arc::new(AtomicBool::new(cancel_path.exists()));
+    let watch = cancel.clone();
     thread::spawn(move || {
         while !watch.load(Ordering::Relaxed) {
             if cancel_path.exists() {
@@ -899,7 +934,9 @@ pub fn worker_main() -> i32 {
             None,
         ));
     };
-    let running_message = if request.method == "audipick.ocr_page" {
+    let running_message = if request.method.starts_with("ocr.") {
+        "OCR 工具正在处理…"
+    } else if request.method == "audipick.ocr_page" {
         "正在识别合同扫描页…"
     } else if request.method == "audipick.extract" {
         "正在提取合同条款…"
@@ -937,7 +974,9 @@ pub fn worker_main() -> i32 {
         Vec::new(),
         None,
     ));
-    let result = if request.method == "wp.generate" {
+    let result = if request.method.starts_with("ocr.") {
+        crate::ocr::run_job(&request.method, request.params, &progress, cancel, &pause)
+    } else if request.method == "wp.generate" {
         crate::wp::run_job(&request.method, request.params, &progress, cancel, &pause)
     } else if request.method == "confirmation.process" {
         crate::confirmation::run_job(&request.method, request.params, &progress, cancel, &pause)
@@ -1091,6 +1130,8 @@ pub(crate) fn tool_id(method: &str) -> &'static str {
         "kanzhang"
     } else if method.starts_with("audipick.") {
         "audipick"
+    } else if method.starts_with("ocr.") {
+        "ocr"
     } else if method.starts_with("tbje_check.") {
         "tbje_check"
     } else if method.starts_with("fa.dep_") {
@@ -3601,6 +3642,7 @@ mod tests {
     use calamine::Reader;
     use std::io::Read;
     include!("excel_merger_header_tests.rs");
+    include!("excel_merger_dispatch_tests.rs");
 
     fn test_merge(params: Value, cancel: Arc<AtomicBool>) -> Result<Value, AppError> {
         let pause = PauseCheckpoint::unpaused(cancel.clone());

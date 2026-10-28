@@ -1,0 +1,243 @@
+.meeting-vocabulary-page {
+  min-width: 0;
+}
+.meeting-vocabulary-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+.meeting-vocabulary-search {
+  flex: 1 1 240px;
+  max-width: 480px;
+}
+.meeting-vocabulary-count {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  margin-left: auto;
+}
+:is(.meeting-vocabulary-page, .meeting-vocabulary-editor)
+  :is(input:not([type="checkbox"]), select, textarea) {
+  width: 100%;
+  min-height: var(--control-height);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--control-bg);
+  color: var(--ink);
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-md);
+  font: inherit;
+}
+.meeting-vocabulary-editor textarea {
+  resize: vertical;
+}
+:is(.meeting-vocabulary-page, .meeting-vocabulary-editor)
+  :is(input, select, textarea):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.meeting-vocabulary-groups {
+  display: grid;
+  gap: var(--sp-4);
+}
+.meeting-vocabulary-group {
+  padding: var(--sp-4) var(--sp-5);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: var(--r-lg);
+  min-width: 0;
+}
+.meeting-vocabulary-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+.meeting-vocabulary-group-header h2 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-md);
+  color: var(--ink-strong);
+  font-weight: var(--fw-strong);
+}
+.meeting-vocabulary-group-header h2 span {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  background: var(--surface-muted);
+  border-radius: var(--r-sm);
+  padding: 0 var(--sp-2);
+  line-height: var(--lh-body);
+  font-weight: var(--fw-regular);
+}
+.meeting-vocabulary-group-header p {
+  margin: var(--sp-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.meeting-vocabulary-words {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-content: flex-start;
+}
+.meeting-vocabulary-word {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--control-height-sm);
+  max-width: 100%;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  text-align: left;
+  overflow-wrap: anywhere;
+  transition:
+    background 120ms,
+    border-color 120ms;
+}
+.meeting-vocabulary-word:hover {
+  border-color: var(--brand-accent);
+  background: var(--surface-muted);
+}
+.meeting-vocabulary-word:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.meeting-vocabulary-word.is-disabled {
+  color: var(--text-muted);
+  border-style: dashed;
+}
+.meeting-vocabulary-word small {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.meeting-vocabulary-word:disabled {
+  cursor: default;
+  opacity: var(--disabled-opacity);
+}
+.meeting-vocabulary-empty {
+  margin: 0;
+  padding-block: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--muted-soft);
+}
+.meeting-vocabulary-help {
+  margin-top: var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+.meeting-vocabulary-help summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.meeting-vocabulary-help p {
+  margin-block: var(--sp-2);
+}
+.meeting-vocabulary-notice {
+  color: var(--success-fg);
+  margin-bottom: var(--sp-3);
+  font-size: var(--fs-sm);
+}
+.meeting-vocabulary-error {
+  color: var(--danger-fg);
+  margin-block: var(--sp-3);
+  font-size: var(--fs-sm);
+}
+.meeting-vocabulary-editor .meeting-vocabulary-form fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--sp-4);
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.meeting-vocabulary-form label {
+  display: grid;
+  gap: var(--sp-2);
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
+.meeting-vocabulary-wide {
+  grid-column: 1 / -1;
+}
+.meeting-vocabulary-enabled {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  grid-column: 1 / -1;
+  font-size: var(--fs-sm);
+}
+.meeting-vocabulary-editor-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.meeting-vocabulary-editor-actions > div {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+.tool-nav {
+  grid-template-columns: minmax(0, 1fr);
+}
+.tool-nav > .tool-group {
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
+.meeting-nav-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--control-height-sm);
+  min-width: 0;
+  align-items: stretch;
+}
+.meeting-nav-heading > a {
+  min-width: 0;
+}
+.meeting-nav-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding: 0;
+  color: var(--on-dark);
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.meeting-nav-toggle:hover {
+  background: var(--brand-soft);
+  color: var(--on-brand-soft);
+}
+.meeting-nav-toggle:focus-visible {
+  outline: 2px solid var(--primary);
+}
+.meeting-nav-chevron { width: 16px; height: 16px; transition: transform 120ms; }
+.meeting-nav-chevron.open { transform: rotate(90deg); }
+@media (max-width: 640px) {
+  .meeting-vocabulary-count {
+    margin-left: 0;
+  }
+  .meeting-vocabulary-group {
+    padding: var(--sp-4);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .meeting-vocabulary-word, .meeting-nav-chevron {
+    transition: none;
+  }
+}

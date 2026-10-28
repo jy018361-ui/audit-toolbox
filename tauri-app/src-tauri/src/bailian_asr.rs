@@ -24,6 +24,7 @@ const DEFAULT_MODEL: &str = "paraformer-v2";
 pub(crate) struct AsrConfig {
     base_url: String,
     model: String,
+    pub(crate) vocabulary: Value,
 }
 
 impl AsrConfig {
@@ -54,6 +55,7 @@ impl AsrConfig {
             ));
         }
         Ok(Self {
+            vocabulary: json!({}),
             base_url: base_url.to_owned(),
             model: model
                 .map(str::trim)
@@ -113,26 +115,63 @@ pub(crate) fn load_api_key(param: Option<&str>) -> Result<String, AppError> {
     if let Some(key) = param.filter(|key| !key.trim().is_empty()) {
         return Ok(key.trim().to_string());
     }
-    keyring::Entry::new(crate::release_channel::credential_service(), "bailian_asr_key")
-        .and_then(|entry| entry.get_password())
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-        .ok_or_else(|| {
-            asr_error(
-                "ASR_KEY_MISSING",
-                "未配置百炼语音转写 API 密钥，请到设置页「语音转写（百炼）」卡片填写。",
-                None,
-            )
-        })
+    keyring::Entry::new(
+        crate::release_channel::credential_service(),
+        "bailian_asr_key",
+    )
+    .and_then(|entry| entry.get_password())
+    .ok()
+    .filter(|key| !key.trim().is_empty())
+    .ok_or_else(|| {
+        asr_error(
+            "ASR_KEY_MISSING",
+            "未配置百炼语音转写 API 密钥，请到设置页「语音转写（百炼）」卡片填写。",
+            None,
+        )
+    })
 }
 
-/// 设置页「测试连接」：调上传凭证接口验证密钥有效性。
+// 两条通道只共享 HTTP 音频编码与传输；凭据仍由各自入口读取。
+fn general_flash_error(mut error: AppError) -> AppError {
+    error.code = error.code.replace("PLAN_ASR_", "ASR_");
+    error.user_message = error
+        .user_message
+        .replace("套餐专用密钥", "百炼 API 密钥")
+        .replace("套餐额度", "账户额度")
+        .replace("套餐", "百炼");
+    error
+}
+
+fn flash_config(config: &AsrConfig) -> crate::bailian_plan_asr::PlanAsrConfig {
+    crate::bailian_plan_asr::PlanAsrConfig {
+        base_url: config.base_url.clone(),
+        model: config.model.clone(),
+        vocabulary: config.vocabulary.clone(),
+    }
+}
+
+/// Flash 发送内置样音验证识别；文件转写模型验证上传凭证。
 pub(crate) fn test_connection(
     api_key: Option<&str>,
     config: &AsrConfig,
 ) -> Result<Value, AppError> {
     let started = std::time::Instant::now();
     let key = load_api_key(api_key)?;
+    if crate::bailian_plan_asr::uses_http_asr(&config.model) {
+        let mut result =
+            crate::bailian_plan_asr::test_connection(&crate::bailian_plan_asr::PlanTestParams {
+                base_url: config.base_url.clone(),
+                model: config.model.clone(),
+                api_key: Some(key),
+            })
+            .map_err(general_flash_error)?;
+        result["message"] = json!(format!(
+            "百炼语音识别测试成功（模型 {}，已识别内置短样音，产生少量转写费用）。",
+            config.model
+        ));
+        return Ok(result);
+    }
+
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
@@ -347,17 +386,28 @@ fn upload_audio(
     Ok(format!("oss://{object_key}"))
 }
 
+fn transcription_parameters(config: &AsrConfig) -> Value {
+    let mut parameters = json!({"diarization_enabled": true});
+    // language_hints 仅适用于 paraformer-v2；自定义兼容模型沿用其默认语言识别。
+    if config.model == DEFAULT_MODEL {
+        parameters["language_hints"] = json!(["zh", "en"]);
+    }
+    // 仅已核对支持即时热词的文件模型接收 vocabulary。
+    if matches!(config.model.as_str(), "qwen-audio-3.0-asr-flash-filetrans" | "qwen-audio-3.1-asr-flash-filetrans")
+        && config.vocabulary.as_object().is_some_and(|words| !words.is_empty())
+    {
+        parameters["vocabulary"] = config.vocabulary.clone();
+    }
+    parameters
+}
+
 fn submit_transcription(
     client: &reqwest::blocking::Client,
     key: &str,
     oss_url: &str,
     config: &AsrConfig,
 ) -> Result<String, AppError> {
-    let mut parameters = json!({"diarization_enabled": true});
-    // language_hints 仅适用于 paraformer-v2；自定义兼容模型沿用其默认语言识别。
-    if config.model == DEFAULT_MODEL {
-        parameters["language_hints"] = json!(["zh", "en"]);
-    }
+    let parameters = transcription_parameters(config);
     let response = client
         .post(config.endpoint("/api/v1/services/audio/asr/transcription"))
         .bearer_auth(key)
@@ -429,7 +479,7 @@ fn query_task(
     config: &AsrConfig,
 ) -> Result<Value, AppError> {
     let response = client
-        .post(config.endpoint(&format!("/api/v1/tasks/{task_id}")))
+        .get(config.endpoint(&format!("/api/v1/tasks/{task_id}")))
         .bearer_auth(key)
         .send()
         .map_err(network_error)?;
@@ -570,7 +620,7 @@ fn missing_url_error(task: &Value) -> AppError {
     )
 }
 
-/// 转写主入口：上传 → 提交 → 轮询 → 下载结果。
+/// 转写主入口：Flash 内嵌音频同步识别，其余模型上传、提交并轮询下载。
 pub(crate) fn transcribe_file(
     path: &Path,
     progress: Progress,
@@ -578,6 +628,29 @@ pub(crate) fn transcribe_file(
     config: &AsrConfig,
 ) -> Result<TranscriptionResult, AppError> {
     let key = load_api_key(None)?;
+    transcribe_file_with_key(path, progress, cancel, config, &key)
+}
+
+fn transcribe_file_with_key(
+    path: &Path,
+    progress: Progress,
+    cancel: &Arc<AtomicBool>,
+    config: &AsrConfig,
+    key: &str,
+) -> Result<TranscriptionResult, AppError> {
+    if crate::bailian_plan_asr::uses_http_asr(&config.model) {
+        return crate::bailian_plan_asr::transcribe_file_with_key(
+            path,
+            &|state, step, total, message| {
+                progress(state, step, total, &message.replace("套餐通道", "百炼通道"))
+            },
+            cancel,
+            &flash_config(config),
+            key,
+        )
+        .map_err(general_flash_error);
+    }
+
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15 * 60))
         .build()
@@ -690,6 +763,135 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vocabulary_is_forwarded_only_to_supported_models() {
+        for model in ["qwen-audio-3.0-asr-flash-filetrans", "qwen-audio-3.1-asr-flash-filetrans", "paraformer-v2", "custom-file-model"] {
+            let mut config = AsrConfig::new(None, Some(model)).unwrap();
+            config.vocabulary = json!({"CSDC":4, "清Q":4});
+            let parameters = transcription_parameters(&config);
+            if model.ends_with("-filetrans") {
+                assert_eq!(parameters["vocabulary"], config.vocabulary);
+            } else {
+                assert!(parameters.get("vocabulary").is_none());
+            }
+            if model == "paraformer-v2" { assert_eq!(parameters["language_hints"], json!(["zh", "en"])); }
+        }
+        let mut flash = AsrConfig::new(None, Some("qwen-audio-3.1-asr-flash")).unwrap();
+        flash.vocabulary = json!({"函证":4});
+        assert_eq!(flash_config(&flash).vocabulary, flash.vocabulary);
+    }
+
+    #[test]
+    fn general_flash_31_uses_inline_audio_for_test_and_real_transcription() {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            for index in 0..3 {
+                let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "未收到 Flash 请求");
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = std::io::BufReader::new(socket.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert_eq!(
+                    line.trim(),
+                    "POST /api/v1/services/aigc/multimodal-generation/generation HTTP/1.1"
+                );
+                let mut length = 0;
+                let mut authorization = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    let (name, value) = line.split_once(':').unwrap();
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                    if name.eq_ignore_ascii_case("authorization") {
+                        authorization = value.trim().into();
+                    }
+                }
+                assert_eq!(authorization, "Bearer general-test-key");
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(value["model"], "qwen-audio-3.1-asr-flash");
+                assert_eq!(value["parameters"]["format"], "wav");
+                if index != 1 {
+                    assert!(value["parameters"].get("vocabulary").is_none());
+                } else {
+                    assert_eq!(value["parameters"]["vocabulary"], json!({"清Q":4}));
+                }
+                assert!(
+                    value
+                        .pointer("/input/messages/0/content/0/input_audio/data")
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .starts_with("data:audio/wav;base64,")
+                );
+                assert!(value.pointer("/input/file_urls").is_none());
+                let (status, response) = if index == 2 {
+                    (
+                        400,
+                        json!({"code":"InvalidParameter", "message":"private-audio"}),
+                    )
+                } else {
+                    (200, json!({"output":{"text":"会议识别成功"}}))
+                };
+                let response = response.to_string();
+                write!(socket, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            }
+        });
+        let mut config = AsrConfig::new(
+            Some(&format!("http://{address}")),
+            Some("qwen-audio-3.1-asr-flash"),
+        )
+        .unwrap();
+        let test = test_connection(Some("general-test-key"), &config).unwrap();
+        config.vocabulary = json!({"清Q":4});
+        assert!(test["message"].as_str().unwrap().contains("内置短样音"));
+        assert!(!test["message"].as_str().unwrap().contains("套餐"));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meeting.wav");
+        std::fs::write(
+            &path,
+            include_bytes!("../../assets/asr/connection-test.wav"),
+        )
+        .unwrap();
+        let result = transcribe_file_with_key(
+            &path,
+            &|_, _, _, message| assert!(!message.contains("套餐")),
+            &Arc::new(AtomicBool::new(false)),
+            &config,
+            "general-test-key",
+        )
+        .unwrap();
+        assert_eq!(result.sentences[0].text, "会议识别成功");
+        assert_eq!(result.speakers, 0);
+        let error = test_connection(Some("general-test-key"), &config).unwrap_err();
+        assert_eq!(error.code, "ASR_SERVER_ERROR");
+        assert!(!error.user_message.contains("套餐"));
+        assert!(!error.detail.unwrap().contains("private-audio"));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn general_config_defaults_and_custom_values() {
         for settings in [
             json!({}),
@@ -722,6 +924,11 @@ mod tests {
 
     #[test]
     fn custom_config_is_used_for_connection_policy_submission_and_polling() {
+        check_filetrans_protocol("custom-file-model");
+        check_filetrans_protocol("qwen-audio-3.1-asr-flash-filetrans");
+    }
+
+    fn check_filetrans_protocol(model: &str) {
         use std::io::{BufRead, BufReader, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -740,6 +947,7 @@ mod tests {
                         Err(error) => panic!("{error}"),
                     }
                 };
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -778,11 +986,8 @@ mod tests {
             }
             requests
         });
-        let config = AsrConfig::new(
-            Some(&format!("http://{address}/proxy/")),
-            Some("custom-file-model"),
-        )
-        .unwrap();
+        let config =
+            AsrConfig::new(Some(&format!("http://{address}/proxy/")), Some(model)).unwrap();
         assert_eq!(
             test_connection(Some("test-only-key"), &config).unwrap()["ok"],
             true
@@ -808,17 +1013,17 @@ mod tests {
         let requests = server.join().unwrap();
         for request in &requests[..2] {
             assert!(request.0.starts_with("GET /proxy/api/v1/uploads?"));
-            assert!(request.0.contains("model=custom-file-model"));
+            assert!(request.0.contains(&format!("model={model}")));
         }
         assert_eq!(
             requests[2].0,
             "POST /proxy/api/v1/services/audio/asr/transcription HTTP/1.1"
         );
-        assert_eq!(requests[2].1["model"], "custom-file-model");
+        assert_eq!(requests[2].1["model"], model);
         assert_eq!(requests[2].1["input"]["file_urls"][0], "oss://test.wav");
         assert_eq!(requests[2].1["parameters"]["diarization_enabled"], true);
         assert!(requests[2].1["parameters"].get("language_hints").is_none());
-        assert_eq!(requests[3].0, "POST /proxy/api/v1/tasks/test-task HTTP/1.1");
+        assert_eq!(requests[3].0, "GET /proxy/api/v1/tasks/test-task HTTP/1.1");
     }
 
     fn sentence(text: &str, speaker_id: i64, begin_ms: i64) -> Sentence {

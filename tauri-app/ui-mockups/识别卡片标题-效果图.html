@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>已识别卡片标题 · 圆圈徽标效果图</title>
+<style>
+  /*
+   * 假设与说明（花叔 junior pass）：
+   * - 所有颜色取自 src/styles.css 的真实主题变量，1:1 复刻「借款利息测算」页面。
+   * - 卡片尺寸、内边距、圆角、描边、投影均按真实界面还原。
+   * - 现状版在上，方案一~四依次排下；每版都同时给 JE / TB 两张卡，看真实并排效果。
+   */
+  :root {
+    --ink: #182626;
+    --brand: #1e6267;
+    --success-bg: #dcf3e7;
+    --success-fg: #176642;
+    --danger-fg: #983d2f;
+    --border: #cbd7d2;
+    --border-soft: #e4e9e7;
+    --surface-page: #edf1ee;
+    --pill-border: #99b7aa;   /* color-mix(success-fg 28%, border) 的实测值 */
+    --pill-bg: #e8f7ef;       /* color-mix(success-bg 65%, card) 的实测值 */
+    --card-border: #afccc5;   /* color-mix(brand-accent 34%, border) 的实测值 */
+    --bar-bg: #ebf8f1;        /* color-mix(success-bg 58%, card) 的实测值 = 现状绿条 */
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    background: var(--surface-page);
+    color: var(--ink);
+    padding: 44px 48px 64px;
+  }
+  .page { max-width: 1400px; margin: 0 auto; }
+  h1 { font-size: 24px; font-weight: 700; color: #173a3e; }
+  .lede { margin-top: 8px; font-size: 13px; color: #5d706d; line-height: 1.7; }
+
+  .variant { margin-top: 40px; }
+  .variant-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  .variant-tag {
+    flex: none;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: var(--brand);
+    color: #eef6f2;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+  }
+  .variant-tag.ghost { background: #83908e; }
+  .variant-tag.reco { background: #176642; }
+  .variant-head b { font-size: 16px; color: #173a3e; }
+  .variant-desc { font-size: 13px; color: #5d706d; margin-bottom: 16px; line-height: 1.7; }
+  .variant-desc em { font-style: normal; color: #176642; }
+
+  /* ===== 来源卡 1:1 复刻 ===== */
+  .fx-source-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    align-items: stretch;
+  }
+  .fx-card {
+    background: #fff;
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    box-shadow: 0 10px 28px rgba(30, 98, 103, 0.07);
+    padding: 24px;
+    overflow: hidden;
+  }
+  .fx-card-header { display: flex; align-items: center; gap: 10px; }
+  .fx-card-title { font-size: 16px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+  .fx-card-content { margin-top: 22px; }
+
+  /* 现状：绿色横条（负边距出血到卡片两缘） */
+  .fx-card.bar .fx-card-header {
+    margin: 0 -24px;
+    padding: 9px 24px;
+    background: var(--bar-bg);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .fx-card.bar .fx-card-content { margin-top: 22px; }
+
+  /* 文件胶囊行 */
+  .fx-detected-file {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 13px 16px;
+    border: 1px solid var(--pill-border);
+    border-radius: 11px;
+    background: var(--pill-bg);
+  }
+  .fx-detected-file .name {
+    flex: 1;
+    min-width: 0;
+    color: var(--success-fg);
+    font-weight: 650;
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .fx-detected-file .acts { display: flex; gap: 22px; flex: none; }
+  .fx-detected-file button {
+    border: 0;
+    background: none;
+    padding: 0;
+    font: inherit;
+    font-size: 14px;
+    color: var(--danger-fg);
+    cursor: pointer;
+  }
+  .fx-meta { margin-top: 16px; font-size: 14px; color: var(--ink); }
+  .fx-meta + .fx-meta { margin-top: 12px; }
+
+  /* ===== 方案徽标 ===== */
+  .badge {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+  }
+  .badge svg { display: block; }
+  /* 方案一：实心深绿 + 白勾 */
+  .badge.solid { background: var(--success-fg); color: #fff; }
+  /* 方案二：浅绿圆底 + 深绿勾 */
+  .badge.soft { background: var(--success-bg); color: var(--success-fg); }
+  /* 方案三：品牌青绿圆底 + TB/JE 字样（与页面 ①②③ 步骤圆点同一语言） */
+  .badge.letter { background: var(--brand); color: #fff; font-size: 10px; font-weight: 700; letter-spacing: 0.02em; }
+  /* 方案四：绿色圆环描边 + 深绿勾 */
+  .badge.ring { background: #fff; color: var(--success-fg); box-shadow: inset 0 0 0 2px var(--success-fg); }
+
+  .footnote {
+    margin-top: 44px;
+    padding: 16px 20px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: #fff;
+    font-size: 13px;
+    color: #5d706d;
+    line-height: 1.9;
+  }
+  .footnote b { color: #173a3e; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>「已识别」卡片标题 · 圆圈徽标效果图</h1>
+  <p class="lede">
+    以下卡片按「借款利息测算」页面真实配色与尺寸 1:1 复刻。改法是同一思路：去掉整条绿色横条，标题左侧改放一个填充色圆圈；
+    差别只在圆圈的画法。每版都给出 JE / TB 两张卡的真实并排效果。
+  </p>
+
+  <!-- 现状 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag ghost">现状</span>
+      <b>绿色横条（对照用）</b>
+    </div>
+    <p class="variant-desc">保留在此方便对比：绿条横贯整张卡片，色块面积大，是「显丑」的来源。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card bar">
+        <div class="fx-card-header"><span class="fx-card-title">已识别：JE 序时账</span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card bar">
+        <div class="fx-card-header"><span class="fx-card-title">已识别：TB 科目余额表</span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 方案一 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag reco">方案一 · 推荐</span>
+      <b>实心绿圆 + 白色对勾</b>
+    </div>
+    <p class="variant-desc">最贴近你说的「圆圈填充色」：绿色收进一个 22px 实心圆，白勾是「已识别」的通用语言。
+      卡片标题恢复和「上传 TB 与 JE」「字段映射一键复核」等其他卡片一样的白底，整页更统一。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="badge solid"><svg width="12" height="12" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span class="fx-card-title">已识别：JE 序时账</span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="badge solid"><svg width="12" height="12" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span class="fx-card-title">已识别：TB 科目余额表</span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 方案二 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag">方案二</span>
+      <b>浅绿圆底 + 深绿对勾</b>
+    </div>
+    <p class="variant-desc">同一思路的柔和版：圆圈用浅绿填充、勾用深绿。视觉更轻，和下方文件胶囊的浅绿底互相呼应，
+      但「已识别」的肯定感比方案一弱一点。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="badge soft"><svg width="12" height="12" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span class="fx-card-title">已识别：JE 序时账</span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="badge soft"><svg width="12" height="12" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span class="fx-card-title">已识别：TB 科目余额表</span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 方案三 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag">方案三</span>
+      <b>青绿圆底 + TB / JE 字样</b>
+    </div>
+    <p class="variant-desc">圆圈里不放勾、放文件类型缩写：左边一眼是 JE、右边一眼是 TB。
+      与页面上方「① 上传与识别」的步骤圆点是同一套视觉语言；标题里也保留了「已识别」二字，语义不丢。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="badge letter">JE</span>
+          <span class="fx-card-title">已识别：JE 序时账</span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="badge letter">TB</span>
+          <span class="fx-card-title">已识别：TB 科目余额表</span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 方案四 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag">方案四</span>
+      <b>绿圈描边 + 深绿对勾（空心）</b>
+    </div>
+    <p class="variant-desc">四个方案里最轻的一版：圆圈只描一圈绿边、内部留白。适合想要「有点缀但不抢眼」的效果；
+      缺点是存在感弱，缩到小窗口时不如实心圆醒目。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="badge ring"><svg width="11" height="11" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span class="fx-card-title">已识别：JE 序时账</span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="badge ring"><svg width="11" height="11" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span class="fx-card-title">已识别：TB 科目余额表</span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="footnote">
+    <b>说明</b><br>
+    ① 四个方案都会同时应用到借款利息、存款利息、汇兑损益三个页面的「已识别」卡片（它们共用同一套样式），一次改、处处生效。<br>
+    ② 颜色全部取自软件现有主题色（成功绿 / 品牌青绿），不会引入新颜色。<br>
+    ③ 「还需要 TB / JE」的灰色待补充卡片没有绿条，不受本次改动影响。
+  </div>
+</div>
+</body>
+</html>

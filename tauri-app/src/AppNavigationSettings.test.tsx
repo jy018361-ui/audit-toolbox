@@ -17,6 +17,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import App, { Field, Settings } from "./App";
 import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import {
+  audipickOcrTest,
   engineCall,
   historyGet,
   historyRestore,
@@ -36,6 +37,7 @@ vi.mock("./api", async (importOriginal) => ({
   secretSet: vi.fn().mockResolvedValue(undefined),
   secretGet: vi.fn().mockResolvedValue("saved-test-key"),
   meetingAsrTest: vi.fn().mockResolvedValue({ ok: true, message: "测试成功", elapsedMs: 10 }),
+  audipickOcrTest: vi.fn().mockResolvedValue({ message: "OCR 连接及测试图片识别成功。", elapsedMs: 20 }),
   engineCall: vi.fn().mockResolvedValue({ bytes: 0, files: 0 }),
   appBootstrap: vi
     .fn()
@@ -65,8 +67,127 @@ vi.mock("./AudiPickPage", () => ({
     </section>
   ),
 }));
+async function flushSettingsChanges() {
+  fireEvent.blur(screen.getByRole("heading", { name: "设置" }));
+  await waitFor(() => expect(document.querySelector(".settings-auto-status")).toHaveTextContent("已自动保存"));
+}
+
+it("autosaves text after typing pauses, applies selects, and removes help and save controls", async () => {
+  render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  expect(settingsSet).not.toHaveBeenCalled();
+  expect(screen.queryByText("配置帮助")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", {name:"保存配置"})).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("模型"), {target:{value:"first"}});
+  fireEvent.change(screen.getByLabelText("模型"), {target:{value:"latest-model"}});
+  expect(settingsSet).not.toHaveBeenCalled();
+  await waitFor(() => expect(settingsSet).toHaveBeenCalledWith(expect.objectContaining({llm:expect.objectContaining({model:"latest-model"})})));
+  expect(settingsSet).toHaveBeenCalledTimes(1);
+  fireEvent.change(screen.getByLabelText("自动清理"), {target:{value:"off"}});
+  await waitFor(() => expect(settingsSet).toHaveBeenLastCalledWith(expect.objectContaining({cache:expect.objectContaining({cleanup:"off"})})));
+});
+
+it("设置页在切换 OCR 和语音通道后仍保持精简文案", async () => {
+  render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+
+  const expectConciseCopy = () => {
+    expect(screen.queryByText(/仍需保存|先保存|测试不会自动保存/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/当前 URL：|OCR 与 AudiPick 共用|仅识别内置示例图片/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/缓存读过的科目余额表|按用途管理工具箱配置/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/字段复核可能耗时较长|会议录音会发送至|长会议可用/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/查看通道差异与计费方式|配置帮助|选择后立即生效/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("API Key")).toHaveAttribute("placeholder", "留空表示不修改");
+  };
+
+  expectConciseCopy();
+  for (const engine of ["bailian", "baidu", "local", "ai"]) {
+    fireEvent.change(screen.getByLabelText("OCR 引擎"), { target: { value: engine } });
+    expectConciseCopy();
+    if (engine === "local") {
+      expect(screen.queryByText("云端测试可能计费")).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByText("云端测试可能计费")).toBeInTheDocument();
+    }
+  }
+  expect(screen.getByText("旧数据迁移").closest("details")).not.toHaveAttribute("open");
+  expect(screen.getByLabelText("迁移备份文件")).toBeInTheDocument();
+  expect(screen.getByLabelText("开机自启")).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText("转写通道"), { target: { value: "token_plan" } });
+  fireEvent.change(screen.getByLabelText("套餐转写模型"), { target: { value: "qwen-audio-3.0-asr-flash" } });
+  expectConciseCopy();
+  expect(screen.getByText("样音测试消耗少量套餐额度")).toBeInTheDocument();
+  await flushSettingsChanges();
+});
+
+it("failed autosave keeps the current input and retries without a save button", async () => {
+  vi.mocked(settingsSet).mockRejectedValueOnce({userMessage:"磁盘暂不可写"});
+  render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  fireEvent.change(screen.getByLabelText("模型"), {target:{value:"retry-model"}});
+  fireEvent.blur(screen.getByLabelText("模型"));
+  expect(await screen.findByRole("alert")).toHaveTextContent("自动保存失败：磁盘暂不可写");
+  expect(screen.getByLabelText("模型")).toHaveValue("retry-model");
+  expect(document.querySelector(".settings-auto-status")).not.toHaveTextContent("已自动保存");
+  fireEvent.click(screen.getByRole("button", {name:"重试"}));
+  await waitFor(() => expect(document.querySelector(".settings-auto-status")).toHaveTextContent("已自动保存"));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("does not overwrite settings before a failed initial read is retried", async () => {
+  vi.mocked(settingsGet).mockRejectedValueOnce({userMessage:"配置读取异常"});
+  render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("配置读取失败：配置读取异常");
+  expect(screen.getByLabelText("模型")).toBeDisabled();
+  expect(settingsSet).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", {name:"重试"}));
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  expect(screen.getByLabelText("模型")).toBeEnabled();
+  expect(settingsSet).not.toHaveBeenCalled();
+});
+
+it("switching LLM providers saves typed credentials to their original provider only", async () => {
+  render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  fireEvent.change(screen.getByLabelText("API Key"), {target:{value:"openai-only"}});
+  fireEvent.change(screen.getByLabelText("接口类型"), {target:{value:"dify_chat"}});
+  await flushSettingsChanges();
+  expect(secretSet).toHaveBeenCalledWith("llm_api_key", "openai-only");
+  expect(secretSet).not.toHaveBeenCalledWith("dify_api_key", "openai-only");
+  expect(screen.getByLabelText("API Key")).toHaveValue("");
+});
+let restoreCanvasMocks: () => void;
+it("进入会议纪要时自动展开词库入口，仍可手动收起", async () => {
+  render(<MemoryRouter initialEntries={["/tools/meeting_minutes"]}><App /></MemoryRouter>);
+  const toggle = await screen.findByRole("button", { name: "会议纪要子菜单" });
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+  expect(screen.getByRole("link", { name: /专有词库/ })).toBeVisible();
+  fireEvent.click(toggle);
+  expect(screen.queryByRole("link", { name: /专有词库/ })).not.toBeInTheDocument();
+});
+
+it("会议词库只在会议纪要二级菜单提供，独立路由可打开并返回", async () => {
+  render(<MemoryRouter initialEntries={["/"]}><App /></MemoryRouter>);
+  const toggle = await screen.findByRole("button", { name: "会议纪要子菜单" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByRole("link", { name: /专有词库/ })).not.toBeInTheDocument();
+  fireEvent.click(toggle);
+  const link = screen.getByRole("link", { name: /专有词库/ });
+  expect(link).toHaveAttribute("href", "/tools/meeting_minutes/vocabulary");
+  fireEvent.click(link);
+  expect(await screen.findByRole("heading", { name: "专有词库" })).toBeVisible();
+  expect(screen.queryByRole("heading", { name: "会议记录配置" })).not.toBeInTheDocument();
+  expect(link).toHaveAttribute("aria-current", "page");
+  expect(screen.getByRole("link", { name: "返回会议纪要" })).toHaveAttribute("href", "/tools/meeting_minutes");
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
+  const context = vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ fillRect: vi.fn(), fillText: vi.fn() } as unknown as CanvasRenderingContext2D);
+  const dataUrl = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/png;base64,dGVzdA==");
+  restoreCanvasMocks = () => { context.mockRestore(); dataUrl.mockRestore(); };
   vi.stubGlobal("scrollTo", vi.fn());
   vi.mocked(historyGet).mockResolvedValue([]);
   vi.mocked(engineCall).mockResolvedValue({ bytes: 0, files: 0 });
@@ -79,8 +200,10 @@ beforeEach(() => {
     warnings: [],
   });
 });
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await act(async () => {});
+  restoreCanvasMocks();
   vi.unstubAllGlobals();
 });
 
@@ -361,7 +484,7 @@ it.each(["/tasks", "/diagnostics"])(
   },
 );
 
-it("marks preview tools as trials in the sidebar without disabling them", async () => {
+it("marks upcoming tools in the sidebar and exposes Roll Forward as a ready download", async () => {
   render(
     <MemoryRouter initialEntries={["/"]}>
       <App />
@@ -372,14 +495,20 @@ it("marks preview tools as trials in the sidebar without disabling them", async 
     document.querySelector("aside.sidebar")! as HTMLElement,
   );
 
-  for (const name of ["AudiPick 智能合同审阅", "WP Roll Forward"]) {
-    const link = sidebar.getByRole("link", {
-      name: new RegExp(`${name}.*即将上线.*即将正式上线`),
-    });
-    expect(link).toBeVisible();
-    expect(link).toHaveAttribute("title", "功能完善中，即将正式上线。");
-    expect(within(link).getByText("即将上线")).toBeVisible();
-  }
+  const audipick = sidebar.getByRole("link", {
+    name: /AudiPick 智能合同审阅.*即将上线.*即将正式上线/,
+  });
+  expect(audipick).toBeVisible();
+  expect(audipick).toHaveAttribute("title", "功能完善中，即将正式上线。");
+  expect(within(audipick).getByText("即将上线")).toBeVisible();
+
+  const rollForward = sidebar.getByRole("link", { name: /WP Roll Forward/ });
+  expect(rollForward).toBeVisible();
+  expect(rollForward).not.toHaveAttribute("title");
+  fireEvent.click(rollForward);
+  const downloadLink = await screen.findByRole("link", { name: "点击获取RollForward小工具" });
+  expect(downloadLink).toHaveAttribute("href", expect.stringContaining("sharepoint.cn"));
+  expect(screen.getByText("有疑问请联系Dana D Li")).toBeVisible();
 
   expect(
     sidebar.getByRole("link", { name: /汇兑损益测算/ }),
@@ -440,6 +569,36 @@ it("opens AudiPick in focus mode without leaving clickable toolbox navigation un
   expect(screen.getAllByTestId("audipick-main-window-page")).toHaveLength(1);
 });
 
+it("桌面环境点击侧栏 AudiPick 仍在主窗口导航，不调用原生新窗口接口", async () => {
+  localStorage.setItem("audit-toolbox.newbie-tour.v2", JSON.stringify({ newbieMode: false, workspaceDone: true }));
+  render(<MemoryRouter initialEntries={["/"]}><App /></MemoryRouter>);
+  await screen.findByRole("heading", {name:"今天要处理什么？"});
+  const api = await import("./api");
+  const meetingSnapshot = vi.spyOn(api,"meetingStatus");
+  // 在工具箱挂载后开启桌面标记，精确覆盖原来只在 EXE 中触发的侧栏分支。
+  const nativeInvoke = vi.fn(async () => undefined);
+  vi.stubGlobal("__TAURI_INTERNALS__", {invoke:nativeInvoke});
+  const alert = vi.spyOn(window,"alert").mockImplementation(() => undefined);
+  try {
+    const sidebar = within(document.querySelector("aside.sidebar")! as HTMLElement);
+    fireEvent.click(sidebar.getByRole("link", {name:/AudiPick/}));
+    expect(await screen.findByTestId("audipick-main-window-page")).toBeVisible();
+    expect(document.querySelector(".app-shell")).toHaveClass("audipick-focus-mode");
+    expect(nativeInvoke.mock.calls.some((args: unknown[]) => /(?:create_webview_window|get_all_webviews)/.test(String(args[0])))).toBe(false);
+    expect(alert).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("link",{name:"返回工具箱"}));
+    await screen.findByRole("heading",{name:"今天要处理什么？"});
+    fireEvent.click(within(document.querySelector("aside.sidebar")! as HTMLElement).getByRole("link",{name:/AudiPick/}));
+    expect(await screen.findByTestId("audipick-main-window-page")).toBeVisible();
+    expect(screen.getAllByTestId("audipick-main-window-page")).toHaveLength(1);
+    expect(meetingSnapshot).not.toHaveBeenCalled();
+  } finally {
+    meetingSnapshot.mockRestore();
+    alert.mockRestore();
+    localStorage.removeItem("audit-toolbox.newbie-tour.v2");
+  }
+});
+
 it("redirects the legacy AudiPick window hash to the main-window tool route", async () => {
   render(
     <MemoryRouter initialEntries={["/audipick-window"]}>
@@ -456,15 +615,16 @@ it("redirects the legacy AudiPick window hash to the main-window tool route", as
   );
 });
 
-it("groups settings into two columns on a single page, preserves draft, and saves via the existing APIs", async () => {
+it("groups settings into two columns on a single page, automatically applies changes via the existing APIs", async () => {
   render(
     <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />,
   );
   await waitFor(() =>
     expect(screen.getByLabelText("模型")).toHaveValue("saved-model"),
   );
-  expect(screen.getByRole("button", { name: "保存配置" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
   expect(settingsGet).toHaveBeenCalled();
+  expect(screen.getByLabelText(/^超时秒数/)).toHaveValue("120");
   expect(screen.getByRole("heading", { name: "统一 LLM 配置" })).toBeVisible();
   expect(
     screen.queryByRole("heading", { name: "软件更新" }),
@@ -473,7 +633,7 @@ it("groups settings into two columns on a single page, preserves draft, and save
   fireEvent.change(screen.getByLabelText("模型"), {
     target: { value: "draft-model" },
   });
-  expect(screen.getByRole("button", { name: "保存配置" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("OCR 引擎"), {
     target: { value: "baidu" },
   });
@@ -493,20 +653,19 @@ it("groups settings into two columns on a single page, preserves draft, and save
     target: { value: "off" },
   });
   expect(screen.getByLabelText("模型")).toHaveValue("draft-model");
-  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
-  await screen.findByRole("status");
+  await flushSettingsChanges();
   expect(settingsSet).toHaveBeenCalledWith(
     expect.objectContaining({
-      llm: expect.objectContaining({ model: "draft-model" }),
+      llm: expect.objectContaining({ model: "draft-model", timeout: 120 }),
       cache: { cleanup: "off" },
-      ocr: { engine: "baidu" },
+      ocr: expect.objectContaining({ engine: "baidu" }),
     }),
   );
   expect(secretSet).toHaveBeenCalledWith("baidu_ocr_key", "test-placeholder");
-  expect(screen.getByLabelText("百度 API Key")).toHaveValue("");
-  expect(screen.getByRole("button", { name: "保存配置" })).toBeDisabled();
+  expect(screen.getByLabelText("百度 API Key")).toHaveValue("test-placeholder");
+  expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "深绿" })).toBeVisible();
-  expect(screen.getByRole("button", { name: "保存配置" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
   const updateButton = screen.getByRole("button", { name: "软件更新" });
   expect(updateButton.closest(".page-header-actions")).not.toBeNull();
   fireEvent.click(updateButton);
@@ -524,82 +683,108 @@ it("百炼 OCR 配置可修改、保存、重新加载，其他设置保存保�
   fireEvent.change(screen.getByLabelText("百炼 OCR URL"), { target: { value: "https://workspace.example/compatible-mode/v1" } });
   fireEvent.change(screen.getByLabelText("百炼 OCR 模型"), { target: { value: "qwen3.5-ocr" } });
   fireEvent.change(screen.getByLabelText("百炼 OCR API Key"), { target: { value: "bailian-placeholder" } });
-  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
-  await screen.findByRole("status");
+  await flushSettingsChanges();
   expect(settingsSet).toHaveBeenCalledWith(expect.objectContaining({ ocr: { engine: "bailian", bailian_base_url: "https://workspace.example/compatible-mode/v1", bailian_model: "qwen3.5-ocr", custom: "keep" } }));
   expect(secretSet).toHaveBeenCalledWith("bailian_ocr_key", "bailian-placeholder");
-  expect(screen.getByLabelText("百炼 OCR API Key")).toHaveValue("");
+  expect(screen.getByLabelText("百炼 OCR API Key")).toHaveValue("bailian-placeholder");
   cleanup();
   vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" } });
 });
 
-it("protects unsaved settings on leave", async () => {
-  render(
-    <MemoryRouter>
-      <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />
-      <ConfirmDialogHost />
-    </MemoryRouter>,
-  );
-  await waitFor(() =>
-    expect(screen.getByLabelText("模型")).toHaveValue("saved-model"),
-  );
-  fireEvent.change(screen.getByLabelText("Base URL"), {
-    target: { value: "https://llm.internal" },
-  });
-  expect(screen.getByText(/有未保存的配置修改/)).toBeVisible();
-
-  const beforeUnload = new Event("beforeunload", { cancelable: true });
-  window.dispatchEvent(beforeUnload);
-  expect(beforeUnload.defaultPrevented).toBe(true);
-
-  const link = document.createElement("a");
-  link.href = "#/history";
-  link.textContent = "离开设置";
-  document.body.appendChild(link);
-  fireEvent.click(link);
-  expect(
-    screen.getByText("设置尚未保存，确定离开并放弃这些修改吗？"),
-  ).toBeVisible();
-  expect(window.location.hash).not.toBe("#/history");
-  fireEvent.click(screen.getByRole("button", { name: "取消" }));
-  await waitFor(() =>
-    expect(
-      screen.queryByText("设置尚未保存，确定离开并放弃这些修改吗？"),
-    ).toBeNull(),
-  );
-  expect(window.location.hash).not.toBe("#/history");
-  fireEvent.click(link);
-  fireEvent.click(screen.getByRole("button", { name: "离开" }));
-  // 确认离开后补发的合成点击应被放行：对话框不再出现，也不需要再次确认
-  await waitFor(() =>
-    expect(
-      screen.queryByText("设置尚未保存，确定离开并放弃这些修改吗？"),
-    ).toBeNull(),
-  );
+it("设置页测试前自动同步百炼 OCR 参数和密钥，并显示耗时", async () => {
+  vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" }, ocr: { engine: "bailian" } });
+  render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /></MemoryRouter>);
+  await screen.findByLabelText("百炼 OCR URL");
+  expect(screen.getByRole("button", { name: "测试 LLM 连接" })).toBeVisible();
+  expect(audipickOcrTest).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("百炼 OCR URL"), { target: { value: " https://draft.example/compatible-mode/v1 " } });
+  fireEvent.change(screen.getByLabelText("百炼 OCR 模型"), { target: { value: " draft-ocr " } });
+  fireEvent.change(screen.getByLabelText("百炼 OCR API Key"), { target: { value: "ocr-draft-key" } });
+  fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("识别成功。 响应耗时 20 毫秒。");
+  expect(audipickOcrTest).toHaveBeenLastCalledWith("bailian", "dGVzdA==", "ocr-draft-key", "", {
+    bailian_base_url: "https://draft.example/compatible-mode/v1", bailian_model: "draft-ocr",
+  }, true);
+  expect(settingsSet).toHaveBeenCalled();
+  expect(secretSet).toHaveBeenCalled();
+  expect(screen.getByLabelText("百炼 OCR API Key")).toHaveValue("ocr-draft-key");
+  fireEvent.change(screen.getByLabelText("百炼 OCR API Key"), { target: { value: "" } });
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
+  await screen.findByRole("status");
+  expect(audipickOcrTest).toHaveBeenLastCalledWith("bailian", "dGVzdA==", "", "", expect.any(Object), true);
 });
 
-it("protects unsaved settings when browser history navigates backward", async () => {
+it.each(["baidu", "ai", "local"])("设置页 %s OCR 测试只传当前引擎的凭据", async (engine) => {
+  vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" }, ocr: { engine: "bailian" } });
+  render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /></MemoryRouter>);
+  await screen.findByLabelText("百炼 OCR API Key");
+  fireEvent.change(screen.getByLabelText("百炼 OCR API Key"), { target: { value: "unrelated-bailian-key" } });
+  fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "unrelated-llm-key" } });
+  fireEvent.change(screen.getByLabelText("OCR 引擎"), { target: { value: engine } });
+  if (engine === "baidu") {
+    fireEvent.change(screen.getByLabelText("百度 API Key"), { target: { value: "baidu-draft-key" } });
+    fireEvent.change(screen.getByLabelText("百度 Secret Key"), { target: { value: "baidu-draft-secret" } });
+  }
+  fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
+  await screen.findByRole("status");
+  expect(audipickOcrTest).toHaveBeenLastCalledWith(engine, "dGVzdA==", engine === "baidu" ? "baidu-draft-key" : "", engine === "baidu" ? "baidu-draft-secret" : "", undefined, true);
+  expect(settingsSet).toHaveBeenCalled();
+  expect(secretSet).toHaveBeenCalled();
+});
+
+it("OCR 测试失败显示原因并可重试，修改配置清除旧结论", async () => {
+  vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" }, ocr: { engine: "bailian" } });
+  vi.mocked(audipickOcrTest).mockRejectedValueOnce({ userMessage: "OCR 鉴权失败，请核对密钥。" });
+  render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /></MemoryRouter>);
+  await screen.findByLabelText("百炼 OCR URL");
+  fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("OCR 鉴权失败，请核对密钥。");
+  expect(screen.getByRole("status")).toHaveClass("failed");
+  fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
+  await waitFor(() => expect(screen.getByRole("status")).toHaveClass("success"));
+  fireEvent.change(screen.getByLabelText("百炼 OCR 模型"), { target: { value: "new-model" } });
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
+it("OCR 测试期间防止重复点击，切换引擎后不显示迟到的旧成功结果", async () => {
+  vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" }, ocr: { engine: "bailian" } });
+  let finish!: (value: { message: string; elapsedMs: number }) => void;
+  vi.mocked(audipickOcrTest).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /></MemoryRouter>);
+  await screen.findByLabelText("百炼 OCR URL");
+  fireEvent.click(screen.getByRole("button", { name: "测试 OCR 连接" }));
+  const button = screen.getByRole("button", { name: "正在测试 OCR…" });
+  expect(button).toBeDisabled();
+  fireEvent.click(button);
+  await waitFor(() => expect(audipickOcrTest).toHaveBeenCalledTimes(1));
+  fireEvent.change(screen.getByLabelText("OCR 引擎"), { target: { value: "local" } });
+  await act(async () => { finish({ message: "旧请求成功", elapsedMs: 20 }); });
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "测试 OCR 连接" })).toBeEnabled();
+});
+
+it("leaving settings flushes text edits without a discard dialog", async () => {
+  const view = render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /><ConfirmDialogHost /></MemoryRouter>);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://llm.internal" } });
+  view.unmount();
+  await waitFor(() => expect(settingsSet).toHaveBeenCalledWith(expect.objectContaining({llm: expect.objectContaining({base_url:"https://llm.internal"})})));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("browser back applies changes without asking the user to save", async () => {
   const router = createMemoryRouter([
-    { path: "/history", element: <p>历史页</p> },
-    { path: "/settings", element: <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /> },
-  ], { initialEntries: ["/history", "/settings"], initialIndex: 1 });
+    {path:"/history",element:<p>历史页</p>},
+    {path:"/settings",element:<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />},
+  ], {initialEntries:["/history","/settings"],initialIndex:1});
   render(<><RouterProvider router={router} /><ConfirmDialogHost /></>);
   await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
-  fireEvent.change(screen.getByLabelText("Base URL"), {
-    target: { value: "https://llm.internal" },
-  });
-
-  await act(async () => { await router.navigate(-1); });
-  expect(router.state.location.pathname).toBe("/settings");
-  expect(screen.getByText("设置尚未保存，确定离开并放弃这些修改吗？")).toBeVisible();
-  fireEvent.click(screen.getByRole("button", { name: "取消" }));
-  await waitFor(() => expect(screen.queryByText("设置尚未保存，确定离开并放弃这些修改吗？")).toBeNull());
-  expect(router.state.location.pathname).toBe("/settings");
-
-  await act(async () => { await router.navigate(-1); });
-  fireEvent.click(screen.getByRole("button", { name: "离开" }));
-  await waitFor(() => expect(router.state.location.pathname).toBe("/history"));
-  expect(screen.getByText("历史页")).toBeVisible();
+  fireEvent.change(screen.getByLabelText("Base URL"), {target:{value:"https://llm.internal"}});
+  await act(async () => {await router.navigate(-1);});
+  expect(router.state.location.pathname).toBe("/history");
+  await waitFor(() => expect(settingsSet).toHaveBeenCalledWith(expect.objectContaining({llm:expect.objectContaining({base_url:"https://llm.internal"})})));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
 it("requires confirmation before clearing local cache", async () => {
@@ -615,8 +800,7 @@ it("requires confirmation before clearing local cache", async () => {
       <ConfirmDialogHost />
     </MemoryRouter>,
   );
-  await waitFor(() => expect(engineCall).toHaveBeenCalled());
-  expect(screen.getByText("已缓存 1.0 KB")).toBeVisible();
+  expect(await screen.findByText("已缓存 1.0 KB")).toBeVisible();
   fireEvent.click(
     screen.getByRole("button", { name: "立刻清理全部缓存（1.0 KB）" }),
   );
@@ -843,7 +1027,7 @@ it("语音转写通道可切换为 Token Plan 套餐通道并随保存落库", a
     screen.getByRole("button", { name: "测试套餐通道" }),
   ).toBeInTheDocument();
   // 保存后通道选择写入 meeting 命名空间，供转写任务读取。
-  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+  await flushSettingsChanges();
   await waitFor(() => expect(vi.mocked(settingsSet)).toHaveBeenCalled());
   const payload = vi.mocked(settingsSet).mock.calls[0][0] as {
     meeting: Record<string, unknown>;
@@ -865,7 +1049,7 @@ it("通用通道预填地址和模型，未保存的修改用于测试，切换�
   await waitFor(() => expect(meetingAsrTest).toHaveBeenCalledWith(" general-test-key ", {
     channel: "paraformer", baseUrl: "https://asr.example.cn/gateway/", model: "custom-file-model",
   }));
-  expect(settingsSet).not.toHaveBeenCalled();
+  expect(settingsSet).toHaveBeenCalled();
   fireEvent.change(screen.getByLabelText("转写通道"), { target: { value: "token_plan" } });
   expect(screen.queryByLabelText(/^通用转写模型/)).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText(/^套餐 API 密钥/), { target: { value: "plan-test-key" } });
@@ -875,7 +1059,7 @@ it("通用通道预填地址和模型，未保存的修改用于测试，切换�
   }));
   fireEvent.change(screen.getByLabelText("转写通道"), { target: { value: "paraformer" } });
   expect(screen.getByLabelText(/^通用转写模型/)).toHaveValue(" custom-file-model ");
-  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+  await flushSettingsChanges();
   await waitFor(() => expect(secretSet).toHaveBeenCalledWith("bailian_asr_key", " general-test-key "));
   expect(vi.mocked(settingsSet).mock.calls[0][0]).toMatchObject({ meeting: {
     asr_channel: "paraformer", asr_base_url: "https://asr.example.cn/gateway/", asr_model: "custom-file-model",
@@ -890,14 +1074,14 @@ it("套餐 ASR Flash 使用当前草稿测试并说明内置样音与额度消�
   fireEvent.change(screen.getByLabelText("套餐地址"), { target: { value: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1" } });
   fireEvent.change(screen.getByLabelText("套餐转写模型"), { target: { value: " qwen-audio-3.0-asr-flash " } });
   fireEvent.change(screen.getByLabelText(/^套餐 API 密钥/), { target: { value: "test-only-key" } });
-  expect(screen.getByText(/ASR Flash 测试会发送内置短样音并消耗少量套餐额度/)).toBeInTheDocument();
+  expect(screen.getByText(/样音测试消耗少量套餐额度/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "测试套餐通道" }));
   await waitFor(() => expect(meetingAsrTest).toHaveBeenCalledWith("test-only-key", {
     channel: "token_plan",
     baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     model: "qwen-audio-3.0-asr-flash",
   }));
-  expect(settingsSet).not.toHaveBeenCalled();
+  expect(settingsSet).toHaveBeenCalled();
 });
 
 it("重新打开设置恢复通用通道的自定义配置", async () => {
@@ -918,11 +1102,12 @@ it("设置页可查看已保存密钥，查看不制造草稿也不覆盖已保�
   await waitFor(() => expect(screen.getByLabelText("API Key")).toHaveValue("saved-test-key"));
   expect(secretGet).toHaveBeenCalledWith("llm_api_key");
   expect(screen.getByLabelText("API Key")).toHaveAttribute("type", "text");
-  expect(screen.getByRole("button", { name: "保存配置" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "保存配置" })).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("模型"), { target: { value: "updated-model" } });
-  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
-  await screen.findByText("配置已保存，相关工具会使用这些设置。");
+  await flushSettingsChanges();
+  await waitFor(() => expect(document.querySelector(".settings-auto-status")).toHaveTextContent("已自动保存"));
   expect(secretSet).not.toHaveBeenCalled();
-  expect(screen.getByLabelText("API Key")).toHaveValue("");
+  expect(screen.getByLabelText("API Key")).toHaveValue("saved-test-key");
+  fireEvent.click(screen.getByRole("button", { name: "隐藏API Key" }));
   expect(screen.getByLabelText("API Key")).toHaveAttribute("type", "password");
 });

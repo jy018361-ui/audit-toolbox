@@ -34,8 +34,8 @@ const HTTP_ASR_PATH: &str = "/api/v1/services/aigc/multimodal-generation/generat
 const HTTP_ASR_WAV_BYTES: usize = 6 * 1024 * 1024;
 const CONNECTION_SAMPLE: &[u8] = include_bytes!("../../assets/asr/connection-test.wav");
 
-fn uses_http_asr(model: &str) -> bool {
-    model.trim() == HTTP_ASR_MODEL
+pub(crate) fn uses_http_asr(model: &str) -> bool {
+    matches!(model.trim(), HTTP_ASR_MODEL | "qwen-audio-3.1-asr-flash")
 }
 /// 未知模型沿用原有分段时长，不将某个模型的缓冲上限套用到其他模型。
 const CHUNK_SECONDS: u32 = 120;
@@ -58,9 +58,18 @@ fn cancelled_error() -> AppError {
 pub(crate) struct PlanAsrConfig {
     pub base_url: String,
     pub model: String,
+    pub vocabulary: Value,
 }
 
 impl PlanAsrConfig {
+    fn endpoint(&self) -> Result<String, AppError> {
+        if uses_http_asr(&self.model) {
+            http_asr_url(&self.base_url)
+        } else {
+            ws_url(&self.base_url, &self.model)
+        }
+    }
+
     /// 从注入的 `__settings.meeting` 命名空间读取，缺省值与设置页占位一致。
     pub(crate) fn from_settings(settings: &Value) -> Self {
         let meeting = settings.get("meeting").cloned().unwrap_or(Value::Null);
@@ -74,6 +83,7 @@ impl PlanAsrConfig {
                 .to_owned()
         };
         PlanAsrConfig {
+            vocabulary: json!({}),
             base_url: pick("plan_base_url", DEFAULT_BASE_URL),
             model: pick("plan_model", DEFAULT_MODEL),
         }
@@ -424,15 +434,19 @@ async fn wait_cancelled(cancel: &AtomicBool) {
     }
 }
 
-fn http_asr_payload(model: &str, chunk_b64: &str, sample_rate: u32) -> Value {
-    json!({
+fn http_asr_payload(model: &str, chunk_b64: &str, sample_rate: u32, vocabulary: &Value) -> Value {
+    let mut payload = json!({
         "model": model.trim(),
         "input": {"messages": [{"role": "user", "content": [{
             "type": "input_audio",
             "input_audio": {"data": format!("data:audio/wav;base64,{chunk_b64}")}
         }]}]},
         "parameters": {"format": "wav", "sample_rate": sample_rate.to_string()}
-    })
+    });
+    if uses_http_asr(model) && vocabulary.as_object().is_some_and(|words| !words.is_empty()) {
+        payload["parameters"]["vocabulary"] = vocabulary.clone();
+    }
+    payload
 }
 
 fn http_asr_response(status: u16, body: &str) -> Result<String, AppError> {
@@ -493,6 +507,7 @@ fn transcribe_http_chunk(
     model: &str,
     chunk_b64: &str,
     sample_rate: u32,
+    vocabulary: &Value,
     cancel: &AtomicBool,
 ) -> Result<String, AppError> {
     if cancel.load(Ordering::Relaxed) {
@@ -517,7 +532,7 @@ fn transcribe_http_chunk(
                 .post(url)
                 .bearer_auth(key.trim())
                 .header("X-DashScope-SSE", "disable")
-                .json(&http_asr_payload(model, chunk_b64, sample_rate))
+                .json(&http_asr_payload(model, chunk_b64, sample_rate, vocabulary))
                 .send()
                 .await
                 .map_err(http_request_error)?;
@@ -661,11 +676,13 @@ pub(crate) fn transcribe_file(
     cancel: &Arc<AtomicBool>,
     config: &PlanAsrConfig,
 ) -> Result<TranscriptionResult, AppError> {
+    // 错误配置先报错，避免无效地址仍触达凭据管理器。
+    config.endpoint()?;
     let key = load_plan_key()?;
     transcribe_file_with_key(path, progress, cancel, config, &key)
 }
 
-fn transcribe_file_with_key(
+pub(crate) fn transcribe_file_with_key(
     path: &Path,
     progress: Progress,
     cancel: &Arc<AtomicBool>,
@@ -673,11 +690,7 @@ fn transcribe_file_with_key(
     key: &str,
 ) -> Result<TranscriptionResult, AppError> {
     let http_asr = uses_http_asr(&config.model);
-    let url = if http_asr {
-        http_asr_url(&config.base_url)?
-    } else {
-        ws_url(&config.base_url, &config.model)?
-    };
+    let url = config.endpoint()?;
     let (spec, chunks) = wav_chunks(path, &config.model)?;
     if chunks.is_empty() {
         return Err(plan_error(
@@ -708,6 +721,7 @@ fn transcribe_file_with_key(
                 &config.model,
                 &chunk.b64,
                 spec.sample_rate,
+                &config.vocabulary,
                 cancel,
             )?
         } else {
@@ -779,6 +793,7 @@ pub(crate) fn test_connection(params: &PlanTestParams) -> Result<Value, AppError
             &params.model,
             &sample,
             16_000,
+            &json!({}),
             &AtomicBool::new(false),
         )?;
         if text.is_empty() {
@@ -871,6 +886,8 @@ mod tests {
             assert!(error.detail.is_none());
         }
         assert!(uses_http_asr(" qwen-audio-3.0-asr-flash "));
+        assert!(uses_http_asr("qwen-audio-3.1-asr-flash"));
+        assert!(!uses_http_asr("qwen-audio-3.1-asr-flash-filetrans"));
         assert!(!uses_http_asr(DEFAULT_MODEL));
         assert!(!uses_http_asr("qwen-audio-3.0-asr-flash-streaming"));
     }
@@ -912,6 +929,10 @@ mod tests {
 
     // 本地 HTTP 服务核对真实请求，既用于设置页测试，也用于长录音完整入口。
     fn http_server(responses: Vec<(u16, Value)>) -> (String, std::thread::JoinHandle<()>) {
+        http_server_with_vocabulary(responses, Value::Null)
+    }
+
+    fn http_server_with_vocabulary(responses: Vec<(u16, Value)>, vocabulary: Value) -> (String, std::thread::JoinHandle<()>) {
         use std::io::{BufRead, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -955,6 +976,7 @@ mod tests {
                 assert_eq!(body["model"], HTTP_ASR_MODEL);
                 assert!(body.get("messages").is_none());
                 assert_eq!(body["parameters"]["format"], "wav");
+                assert_eq!(body["parameters"]["vocabulary"], vocabulary);
                 let audio = body
                     .pointer("/input/messages/0/content/0/input_audio/data")
                     .and_then(Value::as_str)
@@ -1015,10 +1037,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("long-flash.wav");
         write_wav(&path, 8_000, 125.0);
-        let (base_url, server) = http_server(vec![
+        let (base_url, server) = http_server_with_vocabulary(vec![
             (200, json!({"output":{"text":"第一段"}})),
             (200, json!({"text":"第二段"})),
-        ]);
+        ], json!({"函证":4}));
         let result = transcribe_file_with_key(
             &path,
             &|_, _, _, _| {},
@@ -1026,6 +1048,7 @@ mod tests {
             &PlanAsrConfig {
                 base_url,
                 model: HTTP_ASR_MODEL.into(),
+                vocabulary: json!({"函证":4}),
             },
             "test-only-key",
         )
@@ -1075,6 +1098,7 @@ mod tests {
             HTTP_ASR_MODEL,
             "",
             16_000,
+            &json!({}),
             &AtomicBool::new(true),
         )
         .unwrap_err();
@@ -1092,6 +1116,25 @@ mod tests {
         }) {
             Ok(result) => assert_eq!(result["ok"], true),
             Err(error) => panic!("在线 HTTP 识别失败：{}；{}", error.code, error.user_message),
+        }
+    }
+
+    #[test]
+    fn invalid_url_is_rejected_before_credentials_or_reading_audio() {
+        for model in [DEFAULT_MODEL, HTTP_ASR_MODEL] {
+            let config = PlanAsrConfig {
+                vocabulary: json!({}),
+                base_url: "invalid-local-validation-address".into(),
+                model: model.into(),
+            };
+            let error = transcribe_file(
+                Path::new("does-not-exist.wav"),
+                &|_, _, _, _| {},
+                &Arc::new(AtomicBool::new(false)),
+                &config,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "PLAN_ASR_URL_INVALID");
         }
     }
 

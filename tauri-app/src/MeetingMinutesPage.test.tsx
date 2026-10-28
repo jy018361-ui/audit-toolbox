@@ -45,6 +45,7 @@ vi.mock("./api", () => ({
   openOutput: vi.fn(async () => true),
   pickPath: vi.fn(async () => null),
   listenJobEvents: vi.fn(async () => () => undefined),
+  listenNativeFileDragEvents: vi.fn(async () => () => undefined),
   runningInDesktopApp: vi.fn(() => true),
 }));
 vi.mock("./toolPageActivity", () => ({
@@ -69,6 +70,7 @@ beforeEach(async () => {
   const api = await import("./api");
   vi.mocked(api.meetingHistoryList).mockResolvedValue([]);
   vi.mocked(api.meetingHistoryGet).mockResolvedValue({});
+  vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
 });
 
 afterEach(() => {
@@ -191,7 +193,7 @@ describe("MeetingMinutesPage", () => {
     expect(api.jobStart).not.toHaveBeenCalled();
   });
 
-  it("合并配置与生成按钮，历史与结果并列且不再显示步骤条", async () => {
+  it("合并配置与生成按钮，按配置、历史、结果排列且不再显示步骤条", async () => {
     render(<MeetingMinutesPage tool={tool} />);
     expect(
       screen.getByRole("heading", { level: 1, name: tool.name }),
@@ -214,9 +216,99 @@ describe("MeetingMinutesPage", () => {
     render(<MeetingMinutesPage tool={tool} />);
     // 视觉审核 S8：不再指向不存在的「右侧浏览」按钮。
     expect(
-      screen.getByText("拖放或点击选择已有录音（wav / mp3 / m4a 等）"),
+      screen.getByText("拖放或点击选择会议音频或视频"),
     ).toBeInTheDocument();
     expect(screen.queryByText(/点击右侧浏览/)).not.toBeInTheDocument();
+  });
+
+  it.each(["mp4", "WMV", "AVI"])("原生拖入 %s 视频后可生成纪要，文件路径传给任务", async (extension) => {
+    const api = await import("./api");
+    const activity = await import("./toolPageActivity");
+    render(<MeetingMinutesPage tool={tool} />);
+    await waitFor(() => expect(api.listenNativeFileDragEvents).toHaveBeenCalled());
+    const listener = vi.mocked(api.listenNativeFileDragEvents).mock.calls.at(-1)![0];
+    await act(async () => listener({ type: "enter", paths: [`C:/data/会议.${extension}`] }));
+    expect(screen.getByText("拖放或点击选择会议音频或视频").closest(".file-drop-input")).toHaveClass("drag-hover");
+    await act(async () => listener({ type: "drop", paths: [`C:/data/会议.${extension}`] }));
+    expect(screen.getByRole("button", { name: `重新选择文件：会议.${extension}` })).toBeInTheDocument();
+    expect(screen.getByText(`会议.${extension}`).closest(".file-drop-input")).not.toHaveClass("drag-hover");
+    expect(activity.markToolPageLive).toHaveBeenCalledWith(tool.id);
+    fireEvent.click(screen.getByRole("button", { name: "生成纪要" }));
+    await waitFor(() => expect(api.jobStart).toHaveBeenCalledWith("meeting.generate", {
+      audioPath: `C:/data/会议.${extension}`, detailLevel: "standard",
+    }));
+  });
+
+  it("点击上传的选择器包含音视频格式，并处理取消和选择错误", async () => {
+    const api = await import("./api");
+    render(<MeetingMinutesPage tool={tool} />);
+    const upload = screen.getByRole("button", { name: "拖放或点击选择会议音频或视频" });
+    vi.mocked(api.pickPath).mockResolvedValueOnce(null);
+    fireEvent.click(upload);
+    await waitFor(() => expect(api.pickPath).toHaveBeenCalledWith("file", "选择会议音频或视频", expect.arrayContaining(["mp4", "wmv", "avi", "mp3"])));
+    expect(screen.getByRole("button", { name: "生成纪要" })).toBeDisabled();
+    vi.mocked(api.pickPath).mockRejectedValueOnce(new Error("文件选择失败"));
+    fireEvent.click(upload);
+    expect(await screen.findByRole("alert")).toHaveTextContent("文件选择失败");
+    vi.mocked(api.pickPath).mockResolvedValueOnce("C:/data/选择的视频.wmv");
+    fireEvent.click(upload);
+    expect(await screen.findByRole("button", { name: "重新选择文件：选择的视频.wmv" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("不支持或多个拖入文件保留原输入和已显示结果，换成合法文件才清除结果", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({
+      watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false,
+      latestJob: { jobId:"old",toolId:tool.id,phase:"completed",current:1,total:1,
+        message:"已完成",severity:"success",outputPaths:[],result:{minutesMarkdown:"# 旧会议结果"} },
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByRole("article")).toHaveTextContent("旧会议结果");
+    const listener = vi.mocked(api.listenNativeFileDragEvents).mock.calls.at(-1)![0];
+    await act(async () => listener({type:"drop",paths:["C:/data/会议.pdf"]}));
+    expect(screen.getByRole("alert")).toHaveTextContent("请选择支持的会议音频或视频文件");
+    expect(screen.getByRole("article")).toHaveTextContent("旧会议结果");
+    await act(async () => listener({type:"drop",paths:["C:/data/1.mp4","C:/data/2.mp3"]}));
+    expect(screen.getByRole("alert")).toHaveTextContent("每次只支持导入一个");
+    expect(screen.getByRole("article")).toHaveTextContent("旧会议结果");
+    await act(async () => listener({type:"drop",paths:["C:/data/新会议.avi"]}));
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await act(async () => listener({type:"drop",paths:["C:/data/无效.txt"]}));
+    expect(screen.getByRole("button", {name:"重新选择文件：新会议.avi"})).toBeInTheDocument();
+  });
+
+  it("选择器未返回时新拖入的文件优先，迟到的选择不覆盖当前输入", async () => {
+    const api = await import("./api");
+    let resolveSelection!: (value: string) => void;
+    vi.mocked(api.pickPath).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSelection = resolve;
+    }));
+    render(<MeetingMinutesPage tool={tool} />);
+    await waitFor(() => expect(api.listenNativeFileDragEvents).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", {name:"拖放或点击选择会议音频或视频"}));
+    const listener = vi.mocked(api.listenNativeFileDragEvents).mock.calls.at(-1)![0];
+    await act(async () => listener({type:"drop",paths:["C:/data/刚拖入.mp4"]}));
+    await act(async () => resolveSelection("C:/data/迟到.wav"));
+    expect(screen.getByRole("button", {name:"重新选择文件：刚拖入.mp4"})).toBeInTheDocument();
+    expect(screen.queryByText("迟到.wav")).not.toBeInTheDocument();
+  });
+
+  it.each(["recording", "generating", "hidden"])("%s 时原生拖放不替换输入", async (state) => {
+    const api = await import("./api");
+    if (state === "recording") vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:true});
+    const view = render(<div hidden={state === "hidden"}><MeetingMinutesPage tool={tool} /></div>);
+    await waitFor(() => expect(api.listenNativeFileDragEvents).toHaveBeenCalled());
+    if (state === "recording") await screen.findByRole("button", {name:"停止并生成纪要"});
+    if (state === "generating") {
+      const jobListener = vi.mocked(api.listenJobEvents).mock.calls.at(-1)![0];
+      await act(async () => jobListener({jobId:"busy",toolId:tool.id,phase:"running",current:1,total:4,message:"转写中",severity:"info",outputPaths:[]}));
+    }
+    const listener = vi.mocked(api.listenNativeFileDragEvents).mock.calls.at(-1)![0];
+    await act(async () => listener({type:"drop",paths:["C:/data/不应导入.mp4"]}));
+    expect(view.container).not.toHaveTextContent("不应导入.mp4");
+    expect(api.jobStart).not.toHaveBeenCalled();
   });
 
   it("检测关闭时给出设置指引", async () => {
@@ -539,7 +631,7 @@ describe("MeetingMinutesPage", () => {
     render(<MeetingMinutesPage tool={tool} />);
     await screen.findByRole("group", { name: "纪要版本" });
     vi.mocked(pickPath).mockResolvedValueOnce("C:/data/新会议.wav");
-    fireEvent.click(screen.getByRole("button", { name: /拖放或点击选择已有录音/ }));
+    fireEvent.click(screen.getByRole("button", { name: /拖放或点击选择会议音频或视频/ }));
     await waitFor(() => expect(screen.queryByRole("article")).not.toBeInTheDocument());
     expect(screen.queryByRole("group", { name: "纪要版本" })).not.toBeInTheDocument();
   });

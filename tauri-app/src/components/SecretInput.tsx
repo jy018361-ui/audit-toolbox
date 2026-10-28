@@ -9,12 +9,14 @@ export function SecretInput({
   credentialName,
   value,
   onChange,
+  autoSave = false,
   placeholder = "留空表示不修改",
 }: {
   label: string;
   credentialName: string;
   value: string;
   onChange: (value: string) => void;
+  autoSave?: boolean;
   placeholder?: string;
 }) {
   const [visible, setVisible] = useState(false);
@@ -44,7 +46,7 @@ export function SecretInput({
       const saved = await secretGet(credentialName);
       if (requestVersion.current !== version) return;
       setStoredValue(saved ?? "");
-      if (!saved) setMessage("尚未保存该密钥，请填写后保存。");
+      if (!saved) setMessage(autoSave ? "尚未设置密钥。" : "尚未保存该密钥，请填写后保存。");
     } catch (error) {
       if (requestVersion.current === version) setMessage(errorText(error));
     } finally {

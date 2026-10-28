@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { audipickOcrTest, audipickLlmTest, secretSet, settingsGet, settingsSet } from "./api";
 import { errorText } from "@/lib/errors";
 import { SecretInput } from "./components/SecretInput";
-import { BAILIAN_OCR_BASE_URL, BAILIAN_OCR_MODEL, ocrEngineLabel } from "./ocrConfig";
+import { BAILIAN_OCR_BASE_URL, BAILIAN_OCR_MODEL, createOcrTestImage, ocrEngineLabel } from "./ocrConfig";
 import "./AudiPickLegacyAuxiliary.css";
 
 export function AudiPickLegacyHome({ onStart, onConfig }: { onStart: () => void; onConfig: () => void }) {
@@ -107,14 +107,7 @@ export function AudiPickLegacyConfig({ status, onSaved }: {
     try {
       let result;
       if (tab === "ocr") {
-        const canvas = document.createElement("canvas");
-        canvas.width = 480; canvas.height = 100;
-        const context = canvas.getContext("2d");
-        if (!context) throw new Error("无法创建 OCR 测试图片。");
-        context.fillStyle = "white"; context.fillRect(0, 0, 480, 100);
-        context.fillStyle = "black"; context.font = "32px sans-serif";
-        context.fillText("AudiPick OCR 12345", 20, 62);
-        const image = canvas.toDataURL("image/png").split(",")[1];
+        const image = createOcrTestImage();
         result = form.ocrEngine === "bailian"
           ? await audipickOcrTest("bailian", image, form.bailianOcrKey, "", bailianSettings())
           : await audipickOcrTest(form.ocrEngine, image, form.ocrEngine === "baidu" ? form.ocrApiKey : "", form.ocrEngine === "baidu" ? form.ocrSecret : "");

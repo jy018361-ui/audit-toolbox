@@ -1,0 +1,1934 @@
+[
+  {
+    "file": "src/App.tsx",
+    "line": 701,
+    "container": "<div className=\"brand\" data-tauri-drag-region=\"deep\">",
+    "buttons": [
+      {
+        "line": 702,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"sidebar-drawer-close\"",
+        "text": "<button type=\"button\" className=\"sidebar-drawer-close\" aria-label=\"关闭工具导航\" onClick={() => { setToolDrawerOpen(false); restoreToolDrawerTrigger(); }} > × </button>"
+      },
+      {
+        "line": 714,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"sidebar-collapse-toggle\"",
+        "text": "<button ref={sidebarCollapseToggle} type=\"button\" className=\"sidebar-collapse-toggle\" aria-label={sidebarCollapsed ? \"展开侧边栏\" : \"折叠侧边栏\"} aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? \"展开侧边栏\" : \"折叠侧边栏\"} onClick={toggleSidebarCollapsed} > <span aria-hidden=\"true\">{sidebarCollapsed ? \"»\" : \"«\"}</span> </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickAssociationDialog.tsx",
+    "line": 93,
+    "container": "<div className=\"flex flex-wrap justify-end gap-2\">",
+    "buttons": [
+      {
+        "line": 93,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"ghost\"",
+        "text": "<button className=\"ghost\" disabled={busy} onClick={onClose}>取消</button>"
+      },
+      {
+        "line": 93,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"primary min-h-10 rounded-md px-4\"",
+        "text": "<button className=\"primary min-h-10 rounded-md px-4\" disabled={busy || anchorOccupied} onClick={() => void save()}>{busy ? \"保存中…\" : \"保存关联\"}</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyAuxiliary.tsx",
+    "line": 9,
+    "container": "<nav>",
+    "buttons": [
+      {
+        "line": 9,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "",
+        "text": "<button onClick={onConfig}>配置</button>"
+      },
+      {
+        "line": 9,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"primary\"",
+        "text": "<button className=\"primary\" onClick={onStart}>开始使用</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyAuxiliary.tsx",
+    "line": 122,
+    "container": "<div className=\"apl-config-tabs\">",
+    "buttons": [
+      {
+        "line": 122,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{tab === \"ocr\" ? \"active\" : \"\"}",
+        "text": "<button disabled={busy} className={tab === \"ocr\" ? \"active\" : \"\"} onClick={() => { setTab(\"ocr\"); setTestResult(undefined); setMessage(\"\"); }}>OCR引擎</button>"
+      },
+      {
+        "line": 122,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{tab === \"ai\" ? \"active\" : \"\"}",
+        "text": "<button disabled={busy} className={tab === \"ai\" ? \"active\" : \"\"} onClick={() => { setTab(\"ai\"); setTestResult(undefined); setMessage(\"\"); }}>AI模型</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyContract.tsx",
+    "line": 297,
+    "container": "<div className=\"aplc-flow-actions\">",
+    "buttons": [
+      {
+        "line": 298,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{\r\n                hasExtracted ? \"aplc-button primary\" : \"aplc-button outline\"\r\n              }",
+        "text": "<button type=\"button\" className={ hasExtracted ? \"aplc-button primary\" : \"aplc-button outline\" } disabled={!hasExtracted || busy} onClick={onOpenWorkpaper} > {hasExtracted ? `查看底稿(${flow.resultCount})` : \"查看底稿\"} </button>"
+      },
+      {
+        "line": 308,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"aplc-button outline\"",
+        "text": "<button type=\"button\" className=\"aplc-button outline\" disabled={!hasExtracted || busy} onClick={flow.onExportCurrent} > 导出当前底稿 </button>"
+      },
+      {
+        "line": 316,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"aplc-button outline\"",
+        "text": "<button type=\"button\" className=\"aplc-button outline\" disabled={!hasExtracted || busy} onClick={flow.onExportAll} > 导出全部底稿 </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyContract.tsx",
+    "line": 436,
+    "container": "<div className=\"aplc-actions\">",
+    "buttons": [
+      {
+        "line": 437,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"aplc-button primary\"",
+        "text": "<button type=\"button\" className=\"aplc-button primary\" disabled={!props.onSaveContractText || props.busy} onClick={props.onSaveContractText} > 保存修改 </button>"
+      },
+      {
+        "line": 445,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"aplc-button secondary\"",
+        "text": "<button type=\"button\" className=\"aplc-button secondary\" disabled={!props.onCopyContractText} onClick={props.onCopyContractText} > 复制文本 </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyContract.tsx",
+    "line": 713,
+    "container": "<div className=\"aplc-actions wrap\">",
+    "buttons": [
+      {
+        "line": 714,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"aplc-button primary\"",
+        "text": "<button type=\"button\" className=\"aplc-button primary\" disabled={props.busy} onClick={() => workpaper.onSaveRow(selected.id)} > 保存修改 </button>"
+      },
+      {
+        "line": 722,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"aplc-button secondary\"",
+        "text": "<button type=\"button\" className=\"aplc-button secondary\" onClick={() => workpaper.onCopyRow(selected.id)} > 复制条目 </button>"
+      },
+      {
+        "line": 729,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"aplc-button outline\"",
+        "text": "<button type=\"button\" className=\"aplc-button outline\" onClick={() => workpaper.onOpenEvidence(selected.id)} > 查看证据 </button>"
+      },
+      {
+        "line": 736,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"aplc-button outline\"",
+        "text": "<button type=\"button\" className=\"aplc-button outline\" onClick={() => workpaper.onToggleReviewed(selected.id)} > {selected.reviewed ? \"取消复核\" : \"标记已复核\"} </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyContract.tsx",
+    "line": 834,
+    "container": "<div className=\"aplc-view-switch\" aria-label=\"合同页面视图\">",
+    "buttons": [
+      {
+        "line": 835,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{props.view === \"detail\" ? \"active\" : \"\"}",
+        "text": "<button type=\"button\" className={props.view === \"detail\" ? \"active\" : \"\"} onClick={() => props.onViewChange(\"detail\")} > 合同详情 </button>"
+      },
+      {
+        "line": 842,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{props.view === \"workpaper\" ? \"active\" : \"\"}",
+        "text": "<button type=\"button\" className={props.view === \"workpaper\" ? \"active\" : \"\"} disabled={!props.fileFlow.resultCount} onClick={() => props.onViewChange(\"workpaper\")} > 工作底稿 </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyDashboard.tsx",
+    "line": 318,
+    "container": "<div className=\"ap146-modal-actions\">",
+    "buttons": [
+      {
+        "line": 319,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"ap146-cancel-button\"",
+        "text": "<button className=\"ap146-cancel-button\" disabled={busy} type=\"button\" onClick={onClose} > 取消 </button>"
+      },
+      {
+        "line": 327,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"ap146-primary-button\"",
+        "text": "<button className=\"ap146-primary-button\" disabled={busy} type=\"submit\" > {busy ? \"创建中…\" : \"创建\"} </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyDashboard.tsx",
+    "line": 436,
+    "container": "<div className=\"ap146-metrics\">",
+    "buttons": [
+      {
+        "line": 437,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{preferences.status === \"all\" ? \"selected\" : \"\"}",
+        "text": "<button aria-pressed={preferences.status === \"all\"} className={preferences.status === \"all\" ? \"selected\" : \"\"} type=\"button\" onClick={() => updatePreferences({ status: \"all\" })} > <span>项目总数</span> <strong>{formatCount(projects.length)}</strong> </button>"
+      },
+      {
+        "line": 446,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{preferences.status === \"active\" ? \"selected\" : \"\"}",
+        "text": "<button aria-pressed={preferences.status === \"active\"} className={preferences.status === \"active\" ? \"selected\" : \"\"} type=\"button\" onClick={() => updatePreferences({ status: \"active\" })} > <span>进行中</span> <strong className=\"active-count\">{activeCount}</strong> </button>"
+      },
+      {
+        "line": 455,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{preferences.status === \"completed\" ? \"selected\" : \"\"}",
+        "text": "<button aria-pressed={preferences.status === \"completed\"} className={preferences.status === \"completed\" ? \"selected\" : \"\"} type=\"button\" onClick={() => updatePreferences({ status: \"completed\" })} > <span>已完成</span> <strong className=\"completed-count\">{completedCount}</strong> </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyProject.tsx",
+    "line": 228,
+    "container": "<div className=\"alp-file-controls\" onClick={(event) => event.stopPropagation()}>",
+    "buttons": [
+      {
+        "line": 243,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-button alp-button-outline alp-button-tiny\"",
+        "text": "<button type=\"button\" className=\"alp-button alp-button-outline alp-button-tiny\" disabled={disabled || !ruleId} onClick={() => void actions.onConfirmRule(document.id, ruleId)} > 确认模板 </button>"
+      },
+      {
+        "line": 252,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-link-button is-accent\"",
+        "text": "<button type=\"button\" className=\"alp-link-button is-accent\" disabled={disabled} onClick={() => void actions.onResumeOcr?.(document.id)}>读取文字 / OCR</button>"
+      },
+      {
+        "line": 254,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{`alp-link-button${resultCount > 0 ? \"\" : \" is-accent\"}`}",
+        "text": "<button type=\"button\" className={`alp-link-button${resultCount > 0 ? \"\" : \" is-accent\"}`} disabled={disabled || document.extracting} onClick={() => void actions.onExtractDocument(document.id)} > {document.extracting ? \"提取中…\" : resultCount > 0 ? \"重新选择字段并提取\" : \"选择字段并提取\"} </button>"
+      },
+      {
+        "line": 268,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-link-button\"",
+        "text": "<button type=\"button\" className=\"alp-link-button\" disabled={disabled} onClick={() => void actions.onViewWorkpaper(document.id, ruleId)} > 查看底稿 </button>"
+      },
+      {
+        "line": 278,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-link-button\"",
+        "text": "<button type=\"button\" className=\"alp-link-button\" disabled={disabled} onClick={() => void actions.onManageAssociation?.(document.id)} > {grouped ? \"管理资料\" : \"关联资料\"} </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyProject.tsx",
+    "line": 360,
+    "container": "<div className=\"alp-file-heading-actions\">",
+    "buttons": [
+      {
+        "line": 362,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-group-toggle\"",
+        "text": "<button type=\"button\" className=\"alp-group-toggle\" disabled={disabled} aria-expanded={expanded} onClick={() => onExpanded(document.id, !expanded)} > 已关联 {members.length} 份 <Chevron down={expanded} /> </button>"
+      },
+      {
+        "line": 372,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-chevron-button\"",
+        "text": "<button type=\"button\" className=\"alp-chevron-button\" aria-label={`打开${document.name}`} disabled={disabled} onClick={() => void actions.onOpenDocument(document.id)} > <Chevron /> </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyProject.tsx",
+    "line": 439,
+    "container": "<div className=\"alp-child-actions\">",
+    "buttons": [
+      {
+        "line": 440,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-link-button\"",
+        "text": "<button type=\"button\" className=\"alp-link-button\" disabled={disabled} title=\"解除后文件回到待归属资料\" onClick={() => void actions.onRemoveAssociation(document.id, child.id)} > 解除关联 </button>"
+      },
+      {
+        "line": 449,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-delete-button\"",
+        "text": "<button type=\"button\" className=\"alp-delete-button\" disabled={disabled} onClick={() => void actions.onDeleteDocument(child.id)} > 删除 </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyProject.tsx",
+    "line": 591,
+    "container": "<div className=\"alp-header-actions\">",
+    "buttons": [
+      {
+        "line": 592,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-button alp-button-primary\"",
+        "text": "<button type=\"button\" className=\"alp-button alp-button-primary\" disabled={busy || selectedIds.size === 0} onClick={() => void actions.onBatchExtract( orderedDocuments .filter((document) => selectedIds.has(document.id)) .map((document) => document.id), ) } > 开始提取 </button>"
+      },
+      {
+        "line": 607,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-button alp-button-outline\"",
+        "text": "<button type=\"button\" className=\"alp-button alp-button-outline\" disabled={busy} onClick={actions.onOpenLoanAudit}> 借款审计中心 </button>"
+      },
+      {
+        "line": 611,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-button alp-button-outline\"",
+        "text": "<button type=\"button\" className=\"alp-button alp-button-outline\" disabled={busy || !hasResults} title={hasResults ? undefined : \"提取完成后可导出\"} onClick={() => void actions.onExportProject()} > 导出结果 </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyProject.tsx",
+    "line": 633,
+    "container": "<div className=\"alp-inline-actions\">",
+    "buttons": [
+      {
+        "line": 634,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-button alp-button-secondary\"",
+        "text": "<button type=\"button\" className=\"alp-button alp-button-secondary\" disabled={busy} onClick={() => void actions.onDiscardOcr?.(ocrTask.id)}>放弃任务</button>"
+      },
+      {
+        "line": 635,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-button alp-button-primary\"",
+        "text": "<button type=\"button\" className=\"alp-button alp-button-primary\" disabled={busy} onClick={() => void actions.onResumeOcr?.(ocrTask.id)}>继续识别</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyProject.tsx",
+    "line": 657,
+    "container": "<div className=\"alp-inline-actions\">",
+    "buttons": [
+      {
+        "line": 658,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-button alp-button-primary\"",
+        "text": "<button type=\"button\" className=\"alp-button alp-button-primary\" disabled={busy} onClick={() => void actions.onPickPdfs()}>选择PDF</button>"
+      },
+      {
+        "line": 659,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-button alp-button-secondary\"",
+        "text": "<button type=\"button\" className=\"alp-button alp-button-secondary\" disabled={busy} onClick={() => void actions.onPickFolder()}>选择文件夹</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyProject.tsx",
+    "line": 720,
+    "container": "<div className=\"alp-inline-actions\">",
+    "buttons": [
+      {
+        "line": 722,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-link-button\"",
+        "text": "<button type=\"button\" className=\"alp-link-button\" disabled={busy} onClick={() => void actions.onDismissAssociation?.(document.id, suggestion.anchorFileId)}>忽略</button>"
+      },
+      {
+        "line": 724,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alp-button alp-button-outline\"",
+        "text": "<button type=\"button\" className=\"alp-button alp-button-outline\" disabled={busy} onClick={() => void actions.onConfirmAssociation(document.id, suggestion.anchorFileId, suggestion)}>确认关联</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyShell.tsx",
+    "line": 53,
+    "container": "<aside className=\"apl-sidebar\">",
+    "buttons": [
+      {
+        "line": 54,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"apl-brand\"",
+        "text": "<button className=\"apl-brand\" type=\"button\" onClick={() => onNavigate(\"home\")}> <span className=\"apl-brand-mark\">A</span> <span><strong>AudiPick</strong><small>Smart Contract Audit</small></span> </button>"
+      },
+      {
+        "line": 58,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"apl-back-button\"",
+        "text": "<button className=\"apl-back-button\" type=\"button\" onClick={onBackToToolbox}> <Icon name=\"back\" /> 返回工具箱 </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyShell.tsx",
+    "line": 62,
+    "container": "<nav className=\"apl-nav\" aria-label=\"AudiPick 功能导航\">",
+    "buttons": [
+      {
+        "line": 63,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{activePage === \"workbench\" ? \"active\" : \"\"}",
+        "text": "<button id=\"nav-dash\" className={activePage === \"workbench\" ? \"active\" : \"\"} type=\"button\" onClick={() => onNavigate(\"workbench\")}><Icon name=\"grid\" />工作台</button>"
+      },
+      {
+        "line": 64,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{activePage === \"templates\" ? \"active\" : \"\"}",
+        "text": "<button className={activePage === \"templates\" ? \"active\" : \"\"} type=\"button\" onClick={() => onNavigate(\"templates\")}><Icon name=\"file\" />提取模板库</button>"
+      },
+      {
+        "line": 65,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{activePage === \"config\" ? \"active\" : \"\"}",
+        "text": "<button id=\"nav-cfg\" className={activePage === \"config\" ? \"active\" : \"\"} type=\"button\" onClick={() => onNavigate(\"config\")}><Icon name=\"key\" />配置<span className={`apl-config-badge ${configReady ? \"ready\" : \"\"}`}>{configReady ? \"已配置\" : \"未配置\"}</span></button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyTemplates.tsx",
+    "line": 365,
+    "container": "<div className=\"alt-detail-actions\">",
+    "buttons": [
+      {
+        "line": 367,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alt-button alt-button-primary\"",
+        "text": "<button type=\"button\" className=\"alt-button alt-button-primary\" disabled={busy} onClick={() => { setLocalError(\"\"); setCopySource(selectedRule); setCopyName(`${selectedRule.name}（我的模板）`); }}>复制并编辑</button>"
+      },
+      {
+        "line": 374,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alt-button alt-button-primary\"",
+        "text": "<button type=\"button\" className=\"alt-button alt-button-primary\" disabled={busy} onClick={() => startEdit(selectedRule)}>编辑</button>"
+      },
+      {
+        "line": 377,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alt-button alt-button-secondary is-danger\"",
+        "text": "<button type=\"button\" className=\"alt-button alt-button-secondary is-danger\" disabled={busy} onClick={() => { if (window.confirm(\"确认删除该模板？已有提取结果不会自动删除。\")) { void actions.onDeleteRule(selectedRule.id); } }} >删除</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyTemplates.tsx",
+    "line": 421,
+    "container": "<div className=\"alt-detail-actions\">",
+    "buttons": [
+      {
+        "line": 422,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alt-button alt-button-primary\"",
+        "text": "<button type=\"button\" className=\"alt-button alt-button-primary\" disabled={busy} onClick={savePrompt}>保存</button>"
+      },
+      {
+        "line": 423,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alt-button alt-button-secondary\"",
+        "text": "<button type=\"button\" className=\"alt-button alt-button-secondary\" disabled={busy} onClick={cancelEdit}>取消</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyTemplates.tsx",
+    "line": 457,
+    "container": "<div className=\"alt-modal-actions\">",
+    "buttons": [
+      {
+        "line": 458,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alt-button alt-button-secondary\"",
+        "text": "<button type=\"button\" className=\"alt-button alt-button-secondary\" disabled={busy} onClick={() => setCreateOpen(false)}>取消</button>"
+      },
+      {
+        "line": 459,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alt-button alt-button-primary\"",
+        "text": "<button type=\"button\" className=\"alt-button alt-button-primary\" disabled={busy} onClick={createRule}>创建并编辑</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyTemplates.tsx",
+    "line": 471,
+    "container": "<div className=\"alt-modal-actions\">",
+    "buttons": [
+      {
+        "line": 472,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alt-button alt-button-secondary\"",
+        "text": "<button type=\"button\" className=\"alt-button alt-button-secondary\" disabled={busy} onClick={() => setCopySource(null)}>取消</button>"
+      },
+      {
+        "line": 473,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"alt-button alt-button-primary\"",
+        "text": "<button type=\"button\" className=\"alt-button alt-button-primary\" disabled={busy} onClick={copyRule}>创建</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickLegacyTour.tsx",
+    "line": 308,
+    "container": "<div className=\"ap-legacy-tour__actions\">",
+    "buttons": [
+      {
+        "line": 309,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"ap-legacy-tour__skip\"",
+        "text": "<button type=\"button\" className=\"ap-legacy-tour__skip\" onClick={() => requestClose(\"skip\")} > {\"\\u8df3\\u8fc7\"} </button>"
+      },
+      {
+        "line": 316,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"ap-legacy-tour__next\"",
+        "text": "<button type=\"button\" className=\"ap-legacy-tour__next\" onClick={next} > {isLast ? \"\\u5b8c\\u6210\\u4f53\\u9a8c\" : \"\\u4e0b\\u4e00\\u6b65\"} </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickPage.tsx",
+    "line": 3997,
+    "container": "<nav className=\"ap-product-nav\" aria-label=\"AudiPick 功能导航\">",
+    "buttons": [
+      {
+        "line": 3998,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{viewMode === \"workbench\" ? \"active\" : \"\"}",
+        "text": "<button className={viewMode === \"workbench\" ? \"active\" : \"\"} onClick={() => { setViewMode(\"workbench\"); setSelectedId(\"\"); setSelectedDocument(\"\"); }} > <span>⌂</span>项目工作台 </button>"
+      },
+      {
+        "line": 4008,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{viewMode === \"templates\" ? \"active\" : \"\"}",
+        "text": "<button className={viewMode === \"templates\" ? \"active\" : \"\"} onClick={() => setViewMode(\"templates\")} > <span>▦</span>提取模板库 </button>"
+      },
+      {
+        "line": 4014,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{viewMode === \"worklog\" ? \"active\" : \"\"}",
+        "text": "<button className={viewMode === \"worklog\" ? \"active\" : \"\"} onClick={() => setViewMode(\"worklog\")} > <span>≡</span>处理工作日志 </button>"
+      },
+      {
+        "line": 4020,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{viewMode === \"guide\" ? \"active\" : \"\"}",
+        "text": "<button className={viewMode === \"guide\" ? \"active\" : \"\"} onClick={() => setViewMode(\"guide\")} > <span>?</span>使用指南 </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickPage.tsx",
+    "line": 4154,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 4155,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" disabled={!selectedId || busy} onClick={() => void importPdfs()} > 选择 PDF </Button>"
+      },
+      {
+        "line": 4162,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"secondary\"",
+        "text": "<button className=\"secondary\" disabled={!selectedId || busy} onClick={() => void importPdfFolder()} > 选择文件夹 </button>"
+      },
+      {
+        "line": 4169,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"secondary\"",
+        "text": "<button className=\"secondary\" disabled={!selectedId || busy} onClick={() => void remove()} > 删除项目 </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickPage.tsx",
+    "line": 4178,
+    "container": "<div className=\"task-row\" key={value.id}>",
+    "buttons": [
+      {
+        "line": 4186,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{\r\n                  selectedDocument === value.id ? \"primary\" : \"secondary\"\r\n                }",
+        "text": "<button className={ selectedDocument === value.id ? \"primary\" : \"secondary\" } onClick={() => void openDocument(value.id)} > 读取/预览 </button>"
+      },
+      {
+        "line": 4194,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"destructive\"",
+        "className": "",
+        "text": "<Button variant=\"destructive\" aria-label={`删除合同 ${value.name}`} onClick={() => void deleteDocument(value.id)} > 删除 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickPage.tsx",
+    "line": 4350,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 4351,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" disabled={busy || !selectedDocument} onClick={() => void runOcr()} > 识别当前页文字 </Button>"
+      },
+      {
+        "line": 4358,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" disabled={busy || !pdfText} onClick={() => void saveText()} > 保存文字 </Button>"
+      },
+      {
+        "line": 4365,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" disabled={ busy || !configStatus.llm?.ready || !pdfText || ocrRequiredPages.length > 0 || !activeFieldKeys.length } onClick={() => void extract()} > AI 提取并保存 </Button>"
+      },
+      {
+        "line": 4378,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" disabled={busy || !selectedDocument} onClick={() => void exportResults()} > 导出底稿 </Button>"
+      },
+      {
+        "line": 4385,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"secondary\"",
+        "text": "<button className=\"secondary\" disabled={busy || !selectedDocument} onClick={() => void exportProjectResults(\"document\")} > 导出本文件全部模板 </button>"
+      },
+      {
+        "line": 4393,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" disabled={busy || !currentResults.length} onClick={() => void deepReview()} > 深度复核 </Button>"
+      },
+      {
+        "line": 4403,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" disabled={ !configStatus.llm?.ready || !documents.length || !activeFieldKeys.length } onClick={() => void startBatch()} > 批量提取 </Button>"
+      },
+      {
+        "line": 4416,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" onClick={() => toggleJobPause(batchJob.jobId)} > {isJobPaused(batchJob.jobId) ? \"继续\" : \"暂停\"} </Button>"
+      },
+      {
+        "line": 4422,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" onClick={() => void jobCancel(batchJob.jobId)} > 停止 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickPage.tsx",
+    "line": 4643,
+    "container": "<div className=\"actions compact\">",
+    "buttons": [
+      {
+        "line": 4644,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"primary\"",
+        "text": "<button className=\"primary\" disabled={busy} onClick={() => void saveEditedResult()}>保存修改</button>"
+      },
+      {
+        "line": 4645,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"secondary\"",
+        "text": "<button className=\"secondary\" disabled={busy} onClick={() => { setEditingResult(undefined); setEditingResultJson(\"\"); }}>取消</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickPage.tsx",
+    "line": 4620,
+    "container": "<div className=\"task-row\" key={String(row.id ?? index)}>",
+    "buttons": [
+      {
+        "line": 4650,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"secondary\"",
+        "text": "<button className=\"secondary\" onClick={() => beginEditResult(row)}>编辑</button>"
+      },
+      {
+        "line": 4651,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{row.reviewed ? \"primary\" : \"secondary\"}",
+        "text": "<button className={row.reviewed ? \"primary\" : \"secondary\"} onClick={() => void toggleReviewed(String(row.id))} > {row.reviewed ? \"已复核\" : \"标记复核\"} </button>"
+      },
+      {
+        "line": 4657,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" onClick={() => void jumpEvidence(row)} > 证据页 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickPage.tsx",
+    "line": 4771,
+    "container": "<div className=\"actions compact\">",
+    "buttons": [
+      {
+        "line": 4774,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"secondary\"",
+        "text": "<button className=\"secondary\" onClick={editSelectedRule}>编辑</button>"
+      },
+      {
+        "line": 4775,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"secondary\"",
+        "text": "<button className=\"secondary\" onClick={() => void deleteSelectedRule()}>删除</button>"
+      },
+      {
+        "line": 4778,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"primary\"",
+        "text": "<button className=\"primary\" onClick={() => void copySelectedRule()}> 复制并编辑 </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/AudiPickPage.tsx",
+    "line": 4851,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 4852,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" onClick={() => void saveCustomRule()} > {editingCustomRuleId ? \"保存修改\" : \"保存自定义模板\"} </Button>"
+      },
+      {
+        "line": 4859,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"secondary\"",
+        "text": "<button className=\"secondary\" onClick={() => { setEditingCustomRuleId(\"\"); setCustomRuleName(\"\"); setCustomRulePrompt(\"\"); }}>取消</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/components/FileDropInput.tsx",
+    "line": 112,
+    "container": "<div className={cn(\"file-drop-slot filled\", hideFilledLabel && \"without-label\")}>",
+    "buttons": [
+      {
+        "line": 118,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"file-drop-slot-value\"",
+        "text": "<button type=\"button\" className=\"file-drop-slot-value\" disabled={disabled} onClick={onBrowse} aria-label={ariaLabel ?? `重新选择文件：${displayFileName(value)}`} aria-describedby={describedBy} aria-invalid={Boolean(invalid) || undefined} > {displayValue ?? displayFileName(value)} </button>"
+      },
+      {
+        "line": 130,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"ghost\"",
+        "className": "\"file-drop-clear text-destructive\"",
+        "text": "<Button type=\"button\" variant=\"ghost\" size=\"sm\" className=\"file-drop-clear text-destructive\" disabled={disabled} onClick={onClear} > 清空 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/components/LedgerSourceCard.tsx",
+    "line": 42,
+    "container": "<div className=\"kz-actions\">",
+    "buttons": [
+      {
+        "line": 42,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" disabled={busy} onClick={onInspect}>读取并自动映射</Button>"
+      },
+      {
+        "line": 42,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" onClick={()=>onCancel(job.jobId)}>停止</Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/components/ToolRecoveryBoundary.tsx",
+    "line": 61,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 62,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"secondary\"",
+        "text": "<button type=\"button\" className=\"secondary\" onClick={this.props.onBackToHistory} > 返回历史记录 </button>"
+      },
+      {
+        "line": 69,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"primary\"",
+        "text": "<button type=\"button\" className=\"primary\" onClick={() => this.setState({ error: null })} > 清空本页并重新打开 </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/components/tour/SuccessNudge.tsx",
+    "line": 93,
+    "container": "<div className=\"success-nudge-actions\">",
+    "buttons": [
+      {
+        "line": 95,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"success-nudge-btn success-nudge-btn-primary\"",
+        "text": "<button type=\"button\" className=\"success-nudge-btn success-nudge-btn-primary\" onClick={() => { // Keep the notice mounted while Windows resolves the file-open request; // otherwise a short dismissal timer can erase the actionable failure. if (dismissTimerRef.current !== undefined) { window.clearTimeout(dismissTimerRef.current); dismissTimerRef.current = undefined; } setPauseDismiss(true); void openOutput(outputPath) .then(() => setPauseDismiss(false)) .catch(() => setOpenError(true)); }} > {TOUR"
+      },
+      {
+        "line": 114,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"success-nudge-btn\"",
+        "text": "<button type=\"button\" className=\"success-nudge-btn\" onClick={() => { setCelebrating(null); navigate(\"/\"); }} > {TOUR_COPY.returnWorkspace} </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/components/WindowControls.tsx",
+    "line": 96,
+    "container": "<div className=\"window-controls\" role=\"group\" aria-label=\"窗口控制\">",
+    "buttons": [
+      {
+        "line": 97,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "",
+        "text": "<button type=\"button\" title=\"最小化\" aria-label=\"最小化\" onClick={() => void appWindow.minimize()} > <IconMinimize /> </button>"
+      },
+      {
+        "line": 105,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "",
+        "text": "<button type=\"button\" title={maximized ? \"向下还原\" : \"最大化\"} aria-label={maximized ? \"向下还原\" : \"最大化\"} onClick={() => void appWindow.toggleMaximize()} > {maximized ? <IconRestore /> : <IconMaximize />} </button>"
+      },
+      {
+        "line": 113,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"window-controls-close\"",
+        "text": "<button type=\"button\" className=\"window-controls-close\" title=\"关闭\" aria-label=\"关闭\" onClick={() => void appWindow.close()} > <IconClose /> </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/ConfirmationProgressPage.tsx",
+    "line": 427,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 428,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" disabled={!inputPath || busy} onClick={() => void inspect()} > {busy && !job ? \"正在读取…\" : \"检查数据\"} </Button>"
+      },
+      {
+        "line": 437,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"default\" disabled={!inspection || busy} onClick={() => setStep(2)} > 下一步：报告范围 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/ConfirmationProgressPage.tsx",
+    "line": 475,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 476,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" onClick={() => setStep(1)} > 上一步 </Button>"
+      },
+      {
+        "line": 484,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"default\" disabled={ !canGenerateConfirmation(inputPath, inspection) || busy } onClick={() => setStep(3)} > 下一步：生成报告 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/ConfirmationProgressPage.tsx",
+    "line": 509,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 510,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" onClick={() => setStep(2)} > 上一步 </Button>"
+      },
+      {
+        "line": 523,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" onClick={() => void cancelJobWithFeedback(job.jobId)} > 停止 </Button>"
+      },
+      {
+        "line": 532,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" disabled={!generateReady} onClick={() => void generate()} > 重新生成 </Button>"
+      },
+      {
+        "line": 542,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"default\" disabled={!generateReady} onClick={() => void generate()} > 生成进度报告 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/CovenantCaseLibraryManager.tsx",
+    "line": 108,
+    "container": "<div className=\"clm-tabs\" role=\"tablist\" aria-label=\"案例库内容类型\">",
+    "buttons": [
+      {
+        "line": 109,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{view === \"positive\" ? \"active\" : \"\"}",
+        "text": "<button type=\"button\" role=\"tab\" aria-selected={view === \"positive\"} className={view === \"positive\" ? \"active\" : \"\"} onClick={() => setView(\"positive\")}>启用正例（{formatCount(activePositiveExamples.length)}）</button>"
+      },
+      {
+        "line": 110,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{view === \"categories\" ? \"active\" : \"\"}",
+        "text": "<button type=\"button\" role=\"tab\" aria-selected={view === \"categories\"} className={view === \"categories\" ? \"active\" : \"\"} onClick={() => setView(\"categories\")}>分类标准（{formatCount(library.categories.length)}）</button>"
+      },
+      {
+        "line": 111,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{view === \"exclusions\" ? \"active\" : \"\"}",
+        "text": "<button type=\"button\" role=\"tab\" aria-selected={view === \"exclusions\"} className={view === \"exclusions\" ? \"active\" : \"\"} onClick={() => setView(\"exclusions\")}>排除与支持（{formatCount(library.exclusions_and_support.length)}）</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/CovenantCaseLibraryManager.tsx",
+    "line": 160,
+    "container": "<div className=\"clm-actions\">",
+    "buttons": [
+      {
+        "line": 160,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"primary\"",
+        "text": "<button type=\"button\" className=\"primary\" disabled={busy || preview.hash === state?.active.hash} onClick={() => void run(async () => { setState(await activateCaseLibrary(preview.library)); setPreview(undefined); setMessage(\"新版本已启用；重新提取后应用新规则。\"); })}>启用此版本</button>"
+      },
+      {
+        "line": 160,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "",
+        "text": "<button type=\"button\" disabled={busy} onClick={() => setPreview(undefined)}>取消导入</button>"
+      }
+    ]
+  },
+  {
+    "file": "src/DepositInterestPage.tsx",
+    "line": 3557,
+    "container": "<div className=\"fx-detected-file\">",
+    "buttons": [
+      {
+        "line": 3558,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"fx-file-name-button\"",
+        "text": "<button className=\"fx-file-name-button\" type=\"button\" title={`${props.path}（点击更换）`} disabled={props.disabled} onClick={props.onReplace} > {fileName(props.path)} </button>"
+      },
+      {
+        "line": 3567,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"ghost\"",
+        "className": "",
+        "text": "<Button variant=\"ghost\" size=\"sm\" type=\"button\" disabled={props.disabled} onClick={props.onClear} > 移除 </Button>"
+      },
+      {
+        "line": 3577,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"ghost\"",
+        "className": "",
+        "text": "<Button variant=\"ghost\" size=\"sm\" type=\"button\" disabled={props.disabled} onClick={props.onKindChange} > {props.kindChangeLabel ?? \"更正类型\"} </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/ExcelMergerPage.tsx",
+    "line": 512,
+    "container": "<div>",
+    "buttons": [
+      {
+        "line": 513,
+        "kind": "Button",
+        "size": "\"icon-xs\"",
+        "variant": "\"ghost\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"ghost\" size=\"icon-xs\" aria-label={`上移 ${detail?.name ?? path.split(/[\\\\/]/).pop() ?? \"文件\"}`} title=\"上移\" disabled={index === 0} onClick={() => move(index, -1)} > ↑ </Button>"
+      },
+      {
+        "line": 524,
+        "kind": "Button",
+        "size": "\"icon-xs\"",
+        "variant": "\"ghost\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"ghost\" size=\"icon-xs\" aria-label={`下移 ${detail?.name ?? path.split(/[\\\\/]/).pop() ?? \"文件\"}`} title=\"下移\" disabled={index === paths.length - 1} onClick={() => move(index, 1)} > ↓ </Button>"
+      },
+      {
+        "line": 535,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"ghost\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"ghost\" size=\"sm\" aria-label={`移除 ${detail?.name ?? path.split(/[\\\\/]/).pop() ?? \"文件\"}`} onClick={() => setPaths((current) => current.filter((_, i) => i !== index), ) } > 移除 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FaDepCalcPage.tsx",
+    "line": 612,
+    "container": "<div className=\"actions dep-source-actions\">",
+    "buttons": [
+      {
+        "line": 614,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" disabled={busy || llmBusy || !path} onClick={() => void review()} > {llmBusy ? \"LLM 正在复核…\" : \"重新复核映射\"} </Button>"
+      },
+      {
+        "line": 624,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" onClick={() => setStep(1)}> 下一步：核对映射 </Button>"
+      },
+      {
+        "line": 628,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" disabled={busy || !path} onClick={() => void inspect()} > {busy ? \"正在读取表格…\" : inspection ? \"重新读取表格\" : \"读取并复核字段\"} </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FaListPage.tsx",
+    "line": 320,
+    "container": "<div\r\n        className=\"fx-mode-bar fa-mode-tabs\"\r\n        role=\"tablist\"\r\n        aria-label=\"固定资产底稿模式\"\r\n        data-tour=\"tool-mode\"\r\n      >",
+    "buttons": [
+      {
+        "line": 326,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{mode === \"tbje\" ? \"active\" : undefined}",
+        "text": "<button type=\"button\" role=\"tab\" aria-selected={mode === \"tbje\"} className={mode === \"tbje\" ? \"active\" : undefined} onClick={() => setMode(\"tbje\")} > TB＋JE 变动表 </button>"
+      },
+      {
+        "line": 335,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{mode === \"cards\" ? \"active\" : undefined}",
+        "text": "<button type=\"button\" role=\"tab\" aria-selected={mode === \"cards\"} className={mode === \"cards\" ? \"active\" : undefined} onClick={() => setMode(\"cards\")} > 两期固定资产清单 </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FaListPage.tsx",
+    "line": 2587,
+    "container": "<div className=\"actions fa-flow-actions\">",
+    "buttons": [
+      {
+        "line": 2588,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" disabled={busy} onClick={() => void rereadMain()} > {busy ? \"正在读取表格…\" : \"重新读取表格\"} </Button>"
+      },
+      {
+        "line": 2596,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" disabled={!inspection || busy || llmBusy} onClick={() => void reviewLlm()} > {llmBusy ? \"LLM 正在复核…\" : llmReview ? \"LLM 重新复核\" : \"读表并复核\"} </Button>"
+      },
+      {
+        "line": 2609,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" onClick={() => void cancelJobWithFeedback(job.jobId)} > 停止 </Button>"
+      },
+      {
+        "line": 2617,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" disabled={ isFaMatchDisabled(Boolean(inspection), busy) || missingRoles(\"begin\").length > 0 || missingRoles(\"end\").length > 0 } onClick={() => void start(\"fa.match\")} > {resultStale ? \"重新开始匹配\" : \"开始匹配\"} </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FaListPage.tsx",
+    "line": 2858,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 2859,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" onClick={() => setStep(1)} > 上一步 </Button>"
+      },
+      {
+        "line": 2866,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" onClick={() => { supplementReviewGeneration.current += 1; setSupplementLlmBusy(false); setAddition(emptyFaSupplement()); setDisposal(emptyFaSupplement()); setAdditionInspect(undefined); setDisposalInspect(undefined); setSupplementLlmReview(undefined); setSupplementLlmBypassed(false); setError(\"\"); setStep(3); }} > 无补充清单，跳过 </Button>"
+      },
+      {
+        "line": 2885,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" disabled={ supplementLlmBusy || !canApplyFaSupplements( addition.path, disposal.path, endMapping.additionMethod, ) } onClick={() => setStep(3)} > 应用补充映射并继续 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FaListPage.tsx",
+    "line": 3041,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 3042,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" disabled={busy} onClick={() => setStep(2)} > 上一步 </Button>"
+      },
+      {
+        "line": 3051,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" onClick={() => void cancelJobWithFeedback(job.jobId)} > 停止 </Button>"
+      },
+      {
+        "line": 3059,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" disabled={!inspection || missingRoles(\"begin\").length > 0 || missingRoles(\"end\").length > 0} onClick={() => void start(\"fa.export\")} > 生成 FA List 底稿 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FaListPage.tsx",
+    "line": 3196,
+    "container": "<div\r\n          className=\"actions fa-flow-actions fa-page-flow\"\r\n          role=\"group\"\r\n          aria-label=\"匹配完成后的下一步\"\r\n        >",
+    "buttons": [
+      {
+        "line": 3201,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" onClick={() => setStep(2)}> 有，进入补充清单 </Button>"
+      },
+      {
+        "line": 3204,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" onClick={() => setStep(3)}> 没有，直接导出 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FaPolicyComparePage.tsx",
+    "line": 955,
+    "container": "<div className=\"actions fa-flow-actions\">",
+    "buttons": [
+      {
+        "line": 956,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" disabled={busy || !beginPath || !endPath} onClick={() => void inspect()} > {busy ? \"正在读取表格…\" : \"读取表格 + LLM 复核\"} </Button>"
+      },
+      {
+        "line": 965,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" disabled={busy || llmBusy} onClick={() => void review()} > {llmBusy ? \"LLM 正在复核…\" : \"LLM 重新复核\"} </Button>"
+      },
+      {
+        "line": 974,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" disabled={!readyToExport} onClick={() => setStep(2)} > 下一步 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FaPolicyComparePage.tsx",
+    "line": 1069,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 1070,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" onClick={() => setStep(1)} > 上一步 </Button>"
+      },
+      {
+        "line": 1078,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" onClick={() => void cancelJobWithFeedback(job.jobId)} > 停止 </Button>"
+      },
+      {
+        "line": 1086,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "{outputPaths.length ? \"secondary\" : \"default\"}",
+        "className": "",
+        "text": "<Button /* 成功后深色让给「打开结果」，主按钮退为次级「重新生成」 （设计评审·结果页契约：一屏一个深色主按钮）。 */ variant={outputPaths.length ? \"secondary\" : \"default\"} disabled={!readyToExport} onClick={() => void startExport()} > {outputPaths.length ? \"重新生成\" : \"生成折旧政策对比\"} </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FaTbJePage.tsx",
+    "line": 2487,
+    "container": "<div className=\"fx-detected-file\">",
+    "buttons": [
+      {
+        "line": 2488,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"fx-file-name-button\"",
+        "text": "<button className=\"fx-file-name-button\" type=\"button\" title={`${props.path}（点击更换）`} disabled={props.disabled} onClick={props.onReplace} > {fileName(props.path)} </button>"
+      },
+      {
+        "line": 2497,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "",
+        "text": "<button type=\"button\" disabled={props.disabled} onClick={props.onClear} > 移除 </button>"
+      },
+      {
+        "line": 2504,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "",
+        "text": "<button type=\"button\" disabled={props.disabled} onClick={props.onKindChange} > 更正为 {kind === \"tb\" ? \"JE\" : \"TB\"} </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FileListDirectoryPage.tsx",
+    "line": 325,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 326,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" disabled={busy || !sourceDir} onClick={() => void inspect()} > {busy && !scan ? \"正在扫描…\" : \"重新扫描\"} </Button>"
+      },
+      {
+        "line": 335,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"default\" disabled={!scan || busy} onClick={() => setStep(2)} > 下一步：输出文件 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FileListDirectoryPage.tsx",
+    "line": 360,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 361,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" onClick={() => setStep(1)} > 上一步 </Button>"
+      },
+      {
+        "line": 370,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" onClick={() => void cancelJobWithFeedback(activeJobId)} > 取消{job?.phase === \"scan\" || !scan ? \"扫描\" : \"导出\"} </Button>"
+      },
+      {
+        "line": 379,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"default\" disabled={!fileListCanExport(sourceDir, outputPath)} onClick={() => void start()} > 生成文件清单 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FuzzyMatchPage.tsx",
+    "line": 1330,
+    "container": "<div className=\"fuzzy-candidates\">",
+    "buttons": [
+      {
+        "line": 1332,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"fuzzy-candidate\"",
+        "text": "<button key={m.bIndex} type=\"button\" className=\"fuzzy-candidate\" onClick={() => props.onAccept(row, m)} > <span className=\"fuzzy-candidate-head\"> <b title={m.bValue}>{m.bValue}</b> <span className=\"fuzzy-candidate-score\"> {formatScore(m.total)} 分 </span> </span> {m.reasons.length > 0 && ( <small>{m.reasons.join(\"，\")}</small> )} <small className=\"fuzzy-breakdown\"> <span>字面相似 {formatScore(m.breakdown.charSim)}</span> <span>公共子串 {formatScore(m.breakdown.lcsSim)}</span> <span> 词元重叠 {formatScore(m.br"
+      },
+      {
+        "line": 1356,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"fuzzy-reject\"",
+        "text": "<button type=\"button\" className=\"fuzzy-reject\" onClick={() => props.onReject(row)} > 都不是（拒绝匹配） </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/FxAuditPage.tsx",
+    "line": 3501,
+    "container": "<div className=\"fx-detected-file\">",
+    "buttons": [
+      {
+        "line": 3502,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"fx-file-name-button\"",
+        "text": "<button className=\"fx-file-name-button\" type=\"button\" title={`${props.path}（点击更换）`} disabled={props.disabled} onClick={props.onReplace} > {displayFileName(props.path)} </button>"
+      },
+      {
+        "line": 3511,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "",
+        "text": "<button type=\"button\" disabled={props.disabled} onClick={props.onClear} > 移除 </button>"
+      },
+      {
+        "line": 3519,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "",
+        "text": "<button type=\"button\" disabled={props.disabled} onClick={props.onKindChange} > {props.kindChangeLabel ?? \"更正类型\"} </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/JeSignMarkPage.tsx",
+    "line": 1032,
+    "container": "<span className=\"jm-sign-choices\" role=\"group\" aria-label=\"金额符号口径选择\">",
+    "buttons": [
+      {
+        "line": 1033,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{draft.signChoice === \"unsigned\" ? \"active\" : \"\"}",
+        "text": "<button type=\"button\" className={draft.signChoice === \"unsigned\" ? \"active\" : \"\"} aria-pressed={draft.signChoice === \"unsigned\"} title=\"适用于借方、贷方金额都以正数记录，借贷方向由分列或方向字段区分的单边凭证文件。再次点击可恢复自动检测。\" onClick={() => patch({ signChoice: draft.signChoice === \"unsigned\" ? \"auto\" : \"unsigned\" })} > <Equal size={16} aria-hidden=\"true\" /> 借贷符号一样 </button>"
+      },
+      {
+        "line": 1043,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "{draft.signChoice === \"signed\" ? \"active\" : \"\"}",
+        "text": "<button type=\"button\" className={draft.signChoice === \"signed\" ? \"active\" : \"\"} aria-pressed={draft.signChoice === \"signed\"} title=\"适用于金额本身已表达方向（借方为正、贷方为负）的单边凭证文件。再次点击可恢复自动检测。\" onClick={() => patch({ signChoice: draft.signChoice === \"signed\" ? \"auto\" : \"signed\" })} > <CircleMinus size={16} aria-hidden=\"true\" /> 已带符号 </button>"
+      }
+    ]
+  },
+  {
+    "file": "src/JeSignMarkPage.tsx",
+    "line": 1133,
+    "container": "<div className=\"kz-actions\">",
+    "buttons": [
+      {
+        "line": 1135,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" onClick={() => void cancelJobWithFeedback(job.jobId)} > 停止 </Button>"
+      },
+      {
+        "line": 1143,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" disabled={!ready || !validBatches.length} onClick={() => void start()} > 标记并导出 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/KanzhangParityPage.tsx",
+    "line": 566,
+    "container": "<div className=\"kz-actions\">",
+    "buttons": [
+      {
+        "line": 566,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" disabled={busy||llmBusy} onClick={()=>void reviewMapping()}>{llmBusy?\"LLM 正在复核…\":\"重新进行 LLM 复核\"}</Button>"
+      },
+      {
+        "line": 566,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" disabled={llmBusy||missingRequired.length>0} onClick={()=>patch({step:2})}>下一步：科目筛选</Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/KanzhangParityPage.tsx",
+    "line": 583,
+    "container": "<div className=\"kz-source-actions\">",
+    "buttons": [
+      {
+        "line": 583,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" disabled={!available.length} onClick={()=>setSelectedAvailable(available)}>全选当前结果</Button>"
+      },
+      {
+        "line": 583,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" disabled={!selectedAvailable.length} onClick={()=>setSelectedAvailable([])}>清除选择</Button>"
+      },
+      {
+        "line": 583,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" disabled={!selectedAvailable.length} onClick={()=>moveAccounts(selectedAvailable,\"source\",\"target\")}>加入目标批次</Button>"
+      },
+      {
+        "line": 583,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" disabled={!selectedAvailable.length} onClick={addNextBatch}>加入下一批次</Button>"
+      },
+      {
+        "line": 583,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" disabled={!selectedAvailable.length} onClick={()=>moveAccounts(selectedAvailable,\"source\",\"exclude\")}>加入剔除/例外</Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/KanzhangParityPage.tsx",
+    "line": 588,
+    "container": "<div className=\"kz-actions\">",
+    "buttons": [
+      {
+        "line": 588,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" onClick={()=>patch({step:1})}>返回映射</Button>"
+      },
+      {
+        "line": 588,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" disabled={busy} onClick={()=>void start(\"kanzhang.filter\")}>筛选预览</Button>"
+      },
+      {
+        "line": 588,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" onClick={()=>patch({step:3})}>下一步：透视与导出</Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/KanzhangParityPage.tsx",
+    "line": 590,
+    "container": "<div className=\"kz-actions\">",
+    "buttons": [
+      {
+        "line": 590,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" onClick={()=>patch({step:2})}>返回筛选</Button>"
+      },
+      {
+        "line": 590,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button variant=\"secondary\" size=\"sm\" onClick={()=>void cancelJobWithFeedback(job.jobId)}>停止</Button>"
+      },
+      {
+        "line": 590,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button variant=\"default\" onClick={()=>void start(\"kanzhang.export\")}>导出结果</Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/LoanInterestPage.tsx",
+    "line": 3018,
+    "container": "<div className=\"fx-detected-file\">",
+    "buttons": [
+      {
+        "line": 3019,
+        "kind": "button",
+        "size": "\"default\"",
+        "variant": "",
+        "className": "\"fx-file-name-button\"",
+        "text": "<button className=\"fx-file-name-button\" type=\"button\" title={`${props.source.path}（点击更换）`} disabled={props.disabled} onClick={props.onReplace} > {fileNameOf(props.source.path)} </button>"
+      },
+      {
+        "line": 3028,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"ghost\"",
+        "className": "",
+        "text": "<Button variant=\"ghost\" size=\"sm\" type=\"button\" disabled={props.disabled} onClick={props.onClear} > 移除 </Button>"
+      },
+      {
+        "line": 3037,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"ghost\"",
+        "className": "",
+        "text": "<Button variant=\"ghost\" size=\"sm\" type=\"button\" disabled={props.disabled} onClick={props.onKindChange} > 更正为 {props.kind === \"tb\" ? \"JE\" : \"TB\"} </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/PdfToExcelPage.tsx",
+    "line": 357,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 359,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" onClick={() => void cancelJobWithFeedback(job.jobId)} > 取消任务 </Button>"
+      },
+      {
+        "line": 368,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"default\" disabled={!pdfPaths.length} onClick={() => void start()} > 开始转换 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/TsManagerParityPage.tsx",
+    "line": 690,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 691,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" disabled={busy || !state.inputPath} onClick={() => void inspect()} > 加载文件 </Button>"
+      },
+      {
+        "line": 700,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"default\" disabled={!headers.length} onClick={() => setStep(2)} > 下一步：条件筛选 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/TsManagerParityPage.tsx",
+    "line": 748,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 749,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" disabled={!filters.length} onClick={clearAllFilters} > 清除全部筛选 </Button>"
+      },
+      {
+        "line": 758,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" onClick={() => setStep(1)} > 上一步 </Button>"
+      },
+      {
+        "line": 766,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"default\" disabled={!headers.length} onClick={() => setStep(3)} > 下一步：导出 </Button>"
+      }
+    ]
+  },
+  {
+    "file": "src/TsManagerParityPage.tsx",
+    "line": 796,
+    "container": "<div className=\"actions\">",
+    "buttons": [
+      {
+        "line": 797,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" onClick={() => setStep(2)} > 上一步 </Button>"
+      },
+      {
+        "line": 806,
+        "kind": "Button",
+        "size": "\"sm\"",
+        "variant": "\"secondary\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"secondary\" size=\"sm\" onClick={() => void cancelJobWithFeedback(job.jobId)} > 取消 </Button>"
+      },
+      {
+        "line": 815,
+        "kind": "Button",
+        "size": "\"default\"",
+        "variant": "\"default\"",
+        "className": "",
+        "text": "<Button type=\"button\" variant=\"default\" disabled={!canStartTsExport(headers, state.outputPath)} onClick={() => void startExport()} > 导出默认双 Sheet </Button>"
+      }
+    ]
+  }
+]

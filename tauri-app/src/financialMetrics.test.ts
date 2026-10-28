@@ -2,11 +2,38 @@ import { describe,it,expect } from "vitest";
 import {extractFinancialMetrics,isExplicitFinancialMetric} from "./audipickCovenantExtraction";
 import {covenantExportRows,isFormalCovenantRow} from "./audipickCovenant";
 describe("仅财务指标摘录",()=>{
+ it("跨文件分段进度按真实重叠窗口计数，完成前不提前递增",async()=>{
+  const work: {completed:number;total:number}[]=[];
+  let calls=0;
+  await extractFinancialMetrics({
+   documents:[160,161].map((count,index)=>({id:`progress-${index}`,name:`合成${index}.pdf`,text:Array.from({length:count},()=>"普通合同文字").join("\n")})),
+   onWorkProgress:value=>work.push(value),
+   extract:async()=>{
+    expect(work.at(-1)).toEqual({completed:calls,total:3});
+    calls++;
+    return {parsed:{coverage_complete:true,items:[]}};
+   },
+  });
+  expect(calls).toBe(3);
+  expect(work).toEqual([0,1,2,3].map(completed=>({completed,total:3})));
+ });
+ it("同一OCR行的投资、担保和新增融资限额分别保留，同义标题不制造重复",async()=>{
+  const text="20.1 借款人对外投资限额为人民币50000万元；对外提供担保限额为人民币50000万元；增加债务融资限额为人民币50000万元。";
+  const result=await extractFinancialMetrics({documents:[{id:"d",name:"合同.pdf",text}],extract:async()=>({parsed:{coverage_complete:true,items:[
+   {title:"对外投资限额",evidence:[{line_start:1,line_end:1,role:"obligation"}]},
+   {title:"投资金额上限",evidence:[{line_start:1,line_end:1,role:"obligation"}]},
+   {title:"对外提供担保限额",evidence:[{line_start:1,line_end:1,role:"obligation"}]},
+   {title:"增加债务融资限额",evidence:[{line_start:1,line_end:1,role:"obligation"}]},
+  ]}})});
+  expect(result.items).toHaveLength(3);
+  expect(result.items.map(row=>row.title)).toEqual(["对外投资限额","对外提供担保限额","增加债务融资限额"]);
+  expect(result.items.every(row=>row.excerpt===text)).toBe(true);
+ });
  it("无需后果链，保留亏损口径并导出原文与出处",async()=>{
  const text="第二十三条 违约事件\n借款人经审计的母公司报表连续两年净利润为负。";
  const result=await extractFinancialMetrics({documents:[{id:"d",name:"合同.pdf",text}],extract:async()=>({parsed:{coverage_complete:true,items:[{title:"连续两年亏损",evidence:[{line_start:2,line_end:2}]}]}})});
  expect(result.items).toHaveLength(1);expect(isFormalCovenantRow(result.items[0])).toBe(true);
- expect(Object.keys(covenantExportRows(result.items,()=>"合同.pdf")[0])).toEqual(["财务契约类型","限制或触发标准","合同原文摘录","原文引用出处"]);
+ expect(Object.keys(covenantExportRows(result.items,()=>"合同.pdf")[0])).toEqual(["财务指标契约类型","限制或触发标准","合同原文摘录","原文引用出处"]);
  expect(result.unresolvedCount).toBe(0);
  });
  it("保留 C319 的 condition/default 指标并按独立指标拆行",async()=>{
@@ -35,7 +62,7 @@ describe("仅财务指标摘录",()=>{
  });
  it("只收录有财务指标或量化财务门槛的限制",()=>{
  for(const text of ["遵循本合同约定的财务指标约束","贷款用于投资项目","按时还本付息","贷款人有权宣布提前到期","不得分红","不得对外投资","项目资本金1.2亿元","借款人或有负债比率超过"]){expect(isExplicitFinancialMetric(text),text).toBe(false);}
- for(const text of ["关联交易超过净资产10%须同意","担保超过总资产80%须同意","处置经营资产涉及经审计总资产10%以上须同意","信用评级低于A+并追加担保","诉讼标的金额为9000万元以上时须通知","资产负债率不得超过65%","流动比率不得低于1.2","净资产不得低于1亿元","连续两年净利润为负","经营期项目实际收益低于评估水平100%"]){expect(isExplicitFinancialMetric(text),text).toBe(true);}
+ for(const text of ["关联交易超过净资产10%须同意","担保超过总资产80%须同意","处置经营资产涉及经审计总资产10%以上须同意","信用评级低于A+并追加担保","诉讼标的金额为9000万元以上时构成违约事件","资产负债率不得超过65%","流动比率不得低于1.2","净资产不得低于1亿元","连续两年净利润为负","经营期项目实际收益低于评估水平100%"]){expect(isExplicitFinancialMetric(text),text).toBe(true);}
  });
  it("排除 C300 中的期限、提款、还款、利率、账户和无量化交易条款",()=>{
   for(const text of [
@@ -74,7 +101,7 @@ describe("仅财务指标摘录",()=>{
   expect(result.items).toHaveLength(1);
   expect(result.items[0].excerpt).toBe(lines.at(-1));
  });
- it("共同罚息后果不能把普通偿付义务变成财务契约",async()=>{
+ it("共同罚息后果不能把普通偿付义务变成财务指标契约",async()=>{
   const text="借款人应按时还本付息。\n逾期贷款罚息利率为贷款利率的130%。";
   const result=await extractFinancialMetrics({documents:[{id:"d",name:"合同.pdf",text}],extract:async()=>({parsed:{coverage_complete:true,items:[{
    title:"逾期罚息",evidence:[{line_start:1,line_end:1,role:"obligation"},{line_start:2,line_end:2,role:"consequence"}],
@@ -85,5 +112,32 @@ describe("仅财务指标摘录",()=>{
  const documents=[{id:"d",name:"合同",text:"没有财务指标"}];
  expect((await extractFinancialMetrics({documents,extract:async()=>({parsed:{coverage_complete:true,items:[]}})})).items).toEqual([]);
  await expect(extractFinancialMetrics({documents,extract:async()=>({parsed:{coverage_complete:true,items:[{evidence:[{line_start:99}]}]}})})).rejects.toThrow("来源范围");
+ });
+ it("忽略模型截断主句的通知子项，跨分段读取原文且不借共同违约补成财务限制",async()=>{
+  const lines=[
+   "▲8.6 借款人应当在下列事项发生或可能发生之日起7日内书面通知贷款人：",
+   "(1) 修改章程；",
+   ...Array.from({length:170},()=>""),
+   "---PDF第13页---",
+   "(10) 发生关联交易，且交易金额达到或超过最近经审计的净资产的 10%；",
+   " (111) 8.8 借款人资产负债率不得超过65%。",
+   "第九条 违约事件",
+   "借款人违反任何其他义务构成违约事件，贷款人有权宣布贷款提前到期。",
+  ];
+  const result=await extractFinancialMetrics({
+   documents:[{id:"d",name:"合同.pdf",text:lines.join("\n")}],
+   promptOverride:"旧的用户自定义提示词，返回全部比例事项。",
+   extract:async({text})=>{
+    const find=(value:string)=>Number(text.match(new RegExp(`\\[L(\\d+)\\]${value}`))?.[1]);
+    const event=find("\\(10\\)"); const metric=find(" \\(111\\)");const fallback=find("借款人违反");
+    return {parsed:{coverage_complete:true,items:[
+     ...(event?[{evidence:[{line_start:event,role:"obligation"},...(fallback?[{line_start:fallback,role:"default"}]:[])]}]:[]),
+     ...(metric?[{evidence:[{line_start:metric,role:"obligation"}]}]:[]),
+    ]}};
+   },
+  });
+  expect(result.items).toHaveLength(1);
+  expect(result.items[0]).toMatchObject({covenant_category_id:"C01",contract_classification:"财务指标契约"});
+  expect(result.items[0].excerpt).toBe(lines.at(-3));
  });
 });

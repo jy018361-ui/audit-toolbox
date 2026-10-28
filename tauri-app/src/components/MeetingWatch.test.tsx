@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../api", () => ({
+  listenNativeFileDragEvents: vi.fn(async () => () => undefined),
   listenMeetingEvents: vi.fn(async (listener: (event: MeetingEvent) => void) => {
     mocks.listener = listener;
     return () => undefined;
@@ -95,6 +96,13 @@ it("首次挂载从后台快照恢复纪要结果", async () => {
   render(<MeetingWatch />);
   expect(await screen.findByText("会议纪要已生成")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "打开输出文件夹" })).toBeInTheDocument();
+  const close = screen.getByRole("button", { name: "关闭提示" });
+  expect(close.querySelector("svg")).not.toBeNull();
+  expect(close.textContent).toBe("");
+  fireEvent.click(close);
+  expect(screen.queryByText("会议纪要已生成")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "打开输出文件夹" })).not.toBeInTheDocument();
+  expect(mocks.jobStart).not.toHaveBeenCalled();
 });
 
 it("完成双版本任务后查看链接定位工具内版本，仅一个文件夹入口", async () => {

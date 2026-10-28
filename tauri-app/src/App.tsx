@@ -1,4 +1,4 @@
-import { lazy, Suspense, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ComponentType, ReactElement } from "react";
 import {
   matchPath,
@@ -9,12 +9,12 @@ import {
   useLocation,
   useNavigate,
   useParams,
-  useBlocker,
-  UNSAFE_DataRouterContext,
 } from "react-router-dom";
 import "./app-shell.css";
+import "./meeting-vocabulary.css";
 import {
   appBootstrap,
+  audipickOcrTest,
   engineCall,
   historyGet,
   historyClear,
@@ -44,7 +44,8 @@ import { useCountUp } from "./lib/useCountUp";
 import { formatCount } from "./lib/numberFormat";
 import { SwitchInput } from "@/components/SwitchInput";
 import { SecretInput } from "@/components/SecretInput";
-import { BAILIAN_OCR_BASE_URL, BAILIAN_OCR_MODEL } from "./ocrConfig";
+import { SettingsAutoSave, type AutoSaveState } from "./settingsAutoSave";
+import { BAILIAN_OCR_BASE_URL, BAILIAN_OCR_MODEL, createOcrTestImage } from "./ocrConfig";
 import { DateInput } from "@/components/DateInput";
 import { demoDataEnabled } from "./preview/demoRegistry";
 import {
@@ -90,13 +91,10 @@ import {
 } from "@/components/tour/tourState";
 import { ToolTourProvider } from "@/components/tour/ToolTourContext";
 import { NewbieModeToggle } from "@/components/tour/NewbieModeToggle";
-import { Sparkles } from "lucide-react";
+import { ChevronRight, Sparkles } from "lucide-react";
 import { setSavedTheme } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
-import {
-  getCurrentWebviewWindow,
-  WebviewWindow,
-} from "@tauri-apps/api/webviewWindow";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
@@ -107,6 +105,9 @@ const TsManagerParityPage = lazy(() =>
 );
 const TbjeCheckPage = lazy(() =>
   import("./TbjeCheckPage").then((m) => ({ default: m.TbjeCheckPage })),
+);
+const DataFlowPage = lazy(() =>
+  import("./dataflow/DataFlowPage").then((m) => ({ default: m.DataFlowPage })),
 );
 const ConfirmationProgressPage = lazy(
   () => import("./ConfirmationProgressPage"),
@@ -130,6 +131,7 @@ const ExcelMergerPage = lazy(() =>
 const AudiPickPage = lazy(() =>
   import("./AudiPickPage").then((m) => ({ default: m.AudiPickPage })),
 );
+const OcrPage = lazy(() => import("./OcrPage").then((m) => ({ default: m.OcrPage })));
 const WpServicePage = lazy(() =>
   import("./WpServicePage").then((m) => ({ default: m.WpServicePage })),
 );
@@ -163,6 +165,9 @@ const MeetingMinutesPage = lazy(() =>
     default: m.MeetingMinutesPage,
   })),
 );
+const MeetingVocabularyPage = lazy(() =>
+  import("./MeetingVocabularyPage").then((m) => ({ default: m.MeetingVocabularyPage })),
+);
 
 const DEDICATED_TOOL_PAGES: Record<
   string,
@@ -172,8 +177,10 @@ const DEDICATED_TOOL_PAGES: Record<
   wp_service_generator: WpServicePage,
   fa_list: FaListPage,
   audipick: AudiPickPage,
+  ocr: OcrPage,
   ts_manager: TsManagerParityPage,
   tbje_check: TbjeCheckPage,
+  dataflow: DataFlowPage,
   confirmation_progress: ConfirmationProgressPage,
   file_list_directory: FileListDirectoryPage,
   pdf_to_excel: PdfToExcelPage,
@@ -272,6 +279,7 @@ const TOOL_BADGE: Record<string, string> = {
   file_list_directory: "夹",
   pdf_to_excel: "PDF",
   audipick: "AP",
+  ocr: "OCR",
   audit_roll_forward: "RF",
   wp_service_generator: "WP",
   fx_audit: "汇",
@@ -318,7 +326,7 @@ const TOOL_GROUPS = [
   },
   {
     label: "效率工具",
-    ids: ["Excel_Merger", "file_list_directory", "pdf_to_excel", "fuzzy_match"],
+    ids: ["dataflow", "ocr", "Excel_Merger", "file_list_directory", "pdf_to_excel", "fuzzy_match"],
   },
   {
     label: "运营工具",
@@ -345,31 +353,6 @@ function toolStatusLabel(status: ToolManifest["migrationStatus"]) {
   return undefined;
 }
 
-async function openAudiPickWindow(): Promise<void> {
-  const existing = await WebviewWindow.getByLabel("audipick");
-  if (existing) {
-    await existing.show();
-    await existing.setFocus();
-    return;
-  }
-  const popup = new WebviewWindow("audipick", {
-    url: "/#/audipick-window",
-    title: "AudiPick 合同摘录",
-    width: 1480,
-    height: 920,
-    minWidth: 1080,
-    minHeight: 700,
-    center: true,
-    decorations: false,
-    resizable: true,
-    focus: true,
-  });
-  await new Promise<void>((resolve, reject) => {
-    void popup.once("tauri://created", () => resolve());
-    void popup.once("tauri://error", (event) => reject(event.payload));
-  });
-}
-
 /**
  * 侧边栏工具入口统一消费清单里的 migrationStatus。
  * preview/upcoming 工具仍可进入，但必须在点击前让用户知道它未到正式版；
@@ -391,17 +374,10 @@ function SidebarToolLink({
   return (
     <NavLink
       to={tool.route}
+      end
       className={className}
       title={statusLabel ? statusHint : undefined}
       aria-label={accessibleName}
-      onClick={(event) => {
-        if (tool.id !== "audipick" || !("__TAURI_INTERNALS__" in window))
-          return;
-        event.preventDefault();
-        void openAudiPickWindow().catch((error) => {
-          window.alert(`无法打开 AudiPick 独立窗口：${appErrorText(error)}`);
-        });
-      }}
     >
       <span className="tool-badge">
         {TOOL_BADGE[tool.id] ?? tool.name.slice(0, 1)}
@@ -477,6 +453,11 @@ export default function App() {
     fa: true,
     kanzhang: true,
   });
+  useEffect(() => {
+    if (location.pathname === "/tools/meeting_minutes" || location.pathname.startsWith("/tools/meeting_minutes/")) {
+      setSubgroupOpen((current) => ({ ...current, meeting: true }));
+    }
+  }, [location.pathname]);
   // 新手模式：会话状态只记"当前在播哪条引导"；看过与否存 localStorage
   // （tourState.ts）。新手模式开着时，每次进工具都播导览，关掉即全停。
   const [tour, setTour] = useState<
@@ -579,7 +560,8 @@ export default function App() {
     const state = loadTourState();
     if (state.newbieMode === false) return;
     if (playedToolRef.current === activeToolId) return;
-    if (!catalog.some((tool) => tool.id === activeToolId)) return;
+    const activeTool = catalog.find((tool) => tool.id === activeToolId);
+    if (!activeTool || activeTool.capabilities.includes("download")) return;
     // 延迟触发给懒加载页面留出首绘时间；引擎内部还会轮询等待目标元素。
     const timer = setTimeout(() => {
       playedToolRef.current = activeToolId;
@@ -816,6 +798,18 @@ export default function App() {
                     }
                     const tool = catalog.find((t) => t.id === entry);
                     if (!tool) return null;
+                    if (tool.id === "meeting_minutes") {
+                      const open = subgroupOpen.meeting ?? false;
+                      return <div key={tool.id} className="tool-subgroup">
+                        <div className="meeting-nav-heading">
+                          <SidebarToolLink tool={tool} />
+                          <button type="button" className="meeting-nav-toggle" aria-label="会议纪要子菜单" title={open ? "收起词库菜单" : "展开词库菜单"} aria-expanded={open} aria-controls="meeting-submenu" onClick={() => setSubgroupOpen((current) => ({ ...current, meeting: !open }))}>
+                            <ChevronRight className={`meeting-nav-chevron${open ? " open" : ""}`} aria-hidden="true" />
+                          </button>
+                        </div>
+                        {open && <div id="meeting-submenu" className="tool-subgroup-items"><NavLink to="/tools/meeting_minutes/vocabulary" className="tool-subgroup-link"><span className="tool-badge">词</span><span>专有词库</span></NavLink></div>}
+                      </div>;
+                    }
                     return <SidebarToolLink key={tool.id} tool={tool} />;
                   })}
                 </div>
@@ -919,6 +913,7 @@ export default function App() {
                 {/* The visible tool is rendered by PersistentToolPages below so
                   route changes hide it instead of destroying its local state. */}
                 <Route path="/tools/:toolId" element={null} />
+                <Route path="/tools/meeting_minutes/vocabulary" element={<Suspense fallback={<p role="status">正在加载词库…</p>}><MeetingVocabularyPage /></Suspense>} />
                 {/* 兼容旧版书签：AudiPick 已改为工具箱主窗口内页面。 */}
                 <Route
                   path="/audipick-window"
@@ -1657,31 +1652,6 @@ export function formatUpdateProgress(
   return `正在下载更新：${formatBytes(downloaded)} / ${formatBytes(total)}（${percentage}%）`;
 }
 
-function settingsSignature(form: Record<string, unknown>, cacheMode: string) {
-  return JSON.stringify({ form, cacheMode });
-}
-
-function SettingsNavigationBlocker({ dirty }: { dirty: boolean }) {
-  const blocker = useBlocker(({ currentLocation, nextLocation }) =>
-    dirty && currentLocation.pathname !== nextLocation.pathname,
-  );
-  const confirming = useRef(false);
-  useEffect(() => {
-    if (blocker.state !== "blocked" || confirming.current) return;
-    confirming.current = true;
-    void confirmDialog({
-      title: "放弃未保存的修改？",
-      message: "设置尚未保存，确定离开并放弃这些修改吗？",
-      confirmLabel: "离开",
-      tone: "danger",
-    }).then((leave) => {
-      if (leave) blocker.proceed();
-      else blocker.reset();
-    }).finally(() => { confirming.current = false; });
-  }, [blocker]);
-  return null;
-}
-
 export function Settings({
   availableUpdate,
   onAvailableUpdateChange,
@@ -1689,16 +1659,28 @@ export function Settings({
   availableUpdate: Update | null;
   onAvailableUpdateChange: (update: Update | null) => void;
 }) {
-  const [saving, setSaving] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
-  const [secretRevision, setSecretRevision] = useState(0);
+  const [secretRevision] = useState(0);
+  const [ready, setReady] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [loadError, setLoadError] = useState("");
+  const [autoState, setAutoState] = useState<AutoSaveState>("idle");
+  const [autoError, setAutoError] = useState("");
+  const mounted = useRef(true);
+  const readyRef = useRef(false);
+  const saver = useRef<SettingsAutoSave | null>(null);
+  saver.current ??= new SettingsAutoSave((state, error) => {
+    if (!mounted.current) return;
+    setAutoState(state);
+    setAutoError(error ? appErrorText(error) : "");
+  });
   const [form, setForm] = useState({
     enabled: false,
     apiType: "openai",
     baseUrl: "https://api.openai.com/v1",
     model: "",
     authMode: "bearer",
-    timeout: "30",
+    timeout: "120",
     thinkingEnabled: false,
     apiKey: "",
     ocrEngine: "ai",
@@ -1718,6 +1700,9 @@ export function Settings({
   });
   const [message, setMessage] = useState("");
   const [testingLlm, setTestingLlm] = useState(false);
+  const [testingOcr, setTestingOcr] = useState(false);
+  const [ocrTestResult, setOcrTestResult] = useState<{ ok: boolean; text: string }>();
+  const ocrTestRevision = useRef(0);
   const [llmTestResult, setLlmTestResult] = useState<{
     ok: boolean;
     text: string;
@@ -1746,7 +1731,14 @@ export function Settings({
   const [cacheMessage, setCacheMessage] = useState("");
   const [cacheStatError, setCacheStatError] = useState("");
   const [clearHistoryWithCache, setClearHistoryWithCache] = useState(false);
-  const savedSettingsSignature = useRef<string | undefined>(undefined);
+  const formRef = useRef(form);
+  const cacheModeRef = useRef(cacheMode);
+  const pendingSecrets = useRef(new Map<string, string>());
+  const credentialFor = (key: string, apiType: string): string | undefined => ({
+    apiKey: apiType === "dify_chat" ? "dify_api_key" : "llm_api_key",
+    ocrApiKey: "baidu_ocr_key", ocrSecret: "baidu_ocr_secret",
+    bailianOcrKey: "bailian_ocr_key", asrApiKey: "bailian_asr_key", planApiKey: "bailian_plan_asr_key",
+  } as Record<string, string>)[key];
   const refreshCacheStat = () =>
     engineCall("cache.stat", {})
       .then((v) => {
@@ -1913,102 +1905,91 @@ export function Settings({
     }
   }
   useEffect(() => {
-    void settingsGet()
-      .then((value) => {
-        const llm = (value.llm ?? {}) as Record<string, unknown>;
-        const ocr = (value.ocr ?? {}) as Record<string, unknown>;
-        const meeting = (value.meeting ?? {}) as Record<string, unknown>;
-        setForm((x) => {
-          const next = {
-            ...x,
-            enabled: Boolean(llm.enabled),
-            apiType: String(llm.api_type ?? x.apiType),
-            baseUrl: String(llm.base_url ?? x.baseUrl),
-            model: String(llm.model ?? ""),
-            authMode: String(llm.auth_mode ?? x.authMode),
-            timeout: String(llm.timeout ?? x.timeout),
-            thinkingEnabled: Boolean(llm.thinking_enabled),
-            ocrEngine: String(ocr.engine ?? x.ocrEngine),
-            bailianOcrUrl: String(ocr.bailian_base_url ?? "").trim() || BAILIAN_OCR_BASE_URL,
-            bailianOcrModel: String(ocr.bailian_model ?? "").trim() || BAILIAN_OCR_MODEL,
-            meetingDetectEnabled: meeting.detect_enabled !== false,
-            asrChannel:
-              meeting.asr_channel === "token_plan" ? "token_plan" : "paraformer",
-            asrBaseUrl: String(meeting.asr_base_url ?? "").trim() || x.asrBaseUrl,
-            asrModel: String(meeting.asr_model ?? "").trim() || x.asrModel,
-            planBaseUrl: String(meeting.plan_base_url ?? x.planBaseUrl),
-            planModel: String(meeting.plan_model ?? x.planModel),
-          };
-          const cache = (value.cache ?? {}) as Record<string, unknown>;
-          const mode = String(cache.cleanup ?? "weekly");
-          const nextCacheMode =
-            mode === "daily" || mode === "weekly" || mode === "off"
-              ? mode
-              : "weekly";
-          savedSettingsSignature.current = settingsSignature(
-            next,
-            nextCacheMode,
-          );
-          return next;
-        });
-        const cache = (value.cache ?? {}) as Record<string, unknown>;
-        const mode = String(cache.cleanup ?? "weekly");
-        if (mode === "daily" || mode === "weekly" || mode === "off")
-          setCacheMode(mode);
-      })
-      .catch(() => undefined);
-  }, []);
-  const dirty =
-    savedSettingsSignature.current !== undefined &&
-    settingsSignature(form, cacheMode) !== savedSettingsSignature.current;
-  const hasDataRouter = useContext(UNSAFE_DataRouterContext) !== null;
+    let active = true;
+    setLoadError("");
+    void SettingsAutoSave.finishPendingWrites().then(() => settingsGet()).then((value) => {
+      if (!active) return;
+      const llm = (value.llm ?? {}) as Record<string, unknown>;
+      const ocr = (value.ocr ?? {}) as Record<string, unknown>;
+      const meeting = (value.meeting ?? {}) as Record<string, unknown>;
+      const x = formRef.current;
+      const next = {
+        ...x, enabled: Boolean(llm.enabled), apiType: String(llm.api_type ?? x.apiType),
+        baseUrl: String(llm.base_url ?? x.baseUrl), model: String(llm.model ?? ""),
+        authMode: String(llm.auth_mode ?? x.authMode), timeout: String(llm.timeout ?? x.timeout),
+        thinkingEnabled: Boolean(llm.thinking_enabled), ocrEngine: String(ocr.engine ?? x.ocrEngine),
+        bailianOcrUrl: String(ocr.bailian_base_url ?? "").trim() || BAILIAN_OCR_BASE_URL,
+        bailianOcrModel: String(ocr.bailian_model ?? "").trim() || BAILIAN_OCR_MODEL,
+        meetingDetectEnabled: meeting.detect_enabled !== false,
+        asrChannel: meeting.asr_channel === "token_plan" ? "token_plan" : "paraformer",
+        asrBaseUrl: String(meeting.asr_base_url ?? "").trim() || x.asrBaseUrl,
+        asrModel: String(meeting.asr_model ?? "").trim() || x.asrModel,
+        planBaseUrl: String(meeting.plan_base_url ?? x.planBaseUrl),
+        planModel: String(meeting.plan_model ?? x.planModel),
+      };
+      const mode = (value.cache as Record<string, unknown> | undefined)?.cleanup;
+      const nextMode = mode === "daily" || mode === "off" ? mode : "weekly";
+      formRef.current = next;
+      cacheModeRef.current = nextMode;
+      setForm(next);
+      setCacheMode(nextMode);
+      readyRef.current = true;
+      setReady(true);
+    }).catch((error) => { if (active) setLoadError(appErrorText(error)); });
+    return () => { active = false; };
+  }, [loadAttempt]);
   useEffect(() => {
-    if (!dirty) return;
-    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
+    mounted.current = true;
+    const flush = () => { void saver.current?.flush().catch(() => undefined); };
+    const unload = (event: BeforeUnloadEvent) => {
+      flush();
+      if (saver.current?.pending) { event.preventDefault(); event.returnValue = ""; }
     };
-    const confirmLinkNavigation = (event: MouseEvent) => {
-      const link = (event.target as Element | null)?.closest<HTMLAnchorElement>(
-        "a[href]",
-      );
-      if (!link || !document.contains(link)) return;
-      // 同意离开后由 confirmDialog 回调补发的合成点击：放行这一次，避免二次弹窗
-      if (link.dataset.confirmBypass) {
-        delete link.dataset.confirmBypass;
-        return;
-      }
-      // 确认是异步的，必须在事件同步阶段先拦下原生跳转，再按结果决定是否补发
-      event.preventDefault();
-      event.stopPropagation();
-      void confirmDialog({
-        title: "放弃未保存的修改？",
-        message: "设置尚未保存，确定离开并放弃这些修改吗？",
-        confirmLabel: "离开",
-        tone: "danger",
-      }).then((ok) => {
-        if (!ok) return;
-        link.dataset.confirmBypass = "1";
-        link.click();
-      });
-    };
-    window.addEventListener("beforeunload", warnBeforeUnload);
-    // 正式应用由数据路由统一拦截链接、后退和前进；普通 MemoryRouter 测试保留旧回退。
-    if (!hasDataRouter) document.addEventListener("click", confirmLinkNavigation, true);
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("beforeunload", unload);
     return () => {
-      window.removeEventListener("beforeunload", warnBeforeUnload);
-      if (!hasDataRouter) document.removeEventListener("click", confirmLinkNavigation, true);
+      mounted.current = false;
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("beforeunload", unload);
+      flush();
     };
-  }, [dirty, hasDataRouter]);
-  const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) =>
-    setForm((x) => ({ ...x, [key]: value }));
+  }, []);
+  function queueSave(delay = 450) {
+    if (!readyRef.current) return;
+    const snapshot = { ...formRef.current };
+    const mode = cacheModeRef.current;
+    const credentials = new Map(pendingSecrets.current);
+    saver.current!.schedule(() => persistSettings(snapshot, mode, credentials), delay);
+  }
+  const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) => {
+    if (!readyRef.current) return;
+    if (["ocrEngine", "ocrApiKey", "ocrSecret", "bailianOcrUrl", "bailianOcrModel", "bailianOcrKey"].includes(key)) {
+      ocrTestRevision.current += 1;
+      setOcrTestResult(undefined);
+    }
+    const credential = credentialFor(key, formRef.current.apiType);
+    if (credential) {
+      if (String(value).trim()) pendingSecrets.current.set(credential, String(value));
+      else pendingSecrets.current.delete(credential);
+    }
+    const next = { ...formRef.current, [key]: value };
+    if (key === "apiType") next.apiKey = "";
+    formRef.current = next;
+    setForm(next);
+    queueSave(typeof value === "boolean" || ["apiType", "ocrEngine", "authMode", "asrChannel"].includes(key) ? 0 : 450);
+  };
+  const changeCacheMode = (mode: typeof cacheMode) => {
+    cacheModeRef.current = mode;
+    setCacheMode(mode);
+    queueSave(0);
+  };
   const llmSettings = () => ({
     enabled: form.enabled,
     api_type: form.apiType,
     base_url: form.baseUrl.trim(),
     model: form.model.trim(),
     auth_mode: form.authMode,
-    timeout: Number(form.timeout) || 30,
+    timeout: Number(form.timeout) || 120,
     thinking_enabled: form.thinkingEnabled,
   });
   async function testConnection() {
@@ -2026,6 +2007,7 @@ export function Settings({
     }
     setTestingLlm(true);
     try {
+      await flushSettings();
       const result = await llmTest({ llm: llmSettings() }, form.apiKey);
       setLlmTestResult({
         ok: true,
@@ -2047,10 +2029,38 @@ export function Settings({
       setTestingLlm(false);
     }
   }
+  async function testOcrConnection() {
+    if (testingOcr) return;
+    const revision = ocrTestRevision.current;
+    setOcrTestResult(undefined);
+    setTestingOcr(true);
+    try {
+      await flushSettings();
+      const result = await audipickOcrTest(
+        form.ocrEngine,
+        createOcrTestImage(),
+        form.ocrEngine === "bailian" ? form.bailianOcrKey : form.ocrEngine === "baidu" ? form.ocrApiKey : "",
+        form.ocrEngine === "baidu" ? form.ocrSecret : "",
+        form.ocrEngine === "bailian" ? {
+          bailian_base_url: form.bailianOcrUrl.trim() || BAILIAN_OCR_BASE_URL,
+          bailian_model: form.bailianOcrModel.trim() || BAILIAN_OCR_MODEL,
+        } : undefined,
+        true,
+      );
+      if (revision === ocrTestRevision.current) {
+        setOcrTestResult({ ok: true, text: `${result.message} 响应耗时 ${result.elapsedMs} 毫秒。` });
+      }
+    } catch (error) {
+      if (revision === ocrTestRevision.current) setOcrTestResult({ ok: false, text: errorText(error) });
+    } finally {
+      setTestingOcr(false);
+    }
+  }
   async function testAsrConnection() {
     setAsrTestResult(undefined);
     setTestingAsr(true);
     try {
+      await flushSettings();
       const result =
         form.asrChannel === "token_plan"
           ? await meetingAsrTest(form.planApiKey, {
@@ -2098,79 +2108,45 @@ export function Settings({
       setAutostartBusy(false);
     }
   }
-  async function save() {
-    if (saving) return;
-    setSaving(true);
-    setSaveFailed(false);
-    setMessage("");
-    try {
-      // meeting 命名空间合并写：工具页可能已写入 background_resident，
-      // 这里只覆盖 detect_enabled，其余键原样保留。
-      const current = ((await settingsGet().catch(() => ({}))) ??
-        {}) as Record<string, unknown>;
-      const meetingNamespace = {
-        ...((current.meeting as Record<string, unknown> | undefined) ?? {}),
-        detect_enabled: form.meetingDetectEnabled,
-        asr_channel: form.asrChannel,
-        asr_base_url: form.asrBaseUrl.trim(),
-        asr_model: form.asrModel.trim(),
-        plan_base_url: form.planBaseUrl.trim(),
-        plan_model: form.planModel.trim(),
-      };
-      await settingsSet({
-        llm: {
-          ...llmSettings(),
-        },
-        ocr: { ...(current.ocr as object ?? {}), engine: form.ocrEngine,
-          ...(form.ocrEngine === "bailian" ? {
-            bailian_base_url: form.bailianOcrUrl.trim() || BAILIAN_OCR_BASE_URL,
-            bailian_model: form.bailianOcrModel.trim() || BAILIAN_OCR_MODEL,
-          } : {}),
-        },
-        cache: { cleanup: cacheMode },
-        meeting: meetingNamespace,
-      });
-      // 检测开关保存后立即生效，不必重启应用。
-      await meetingDetectSetEnabled(form.meetingDetectEnabled);
-      if (form.apiKey)
-        await secretSet(
-          form.apiType === "dify_chat" ? "dify_api_key" : "llm_api_key",
-          form.apiKey,
-        );
-      if (form.ocrApiKey) await secretSet("baidu_ocr_key", form.ocrApiKey);
-      if (form.ocrSecret) await secretSet("baidu_ocr_secret", form.ocrSecret);
-      if (form.bailianOcrKey.trim()) await secretSet("bailian_ocr_key", form.bailianOcrKey.trim());
-      if (form.asrApiKey) await secretSet("bailian_asr_key", form.asrApiKey);
-      if (form.planApiKey)
-        await secretSet("bailian_plan_asr_key", form.planApiKey);
-      const savedForm = {
-        ...form,
-        apiKey: "",
-        ocrApiKey: "",
-        ocrSecret: "",
-        bailianOcrKey: "",
-        asrApiKey: "",
-        planApiKey: "",
-      };
-      savedSettingsSignature.current = settingsSignature(savedForm, cacheMode);
-      setForm(savedForm);
-      setSecretRevision((revision) => revision + 1);
-      setMessage("配置已保存，相关工具会使用这些设置。");
-    } catch (e) {
-      setSaveFailed(true);
-      setMessage(appErrorText(e));
-    } finally {
-      setSaving(false);
+  async function persistSettings(snapshot: typeof form, mode: typeof cacheMode, credentials: Map<string, string>) {
+    // Never replace unknown namespace fields or hide a failed read with defaults.
+    const current = await settingsGet();
+    for (const [name, value] of credentials) {
+      await secretSet(name, name === "bailian_ocr_key" ? value.trim() : value);
+      if (pendingSecrets.current.get(name) === value) pendingSecrets.current.delete(name);
     }
+    await settingsSet({
+      llm: {
+        ...(current.llm as object ?? {}), enabled: snapshot.enabled, api_type: snapshot.apiType,
+        base_url: snapshot.baseUrl.trim(), model: snapshot.model.trim(), auth_mode: snapshot.authMode,
+        timeout: Number(snapshot.timeout) || 30, thinking_enabled: snapshot.thinkingEnabled,
+      },
+      ocr: { ...(current.ocr as object ?? {}), engine: snapshot.ocrEngine,
+        bailian_base_url: snapshot.bailianOcrUrl.trim() || BAILIAN_OCR_BASE_URL,
+        bailian_model: snapshot.bailianOcrModel.trim() || BAILIAN_OCR_MODEL,
+      },
+      cache: { ...(current.cache as object ?? {}), cleanup: mode },
+      meeting: {
+        ...(current.meeting as object ?? {}), detect_enabled: snapshot.meetingDetectEnabled,
+        asr_channel: snapshot.asrChannel, asr_base_url: snapshot.asrBaseUrl.trim(), asr_model: snapshot.asrModel.trim(),
+        plan_base_url: snapshot.planBaseUrl.trim(), plan_model: snapshot.planModel.trim(),
+      },
+    });
+    await meetingDetectSetEnabled(snapshot.meetingDetectEnabled);
+  }
+  function flushSettings() {
+    return saver.current!.flush();
   }
   return (
-    <div className="settings-page">
-      {hasDataRouter && <SettingsNavigationBlocker dirty={dirty} />}
+    <div className="settings-page" onBlurCapture={() => { void flushSettings().catch(() => undefined); }}>
       <PageHeader
         eyebrow="本机配置"
         title="设置"
-        detail="按用途管理工具箱配置；密钥保存在本机凭据管理器。"
         actions={
+          <div className="settings-header-actions">
+          <span className="settings-auto-status" aria-live="polite">
+            {!ready && !loadError ? "读取中…" : autoState === "pending" || autoState === "saving" ? "正在保存…" : autoState === "saved" ? "已自动保存" : ""}
+          </span>
           <Button
             ref={updateTriggerRef}
             variant="secondary"
@@ -2188,8 +2164,13 @@ export function Settings({
                   ? `发现新版本 v${availableUpdate.version}`
                   : "软件更新"}
           </Button>
+          </div>
         }
       />
+      {(loadError || autoState === "error") && <div className="settings-auto-error" role="alert">
+        <span>{loadError ? `配置读取失败：${loadError}` : `自动保存失败：${autoError}`}</span>
+        <Button variant="outline" size="sm" onClick={() => loadError ? setLoadAttempt((n) => n + 1) : void flushSettings().catch(() => undefined)}>重试</Button>
+      </div>}
       {updateOpen && (
         /*
          * UI v1：让用户先确认版本，再看状态，最后按需阅读说明。
@@ -2407,7 +2388,7 @@ export function Settings({
         </section>
       )}
       {/* 单页双栏：左栏放要填写的（LLM / OCR），右栏放要选择的（主题、新手模式、缓存）；窄窗口自动落回单栏 */}
-      <div className="settings-columns">
+      <fieldset className="settings-columns" disabled={!ready}>
         <div className="settings-col">
           <section className="list-card">
             <h2>统一 LLM 配置</h2>
@@ -2441,12 +2422,12 @@ export function Settings({
                 <input
                   value={form.model}
                   onChange={(e) => set("model", e.target.value)}
-                  placeholder="填写模型名称，如 gpt-4o-mini"
+                  placeholder="模型名称"
                 />
               </label>
               <label className="field">
                 <span>API Key</span>
-                <SecretInput
+                <SecretInput autoSave
                   key={`${form.apiType}-${secretRevision}`}
                   label="API Key"
                   credentialName={form.apiType === "dify_chat" ? "dify_api_key" : "llm_api_key"}
@@ -2475,7 +2456,6 @@ export function Settings({
                     value={form.timeout}
                     onChange={(e) => set("timeout", e.target.value)}
                   />
-                  <small>字段复核可能耗时较长，建议设置为 120 秒以上。</small>
                 </label>
                 <label className="field settings-toggle">
                   <span>思考模式</span>
@@ -2494,7 +2474,6 @@ export function Settings({
               >
                 {testingLlm ? "正在测试…" : "测试 LLM 连接"}
               </button>
-              <span>测试成功后仍需保存配置。</span>
             </div>
             {llmTestResult && (
               <div
@@ -2505,11 +2484,7 @@ export function Settings({
             )}
           </section>
           <section className="list-card">
-            <h2>AudiPick 配置</h2>
-            <p className="settings-note">
-              OCR 仅用于 AudiPick
-              扫描件文字识别，按所选引擎显示配置；旧数据迁移也收在同一张卡片内，按需展开。
-            </p>
+            <h2>OCR 配置</h2>
             <div className="form-grid">
               <label className="field">
                 <span>OCR 引擎</span>
@@ -2528,7 +2503,7 @@ export function Settings({
                   {" "}
                   <label className="field">
                     <span>百度 API Key</span>
-                    <SecretInput
+                    <SecretInput autoSave
                       key={`ocr-key-${secretRevision}`}
                       label="百度 API Key"
                       credentialName="baidu_ocr_key"
@@ -2539,7 +2514,7 @@ export function Settings({
                   </label>
                   <label className="field">
                     <span>百度 Secret Key</span>
-                    <SecretInput
+                    <SecretInput autoSave
                       key={`ocr-secret-${secretRevision}`}
                       label="百度 Secret Key"
                       credentialName="baidu_ocr_secret"
@@ -2553,26 +2528,28 @@ export function Settings({
               {form.ocrEngine === "bailian" && <>
                 <label className="field"><span>百炼 OCR URL</span><input value={form.bailianOcrUrl} onChange={(event) => set("bailianOcrUrl", event.target.value)} placeholder={BAILIAN_OCR_BASE_URL} /></label>
                 <label className="field"><span>百炼 OCR 模型</span><input value={form.bailianOcrModel} onChange={(event) => set("bailianOcrModel", event.target.value)} placeholder={BAILIAN_OCR_MODEL} /></label>
-                <label className="field"><span>百炼 OCR API Key</span><SecretInput key={`bailian-ocr-key-${secretRevision}`} label="百炼 OCR API Key" credentialName="bailian_ocr_key" value={form.bailianOcrKey} onChange={(value) => set("bailianOcrKey", value)} placeholder="留空表示不修改" /></label>
+                <label className="field"><span>百炼 OCR API Key</span><SecretInput autoSave key={`bailian-ocr-key-${secretRevision}`} label="百炼 OCR API Key" credentialName="bailian_ocr_key" value={form.bailianOcrKey} onChange={(value) => set("bailianOcrKey", value)} placeholder="留空表示不修改" /></label>
               </>}
             </div>
-            {form.ocrEngine === "bailian" && <><p className="settings-note">当前 URL：{form.bailianOcrUrl.trim() || BAILIAN_OCR_BASE_URL}</p><p className="settings-note">使用与 API Key 同一业务空间的兼容接口 URL（通常以 /compatible-mode/v1 结尾）。模型和密钥独立于统一 AI；可在 AudiPick 配置页测试内置图片识别。</p></>}
-            {form.ocrEngine === "ai" && (
-              <p className="settings-note">
-                沿用上方统一 LLM 配置，无需额外密钥。
-              </p>
-            )}
-            {form.ocrEngine === "local" && (
-              <p className="settings-note">请先启动已配置的本机 OCR 服务。</p>
+            <div className="settings-test-row">
+              <button className="secondary" disabled={testingOcr} onClick={() => void testOcrConnection()}>
+                {testingOcr ? "正在测试 OCR…" : "测试 OCR 连接"}
+              </button>
+              {form.ocrEngine !== "local" && <span>云端测试可能计费</span>}
+            </div>
+            {ocrTestResult && (
+              <div role="status" className={`settings-test-result ${ocrTestResult.ok ? "success" : "failed"}`}>
+                {ocrTestResult.text}
+              </div>
             )}
             <details className="settings-advanced">
-              <summary>旧数据迁移（按需使用）</summary>
+              <summary>旧数据迁移</summary>
               <p>
-                先在旧 AudiPick 配置页导出迁移备份，再在这里导入。导入按项目 ID
-                去重，不会删除旧数据。
+                导入旧 AudiPick 的迁移备份，按项目去重。
               </p>
               <div className="input-with-button">
                 <input
+                  aria-label="迁移备份文件"
                   value={displayFileName(backupPath)}
                   readOnly
                   placeholder="选择 AudiPick迁移备份.json"
@@ -2611,13 +2588,6 @@ export function Settings({
           </section>
           <section className="list-card">
             <h2>语音转写（百炼）</h2>
-            <p className="settings-note">
-              会议录音会发送至你配置的百炼转写服务；纪要整理使用上方的大模型配置。
-            </p>
-            <details className="settings-note">
-              <summary>查看通道差异与计费方式</summary>
-              <p>通用通道按录音时长计费，可区分说话人；套餐通道消耗 Token Plan 套餐额度，不区分说话人，仅支持 WAV 录音。</p>
-            </details>
             <div className="form-grid">
               <label className="field">
                 <span>转写通道</span>
@@ -2625,7 +2595,7 @@ export function Settings({
                   value={form.asrChannel}
                   onChange={(e) => set("asrChannel", e.target.value)}
                 >
-                  <option value="paraformer">通用通道（区分说话人）</option>
+                  <option value="paraformer">通用通道（按模型支持说话人）</option>
                   <option value="token_plan">Token Plan 套餐通道</option>
                 </select>
               </label>
@@ -2639,7 +2609,7 @@ export function Settings({
                 />
               </label>
               <label className="field settings-toggle">
-                <span>开机自启（登录后驻留托盘监控）</span>
+                <span>开机自启</span>
                 <SwitchInput
                   checked={autostartEnabled}
                   disabled={autostartBusy}
@@ -2656,7 +2626,6 @@ export function Settings({
                       onChange={(e) => set("planBaseUrl", e.target.value)}
                       placeholder="https://token-plan.cn-beijing.maas.aliyuncs.com"
                     />
-                    <small>可填服务根地址，或粘贴以 /compatible-mode/v1 结尾的订阅地址。</small>
                   </label>
                   <label className="field">
                     <span>套餐转写模型</span>
@@ -2666,11 +2635,10 @@ export function Settings({
                       onChange={(e) => set("planModel", e.target.value)}
                       placeholder="qwen-audio-3.0-realtime-plus"
                     />
-                    <small>qwen-audio-3.0-asr-flash 使用 HTTP 识别；qwen-audio-3.0-realtime-plus 使用实时接口。</small>
                   </label>
                   <label className="field">
                     <span>套餐 API 密钥（sk-sp- 开头）</span>
-                    <SecretInput
+                    <SecretInput autoSave
                       key={`plan-key-${secretRevision}`}
                       label="套餐 API 密钥（sk-sp- 开头）"
                       credentialName="bailian_plan_asr_key"
@@ -2689,7 +2657,6 @@ export function Settings({
                       onChange={(e) => set("asrBaseUrl", e.target.value)}
                       placeholder="https://dashscope.aliyuncs.com"
                     />
-                    <small>填写服务根地址，留空使用默认地址。</small>
                   </label>
                   <label className="field">
                     <span>通用转写模型</span>
@@ -2698,11 +2665,10 @@ export function Settings({
                       onChange={(e) => set("asrModel", e.target.value)}
                       placeholder="paraformer-v2"
                     />
-                    <small>留空使用 paraformer-v2；其他模型需兼容百炼录音文件转写接口。</small>
                   </label>
                   <label className="field">
                     <span>百炼 API 密钥</span>
-                    <SecretInput
+                    <SecretInput autoSave
                       key={`asr-key-${secretRevision}`}
                       label="百炼 API 密钥"
                       credentialName="bailian_asr_key"
@@ -2714,10 +2680,6 @@ export function Settings({
                 </>
               )}
             </div>
-            <p className="settings-note">
-              「开机自启」勾选后立即生效：登录 Windows
-              后工具箱自动在系统托盘启动会议监控，不弹窗口；取消「后台常驻」会同时取消开机自启。
-            </p>
             <div className="settings-test-row">
               <button
                 className="secondary"
@@ -2730,11 +2692,7 @@ export function Settings({
                     ? "测试套餐通道"
                     : "测试百炼连接"}
               </button>
-              <span>
-                {form.asrChannel === "token_plan"
-                  ? "地址与模型按「我的订阅」页面填写；ASR Flash 测试会发送内置短样音并消耗少量套餐额度，实时模型仅测试会话。密钥留空使用已保存密钥。"
-                  : "按当前地址与模型验证上传凭证；完整转写需实际录音任务验证。密钥留空使用已保存密钥。"}
-              </span>
+              {form.asrChannel === "token_plan" && form.planModel.includes("asr-flash") && <span>样音测试消耗少量套餐额度</span>}
             </div>
             {asrTestResult && (
               <div
@@ -2748,9 +2706,6 @@ export function Settings({
         <div className="settings-col">
           <section className="list-card">
             <h2>界面主题</h2>
-            <p className="settings-note">
-              选择后立即生效。
-            </p>
             <div className="theme-picker">
               {[
                 {
@@ -2819,12 +2774,9 @@ export function Settings({
           
           <section className="list-card">
             <h2>本地缓存</h2>
-            <p>
-              缓存读过的科目余额表与序时账，再次打开同一份文件直接命中，不必重新解析。
-            </p>
             {cacheStatError ? (
               <div className="cache-stat-error" role="alert">
-                <span>缓存占用读取失败，请重新读取后再决定是否清理。</span>
+                <span>缓存读取失败，请重试。</span>
                 <Button type="button" variant="outline" size="sm" onClick={() => void refreshCacheStat()}>
                   重新读取
                 </Button>
@@ -2839,7 +2791,7 @@ export function Settings({
               <select
                 value={cacheMode}
                 onChange={(e) =>
-                  setCacheMode(e.target.value as typeof cacheMode)
+                  changeCacheMode(e.target.value as typeof cacheMode)
                 }
               >
                 {/* 说明写进选项本身：选「每天」不是每天清空，是每天清掉没再用过的。 */}
@@ -2918,7 +2870,7 @@ export function Settings({
             {cacheMessage && <p className="cache-result">{cacheMessage}</p>}
           </section>
         </div>
-      </div>
+       </fieldset>
       {message && (
         <div
           role={saveFailed ? "alert" : "status"}
@@ -2927,20 +2879,6 @@ export function Settings({
           {message}
         </div>
       )}
-      <div className={`settings-save-bar${dirty ? " is-dirty" : ""}`}>
-        <span>
-          {dirty
-            ? "有未保存的配置修改；测试连接不会自动保存。"
-            : "配置会保存到本机；界面主题在选择后立即生效。"}
-        </span>
-        <button
-          className="primary"
-          disabled={!dirty || saving || testingLlm}
-          onClick={() => void save()}
-        >
-          {saving ? "保存中…" : "保存配置"}
-        </button>
-      </div>
     </div>
   );
 }

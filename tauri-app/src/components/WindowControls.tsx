@@ -12,26 +12,38 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 const inTauriEnv =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-/* 与 App.tsx 里 IconHome 同一套路：10×10 描边小图标，不用 emoji。 */
+/* 统一 12×12 画布和线宽，让三种窗口动作具有一致的视觉重量。 */
 function IconMinimize() {
   return (
-    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-      <path d="M0.5 5h9" stroke="currentColor" strokeWidth="1" />
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M2 6h8"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }
 
 function IconMaximize() {
   return (
-    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
       <rect
-        x="0.5"
-        y="0.5"
-        width="9"
-        height="9"
+        x="2"
+        y="2"
+        width="8"
+        height="8"
+        rx="1"
         fill="none"
         stroke="currentColor"
-        strokeWidth="1"
+        strokeWidth="1.25"
       />
     </svg>
   );
@@ -39,21 +51,27 @@ function IconMaximize() {
 
 function IconRestore() {
   return (
-    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-      <rect
-        x="3"
-        y="0.5"
-        width="6.5"
-        height="6.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1"
-      />
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      aria-hidden="true"
+    >
       <path
-        d="M0.5 3v6.5H7"
-        fill="none"
+        d="M4 2h5a1 1 0 0 1 1 1v5"
         stroke="currentColor"
-        strokeWidth="1"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+      />
+      <rect
+        x="2"
+        y="4"
+        width="6"
+        height="6"
+        rx="1"
+        stroke="currentColor"
+        strokeWidth="1.25"
       />
     </svg>
   );
@@ -61,8 +79,19 @@ function IconRestore() {
 
 function IconClose() {
   return (
-    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-      <path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" strokeWidth="1" />
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="m2.5 2.5 7 7m0-7-7 7"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }

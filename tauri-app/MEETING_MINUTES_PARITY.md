@@ -1,5 +1,21 @@
 # 会议纪要原生功能验收矩阵
 
+## 2026-10-28 · 可维护的专有词库
+
+- 含义确认：按用户确认写入 FIC＝现场负责人、FDE＝现场部署工程师、EDC／CSDC＝安永交付中心、CCP＝PBC 收发存管理门户、SWP＝标准审计工作底稿、A3＝试算平衡表、ARP＝分析性复核、TRDA＝安永数字化团队、TR＝TRDA 简称、UT＝工时利用率、skywind＝天风，并写入此前讨论且获确认的底稿、分录、复核及风险术语解释。AI 保留人工智能／审计指令的语境歧义，PMTE 解释为 PM、TE 两项连读；PIFEE、EYC、CA、ca tie 等未确认项保持空白，不补造全称。所有标准词条保留，跨条目的同义关系在含义中注明，skywind 补充「天风」别名用于识别。
+- 旧词库升级：一次性 `confirmed-definitions-20261028-v1` 迁移，仅给仍符合旧初始值（原拼写、行业分类、启用、无别名、空解释）的现存默认词条补充含义。改名、人工解释、改分类、别名及停用项保持原值，不重建已删除项；新别名冲突时只补含义，达到词库总容量限制时跳过该条补充。初始化、回填和迁移标记同一事务完成，后续清空解释或删除别名不再自动补回。首次安装直接载入带解释的默认配置。回归覆盖旧库重开、重复启动、编辑保护、别名冲突、容量边界及实际纪要／热词快照。
+
+- 入口修正：侧栏网格和分类组使用可收缩轨道，展开按钮保留固定宽度，避免长工具名把箭头推入滚动条裁切范围。进入会议纪要页自动展开二级词库菜单，支持手动收起。浏览器验收必须从会议主页面实际点击进入，检查按钮边界和点击命中，不能只用词库直达路由验证。
+
+- 入口仅放在侧栏「会议纪要助手」的二级菜单「专有词库」，独立路由 `/tools/meeting_minutes/vocabulary`；会议主界面维持现有布局。词库按公司／行业／其他三个区域展示紧凑词块，名称、简称和含义均可搜索；点击词块弹窗查看、编辑、启停或确认删除，新增时可选择分类。
+- `assets/meeting/vocabulary-defaults.json` 编译期内嵌用户提供的初始词，保持原拼写、重复 TRDA 去重，初始分类为行业、默认启用；仅写入已讨论并获用户确认的解释。完整词条仅首次创建 `meeting_vocabulary` 表时导入；后续仅执行上述一次性解释补充，不覆盖人工修改，不补回已删除项。词库与 `settings` 独立，避免设置页自动保存覆盖；增删改在 SQLite 事务及同一连接锁下执行。
+- 词条包含标准名称、分类、最多五个简称、含义和启用状态。前后端校验输入；名称／简称去除首尾空格，不区分大小写检查跨词条重名与简称冲突；词库容量与总内容有界，失败不覆盖当前内容。保存失败保留弹窗草稿，预览模式不伪造本机保存。
+- 持久库 `data/audit-toolbox.db` 与缓存根目录分离；手动清缓存／周期清缓存均只扫描缓存目录，词库不纳入清理。同通道正常升级复用持久库并保留人工增删改；正式版与 Dev 版遵循原有独立数据目录规则。删除应用数据目录会丢失词库。路径隔离、数据库重开及删除默认词后不补回有回归保护。
+- `job_start_inner` 为所有 `meeting.*` 任务注入 `__meetingVocabulary` 快照；后台自动生成、手动停止、导入及转写稿重出共用。任务运行中修改词库仅影响之后启动的任务。worker 读取快照，不访问 Tauri state；停用词条不进入转写热词或纪要上下文。
+- Qwen ASR Flash 3.0／3.1 的 HTTP 与异步文件转写请求通过 `parameters.vocabulary` 传入标准名和简称（普通权重 4）；长录音每段沿用同一份热词。不含非 ASCII 字符的词最多七个空格分词，否则最多十五个字符，超长公司名称仍保留于纪要理解上下文。Paraformer、realtime 和未知兼容模型不发送未核对的热词参数；本次未实现 Paraformer 云端预编译词表的创建／更新。
+- 两版纪要均收到同一份启用词条及含义；作为参考数据加入用户正文，系统提示词要求仅按明确上下文规范名称、不强替换歧义简称、不将词库当作会议事实或任务指令。词条中出现 `json` 不会改写系统提示词或触发公共请求器的结构化输出模式。保留转写原稿，不做全局字符串替换，不重写已有纪要。提示词约束不能代替真实会议内容复核。
+- 验证命令：`npx vitest run src/MeetingVocabularyPage.test.tsx src/meetingVocabularyApi.test.ts src/AppNavigationSettings.test.tsx src/MeetingMinutesPage.test.tsx`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml --lib meeting_`、`cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_`。本地 HTTP 验证通用及套餐转写的实际热词请求与多段传递；无真实云端调用。`node scripts/verify_meeting_vocabulary_ui.cjs` 使用隔离模拟 IPC，检查宽窄窗口、分组词块、弹窗增删改及主题；`python scripts/verify_meeting_vocabulary_worker.py --exe <EXE路径>` 用合成转写稿验证独立 worker 的快照和双版错误路径，不读凭据或访问云端。构建日志、浏览器截图和检查结果位于 `artifacts/meeting-vocabulary-20261028/`。未重新打包或替换安装版，未用真实录音评价识别准确率提升。
+
 会议纪要是 Rust 原生功能，不依赖上一级 Python 引擎。此表记录当前行为和验证边界，不表示全部 Teams 版本与设备组合均经真机验收。
 
 | 行为 | Rust / 前端实现 | 回归与边界 |
@@ -10,13 +26,16 @@
 | 会议系统声 | `meeting_record.rs` 优先按 Teams 活跃播放会话选实际播放设备回环，设备不可用才回退 Teams 进程树，最后默认通信／播放设备；备用来源明确提醒 | 来源优先级及失败回退回归；设备回环会包含同一设备上其他应用的声音，开录提醒；多账户、多个独立 Teams 根进程及录音中途切换设备尚未全部验收 |
 | 麦克风 | 优先选 Teams 活跃采集会话设备；其次音量峰值；最终默认通信麦克风并告警 | 与 Windows 会话共用归属逻辑；设备临时切换后自动重连尚未实现 |
 | 录音质量提示 | 初始来源和警告写 `recording-start.json`，最终成品、警告和系统声／麦克风／混音的 `audioStats` 写 `recording-summary.json`；页面提醒不会被转写启动清掉 | `MeetingMinutesPage.test.tsx`、`meeting_record::tests::`；统计含样本数、非零样本数、归一化峰值和 RMS；不把初始化成功等同采集有声，RMS 体检仍只是启发式 |
-| 纯静音上传拦截 | `meeting.generate` 在读取密钥和调用云端之前检查可解析的 16 位 PCM WAV，全零／空数据直接中文报错，保留原文件；通用和套餐通道共用 | `meeting_minutes::tests::`、`meeting_record::tests::`；低音量、包含非零数据或本地不支持解析的导入格式不据此拦截，交由原有云端解码；不宣称可判断是否有人声 |
-| 百炼文件转写 | HTTP 信封读取 `output.results`（兼容扁平快照）；提取结果地址后下载文本 | `bailian_asr::tests::`；真实结构成功、子文件失败、空结果与缺字段分别回归；不再把缺字段误报为无人声 |
-| 通用转写配置 | 设置页预填默认服务根地址与 paraformer-v2，均可编辑；保存到 `meeting.asr_base_url` / `meeting.asr_model`，worker 从 `__settings` 读取；旧设置或空值使用原默认值 | `AppNavigationSettings.test.tsx`、`meetingAsrApi.test.ts`、`bailian_asr::tests::`；自定义模型需兼容百炼文件转写协议；通用／套餐配置及密钥独立 |
-| 通用连接测试 | 使用界面当前未保存的地址、模型、密钥请求上传凭证；密钥空时读取已保存通用凭据 | 本地 HTTP 服务核对连接测试、上传凭证、提交与轮询的实际路径和模型；测试成功仅表示取得上传凭证，不等同实际录音转写成功；不消耗真实云端服务 |
+| 本地音视频解码 | `meeting_media.rs` 使用 Windows Media Foundation Source Reader，只选择首条音轨，转为临时 16 位 PCM WAV 后交给通用或套餐转写；原生录音／已有 16 位 PCM WAV 原样复用 | `meeting_minutes::media::tests::`；必跑合成 H.264＋AAC 的 MP4/MOV、WMV＋WMA、MJPEG＋PCM 的 AVI 及 MP3/M4A/AAC；WebM（VP8＋Opus）与 FLAC 独立 ignored 测试，仅在已安装对应媒体解码器的系统显式执行；Windows 解码能力仍依赖系统可用媒体组件，特殊编码或受保护文件友好报错，不宣称任意编码都兼容；应用运行／测试不依赖 FFmpeg、Python 或额外 EXE |
+| 音轨隐私、取消与来源 | 视频画面不上传；逐音频缓冲检查取消，结束／失败／取消时清理本任务 WAV 与空临时目录；结果、历史、输出目录均继续关联用户原文件，不登记临时音轨 | 合成样例断言原文件字节不变、临时路径清理；无音轨、损坏文件、预先取消和已写入部分音轨后的中途取消均本地报中文错误并验证清理，无真实云调用；强制结束进程后的临时文件回收未覆盖 |
+| 纯静音上传拦截 | `meeting.generate` 在读取密钥和调用云端之前检查解码后的 16 位 PCM WAV，全零／空数据直接中文报错，保留原文件；通用和套餐通道共用 | `meeting_minutes::tests::`、`meeting_record::tests::`；低音量、包含非零数据不据此拦截，不宣称可判断是否有人声；解码失败不再向套餐入口直接传入不兼容压缩文件 |
+| 百炼文件转写 | qwen-audio-3.1-asr-flash-filetrans 保留异步上传／提交、以 GET 查询任务并开启说话人分离；HTTP 信封读取 `output.results`（兼容扁平快照）；提取结果地址后下载文本 | `bailian_asr::tests::`；真实结构成功、子文件失败、空结果与缺字段分别回归；不再把缺字段误报为无人声 |
+| 原生 worker 音视频验收 | `scripts/verify_meeting_media_workers.py --exe` 启动指定 EXE 的 `--rust-table-worker`，MP4/WMV/AVI 分别经过两条转写通道；在原生解码后故意以无效地址结束 | 验证已读取声音、返回对应通道 URL 配置错误、原文件字节不变、独立 TEMP 中无残留；另验无音轨、损坏、预先取消；通用和套餐的配置校验均先于凭据读取，不调用真实服务，不等同云端转写内容验收 |
+| 通用转写配置 | 设置页预填默认服务根地址与 paraformer-v2，均可编辑；保存到 `meeting.asr_base_url` / `meeting.asr_model`，worker 从 `__settings` 读取；旧设置或空值使用原默认值 | `AppNavigationSettings.test.tsx`、`meetingAsrApi.test.ts`、`bailian_asr::tests::`；3.0／3.1 ASR Flash 走同步 HTTP，其他模型需兼容百炼文件转写协议；通用／套餐配置及密钥独立 |
+| 通用连接测试 | 使用界面当前未保存的地址、模型、密钥请求上传凭证；密钥空时读取已保存通用凭据 | 本地 HTTP 服务核对连接测试、上传凭证、提交与轮询的实际路径和模型；3.0／3.1 ASR Flash 测试实际识别内置短样音（少量费用），其余文件模型测试成功仅表示取得上传凭证，不等同实际录音转写成功；不消耗真实云端服务 |
 | 配置页密钥查看 | 点击「显示」按需读取本通道保存的凭据，或直接展示当前输入；隐藏清除读取值，编辑后才成为待保存草稿 | `SecretInput.test.tsx`、`AppNavigationSettings.test.tsx`、`secretApi.test.ts`；读取命令与写入共用凭据名白名单，不读取其他名称；测试仅使用模拟值 |
 | 套餐地址与 TLS | 根地址、订阅页 `/compatible-mode/v1`、完整实时接口及重复后缀统一到正确 WebSocket 路径；测试与转写共用 Windows 原生证书链校验及握手超时 | `bailian_plan_asr::tests::`；本地握手核对路径和鉴权头，错误区分证书／HTTP 状态；域名、有效期与系统信任检查保留，未知查询参数或含账号密码的地址拒绝且不回显 |
-| 套餐 ASR Flash HTTP 识别 | `qwen-audio-3.0-asr-flash` 使用原生 HTTP `multimodal-generation/generation`，以 `input.messages[].content[].input_audio.data` 的 WAV Data URI 传入；支持 `output.text` 与扁平 `text`，缺字段报错；实时模型保留原协议 | 本地 HTTP 验证设置页及转写主入口使用正确路径、模型、鉴权、采样率和音频；取消与 HTTP 错误不回退实时接口；错误不附原始响应中的密钥、录音或 Data URI |
+| 套餐 ASR Flash HTTP 识别 | 通用和套餐的 `qwen-audio-3.0-asr-flash`／`qwen-audio-3.1-asr-flash` 使用原生 HTTP `multimodal-generation/generation`，以 `input.messages[].content[].input_audio.data` 的 WAV Data URI 传入；支持 `output.text` 与扁平 `text`，缺字段报错；实时模型保留原协议；当前 Flash 接入输出不带说话人，不启用 3.1 可选的说话人分离，跨分段说话人身份未关联 | 本地 HTTP 验证设置页及转写主入口使用正确路径、模型、鉴权、采样率和音频；取消与 HTTP 错误不回退实时接口；错误不附原始响应中的密钥、录音或 Data URI |
 | ASR Flash 长录音及连接测试 | 每段不超过 120 秒、WAV 不超过 6 MiB（base64 约 8 MiB），按完整声道帧切分并保留连续时间戳；设置页测试发送嵌入 EXE 的短合成语音，须识别到非空文字 | `bailian_plan_asr::tests::` 覆盖双声道高采样率样本完整性、125 秒录音经 HTTP 分段、空结果与服务拒绝；`AppNavigationSettings.test.tsx` 检查草稿测试及额度提示。测试会消耗少量套餐额度；不代表真实长会议质量验收 |
 | 套餐长录音缓冲上限 | `qwen-audio-3.0-realtime-plus` 的 16 位 WAV 按 25 秒切成独立会话，每段发送后提交，低于该模型未提交缓冲区 30 秒上限；其他模型沿用 120 秒分段，结果保留原录音连续时间戳 | `bailian_plan_asr::tests::`；覆盖按模型选择时长、分段边界、超过 120 秒的录音、双声道 48 kHz 样本完整性；本地 WebSocket 检查 append 累积时长与逐段 commit；未据此宣称真实云端长会议已验收 |
 | 转写失败诊断 | 合并顶层、`output` 与子文件的错误码／原因，保留任务与请求编号；子文件明确失败立即退出，缺失／未知状态不再持续轮询 | `bailian_asr::tests::`；覆盖嵌套及扁平响应、空原因、HTTP 错误、本地 HTTP 服务响应；诊断不回显整个响应中的录音地址或签名 |
@@ -27,7 +46,7 @@
 
 ## 2026-10-26 · 会议专属历史与阅读工作区
 
-- 去掉步骤导引，详细度、生成操作、任务进度合入会议记录配置；历史列表按日期分组并支持标题搜索，选择后在结果区切换两版纪要与原始转写。宽工作区左右并列，窄工作区上下排列。
+- 去掉步骤导引，详细度、生成操作、任务进度合入会议记录配置；历史列表按日期分组并支持标题搜索，选择后在结果区切换两版纪要与原始转写。所有窗口均按「上方配置、中间历史、下方结果」纵向排列，历史列表限制高度并独立滚动。
 - `Storage` 新建 `meeting_history` 索引，列表查询不返回正文；已落盘正文只保存路径，保存失败的正文保留有界内联副本（每段最多 2 MB）。首次生成／导入时间用于排序并明确标注，不推断会议实际发生时间。录音或转写稿路径关联重新生成，同条记录保留最新结果；重新生成失败时保留原可阅读内容。旧任务晚到的事件不得覆盖新任务状态，快速失败先于参数归档时不留下重复会议。
 - 旧数据仅一次回填通用任务历史中已有的输出路径；根据已登记的 Markdown 读取标题，不扫描磁盘或旁边文件。旧任务没有输出路径、文件已丢失或通用历史已被清除时，无法据此完整重建旧结果，仍可手动选择已有纪要查看。会议专属索引独立于通用任务日志，清空通用任务日志不会删除会议索引或输出文件。
 - `meeting_history_list` 返回元数据；`meeting_history_get` 仅按已归档 ID 恢复确切存在的文件授权，不授权父目录，也不把后来变成目录的旧文件路径加入白名单。原始转写通过 `meeting_read_transcript` 在授权检查后限读 TXT、UTF-8、2 MB；缺失、错误编码和超限分别返回中文错误。
@@ -96,6 +115,9 @@ npx vitest run src/api.test.ts src/MeetingMinutesPage.test.tsx src/components/Me
 npx vitest run src/AppNavigationSettings.test.tsx src/meetingAsrApi.test.ts src/secretApi.test.ts src/components/SecretInput.test.tsx
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml --lib meeting_
+# 仅在已安装 WebM 和 FLAC 系统解码器时
+cargo test --manifest-path src-tauri/Cargo.toml --lib meeting_minutes::media::tests::optional_windows_codecs -- --ignored
+python scripts/verify_meeting_media_workers.py --exe <待验收EXE路径>
 cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_asr::tests::
 cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_plan_asr::tests::
 # 只读真实设备会话枚举，不录音、不上传

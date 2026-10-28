@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement } from "react";
@@ -8,6 +14,7 @@ import { SuccessNudge } from "./SuccessNudge";
 import { saveTourState } from "./tourState";
 import { openOutput } from "@/api";
 import type { JobEvent } from "@/types";
+import { registerOcrScanJob } from "../../ocrProgress";
 
 vi.mock("@/api", () => ({
   openOutput: vi.fn().mockResolvedValue(undefined),
@@ -52,21 +59,61 @@ afterEach(() => {
 });
 
 describe("SuccessNudge", () => {
+  it("OCR 分页 worker 完成不冒充整批扫描完成，独立导出仍提示成功", () => {
+    saveTourState({ newbieMode: true });
+    registerOcrScanJob("ocr-progress-page-completed");
+    const page = completedJob({
+      jobId: "ocr-progress-page-completed",
+      toolId: "ocr",
+      outputPaths: [],
+    });
+    const { rerender } = renderWithRouter(
+      <SuccessNudge jobs={[page]} toolNameOf={() => "OCR"} />,
+    );
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    rerender(
+      <MemoryRouter>
+        <SuccessNudge
+          jobs={[
+            page,
+            completedJob({
+              jobId: "ocr-progress-export-completed",
+              toolId: "ocr",
+            }),
+          ]}
+          toolNameOf={() => "OCR"}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("OCR已完成")).toBeInTheDocument();
+  });
   it("新手模式下 JE 后台完整读取完成不提示测算完成", () => {
     saveTourState({ newbieMode: true });
     renderWithRouter(
       <SuccessNudge
-        jobs={[completedJob({ toolId: "loan_interest", background: true, outputPaths: [], message: "完整读取已完成" })]}
+        jobs={[
+          completedJob({
+            toolId: "loan_interest",
+            background: true,
+            outputPaths: [],
+            message: "完整读取已完成",
+          }),
+        ]}
         toolNameOf={toolNameOf}
       />,
     );
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "返回工作台" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "返回工作台" }),
+    ).not.toBeInTheDocument();
   });
 
   it("正式测算完成仍提示成功，不被同工具后台读取完成事件覆盖", () => {
     saveTourState({ newbieMode: true });
-    const calculation = completedJob({ jobId: "loan-calculation", toolId: "loan_interest" });
+    const calculation = completedJob({
+      jobId: "loan-calculation",
+      toolId: "loan_interest",
+    });
     const { rerender } = renderWithRouter(
       <SuccessNudge jobs={[calculation]} toolNameOf={toolNameOf} />,
     );
@@ -78,7 +125,12 @@ describe("SuccessNudge", () => {
         <SuccessNudge
           jobs={[
             calculation,
-            completedJob({ jobId: "loan-reading", toolId: "loan_interest", background: true, outputPaths: [] }),
+            completedJob({
+              jobId: "loan-reading",
+              toolId: "loan_interest",
+              background: true,
+              outputPaths: [],
+            }),
           ]}
           toolNameOf={toolNameOf}
         />
@@ -90,15 +142,26 @@ describe("SuccessNudge", () => {
         <LocationProbe />
         <SuccessNudge
           jobs={[
-            completedJob({ jobId: "loan-calculation-next", toolId: "loan_interest", background: false }),
-            completedJob({ jobId: "loan-reading", toolId: "loan_interest", background: true, outputPaths: [] }),
+            completedJob({
+              jobId: "loan-calculation-next",
+              toolId: "loan_interest",
+              background: false,
+            }),
+            completedJob({
+              jobId: "loan-reading",
+              toolId: "loan_interest",
+              background: true,
+              outputPaths: [],
+            }),
           ]}
           toolNameOf={toolNameOf}
         />
       </MemoryRouter>,
     );
     expect(screen.getByText("借款利息测算已完成")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "打开结果" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "打开结果" }),
+    ).toBeInTheDocument();
   });
 
   it("初始 jobs 为空不显示；出现 completed 任务后显示卡片和按钮", () => {
@@ -110,10 +173,7 @@ describe("SuccessNudge", () => {
     rerender(
       <MemoryRouter initialEntries={["/tools/fa_export"]}>
         <LocationProbe />
-        <SuccessNudge
-          jobs={[completedJob()]}
-          toolNameOf={toolNameOf}
-        />
+        <SuccessNudge jobs={[completedJob()]} toolNameOf={toolNameOf} />
       </MemoryRouter>,
     );
     expect(screen.getByText("凭证导出已完成")).toBeInTheDocument();
@@ -141,7 +201,11 @@ describe("SuccessNudge", () => {
   it("打开结果失败时保留提示并告知下一步", async () => {
     vi.mocked(openOutput).mockRejectedValueOnce(new Error("missing"));
     renderWithRouter(
-      <SuccessNudge jobs={[completedJob()]} toolNameOf={toolNameOf} autoDismissMs={30} />,
+      <SuccessNudge
+        jobs={[completedJob()]}
+        toolNameOf={toolNameOf}
+        autoDismissMs={30}
+      />,
     );
     fireEvent.click(screen.getByRole("button", { name: "打开结果" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("历史记录");

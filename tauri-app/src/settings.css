@@ -1,5 +1,9 @@
 /* 单页双栏：左栏「要填写的」（LLM / OCR）略宽，右栏「要选择的」略窄 */
 .settings-page .settings-columns {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 8fr) minmax(0, 7fr);
   gap: var(--sp-4);
@@ -33,6 +37,74 @@
 
 .settings-page .list-card {
   margin: 0;
+}
+
+/* Card button margins also enlarged password rows and shifted their baseline. */
+.settings-page .list-card button {
+  margin: 0;
+}
+
+.settings-page .field > .secret-field {
+  margin: 0;
+  max-width: 420px;
+  font-weight: 400;
+}
+
+.settings-page .secret-input {
+  min-height: 40px;
+}
+
+.settings-page .secret-visibility,
+.settings-page .settings-test-row > button {
+  height: 40px;
+  border-radius: var(--r-sm);
+}
+
+.settings-page .theme-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr));
+}
+
+.settings-page .theme-option {
+  min-width: 0;
+  min-height: 40px;
+  justify-content: flex-start;
+}
+
+.settings-page .theme-option-swatches {
+  flex: 0 0 34px;
+}
+
+.settings-page .cache-stat-error + .field {
+  margin-top: var(--sp-4);
+}
+
+.settings-page .settings-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.settings-page .settings-auto-status {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.settings-page .settings-auto-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-3);
+  border-radius: var(--r-sm);
+  color: var(--danger-fg);
+  background: var(--danger-bg);
+  overflow-wrap: anywhere;
+}
+
+.settings-page .settings-auto-error > span {
+  min-width: 0;
 }
 
 /* 普通设置卡片统一由父级控制纵向节奏。独立的 .field 之前是 inline label，
@@ -419,8 +491,7 @@
 }
 
 .settings-note,
-.settings-test-row > span,
-.settings-save-bar > span {
+.settings-test-row > span {
   color: var(--text-muted);
   font-size: var(--fs-sm);
 }
@@ -439,8 +510,7 @@
   margin-bottom: var(--sp-4);
 }
 
-.settings-test-row,
-.settings-save-bar {
+.settings-test-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -466,27 +536,6 @@
   background: var(--danger-bg);
 }
 
-.settings-save-bar {
-  position: static;
-  justify-content: space-between;
-  padding: var(--sp-4);
-  padding-bottom: max(var(--sp-4), env(safe-area-inset-bottom));
-  background: var(--surface);
-  border-top: 1px solid var(--border);
-}
-
-.settings-save-bar.is-dirty {
-  position: sticky;
-  bottom: 0;
-  z-index: 4;
-  border-top-color: var(--border-strong);
-  box-shadow: var(--shadow-sticky);
-}
-
-.settings-save-bar.is-dirty > span {
-  color: var(--ink-strong);
-  font-weight: 600;
-}
 @media (max-width: 640px), (max-height: 520px) {
   .settings-update-heading {
     flex-direction: column;
@@ -514,12 +563,8 @@
     margin-inline: var(--sp-4);
   }
 
-  .settings-update-actions > button,
-  .settings-save-bar > button {
+  .settings-update-actions > button {
     flex: 1 1 160px;
   }
 
-  .settings-save-bar {
-    align-items: stretch;
-  }
 }

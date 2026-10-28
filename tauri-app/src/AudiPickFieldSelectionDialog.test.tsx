@@ -11,7 +11,7 @@ afterEach(cleanup);
 
 const loanGroup: AudiPickFieldSelectionGroup = {
   ruleId: "loan",
-  ruleName: "借款·财务契约",
+  ruleName: "借款·财务指标契约",
   ruleVersion: "4.2",
   fields: [
     { key: "page", label: "页码", required: true },
@@ -33,7 +33,7 @@ it("必选字段保持选中且不可取消，全选和仅必选会更新可选�
     />,
   );
 
-  const group = screen.getByRole("region", { name: "借款·财务契约" });
+  const group = screen.getByRole("region", { name: "借款·财务指标契约" });
   const page = within(group).getByRole("checkbox", { name: /页码/ });
   const excerpt = within(group).getByRole("checkbox", { name: /合同原文摘录/ });
   const metric = within(group).getByRole("checkbox", { name: /财务指标/ });

@@ -340,7 +340,7 @@ it("单独导出仅显示一个进度窗，未知进度动态等待，失败后�
   await screen.findByRole("dialog", { name: "OCR 摘录与导出" });
   await waitFor(() => expect(mocks.job).toHaveBeenCalledTimes(1));
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
-  expect(screen.getByText("正在生成项目 Excel")).toBeInTheDocument();
+  expect(await screen.findByText("正在生成项目 Excel")).toBeInTheDocument();
   expect(screen.getByRole("progressbar", { name: "导出进度" })).toHaveClass("is-working");
   await act(async () => rejectExport(new Error("合成导出失败")));
   await screen.findByText("合成导出失败");

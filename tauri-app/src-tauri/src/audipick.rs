@@ -3045,8 +3045,8 @@ fn request_llm_with_key(
             format!("{base}/chat-messages")
         };
         let query = format!("{prompt}\n\n{text}");
-        let response = client.post(url).bearer_auth(key).json(&json!({"inputs":{},"query":query,"response_mode":"blocking","user":"audit-toolbox"})).send().map_err(network_error)?;
-        let value = read_llm_response(response, "Dify 提取请求失败。")?;
+        let response = client.post(url).bearer_auth(key).json(&json!({"inputs":{},"query":query,"response_mode":"blocking","user":"audit-toolbox"})).send().map_err(|failure| llm_request_error(failure, timeout))?;
+        let value = read_llm_response(response, "Dify 提取请求失败。", timeout)?;
         return Ok(value
             .get("answer")
             .and_then(Value::as_str)
@@ -3084,11 +3084,12 @@ fn request_llm_with_key(
         "messages": [{"role":"system","content":system_prompt},{"role":"user","content":user_content}],
         "thinking": {"type": if thinking_enabled(config) { "enabled" } else { "disabled" }},
     });
+    apply_provider_thinking(&mut body, base, config);
     if json_prompt.is_some() {
         body["response_format"] = json!({"type": "json_object"});
     }
-    let response = request.json(&body).send().map_err(network_error)?;
-    let value = read_llm_response(response, "LLM 提取请求失败。")?;
+    let response = request.json(&body).send().map_err(|failure| llm_request_error(failure, timeout))?;
+    let value = read_llm_response(response, "LLM 提取请求失败。", timeout)?;
     if config["__rejectTruncated"] == true && value.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length") {
         return Err(error("OCR_MODEL_TRUNCATED", "模型输出被截断，请拆分页面或缩短摘录范围后重试。", None));
     }
@@ -3238,6 +3239,36 @@ fn thinking_enabled(config: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The official Bailian Qwen API controls hybrid thinking with a top-level
+/// boolean, not the MiniMax/DeepSeek-shaped `thinking.type` object. Preserve
+/// the saved user preference without changing provider, model or settings.
+/// https://help.aliyun.com/en/model-studio/deep-thinking
+/// Unknown gateways/models retain their existing wire protocol.
+fn apply_provider_thinking(body: &mut Value, base: &str, config: &Value) {
+    let Ok(url) = reqwest::Url::parse(base) else { return; };
+    let host = url.host_str().unwrap_or("");
+    if url.scheme() != "https" || url.port().is_some()
+        || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some()
+        || !matches!(url.path().trim_end_matches('/'), "/compatible-mode/v1" | "/compatible-mode/v1/chat/completions")
+        || !(matches!(host, "dashscope.aliyuncs.com" | "dashscope-intl.aliyuncs.com" | "dashscope-us.aliyuncs.com")
+            || host.ends_with(".maas.aliyuncs.com"))
+    { return; }
+    let model = config["model"].as_str().unwrap_or("");
+    // Explicit known capabilities avoid sending false to thinking-only models.
+    let hybrid = matches!(model,
+        "qwen3.8-flash" | "qwen3.8-max" | "qwen3.8-max-0902" | "qwen3.8-27b"
+        | "qwen3.7-max" | "qwen3.7-max-2026-05-20" | "qwen3.7-max-2026-06-08"
+        | "qwen3.7-plus" | "qwen3.7-plus-2026-05-26" | "qwen3.7-flash" | "qwen3.7-flash-2026-07-15"
+        | "qwen3.6-plus" | "qwen3.6-plus-2026-04-02" | "qwen3.6-flash" | "qwen3.6-flash-2026-04-16"
+        | "qwen3.5-plus" | "qwen3.5-plus-2026-02-15" | "qwen3.5-flash" | "qwen3.5-flash-2026-02-23"
+        | "qwen3.5-397b-a17b" | "qwen3.5-122b-a10b" | "qwen3.5-27b" | "qwen3.5-35b-a3b");
+    let thinking_only = matches!(model, "qwen3.8-2.4t-a95b" | "qwen3.7-max-preview" | "qwen3.7-max-2026-05-17");
+    if hybrid || thinking_only {
+        if let Some(object) = body.as_object_mut() { object.remove("thinking"); }
+        if hybrid { body["enable_thinking"] = json!(thinking_enabled(config)); }
+    }
+}
+
 fn wants_json_response(base: &str) -> bool {
     base.to_ascii_lowercase().contains("api.deepseek.com")
 }
@@ -3265,9 +3296,10 @@ fn body_snippet(body: &str) -> String {
 fn read_llm_response(
     response: reqwest::blocking::Response,
     label: &str,
+    timeout: u64,
 ) -> Result<Value, AppError> {
     let status = response.status();
-    let body = response.text().map_err(network_error)?;
+    let body = response.text().map_err(|failure| llm_request_error(failure, timeout))?;
     if !status.is_success() {
         let detail = serde_json::from_str::<Value>(&body)
             .as_ref()
@@ -3286,6 +3318,14 @@ fn read_llm_response(
             Some(format!("{e}；响应开头：{}", body_snippet(&body))),
         )
     })
+}
+
+fn llm_request_error(failure: reqwest::Error, timeout: u64) -> AppError {
+    if failure.is_timeout() {
+        error("LLM_REQUEST_TIMEOUT", &format!("模型请求已达到配置的 {timeout} 秒时限，本段尚未获得完整响应。原文已保留，请减少单次摘录范围后重试。"), None)
+    } else {
+        network_error(failure)
+    }
 }
 
 fn network_error(error: impl std::fmt::Display) -> AppError {
@@ -4095,6 +4135,119 @@ mod tests {
             json_response_prompt("https://example.com/v1", "只输出严格 JSON").is_none(),
             "未知兼容端点不得贸然发送 response_format"
         );
+    }
+    #[test]
+    #[ignore = "手动真实服务验收，仅在用户明确授权同一份资料实测时运行"]
+    fn live_dev_text_request_from_stdin() {
+        // Credentials remain in this process; the caller passes only the
+        // already authorized prompt/text and non-secret Dev model settings.
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        let request: Value = serde_json::from_str(&input).expect("需要单行 JSON 实测请求");
+        let mut config = request["llm"].clone();
+        config["__rejectTruncated"] = json!(true);
+        let started = std::time::Instant::now();
+        let key = keyring::Entry::new("AuditToolboxDev", "llm_api_key")
+            .and_then(|entry| entry.get_password());
+        let result = match key.as_ref() {
+            Ok(key) => request_llm_with_key(&config, request["prompt"].as_str().unwrap_or(""),
+                request["text"].as_str().unwrap_or(""), None, Some(key)),
+            Err(_) => Err(error("LLM_KEY_MISSING", "未找到 Dev 统一 LLM 密钥。", None)),
+        };
+        let elapsed = started.elapsed().as_secs_f64();
+        let value = match result {
+            Ok(raw) => json!({"ok":true,"elapsedSeconds":elapsed,"model":config["model"],
+                "result":{"parsed":serde_json::from_str::<Value>(&raw).ok(),"raw":raw}}),
+            Err(mut failure) => {
+                // A gateway error can echo authorization data. Never propagate
+                // those details through even this local acceptance protocol.
+                failure.detail = None;
+                if let Ok(key) = key { failure.user_message = failure.user_message.replace(&key, "[已隐去]"); }
+                json!({"ok":false,"elapsedSeconds":elapsed,"model":config["model"],"error":failure})
+            }
+        };
+        println!("{}", value);
+    }
+    #[test]
+    fn llm_timeout_is_named_for_slow_headers_and_slow_body_without_waiting_real_limits() {
+        use std::io::{Read, Write};
+        for delay_body in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut bytes = [0; 1024];
+                let _ = stream.read(&mut bytes);
+                if delay_body {
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n");
+                    let _ = stream.flush();
+                }
+                thread::sleep(Duration::from_millis(650));
+            });
+            let client = Client::builder().no_proxy().timeout(Duration::from_millis(250)).build().unwrap();
+            let request = client.get(format!("http://{address}/v1")).send();
+            let failure = if delay_body {
+                read_llm_response(request.unwrap(), "合成失败", 120).unwrap_err()
+            } else { llm_request_error(request.unwrap_err(), 120) };
+            assert_eq!(failure.code, "LLM_REQUEST_TIMEOUT");
+            assert!(failure.user_message.contains("120 秒时限"));
+            assert!(failure.user_message.contains("原文已保留"));
+            assert!(!failure.user_message.contains("代理"));
+            assert!(failure.detail.is_none());
+            server.join().unwrap();
+        }
+        let invalid = Client::new().get("not a URL").send().unwrap_err();
+        assert_eq!(llm_request_error(invalid, 120).code, "NETWORK_ERROR");
+    }
+    #[test]
+    fn official_qwen_hybrid_thinking_follows_the_saved_switch_with_the_correct_parameter() {
+        for base in ["https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "https://dashscope-us.aliyuncs.com:443/compatible-mode/v1"] {
+            for enabled in [false, true] {
+                let config = json!({"model":"qwen3.8-flash","thinking_enabled":enabled});
+                let mut body = json!({"model":"qwen3.8-flash","messages":[{"role":"user","content":"合成资料"}],"thinking":{"type":"disabled"}});
+                apply_provider_thinking(&mut body, base, &config);
+                assert_eq!(body["enable_thinking"], enabled);
+                assert!(body.get("thinking").is_none());
+                assert_eq!(body["messages"][0]["content"], "合成资料");
+                assert_eq!(config["thinking_enabled"], enabled);
+            }
+        }
+        let mut absent = json!({"thinking":{"type":"disabled"}});
+        apply_provider_thinking(&mut absent, "https://dashscope.aliyuncs.com/compatible-mode/v1", &json!({"model":"qwen3.8-flash"}));
+        assert_eq!(absent["enable_thinking"], false);
+        let mut camel_case = json!({"thinking":{"type":"enabled"}});
+        apply_provider_thinking(&mut camel_case, "https://dashscope.aliyuncs.com/compatible-mode/v1", &json!({"model":"qwen3.8-flash","thinkingEnabled":true}));
+        assert_eq!(camel_case["enable_thinking"], true);
+    }
+    #[test]
+    fn thinking_only_qwen_never_receives_an_unsupported_false_switch() {
+        for model in ["qwen3.8-2.4t-a95b", "qwen3.7-max-preview", "qwen3.7-max-2026-05-17"] {
+            let mut body = json!({"thinking":{"type":"disabled"}});
+            apply_provider_thinking(&mut body, "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", &json!({"model":model,"thinking_enabled":false}));
+            assert!(body.get("enable_thinking").is_none());
+            assert!(body.get("thinking").is_none());
+        }
+    }
+    #[test]
+    fn other_providers_models_and_proxy_routes_keep_the_existing_protocol() {
+        for (base, model) in [
+            ("https://api.deepseek.com/v1", "deepseek-chat"),
+            ("https://gateway.example/v1", "qwen3.8-flash"),
+            ("http://127.0.0.1:8765/compatible-mode/v1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com.evil.example/compatible-mode/v1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com:8443/compatible-mode/v1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com/proxy/v1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com/compatible-mode/v1?query=1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.8-unknown"),
+            ("https://dashscope.aliyuncs.com/compatible-mode/v1", "glm-5.3"),
+        ] {
+            let mut body = json!({"thinking":{"type":"disabled"},"model":model});
+            let original = body.clone();
+            apply_provider_thinking(&mut body, base, &json!({"model":model,"thinking_enabled":false}));
+            assert_eq!(body, original, "不应改写 {base} / {model}");
+        }
     }
     #[test]
     fn batch_keeps_per_document_failures() {

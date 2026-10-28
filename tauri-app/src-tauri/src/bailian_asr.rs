@@ -24,6 +24,7 @@ const DEFAULT_MODEL: &str = "paraformer-v2";
 pub(crate) struct AsrConfig {
     base_url: String,
     model: String,
+    pub(crate) vocabulary: Value,
 }
 
 impl AsrConfig {
@@ -54,6 +55,7 @@ impl AsrConfig {
             ));
         }
         Ok(Self {
+            vocabulary: json!({}),
             base_url: base_url.to_owned(),
             model: model
                 .map(str::trim)
@@ -144,6 +146,7 @@ fn flash_config(config: &AsrConfig) -> crate::bailian_plan_asr::PlanAsrConfig {
     crate::bailian_plan_asr::PlanAsrConfig {
         base_url: config.base_url.clone(),
         model: config.model.clone(),
+        vocabulary: config.vocabulary.clone(),
     }
 }
 
@@ -383,17 +386,28 @@ fn upload_audio(
     Ok(format!("oss://{object_key}"))
 }
 
+fn transcription_parameters(config: &AsrConfig) -> Value {
+    let mut parameters = json!({"diarization_enabled": true});
+    // language_hints 仅适用于 paraformer-v2；自定义兼容模型沿用其默认语言识别。
+    if config.model == DEFAULT_MODEL {
+        parameters["language_hints"] = json!(["zh", "en"]);
+    }
+    // 仅已核对支持即时热词的文件模型接收 vocabulary。
+    if matches!(config.model.as_str(), "qwen-audio-3.0-asr-flash-filetrans" | "qwen-audio-3.1-asr-flash-filetrans")
+        && config.vocabulary.as_object().is_some_and(|words| !words.is_empty())
+    {
+        parameters["vocabulary"] = config.vocabulary.clone();
+    }
+    parameters
+}
+
 fn submit_transcription(
     client: &reqwest::blocking::Client,
     key: &str,
     oss_url: &str,
     config: &AsrConfig,
 ) -> Result<String, AppError> {
-    let mut parameters = json!({"diarization_enabled": true});
-    // language_hints 仅适用于 paraformer-v2；自定义兼容模型沿用其默认语言识别。
-    if config.model == DEFAULT_MODEL {
-        parameters["language_hints"] = json!(["zh", "en"]);
-    }
+    let parameters = transcription_parameters(config);
     let response = client
         .post(config.endpoint("/api/v1/services/audio/asr/transcription"))
         .bearer_auth(key)
@@ -749,6 +763,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vocabulary_is_forwarded_only_to_supported_models() {
+        for model in ["qwen-audio-3.0-asr-flash-filetrans", "qwen-audio-3.1-asr-flash-filetrans", "paraformer-v2", "custom-file-model"] {
+            let mut config = AsrConfig::new(None, Some(model)).unwrap();
+            config.vocabulary = json!({"CSDC":4, "清Q":4});
+            let parameters = transcription_parameters(&config);
+            if model.ends_with("-filetrans") {
+                assert_eq!(parameters["vocabulary"], config.vocabulary);
+            } else {
+                assert!(parameters.get("vocabulary").is_none());
+            }
+            if model == "paraformer-v2" { assert_eq!(parameters["language_hints"], json!(["zh", "en"])); }
+        }
+        let mut flash = AsrConfig::new(None, Some("qwen-audio-3.1-asr-flash")).unwrap();
+        flash.vocabulary = json!({"函证":4});
+        assert_eq!(flash_config(&flash).vocabulary, flash.vocabulary);
+    }
+
+    #[test]
     fn general_flash_31_uses_inline_audio_for_test_and_real_transcription() {
         use std::io::{BufRead, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -800,6 +832,11 @@ mod tests {
                 let value: Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(value["model"], "qwen-audio-3.1-asr-flash");
                 assert_eq!(value["parameters"]["format"], "wav");
+                if index != 1 {
+                    assert!(value["parameters"].get("vocabulary").is_none());
+                } else {
+                    assert_eq!(value["parameters"]["vocabulary"], json!({"清Q":4}));
+                }
                 assert!(
                     value
                         .pointer("/input/messages/0/content/0/input_audio/data")
@@ -821,12 +858,13 @@ mod tests {
                 write!(socket, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
             }
         });
-        let config = AsrConfig::new(
+        let mut config = AsrConfig::new(
             Some(&format!("http://{address}")),
             Some("qwen-audio-3.1-asr-flash"),
         )
         .unwrap();
         let test = test_connection(Some("general-test-key"), &config).unwrap();
+        config.vocabulary = json!({"清Q":4});
         assert!(test["message"].as_str().unwrap().contains("内置短样音"));
         assert!(!test["message"].as_str().unwrap().contains("套餐"));
         let dir = tempfile::tempdir().unwrap();

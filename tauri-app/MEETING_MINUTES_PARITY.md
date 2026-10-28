@@ -1,5 +1,16 @@
 # 会议纪要原生功能验收矩阵
 
+## 2026-10-28 · 可维护的专有词库
+
+- 入口仅放在侧栏「会议纪要助手」的二级菜单「专有词库」，独立路由 `/tools/meeting_minutes/vocabulary`；会议主界面维持现有布局。词库按公司／行业／其他三个区域展示紧凑词块，名称、简称和含义均可搜索；点击词块弹窗查看、编辑、启停或确认删除，新增时可选择分类。
+- `assets/meeting/vocabulary-defaults.json` 编译期内嵌用户提供的初始词，保持原拼写、重复 TRDA 去重，初始分类为行业、默认启用，未推断缩写含义。仅首次创建 `meeting_vocabulary` 表时导入；后续启动不覆盖人工修改，不补回已删除项。词库与 `settings` 独立，避免设置页自动保存覆盖；增删改在 SQLite 事务及同一连接锁下执行。
+- 词条包含标准名称、分类、最多五个简称、含义和启用状态。前后端校验输入；名称／简称去除首尾空格，不区分大小写检查跨词条重名与简称冲突；词库容量与总内容有界，失败不覆盖当前内容。保存失败保留弹窗草稿，预览模式不伪造本机保存。
+- 持久库 `data/audit-toolbox.db` 与缓存根目录分离；手动清缓存／周期清缓存均只扫描缓存目录，词库不纳入清理。同通道正常升级复用持久库并保留人工增删改；正式版与 Dev 版遵循原有独立数据目录规则。删除应用数据目录会丢失词库。路径隔离、数据库重开及删除默认词后不补回有回归保护。
+- `job_start_inner` 为所有 `meeting.*` 任务注入 `__meetingVocabulary` 快照；后台自动生成、手动停止、导入及转写稿重出共用。任务运行中修改词库仅影响之后启动的任务。worker 读取快照，不访问 Tauri state；停用词条不进入转写热词或纪要上下文。
+- Qwen ASR Flash 3.0／3.1 的 HTTP 与异步文件转写请求通过 `parameters.vocabulary` 传入标准名和简称（普通权重 4）；长录音每段沿用同一份热词。不含非 ASCII 字符的词最多七个空格分词，否则最多十五个字符，超长公司名称仍保留于纪要理解上下文。Paraformer、realtime 和未知兼容模型不发送未核对的热词参数；本次未实现 Paraformer 云端预编译词表的创建／更新。
+- 两版纪要均收到同一份启用词条及含义；作为参考数据加入用户正文，系统提示词要求仅按明确上下文规范名称、不强替换歧义简称、不将词库当作会议事实或任务指令。词条中出现 `json` 不会改写系统提示词或触发公共请求器的结构化输出模式。保留转写原稿，不做全局字符串替换，不重写已有纪要。提示词约束不能代替真实会议内容复核。
+- 验证命令：`npx vitest run src/MeetingVocabularyPage.test.tsx src/meetingVocabularyApi.test.ts src/AppNavigationSettings.test.tsx src/MeetingMinutesPage.test.tsx`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml --lib meeting_`、`cargo test --manifest-path src-tauri/Cargo.toml --lib bailian_`。本地 HTTP 验证通用及套餐转写的实际热词请求与多段传递；无真实云端调用。`node scripts/verify_meeting_vocabulary_ui.cjs` 使用隔离模拟 IPC，检查宽窄窗口、分组词块、弹窗增删改及主题；`python scripts/verify_meeting_vocabulary_worker.py --exe <EXE路径>` 用合成转写稿验证独立 worker 的快照和双版错误路径，不读凭据或访问云端。构建日志、浏览器截图和检查结果位于 `artifacts/meeting-vocabulary-20261028/`。未重新打包或替换安装版，未用真实录音评价识别准确率提升。
+
 会议纪要是 Rust 原生功能，不依赖上一级 Python 引擎。此表记录当前行为和验证边界，不表示全部 Teams 版本与设备组合均经真机验收。
 
 | 行为 | Rust / 前端实现 | 回归与边界 |

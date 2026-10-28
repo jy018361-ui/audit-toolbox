@@ -777,6 +777,11 @@ async fn job_start_inner(
             map.insert("__settings".into(), storage.settings_get()?);
         }
     }
+    if method.starts_with("meeting.") {
+        if let Value::Object(ref mut map) = params {
+            map.insert("__meetingVocabulary".into(), json!(storage.meeting_vocabulary_list()?));
+        }
+    }
     if method.starts_with("fuzzy.") {
         // worker 进程拿不到 Tauri state：把 SQLite 库文件绝对路径注入 params，
         // fuzzy.match 落库 / fuzzy.export 读库都在 worker 里自开连接。
@@ -1305,6 +1310,21 @@ fn meeting_read_minutes(allowed: State<'_, AllowedPaths>, path: String) -> Resul
 #[tauri::command]
 fn meeting_history_list(storage: State<'_, Storage>) -> Result<Value, AppError> {
     storage.meeting_history_list()
+}
+
+#[tauri::command]
+fn meeting_vocabulary_list(storage: State<'_, Storage>) -> Result<Value, AppError> {
+    Ok(json!(storage.meeting_vocabulary_list()?))
+}
+
+#[tauri::command]
+fn meeting_vocabulary_save(storage: State<'_, Storage>, entry: storage::meeting_vocabulary::VocabularyEntry) -> Result<Value, AppError> {
+    Ok(json!(storage.meeting_vocabulary_save(entry)?))
+}
+
+#[tauri::command]
+fn meeting_vocabulary_delete(storage: State<'_, Storage>, id: String) -> Result<Value, AppError> {
+    Ok(json!(storage.meeting_vocabulary_delete(&id)?))
 }
 
 #[tauri::command]
@@ -2178,6 +2198,9 @@ pub fn run() {
             meeting_status,
             meeting_read_minutes,
             meeting_history_list,
+            meeting_vocabulary_list,
+            meeting_vocabulary_save,
+            meeting_vocabulary_delete,
             meeting_history_get,
             meeting_read_transcript,
             meeting_detect_set_enabled,

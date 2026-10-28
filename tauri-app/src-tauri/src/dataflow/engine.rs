@@ -1574,4 +1574,3 @@ mod tests {
         assert!(result.pointer("/nodes/c").is_none(), "目标节点之后不应执行");
     }
 }
-

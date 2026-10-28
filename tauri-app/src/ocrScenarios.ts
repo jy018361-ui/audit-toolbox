@@ -113,7 +113,7 @@ excerpt: 合同原文摘录
 const RESTRICTIVE_SCENARIO: OcrScenario = {
   id: "loan_restrictive",
   name: "借款·限制性契约（含非财务）",
-  version: "restrictive-covenants-v2-obligation-context",
+  version: "restrictive-covenants-v3-bounded-chunks",
   fields: fieldsFromPrompt(RESTRICTIVE_COVENANTS_PROMPT),
   defaultPrompts: [
     {
@@ -123,6 +123,16 @@ const RESTRICTIVE_SCENARIO: OcrScenario = {
     },
   ],
 };
+
+const RESTRICTIVE_OUTPUT_CONTRACT = `
+【限制性契约运行时返回契约】
+保留前面的业务关注事项。本轮仅检查给出的L行号范围；整份合同尚有其他段、缺附件或具体后果未约定，均不代表本轮未检查完。
+返回完整JSON {"coverage_complete":true,"items":[{"category":"","clause":"","party":"","requirement":"","trigger":"","consequence":"本条未明确","excerpt":"","evidence_refs":[{"line_start":1,"line_end":2,"role":"obligation"}]}]}。
+每项独立义务一条。每条必须引用本轮有效行号及role，义务本身用obligation，实质违约后果用consequence；不能用只有后果的证据冒充义务。无明确后果统一填“本条未明确”，有实质后果必须附该后果证据。excerpt留空，由程序逐字回填。仅检查完且确无匹配时items才为空；未检查完coverage_complete必须如实为false。不要重抄原文，不输出evidence_quotes或定位协议作为正文。此前编辑模板中的返回格式与本契约不同时，以本契约为准。
+【逐项检查与边界】
+账户状态正常/未被冻结、支付方式变更后重新提交资料、项目收入归集到指定账户、送达地址变更通知等，均是应检查的独立义务；不能以另一条“不得处分资金”代替“收入必须进入账户”，不能把立即通知代替提前若干工作日通知。保留实际期限和适用条件。
+仅作为银行风险判断或行使救济的触发事件，不等于借款人绝对禁止或须事先同意；没有原文明文不得输出“隐含需同意”或推导主体义务。普通逾期/挪用罚息、普通偿付费用、泛泛违反任一义务不独立列项，只在已有具体约束中关联实际后果。提款前提条件归条件性附带义务，除原文明确同意要求外不得归须经同意。
+资本金/项目审批/进度、保险赔款控制等按实际义务类型填写，不得套用“一般财务承诺（具体指标待核对）”；此标签仅用于原文明说财务指标但缺具体标准的承诺。两个可独立核验的财务标准（例如或有负债率和或有负债金额）分别成行，可引用同一证据。`;
 
 function fieldsFromPrompt(prompt: string): OcrScenario["fields"] {
   const block = prompt.split("【字段定义】")[1]?.split(/\n【[^】]+】/)[0] ?? "";
@@ -254,6 +264,12 @@ export function getOcrPromptStages(
 }
 
 type Row = Record<string, unknown>;
+class RestrictiveRowRepair extends Error {
+  constructor(message: string, readonly original: Row[], readonly invalid: number[]) { super(message); }
+}
+class RestrictiveCoverageRepair extends RestrictiveRowRepair {
+  constructor(message: string, original: Row[], readonly missing: RegExp[]) { super(message, original, []); }
+}
 const isObject = (value: unknown): value is Row =>
   !!value && typeof value === "object" && !Array.isArray(value);
 type Response = {
@@ -328,6 +344,25 @@ function sourceChunks(
 }
 
 type RestrictiveSourceLine = { page: number; text: string; start: number };
+function restrictiveClauseLabel(source: string, end: number): string | undefined {
+  const prefix = source.slice(0, end);
+  const article = [...prefix.matchAll(/^[ \t]*(第[一二三四五六七八九十百\d]+条|附\s*[一二三四五六七八九十\d]+\s*[:：])/gm)].at(-1);
+  if (!article) return undefined;
+  let major = "", chinese = "", numbered = "", nested = "";
+  let numberedIsStatement = false;
+  for (const line of prefix.slice(article.index! + article[0].length).split("\n")) {
+    const top = line.match(/^[ \t]*([一二三四五六七八九十]+)、/);
+    const upper = line.match(/^[ \t]*([（(][一二三四五六七八九十]+[）)])/);
+    const number = line.match(/^[ \t]*(?:(\d+(?:\.\d+)*)[.．](?!\d)|(\d+(?:\.\d+)+)[ \t]+)/);
+    const lower = line.match(/^[ \t]*([（(]\d+[）)])(.*)$/);
+    if (top) { major = top[1]; chinese = numbered = nested = ""; numberedIsStatement = false; }
+    else if (upper) { chinese = upper[1]; numbered = nested = ""; numberedIsStatement = false; }
+    else if (number) { numbered = number[1] ?? number[2]; nested = ""; numberedIsStatement = /[；;。]\s*$/.test(line); }
+    else if (lower) nested = /^\s*(?:此栏空白|[；;。]*$)/.test(lower[2]) ? "" : lower[1];
+    else if (line.trim() && numberedIsStatement) { numbered = nested = ""; numberedIsStatement = false; }
+  }
+  return [article[1].trim(), major, chinese, numbered, nested].filter(Boolean).join(" · ");
+}
 function resolveLineEvidence(row: Row, lines: RestrictiveSourceLine[]): Row {
   // Old saved prompts may still return verbatim quotes; those continue through
   // the same strict verifier. A supplied line reference is never ignored.
@@ -417,6 +452,15 @@ function resolveRestrictiveEvidence(
   source: string,
   library: Parameters<typeof classifyCovenant>[1],
 ): Row {
+  // Equivalent explicit absence markers are not assertions of a remedy.
+  // Normalize this finite set only; substantive consequences still need proof.
+  const consequence = typeof row.consequence === "string"
+    ? row.consequence.trim().replace(/[。；;]$/, "") : row.consequence;
+  const genericReservation = typeof consequence === "string" &&
+    /^(?:本条未明确|未明确)[（(](?:注[:：]?)?.*保留.*救济措施.*[）)]$/.test(consequence) &&
+    !/提前到期|停贷|停止|罚息|违约金|赔偿|支付|扣划|立即偿还/.test(consequence);
+  const absent = typeof consequence === "string" && (["", "本条未明确", "未明确", "未约定", "无明确约定", "不适用", "无"].includes(consequence) || genericReservation);
+  if (absent) row = { ...row, consequence: "本条未明确" };
   if (!Array.isArray(row.evidence_refs) || !row.evidence_refs.length)
     throw new Error("限制性契约摘录必须提供原文行号证据，本轮结果未保存。");
   const quotes: string[] = [];
@@ -470,11 +514,35 @@ function resolveRestrictiveEvidence(
   const { evidence_refs: _refs, ...values } = row;
   const obligation = obligations.join("\n");
   const context = [...new Set(governing)].join("\n");
+  const firstObligation = row.evidence_refs.filter(isObject).find(ref => ref.role === "obligation");
+  const firstLine = firstObligation && lines[Number(firstObligation.line_start) - 1];
+  if (firstLine) {
+    // Clause labels are source metadata, not model-authored contract facts.
+    const prefix = source.slice(0, firstLine.start + firstLine.text.length);
+    const headings = [...prefix.matchAll(/^[ \t]*(第[一二三四五六七八九十百\d]+条|附\s*[一二三四五六七八九十\d]+\s*[:：])/gm)];
+    const article = headings.at(-1);
+    if (article) {
+      const within = prefix.slice(article.index! + article[0].length);
+      const major = [...within.matchAll(/^[ \t]*([一二三四五六七八九十]+)、/gm)].at(-1);
+      const scope = within.slice(major?.index ?? 0);
+      values.clause = restrictiveClauseLabel(source, firstLine.start + firstLine.text.length);
+      if (/发放贷款的?前提条件/.test(scope.split("\n")[0]) && /除乙方全部或部分放弃外/.test(scope) &&
+        !/放弃/.test(`${String(values.requirement)}${String(values.trigger)}`))
+        values.trigger = `除乙方全部或部分放弃外，须持续满足；${String(values.trigger ?? "")}`;
+    }
+  }
+  if (/如为集团客户/.test(obligation) && !/集团客户/.test(`${String(values.requirement)}${String(values.trigger)}`))
+    values.trigger = `仅甲方为集团客户时；${String(values.trigger ?? "")}`;
+  for (const amount of quotes.join("\n").matchAll(/\d+(?:\.\d+)?%0/g)) {
+    // Do not silently correct an ambiguous OCR rate symbol into a fact.
+    if (typeof values.consequence === "string")
+      values.consequence = values.consequence.replaceAll(amount[0].replace("%0", "‰"), amount[0]);
+  }
   const classified = classifyCovenant(obligation, library, context);
   if (isNotificationOnlyCovenant(obligation, context))
     values.category = "报送/检查等附带义务";
   else if (classified.decision !== "exclude") values.category = "财务指标约束";
-  else if (/财务指标/.test(String(values.category))) {
+  else if (/财务指标|一般财务承诺/.test(String(values.category))) {
     const duty = (obligation + context).replace(/\s+/g, "");
     values.category = /财务指标/.test(obligation)
       ? "一般财务承诺（具体指标待核对）"
@@ -482,8 +550,29 @@ function resolveRestrictiveEvidence(
         ? "须经同意的约束"
         : /不得|禁止|不能/.test(duty)
           ? "禁止性约束"
-          : "其他约束（性质待核对）";
+          : "报送/检查等附带义务";
   }
+  const ownDuty = obligation.replace(/\s/g, "");
+  if (values.category !== "财务指标约束" && !isNotificationOnlyCovenant(obligation, context)) {
+    if (/(?:未经|未征得|征得|经).{0,8}(?:乙方|贷款人|银行).{0,12}(?:同意|批准|认可)/.test(ownDuty))
+      values.category = "须经同意的约束";
+    else if ((/须经同意/.test(String(values.category)) && /政府.{0,16}批准/.test(ownDuty)) ||
+      (/禁止性/.test(String(values.category)) && !/不得|禁止|不能/.test(ownDuty)))
+      values.category = "报送/检查等附带义务";
+  }
+  const assertedDuty = `${String(values.requirement ?? "")}；${String(values.trigger ?? "")}`;
+  if (/须经同意/.test(String(values.category)) &&
+    !/同意|认可/.test(ownDuty) &&
+    !/(?:经|征得|取得|获得).{0,8}(?:乙方|贷款人|银行).{0,8}批准/.test(ownDuty) &&
+    !/(?:须|应|需|必须|事先|提前|取得|征得).{0,20}同意/.test(assertedDuty))
+    values.category = /不得|禁止|不能/.test(ownDuty) ? "禁止性约束" : "报送/检查等附带义务";
+  if (/变更送达地址.{0,30}提前.{0,15}(?:工作日|日)/.test(obligation.replace(/\s/g, "")) &&
+    /送达地址/.test(assertedDuty) && !/提前.{0,15}(?:工作日|日)/.test(assertedDuty.replace(/\s/g, "")))
+    throw new Error("送达地址变更的提前通知条件遗漏或被改写，须保留原文期限。");
+  if (/隐含|推定|推断/.test(assertedDuty) && !/隐含|推定|推断/.test(obligation + context))
+    throw new Error("限制内容含原文未明示的推断，不能把银行风险触发事件改成须经同意或禁止。");
+  if ((/须经同意|事先同意/.test(String(values.category)) || /(?:须|应|需|必须|事先|提前|取得|征得).{0,20}同意/.test(assertedDuty)) && !/同意|认可|(?:乙方|贷款人|银行|债权人).{0,8}批准/.test(obligation + context))
+    throw new Error("原文义务证据未载明同意要求，不能将提款前提或银行风险事件改写为须经同意。");
   return { ...values, excerpt: "", evidence_quotes: [...new Set(quotes)] };
 }
 
@@ -493,7 +582,7 @@ function parseRows(response: Response): Row[] {
       "摘录输出被截断，本轮没有保存为完整结果，请减少单次范围或提高输出额度。",
     );
   let parsed = response.parsed;
-  if (parsed === undefined) {
+  if (parsed === undefined || parsed === null) {
     const raw = response.raw ?? response.content ?? "";
     try {
       parsed = JSON.parse(
@@ -599,7 +688,13 @@ export async function extractOcrScenario(options: {
     validate: (rows: Row[]) => Row[],
   ): Promise<Row[]> {
     let failure = "";
-    for (let attempt = 0; attempt < 2; attempt++) {
+    let rowRepair: RestrictiveRowRepair | undefined;
+    let wholeRepairUsed = false;
+    let rowRepairUsed = false;
+    let coverageRepairUsed = false;
+    // Each failure class has one repair budget. Fixing an invalid row does not
+    // consume the missing-duty budget; neither may repeat indefinitely.
+    for (let attempt = 0; attempt < (kind === "loan_restrictive" ? 4 : 2); attempt++) {
       await options.checkpoint?.();
       // A transport failure is not a malformed model response. Do not repeat
       // expensive timed-out requests or retry user cancellation here.
@@ -607,16 +702,51 @@ export async function extractOcrScenario(options: {
         prompt:
           prompt +
           (attempt
-            ? `\n【本轮校验修复】\n上次返回未通过校验：${failure}\n请重新检查同一本轮来源后返回完整结果。使用规定的行号/证据编号，不能改写证据或省略 coverage_complete。若未完成必须如实返回 false。`
+            ? `\n【本轮校验修复】\n上次返回未通过校验：${failure}\n` +
+              (rowRepair instanceof RestrictiveCoverageRepair ? "本轮是定点补漏。其他记录已通过证据校验并由程序保留，不要重新输出；items仅返回上述遗漏义务的新增记录，仍用同一本轮原文L行号。coverage_complete只表示此次补漏是否完成。" : rowRepair ? `本轮是定点修复。其他记录已通过证据校验，不要重新输出。仅修复以下记录，仍用同一本轮原文L行号：${JSON.stringify(rowRepair.invalid.map((index) => rowRepair!.original[index]))}。不得原样返回已报错记录。若错误为后果缺证，应为同一来源行另加role为consequence的引用；没有具体后果则仅填“本条未明确”，不能在括号中补充无证据后果。items仅返回修复后的这些记录，保留义务，不因后果缺证而删掉真实义务。coverage_complete只表示本次定点修复是否完成，不要求再生成其他已通过记录。` : "请重新检查同一本轮来源后返回完整结果。") +
+              "使用规定的行号/证据编号，不能改写证据或省略 coverage_complete。若未完成必须如实返回 false。"
             : ""),
         text,
       });
+      if (attempt && rowRepair instanceof RestrictiveCoverageRepair) coverageRepairUsed = true;
+      else if (attempt && rowRepair) rowRepairUsed = true;
       try {
-        return validate(parseRows(response));
+        let returned = parseRows(response);
+        if (attempt && rowRepair) {
+          if (!(rowRepair instanceof RestrictiveCoverageRepair) && returned.length > rowRepair.invalid.length) {
+            const canonical = (value: unknown) => String(value ?? "").replace(/[\s，。；：,.;:]/g, "");
+            const requested = new Set(rowRepair.invalid.map(index => canonical(rowRepair!.original[index].requirement)).filter(Boolean));
+            returned = returned.filter(row => requested.has(canonical(row.requirement)));
+          }
+          if (returned.length < rowRepair.invalid.length) throw new Error("定点修复遗漏原有义务，本轮结果未保存；不能用空结果或删除记录代替修复。");
+          const retained = rowRepair.original.filter((_, index) => !rowRepair!.invalid.includes(index));
+          if (rowRepair instanceof RestrictiveCoverageRepair) {
+            const missing = rowRepair.missing;
+            // Some models resend the full segment despite an append-only
+            // request. Only requested missing duties may enter the merge.
+            returned = returned.filter(row => missing.some(rule => rule.test(`${String(row.requirement ?? "")}；${String(row.trigger ?? "")}`.replace(/\s/g, ""))));
+          }
+          returned = [...retained, ...returned].sort((a, b) => {
+            const start = (row: Row) => Array.isArray(row.evidence_refs) ? Math.min(...row.evidence_refs.filter(isObject).filter(ref => ref.role === "obligation").map(ref => Number(ref.line_start))) : 0;
+            return start(a) - start(b);
+          });
+        }
+        return validate(returned);
       } catch (error) {
-        if (attempt) throw error;
+        if (rowRepair && !(error instanceof RestrictiveRowRepair)) throw error;
+        if (error instanceof RestrictiveCoverageRepair) {
+          if (coverageRepairUsed) throw error;
+          rowRepair = error;
+        } else if (error instanceof RestrictiveRowRepair) {
+          if (rowRepairUsed) throw error;
+          rowRepair = error;
+        } else {
+          if (wholeRepairUsed) throw error;
+          wholeRepairUsed = true;
+          rowRepair = undefined;
+        }
         failure = error instanceof Error ? error.message : "返回结构或证据无效";
-        options.onProgress?.("返回结果未通过完整性或证据校验，正在修复一次");
+        options.onProgress?.("返回结果未通过完整性或证据校验，正在核验修复");
       }
     }
     throw new Error("摘录结果校验未完成。");
@@ -725,11 +855,13 @@ export async function extractOcrScenario(options: {
     // larger files still use the same bounded, verified consolidation path.
     const chunks = sourceChunks(
       pages,
-      kind === "loan_general" ? 24_000 : 12_000,
+      kind === "loan_general" ? 24_000 : kind === "loan_restrictive" ? 4_000 : 12_000,
     );
     const workTotal = chunks.length + (kind === "loan_general" && chunks.length > 1 ? 1 : 0);
     options.onWorkProgress?.({ completed: 0, total: workTotal });
-    for (const [index, chunk] of chunks.entries()) {
+    const chunkRows: Row[][] = Array.from({ length: chunks.length }, () => []);
+    let completedChunks = 0;
+    const processChunk = async (chunk: (typeof chunks)[number], index: number, canSplit = true): Promise<Row[]> => {
       await options.checkpoint?.();
       options.onProgress?.(
         `摘录${scenario.name}：第 ${index + 1}/${chunks.length} 段`,
@@ -746,18 +878,20 @@ export async function extractOcrScenario(options: {
         kind === "loan_general" && chunks.length > 1
           ? `\n【当前执行阶段：第${index + 1}/${chunks.length}段的主表草稿，不是整份主表定稿】\n本轮只核对下面给出的L行号范围。上面“最终结论基于整份合同”的要求将在后续汇总阶段执行。现在完整检查本轮行号范围就返回 coverage_complete:true，尚未提供的其他段不是本轮待检查范围。缺少主合同/申请书/签章页或业务字段时仍保留本段实际条款，缺失字段填未明确，不得因缺后续段返回 false。`
           : "";
+      const context = kind === "loan_restrictive"
+        ? governingCovenantText(source, sourceLines[0]?.start ?? 0).trim().slice(0, 1200)
+        : "";
       const returned = await requestVerified(
         stages[0].prompt +
-          (kind === "loan_restrictive" ||
-          stages[0].prompt.endsWith(OUTPUT_CONTRACT)
-            ? ""
-            : OUTPUT_CONTRACT) +
+          (kind === "loan_restrictive" ? RESTRICTIVE_OUTPUT_CONTRACT :
+            stages[0].prompt.endsWith(OUTPUT_CONTRACT) ? "" : OUTPUT_CONTRACT) +
           (kind === "loan_general" &&
           !stages[0].prompt.includes(LOAN_SOURCE_LIMITS)
             ? LOAN_SOURCE_LIMITS
             : "") +
           chunkContract,
         `[来源文件：${document.name}；分段 ${index + 1}/${chunks.length}]\n` +
+          (context ? `【前文主句，仅供理解，不是本轮新增事项或证据行】\n${context}\n【本轮可引用原文】\n` : "") +
           sourceLines
             .map(
               (line, number) =>
@@ -765,8 +899,24 @@ export async function extractOcrScenario(options: {
             )
             .join("\n"),
         (items) => {
-          const result = items.map((row) =>
-            verifyRow(
+          if (kind === "loan_restrictive") {
+            items = items.filter(row => {
+              if (!Array.isArray(row.evidence_refs)) return true;
+              const refs = row.evidence_refs.filter(isObject).filter(ref => ref.role === "obligation");
+              if (!refs.length) return true; // Invalid refs still fail below.
+              return !refs.every(ref => {
+                const line = sourceLines[Number(ref.line_start) - 1];
+                if (!line) return false;
+                const prefix = source.slice(0, line.start);
+                const section = [...prefix.matchAll(/^[ \t]*[一二三四五六七八九十]+、[^\n]+/gm)].at(-1)?.[0] ?? "";
+                return /违约情形|可能危及.{0,30}情形|救济措施|罚息利率/.test(section);
+              });
+            }).filter(row => !/^(?:承担|同意乙方).*(?:诉讼费|征信机构)/.test(String(row.requirement ?? "")));
+          }
+          const invalid: number[] = [];
+          const rowErrors: string[] = [];
+          const result = items.map((row, itemIndex) => {
+            try { return verifyRow(
               kind === "loan_restrictive"
                 ? resolveRestrictiveEvidence(
                     row,
@@ -778,8 +928,13 @@ export async function extractOcrScenario(options: {
               document.name,
               chunk.pages,
               chunk.text,
-            ),
-          );
+            ); } catch (error) {
+              const message = `第${itemIndex + 1}条摘录未通过来源校验：${error instanceof Error ? error.message : "证据无效"}`;
+              if (kind !== "loan_restrictive") throw new Error(message);
+              invalid.push(itemIndex); rowErrors.push(message); return row;
+            }
+          });
+          if (invalid.length) throw new RestrictiveRowRepair(rowErrors.join("\n"), items, invalid);
           if (kind === "loan_general") {
             const evidence = result.map((row) => row.evidence).join("\n\n");
             const missing = sourceLines
@@ -795,18 +950,99 @@ export async function extractOcrScenario(options: {
                 `借款主表遗漏期限、经营限额或报送义务的关键原文行：${missing.map((line) => `L${line.index + 1}`).join("、")}，请补充这些行的证据及对应字段，不能仅保留封面/签署页。`,
               );
           }
+          if (kind === "loan_restrictive") {
+            const duties = result.map((row) => `${String(row.requirement ?? "")}；${String(row.trigger ?? "")}`).join("\n");
+            const required = [
+              { source: /(?:应|须|必须|确保).{0,15}账户状态正常/, result: /账户.{0,15}(?:状态正常|未.{0,4}冻结)/, name: "账户状态正常" },
+              { source: /(?:应|须).{0,40}重新提交资料/, result: /重新.{0,12}(?:提交|提供).{0,8}资料/, name: "重新提交资料" },
+              { source: /所有项目收入应进入/, result: /(?:所有|全部)?项目收入.{0,18}(?:进入|存入|归集)/, name: "项目收入进入指定账户" },
+              { source: /(?:甲方|借款人|债务人).{0,15}变更送达地址.{0,30}通知/, result: /(?:送达地址.{0,45}提前.{0,15}(?:工作日|日)|提前.{0,15}(?:工作日|日).{0,45}送达地址)/, name: "变更送达地址的提前通知" },
+              { source: /承诺.{0,150}环境和社会风险管理/, result: /环境|社会风险/, name: "环境与社会风险管理承诺及监督报送" },
+              { source: /(?:应|须|必须).{0,15}确保.{0,20}交易对手.{0,25}交易资料相符/, result: /交易对手.{0,35}(?:用途|资料).{0,20}(?:相符|匹配)/, name: "支付交易对手与借款用途及交易资料匹配、资料准确义务" },
+              { source: /(?:仲裁|民事诉讼).{0,45}(?:向|对).{0,20}(?:仲裁机构|法院).{0,20}书面通知/, result: /(?:仲裁机构|法院).{0,20}(?:书面通知|通知)|(?:书面通知|通知).{0,20}(?:仲裁机构|法院)/, name: "仲裁诉讼变更地址向仲裁机构和法院书面通知" },
+            ];
+            const missing = required.filter((rule) => sourceLines.some((line) => rule.source.test(line.text.replace(/\s/g, ""))) && !rule.result.test(duties.replace(/\s/g, "")));
+            if (missing.length) throw new RestrictiveCoverageRepair(`本段漏掉明确的独立义务：${missing.map((rule) => rule.name).join("、")}；请逐项补充对应来源行和实际期限，不能用其他条款代替。`, items, missing.map(rule => rule.result));
+          }
           return result;
         },
-      );
+      ).catch(async (error: unknown): Promise<Row[]> => {
+        // A model that explicitly cannot finish a large segment gets smaller
+        // source windows once. Keep the exact text and original offsets;
+        // never reinterpret coverage=false as success.
+        if (kind !== "loan_restrictive" || !canSplit || chunk.text.length < 2000 ||
+          !(error instanceof Error) || !error.message.includes("模型未确认本段检查完整")) throw error;
+        options.onProgress?.(`第 ${index + 1}/${chunks.length} 段未检查完整，拆为两个较小范围核验`);
+        const half = sourceLines.reduce((n, line) => n + line.text.length + 1, 0) / 2;
+        let size = 0;
+        let boundary = 1;
+        for (let i = 0; i < sourceLines.length - 1; i++) {
+          size += sourceLines[i].text.length + 1;
+          boundary = i + 1;
+          if (size >= half) break;
+        }
+        const result: Row[] = [];
+        for (const part of [sourceLines.slice(0, boundary), sourceLines.slice(boundary)]) {
+          if (!part.length) throw error;
+          const segments: SourceSegment[] = [];
+          for (const line of part) {
+            const previous = segments.at(-1);
+            if (previous?.page === line.page) previous.text += "\n" + line.text;
+            else segments.push({ page: line.page, text: line.text, start: line.start - pageStarts.get(line.page)! });
+          }
+          result.push(...await processChunk({ text: segments.map(s => s.text).join("\n\n"), segments,
+            pages: chunk.pages.filter(p => segments.some(s => s.page === p.page)) }, index, false));
+        }
+        return result;
+      });
+      return returned;
+    };
+    let nextChunk = 0;
+    let stopped = false;
+    const outcomes = await Promise.allSettled(
+      Array.from({ length: Math.min(chunks.length, kind === "loan_restrictive" ? 2 : 1) }, async () => {
+        try {
+          while (!stopped && nextChunk < chunks.length) {
+            await options.checkpoint?.();
+            if (stopped || nextChunk >= chunks.length) break;
+            const index = nextChunk++;
+            try {
+              chunkRows[index] = await processChunk(chunks[index], index);
+              completedChunks++;
+              options.onWorkProgress?.({ completed: completedChunks, total: workTotal });
+            }
+            catch (error) { throw new Error(`第${index + 1}/${chunks.length}段摘录失败：${error instanceof Error ? error.message : "请求失败"}`); }
+          }
+        } catch (error) { stopped = true; throw error; }
+      }),
+    );
+    const failed = outcomes.find((outcome) => outcome.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
+    // Responses may arrive in any order. Merge only after every required chunk
+    // passes, in source order; never save a partial file as a complete result.
+    for (const returned of chunkRows) {
       for (const verified of returned) {
         const signature = JSON.stringify(verified);
         if (
           !verified.evidence ||
-          !rows.some((item) => JSON.stringify(item) === signature)
+          !rows.some((item) => JSON.stringify(item) === signature || (kind === "loan_restrictive" &&
+            item.evidence === verified.evidence && item.party === verified.party &&
+            typeof verified.evidence === "string" &&
+            !/[；;、]|包括|[（(][一二三四五六七八九十\d]+[）)]/.test(verified.evidence) &&
+            (verified.evidence.match(/不得|应当|应|须|必须|承诺|保证|确保/g) ?? []).length === 1))
         )
           rows.push(verified);
       }
-      options.onWorkProgress?.({ completed: index + 1, total: workTotal });
+    }
+    if (kind === "loan_restrictive") {
+      for (let index = rows.length - 1; index >= 0; index--) {
+        const row = rows[index];
+        const requirement = String(row.requirement ?? "");
+        const separate = requirement.split(/且|并且/);
+        if (row.category === "财务指标约束" && separate.length > 1 &&
+          separate.every(part => /(?:比率|负债率|负债|金额).*(?:不得|不应|不超过|不高于|不低于)/.test(part)))
+          rows.splice(index, 1, ...separate.map(part => ({ ...row, requirement: part.trim() })));
+      }
     }
     if (kind === "loan_general" && chunks.length > 1 && rows.length) {
       const evidence = new Map<string, string>();

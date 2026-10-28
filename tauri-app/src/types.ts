@@ -120,6 +120,16 @@ export const MeetingHistoryRowSchema = z.object({
 });
 export type MeetingHistoryRow = z.infer<typeof MeetingHistoryRowSchema>;
 
+export const MeetingVocabularyEntrySchema = z.object({
+  id: z.string(),
+  term: z.string().min(1).max(40),
+  category: z.enum(["company", "industry", "other"]),
+  aliases: z.array(z.string().min(1).max(40)).max(5),
+  definition: z.string().max(200),
+  enabled: z.boolean(),
+});
+export type MeetingVocabularyEntry = z.infer<typeof MeetingVocabularyEntrySchema>;
+
 export const MeetingRecordStartSchema = z.object({
   startedAt: z.string(),
   recordDir: z.string(),

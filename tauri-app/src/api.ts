@@ -19,6 +19,8 @@ import {
   MeetingStatusSchema,
   MeetingResultSchema,
   MeetingHistoryRowSchema,
+  MeetingVocabularyEntrySchema,
+  type MeetingVocabularyEntry,
   TaskRestoreSchema,
   ToolManifestSchema,
   type HistoryRow,
@@ -408,6 +410,22 @@ export const legacyImport = (path: string) =>
     : Promise.reject(previewUnavailable("导入迁移备份"));
 
 // ===== 会议纪要助手 =====
+
+export const meetingVocabularyList = async () => {
+  if (!inTauri()) return [];
+  return MeetingVocabularyEntrySchema.array().parse(await invoke("meeting_vocabulary_list"));
+};
+
+export const meetingVocabularySave = async (entry: MeetingVocabularyEntry) => {
+  if (!inTauri()) throw previewUnavailable("保存会议词库");
+  const validated = MeetingVocabularyEntrySchema.parse(entry);
+  return MeetingVocabularyEntrySchema.array().parse(await invoke("meeting_vocabulary_save", { entry: validated }));
+};
+
+export const meetingVocabularyDelete = async (id: string) => {
+  if (!inTauri()) throw previewUnavailable("删除会议词条");
+  return MeetingVocabularyEntrySchema.array().parse(await invoke("meeting_vocabulary_delete", { id }));
+};
 
 export const meetingHistoryList = async () => {
   if (!inTauri()) return MeetingHistoryRowSchema.array().parse(demoLookup("meeting.history_list")?.({}) ?? []);

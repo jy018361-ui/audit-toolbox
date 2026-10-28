@@ -58,6 +58,7 @@ fn cancelled_error() -> AppError {
 pub(crate) struct PlanAsrConfig {
     pub base_url: String,
     pub model: String,
+    pub vocabulary: Value,
 }
 
 impl PlanAsrConfig {
@@ -82,6 +83,7 @@ impl PlanAsrConfig {
                 .to_owned()
         };
         PlanAsrConfig {
+            vocabulary: json!({}),
             base_url: pick("plan_base_url", DEFAULT_BASE_URL),
             model: pick("plan_model", DEFAULT_MODEL),
         }
@@ -432,15 +434,19 @@ async fn wait_cancelled(cancel: &AtomicBool) {
     }
 }
 
-fn http_asr_payload(model: &str, chunk_b64: &str, sample_rate: u32) -> Value {
-    json!({
+fn http_asr_payload(model: &str, chunk_b64: &str, sample_rate: u32, vocabulary: &Value) -> Value {
+    let mut payload = json!({
         "model": model.trim(),
         "input": {"messages": [{"role": "user", "content": [{
             "type": "input_audio",
             "input_audio": {"data": format!("data:audio/wav;base64,{chunk_b64}")}
         }]}]},
         "parameters": {"format": "wav", "sample_rate": sample_rate.to_string()}
-    })
+    });
+    if uses_http_asr(model) && vocabulary.as_object().is_some_and(|words| !words.is_empty()) {
+        payload["parameters"]["vocabulary"] = vocabulary.clone();
+    }
+    payload
 }
 
 fn http_asr_response(status: u16, body: &str) -> Result<String, AppError> {
@@ -501,6 +507,7 @@ fn transcribe_http_chunk(
     model: &str,
     chunk_b64: &str,
     sample_rate: u32,
+    vocabulary: &Value,
     cancel: &AtomicBool,
 ) -> Result<String, AppError> {
     if cancel.load(Ordering::Relaxed) {
@@ -525,7 +532,7 @@ fn transcribe_http_chunk(
                 .post(url)
                 .bearer_auth(key.trim())
                 .header("X-DashScope-SSE", "disable")
-                .json(&http_asr_payload(model, chunk_b64, sample_rate))
+                .json(&http_asr_payload(model, chunk_b64, sample_rate, vocabulary))
                 .send()
                 .await
                 .map_err(http_request_error)?;
@@ -714,6 +721,7 @@ pub(crate) fn transcribe_file_with_key(
                 &config.model,
                 &chunk.b64,
                 spec.sample_rate,
+                &config.vocabulary,
                 cancel,
             )?
         } else {
@@ -785,6 +793,7 @@ pub(crate) fn test_connection(params: &PlanTestParams) -> Result<Value, AppError
             &params.model,
             &sample,
             16_000,
+            &json!({}),
             &AtomicBool::new(false),
         )?;
         if text.is_empty() {
@@ -920,6 +929,10 @@ mod tests {
 
     // 本地 HTTP 服务核对真实请求，既用于设置页测试，也用于长录音完整入口。
     fn http_server(responses: Vec<(u16, Value)>) -> (String, std::thread::JoinHandle<()>) {
+        http_server_with_vocabulary(responses, Value::Null)
+    }
+
+    fn http_server_with_vocabulary(responses: Vec<(u16, Value)>, vocabulary: Value) -> (String, std::thread::JoinHandle<()>) {
         use std::io::{BufRead, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -963,6 +976,7 @@ mod tests {
                 assert_eq!(body["model"], HTTP_ASR_MODEL);
                 assert!(body.get("messages").is_none());
                 assert_eq!(body["parameters"]["format"], "wav");
+                assert_eq!(body["parameters"]["vocabulary"], vocabulary);
                 let audio = body
                     .pointer("/input/messages/0/content/0/input_audio/data")
                     .and_then(Value::as_str)
@@ -1023,10 +1037,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("long-flash.wav");
         write_wav(&path, 8_000, 125.0);
-        let (base_url, server) = http_server(vec![
+        let (base_url, server) = http_server_with_vocabulary(vec![
             (200, json!({"output":{"text":"第一段"}})),
             (200, json!({"text":"第二段"})),
-        ]);
+        ], json!({"函证":4}));
         let result = transcribe_file_with_key(
             &path,
             &|_, _, _, _| {},
@@ -1034,6 +1048,7 @@ mod tests {
             &PlanAsrConfig {
                 base_url,
                 model: HTTP_ASR_MODEL.into(),
+                vocabulary: json!({"函证":4}),
             },
             "test-only-key",
         )
@@ -1083,6 +1098,7 @@ mod tests {
             HTTP_ASR_MODEL,
             "",
             16_000,
+            &json!({}),
             &AtomicBool::new(true),
         )
         .unwrap_err();
@@ -1107,6 +1123,7 @@ mod tests {
     fn invalid_url_is_rejected_before_credentials_or_reading_audio() {
         for model in [DEFAULT_MODEL, HTTP_ASR_MODEL] {
             let config = PlanAsrConfig {
+                vocabulary: json!({}),
                 base_url: "invalid-local-validation-address".into(),
                 model: model.into(),
             };

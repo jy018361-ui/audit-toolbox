@@ -159,6 +159,21 @@ it("switching LLM providers saves typed credentials to their original provider o
   expect(screen.getByLabelText("API Key")).toHaveValue("");
 });
 let restoreCanvasMocks: () => void;
+it("会议词库只在会议纪要二级菜单提供，独立路由可打开并返回", async () => {
+  render(<MemoryRouter initialEntries={["/"]}><App /></MemoryRouter>);
+  const toggle = await screen.findByRole("button", { name: "会议纪要子菜单" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByRole("link", { name: /专有词库/ })).not.toBeInTheDocument();
+  fireEvent.click(toggle);
+  const link = screen.getByRole("link", { name: /专有词库/ });
+  expect(link).toHaveAttribute("href", "/tools/meeting_minutes/vocabulary");
+  fireEvent.click(link);
+  expect(await screen.findByRole("heading", { name: "专有词库" })).toBeVisible();
+  expect(screen.queryByRole("heading", { name: "会议记录配置" })).not.toBeInTheDocument();
+  expect(link).toHaveAttribute("aria-current", "page");
+  expect(screen.getByRole("link", { name: "返回会议纪要" })).toHaveAttribute("href", "/tools/meeting_minutes");
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   const context = vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ fillRect: vi.fn(), fillText: vi.fn() } as unknown as CanvasRenderingContext2D);
@@ -770,8 +785,7 @@ it("requires confirmation before clearing local cache", async () => {
       <ConfirmDialogHost />
     </MemoryRouter>,
   );
-  await waitFor(() => expect(engineCall).toHaveBeenCalled());
-  expect(screen.getByText("已缓存 1.0 KB")).toBeVisible();
+  expect(await screen.findByText("已缓存 1.0 KB")).toBeVisible();
   fireEvent.click(
     screen.getByRole("button", { name: "立刻清理全部缓存（1.0 KB）" }),
   );

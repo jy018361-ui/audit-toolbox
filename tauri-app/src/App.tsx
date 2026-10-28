@@ -11,6 +11,7 @@ import {
   useParams,
 } from "react-router-dom";
 import "./app-shell.css";
+import "./meeting-vocabulary.css";
 import {
   appBootstrap,
   audipickOcrTest,
@@ -163,6 +164,9 @@ const MeetingMinutesPage = lazy(() =>
   import("./MeetingMinutesPage").then((m) => ({
     default: m.MeetingMinutesPage,
   })),
+);
+const MeetingVocabularyPage = lazy(() =>
+  import("./MeetingVocabularyPage").then((m) => ({ default: m.MeetingVocabularyPage })),
 );
 
 const DEDICATED_TOOL_PAGES: Record<
@@ -370,6 +374,7 @@ function SidebarToolLink({
   return (
     <NavLink
       to={tool.route}
+      end
       className={className}
       title={statusLabel ? statusHint : undefined}
       aria-label={accessibleName}
@@ -448,6 +453,11 @@ export default function App() {
     fa: true,
     kanzhang: true,
   });
+  useEffect(() => {
+    if (location.pathname.startsWith("/tools/meeting_minutes/")) {
+      setSubgroupOpen((current) => ({ ...current, meeting: true }));
+    }
+  }, [location.pathname]);
   // 新手模式：会话状态只记"当前在播哪条引导"；看过与否存 localStorage
   // （tourState.ts）。新手模式开着时，每次进工具都播导览，关掉即全停。
   const [tour, setTour] = useState<
@@ -787,6 +797,18 @@ export default function App() {
                     }
                     const tool = catalog.find((t) => t.id === entry);
                     if (!tool) return null;
+                    if (tool.id === "meeting_minutes") {
+                      const open = subgroupOpen.meeting ?? false;
+                      return <div key={tool.id} className="tool-subgroup">
+                        <div className="meeting-nav-heading">
+                          <SidebarToolLink tool={tool} />
+                          <button type="button" className="meeting-nav-toggle" aria-label="会议纪要子菜单" aria-expanded={open} aria-controls="meeting-submenu" onClick={() => setSubgroupOpen((current) => ({ ...current, meeting: !open }))}>
+                            <span className={`tool-subgroup-chevron${open ? " open" : ""}`} aria-hidden="true">▸</span>
+                          </button>
+                        </div>
+                        {open && <div id="meeting-submenu" className="tool-subgroup-items"><NavLink to="/tools/meeting_minutes/vocabulary" className="tool-subgroup-link"><span className="tool-badge">词</span><span>专有词库</span></NavLink></div>}
+                      </div>;
+                    }
                     return <SidebarToolLink key={tool.id} tool={tool} />;
                   })}
                 </div>
@@ -890,6 +912,7 @@ export default function App() {
                 {/* The visible tool is rendered by PersistentToolPages below so
                   route changes hide it instead of destroying its local state. */}
                 <Route path="/tools/:toolId" element={null} />
+                <Route path="/tools/meeting_minutes/vocabulary" element={<Suspense fallback={<p role="status">正在加载词库…</p>}><MeetingVocabularyPage /></Suspense>} />
                 {/* 兼容旧版书签：AudiPick 已改为工具箱主窗口内页面。 */}
                 <Route
                   path="/audipick-window"

@@ -39,7 +39,7 @@
   flex-direction: column;
   height: auto;
   min-height: 560px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--r-lg);
   background: var(--surface);
   overflow: hidden;
@@ -54,13 +54,17 @@
   gap: var(--sp-1);
   padding: var(--sp-2);
   background: var(--surface-sunken);
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-strong);
 }
 .df-tb-row {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   flex-wrap: wrap;
+}
+.df-tb-row + .df-tb-row {
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
 }
 .df-flow-name {
   display: inline-flex;
@@ -104,7 +108,7 @@
   gap: var(--sp-1);
   height: var(--control-height-sm);
   padding: 0 var(--sp-2);
-  border: 1px solid var(--border-soft);
+  border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--surface-sunken);
   color: var(--ink);
@@ -247,7 +251,7 @@
   overflow: auto;
   padding: var(--sp-3);
   background: var(--surface);
-  border-right: 1px solid var(--border-soft);
+  border-right: 1px solid var(--border-strong);
 }
 .df-config.df-collapsed {
   width: 40px;
@@ -264,7 +268,7 @@
   gap: var(--sp-2);
   margin-bottom: var(--sp-2);
   padding-bottom: var(--sp-2);
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border);
 }
 /* 面板标题升一档并加品牌色左锚点，与全站分区标题语言对齐；
    避免从页头 30px 直接跌到与表单文字同大。 */
@@ -322,7 +326,7 @@
 /* 长表单按语义分组：分隔线让十几个字段的表单分层可扫读
    （对照 merger.css fieldset+legend 的分层语言）。 */
 .df-group {
-  border-top: 1px solid var(--border-soft);
+  border-top: 1px solid var(--border);
   padding-top: var(--sp-2);
   margin-top: var(--sp-2);
 }
@@ -750,7 +754,7 @@ textarea.df-in {
   min-height: 0;
   height: 236px;
   background: var(--surface);
-  border-top: 1px solid var(--border-soft);
+  border-top: 1px solid var(--border-strong);
 }
 .df-results.df-collapsed {
   height: 37px;
@@ -760,8 +764,10 @@ textarea.df-in {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-3) 0;
+  padding: var(--sp-1) var(--sp-3);
   flex-wrap: wrap;
+  background: var(--surface-sunken);
+  border-bottom: 1px solid var(--border);
 }
 .df-results-title {
   font-size: var(--fs-md);
@@ -899,7 +905,7 @@ textarea.df-in {
   min-height: 28px;
   padding: 0 var(--sp-3);
   background: var(--surface-sunken);
-  border-top: 1px solid var(--border-soft);
+  border-top: 1px solid var(--border);
   font-size: var(--fs-xs);
   color: var(--text-muted);
 }

@@ -1,0 +1,394 @@
+[
+  {
+    "term": "CSDC",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "COE",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "workshop",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "PIFEE",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "FDE",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "AI",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "EDC",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "working paper",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "DDP",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "DA",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "TRDA",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "ECL",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "LEASE",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "SOP",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "timesheet",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "CCP",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "EYC",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "函证",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "拉通",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "答疑",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "SWP",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "A3",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "TB",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "JE",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "PMTE",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "CRA",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "ARP",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "LEAD",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "breakdown",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "BKD",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "TOD",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "skywind",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "EIC",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "PIC",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "FIC",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "prepare",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "review",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "清Q",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "出Q",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "supporting",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "PBC",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "refer",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "REF",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "DDL",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "SPOC",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "CC",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "MNC",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "EY",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "TR",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "UT",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "FAIT",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "audit",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "ca tie",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "CA",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "TIE",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  },
+  {
+    "term": "JET",
+    "category": "industry",
+    "aliases": [],
+    "definition": "",
+    "enabled": true
+  }
+]

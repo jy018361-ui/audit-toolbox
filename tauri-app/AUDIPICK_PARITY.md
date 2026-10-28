@@ -1,3 +1,12 @@
+## 2026-10-28 · 官方 Qwen 思考开关参数适配
+
+- 问题：统一模型请求此前仅发送 `thinking.type`。本机 Dev 已保存 `thinking_enabled=false`，但官方 Qwen Chat 接口使用顶层 `enable_thinking`；`qwen3.8-flash` 为默认启用思考、可切换的混合思考模型。因此旧请求不能据其发送了 `thinking.type=disabled` 就认定服务已关闭思考。
+- 实现：仅在标准 HTTPS 百炼域名、标准 compatible-mode 路径、已知支持切换的 Qwen 模型上，按原有用户开关发送 `enable_thinking` 布尔值，并移除错误的 `thinking` 对象。已知只支持思考的 Qwen 模型不发送不支持的 false 开关。其他模型、未知网关、非标准端口和代理路径继续原协议，不推断能力、不改用户配置或凭据，不切换模型或代理。
+- 超时反馈：统一模型 OpenAI/Dify 的响应头等待和响应体读取超时均返回 `LLM_REQUEST_TIMEOUT`，说明实际配置秒数、本段未获得完整响应且原文保留；不再把达到时限一律归为地址/代理错误。其他网络失败继续原错误类型。仅缩小范围建议，不自动延长设置或重发付费请求。
+- 边界：修复协议参数不等同证明某次历史延迟全部由思考引起；真实端到端耗时及完整条款覆盖需由本次合同实测另行验证。
+- 官方依据：[深度思考支持模型及默认值](https://help.aliyun.com/en/model-studio/deep-thinking)、[Chat 参数规范](https://help.aliyun.com/en/model-studio/qwen-api-via-openai-chat-completions)。
+- 定向回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib official_qwen_hybrid_thinking`、`cargo test --manifest-path src-tauri/Cargo.toml --lib thinking_only_qwen`、`cargo test --manifest-path src-tauri/Cargo.toml --lib other_providers_models_and_proxy_routes`、`cargo test --manifest-path src-tauri/Cargo.toml --lib llm_timeout_is_named`。测试覆盖已有开关、默认关闭、只支持思考模型以及未知网关保持原请求；不调用付费服务。
+
 ## 2026-10-28 · 财务指标契约口径及命名
 
 - 内置财务场景更名为“借款·财务指标契约”，四列字段、执行进度、待确认项及独立 OCR 导出的场景标题同步；`loan_covenant` 和既有持久化字段保留，旧“财务契约类型”列继续识别为财务专用底稿。

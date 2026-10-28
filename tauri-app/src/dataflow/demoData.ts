@@ -402,7 +402,7 @@ export function dataflowDemoResult(
     switch (node.type) {
       case "excel_in":
       case "csv_in": {
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         outcome.messages = [
           `${timestamp} 读取 12 个文件（xlsx×8、xls×2、csv×2）`,
           `${timestamp} 2 个文件为 GBK 编码，已自动识别`,
@@ -418,14 +418,14 @@ export function dataflowDemoResult(
         break;
       }
       case "select_n": {
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         outcome.messages = [`${timestamp} 重命名 2 个字段：借方→借方金额、贷方→贷方金额；保留来源列`];
         outcome.stats = ["字段 8 个 · 全部保留", "进出行数相同"];
         break;
       }
       case "clean": {
         outcome.status = "warn";
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         outcome.messages = [
           `${timestamp} 去除首尾空格 41 处；全角转半角 12 处`,
           `${timestamp} 跳过 3 行：金额列含无法识别字符（可导出异常清单）`,
@@ -438,7 +438,7 @@ export function dataflowDemoResult(
         break;
       }
       case "formula": {
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         outcome.messages = [`${timestamp} 计算 2 条公式：净额＝借方金额－贷方金额；期间＝年月(凭证日期)`];
         outcome.stats = ["新增字段 2 个：净额、期间", "除零与空值按行级异常策略处理"];
         break;
@@ -460,7 +460,7 @@ export function dataflowDemoResult(
       }
       case "excel_out":
       case "csv_out": {
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         const rawName =
           typeof config.fileName === "string" && config.fileName
             ? config.fileName
@@ -507,7 +507,7 @@ export function dataflowDemoResult(
         break;
       }
       case "union_n": {
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         outcome.messages = [`${timestamp} 按字段名对齐拼接 2 个上游表；多出字段「来源」缺失侧已补空值`];
         outcome.stats = [
           `输入 2,847,302 + 2,847,302 行 → 合并 ${rows.toLocaleString("zh-CN")} 行（守恒核对通过）`,
@@ -527,13 +527,13 @@ export function dataflowDemoResult(
         break;
       }
       case "sort_n": {
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         outcome.messages = [`${timestamp} 全局排序完成：借方金额 降序，空值排最后`];
         outcome.stats = ["进出行数相同", "相同排序键按输入到达顺序保持相对次序（稳定排序）"];
         break;
       }
       case "summarize": {
-        outcome.anchors.out = anchorFromTable(SUMMARY_COLUMNS, SUMMARY_ROWS, rows);
+        outcome.anchors.output = anchorFromTable(SUMMARY_COLUMNS, SUMMARY_ROWS, rows);
         outcome.messages = [`${timestamp} 按客商名称分组：求和 2 项、总行数 1 项`];
         outcome.stats = [
           `输入 ${(rows * 474567).toLocaleString("zh-CN")} 行 → 分组 ${rows.toLocaleString("zh-CN")} 组`,
@@ -542,7 +542,7 @@ export function dataflowDemoResult(
         break;
       }
       case "crosstab": {
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         outcome.messages = [`${timestamp} 透视完成：行＝客商名称，列＝期间（202601–202612）`];
         outcome.stats = [
           `输出 ${rows.toLocaleString("zh-CN")} 行 × ${CROSSTAB_COLUMNS.length} 列（动态生成 12 列）`,
@@ -551,13 +551,13 @@ export function dataflowDemoResult(
         break;
       }
       case "transpose": {
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         outcome.messages = [`${timestamp} 宽转长：期初余额/期末余额 两列转入行（项目/数值）`];
         outcome.stats = [`输出 ${rows.toLocaleString("zh-CN")} 行 ＝ 输入行数 × 转入列数`, "输出列：科目编码、项目、数值"];
         break;
       }
       case "split": {
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         outcome.messages = [`${timestamp} 按固定宽度拆分「科目编码」：前 4 位/后 4 位两列，保留原列`];
         outcome.stats = ["进出行数相同", "拆出 2 列：科目编码_1、科目编码_2；段不足补空值"];
         break;
@@ -579,13 +579,13 @@ export function dataflowDemoResult(
         break;
       }
       case "manual_in": {
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         outcome.messages = [`${timestamp} 内嵌小表读取完成：${rows.toLocaleString("zh-CN")} 行 × 3 列（随流程文件保存）`];
         outcome.stats = [`行数 ${rows.toLocaleString("zh-CN")} · 列数 3`, "列类型：文本、文本、整数"];
         break;
       }
       case "db_in": {
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         const table2 = typeof config.table === "string" && config.table ? config.table : "序时账_2026";
         outcome.messages = [
           `${timestamp} 识别为 SQLite 数据库，读取表「${table2}」`,
@@ -598,14 +598,14 @@ export function dataflowDemoResult(
         break;
       }
       case "parquet_in": {
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         outcome.messages = [`${timestamp} 读取 2 个 Parquet 文件，结构兼容`];
         outcome.stats = [`文件 2 个 · ${rows.toLocaleString("zh-CN")} 行`, "精度、空值与日期类型保持一致"];
         break;
       }
       default: {
         // 二期节点（打开旧流程时可能出现）：给通用成功结果。
-        outcome.anchors.out = anchorFromTable(table.columns, table.rows, rows);
+        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         outcome.messages = [`${timestamp} 演示数据：该节点属于二期能力，按通用表返回。`];
         outcome.stats = [`行数 ${rows.toLocaleString("zh-CN")}`];
       }

@@ -169,7 +169,7 @@ export function DataflowCanvas({
         dragRef.current = {
           mode: "connect",
           from: nodeEl.dataset.id ?? "",
-          fromAnchor: outAnchor.dataset.key ?? "out",
+          fromAnchor: outAnchor.dataset.key ?? "output",
           moved: 0,
         };
         capturePointer(event);

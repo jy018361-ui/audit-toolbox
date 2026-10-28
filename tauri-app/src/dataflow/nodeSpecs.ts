@@ -56,7 +56,7 @@ export const DATAFLOW_CATEGORIES: DataflowCategorySpec[] = [
 ];
 
 const SINGLE_IN: DataflowAnchorSpec[] = [{ key: "in", label: "输入" }];
-const SINGLE_OUT: DataflowAnchorSpec[] = [{ key: "out", label: "数据" }];
+const SINGLE_OUT: DataflowAnchorSpec[] = [{ key: "output", label: "数据" }];
 
 /** 当前可用节点的 type 集合（第一期 8 个＋二期补齐 12 个，与 Rust 引擎契约一致）。 */
 export const DATAFLOW_AVAILABLE_TYPES = [

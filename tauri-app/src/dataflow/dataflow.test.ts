@@ -94,8 +94,8 @@ function sampleWorkflow(): DataflowWorkflow {
     },
   ];
   workflow.edges = [
-    { from: "n1", fromAnchor: "out", to: "n2", toAnchor: "in" },
-    { from: "n2", fromAnchor: "out", to: "n3", toAnchor: "in" },
+    { from: "n1", fromAnchor: "output", to: "n2", toAnchor: "in" },
+    { from: "n2", fromAnchor: "output", to: "n3", toAnchor: "in" },
     { from: "n3", fromAnchor: "T", to: "n4", toAnchor: "in" },
   ];
   return workflow;
@@ -189,7 +189,7 @@ describe("数据流：锚点连线校验", () => {
   it("禁止自环", () => {
     const check = validateNewEdge(workflow, {
       from: "n2",
-      fromAnchor: "out",
+      fromAnchor: "output",
       to: "n2",
       toAnchor: "in",
     });
@@ -201,7 +201,7 @@ describe("数据流：锚点连线校验", () => {
   it("禁止重复连线", () => {
     const check = validateNewEdge(workflow, {
       from: "n1",
-      fromAnchor: "out",
+      fromAnchor: "output",
       to: "n2",
       toAnchor: "in",
     });
@@ -213,7 +213,7 @@ describe("数据流：锚点连线校验", () => {
   it("锚点不存在时报错（输出节点没有输出口）", () => {
     const check = validateNewEdge(workflow, {
       from: "n4",
-      fromAnchor: "out",
+      fromAnchor: "output",
       to: "n2",
       toAnchor: "in",
     });
@@ -223,7 +223,7 @@ describe("数据流：锚点连线校验", () => {
   it("单输入口被占用后拒绝再接入", () => {
     const check = validateNewEdge(workflow, {
       from: "n1",
-      fromAnchor: "out",
+      fromAnchor: "output",
       to: "n3",
       toAnchor: "in",
     });
@@ -239,7 +239,7 @@ describe("数据流：锚点连线校验", () => {
         { id: "n2", type: "select_n", name: "统一字段", x: 0, y: 0, config: defaultConfigFor("select_n") },
         { id: "n3", type: "filter_n", name: "筛大额", x: 200, y: 0, config: defaultConfigFor("filter_n") },
       ],
-      edges: [{ from: "n2", fromAnchor: "out", to: "n3", toAnchor: "in" }],
+      edges: [{ from: "n2", fromAnchor: "output", to: "n3", toAnchor: "in" }],
     };
     const check = validateNewEdge(cyclic, {
       from: "n3",
@@ -269,7 +269,7 @@ describe("数据流：锚点连线校验", () => {
     };
     const second = validateNewEdge(withBoth, {
       from: "n2",
-      fromAnchor: "out",
+      fromAnchor: "output",
       to: "n4",
       toAnchor: "in",
     });
@@ -285,14 +285,14 @@ describe("数据流：锚点连线校验", () => {
         { id: "n3", type: "join_n", name: "关联", x: 300, y: 100, config: defaultConfigFor("join_n") },
       ],
       edges: [
-        { from: "n1", fromAnchor: "out", to: "n3", toAnchor: "inL" },
-        { from: "n2", fromAnchor: "out", to: "n3", toAnchor: "inR" },
+        { from: "n1", fromAnchor: "output", to: "n3", toAnchor: "inL" },
+        { from: "n2", fromAnchor: "output", to: "n3", toAnchor: "inR" },
       ],
     };
     // 左口占用后，另一条线想再进左口应被拒绝。
     const leftTaken = validateNewEdge(joinFlow, {
       from: "n2",
-      fromAnchor: "out",
+      fromAnchor: "output",
       to: "n3",
       toAnchor: "inL",
     });
@@ -312,11 +312,11 @@ describe("数据流：锚点连线校验", () => {
         { id: "n2", type: "csv_in", name: "表二", x: 0, y: 200, config: defaultConfigFor("csv_in") },
         { id: "n3", type: "union_n", name: "合并", x: 300, y: 100, config: defaultConfigFor("union_n") },
       ],
-      edges: [{ from: "n1", fromAnchor: "out", to: "n3", toAnchor: "in" }],
+      edges: [{ from: "n1", fromAnchor: "output", to: "n3", toAnchor: "in" }],
     };
     const second = validateNewEdge(unionFlow, {
       from: "n2",
-      fromAnchor: "out",
+      fromAnchor: "output",
       to: "n3",
       toAnchor: "in",
     });
@@ -684,7 +684,7 @@ describe("数据流：浏览器预览演示数据", () => {
     expect(() => DataflowRunResultSchema.parse(preview)).not.toThrow();
     expect(preview.mode).toBe("preview");
     expect(preview.error).toBeNull();
-    expect(preview.nodes[workflow.nodes[0].id].anchors.out.columns).toContain("凭证号");
+    expect(preview.nodes[workflow.nodes[0].id].anchors.output.columns).toContain("凭证号");
 
     const full = dataflowDemoResult("full", workflow, { p1: "2027" });
     expect(DataflowRunResultSchema.parse(full).mode).toBe("full");
@@ -710,8 +710,8 @@ describe("数据流：浏览器预览演示数据", () => {
       { id: "n3", type: "join_n", name: "关联", x: 300, y: 100, config: defaultConfigFor("join_n") },
     ];
     workflow.edges = [
-      { from: "n1", fromAnchor: "out", to: "n3", toAnchor: "inL" },
-      { from: "n2", fromAnchor: "out", to: "n3", toAnchor: "inR" },
+      { from: "n1", fromAnchor: "output", to: "n3", toAnchor: "inL" },
+      { from: "n2", fromAnchor: "output", to: "n3", toAnchor: "inR" },
     ];
     const result = dataflowDemoResult("full", workflow);
     expect(() => DataflowRunResultSchema.parse(result)).not.toThrow();
@@ -721,7 +721,7 @@ describe("数据流：浏览器预览演示数据", () => {
     // 左口缺线时关联节点应失败。
     const broken = dataflowDemoResult("full", {
       ...workflow,
-      edges: [{ from: "n1", fromAnchor: "out", to: "n3", toAnchor: "inL" }],
+      edges: [{ from: "n1", fromAnchor: "output", to: "n3", toAnchor: "inL" }],
     });
     expect(broken.nodes.n3.status).toBe("error");
   });
@@ -734,7 +734,7 @@ describe("数据流：浏览器预览演示数据", () => {
       { id: "n3", type: "check_n", name: "检查", x: 600, y: 0, config: defaultConfigFor("check_n") },
     ];
     workflow.edges = [
-      { from: "n1", fromAnchor: "out", to: "n2", toAnchor: "in" },
+      { from: "n1", fromAnchor: "output", to: "n2", toAnchor: "in" },
       { from: "n2", fromAnchor: "U", to: "n3", toAnchor: "in" },
     ];
     const result = dataflowDemoResult("preview", workflow);

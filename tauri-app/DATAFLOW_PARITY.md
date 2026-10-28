@@ -34,7 +34,7 @@ python scripts/gen_dataflow_fixtures.py                                         
 ## 契约备忘（前后端对接细节）
 
 - 请求体＝工作流 JSON 本体＋可选 `paramOverrides`（引擎按方法名区分预览/全量；`runMode` 字段冗余可传）；节点类型双别名（`select`/`select_n`、`filter`/`filter_n`）。
-- 响应锚点 key：单输出节点为 `output`、筛选 `T`/`F`、输出节点 `sheet:名`/`file:名`；样例每锚点 ≤200 行；十进制序列化为字符串、空值 null。
+- 响应锚点 key：单输出节点为 `output`、筛选 `T`/`F`、输出节点 `sheet:名`/`file:名`；样例每锚点 ≤200 行；十进制序列化为字符串、空值 null。2026-10-28 修复：前端规格/演示数据曾写 `out`，与引擎 `output` 不一致——真实引擎运行时结果区显示「样本数据为空」且连线锚点对不上；已统一为 `output`（nodeSpecs SINGLE_OUT、demoData、Canvas 兜底、测试夹具），并用真实引擎返回形态在浏览器端到端验证表格/行数/状态显示。
 - 单节点内存上限 100 万行（`MAX_TABLE_ROWS`），超限中文报错等第三期磁盘路径，不静默截断。
 - 全量运行目前走同步 engine_call（长任务 job 化、增量重跑属第三期）。
 

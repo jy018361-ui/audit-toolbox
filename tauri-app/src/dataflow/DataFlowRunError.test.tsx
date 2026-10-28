@@ -48,6 +48,14 @@ it("预览运行整体失败时，结果区显示「运行失败」与原因，�
   expect(screen.getByText(/运行失败/)).toBeInTheDocument();
 });
 
+it("空画布点预览运行，结果区显示「画布还没有节点」错误卡而非静默无反应", async () => {
+  render(<DataFlowPage tool={dataflowTool} />);
+  fireEvent.click(screen.getByRole("button", { name: /预览运行/ }));
+  const card = await screen.findByRole("alert");
+  expect(card.textContent).toContain("画布还没有节点");
+  expect(screen.queryByText(/尚未运行/)).not.toBeInTheDocument();
+});
+
 it("未发生失败时，结果区仍显示「尚未运行」占位，不出现错误卡", async () => {
   render(<DataFlowPage tool={dataflowTool} />);
   fireEvent.click(screen.getAllByText("输入")[0].closest("button") ?? screen.getAllByText("输入")[0]);

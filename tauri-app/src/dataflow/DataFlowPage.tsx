@@ -115,6 +115,8 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     };
     commit((current) => ({ ...current, nodes: [...current.nodes, node] }));
     setSelection({ kind: "node", id: node.id });
+    // 添加节点是用户对错误提示的典型响应，先清掉上次的失败卡。
+    setError("");
     setStatusText(`已添加「${node.name}」节点。`);
   }
 
@@ -241,6 +243,8 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     if (running) return;
     const wf = workflowRef.current;
     if (!wf.nodes.length) {
+      // 空画布点运行也必须走可见错误通道：只写状态栏会让用户以为点了没反应。
+      setError("画布还没有节点：请先从上方分类菜单添加输入节点并选择数据文件，再点运行。");
       setStatusText("画布还没有节点，请先从上方分类菜单添加。");
       return;
     }

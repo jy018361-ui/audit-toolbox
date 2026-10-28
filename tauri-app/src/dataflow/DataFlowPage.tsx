@@ -51,6 +51,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   /** 「运行到选中节点」时记录目标节点 id，其余运行方式为 null。 */
   const [ranUpTo, setRanUpTo] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  const [runSeconds, setRunSeconds] = useState(0);
   const [statusText, setStatusText] = useState("就绪 · 编辑过程会自动保存草稿到本机。");
   const [error, setError] = useState("");
   const [paramsDialog, setParamsDialog] = useState<null | "edit" | "confirm">(null);
@@ -210,6 +211,17 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   });
 
+  // 运行计时：同步引擎调用没有进度事件，至少让用户知道已运行多久。
+  useEffect(() => {
+    if (!running) return;
+    const started = Date.now();
+    setRunSeconds(0);
+    const timer = window.setInterval(() => {
+      setRunSeconds(Math.floor((Date.now() - started) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+
   async function runFlow(mode: "preview" | "full", uptoNodeId?: string) {
     if (running) return;
     const wf = workflowRef.current;
@@ -223,10 +235,10 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     setRanUpTo(null);
     setStatusText(
       uptoNodeId
-        ? `正在运行到所选节点（全量数据，只执行到该节点为止）…`
+        ? `正在运行到所选节点（全量数据，大文件可能需要数分钟且暂无进度显示）…`
         : mode === "preview"
           ? "正在预览运行（样本数据）…"
-          : "正在全量运行…",
+          : "正在全量运行（大文件可能需要数分钟且暂无进度显示；探索数据建议先用预览运行）…",
     );
     const overrides = Object.fromEntries(wf.params.map((param) => [param.id, param.value]));
     try {
@@ -459,6 +471,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
             title={error || statusText}
           >
             {error || statusText}
+            {running ? ` · 已运行 ${runSeconds} 秒` : ""}
           </span>
           <span className="df-status-meta">
             <span>

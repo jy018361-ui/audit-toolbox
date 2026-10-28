@@ -541,19 +541,23 @@ fn assemble_outcome(
     }
 
     // 基准表头 = 第一个文件；其余文件按字段名投影对齐（缺失补空值）。
+    // 只在表头层面建映射，不物化整表中间副本（大文件下逐行二次克隆是
+    // 主要耗时来源）；投影与类型转换在末尾的单遍循环里合并完成。
     let (base_header, base_renames) = normalize_header(&collected[0].2.header);
     if base_header.is_empty() {
         return Err(structural(
             "DATAFLOW_HEADER_EMPTY",
-            format!("节点「{node_name}」读取 {} 时：表头行为空。", collected[0].0),
+            format!(
+                "节点「{node_name}」读取 {} 时：表头行为空。",
+                collected[0].0
+            ),
         ));
     }
     for rename in &base_renames {
-        messages.push(format!("表头{}", rename));
+        messages.push(format!("表头{rename}"));
     }
     let width = base_header.len();
-    // aligned：(文件, Sheet, 物理行, 按基准表头投影后的单元格)。
-    let mut aligned: Vec<(String, String, usize, Vec<String>)> = Vec::new();
+    let mut files: Vec<(&str, &str, &RawSheet, Vec<Option<usize>>)> = Vec::new();
     for (label, sheet, raw) in &collected {
         let (names, renames) = normalize_header(&raw.header);
         for rename in &renames {
@@ -583,98 +587,110 @@ fn assemble_outcome(
             }
             messages.push(format!("{label} 与第一个文件字段不一致：{}", parts.join("；")));
         }
-        for (physical, cells) in &raw.rows {
-            let projected: Vec<String> = (0..width)
-                .map(|index| match mapping[index] {
-                    Some(source) => cells.get(source).cloned().unwrap_or_default(),
-                    None => String::new(),
-                })
-                .collect();
-            aligned.push((label.clone(), sheet.clone(), *physical, projected));
-        }
+        files.push((label, sheet, raw, mapping));
     }
-    if aligned.len() > MAX_TABLE_ROWS {
+    let total_rows: usize = files.iter().map(|(_, _, raw, _)| raw.rows.len()).sum();
+    if total_rows > MAX_TABLE_ROWS {
         return Err(structural(
             "DATAFLOW_ROW_LIMIT",
             format!(
-                "节点「{node_name}」读取的数据行数（{}）超出第一期内网上限（{MAX_TABLE_ROWS} 行）。\
-                 第一期在内存中完整处理数据，不会静默截断；请缩小数据范围，或等待第三期磁盘执行路径。",
-                aligned.len()
+                "节点「{node_name}」读取的数据行数（{total_rows}）超出第一期内网上限（{MAX_TABLE_ROWS} 行）。                 第一期在内存中完整处理数据，不会静默截断；请缩小数据范围，或等待第三期磁盘执行路径。"
             ),
         ));
     }
 
     // 列类型：锁定优先，其余按样例建议；超 15 位整数列给出提示。
+    // 样例按文件顺序、行顺序收集，任一列满 1000 个非空值即全局刹车。
     let mut types = Vec::with_capacity(width);
     let mut type_notes = Vec::new();
+    let mut samples: Vec<Vec<String>> = vec![Vec::new(); width];
+    let mut capped = vec![false; width];
+    let mut open_columns = width;
+    'sample: for (_, _, raw, mapping) in &files {
+        for (_, cells) in &raw.rows {
+            for index in 0..width {
+                if capped[index] {
+                    continue;
+                }
+                let source = match mapping[index] {
+                    Some(source) => source,
+                    None => continue,
+                };
+                if let Some(cell) = cells.get(source) {
+                    if !cell.trim().is_empty() {
+                        samples[index].push(cell.clone());
+                        if samples[index].len() >= 1000 {
+                            capped[index] = true;
+                            open_columns -= 1;
+                        }
+                    }
+                }
+            }
+            if open_columns == 0 {
+                break 'sample;
+            }
+        }
+    }
     for (index, column) in base_header.iter().enumerate() {
         if let Some(kind) = locked.get(column) {
             types.push(*kind);
             continue;
         }
-        let mut samples: Vec<String> = Vec::new();
-        for (_, _, _, cells) in &aligned {
-            if let Some(cell) = cells.get(index) {
-                if !cell.trim().is_empty() {
-                    samples.push(cell.clone());
-                }
-                if samples.len() >= 1000 {
-                    break;
-                }
-            }
-        }
-        let (kind, note) = infer_column_type(&samples);
+        let (kind, note) = infer_column_type(&samples[index]);
         if let Some(note) = note {
             type_notes.push(format!("列“{column}”：{note}"));
         }
         types.push(kind);
     }
 
-    // 全量逐行转换；行级错误按 onRowError 处理（默认停止）。
-    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(aligned.len());
+    // 逐行投影并转换（单遍，不建中间副本）；行级错误按 onRowError 处理（默认停止）。
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(total_rows);
     let mut skipped = 0usize;
-    for (label, sheet, physical, cells) in &aligned {
-        let mut converted: Vec<Value> = Vec::with_capacity(width);
-        let mut failure: Option<String> = None;
-        for index in 0..width {
-            let raw = cells.get(index).map(String::as_str).unwrap_or("");
-            match convert_cell(raw, types[index]) {
-                Ok(value) => converted.push(value),
-                Err(reason) => {
-                    failure = Some(format!("字段“{}”的值“{raw}”{reason}", base_header[index]));
-                    break;
-                }
-            }
-        }
-        match failure {
-            Some(detail) => match policy {
-                RowErrorPolicy::Stop => {
-                    return Err(structural(
-                        "DATAFLOW_ROW_ERROR",
-                        format!(
-                            "节点「{node_name}」读取 {label} 第 {physical} 行时{detail}。\
-                             已按“停止”策略中止；可在节点配置中改为“跳过并记录”。"
-                        ),
-                    ));
-                }
-                RowErrorPolicy::Skip => {
-                    skipped += 1;
-                    if messages.len() < 20 {
-                        messages.push(format!("跳过 {label} 第 {physical} 行：{detail}"));
+    for (label, sheet, raw, mapping) in &files {
+        for (physical, cells) in &raw.rows {
+            let mut converted: Vec<Value> = Vec::with_capacity(width);
+            let mut failure: Option<String> = None;
+            for index in 0..width {
+                let cell = mapping[index]
+                    .and_then(|source| cells.get(source))
+                    .map(String::as_str)
+                    .unwrap_or("");
+                match convert_cell(cell, types[index]) {
+                    Ok(value) => converted.push(value),
+                    Err(reason) => {
+                        failure = Some(format!("字段“{}”的值“{cell}”{reason}", base_header[index]));
+                        break;
                     }
                 }
-            },
-            None => {
-                if attach {
-                    converted.push(Value::Text(label.clone()));
-                    converted.push(Value::Text(sheet.clone()));
-                    converted.push(Value::Int(*physical as i64));
+            }
+            match failure {
+                Some(detail) => match policy {
+                    RowErrorPolicy::Stop => {
+                        return Err(structural(
+                            "DATAFLOW_ROW_ERROR",
+                            format!(
+                                "节点「{node_name}」读取 {label} 第 {physical} 行时{detail}。                                 已按“停止”策略中止；可在节点配置中改为“跳过并记录”。"
+                            ),
+                        ));
+                    }
+                    RowErrorPolicy::Skip => {
+                        skipped += 1;
+                        if messages.len() < 20 {
+                            messages.push(format!("跳过 {label} 第 {physical} 行：{detail}"));
+                        }
+                    }
+                },
+                None => {
+                    if attach {
+                        converted.push(Value::Text((*label).to_owned()));
+                        converted.push(Value::Text((*sheet).to_owned()));
+                        converted.push(Value::Int(*physical as i64));
+                    }
+                    rows.push(converted);
                 }
-                rows.push(converted);
             }
         }
     }
-
     let mut columns = base_header.clone();
     if attach {
         columns.push("来源文件".to_owned());

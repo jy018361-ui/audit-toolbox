@@ -921,6 +921,9 @@ function draftKey(name: string): string {
 }
 
 export function saveDraft(workflow: DataflowWorkflow): boolean {
+  // 空流程不落草稿：没有恢复价值，且会按时间排在最前，
+  // 把含节点的草稿顶出自动恢复位（页面切换后画布靠草稿兜底）。
+  if (!workflow.nodes.length) return false;
   try {
     const payload = JSON.stringify({
       name: workflow.name,

@@ -21,7 +21,6 @@ import {
   removeDraft,
   saveDraft,
   validateNewEdge,
-  type DataflowDraft,
   type DataflowEdge,
   type DataflowRunResult,
   type DataflowWorkflow,
@@ -55,7 +54,6 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   const [statusText, setStatusText] = useState("就绪 · 编辑过程会自动保存草稿到本机。");
   const [error, setError] = useState("");
   const [paramsDialog, setParamsDialog] = useState<null | "edit" | "confirm">(null);
-  const [draftPrompt, setDraftPrompt] = useState<DataflowDraft | null>(null);
   const [autosaveNote, setAutosaveNote] = useState("");
   const [configCollapsed, setConfigCollapsed] = useState(false);
   const [resultsCollapsed, setResultsCollapsed] = useState(false);
@@ -78,10 +76,19 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     setHistoryTick((tick) => tick + 1);
   }
 
-  // 打开页面时检查未保存草稿，异常关闭后提示恢复。
+  // 打开页面时自动恢复最近一份含节点的草稿：工具页切换会重建组件，
+  // 画布状态随之丢失，草稿是唯一兜底（设计文档：自动保存草稿）。
+  // 恢复不再弹窗确认——「忽略并清除」式的二选一曾让用户误删整个流程；
+  // 要重新开始请点工具栏「新建」（显式清除当前流程名的草稿）。
   useEffect(() => {
-    const drafts = listDrafts();
-    if (drafts.length && drafts[0].workflow.nodes.length) setDraftPrompt(drafts[0]);
+    const draft = listDrafts().find((item) => item.workflow.nodes.length);
+    if (!draft) return;
+    replaceWorkflow(draft.workflow, true);
+    setAutosaveNote(`恢复自草稿 ${draft.savedAt.replace("T", " ").slice(11, 16)}`);
+    setStatusText(
+      `已自动恢复未保存的流程《${draft.name}》（${draft.workflow.nodes.length} 个节点，保存于 ${draft.savedAt.replace("T", " ").slice(0, 19)}）。如需重新开始请点「新建」。`,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 自动保存草稿（键含流程名）；空流程不落草稿，避免自触发恢复提示。
@@ -310,6 +317,19 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     if (parsed.workflow.params.length) setParamsDialog("confirm");
   }
 
+  /** 新建空白流程：显式清掉当前流程名的草稿，避免下次进页面又被自动恢复。 */
+  function startNewFlow() {
+    removeDraft(workflowRef.current.name);
+    replaceWorkflow(createEmptyWorkflow(), true);
+    setSelection(null);
+    setRunResult(null);
+    setLastRunMode(null);
+    setRanUpTo(null);
+    setError("");
+    setAutosaveNote("");
+    setStatusText("已新建空白流程（原草稿已清除）。");
+  }
+
   async function handlePickPath(
     kind: "file" | "folder",
     extensions: string[],
@@ -321,24 +341,6 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
       extensions,
     );
     if (typeof value === "string" && value) apply(value);
-  }
-
-  function restoreDraft() {
-    if (!draftPrompt) return;
-    replaceWorkflow(draftPrompt.workflow, true);
-    setSelection(null);
-    setRunResult(null);
-    setLastRunMode(null);
-    setRanUpTo(null);
-    setStatusText(`已恢复草稿《${draftPrompt.name}》（保存于 ${draftPrompt.savedAt.replace("T", " ").slice(0, 19)}）。`);
-    setDraftPrompt(null);
-  }
-
-  function dismissDraft() {
-    if (!draftPrompt) return;
-    removeDraft(draftPrompt.name);
-    setDraftPrompt(null);
-    setStatusText("已忽略并清除该草稿。");
   }
 
   const selectedNode =
@@ -363,26 +365,13 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
         title={tool.name}
         detail="拖拽节点搭建数据处理流程：读取、整理、筛选、输出，保存流程文件后换一批数据改参数重跑。"
       />
-      {draftPrompt && (
-        <div className="df-draft-bar" role="status">
-          <span>
-            检测到未保存的草稿《{draftPrompt.name}
-            》（保存于 {draftPrompt.savedAt.replace("T", " ").slice(0, 19)}），是否恢复？
-          </span>
-          <button type="button" className="df-btn-sm" onClick={restoreDraft}>
-            恢复草稿
-          </button>
-          <button type="button" className="df-btn-sm" onClick={dismissDraft}>
-            忽略并清除
-          </button>
-        </div>
-      )}
       <div className="df-shell" data-history-tick={historyTick}>
         <DataflowToolbar
           flowName={workflow.name}
           onFlowNameChange={(name) =>
             commit((current) => ({ ...current, name: name || "未命名流程" }))
           }
+          onNew={startNewFlow}
           autosaveNote={autosaveNote}
           onAddNode={addNode}
           canUndo={historyRef.current.canUndo}

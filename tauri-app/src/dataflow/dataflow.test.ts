@@ -649,6 +649,17 @@ describe("数据流：草稿与撤销栈", () => {
     expect(listDrafts().filter((draft) => draft.name === workflow.name)).toHaveLength(0);
   });
 
+  it("空流程不落草稿：改名后无节点的流程也不会顶掉含节点草稿的恢复位", () => {
+    const withNodes = sampleWorkflow();
+    expect(saveDraft(withNodes)).toBe(true);
+    const empty = createEmptyWorkflow("只有名字没有节点");
+    expect(saveDraft(empty)).toBe(false);
+    const drafts = listDrafts();
+    expect(drafts.some((draft) => draft.name === empty.name)).toBe(false);
+    expect(drafts.some((draft) => draft.name === withNodes.name)).toBe(true);
+    removeDraft(withNodes.name);
+  });
+
   it("撤销/重做操作栈往返一致", () => {
     const history = new WorkflowHistory();
     const first = createEmptyWorkflow("一");

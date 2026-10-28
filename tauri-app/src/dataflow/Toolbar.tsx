@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   Eye,
+  FilePlus,
   FolderOpen,
   Play,
   Redo2,
@@ -21,6 +22,8 @@ import {
 export interface DataflowToolbarProps {
   flowName: string;
   onFlowNameChange: (name: string) => void;
+  /** 新建空白流程（清除当前流程名的草稿，避免下次进页面又被自动恢复）。 */
+  onNew: () => void;
   autosaveNote: string;
   onAddNode: (type: string) => void;
   canUndo: boolean;
@@ -43,6 +46,7 @@ export interface DataflowToolbarProps {
 export function DataflowToolbar({
   flowName,
   onFlowNameChange,
+  onNew,
   autosaveNote,
   onAddNode,
   canUndo,
@@ -90,6 +94,10 @@ export function DataflowToolbar({
           {autosaveNote && <span className="df-autosave">{autosaveNote}</span>}
         </span>
         <div className="df-tb-right">
+          <button type="button" className="df-tool" onClick={onNew}>
+            <FilePlus size={13} />
+            新建
+          </button>
           <button type="button" className="df-tool" onClick={onParams}>
             <Settings2 size={13} />
             参数

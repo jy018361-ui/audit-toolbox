@@ -145,7 +145,7 @@ it("参数弹窗可新增参数并保存定义", async () => {
   );
 });
 
-it("存在草稿时提示恢复", async () => {
+it("存在草稿时进入页面自动恢复（不再弹窗，杜绝误点忽略丢流程）", async () => {
   saveDraft({
     version: 1,
     name: "草稿流程",
@@ -157,8 +157,30 @@ it("存在草稿时提示恢复", async () => {
     notes: [],
   });
   render(<DataFlowPage tool={dataflowTool} />);
-  const prompt = await screen.findByText(/检测到未保存的草稿/);
-  expect(prompt).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "恢复草稿" }));
   await waitFor(() => expect(screen.getByText("流水")).toBeInTheDocument());
+  expect(screen.getByText(/已自动恢复未保存的流程/)).toBeInTheDocument();
+});
+
+it("点「新建」清空画布并清除草稿，下次进入不再自动恢复", async () => {
+  saveDraft({
+    version: 1,
+    name: "草稿流程",
+    params: [],
+    nodes: [
+      { id: "n1", type: "csv_in", name: "流水", x: 0, y: 0, config: { path: "" } },
+    ],
+    edges: [],
+    notes: [],
+  });
+  const view = render(<DataFlowPage tool={dataflowTool} />);
+  await waitFor(() => expect(screen.getByText("流水")).toBeInTheDocument());
+  fireEvent.click(screen.getByRole("button", { name: /新建/ }));
+  await waitFor(() => expect(screen.getByText(/已新建空白流程/)).toBeInTheDocument());
+  expect(screen.queryByText("流水")).not.toBeInTheDocument();
+  view.unmount();
+  render(<DataFlowPage tool={dataflowTool} />);
+  await waitFor(() =>
+    expect(screen.getByText(/就绪 · 编辑过程会自动保存草稿/)).toBeInTheDocument(),
+  );
+  expect(screen.queryByText("流水")).not.toBeInTheDocument();
 });

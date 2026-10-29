@@ -243,12 +243,19 @@ fn walk(
                         })
                     })
                     .collect::<Option<Vec<Vec<String>>>>();
-                if let Some(rows) =
+                if let Some(mut rows) =
                     grid.filter(|rows| !rows.is_empty() && rows.iter().all(|row| !row.is_empty()))
                 {
+                    if normalize_markdown_totals(&mut rows) {
+                        warnings.push("表格重复的合计标签已按汇总行整理，数字未改写；请核对原表合并区域。".into());
+                    }
+                    let mut body_tables = vec![];
+                    if has_markdown_table(text) { markdown_tables(text, &mut body_tables, &mut vec![]); }
+                    let covered = body_tables.iter().filter(|table| table["rows"] == json!(rows)).count()
+                        > tables.iter().filter(|table| table["rows"] == json!(rows)).count();
                     for row in &rows {
                         let declared_text = map.get("text").and_then(Value::as_str).unwrap_or("");
-                        if !row.iter().all(|cell| {
+                        if !covered && !row.iter().all(|cell| {
                             cell.trim().is_empty() || declared_text.contains(cell.trim())
                         }) {
                             push_text(text, &row.join("\t"));
@@ -426,49 +433,104 @@ fn html_tables(raw: &str, tables: &mut Vec<Value>, warnings: &mut Vec<String>) -
     body.trim().to_owned()
 }
 
-fn markdown_tables(raw: &str, tables: &mut Vec<Value>) -> String {
-    fn cells(line: &str) -> Vec<String> {
+fn markdown_cells(line: &str) -> Vec<String> {
         let mut cells = vec![];
         let mut current = String::new();
-        let mut escaped = false;
-        for c in line.trim().trim_matches('|').chars() {
-            if escaped {
-                current.push(c);
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
+        // Only the outer border is syntax. Every additional pipe represents
+        // an actual empty cell, including the last cells of a sparse row.
+        let line = line.trim();
+        let mut chars = line.strip_prefix('|').unwrap_or(line).chars().peekable();
+        let mut ended_with_border = false;
+        while let Some(c) = chars.next() {
+            ended_with_border = false;
+            if c == '\\' && matches!(chars.peek(), Some('|' | '\\')) {
+                current.push(chars.next().unwrap());
             } else if c == '|' {
                 cells.push(current.trim().to_owned());
                 current.clear();
+                ended_with_border = chars.peek().is_none();
             } else {
                 current.push(c);
             }
         }
-        if escaped {
-            current.push('\\');
-        }
-        cells.push(current.trim().to_owned());
+        if !ended_with_border { cells.push(current.trim().to_owned()); }
         cells
+}
+
+fn markdown_separator(line: &str) -> bool {
+    let cells = markdown_cells(line);
+    cells.len() >= 2 && cells.iter().all(|s| {
+        let s = s.trim_matches(':');
+        s.len() >= 3 && s.chars().all(|c| c == '-')
+    })
+}
+
+fn markdown_header(lines: &[&str], start: usize) -> Option<(usize, Vec<String>)> {
+    if !lines[start].contains('|') { return None; }
+    // Some document parsers put signature/address cells on multiple physical
+    // lines before their separator. Require the complete row's column count;
+    // never discard those line breaks or combine arbitrary prose into cells.
+    let mut size = lines[start].len();
+    for separator in start + 1..lines.len().min(start + 201) {
+        if separator > start + 1 && !lines[start].trim_start().starts_with('|') { return None; }
+        size += lines[separator].len();
+        if size > 64_000 { return None; }
+        if markdown_separator(lines[separator]) {
+            let header = markdown_cells(&lines[start..separator].join("\n"));
+            return (header.len() == markdown_cells(lines[separator]).len()).then_some((separator, header));
+        }
     }
+    None
+}
+
+pub(crate) fn has_markdown_table(raw: &str) -> bool {
+    let lines = raw.lines().collect::<Vec<_>>();
+    (0..lines.len()).any(|i| markdown_header(&lines, i).is_some())
+}
+
+fn normalize_markdown_totals(rows: &mut [Vec<String>]) -> bool {
+    let Some(header) = rows.first().cloned() else { return false; };
+    let mut changed = false;
+    for row in rows.iter_mut().skip(1) {
+        // The provider can repeat the same merged summary caption into every
+        // column. Restrict recovery to explicit totals, never ordinary values.
+        let full_caption = row.len() >= 3 && !row[0].is_empty()
+            && (row[0].starts_with("合计人民币金额") || row[0].starts_with("价税合计（大写）") || row[0].starts_with("价税合计(大写)"))
+            && row.iter().all(|cell| cell == &row[0]);
+        let prefix = row.iter().take_while(|cell| matches!(cell.as_str(), "合计" | "合计：" | "合计:" | "总计" | "总计：" | "总计:")).count();
+        let remaining = row.iter().enumerate().skip(prefix).filter(|(_, cell)| !cell.is_empty()).collect::<Vec<_>>();
+        let total_prefix = prefix >= 3 && remaining.len() == 1
+            && header.get(remaining[0].0).is_some_and(|label| label.contains("金额") || label.contains("总价"))
+            && remaining[0].1.chars().all(|c| c.is_ascii_digit() || ",.，￥¥ ".contains(c));
+        if full_caption || total_prefix {
+            let end = if full_caption { row.len() } else { prefix };
+            for cell in &mut row[1..end] { cell.clear(); }
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn markdown_tables(raw: &str, tables: &mut Vec<Value>, warnings: &mut Vec<String>) -> String {
     let lines: Vec<_> = raw.lines().collect();
     let mut body = vec![];
     let mut i = 0;
     while i < lines.len() {
-        let separator = lines.get(i + 1).map(|s| cells(s)).unwrap_or_default();
-        if lines[i].contains('|')
-            && separator.len() >= 2
-            && separator.iter().all(|s| {
-                s.trim_matches(':').len() >= 3 && s.trim_matches(':').chars().all(|c| c == '-')
-            })
-        {
-            let mut rows = vec![cells(lines[i])];
-            i += 2;
+        if let Some((separator, header)) = markdown_header(&lines, i) {
+            let mut rows = vec![header];
+            i = separator + 1;
             while i < lines.len()
                 && lines[i].contains('|')
-                && cells(lines[i]).len() == rows[0].len()
+                && markdown_cells(lines[i]).len() == rows[0].len()
             {
-                rows.push(cells(lines[i]));
+                rows.push(markdown_cells(lines[i]));
                 i += 1;
+            }
+            if lines.get(i).is_some_and(|line| line.trim_start().starts_with('|')) {
+                warnings.push("表格行列不齐，未推测缺失单元格，已保留剩余原文供核对。".into());
+            }
+            if normalize_markdown_totals(&mut rows) {
+                warnings.push("表格重复的合计标签已按汇总行整理，数字未改写；请核对原表合并区域。".into());
             }
             for row in &rows {
                 body.push(row.join("\t"));
@@ -504,8 +566,19 @@ pub(crate) fn readable_ocr_content(raw: &str) -> Value {
         .is_match(&text)
     {
         text = plain_html(&text);
-    } else if !structured {
-        text = markdown_tables(&text, &mut tables);
+    }
+    // A JSON envelope may itself contain Markdown; the envelope is not a
+    // reason to bypass table decoding. Match native grids by occurrence so a
+    // text/native duplicate is not exported twice, while repeated real tables
+    // remain distinct.
+    let native = tables.clone();
+    let mut recovered = vec![];
+    text = markdown_tables(&text, &mut recovered, &mut warnings);
+    let mut matched = vec![false; native.len()];
+    for table in recovered {
+        if let Some(index) = native.iter().enumerate().position(|(index, existing)| !matched[index] && existing["rows"] == table["rows"]) {
+            matched[index] = true;
+        } else { tables.push(table); }
     }
     text = readable_headings(&readable_latex(&text, &mut warnings));
     for table in &mut tables {
@@ -711,6 +784,51 @@ $\boxed{\begin{array}{l}\text { 重要提示 } \\\text { 先决条件：负债�
         );
         assert!(result["text"].as_str().unwrap().contains("尾页"));
         assert!(!result["text"].as_str().unwrap().contains("<td>"));
+    }
+    #[test]
+    fn sparse_markdown_keeps_every_empty_cell_and_decodes_json_text() {
+        let raw = "电\n|序号|标的名称|备注|规格型号|生产厂家|计量单位|数量|单价|金额|交货时间|\n|---|---|---|---|---|---|---|---|---|---|\n|1|电力|||||1.401.048.00|0.57|801.175.29||\n|2||||||||||\n|3||||||||||\n|合计：|合计：|合计：|合计：|合计：|合计：|合计：|合计：|801，175.29||\n|合计人民币金额(大写)：捌拾万元|合计人民币金额(大写)：捌拾万元|合计人民币金额(大写)：捌拾万元|合计人民币金额(大写)：捌拾万元|合计人民币金额(大写)：捌拾万元|合计人民币金额(大写)：捌拾万元|合计人民币金额(大写)：捌拾万元|合计人民币金额(大写)：捌拾万元|合计人民币金额(大写)：捌拾万元|合计人民币金额(大写)：捌拾万元|\n合同正文";
+        for source in [raw.to_owned(), json!({"text":raw,"tables":[]}).to_string()] {
+            let parsed = readable_ocr_content(&source);
+            let rows = parsed["tables"][0]["rows"].as_array().unwrap();
+            assert_eq!(rows.len(), 6);
+            assert!(rows.iter().all(|row| row.as_array().unwrap().len() == 10));
+            assert_eq!(rows[1][6], "1.401.048.00"); // No numeric guess or arithmetic correction.
+            assert_eq!(rows[1][9], "");
+            assert_eq!(rows[2], json!(["2","","","","","","","","",""]));
+            assert_eq!(rows[4], json!(["合计：","","","","","","","","801，175.29",""]));
+            assert_eq!(rows[5][0], "合计人民币金额(大写)：捌拾万元");
+            assert_eq!(rows[5].as_array().unwrap().iter().filter(|v| *v != "").count(), 1);
+            assert!(!parsed["text"].as_str().unwrap().contains("|---"));
+            assert!(parsed["text"].as_str().unwrap().ends_with("合同正文"));
+        }
+        assert_eq!(markdown_cells(r"|A\|B|\(\underline{00123}\)|"), vec!["A|B", r"\(\underline{00123}\)"]);
+        assert!(has_markdown_table(raw));
+        assert!(!has_markdown_table("合同编号A|B\n普通正文"));
+    }
+    #[test]
+    fn json_markdown_and_native_grid_share_one_table_but_keep_real_repetitions() {
+        let raw = "|名称|金额|\n|---|---|\n|相同值|相同值|\n|相同值|相同值|";
+        let grid = json!([["名称","金额"],["相同值","相同值"],["相同值","相同值"]]);
+        let parsed = readable_ocr_content(&json!({"text":raw,"tables":[{"rows":grid}]}).to_string());
+        assert_eq!(parsed["tables"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["tables"][0]["rows"], grid);
+        assert_eq!(parsed["text"].as_str().unwrap().matches("相同值\t相同值").count(), 2);
+        let repeated = readable_ocr_content(&format!("{raw}\n\n{raw}"));
+        assert_eq!(repeated["tables"].as_array().unwrap().len(), 2);
+        let malformed = readable_ocr_content("|名称|金额|\n|---|---|\n|不能确定|三|列|\n合同尾部");
+        assert!(malformed["text"].as_str().unwrap().contains("不能确定|三|列"));
+        assert!(!malformed["warnings"].as_array().unwrap().is_empty());
+    }
+    #[test]
+    fn multiline_markdown_signature_cells_keep_addresses_and_paragraph_order() {
+        let raw = "合同正文\n|出卖人：甲公司\n住所：甲地址\n账号：00123|买受人：乙公司\n住所：乙地址\n经办人：|鉴证机关：\n经办人：\n年 月 日|\n|---|---|---|\n\n合同尾部";
+        assert!(has_markdown_table(raw));
+        let parsed = readable_ocr_content(&json!({"text":raw,"tables":[]}).to_string());
+        assert_eq!(parsed["tables"][0]["rows"], json!([["出卖人：甲公司\n住所：甲地址\n账号：00123","买受人：乙公司\n住所：乙地址\n经办人：","鉴证机关：\n经办人：\n年 月 日"]]));
+        assert!(!parsed["text"].as_str().unwrap().contains('|'));
+        assert!(parsed["text"].as_str().unwrap().starts_with("合同正文"));
+        assert!(parsed["text"].as_str().unwrap().ends_with("合同尾部"));
     }
     #[test]
     fn markdown_and_serialized_text_are_readable() {

@@ -231,6 +231,36 @@
   user-select: text;
 }
 
+.meeting-editor-tools { display: grid; gap: var(--sp-2); min-width: 0; }
+.meeting-inline-editor { min-height: 180px; cursor: text; overflow-x: auto; }
+.meeting-inline-editor:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.meeting-inline-editor:empty::before { content: "点击输入会议纪要…"; color: var(--label); }
+.meeting-autosave-status { color: var(--label); font-size: var(--fs-xs); display: grid; gap: var(--sp-2); }
+.meeting-speaker-names { padding: var(--sp-3); border: 1px solid var(--border-soft); border-radius: var(--r-md); background: var(--surface-muted); }
+.meeting-speaker-names h3 { margin: 0 0 var(--sp-2); font-size: var(--fs-sm); font-weight: 600; }
+.meeting-speaker-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--sp-3); margin-top: var(--sp-3); }
+.meeting-speaker-field { display: grid; gap: var(--sp-1); font-size: var(--fs-sm); min-width: 0; }
+.meeting-speaker-field input { width: 100%; min-width: 0; min-height: 36px; padding: var(--sp-2); border: 1px solid var(--control-border); border-radius: var(--r-sm); background: var(--control-bg); color: var(--fg); }
+.meeting-speaker-field input:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.meeting-editor-tools .meeting-result-actions { align-items: center; }
+.meeting-editor-tools .meeting-result-actions > span { font-size: var(--fs-sm); color: var(--label); }
+.meeting-minutes-editor {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 420px;
+  padding: var(--sp-4);
+  resize: vertical;
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-md);
+  background: var(--control-bg);
+  color: var(--fg);
+  font: inherit;
+  line-height: 1.85;
+  user-select: text;
+}
+.meeting-minutes-editor:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
 .meeting-minutes-content :is(h3, h4, h5, h6) {
   margin: var(--sp-4) 0 var(--sp-2);
   font-weight: 600;
@@ -299,8 +329,10 @@
 
 /* ===== 会议询问小窗（无边框透明置顶窗口，不进 App 壳） ===== */
 
-/* 透明窗口：body 底色必须让位，窗口四周留出的边距用于透出卡片投影。 */
-body.meeting-ask-body {
+/* 整个文档画布透明，避免 body 透明后仍透出 :root 的主题底板。 */
+html.meeting-ask-root,
+html.meeting-ask-root body,
+html.meeting-ask-root #root {
   background: transparent;
 }
 

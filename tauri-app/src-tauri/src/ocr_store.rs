@@ -100,7 +100,8 @@ fn readable_page(mut page: Page) -> Page {
     let is_payload = is_structure
         || crate::bailian_ocr::has_latex_layout(&page.original_text)
         || crate::bailian_ocr::has_markdown_heading(&page.original_text)
-        || crate::bailian_ocr::has_image_markup(&page.original_text);
+        || crate::bailian_ocr::has_image_markup(&page.original_text)
+        || crate::bailian_ocr::has_markdown_table(&page.original_text);
     if is_payload {
         let parsed = crate::bailian_ocr::readable_ocr_content(&page.original_text);
         let parsed_text = parsed["text"].as_str().unwrap_or("").to_owned();
@@ -681,6 +682,21 @@ mod tests {
             ("ocr.export","completed",json!({"projectId":"other","outputDir":"C:\\其他项目目录"}),"4"),
         ] { store.conn.execute("INSERT INTO task_history VALUES(?,?,?,?)",params![method,status,params.to_string(),stamp]).unwrap(); }
         assert_eq!(store.previous_output_directory(id).unwrap(), Some(PathBuf::from("C:\\已授权输出目录")));
+    }
+    #[test]
+    fn saved_markdown_table_recovers_sparse_columns_without_changing_human_text() {
+        let raw = "合同\n|序号|名称|数量|金额|备注|\n|---|---|---|---|---|\n|1|电力|00123|6.00||\n|2|||||\n尾部";
+        let mut page = Page { metadata: Default::default(), page: 1, text: raw.into(), original_text: raw.into(), tables: vec![], original_tables: vec![], revision: 7, status: "completed".into(), warnings: vec![] };
+        let projected = readable_page(page.clone());
+        assert_eq!(projected.tables[0].rows[1], vec!["1","电力","00123","6.00",""]);
+        assert_eq!(projected.tables[0].rows[2], vec!["2","","","",""]);
+        assert!(projected.original_text.contains("1\t电力\t00123\t6.00\t"));
+        assert_eq!(projected.revision, 7);
+        page.text = "人工已核对正文".into();
+        let corrected = readable_page(page);
+        assert_eq!(corrected.text, "人工已核对正文");
+        assert!(corrected.tables.is_empty());
+        assert_eq!(corrected.original_tables[0].rows[1][2], "00123");
     }
     #[test]
     fn saved_image_markup_projects_without_overwriting_human_text_or_cells() {

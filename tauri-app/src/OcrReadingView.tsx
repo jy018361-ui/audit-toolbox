@@ -1,7 +1,41 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
-import type { OcrDocumentDetail, OcrPageData } from "./ocrTypes";
+import type { OcrDocumentDetail, OcrPageData, OcrTable } from "./ocrTypes";
 import { Button } from "./components/ui/button";
 import { Copy, ZoomIn, ZoomOut, Maximize } from "lucide-react";
+
+function OcrReadableText({ text, tables }: { text: string; tables: OcrTable[] }) {
+  // Substitute only an exact grid already present in the original text. Keep
+  // its position and copying source; never infer columns from ordinary prose.
+  const matches: { start: number; end: number; table: OcrTable; index: number }[] = [];
+  tables.forEach((table, index) => {
+    if (!table.rows.length || table.rows[0].length < 2) return;
+    for (const separator of ["\n", "\n\n"]) {
+      const grid = table.rows.map(row => row.join("\t")).join(separator);
+      if (!grid) continue;
+      let start = text.indexOf(grid);
+      while (start >= 0 && matches.some(match => start < match.end && start + grid.length > match.start)) {
+        start = text.indexOf(grid, start + 1);
+      }
+      if (start >= 0) { matches.push({ start, end: start + grid.length, table, index }); break; }
+    }
+  });
+  matches.sort((a, b) => a.start - b.start);
+  let cursor = 0;
+  const parts = matches.flatMap(({ start, end, table, index }) => {
+    const before = text.slice(cursor, start);
+    cursor = end;
+    return [
+      <span key={`text-${index}`}>{before}</span>,
+      <div key={`table-${index}`} className="ocr-reading-table-scroll" role="region" aria-label={`识别表格 ${index + 1}`} tabIndex={0}>
+        <table className="ocr-reading-table">
+          <caption>{table.title || `识别表格 ${index + 1}`}</caption>
+          <tbody>{table.rows.map((row, r) => <tr key={r}>{row.map((cell, c) => <td key={c}>{cell}</td>)}</tr>)}</tbody>
+        </table>
+      </div>,
+    ];
+  });
+  return <div className="ocr-original-text ocr-readable-content">{parts}{text.slice(cursor)}</div>;
+}
 
 function OcrScanPreview({ name, pageNumber, sourceImage, sourceError }: {
   name: string;
@@ -111,9 +145,7 @@ export function OcrReadingView({
   function textContent(item?: OcrPageData) {
     return item ? (
       <>
-        <div className="ocr-original-text">
-          {item.originalText || "本页未识别到正文。"}
-        </div>
+        <OcrReadableText text={item.originalText || "本页未识别到正文。"} tables={item.originalTables} />
         {item.warnings.map((warning, index) => (
           <p className="ocr-warning" key={index}>
             {warning}

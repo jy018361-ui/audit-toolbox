@@ -50,6 +50,28 @@ it("扫描页未加载时禁用缩放，全篇模式仅展示和复制完整原�
   expect(props.onCopy).toHaveBeenLastCalledWith("测试扫描件.pdf\n第 1 页\n第1页原文\n\n第 2 页\n第2页原文");
 });
 
+it("原文中的已确认表格原位显示行列及空格，复制仍保留完整来源且不追加尾部表格", () => {
+  const rows = [["序号", "名称", "数量", "单价", "金额", "备注"], ["1", "电力", "00123", "0.57", "801.00", ""], ["2", "", "", "", "", ""]];
+  const originalText = `合同前文\n${rows.map(row => row.join("\t")).join("\n")}\n合同后文`;
+  const sample = { ...current, pages: [{ ...current.pages[0], text: originalText, originalText,
+    originalTables: [{ id: "grid", title: "", rows }], tables: [] }] };
+  const { rerender } = render(<OcrReadingView {...props} current={sample} documents={[sample]} />);
+  const table = screen.getByRole("table");
+  expect(table.querySelectorAll("tr")).toHaveLength(3);
+  expect(table.querySelectorAll("tr")[1].children).toHaveLength(6);
+  expect(table.querySelectorAll("tr")[2].children).toHaveLength(6);
+  expect(table).toHaveTextContent("00123");
+  expect(table.querySelectorAll("tr")[1].lastElementChild).toBeEmptyDOMElement();
+  expect(screen.getAllByRole("table")).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "复制本页原文" }));
+  expect(props.onCopy).toHaveBeenLastCalledWith(originalText);
+  rerender(<OcrReadingView {...props} current={sample} documents={[sample]} fullText />);
+  expect(screen.getAllByRole("table")).toHaveLength(1);
+  // A separately corrected table cannot overwrite the initial original text.
+  rerender(<OcrReadingView {...props} current={{ ...sample, pages: [{ ...sample.pages[0], originalText: "未结构化的原文" }] }} documents={[sample]} />);
+  expect(screen.queryByRole("table")).not.toBeInTheDocument();
+});
+
 it("左键拖动平移原扫描件，抬起或丢失捕获立即停止且右键不移动", () => {
   render(<OcrReadingView {...props} />);
   const viewport = screen.getByRole("region", { name: "扫描件图片" });

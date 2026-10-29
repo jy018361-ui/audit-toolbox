@@ -3,17 +3,29 @@ import { createContext, useContext } from "react";
 export type OcrScanPageState =
   | "preparing"
   | "running"
+  | "ocr_request"
+  | "ocr_save"
   | "queued"
   | "completed"
   | "failed"
   | "cancelled"
   | "memory_paused";
+export type OcrScanPageProgress = {
+  page: number;
+  state: OcrScanPageState;
+  startedAt?: number;
+  message?: string;
+  cancellable?: boolean;
+  cancelling?: boolean;
+};
+export const isActiveOcrScanPage = (page: OcrScanPageProgress) =>
+  !["completed", "failed", "cancelled"].includes(page.state);
 export type OcrScanProgress = {
   fileName: string;
   fileIndex: number;
   fileCount: number;
   phase: "preparing" | "scanning" | "saving";
-  pages: { page: number; state: OcrScanPageState }[];
+  pages: OcrScanPageProgress[];
   completed: number;
   total: number;
   paused: boolean;
@@ -22,8 +34,9 @@ export type OcrScanProgress = {
   error?: string;
   onPause: () => void;
   onCancel: () => void;
+  onDeferPage?: (page: number) => void;
 };
-export type OcrTaskProgress = Omit<OcrScanProgress, "phase" | "pages"> & {
+export type OcrTaskProgress = Omit<OcrScanProgress, "phase" | "pages" | "onDeferPage"> & {
   kind: "task";
   phase: "preparing" | "extracting" | "saving" | "exporting";
   message: string;

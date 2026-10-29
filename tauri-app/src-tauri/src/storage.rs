@@ -17,6 +17,9 @@ use crate::AppError;
 #[path = "meeting_history.rs"]
 mod meeting_history;
 
+#[path = "meeting_documents.rs"]
+pub(crate) mod meeting_documents;
+
 #[path = "meeting_vocabulary.rs"]
 pub(crate) mod meeting_vocabulary;
 
@@ -48,6 +51,7 @@ impl Storage {
         storage.migrate_task_history_summaries()?;
         storage.migrate_task_history_params()?;
         storage.initialize_meeting_history()?;
+        storage.initialize_meeting_documents()?;
         storage.initialize_meeting_vocabulary()?;
         storage.import_legacy_defaults()?;
         storage.sanitize_roll_forward_settings()?;

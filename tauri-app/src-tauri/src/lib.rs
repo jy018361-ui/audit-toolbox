@@ -34,6 +34,7 @@ mod loan_interest;
 mod lpr;
 mod meeting_audio;
 mod meeting_minutes;
+mod meeting_outlook;
 mod meeting_record;
 mod meeting_watch;
 mod ocr;
@@ -1303,8 +1304,28 @@ fn meeting_status(meeting: State<'_, Arc<meeting_watch::MeetingState>>) -> Value
 }
 
 #[tauri::command]
-fn meeting_read_minutes(allowed: State<'_, AllowedPaths>, path: String) -> Result<Value, AppError> {
-    read_authorized_meeting_minutes(&allowed, Path::new(&path))
+async fn meeting_create_mail_draft(subject: String, html_body: String) -> Result<Value, AppError> {
+    tauri::async_runtime::spawn_blocking(move || meeting_outlook::create_draft(subject, html_body))
+        .await.map_err(|_| AppError::new("MEETING_MAIL_FAILED", "生成 Outlook 邮件草稿异常结束，请重试。", true, None))?
+}
+
+#[tauri::command]
+fn meeting_read_minutes(allowed: State<'_, AllowedPaths>, storage: State<'_, Storage>, path: String) -> Result<Value, AppError> {
+    let path = Path::new(&path);
+    storage.meeting_document_read(path, read_authorized_meeting_minutes(&allowed, path)?)
+}
+
+#[tauri::command]
+fn meeting_save_minutes(allowed: State<'_, AllowedPaths>, storage: State<'_, Storage>, path: String, minutes_markdown: String, expected_markdown: String,
+    speaker_names: Option<storage::meeting_documents::SpeakerNames>) -> Result<Value, AppError> {
+    save_authorized_meeting_minutes(&allowed, &storage, Path::new(&path), &minutes_markdown, &expected_markdown, &speaker_names.unwrap_or_default())
+}
+
+fn save_authorized_meeting_minutes(allowed: &AllowedPaths, storage: &Storage, path: &Path, markdown: &str, expected: &str,
+    names: &storage::meeting_documents::SpeakerNames) -> Result<Value, AppError> {
+    // Authorize before opening the metadata database or touching the file.
+    read_authorized_meeting_minutes(allowed, path)?;
+    storage.meeting_document_save(path, markdown, expected, names)
 }
 
 #[tauri::command]
@@ -2199,7 +2220,9 @@ pub fn run() {
             meeting_record_start,
             meeting_record_stop,
             meeting_status,
+            meeting_create_mail_draft,
             meeting_read_minutes,
+            meeting_save_minutes,
             meeting_history_list,
             meeting_vocabulary_list,
             meeting_vocabulary_save,
@@ -2465,6 +2488,24 @@ mod tests {
         );
         allowed.0.lock().insert(dir.path().to_path_buf());
         assert!(read_authorized_meeting_minutes(&allowed, &sibling).is_ok());
+    }
+
+    #[test]
+    fn meeting_minutes_edit_requires_exact_file_authorization() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("选中.md");
+        let sibling = dir.path().join("其他.md");
+        std::fs::write(&selected, "# 选中").unwrap();
+        std::fs::write(&sibling, "# 其他").unwrap();
+        let allowed = AllowedPaths(Arc::new(Mutex::new(HashSet::new())));
+        let storage = Storage::new(&dir.path().join("data")).unwrap();
+        let names = storage::meeting_documents::SpeakerNames::new();
+        assert_eq!(save_authorized_meeting_minutes(&allowed, &storage, &selected, "# 修改", "# 选中", &names).unwrap_err().code, "PATH_NOT_AUTHORIZED");
+        allowed.0.lock().insert(selected.clone());
+        save_authorized_meeting_minutes(&allowed, &storage, &selected, "# 修改", "# 选中", &names).unwrap();
+        assert_eq!(save_authorized_meeting_minutes(&allowed, &storage, &sibling, "# 不应保存", "# 其他", &names).unwrap_err().code, "PATH_NOT_AUTHORIZED");
+        assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "# 其他");
+        assert_eq!(std::fs::read_to_string(&selected).unwrap(), "# 修改");
     }
 
     #[test]

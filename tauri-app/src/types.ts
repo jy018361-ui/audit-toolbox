@@ -94,18 +94,23 @@ export const MeetingStatusSchema = z.object({
 export type MeetingStatus = z.infer<typeof MeetingStatusSchema>;
 
 /** 会议任务与本地纪要预览共用的结果契约。 */
+export const MeetingSpeakerNamesSchema = z.record(z.string().regex(/^[1-9]\d{0,2}$/), z.string().max(60));
 export const MeetingMinutesVersionSchema = z.object({
   kind: z.enum(["content", "timeline"]),
   label: z.string(),
   title: z.string().nullish(),
   minutesPath: z.string().nullish(),
   minutesMarkdown: z.string().nullish(),
+  sourceMarkdown: z.string().optional(),
+  speakerNames: MeetingSpeakerNamesSchema.optional(),
   minutesError: z.string().nullish(),
 });
 export const MeetingResultSchema = z.object({
   title: z.string().optional(),
   minutesPath: z.string().nullish(),
   minutesMarkdown: z.string().nullish(),
+  sourceMarkdown: z.string().optional(),
+  speakerNames: MeetingSpeakerNamesSchema.optional(),
   transcriptPath: z.string().optional(),
   audioPath: z.string().nullish(),
   speakerCount: z.number().optional(),
@@ -113,6 +118,10 @@ export const MeetingResultSchema = z.object({
   minutesVersions: z.array(MeetingMinutesVersionSchema).optional(),
 });
 export type MeetingResult = z.infer<typeof MeetingResultSchema>;
+
+export const MeetingMailDraftSchema = z.object({
+  saved: z.literal(true), displayed: z.boolean(), message: z.string(),
+});
 
 export const MeetingHistoryRowSchema = z.object({
   id: z.string(), jobId: z.string(), title: z.string(), startedAt: z.string(),

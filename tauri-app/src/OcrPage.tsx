@@ -173,6 +173,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     >();
   const scanDialog = useOcrScanProgressDialog();
   const scanControls = useRef({ pause: () => {}, cancel: () => {} });
+  const deferScanPage = useRef<(page: number) => Promise<void>>(async () => {});
   const controllingRef = useRef(false);
   const projectRef = useRef<string | undefined>(undefined);
   const documentRef = useRef<string | undefined>(undefined);
@@ -562,18 +563,45 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
             phase: "scanning",
             pages: [],
           });
-          const updatePageState = (page: number, state: OcrScanPageState) =>
+          const updatePageState = (page: number, state: OcrScanPageState, message?: string, cancellable?: boolean) =>
             setScanView(
               (view) =>
                 view && {
                   ...view,
                   pages: [
                     ...view.pages.filter((item) => item.page !== page),
-                    { page, state },
+                    {
+                      ...view.pages.find((item) => item.page === page),
+                      page, state,
+                      startedAt: view.pages.find((item) => item.page === page)?.startedAt ?? performance.now(),
+                      message,
+                      ...(cancellable !== undefined ? { cancellable } : {}),
+                      ...(["completed", "failed", "cancelled"].includes(state) ? { cancellable: false, cancelling: false } : {}),
+                    },
                   ].sort((a, b) => a.page - b.page),
                 },
             );
           let finished = 0;
+          const pageJobs = new Map<number, string>();
+          const deferredPages = new Set<number>();
+          const deferPage = async (page: number) => {
+            const jobId = pageJobs.get(page);
+            if (!jobId || active.cancelled || active.paused || operation.current !== active || deferScanPage.current !== deferPage || deferredPages.has(page)) return;
+            deferredPages.add(page);
+            setScanControlError("");
+            setScanView(view => view && ({ ...view, pages: view.pages.map(item => item.page === page ? { ...item, cancelling: true } : item) }));
+            try {
+              if (!(await jobCancel(jobId)) && pageJobs.get(page) === jobId)
+                throw new Error(`第 ${page} 页未能取消，请重试。`);
+            } catch (reason) {
+              deferredPages.delete(page);
+              if (mounted.current && operation.current === active && deferScanPage.current === deferPage) {
+                setScanControlError(errorText(reason));
+                setScanView(view => view && ({ ...view, pages: view.pages.map(item => item.page === page ? { ...item, cancelling: false } : item) }));
+              }
+            }
+          };
+          deferScanPage.current = deferPage;
           const inFlight = new Set<number>();
           const updateMessage = () =>
             setMessage(
@@ -624,17 +652,18 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                     id = jobId;
                     registerOcrScanJob(jobId);
                     attachJob(active, jobId);
-                    updatePageState(number, "running");
+                    pageJobs.set(number, jobId);
+                    updatePageState(number, "running", undefined, true);
                   },
                   (event) => {
-                    if (["queued", "memory_paused"].includes(event.phase))
-                      updatePageState(number, event.phase as OcrScanPageState);
+                    if (["queued", "memory_paused", "ocr_request", "ocr_save"].includes(event.phase))
+                      updatePageState(number, event.phase as OcrScanPageState, event.message);
                     else if (
                       !["completed", "failed", "cancelled"].includes(
                         event.phase,
                       )
                     )
-                      updatePageState(number, "running");
+                      updatePageState(number, "running", event.message);
                   },
                   (jobTiming) => {
                     timing.startMs = jobTiming.startMs;
@@ -656,10 +685,11 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
               updatePageState(number, "failed");
               setFailedScanPages(values => ({ ...values, [target.id]: [...new Set([...(values[target.id] ?? []), number])].sort((a, b) => a - b) }));
               failed.push(
-                `${target.name} 第 ${number} 页：${errorText(reason)}`,
+                `${target.name} 第 ${number} 页：${deferredPages.has(number) ? "已结束本次等待，可重试失败页补扫；若该页刚好已保存，将保留已保存结果。" : errorText(reason)}`,
               );
             } finally {
               if (id) active.jobIds.delete(id);
+              pageJobs.delete(number);
               timing.totalMs = performance.now() - pageStarted;
               if (mounted.current) {
                 setScanRuns(values => ({ ...values, [target.id]: {
@@ -677,12 +707,28 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
           const updated = await ocrCall<OcrDocumentDetail>("ocr.document", {
             documentId: target.id,
           });
+          // Cancel can race a committed save and its terminal event. Re-read
+          // revisions before offering retry, so a saved page is never discarded
+          // or submitted again merely because the cancellation event arrived first.
+          const savedDuringCancel = [...deferredPages].filter(number =>
+            (updated.pages.find(page => page.page === number)?.revision ?? 0) >
+            (saved.pages.find(page => page.page === number)?.revision ?? 0));
+          if (mounted.current && savedDuringCancel.length) {
+            setFailedScanPages(values => ({ ...values, [target.id]: (values[target.id] ?? []).filter(page => !savedDuringCancel.includes(page)) }));
+            setScanRuns(values => ({ ...values, [target.id]: { ...values[target.id], pages: values[target.id].pages.map(page => savedDuringCancel.includes(page.page) ? { ...page, status: "completed" } : page) } }));
+            for (const number of savedDuringCancel) {
+              updatePageState(number, "completed");
+              const prefix = `${target.name} 第 ${number} 页：`;
+              for (let i = failed.length - 1; i >= 0; i--) if (failed[i].startsWith(prefix)) failed.splice(i, 1);
+            }
+          }
           if (mounted.current)
             setDetailCache((values) => ({ ...values, [target.id]: updated }));
         } catch (reason) {
           if (active.cancelled) throw reason;
           failed.push(`${target.name}：${errorText(reason)}`);
         } finally {
+          deferScanPage.current = async () => {};
           source?.dispose();
         }
       }
@@ -782,6 +828,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   };
   const presentScan = scanDialog.setProgress;
   useEffect(() => {
+    const deferPage = deferScanPage.current;
     presentScan(
       busy && (scanView || taskView)
         ? {
@@ -796,6 +843,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
             error: scanControlError,
             onPause: () => scanControls.current.pause(),
             onCancel: () => scanControls.current.cancel(),
+            ...(!taskView ? { onDeferPage: (page: number) => { void deferPage(page); } } : {}),
           }
         : undefined,
     );

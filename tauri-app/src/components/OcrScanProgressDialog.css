@@ -95,6 +95,30 @@
   font-size: var(--fs-sm);
   color: var(--text-muted);
 }
+.ocr-scan-active-pages {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+.ocr-scan-active-pages > p {
+  margin: 0;
+}
+.ocr-scan-active-pages > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-variant-numeric: tabular-nums;
+}
+.ocr-scan-slow-note {
+  color: var(--text-muted);
+  line-height: 1.6;
+}
 .ocr-scan-page-details {
   max-height: min(220px, 30dvh);
   overflow-y: auto;

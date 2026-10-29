@@ -11,6 +11,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FileListDirectoryPage from "./FileListDirectoryPage";
+import { publishTaskRestore } from "./restore";
 import { jobStart, listenJobEvents } from "./api";
 import type { ToolManifest } from "./types";
 
@@ -59,6 +60,21 @@ describe("FileListDirectoryPage", () => {
   afterEach(() => {
     cleanup();
     sessionStorage.clear();
+  });
+
+  it("restores a scan-only task and clears another directory's cached result", async () => {
+    publishTaskRestore({
+      jobId: "old-scan", toolId: tool.id, method: "file_list.scan",
+      params: { sourceDir: "C:\\新的目录" }, missingPaths: [], authorizedPathCount: 1,
+    });
+    render(<FileListDirectoryPage tool={tool} />);
+    await waitFor(() => {
+      const draft = JSON.parse(sessionStorage.getItem("audit-toolbox:file-list-directory:v1") ?? "{}");
+      expect(draft.sourceDir).toBe("C:\\新的目录");
+      expect(draft.scan).toBeUndefined();
+      expect(draft.outputPath).toBe("");
+    });
+    expect(jobStart).not.toHaveBeenCalled();
   });
 
   it("uses two steps and generates directly from the output step", async () => {

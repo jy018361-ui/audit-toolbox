@@ -117,7 +117,7 @@ describe("kanzhang history resume", () => {
     });
   });
 
-  it("ignores restores without an archived mapping (sub-step jobs)", async () => {
+  it("re-reads source steps without an archived mapping and uses fresh suggestions", async () => {
     publishTaskRestore({
       jobId: "j2",
       toolId: "kanzhang",
@@ -127,10 +127,22 @@ describe("kanzhang history resume", () => {
       authorizedPathCount: 1,
     });
     render(<KanzhangParityPage tool={tool} />);
-    // 不应用、也不触发读取。
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(jobStart).not.toHaveBeenCalled();
-    const draft = JSON.parse(sessionStorage.getItem(DRAFT_CACHE) ?? "{}");
-    expect(draft.inputPath ?? "").toBe("");
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("kanzhang.inspect", {
+      inputPath: "C:/tmp/je.xlsx", sheet: undefined, headerRow: 1, headerDepth: 1,
+    }));
+    act(() => jobEventsCallback?.({
+      toolId: "kanzhang", jobId: "job-restore-1", phase: "completed",
+      result: {
+        headers: ["科目名称", "金额"], preview: [], dimensions: { rows: 1, columns: 2 },
+        sheets: [], selectedSheet: "", accounts: [],
+        suggestedMapping: { id: [], accountName: ["科目名称"], date: "", functionalAmount: "金额" },
+      },
+    }));
+    await waitFor(() => {
+      const draft = JSON.parse(sessionStorage.getItem(DRAFT_CACHE) ?? "{}");
+      expect(draft.inputPath).toBe("C:/tmp/je.xlsx");
+      expect(draft.mapping.accountName).toEqual(["科目名称"]);
+      expect(draft.inspect.headers).toEqual(["科目名称", "金额"]);
+    });
   });
 });

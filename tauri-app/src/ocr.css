@@ -401,6 +401,34 @@
 .ocr-preview-draggable.is-panning {
   cursor: grabbing;
 }
+.ocr-reading-table-scroll {
+  max-width: 100%;
+  overflow: auto;
+  margin-block: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: normal;
+}
+.ocr-reading-table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-size: 13px;
+}
+.ocr-reading-table caption {
+  text-align: left;
+  padding: 8px 10px;
+  color: var(--muted-foreground);
+}
+.ocr-reading-table td {
+  border: 1px solid var(--border);
+  min-width: 72px;
+  max-width: 300px;
+  padding: 8px;
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .ocr-preview-viewport:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: -2px;

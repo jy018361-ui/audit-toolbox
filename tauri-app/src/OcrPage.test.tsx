@@ -221,6 +221,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -790,7 +791,9 @@ it("确认自定义范围重扫只处理当前文件所选页面，并携带各�
 });
 
 function prepareConcurrentPages(latePage?: number) {
-  vi.mocked(openOcrSource).mockResolvedValueOnce({
+  // Preview and scan can open the same source in either order. Both must see
+  // the same fixture page count instead of competing for a one-shot response.
+  vi.mocked(openOcrSource).mockResolvedValue({
     totalPages: 8,
     render: async () => "data:image/png;base64,aW1hZ2U=",
     dispose: mocks.dispose,
@@ -865,6 +868,73 @@ it("扫描总进度统一暂停所有页和后续派发，恢复后继续，完�
   });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(screen.getByRole("button", { name: "开始扫描" })).toBeEnabled();
+});
+
+it("慢页单独结束等待，取消失败可重试，不影响其余并发页，补扫仅提交该页", async () => {
+  let now = 1000;
+  vi.spyOn(performance, "now").mockImplementation(() => now);
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  await openDocument(false, true);
+  const pending = prepareConcurrentPages();
+  mocks.cancel.mockRejectedValueOnce(new Error("合成取消失败")).mockImplementation(async () => true);
+  fireEvent.click(screen.getByRole("button", { name: "开始扫描" }));
+  await waitFor(() => expect(pending.size).toBe(5));
+  now = 41000;
+  act(() => vi.advanceTimersByTime(1000));
+  const deferButton = screen.getByRole("button", { name: "结束第 2 页等待，稍后补扫" });
+  fireEvent.click(deferButton);
+  await screen.findByText("合成取消失败");
+  expect(deferButton).toBeEnabled();
+  expect(mocks.cancel).toHaveBeenCalledTimes(1);
+  fireEvent.click(deferButton);
+  await waitFor(() => expect(mocks.cancel).toHaveBeenCalledTimes(2));
+  expect(mocks.cancel.mock.calls.map(call => call[0])).toEqual(["page-2", "page-2"]);
+  expect(deferButton).toBeDisabled();
+  // A slot is released only after that worker actually settles.
+  expect(pending.has(7)).toBe(false);
+  await act(async () => { pending.get(2)!.fail(); });
+  await waitFor(() => expect(pending.has(7)).toBe(true));
+  await act(async () => { for (const page of [3, 4, 5, 6]) pending.get(page)!.finish(); });
+  await waitFor(() => expect(pending.has(8)).toBe(true));
+  await act(async () => { pending.get(7)!.finish(); pending.get(8)!.finish(); });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(detail.pages.map(page => page.page).sort()).toEqual([1, 3, 4, 5, 6, 7, 8]);
+  expect(mocks.cancel).toHaveBeenCalledTimes(2);
+  expect(screen.getByText(/第 2 页：已结束本次等待/)).toBeInTheDocument();
+  vi.mocked(openOcrSource).mockResolvedValueOnce({ totalPages: 8, render: mocks.renderSource, dispose: mocks.dispose });
+  fireEvent.click(screen.getByRole("button", { name: /重试失败页/ }));
+  await waitFor(() => expect(mocks.job).toHaveBeenCalledTimes(8));
+  expect(mocks.job.mock.lastCall?.[1]).toEqual(expect.objectContaining({ page: 2, expectedRevision: 0 }));
+  await act(async () => { pending.get(2)!.finish(); });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(detail.pages).toHaveLength(8);
+});
+
+it("取消事件与保存竞争时以数据库修订为准，已保存慢页不会成为失败补扫项", async () => {
+  let now = 1000;
+  vi.spyOn(performance, "now").mockImplementation(() => now);
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  await openDocument(false, true);
+  const pending = prepareConcurrentPages();
+  fireEvent.click(screen.getByRole("button", { name: "开始扫描" }));
+  await waitFor(() => expect(pending.size).toBe(5));
+  now = 41000;
+  act(() => vi.advanceTimersByTime(1000));
+  fireEvent.click(screen.getByRole("button", { name: "结束第 2 页等待，稍后补扫" }));
+  await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith("page-2"));
+  await act(async () => {
+    detail.pages.push({ ...structuredClone(detail.pages[0]), page: 2, revision: 1, text: "取消之前刚保存的结果" });
+    pending.get(2)!.fail();
+  });
+  await waitFor(() => expect(pending.has(7)).toBe(true));
+  await act(async () => { for (const page of [3, 4, 5, 6]) pending.get(page)!.finish(); });
+  await waitFor(() => expect(pending.has(8)).toBe(true));
+  await act(async () => { pending.get(7)!.finish(); pending.get(8)!.finish(); });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.queryByRole("button", { name: /重试失败页/ })).toBeNull();
+  expect(screen.queryByText(/第 2 页：已结束本次等待/)).toBeNull();
+  expect(detail.pages.find(page => page.page === 2)?.text).toBe("取消之前刚保存的结果");
+  expect(mocks.job).toHaveBeenCalledTimes(7);
 });
 
 it("默认最多五页并发，乱序完成按完成数量推进，失败不阻塞其他页并显示分段耗时", async () => {

@@ -305,7 +305,7 @@ fn build_minutes_prompt(detail: &str, has_speakers: bool, kind: MinutesKind) -> 
             "本次只生成「按内容版」：讨论要点按内容和议题分类，同一议题在不同时段的讨论合并归纳；保留方案变化的先后关系，区分最初建议、后续调整与最终决定。标题末尾标注「（按内容）」。"
         }
         MinutesKind::Timeline => {
-            "本次只生成「按时间版」：讨论要点严格按原始转写顺序，以连续的讨论阶段分小节，展现开场、讨论、调整和最终决定的过程；同一议题稍后再次出现时仍在后续位置记录，不得前移合并。只引用转写稿已有的时间戳作为相对定位，不插值或编造起止时间；没有时间戳时用「第一阶段、第二阶段」等顺序标识。此版仍为摘要，不是逐字转写稿。标题末尾标注「（按时间）」。"
+            "本次只生成「按时间版」：讨论要点严格按原始转写顺序，以连续的讨论阶段分小节，展现开场、讨论、调整和最终决定的过程；同一议题稍后再次出现时仍在后续位置记录，不得前移合并。不要输出录音时间轴、相对时间戳或阶段起止时间，用「第一阶段、第二阶段」等顺序标识。会议中明确提及的实际会议时间和截止日期仍按事实保留。此版仍为摘要，不是逐字转写稿。标题末尾标注「（按时间）」。"
         }
     };
     let participant_rules = if has_speakers {
@@ -379,7 +379,14 @@ fn summarize_with_llm(
     if minutes_title(markdown).is_none() {
         return Err("纪要生成结果缺少有效的内容标题，请从转写稿重新生成。".into());
     }
-    Ok(markdown.to_string())
+    Ok(if kind == MinutesKind::Timeline { without_timeline_markers(markdown) } else { markdown.to_string() })
+}
+
+fn without_timeline_markers(markdown: &str) -> String {
+    let time = r"\d{1,3}:[0-5]\d(?::[0-5]\d)?(?:[.,]\d{1,3})?";
+    let bracket = regex::Regex::new(&format!(r"[\[【]\s*{time}(?:\s*[-–—~至]\s*{time})?\s*[\]】][ \t]*")).unwrap();
+    let prefix = regex::Regex::new(&format!(r"^((?:\s{{0,3}}#{{1,6}}\s+|\s*[-*+]\s+|\s*\d+[.)]\s+)?){time}(?:\s*[-–—~至]\s*{time})?[ \t]+(\S)")).unwrap();
+    markdown.lines().map(|line| prefix.replace(&bracket.replace_all(line, ""), "$1$2").into_owned()).collect::<Vec<_>>().join("\n")
 }
 
 /// 取正文首个非空行的一级标题，结果卡与文件共用同一个内容标题。
@@ -440,6 +447,39 @@ pub(crate) fn read_minutes(path: &Path) -> Result<Value, AppError> {
         "minutesPath": path.to_string_lossy(),
         "minutesMarkdown": markdown,
     }))
+}
+
+/// Only overwrite the exact version the editor read. Write beside the target,
+/// then rename with replacement (Windows MoveFileExW); never delete it first.
+pub(crate) fn save_minutes(path: &Path, markdown: &str, expected: &str) -> Result<Value, AppError> {
+    static SAVE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    let _guard = SAVE_LOCK.lock();
+    if markdown.len() > 2 * 1024 * 1024 {
+        return Err(job_error("MEETING_MINUTES_TOO_LARGE", "会议纪要超过 2 MB，请缩短正文后保存。", None));
+    }
+    let current = read_minutes(path)?;
+    if current["minutesMarkdown"].as_str() != Some(expected) {
+        return Err(job_error("MEETING_MINUTES_CONFLICT", "纪要文件已被其他操作修改。草稿已保留，请重新打开文件核对后再编辑。", None));
+    }
+    let temporary = path.with_file_name(format!(".meeting-edit-{}.tmp", uuid::Uuid::new_v4()));
+    let write_error = |e: std::io::Error| job_error(
+        "MEETING_MINUTES_SAVE_FAILED", "无法保存会议纪要，请检查文件是否被占用或目录是否可写。草稿已保留。", Some(e.to_string()));
+    let saved = (|| {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(write_error)?;
+        file.write_all(markdown.as_bytes()).map_err(write_error)?;
+        file.sync_all().map_err(write_error)?;
+        drop(file);
+        // Check once more after writing, before replacing the source.
+        if read_minutes(path)?["minutesMarkdown"].as_str() != Some(expected) {
+            return Err(job_error("MEETING_MINUTES_CONFLICT", "纪要文件已被其他操作修改。草稿已保留，请重新打开文件核对后再编辑。", None));
+        }
+        fs::rename(&temporary, path).map_err(write_error)?;
+        Ok(json!({"minutesPath": path.to_string_lossy(), "minutesMarkdown": markdown,
+            "title": minutes_title(markdown).unwrap_or_else(|| "会议纪要".into())}))
+    })();
+    if saved.is_err() { let _ = fs::remove_file(&temporary); }
+    saved
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -514,6 +554,70 @@ fn finish_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meeting_timeline_omits_recording_positions_but_keeps_deadlines() {
+        let source = "# 会议（按时间）\n### [00:01–02:30] 开场\n[02:30] 讨论\n- 03:10 补充\n会议时间：10:00–11:00\n截止时间：周五18:00";
+        let clean = without_timeline_markers(source);
+        assert!(!clean.contains("00:01"));
+        assert!(!clean.contains("02:30"));
+        assert!(!clean.contains("03:10"));
+        assert!(clean.contains("### 开场"));
+        assert!(clean.contains("会议时间：10:00–11:00"));
+        assert!(clean.contains("截止时间：周五18:00"));
+    }
+
+    #[test]
+    fn meeting_minutes_edits_replace_only_selected_file_and_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("按内容.md");
+        let timeline = dir.path().join("按时间.md");
+        let transcript = dir.path().join("转写稿.txt");
+        let original = "# 原标题\r\n\r\n原始纪要。";
+        let edited = "# 修订标题\n\n修改中文与 English\n\n|事项|责任人|\n|---|---|\n|复核|张三|";
+        fs::write(&path, original).unwrap();
+        fs::write(&timeline, "# 时间版\n保留").unwrap();
+        fs::write(&transcript, "[00:00] 原始发言").unwrap();
+        assert_eq!(save_minutes(&path, edited, original).unwrap()["title"], "修订标题");
+        assert_eq!(read_minutes(&path).unwrap()["minutesMarkdown"], edited);
+        assert_eq!(fs::read_to_string(&timeline).unwrap(), "# 时间版\n保留");
+        assert_eq!(fs::read_to_string(&transcript).unwrap(), "[00:00] 原始发言");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+        // Users may intentionally clear a document, then edit it again.
+        save_minutes(&path, "", edited).unwrap();
+        assert_eq!(read_minutes(&path).unwrap()["minutesMarkdown"], "");
+    }
+
+    #[test]
+    fn meeting_minutes_edits_reject_conflicts_invalid_formats_and_large_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("纪要.md");
+        fs::write(&path, "# 已被外部修改").unwrap();
+        assert_eq!(save_minutes(&path, "新内容", "# 旧内容").unwrap_err().code, "MEETING_MINUTES_CONFLICT");
+        assert_eq!(save_minutes(&path, &"x".repeat(2 * 1024 * 1024 + 1), "# 已被外部修改").unwrap_err().code, "MEETING_MINUTES_TOO_LARGE");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# 已被外部修改");
+        let transcript = dir.path().join("原稿.txt");
+        fs::write(&transcript, "原稿").unwrap();
+        assert_eq!(save_minutes(&transcript, "修改", "原稿").unwrap_err().code, "MEETING_MINUTES_FORMAT");
+        assert_eq!(fs::read_to_string(&transcript).unwrap(), "原稿");
+        assert!(save_minutes(&dir.path().join("不存在.md"), "修改", "").is_err());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn meeting_minutes_failed_replacement_keeps_original_and_removes_temporary() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("占用.md");
+        fs::write(&path, "# 原文件").unwrap();
+        // Allow reads but deny delete/rename, as an external editor may do.
+        let locked = fs::OpenOptions::new().read(true).share_mode(1).open(&path).unwrap();
+        assert_eq!(save_minutes(&path, "# 修订", "# 原文件").unwrap_err().code, "MEETING_MINUTES_SAVE_FAILED");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# 原文件");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        drop(locked);
+        save_minutes(&path, "# 修订", "# 原文件").unwrap();
+    }
 
     #[test]
     fn prompt_contains_fixed_sections_and_never_triggers_llm_json_mode() {
@@ -631,8 +735,8 @@ mod tests {
             assert!(content.contains("同一议题在不同时段的讨论合并归纳"));
             assert!(timeline.contains("严格按原始转写顺序"));
             assert!(timeline.contains("不得前移合并"));
-            assert!(timeline.contains("不插值或编造起止时间"));
-            assert!(timeline.contains("没有时间戳时"));
+            assert!(timeline.contains("不要输出录音时间轴"));
+            assert!(timeline.contains("实际会议时间和截止日期仍按事实保留"));
             assert!(!timeline.contains("按议题归纳"));
         }
     }

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::AppError;
 #[path = "ocr_content.rs"]
 mod ocr_content;
-pub(crate) use ocr_content::{has_image_markup, has_latex_layout, has_markdown_heading, looks_like_ocr_payload, readable_ocr_content, readable_ocr_text};
+pub(crate) use ocr_content::{has_image_markup, has_latex_layout, has_markdown_heading, has_markdown_table, looks_like_ocr_payload, readable_ocr_content, readable_ocr_text};
 
 const DEFAULT_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const DEFAULT_MODEL: &str = "qwen3.5-ocr";

@@ -261,7 +261,7 @@ it("returns to the top when navigating away from a long settings page", async ()
     await screen.findByRole("heading", { name: "设置" });
     fireEvent.click(screen.getAllByRole("link", { name: "工作台" })[0]);
     await screen.findByRole("heading", { name: "今天要处理什么？" });
-    expect(scrollTo).toHaveBeenCalledWith(0, 0);
+    expect(scrollTo).toHaveBeenCalledWith({ left: 0, top: 0, behavior: "instant" });
   } finally {
     vi.unstubAllGlobals();
   }

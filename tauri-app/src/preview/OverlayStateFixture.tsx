@@ -14,9 +14,11 @@ import type { JobEvent } from "@/types";
 import "./OverlayStateFixture.css";
 import { OcrScanProgressDialog } from "@/components/OcrScanProgressDialog";
 
-function OcrScanFixture() {
+function OcrScanFixture({ tail = false }: { tail?: boolean }) {
   const [paused, setPaused] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [deferred, setDeferred] = useState(false);
+  const startedAt = useRef(performance.now() - 90000).current;
   return (
     <main className="overlay-state-fixture">
       <h1>OCR 扫描进度预览</h1>
@@ -25,14 +27,18 @@ function OcrScanFixture() {
         progress={{
           fileName: "项目贷款合同_2026.pdf",
           fileIndex: 1,
-          fileCount: 2,
-          completed: 8,
+          fileCount: tail ? 1 : 2,
+          completed: tail ? deferred ? 30 : 29 : 8,
           total: 30,
           phase: "scanning",
           paused,
           stopping,
           controlling: false,
-          pages: Array.from({ length: 13 }, (_, index) => ({
+          pages: tail ? Array.from({ length: 30 }, (_, index) => ({
+            page: index + 1,
+            state: index === 10 ? deferred ? "failed" : "ocr_request" : "completed",
+            startedAt, cancellable: index === 10 && !deferred,
+          })) : Array.from({ length: 13 }, (_, index) => ({
             page: index + 1,
             state:
               index < 8
@@ -45,6 +51,7 @@ function OcrScanFixture() {
           })),
           onPause: () => setPaused(!paused),
           onCancel: () => setStopping(true),
+          onDeferPage: tail ? () => setDeferred(true) : undefined,
         }}
       />
     </main>
@@ -290,6 +297,7 @@ export function OverlayStateFixture() {
     new URLSearchParams(window.location.search).get("overlay-fixture") ??
     "confirm";
   if (scenario === "ocr-scan") return <OcrScanFixture />;
+  if (scenario === "ocr-tail") return <OcrScanFixture tail />;
   const jobs =
     scenario === "job-multi"
       ? Array.from({ length: 8 }, (_, index) =>

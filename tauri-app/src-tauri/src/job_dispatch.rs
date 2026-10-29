@@ -36,7 +36,9 @@ impl WorkerLanes {
 
     #[cfg(test)]
     pub(crate) fn with_ocr_limit(limit: usize) -> Self {
-        assert!((1..=OCR_PAGE_WORKER_LIMIT).contains(&limit));
+        // Manual throughput probes may compare eight workers. This test-only
+        // constructor never changes the application's five-worker default.
+        assert!((1..=8).contains(&limit));
         Self { ocr_limit: limit, ..Self::new() }
     }
 

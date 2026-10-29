@@ -143,7 +143,7 @@ fn visible_field(key: &str) -> bool {
 fn canonical_field(key: &str) -> &str {
     match key {
         "source_documents" => "sourceFile",
-        "pages" => "sourcePage",
+        "page" | "pages" | "source_page" => "sourcePage",
         _ => key,
     }
 }
@@ -224,7 +224,7 @@ fn readable_extraction_row(data: &Value) -> Value {
     let mut row = data.as_object().cloned().unwrap_or_default();
     // Old model output duplicates provenance under aliases. Prefer the already
     // verified canonical value; otherwise retain the alias's source information.
-    for (alias, canonical) in [("source_documents", "sourceFile"), ("pages", "sourcePage")] {
+    for (alias, canonical) in [("source_documents", "sourceFile"), ("pages", "sourcePage"), ("page", "sourcePage"), ("source_page", "sourcePage")] {
         if let Some(value) = row.remove(alias)
             && row.get(canonical).is_none_or(|v| value_text(v).trim().is_empty())
         {
@@ -259,6 +259,57 @@ fn section_row(s: &mut Worksheet, index: &mut u32, values: &[String]) -> Result<
         &Format::new().set_bold().set_background_color(0xEAF2F1),
     )
     .map_err(xlsx_error)?;
+    Ok(())
+}
+
+/// Use the same source-page blocks as recognized text. Cross-page evidence is
+/// one verified record with its complete page label, never copied per page.
+fn extraction_blocks(
+    s: &mut Worksheet,
+    r: &mut u32,
+    doc: &Document,
+    extraction: &Value,
+    scenario: &str,
+    pause: &PauseCheckpoint,
+) -> Result<(), AppError> {
+    let rows: Vec<Value> = extraction["rows"].as_array().into_iter().flatten()
+        .map(readable_extraction_row).collect();
+    section_row(s, r, &["场景摘录".into(), scenario.into(), "摘录结果".into()])?;
+    if rows.is_empty() {
+        row(s, r, &["未发现符合场景事项".into()])?;
+        return Ok(());
+    }
+    let mut columns = extraction_columns(extraction, false);
+    let mut seen: BTreeSet<String> = columns.iter().map(|column| column.0.clone()).collect();
+    for data in &rows {
+        if let Some(object) = data.as_object() {
+            for key in object.keys().filter(|key| visible_field(key)) {
+                if seen.insert(key.clone()) { columns.push((key.clone(), field_label(key).into())); }
+            }
+        }
+    }
+    columns.retain(|(key, _)| !matches!(canonical_field(key), "sourceFile" | "sourcePage"));
+    let mut groups: Vec<(String, Vec<&Value>)> = vec![];
+    for data in &rows {
+        let page = value_text(&data["sourcePage"]);
+        let page = if page.trim().is_empty() { "具体出处待核对".into() } else { page };
+        if let Some((_, group)) = groups.iter_mut().find(|(label, _)| label == &page) { group.push(data); }
+        else { groups.push((page, vec![data])); }
+    }
+    for (page, entries) in groups {
+        pause.wait()?;
+        section_row(s, r, &["来源文件".into(), doc.name.clone(), "来源页码".into(), page, "场景摘录".into()])?;
+        row(s, r, &columns.iter().map(|(_, label)| label.clone()).collect::<Vec<_>>())?;
+        for data in entries {
+            pause.wait()?;
+            row(s, r, &columns.iter().map(|(key, _)| value_text(&data[key])).collect::<Vec<_>>())?;
+        }
+        row(s, r, &[])?;
+    }
+    for column in 0..columns.len().min(16384) {
+        s.set_column_width(column as u16, 45).map_err(xlsx_error)?;
+        s.set_column_format(column as u16, &Format::new().set_text_wrap().set_num_format("@")).map_err(xlsx_error)?;
+    }
     Ok(())
 }
 
@@ -339,51 +390,8 @@ fn document_blocks(
     }
     for extraction in store.extractions(&doc.id)? {
         pause.wait()?;
-        section_row(
-            s,
-            r,
-            &[
-                "场景摘录".into(),
-                scenario_label(extraction["scenarioId"].as_str().unwrap_or("")).into(),
-                "摘录结果".into(),
-            ],
-        )?;
-        let rows: Vec<Value> = extraction["rows"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(readable_extraction_row)
-            .collect();
-        let mut columns = extraction_columns(&extraction, false);
-        let mut seen: BTreeSet<String> = columns.iter().map(|column| column.0.clone()).collect();
-        for data in &rows {
-            if let Some(object) = data.as_object() {
-                for key in object.keys() {
-                    if seen.insert(key.clone()) {
-                        columns.push((key.clone(), field_label(key).into()));
-                    }
-                }
-            }
-        }
-        row(
-            s,
-            r,
-            &columns
-                .iter()
-                .map(|column| column.1.clone())
-                .collect::<Vec<_>>(),
-        )?;
-        for data in rows {
-            pause.wait()?;
-            row(
-                s,
-                r,
-                &columns
-                    .iter()
-                    .map(|(key, _)| value_text(&data[key]))
-                    .collect::<Vec<_>>(),
-            )?;
-        }
+        extraction_blocks(s, r, doc, &extraction,
+            scenario_label(extraction["scenarioId"].as_str().unwrap_or("")), pause)?;
     }
     row(s, r, &[])?;
     Ok(())
@@ -501,55 +509,7 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
             )?;
             let extract_name = s.name();
             let mut r = 0;
-            row(
-                s,
-                &mut r,
-                &[
-                    "来源文件".into(),
-                    doc.name.clone(),
-                    "摘录结果".into(),
-                ],
-            )?;
-            let rows: Vec<Value> = extraction["rows"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(readable_extraction_row)
-                .collect();
-            let mut columns = extraction_columns(&extraction, false);
-            let mut seen: BTreeSet<String> = columns.iter().map(|v| v.0.clone()).collect();
-            for data in &rows {
-                if let Some(object) = data.as_object() {
-                    for key in object.keys() {
-                        if seen.insert(key.clone()) {
-                            columns.push((key.clone(), field_label(key).into()));
-                        }
-                    }
-                }
-            }
-            row(
-                s,
-                &mut r,
-                &columns.iter().map(|v| v.1.clone()).collect::<Vec<_>>(),
-            )?;
-            for column in 0..columns.len().min(16384) {
-                s.set_column_width(column as u16, 32).map_err(xlsx_error)?;
-                s.set_column_format(
-                    column as u16,
-                    &Format::new().set_text_wrap().set_num_format("@"),
-                )
-                .map_err(xlsx_error)?;
-            }
-            for data in rows {
-                row(
-                    s,
-                    &mut r,
-                    &columns
-                        .iter()
-                        .map(|(key, _)| value_text(&data[key]))
-                        .collect::<Vec<_>>(),
-                )?;
-            }
+            extraction_blocks(s, &mut r, doc, &extraction, scenario, pause)?;
             entries.push(vec![
                 doc.name.clone(),
                 String::new(),
@@ -633,33 +593,7 @@ fn build_extractions(store: &Store, docs: &[Document], ids: &BTreeSet<String>, s
             let scenario_id = extraction["scenarioId"].as_str().unwrap_or("");
             let scenario_name = project["customScenarios"].as_array().into_iter().flatten()
                 .find(|entry| entry["id"] == scenario_id).and_then(|entry| entry["name"].as_str()).unwrap_or_else(|| scenario_label(scenario_id));
-            section_row(target, &mut r, &["场景摘录".into(), scenario_name.into(), "本次摘录结果".into()])?;
-            let rows: Vec<Value> = extraction["rows"].as_array().into_iter().flatten().map(readable_extraction_row).collect();
-            if rows.is_empty() {
-                row(target, &mut r, &["未发现符合场景事项".into()])?;
-                continue;
-            }
-            let mut columns = extraction_columns(&extraction, true);
-            let mut seen: BTreeSet<String> = columns.iter().map(|column| column.0.clone()).collect();
-            for data in &rows {
-                if let Some(object) = data.as_object() {
-                    for key in object.keys().filter(|key| visible_field(key)) {
-                        if seen.insert(key.clone()) { columns.push((key.clone(), field_label(key).into())); }
-                    }
-                }
-            }
-            if !seen.contains("sourcePage") { columns.push(("sourcePage".into(), "来源页码".into())); }
-            row(target, &mut r, &columns.iter().map(|column| column.1.clone()).collect::<Vec<_>>())?;
-            for data in rows {
-                pause.wait()?;
-                row(target, &mut r, &columns.iter().map(|(key, _)| if key == "sourceFile" { doc.name.clone() }
-                    else if key == "sourcePage" && data[key].is_null() { "具体出处待核对".into() }
-                    else { value_text(&data[key]) }).collect::<Vec<_>>())?;
-            }
-            for column in 0..columns.len().min(16384) {
-                target.set_column_width(column as u16, if column == 0 { 36 } else { 45 }).map_err(xlsx_error)?;
-                target.set_column_format(column as u16, &Format::new().set_text_wrap().set_num_format("@")).map_err(xlsx_error)?;
-            }
+            extraction_blocks(target, &mut r, doc, &extraction, scenario_name, pause)?;
         }
         row(target, &mut r, &[])?;
         if single_sheet { shared_row = r; }
@@ -907,6 +841,59 @@ mod tests {
         let mut invalid = params; invalid["extractionIds"] = json!(["other-project-id"]);
         assert!(export(&store,&invalid,&|_,_,_,_|{},&pause).is_err());
         assert_eq!(store.project(project["id"].as_str().unwrap()).unwrap()["outputDirectory"],json!(dir.path().to_string_lossy()));
+    }
+    #[test]
+    fn extraction_exports_stack_source_page_blocks_in_every_mode() {
+        use calamine::{Data, Reader};
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("db")).unwrap();
+        let project = store.save_project(&json!({"name":"分块摘录"})).unwrap();
+        let mut docs = vec![];
+        let mut ids = vec![];
+        let long = "证据😀".repeat(17000);
+        for name in ["甲合同.pdf", "乙合同.pdf"] {
+            let path = dir.path().join(name); fs::write(&path, b"synthetic").unwrap();
+            let doc = store.import(project["id"].as_str().unwrap(), &path).unwrap();
+            let saved = store.save_extraction(&json!({"documentId":doc.id,"sourceRevision":0,"scenarioId":"custom","prompts":[],
+                "columns":[{"key":"sourceFile","label":"来源文件"},{"key":"sourcePage","label":"来源页码"},{"key":"amount","label":"金额"},{"key":"evidence","label":"逐字证据"}],
+                "rows":[{"sourceFile":"错误模型文件名.pdf","sourcePage":"2","amount":"00100","evidence":"同页第一项"},
+                    {"pages":[3,4],"amount":"=1+1","evidence":long},
+                    {"sourcePage":"2","amount":"00200","evidence":"同页第二项"},
+                    {"amount":"00300","evidence":"未定位证据","_trace":"不可导出"}]})).unwrap();
+            ids.push(saved["id"].as_str().unwrap().to_owned()); docs.push(doc);
+        }
+        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        for mode in ["single_sheet", "per_document", "individual", "combined"] {
+            for only in [true, false] {
+                let result = export(&store,&json!({"projectId":project["id"],"documentIds":docs.iter().map(|d|&d.id).collect::<Vec<_>>(),"outputDir":dir.path(),"mode":mode,"extractionsOnly":only,"extractionIds":ids}),&|_,_,_,_|{},&pause).unwrap();
+                let mut headers = 0;
+                let mut entries = 0;
+                let mut restored = String::new();
+                for output in result["outputPaths"].as_array().unwrap() {
+                    let mut book = calamine::open_workbook_auto(output.as_str().unwrap()).unwrap();
+                    for name in book.sheet_names() {
+                        if !only && (name == "目录" || name.ends_with("完整原文")) { continue; }
+                        let range = book.worksheet_range(&name).unwrap();
+                        let lines = range.rows().collect::<Vec<_>>();
+                        for (i, row) in lines.iter().enumerate() {
+                            if row.first() == Some(&Data::String("来源文件".into())) && row.get(2) == Some(&Data::String("来源页码".into())) {
+                                headers += 1;
+                                assert!(matches!(row.get(1), Some(Data::String(s)) if s == "甲合同.pdf" || s == "乙合同.pdf"));
+                                assert!(matches!(row.get(3), Some(Data::String(s)) if ["2", "3\n4", "具体出处待核对"].contains(&s.as_str())));
+                                assert_eq!(lines[i+1][0], Data::String("金额".into()));
+                                assert!(!lines[i+1].iter().any(|v| matches!(v, Data::String(s) if s == "来源文件" || s == "来源页码")));
+                            }
+                            if row.first().is_some_and(|v| matches!(v, Data::String(s) if ["00100","00200","00300","=1+1"].contains(&s.as_str()))) { entries += 1; }
+                            if let Some(Data::String(value)) = row.get(1) { if !value.is_empty() && value.chars().all(|ch| "证据😀".contains(ch)) { restored.push_str(value); } }
+                            assert!(!row.iter().any(|v| matches!(v, Data::String(s) if s == "错误模型文件名.pdf" || s == "不可导出")));
+                        }
+                    }
+                }
+                assert_eq!(headers, 6, "{mode}, only={only}");
+                assert_eq!(entries, 8, "{mode}, only={only}");
+                assert_eq!(restored, long.repeat(2));
+            }
+        }
     }
     #[test]
     fn unicode_chunks_are_lossless_and_within_excel_limit() {
@@ -1206,10 +1193,7 @@ mod tests {
         assert!(!all.contains("实际使用的提示词"));
         assert!(!all.contains("场景规则版本"));
         assert!(!all.contains("{\""));
-        assert_eq!(
-            result.get((2, 0)),
-            Some(&Data::String("00123456789012345678901234567890".into()))
-        );
+        assert!(result.rows().flatten().any(|cell| cell == &Data::String("00123456789012345678901234567890".into())));
         assert_eq!(
             value_text(&json!({"condition":{"value":"=1+1","enabled":true}})),
             "条件：enabled：是\n内容：=1+1"

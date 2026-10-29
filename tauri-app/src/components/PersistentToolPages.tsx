@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { telemetryTrack } from "../api";
 import { liveToolPageIds, markToolPageLive } from "../toolPageActivity";
@@ -39,6 +39,7 @@ export function PersistentToolPages({
   const activeToolId = toolIdFromPathname(pathname);
   const [visitedToolIds, setVisitedToolIds] = useState<string[]>([]);
   const wrappers = useRef(new Map<string, HTMLDivElement>());
+  const scrollPositions = useRef(new Map<string, Map<HTMLElement, { top: number; left: number }>>());
   const keepAliveKey = [...new Set(keepAliveToolIds)].sort().join("\0");
   const keepAlive = useMemo(
     () => new Set(keepAliveKey ? keepAliveKey.split("\0") : []),
@@ -67,6 +68,26 @@ export function PersistentToolPages({
       liveToolPageIds(),
     );
   }, [activeToolId, keepAlive, maxHiddenPages, visitedToolIds]);
+
+  useEffect(() => {
+    for (const toolId of scrollPositions.current.keys()) {
+      if (!mountedToolIds.includes(toolId)) scrollPositions.current.delete(toolId);
+    }
+  }, [mountedToolIds]);
+
+  useLayoutEffect(() => {
+    if (!activeToolId) return;
+    const wrapper = wrappers.current.get(activeToolId);
+    const positions = scrollPositions.current.get(activeToolId);
+    if (!wrapper || !positions) return;
+    for (const [element, position] of positions) {
+      if (!wrapper.contains(element)) positions.delete(element);
+      else {
+        element.scrollTop = position.top;
+        element.scrollLeft = position.left;
+      }
+    }
+  }, [activeToolId]);
 
   useEffect(() => {
     const focused = document.activeElement;
@@ -107,6 +128,17 @@ export function PersistentToolPages({
             onClick={() => markToolPageLive(toolId)}
             onChange={() => markToolPageLive(toolId)}
             onDragEnter={() => markToolPageLive(toolId)}
+            onScrollCapture={(event) => {
+              if (!active || !(event.target instanceof HTMLElement)) return;
+              const element = event.target;
+              const positions = scrollPositions.current.get(toolId) ?? new Map();
+              for (const savedElement of positions.keys()) {
+                if (!savedElement.isConnected) positions.delete(savedElement);
+              }
+              positions.set(element, { top: element.scrollTop, left: element.scrollLeft });
+              scrollPositions.current.set(toolId, positions);
+              if (element.scrollTop || element.scrollLeft) markToolPageLive(toolId);
+            }}
           >
             {renderPage(toolId)}
           </div>

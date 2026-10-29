@@ -39,6 +39,8 @@ vi.mock("./api", () => ({
   meetingReadMinutes: vi.fn(async (path: string) => ({
     minutesPath: path, minutesMarkdown: "# 已有纪要标题\n\n原有纪要内容。",
   })),
+  meetingSaveMinutes: vi.fn(async (path: string, minutesMarkdown: string) => ({ minutesPath: path, minutesMarkdown })),
+  meetingCreateMailDraft: vi.fn(async () => ({saved:true as const,displayed:true,message:"已生成 Outlook 邮件草稿。"})),
   meetingHistoryList: vi.fn(async () => []),
   meetingHistoryGet: vi.fn(async () => ({})),
   meetingReadTranscript: vi.fn(async () => "[00:00] 原始发言。"),
@@ -71,6 +73,105 @@ beforeEach(async () => {
   vi.mocked(api.meetingHistoryList).mockResolvedValue([]);
   vi.mocked(api.meetingHistoryGet).mockResolvedValue({});
   vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
+  vi.mocked(api.meetingSaveMinutes).mockImplementation(async (path, minutesMarkdown, _expected, speakerNames = {}) => ({
+    minutesPath: path, minutesMarkdown: replaceSpeakerNames(minutesMarkdown, speakerNames), sourceMarkdown: minutesMarkdown, speakerNames,
+  }));
+});
+
+import { replaceSpeakerNames } from "./meetingSpeakerNames";
+import { ConfirmDialogHost } from "./components/ConfirmDialog";
+
+describe("会议正文编辑及姓名对应", () => {
+  const content = "# 内容版\n\n说话人1安排复核，张三提供资料。说话人10补充意见。\n\n|责任人|事项|\n|---|---|\n|说话人2|核对金额|";
+  const timeline = "# 时间版\n\n[00:00] 说话人1发言。\n[00:10] 说话人2回复。";
+  const result = {
+    transcriptPath: "C:/data/meeting-a.txt",
+    minutesVersions: [
+      { kind: "content" as const, label: "按内容", minutesPath: "C:/data/content.md", minutesMarkdown: content },
+      { kind: "timeline" as const, label: "按时间", minutesPath: "C:/data/timeline.md", minutesMarkdown: timeline },
+    ],
+  };
+  async function open() {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false,
+      latestJob: {jobId:"edit-job",toolId:tool.id,phase:"completed",current:1,total:1,message:"完成",severity:"success",outputPaths:[],result}});
+    render(<><MeetingMinutesPage tool={tool}/><ConfirmDialogHost/></>);
+    await screen.findByRole("article", { name: "会议纪要正文" });
+    return api;
+  }
+
+  const editBody = (html: string) => {
+    const article = screen.getByRole("article", {name:"会议纪要正文"});
+    article.innerHTML = html;
+    fireEvent.input(article);
+    return article;
+  };
+  it("正文默认可直接编辑，自动保存且版本切换保留排版和草稿", async () => {
+    const api = await open();
+    expect(screen.getByRole("article")).toHaveAttribute("contenteditable", "true");
+    expect(screen.queryByRole("button", {name:"编辑正文"})).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", {name:"保存姓名及全部修改"})).not.toBeInTheDocument();
+    editBody("<h1>人工修订</h1><p>修改后的正文。</p><table><tr><th>事项</th></tr><tr><td>复核</td></tr></table>");
+    fireEvent.click(screen.getByRole("button", {name:"按时间"}));
+    expect(screen.getByRole("article")).not.toHaveTextContent("[00:00]");
+    fireEvent.click(screen.getByRole("button", {name:"按内容"}));
+    expect(screen.getByRole("article")).toHaveTextContent("人工修订");
+    await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenCalledWith("C:/data/content.md", expect.stringContaining("修改后的正文"), content, {}));
+    expect(within(screen.getByRole("article")).getByRole("table")).toBeInTheDocument();
+    expect(await screen.findByText("已自动保存")).toBeInTheDocument();
+  });
+  it("自动保存失败保留当前编辑，可重试，成功前不冒报已保存", async () => {
+    const api = await open();
+    vi.mocked(api.meetingSaveMinutes).mockRejectedValueOnce({userMessage:"文件被占用"});
+    editBody("<h1>不应丢失的修改</h1>");
+    expect(await screen.findByRole("alert")).toHaveTextContent("文件被占用");
+    expect(screen.getByRole("article")).toHaveTextContent("不应丢失的修改");
+    fireEvent.click(screen.getByRole("button", {name:"重试自动保存"}));
+    await screen.findByText("已自动保存");
+  });
+  it("姓名自动保存至两版，改名和清空可逆且不替换普通姓名", async () => {
+    const api = await open();
+    const input = screen.getByRole("textbox", {name:"说话人1姓名"});
+    fireEvent.change(input,{target:{value:"王五"}});fireEvent.blur(input);
+    expect(screen.getByRole("article")).toHaveTextContent("王五安排复核，张三提供资料。说话人10补充意见。");
+    await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenCalledWith("C:/data/content.md", content, content, {"1":"王五"}));
+    await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenCalledWith("C:/data/timeline.md", expect.not.stringContaining("[00:00]"), timeline, {"1":"王五"}));
+    fireEvent.change(input,{target:{value:""}});fireEvent.blur(input);
+    expect(screen.getByRole("article")).toHaveTextContent("说话人1安排复核，张三提供资料。");
+    await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenLastCalledWith("C:/data/timeline.md", expect.any(String), expect.stringContaining("王五发言"), {}));
+  });
+  it("正文和姓名使用当前修订生成HTML邮件，时间版不含录音时间轴", async () => {
+    const api = await open();
+    editBody("<h1>预算评审（按内容）</h1><p><span data-meeting-speaker='1' data-speaker-label='说话人1' data-speaker-display='说话人1'>说话人1</span>负责<strong>复核</strong>。</p>");
+    const name = screen.getByRole("textbox",{name:"说话人1姓名"});
+    fireEvent.change(name,{target:{value:"王五"}});fireEvent.blur(name);
+    const folder = screen.getByRole("button", {name:"打开输出文件夹"});
+    const mail = screen.getByRole("button", {name:"生成邮件草稿"});
+    expect(folder.nextElementSibling).toBe(mail);
+    fireEvent.click(mail);
+    await waitFor(() => expect(api.meetingCreateMailDraft).toHaveBeenCalledWith("预算评审_会议纪要",expect.stringContaining("王五负责<strong>复核</strong>")));
+    expect(vi.mocked(api.meetingCreateMailDraft).mock.calls[0][1]).not.toContain("（按内容）");
+    fireEvent.click(screen.getByRole("button",{name:"按时间"}));
+    fireEvent.click(mail);
+    await waitFor(() => expect(api.meetingCreateMailDraft).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.meetingCreateMailDraft).mock.calls[1][1]).not.toMatch(/00:00|00:10/);
+    expect(api.jobStart).not.toHaveBeenCalled();
+  });
+  it("Outlook失败可重试，创建期间禁用防止重复，切换版本不串用完成提示", async () => {
+    const api = await open();
+    vi.mocked(api.meetingCreateMailDraft).mockRejectedValueOnce({userMessage:"Outlook暂不可用"});
+    fireEvent.click(screen.getByRole("button", {name:"生成邮件草稿"}));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Outlook暂不可用");
+    let resolve!: (value: {saved:true;displayed:boolean;message:string}) => void;
+    vi.mocked(api.meetingCreateMailDraft).mockImplementationOnce(() => new Promise(done => {resolve=done;}));
+    fireEvent.click(screen.getByRole("button", {name:"生成邮件草稿"}));
+    expect(screen.getByRole("button", {name:"正在生成邮件草稿…"})).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", {name:"按时间"}));
+    await act(async () => resolve({saved:true,displayed:true,message:"内容版草稿已创建"}));
+    expect(screen.queryByText("内容版草稿已创建")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", {name:"原始转写"}));
+    expect(screen.queryByRole("button", {name:"生成邮件草稿"})).not.toBeInTheDocument();
+  });
 });
 
 afterEach(() => {
@@ -577,7 +678,8 @@ describe("MeetingMinutesPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开输出文件夹" }));
     await waitFor(() => expect(openOutput).toHaveBeenCalledWith("C:/data/按内容.md"));
     fireEvent.click(screen.getByRole("button", { name: "按时间", pressed: false }));
-    expect(screen.getByRole("article")).toHaveTextContent("[00:08] 开场。");
+    expect(screen.getByRole("article")).toHaveTextContent("开场。");
+    expect(screen.getByRole("article")).not.toHaveTextContent("[00:08]");
     expect(screen.getByRole("article")).not.toHaveTextContent("合并同类议题。");
     expect(openOutput).toHaveBeenCalledTimes(1);
     expect(screen.getAllByRole("button", { name: "打开输出文件夹" })).toHaveLength(1);

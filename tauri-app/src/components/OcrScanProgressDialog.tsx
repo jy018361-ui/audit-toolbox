@@ -8,12 +8,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "./ui/dialog";
-import type { OcrScanProgress, OcrScanPageState } from "../ocrProgress";
+import { isActiveOcrScanPage, type OcrScanProgress, type OcrScanPageState } from "../ocrProgress";
 import "./OcrScanProgressDialog.css";
 
 const pageLabels: Record<OcrScanPageState, string> = {
   preparing: "准备中",
   running: "识别中",
+  ocr_request: "等待识别服务返回",
+  ocr_save: "保存中",
   queued: "排队中",
   completed: "已完成",
   failed: "失败",
@@ -32,7 +34,15 @@ export function OcrScanProgressDialog({
 }) {
   const [minimized, setMinimized] = useState(false);
   const [details, setDetails] = useState(false);
+  const [now, setNow] = useState(() => performance.now());
   const pill = useRef<HTMLButtonElement>(null);
+  const visible = Boolean(progress);
+  useEffect(() => {
+    if (!visible) return;
+    setNow(performance.now());
+    const timer = window.setInterval(() => setNow(performance.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [visible]);
   useEffect(() => {
     if (!progress) {
       setMinimized(false);
@@ -48,9 +58,10 @@ export function OcrScanProgressDialog({
   const { total, completed, pages } = progress;
   const failed = pages.filter((page) => page.state === "failed").length;
   const succeeded = pages.filter((page) => page.state === "completed").length;
-  const active = pages.filter((page) =>
-    ["running", "queued", "preparing", "memory_paused"].includes(page.state),
-  ).length;
+  const activePages = pages.filter(isActiveOcrScanPage);
+  const active = activePages.length;
+  const elapsed = (startedAt?: number) => startedAt === undefined ? undefined : Math.max(0, Math.floor((now - startedAt) / 1000));
+  const slow = !progress.paused && !progress.stopping && activePages.some(page => (elapsed(page.startedAt) ?? 0) >= 30);
   const status = progress.stopping
     ? "正在取消"
     : progress.paused
@@ -126,6 +137,30 @@ export function OcrScanProgressDialog({
                 : status}
             </span>
           </div>
+          {active > 0 && (
+            <div className="ocr-scan-active-pages" aria-label="仍在处理的页面">
+              <p>仍在处理：{activePages.map(page => `第 ${page.page} 页`).join("、")}</p>
+              {activePages.map(page => (
+                <div key={page.page}>
+                  <span>
+                    第 {page.page} 页 · {page.cancelling || progress.stopping ? "正在取消" : progress.paused ? "已暂停" : pageLabels[page.state]}
+                    {page.startedAt !== undefined && ` · 已用时 ${elapsed(page.startedAt)} 秒（含暂停）`}
+                  </span>
+                  {progress.onDeferPage && page.cancellable && (elapsed(page.startedAt) ?? 0) >= 30 && (
+                    <Button variant="outline" size="sm"
+                      disabled={disabled || progress.paused || page.cancelling}
+                      aria-label={`结束第 ${page.page} 页等待，稍后补扫`}
+                      onClick={() => progress.onDeferPage?.(page.page)}>
+                      {page.cancelling ? "正在取消…" : "结束此页等待"}
+                    </Button>
+                  )}
+                </div>
+              ))}
+              {slow && <p className="ocr-scan-slow-note">
+                部分页面耗时较长，完成数量不代表当前页码。可继续等待，或结束该页等待后重试失败页；已保存页会保留，不会自动重复请求。结束本机等待不保证服务端停止计费。
+              </p>}
+            </div>
+          )}
           <button
             type="button"
             className="ocr-scan-details-toggle"
@@ -152,7 +187,7 @@ export function OcrScanProgressDialog({
                       }
                     >
                       {progress.paused &&
-                      ["running", "preparing", "queued"].includes(page.state)
+                      isActiveOcrScanPage(page) && page.state !== "memory_paused"
                         ? "已暂停"
                         : pageLabels[page.state]}
                     </span>
@@ -216,6 +251,7 @@ export function OcrScanProgressDialog({
           <span>
             第 {progress.fileIndex} / {progress.fileCount} 份 · {count}
           </span>
+          {active > 0 && <span>仍在处理：{activePages.map(page => `第 ${page.page} 页`).join("、")}</span>}
           <progress
             aria-label="后台扫描进度"
             max={Math.max(total, 1)}

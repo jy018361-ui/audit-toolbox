@@ -407,9 +407,11 @@ pub(crate) fn run_filter(
         return Err(config_error("筛选", node_name, "至少需要 1 个条件。".into()));
     }
     let index = input.column_index();
+    // 输入运算符会先 to_lowercase 再比对，白名单必须全小写（曾写成驼峰导致
+    // 界面上的 startsWith/notContains 等条件必然报「无法识别」）。
     const OPERATORS: [&str; 13] = [
-        "=", "!=", "<>", ">", ">=", "<", "<=", "contains", "notContains", "startsWith",
-        "endsWith", "isEmpty", "isNotEmpty",
+        "=", "!=", "<>", ">", ">=", "<", "<=", "contains", "notcontains", "startswith",
+        "endswith", "isempty", "isnotempty",
     ];
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Cmp {

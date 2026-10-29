@@ -25,7 +25,7 @@ python scripts/gen_dataflow_fixtures.py                                         
 | 类型规则 | 超 15 位整数保底文本、前导零保留、千分位金额解析、列类型锁定、空值/空文本区分 | 引擎 `column_type_inference_follows_section9_rules`、`thousand_separator_leading_zero_and_long_id_rules` 等 |
 | 字段选择/清洗 | 勾选保留/重命名/改序、新增字段自动传递；去空格/全半角/不可见字符/替换/删空行 | 引擎 clean/select 用例 |
 | 公式 | 定点十进制（0.1+0.2=0.3）、ROUND 中点远离零、IF 短路、空值三值逻辑、除零行级异常、日期函数与 TODAY 固定 | 引擎 `dataflow::formula` 用例 |
-| 筛选 | T/F 两路、行数守恒、空值进 F 路 | 引擎 filter 用例 |
+| 筛选 | T/F 两路、行数守恒、空值进 F 路；运算符大小写不敏感（2026-10-29 修复：白名单曾为驼峰导致界面 startsWith/notContains 等条件必然报「无法识别」） | 引擎 filter 用例（含 camelCase 运算符回归） |
 | 输出 | 预览不写文件；全量临时文件成功后提交；覆盖三策略（报错/时间戳/覆盖）；xlsx 超量分 Sheet/分文件；csv 编码（GBK 不可表示字符报错）与按行分文件；精度往返校验失败自动按文本写出并警告 | 引擎 `dataflow::nodes::output` 用例 |
 | 运行体系 | 预览=每输入前 1000 行；行级异常 stop（默认）/skip 并记录；结构性错误必停且保留已完成节点状态；环/悬空连线中文报错 | 引擎 engine 用例 |
 | 路径安全 | lib.rs 注入本会话授权路径，引擎校验输入路径与输出目录（选中目录授权后代、文件仅自身）；流程文件保存走 pickPath("save") 授权后由 dataflow_save_workflow 落盘；打开流程用 HTML 文件选择，不反向授权 | 接线见 lib.rs dataflow 分支；授权门在 `RunContext::ensure_permitted` |

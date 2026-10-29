@@ -737,6 +737,30 @@ mod tests {
 
     // ---------- 伪 xls 文本（后缀 .xls 的分隔文本，走既有识别层） ----------
 
+    // 界面传驼峰运算符（startsWith 等）：白名单已全小写比对，大小写不再误报。
+    #[test]
+    fn filter_operators_case_insensitive() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("t.csv");
+        fs::write(&file, "名称
+苹果
+香蕉
+").unwrap();
+        let flow = workflow(
+            json!([
+                {"id": "in", "type": "csv_in", "name": "CSV输入", "config": {"path": file.to_string_lossy()}},
+                {"id": "fl", "type": "filter", "name": "筛选",
+                 "config": {"condition": {"op": "and", "rules": [
+                    {"field": "名称", "operator": "startsWith", "value": "香"}
+                 ]}}}
+            ]),
+            json!([{"from": "in", "to": "fl"}]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "fl"), "ok");
+        assert_eq!(row_count(&result, "fl", "T"), 1);
+    }
+
     #[test]
     fn reads_pseudo_xls_text_via_unified_layer() {
         let root = tempfile::tempdir().unwrap();

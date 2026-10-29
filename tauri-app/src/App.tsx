@@ -2119,7 +2119,7 @@ export function Settings({
       llm: {
         ...(current.llm as object ?? {}), enabled: snapshot.enabled, api_type: snapshot.apiType,
         base_url: snapshot.baseUrl.trim(), model: snapshot.model.trim(), auth_mode: snapshot.authMode,
-        timeout: Number(snapshot.timeout) || 30, thinking_enabled: snapshot.thinkingEnabled,
+        timeout: Number(snapshot.timeout) || 120, thinking_enabled: snapshot.thinkingEnabled,
       },
       ocr: { ...(current.ocr as object ?? {}), engine: snapshot.ocrEngine,
         bailian_base_url: snapshot.bailianOcrUrl.trim() || BAILIAN_OCR_BASE_URL,

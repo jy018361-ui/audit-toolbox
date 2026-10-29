@@ -675,6 +675,17 @@ it("groups settings into two columns on a single page, automatically applies cha
   expect(screen.getByRole("button", { name: "重新检查" })).toBeVisible();
 });
 
+it("超时留空自动保存为120秒，显式自定义值仍可保存", async () => {
+  render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  fireEvent.change(screen.getByLabelText(/^超时秒数/), { target: { value: "" } });
+  await flushSettingsChanges();
+  expect(settingsSet).toHaveBeenLastCalledWith(expect.objectContaining({ llm: expect.objectContaining({ timeout: 120 }) }));
+  fireEvent.change(screen.getByLabelText(/^超时秒数/), { target: { value: "180" } });
+  await flushSettingsChanges();
+  expect(settingsSet).toHaveBeenLastCalledWith(expect.objectContaining({ llm: expect.objectContaining({ timeout: 180 }) }));
+});
+
 it("百炼 OCR 配置可修改、保存、重新加载，其他设置保存保留 OCR 参数", async () => {
   vi.mocked(settingsGet).mockResolvedValue({ llm: { model: "saved-model" }, ocr: { engine: "bailian", bailian_base_url: "https://saved.example/v1", bailian_model: "saved-ocr", custom: "keep" } });
   render(<MemoryRouter><Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /></MemoryRouter>);

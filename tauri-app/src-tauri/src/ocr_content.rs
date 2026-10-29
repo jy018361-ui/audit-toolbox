@@ -22,7 +22,7 @@ pub(crate) fn looks_like_ocr_payload(raw: &str) -> bool {
 }
 
 pub(crate) fn has_latex_layout(raw: &str) -> bool {
-    [r"\text", r"\boxed", r"\begin{", r"\mbox", r"\displaylines", r"\underline", r"\(", r"\["].iter().any(|tag| raw.contains(tag))
+    [r"\text", r"\boxed", r"\begin{", r"\mbox", r"\displaylines", r"\underline", r"\%", r"\(", r"\["].iter().any(|tag| raw.contains(tag))
 }
 
 pub(crate) fn has_markdown_heading(raw: &str) -> bool {
@@ -140,12 +140,31 @@ fn readable_latex(raw: &str, warnings: &mut Vec<String>) -> String {
     let spans = Regex::new(r"(?s)\$\$((?:\\.|[^$\\])+)\$\$|\$((?:\\.|[^$\\])+)\$|\\\((.*?)\\\)|\\\[(.*?)\\\]").unwrap();
     let result = spans.replace_all(raw, |captures: &regex::Captures<'_>| {
         let body = (1..=4).find_map(|i| captures.get(i)).unwrap().as_str();
-        prose_layout(body, 0).unwrap_or_else(|| captures[0].to_owned())
+        prose_layout(body, 0).or_else(|| percent_layout(body)).unwrap_or_else(|| captures[0].to_owned())
     }).into_owned();
     if has_latex_layout(&result) {
         warnings.push("本页含未能安全还原的排版或公式标记，已保留原内容，请对照扫描件核对。".into());
     }
     result
+}
+
+// Render only the escaped percent token and a complete numeric subscript.
+// In particular, OCR's `\%_{0}` stays %₀ rather than being guessed to mean ‰;
+// this projection must not change a unit or repair the model's numeric value.
+fn percent_layout(raw: &str) -> Option<String> {
+    let rest = raw.trim().strip_prefix(r"\%")?.trim();
+    if rest.is_empty() { return Some("%".into()); }
+    let subscript = rest.strip_prefix("_{")?.strip_suffix('}')?;
+    if subscript.is_empty() { return None; }
+    let mut out = String::from("%");
+    for digit in subscript.chars() {
+        out.push(match digit {
+            '0' => '₀', '1' => '₁', '2' => '₂', '3' => '₃', '4' => '₄',
+            '5' => '₅', '6' => '₆', '7' => '₇', '8' => '₈', '9' => '₉',
+            _ => return None,
+        });
+    }
+    Some(out)
 }
 
 fn readable_headings(raw: &str) -> String {
@@ -608,6 +627,22 @@ pub(crate) fn readable_ocr_content(raw: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn escaped_percent_subscript_is_readable_without_guessing_unit_or_value() {
+        let raw = r"提前还款金额 × 剩余借款期限（月数）× 1 \(\%_{0}\)，剩余借款月数";
+        let expected = "提前还款金额 × 剩余借款期限（月数）× 1 %₀，剩余借款月数";
+        assert_eq!(readable_ocr_content(raw)["text"], expected);
+        assert_eq!(readable_ocr_text(raw), expected);
+        assert_eq!(readable_ocr_text(expected), expected);
+        for (raw, expected) in [(r"$\%$", "%"), (r"$$\%_{0123456789}$$", "%₀₁₂₃₄₅₆₇₈₉")] {
+            assert_eq!(readable_ocr_text(raw), expected);
+        }
+        for raw in [r"\(\%_{x}\)", r"\(\%_{}\)", r"\(\%_{0}+x\)", r"\(\%_{0\)", r"\(\%_{0}\unknown{a}\)"] {
+            assert_eq!(readable_ocr_text(raw), raw);
+        }
+        let table = readable_ocr_content(&json!({"tables":[{"rows":[[raw]]}]}).to_string());
+        assert_eq!(table["tables"][0]["rows"][0][0], expected);
+    }
     #[test]
     fn numeric_underline_with_escaped_percentage_is_readable_but_math_survives() {
         let raw = r"一、本合同项下委托贷款年利率为\(\underline{4.35}\%\)。账号\(\underline{00123}\)，期限\(\underline{15}\)日。";

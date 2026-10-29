@@ -54,7 +54,11 @@ it("原文中的已确认表格原位显示行列及空格，复制仍保留完�
   const rows = [["序号", "名称", "数量", "单价", "金额", "备注"], ["1", "电力", "00123", "0.57", "801.00", ""], ["2", "", "", "", "", ""]];
   const originalText = `合同前文\n${rows.map(row => row.join("\t")).join("\n")}\n合同后文`;
   const sample = { ...current, pages: [{ ...current.pages[0], text: originalText, originalText,
-    originalTables: [{ id: "grid", title: "", rows }], tables: [] }] };
+    originalTables: [{ id: "grid", title: "", rows }], tables: [], warnings: [
+      "本页含未能安全还原的排版或公式标记，已保留原内容，请对照扫描件核对。",
+      "本页涉及公式，请对照扫描件核对上下标、分数线和运算符；识别文字不作为可计算公式。",
+      "页面方向判断不充分",
+    ] }] };
   const { rerender } = render(<OcrReadingView {...props} current={sample} documents={[sample]} />);
   const table = screen.getByRole("table");
   expect(table.querySelectorAll("tr")).toHaveLength(3);
@@ -62,6 +66,9 @@ it("原文中的已确认表格原位显示行列及空格，复制仍保留完�
   expect(table.querySelectorAll("tr")[2].children).toHaveLength(6);
   expect(table).toHaveTextContent("00123");
   expect(table.querySelectorAll("tr")[1].lastElementChild).toBeEmptyDOMElement();
+  expect(table.querySelector("caption")).toBeNull();
+  expect(screen.queryByText(/本页含未能安全还原|本页涉及公式/)).not.toBeInTheDocument();
+  expect(screen.getByText("页面方向判断不充分")).toBeInTheDocument();
   expect(screen.getAllByRole("table")).toHaveLength(1);
   fireEvent.click(screen.getByRole("button", { name: "复制本页原文" }));
   expect(props.onCopy).toHaveBeenLastCalledWith(originalText);
@@ -103,4 +110,22 @@ it("左键拖动平移原扫描件，抬起或丢失捕获立即停止且右键�
   expect(viewport.scrollLeft).toBe(270);
   expect(viewport).not.toHaveClass("is-panning");
   expect(screen.getByRole("img")).toHaveAttribute("src", props.sourceImage);
+});
+
+it("已识别单列表格及校对表格按行显示，普通正文子串不替换成表格", () => {
+  const originalText = "合同前文\n项目\n00123\n原文结尾";
+  const corrected = "校对前文\n项目\n00456\n校对结尾";
+  const sample = { ...current, pages: [{ ...current.pages[0], text: corrected, originalText,
+    originalTables: [{ id: "original", title: "原始单列表", rows: [["项目"], ["00123"]] }],
+    tables: [{ id: "corrected", title: "校对单列表", rows: [["项目"], ["00456"]] }] }] };
+  const { rerender } = render(<OcrReadingView {...props} current={sample} documents={[sample]} />);
+  expect(screen.getByRole("table", { name: "原始单列表" })).toHaveTextContent("00123");
+  const detail = screen.getByText("查看此前保存的校对正文（导出和摘录继续使用此版本）").closest("details")!;
+  detail.open = true;
+  expect(screen.getByRole("table", { name: "校对单列表" })).toHaveTextContent("00456");
+  fireEvent.click(screen.getByRole("button", { name: "复制本页原文" }));
+  expect(props.onCopy).toHaveBeenLastCalledWith(originalText);
+  rerender(<OcrReadingView {...props} current={{ ...sample, pages: [{ ...sample.pages[0],
+    originalText: "合同项目\n00123以及其他内容", originalTables: sample.pages[0].originalTables }] }} />);
+  expect(screen.queryByRole("table", { name: "原始单列表" })).not.toBeInTheDocument();
 });

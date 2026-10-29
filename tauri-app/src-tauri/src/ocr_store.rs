@@ -730,6 +730,21 @@ mod tests {
         assert_eq!(baseline.text, raw);
     }
     #[test]
+    fn legacy_percent_subscript_projection_keeps_source_and_human_edits() {
+        let raw = r"提前还款 × 1 \(\%_{0}\)";
+        let page = Page { metadata: Default::default(), page: 5, text: raw.into(), original_text: raw.into(), tables: vec![], original_tables: vec![], revision: 3, status: "needs_review".into(), warnings: vec![] };
+        let projected = readable_page(page.clone());
+        assert_eq!(projected.original_text, "提前还款 × 1 %₀");
+        assert_eq!(projected.text, projected.original_text);
+        assert_eq!(projected.revision, 3);
+        assert_eq!(page.original_text, raw);
+        let mut corrected = page;
+        corrected.text = "人工校对：提前还款 × /‰".into();
+        let projected = readable_page(corrected);
+        assert_eq!(projected.text, "人工校对：提前还款 × /‰");
+        assert_eq!(projected.original_text, "提前还款 × 1 %₀");
+    }
+    #[test]
     fn nested_layout_projection_keeps_human_cells_and_recomputes_format_warnings() {
         let raw = r"# 借款金额
 \(\underline{\text{金额大写壹仟元}}\)";

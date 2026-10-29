@@ -415,11 +415,6 @@
   min-width: 100%;
   font-size: 13px;
 }
-.ocr-reading-table caption {
-  text-align: left;
-  padding: 8px 10px;
-  color: var(--muted-foreground);
-}
 .ocr-reading-table td {
   border: 1px solid var(--border);
   min-width: 72px;

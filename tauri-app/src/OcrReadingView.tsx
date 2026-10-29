@@ -8,12 +8,16 @@ function OcrReadableText({ text, tables }: { text: string; tables: OcrTable[] })
   // its position and copying source; never infer columns from ordinary prose.
   const matches: { start: number; end: number; table: OcrTable; index: number }[] = [];
   tables.forEach((table, index) => {
-    if (!table.rows.length || table.rows[0].length < 2) return;
+    if (!table.rows.length || !table.rows.some(row => row.length)) return;
     for (const separator of ["\n", "\n\n"]) {
       const grid = table.rows.map(row => row.join("\t")).join(separator);
       if (!grid) continue;
       let start = text.indexOf(grid);
-      while (start >= 0 && matches.some(match => start < match.end && start + grid.length > match.start)) {
+      while (start >= 0 && (
+        (start > 0 && text[start - 1] !== "\n") ||
+        (start + grid.length < text.length && text[start + grid.length] !== "\n") ||
+        matches.some(match => start < match.end && start + grid.length > match.start)
+      )) {
         start = text.indexOf(grid, start + 1);
       }
       if (start >= 0) { matches.push({ start, end: start + grid.length, table, index }); break; }
@@ -27,8 +31,7 @@ function OcrReadableText({ text, tables }: { text: string; tables: OcrTable[] })
     return [
       <span key={`text-${index}`}>{before}</span>,
       <div key={`table-${index}`} className="ocr-reading-table-scroll" role="region" aria-label={`识别表格 ${index + 1}`} tabIndex={0}>
-        <table className="ocr-reading-table">
-          <caption>{table.title || `识别表格 ${index + 1}`}</caption>
+        <table className="ocr-reading-table" aria-label={table.title || `识别表格 ${index + 1}`}>
           <tbody>{table.rows.map((row, r) => <tr key={r}>{row.map((cell, c) => <td key={c}>{cell}</td>)}</tr>)}</tbody>
         </table>
       </div>,
@@ -146,7 +149,8 @@ export function OcrReadingView({
     return item ? (
       <>
         <OcrReadableText text={item.originalText || "本页未识别到正文。"} tables={item.originalTables} />
-        {item.warnings.map((warning, index) => (
+        {item.warnings.filter(warning => !warning.startsWith("本页含未能安全还原的排版或公式标记")
+          && !warning.startsWith("本页涉及公式")).map((warning, index) => (
           <p className="ocr-warning" key={index}>
             {warning}
           </p>
@@ -156,7 +160,7 @@ export function OcrReadingView({
             <summary>
               查看此前保存的校对正文（导出和摘录继续使用此版本）
             </summary>
-            <div className="ocr-original-text">{item.text}</div>
+            <OcrReadableText text={item.text} tables={item.tables} />
           </details>
         )}
       </>

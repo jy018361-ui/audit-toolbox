@@ -776,6 +776,40 @@ export type EdgeCheckResult =
   | { ok: false; reason: string };
 
 /**
+ * 修正跨版本流程里的过期锚点名：旧版搭的流程（草稿/流程文件）可能带着
+ * 上游节点已不存在的出口名（如筛选节点上旧的 output），画布按第一出口
+ * 画线看不出异常，运行时引擎才报「该锚点不存在」。恢复/打开/运行前统一
+ * 把无效出口改接到上游第一个出口，并返回修正说明供状态栏提示。
+ */
+export function repairWorkflowEdges(
+  workflow: DataflowWorkflow,
+): { workflow: DataflowWorkflow; fixes: string[] } {
+  const fixes: string[] = [];
+  const nodesById = new Map(workflow.nodes.map((node) => [node.id, node]));
+  const edges = workflow.edges.map((edge) => {
+    const from = nodesById.get(edge.from);
+    const to = nodesById.get(edge.to);
+    let next = edge;
+    const fromSpec = from ? nodeSpec(from.type) : undefined;
+    if (from && fromSpec?.outputs.length && !fromSpec.outputs.some((a) => a.key === next.fromAnchor)) {
+      const target = fromSpec.outputs[0];
+      fixes.push(
+        `「${from.name}」到「${to?.name ?? edge.to}」的连线出口「${next.fromAnchor}」已不存在，已改接「${target.label}」。`,
+      );
+      next = { ...next, fromAnchor: target.key };
+    }
+    const toSpec = to ? nodeSpec(to.type) : undefined;
+    if (to && toSpec?.inputs.length && !toSpec.inputs.some((a) => a.key === next.toAnchor)) {
+      const target = toSpec.inputs[0];
+      fixes.push(`「${to.name}」的输入口「${next.toAnchor}」已不存在，已改接「${target.label}」。`);
+      next = { ...next, toAnchor: target.key };
+    }
+    return next;
+  });
+  return { workflow: fixes.length ? { ...workflow, edges } : workflow, fixes };
+}
+
+/**
  * 校验一条新连线：锚点存在、禁自环、禁重复、禁成环、
  * 单输入口（除 Excel 输出/纵向合并等多入口）不重复占用。
  */

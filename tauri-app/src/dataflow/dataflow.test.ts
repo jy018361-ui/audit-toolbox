@@ -21,6 +21,7 @@ import {
   normalizeConfig,
   parseWorkflowFile,
   removeDraft,
+  repairWorkflowEdges,
   saveDraft,
   listDrafts,
   serializeWorkflow,
@@ -658,6 +659,26 @@ describe("数据流：草稿与撤销栈", () => {
     expect(drafts.some((draft) => draft.name === empty.name)).toBe(false);
     expect(drafts.some((draft) => draft.name === withNodes.name)).toBe(true);
     removeDraft(withNodes.name);
+  });
+
+  it("跨版本过期连线自动修正：筛选上的旧出口名改接 T，正常连线不动", () => {
+    const wf = createEmptyWorkflow("旧流程");
+    wf.nodes = [
+      { id: "n1", type: "excel_in", name: "输入", x: 0, y: 0, config: {} as never },
+      { id: "n2", type: "filter_n", name: "筛选", x: 200, y: 0, config: {} as never },
+      { id: "n3", type: "excel_out", name: "输出", x: 400, y: 0, config: {} as never },
+    ];
+    wf.edges = [
+      { from: "n1", fromAnchor: "output", to: "n2", toAnchor: "in" },
+      { from: "n2", fromAnchor: "output", to: "n3", toAnchor: "in" },
+    ];
+    const { workflow, fixes } = repairWorkflowEdges(wf);
+    expect(fixes).toHaveLength(1);
+    expect(fixes[0]).toContain("筛选");
+    expect(workflow.edges[0].fromAnchor).toBe("output");
+    expect(workflow.edges[1].fromAnchor).toBe("T");
+    // 再修一遍应无变化（幂等）。
+    expect(repairWorkflowEdges(workflow).fixes).toHaveLength(0);
   });
 
   it("撤销/重做操作栈往返一致", () => {

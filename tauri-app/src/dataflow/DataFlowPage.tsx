@@ -19,6 +19,7 @@ import {
   nextNodeId,
   parseWorkflowFile,
   removeDraft,
+  repairWorkflowEdges,
   saveDraft,
   validateNewEdge,
   type DataflowEdge,
@@ -83,10 +84,12 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   useEffect(() => {
     const draft = listDrafts().find((item) => item.workflow.nodes.length);
     if (!draft) return;
-    replaceWorkflow(draft.workflow, true);
+    // 跨版本草稿可能带过期锚点名，恢复时即修正，别等运行才炸。
+    const { workflow, fixes } = repairWorkflowEdges(draft.workflow);
+    replaceWorkflow(workflow, true);
     setAutosaveNote(`恢复自草稿 ${draft.savedAt.replace("T", " ").slice(11, 16)}`);
     setStatusText(
-      `已自动恢复未保存的流程《${draft.name}》（${draft.workflow.nodes.length} 个节点，保存于 ${draft.savedAt.replace("T", " ").slice(0, 19)}）。如需重新开始请点「新建」。`,
+      `已自动恢复未保存的流程《${draft.name}》（${workflow.nodes.length} 个节点，保存于 ${draft.savedAt.replace("T", " ").slice(0, 19)}）。${fixes.length ? ` 已修正 ${fixes.length} 条过期连线：${fixes.join(" ")}` : "" }如需重新开始请点「新建」。`,
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -249,6 +252,14 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
       return;
     }
     if (uptoNodeId && !wf.nodes.some((node) => node.id === uptoNodeId)) return;
+    // 运行前兜底修正过期连线（手工编辑流程文件等来源），保证引擎拿到合法锚点。
+    const repaired = repairWorkflowEdges(wf);
+    if (repaired.fixes.length) {
+      workflowRef.current = repaired.workflow;
+      setWorkflow(repaired.workflow);
+      setStatusText(`已自动修正 ${repaired.fixes.length} 条过期连线后运行：${repaired.fixes[0]}`);
+    }
+    const runWf = repaired.workflow;
     setRunning(true);
     setError("");
     setRanUpTo(null);
@@ -263,8 +274,8 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     try {
       const raw =
         mode === "preview"
-          ? await dataflowPreview(wf, overrides)
-          : await dataflowRun(wf, overrides, uptoNodeId);
+          ? await dataflowPreview(runWf, overrides)
+          : await dataflowRun(runWf, overrides, uptoNodeId);
       const parsed = DataflowRunResultSchema.safeParse(raw);
       if (!parsed.success) {
         setError("引擎返回的数据不符合数据流契约，请更新应用后重试。");
@@ -319,14 +330,17 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
       setError(parsed.error);
       return;
     }
-    replaceWorkflow(parsed.workflow, true);
+    const { workflow, fixes } = repairWorkflowEdges(parsed.workflow);
+    replaceWorkflow(workflow, true);
     setSelection(null);
     setRunResult(null);
     setLastRunMode(null);
     setRanUpTo(null);
     setError("");
-    setStatusText(`已打开流程《${parsed.workflow.name}》（来自 ${picked.fileName}）。`);
-    if (parsed.workflow.params.length) setParamsDialog("confirm");
+    setStatusText(
+      `已打开流程《${workflow.name}》（来自 ${picked.fileName}）。${fixes.length ? ` 已修正 ${fixes.length} 条过期连线：${fixes.join(" ")}` : ""}`,
+    );
+    if (workflow.params.length) setParamsDialog("confirm");
   }
 
   /** 新建空白流程：显式清掉当前流程名的草稿，避免下次进页面又被自动恢复。 */

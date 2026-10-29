@@ -12,6 +12,7 @@ import {
   DataflowRunResultSchema,
   WorkflowHistory,
   applyParamPlaceholders,
+  canonicalSummarizeFunc,
   configKeysWithinContract,
   createEmptyWorkflow,
   dataflowRunRequest,
@@ -26,6 +27,8 @@ import {
   listDrafts,
   serializeWorkflow,
   validateNewEdge,
+  CROSSTAB_VALUE_FUNCS,
+  SUMMARIZE_FUNCS,
   type DataflowWorkflow,
 } from "./model";
 import { dataflowDemoResult } from "./demoData";
@@ -527,7 +530,7 @@ describe("数据流：config 序列化", () => {
       },
       crosstab: { rowField: "客商名称", columnField: "期间", valueField: "借方金额", valueFunc: "sum", fill: null },
       transpose: { fixedFields: ["科目编码"], valueColumns: ["期初余额", "期末余额"], nameColumn: "项目", valueColumn: "数值" },
-      split: { field: "科目编码", mode: "width", delimiter: "", widths: [4, 4], keepOriginal: true, columnPrefix: "段" },
+      split: { field: "科目编码", mode: "fixedWidth", delimiter: "", widths: [4, 4], keepOriginal: true, columnPrefix: "段" },
       check_n: {
         rules: [
           { type: "balance", groupBy: ["凭证号"], debitField: "借方金额", creditField: "贷方金额", tolerance: 0.01 },
@@ -598,6 +601,130 @@ describe("数据流：config 序列化", () => {
     ).toEqual([{ type: "balance", groupBy: ["凭证号"], debitField: "", creditField: "", tolerance: 0.01 }]);
   });
 
+  it("分列拆分方式与引擎契约对齐：旧值 width 迁移为 fixedWidth，非法值回退分隔符", () => {
+    // 引擎 split.rs 只认 delimiter / fixedWidth；旧流程文件的 width 必须迁移而不是回退。
+    expect(normalizeConfig("split", { mode: "width", widths: [4] }).mode).toBe("fixedWidth");
+    expect(normalizeConfig("split", { mode: "fixedWidth", widths: [4] }).mode).toBe("fixedWidth");
+    expect(normalizeConfig("split", { mode: "乱写" }).mode).toBe("delimiter");
+    expect(normalizeConfig("split", {}).mode).toBe("delimiter");
+  });
+
+  it("分列固定宽度模式前端→引擎：取值经规整、保存往返与运行请求后仍为 fixedWidth", () => {
+    // 界面「按固定宽度」选项值即引擎契约值，运行请求体平铺后引擎可直接识别。
+    const config = normalizeConfig("split", {
+      field: "科目编码",
+      mode: "fixedWidth",
+      widths: [4, 4],
+      keepOriginal: true,
+      columnPrefix: "段",
+    });
+    const workflow = createEmptyWorkflow("固定宽度拆分");
+    workflow.nodes = [{ id: "n1", type: "split", name: "分列", x: 0, y: 0, config }];
+    const parsed = parseWorkflowFile(serializeWorkflow(workflow));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const reopened = normalizeConfig("split", parsed.workflow.nodes[0].config);
+    const payload = dataflowRunRequest(
+      { ...workflow, nodes: [{ ...workflow.nodes[0], config: reopened }] },
+      "preview",
+      {},
+    );
+    const splitNode = (payload.nodes as { type: string; config: { mode?: string } }[]).find(
+      (node) => node.type === "split",
+    );
+    expect(splitNode?.config.mode).toBe("fixedWidth");
+  });
+
+  it("汇总/透视聚合函数键名与引擎白名单一致（countNonEmpty/distinctCount）", () => {
+    // 引擎 aggregate.rs func_display 白名单（键名原样透传给 Rust，前端不得自造别名）。
+    expect(SUMMARIZE_FUNCS.map((fn) => fn.value)).toEqual([
+      "countAll", "sum", "countNonEmpty", "distinctCount", "avg", "min", "max",
+    ]);
+    // 旧版前端错误键名不得再出现在枚举里。
+    expect(SUMMARIZE_FUNCS.some((fn) => fn.value === ("countNotNull" as never))).toBe(false);
+    expect(SUMMARIZE_FUNCS.some((fn) => fn.value === ("countDistinct" as never))).toBe(false);
+    // 透视引擎 run_crosstab 仅支持 3 项。
+    expect(CROSSTAB_VALUE_FUNCS.map((fn) => fn.value)).toEqual([
+      "sum", "countNonEmpty", "distinctCount",
+    ]);
+    // 键名规整：旧键迁移、引擎键保留、未知返回 null。
+    expect(canonicalSummarizeFunc("countNotNull")).toBe("countNonEmpty");
+    expect(canonicalSummarizeFunc("countDistinct")).toBe("distinctCount");
+    expect(canonicalSummarizeFunc("distinctCount")).toBe("distinctCount");
+    expect(canonicalSummarizeFunc("sum")).toBe("sum");
+    expect(canonicalSummarizeFunc("乱写")).toBeNull();
+  });
+
+  it("旧流程文件的 countNotNull/countDistinct 打开时迁移为引擎键名，透视白名单外回落求和", () => {
+    // 汇总：旧键名逐条迁移，不再落入「无法识别」报错。
+    expect(
+      normalizeConfig("summarize", {
+        groupBy: ["客商名称"],
+        aggregations: [
+          { field: "客商名称", func: "countNotNull", output: "非空家数" },
+          { field: "客商名称", func: "countDistinct", output: "去重家数" },
+          { field: "", func: "countAll", output: "" },
+          { field: "金额", func: "乱写", output: "x" },
+        ],
+      }).aggregations,
+    ).toEqual([
+      { field: "客商名称", func: "countNonEmpty", output: "非空家数" },
+      { field: "客商名称", func: "distinctCount", output: "去重家数" },
+      { field: "", func: "countAll", output: "" },
+      { field: "金额", func: "countAll", output: "x" },
+    ]);
+    // 透视：引擎仅支持 sum/countNonEmpty/distinctCount；旧键迁移后可用，
+    // 白名单外（countAll/avg/min/max/乱写）回落默认「求和」。
+    expect(normalizeConfig("crosstab", { valueFunc: "countNotNull" }).valueFunc).toBe("countNonEmpty");
+    expect(normalizeConfig("crosstab", { valueFunc: "countDistinct" }).valueFunc).toBe("distinctCount");
+    expect(normalizeConfig("crosstab", { valueFunc: "countNonEmpty" }).valueFunc).toBe("countNonEmpty");
+    expect(normalizeConfig("crosstab", { valueFunc: "avg" }).valueFunc).toBe("sum");
+    expect(normalizeConfig("crosstab", { valueFunc: "countAll" }).valueFunc).toBe("sum");
+    expect(normalizeConfig("crosstab", { valueFunc: "乱写" }).valueFunc).toBe("sum");
+  });
+
+  it("打开含旧聚合键名的流程文件：解析即迁移，运行请求体只含引擎键名", () => {
+    const legacy = {
+      version: 1,
+      name: "旧流程",
+      params: [],
+      nodes: [
+        {
+          id: "n1",
+          type: "summarize",
+          name: "汇总",
+          x: 0,
+          y: 0,
+          config: {
+            groupBy: ["客商名称"],
+            aggregations: [{ field: "客商名称", func: "countNotNull", output: "" }],
+          },
+        },
+        {
+          id: "n2",
+          type: "crosstab",
+          name: "透视",
+          x: 200,
+          y: 0,
+          config: { rowField: "客商名称", columnField: "期间", valueField: "金额", valueFunc: "countDistinct", fill: 0 },
+        },
+      ],
+      edges: [{ from: "n1", fromAnchor: "output", to: "n2", toAnchor: "in" }],
+      notes: [],
+    };
+    const parsed = parseWorkflowFile(JSON.stringify(legacy));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const summarizeConfig = parsed.workflow.nodes[0].config as { aggregations: { func: string }[] };
+    expect(summarizeConfig.aggregations[0].func).toBe("countNonEmpty");
+    expect(parsed.workflow.nodes[1].config.valueFunc).toBe("distinctCount");
+    // 运行请求体平铺工作流，引擎收到的键名已是白名单内的值。
+    const payload = dataflowRunRequest(parsed.workflow, "preview", {});
+    const nodes = payload.nodes as { type: string; config: Record<string, unknown> }[];
+    expect((nodes[0].config.aggregations as { func: string }[])[0].func).toBe("countNonEmpty");
+    expect(nodes[1].config.valueFunc).toBe("distinctCount");
+  });
+
   it("检查规则默认值按类型给出（容差默认 0＝精确相等）", () => {
     expect(defaultCheckRule("balance")).toEqual({
       type: "balance",
@@ -612,6 +739,83 @@ describe("数据流：config 序列化", () => {
       expression: "金额 > 0",
     });
     expect(normalizeCheckRule({ type: "不存在" })).toBeNull();
+  });
+
+  it("检查规则兼容手写流程文件的 kind 判别与单字符串分组（不再被丢弃）", () => {
+    expect(
+      normalizeCheckRule({
+        kind: "balance",
+        groupBy: "凭",
+        debitField: "借方",
+        creditField: "贷方",
+        tolerance: 0.01,
+      }),
+    ).toEqual({
+      type: "balance",
+      groupBy: ["凭"],
+      debitField: "借方",
+      creditField: "贷方",
+      tolerance: 0.01,
+    });
+    expect(normalizeCheckRule({ kind: "unique", field: "凭证号", groupBy: "凭" })).toEqual({
+      type: "unique",
+      field: "凭证号",
+      groupBy: ["凭"],
+    });
+    expect(normalizeCheckRule({ kind: "乱写" })).toBeNull();
+    // kind 形态的流程文件打开后规则保留，并规整回界面 type 形态
+    //（此前 normalizeCheckRule 不识别 kind，手工改的规则打开即被丢弃）。
+    const parsed = parseWorkflowFile(
+      JSON.stringify({
+        version: 1,
+        name: "手写检查",
+        params: [],
+        nodes: [
+          {
+            id: "n1",
+            type: "check_n",
+            name: "检查",
+            x: 0,
+            y: 0,
+            config: { rules: [{ kind: "notEmpty", fields: ["金额"] }] },
+          },
+        ],
+        edges: [],
+        notes: [],
+      }),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect((parsed.workflow.nodes[0].config as { rules: unknown[] }).rules).toEqual([
+      { type: "notEmpty", fields: ["金额"] },
+    ]);
+  });
+
+  it("检查规则前端→引擎契约：五类规则 type 判别＋groupBy 数组经保存/打开/运行请求保持不变", () => {
+    // 引擎 nodes/check.rs 归一层接受 type 判别与 groupBy 数组；本测试锁定
+    // 界面五类规则的序列化形态，任一侧契约漂移（判别字段或分组形态改形）即失败。
+    const rules = (["balance", "notEmpty", "unique", "range", "expression"] as const).map(
+      defaultCheckRule,
+    );
+    const workflow = createEmptyWorkflow("检查契约");
+    workflow.nodes = [{ id: "n1", type: "check_n", name: "检查", x: 0, y: 0, config: { rules } }];
+    const parsed = parseWorkflowFile(serializeWorkflow(workflow));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const payload = dataflowRunRequest(parsed.workflow, "full", {});
+    const sent = (
+      payload.nodes as { config: { rules: { type: string; groupBy?: string[] }[] } }[]
+    )[0].config.rules;
+    expect(sent.map((rule) => rule.type)).toEqual([
+      "balance",
+      "notEmpty",
+      "unique",
+      "range",
+      "expression",
+    ]);
+    for (const rule of sent) {
+      if ("groupBy" in rule) expect(Array.isArray(rule.groupBy)).toBe(true);
+    }
   });
 });
 

@@ -7,6 +7,7 @@ import { dataflowDbTables } from "../api";
 import { CATEGORY_COLOR } from "./Canvas";
 import {
   CHECK_RULE_TYPES,
+  CROSSTAB_VALUE_FUNCS,
   FILTER_OPERATORS,
   MANUAL_COLUMN_TYPES,
   SUMMARIZE_FUNCS,
@@ -1327,9 +1328,10 @@ export function ConfigPanel({
               />
             </Field>
             <Field label="聚合方式">
+              {/* 透视引擎仅支持求和/非空计数/去重计数（aggregate.rs 白名单），不能复用汇总的全量枚举。 */}
               <Sel
                 value={String(config.valueFunc ?? "sum")}
-                options={SUMMARIZE_FUNCS.map((fn) => ({ value: fn.value, label: fn.label }))}
+                options={CROSSTAB_VALUE_FUNCS.map((fn) => ({ value: fn.value, label: fn.label }))}
                 onChange={(value) => setKey("valueFunc", value)}
               />
             </Field>
@@ -1403,7 +1405,7 @@ export function ConfigPanel({
               value={mode}
               options={[
                 { value: "delimiter", label: "按分隔符" },
-                { value: "width", label: "按固定宽度" },
+                { value: "fixedWidth", label: "按固定宽度" },
               ]}
               onChange={(value) => setKey("mode", value)}
             />

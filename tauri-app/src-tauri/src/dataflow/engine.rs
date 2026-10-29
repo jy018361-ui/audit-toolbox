@@ -1396,6 +1396,32 @@ mod tests {
     }
 
     #[test]
+    fn crosstab_count_funcs_use_engine_keys() {
+        // 透视聚合方式的引擎白名单只有 sum / countNonEmpty / distinctCount
+        // （前端下拉枚举与之同源）；两个计数键必须可直接运行，防止键名漂移。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("pc.csv");
+        fs::write(&file, "r,c,v\nA,X,1\nA,X,\nA,X,1\n").unwrap();
+        // A/X 三行值：1、空、1 → 非空计数 2；非空去重（只剩 1）计数 1。
+        for (func, expect_x) in [("countNonEmpty", json!(2)), ("distinctCount", json!(1))] {
+            let flow = workflow(
+                json!([
+                    csv_in_node("i", &file, json!({})),
+                    {"id": "p", "type": "crosstab", "name": "透视", "config": {
+                        "rowField": "r", "columnField": "c", "valueField": "v",
+                        "valueFunc": func, "fill": 0
+                    }}
+                ]),
+                json!([edge("i", "p", "in")]),
+            );
+            let result = run("dataflow_preview", flow);
+            assert_eq!(row_count(&result, "p", "output"), 1, "valueFunc={func}");
+            let x = col(&result, "p", "output", "X");
+            assert_eq!(cell(&result, "p", "output", 0, x), expect_x, "valueFunc={func}");
+        }
+    }
+
+    #[test]
     fn transpose_melts_columns_with_default_names() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("t.csv");
@@ -1498,6 +1524,63 @@ mod tests {
         let result = run("dataflow_preview", flow);
         assert_eq!(row_count(&result, "k", "P"), 0);
         assert!(!stats_of(&result, "k").is_empty(), "空输入必须在规则摘要中说明");
+    }
+
+    #[test]
+    fn check_rules_accept_frontend_form_type_discriminator_and_array_group_by() {
+        // 前端序列化形态（model.ts defaultCheckRule / normalizeCheckRule）：
+        // type 判别 + groupBy 字符串数组。本测试锁定前端→引擎契约：任一侧
+        // 漂移（判别字段只剩 kind，或分组只收单字符串）即失败。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("f.csv");
+        fs::write(&file, "凭,日,d,c\nP1,1,100,100\nP1,2,50,50\nP2,1,10,10\nP3,1,5,4\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "k", "type": "check_n", "name": "检查", "config": {
+                    "rules": [
+                        {"type": "balance", "groupBy": ["凭", "日"], "debitField": "d", "creditField": "c", "tolerance": 0},
+                        {"type": "unique", "field": "日", "groupBy": ["凭"]},
+                        {"type": "notEmpty", "fields": ["凭"]},
+                        {"type": "range", "field": "d", "min": 0, "max": 1000},
+                        {"type": "expression", "expression": "d >= 0"}
+                    ]
+                }}
+            ]),
+            json!([edge("i", "k", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "k"), "ok");
+        // 借贷平衡按（凭,日）复合分组：仅 P3/1 借 5 贷 4 差 1 超容差 0 进 NG；
+        // 其余四类规则本批数据全部通过。
+        assert_eq!(row_count(&result, "k", "NG"), 1);
+        assert_eq!(row_count(&result, "k", "P"), 3);
+    }
+
+    #[test]
+    fn check_rules_unknown_type_reports_chinese_config_error() {
+        // 配置错误必须给中文提示（不得把 serde 英文消息直达用户）。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("x.csv");
+        fs::write(&file, "a\n1\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "k", "type": "check_n", "name": "检查", "config": {
+                    "rules": [{"type": "乱写", "fields": ["a"]}]
+                }}
+            ]),
+            json!([edge("i", "k", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "k"), "error");
+        let message = result
+            .pointer("/error/userMessage")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        assert!(message.contains("无法识别"), "报错应指明类型无法识别：{message}");
+        assert!(message.contains("借贷合计一致"), "报错应列出支持的规则类型：{message}");
     }
 
     #[test]

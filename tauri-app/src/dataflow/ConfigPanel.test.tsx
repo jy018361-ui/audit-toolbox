@@ -277,7 +277,7 @@ describe("数据流配置区：其余新节点表单关键控件", () => {
   it("分列：宽度模式可增删宽度行", () => {
     const { onConfigChange } = renderLivePanel("split", {
       ...defaultConfigFor("split"),
-      mode: "width",
+      mode: "fixedWidth",
       widths: [4],
     });
     fireEvent.click(screen.getByRole("button", { name: "添加宽度" }));
@@ -297,6 +297,44 @@ describe("数据流配置区：其余新节点表单关键控件", () => {
     expect(onConfigChange).toHaveBeenLastCalledWith({
       groupBy: ["客商名称"],
       aggregations: [{ field: "借方金额", func: "sum", output: "借方合计" }],
+    });
+  });
+
+  it("汇总：聚合方式选「非空计数」写入引擎键名 countNonEmpty（非 countNotNull）", () => {
+    const { onConfigChange } = renderLivePanel("summarize", {
+      groupBy: ["客商名称"],
+      aggregations: [{ field: "借方金额", func: "sum", output: "" }],
+    });
+    fireEvent.change(screen.getByDisplayValue("求和"), { target: { value: "countNonEmpty" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      groupBy: ["客商名称"],
+      aggregations: [{ field: "借方金额", func: "countNonEmpty", output: "" }],
+    });
+  });
+
+  it("透视：聚合方式仅列引擎支持的 3 项，选「非空计数」写入 countNonEmpty", () => {
+    const { onConfigChange } = renderLivePanel("crosstab", {
+      rowField: "客商名称",
+      columnField: "期间",
+      valueField: "借方金额",
+      valueFunc: "sum",
+      fill: 0,
+    });
+    const select = screen.getByLabelText("聚合方式") as HTMLSelectElement;
+    // 引擎 run_crosstab 白名单只有 sum / countNonEmpty / distinctCount，
+    // 界面不得复用汇总的全量 7 项（countAll/avg/min/max 一选运行必报错）。
+    expect(Array.from(select.options).map((option) => option.value)).toEqual([
+      "sum",
+      "countNonEmpty",
+      "distinctCount",
+    ]);
+    fireEvent.change(select, { target: { value: "countNonEmpty" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      rowField: "客商名称",
+      columnField: "期间",
+      valueField: "借方金额",
+      valueFunc: "countNonEmpty",
+      fill: 0,
     });
   });
 });

@@ -151,11 +151,12 @@ export interface SortRuleConfig {
   nulls: "first" | "last";
 }
 
+/** 聚合函数键名必须与 Rust 引擎 func_display 白名单一致（aggregate.rs）。 */
 export type SummarizeFunc =
   | "countAll"
   | "sum"
-  | "countNotNull"
-  | "countDistinct"
+  | "countNonEmpty"
+  | "distinctCount"
   | "avg"
   | "min"
   | "max";
@@ -163,12 +164,36 @@ export type SummarizeFunc =
 export const SUMMARIZE_FUNCS: { value: SummarizeFunc; label: string }[] = [
   { value: "countAll", label: "总行数" },
   { value: "sum", label: "求和" },
-  { value: "countNotNull", label: "非空计数" },
-  { value: "countDistinct", label: "去重计数" },
+  { value: "countNonEmpty", label: "非空计数" },
+  { value: "distinctCount", label: "去重计数" },
   { value: "avg", label: "平均" },
   { value: "min", label: "最小" },
   { value: "max", label: "最大" },
 ];
+
+/** 透视节点引擎只支持 3 种聚合方式（aggregate.rs run_crosstab 白名单）。 */
+export const CROSSTAB_VALUE_FUNCS: { value: SummarizeFunc; label: string }[] = [
+  { value: "sum", label: "求和" },
+  { value: "countNonEmpty", label: "非空计数" },
+  { value: "distinctCount", label: "去重计数" },
+];
+
+/** 旧版前端写出的错误键名 → 引擎键名（打开历史流程文件时迁移）。 */
+const LEGACY_SUMMARIZE_FUNC_ALIASES: Record<string, SummarizeFunc> = {
+  countNotNull: "countNonEmpty",
+  countDistinct: "distinctCount",
+};
+
+/**
+ * 聚合函数键名规整：引擎白名单内的原样返回；旧版前端的 countNotNull /
+ * countDistinct 映射为引擎键名；无法识别返回 null（由调用方兜底）。
+ */
+export function canonicalSummarizeFunc(raw: unknown): SummarizeFunc | null {
+  if (typeof raw !== "string") return null;
+  const alias = LEGACY_SUMMARIZE_FUNC_ALIASES[raw];
+  if (alias) return alias;
+  return SUMMARIZE_FUNCS.some((fn) => fn.value === raw) ? (raw as SummarizeFunc) : null;
+}
 
 export interface SummarizeAggregation {
   field: string;
@@ -186,7 +211,11 @@ export const CHECK_RULE_TYPES: { value: CheckRuleType; label: string }[] = [
   { value: "expression", label: "表达式" },
 ];
 
-/** 检查规则：type 判别＋各类型自己的字段（序列化时只保留该类型相关字段）。 */
+/**
+ * 检查规则：type 判别＋各类型自己的字段（序列化时只保留该类型相关字段）。
+ * 引擎侧同时兼容 type/kind 两种判别与 groupBy 单字符串/数组（见引擎
+ * nodes/check.rs 的规则归一）；本侧打开文件时也兼容 kind 判别形态。
+ */
 export interface CheckRuleConfig {
   type: CheckRuleType;
   /** balance / unique：分组字段（空＝全表/全表唯一）。 */
@@ -248,7 +277,8 @@ const numOrNull = (value: unknown): number | null => {
 export function normalizeCheckRule(raw: unknown): CheckRuleConfig | null {
   if (typeof raw !== "object" || raw === null) return null;
   const item = raw as Record<string, unknown>;
-  const type = item.type;
+  // 判别字段兼容 type（界面序列化）与 kind（手写流程文件/引擎历史形态）。
+  const type = typeof item.type === "string" && item.type ? item.type : item.kind;
   switch (type) {
     case "balance":
       return {
@@ -555,9 +585,8 @@ export function normalizeConfig(
           const agg = (item ?? {}) as Record<string, unknown>;
           return {
             field: str(agg.field),
-            func: (SUMMARIZE_FUNCS.some((fn) => fn.value === agg.func)
-              ? agg.func
-              : "countAll") as SummarizeFunc,
+            // 旧版前端键名（countNotNull/countDistinct）在此迁移为引擎键名。
+            func: (canonicalSummarizeFunc(agg.func) ?? "countAll") as SummarizeFunc,
             output: str(agg.output),
           };
         })
@@ -571,8 +600,13 @@ export function normalizeConfig(
     for (const key of ["rowField", "columnField", "valueField"]) {
       if (typeof coerced[key] !== "string") coerced[key] = "";
     }
-    if (!SUMMARIZE_FUNCS.some((fn) => fn.value === coerced.valueFunc)) {
+    // 聚合方式先迁移旧键名，再按透视白名单（sum/countNonEmpty/distinctCount，
+    // 引擎 run_crosstab 仅支持这 3 项）校验；不合法回落默认「求和」。
+    const valueFunc = canonicalSummarizeFunc(coerced.valueFunc);
+    if (!CROSSTAB_VALUE_FUNCS.some((fn) => fn.value === valueFunc)) {
       coerced.valueFunc = defaults.valueFunc;
+    } else {
+      coerced.valueFunc = valueFunc;
     }
   }
   if (type === "transpose") {
@@ -586,7 +620,10 @@ export function normalizeConfig(
     }
   }
   if (type === "split") {
-    if (coerced.mode !== "delimiter" && coerced.mode !== "width") coerced.mode = defaults.mode;
+    // 拆分方式与引擎契约对齐（split.rs 只认 delimiter / fixedWidth）；
+    // 旧流程文件曾用 "width"，此处统一迁移为 fixedWidth，避免打开时退化为分隔符模式。
+    if (coerced.mode === "width") coerced.mode = "fixedWidth";
+    if (coerced.mode !== "delimiter" && coerced.mode !== "fixedWidth") coerced.mode = defaults.mode;
     coerced.widths = Array.isArray(coerced.widths)
       ? (coerced.widths as unknown[])
           .map((width) => Math.trunc(Number(width)))

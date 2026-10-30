@@ -38,6 +38,8 @@ function renderPanel(type: string, config: Record<string, unknown> = defaultConf
       onConfigChange={onConfigChange}
       onDelete={() => undefined}
       onPickPath={() => undefined}
+      outputDir="D:\审计底稿"
+      onPickOutputDir={() => undefined}
     />,
   );
   return { onConfigChange };
@@ -61,6 +63,8 @@ function renderLivePanel(type: string, initial: Record<string, unknown> = defaul
         }}
         onDelete={() => undefined}
         onPickPath={() => undefined}
+      outputDir="D:\审计底稿"
+      onPickOutputDir={() => undefined}
       />
     );
   }

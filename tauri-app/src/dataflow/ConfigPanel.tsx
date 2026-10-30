@@ -58,6 +58,9 @@ export interface ConfigPanelProps {
     extensions: string[],
     apply: (path: string) => void,
   ) => void;
+  /** 输出位置（记住的默认输出文件夹）；输出文件名留空/只填名字时自动保存到这里。 */
+  outputDir: string;
+  onPickOutputDir: () => void;
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -401,6 +404,8 @@ export function ConfigPanel({
   onConfigChange,
   onDelete,
   onPickPath,
+  outputDir,
+  onPickOutputDir,
 }: ConfigPanelProps) {
   // 检查规则编辑器「新增规则类型」的记忆值；hook 须位于所有提前 return 之前。
   const [newCheckRuleType, setNewCheckRuleType] = useState<CheckRuleType>("balance");
@@ -977,6 +982,17 @@ export function ConfigPanel({
     case "excel_out": {
       form = (
         <>
+          <Field label="输出位置（文件名留空时自动按时间戳命名）">
+            <div className="df-outdir">
+              <span className="df-outdir-path" title={outputDir || undefined}>
+                {outputDir || "未设置：运行时会请您选择一次并记住"}
+              </span>
+              <button type="button" className="df-btn-sm" onClick={onPickOutputDir}>
+                选择…
+              </button>
+            </div>
+          </Field>
+          <NoteFold>文件名可只填名字或留空：留空＝自动命名（流程名_节点名_时间戳），都会保存到上方「输出位置」；填了扩展名会自动补齐；需要存到别处时再填含盘符的完整路径。</NoteFold>
           <Field label="输出文件名（可代入参数）">
             <TextIn
               value={String(config.fileName ?? "")}
@@ -1021,6 +1037,17 @@ export function ConfigPanel({
     case "csv_out": {
       form = (
         <>
+          <Field label="输出位置（文件名留空时自动按时间戳命名）">
+            <div className="df-outdir">
+              <span className="df-outdir-path" title={outputDir || undefined}>
+                {outputDir || "未设置：运行时会请您选择一次并记住"}
+              </span>
+              <button type="button" className="df-btn-sm" onClick={onPickOutputDir}>
+                选择…
+              </button>
+            </div>
+          </Field>
+          <NoteFold>文件名可只填名字或留空：留空＝自动命名（流程名_节点名_时间戳），都会保存到上方「输出位置」；填了扩展名会自动补齐；需要存到别处时再填含盘符的完整路径。</NoteFold>
           <Field label="输出文件名（可代入参数）">
             <TextIn
               value={String(config.fileName ?? "")}

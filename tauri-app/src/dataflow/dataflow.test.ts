@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
@@ -38,6 +38,7 @@ import {
   type DataflowNodeResult,
   type DataflowRunResult,
   type DataflowWorkflow,
+  resolveOutputPaths,
 } from "./model";
 import { dataflowDemoResult } from "./demoData";
 import { ResultsPanel } from "./ResultsPanel";
@@ -1567,6 +1568,11 @@ describe("数据流：全量运行后输出节点显示写入文件表格", () =
     migrationStatus: "preview",
   };
 
+  beforeEach(() => {
+    // 运行前输出文件名解析需要「输出位置」：预置记住值，模拟用户已选过一次。
+    window.localStorage.setItem("audit-toolbox:dataflow:output-dir", "D:\\审计输出");
+  });
+
   afterEach(() => {
     cleanup();
     window.localStorage.clear();
@@ -1694,5 +1700,35 @@ describe("数据流：全量运行后输出节点显示写入文件表格", () =
     expect(screen.getByText("写入文件")).toBeTruthy();
     expect(screen.getByText("2,847,301")).toBeTruthy();
     expect(screen.queryByText("2847301")).toBeNull();
+  });
+});
+
+describe("输出文件名解析（留空自动命名、纯名字进输出位置）", () => {
+  it("留空＝流程名_节点名_时间戳；纯名字＝进输出位置并补扩展名；完整路径原样；不改用户配置", () => {
+    const wf = createEmptyWorkflow("底稿流程");
+    wf.nodes = [
+      { id: "n1", type: "excel_out", name: "大额清单", x: 0, y: 0, config: { fileName: "" } },
+      { id: "n2", type: "csv_out", name: "明细", x: 0, y: 0, config: { fileName: "123" } },
+      { id: "n3", type: "excel_out", name: "手填", x: 0, y: 0, config: { fileName: "D:\\x\\y.xlsx" } },
+    ];
+    const resolved = resolveOutputPaths(wf, "D:\\审计底稿");
+    expect(resolved.needsDir).toBe(false);
+    const [n1, n2, n3] = resolved.workflow.nodes;
+    expect(String((n1!.config as Record<string, unknown>).fileName)).toMatch(
+      /^D:\\审计底稿\\底稿流程_大额清单_\d{8}_\d{6}\.xlsx$/,
+    );
+    expect((n2!.config as Record<string, unknown>).fileName).toBe("D:\\审计底稿\\123.csv");
+    expect((n3!.config as Record<string, unknown>).fileName).toBe("D:\\x\\y.xlsx");
+    // 解析只用于本次运行：用户留在配置里的原文不被改写。
+    expect((wf.nodes[0]!.config as Record<string, unknown>).fileName).toBe("");
+    expect(resolved.notes.length).toBe(2);
+  });
+
+  it("输出位置未设置且有输出节点时报告 needsDir，由页面引导用户选一次", () => {
+    const wf = createEmptyWorkflow("流程");
+    wf.nodes = [{ id: "n1", type: "csv_out", name: "输出", x: 0, y: 0, config: { fileName: "a.csv" } }];
+    const resolved = resolveOutputPaths(wf, "");
+    expect(resolved.needsDir).toBe(true);
+    expect(resolved.workflow.nodes[0]).toBe(wf.nodes[0]);
   });
 });

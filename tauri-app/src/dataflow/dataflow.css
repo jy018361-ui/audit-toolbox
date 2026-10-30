@@ -412,6 +412,24 @@ textarea.df-in {
   background: var(--warning-bg);
   color: var(--warning-fg);
 }
+/* 输出位置行：路径省略显示 + 选择按钮。 */
+.df-outdir {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.df-outdir-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
 /* 未填完整的条件行：浅红底提示，运行前会被拦下。 */
 .df-row-incomplete {
   border-radius: var(--r-sm);

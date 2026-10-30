@@ -16,6 +16,9 @@ import {
   defaultConfigFor,
   defaultNodeName,
   incompleteFilterRule,
+  loadOutputDir,
+  resolveOutputPaths,
+  saveOutputDir,
   listDrafts,
   nextNodeId,
   parseWorkflowFile,
@@ -92,6 +95,10 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   configWidthRef.current = configWidth;
   const resultsHeightRef = useRef(resultsHeight);
   resultsHeightRef.current = resultsHeight;
+  // 输出位置：用户设定一次即记住，输出文件名留空/只填名字时自动保存到这里。
+  const [outputDir, setOutputDir] = useState<string>(() => loadOutputDir());
+  const outputDirRef = useRef(outputDir);
+  outputDirRef.current = outputDir;
   const [paramsDialog, setParamsDialog] = useState<null | "edit" | "confirm">(null);
   const [autosaveNote, setAutosaveNote] = useState("");
   const [configCollapsed, setConfigCollapsed] = useState(false);
@@ -393,16 +400,38 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
       setWorkflow(repaired.workflow);
       setStatusText(`已自动修正 ${repaired.fixes.length} 条过期连线后运行：${repaired.fixes[0]}`);
     }
-    const runWf = repaired.workflow;
+    // 输出文件名解析：留空＝自动命名（含时间戳）、只填名字＝放进输出位置，
+    // 都不需要用户写完整路径（真实反馈 2026-10-30）。目录未设置时先让用户
+    // 选一次文件夹并记住，之后零操作。
+    let resolved = resolveOutputPaths(repaired.workflow, outputDirRef.current);
+    if (resolved.needsDir) {
+      const picked = await pickPath("folder", "选择输出文件夹（输出文件将自动保存到这里，只需设置一次）");
+      if (typeof picked === "string" && picked) {
+        outputDirRef.current = picked;
+        setOutputDir(picked);
+        saveOutputDir(picked);
+        resolved = resolveOutputPaths(repaired.workflow, picked);
+      } else {
+        setError(
+          "输出文件还没有落脚的文件夹：请点输出节点的「选择输出位置」选一次（会记住），或把文件名写成含盘符的完整路径。",
+        );
+        setStatusText("未设置输出位置，已拦下本次运行。");
+        return;
+      }
+    }
+    const runWf = resolved.workflow;
     setRunning(true);
     setError("");
     setRanUpTo(null);
+    const resolveNote = resolved.notes.length ? `${resolved.notes.join("；")}。` : "";
     setStatusText(
-      uptoNodeId
-        ? `正在运行到所选节点（全量数据，大文件可能需要数分钟且暂无进度显示）…`
-        : mode === "preview"
-          ? "正在预览运行（样本数据）…"
-          : "正在全量运行（大文件可能需要数分钟且暂无进度显示；探索数据建议先用预览运行）…",
+      `${resolveNote}${
+        uptoNodeId
+          ? "正在运行到所选节点（全量数据，大文件可能需要数分钟且暂无进度显示）…"
+          : mode === "preview"
+            ? "正在预览运行（样本数据）…"
+            : "正在全量运行（大文件可能需要数分钟且暂无进度显示；探索数据建议先用预览运行）…"
+      }`,
     );
     const overrides = Object.fromEntries(wf.params.map((param) => [param.id, param.value]));
     try {
@@ -459,6 +488,17 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
       setAutosaveNote("");
     } else {
       setError(outcome.message);
+    }
+  }
+
+  /** 选择默认输出文件夹（设定一次即记住）：输出文件名留空/只填名字时自动保存到这里。 */
+  async function handlePickOutputDir() {
+    const picked = await pickPath("folder", "选择输出文件夹（输出文件将自动保存到这里）");
+    if (typeof picked === "string" && picked) {
+      outputDirRef.current = picked;
+      setOutputDir(picked);
+      saveOutputDir(picked);
+      setStatusText(`输出位置已设为 ${picked}。`);
     }
   }
 
@@ -605,6 +645,8 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
             }}
             onDelete={deleteSelection}
             onPickPath={(kind, extensions, apply) => void handlePickPath(kind, extensions, apply)}
+            outputDir={outputDir}
+            onPickOutputDir={() => void handlePickOutputDir()}
           />
           <div
             className="df-split df-split-v"

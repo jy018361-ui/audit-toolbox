@@ -476,7 +476,13 @@ export function dataflowDemoResult(
           typeof config.fileName === "string" && config.fileName
             ? config.fileName
             : `${node.type === "excel_out" ? "输出结果" : "输出明细"}_{p1}.${node.type === "excel_out" ? "xlsx" : "csv"}`;
-        const fileName = applyParamPlaceholders(rawName, workflow.params, paramOverrides);
+        // 运行前解析可能已把文件名补成绝对路径（输出位置自动补全），演示层
+        // 只取文件名部分再拼自己的样例目录，避免出现双盘符拼接。
+        const fileName = applyParamPlaceholders(
+          rawName.split(/[\\/]/).pop() ?? rawName,
+          workflow.params,
+          paramOverrides,
+        );
         // 锚点键对齐真实引擎（nodes/output.rs）：Excel 输出用「sheet:名」——第 1 条连线
         // 用配置 Sheet 名（缺省＝上游节点名），其余连线用各自上游节点名；CSV 输出用
         // 「file:名.扩展名」，多输入时文件名 _2/_3 递增。

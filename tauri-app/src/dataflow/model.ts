@@ -149,6 +149,84 @@ export function incompleteFilterRule(rule: Partial<FilterRuleConfig>): boolean {
   return !(rule.value ?? "").trim();
 }
 
+/** 输出节点的默认目录（用户设定一次即记住，输出文件自动保存到这里）。 */
+export const OUTPUT_DIR_KEY = "audit-toolbox:dataflow:output-dir";
+
+export function loadOutputDir(): string {
+  try {
+    return window.localStorage.getItem(OUTPUT_DIR_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function saveOutputDir(dir: string): void {
+  try {
+    window.localStorage.setItem(OUTPUT_DIR_KEY, dir);
+  } catch {
+    // 存储不可用时静默跳过：本次运行仍可用，只是不记忆。
+  }
+}
+
+function isAbsolutePath(name: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(name) || name.startsWith("\\\\");
+}
+
+function sanitizeFileName(name: string): string {
+  return name.replace(/[\\/:*?"<>|]/g, "_").trim();
+}
+
+function timestampNow(): string {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+export interface OutputResolveResult {
+  /** 输出节点文件名全部落成绝对路径后的工作流（仅用于本次运行，不改用户草稿）。 */
+  workflow: DataflowWorkflow;
+  /** 自动定位说明（供状态栏提示）。 */
+  notes: string[];
+  /** 是否存在需要默认输出目录的输出节点而目录尚未设置（调用方应先让用户选一次）。 */
+  needsDir: boolean;
+}
+
+/**
+ * 运行前把输出节点的文件名解析成绝对路径（用户反馈 2026-10-30：文件名
+ * 不应要求填完整路径）：留空＝自动命名（流程名_节点名_时间戳）；只填
+ * 名字＝放进默认输出目录；缺扩展名自动补；已是完整路径则原样保留。
+ */
+export function resolveOutputPaths(
+  workflow: DataflowWorkflow,
+  outputDir: string,
+): OutputResolveResult {
+  const notes: string[] = [];
+  let needsDir = false;
+  const dir = outputDir.trim();
+  const nodes = workflow.nodes.map((node) => {
+    if (node.type !== "excel_out" && node.type !== "csv_out") return node;
+    const extension = node.type === "excel_out" ? ".xlsx" : ".csv";
+    const raw = String((node.config as Record<string, unknown> | undefined)?.fileName ?? "").trim();
+    if (isAbsolutePath(raw)) return node;
+    if (!dir) {
+      needsDir = true;
+      return node;
+    }
+    let name: string;
+    if (!raw) {
+      name = `${sanitizeFileName(workflow.name) || "数据流输出"}_${sanitizeFileName(node.name)}_${timestampNow()}${extension}`;
+      notes.push(`「${node.name}」文件名留空，已自动命名并保存到输出位置`);
+    } else {
+      name = sanitizeFileName(raw);
+      if (!name.toLowerCase().endsWith(extension)) name += extension;
+      notes.push(`「${node.name}」已自动保存到输出位置`);
+    }
+    const config = { ...(node.config as Record<string, unknown>), fileName: `${dir}\\${name}` };
+    return { ...node, config };
+  });
+  return { workflow: { ...workflow, nodes }, notes, needsDir };
+}
+
 // ===== 二期节点 config 类型（契约见 DATAFLOW_NODE_SPECS.md 第八节裁定） =====
 
 export interface JoinKeyPair {

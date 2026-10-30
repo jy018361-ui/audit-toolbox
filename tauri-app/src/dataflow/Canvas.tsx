@@ -105,6 +105,8 @@ export interface DataflowCanvasProps {
   onConnect: (edge: DataflowEdge) => void;
   /** 最近新增节点的 id：若它落在当前视野外（视角曾被拖远），自动把视角对准它。 */
   focusNodeId?: string | null;
+  /** 请求「适配视图」的令牌：恢复草稿/打开流程时递增，画布把全部节点缩放进视野。 */
+  fitKey?: number;
 }
 
 /** 数据流画布：拖动/连线/平移/缩放/点选，原生 DOM + SVG 实现。 */
@@ -118,6 +120,7 @@ export function DataflowCanvas({
   onNodeDragStart,
   onConnect,
   focusNodeId,
+  fitKey,
 }: DataflowCanvasProps) {
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const [camera, setCamera] = useState({ x: 24, y: 16, zoom: 1 });
@@ -183,6 +186,45 @@ export function DataflowCanvas({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusNodeId]);
+
+  /** 适配视图：把全部节点缩放进画布并居中。旧坐标可能来自更宽的窗口
+   *  （真实案例：节点横坐标 603/809/1026，当前画布仅约 670 宽），原先的
+   *  「重置视图」只把缩放平移归一，内容在视野外的问题原样保留——用户
+   *  看到的仍是空画布，点多少次重置都没用。空画布时恢复默认视角。 */
+  function fitToContent() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (!workflow.nodes.length) {
+      setCamera({ x: 24, y: 16, zoom: 1 });
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const minX = Math.min(...workflow.nodes.map((node) => node.x));
+    const minY = Math.min(...workflow.nodes.map((node) => node.y));
+    const maxX = Math.max(...workflow.nodes.map((node) => node.x + NODE_W));
+    const maxY = Math.max(...workflow.nodes.map((node) => node.y + NODE_H));
+    const w = Math.max(1, maxX - minX);
+    const h = Math.max(1, maxY - minY);
+    const padding = 36;
+    const zoom = Math.max(
+      0.35,
+      Math.min(
+        1.5,
+        Math.min((rect.width - padding * 2) / w, (rect.height - padding * 2) / h),
+      ),
+    );
+    setCamera({
+      zoom,
+      x: (rect.width - w * zoom) / 2 - minX * zoom,
+      y: (rect.height - h * zoom) / 2 - minY * zoom,
+    });
+  }
+
+  useEffect(() => {
+    if (!fitKey) return;
+    fitToContent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fitKey]);
 
   function worldFromEvent(event: React.PointerEvent): { x: number; y: number } {
     const rect = (canvasRef.current as HTMLDivElement).getBoundingClientRect();
@@ -568,10 +610,11 @@ export function DataflowCanvas({
           <button
             type="button"
             className="df-tool"
-            onClick={() => setCamera({ x: 24, y: 16, zoom: 1 })}
+            title="把全部节点缩放进视野并居中（找不到内容时点这里）"
+            onClick={fitToContent}
           >
             <RotateCcw size={13} />
-            重置视图
+            适配视图
           </button>
         </div>
         <span className="df-hint">

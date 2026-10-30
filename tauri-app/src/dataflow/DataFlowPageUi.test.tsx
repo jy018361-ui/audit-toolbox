@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, expect, it, vi } from "vitest";
 
 import { DataFlowPage } from "./DataFlowPage";
-import { saveDraft } from "./model";
+import { createEmptyWorkflow, defaultConfigFor, saveDraft } from "./model";
 import { pickPath, runningInDesktopApp } from "../api";
 import type { ToolManifest } from "../types";
 
@@ -365,4 +365,29 @@ it("视角被拖远后新增节点：画布自动把视角对准新节点，不�
   // x = -60-78 = -138、y = -60-39 = -99。
   const transform = (document.querySelector(".df-world") as HTMLElement).style.transform;
   expect(transform).toBe("translate(-138px, -99px) scale(1)");
+});
+
+it("恢复坐标超出当前画布的草稿：自动适配视角，全部节点进入视野（不再打开即空白）", async () => {
+  // 真实案例（dev.16 诊断）：草稿节点横坐标 603/809/1026，画布仅约 670 宽，
+  // 旧「重置视图」只归一缩放平移，内容仍在视野外，用户怎么点都是空画布。
+  // jsdom 画布尺寸恒 0×0，适配必然触发且缩放被压到下限 0.35——这里断言
+  // 视角确实变了（不再是默认 24,16,1），真实浏览器中的入画效果另有人工验证。
+  const wf = createEmptyWorkflow("宽屏旧流程");
+  wf.nodes = [
+    { id: "n1", type: "csv_in", name: "CSV输入", x: 603, y: 54, config: defaultConfigFor("csv_in") },
+    { id: "n2", type: "filter_n", name: "筛选", x: 809, y: 87, config: defaultConfigFor("filter_n") },
+    { id: "n3", type: "csv_out", name: "CSV输出", x: 1026, y: 86, config: defaultConfigFor("csv_out") },
+  ];
+  wf.edges = [
+    { from: "n1", fromAnchor: "output", to: "n2", toAnchor: "in" },
+    { from: "n2", fromAnchor: "T", to: "n3", toAnchor: "in" },
+  ];
+  saveDraft(wf);
+  render(<DataFlowPage tool={dataflowTool} />);
+  await screen.findByText(/已自动恢复未保存的流程/);
+  await waitFor(() => {
+    const transform = (document.querySelector(".df-world") as HTMLElement).style.transform;
+    expect(transform).not.toBe("translate(24px, 16px) scale(1)");
+    expect(transform).toContain("scale(0.35)");
+  });
 });

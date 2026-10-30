@@ -52,6 +52,9 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   const [selection, setSelection] = useState<DataflowSelection>(null);
   // 最近新增节点：交给画布保证落在视野内（视角被拖远时自动对准）。
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
+  // 「适配视图」请求令牌：恢复草稿/打开流程后递增，画布把全部节点缩放进视野
+  // （旧流程的节点坐标可能超出当前窗口的画布范围，不适配就"打开即看不见"）。
+  const [fitKey, setFitKey] = useState(0);
   const [runResult, setRunResult] = useState<DataflowRunResult | null>(null);
   const [lastRunMode, setLastRunMode] = useState<"preview" | "full" | null>(null);
   /** 「运行到选中节点」时记录目标节点 id，其余运行方式为 null。 */
@@ -93,6 +96,9 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     // 跨版本草稿可能带过期锚点名，恢复时即修正，别等运行才炸。
     const { workflow, fixes } = repairWorkflowEdges(draft.workflow);
     replaceWorkflow(workflow, true);
+    // 草稿里的节点坐标可能落在当前画布视野外（换窗口/换机器后常见），
+    // 恢复后立即适配，保证「恢复即看得见」。
+    setFitKey((key) => key + 1);
     setAutosaveNote(`恢复自草稿 ${draft.savedAt.replace("T", " ").slice(11, 16)}`);
     setStatusText(
       `已自动恢复未保存的流程《${draft.name}》（${workflow.nodes.length} 个节点，保存于 ${draft.savedAt.replace("T", " ").slice(0, 19)}）。${fixes.length ? ` 已修正 ${fixes.length} 条过期连线：${fixes.join(" ")}` : "" }如需重新开始请点「新建」。`,
@@ -392,6 +398,9 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     }
     const { workflow, fixes } = repairWorkflowEdges(parsed.workflow);
     replaceWorkflow(workflow, true);
+    // 流程文件的节点坐标可能超出当前画布（保存时的窗口更大/更宽），
+    // 打开后立即适配，保证「打开即看得见」。
+    setFitKey((key) => key + 1);
     setSelection(null);
     setRunResult(null);
     setLastRunMode(null);
@@ -539,6 +548,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
             onNodeDragStart={snapshotForDrag}
             onConnect={connect}
             focusNodeId={focusNodeId}
+            fitKey={fitKey}
           />
         </div>
         <ResultsPanel

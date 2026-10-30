@@ -37,8 +37,12 @@
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  height: auto;
-  min-height: 560px;
+  /* 工作台整体限高一屏（顶部应用栏＋工具页头＋页内边距实测约 190px，再留
+     弹性伸展余量）：画布弹性伸缩、预览区钉在底部始终可见，用户不再滚动
+     窗口找预览信息（真实反馈 2026-10-30）。用 max-height 封顶而不是固定
+     height——外层弹性容器会把固定高度再撑大；极矮窗口时退化为少量滚动。 */
+  max-height: calc(100vh - 220px);
+  min-height: 420px;
   border: 1px solid var(--border-strong);
   border-radius: var(--r-lg);
   background: var(--surface);

@@ -207,16 +207,27 @@ function TokenIn({
   value: string[];
   onChange: (value: string[]) => void;
   placeholder?: string;
-  /** 上游列名下拉建议（datalist）：选中一项即追加一个字段。 */
+  /** 上游列名：多字段场景用勾选清单（选一个加一个），单字段场景见 FieldIn。 */
   suggestions?: string[];
 }) {
-  const listId = useMemo(() => `df-token-list-${++fieldSuggestSeq}`, []);
+  const [open, setOpen] = useState(false);
+  const toggle = (name: string) =>
+    onChange(
+      value.includes(name) ? value.filter((item) => item !== name) : [...value, name],
+    );
   return (
-    <>
+    <div className="df-tokenpick">
+      {value.map((name) => (
+        <span className="df-token" key={name}>
+          {name}
+          <button type="button" aria-label={`移除 ${name}`} onClick={() => toggle(name)}>
+            ×
+          </button>
+        </span>
+      ))}
       <input
-        className="df-in"
+        className="df-in df-tokenpick-input"
         type="text"
-        list={suggestions.length ? listId : undefined}
         value={value.join("、")}
         placeholder={placeholder}
         onChange={(event) =>
@@ -229,13 +240,27 @@ function TokenIn({
         }
       />
       {suggestions.length > 0 && (
-        <datalist id={listId}>
-          {suggestions.map((name) => (
-            <option key={name} value={name} />
-          ))}
-        </datalist>
+        <span className="df-tokenpick-select">
+          <button type="button" className="df-btn-sm" onClick={() => setOpen((now) => !now)}>
+            选择
+          </button>
+          {open && (
+            <span className="df-tokenpick-pop">
+              {suggestions.map((name) => (
+                <label key={name}>
+                  <input
+                    type="checkbox"
+                    checked={value.includes(name)}
+                    onChange={() => toggle(name)}
+                  />
+                  {name}
+                </label>
+              ))}
+            </span>
+          )}
+        </span>
       )}
-    </>
+    </div>
   );
 }
 
@@ -1428,19 +1453,27 @@ export function ConfigPanel({
       form = (
         <>
           <div className="df-row2">
-            <Field label="行字段">
-              <FieldIn
+            <Field label="行字段（可多选＝多级行键）">
+              <TokenIn
                 suggestions={fieldOptions}
-                value={String(config.rowField ?? "")}
-                placeholder="如 客商名称（可下拉选）"
+                value={(Array.isArray(config.rowField)
+                  ? (config.rowField as string[])
+                  : config.rowField
+                    ? [String(config.rowField)]
+                    : []) as string[]}
+                placeholder="点「选择」勾选，或输入字段名"
                 onChange={(value) => setKey("rowField", value)}
               />
             </Field>
-            <Field label="列字段（首版 1 个）">
-              <FieldIn
+            <Field label="列字段（可多选，动态列名按「·」拼接）">
+              <TokenIn
                 suggestions={fieldOptions}
-                value={String(config.columnField ?? "")}
-                placeholder="如 期间（可下拉选）"
+                value={(Array.isArray(config.columnField)
+                  ? (config.columnField as string[])
+                  : config.columnField
+                    ? [String(config.columnField)]
+                    : []) as string[]}
+                placeholder="点「选择」勾选，或输入字段名"
                 onChange={(value) => setKey("columnField", value)}
               />
             </Field>

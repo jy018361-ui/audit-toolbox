@@ -372,10 +372,12 @@ pub(crate) struct SummarizeConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CrosstabConfig {
-    #[serde(default)]
-    pub row_field: String,
-    #[serde(default)]
-    pub column_field: String,
+    /// 行字段：单字段历史写法（字符串）或数组（多级行键）都接受。
+    #[serde(default, deserialize_with = "string_or_vec")]
+    pub row_field: Vec<String>,
+    /// 列字段：同上，多字段时动态列名＝各字段取值按「·」拼接。
+    #[serde(default, deserialize_with = "string_or_vec")]
+    pub column_field: Vec<String>,
     #[serde(default)]
     pub value_field: String,
     /// sum | countNonEmpty | distinctCount。
@@ -384,6 +386,30 @@ pub(crate) struct CrosstabConfig {
     /// 缺失组合填充值：数字（默认 0）或 null。
     #[serde(default = "default_crosstab_fill")]
     pub fill: Value,
+}
+
+/// 单字符串或字符串数组 → 规整后的字符串数组（过滤空白项）。
+/// 透视行/列字段从首版单字段升级为多字段，历史流程文件与旧界面
+/// 保存的单字符串写法必须继续可用。
+fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    let parsed = OneOrMany::deserialize(deserializer)?;
+    Ok(match parsed {
+        OneOrMany::One(text) => vec![text],
+        OneOrMany::Many(items) => items,
+    }
+    .into_iter()
+    .map(|item| item.trim().to_owned())
+    .filter(|item| !item.is_empty())
+    .collect())
 }
 
 fn default_crosstab_fill() -> Value {

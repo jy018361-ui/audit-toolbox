@@ -457,3 +457,47 @@ it("没有上游列名时字段输入框退化为普通输入（不挂 datalist�
   const fieldInput = screen.getByPlaceholderText("字段（可下拉选）");
   expect(fieldInput.getAttribute("list")).toBeNull();
 });
+
+it("多字段输入（如透视行字段）：点「选择」出勾选清单，勾选即加标签、再点移除；手输仍可用", async () => {
+  // 用户需求 2026-10-30：多字段场景应多选（选一个加一个），不是单选。
+  // ConfigPanel 受控：用带状态的壳回写配置，才能验证连续勾选的追加语义。
+  const onConfigChange = vi.fn();
+  function Harness() {
+    const [config, setConfig] = useState({ ...defaultConfigFor("crosstab"), valueField: "借方" });
+    const apply = (next: Record<string, unknown>) => {
+      onConfigChange(next);
+      setConfig(next as typeof config);
+    };
+    return (
+      <ConfigPanel
+        node={{ id: "ct", type: "crosstab", name: "透视", x: 0, y: 0, config }}
+        params={[]}
+        collapsed={false}
+        onToggleCollapse={() => undefined}
+        onRename={() => undefined}
+        onConfigChange={apply}
+        onDelete={() => undefined}
+        onPickPath={() => undefined}
+        outputDir=""
+        onPickOutputDir={() => undefined}
+        fieldOptions={["客商名称", "期间", "科目编码"]}
+      />
+    );
+  }
+  render(<Harness />);
+  // 行字段区域点「选择」展开勾选清单
+  const selectButtons = await screen.findAllByRole("button", { name: "选择" });
+  fireEvent.click(selectButtons[0]!);
+  fireEvent.click(screen.getByLabelText("客商名称"));
+  expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ rowField: ["客商名称"] }));
+  // 再勾一个：追加而不是替换（多选语义）。
+  fireEvent.click(screen.getByLabelText("期间"));
+  expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ rowField: ["客商名称", "期间"] }));
+  // 取消勾选：从数组移除。
+  fireEvent.click(screen.getByLabelText("客商名称"));
+  expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ rowField: ["期间"] }));
+  // 手输解析仍可用。
+  const manual = screen.getAllByPlaceholderText("点「选择」勾选，或输入字段名")[0]!;
+  fireEvent.change(manual, { target: { value: "科目编码、备注" } });
+  expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ rowField: ["科目编码", "备注"] }));
+});

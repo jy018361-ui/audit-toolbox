@@ -498,8 +498,8 @@ export function defaultConfigFor(type: string): Record<string, unknown> {
       };
     case "crosstab":
       return {
-        rowField: "",
-        columnField: "",
+        rowField: [] as string[],
+        columnField: [] as string[],
         valueField: "",
         valueFunc: "sum",
         fill: 0,
@@ -694,9 +694,16 @@ export function normalizeConfig(
     else if (typeof coerced.fill === "number" && Number.isFinite(coerced.fill)) {
       // 保留数值（含 0）。
     } else coerced.fill = defaults.fill;
-    for (const key of ["rowField", "columnField", "valueField"]) {
-      if (typeof coerced[key] !== "string") coerced[key] = "";
+    // 行/列字段支持多选（多级行键/列键）：字符串或数组统一规整为数组。
+    for (const key of ["rowField", "columnField"]) {
+      const raw = coerced[key];
+      coerced[key] = Array.isArray(raw)
+        ? raw.map((item) => String(item).trim()).filter(Boolean)
+        : typeof raw === "string" && raw.trim()
+          ? [raw.trim()]
+          : [];
     }
+    if (typeof coerced.valueField !== "string") coerced.valueField = "";
     // 聚合方式先迁移旧键名，再按透视白名单（sum/countNonEmpty/distinctCount，
     // 引擎 run_crosstab 仅支持这 3 项）校验；不合法回落默认「求和」。
     const valueFunc = canonicalSummarizeFunc(coerced.valueFunc);

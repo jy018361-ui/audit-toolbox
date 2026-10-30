@@ -478,8 +478,8 @@ describe("数据流：config 序列化", () => {
       aggregations: [{ field: "", func: "countAll", output: "" }],
     });
     expect(defaultConfigFor("crosstab")).toEqual({
-      rowField: "",
-      columnField: "",
+      rowField: [],
+      columnField: [],
       valueField: "",
       valueFunc: "sum",
       fill: 0,
@@ -541,7 +541,7 @@ describe("数据流：config 序列化", () => {
           { field: "", func: "countAll", output: "凭证笔数" },
         ],
       },
-      crosstab: { rowField: "客商名称", columnField: "期间", valueField: "借方金额", valueFunc: "sum", fill: null },
+      crosstab: { rowField: ["客商名称"], columnField: ["期间"], valueField: "借方金额", valueFunc: "sum", fill: null },
       transpose: { fixedFields: ["科目编码"], valueColumns: ["期初余额", "期末余额"], nameColumn: "项目", valueColumn: "数值" },
       split: { field: "科目编码", mode: "fixedWidth", delimiter: "", widths: [4, 4], keepOriginal: true, columnPrefix: "段" },
       check_n: {

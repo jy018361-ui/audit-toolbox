@@ -1402,6 +1402,19 @@ mod tests {
             .unwrap_or_else(|| panic!("列「{name}」应存在"))
     }
 
+    /// 按指定列的取值定位样本行号（透视多行键测试用）。
+    fn row_of(result: &Value, node: &str, anchor: &str, want: &Value, column: usize) -> usize {
+        let rows = result
+            .pointer(&format!("/nodes/{node}/anchors/{anchor}/sample"))
+            .and_then(Value::as_array)
+            .expect("样本应存在");
+        rows.iter()
+            .position(|row| {
+                row.as_array().and_then(|cells| cells.get(column)) == Some(want)
+            })
+            .unwrap_or_else(|| panic!("取值为 {want} 的行应存在"))
+    }
+
     fn stats_of(result: &Value, node: &str) -> Vec<String> {
         result
             .pointer(&format!("/nodes/{node}/stats"))
@@ -1619,6 +1632,56 @@ mod tests {
             let x = col(&result, "p", "output", "X");
             assert_eq!(cell(&result, "p", "output", 0, x), expect_x, "valueFunc={func}");
         }
+    }
+
+    #[test]
+    fn crosstab_multi_row_and_column_fields() {
+        // 行/列字段多选（用户需求 2026-10-30）：数组写法＝多级行键/列键，
+        // 动态列名按「·」拼接；单字符串历史写法等价于长度 1，输出不变。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("mc.csv");
+        fs::write(&file, "部门,客商,期间,币种,金额\n北,甲,1月,人民币,10\n北,甲,2月,人民币,20\n南,乙,1月,美元,5\n南,乙,1月,美元,3\n").unwrap();
+
+        // ① 多行字段＋多列字段：行＝部门+客商，列＝期间+币种。
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "p", "type": "crosstab", "name": "透视", "config": {
+                    "rowField": ["部门", "客商"],
+                    "columnField": ["期间", "币种"],
+                    "valueField": "金额", "valueFunc": "sum", "fill": 0
+                }}
+            ]),
+            json!([edge("i", "p", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "p"), "ok");
+        let c_1 = col(&result, "p", "output", "1月·人民币");
+        let c_2 = col(&result, "p", "output", "2月·人民币");
+        let c_3 = col(&result, "p", "output", "1月·美元");
+        let c_d = col(&result, "p", "output", "部门");
+        let row_north = row_of(&result, "p", "output", &json!("北"), c_d);
+        let row_south = row_of(&result, "p", "output", &json!("南"), c_d);
+        assert_eq!(cell(&result, "p", "output", row_north, c_1), json!(10));
+        assert_eq!(cell(&result, "p", "output", row_north, c_2), json!(20));
+        assert_eq!(cell(&result, "p", "output", row_south, c_3), json!(8));
+
+        // ② 单字符串历史写法：输出与旧版一致（单行标签列）。
+        let flow_legacy = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "p", "type": "crosstab", "name": "透视", "config": {
+                    "rowField": "客商", "columnField": "期间",
+                    "valueField": "金额", "valueFunc": "sum", "fill": 0
+                }}
+            ]),
+            json!([edge("i", "p", "in")]),
+        );
+        let legacy = run("dataflow_preview", flow_legacy);
+        assert_eq!(node_status(&legacy, "p"), "ok");
+        // 金额列是整数：求和单元格同为整数类型（单字符串写法输出形状不变）。
+        assert_eq!(types(&legacy, "p", "output"), ["text", "integer", "integer"]);
+        assert_eq!(row_count(&legacy, "p", "output"), 2);
     }
 
     #[test]

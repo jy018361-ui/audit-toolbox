@@ -412,6 +412,75 @@ textarea.df-in {
   background: var(--warning-bg);
   color: var(--warning-fg);
 }
+/* 多字段选择：标签 + 手输 + 勾选清单弹层。 */
+.df-tokenpick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  width: 100%;
+  min-height: 30px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+.df-tokenpick-input {
+  flex: 1;
+  min-width: 90px;
+  border: none;
+  background: transparent;
+}
+.df-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  background: var(--surface-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.df-token button {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0 2px;
+  font-size: var(--fs-sm);
+}
+.df-token button:hover {
+  color: var(--danger-fg);
+}
+.df-tokenpick-select {
+  position: relative;
+}
+.df-tokenpick-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 170px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 6px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-card);
+}
+.df-tokenpick-pop label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
 /* 输出位置行：路径省略显示 + 选择按钮。 */
 .df-outdir {
   display: flex;

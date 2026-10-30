@@ -405,11 +405,11 @@ pub(crate) fn run_crosstab(
 ) -> Result<NodeOutcome, AppError> {
     let config: CrosstabConfig = serde_json::from_value(config.clone())
         .map_err(|error| config_error("透视", node_name, error.to_string()))?;
-    if config.row_field.trim().is_empty() {
+    if config.row_field.is_empty() {
         return Err(config_error("透视", node_name, "必须选择行字段。".into()));
     }
-    if config.column_field.trim().is_empty() {
-        return Err(config_error("透视", node_name, "必须选择列字段（首版只支持 1 个）。".into()));
+    if config.column_field.is_empty() {
+        return Err(config_error("透视", node_name, "必须选择列字段。".into()));
     }
     if config.value_field.trim().is_empty() {
         return Err(config_error("透视", node_name, "必须选择值字段。".into()));
@@ -442,8 +442,13 @@ pub(crate) fn run_crosstab(
                 )
             })
     };
-    let row_column = column_of(&config.row_field)?;
-    let column_column = column_of(&config.column_field)?;
+    // 行/列字段支持多选（多级行键/列键）：单字段历史写法等价于长度 1。
+    let row_columns: Vec<usize> = config.row_field.iter().map(|name| column_of(name)).collect::<Result<_, _>>()?;
+    let column_columns: Vec<usize> = config
+        .column_field
+        .iter()
+        .map(|name| column_of(name))
+        .collect::<Result<_, _>>()?;
     let value_column = column_of(&config.value_field)?;
     if value_func == "sum" && !matches!(input.types[value_column], ColType::Integer | ColType::Decimal) {
         return Err(config_error(
@@ -478,36 +483,39 @@ pub(crate) fn run_crosstab(
         }
     };
 
-    // 行键与列键按首次出现顺序；单元格收集值。
-    let mut row_order: Vec<Value> = Vec::new();
+    // 行键与列键按首次出现顺序；单元格收集值。多字段时键为取值元组。
+    let mut row_order: Vec<Vec<Value>> = Vec::new();
     let mut row_seen: HashMap<String, usize> = HashMap::new();
-    let mut column_order: Vec<Value> = Vec::new();
+    let mut column_order: Vec<Vec<Value>> = Vec::new();
     let mut column_seen: HashMap<String, usize> = HashMap::new();
     let mut cells: HashMap<(usize, usize), Vec<Value>> = HashMap::new();
-    let display = |value: &Value| -> String {
+    let display_one = |value: &Value| -> String {
         match value {
             Value::Null => NULL_GROUP_LABEL.to_owned(),
             other => other.to_display(),
         }
     };
+    let display = |key: &[Value]| -> String {
+        key.iter().map(display_one).collect::<Vec<_>>().join("·")
+    };
     for row in &input.rows {
-        let row_key = &row[row_column];
-        let column_key = &row[column_column];
-        let row_position = match row_seen.get(&composite_key(std::slice::from_ref(row_key))) {
+        let row_key: Vec<Value> = row_columns.iter().map(|&column| row[column].clone()).collect();
+        let column_key: Vec<Value> = column_columns.iter().map(|&column| row[column].clone()).collect();
+        let row_position = match row_seen.get(&composite_key(&row_key)) {
             Some(&position) => position,
             None => {
                 let position = row_order.len();
-                row_seen.insert(composite_key(std::slice::from_ref(row_key)), position);
-                row_order.push(row_key.clone());
+                row_seen.insert(composite_key(&row_key), position);
+                row_order.push(row_key);
                 position
             }
         };
-        let column_position = match column_seen.get(&composite_key(std::slice::from_ref(column_key))) {
+        let column_position = match column_seen.get(&composite_key(&column_key)) {
             Some(&position) => position,
             None => {
                 let position = column_order.len();
-                column_seen.insert(composite_key(std::slice::from_ref(column_key)), position);
-                column_order.push(column_key.clone());
+                column_seen.insert(composite_key(&column_key), position);
+                column_order.push(column_key);
                 position
             }
         };
@@ -544,13 +552,17 @@ pub(crate) fn run_crosstab(
         ));
     }
 
-    // 动态列名＝列字段值文本；不同键产生相同列名时明确报错（不静默合并）。
-    let row_field_name = input.columns[row_column].clone();
-    let mut columns = vec![row_field_name.clone()];
+    // 动态列名＝列字段值文本（多字段按「·」拼接）；与行字段名或已有列名
+    // 重复时明确报错（不静默合并）。
+    let row_field_names: Vec<String> = row_columns
+        .iter()
+        .map(|&column| input.columns[column].clone())
+        .collect();
+    let mut columns = row_field_names.clone();
     let mut names: Vec<String> = Vec::with_capacity(column_order.len());
     for key in &column_order {
         let name = display(key);
-        if name == row_field_name || names.contains(&name) {
+        if row_field_names.contains(&name) || names.contains(&name) {
             return Err(structural(
                 "DATAFLOW_CROSSTAB_NAME_CONFLICT",
                 format!(
@@ -578,17 +590,23 @@ pub(crate) fn run_crosstab(
     } else {
         fill.clone()
     };
-    let mut types = vec![input.types[row_column]];
+    let mut types: Vec<ColType> = row_columns
+        .iter()
+        .map(|&column| input.types[column])
+        .collect();
     types.extend(std::iter::repeat(cell_type).take(column_order.len()));
 
-    // 组装单元格；缺失组合填 fill。
+    // 组装单元格；缺失组合填 fill。行键元组逐格写出（空值显示「（空）」）。
     let mut rows: Vec<Vec<Value>> = Vec::with_capacity(row_order.len());
     let mut filled_cells = 0usize;
     for (row_position, row_key) in row_order.iter().enumerate() {
-        let mut line = vec![match row_key {
-            Value::Null => Value::Text(NULL_GROUP_LABEL.to_owned()),
-            other => other.clone(),
-        }];
+        let mut line: Vec<Value> = row_key
+            .iter()
+            .map(|value| match value {
+                Value::Null => Value::Text(NULL_GROUP_LABEL.to_owned()),
+                other => other.clone(),
+            })
+            .collect();
         for column_position in 0..column_order.len() {
             match cells.get(&(row_position, column_position)) {
                 Some(values) => {
@@ -609,14 +627,14 @@ pub(crate) fn run_crosstab(
             "输入 {} 行 → 输出 {} 行 × {} 列（行字段 {}、列字段 {}、聚合 {}）",
             input.rows.len(),
             rows.len(),
-            column_order.len() + 1,
-            config.row_field,
-            config.column_field,
+            column_order.len() + row_columns.len(),
+            config.row_field.join("+"),
+            config.column_field.join("+"),
             func_display
         ),
         format!("缺失组合填充单元格：{filled_cells} 个（填充值：{}）", fill_display(&fill_aligned)),
     ];
-    stats.push("动态列名＝列字段值文本（空值列名显示「（空）」）；列数上限 1000".to_owned());
+    stats.push("动态列名＝列字段值文本（多字段按「·」拼接，空值列名显示「（空）」）；列数上限 1000".to_owned());
     let mut outcome = NodeOutcome::with_anchor("output", Table { columns, types, rows });
     outcome.stats = stats;
     Ok(outcome)

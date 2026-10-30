@@ -42,6 +42,28 @@ function timeNow(): string {
  * 检查/手工输入/数据库输入/Parquet 输入）全部可用；预览/全量/运行到选中节点经
  * engine_call 的 dataflow_preview / dataflow_run 与 Rust 引擎交互。
  */
+/** 面板尺寸记忆键：与草稿同前缀，便于统一清理。 */
+const PANEL_SIZE_KEY = "audit-toolbox:dataflow:layout";
+
+function loadPanelSize(field: string, fallback: number, min: number, max: number): number {
+  try {
+    const raw = window.localStorage.getItem(PANEL_SIZE_KEY);
+    if (!raw) return fallback;
+    const value = Number((JSON.parse(raw) as Record<string, unknown>)?.[field]);
+    return Number.isFinite(value) && value >= min && value <= max ? value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function savePanelSizes(configWidth: number, resultsHeight: number): void {
+  try {
+    window.localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify({ configWidth, resultsHeight }));
+  } catch {
+    // 存储不可用时静默跳过：尺寸仍可用，只是不记忆。
+  }
+}
+
 export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   const [workflow, setWorkflow] = useState<DataflowWorkflow>(() => createEmptyWorkflow());
   const workflowRef = useRef(workflow);
@@ -63,6 +85,13 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   const [runSeconds, setRunSeconds] = useState(0);
   const [statusText, setStatusText] = useState("就绪 · 编辑过程会自动保存草稿到本机。");
   const [error, setError] = useState("");
+  // 面板尺寸（用户可用鼠标拖分隔条调整）：记忆在本机，双击分隔条恢复默认。
+  const [configWidth, setConfigWidth] = useState<number>(() => loadPanelSize("configWidth", 288, 232, 560));
+  const [resultsHeight, setResultsHeight] = useState<number>(() => loadPanelSize("resultsHeight", 236, 120, 640));
+  const configWidthRef = useRef(configWidth);
+  configWidthRef.current = configWidth;
+  const resultsHeightRef = useRef(resultsHeight);
+  resultsHeightRef.current = resultsHeight;
   const [paramsDialog, setParamsDialog] = useState<null | "edit" | "confirm">(null);
   const [autosaveNote, setAutosaveNote] = useState("");
   const [configCollapsed, setConfigCollapsed] = useState(false);
@@ -126,6 +155,54 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     }, 800);
     return () => window.clearTimeout(timer);
   }, [workflow]);
+
+  /** 面板分隔条拖拽：axis 决定调整配置区宽度（左右）还是结果区高度（上下），
+      拖完记忆尺寸；双击分隔条恢复默认。折叠状态下面板尺寸固定，忽略拖拽。 */
+  function startPanelResize(
+    axis: "config" | "results",
+    event: React.PointerEvent<HTMLDivElement>,
+  ) {
+    if (axis === "config" ? configCollapsed : resultsCollapsed) return;
+    event.preventDefault();
+    const start = axis === "config" ? event.clientX : event.clientY;
+    const startSize = axis === "config" ? configWidth : resultsHeight;
+    const target = event.currentTarget;
+    try {
+      target.setPointerCapture(event.pointerId);
+    } catch {
+      // 合成指针事件没有活动指针 id，捕获失败不阻断拖动。
+    }
+    const onMove = (moveEvent: PointerEvent) => {
+      const delta = (axis === "config" ? moveEvent.clientX : moveEvent.clientY) - start;
+      // ref 同步写：pointerup 可能先于 React 重渲染到达，松手保存时必须
+      // 读到最新值（否则存下的是拖动前的旧尺寸）。
+      if (axis === "config") {
+        const next = Math.max(232, Math.min(560, startSize + delta));
+        configWidthRef.current = next;
+        setConfigWidth(next);
+      } else {
+        const next = Math.max(120, Math.min(640, startSize - delta));
+        resultsHeightRef.current = next;
+        setResultsHeight(next);
+      }
+    };
+    const onUp = () => {
+      target.removeEventListener("pointermove", onMove);
+      target.removeEventListener("pointerup", onUp);
+      savePanelSizes(configWidthRef.current, resultsHeightRef.current);
+    };
+    target.addEventListener("pointermove", onMove);
+    target.addEventListener("pointerup", onUp);
+  }
+
+  function resetPanelSize(axis: "config" | "results") {
+    if (axis === "config") setConfigWidth(288);
+    else setResultsHeight(236);
+    savePanelSizes(
+      axis === "config" ? 288 : configWidthRef.current,
+      axis === "results" ? 236 : resultsHeightRef.current,
+    );
+  }
 
   function addNode(type: string) {
     const wf = workflowRef.current;
@@ -469,7 +546,14 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
         title={tool.name}
         detail="拖拽节点搭建数据处理流程：读取、整理、筛选、输出，保存流程文件后换一批数据改参数重跑。"
       />
-      <div className="df-shell" data-history-tick={historyTick}>
+      <div
+        className="df-shell"
+        data-history-tick={historyTick}
+        style={{
+          ["--df-config-w" as string]: `${configWidth}px`,
+          ["--df-results-h" as string]: `${resultsHeight}px`,
+        }}
+      >
         <DataflowToolbar
           flowName={workflow.name}
           onFlowNameChange={(name) =>
@@ -522,6 +606,15 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
             onDelete={deleteSelection}
             onPickPath={(kind, extensions, apply) => void handlePickPath(kind, extensions, apply)}
           />
+          <div
+            className="df-split df-split-v"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖动调整配置区宽度（双击恢复默认）"
+            title="拖动调整配置区宽度 · 双击恢复默认"
+            onPointerDown={(event) => startPanelResize("config", event)}
+            onDoubleClick={() => resetPanelSize("config")}
+          />
           {runResult && lastRunMode && (
             <div
               className={`df-banner ${
@@ -551,6 +644,15 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
             fitKey={fitKey}
           />
         </div>
+        <div
+          className="df-split df-split-h"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="拖动调整结果区高度（双击恢复默认）"
+          title="拖动调整结果区高度 · 双击恢复默认"
+          onPointerDown={(event) => startPanelResize("results", event)}
+          onDoubleClick={() => resetPanelSize("results")}
+        />
         <ResultsPanel
           node={selectedNode}
           result={selectedNode ? resultOf(selectedNode.id) : undefined}

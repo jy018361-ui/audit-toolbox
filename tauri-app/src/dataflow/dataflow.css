@@ -250,7 +250,7 @@
 
 /* 配置区（左） */
 .df-config {
-  width: 288px;
+  width: var(--df-config-w, 288px);
   flex: none;
   overflow: auto;
   /* 配置项多时限制自身高度、内部滚动（用户建议），不再把整个工作台
@@ -812,12 +812,32 @@ textarea.df-in {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  height: 236px;
+  height: var(--df-results-h, 236px);
   background: var(--surface);
   border-top: 1px solid var(--border-strong);
 }
 .df-results.df-collapsed {
   height: 37px;
+}
+/* 面板尺寸分隔条：拖动调整配置区宽度/结果区高度（双击恢复默认）。 */
+.df-split {
+  flex: none;
+  z-index: 5;
+  touch-action: none;
+  user-select: none;
+  background: transparent;
+  transition: background 0.12s;
+}
+.df-split:hover {
+  background: color-mix(in srgb, var(--df-run, #3d7fd6) 30%, transparent);
+}
+.df-split-v {
+  width: 7px;
+  cursor: col-resize;
+}
+.df-split-h {
+  height: 7px;
+  cursor: row-resize;
 }
 .df-results-head {
   flex: none;

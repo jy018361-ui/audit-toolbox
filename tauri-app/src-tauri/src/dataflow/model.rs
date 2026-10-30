@@ -63,10 +63,15 @@ pub(crate) struct Node {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Edge {
     pub from: String,
-    #[serde(default)]
+    /// 前端与流程文件用驼峰 fromAnchor/toAnchor；曾漏配 rename，
+    /// serde 把驼峰键静默当未填（default），引擎一律回落到单输出口
+    /// "output"——从筛选 T/F、关联 J/L/R 等多出口拉出的连线全部报
+    /// 「锚点 output 不存在」，单输出口连线碰巧不受影响。alias 兼容
+    /// 手工编辑流程文件时的下划线写法。
+    #[serde(default, rename = "fromAnchor", alias = "from_anchor")]
     pub from_anchor: Option<String>,
     pub to: String,
-    #[serde(default)]
+    #[serde(default, rename = "toAnchor", alias = "to_anchor")]
     pub to_anchor: Option<String>,
 }
 

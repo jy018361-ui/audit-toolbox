@@ -34,7 +34,7 @@ python scripts/gen_dataflow_fixtures.py                                         
 ## 契约备忘（前后端对接细节）
 
 - 请求体＝工作流 JSON 本体＋可选 `paramOverrides`（引擎按方法名区分预览/全量；`runMode` 字段冗余可传）；节点类型双别名（`select`/`select_n`、`filter`/`filter_n`）。
-- 响应锚点 key：单输出节点为 `output`、筛选 `T`/`F`、输出节点 `sheet:名`/`file:名`；样例每锚点 ≤200 行；十进制序列化为字符串、空值 null。2026-10-28 修复：前端规格/演示数据曾写 `out`，与引擎 `output` 不一致——真实引擎运行时结果区显示「样本数据为空」且连线锚点对不上；已统一为 `output`（nodeSpecs SINGLE_OUT、demoData、Canvas 兜底、测试夹具），并用真实引擎返回形态在浏览器端到端验证表格/行数/状态显示。
+- 响应锚点 key：单输出节点为 `output`、筛选 `T`/`F`、输出节点 `sheet:名`/`file:名`。2026-10-30 修复：请求侧连线锚点字段（fromAnchor/toAnchor，驼峰）曾被引擎 serde 漏配 rename 静默当未填、一律回落 `output`——从筛选 T/F、关联 J/L/R、去重 U/D、检查 P/NG 等多出口拉出的连线在 JSON 边界上从未通过（必报「锚点 output 不存在」），单输出口连线碰巧不受影响；现有 join 用例靠边序补位与默认值巧合通过，故长期无测试暴露。修复后驼峰为契约、下划线为兼容别名，并补筛选 T→输出 的 JSON 级回归；样例每锚点 ≤200 行；十进制序列化为字符串、空值 null。2026-10-28 修复：前端规格/演示数据曾写 `out`，与引擎 `output` 不一致——真实引擎运行时结果区显示「样本数据为空」且连线锚点对不上；已统一为 `output`（nodeSpecs SINGLE_OUT、demoData、Canvas 兜底、测试夹具），并用真实引擎返回形态在浏览器端到端验证表格/行数/状态显示。
 - 单节点内存上限 100 万行（`MAX_TABLE_ROWS`），超限中文报错等第三期磁盘路径，不静默截断。
 - 全量运行目前走同步 engine_call（长任务 job 化、增量重跑属第三期）。
 

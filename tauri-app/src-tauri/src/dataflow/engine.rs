@@ -762,6 +762,37 @@ mod tests {
     }
 
     #[test]
+    fn edge_anchor_camelcase_honored_for_filter_t() {
+        // 前端连线带驼峰 fromAnchor（如从筛选的 T 口拉到输出）：曾因
+        // serde 漏配 rename 被静默当未填，引擎一律回落单输出口 "output"，
+        // 筛选→输出必报「锚点 output 不存在」——真实用户两次踩中。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("t.csv");
+        fs::write(&file, "名称
+苹果
+香蕉
+").unwrap();
+        let flow = workflow(
+            json!([
+                {"id": "in", "type": "csv_in", "name": "CSV输入", "config": {"path": file.to_string_lossy()}},
+                {"id": "fl", "type": "filter", "name": "筛选",
+                 "config": {"condition": {"op": "and", "rules": [
+                    {"field": "名称", "operator": "startsWith", "value": "香"}
+                 ]}}},
+                {"id": "out", "type": "csv_out", "name": "CSV输出",
+                 "config": {"fileName": file.with_file_name("t_out.csv").to_string_lossy(), "overwrite": "replace"}}
+            ]),
+            json!([
+                {"from": "in", "to": "fl", "fromAnchor": "output", "toAnchor": "in"},
+                {"from": "fl", "to": "out", "fromAnchor": "T", "toAnchor": "in"}
+            ]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "out"), "ok");
+        assert_eq!(row_count(&result, "out", "file:t_out.csv"), 1);
+    }
+
+    #[test]
     fn filter_text_operators_match_date_as_text() {
         // 日期列用「包含」筛选（如 包含 01 捞一月/一日凭证）按日期的
         // 文本形式匹配，不要求条件值本身是完整日期。

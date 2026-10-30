@@ -1,5 +1,5 @@
 import { formatMeetingMinutes } from "./meetingMinutesFormat";
-import type { SpeakerNames } from "./meetingSpeakerNames";
+import { speakerDisplay, type SpeakerNames } from "./meetingSpeakerNames";
 
 function escapeText(text: string) {
   return text.replace(/\u00a0/g, " ").replace(/[\\`*_{}\[\]<>|#!]/g, "\\$&");
@@ -7,7 +7,7 @@ function escapeText(text: string) {
 
 /** Preserve identity only on marked occurrences, never reverse-replace a name
  * in unrelated prose. Editing an occurrence by hand makes it ordinary text. */
-export function editableMinutesHtml(source: string, names: SpeakerNames): string {
+export function editableMinutesHtml(source: string, names: SpeakerNames, shares: Record<string, string> = {}): string {
   const html = formatMeetingMinutes(source, undefined, { email: false }).html;
   const doc = new DOMParser().parseFromString(html, "text/html");
   const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
@@ -24,7 +24,7 @@ export function editableMinutesHtml(source: string, names: SpeakerNames): string
       const span = doc.createElement("span");
       span.dataset.meetingSpeaker = match[1];
       span.dataset.speakerLabel = match[0];
-      span.dataset.speakerDisplay = names[match[1]] || match[0];
+      span.dataset.speakerDisplay = speakerDisplay(match[0], match[1], names, shares);
       span.textContent = span.dataset.speakerDisplay;
       fragment.append(span);
       offset = match.index! + match[0].length;
@@ -33,6 +33,16 @@ export function editableMinutesHtml(source: string, names: SpeakerNames): string
     text.replaceWith(fragment);
   }
   return doc.body.firstElementChild?.innerHTML ?? "";
+}
+
+/** Update only intact identity spans, keeping edits/caret and the canonical source intact. */
+export function updateMinutesSpeakerDisplays(element: Element, names: SpeakerNames, shares: Record<string, string>) {
+  element.querySelectorAll<HTMLElement>("[data-meeting-speaker]").forEach(span => {
+    if (span.textContent !== span.dataset.speakerDisplay) return;
+    const display = speakerDisplay(span.dataset.speakerLabel || "", span.dataset.meetingSpeaker!, names, shares);
+    if (span.textContent !== display) span.textContent = display;
+    span.dataset.speakerDisplay = display;
+  });
 }
 
 function inline(node: Node): string {

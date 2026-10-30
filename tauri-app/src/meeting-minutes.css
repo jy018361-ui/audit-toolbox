@@ -240,6 +240,7 @@
 .meeting-speaker-names h3 { margin: 0 0 var(--sp-2); font-size: var(--fs-sm); font-weight: 600; }
 .meeting-speaker-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--sp-3); margin-top: var(--sp-3); }
 .meeting-speaker-field { display: grid; gap: var(--sp-1); font-size: var(--fs-sm); min-width: 0; }
+.meeting-speaker-field > span { overflow-wrap: anywhere; }
 .meeting-speaker-field input { width: 100%; min-width: 0; min-height: 36px; padding: var(--sp-2); border: 1px solid var(--control-border); border-radius: var(--r-sm); background: var(--control-bg); color: var(--fg); }
 .meeting-speaker-field input:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .meeting-editor-tools .meeting-result-actions { align-items: center; }

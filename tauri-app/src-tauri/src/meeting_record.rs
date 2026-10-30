@@ -229,6 +229,7 @@ pub(crate) fn recording_summary(active: &ActiveRecording) -> Value {
     json!({
         "startedAt": active.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "recordDir": active.dir.to_string_lossy(),
+        "appVersion": env!("CARGO_PKG_VERSION"),
         "systemOk": tracks.iter().any(|t| t.label == "system" && t.ok),
         "micOk": tracks.iter().any(|t| t.label == "mic" && t.ok),
         "systemSource": source_of("system"),
@@ -263,8 +264,46 @@ fn warnings_of(tracks: &[Track]) -> Vec<String> {
     warnings
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum StopReason {
+    Manual,
+    Automatic,
+    AppExit,
+}
+impl StopReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Automatic => "automatic",
+            Self::AppExit => "app_exit",
+        }
+    }
+}
+
 /// 停止录音并混音出成品，返回给前端的结果（audioPath 即混音文件）。
-pub(crate) fn finalize(active: Arc<ActiveRecording>) -> Result<Value, AppError> {
+pub(crate) fn finalize(
+    active: Arc<ActiveRecording>,
+    reason: StopReason,
+) -> Result<Value, AppError> {
+    // 停止标记之前留证：文件长度是已写入字节，可能有少量缓冲尚未落盘，不是语音时长。
+    let requested_at = chrono::Local::now();
+    let size_of = |name: &str| {
+        fs::metadata(active.dir.join(name))
+            .ok()
+            .map(|meta| meta.len())
+    };
+    let stop_context = json!({
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "stopReason": reason.as_str(),
+        "stopRequestedAt": requested_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "wallDurationBeforeStopSec": (requested_at - active.started_at).num_seconds().max(0),
+        "trackBytesBeforeStop": {"system": size_of("track-system.wav"), "mic": size_of("track-mic.wav")},
+    });
+    // 诊断写入失败不能阻止真正停录与封盘。
+    let _ = fs::write(
+        active.dir.join("recording-stop-request.json"),
+        stop_context.to_string(),
+    );
     active.stop.store(true, Ordering::Relaxed);
     let handles: Vec<_> = active.handles.lock().drain(..).collect();
     for handle in handles {
@@ -293,6 +332,8 @@ pub(crate) fn finalize(active: Arc<ActiveRecording>) -> Result<Value, AppError> 
         warnings.push(format!("录音开启了 {wall_duration_sec} 秒，但音频文件仅 {duration_sec} 秒，存在采集缺失；未采集到的声音无法通过重新转写恢复。"));
     }
     let summary = json!({
+        "stopContext": stop_context,
+        "appVersion": env!("CARGO_PKG_VERSION"),
         "endedAt": ended_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "wallDurationSec": wall_duration_sec,
         "audioPath": mix_path.to_string_lossy(),
@@ -1017,6 +1058,56 @@ mod tests {
     }
 
     #[test]
+    fn manual_and_automatic_stop_both_wait_for_track_flush_before_mixing() {
+        for reason in [StopReason::Manual, StopReason::Automatic] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("track-mic.wav");
+            let mut writer = WavWriter::create(&path, target_spec()).unwrap();
+            for _ in 0..200 {
+                writer.write_sample(200i16).unwrap();
+            }
+            writer.flush().unwrap();
+            let before_stop = fs::metadata(&path).unwrap().len();
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = stop.clone();
+            let handle = thread::spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                // 模拟停止时仍有缓冲数据需要写完。
+                for _ in 0..400 {
+                    writer.write_sample(300i16).unwrap();
+                }
+                writer.finalize().unwrap();
+            });
+            let summary = finalize(
+                Arc::new(ActiveRecording {
+                    stop,
+                    dir: dir.path().to_path_buf(),
+                    started_at: chrono::Local::now() - chrono::Duration::minutes(30),
+                    handles: Mutex::new(vec![handle]),
+                    tracks: Mutex::new(vec![]),
+                }),
+                reason,
+            )
+            .unwrap();
+            let samples = read_wav_samples(&dir.path().join("audio-mix.wav"));
+            assert_eq!(samples.len(), 600);
+            assert_eq!(&samples[..200], &vec![200; 200]);
+            assert_eq!(&samples[200..], &vec![300; 400]);
+            let context: Value = serde_json::from_slice(
+                &fs::read(dir.path().join("recording-stop-request.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(context["stopReason"], reason.as_str());
+            assert_eq!(context["trackBytesBeforeStop"]["mic"], before_stop);
+            assert_eq!(context, summary["stopContext"]);
+            assert!(context["wallDurationBeforeStopSec"].as_i64().unwrap() >= 1800);
+            assert_eq!(summary["appVersion"], env!("CARGO_PKG_VERSION"));
+        }
+    }
+
+    #[test]
     fn reconnect_retries_failed_devices_and_stops_without_opening_another_stream() {
         let stop = AtomicBool::new(false);
         let mut attempts = 0;
@@ -1053,13 +1144,16 @@ mod tests {
     fn finalize_reports_long_running_recording_with_only_ten_seconds_of_audio() {
         let dir = tempfile::tempdir().unwrap();
         write_test_wav(&dir.path().join("track-mic.wav"), &vec![100i16; 160_000]);
-        let summary = finalize(Arc::new(ActiveRecording {
-            stop: Arc::new(AtomicBool::new(false)),
-            dir: dir.path().to_path_buf(),
-            started_at: chrono::Local::now() - chrono::Duration::minutes(30),
-            handles: Mutex::new(vec![]),
-            tracks: Mutex::new(vec![]),
-        }))
+        let summary = finalize(
+            Arc::new(ActiveRecording {
+                stop: Arc::new(AtomicBool::new(false)),
+                dir: dir.path().to_path_buf(),
+                started_at: chrono::Local::now() - chrono::Duration::minutes(30),
+                handles: Mutex::new(vec![]),
+                tracks: Mutex::new(vec![]),
+            }),
+            StopReason::Manual,
+        )
         .unwrap();
         assert_eq!(summary["durationSec"], 10);
         assert!(summary["wallDurationSec"].as_i64().unwrap() >= 1800);
@@ -1213,7 +1307,7 @@ mod tests {
             handles: Mutex::new(vec![]),
             tracks: Mutex::new(vec![]),
         });
-        let summary = finalize(active).unwrap();
+        let summary = finalize(active, StopReason::Manual).unwrap();
         for track in ["system", "mic", "mix"] {
             assert_eq!(summary["audioStats"][track]["sampleCount"], 160);
             assert_eq!(summary["audioStats"][track]["nonzeroSampleCount"], 0);
@@ -1370,7 +1464,7 @@ mod tests {
                 println!("启动成功: {}", recording_summary(&recording));
                 std::thread::sleep(std::time::Duration::from_secs(3));
                 let active = Arc::new(recording);
-                match finalize(active) {
+                match finalize(active, StopReason::Manual) {
                     Ok(result) => println!("收尾成功: {result}"),
                     Err(error) => {
                         println!("收尾失败: code={} detail={:?}", error.code, error.detail)

@@ -72,6 +72,7 @@ beforeEach(async () => {
   const api = await import("./api");
   vi.mocked(api.meetingHistoryList).mockResolvedValue([]);
   vi.mocked(api.meetingHistoryGet).mockResolvedValue({});
+  vi.mocked(api.meetingReadTranscript).mockResolvedValue("[00:00] 原始发言。");
   vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
   vi.mocked(api.meetingSaveMinutes).mockImplementation(async (path, minutesMarkdown, _expected, speakerNames = {}) => ({
     minutesPath: path, minutesMarkdown: replaceSpeakerNames(minutesMarkdown, speakerNames), sourceMarkdown: minutesMarkdown, speakerNames,
@@ -106,6 +107,44 @@ describe("会议正文编辑及姓名对应", () => {
     fireEvent.input(article);
     return article;
   };
+  it("正文说话人显示内容占比，姓名输入区域无占比，编辑保存不重复追加百分比", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingReadTranscript).mockResolvedValue("[00:00] 说话人1：甲乙丙丁戊己庚辛\n[00:10] 说话人2：壬癸");
+    await open();
+    const region = screen.getByRole("region", {name:"说话人姓名对应"});
+    const article = screen.getByRole("article", {name:"会议纪要正文"});
+    await waitFor(() => expect(article).toHaveTextContent("说话人1（80%）安排复核"));
+    expect(article).toHaveTextContent("说话人2（20%）");
+    expect(region).not.toHaveTextContent("%");
+    expect(screen.getByText(/不代表发言时长/)).toBeInTheDocument();
+    expect(api.meetingSaveMinutes).not.toHaveBeenCalled();
+    article.append(document.createTextNode("人工补充文字。")); fireEvent.input(article);
+    const name = within(region).getByRole("textbox", {name:"说话人1姓名"});
+    fireEvent.change(name,{target:{value:"张三"}}); fireEvent.blur(name);
+    await waitFor(() => expect(article).toHaveTextContent("张三（80%）安排复核"));
+    fireEvent.click(screen.getByRole("button", {name:"生成邮件草稿"}));
+    await waitFor(() => expect(api.meetingCreateMailDraft).toHaveBeenCalledWith(expect.any(String),expect.stringContaining("张三（80%）安排复核")));
+    await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenCalled());
+    for (const call of vi.mocked(api.meetingSaveMinutes).mock.calls) expect(call[1]).not.toContain("%");
+    fireEvent.click(screen.getByRole("button", {name:"按时间"}));
+    expect(screen.getByRole("article")).toHaveTextContent("张三（80%）发言");
+    fireEvent.change(name,{target:{value:""}}); fireEvent.blur(name);
+    expect(screen.getByRole("article")).toHaveTextContent("说话人1（80%）发言");
+    expect(screen.getByRole("article")).not.toHaveTextContent("（80%）（80%）");
+    fireEvent.click(screen.getByRole("button", {name:"原始转写"}));
+    await screen.findByRole("article", {name:"原始转写正文"});
+    expect(api.meetingReadTranscript).toHaveBeenCalledTimes(1);
+  });
+  it("转写不可读时保留姓名编辑，不虚构占比", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingReadTranscript).mockRejectedValueOnce(new Error("文件不存在"));
+    await open();
+    const region = screen.getByRole("region", {name:"说话人姓名对应"});
+    expect(await screen.findByText(/读取失败，内容占比暂不可用/)).toBeInTheDocument();
+    expect(region).not.toHaveTextContent("%");
+    expect(within(region).getByRole("textbox", {name:"说话人1姓名"})).toBeEnabled();
+    expect(screen.getByRole("article")).toHaveTextContent("安排复核");
+  });
   it("正文默认可直接编辑，自动保存且版本切换保留排版和草稿", async () => {
     const api = await open();
     expect(screen.getByRole("article")).toHaveAttribute("contenteditable", "true");
@@ -133,7 +172,7 @@ describe("会议正文编辑及姓名对应", () => {
     const api = await open();
     const input = screen.getByRole("textbox", {name:"说话人1姓名"});
     fireEvent.change(input,{target:{value:"王五"}});fireEvent.blur(input);
-    expect(screen.getByRole("article")).toHaveTextContent("王五安排复核，张三提供资料。说话人10补充意见。");
+    await waitFor(() => expect(screen.getByRole("article")).toHaveTextContent("王五安排复核，张三提供资料。说话人10补充意见。"));
     await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenCalledWith("C:/data/content.md", content, content, {"1":"王五"}));
     await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenCalledWith("C:/data/timeline.md", expect.not.stringContaining("[00:00]"), timeline, {"1":"王五"}));
     fireEvent.change(input,{target:{value:""}});fireEvent.blur(input);
@@ -296,6 +335,26 @@ describe("MeetingMinutesPage", () => {
     expect(screen.queryByText("迟到的新会议")).not.toBeInTheDocument();
   });
 
+  it("切换会议后迟到的转写不会覆盖当前会议占比", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockImplementation(async id => ({
+      transcriptPath:`C:/data/${id}.txt`,minutesMarkdown:`# ${id}\n说话人1发言，说话人2回复。`,
+    }));
+    let resolveNew!: (text: string) => void;
+    vi.mocked(api.meetingReadTranscript).mockImplementation(path => path.endsWith("new.txt")
+      ? new Promise(resolve => {resolveNew=resolve;})
+      : Promise.resolve("说话人1：甲\n说话人2：乙丙丁"));
+    render(<MeetingMinutesPage tool={tool} />);
+    await waitFor(() => expect(api.meetingReadTranscript).toHaveBeenCalledWith("C:/data/new.txt"));
+    fireEvent.click(screen.getByRole("button", {name:/项目周报/}));
+    const article = await screen.findByRole("article");
+    await waitFor(() => expect(article).toHaveTextContent("说话人1（25%）"));
+    await act(async () => resolveNew("说话人1：甲乙丙丁\n说话人2：戊"));
+    expect(article).toHaveTextContent("说话人1（25%）");
+    expect(article).not.toHaveTextContent("80%");
+  });
+
   it("阅读历史时后台任务的进度和完成事件不覆盖正文", async () => {
     const api = await import("./api");
     vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
@@ -315,7 +374,7 @@ describe("MeetingMinutesPage", () => {
     expect(screen.queryByRole("heading", {name:"新会议正文"})).not.toBeInTheDocument();
   });
 
-  it("原始转写按需加载纯文本且支持复制正文", async () => {
+  it("原始转写预读用于占比，切换后以纯文本展示且支持复制正文", async () => {
     const api = await import("./api");
     vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
     vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
@@ -325,10 +384,11 @@ describe("MeetingMinutesPage", () => {
     Object.defineProperty(navigator,"clipboard",{configurable:true,value:{writeText}});
     render(<MeetingMinutesPage tool={tool} />);
     await screen.findByRole("article");
-    expect(api.meetingReadTranscript).not.toHaveBeenCalled();
+    await waitFor(() => expect(api.meetingReadTranscript).toHaveBeenCalledWith("C:/data/raw.txt"));
     fireEvent.click(screen.getByRole("button", {name:"原始转写"}));
     expect(await screen.findByRole("article",{name:"原始转写正文"})).toHaveTextContent("<script>原始发言</script>");
     expect(document.querySelector("article script")).toBeNull();
+    expect(api.meetingReadTranscript).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button",{name:"复制正文"}));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("[00:00] <script>原始发言</script>"));
   });

@@ -336,7 +336,7 @@ impl MeetingState {
         }
         let active = self.recording.lock().take();
         if let Some(active) = active {
-            let _ = crate::meeting_record::finalize(active);
+            let _ = crate::meeting_record::finalize(active, crate::meeting_record::StopReason::AppExit);
         }
     }
 
@@ -380,7 +380,7 @@ impl MeetingState {
         let active = self.recording.lock().take().ok_or_else(|| {
             record_error("MEETING_RECORD_NONE", "当前没有进行中的会议录音。", None)
         })?;
-        crate::meeting_record::finalize(active)
+        crate::meeting_record::finalize(active, crate::meeting_record::StopReason::Manual)
     }
 }
 
@@ -451,7 +451,7 @@ fn auto_finalize_recording(app: &tauri::AppHandle, state: &Arc<MeetingState>) {
         return;
     };
     let at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    match crate::meeting_record::finalize(active) {
+    match crate::meeting_record::finalize(active, crate::meeting_record::StopReason::Automatic) {
         Ok(summary) => {
             let _ = app.emit(
                 "meeting-event",

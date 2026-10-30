@@ -1,9 +1,9 @@
 import { useLayoutEffect, useRef } from "react";
-import { editableMinutesHtml, minutesElementToMarkdown, pastedMinutesHtml } from "../meetingMinutesEditing";
+import { editableMinutesHtml, minutesElementToMarkdown, pastedMinutesHtml, updateMinutesSpeakerDisplays } from "../meetingMinutesEditing";
 import type { SpeakerNames } from "../meetingSpeakerNames";
 
-export function MeetingMinutesInlineEditor({ source, names, onChange, onBlur }: {
-  source: string; names: SpeakerNames; onChange: (source: string) => void; onBlur: () => void;
+export function MeetingMinutesInlineEditor({ source, names, shares, onChange, onBlur }: {
+  source: string; names: SpeakerNames; shares: Record<string, string>; onChange: (source: string) => void; onBlur: () => void;
 }) {
   const editor = useRef<HTMLElement>(null);
   const lastSource = useRef<string>(undefined);
@@ -12,17 +12,12 @@ export function MeetingMinutesInlineEditor({ source, names, onChange, onBlur }: 
     const element = editor.current;
     if (!element || composing.current) return;
     if (lastSource.current !== source) {
-      element.innerHTML = editableMinutesHtml(source, names);
+      element.innerHTML = editableMinutesHtml(source, names, shares);
       lastSource.current = source;
     } else {
-      element.querySelectorAll<HTMLElement>("[data-meeting-speaker]").forEach(span => {
-        if (span.textContent !== span.dataset.speakerDisplay) return;
-        const display = names[span.dataset.meetingSpeaker!] || span.dataset.speakerLabel || "";
-        if (span.textContent !== display) span.textContent = display;
-        span.dataset.speakerDisplay = display;
-      });
+      updateMinutesSpeakerDisplays(element, names, shares);
     }
-  }, [source, names]);
+  }, [source, names, shares]);
   const input = () => {
     if (!editor.current || composing.current) return;
     const markdown = minutesElementToMarkdown(editor.current);
@@ -34,7 +29,11 @@ export function MeetingMinutesInlineEditor({ source, names, onChange, onBlur }: 
     tabIndex={0} contentEditable suppressContentEditableWarning
     onInput={input} onBlur={onBlur}
     onCompositionStart={() => { composing.current = true; }}
-    onCompositionEnd={() => { composing.current = false; input(); }}
+    onCompositionEnd={() => {
+      composing.current = false;
+      if (editor.current) updateMinutesSpeakerDisplays(editor.current, names, shares);
+      input();
+    }}
     onPaste={event => {
       event.preventDefault();
       const html = pastedMinutesHtml(event.clipboardData.getData("text/html"), event.clipboardData.getData("text/plain"));

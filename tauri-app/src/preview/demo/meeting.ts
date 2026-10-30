@@ -88,7 +88,7 @@ export const handlers: Record<string, DemoHandler> = {
           ],
         },
   "meeting.read_transcript": () =>
-    "[00:00] 本文是界面演示用的合成转写。\n[00:08] 说话人1：我们先核对底稿和台账准备情况。\n[00:25] 说话人2：资料缺口整理后，再确认复核时间。",
+    "[00:08] 说话人1：我们先核对底稿和台账准备情况。\n[00:25] 说话人2：资料缺口整理后，再确认复核时间。",
 };
 
 const regenerate: DemoJobHandler = params => {

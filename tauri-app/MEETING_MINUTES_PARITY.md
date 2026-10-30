@@ -1,3 +1,16 @@
+## 2026-10-30 · 说话人发言内容占比
+
+- 根据原始转写计算内容占比（有效Unicode字母／数字字符数，忽略时间、标签、标点、空白），在两版结果正文中的编号或用户姓名之后显示，姓名输入区域不显示；不按纪要中标签出现次数统计，不等同发言时长或声纹识别。百分比最多一位小数，四舍五入可能存在尾差；极小非零占比显示小于0.1%，非独占的极大占比不冒报100%。
+- 预读复用原有授权转写接口，不修改原始文件、不增加模型调用；未知归属内容计入分母并提示。无文件、读取失败、无有效说话人内容时提示不可用，不编造0%或100%。转写结果按会议／路径关联并丢弃迟到读取；切版本、改姓名、编辑摘要不改变占比。富文本正文及表格带占比，复制及邮件同样带占比；保存时身份标记仍还原编号来源，不把派生百分比重复追加到源稿。手工改写身份标记仍尊重用户正文，不反向替换普通同名文字。
+- 验证：`npx vitest run src/meetingSpeakerShares.test.ts src/MeetingMinutesPage.test.tsx src/meetingMinutesEditing.test.ts src/meetingMinutesAutoSave.test.ts src/meetingMinutesEditApi.test.ts src/meetingMinutesFormat.test.tsx`、`npm run build`、`node scripts/verify_meeting_speaker_shares_ui.cjs`；仅使用本地合成数据，正文显示、姓名替换／清空、富文本保存去重及浏览器验收记录在 `artifacts/meeting-speaker-shares-20261030/`。未改原生转写和录音流水线、未更新安装版。
+
+## 2026-10-30 · 手动与自动停录对照诊断
+
+- 用户反馈：正式版132中手动「停止并生成纪要」易出现短录音、自动结束正常；当前不能从旧summary确定点击前已断录还是点击后截断，不能把相关性写成已证实因果。
+- 核对：手动入口先等待原生 `meeting_record_stop` 返回再生成，自动入口同样先封盘再启动任务；两者共用 `meeting_record::finalize`，停止后等待全部采集线程退出再混音。新增实际WAV回归模拟停止时缓冲仍待写入，手动／自动均需保留全部样本。
+- 诊断增强：明确区分manual／automatic／app_exit，在发停止标记之前写入 `recording-stop-request.json`，保存请求时间、开启时长、各轨已落盘字节和编译版本；最终summary保留同一stopContext及版本。字节数允许有尚未落盘的缓冲，不能当作有效语音时长；诊断写入失败不阻止停录。原始音轨保留，不重试上传或改变停止行为。
+- 验证：`cargo --config profile.test.package.audit-toolbox.debug=0 test --lib meeting_`；合成样本覆盖两个入口的线程等待、封盘后完整混音与停止前证据，原生会议模块定向回归通过（日志：`artifacts/meeting-stop-comparison-20261030/rust-tests.log`）。此项补充诊断及回归，不宣称已在用户电脑复现或修复手动按钮特有的截断；自动重连修复仍需包含该代码的新版本验收。
+
 ## 2026-10-29 · 详细度与重新生成入口
 
 - 详细度旁「生成纪要」的来源优先级为：已导入音视频、当前会议转写稿、当前会议保留录音。存在上传时不误用当前阅读的其他会议；无上传时允许自动录制结束后的结果或所选历史会议按新的详细度重新生成两版。有转写稿走 `meeting.summarize`，不再发起转写；仅有Markdown而没有转写或录音时仍禁用。

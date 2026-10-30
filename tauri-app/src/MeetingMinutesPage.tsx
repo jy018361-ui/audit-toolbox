@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { demoDataEnabled } from "./preview/demoRegistry";
 import { formatCount } from "@/lib/numberFormat";
@@ -45,6 +45,7 @@ import {
 import { markToolPageLive } from "./toolPageActivity";
 import { meetingOutputPath } from "./meetingMinutesResult";
 import { replaceSpeakerNames, speakerIds, type SpeakerNames } from "./meetingSpeakerNames";
+import { meetingSpeakerShares } from "./meetingSpeakerShares";
 import { copyFormattedMinutes, formatMeetingMinutes } from "./meetingMinutesFormat";
 import {
   MeetingResultSchema,
@@ -148,8 +149,10 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   const [historyError, setHistoryError] = useState("");
   const [selectedHistoryId, setSelectedHistoryId] = useState<string>();
   const [historyResultError, setHistoryResultError] = useState("");
-  const [transcript, setTranscript] = useState<string>();
-  const [transcriptError, setTranscriptError] = useState("");
+  const [loadedTranscript, setLoadedTranscript] = useState<{ key: string; text?: string; error?: string }>();
+  const transcriptKey = JSON.stringify([result?.transcriptPath, selectedHistoryId]);
+  const transcript = loadedTranscript?.key === transcriptKey ? loadedTranscript.text : undefined;
+  const transcriptError = loadedTranscript?.key === transcriptKey ? loadedTranscript.error : undefined;
   const [copyStatus, setCopyStatus] = useState("");
   const [creatingMail, setCreatingMail] = useState(false);
   const creatingMailRef = useRef(false);
@@ -347,7 +350,13 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     expected: version.minutesMarkdown, names: version.speakerNames, timeline: version.kind === "timeline",
   })) : [document];
   const minutesEditor = useMeetingMinutesEditor(document, speakerNames, !previewMode);
-  const visibleMinutes = minutesEditor.body == null ? undefined : replaceSpeakerNames(minutesEditor.body, speakerNames);
+  const speakerShares = useMemo(() => meetingSpeakerShares(transcript), [transcript]);
+  const shareHint = !result?.transcriptPath ? "未保留原始转写稿，内容占比暂不可用。"
+    : transcriptError ? "原始转写稿读取失败，内容占比暂不可用。"
+    : transcript === undefined ? "正在统计发言内容占比…"
+    : !Object.keys(speakerShares.percentages).length ? "转写稿缺少可统计的说话人发言，内容占比暂不可用。"
+    : `内容占比按原始转写的有效文字量估算，忽略标点和空白，不代表发言时长。${speakerShares.hasUnattributed ? "未标注说话人的内容也计入总量。" : ""}`;
+  const visibleMinutes = minutesEditor.body == null ? undefined : replaceSpeakerNames(minutesEditor.body, speakerNames, speakerShares.percentages);
   const saveErrors = minutesEditor.errorsFor(documents);
   const commitNames = (names: SpeakerNames) => {
     updateSpeakerNames(names);
@@ -409,8 +418,6 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   }, [minutesPath, minutesMarkdown, previewKind, selectedKind]);
 
   useEffect(() => {
-    setTranscript(undefined);
-    setTranscriptError("");
     setCopyStatus("");
   }, [result?.transcriptPath, selectedHistoryId]);
 
@@ -425,24 +432,19 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   }, [selectedKind, minutesPath, visibleMinutes]);
 
   useEffect(() => {
-    if (
-      selectedKind !== "transcript" ||
-      !result?.transcriptPath ||
-      transcript !== undefined
-    )
-      return;
+    if (!result?.transcriptPath) return;
     let disposed = false;
     void meetingReadTranscript(result.transcriptPath)
       .then((text) => {
-        if (!disposed) setTranscript(text);
+        if (!disposed) setLoadedTranscript({ key: transcriptKey, text });
       })
       .catch((e) => {
-        if (!disposed) setTranscriptError(errorText(e));
+        if (!disposed) setLoadedTranscript({ key: transcriptKey, error: errorText(e) });
       });
     return () => {
       disposed = true;
     };
-  }, [selectedKind, result?.transcriptPath, transcript]);
+  }, [transcriptKey, result?.transcriptPath]);
 
   async function copyBody() {
     const request = mailRequest.current;
@@ -1229,6 +1231,9 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                       </div>}
                     </div>
                   )}
+                  {selectedKind !== "transcript" && recognizedSpeakerIds.length > 0 && (
+                    <p className="meeting-watch-hint">{shareHint}</p>
+                  )}
                   {selectedKind === "transcript" ? (
                     transcriptError ? (
                       <p role="alert" className="meeting-ask-error">
@@ -1246,7 +1251,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                     )
                   ) : visibleMinutes != null ? (
                     <MeetingMinutesInlineEditor key={document.key} source={minutesEditor.body ?? ""}
-                      names={speakerNames} onChange={minutesEditor.change} onBlur={minutesEditor.flush} />
+                      names={speakerNames} shares={speakerShares.percentages} onChange={minutesEditor.change} onBlur={minutesEditor.flush} />
                   ) : minutesPath && !previewError ? (
                     <p role="status">正在读取纪要正文…</p>
                   ) : null}

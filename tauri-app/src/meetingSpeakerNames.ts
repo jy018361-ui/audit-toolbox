@@ -9,10 +9,14 @@ export function speakerIds(texts: (string | null | undefined)[]): string[] {
   return [...ids].sort((a, b) => Number(a) - Number(b));
 }
 
-export function replaceSpeakerNames(markdown: string, names: SpeakerNames): string {
+export function speakerDisplay(label: string, id: string, names: SpeakerNames, shares: Record<string, string> = {}): string {
+  return `${names[id]?.trim() || label}${shares[id] ? `（${shares[id]}）` : ""}`;
+}
+
+export function replaceSpeakerNames(markdown: string, names: SpeakerNames, shares: Record<string, string> = {}): string {
   return markdown.replace(labelPattern, (label, id: string) => {
-    const name = names[id]?.trim();
+    const display = speakerDisplay(label, id, names, shares);
     // Names are literal text, including inside Markdown tables.
-    return name ? name.replace(/[\\`*_{}\[\]()#+\-.!|>~<>]/g, "\\$&") : label;
+    return display === label ? label : display.replace(/[\\`*_{}\[\]()#+\-.!|>~<>]/g, "\\$&");
   });
 }

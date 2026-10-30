@@ -185,6 +185,86 @@ describe("MeetingMinutesPage", () => {
     { id:"old", jobId:"old-job", title:"项目周报", startedAt:"2026-10-20T09:00:00+08:00", timeLabel:"导入时间", status:"completed", message:"已完成" },
   ];
 
+  it("自动会议完成后无上传文件也可从详细度旁重新生成，复用转写稿", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false,
+      latestJob:{jobId:"automatic",toolId:tool.id,phase:"completed",current:1,total:1,message:"完成",severity:"success",outputPaths:[],
+        result:{title:"项目协调",transcriptPath:"C:/data/auto.txt",audioPath:"C:/data/auto.wav",minutesMarkdown:"# 项目协调\n自动会议纪要"}}});
+    render(<MeetingMinutesPage tool={tool}/>);
+    await screen.findByRole("article");
+    const generate = screen.getByRole("button",{name:"生成纪要"});
+    expect(generate).toBeEnabled();
+    expect(screen.getByText(/本次生成：当前会议「项目协调」/)).toHaveTextContent("复用已有转写稿");
+    fireEvent.change(screen.getByRole("combobox",{name:"纪要详细度"}),{target:{value:"detailed"}});
+    fireEvent.click(generate);fireEvent.click(generate);
+    await waitFor(()=>expect(api.jobStart).toHaveBeenCalledWith("meeting.summarize",{transcriptPath:"C:/data/auto.txt",detailLevel:"detailed"}));
+    expect(api.jobStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("无上传时按当前选择的历史会议生成，仅有录音时回退到录音",async()=>{
+    const api=await import("./api");
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockImplementation(async id=>id==="new"
+      ? {title:"预算评审",transcriptPath:"C:/data/new.txt",minutesMarkdown:"# 预算评审"}
+      : {title:"项目周报",audioPath:"C:/data/old.wav",minutesMarkdown:"# 项目周报"});
+    render(<MeetingMinutesPage tool={tool}/>);
+    await screen.findByRole("article");
+    fireEvent.click(screen.getByRole("button",{name:/项目周报/}));
+    await waitFor(()=>expect(screen.getByRole("article")).toHaveTextContent("项目周报"));
+    expect(screen.getByText(/本次生成：当前会议「项目周报」/)).toHaveTextContent("从保留的录音重新生成");
+    fireEvent.change(screen.getByRole("combobox",{name:"纪要详细度"}),{target:{value:"brief"}});
+    fireEvent.click(screen.getByRole("button",{name:"生成纪要"}));
+    await waitFor(()=>expect(api.jobStart).toHaveBeenCalledWith("meeting.generate",{audioPath:"C:/data/old.wav",detailLevel:"brief"}));
+  });
+
+  it("已导入文件优先于当前查看的会议，来源提示明确且启动参数一致",async()=>{
+    const api=await import("./api");
+    vi.mocked(api.pickPath).mockResolvedValueOnce("C:/upload/新录音.mp4");
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockResolvedValue({title:"预算评审",transcriptPath:"C:/data/previous.txt",minutesMarkdown:"# 原会议"});
+    render(<MeetingMinutesPage tool={tool}/>);
+    await screen.findByRole("article");
+    fireEvent.click(screen.getByRole("button",{name:/拖放或点击选择会议音频或视频/}));
+    await screen.findByText("新录音.mp4");
+    fireEvent.click(screen.getByRole("button",{name:/预算评审/}));
+    await screen.findByRole("article");
+    expect(screen.getByText(/本次生成：已导入的文件「新录音.mp4」/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button",{name:"生成纪要"}));
+    await waitFor(()=>expect(api.jobStart).toHaveBeenCalledWith("meeting.generate",{audioPath:"C:/upload/新录音.mp4",detailLevel:"standard"}));
+  });
+
+  it("仅有Markdown时仍禁用生成，启动失败保留已有会议供重试",async()=>{
+    const api=await import("./api");
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockImplementation(async id=>id==="new"
+      ? {minutesMarkdown:"# 仅有纪要"} : {transcriptPath:"C:/old.txt",minutesMarkdown:"# 可重新生成"});
+    render(<MeetingMinutesPage tool={tool}/>);
+    await screen.findByRole("article");
+    expect(screen.getByRole("button",{name:"生成纪要"})).toBeDisabled();
+    fireEvent.click(screen.getByRole("button",{name:/项目周报/}));
+    await waitFor(()=>expect(screen.getByRole("article")).toHaveTextContent("可重新生成"));
+    vi.mocked(api.jobStart).mockRejectedValueOnce({userMessage:"任务暂时无法启动"});
+    fireEvent.click(screen.getByRole("button",{name:"生成纪要"}));
+    await screen.findByText("任务暂时无法启动");
+    expect(screen.getByRole("article")).toHaveTextContent("可重新生成");
+    expect(screen.getByRole("button",{name:"生成纪要"})).toBeEnabled();
+  });
+
+  it.each(["recording","running"])("已有会议在%s时仍不能重复生成",async phase=>{
+    const api=await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:true,logFound:true,recording:phase==="recording"});
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockResolvedValue({transcriptPath:"C:/saved.txt",minutesMarkdown:"# 历史会议"});
+    render(<MeetingMinutesPage tool={tool}/>);
+    await screen.findByRole("article");
+    if(phase==="running"){
+      const listener=vi.mocked(api.listenJobEvents).mock.calls.at(-1)![0];
+      await act(async()=>listener({jobId:"inflight",toolId:tool.id,phase:"running",current:1,total:4,message:"生成中",severity:"info",outputPaths:[]}));
+    }
+    expect(screen.getByRole("button",{name:"生成纪要"})).toBeDisabled();
+    expect(api.jobStart).not.toHaveBeenCalled();
+  });
+
   it("重开页面读取归档历史，按标题搜索并点击查看结果，不发起云端任务", async () => {
     const api = await import("./api");
     vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
@@ -737,4 +817,15 @@ describe("MeetingMinutesPage", () => {
     await waitFor(() => expect(screen.queryByRole("article")).not.toBeInTheDocument());
     expect(screen.queryByRole("group", { name: "纪要版本" })).not.toBeInTheDocument();
   });
+});
+
+it("通知历史链接直接读取指定会议，不先打开最新会议", async () => {
+  const api = await import("./api");
+  vi.mocked(api.meetingHistoryList).mockResolvedValue([
+    { id: "new", jobId: "new-job", title: "新会议", startedAt: "2026-10-29T12:00:00Z", timeLabel: "生成时间", status: "completed", message: "" },
+    { id: "old", jobId: "old-job", title: "旧会议", startedAt: "2026-10-29T10:00:00Z", timeLabel: "生成时间", status: "completed", message: "" },
+  ]);
+  const calls = vi.mocked(api.meetingHistoryGet).mock.calls.length;
+  renderUi(<MemoryRouter initialEntries={[`${tool.route}?meeting=old&version=content`]}><MeetingMinutesPage tool={tool} /></MemoryRouter>);
+  await waitFor(() => expect(vi.mocked(api.meetingHistoryGet).mock.calls.slice(calls)).toEqual([["old"]]));
 });

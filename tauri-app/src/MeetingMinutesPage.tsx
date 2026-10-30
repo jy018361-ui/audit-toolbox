@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
+import { demoDataEnabled } from "./preview/demoRegistry";
 import { formatCount } from "@/lib/numberFormat";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -261,8 +262,17 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
       viewingHistoryRef.current
     )
       return;
+    if (new URLSearchParams(location.search).has("meeting")) return;
     if (history[0]) void selectHistory(history[0]);
   }, [history, status, result, readingMinutes]);
+
+  // Windows 通知可在 WebView 重载后按持久化历史定位确切会议。
+  useEffect(() => {
+    if (location.pathname !== tool.route) return;
+    const id = new URLSearchParams(location.search).get("meeting");
+    const row = id && history.find(row => row.id === id);
+    if (row && selectedHistoryId !== row.id) void selectHistory(row);
+  }, [location, history]);
 
   // 完成提示携带同一任务结果进入工具页，也适用于已保活、没有重新挂载的页面。
   useEffect(() => {
@@ -552,12 +562,16 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     transcriptPath?: string;
   }) {
     if (busy || generationStartingRef.current) return;
+    const previousResult = result;
+    const previousHistoryId = selectedHistoryId;
+    const previousKind = selectedKind;
+    const previouslyViewingHistory = viewingHistoryRef.current;
     generationStartingRef.current = true;
     setGenerationStarting(true);
-    jobVersion.current += 1;
+    const generationVersion = ++jobVersion.current;
     autoRestoreRef.current = false;
     viewingHistoryRef.current = false;
-    selectionVersion.current += 1;
+    const selection = ++selectionVersion.current;
     setReadingMinutes(false);
     setSelectedHistoryId(undefined);
     setHistoryResultError("");
@@ -592,6 +606,14 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
       markToolPageLive(tool.id);
       void refreshHistory();
     } catch (e) {
+      // No task event arrived: a launch error must leave the selected meeting
+      // available for retry, rather than disabling generation with no input.
+      if (selectionVersion.current === selection && jobVersion.current === generationVersion) {
+        setResult(previousResult);
+        setSelectedHistoryId(previousHistoryId);
+        setSelectedKind(previousKind);
+        viewingHistoryRef.current = previouslyViewingHistory;
+      }
       setError(errorText(e));
     } finally {
       generationStartingRef.current = false;
@@ -677,6 +699,21 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     (!viewingHistoryRef.current
       ? history.find((row) => row.jobId === job?.jobId)
       : undefined);
+  const generationSource = importPath
+    ? { audioPath: importPath }
+    : result?.transcriptPath
+      ? { transcriptPath: result.transcriptPath }
+      : result?.audioPath
+        ? { audioPath: result.audioPath }
+        : undefined;
+  const generationDisabled = !generationSource || busy || recordBusy || recording || readingMinutes || (previewMode && !demoDataEnabled());
+  const generationSourceHint = busy
+    ? "正在生成会议纪要，请等待完成后再调整详细度。"
+    : importPath
+    ? `本次生成：已导入的文件「${displayAudioFileName(importPath)}」。`
+    : generationSource
+      ? `本次生成：当前会议${selectedHistory?.title || result?.title ? `「${selectedHistory?.title || result?.title}」` : ""}。${result?.transcriptPath ? "复用已有转写稿，按所选详细度重新生成。" : "从保留的录音重新生成。"}`
+      : "导入音视频或选择已有会议后，可按所选详细度生成纪要。";
   const visibleHistory = history.filter((row) =>
     row.title
       .toLocaleLowerCase()
@@ -835,6 +872,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                   纪要详细度
                   <select
                     value={detailLevel}
+                    disabled={busy || recordBusy}
                     onChange={(e) => setDetailLevel(e.target.value)}
                   >
                     {DETAIL_OPTIONS.map((option) => (
@@ -863,13 +901,20 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                 )}
                 <Button
                   variant="secondary"
-                  disabled={!importPath || busy || recording || previewMode}
-                  onClick={() => void startGenerate({ audioPath: importPath })}
+                  disabled={generationDisabled}
+                  aria-describedby="meeting-generation-source"
+                  onClick={() => {
+                    if (!generationDisabled && generationSource) void startGenerate(generationSource);
+                  }}
                 >
                   生成纪要
                 </Button>
               </div>
             </div>
+            <p id="meeting-generation-source" className="meeting-watch-hint" role="status">{generationSourceHint}</p>
+            {previewMode && demoDataEnabled() && generationSource && (
+              <p className="meeting-watch-hint">演示模式：可切换详细度体验生成流程，仅使用合成示例，不处理真实会议或调用云端。</p>
+            )}
             <p className="meeting-watch-hint">
               一次生成按内容、按时间两个版本，共用所选详细度；标题根据会议内容自动生成。
             </p>
@@ -1240,7 +1285,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                     {result.transcriptPath && (
                       <Button
                         variant="ghost"
-                        disabled={busy}
+                        disabled={busy || recordBusy || recording || previewMode}
                         onClick={() =>
                           void startGenerate({
                             transcriptPath: result.transcriptPath,
@@ -1255,7 +1300,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                     {!result.transcriptPath && result.audioPath && (
                       <Button
                         variant="ghost"
-                        disabled={busy || previewMode}
+                        disabled={busy || recordBusy || recording || previewMode}
                         onClick={() =>
                           void startGenerate({
                             audioPath: result.audioPath || undefined,

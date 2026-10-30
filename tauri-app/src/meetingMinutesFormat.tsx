@@ -4,15 +4,15 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 const fontFamily = '"Microsoft YaHei", "微软雅黑", sans-serif';
-const typography: CSSProperties = { fontFamily, color: "#202b33", fontSize: "11pt", lineHeight: "1.75" };
+const typography: CSSProperties = { fontFamily, color: "#000000", fontSize: "11pt", lineHeight: "1.75" };
 const cell: CSSProperties = { ...typography, fontSize: "10.5pt", border: "1px solid #cfd7dc", padding: "9px 12px", textAlign: "left", verticalAlign: "top" };
 
 /** Inline styles survive Outlook's Word HTML editor and formatted paste. */
 function MinutesBody({ markdown }: { markdown: string }) {
   return <div style={{ ...typography, maxWidth: "800px", padding: "8px 8px 20px 0" }}>
     <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
-      h1: ({ children }) => <h1 style={{ ...typography, fontSize: "20pt", fontWeight: 700, color: "#153f47", margin: "0 0 22px", padding: "0 0 14px", borderBottom: "2px solid #d8e4e6", lineHeight: "1.4" }}>{children}</h1>,
-      h2: ({ children }) => <h2 style={{ ...typography, fontSize: "13pt", fontWeight: 700, color: "#153f47", margin: "24px 0 10px" }}>{children}</h2>,
+      h1: ({ children }) => <h1 style={{ ...typography, fontSize: "20pt", fontWeight: 700, color: "#000000", margin: "0 0 22px", padding: "0 0 14px", borderBottom: "2px solid #d8e4e6", lineHeight: "1.4" }}>{children}</h1>,
+      h2: ({ children }) => <h2 style={{ ...typography, fontSize: "13pt", fontWeight: 700, color: "#000000", margin: "24px 0 10px" }}>{children}</h2>,
       h3: ({ children }) => <h3 style={{ ...typography, fontSize: "11.5pt", fontWeight: 700, margin: "16px 0 8px" }}>{children}</h3>,
       h4: ({ children }) => <h4 style={{ ...typography, fontWeight: 700, margin: "14px 0 8px" }}>{children}</h4>,
       h5: ({ children }) => <h5 style={{ ...typography, fontWeight: 700 }}>{children}</h5>,
@@ -21,7 +21,7 @@ function MinutesBody({ markdown }: { markdown: string }) {
       ul: ({ children }) => <ul style={{ ...typography, margin: "8px 0", paddingLeft: "26px", listStyleType: "disc" }}>{children}</ul>,
       ol: ({ children, start }) => <ol start={start} style={{ ...typography, margin: "8px 0", paddingLeft: "26px", listStyleType: "decimal" }}>{children}</ol>,
       li: ({ children }) => <li style={{ ...typography, margin: "4px 0" }}>{children}</li>,
-      blockquote: ({ children }) => <blockquote style={{ ...typography, margin: "12px 0", padding: "4px 14px", borderLeft: "3px solid #bacdd0", color: "#52626b" }}>{children}</blockquote>,
+      blockquote: ({ children }) => <blockquote style={{ ...typography, margin: "12px 0", padding: "4px 14px", borderLeft: "3px solid #bacdd0", color: "#000000" }}>{children}</blockquote>,
       table: ({ children }) => <table cellPadding={0} cellSpacing={0} style={{ width: "100%", borderCollapse: "collapse", margin: "12px 0 18px", ...typography }}>{children}</table>,
       th: ({ children }) => <th style={{ ...cell, backgroundColor: "#f0f4f5", fontWeight: 700 }}>{children}</th>,
       td: ({ children }) => <td style={cell}>{children}</td>,
@@ -56,7 +56,7 @@ export function formatMeetingMinutes(markdown: string, fallbackTitle = "未命�
   const title = subject.replace(/[&<>"']/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[character]!);
   return {
     subject,
-    html: `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>${title}</title></head><body style="margin:0;padding:0;font-family:Microsoft YaHei,微软雅黑,sans-serif;background:#fff;color:#202b33">${fragment}</body></html>`,
+    html: `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>${title}</title></head><body style="margin:0;padding:0;font-family:Microsoft YaHei,微软雅黑,sans-serif;background:#fff;color:#000000">${fragment}</body></html>`,
     text: textOf(document.body).trim(),
   };
 }

@@ -28,6 +28,86 @@ fn decode<T: serde::de::DeserializeOwned>(v: String) -> Result<T, AppError> {
 pub(crate) fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
+
+fn extraction_key(value: &str) -> Result<(), AppError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return Err(failure("OCR_CACHE_KEY", "摘录缓存标识无效，请重新开始摘录。"));
+    }
+    Ok(())
+}
+
+fn canonical(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let sorted: std::collections::BTreeMap<_, _> = map.iter().map(|(key, value)| (key.clone(), canonical(value))).collect();
+            serde_json::to_value(sorted).unwrap_or(Value::Null)
+        }
+        Value::Array(values) => Value::Array(values.iter().map(canonical).collect()),
+        value => value.clone(),
+    }
+}
+
+fn extraction_context_from(conn: &Connection, id: &str, settings: &Value) -> Result<String, AppError> {
+    let raw = conn.query_row("SELECT data FROM ocr_documents WHERE id=?", [id], |row| row.get::<_, String>(0))
+        .optional().map_err(db_error)?.ok_or_else(|| failure("OCR_DOCUMENT_NOT_FOUND", "OCR 文件不存在。"))?;
+    let document: Document = decode(raw)?;
+    let mut statement = conn.prepare("SELECT data FROM ocr_pages WHERE document_id=? ORDER BY page").map_err(db_error)?;
+    let raw_pages = statement.query_map([id], |row| row.get::<_, String>(0)).map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>().map_err(db_error)?;
+    let pages = raw_pages.into_iter().map(decode::<Value>).collect::<Result<Vec<_>, _>>()?;
+    // Use only inference settings. Credentials are never returned, persisted,
+    // or included in the digest; changing unrelated toolbox settings is cheap.
+    let mut llm = serde_json::Map::new();
+    for key in ["enabled", "model", "base_url", "baseUrl", "api_base", "api_type", "apiType", "url", "endpoint", "provider", "timeout", "timeout_seconds", "timeoutSeconds", "thinking_enabled", "thinkingEnabled", "temperature", "top_p", "topP", "max_tokens", "maxTokens", "auth_mode"] {
+        if let Some(value) = settings.get("llm").and_then(|llm| llm.get(key)) { llm.insert(key.into(), value.clone()); }
+    }
+    let context = canonical(&json!({"version":"ocr-extraction-context-v1", "document":document,"pages":pages,"llm":llm}));
+    Ok(format!("{:x}", Sha256::digest(encode(&context)?.as_bytes())))
+}
+
+fn validated_cache_entry(entry: &Value) -> Result<String, AppError> {
+    let invalid = || failure("OCR_CACHE_DATA", "摘录缓存数据无效，未保存本段缓存。");
+    let object = entry.as_object().ok_or_else(invalid)?;
+    if object.len() != 1 || !object.contains_key("parsed") { return Err(invalid()); }
+    let parsed = entry["parsed"].as_object().ok_or_else(invalid)?;
+    if parsed.keys().any(|key| !matches!(key.as_str(), "coverage_complete" | "items" | "columns"))
+        || parsed.get("coverage_complete") != Some(&Value::Bool(true)) {
+        return Err(invalid());
+    }
+    let rows = parsed.get("items").and_then(Value::as_array).ok_or_else(invalid)?;
+    if rows.len() > 5000 || rows.iter().any(|row| !row.is_object()) { return Err(invalid()); }
+    if let Some(columns) = parsed.get("columns") {
+        let columns = columns.as_array().ok_or_else(invalid)?;
+        if columns.len() > 200 || columns.iter().any(|column| {
+            let Some(column) = column.as_object() else { return true; };
+            column.len() != 2 || !column.get("key").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty() && s.len() <= 320)
+                || !column.get("label").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty() && s.len() <= 400)
+        }) { return Err(invalid()); }
+    }
+    let encoded = encode(entry)?;
+    if encoded.len() > 512 * 1024 { return Err(invalid()); }
+    Ok(encoded)
+}
+
+fn validated_extraction_diagnostics(entries: &Value) -> Result<String, AppError> {
+    let invalid = || failure("OCR_DIAGNOSTICS_INVALID", "摘录请求统计无效，未保存诊断记录。");
+    let entries = entries.as_array().ok_or_else(invalid)?;
+    if entries.len() > 512 { return Err(invalid()); }
+    for entry in entries {
+        let object = entry.as_object().ok_or_else(invalid)?;
+        if object.keys().any(|key| !matches!(key.as_str(), "sequence" | "attempt" | "status" | "elapsedMs" | "promptChars" | "sourceChars" | "reason"))
+            || !entry["sequence"].as_u64().is_some_and(|value| value <= 1_000_000)
+            || !entry["attempt"].as_u64().is_some_and(|value| value <= 16)
+            || !entry["elapsedMs"].as_f64().is_some_and(|value| value.is_finite() && (0.0..=86_400_000.0).contains(&value))
+            || !entry["promptChars"].as_u64().is_some_and(|value| value <= 10_000_000)
+            || !entry["sourceChars"].as_u64().is_some_and(|value| value <= 10_000_000)
+            || !entry["status"].as_str().is_some_and(|value| matches!(value, "cached" | "validated" | "rejected" | "transport_error"))
+            || object.get("reason").is_some_and(|reason| !reason.as_str().is_some_and(|value| matches!(value, "coverage" | "evidence" | "columns" | "facts" | "format" | "transport"))) {
+            return Err(invalid());
+        }
+    }
+    encode(&entries)
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PromptStage {
@@ -193,7 +273,9 @@ impl Store {
           CREATE TABLE IF NOT EXISTS ocr_documents(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES ocr_projects(id) ON DELETE CASCADE, data TEXT NOT NULL, source TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS ocr_pages(document_id TEXT NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE, page INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(document_id,page));
           CREATE TABLE IF NOT EXISTS ocr_extractions(id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE, data TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS ocr_recognition_diagnostics(document_id TEXT NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE, page INTEGER NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(document_id,page,revision));").map_err(db_error)?;
+          CREATE TABLE IF NOT EXISTS ocr_recognition_diagnostics(document_id TEXT NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE, page INTEGER NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(document_id,page,revision));
+          CREATE TABLE IF NOT EXISTS ocr_extraction_cache(document_id TEXT NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE, context_key TEXT NOT NULL, cache_key TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(document_id,context_key,cache_key));
+          CREATE TABLE IF NOT EXISTS ocr_extraction_diagnostics(document_id TEXT NOT NULL REFERENCES ocr_documents(id) ON DELETE CASCADE, run_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(document_id,run_id));").map_err(db_error)?;
         Ok(Self {
             conn,
             root: db.parent().unwrap_or(Path::new(".")).join("ocr-files"),
@@ -326,6 +408,62 @@ impl Store {
             .map(decode)
             .transpose()?
             .ok_or_else(|| failure("OCR_DOCUMENT_NOT_FOUND", "OCR 文件不存在。"))
+    }
+    pub fn extraction_context(&self, id: &str, settings: &Value) -> Result<String, AppError> {
+        extraction_context_from(&self.conn, id, settings)
+    }
+    pub fn extraction_cache_get(&mut self, id: &str, context: &str, key: &str, settings: &Value) -> Result<Value, AppError> {
+        extraction_key(context)?; extraction_key(key)?;
+        // A hit refreshes LRU time. Reserve the writer before reading so two
+        // workers do not deadlock while upgrading deferred read transactions.
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_error)?;
+        if extraction_context_from(&tx, id, settings)? != context { return Ok(Value::Null); }
+        let stored = tx.query_row("SELECT data FROM ocr_extraction_cache WHERE document_id=? AND context_key=? AND cache_key=?",
+            params![id, context, key], |row| row.get::<_, String>(0)).optional().map_err(db_error)?;
+        let Some(stored) = stored else { return Ok(Value::Null); };
+        // Corrupted cache is a miss, never a reason to accept incomplete data.
+        let entry: Value = match decode(stored) { Ok(value) => value, Err(_) => return Ok(Value::Null) };
+        if validated_cache_entry(&entry).is_err() { return Ok(Value::Null); }
+        tx.execute("UPDATE ocr_extraction_cache SET updated_at=? WHERE document_id=? AND context_key=? AND cache_key=?", params![now(), id, context, key]).map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        Ok(entry)
+    }
+    pub fn extraction_cache_put(&mut self, id: &str, context: &str, key: &str, entry: &Value, settings: &Value) -> Result<bool, AppError> {
+        extraction_key(context)?; extraction_key(key)?;
+        let data = validated_cache_entry(entry)?;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_error)?;
+        if extraction_context_from(&tx, id, settings)? != context { return Ok(false); }
+        tx.execute("DELETE FROM ocr_extraction_cache WHERE document_id=? AND context_key<>?", params![id, context]).map_err(db_error)?;
+        tx.execute("INSERT INTO ocr_extraction_cache(document_id,context_key,cache_key,data,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(document_id,context_key,cache_key) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at",
+            params![id, context, key, data, now()]).map_err(db_error)?;
+        tx.execute("DELETE FROM ocr_extraction_cache WHERE document_id=? AND rowid NOT IN (SELECT rowid FROM ocr_extraction_cache WHERE document_id=? ORDER BY updated_at DESC,rowid DESC LIMIT 256)", params![id, id]).map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        Ok(true)
+    }
+    pub fn extraction_diagnostics_save(&mut self, id: &str, run_id: &str, entries: &Value) -> Result<(), AppError> {
+        if uuid::Uuid::parse_str(run_id).is_err() { return Err(failure("OCR_DIAGNOSTICS_INVALID", "摘录任务标识无效。")); }
+        let data = validated_extraction_diagnostics(entries)?;
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_error)?;
+        // Verify document existence rather than accepting arbitrary IDs from UI.
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ocr_documents WHERE id=?)", [id], |row| row.get(0)).map_err(db_error)?;
+        if !exists { return Err(failure("OCR_DOCUMENT_NOT_FOUND", "OCR 文件不存在。")); }
+        tx.execute("INSERT INTO ocr_extraction_diagnostics(document_id,run_id,data,updated_at) VALUES(?,?,?,?) ON CONFLICT(document_id,run_id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at", params![id, run_id, data, now()]).map_err(db_error)?;
+        tx.execute("DELETE FROM ocr_extraction_diagnostics WHERE document_id=? AND rowid NOT IN (SELECT rowid FROM ocr_extraction_diagnostics WHERE document_id=? ORDER BY updated_at DESC,rowid DESC LIMIT 20)", params![id, id]).map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        Ok(())
+    }
+    pub fn extraction_diagnostics(&self, id: &str) -> Result<Vec<Value>, AppError> {
+        self.document(id)?;
+        let mut statement = self.conn.prepare("SELECT run_id,data,updated_at FROM ocr_extraction_diagnostics WHERE document_id=? ORDER BY updated_at DESC,rowid DESC LIMIT 20").map_err(db_error)?;
+        let rows = statement.query_map([id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>().map_err(db_error)?;
+        // A damaged diagnostic is disposable and cannot reintroduce raw model
+        // text or arbitrary fields into a UI that expects statistics only.
+        Ok(rows.into_iter().filter_map(|(run_id, entries, updated_at)| {
+            let entries = decode::<Value>(entries).ok()?;
+            validated_extraction_diagnostics(&entries).ok()?;
+            Some(json!({"runId":run_id,"entries":entries,"updatedAt":updated_at}))
+        }).collect())
     }
     pub fn source(&self, id: &str) -> Result<PathBuf, AppError> {
         self.document(id)?;
@@ -655,6 +793,103 @@ mod tests {
         println!("已保存结果离线回放与导出完成。");
     }
     use super::*;
+    #[test]
+    fn extraction_cache_binds_model_source_and_revision_and_keeps_no_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("test.db")).unwrap();
+        let project = store.save_project(&json!({"name":"断点续跑"})).unwrap();
+        let source = dir.path().join("source.png"); fs::write(&source, b"synthetic").unwrap();
+        let doc = store.import(project["id"].as_str().unwrap(), &source).unwrap();
+        let page = Page { metadata: Default::default(),page:1,text:"本金00123元".into(),original_text:"本金00123元".into(),tables:vec![Table{id:"t".into(),title:"本金".into(),rows:vec![vec!["00123".into()]]}],original_tables:vec![],revision:0,status:"completed".into(),warnings:vec![] };
+        let saved = store.save_page(&doc.id,page,0,true).unwrap();
+        let settings = json!({"llm":{"enabled":true,"model":"qwen-test","base_url":"https://example.com/v1","thinking_enabled":false,"api_key":"NEVER_STORE_THIS_SECRET"}});
+        let context = store.extraction_context(&doc.id,&settings).unwrap();
+        assert_eq!(context.len(),64);
+        let key = "a".repeat(64);
+        let entry = json!({"parsed":{"coverage_complete":true,"items":[{"本金":"00123","evidence_refs":[{"line_start":1,"line_end":1}]}],"columns":[{"key":"本金","label":"本金"}]}});
+        assert!(store.extraction_cache_put(&doc.id,&context,&key,&entry,&settings).unwrap());
+        assert_eq!(store.extraction_cache_get(&doc.id,&context,&key,&settings).unwrap(),entry);
+        let mut credentials = settings.clone(); credentials["llm"]["api_key"] = json!("DIFFERENT_SECRET");
+        assert_eq!(store.extraction_context(&doc.id,&credentials).unwrap(),context);
+        credentials["llm"]["apiKey"] = json!("OTHER_SECRET");
+        credentials["llm"]["token"] = json!("TOKEN_SECRET");
+        credentials["llm"]["password"] = json!("PASSWORD_SECRET");
+        credentials["unrelatedTool"] = json!({"enabled":true});
+        assert_eq!(store.extraction_context(&doc.id,&credentials).unwrap(),context);
+        for (field,value) in [("model",json!("another-model")),("base_url",json!("https://other.example/v1")),("thinking_enabled",json!(true))] {
+            let mut changed = settings.clone(); changed["llm"][field]=value;
+            assert_ne!(store.extraction_context(&doc.id,&changed).unwrap(),context);
+            assert!(store.extraction_cache_get(&doc.id,&context,&key,&changed).unwrap().is_null());
+            assert!(!store.extraction_cache_put(&doc.id,&context,&key,&entry,&changed).unwrap());
+        }
+        // Hashes include actual row content even if an old client forgot to
+        // update revision; persisted evidence must never hide a source edit.
+        for mutation in ["text","tables","revision"] {
+            let mut changed=serde_json::to_value(&saved).unwrap();
+            match mutation { "text" => changed["text"]=json!("本金999元"),"tables" => changed["tables"][0]["rows"][0][0]=json!("999"),_ => changed["revision"]=json!(999) }
+            store.conn.execute("UPDATE ocr_pages SET data=? WHERE document_id=? AND page=1",params![encode(&changed).unwrap(),&doc.id]).unwrap();
+            assert_ne!(store.extraction_context(&doc.id,&settings).unwrap(),context);
+            assert!(store.extraction_cache_get(&doc.id,&context,&key,&settings).unwrap().is_null());
+            assert!(!store.extraction_cache_put(&doc.id,&context,&key,&entry,&settings).unwrap());
+        }
+        store.conn.execute("UPDATE ocr_pages SET data=? WHERE document_id=? AND page=1",params![encode(&saved).unwrap(),&doc.id]).unwrap();
+        assert_eq!(store.extraction_context(&doc.id,&settings).unwrap(),context);
+        let mut changed_doc=serde_json::to_value(store.document(&doc.id).unwrap()).unwrap();
+        changed_doc["revision"]=json!(999);
+        store.conn.execute("UPDATE ocr_documents SET data=? WHERE id=?",params![encode(&changed_doc).unwrap(),&doc.id]).unwrap();
+        assert_ne!(store.extraction_context(&doc.id,&settings).unwrap(),context);
+        assert!(store.extraction_cache_get(&doc.id,&context,&key,&settings).unwrap().is_null());
+        let data: String=store.conn.query_row("SELECT data FROM ocr_extraction_cache",[],|row|row.get(0)).unwrap();
+        assert!(!data.contains("SECRET")); assert!(!data.contains("base_url"));
+        assert!(store.extraction_context("missing",&settings).is_err());
+        assert!(store.extraction_cache_get("missing",&context,&key,&settings).is_err());
+    }
+    #[test]
+    fn extraction_cache_rejects_incomplete_or_oversized_entries_and_bounds_rows() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=Store::open(&dir.path().join("test.db")).unwrap();
+        let project=store.save_project(&json!({"name":"缓存边界"})).unwrap();
+        let source=dir.path().join("source.png");fs::write(&source,b"synthetic").unwrap();
+        let doc=store.import(project["id"].as_str().unwrap(),&source).unwrap();let settings=json!({});
+        let context=store.extraction_context(&doc.id,&settings).unwrap();let key="b".repeat(64);
+        for entry in [json!({"parsed":{"coverage_complete":false,"items":[]}}),json!({"parsed":{"coverage_complete":true,"items":[null]}}),json!({"parsed":{"coverage_complete":true,"items":[]},"raw":"unused"}),json!({"parsed":{"coverage_complete":true,"items":[{"large":"a".repeat(512*1024)}]}}),json!({"parsed":{"coverage_complete":true,"items":[],"columns":[{"key":"a","label":"A","extra":"x"}]}})] {
+            assert!(store.extraction_cache_put(&doc.id,&context,&key,&entry,&settings).is_err());
+        }
+        let entry=json!({"parsed":{"coverage_complete":true,"items":[]}});
+        for key in ["../bad".into(),"A".repeat(64),"g".repeat(64)] {
+            assert!(store.extraction_cache_put(&doc.id,&context,&key,&entry,&settings).is_err());
+            assert!(store.extraction_cache_get(&doc.id,&context,&key,&settings).is_err());
+        }
+        for index in 0..258 {assert!(store.extraction_cache_put(&doc.id,&context,&format!("{index:064x}"),&entry,&settings).unwrap());}
+        let count:i64=store.conn.query_row("SELECT COUNT(*) FROM ocr_extraction_cache",[],|r|r.get(0)).unwrap();assert_eq!(count,256);
+        assert!(store.extraction_cache_get(&doc.id,&context,&format!("{:064x}",0),&settings).unwrap().is_null());
+        store.conn.execute("UPDATE ocr_extraction_cache SET data='{}' WHERE cache_key=?",[format!("{:064x}",257)]).unwrap();
+        assert!(store.extraction_cache_get(&doc.id,&context,&format!("{:064x}",257),&settings).unwrap().is_null());
+        store.delete_document(&doc.id).unwrap();
+        let count:i64=store.conn.query_row("SELECT COUNT(*) FROM ocr_extraction_cache",[],|r|r.get(0)).unwrap();assert_eq!(count,0);
+    }
+    #[test]
+    fn extraction_diagnostics_keep_only_bounded_statistics_and_cascade_on_delete() {
+        let dir=tempfile::tempdir().unwrap();let mut store=Store::open(&dir.path().join("test.db")).unwrap();
+        let project=store.save_project(&json!({"name":"请求统计"})).unwrap();let source=dir.path().join("source.png");fs::write(&source,b"synthetic").unwrap();
+        let doc=store.import(project["id"].as_str().unwrap(),&source).unwrap();
+        let entry=json!({"sequence":0,"attempt":0,"status":"rejected","elapsedMs":12.5,"promptChars":100,"sourceChars":200,"reason":"evidence"});
+        let id=uuid::Uuid::new_v4().to_string();
+        store.extraction_diagnostics_save(&doc.id,&id,&json!([entry])).unwrap();
+        let accepted=json!([{"sequence":1,"attempt":1,"status":"validated","elapsedMs":10,"promptChars":100,"sourceChars":200}]);
+        store.extraction_diagnostics_save(&doc.id,&id,&accepted).unwrap();
+        let runs=store.extraction_diagnostics(&doc.id).unwrap();assert_eq!(runs.len(),1);assert_eq!(runs[0]["entries"],accepted);
+        let mut with_text=entry.clone();with_text["prompt"]=json!("PRIVATE_BODY");
+        for entries in [json!([with_text]),json!([{"status":"validated"}]),json!([{"sequence":0,"attempt":0,"status":"rejected","elapsedMs":-1,"promptChars":0,"sourceChars":0}]),json!(vec![entry.clone();513])] {
+            assert!(store.extraction_diagnostics_save(&doc.id,&id,&entries).is_err());
+        }
+        assert!(store.extraction_diagnostics_save(&doc.id,"not-a-uuid",&json!([])).is_err());
+        assert!(store.extraction_diagnostics_save("missing",&id,&json!([])).is_err());
+        for _ in 0..22 {store.extraction_diagnostics_save(&doc.id,&uuid::Uuid::new_v4().to_string(),&json!([entry])).unwrap();}
+        assert_eq!(store.extraction_diagnostics(&doc.id).unwrap().len(),20);
+        store.conn.execute("UPDATE ocr_extraction_diagnostics SET data=?",[json!([{"prompt":"PRIVATE_BODY"}]).to_string()]).unwrap();
+        assert!(store.extraction_diagnostics(&doc.id).unwrap().is_empty());
+        store.delete_document(&doc.id).unwrap();let count:i64=store.conn.query_row("SELECT COUNT(*) FROM ocr_extraction_diagnostics",[],|r|r.get(0)).unwrap();assert_eq!(count,0);
+    }
     #[test]
     fn named_scenarios_round_trip_and_survive_old_project_saves() {
         let dir = tempfile::tempdir().unwrap();

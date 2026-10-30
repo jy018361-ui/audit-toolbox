@@ -152,6 +152,9 @@ beforeEach(() => {
     ],
   };
   mocks.call.mockImplementation(async (method, params) => {
+    if (method === "ocr.extraction_context") return { contextKey: "a".repeat(64) };
+    if (method === "ocr.extraction_cache_get") return { entry: null };
+    if (method === "ocr.extraction_cache_put" || method === "ocr.extraction_diagnostics_save") return { saved: true };
     if (method === "ocr.projects")
       return { projects: [structuredClone(savedProject)] };
     if (method === "ocr.output_directory") return { outputDir: "C:/输出" };
@@ -300,6 +303,35 @@ async function openDocument(showOriginal = true, managed = false) {
     await screen.findByRole("region", { name: "全篇初始原文" });
   }
 }
+
+it("摘录区展示请求与复用统计，失败也保存纯统计诊断", async () => {
+  const entries = [{ sequence: 1, attempt: 0, status: "cached", elapsedMs: 1, promptChars: 10, sourceChars: 20 },
+    { sequence: 2, attempt: 0, status: "transport_error", elapsedMs: 1500, promptChars: 10, sourceChars: 20, reason: "transport" }];
+  mocks.extract.mockImplementation(async options => { entries.forEach(entry => options.onDiagnostic(entry)); throw new Error("连接失败"); });
+  await openDocument(false, true);
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  fireEvent.change(await screen.findByLabelText("摘录场景"), { target: { value: "loan_general" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "开始摘录" }));
+  await screen.findByRole("alert", { name: "场景摘录失败详情" });
+  expect(screen.getByLabelText("摘录请求统计")).toHaveTextContent("已请求模型 1 次 · 复用 1 段");
+  expect(mocks.call).toHaveBeenCalledWith("ocr.extraction_diagnostics_save", expect.objectContaining({ documentId: "d", entries }));
+  expect(mocks.call.mock.calls.filter(([method]) => method === "ocr.extraction_save")).toHaveLength(0);
+});
+
+it("摘录期间模型上下文变化时拒绝混存结果并保留诊断", async () => {
+  const original = mocks.call.getMockImplementation()!; let contextReads = 0;
+  mocks.call.mockImplementation(async (method, params) => method === "ocr.extraction_context"
+    ? { contextKey: (++contextReads === 1 ? "a" : "b").repeat(64) } : original(method, params));
+  await openDocument(false, true);
+  fireEvent.click(screen.getByRole("button", { name: "下一步：场景摘录" }));
+  fireEvent.change(await screen.findByLabelText("摘录场景"), { target: { value: "loan_general" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "开始摘录" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "开始摘录" }));
+  const failure = await screen.findByRole("alert", { name: "场景摘录失败详情" });
+  expect(failure).toHaveTextContent("原文或统一 LLM 配置已变化");
+  expect(mocks.call.mock.calls.filter(([method]) => method === "ocr.extraction_save")).toHaveLength(0);
+});
 
 it("整批摘录取消通知当前请求，阻止保存与自动导出并关闭进度窗", async () => {
   let rejectRequest!: (error: Error) => void;

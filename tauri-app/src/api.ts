@@ -242,6 +242,7 @@ const DEMO_JOB_TOOL_ID_RULES: Array<[prefix: string, toolId: string]> = [
   ["pdf2excel.", "pdf_to_excel"],
   ["fuzzy.", "fuzzy_match"],
   ["meeting.", "meeting_minutes"],
+  ["meeting.", "meeting_minutes"],
 ];
 
 const demoJobToolId = (method: string): string =>
@@ -746,4 +747,16 @@ export async function dataflowDbTables(path: string): Promise<string[]> {
       .filter((name): name is string => typeof name === "string" && name.length > 0);
   }
   return [];
+}
+
+/** 通知点击仅带任务编号，结果仍通过会议历史与现有文件授权读取。 */
+export async function meetingNotify(jobId: string, title: string, body: string) {
+  if (!inTauri()) return;
+  await invoke("meeting_notify", { jobId, title, body: body.slice(0, 1000) });
+}
+export async function listenMeetingNotificationOpen(handler: (jobId: string) => void) {
+  if (!inTauri()) return () => undefined;
+  return listen<{ jobId: string }>("meeting-notification-open", event => {
+    if (typeof event.payload?.jobId === "string") handler(event.payload.jobId);
+  });
 }

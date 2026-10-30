@@ -84,6 +84,14 @@ pub(crate) fn call(
                 json!({"document":store.document(id)?,"pages":store.pages(id)?,"extractions":store.extractions(id)?}),
             )
         }
+        "ocr.extraction_context" => Ok(json!({"contextKey":store.extraction_context(required(&params,"documentId")?, settings)?})),
+        "ocr.extraction_cache_get" => Ok(json!({"entry":store.extraction_cache_get(required(&params,"documentId")?, required(&params,"contextKey")?, required(&params,"key")?, settings)?})),
+        "ocr.extraction_cache_put" => Ok(json!({"saved":store.extraction_cache_put(required(&params,"documentId")?, required(&params,"contextKey")?, required(&params,"key")?, &params["entry"], settings)?})),
+        "ocr.extraction_diagnostics_save" => {
+            store.extraction_diagnostics_save(required(&params,"documentId")?, required(&params,"runId")?, &params["entries"])?;
+            Ok(json!({"saved":true}))
+        }
+        "ocr.extraction_diagnostics" => Ok(json!({"runs":store.extraction_diagnostics(required(&params,"documentId")?)?})),
         "ocr.document_delete" => store.delete_document(required(&params, "documentId")?),
         "ocr.document_prepare" => to_value(store.prepare(
             required(&params, "documentId")?,
@@ -705,6 +713,17 @@ pub(crate) fn run_job(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "手动隔离数据库摘录缓存及导出回放，不读取实际配置或调用模型"]
+    fn replay_extraction_cache_from_stdin() {
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        let request: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let method = request["method"].as_str().unwrap();
+        assert!(matches!(method, "ocr.extraction_context" | "ocr.extraction_cache_get" | "ocr.extraction_cache_put" | "ocr.extraction_diagnostics_save" | "ocr.extraction_diagnostics"));
+        let result = super::call(method, request["params"].clone(), std::path::Path::new(request["snapshotPath"].as_str().unwrap()), &request["settings"]).unwrap();
+        std::fs::write(request["reportPath"].as_str().unwrap(), serde_json::to_vec(&result).unwrap()).unwrap();
+    }
     #[test]
     fn sparse_cloud_text_gets_review_warning_without_guessing_missing_content() {
         assert!(super::sparse_recognition_warning("编号：ABC000123", 180).is_some());

@@ -1,15 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { X } from "lucide-react";
 import {
   getCurrentWebviewWindow,
   WebviewWindow,
 } from "@tauri-apps/api/webviewWindow";
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
@@ -21,6 +16,9 @@ import {
 } from "@/components/ui/dialog";
 import {
   jobStart,
+  meetingNotify,
+  listenMeetingNotificationOpen,
+  meetingHistoryList,
   listenMeetingAskChoice,
   listenMeetingEvents,
   listenJobEvents,
@@ -43,15 +41,13 @@ import "../meeting-minutes.css";
  * 录音的开始/结束由 Rust 检测层统一广播（recording_started / stopped /
  * auto_finished），这里只消费事件，不再自己记账。 */
 
-async function notifyDesktop(title: string, body: string) {
+async function notifyDesktop(jobId: string, title: string, body: string) {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
   try {
-    let granted = await isPermissionGranted();
-    if (!granted) granted = (await requestPermission()) === "granted";
-    if (granted) sendNotification({ title, body });
-  } catch {
-    // 通知失败不影响主流程：询问小窗仍会照常出现。
-  }
+    const focused = await getCurrentWebviewWindow().isFocused();
+    if (document.visibilityState === "visible" && focused) return;
+    await meetingNotify(jobId, title, body);
+  } catch { /* 系统通知不可用时，结果仍可从工具箱查看。 */ }
 }
 
 function focusMainWindow() {
@@ -134,6 +130,31 @@ function elapsedText(startedAt: string) {
 }
 
 export function MeetingWatch() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const inMeetingPage = location.pathname === "/tools/meeting_minutes";
+  const terminalEvents = useRef(new Map<string, JobEvent>());
+  const notified = useRef(new Set<string>());
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenMeetingNotificationOpen(async jobId => {
+      if (disposed) return;
+      const event = terminalEvents.current.get(jobId);
+      if (event?.phase === "completed") {
+        navigate("/tools/meeting_minutes?version=content", { state: { meetingJob: event } });
+        return;
+      }
+      try {
+        const rows = await meetingHistoryList();
+        if (disposed) return;
+        const row = rows.find(row => row.jobId === jobId);
+        navigate(row ? `/tools/meeting_minutes?meeting=${encodeURIComponent(row.id)}&version=content` : "/tools/meeting_minutes");
+      } catch { if (!disposed) navigate("/tools/meeting_minutes"); }
+    }).then(fn => { if (disposed) fn(); else unlisten = fn; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, [navigate]);
   // 应用内弹窗只作为小窗创建失败的降级形态。
   const [askOpen, setAskOpen] = useState(false);
   const [askError, setAskError] = useState("");
@@ -159,14 +180,24 @@ export function MeetingWatch() {
       jobVersion.current += 1;
       setLatestJob(event);
       setProcessingError("");
+      if (["completed", "failed", "cancelled"].includes(event.phase)) {
+        terminalEvents.current.set(event.jobId, event);
+        if (terminalEvents.current.size > 30) terminalEvents.current.delete(terminalEvents.current.keys().next().value!);
+      }
+      if (notified.current.has(event.jobId)) return;
+      if (["completed", "failed", "cancelled"].includes(event.phase)) {
+        notified.current.add(event.jobId);
+        if (notified.current.size > 256) notified.current.delete(notified.current.values().next().value!);
+      }
       if (event.phase === "completed") {
         const result = event.result as MeetingResult | undefined;
         void notifyDesktop(
+          event.jobId,
           result?.minutesPath ? "会议纪要已生成" : "会议纪要需要处理",
           result?.minutesError || (result?.minutesPath ? (result.minutesVersions ? "按内容、按时间两个版本及转写稿已保存，可在工具箱中查看。" : "会议纪要和转写稿已保存，可在工具箱中打开。") : "任务结束但未返回会议纪要，请查看任务结果。"),
         );
-      } else if (event.phase === "failed" || event.phase === "cancelled") {
-        void notifyDesktop("会议纪要未生成", terminalJobError(event));
+      } else if (event.phase === "failed") {
+        void notifyDesktop(event.jobId, "会议纪要未生成", terminalJobError(event));
       }
     }).then((fn) => {
       if (disposed) fn();
@@ -196,10 +227,7 @@ export function MeetingWatch() {
         if (recordingRef.current || suppressed.current) return;
         const generation = ++askGeneration.current;
         setAskError("");
-        void notifyDesktop(
-          "检测到 Teams 会议",
-          "工具箱已就绪，请在弹出的询问窗口确认是否开始记录会议纪要。",
-        );
+
         openAskWindow(() => !disposed && generation === askGeneration.current && !suppressed.current).catch(() => {
           if (disposed || generation !== askGeneration.current) return;
           // 降级：应用内弹窗 + 拉起主窗口，功能不能因为小窗失败而丢失。
@@ -226,11 +254,7 @@ export function MeetingWatch() {
           recordingRef.current = parsed;
           setRecording(parsed);
           setProcessingError("");
-          // 开录即提示设备疑点（如退回默认设备、麦克风换了非默认设备）：
-          // 等会议结束才发现没录到声音就晚了，中途还有机会调整设备。
-          for (const warning of parsed.warnings) {
-            void notifyDesktop("录音质量提醒", warning);
-          }
+
         }
       } else if (event.type === "recording_stopped") {
         setFinalizing(false);
@@ -242,24 +266,17 @@ export function MeetingWatch() {
         setRecording(undefined);
         const stopped = pickStopSummary(event.summary);
         if (!stopped) return;
-        void notifyDesktop(
-          "会议结束，录音已保存",
-          `时长约 ${Math.round(stopped.durationSec / 60)} 分钟，正在转写并生成纪要。`,
-        );
-        // 空录体检有疑点时单独再提醒一次：转写多半要空手而归，先讲清原因。
-        for (const warning of stopped.warnings) {
-          void notifyDesktop("录音质量提醒", warning);
-        }
         // 后台已负责启动任务；这里再启动会重复上传、重复计费。
       } else if (event.type === "recording_failed") {
         setFinalizing(false);
         recordingRef.current = undefined;
         setRecording(undefined);
         setProcessingError(event.message ?? "录音收尾出现问题");
-        void notifyDesktop(
-          "会议纪要",
-          event.message ?? "录音收尾出现问题",
-        );
+        const failureKey = `${event.at}:${event.message}`;
+        if (!notified.current.has(failureKey)) {
+          notified.current.add(failureKey);
+          void notifyDesktop("", "会议纪要需要处理", event.message ?? "录音收尾出现问题");
+        }
       }
     };
     void listenMeetingEvents(handleEvent)
@@ -321,10 +338,7 @@ export function MeetingWatch() {
       const started = await meetingRecordStart();
       setRecording(started);
       setAskOpen(false);
-      void notifyDesktop(
-        "已开始录制会议",
-        "录音将上传阿里云百炼转写，请确认已告知参会人；会议结束后自动生成纪要。",
-      );
+
     } catch (error) {
       setAskError(errorText(error));
     } finally {
@@ -417,11 +431,11 @@ export function MeetingWatch() {
         </div>
       )}
       {finalizing && (
-        <div className="meeting-processing-card" role="status" aria-live="polite">
+        <div className="meeting-recording-capsule" role="status" aria-live="polite">
           <strong>会议已结束，正在保存录音…</strong>
         </div>
       )}
-      {!recording && !finalizing && (processingError || finished) && (
+      {!inMeetingPage && !recording && !finalizing && (processingError || (finished && latestJob.phase !== "cancelled")) && (
         <div className="meeting-processing-card" role={resultError ? "alert" : "status"}>
           <div className="meeting-processing-header">
             <strong>{result?.minutesPath ? "会议纪要已生成" : "会议纪要未生成"}</strong>

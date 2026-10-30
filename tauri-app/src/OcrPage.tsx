@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { jobCancel, jobPause, openOutput, pickPath } from "./api";
 import { ocrCall, runOcrJob } from "./ocrApi";
+import { openOcrExtractionCache, type OcrExtractionDiagnostic } from "./ocrExtractionResume";
 import { OcrOperation, runOcrPool, OCR_CONCURRENCY } from "./ocrBatch";
 import {
   useOcrScanProgressDialog,
@@ -95,6 +96,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
     extractionIds: string[];
   }>();
   const [extractionFailures, setExtractionFailures] = useState<string[]>([]);
+  const [extractionStats, setExtractionStats] = useState<OcrExtractionDiagnostic[]>([]);
   const [stages, setStages] = useState<OcrPromptStage[]>([]);
   const [step, setStep] = useState(0);
   useEffect(() => {
@@ -944,6 +946,7 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
   }
   async function extract() {
     setExtractionFailures([]);
+    setExtractionStats([]);
     if (!selectedDocuments.length || !scenario) return;
     if (stages.some((item) => item.id !== "consolidate" && !item.prompt.trim()))
       throw new Error("请填写摘录要求。");
@@ -992,11 +995,20 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
             failures.push(`${target.name}：尚未扫描，已跳过。`);
             continue;
           }
-          const result = await extractOcrScenario({
+          const cache = await openOcrExtractionCache(current.document.id);
+          const runId = crypto.randomUUID();
+          const diagnostics: OcrExtractionDiagnostic[] = [];
+          let result: Awaited<ReturnType<typeof extractOcrScenario>>;
+          try { result = await extractOcrScenario({
             scenario,
             stages: promptStages,
             document: current.document,
             pages: current.pages,
+            cache,
+            onDiagnostic: entry => {
+              diagnostics.push(entry);
+              if (mounted.current) setExtractionStats(values => [...values, entry]);
+            },
             checkpoint: () => checkpoint(active),
             onProgress: (text) => {
               setMessage(
@@ -1019,8 +1031,12 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                 if (jobId) active.jobIds.delete(jobId);
               }
             },
-          });
+          }); } finally {
+            await ocrCall("ocr.extraction_diagnostics_save", { documentId: current.document.id, runId, entries: diagnostics }).catch(() => {});
+          }
           await checkpoint(active);
+          const latest = await openOcrExtractionCache(current.document.id);
+          if (latest.contextKey !== cache.contextKey) throw new Error("原文或统一 LLM 配置已变化，请基于当前版本重新摘录；已核验分段仍按各自版本保存。");
           setTaskView(
             (view) =>
               view && {
@@ -2002,6 +2018,14 @@ export default function OcrPage({ tool }: { tool?: ToolManifest }) {
                           )}
                           {renderTaskProgress()}
                           {renderExportNotice()}
+                          {extractionStats.length > 0 && (
+                            <p className="ocr-muted" aria-label="摘录请求统计">
+                              已请求模型 {extractionStats.filter(entry => entry.status !== "cached").length} 次
+                              · 复用 {extractionStats.filter(entry => entry.status === "cached").length} 段
+                              · 校验未通过 {extractionStats.filter(entry => entry.status === "rejected").length} 次
+                              · 请求累计 {(extractionStats.filter(entry => entry.status !== "cached").reduce((sum, entry) => sum + entry.elapsedMs, 0) / 1000).toFixed(1)} 秒（并行耗时有重叠）
+                            </p>
+                          )}
                           {extractionFailures.length > 0 && (
                             <div
                               className="ocr-extraction-failure"

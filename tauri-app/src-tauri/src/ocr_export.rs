@@ -135,8 +135,23 @@ fn value_text(v: &Value) -> String {
             .join("\n"),
     }
 }
+fn source_text_field(key: &str) -> bool {
+    let compact: String = key.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if compact.contains("原文") || compact.contains("全文") || compact.contains("逐字证据") { return true; }
+    matches!(compact.to_ascii_lowercase().as_str(),
+        "quote" | "quotes" | "excerpt" | "contract_excerpt" | "source_excerpt"
+        | "evidence" | "evidence_quotes" | "evidence_refs" | "evidence_ids"
+        | "source_reference" | "source_text" | "sourcetext" | "original_text"
+        | "originaltext" | "full_text" | "fulltext" | "raw_text" | "rawtext"
+        | "contractexcerpt" | "sourceexcerpt" | "evidencequotes" | "evidencerefs"
+        | "evidenceids" | "sourcereference"
+        | "原文" | "原文摘录" | "合同原文" | "合同原文摘录" | "关键合同原文"
+        | "完整原文" | "原文内容" | "来源原文" | "逐字原文" | "逐字证据"
+        | "原文证据" | "证据原文" | "原文引用出处" | "原文引用" | "原文引用位置"
+        | "原文引用内容" | "原文引用来源" | "原文片段")
+}
 fn visible_field(key: &str) -> bool {
-    !key.starts_with('_') && !matches!(key,
+    !key.starts_with('_') && !source_text_field(key) && !matches!(key,
         "source_document_id" | "evidence_quotes" | "covenant_category_id"
         | "covenant_scope" | "contract_classification" | "is_financial")
 }
@@ -156,6 +171,7 @@ fn extraction_columns(extraction: &Value, source_file_first: bool) -> Vec<(Strin
     }
     for column in extraction["columns"].as_array().into_iter().flatten() {
         let Some(original_key) = column["key"].as_str().filter(|key| visible_field(key)) else { continue; };
+        if column["label"].as_str().is_some_and(source_text_field) { continue; }
         let key = canonical_field(original_key);
         if !seen.insert(key.to_string()) { continue; }
         let label = column["label"].as_str().unwrap_or(original_key);
@@ -238,18 +254,22 @@ fn readable_extraction_row(data: &Value) -> Value {
     {
         row.insert("review_note".into(), reason);
     }
-    if !["evidence", "excerpt", "contract_excerpt", "source_excerpt"]
-        .iter()
-        .any(|key| {
-            row.get(*key)
-                .is_some_and(|v| !value_text(v).trim().is_empty())
-        })
-        && let Some(quotes) = row.get("evidence_quotes").cloned()
-    {
-        row.insert("evidence".into(), quotes);
-    }
     row.retain(|key, _| visible_field(key));
     Value::Object(row)
+}
+fn extraction_row(extraction: &Value, data: &Value) -> Value {
+    let mut row = readable_extraction_row(data);
+    // A model-defined key may be opaque while its label clearly names an
+    // original-text column. Do not resurrect it through historical row-key
+    // discovery after the declared column was excluded.
+    if let Some(values) = row.as_object_mut() {
+        for column in extraction["columns"].as_array().into_iter().flatten() {
+            if column["label"].as_str().is_some_and(source_text_field)
+                && let Some(key) = column["key"].as_str()
+            { values.remove(key); }
+        }
+    }
+    row
 }
 fn section_row(s: &mut Worksheet, index: &mut u32, values: &[String]) -> Result<(), AppError> {
     let first = *index;
@@ -320,7 +340,7 @@ fn extraction_business_columns(extractions: &[Value]) -> Vec<(String, String)> {
         for (key, label) in extraction_columns(extraction, false) {
             if !matches!(canonical_field(&key), "sourceFile" | "sourcePage") && seen.insert(key.clone()) { columns.push((key, label)); }
         }
-        for data in extraction["rows"].as_array().into_iter().flatten().map(readable_extraction_row) {
+        for data in extraction["rows"].as_array().into_iter().flatten().map(|data| extraction_row(extraction, data)) {
             if let Some(object) = data.as_object() {
                 for key in object.keys().filter(|key| visible_field(key)) {
                     if !matches!(canonical_field(key), "sourceFile" | "sourcePage") && seen.insert(key.clone()) { columns.push((key.clone(), field_label(key).into())); }
@@ -332,9 +352,9 @@ fn extraction_business_columns(extractions: &[Value]) -> Vec<(String, String)> {
         columns.push(("__empty_result".into(), "摘录说明".into()));
     }
     if columns.is_empty() { columns.push(("value".into(), "内容".into())); }
-    // Keep the principal readable excerpt in C; classification and scenario
+    // Keep the principal business content in C; classification and scenario
     // labels must not displace the content the user is trying to review.
-    if let Some(index) = ["requirement", "trigger_standard", "value", "description", "excerpt", "contract_excerpt", "source_excerpt", "evidence"]
+    if let Some(index) = ["requirement", "trigger_standard", "value", "description"]
         .iter().find_map(|key| columns.iter().position(|(column, _)| column == key)) {
         let content = columns.remove(index); columns.insert(0, content);
     }
@@ -351,7 +371,7 @@ fn extraction_header(s: &mut Worksheet, r: &mut u32, columns: &[(String, String)
 }
 fn extraction_rows(s: &mut Worksheet, r: &mut u32, doc: &Document, extraction: &Value, scenario: &str,
     columns: &[(String, String)], pause: &PauseCheckpoint, link: Option<&str>) -> Result<(), AppError> {
-    let rows: Vec<_> = extraction["rows"].as_array().into_iter().flatten().map(readable_extraction_row).collect();
+    let rows: Vec<_> = extraction["rows"].as_array().into_iter().flatten().map(|data| extraction_row(extraction, data)).collect();
     if rows.is_empty() {
         let mut cells: Vec<String> = columns.iter().map(|(key, _)| if key == "__empty_result" { "未发现符合场景事项".into() } else { String::new() }).collect();
         cells.push(scenario.to_owned());
@@ -814,6 +834,68 @@ mod tests {
         assert_eq!(readable_extraction_row(&json!({"source_documents":["甲.pdf","乙.pdf"],"pages":[1,3]})),json!({"sourceFile":["甲.pdf","乙.pdf"],"sourcePage":[1,3]}));
     }
     #[test]
+    fn all_scenarios_exclude_source_text_aliases_and_labels_across_export_modes() {
+        use crate::ocr_store::Page;
+        use calamine::Reader;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("db")).unwrap();
+        let project = store.save_project(&json!({"name":"场景不附原文"})).unwrap();
+        let source = dir.path().join("合同.pdf"); fs::write(&source,b"synthetic").unwrap();
+        let doc = store.import(project["id"].as_str().unwrap(),&source).unwrap();
+        store.prepare(&doc.id,1).unwrap();
+        let grid = "单价\t数量\n0.57\t00123";
+        store.save_page(&doc.id,Page { metadata:Default::default(),page:1,
+            text:format!("直接识别正文保留\n{grid}"),original_text:String::new(),revision:0,status:"completed".into(),warnings:vec![],original_tables:vec![],
+            tables:vec![crate::ocr_store::Table{id:"table".into(),title:"".into(),rows:vec![vec!["单价".into(),"数量".into()],vec!["0.57".into(),"00123".into()]]}] },0,true).unwrap();
+        let aliases = ["quote","quotes","excerpt","contract_excerpt","source_excerpt","evidence","evidence_quotes","evidence_refs","evidence_ids","source_reference",
+            "sourceText","originalText","fullText","rawText","contractExcerpt","sourceExcerpt","evidenceQuotes","evidenceRefs","evidenceIds","sourceReference","_hiddenEvidence","原文片段"];
+        let hidden_labels = ["关键合同原文","完整原文","逐字证据","原文引用出处","原文摘录"," 合同 原文 ","补充条款原文","合同全文"];
+        let scenarios = ["loan_general","loan_covenant","loan_restrictive","revenue","procurement","invoicing_agreement","statement","invoice","warehouse_io","account_opening","tax_declaration","credit_report","tax_audit_report","custom"];
+        let mut ids = vec![];
+        for scenario in scenarios {
+            let mut row = json!({"description":"有效业务摘要","auditor_summary":"有效审计提示","sourcePage":"1","clause_ref":"第十条"});
+            let mut columns = vec![json!({"key":"description","label":"业务摘要"}),json!({"key":"auditor_summary","label":"审计提示"}),json!({"key":"clause_ref","label":"条款位置"})];
+            for alias in aliases { row[alias] = json!("附加原文禁止出现"); }
+            for (index,label) in hidden_labels.iter().enumerate() {
+                let key = format!("opaque_{index}"); row[&key] = json!("动态原文禁止出现");
+                columns.push(json!({"key":key,"label":label}));
+            }
+            // Exercise fallback discovery: source aliases need not be declared.
+            let saved = store.save_extraction(&json!({"documentId":doc.id,"sourceRevision":1,"scenarioId":scenario,"columns":columns,"rows":[row],"prompts":[]})).unwrap();
+            ids.push(saved["id"].as_str().unwrap().to_owned());
+        }
+        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        for mode in ["single_sheet","per_document","individual","combined"] {
+            for only in [true,false] {
+                let result = export(&store,&json!({"projectId":project["id"],"documentIds":[doc.id],"outputDir":dir.path(),"mode":mode,"extractionsOnly":only,"extractionIds":ids}),&|_,_,_,_|{},&pause).unwrap();
+                let mut all = String::new();
+                let mut summaries = 0;
+                for path in result["outputPaths"].as_array().unwrap() {
+                    let mut book = calamine::open_workbook_auto(path.as_str().unwrap()).unwrap();
+                    for name in book.sheet_names() {
+                        let range = book.worksheet_range(&name).unwrap();
+                        for row in range.rows() {
+                            if row.iter().any(|v|v.to_string()=="有效业务摘要") {
+                                summaries += 1;
+                                assert_eq!(row[0].to_string(),"合同.pdf");
+                                assert_eq!(row[1].to_string(),"1");
+                            }
+                            all.push_str(&row.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"));
+                            all.push('\n');
+                        }
+                    }
+                }
+                assert_eq!(summaries,scenarios.len(),"{mode}, only={only}");
+                for unwanted in ["附加原文禁止出现","动态原文禁止出现","关键合同原文","逐字证据","原文引用出处"] {
+                    assert!(!all.contains(unwanted),"{mode}, only={only}: {unwanted}");
+                }
+                assert!(all.contains("有效审计提示") && all.contains("第十条"));
+                assert_eq!(all.contains("直接识别正文保留"),!only);
+                if !only { assert!(all.contains("单价\n数量") && all.contains("0.57\n00123")); }
+            }
+        }
+    }
+    #[test]
     fn only_current_extractions_are_exported_with_sources_empty_results_and_timestamp() {
         use crate::ocr_store::Page;
         use calamine::Reader;
@@ -825,10 +907,10 @@ mod tests {
         let doc = store.import(project["id"].as_str().unwrap(), &source).unwrap();
         store.prepare(&doc.id, 2).unwrap();
         store.save_page(&doc.id, Page { metadata: Default::default(), page:1, text:"不得导出整篇正文".into(), original_text:"不得导出整篇正文".into(), tables:vec![], original_tables:vec![], revision:0,status:"needs_review".into(),warnings:vec!["方向待复核".into()] },0,true).unwrap();
-        let data = json!({"documentId":doc.id,"sourceRevision":1,"scenarioId":"saved-covenant","columns":[{"key":"excerpt","label":"合同原文摘录"},{"key":"sourcePage","label":"来源页码"}],"prompts":[]});
+        let data = json!({"documentId":doc.id,"sourceRevision":1,"scenarioId":"saved-covenant","columns":[{"key":"requirement","label":"限制内容"},{"key":"excerpt","label":"合同原文摘录"},{"key":"sourcePage","label":"来源页码"}],"prompts":[]});
         let mut historical = data.clone(); historical["rows"] = json!([{"excerpt":"不得包含历史结果"}]);
         store.save_extraction(&historical).unwrap();
-        let mut current = data.clone(); current["rows"] = json!([{"excerpt":"借款人负债率不得超过65%","sourcePage":"1"}]);
+        let mut current = data.clone(); current["rows"] = json!([{"requirement":"借款人负债率不得超过65%","excerpt":"原文证据不应附上","sourcePage":"1"}]);
         let saved = store.save_extraction(&current).unwrap();
         let mut empty = data; empty["rows"] = json!([]);
         let zero = store.save_extraction(&empty).unwrap();
@@ -847,7 +929,7 @@ mod tests {
         let range = book.worksheet_range(&book.sheet_names()[0]).unwrap();
         let text = range.rows().flat_map(|row| row.iter()).map(ToString::to_string).collect::<Vec<_>>().join("\n");
         for expected in ["合同.pdf","页码","不得超过65%","未发现符合场景事项","我的财务限制"] { assert!(text.contains(expected),"缺少 {expected}"); }
-        for unwanted in ["尚未扫描页", "第1页待校对", "方向待复核", "不能认定", "已扫描", "摘录需要更新"] { assert!(!text.contains(unwanted), "不应插入诊断：{unwanted}"); }
+        for unwanted in ["尚未扫描页", "第1页待校对", "方向待复核", "不能认定", "已扫描", "摘录需要更新", "原文证据不应附上", "合同原文摘录"] { assert!(!text.contains(unwanted), "不应插入诊断或证据：{unwanted}"); }
         assert_eq!(result["partial"], true);
         assert!(!text.contains("不得导出整篇正文"));
         assert!(!text.contains("不得包含历史结果"));
@@ -864,16 +946,16 @@ mod tests {
         let project = store.save_project(&json!({"name":"分块摘录"})).unwrap();
         let mut docs = vec![];
         let mut ids = vec![];
-        let long = "证据😀".repeat(17000);
+        let long = "业务😀".repeat(17000);
         for name in ["甲合同.pdf", "乙合同.pdf"] {
             let path = dir.path().join(name); fs::write(&path, b"synthetic").unwrap();
             let doc = store.import(project["id"].as_str().unwrap(), &path).unwrap();
             let saved = store.save_extraction(&json!({"documentId":doc.id,"sourceRevision":0,"scenarioId":"custom","prompts":[],
-                "columns":[{"key":"sourceFile","label":"来源文件"},{"key":"sourcePage","label":"来源页码"},{"key":"amount","label":"金额"},{"key":"evidence","label":"逐字证据"}],
-                "rows":[{"sourceFile":"错误模型文件名.pdf","sourcePage":"2","amount":"00100","evidence":"同页第一项"},
-                    {"pages":[3,4],"amount":"=1+1","evidence":long},
-                    {"sourcePage":"2","amount":"00200","evidence":"同页第二项"},
-                    {"amount":"00300","evidence":"未定位证据","_trace":"不可导出"}]})).unwrap();
+                "columns":[{"key":"sourceFile","label":"来源文件"},{"key":"sourcePage","label":"来源页码"},{"key":"amount","label":"金额"},{"key":"description","label":"业务摘要"},{"key":"evidence","label":"逐字证据"}],
+                "rows":[{"sourceFile":"错误模型文件名.pdf","sourcePage":"2","amount":"00100","description":"同页第一项","evidence":"原文证据不可导出"},
+                    {"pages":[3,4],"amount":"=1+1","description":long,"evidence":"原文证据不可导出"},
+                    {"sourcePage":"2","amount":"00200","description":"同页第二项"},
+                    {"amount":"00300","description":"未定位业务摘要","_trace":"不可导出"}]})).unwrap();
             ids.push(saved["id"].as_str().unwrap().to_owned()); docs.push(doc);
         }
         let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
@@ -890,7 +972,7 @@ mod tests {
                         let range = book.worksheet_range(&name).unwrap();
                         let lines = range.rows().collect::<Vec<_>>();
                         for row in &lines {
-                            if row.first() == Some(&Data::String("来源文件".into())) && row.get(2) == Some(&Data::String("逐字证据".into())) {
+                            if row.first() == Some(&Data::String("来源文件".into())) && row.get(2) == Some(&Data::String("业务摘要".into())) {
                                 headers += 1;
                                 assert_eq!(row[1], Data::String("页码".into()));
                                 assert_eq!(row[3], Data::String("金额".into()));
@@ -902,13 +984,13 @@ mod tests {
                             }
                             if row.get(3).is_some_and(|v| matches!(v, Data::String(s) if ["00100","00200","00300","=1+1"].contains(&s.as_str()))) { entries += 1; }
                             if let Some(Data::String(value)) = row.get(2) {
-                                if !value.is_empty() && value.chars().all(|ch| "证据😀".contains(ch)) {
+                                if !value.is_empty() && value.chars().all(|ch| "业务😀".contains(ch)) {
                                     assert!(matches!(row.first(), Some(Data::String(s)) if s == "甲合同.pdf" || s == "乙合同.pdf"));
                                     assert_eq!(row[1], Data::String("3\n4".into()));
                                     restored.push_str(value);
                                 }
                             }
-                            assert!(!row.iter().any(|v| matches!(v, Data::String(s) if s == "错误模型文件名.pdf" || s == "不可导出")));
+                            assert!(!row.iter().any(|v| matches!(v, Data::String(s) if s == "错误模型文件名.pdf" || s == "不可导出" || s == "逐字证据" || s == "原文证据不可导出")));
                         }
                     }
                 }
@@ -965,7 +1047,7 @@ mod tests {
         store.prepare(&doc.id, 1).unwrap();
         let long = "证据".repeat(18000);
         store.save_page(&doc.id,Page{metadata:Default::default(),page:1,text:long.clone(),original_text:String::new(),tables:vec![],original_tables:vec![],revision:0,status:"completed".into(),warnings:vec![]},0,true).unwrap();
-        let extraction=store.save_extraction(&json!({"documentId":doc.id,"sourceRevision":1,"scenarioId":"custom","columns":[{"key":"evidence","label":"逐字证据"}],"rows":[{"sourcePage":"1","sourceFile":"https://model.invalid/","evidence":long}],"prompts":[]})).unwrap();
+        let extraction=store.save_extraction(&json!({"documentId":doc.id,"sourceRevision":1,"scenarioId":"custom","columns":[{"key":"description","label":"业务摘要"}],"rows":[{"sourcePage":"1","sourceFile":"https://model.invalid/","description":long}],"prompts":[]})).unwrap();
         let link = source_link(&store,&doc).unwrap().unwrap();
         assert_eq!(reqwest::Url::parse(&link).unwrap().to_file_path().unwrap(), store.source(&doc.id).unwrap());
         assert!(link.contains("%23") && link.contains("%25") && link.contains("%20"));
@@ -1284,7 +1366,8 @@ mod tests {
         }
         assert!(all.contains("复核提示"));
         assert!(all.contains("利率调整日待核对"));
-        assert!(all.contains("第一段逐字证据\n第二段逐字证据"));
+        assert!(!all.contains("第一段逐字证据"));
+        assert!(!all.contains("第二段逐字证据"));
         assert!(!all.contains(r"\underline"));
         assert!(!all.contains(r"\text{"));
         assert!(result.rows().flatten().any(|cell| cell == &Data::String("=1+1".into())));

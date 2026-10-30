@@ -36,6 +36,7 @@ mod meeting_audio;
 mod meeting_minutes;
 mod meeting_outlook;
 mod meeting_record;
+mod meeting_notifications;
 mod meeting_watch;
 mod ocr;
 mod ocr_orientation;
@@ -2220,6 +2221,7 @@ pub fn run() {
             meeting_record_start,
             meeting_record_stop,
             meeting_status,
+            meeting_notifications::meeting_notify,
             meeting_create_mail_draft,
             meeting_read_minutes,
             meeting_save_minutes,

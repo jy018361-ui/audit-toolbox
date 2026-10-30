@@ -15,6 +15,7 @@ import {
   createEmptyWorkflow,
   defaultConfigFor,
   defaultNodeName,
+  incompleteFilterRule,
   listDrafts,
   nextNodeId,
   parseWorkflowFile,
@@ -24,9 +25,10 @@ import {
   validateNewEdge,
   type DataflowEdge,
   type DataflowRunResult,
+  type FilterRuleConfig,
   type DataflowWorkflow,
 } from "./model";
-import { pickWorkflowFile, saveWorkflowFile } from "./workflowFile";
+import { pickWorkflowFile, saveWorkflowFile, type SaveWorkflowOutcome } from "./workflowFile";
 import { dataflowPreview, dataflowRun } from "../api";
 import "./dataflow.css";
 
@@ -44,6 +46,8 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   const [workflow, setWorkflow] = useState<DataflowWorkflow>(() => createEmptyWorkflow());
   const workflowRef = useRef(workflow);
   const historyRef = useRef(new WorkflowHistory());
+  /** 最近一次「连线被拒」写入错误通道的文案：连线成功即撤下，避免拒绝提示长期占着错误通道。 */
+  const connectRejectedRef = useRef("");
   const [historyTick, setHistoryTick] = useState(0);
   const [selection, setSelection] = useState<DataflowSelection>(null);
   const [runResult, setRunResult] = useState<DataflowRunResult | null>(null);
@@ -100,7 +104,17 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
       !workflow.nodes.length && !workflow.params.length && workflow.name === "新建流程";
     if (empty) return;
     const timer = window.setTimeout(() => {
-      if (saveDraft(workflow)) setAutosaveNote(`已自动保存 ${timeNow()}`);
+      // saveDraft 返回 false 有两种含义：无节点流程有意跳过（model.ts 的
+      // 设计），以及 localStorage 写入失败（配额满/存储禁用）。只有带节点的
+      // 流程写不进草稿才是真失败——此时「切页靠草稿兜底」已无声失效，必须
+      // 明说并用警告覆盖旧的「已自动保存」成功文案，否则用户误信已保存。
+      if (saveDraft(workflow)) {
+        setAutosaveNote(`已自动保存 ${timeNow()}`);
+      } else if (workflow.nodes.length) {
+        setAutosaveNote(
+          "自动保存失败（本机存储不可用或已满）：切换工具页后画布将无法自动恢复，请点「保存」手动保存流程文件。",
+        );
+      }
     }, 800);
     return () => window.clearTimeout(timer);
   }, [workflow]);
@@ -140,10 +154,21 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   function connect(edge: DataflowEdge) {
     const check = validateNewEdge(workflowRef.current, edge);
     if (!check.ok) {
+      // 连线被拒也必须走可见错误通道（错误样式状态栏＋结果区红卡）：
+      // 只写状态栏小字会被后续任意操作覆盖，且线没出现，用户会以为
+      // 连线成功了，直到运行才报「需要恰好 1 条输入连线」——与 runFlow
+      // 空画布路径同款双通道处理。
+      const message = `连线未创建：${check.reason}`;
+      setError(message);
       setStatusText(check.reason);
+      connectRejectedRef.current = message;
       return;
     }
     commit((current) => ({ ...current, edges: [...current.edges, check.edge] }));
+    // 连线成功即撤下上一次「连线被拒」的提示；只清自己写入的文案，
+    // 不误清运行失败、路径未授权等其他来源的错误。
+    if (connectRejectedRef.current && error === connectRejectedRef.current) setError("");
+    connectRejectedRef.current = "";
     setStatusText("已连线。");
   }
 
@@ -252,6 +277,29 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
       return;
     }
     if (uptoNodeId && !wf.nodes.some((node) => node.id === uptoNodeId)) return;
+    // 运行前自检筛选条件：没选字段/没填值的空条件行直接拦下，并指出
+    // 是哪个节点第几条——引擎只会报「引用了字段“”」，用户无从定位。
+    const wiredIds = new Set(wf.edges.flatMap((edge) => [edge.from, edge.to]));
+    const incomplete: string[] = [];
+    for (const node of wf.nodes) {
+      if (node.type !== "filter_n" || !wiredIds.has(node.id)) continue;
+      const rules =
+        ((node.config as Record<string, unknown> | undefined)?.condition as
+          | { rules?: Partial<FilterRuleConfig>[] }
+          | undefined)?.rules ?? [];
+      rules.forEach((rule, index) => {
+        if (incompleteFilterRule(rule)) {
+          incomplete.push(`「${node.name}」第 ${index + 1} 条条件`);
+        }
+      });
+    }
+    if (incomplete.length) {
+      setError(
+        `有 ${incomplete.length} 条筛选条件还没填完整（${incomplete.join("、")}）：请补上字段和值，或删掉不需要的条件行，再点运行。`,
+      );
+      setStatusText("筛选条件未填完整，已拦下本次运行。");
+      return;
+    }
     // 运行前兜底修正过期连线（手工编辑流程文件等来源），保证引擎拿到合法锚点。
     const repaired = repairWorkflowEdges(wf);
     if (repaired.fixes.length) {
@@ -305,7 +353,16 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   }
 
   async function handleSave() {
-    const outcome = await saveWorkflowFile(workflowRef.current);
+    let outcome: SaveWorkflowOutcome;
+    try {
+      outcome = await saveWorkflowFile(workflowRef.current);
+    } catch (caught) {
+      // 保存链路的意外异常兜底成可见错误：不能变成 unhandled rejection，
+      // 让用户点了「保存」毫无反应。
+      setError(`保存流程失败：${errorText(caught)}`);
+      setStatusText("保存失败，详见左下提示。");
+      return;
+    }
     if (!outcome.ok && outcome.message === "已取消保存。") {
       setStatusText(outcome.message);
       return;
@@ -361,12 +418,21 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     extensions: string[],
     apply: (path: string) => void,
   ) {
-    const value = await pickPath(
-      kind,
-      kind === "folder" ? "选择数据文件夹" : "选择数据文件",
-      extensions,
-    );
-    if (typeof value === "string" && value) apply(value);
+    try {
+      const value = await pickPath(
+        kind,
+        kind === "folder" ? "选择数据文件夹" : "选择数据文件",
+        extensions,
+      );
+      if (typeof value === "string" && value) apply(value);
+    } catch (caught) {
+      // 系统对话框组件出错（IPC 异常等）时兜底为可见的中文错误，参照
+      // DbTableSelect 的错误通道：不能让「选择…」成为 unhandled rejection，
+      // 用户点了毫无反应。
+      const what = kind === "folder" ? "文件夹" : "文件";
+      setError(`选择${what}失败：${errorText(caught)}`);
+      setStatusText(`选择${what}失败，详见左下提示。`);
+    }
   }
 
   const selectedNode =

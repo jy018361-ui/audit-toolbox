@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { PanelBottomClose, PanelBottomOpen } from "lucide-react";
 
 import type {
@@ -226,6 +226,18 @@ export function ResultsPanel({
   const current = activeTab && tabs.some((tab) => tab.key === activeTab) ? activeTab : tabs[0].key;
   const chip = STATUS_CHIP[nodeStatus] ?? STATUS_CHIP.idle;
   const nodeOutputs = outputs.filter((item) => item.nodeId === node.id);
+  // 真实引擎输出节点的锚点键是「sheet:名」（Excel 输出）/「file:名.扩展名」（CSV 输出），
+  // 与普通节点的 output/T/F 等键不同（对照 nodes/output.rs）。预览的「写入结果」页签
+  // 按这两个前缀取该节点的全部待写入锚点逐个展示，多输入时每条连线一个锚点。
+  const writeAnchors = Object.entries(result?.anchors ?? {}).filter(
+    ([key]) => key.startsWith("sheet:") || key.startsWith("file:"),
+  );
+  const anchorKeys = Object.keys(result?.anchors ?? {});
+  // 引擎实际返回了锚点、但键名与界面页签对不上时，明确提示版本不兼容，
+  // 而不是显示「样本数据为空。」让用户误以为节点没有产出（F14）。
+  const expectedKeys = spec.outputs.length
+    ? spec.outputs.map((anchor) => anchor.key).join("、")
+    : "sheet:名 / file:名";
 
   return (
     <section className="df-results" aria-label="结果区">
@@ -314,12 +326,26 @@ export function ResultsPanel({
                 </table>
               </div>
             ) : lastRunMode === "preview" ? (
-              result.anchors.out ? (
-                <SampleTable
-                  columns={result.anchors.out.columns}
-                  types={result.anchors.out.types}
-                  rows={result.anchors.out.sample}
-                />
+              writeAnchors.length ? (
+                writeAnchors.map(([key, anchor]) => (
+                  <Fragment key={key}>
+                    <div className="df-note">
+                      {key.startsWith("sheet:")
+                        ? `拟写入 Sheet：${key.slice("sheet:".length)}`
+                        : `拟写入文件：${key.slice("file:".length)}`}
+                    </div>
+                    <SampleTable
+                      columns={anchor.columns}
+                      types={anchor.types}
+                      rows={anchor.sample}
+                    />
+                  </Fragment>
+                ))
+              ) : anchorKeys.length ? (
+                <div className="df-note df-note-warn">
+                  引擎返回的输出键（{anchorKeys.join("、")}）与界面预期（{expectedKeys}）不一致，
+                  写入样本无法展示——可能为版本不兼容，请反馈此问题。
+                </div>
               ) : (
                 <div className="df-placeholder">预览模式：未写入文件。</div>
               )
@@ -327,12 +353,19 @@ export function ResultsPanel({
               <div className="df-placeholder">本次运行没有写入文件。</div>
             )}
           </>
-        ) : (
+        ) : result.anchors[current] ? (
           <SampleTable
-            columns={result.anchors[current]?.columns ?? []}
-            types={result.anchors[current]?.types}
-            rows={result.anchors[current]?.sample ?? []}
+            columns={result.anchors[current].columns}
+            types={result.anchors[current].types}
+            rows={result.anchors[current].sample}
           />
+        ) : anchorKeys.length ? (
+          <div className="df-note df-note-warn">
+            页签「{current}」对应的输出键未在引擎返回中找到：实际收到 {anchorKeys.join("、")}
+            （该节点类型预期 {expectedKeys}），样本无法展示——可能为版本不兼容，请反馈此问题。
+          </div>
+        ) : (
+          <div className="df-placeholder">本次运行未返回该锚点的样本数据。</div>
         )}
       </div>
     </section>

@@ -138,6 +138,17 @@ export interface FilterConditionConfig {
   rules: FilterRuleConfig[];
 }
 
+/** 筛选条件行是否还没填完整：字段为空、运算符缺失，或需要值的运算符
+    （「为空/不为空」除外）值为空。空行直接送引擎会报「引用了字段“”」
+    这类难懂的错误，运行前先在界面拦下并指出是第几条。 */
+export function incompleteFilterRule(rule: Partial<FilterRuleConfig>): boolean {
+  if (!(rule.field ?? "").trim()) return true;
+  const operator = (rule.operator ?? "").trim().toLowerCase();
+  if (!operator) return true;
+  if (operator === "isempty" || operator === "isnotempty") return false;
+  return !(rule.value ?? "").trim();
+}
+
 // ===== 二期节点 config 类型（契约见 DATAFLOW_NODE_SPECS.md 第八节裁定） =====
 
 export interface JoinKeyPair {
@@ -354,6 +365,8 @@ export function defaultConfigFor(type: string): Record<string, unknown> {
     case "formula":
       return {
         formulas: [] as FormulaConfig[],
+        // 行级异常策略（除零、转换失败等）独立于输入节点，默认与引擎 RowErrorPolicy 一致。
+        onRowError: "stop",
       };
     case "filter_n":
       return {
@@ -468,10 +481,10 @@ const CONFIG_FIELDS_BY_TYPE: Record<string, string[]> = {
   ],
   select_n: ["fields", "passThroughNewFields"],
   clean: ["actions", "dropBlankRows", "nullTextToNull"],
-  formula: ["formulas"],
+  formula: ["formulas", "onRowError"],
   filter_n: ["condition"],
   excel_out: ["fileName", "sheetName", "overwrite", "splitMode"],
-  csv_out: ["fileName", "encoding", "delimiter", "splitRows"],
+  csv_out: ["fileName", "encoding", "delimiter", "overwrite", "splitRows"],
   join_n: ["keys", "leftFields", "rightFields", "sameNameSuffix"],
   union_n: ["align", "extraFieldPolicy", "typeConflictPolicy", "order"],
   unique_n: ["fields", "keep"],
@@ -516,6 +529,12 @@ export function normalizeConfig(
   if (type === "select_n" && !Array.isArray(coerced.fields)) coerced.fields = [];
   if (type === "clean" && !Array.isArray(coerced.actions)) coerced.actions = [];
   if (type === "formula" && !Array.isArray(coerced.formulas)) coerced.formulas = [];
+  if (type === "formula") {
+    // 引擎 RowErrorPolicy 只认 stop/skip，乱值兜底回默认 stop。
+    if (coerced.onRowError !== "stop" && coerced.onRowError !== "skip") {
+      coerced.onRowError = "stop";
+    }
+  }
   if (type === "filter_n") {
     const condition = coerced.condition;
     if (typeof condition !== "object" || condition === null || Array.isArray(condition)) {
@@ -816,13 +835,20 @@ export type EdgeCheckResult =
  * 修正跨版本流程里的过期锚点名：旧版搭的流程（草稿/流程文件）可能带着
  * 上游节点已不存在的出口名（如筛选节点上旧的 output），画布按第一出口
  * 画线看不出异常，运行时引擎才报「该锚点不存在」。恢复/打开/运行前统一
- * 把无效出口改接到上游第一个出口，并返回修正说明供状态栏提示。
+ * 把无效出口改接到上游第一个出口；无效/缺失入口按连线顺序改接第一个
+ * 未占用输入口（与引擎对空锚点先左后右的补位语义一致），并返回修正说明
+ * 供状态栏提示。
  */
 export function repairWorkflowEdges(
   workflow: DataflowWorkflow,
 ): { workflow: DataflowWorkflow; fixes: string[] } {
   const fixes: string[] = [];
   const nodesById = new Map(workflow.nodes.map((node) => [node.id, node]));
+  // 目标节点各输入口的占用情况（按连线声明顺序）。与引擎缺省补位语义对齐
+  // （engine.rs：空 to_anchor 先占左、后占右）：多输入口节点（关联 inL/inR）
+  // 改接第一个未占用槽位，而不是一律改接第一个口——否则两条都缺锚点的连线
+  // 会被统一改成同侧，制造引擎「输入锚点冲突」，反而改坏手工编辑的流程。
+  const occupiedInputs = new Map<string, Set<string>>();
   const edges = workflow.edges.map((edge) => {
     const from = nodesById.get(edge.from);
     const to = nodesById.get(edge.to);
@@ -836,10 +862,19 @@ export function repairWorkflowEdges(
       next = { ...next, fromAnchor: target.key };
     }
     const toSpec = to ? nodeSpec(to.type) : undefined;
-    if (to && toSpec?.inputs.length && !toSpec.inputs.some((a) => a.key === next.toAnchor)) {
-      const target = toSpec.inputs[0];
-      fixes.push(`「${to.name}」的输入口「${next.toAnchor}」已不存在，已改接「${target.label}」。`);
-      next = { ...next, toAnchor: target.key };
+    if (to) {
+      let occupied = occupiedInputs.get(to.id);
+      if (!occupied) {
+        occupied = new Set<string>();
+        occupiedInputs.set(to.id, occupied);
+      }
+      if (toSpec?.inputs.length && !toSpec.inputs.some((a) => a.key === next.toAnchor)) {
+        const target =
+          toSpec.inputs.find((anchor) => !occupied.has(anchor.key)) ?? toSpec.inputs[0];
+        fixes.push(`「${to.name}」的输入口「${next.toAnchor}」已不存在，已改接「${target.label}」。`);
+        next = { ...next, toAnchor: target.key };
+      }
+      occupied.add(next.toAnchor);
     }
     return next;
   });
@@ -1126,3 +1161,66 @@ export const DataflowRunResultSchema = z.object({
 export type DataflowAnchorResult = z.infer<typeof DataflowAnchorResultSchema>;
 export type DataflowNodeResult = z.infer<typeof DataflowNodeResultSchema>;
 export type DataflowRunResult = z.infer<typeof DataflowRunResultSchema>;
+
+// ===== 引擎响应契约的第二道防线 =====
+// 运行时 schema 的 .catch() 会把结构不符静默吞成空值（结果区只显示「样本数据为空。」，
+// 用户误以为节点没有产出），历史上一月内至少 4 次锚点键名错位都从这道防线漏过。
+// 严格版去掉全部 catch：仅供契约测试对真实引擎形态 fixture 与演示数据做双断言，
+// 解析失败即测试失败；运行时仍用上面的宽松版（向前兼容优先）。
+export const DataflowAnchorResultStrictSchema = z.object({
+  columns: z.array(z.string()),
+  types: z.array(z.string()),
+  rowCount: z.number(),
+  sample: z.array(
+    z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])),
+  ),
+});
+
+export const DataflowRunResultStrictSchema = z.object({
+  mode: z.enum(["preview", "full"]),
+  nodes: z.record(
+    z.string(),
+    z.object({
+      status: z.enum(["ok", "warn", "error"]),
+      rows: z.number(),
+      ms: z.number(),
+      messages: z.array(z.string()),
+      stats: z.array(z.string()),
+      anchors: z.record(z.string(), DataflowAnchorResultStrictSchema),
+    }),
+  ),
+  outputs: z.array(
+    z.object({
+      nodeId: z.string(),
+      path: z.string(),
+      sheet: z.string(),
+      rows: z.number(),
+    }),
+  ),
+  error: z.unknown().nullable(),
+});
+
+/** 锚点键按节点类型收紧（对照 DATAFLOW_PARITY.md 契约备忘与 Rust 引擎）：
+ *  普通节点的引擎锚点键必须落在该节点 spec.outputs 的键集合内（如筛选 T/F、关联 J/L/R）；
+ *  输出节点（excel_out/csv_out）必须是「sheet:名」/「file:名.扩展名」前缀
+ *  （output.rs:318/636）。返回 null＝契约相符或无法判定（未知类型/无锚点）；
+ *  否则给出预期键描述与越界键清单，供测试断言与界面降级提示共用。 */
+export function anchorKeyMismatch(
+  nodeType: string,
+  actualKeys: string[],
+): { expected: string; unexpected: string[] } | null {
+  if (actualKeys.length === 0) return null;
+  const spec = nodeSpec(nodeType);
+  if (!spec) return null;
+  if (nodeType === "excel_out" || nodeType === "csv_out") {
+    const unexpected = actualKeys.filter(
+      (key) => !key.startsWith("sheet:") && !key.startsWith("file:"),
+    );
+    return unexpected.length
+      ? { expected: "sheet:名 / file:名", unexpected }
+      : null;
+  }
+  const allowed = spec.outputs.map((anchor) => anchor.key);
+  const unexpected = actualKeys.filter((key) => !allowed.includes(key));
+  return unexpected.length ? { expected: allowed.join("、"), unexpected } : null;
+}

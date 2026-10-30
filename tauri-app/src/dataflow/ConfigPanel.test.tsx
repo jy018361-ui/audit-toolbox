@@ -5,7 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 
 import { ConfigPanel } from "./ConfigPanel";
-import { defaultConfigFor, type DataflowNode } from "./model";
+import {
+  configKeysWithinContract,
+  defaultConfigFor,
+  normalizeConfig,
+  type DataflowNode,
+} from "./model";
 
 // db_in 表下拉的数据源：mock 掉 ../api，按用例给成功/失败实现。
 const { dbTablesMock } = vi.hoisted(() => ({ dbTablesMock: vi.fn() }));
@@ -336,5 +341,80 @@ describe("数据流配置区：其余新节点表单关键控件", () => {
       valueFunc: "countNonEmpty",
       fill: 0,
     });
+  });
+});
+
+describe("数据流配置区：CSV 输出覆盖保护（与 Excel 输出对齐）", () => {
+  it("csv_out 表单有「覆盖保护」下拉，旧文件无该字段时回显默认 error，选项与引擎白名单一致", () => {
+    // 模拟修复前的旧流程文件：csv_out config 不含 overwrite。
+    renderPanel("csv_out", { fileName: "明细.csv", encoding: "gbk", delimiter: "comma", splitRows: 0 });
+    const select = screen.getByLabelText("覆盖保护") as HTMLSelectElement;
+    // 引擎 run_csv_out 只认 error / timestamp / replace（默认 error＝目标文件已存在即报错），
+    // 缺这个下拉时用户改不了策略，重跑同名 CSV 只能手动改名。
+    expect(Array.from(select.options).map((option) => option.value)).toEqual([
+      "error",
+      "timestamp",
+      "replace",
+    ]);
+    expect(select.value).toBe("error");
+  });
+
+  it("选「已存在：自动加时间戳」写入 config.overwrite＝timestamp", () => {
+    const { onConfigChange } = renderPanel("csv_out", defaultConfigFor("csv_out"));
+    fireEvent.change(screen.getByLabelText("覆盖保护"), { target: { value: "timestamp" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ overwrite: "timestamp" }),
+    );
+  });
+
+  it("契约：overwrite 属于 csv_out 契约字段（含它的 config 通过保存前自检，越界字段仍拦截）", () => {
+    // 修复前 csv_out 契约清单不含 overwrite，手工配置了该字段的节点会被保存前自检判为越界。
+    expect(
+      configKeysWithinContract("csv_out", { ...defaultConfigFor("csv_out"), overwrite: "replace" }),
+    ).toBe(true);
+    // 自检本身仍严格：契约外字段照样拦下。
+    expect(
+      configKeysWithinContract("csv_out", {
+        ...defaultConfigFor("csv_out"),
+        overwrite: "replace",
+        bogus: 1,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("数据流配置区：公式节点行级异常策略（onRowError 独立生效）", () => {
+  it("公式表单有「异常处理」下拉，旧文件无该字段回显默认 stop，选项与引擎白名单一致", () => {
+    // 模拟修复前的旧流程文件：formula config 不含 onRowError。
+    renderPanel("formula", { formulas: [{ target: "差额", expression: "借方金额 - 贷方金额" }] });
+    const select = screen.getByLabelText("异常处理（行级错误）") as HTMLSelectElement;
+    // 引擎 RowErrorPolicy::parse 只认 stop（默认）/ skip；
+    // 公式节点的策略从自身 config 解析，与输入节点设置无关。
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(["stop", "skip"]);
+    expect(select.value).toBe("stop");
+  });
+
+  it("选「跳过整行并记录」写入 config.onRowError＝skip（不再中止整次运行）", () => {
+    const { onConfigChange } = renderPanel("formula", defaultConfigFor("formula"));
+    fireEvent.change(screen.getByLabelText("异常处理（行级错误）"), { target: { value: "skip" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ onRowError: "skip" }),
+    );
+  });
+
+  it("契约与默认值：onRowError 纳入 formula 契约，默认 stop，乱值规整回 stop", () => {
+    expect(defaultConfigFor("formula").onRowError).toBe("stop");
+    // 修复前 formula 契约清单仅 [\"formulas\"]，配置了 onRowError 的节点会被保存前自检判越界。
+    expect(configKeysWithinContract("formula", defaultConfigFor("formula"))).toBe(true);
+    expect(normalizeConfig("formula", { formulas: [], onRowError: "skip" }).onRowError).toBe("skip");
+    expect(normalizeConfig("formula", { formulas: [], onRowError: "乱写" }).onRowError).toBe("stop");
+  });
+
+  it("底部文案不再对公式节点宣称「由输入节点决定」，改为独立生效说明", () => {
+    renderPanel("formula", defaultConfigFor("formula"));
+    expect(
+      screen.queryByText(/行级异常策略由输入节点的「异常处理」设置决定/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/与输入节点的设置无关/)).toBeInTheDocument();
   });
 });

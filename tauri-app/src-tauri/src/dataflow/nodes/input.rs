@@ -44,20 +44,43 @@ fn file_label(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
-/// 简单通配符匹配（* 任意、? 单字符，Windows 下不区分大小写）。
+/// 简单通配符匹配（* 任意、? 单字节，Windows 下不区分大小写）。
+///
+/// 迭代式双指针 + 最近一个 `*` 位置回溯：失配时只回到最近的星号、
+/// 让它多吞一个字节重来，最坏 O(模式长×文件名长) 步内出结果。
+/// 此前为双分支递归（星号处「跳过星号」与「吞一个字节」两路展开），
+/// 多 `*` 病态模式是指数回溯——十几个 `*` 叠加配长文件名会让整次
+/// 运行卡死在阻塞线程上且无任何报错（F22）。
 fn pattern_matches(pattern: &[u8], name: &[u8]) -> bool {
-    match (pattern.first(), name.first()) {
-        (None, None) => true,
-        (Some(b'*'), _) => {
-            pattern_matches(&pattern[1..], name)
-                || name
-                    .first()
-                    .is_some_and(|_| pattern_matches(pattern, &name[1..]))
+    let mut pattern_at = 0usize;
+    let mut name_at = 0usize;
+    // 最近一个 `*` 之后的模式位置，与该 `*` 当前吞到的名字起点。
+    let mut star_after: Option<usize> = None;
+    let mut star_name = 0usize;
+    while name_at < name.len() {
+        if pattern_at < pattern.len() && pattern[pattern_at] == b'*' {
+            // 先尝试让星号吞零个字节；失配再回溯到这里多吞一个。
+            star_after = Some(pattern_at + 1);
+            star_name = name_at;
+            pattern_at += 1;
+        } else if pattern_at < pattern.len()
+            && (pattern[pattern_at] == b'?' || pattern[pattern_at] == name[name_at])
+        {
+            pattern_at += 1;
+            name_at += 1;
+        } else if let Some(resume) = star_after {
+            pattern_at = resume;
+            star_name += 1;
+            name_at = star_name;
+        } else {
+            return false;
         }
-        (Some(b'?'), Some(_)) => pattern_matches(&pattern[1..], &name[1..]),
-        (Some(want), Some(have)) if want == have => pattern_matches(&pattern[1..], &name[1..]),
-        _ => false,
     }
+    // 名字耗尽后，模式剩余部分必须全为 `*`（可吞零字节）。
+    while pattern_at < pattern.len() && pattern[pattern_at] == b'*' {
+        pattern_at += 1;
+    }
+    pattern_at == pattern.len()
 }
 
 fn excel_extensions() -> [&'static str; 6] {
@@ -1006,6 +1029,49 @@ mod tests {
         assert!(!pattern_matches(b"a*c", b"ab"));
     }
 
+    /// F22 语义回归：重写为迭代回溯后，匹配语义与原递归版完全一致。
+    #[test]
+    fn wildcard_matching_semantics_survive_rewrite() {
+        // 多星号组合：*a*b*c* 要求 a、b、c 依次出现。
+        assert!(pattern_matches(b"*a*b*c*", b"xabcybczc"));
+        assert!(!pattern_matches(b"*a*b*c*", b"acb"));
+        assert!(pattern_matches(b"*a*b*c*", b"abc"));
+        // 连续星号等价于单个星号。
+        assert!(pattern_matches(b"**a", b"xxa"));
+        assert!(pattern_matches(b"a**", b"axx"));
+        assert!(pattern_matches(b"a**b", b"ab"));
+        // 星号吞空与尾随星号。
+        assert!(pattern_matches(b"*csv*", b"2026-01.csv"));
+        assert!(pattern_matches(b"2026*", b"2026-01.csv"));
+        assert!(pattern_matches(b"*.csv", b".csv"));
+        // ? 是单字节通配：UTF-8 多字节字符按字节计数（与原实现一致）。
+        assert!(pattern_matches(b"???", "任".as_bytes()));
+        assert!(!pattern_matches(b"??", "任".as_bytes()));
+        // 空模式/空名字边界（原递归 (None, None) => true）。
+        assert!(pattern_matches(b"", b""));
+        assert!(!pattern_matches(b"", b"a"));
+        assert!(pattern_matches(b"*", b""));
+        assert!(!pattern_matches(b"a", b""));
+    }
+
+    /// F22 性能回归：病态模式（多个 * 叠加 + 长文件名）必须立即返回
+    /// 而非指数回溯。原双分支递归实现下本用例为天文数字次调用
+    /// （组合外推远超 1e18），实际表现为运行永久卡死且无报错；
+    /// 迭代回溯为 O(模式长×名字长)。
+    #[test]
+    fn pathological_wildcard_pattern_returns_promptly() {
+        let pattern = format!("{}z", "*a".repeat(16));
+        let name = "a".repeat(255); // Windows 文件名上限长度
+        let started = std::time::Instant::now();
+        let matched = pattern_matches(pattern.as_bytes(), name.as_bytes());
+        let elapsed = started.elapsed();
+        assert!(!matched, "名字里没有 z，模式必不匹配");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "病态模式应在毫秒级完成，实际耗时 {elapsed:?}"
+        );
+    }
+
     #[test]
     fn column_type_inference_follows_section9_rules() {
         let samples = |texts: &[&str]| texts.iter().map(|t| t.to_string()).collect::<Vec<_>>();
@@ -1020,5 +1086,59 @@ mod tests {
         assert_eq!(infer_column_type(&samples(&[])).0, ColType::Text);
         // 8 位连续数字不自动判日期（账号场景）。
         assert_eq!(infer_column_type(&samples(&["20261027", "20261028"])).0, ColType::Integer);
+    }
+
+    /// F6 回归：前端「列类型锁定」下拉提供 datetime（日期时间）选项，
+    /// 引擎此前不识别该值，用户一锁定整次运行即报
+    /// 「列"X"的锁定类型"datetime"无法识别」。修复后 datetime 按日期
+    /// 读入（第一期日期只到日），不再阻断运行。
+    #[test]
+    fn datetime_locked_column_reads_as_date_without_config_error() {
+        let context = RunContext {
+            mode: super::super::RunMode::Full,
+            today: chrono::NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(),
+            param_values: HashMap::new(),
+            preview_rows: PREVIEW_ROWS,
+            allowed_paths: None,
+        };
+        let collected = vec![(
+            "数据.csv".to_owned(),
+            "CSV".to_owned(),
+            RawSheet {
+                header: vec!["发生日期".to_owned()],
+                rows: vec![
+                    (2, vec!["2026-01-02".to_owned()]),
+                    (3, vec!["2026-01-03 00:00:00".to_owned()]),
+                ],
+            },
+        )];
+        let column_types = Some(HashMap::from([(
+            "发生日期".to_owned(),
+            "datetime".to_owned(),
+        )]));
+        let outcome = assemble_outcome(
+            "节点一",
+            "CSV 输入",
+            collected,
+            &column_types,
+            RowErrorPolicy::parse(None),
+            false,
+            &context,
+            Vec::new(),
+        )
+        .expect("锁定 datetime 不应再报「锁定类型无法识别」");
+        let (_, table) = &outcome.anchors[0];
+        assert_eq!(table.types, vec![ColType::Date]);
+        assert_eq!(
+            table.rows,
+            vec![
+                vec![Value::Date(
+                    chrono::NaiveDate::from_ymd_opt(2026, 1, 2).unwrap()
+                )],
+                vec![Value::Date(
+                    chrono::NaiveDate::from_ymd_opt(2026, 1, 3).unwrap()
+                )],
+            ]
+        );
     }
 }

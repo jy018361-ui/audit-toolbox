@@ -39,6 +39,11 @@ function anchorPos(
   };
 }
 
+/** 当前版本不认识的节点类型没有锚点定义，连线端点退化为节点中心。 */
+function nodeCenter(node: DataflowNode): { x: number; y: number } {
+  return { x: node.x + NODE_W / 2, y: node.y + NODE_H / 2 };
+}
+
 function bezierPath(a: { x: number; y: number }, b: { x: number; y: number }): string {
   const dx = Math.min(120, Math.max(40, Math.abs(b.x - a.x) * 0.5));
   return `M${a.x} ${a.y} C${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;
@@ -166,6 +171,8 @@ export function DataflowCanvas({
     if (outAnchor) {
       const nodeEl = outAnchor.closest(".df-node") as HTMLElement | null;
       if (nodeEl) {
+        // 阻止指针按下衍生的默认行为（文字框选等），连线拖动才干净。
+        event.preventDefault();
         dragRef.current = {
           mode: "connect",
           from: nodeEl.dataset.id ?? "",
@@ -206,6 +213,9 @@ export function DataflowCanvas({
         return;
       }
     }
+    // 空白处按下即进入平移：掐掉浏览器默认的文字框选，否则拖动时
+    // 蓝色选区盖在画布上，用户看到的不是平移而是「选中了一堆文字」。
+    event.preventDefault();
     dragRef.current = { mode: "pan", moved: 0, lastX: event.clientX, lastY: event.clientY };
     capturePointer(event);
   }
@@ -285,6 +295,10 @@ export function DataflowCanvas({
   }
 
   const nodeById = new Map(workflow.nodes.map((node) => [node.id, node]));
+  // 未知类型节点（新版本工具保存/手工编辑的流程文件里出现，parseWorkflowFile 不拦截）：
+  // 此前静默不渲染，状态栏计数却含它们，运行报「节点类型未实现」时用户无从定位。
+  // 这里改为灰色占位块＋画布顶部明示，连线以虚线接到占位块中心。
+  const unknownNodes = workflow.nodes.filter((node) => !nodeSpec(node.type));
 
   return (
     <div className="df-canvas-wrap">
@@ -323,9 +337,11 @@ export function DataflowCanvas({
             {workflow.edges.map((edge) => {
               const from = nodeById.get(edge.from);
               const to = nodeById.get(edge.to);
-              const fromSpec = from ? nodeSpec(from.type) : undefined;
-              const toSpec = to ? nodeSpec(to.type) : undefined;
-              if (!from || !to || !fromSpec || !toSpec) return null;
+              if (!from || !to) return null;
+              const fromSpec = nodeSpec(from.type);
+              const toSpec = nodeSpec(to.type);
+              // 任一端是未知类型：仍渲染（虚线），端点退化为占位块中心，保证拓扑可见。
+              const unknownEnd = !fromSpec || !toSpec;
               const selected =
                 selection?.kind === "edge" &&
                 selection.edge.from === edge.from &&
@@ -335,12 +351,17 @@ export function DataflowCanvas({
               return (
                 <path
                   key={`${edge.from}:${edge.fromAnchor}->${edge.to}:${edge.toAnchor}`}
-                  className={`df-edge${selected ? " df-edge-selected" : ""}`}
+                  className={`df-edge${unknownEnd ? " df-edge-unknown" : ""}${
+                    selected ? " df-edge-selected" : ""
+                  }`}
                   d={bezierPath(
-                    anchorPos(from, fromSpec, "out", edge.fromAnchor),
-                    anchorPos(to, toSpec, "in", edge.toAnchor),
+                    fromSpec
+                      ? anchorPos(from, fromSpec, "out", edge.fromAnchor)
+                      : nodeCenter(from),
+                    toSpec ? anchorPos(to, toSpec, "in", edge.toAnchor) : nodeCenter(to),
                   )}
                   markerEnd="url(#df-edge-arrow)"
+                  strokeDasharray={unknownEnd ? "6 4" : undefined}
                   data-from={edge.from}
                   data-from-anchor={edge.fromAnchor}
                   data-to={edge.to}
@@ -357,11 +378,47 @@ export function DataflowCanvas({
           </svg>
           {workflow.nodes.map((node) => {
             const spec = nodeSpec(node.type);
-            if (!spec) return null;
             const status = statusOf(node.id);
+            const selected = selection?.kind === "node" && selection.id === node.id;
+            if (!spec) {
+              // 未知类型占位块：保留名称/位置/选中/拖动与运行错误状态，让用户能定位
+              // 「节点类型未实现」的出错节点；无锚点，不可从它发起连线。
+              const badge =
+                status === "run" ? "运行中…" : status === "error" ? "类型未实现" : "";
+              return (
+                <div
+                  key={node.id}
+                  className={`df-node df-node-unknown${selected ? " df-selected" : ""}${
+                    status !== "idle" ? ` df-st-${statusClass(status)}` : ""
+                  }`}
+                  data-id={node.id}
+                  title={`节点类型「${node.type}」当前版本不支持`}
+                  onClick={() => onSelect({ kind: "node", id: node.id })}
+                  style={{
+                    left: node.x,
+                    top: node.y,
+                    borderLeft: "4px dashed var(--muted-soft)",
+                  }}
+                >
+                  <div className="df-node-head">
+                    <DataflowIcon icon="flag" />
+                    <div className="df-node-names">
+                      <b>{node.name}</b>
+                      <span>未知类型：{node.type}</span>
+                    </div>
+                  </div>
+                  <div
+                    className={`df-node-badge df-b-${statusClass(status)}${
+                      badge ? " df-badge-show" : ""
+                    }`}
+                  >
+                    {badge}
+                  </div>
+                </div>
+              );
+            }
             const result = resultOf(node.id);
             const badge = status === "run" ? "运行中…" : badgeText(spec, result);
-            const selected = selection?.kind === "node" && selection.id === node.id;
             return (
               <div
                 key={node.id}
@@ -430,6 +487,24 @@ export function DataflowCanvas({
             );
           })}
         </div>
+        {unknownNodes.length > 0 && (
+          <div
+            className="df-note df-note-warn"
+            role="status"
+            style={{
+              position: "absolute",
+              top: "var(--sp-2)",
+              left: "var(--sp-2)",
+              right: "140px",
+              zIndex: 30,
+              margin: 0,
+            }}
+          >
+            检测到 {unknownNodes.length} 个节点类型当前版本不支持：
+            {[...new Set(unknownNodes.map((node) => node.type))].join("、")}
+            。已用灰色占位块显示在画布上（可选中、拖动定位），运行将报「节点类型未实现」。
+          </div>
+        )}
         {!workflow.nodes.length && (
           <div className="df-canvas-empty">
             <DataflowIcon icon="grid3x3" size={30} />

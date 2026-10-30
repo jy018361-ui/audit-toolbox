@@ -12,6 +12,7 @@ import {
   MANUAL_COLUMN_TYPES,
   SUMMARIZE_FUNCS,
   defaultCheckRule,
+  incompleteFilterRule,
   type CheckRuleConfig,
   type CheckRuleType,
   type CleanActionConfig,
@@ -322,6 +323,18 @@ function Note({ children, warn }: { children: ReactNode; warn?: boolean }) {
   return <div className={`df-note${warn ? " df-note-warn" : ""}`}>{children}</div>;
 }
 
+/** 背景说明的折叠版：默认只占一行「说明」小字，点开才显示原文。
+    输入节点的类型规则说明较长，整段铺开时配置区被灰字占满，
+    下方预览区被挤出可视范围（用户反馈），需要时再展开阅读。 */
+function NoteFold({ children }: { children: ReactNode }) {
+  return (
+    <details className="df-note-fold">
+      <summary>说明</summary>
+      <div className="df-note">{children}</div>
+    </details>
+  );
+}
+
 /** 字段列表行工具：上移/下移/删除。 */
 function RowTools({
   onUp,
@@ -488,7 +501,7 @@ export function ConfigPanel({
       <Field label="列类型锁定（选「自动」以外即锁定该列）">
         <div className="df-list-head">
           {rows.length === 0 && (
-            <Note>未锁定列。账号、编号等易被误判为数字的列建议锁定「文本」，超 15 位整数默认按文本。</Note>
+            <NoteFold>未锁定列。账号、编号等易被误判为数字的列建议锁定「文本」，超 15 位整数默认按文本。</NoteFold>
           )}
           {rows.map((row, index) => (
             <div className="df-list-row" key={index}>
@@ -558,7 +571,7 @@ export function ConfigPanel({
                     onChange={(value) => setKey("filePattern", value)}
                   />
                 </Field>
-                <Note>重跑时会在结果区报告文件清单变化：新增/缺失文件逐项列出。</Note>
+                <NoteFold>重跑时会在结果区报告文件清单变化：新增/缺失文件逐项列出。</NoteFold>
               </>
             )}
           </div>
@@ -651,7 +664,7 @@ export function ConfigPanel({
               onChange={(value) => setKey("attachSourceColumns", value)}
               label="附加来源列（来源文件/记录序号）"
             />
-            <Note>文本编号保留前导零；超 15 位整数默认按文本（保底规则）。</Note>
+            <NoteFold>文本编号保留前导零；超 15 位整数默认按文本（保底规则）。</NoteFold>
           </div>
           <div className="df-group">
             {columnTypesField()}
@@ -859,7 +872,8 @@ export function ConfigPanel({
               </button>
             </div>
           </Field>
-          <Note>后面的公式可引用前面生成的新字段；普通运算遇空值得空值，除零按行级异常处理。</Note>
+          {onRowErrorField()}
+          <Note>后面的公式可引用前面生成的新字段；普通运算遇空值得空值，除零等行级异常按上方「异常处理」设置处理（默认停止）。</Note>
         </>
       );
       break;
@@ -885,7 +899,15 @@ export function ConfigPanel({
           <Field label="条件（字段＋运算符＋值）">
             <div className="df-list-head">
               {rules.map((rule, index) => (
-                <div className="df-list-row" key={index}>
+                <div
+                  className={`df-list-row${incompleteFilterRule(rule) ? " df-row-incomplete" : ""}`}
+                  key={index}
+                  title={
+                    incompleteFilterRule(rule)
+                      ? "这条条件还没填完整（字段或值）：运行前请补全，或删除这一行。"
+                      : undefined
+                  }
+                >
                   <TextIn
                     value={rule.field}
                     placeholder="字段"
@@ -1028,6 +1050,17 @@ export function ConfigPanel({
                 { value: "pipe", label: "竖线" },
               ]}
               onChange={(value) => setKey("delimiter", value)}
+            />
+          </Field>
+          <Field label="覆盖保护">
+            <Sel
+              value={String(config.overwrite ?? "error")}
+              options={[
+                { value: "error", label: "已存在：报错并提示（默认）" },
+                { value: "timestamp", label: "已存在：自动加时间戳" },
+                { value: "replace", label: "已存在：直接覆盖" },
+              ]}
+              onChange={(value) => setKey("overwrite", value)}
             />
           </Field>
           <Field label="按行数分文件（0＝不分）">
@@ -1815,7 +1848,9 @@ export function ConfigPanel({
       </p>
       {form}
       <div className="df-cfg-foot">
-        {node.type === "excel_in" || node.type === "csv_in" ? null : (
+        {node.type === "excel_in" || node.type === "csv_in" ? null : node.type === "formula" ? (
+          <Note>行级异常（除零、转换失败等）按本节点「异常处理」设置独立生效，与输入节点的设置无关；结构性错误一律停止。</Note>
+        ) : (
           <Note>行级异常策略由输入节点的「异常处理」设置决定；结构性错误一律停止。</Note>
         )}
         <button type="button" className="df-btn-danger" onClick={onDelete}>

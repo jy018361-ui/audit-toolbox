@@ -287,9 +287,22 @@ pub(crate) enum BinaryOp {
     Or,
 }
 
+/// 表达式最大嵌套深度（括号/负号/NOT/函数调用任一嵌套均计数）。
+/// 递归下降解析每层嵌套走约 9 层栈帧，求值与 Drop 亦按树深递归；
+/// 不设上限时万字符级粘贴事故会打爆线程栈（Windows 下为进程级
+/// abort，用户看不到中文错误）。阈值取 64：与 Excel 嵌套函数上限
+/// 一致，正常审计公式嵌套几乎不超 20 层；且经本机 debug 构建实测，
+/// 256 层括号的解析递归即可溢出 2MiB 线程栈（F20 的测试曾复现
+/// STATUS_STACK_OVERFLOW），64 层留有数倍余量（F20）。
+const MAX_EXPR_DEPTH: usize = 64;
+/// 表达式总长度上限（字符数），防误粘贴大段文本进入词法与解析。
+const MAX_EXPR_LENGTH: usize = 100_000;
+
 struct Parser {
     tokens: Vec<(Token, usize)>,
     position: usize,
+    /// 当前嵌套深度（括号/一元符号/函数调用各层累计）。
+    depth: usize,
 }
 
 impl Parser {
@@ -310,6 +323,22 @@ impl Parser {
         } else {
             Err(format!("此处应为{description}"))
         }
+    }
+
+    /// 进入一层嵌套（括号/一元符号/函数调用实参）：超深返回中文语法错误，
+    /// 防止递归下降打爆线程栈。错误上抛后整个 Parser 即废弃，无需回退。
+    fn enter(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_EXPR_DEPTH {
+            return Err(format!(
+                "表达式嵌套过深（超过 {MAX_EXPR_DEPTH} 层括号/符号/函数），\
+                 为避免程序崩溃已停止解析；请拆分公式或检查是否误粘贴了大段文本"
+            ));
+        }
+        Ok(())
+    }
+    fn leave(&mut self) {
+        self.depth -= 1;
     }
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
@@ -357,7 +386,10 @@ impl Parser {
             || matches!(self.peek(), Token::NotSym)
         {
             self.advance();
-            return Ok(Expr::Not(Box::new(self.parse_not()?)));
+            self.enter()?;
+            let inner = self.parse_not()?;
+            self.leave();
+            return Ok(Expr::Not(Box::new(inner)));
         }
         self.parse_compare()
     }
@@ -425,7 +457,10 @@ impl Parser {
     fn parse_unary(&mut self) -> Result<Expr, String> {
         if matches!(self.peek(), Token::Minus) {
             self.advance();
-            return Ok(Expr::Neg(Box::new(self.parse_unary()?)));
+            self.enter()?;
+            let inner = self.parse_unary()?;
+            self.leave();
+            return Ok(Expr::Neg(Box::new(inner)));
         }
         self.parse_primary()
     }
@@ -437,7 +472,9 @@ impl Parser {
             Token::Str(value) => Ok(Expr::Str(value)),
             Token::Field(name) => Ok(Expr::Field(name)),
             Token::LParen => {
+                self.enter()?;
                 let inner = self.parse_expr()?;
+                self.leave();
                 self.expect(&Token::RParen, "右括号 )")?;
                 Ok(inner)
             }
@@ -452,6 +489,7 @@ impl Parser {
                             self.advance();
                             let mut args = Vec::new();
                             if !matches!(self.peek(), Token::RParen) {
+                                self.enter()?;
                                 loop {
                                     args.push(self.parse_expr()?);
                                     if matches!(self.peek(), Token::Comma) {
@@ -460,6 +498,7 @@ impl Parser {
                                         break;
                                     }
                                 }
+                                self.leave();
                             }
                             self.expect(&Token::RParen, "函数的右括号 )")?;
                             validate_arity(&upper, args.len())?;
@@ -497,8 +536,18 @@ fn validate_arity(name: &str, count: usize) -> Result<(), String> {
 
 /// 编译表达式（语法检查）。失败返回中文错误与位置。
 pub(crate) fn compile(expression: &str) -> Result<Expr, String> {
+    // 总长限制：防误粘贴大段文本（F20）；正常公式远短于该上限。
+    if expression.chars().count() > MAX_EXPR_LENGTH {
+        return Err(format!(
+            "表达式过长（超过 {MAX_EXPR_LENGTH} 个字符），请检查是否误粘贴了大段文本"
+        ));
+    }
     let tokens = lex(expression)?;
-    let mut parser = Parser { tokens, position: 0 };
+    let mut parser = Parser {
+        tokens,
+        position: 0,
+        depth: 0,
+    };
     let expr = parser.parse_expr()?;
     if !matches!(parser.peek(), Token::End) {
         return Err("表达式末尾存在多余内容".to_owned());
@@ -1015,23 +1064,27 @@ fn eval_call(
             (Value::Date(date), Value::Text(format)) => {
                 let mut pattern = String::new();
                 let lower = format.to_lowercase();
+                // 按 char 迭代：非 ASCII 字面量（如“yyyy年mm月dd日”里的
+                // 年/月/日）必须整字符进入 pattern。此前按字节扫描时
+                // `byte as char` 把 UTF-8 多字节字符按 Latin-1 直映拆碎
+                // （「年」→ å¹´），输出“2026å¹´10æœˆ”式乱码（F18）。
+                let chars: Vec<char> = lower.chars().collect();
                 let mut index = 0;
-                let bytes = lower.as_bytes();
-                while index < bytes.len() {
-                    if bytes[index..].starts_with(b"yyyy") {
+                while index < chars.len() {
+                    if chars[index..].starts_with(&['y', 'y', 'y', 'y']) {
                         pattern.push_str("%Y");
                         index += 4;
-                    } else if bytes[index..].starts_with(b"yy") {
+                    } else if chars[index..].starts_with(&['y', 'y']) {
                         pattern.push_str("%y");
                         index += 2;
-                    } else if bytes[index..].starts_with(b"mm") {
+                    } else if chars[index..].starts_with(&['m', 'm']) {
                         pattern.push_str("%m");
                         index += 2;
-                    } else if bytes[index..].starts_with(b"dd") {
+                    } else if chars[index..].starts_with(&['d', 'd']) {
                         pattern.push_str("%d");
                         index += 2;
                     } else {
-                        pattern.push(bytes[index] as char);
+                        pattern.push(chars[index]);
                         index += 1;
                     }
                 }
@@ -1209,6 +1262,75 @@ mod tests {
         assert_eq!(eval_text("DAYSBETWEEN(TODAY(), TODATE(\"2026-10-20\"))").unwrap(), "7");
         assert_eq!(eval_text("TOHALF(\"ＡＢ１２３\")").unwrap(), "AB123");
         assert_eq!(eval_text("COALESCE(ISNULL(NULL), \"兜底\")").unwrap(), "true");
+    }
+
+    #[test]
+    fn dateformat_keeps_non_ascii_literals_intact() {
+        // F18 回归：中文日期格式（审计底稿常见）此前按字节扫描格式串，
+        // `byte as char` 按 Latin-1 直映把「年」(E5 B9 B4) 拆成 å¹´ 三个
+        // 字符，输出“2026å¹´10æœˆ”式乱码。现在按 char 迭代，非 ASCII
+        // 字面量整字符进入 chrono pattern。
+        assert_eq!(
+            eval_text("DATEFORMAT(TODAY(), \"yyyy年mm月dd日\")").unwrap(),
+            "2026年10月27日"
+        );
+        assert_eq!(
+            eval_text("DATEFORMAT(TODATE(\"2026-01-02\"), \"yyyy年mm月dd日\")").unwrap(),
+            "2026年01月02日"
+        );
+        // 大写 YYYY/MM/DD 经 to_lowercase 归一后同样识别。
+        assert_eq!(
+            eval_text("DATEFORMAT(TODAY(), \"YYYY年MM月DD日\")").unwrap(),
+            "2026年10月27日"
+        );
+        // ASCII 格式回归保护：行为与修复前完全一致。
+        assert_eq!(eval_text("DATEFORMAT(TODAY(), \"yyyy-mm-dd\")").unwrap(), "2026-10-27");
+        assert_eq!(eval_text("DATEFORMAT(TODAY(), \"yy/mm/dd\")").unwrap(), "26/10/27");
+    }
+
+    #[test]
+    fn expression_nesting_depth_is_capped() {
+        // F20 回归：此前括号/负号/NOT/函数嵌套无上限，万字符级粘贴事故
+        // 会把递归下降解析打爆线程栈（进程级崩溃、无中文错误）。现在
+        // 超过 MAX_EXPR_DEPTH 层返回中文语法错误。
+        // 用例深度刻意取在上限之上不远处（65 层而非数万层）：
+        // 防回归测试自身不能踩爆线程栈。
+        let error = compile(&format!("{}1{}", "(".repeat(MAX_EXPR_DEPTH + 1), ")".repeat(MAX_EXPR_DEPTH + 1)))
+            .expect_err("超过上限的括号嵌套应报错");
+        assert!(error.contains("嵌套过深"), "报错应为中文嵌套过深提示：{error}");
+
+        let error = compile(&format!("-{}1", "-".repeat(MAX_EXPR_DEPTH + 1)))
+            .expect_err("连续负号嵌套应报错");
+        assert!(error.contains("嵌套过深"), "报错应指向嵌套过深：{error}");
+
+        let error = compile(&format!("{}true", "NOT ".repeat(MAX_EXPR_DEPTH + 1)))
+            .expect_err("连续 NOT 嵌套应报错");
+        assert!(error.contains("嵌套过深"), "报错应指向嵌套过深：{error}");
+
+        let error = compile(&format!("{}1{}", "IF(".repeat(MAX_EXPR_DEPTH + 1), ")".repeat(MAX_EXPR_DEPTH + 1)))
+            .expect_err("深层嵌套函数调用应报错（且早于参数个数校验）");
+        assert!(error.contains("嵌套过深"), "报错应指向嵌套过深：{error}");
+    }
+
+    #[test]
+    fn expression_within_depth_cap_still_compiles() {
+        // 边界回归：恰在上限内的嵌套不受影响。
+        let at_cap = format!("{}1{}", "(".repeat(MAX_EXPR_DEPTH), ")".repeat(MAX_EXPR_DEPTH));
+        assert!(compile(&at_cap).is_ok(), "恰 {MAX_EXPR_DEPTH} 层应放行");
+        // 适度嵌套照常求值。
+        assert_eq!(eval_text("((((1+2))))").unwrap(), "3");
+        assert_eq!(eval_text("IF(NOT(1 > 2), -(-(-5)), 0)").unwrap(), "-5");
+    }
+
+    #[test]
+    fn overlong_expression_is_rejected() {
+        let bloated = format!("{}0", "0+".repeat(MAX_EXPR_LENGTH / 2 + 1));
+        assert!(bloated.chars().count() > MAX_EXPR_LENGTH);
+        let error = compile(&bloated).expect_err("超长表达式应报错");
+        assert!(error.contains("表达式过长"), "报错应为中文长度提示：{error}");
+        // 上限内的长表达式不受影响（纯编译，不求值）。
+        let long_but_ok = format!("{}0", "0+".repeat(1000));
+        assert!(compile(&long_but_ok).is_ok());
     }
 
     #[test]

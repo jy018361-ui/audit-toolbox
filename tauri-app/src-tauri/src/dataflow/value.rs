@@ -369,12 +369,19 @@ impl ColType {
     }
 
     /// 解析 columnTypes 锁定配置里的类型名（支持常见别名）。
+    ///
+    /// 前端 src/dataflow/ConfigPanel.tsx 的 COLUMN_TYPE_OPTIONS 与
+    /// src/dataflow/model.ts 的 MANUAL_COLUMN_TYPES 提供的每个 value
+    /// 都必须能被这里识别，否则用户一锁定该类型，输入节点整次运行即报
+    /// 「锁定类型无法识别」（两侧清单的对照测试见文件尾 tests 模块）。
+    /// "datetime"（日期时间）第一期按日期处理——引擎日期只到日、不含
+    /// 时分秒（见模块文档），日期时间完整语义为后续期期内容。
     pub(crate) fn parse(key: &str) -> Option<Self> {
         match key.trim().to_ascii_lowercase().as_str() {
             "text" | "文本" | "string" | "str" => Some(ColType::Text),
             "integer" | "int" | "整数" => Some(ColType::Integer),
             "decimal" | "number" | "数值" | "十进制" | "金额" => Some(ColType::Decimal),
-            "date" | "日期" => Some(ColType::Date),
+            "date" | "datetime" | "日期" | "日期时间" => Some(ColType::Date),
             "bool" | "boolean" | "布尔" => Some(ColType::Bool),
             _ => None,
         }
@@ -552,5 +559,48 @@ pub(crate) fn parse_bool_strict(text: &str) -> Option<bool> {
         "true" | "1" | "是" | "y" | "yes" => Some(true),
         "false" | "0" | "否" | "n" | "no" => Some(false),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 前端 src/dataflow/ConfigPanel.tsx 的 COLUMN_TYPE_OPTIONS（value 集合），
+    /// 即「列类型锁定」下拉的全部选项。前端清单更新时须同步本常量。
+    const FRONTEND_COLUMN_TYPE_KEYS: &[&str] =
+        &["text", "integer", "decimal", "boolean", "date", "datetime"];
+
+    /// 前端 src/dataflow/model.ts 的 MANUAL_COLUMN_TYPES（value 集合），
+    /// 即手工建表列类型的全部选项。前端清单更新时须同步本常量。
+    const FRONTEND_MANUAL_COLUMN_KEYS: &[&str] = &["text", "int", "decimal", "date"];
+
+    /// F6 回归：前端界面提供的每一个列类型选项引擎都必须认识，
+    /// 否则用户一锁定，输入节点整次运行即报
+    /// 「列"X"的锁定类型"…"无法识别」。
+    #[test]
+    fn parse_accepts_every_frontend_column_type_option() {
+        for key in FRONTEND_COLUMN_TYPE_KEYS
+            .iter()
+            .chain(FRONTEND_MANUAL_COLUMN_KEYS.iter())
+        {
+            assert!(
+                ColType::parse(key).is_some(),
+                "前端提供的列类型“{key}”引擎无法识别，用户锁定后整次运行必失败"
+            );
+        }
+    }
+
+    /// datetime（日期时间）第一期映射到日期：引擎日期只到日。
+    #[test]
+    fn parse_datetime_aliases_to_date() {
+        assert_eq!(ColType::parse("datetime"), Some(ColType::Date));
+        assert_eq!(ColType::parse("日期时间"), Some(ColType::Date));
+        assert_eq!(ColType::parse("  Datetime  "), Some(ColType::Date));
+        // 锁定后按日期读入的解析路径与 date 完全一致。
+        assert_eq!(ColType::parse("datetime"), ColType::parse("date"));
+        // 真正无法识别的取值仍返回 None（input.rs 会转成配置错误）。
+        assert_eq!(ColType::parse("timestamp"), None);
+        assert_eq!(ColType::parse(""), None);
     }
 }

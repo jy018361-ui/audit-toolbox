@@ -225,8 +225,21 @@ pub(crate) fn run_union(
         }
     }
 
+    // 预检总行数：纵向合并是纯拼接（无去重、无过滤），合并后行数 == 各输入
+    // 行数之和，可先于投影物化算出——多表合计超限时立即报错，不再先白占
+    // 内存与时间把全部行投影完再丢弃（守恒核对用同一数值）。
+    let total: usize = inputs.iter().map(|(_, table)| table.rows.len()).sum();
+    if total > MAX_TABLE_ROWS {
+        return Err(structural(
+            "DATAFLOW_ROW_LIMIT",
+            format!(
+                "节点「{node_name}」合并后行数（{total}）超出内网上限（{MAX_TABLE_ROWS} 行）。",
+            ),
+        ));
+    }
+
     // 逐表投影到输出列集合（缺失补空值，类型冲突列转显示文本）。
-    let mut rows: Vec<Vec<Value>> = Vec::new();
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(total);
     for (_, table) in &inputs {
         let mapping: Vec<Option<usize>> = if align == "byName" {
             columns
@@ -255,17 +268,7 @@ pub(crate) fn run_union(
             rows.push(line);
         }
     }
-    if rows.len() > MAX_TABLE_ROWS {
-        return Err(structural(
-            "DATAFLOW_ROW_LIMIT",
-            format!(
-                "节点「{node_name}」合并后行数（{}）超出内网上限（{MAX_TABLE_ROWS} 行）。",
-                rows.len()
-            ),
-        ));
-    }
 
-    let total: usize = inputs.iter().map(|(_, table)| table.rows.len()).sum();
     stats.insert(
         0,
         format!(
@@ -529,5 +532,105 @@ fn sort_level(left: &Value, right: &Value, nulls_first: bool) -> Ordering {
             }
         }
         _ => compare_values(left, right).unwrap_or_else(|| left.to_display().cmp(&right.to_display())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// NodeOutcome 未实现 Debug，统一经 match 取错误，避免 unwrap_err 编译不过。
+    fn expect_row_limit(result: Result<NodeOutcome, AppError>) -> AppError {
+        match result {
+            Ok(_) => panic!("合并总行数超限时应返回 DATAFLOW_ROW_LIMIT，而不是成功"),
+            Err(error) => error,
+        }
+    }
+
+    fn output_anchor(outcome: &NodeOutcome) -> &Table {
+        &outcome
+            .anchors
+            .iter()
+            .find(|(key, _)| key == "output")
+            .expect("应存在 output 锚点")
+            .1
+    }
+
+    /// 常规合并不受影响：按字段名取并集、缺失补空值、行数守恒。
+    #[test]
+    fn union_by_name_union_columns_and_fill_null() {
+        let t1 = (
+            "n1".to_owned(),
+            "表一".to_owned(),
+            Table {
+                columns: vec!["a".into(), "b".into()],
+                types: vec![ColType::Integer, ColType::Text],
+                rows: vec![vec![Value::Int(1), Value::Text("x".into())]],
+            },
+        );
+        let t2 = (
+            "n2".to_owned(),
+            "表二".to_owned(),
+            Table {
+                columns: vec!["b".into(), "c".into()],
+                types: vec![ColType::Text, ColType::Text],
+                rows: vec![vec![Value::Text("y".into()), Value::Text("z".into())]],
+            },
+        );
+        let outcome = run_union("纵向合并", &json!({}), &[t1, t2]).unwrap();
+        let table = output_anchor(&outcome);
+        assert_eq!(table.columns, vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]);
+        assert_eq!(
+            table.rows,
+            vec![
+                vec![Value::Int(1), Value::Text("x".into()), Value::Null],
+                vec![Value::Null, Value::Text("y".into()), Value::Text("z".into())],
+            ]
+        );
+        assert!(outcome.stats[0].contains("守恒核对：一致"), "stats 应含守恒核对：{}", outcome.stats[0]);
+    }
+
+    /// 总行数预检：500000 + 500001 = 1000001 > 100 万，必须在投影物化前报
+    /// DATAFLOW_ROW_LIMIT（纯拼接下总行数可先验算，不再先投影完再丢弃）。
+    #[test]
+    fn union_total_rows_prechecked_before_projection() {
+        let int_table = |id: &str, count: usize| {
+            (
+                id.to_owned(),
+                id.to_owned(),
+                Table {
+                    columns: vec!["v".into()],
+                    types: vec![ColType::Integer],
+                    rows: (0..count).map(|i| vec![Value::Int(i as i64)]).collect(),
+                },
+            )
+        };
+        let inputs = [int_table("n1", 500_000), int_table("n2", 500_001)];
+        let error = expect_row_limit(run_union("纵向合并", &json!({}), &inputs));
+        let payload = serde_json::to_value(&error).unwrap();
+        assert_eq!(payload["code"], "DATAFLOW_ROW_LIMIT");
+        let message = payload["userMessage"].as_str().unwrap();
+        assert!(message.contains("超出内网上限"), "应给出中文上限提示：{message}");
+        assert!(message.contains("1000001"), "应报告合并后总行数 1000001：{message}");
+    }
+
+    /// 边界语义：500000 + 500000 = 恰好 100 万行不报错（> 才报，与既有检查一致）。
+    #[test]
+    fn union_exactly_one_million_rows_allowed() {
+        let int_table = |id: &str, count: usize| {
+            (
+                id.to_owned(),
+                id.to_owned(),
+                Table {
+                    columns: vec!["v".into()],
+                    types: vec![ColType::Integer],
+                    rows: (0..count).map(|i| vec![Value::Int(i as i64)]).collect(),
+                },
+            )
+        };
+        let inputs = [int_table("n1", 500_000), int_table("n2", 500_000)];
+        let outcome = run_union("纵向合并", &json!({}), &inputs).unwrap();
+        assert_eq!(output_anchor(&outcome).rows.len(), 1_000_000);
     }
 }

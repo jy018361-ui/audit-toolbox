@@ -40,6 +40,20 @@ fn resolve_output_path(
         return Err(config_error(node_kind, node_name, "未填写输出文件名。".into()));
     }
     let path = PathBuf::from(&resolved);
+    // F13 回归：相对路径（含纯文件名）一律拒绝。此前纯文件名会跳过目录
+    // 存在性检查与授权检查，文件被写到进程当前工作目录（常见为安装目录），
+    // 用户难以找到交付文件，且绕过了与其他节点一致的路径授权门。
+    if !path.is_absolute() {
+        return Err(config_error(
+            node_kind,
+            node_name,
+            format!(
+                "输出位置须为含盘符的完整路径：当前填写的是“{resolved}”。\
+                 相对路径会被写到程序运行目录，既难以找到，也不经过输出目录\
+                 检查与授权。请填写完整路径，例如 D:\\审计底稿\\大额客商_{{参数id}}.xlsx。"
+            ),
+        ));
+    }
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.is_dir() {
             return Err(structural(
@@ -715,4 +729,97 @@ pub(crate) fn run_csv_out(
         rows,
         has_warnings: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context_with_allowed(allowed: Option<Vec<PathBuf>>) -> RunContext {
+        RunContext {
+            mode: super::super::RunMode::Full,
+            today: chrono::NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(),
+            param_values: std::collections::HashMap::new(),
+            preview_rows: 1000,
+            allowed_paths: allowed,
+        }
+    }
+
+    /// F13 回归：占位符示例鼓励填纯文件名（如 大额客商_{参数id}.xlsx），
+    /// 此前该形态会跳过目录存在性检查与授权检查，文件被写到进程当前
+    /// 工作目录（常见为安装目录），用户找不到交付文件且绕过授权门。
+    /// 现在相对路径（含纯文件名）一律中文报错，要求填写完整路径。
+    #[test]
+    fn bare_file_name_and_relative_path_are_rejected() {
+        let context = context_with_allowed(None);
+        for name in ["大额客商_1.xlsx", "明细.csv", "sub/结果.xlsx", "./结果.xlsx"] {
+            let error = resolve_output_path("Excel 输出", "节点一", name, &context)
+                .expect_err("相对路径应被拒绝");
+            assert_eq!(
+                error.code, "DATAFLOW_CONFIG_INVALID",
+                "应报配置错误（实际报 {name}）：{}",
+                error.user_message
+            );
+            assert!(
+                error.user_message.contains("完整路径"),
+                "报错应引导填写完整路径：{}",
+                error.user_message
+            );
+        }
+    }
+
+    /// 绝对路径照常放行（未注入白名单的单元测试直调场景）。
+    #[test]
+    fn absolute_path_in_existing_dir_is_accepted() {
+        let context = context_with_allowed(None);
+        let target = std::env::temp_dir().join("大额客商_1.xlsx");
+        let path = resolve_output_path("Excel 输出", "节点一", &target.to_string_lossy(), &context)
+            .expect("绝对路径应放行");
+        assert_eq!(path, target);
+    }
+
+    /// 授权检查须覆盖输出目录：注入白名单后，目录在白名单内放行、
+    /// 白名单外拒绝（此前纯文件名分支会完全跳过这一检查）。
+    #[test]
+    fn permitted_directory_gate_covers_output_path() {
+        let temp = std::env::temp_dir();
+        let allowed = context_with_allowed(Some(vec![temp.clone()]));
+        let inside = temp.join("大额客商_1.xlsx");
+        resolve_output_path("Excel 输出", "节点一", &inside.to_string_lossy(), &allowed)
+            .expect("白名单目录内的输出应放行");
+
+        let outside = PathBuf::from(r"C:\Windows\System32\drivers\etc\结果.xlsx");
+        let error = resolve_output_path("Excel 输出", "节点一", &outside.to_string_lossy(), &allowed)
+            .expect_err("白名单外的输出应被授权门拒绝");
+        assert_eq!(error.code, "PATH_NOT_AUTHORIZED");
+    }
+
+    /// 既有行为回归保护：绝对路径的输出目录不存在时仍报目录缺失。
+    #[test]
+    fn missing_output_directory_still_errors() {
+        let context = context_with_allowed(None);
+        let missing = std::env::temp_dir().join("dataflow-no-such-dir-xyz")
+            .join("结果.xlsx");
+        let error = resolve_output_path("CSV 输出", "节点一", &missing.to_string_lossy(), &context)
+            .expect_err("输出目录不存在应报错");
+        assert_eq!(error.code, "DATAFLOW_OUTPUT_DIR_MISSING");
+    }
+
+    /// 占位符解析成完整路径后应正常放行（{参数id} 替换表注入白名单目录）。
+    #[test]
+    fn placeholder_resolved_to_absolute_path_is_accepted() {
+        let mut context = context_with_allowed(None);
+        let temp = std::env::temp_dir();
+        context
+            .param_values
+            .insert("输出目录".to_owned(), temp.to_string_lossy().into_owned());
+        let path = resolve_output_path(
+            "Excel 输出",
+            "节点一",
+            "{输出目录}\\大额客商_{参数id}.xlsx",
+            &context,
+        )
+        .expect("占位符解析为完整路径应放行");
+        assert_eq!(path, temp.join("大额客商_{参数id}.xlsx"));
+    }
 }

@@ -22,6 +22,7 @@ use crate::AppError;
 use chrono::NaiveDate;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// 第一期内存物化的行数上限：超出时明确报错（不静默截断），
 /// 提示等待第三期磁盘执行路径。
@@ -90,8 +91,9 @@ pub(crate) struct WrittenFile {
 /// 单个节点的一次执行结果。
 pub(crate) struct NodeOutcome {
     /// 输出锚点（key：输入/整理节点为 "output"，筛选为 "T"/"F"，
-    /// 输出节点为 "sheet:名" / "file:名"）。
-    pub anchors: Vec<(String, Table)>,
+    /// 输出节点为 "sheet:名" / "file:名"）。表用 Arc 共享：节点产出入
+    /// 全局锚点库时只复制指针，不深克隆整表。
+    pub anchors: Vec<(String, Arc<Table>)>,
     pub messages: Vec<String>,
     pub stats: Vec<String>,
     pub written: Vec<WrittenFile>,
@@ -104,6 +106,21 @@ pub(crate) struct NodeOutcome {
 
 impl NodeOutcome {
     pub(crate) fn with_anchor(key: &str, table: Table) -> Self {
+        let rows = table.row_count();
+        Self {
+            anchors: vec![(key.to_owned(), Arc::new(table))],
+            messages: Vec::new(),
+            stats: Vec::new(),
+            written: Vec::new(),
+            rows,
+            has_warnings: false,
+        }
+    }
+
+    /// 与 with_anchor 相同，但直接接收共享表：上游已是 Arc<Table> 时
+    /// 避免解开重包（透传型节点用，波 3 起接入）。
+    #[allow(dead_code)] // 波 3 起由 clean/sort 等透传节点调用
+    pub(crate) fn with_shared_anchor(key: &str, table: Arc<Table>) -> Self {
         let rows = table.row_count();
         Self {
             anchors: vec![(key.to_owned(), table)],

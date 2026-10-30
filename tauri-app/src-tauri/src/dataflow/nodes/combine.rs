@@ -17,17 +17,19 @@ use crate::AppError;
 use serde_json::Value as Json;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // 纵向合并 Union
 // ---------------------------------------------------------------------------
 
-/// 纵向合并。`inputs` 为 (上游节点 id, 上游显示名, 表)；order 配置非空时按
-/// 其重排（未知 id 报错；未列入的上游按连线顺序追加并提示），空 = 连线顺序。
+/// 纵向合并。`inputs` 为 (上游节点 id, 上游显示名, 表共享指针)；order 配置非空时
+/// 按其重排（未知 id 报错；未列入的上游按连线顺序追加并提示），空 = 连线顺序。
+/// 重排直接在引用层持 &(id, 名称, Arc<Table>)，不做二次整表克隆。
 pub(crate) fn run_union(
     node_name: &str,
     config: &Json,
-    inputs: &[(String, String, Table)],
+    inputs: &[(String, String, Arc<Table>)],
 ) -> Result<NodeOutcome, AppError> {
     let config: UnionConfig = serde_json::from_value(config.clone())
         .map_err(|error| config_error("纵向合并", node_name, error.to_string()))?;
@@ -36,7 +38,7 @@ pub(crate) fn run_union(
     }
 
     // 拼接次序：order（上游节点 id 数组）优先，空 = 按连线顺序。
-    let mut ordered: Vec<&(String, String, Table)> = Vec::with_capacity(inputs.len());
+    let mut ordered: Vec<&(String, String, Arc<Table>)> = Vec::with_capacity(inputs.len());
     let mut order_messages = Vec::new();
     if config.order.is_empty() {
         ordered.extend(inputs.iter());
@@ -70,10 +72,9 @@ pub(crate) fn run_union(
         }
     }
 
-    let inputs: Vec<(String, Table)> = ordered
-        .into_iter()
-        .map(|(_, name, table)| (name.clone(), table.clone()))
-        .collect();
+    // 重排后的工作清单：直接持有各输入的引用（含 Arc 共享指针），
+    // 后续投影经 entry.2.as_ref() 读表，不复制整表。
+    let inputs = ordered;
     let align = config.align.as_deref().unwrap_or("byName");
     if align != "byName" && align != "byPosition" {
         return Err(config_error(
@@ -102,13 +103,13 @@ pub(crate) fn run_union(
     let mut messages = Vec::new();
     let mut stats = Vec::new();
     messages.extend(order_messages);
-    let base = &inputs[0].1;
+    let base = inputs[0].2.as_ref();
 
     // 输出字段集合：byName 取并集（keep）或仅基准（drop）；byPosition 以
     // 第一个输入的列数与列名为基准，多出的列截去并列入差异报告。
     let mut columns: Vec<String> = base.columns.clone();
     if align == "byName" && extra_policy == "keep" {
-        for (_, table) in inputs.iter().skip(1) {
+        for (_, _, table) in inputs.iter().skip(1) {
             for name in &table.columns {
                 if !columns.contains(name) {
                     columns.push(name.clone());
@@ -118,7 +119,7 @@ pub(crate) fn run_union(
     }
 
     // 差异报告：逐上游列出多出/缺失/类型不同。
-    for (label, table) in inputs.iter().skip(1) {
+    for (_, label, table) in inputs.iter().skip(1) {
         let mut parts = Vec::new();
         if align == "byName" {
             let extra: Vec<&str> = table
@@ -197,7 +198,7 @@ pub(crate) fn run_union(
     for (position, name) in columns.iter().enumerate() {
         let mut unified: Option<ColType> = None;
         let mut conflict = false;
-        for (_, table) in &inputs {
+        for (_, _, table) in &inputs {
             let other = if align == "byName" {
                 table.columns.iter().position(|candidate| candidate == name)
             } else if position < table.columns.len() {
@@ -228,7 +229,7 @@ pub(crate) fn run_union(
     // 预检总行数：纵向合并是纯拼接（无去重、无过滤），合并后行数 == 各输入
     // 行数之和，可先于投影物化算出——多表合计超限时立即报错，不再先白占
     // 内存与时间把全部行投影完再丢弃（守恒核对用同一数值）。
-    let total: usize = inputs.iter().map(|(_, table)| table.rows.len()).sum();
+    let total: usize = inputs.iter().map(|(_, _, table)| table.rows.len()).sum();
     if total > MAX_TABLE_ROWS {
         return Err(structural(
             "DATAFLOW_ROW_LIMIT",
@@ -239,8 +240,11 @@ pub(crate) fn run_union(
     }
 
     // 逐表投影到输出列集合（缺失补空值，类型冲突列转显示文本）。
+    // 投影经引用读表（entry.2.as_ref()）：逐格 row.get(column).cloned() 属
+    // 列对齐/补空/转文本语义的固有成本，保留；但不再有整表级二次克隆。
     let mut rows: Vec<Vec<Value>> = Vec::with_capacity(total);
-    for (_, table) in &inputs {
+    for (_, _, entry) in &inputs {
+        let table = entry.as_ref();
         let mapping: Vec<Option<usize>> = if align == "byName" {
             columns
                 .iter()
@@ -275,7 +279,7 @@ pub(crate) fn run_union(
             "各输入行数：{}；合并后总行数：{}（守恒核对：{}）",
             inputs
                 .iter()
-                .map(|(label, table)| format!("“{label}”{}", table.rows.len()))
+                .map(|(_, label, table)| format!("“{label}”{}", table.rows.len()))
                 .collect::<Vec<_>>()
                 .join("、"),
             rows.len(),
@@ -378,16 +382,16 @@ pub(crate) fn run_unique(
     ];
     let outcome = NodeOutcome {
         anchors: vec![
-            ("U".to_owned(), Table {
+            ("U".to_owned(), Arc::new(Table {
                 columns: input.columns.clone(),
                 types: input.types.clone(),
                 rows: u_rows,
-            }),
-            ("D".to_owned(), Table {
+            })),
+            ("D".to_owned(), Arc::new(Table {
                 columns: input.columns.clone(),
                 types: input.types.clone(),
                 rows: d_rows,
-            }),
+            })),
         ],
         messages: Vec::new(),
         stats,
@@ -412,7 +416,7 @@ struct PreparedSortRule {
 pub(crate) fn run_sort(
     node_name: &str,
     config: &Json,
-    input: &Table,
+    mut input: Arc<Table>,
 ) -> Result<NodeOutcome, AppError> {
     let config: SortConfig = serde_json::from_value(config.clone())
         .map_err(|error| config_error("排序", node_name, error.to_string()))?;
@@ -422,12 +426,14 @@ pub(crate) fn run_sort(
     let index = input.column_index();
     let mut rules: Vec<PreparedSortRule> = Vec::new();
     for rule in &config.rules {
-        rules.push(prepare_rule(node_name, rule, &index, input)?);
+        rules.push(prepare_rule(node_name, rule, &index, &input)?);
     }
 
     // 稳定排序：相同排序键保持输入相对次序（sort_by 稳定）。
-    let mut rows = input.rows.clone();
-    rows.sort_by(|a, b| {
+    // 写时复制：锚点库仍持引用（refcount ≥ 2）时 make_mut 克隆一次，与改造前
+    // input.rows.clone() 成本等价、行为一致；引用计数归 1 后自动退化为原地
+    // 排序零拷贝。columns/types/rows 经共享锚点原样复用，不再克隆。
+    Arc::make_mut(&mut input).rows.sort_by(|a, b| {
         for rule in &rules {
             let order = sort_level(&a[rule.column], &b[rule.column], rule.nulls_first);
             let order = if rule.descending { order.reverse() } else { order };
@@ -457,14 +463,7 @@ pub(crate) fn run_sort(
                 .join("、")
         ),
     ];
-    let mut outcome = NodeOutcome::with_anchor(
-        "output",
-        Table {
-            columns: input.columns.clone(),
-            types: input.types.clone(),
-            rows,
-        },
-    );
+    let mut outcome = NodeOutcome::with_shared_anchor("output", input);
     outcome.stats = stats;
     Ok(outcome)
 }
@@ -563,20 +562,20 @@ mod tests {
         let t1 = (
             "n1".to_owned(),
             "表一".to_owned(),
-            Table {
+            Arc::new(Table {
                 columns: vec!["a".into(), "b".into()],
                 types: vec![ColType::Integer, ColType::Text],
                 rows: vec![vec![Value::Int(1), Value::Text("x".into())]],
-            },
+            }),
         );
         let t2 = (
             "n2".to_owned(),
             "表二".to_owned(),
-            Table {
+            Arc::new(Table {
                 columns: vec!["b".into(), "c".into()],
                 types: vec![ColType::Text, ColType::Text],
                 rows: vec![vec![Value::Text("y".into()), Value::Text("z".into())]],
-            },
+            }),
         );
         let outcome = run_union("纵向合并", &json!({}), &[t1, t2]).unwrap();
         let table = output_anchor(&outcome);
@@ -599,11 +598,11 @@ mod tests {
             (
                 id.to_owned(),
                 id.to_owned(),
-                Table {
+                Arc::new(Table {
                     columns: vec!["v".into()],
                     types: vec![ColType::Integer],
                     rows: (0..count).map(|i| vec![Value::Int(i as i64)]).collect(),
-                },
+                }),
             )
         };
         let inputs = [int_table("n1", 500_000), int_table("n2", 500_001)];
@@ -622,11 +621,11 @@ mod tests {
             (
                 id.to_owned(),
                 id.to_owned(),
-                Table {
+                Arc::new(Table {
                     columns: vec!["v".into()],
                     types: vec![ColType::Integer],
                     rows: (0..count).map(|i| vec![Value::Int(i as i64)]).collect(),
-                },
+                }),
             )
         };
         let inputs = [int_table("n1", 500_000), int_table("n2", 500_000)];

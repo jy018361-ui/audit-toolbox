@@ -23,6 +23,7 @@ use crate::dataflow::value::{ColType, Dec, Value};
 use crate::AppError;
 use serde_json::Value as Json;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 违规原因列的列名。
 const RESULT_COLUMN: &str = "检查结果";
@@ -768,8 +769,8 @@ pub(crate) fn run_check(
 
     let outcome = NodeOutcome {
         anchors: vec![
-            ("P".to_owned(), Table { columns: columns.clone(), types: types.clone(), rows: p_rows }),
-            ("NG".to_owned(), Table { columns, types, rows: ng_rows }),
+            ("P".to_owned(), Arc::new(Table { columns: columns.clone(), types: types.clone(), rows: p_rows })),
+            ("NG".to_owned(), Arc::new(Table { columns, types, rows: ng_rows })),
         ],
         messages: Vec::new(),
         stats,

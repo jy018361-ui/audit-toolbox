@@ -16,6 +16,7 @@ use crate::dataflow::value::{ColType, Value};
 use crate::AppError;
 use serde_json::Value as Json;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 键类型类别：同类别才允许配对（整数与十进制同属数值，可精确相等）。
 fn key_class(kind: ColType) -> &'static str {
@@ -355,9 +356,9 @@ pub(crate) fn run_join(
     let r_count = r_rows.len();
     let outcome = NodeOutcome {
         anchors: vec![
-            ("J".to_owned(), Table { columns: columns.clone(), types: types.clone(), rows: j_rows }),
-            ("L".to_owned(), Table { columns: columns.clone(), types: types.clone(), rows: l_rows }),
-            ("R".to_owned(), Table { columns, types, rows: r_rows }),
+            ("J".to_owned(), Arc::new(Table { columns: columns.clone(), types: types.clone(), rows: j_rows })),
+            ("L".to_owned(), Arc::new(Table { columns: columns.clone(), types: types.clone(), rows: l_rows })),
+            ("R".to_owned(), Arc::new(Table { columns, types, rows: r_rows })),
         ],
         messages: Vec::new(),
         stats,

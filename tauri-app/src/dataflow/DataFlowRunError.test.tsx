@@ -158,6 +158,8 @@ it("引擎节点级失败（HTTP 成功＋error 字段＋保留已完成节点�
       userMessage: "目标文件已存在：D:\\结果\\序时账.xlsx，请删除或改名后重试。",
     },
   });
+  // 输出文件名解析需要「输出位置」：预置记住值，模拟用户已选过一次。
+  window.localStorage.setItem("audit-toolbox:dataflow:output-dir", "D:\\审计底稿");
   render(<DataFlowPage tool={dataflowTool} />);
   await addNodeFromMenu("输入", "Excel 输入"); // n1 成功
   await addNodeFromMenu("输出", "Excel 输出"); // n2 失败

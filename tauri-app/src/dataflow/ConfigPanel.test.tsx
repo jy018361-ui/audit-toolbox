@@ -40,6 +40,7 @@ function renderPanel(type: string, config: Record<string, unknown> = defaultConf
       onPickPath={() => undefined}
       outputDir="D:\审计底稿"
       onPickOutputDir={() => undefined}
+      fieldOptions={["凭证号", "金额", "客商名称"]}
     />,
   );
   return { onConfigChange };
@@ -65,6 +66,7 @@ function renderLivePanel(type: string, initial: Record<string, unknown> = defaul
         onPickPath={() => undefined}
       outputDir="D:\审计底稿"
       onPickOutputDir={() => undefined}
+      fieldOptions={["凭证号", "金额", "客商名称"]}
       />
     );
   }
@@ -421,4 +423,37 @@ describe("数据流配置区：公式节点行级异常策略（onRowError 独�
     ).not.toBeInTheDocument();
     expect(screen.getByText(/与输入节点的设置无关/)).toBeInTheDocument();
   });
+});
+
+it("字段输入框带上游列名下拉建议（datalist）：跑过一次后可直接选列名", () => {
+  // 用户需求 2026-10-30：字段不用手抄，设置标题行后从下拉里选。
+  renderPanel("filter_n");
+  const fieldInput = screen.getByPlaceholderText("字段（可下拉选）");
+  expect(fieldInput.getAttribute("list")).toMatch(/^df-field-list-/);
+  const options = document.querySelectorAll(`datalist#${fieldInput.getAttribute("list")} option`);
+  expect([...options].map((o) => o.getAttribute("value"))).toEqual(["凭证号", "金额", "客商名称"]);
+});
+
+it("没有上游列名时字段输入框退化为普通输入（不挂 datalist）", () => {
+  renderPanel("filter_n");
+  // renderPanel 固定传了 fieldOptions；这里再渲染一个无建议面板验证退化。
+  cleanup();
+  const node: DataflowNode = { id: "n2", type: "filter_n", name: "筛选", x: 0, y: 0, config: defaultConfigFor("filter_n") };
+  render(
+    <ConfigPanel
+      node={node}
+      params={[]}
+      collapsed={false}
+      onToggleCollapse={() => undefined}
+      onRename={() => undefined}
+      onConfigChange={() => undefined}
+      onDelete={() => undefined}
+      onPickPath={() => undefined}
+      outputDir=""
+      onPickOutputDir={() => undefined}
+      fieldOptions={[]}
+    />,
+  );
+  const fieldInput = screen.getByPlaceholderText("字段（可下拉选）");
+  expect(fieldInput.getAttribute("list")).toBeNull();
 });

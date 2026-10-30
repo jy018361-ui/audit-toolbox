@@ -579,6 +579,26 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     return runResult?.nodes[nodeId];
   }
 
+  /** 选中节点的字段下拉建议：取全部上游（无上游＝输入节点自身）最近一次
+      运行结果的列名，按连线顺序去重合并——设置好标题行并跑过一次后，
+      各功能区的字段输入框就能直接选，不必照着表格手抄。 */
+  function fieldOptionsOf(nodeId: string | undefined): string[] {
+    if (!nodeId || !runResult) return [];
+    const upstream = [...new Set(workflow.edges.filter((edge) => edge.to === nodeId).map((edge) => edge.from))];
+    const sourceIds = upstream.length ? upstream : [nodeId];
+    const names: string[] = [];
+    for (const id of sourceIds) {
+      const result = runResult.nodes[id];
+      if (!result) continue;
+      for (const anchor of Object.values(result.anchors)) {
+        for (const column of anchor.columns ?? []) {
+          if (!names.includes(column)) names.push(column);
+        }
+      }
+    }
+    return names;
+  }
+
   return (
     <div className="df-page">
       <PageHeader
@@ -647,6 +667,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
             onPickPath={(kind, extensions, apply) => void handlePickPath(kind, extensions, apply)}
             outputDir={outputDir}
             onPickOutputDir={() => void handlePickOutputDir()}
+            fieldOptions={fieldOptionsOf(selectedNode?.id)}
           />
           <div
             className="df-split df-split-v"

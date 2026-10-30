@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { SwitchInput } from "@/components/SwitchInput";
@@ -61,6 +61,8 @@ export interface ConfigPanelProps {
   /** 输出位置（记住的默认输出文件夹）；输出文件名留空/只填名字时自动保存到这里。 */
   outputDir: string;
   onPickOutputDir: () => void;
+  /** 上游（或输入节点自身）最近一次运行的列名：字段输入框的下拉建议来源。 */
+  fieldOptions: string[];
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -92,6 +94,42 @@ function TextIn({
       placeholder={placeholder}
       onChange={(event) => onChange(event.target.value)}
     />
+  );
+}
+
+/** 字段名输入：带上游列名下拉建议（datalist）。可直接手输，也可从
+    上游节点最近一次运行的标题行/输出列里选——用户不必再照着表格抄字段名。 */
+let fieldSuggestSeq = 0;
+function FieldIn({
+  value,
+  onChange,
+  placeholder,
+  suggestions,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  suggestions: string[];
+}) {
+  const listId = useMemo(() => `df-field-list-${++fieldSuggestSeq}`, []);
+  return (
+    <>
+      <input
+        className="df-in"
+        type="text"
+        list={suggestions.length ? listId : undefined}
+        value={value}
+        placeholder={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {suggestions.length > 0 && (
+        <datalist id={listId}>
+          {suggestions.map((name) => (
+            <option key={name} value={name} />
+          ))}
+        </datalist>
+      )}
+    </>
   );
 }
 
@@ -164,26 +202,40 @@ function TokenIn({
   value,
   onChange,
   placeholder,
+  suggestions = [],
 }: {
   value: string[];
   onChange: (value: string[]) => void;
   placeholder?: string;
+  /** 上游列名下拉建议（datalist）：选中一项即追加一个字段。 */
+  suggestions?: string[];
 }) {
+  const listId = useMemo(() => `df-token-list-${++fieldSuggestSeq}`, []);
   return (
-    <input
-      className="df-in"
-      type="text"
-      value={value.join("、")}
-      placeholder={placeholder}
-      onChange={(event) =>
-        onChange(
-          event.target.value
-            .split(/[,，、;；\n]+/)
-            .map((item) => item.trim())
-            .filter(Boolean),
-        )
-      }
-    />
+    <>
+      <input
+        className="df-in"
+        type="text"
+        list={suggestions.length ? listId : undefined}
+        value={value.join("、")}
+        placeholder={placeholder}
+        onChange={(event) =>
+          onChange(
+            event.target.value
+              .split(/[,，、;；\n]+/)
+              .map((item) => item.trim())
+              .filter(Boolean),
+          )
+        }
+      />
+      {suggestions.length > 0 && (
+        <datalist id={listId}>
+          {suggestions.map((name) => (
+            <option key={name} value={name} />
+          ))}
+        </datalist>
+      )}
+    </>
   );
 }
 
@@ -406,6 +458,7 @@ export function ConfigPanel({
   onPickPath,
   outputDir,
   onPickOutputDir,
+  fieldOptions,
 }: ConfigPanelProps) {
   // 检查规则编辑器「新增规则类型」的记忆值；hook 须位于所有提前 return 之前。
   const [newCheckRuleType, setNewCheckRuleType] = useState<CheckRuleType>("balance");
@@ -510,9 +563,10 @@ export function ConfigPanel({
           )}
           {rows.map((row, index) => (
             <div className="df-list-row" key={index}>
-              <TextIn
+              <FieldIn
+                suggestions={fieldOptions}
                 value={row.name}
-                placeholder="列名"
+                placeholder="列名（可下拉选）"
                 onChange={(value) =>
                   rebuild(rows.map((item, i) => (i === index ? { ...item, name: value } : item)))
                 }
@@ -759,9 +813,10 @@ export function ConfigPanel({
               {actions.map((action, index) => (
                 <div className="df-list-head" key={index} style={{ padding: "4px 0", borderBottom: "1px solid var(--border-soft)" }}>
                   <div className="df-list-row">
-                    <TextIn
+                    <FieldIn
+                      suggestions={fieldOptions}
                       value={action.field}
-                      placeholder="字段名"
+                      placeholder="字段名（可下拉选）"
                       onChange={(value) => patchAction(index, { field: value })}
                     />
                     <RowTools
@@ -913,9 +968,10 @@ export function ConfigPanel({
                       : undefined
                   }
                 >
-                  <TextIn
+                  <FieldIn
+                    suggestions={fieldOptions}
                     value={rule.field}
-                    placeholder="字段"
+                    placeholder="字段（可下拉选）"
                     onChange={(value) =>
                       setCondition({
                         ...condition,
@@ -1110,16 +1166,18 @@ export function ConfigPanel({
             <div className="df-list-head">
               {keys.map((pair, index) => (
                 <div className="df-list-row" key={index}>
-                  <TextIn
+                  <FieldIn
+                    suggestions={fieldOptions}
                     value={pair.left}
-                    placeholder="左表字段名"
+                    placeholder="左表字段名（可下拉选）"
                     onChange={(value) =>
                       setKeys(keys.map((item, i) => (i === index ? { ...item, left: value } : item)))
                     }
                   />
-                  <TextIn
+                  <FieldIn
+                    suggestions={fieldOptions}
                     value={pair.right}
-                    placeholder="右表字段名"
+                    placeholder="右表字段名（可下拉选）"
                     onChange={(value) =>
                       setKeys(keys.map((item, i) => (i === index ? { ...item, right: value } : item)))
                     }
@@ -1144,6 +1202,7 @@ export function ConfigPanel({
           <Note>两侧字段类型须一致（文本键与数字键不静默互转）；复合键任一字段为空值时不匹配；空文本按具体值参与。</Note>
           <Field label="J 路左表输出字段（留空＝全部保留）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.leftFields ?? []) as string[]}
               placeholder="左表字段名，多个用「、」分隔"
               onChange={(value) => setKey("leftFields", value)}
@@ -1151,6 +1210,7 @@ export function ConfigPanel({
           </Field>
           <Field label="J 路右表输出字段（留空＝全部保留）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.rightFields ?? []) as string[]}
               placeholder="右表字段名，多个用「、」分隔"
               onChange={(value) => setKey("rightFields", value)}
@@ -1213,6 +1273,7 @@ export function ConfigPanel({
         <>
           <Field label="去重字段（至少 1 个）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.fields ?? []) as string[]}
               placeholder="字段名，多个用「、」分隔"
               onChange={(value) => setKey("fields", value)}
@@ -1244,9 +1305,10 @@ export function ConfigPanel({
             <div className="df-list-head">
               {rules.map((rule, index) => (
                 <div className="df-list-row" key={index}>
-                  <TextIn
+                  <FieldIn
+                    suggestions={fieldOptions}
                     value={rule.field}
-                    placeholder="字段名"
+                    placeholder="字段名（可下拉选）"
                     onChange={(value) => patchRule(index, { field: value })}
                   />
                   <Sel
@@ -1298,6 +1360,7 @@ export function ConfigPanel({
         <>
           <Field label="分组字段（留空＝全表作为一组）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.groupBy ?? []) as string[]}
               placeholder="字段名，多个用「、」分隔"
               onChange={(value) => setKey("groupBy", value)}
@@ -1307,9 +1370,10 @@ export function ConfigPanel({
             <div className="df-list-head">
               {aggregations.map((agg, index) => (
                 <div className="df-list-row" key={index}>
-                  <TextIn
+                  <FieldIn
+                    suggestions={fieldOptions}
                     value={agg.field}
-                    placeholder="字段（总行数可留空）"
+                    placeholder="字段（可下拉选，总行数可留空）"
                     onChange={(value) =>
                       setAggregations(
                         aggregations.map((item, i) => (i === index ? { ...item, field: value } : item)),
@@ -1365,25 +1429,28 @@ export function ConfigPanel({
         <>
           <div className="df-row2">
             <Field label="行字段">
-              <TextIn
+              <FieldIn
+                suggestions={fieldOptions}
                 value={String(config.rowField ?? "")}
-                placeholder="如 客商名称"
+                placeholder="如 客商名称（可下拉选）"
                 onChange={(value) => setKey("rowField", value)}
               />
             </Field>
             <Field label="列字段（首版 1 个）">
-              <TextIn
+              <FieldIn
+                suggestions={fieldOptions}
                 value={String(config.columnField ?? "")}
-                placeholder="如 期间"
+                placeholder="如 期间（可下拉选）"
                 onChange={(value) => setKey("columnField", value)}
               />
             </Field>
           </div>
           <div className="df-row2">
             <Field label="值字段">
-              <TextIn
+              <FieldIn
+                suggestions={fieldOptions}
                 value={String(config.valueField ?? "")}
-                placeholder="如 借方金额"
+                placeholder="如 借方金额（可下拉选）"
                 onChange={(value) => setKey("valueField", value)}
               />
             </Field>
@@ -1416,6 +1483,7 @@ export function ConfigPanel({
         <>
           <Field label="保持不变的列（固定列）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.fixedFields ?? []) as string[]}
               placeholder="字段名，多个用「、」分隔"
               onChange={(value) => setKey("fixedFields", value)}
@@ -1423,6 +1491,7 @@ export function ConfigPanel({
           </Field>
           <Field label="转入行的列（转置列，至少 1 个）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.valueColumns ?? []) as string[]}
               placeholder="字段名，多个用「、」分隔"
               onChange={(value) => setKey("valueColumns", value)}
@@ -1561,6 +1630,7 @@ export function ConfigPanel({
                   {rule.type === "balance" && (
                     <div className="df-list-head">
                       <TokenIn
+                        suggestions={fieldOptions}
                         value={rule.groupBy ?? []}
                         placeholder="分组字段（留空＝全表），如 凭证号"
                         onChange={(value) => patchRule(index, { groupBy: value })}
@@ -1586,6 +1656,7 @@ export function ConfigPanel({
                   )}
                   {rule.type === "notEmpty" && (
                     <TokenIn
+                      suggestions={fieldOptions}
                       value={rule.fields ?? []}
                       placeholder="非空字段，多个用「、」分隔"
                       onChange={(value) => patchRule(index, { fields: value })}
@@ -1599,6 +1670,7 @@ export function ConfigPanel({
                         onChange={(value) => patchRule(index, { field: value })}
                       />
                       <TokenIn
+                        suggestions={fieldOptions}
                         value={rule.groupBy ?? []}
                         placeholder="分组内唯一（留空＝全表唯一）"
                         onChange={(value) => patchRule(index, { groupBy: value })}
@@ -1800,6 +1872,7 @@ export function ConfigPanel({
           />
           <Field label="读取字段（留空＝全部字段）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.fields ?? []) as string[]}
               placeholder="字段名，多个用「、」分隔"
               onChange={(value) => setKey("fields", value)}
@@ -1831,6 +1904,7 @@ export function ConfigPanel({
           </Field>
           <Field label="读取字段（留空＝全部字段）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.fields ?? []) as string[]}
               placeholder="字段名，多个用「、」分隔"
               onChange={(value) => setKey("fields", value)}

@@ -103,6 +103,8 @@ export interface DataflowCanvasProps {
   /** 节点真正开始被拖动前调用一次（撤销栈快照）。 */
   onNodeDragStart: () => void;
   onConnect: (edge: DataflowEdge) => void;
+  /** 最近新增节点的 id：若它落在当前视野外（视角曾被拖远），自动把视角对准它。 */
+  focusNodeId?: string | null;
 }
 
 /** 数据流画布：拖动/连线/平移/缩放/点选，原生 DOM + SVG 实现。 */
@@ -115,6 +117,7 @@ export function DataflowCanvas({
   onMoveNode,
   onNodeDragStart,
   onConnect,
+  focusNodeId,
 }: DataflowCanvasProps) {
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const [camera, setCamera] = useState({ x: 24, y: 16, zoom: 1 });
@@ -154,6 +157,32 @@ export function DataflowCanvas({
     canvas.addEventListener("wheel", onWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", onWheel);
   }, []);
+
+  // 新增节点必须落在视野内：节点坐标固定在原点附近，视角一旦被拖远
+  // （旧版拖动画布带文字选择假象时尤其容易反复拖），新节点全部画在
+  // 视野外，用户看到的就是「点了添加，画框里什么都没有」。这里在
+  // 新节点完整落于视野外时把视角平移到对准它（缩放保持不变）。
+  useEffect(() => {
+    if (!focusNodeId) return;
+    const node = workflow.nodes.find((item) => item.id === focusNodeId);
+    const canvas = canvasRef.current;
+    if (!node || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const cameraNow = cameraRef.current;
+    const screenX = cameraNow.x + node.x * cameraNow.zoom;
+    const screenY = cameraNow.y + node.y * cameraNow.zoom;
+    const w = NODE_W * cameraNow.zoom;
+    const h = NODE_H * cameraNow.zoom;
+    const visible =
+      screenX >= 0 && screenY >= 0 && screenX + w <= rect.width && screenY + h <= rect.height;
+    if (visible) return;
+    setCamera({
+      zoom: cameraNow.zoom,
+      x: rect.width / 2 - (node.x + NODE_W / 2) * cameraNow.zoom,
+      y: rect.height / 2 - (node.y + NODE_H / 2) * cameraNow.zoom,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusNodeId]);
 
   function worldFromEvent(event: React.PointerEvent): { x: number; y: number } {
     const rect = (canvasRef.current as HTMLDivElement).getBoundingClientRect();

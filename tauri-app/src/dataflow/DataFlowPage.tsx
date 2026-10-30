@@ -50,6 +50,8 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   const connectRejectedRef = useRef("");
   const [historyTick, setHistoryTick] = useState(0);
   const [selection, setSelection] = useState<DataflowSelection>(null);
+  // 最近新增节点：交给画布保证落在视野内（视角被拖远时自动对准）。
+  const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const [runResult, setRunResult] = useState<DataflowRunResult | null>(null);
   const [lastRunMode, setLastRunMode] = useState<"preview" | "full" | null>(null);
   /** 「运行到选中节点」时记录目标节点 id，其余运行方式为 null。 */
@@ -132,6 +134,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     };
     commit((current) => ({ ...current, nodes: [...current.nodes, node] }));
     setSelection({ kind: "node", id: node.id });
+    setFocusNodeId(node.id);
     // 添加节点是用户对错误提示的典型响应，先清掉上次的失败卡。
     setError("");
     setStatusText(`已添加「${node.name}」节点。`);
@@ -535,6 +538,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
             onMoveNode={moveNode}
             onNodeDragStart={snapshotForDrag}
             onConnect={connect}
+            focusNodeId={focusNodeId}
           />
         </div>
         <ResultsPanel

@@ -351,3 +351,18 @@ it("仅定义参数、没有节点的流程不落草稿，也不误报「自动�
   expect(screen.queryByText(/已自动保存/)).not.toBeInTheDocument();
   expect(screen.queryByText(/自动保存失败/)).not.toBeInTheDocument();
 });
+
+it("视角被拖远后新增节点：画布自动把视角对准新节点，不再出现「添加了节点却看不见」", async () => {
+  // 真实反馈（dev.16）：画布空白处拖动带文字选择假象，用户反复拖把视角
+  // 拖远；此后新增节点固定放在原点附近，全部落在视野外，画布看着是空的。
+  render(<DataFlowPage tool={dataflowTool} />);
+  await addNodeFromMenu("输入", "Excel 输入");
+
+  // jsdom 没有布局（画布尺寸恒为 0×0），新增节点永远判定为「在视野外」，
+  // 因此这里锁定确定性的对准行为：新节点落在视野外时视角对准它。
+  // （视角拖远后自动回焦的完整路径在真实浏览器里验证。）
+  // 节点 1（Excel 输入）位于 (60, 60)，宽 156 高 78：对准后相机
+  // x = -60-78 = -138、y = -60-39 = -99。
+  const transform = (document.querySelector(".df-world") as HTMLElement).style.transform;
+  expect(transform).toBe("translate(-138px, -99px) scale(1)");
+});

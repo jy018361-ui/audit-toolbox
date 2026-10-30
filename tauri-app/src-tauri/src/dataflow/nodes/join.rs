@@ -16,6 +16,7 @@ use crate::dataflow::value::{ColType, Value};
 use crate::AppError;
 use serde_json::Value as Json;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 键类型类别：同类别才允许配对（整数与十进制同属数值，可精确相等）。
 fn key_class(kind: ColType) -> &'static str {
@@ -209,7 +210,26 @@ pub(crate) fn run_join(
         }
     }
 
-    let mut j_rows: Vec<Vec<Value>> = Vec::new();
+    // 预检 J 路总组合行数（Σ 左键行数 × 右键行数，饱和运算防溢出）：
+    // 多对多键选错（如两表键列全为空文本——空文本按具体值参与匹配）时，
+    // 组合数可达数十亿，必须先于任何物化拦截，否则进程在报错前就耗尽内存
+    // （参照宽转长 transpose 的预检范式）。
+    let j_total = left_counts.iter().fold(0usize, |acc, (key, &count)| match right_map.get(key) {
+        Some(partners) => acc.saturating_add(count.saturating_mul(partners.len())),
+        None => acc,
+    });
+    if j_total > MAX_TABLE_ROWS {
+        return Err(structural(
+            "DATAFLOW_ROW_LIMIT",
+            format!(
+                "节点「{node_name}」的 J 路（匹配）预计行数（{j_total}）\
+                 超出内网上限（{MAX_TABLE_ROWS} 行），多对多组合膨胀明显超出资源预算。\
+                 请先去重关联键或缩小数据范围。",
+            ),
+        ));
+    }
+
+    let mut j_rows: Vec<Vec<Value>> = Vec::with_capacity(j_total.min(MAX_TABLE_ROWS));
     let mut l_rows: Vec<Vec<Value>> = Vec::new();
     let mut left_matched_rows = 0usize;
     for row in &left.rows {
@@ -224,6 +244,18 @@ pub(crate) fn run_join(
                     .collect();
                 combined.resize(width, Value::Null);
                 for &partner in partners {
+                    // 双保险：预检按构造与实际 push 数一致，但这里在每次 push 前
+                    // 再拦一次已达上限的组合，保证任何路径下都不超限物化。
+                    if j_rows.len() >= MAX_TABLE_ROWS {
+                        return Err(structural(
+                            "DATAFLOW_ROW_LIMIT",
+                            format!(
+                                "节点「{node_name}」的 J 路（匹配）行数已达内网上限\
+                                 （{MAX_TABLE_ROWS} 行），多对多组合膨胀明显超出资源预算，\
+                                 已提前中止。请先去重关联键或缩小数据范围。",
+                            ),
+                        ));
+                    }
                     let mut line = combined.clone();
                     for (slot, &column) in right_slots.iter().enumerate() {
                         line[left_width + slot] = right.rows[partner][column].clone();
@@ -237,16 +269,6 @@ pub(crate) fn run_join(
                 l_rows.push(line);
             }
         }
-    }
-    if j_rows.len() > MAX_TABLE_ROWS {
-        return Err(structural(
-            "DATAFLOW_ROW_LIMIT",
-            format!(
-                "节点「{node_name}」的 J 路（匹配）行数（{}）超出内网上限（{MAX_TABLE_ROWS} 行），\
-                 多对多组合膨胀明显超出资源预算。请先去重关联键或缩小数据范围。",
-                j_rows.len()
-            ),
-        ));
     }
 
     // 右表未匹配行 → R（左字段补空值）。空值键的右侧行一律未匹配。
@@ -334,9 +356,9 @@ pub(crate) fn run_join(
     let r_count = r_rows.len();
     let outcome = NodeOutcome {
         anchors: vec![
-            ("J".to_owned(), Table { columns: columns.clone(), types: types.clone(), rows: j_rows }),
-            ("L".to_owned(), Table { columns: columns.clone(), types: types.clone(), rows: l_rows }),
-            ("R".to_owned(), Table { columns, types, rows: r_rows }),
+            ("J".to_owned(), Arc::new(Table { columns: columns.clone(), types: types.clone(), rows: j_rows })),
+            ("L".to_owned(), Arc::new(Table { columns: columns.clone(), types: types.clone(), rows: l_rows })),
+            ("R".to_owned(), Arc::new(Table { columns, types, rows: r_rows })),
         ],
         messages: Vec::new(),
         stats,
@@ -345,4 +367,106 @@ pub(crate) fn run_join(
         has_warnings: false,
     };
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn key_config() -> Json {
+        json!({
+            "keys": [{"left": "k", "right": "k"}],
+            "leftFields": [], "rightFields": [], "sameNameSuffix": "_右"
+        })
+    }
+
+    fn anchor<'a>(outcome: &'a NodeOutcome, name: &str) -> &'a Table {
+        &outcome
+            .anchors
+            .iter()
+            .find(|(key, _)| key == name)
+            .unwrap_or_else(|| panic!("应存在 {name} 输出锚点"))
+            .1
+    }
+
+    /// NodeOutcome 未实现 Debug，无法用 unwrap_err，统一走这个取错误断言入口。
+    fn expect_row_limit(result: Result<NodeOutcome, AppError>) -> AppError {
+        match result {
+            Ok(_) => panic!("组合行数超限时应返回 DATAFLOW_ROW_LIMIT 错误，而不是成功"),
+            Err(error) => error,
+        }
+    }
+
+    /// 正常多对多：3 左 × 4 右同键 = 12 行笛卡尔积，不挑一条、不去重。
+    #[test]
+    fn multi_multi_small_cartesian_still_works() {
+        let left = Table {
+            columns: vec!["k".into(), "a".into()],
+            types: vec![ColType::Integer, ColType::Integer],
+            rows: (0..3).map(|i| vec![Value::Int(1), Value::Int(10 + i)]).collect(),
+        };
+        let right = Table {
+            columns: vec!["k".into(), "b".into()],
+            types: vec![ColType::Integer, ColType::Text],
+            rows: (0..4).map(|i| vec![Value::Int(1), Value::Text(format!("x{i}"))]).collect(),
+        };
+        let outcome = run_join("关联", &key_config(), &left, &right).unwrap();
+        let j = anchor(&outcome, "J");
+        assert_eq!(j.rows.len(), 12, "同一键左 3 × 右 4 应得 12 行组合");
+        assert_eq!(anchor(&outcome, "L").rows.len(), 0);
+        assert_eq!(anchor(&outcome, "R").rows.len(), 0);
+        assert_eq!(
+            j.rows[0],
+            vec![Value::Int(1), Value::Int(10), Value::Int(1), Value::Text("x0".into())]
+        );
+        assert_eq!(
+            j.rows[11],
+            vec![Value::Int(1), Value::Int(12), Value::Int(1), Value::Text("x3".into())]
+        );
+    }
+
+    /// 多对多组合爆炸：1500 × 1000 同键 = 150 万行 > 100 万上限，
+    /// 必须在物化前（预检）返回 DATAFLOW_ROW_LIMIT 中文错误，而不是先堆内存再报错。
+    #[test]
+    fn cartesian_blowup_errors_before_materialization() {
+        let left = Table {
+            columns: vec!["k".into(), "a".into()],
+            types: vec![ColType::Integer, ColType::Integer],
+            rows: (0..1500).map(|i| vec![Value::Int(1), Value::Int(i)]).collect(),
+        };
+        let right = Table {
+            columns: vec!["k".into(), "b".into()],
+            types: vec![ColType::Integer, ColType::Integer],
+            rows: (0..1000).map(|i| vec![Value::Int(1), Value::Int(i)]).collect(),
+        };
+        let error = expect_row_limit(run_join("关联", &key_config(), &left, &right));
+        let payload = serde_json::to_value(&error).unwrap();
+        assert_eq!(payload["code"], "DATAFLOW_ROW_LIMIT");
+        let message = payload["userMessage"].as_str().unwrap();
+        assert!(message.contains("超出内网上限"), "应给出中文上限提示：{message}");
+        assert!(message.contains("1500000"), "应报告预计组合行数 150 万：{message}");
+        assert!(message.contains("去重关联键"), "应给出处理建议：{message}");
+    }
+
+    /// 空文本是合法匹配键（Null 才不匹配）：两表键列全为空文本即全表单键，
+    /// 1200 × 1000 = 120 万行同样必须在物化前被拦下（选错键列的现实触发路径）。
+    #[test]
+    fn empty_text_keys_blowup_also_guarded() {
+        let left = Table {
+            columns: vec!["k".into(), "a".into()],
+            types: vec![ColType::Text, ColType::Integer],
+            rows: (0..1200).map(|i| vec![Value::Text(String::new()), Value::Int(i)]).collect(),
+        };
+        let right = Table {
+            columns: vec!["k".into(), "b".into()],
+            types: vec![ColType::Text, ColType::Integer],
+            rows: (0..1000).map(|i| vec![Value::Text(String::new()), Value::Int(i)]).collect(),
+        };
+        let error = expect_row_limit(run_join("关联", &key_config(), &left, &right));
+        let payload = serde_json::to_value(&error).unwrap();
+        assert_eq!(payload["code"], "DATAFLOW_ROW_LIMIT");
+        let message = payload["userMessage"].as_str().unwrap();
+        assert!(message.contains("1200000"), "应报告预计组合行数 120 万：{message}");
+    }
 }

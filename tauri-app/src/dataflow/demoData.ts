@@ -336,7 +336,9 @@ function upstreamClosure(workflow: DataflowWorkflow, targetId: string): Set<stri
  * 生成演示运行结果。按拓扑序给每个节点编造可解释的行数/耗时/消息；
  * 筛选 T/F、去重 U/D、关联 J/L/R、检查 P/NG 多路锚点齐全；
  * 输出节点在预览模式不落盘、全量模式给出输出清单。
- * uptoNodeId＝「运行到选中节点」：只返回该节点及其上游的结果，其后节点不出现。
+ * uptoNodeId＝「运行到选中节点」：只返回该节点及其上游的结果，其后节点不出现；
+ * 目标节点不在流程中时与真实引擎一致（engine.rs upstream_closure）返回
+ * DATAFLOW_UPTO_NODE_MISSING 错误结果，而不是静默全量执行。
  */
 export function dataflowDemoResult(
   mode: "preview" | "full",
@@ -354,11 +356,21 @@ export function dataflowDemoResult(
     };
   }
   const workflow: DataflowWorkflow = parsed.workflow;
+  // 与真实引擎对齐：未知目标节点报错，不再「兜底全量执行」——同一请求在浏览器
+  // 演示与 Tauri 下结局一致（此前浏览器静默全跑、Tauri 报中文错误）。
+  if (uptoNodeId && !workflow.nodes.some((node) => node.id === uptoNodeId)) {
+    return {
+      mode,
+      nodes: {},
+      outputs: [],
+      error: {
+        code: "DATAFLOW_UPTO_NODE_MISSING",
+        userMessage: `「运行到选中节点」的目标节点“${uptoNodeId}”不存在，请检查节点 id。`,
+      },
+    };
+  }
   const order = topoOrder(workflow);
-  // 目标节点不在流程中时不截断（页面层已拦截，这里兜底演示）。
-  const uptoValid =
-    uptoNodeId && workflow.nodes.some((node) => node.id === uptoNodeId) ? uptoNodeId : undefined;
-  const allowed = uptoValid ? upstreamClosure(workflow, uptoValid) : null;
+  const allowed = uptoNodeId ? upstreamClosure(workflow, uptoNodeId) : null;
   const outcomes: Record<string, NodeOutcome> = {};
   const outputs: DataflowRunResult["outputs"] = [];
   const timestamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -460,13 +472,48 @@ export function dataflowDemoResult(
       }
       case "excel_out":
       case "csv_out": {
-        outcome.anchors.output = anchorFromTable(table.columns, table.rows, rows);
         const rawName =
           typeof config.fileName === "string" && config.fileName
             ? config.fileName
             : `${node.type === "excel_out" ? "输出结果" : "输出明细"}_{p1}.${node.type === "excel_out" ? "xlsx" : "csv"}`;
-        const fileName = applyParamPlaceholders(rawName, workflow.params, paramOverrides);
-        const sheet = typeof config.sheetName === "string" && config.sheetName ? config.sheetName : node.name;
+        // 运行前解析可能已把文件名补成绝对路径（输出位置自动补全），演示层
+        // 只取文件名部分再拼自己的样例目录，避免出现双盘符拼接。
+        const fileName = applyParamPlaceholders(
+          rawName.split(/[\\/]/).pop() ?? rawName,
+          workflow.params,
+          paramOverrides,
+        );
+        // 锚点键对齐真实引擎（nodes/output.rs）：Excel 输出用「sheet:名」——第 1 条连线
+        // 用配置 Sheet 名（缺省＝上游节点名），其余连线用各自上游节点名；CSV 输出用
+        // 「file:名.扩展名」，多输入时文件名 _2/_3 递增。
+        const incoming = workflow.edges
+          .filter((edge) => edge.to === nodeId && edge.toAnchor === "in")
+          .map((edge) => workflow.nodes.find((item) => item.id === edge.from)?.name ?? "上游数据");
+        const configuredSheet =
+          typeof config.sheetName === "string" && config.sheetName ? config.sheetName : "";
+        const sheetBases = incoming.map((upstream, position) =>
+          position === 0 && configuredSheet ? configuredSheet : upstream,
+        );
+        const sheet = sheetBases[0] ?? node.name;
+        if (node.type === "excel_out") {
+          const seen = new Set<string>();
+          for (const base of sheetBases) {
+            if (seen.has(base)) continue;
+            seen.add(base);
+            outcome.anchors[`sheet:${base}`] = anchorFromTable(table.columns, table.rows, rows);
+          }
+        } else {
+          const dot = fileName.lastIndexOf(".");
+          const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
+          const ext = dot > 0 ? fileName.slice(dot + 1) : "csv";
+          const seen = new Set<string>();
+          incoming.forEach((_, position) => {
+            const base = position === 0 ? stem : `${stem}_${position + 1}`;
+            if (seen.has(base)) return;
+            seen.add(base);
+            outcome.anchors[`file:${base}.${ext}`] = anchorFromTable(table.columns, table.rows, rows);
+          });
+        }
         if (mode === "preview") {
           outcome.messages = [
             `${timestamp} 预览运行不写输出文件，仅在结果区展示样本`,

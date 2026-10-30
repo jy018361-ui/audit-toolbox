@@ -527,6 +527,23 @@ pub(crate) fn run_crosstab(
         ));
     }
 
+    // 预检输出规模：行键基数 × 列键基数 = 输出单元格数量级。稀疏透视（如
+    // 单据号×科目）缺失组合照样逐格物化，必须先于物化拦截，否则数千万至
+    // 十亿个 Value 先堆满内存（参照宽转长 transpose 的乘积预检范式）。
+    let total_cells = row_order.len().saturating_mul(column_order.len());
+    if total_cells > MAX_TABLE_ROWS {
+        return Err(structural(
+            "DATAFLOW_ROW_LIMIT",
+            format!(
+                "节点「{node_name}」透视输出规模（{} 行 × {} 列 = {total_cells} 个单元格）\
+                 超出内网上限（{MAX_TABLE_ROWS}）。行字段与列字段取值组合过多\
+                 （如单据号×科目），请先筛选取值或改用汇总+导出。",
+                row_order.len(),
+                column_order.len()
+            ),
+        ));
+    }
+
     // 动态列名＝列字段值文本；不同键产生相同列名时明确报错（不静默合并）。
     let row_field_name = input.columns[row_column].clone();
     let mut columns = vec![row_field_name.clone()];
@@ -763,4 +780,104 @@ pub(crate) fn run_transpose(
     let mut outcome = NodeOutcome::with_anchor("output", Table { columns, types, rows });
     outcome.stats = stats;
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn crosstab_config() -> Json {
+        json!({"rowField": "r", "columnField": "c", "valueField": "v"})
+    }
+
+    fn input_table(rows: Vec<Vec<Value>>) -> Table {
+        Table {
+            columns: vec!["r".into(), "c".into(), "v".into()],
+            types: vec![ColType::Text, ColType::Text, ColType::Integer],
+            rows,
+        }
+    }
+
+    /// NodeOutcome 未实现 Debug，统一经 match 取错误，避免 unwrap_err 编译不过。
+    fn expect_row_limit(result: Result<NodeOutcome, AppError>) -> AppError {
+        match result {
+            Ok(_) => panic!("透视单元格总数超限时应返回 DATAFLOW_ROW_LIMIT，而不是成功"),
+            Err(error) => error,
+        }
+    }
+
+    /// 常规稀疏透视不受影响：缺失组合填默认 0，命中组合求和。
+    #[test]
+    fn crosstab_small_sparse_pivot_still_works() {
+        let input = input_table(vec![
+            vec![Value::Text("r1".into()), Value::Text("c1".into()), Value::Int(10)],
+            vec![Value::Text("r1".into()), Value::Text("c2".into()), Value::Int(20)],
+            vec![Value::Text("r2".into()), Value::Text("c1".into()), Value::Int(30)],
+        ]);
+        let outcome = run_crosstab("透视", &crosstab_config(), &input).unwrap();
+        let (key, table) = outcome
+            .anchors
+            .iter()
+            .find(|(key, _)| key == "output")
+            .expect("应存在 output 锚点");
+        assert_eq!(key, "output");
+        assert_eq!(table.columns, vec!["r".to_owned(), "c1".to_owned(), "c2".to_owned()]);
+        assert_eq!(
+            table.rows,
+            vec![
+                vec![Value::Text("r1".into()), Value::Int(10), Value::Int(20)],
+                vec![Value::Text("r2".into()), Value::Int(30), Value::Int(0)],
+            ]
+        );
+    }
+
+    /// 单元格总数超限（1100 行键 × 1000 列键 = 110 万 > 100 万）必须在物化前
+    /// 报 DATAFLOW_ROW_LIMIT——列数 1000 未超列上限，风险只来自行列乘积。
+    #[test]
+    fn crosstab_cell_count_blowup_guarded_before_materialization() {
+        let rows = (0..1100)
+            .map(|i| {
+                vec![
+                    Value::Text(format!("单据{i:04}")),
+                    Value::Text(format!("c{}", i % 1000)),
+                    Value::Int(1),
+                ]
+            })
+            .collect();
+        let error = expect_row_limit(run_crosstab("透视", &crosstab_config(), &input_table(rows)));
+        let payload = serde_json::to_value(&error).unwrap();
+        assert_eq!(payload["code"], "DATAFLOW_ROW_LIMIT");
+        let message = payload["userMessage"].as_str().unwrap();
+        assert!(message.contains("内网上限"), "应给出中文上限提示：{message}");
+        assert!(message.contains("1100000"), "应报告单元格总数 110 万：{message}");
+    }
+
+    /// 边界语义：恰好 1000 × 1000 = 100 万个单元格不报错（与汇总的 > 语义一致），
+    /// 输出 1000 行 × 1001 列。
+    #[test]
+    fn crosstab_exactly_one_million_cells_allowed() {
+        let rows = (0..1000)
+            .map(|i| {
+                vec![
+                    Value::Text(format!("r{i}")),
+                    Value::Text(format!("c{i}")),
+                    Value::Int(7),
+                ]
+            })
+            .collect();
+        let outcome = run_crosstab("透视", &crosstab_config(), &input_table(rows)).unwrap();
+        let table = &outcome
+            .anchors
+            .iter()
+            .find(|(key, _)| key == "output")
+            .expect("应存在 output 锚点")
+            .1;
+        assert_eq!(table.rows.len(), 1000);
+        assert_eq!(table.columns.len(), 1001);
+        // 首行：r0 命中 c0=7，其余 999 列填默认 0。
+        assert_eq!(table.rows[0][0], Value::Text("r0".into()));
+        assert_eq!(table.rows[0][1], Value::Int(7));
+        assert_eq!(table.rows[0][2], Value::Int(0));
+    }
 }

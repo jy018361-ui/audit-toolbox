@@ -3,6 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JeSignMarkPage } from "./JeSignMarkPage";
+import { publishTaskRestore } from "./restore";
 import type { ToolManifest } from "./types";
 
 vi.mock("./api", () => ({
@@ -50,6 +51,22 @@ function seedLoadedDraft() {
 }
 
 describe("JeSignMarkPage", () => {
+  it("restores a reading step without mapping and re-identifies the saved source", async () => {
+    const { jobStart } = await import("./api");
+    vi.mocked(jobStart).mockResolvedValueOnce("restored-read");
+    publishTaskRestore({
+      jobId: "old-read", toolId: tool.id, method: "kanzhang.mark_inspect",
+      params: { inputPath: "C:/tmp/saved.xlsx", sheet: "凭证", headerRow: 2 },
+      missingPaths: [], authorizedPathCount: 1,
+    });
+    render(<JeSignMarkPage tool={tool} />);
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("kanzhang.mark_inspect", {
+      inputPath: "C:/tmp/saved.xlsx", sheet: "凭证", headerRow: 2, headerDepth: 1,
+    }));
+    const draft = JSON.parse(sessionStorage.getItem("audit-toolbox.je-sign-mark.draft.v2") ?? "{}");
+    expect(draft.inputPath).toBe("C:/tmp/saved.xlsx");
+    expect(draft.sheet).toBe("凭证");
+  });
   it("取消后页首提供独立警示徽标和重试方向", async () => {
     const { listenJobEvents } = await import("./api");
     const { container } = render(<JeSignMarkPage tool={tool} />);
@@ -62,6 +79,7 @@ describe("JeSignMarkPage", () => {
     // vitest 未开全局 cleanup，不手动卸载的话上一条用例的 DOM 会留到下一条。
     cleanup();
     sessionStorage.clear();
+    vi.clearAllMocks();
   });
 
   it("shows only the loading card before a file is read", () => {

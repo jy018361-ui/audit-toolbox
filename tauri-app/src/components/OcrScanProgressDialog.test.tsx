@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import {
   cleanup,
+  act,
   fireEvent,
   render,
   screen,
@@ -12,7 +13,7 @@ import { OcrScanProgressDialog } from "./OcrScanProgressDialog";
 import { JobDialogProvider } from "./JobDialog";
 import { useOcrScanProgressDialog, type OcrScanProgress } from "../ocrProgress";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 const scan = (changes: Partial<OcrScanProgress> = {}): OcrScanProgress => ({
   fileName: "测试贷款合同.pdf",
   fileIndex: 1,
@@ -50,6 +51,48 @@ it("以已处理页数展示扫描进度，仅一组操作，逐页状态按需�
   fireEvent.click(screen.getByRole("button", { name: "取消扫描" }));
   expect(progress.onPause).toHaveBeenCalledOnce();
   expect(progress.onCancel).toHaveBeenCalledOnce();
+});
+
+it("29/30时默认显示真实拖尾第11页，用时持续更新且不自动重试", () => {
+  vi.useFakeTimers();
+  let now = 100000;
+  vi.spyOn(performance, "now").mockImplementation(() => now);
+  const onDeferPage = vi.fn();
+  const progress = scan({ completed: 29, total: 30, onDeferPage,
+    pages: Array.from({ length: 30 }, (_, i) => ({
+      page: i + 1, state: i === 10 ? "ocr_request" : "completed",
+      startedAt: i === 10 ? 10000 : 0, cancellable: i === 10,
+    })),
+  });
+  const { rerender } = render(<OcrScanProgressDialog progress={progress} />);
+  expect(screen.getByLabelText("仍在处理的页面").textContent).toContain("仍在处理：第 11 页");
+  expect(screen.getByLabelText("仍在处理的页面").textContent).toContain("等待识别服务返回 · 已用时 90 秒");
+  expect(screen.queryByLabelText("逐页扫描状态")).toBeNull();
+  now += 4000;
+  act(() => vi.advanceTimersByTime(4000));
+  expect(screen.getByLabelText("仍在处理的页面").textContent).toContain("已用时 94 秒");
+  expect(onDeferPage).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "结束第 11 页等待，稍后补扫" }));
+  expect(onDeferPage).toHaveBeenCalledWith(11);
+  expect(progress.onCancel).not.toHaveBeenCalled();
+  rerender(<OcrScanProgressDialog progress={{ ...progress, pages: progress.pages.map(p => p.page === 11 ? { ...p, cancelling: true } : p) }} />);
+  expect((screen.getByRole("button", { name: "结束第 11 页等待，稍后补扫" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "后台运行" }));
+  expect(screen.getByRole("button", { name: "展开 OCR 扫描进度" }).textContent).toContain("仍在处理：第 11 页");
+});
+
+it("短任务及暂停时不误报长等待，旧版无开始时间仍显示活动页码", () => {
+  vi.spyOn(performance, "now").mockReturnValue(10000);
+  const progress = scan({ onDeferPage: vi.fn(), pages: [{ page: 7, state: "running", startedAt: 0, cancellable: true }] });
+  const { rerender } = render(<OcrScanProgressDialog progress={progress} />);
+  expect(screen.queryByText(/部分页面耗时较长/)).toBeNull();
+  expect(screen.queryByRole("button", { name: /结束第/ })).toBeNull();
+  rerender(<OcrScanProgressDialog progress={{ ...progress, paused: true, pages: [{ ...progress.pages[0], startedAt: -40000 }] }} />);
+  expect(screen.queryByText(/部分页面耗时较长/)).toBeNull();
+  expect((screen.getByRole("button", { name: /结束第/ }) as HTMLButtonElement).disabled).toBe(true);
+  rerender(<OcrScanProgressDialog progress={scan({ pages: [{ page: 11, state: "running" }] })} />);
+  expect(screen.getByLabelText("仍在处理的页面").textContent).toContain("第 11 页 · 识别中");
+  expect(screen.getByLabelText("仍在处理的页面").textContent).not.toContain("秒");
 });
 it("未知页数不显示虚假百分比，保存阶段保留弹窗", () => {
   const { rerender } = render(

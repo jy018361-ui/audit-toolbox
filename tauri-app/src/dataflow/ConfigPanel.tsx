@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { SwitchInput } from "@/components/SwitchInput";
@@ -7,10 +7,12 @@ import { dataflowDbTables } from "../api";
 import { CATEGORY_COLOR } from "./Canvas";
 import {
   CHECK_RULE_TYPES,
+  CROSSTAB_VALUE_FUNCS,
   FILTER_OPERATORS,
   MANUAL_COLUMN_TYPES,
   SUMMARIZE_FUNCS,
   defaultCheckRule,
+  incompleteFilterRule,
   type CheckRuleConfig,
   type CheckRuleType,
   type CleanActionConfig,
@@ -56,6 +58,11 @@ export interface ConfigPanelProps {
     extensions: string[],
     apply: (path: string) => void,
   ) => void;
+  /** 输出位置（记住的默认输出文件夹）；输出文件名留空/只填名字时自动保存到这里。 */
+  outputDir: string;
+  onPickOutputDir: () => void;
+  /** 上游（或输入节点自身）最近一次运行的列名：字段输入框的下拉建议来源。 */
+  fieldOptions: string[];
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -87,6 +94,42 @@ function TextIn({
       placeholder={placeholder}
       onChange={(event) => onChange(event.target.value)}
     />
+  );
+}
+
+/** 字段名输入：带上游列名下拉建议（datalist）。可直接手输，也可从
+    上游节点最近一次运行的标题行/输出列里选——用户不必再照着表格抄字段名。 */
+let fieldSuggestSeq = 0;
+function FieldIn({
+  value,
+  onChange,
+  placeholder,
+  suggestions,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  suggestions: string[];
+}) {
+  const listId = useMemo(() => `df-field-list-${++fieldSuggestSeq}`, []);
+  return (
+    <>
+      <input
+        className="df-in"
+        type="text"
+        list={suggestions.length ? listId : undefined}
+        value={value}
+        placeholder={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {suggestions.length > 0 && (
+        <datalist id={listId}>
+          {suggestions.map((name) => (
+            <option key={name} value={name} />
+          ))}
+        </datalist>
+      )}
+    </>
   );
 }
 
@@ -159,26 +202,40 @@ function TokenIn({
   value,
   onChange,
   placeholder,
+  suggestions = [],
 }: {
   value: string[];
   onChange: (value: string[]) => void;
   placeholder?: string;
+  /** 上游列名下拉建议（datalist）：选中一项即追加一个字段。 */
+  suggestions?: string[];
 }) {
+  const listId = useMemo(() => `df-token-list-${++fieldSuggestSeq}`, []);
   return (
-    <input
-      className="df-in"
-      type="text"
-      value={value.join("、")}
-      placeholder={placeholder}
-      onChange={(event) =>
-        onChange(
-          event.target.value
-            .split(/[,，、;；\n]+/)
-            .map((item) => item.trim())
-            .filter(Boolean),
-        )
-      }
-    />
+    <>
+      <input
+        className="df-in"
+        type="text"
+        list={suggestions.length ? listId : undefined}
+        value={value.join("、")}
+        placeholder={placeholder}
+        onChange={(event) =>
+          onChange(
+            event.target.value
+              .split(/[,，、;；\n]+/)
+              .map((item) => item.trim())
+              .filter(Boolean),
+          )
+        }
+      />
+      {suggestions.length > 0 && (
+        <datalist id={listId}>
+          {suggestions.map((name) => (
+            <option key={name} value={name} />
+          ))}
+        </datalist>
+      )}
+    </>
   );
 }
 
@@ -321,6 +378,18 @@ function Note({ children, warn }: { children: ReactNode; warn?: boolean }) {
   return <div className={`df-note${warn ? " df-note-warn" : ""}`}>{children}</div>;
 }
 
+/** 背景说明的折叠版：默认只占一行「说明」小字，点开才显示原文。
+    输入节点的类型规则说明较长，整段铺开时配置区被灰字占满，
+    下方预览区被挤出可视范围（用户反馈），需要时再展开阅读。 */
+function NoteFold({ children }: { children: ReactNode }) {
+  return (
+    <details className="df-note-fold">
+      <summary>说明</summary>
+      <div className="df-note">{children}</div>
+    </details>
+  );
+}
+
 /** 字段列表行工具：上移/下移/删除。 */
 function RowTools({
   onUp,
@@ -387,6 +456,9 @@ export function ConfigPanel({
   onConfigChange,
   onDelete,
   onPickPath,
+  outputDir,
+  onPickOutputDir,
+  fieldOptions,
 }: ConfigPanelProps) {
   // 检查规则编辑器「新增规则类型」的记忆值；hook 须位于所有提前 return 之前。
   const [newCheckRuleType, setNewCheckRuleType] = useState<CheckRuleType>("balance");
@@ -487,13 +559,14 @@ export function ConfigPanel({
       <Field label="列类型锁定（选「自动」以外即锁定该列）">
         <div className="df-list-head">
           {rows.length === 0 && (
-            <Note>未锁定列。账号、编号等易被误判为数字的列建议锁定「文本」，超 15 位整数默认按文本。</Note>
+            <NoteFold>未锁定列。账号、编号等易被误判为数字的列建议锁定「文本」，超 15 位整数默认按文本。</NoteFold>
           )}
           {rows.map((row, index) => (
             <div className="df-list-row" key={index}>
-              <TextIn
+              <FieldIn
+                suggestions={fieldOptions}
                 value={row.name}
-                placeholder="列名"
+                placeholder="列名（可下拉选）"
                 onChange={(value) =>
                   rebuild(rows.map((item, i) => (i === index ? { ...item, name: value } : item)))
                 }
@@ -557,7 +630,7 @@ export function ConfigPanel({
                     onChange={(value) => setKey("filePattern", value)}
                   />
                 </Field>
-                <Note>重跑时会在结果区报告文件清单变化：新增/缺失文件逐项列出。</Note>
+                <NoteFold>重跑时会在结果区报告文件清单变化：新增/缺失文件逐项列出。</NoteFold>
               </>
             )}
           </div>
@@ -650,7 +723,7 @@ export function ConfigPanel({
               onChange={(value) => setKey("attachSourceColumns", value)}
               label="附加来源列（来源文件/记录序号）"
             />
-            <Note>文本编号保留前导零；超 15 位整数默认按文本（保底规则）。</Note>
+            <NoteFold>文本编号保留前导零；超 15 位整数默认按文本（保底规则）。</NoteFold>
           </div>
           <div className="df-group">
             {columnTypesField()}
@@ -740,9 +813,10 @@ export function ConfigPanel({
               {actions.map((action, index) => (
                 <div className="df-list-head" key={index} style={{ padding: "4px 0", borderBottom: "1px solid var(--border-soft)" }}>
                   <div className="df-list-row">
-                    <TextIn
+                    <FieldIn
+                      suggestions={fieldOptions}
                       value={action.field}
-                      placeholder="字段名"
+                      placeholder="字段名（可下拉选）"
                       onChange={(value) => patchAction(index, { field: value })}
                     />
                     <RowTools
@@ -858,7 +932,8 @@ export function ConfigPanel({
               </button>
             </div>
           </Field>
-          <Note>后面的公式可引用前面生成的新字段；普通运算遇空值得空值，除零按行级异常处理。</Note>
+          {onRowErrorField()}
+          <Note>后面的公式可引用前面生成的新字段；普通运算遇空值得空值，除零等行级异常按上方「异常处理」设置处理（默认停止）。</Note>
         </>
       );
       break;
@@ -884,10 +959,19 @@ export function ConfigPanel({
           <Field label="条件（字段＋运算符＋值）">
             <div className="df-list-head">
               {rules.map((rule, index) => (
-                <div className="df-list-row" key={index}>
-                  <TextIn
+                <div
+                  className={`df-list-row${incompleteFilterRule(rule) ? " df-row-incomplete" : ""}`}
+                  key={index}
+                  title={
+                    incompleteFilterRule(rule)
+                      ? "这条条件还没填完整（字段或值）：运行前请补全，或删除这一行。"
+                      : undefined
+                  }
+                >
+                  <FieldIn
+                    suggestions={fieldOptions}
                     value={rule.field}
-                    placeholder="字段"
+                    placeholder="字段（可下拉选）"
                     onChange={(value) =>
                       setCondition({
                         ...condition,
@@ -954,6 +1038,17 @@ export function ConfigPanel({
     case "excel_out": {
       form = (
         <>
+          <Field label="输出位置（文件名留空时自动按时间戳命名）">
+            <div className="df-outdir">
+              <span className="df-outdir-path" title={outputDir || undefined}>
+                {outputDir || "未设置：运行时会请您选择一次并记住"}
+              </span>
+              <button type="button" className="df-btn-sm" onClick={onPickOutputDir}>
+                选择…
+              </button>
+            </div>
+          </Field>
+          <NoteFold>文件名可只填名字或留空：留空＝自动命名（流程名_节点名_时间戳），都会保存到上方「输出位置」；填了扩展名会自动补齐；需要存到别处时再填含盘符的完整路径。</NoteFold>
           <Field label="输出文件名（可代入参数）">
             <TextIn
               value={String(config.fileName ?? "")}
@@ -998,6 +1093,17 @@ export function ConfigPanel({
     case "csv_out": {
       form = (
         <>
+          <Field label="输出位置（文件名留空时自动按时间戳命名）">
+            <div className="df-outdir">
+              <span className="df-outdir-path" title={outputDir || undefined}>
+                {outputDir || "未设置：运行时会请您选择一次并记住"}
+              </span>
+              <button type="button" className="df-btn-sm" onClick={onPickOutputDir}>
+                选择…
+              </button>
+            </div>
+          </Field>
+          <NoteFold>文件名可只填名字或留空：留空＝自动命名（流程名_节点名_时间戳），都会保存到上方「输出位置」；填了扩展名会自动补齐；需要存到别处时再填含盘符的完整路径。</NoteFold>
           <Field label="输出文件名（可代入参数）">
             <TextIn
               value={String(config.fileName ?? "")}
@@ -1029,6 +1135,17 @@ export function ConfigPanel({
               onChange={(value) => setKey("delimiter", value)}
             />
           </Field>
+          <Field label="覆盖保护">
+            <Sel
+              value={String(config.overwrite ?? "error")}
+              options={[
+                { value: "error", label: "已存在：报错并提示（默认）" },
+                { value: "timestamp", label: "已存在：自动加时间戳" },
+                { value: "replace", label: "已存在：直接覆盖" },
+              ]}
+              onChange={(value) => setKey("overwrite", value)}
+            />
+          </Field>
           <Field label="按行数分文件（0＝不分）">
             <NumIn
               value={Number(config.splitRows ?? 0)}
@@ -1049,16 +1166,18 @@ export function ConfigPanel({
             <div className="df-list-head">
               {keys.map((pair, index) => (
                 <div className="df-list-row" key={index}>
-                  <TextIn
+                  <FieldIn
+                    suggestions={fieldOptions}
                     value={pair.left}
-                    placeholder="左表字段名"
+                    placeholder="左表字段名（可下拉选）"
                     onChange={(value) =>
                       setKeys(keys.map((item, i) => (i === index ? { ...item, left: value } : item)))
                     }
                   />
-                  <TextIn
+                  <FieldIn
+                    suggestions={fieldOptions}
                     value={pair.right}
-                    placeholder="右表字段名"
+                    placeholder="右表字段名（可下拉选）"
                     onChange={(value) =>
                       setKeys(keys.map((item, i) => (i === index ? { ...item, right: value } : item)))
                     }
@@ -1083,6 +1202,7 @@ export function ConfigPanel({
           <Note>两侧字段类型须一致（文本键与数字键不静默互转）；复合键任一字段为空值时不匹配；空文本按具体值参与。</Note>
           <Field label="J 路左表输出字段（留空＝全部保留）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.leftFields ?? []) as string[]}
               placeholder="左表字段名，多个用「、」分隔"
               onChange={(value) => setKey("leftFields", value)}
@@ -1090,6 +1210,7 @@ export function ConfigPanel({
           </Field>
           <Field label="J 路右表输出字段（留空＝全部保留）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.rightFields ?? []) as string[]}
               placeholder="右表字段名，多个用「、」分隔"
               onChange={(value) => setKey("rightFields", value)}
@@ -1152,6 +1273,7 @@ export function ConfigPanel({
         <>
           <Field label="去重字段（至少 1 个）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.fields ?? []) as string[]}
               placeholder="字段名，多个用「、」分隔"
               onChange={(value) => setKey("fields", value)}
@@ -1183,9 +1305,10 @@ export function ConfigPanel({
             <div className="df-list-head">
               {rules.map((rule, index) => (
                 <div className="df-list-row" key={index}>
-                  <TextIn
+                  <FieldIn
+                    suggestions={fieldOptions}
                     value={rule.field}
-                    placeholder="字段名"
+                    placeholder="字段名（可下拉选）"
                     onChange={(value) => patchRule(index, { field: value })}
                   />
                   <Sel
@@ -1237,6 +1360,7 @@ export function ConfigPanel({
         <>
           <Field label="分组字段（留空＝全表作为一组）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.groupBy ?? []) as string[]}
               placeholder="字段名，多个用「、」分隔"
               onChange={(value) => setKey("groupBy", value)}
@@ -1246,9 +1370,10 @@ export function ConfigPanel({
             <div className="df-list-head">
               {aggregations.map((agg, index) => (
                 <div className="df-list-row" key={index}>
-                  <TextIn
+                  <FieldIn
+                    suggestions={fieldOptions}
                     value={agg.field}
-                    placeholder="字段（总行数可留空）"
+                    placeholder="字段（可下拉选，总行数可留空）"
                     onChange={(value) =>
                       setAggregations(
                         aggregations.map((item, i) => (i === index ? { ...item, field: value } : item)),
@@ -1304,32 +1429,36 @@ export function ConfigPanel({
         <>
           <div className="df-row2">
             <Field label="行字段">
-              <TextIn
+              <FieldIn
+                suggestions={fieldOptions}
                 value={String(config.rowField ?? "")}
-                placeholder="如 客商名称"
+                placeholder="如 客商名称（可下拉选）"
                 onChange={(value) => setKey("rowField", value)}
               />
             </Field>
             <Field label="列字段（首版 1 个）">
-              <TextIn
+              <FieldIn
+                suggestions={fieldOptions}
                 value={String(config.columnField ?? "")}
-                placeholder="如 期间"
+                placeholder="如 期间（可下拉选）"
                 onChange={(value) => setKey("columnField", value)}
               />
             </Field>
           </div>
           <div className="df-row2">
             <Field label="值字段">
-              <TextIn
+              <FieldIn
+                suggestions={fieldOptions}
                 value={String(config.valueField ?? "")}
-                placeholder="如 借方金额"
+                placeholder="如 借方金额（可下拉选）"
                 onChange={(value) => setKey("valueField", value)}
               />
             </Field>
             <Field label="聚合方式">
+              {/* 透视引擎仅支持求和/非空计数/去重计数（aggregate.rs 白名单），不能复用汇总的全量枚举。 */}
               <Sel
                 value={String(config.valueFunc ?? "sum")}
-                options={SUMMARIZE_FUNCS.map((fn) => ({ value: fn.value, label: fn.label }))}
+                options={CROSSTAB_VALUE_FUNCS.map((fn) => ({ value: fn.value, label: fn.label }))}
                 onChange={(value) => setKey("valueFunc", value)}
               />
             </Field>
@@ -1354,6 +1483,7 @@ export function ConfigPanel({
         <>
           <Field label="保持不变的列（固定列）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.fixedFields ?? []) as string[]}
               placeholder="字段名，多个用「、」分隔"
               onChange={(value) => setKey("fixedFields", value)}
@@ -1361,6 +1491,7 @@ export function ConfigPanel({
           </Field>
           <Field label="转入行的列（转置列，至少 1 个）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.valueColumns ?? []) as string[]}
               placeholder="字段名，多个用「、」分隔"
               onChange={(value) => setKey("valueColumns", value)}
@@ -1403,7 +1534,7 @@ export function ConfigPanel({
               value={mode}
               options={[
                 { value: "delimiter", label: "按分隔符" },
-                { value: "width", label: "按固定宽度" },
+                { value: "fixedWidth", label: "按固定宽度" },
               ]}
               onChange={(value) => setKey("mode", value)}
             />
@@ -1499,6 +1630,7 @@ export function ConfigPanel({
                   {rule.type === "balance" && (
                     <div className="df-list-head">
                       <TokenIn
+                        suggestions={fieldOptions}
                         value={rule.groupBy ?? []}
                         placeholder="分组字段（留空＝全表），如 凭证号"
                         onChange={(value) => patchRule(index, { groupBy: value })}
@@ -1524,6 +1656,7 @@ export function ConfigPanel({
                   )}
                   {rule.type === "notEmpty" && (
                     <TokenIn
+                      suggestions={fieldOptions}
                       value={rule.fields ?? []}
                       placeholder="非空字段，多个用「、」分隔"
                       onChange={(value) => patchRule(index, { fields: value })}
@@ -1537,6 +1670,7 @@ export function ConfigPanel({
                         onChange={(value) => patchRule(index, { field: value })}
                       />
                       <TokenIn
+                        suggestions={fieldOptions}
                         value={rule.groupBy ?? []}
                         placeholder="分组内唯一（留空＝全表唯一）"
                         onChange={(value) => patchRule(index, { groupBy: value })}
@@ -1738,6 +1872,7 @@ export function ConfigPanel({
           />
           <Field label="读取字段（留空＝全部字段）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.fields ?? []) as string[]}
               placeholder="字段名，多个用「、」分隔"
               onChange={(value) => setKey("fields", value)}
@@ -1769,6 +1904,7 @@ export function ConfigPanel({
           </Field>
           <Field label="读取字段（留空＝全部字段）">
             <TokenIn
+              suggestions={fieldOptions}
               value={(config.fields ?? []) as string[]}
               placeholder="字段名，多个用「、」分隔"
               onChange={(value) => setKey("fields", value)}
@@ -1813,7 +1949,9 @@ export function ConfigPanel({
       </p>
       {form}
       <div className="df-cfg-foot">
-        {node.type === "excel_in" || node.type === "csv_in" ? null : (
+        {node.type === "excel_in" || node.type === "csv_in" ? null : node.type === "formula" ? (
+          <Note>行级异常（除零、转换失败等）按本节点「异常处理」设置独立生效，与输入节点的设置无关；结构性错误一律停止。</Note>
+        ) : (
           <Note>行级异常策略由输入节点的「异常处理」设置决定；结构性错误一律停止。</Note>
         )}
         <button type="button" className="df-btn-danger" onClick={onDelete}>

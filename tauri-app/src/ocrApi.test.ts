@@ -26,6 +26,15 @@ it("does not dispatch unknown methods", async () => {
   await expect(ocrCall("ocr.unknown", {})).rejects.toThrow("未找到");
   expect(mocks.engineCall).not.toHaveBeenCalled();
 });
+
+it("摘录缓存不接受不完整封装，诊断不接受正文及任意附加字段", async () => {
+  mocks.engineCall.mockResolvedValue({ entry: { parsed: { coverage_complete: false, items: [] } } });
+  await expect(ocrCall("ocr.extraction_cache_get", {})).rejects.toThrow("数据格式不完整");
+  mocks.engineCall.mockResolvedValue({ entry: { parsed: { coverage_complete: true, items: [] } } });
+  await expect(ocrCall("ocr.extraction_cache_get", {})).resolves.toEqual({ entry: { parsed: { coverage_complete: true, items: [] } } });
+  mocks.engineCall.mockResolvedValue({ runs: [{ runId: "run", updatedAt: "now", entries: [{ sequence: 1, attempt: 0, status: "validated", elapsedMs: 2, promptChars: 30, sourceChars: 90, text: "不可保存原文" }] }] });
+  await expect(ocrCall("ocr.extraction_diagnostics", {})).rejects.toThrow("数据格式不完整");
+});
 it("receives completion emitted before job_start returns and ignores other jobs", async () => {
   mocks.jobStart.mockImplementation(async () => {
     mocks.listener!(event({ jobId: "another" }));

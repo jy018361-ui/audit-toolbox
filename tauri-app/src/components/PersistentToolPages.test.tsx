@@ -136,6 +136,25 @@ describe("PersistentToolPages", () => {
     ]);
   });
 
+  it("内部滚动的页面保活，恢复横纵位置且忽略隐藏页的滚动重置", () => {
+    render(<MemoryRouter initialEntries={["/tools/a"]}>
+      <nav>{["a", "b", "c", "d", "e"].map(id =>
+        <NavLink key={id} to={`/tools/${id}`}>{id}</NavLink>)}</nav>
+      <PersistentToolPages renderPage={id => <div data-testid={`scroller-${id}`} />}/>
+    </MemoryRouter>);
+    const scroller = screen.getByTestId("scroller-a");
+    fireEvent.scroll(scroller, { target: { scrollTop: 460, scrollLeft: 180 } });
+    expect(toolPageIsLive("a")).toBe(true);
+    for (const id of ["b", "c", "d", "e"]) {
+      fireEvent.click(screen.getByRole("link", { name: id }));
+    }
+    fireEvent.scroll(scroller, { target: { scrollTop: 0, scrollLeft: 0 } });
+    fireEvent.click(screen.getByRole("link", { name: "a" }));
+    expect(screen.getByTestId("scroller-a")).toBe(scroller);
+    expect(scroller.scrollTop).toBe(460);
+    expect(scroller.scrollLeft).toBe(180);
+  });
+
   it("marks a tool page live on user interaction and keeps it mounted afterwards", async () => {
     const cleanupPage = vi.fn();
     function StatefulPage({ id }: { id: string }) {

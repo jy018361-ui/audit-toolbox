@@ -20,6 +20,8 @@ import {
   MeetingResultSchema,
   MeetingHistoryRowSchema,
   MeetingVocabularyEntrySchema,
+  MeetingSpeakerNamesSchema,
+  MeetingMailDraftSchema,
   type MeetingVocabularyEntry,
   TaskRestoreSchema,
   ToolManifestSchema,
@@ -240,6 +242,7 @@ const DEMO_JOB_TOOL_ID_RULES: Array<[prefix: string, toolId: string]> = [
   ["pdf2excel.", "pdf_to_excel"],
   ["fuzzy.", "fuzzy_match"],
   ["meeting.", "meeting_minutes"],
+  ["meeting.", "meeting_minutes"],
 ];
 
 const demoJobToolId = (method: string): string =>
@@ -455,6 +458,23 @@ export const meetingReadTranscript = async (path: string) => {
 export const meetingReadMinutes = async (path: string) => {
   if (!inTauri()) throw previewUnavailable("读取会议纪要");
   return MeetingResultSchema.parse(await invoke("meeting_read_minutes", { path }));
+};
+
+export const meetingSaveMinutes = async (path: string, minutesMarkdown: string, expectedMarkdown: string, speakerNames: Record<string, string> = {}) => {
+  if (!inTauri()) throw previewUnavailable("保存会议纪要");
+  if (typeof minutesMarkdown !== "string" || new TextEncoder().encode(minutesMarkdown).length > 2 * 1024 * 1024) {
+    throw new Error("会议纪要超过 2 MB，请缩短正文后保存。");
+  }
+  const names = MeetingSpeakerNamesSchema.parse(speakerNames);
+  return MeetingResultSchema.parse(await invoke("meeting_save_minutes", { path, minutesMarkdown, expectedMarkdown, speakerNames: names }));
+};
+
+export const meetingCreateMailDraft = async (subject: string, htmlBody: string) => {
+  if (!inTauri()) throw previewUnavailable("生成 Outlook 邮件草稿");
+  if (!subject.trim() || subject.length > 255 || /[\r\n]/.test(subject) || new TextEncoder().encode(htmlBody).length > 4 * 1024 * 1024) {
+    throw new Error("邮件标题或正文格式不正确，正文最多 4 MB。");
+  }
+  return MeetingMailDraftSchema.parse(await invoke("meeting_create_mail_draft", { subject, htmlBody }));
 };
 
 export const meetingStatus = () =>
@@ -727,4 +747,16 @@ export async function dataflowDbTables(path: string): Promise<string[]> {
       .filter((name): name is string => typeof name === "string" && name.length > 0);
   }
   return [];
+}
+
+/** 通知点击仅带任务编号，结果仍通过会议历史与现有文件授权读取。 */
+export async function meetingNotify(jobId: string, title: string, body: string) {
+  if (!inTauri()) return;
+  await invoke("meeting_notify", { jobId, title, body: body.slice(0, 1000) });
+}
+export async function listenMeetingNotificationOpen(handler: (jobId: string) => void) {
+  if (!inTauri()) return () => undefined;
+  return listen<{ jobId: string }>("meeting-notification-open", event => {
+    if (typeof event.payload?.jobId === "string") handler(event.payload.jobId);
+  });
 }

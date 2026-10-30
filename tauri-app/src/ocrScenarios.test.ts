@@ -429,7 +429,7 @@ describe("OCR 场景默认提示词与逐字来源", () => {
     expect(result.rows.every((row) => row.sourcePage === "13")).toBe(true);
   });
 
-  it("长段两次未完成后仅拆一次，子窗口逐行覆盖来源并保留跨页定位及双并发上限", async () => {
+  it("长段首次未完成即拆分，避免重复大段请求，子窗口完整覆盖来源及双并发上限", async () => {
     const selected = await scenario("loan_restrictive");
     const lines = Array.from({ length: 6 }, (_, index) =>
       `第${index + 1}项：借款人不得转让该项资产。` + "中性背景说明。".repeat(110));
@@ -454,9 +454,8 @@ describe("OCR 场景默认提示词与逐字来源", () => {
       } finally { active--; }
     });
     const result = await extractOcrScenario({ scenario: selected, stages: selected.defaultPrompts, document, pages, request });
-    expect(request).toHaveBeenCalledTimes(5);
-    expect(incompleteInputs).toHaveLength(2);
-    expect(incompleteInputs[1]).toBe(incompleteInputs[0]);
+    expect(request).toHaveBeenCalledTimes(4);
+    expect(incompleteInputs).toHaveLength(1);
     expect(peak).toBe(2);
     expect(accepted.map((line) => line.text).sort()).toEqual([...lines].sort());
     expect(result.rows.map((row) => row.evidence)).toEqual(lines);
@@ -471,11 +470,10 @@ describe("OCR 场景默认提示词与逐字来源", () => {
     const request = vi.fn(async (_input: { prompt: string; text: string }) => ({ parsed: { coverage_complete: false, items: [] } }));
     await expect(extractOcrScenario({ scenario: selected, stages: selected.defaultPrompts,
       document, pages: [page(lines.join("\n"), 18)], request })).rejects.toThrow("模型未确认本段检查完整");
-    expect(request).toHaveBeenCalledTimes(4);
+    expect(request).toHaveBeenCalledTimes(3);
     const inputs = request.mock.calls;
-    expect(inputs[0][0].text).toBe(inputs[1][0].text);
-    expect(inputs[2][0].text).toBe(inputs[3][0].text);
-    expect(inputs[2][0].text.length).toBeLessThan(inputs[0][0].text.length);
+    expect(inputs[1][0].text).toBe(inputs[2][0].text);
+    expect(inputs[1][0].text.length).toBeLessThan(inputs[0][0].text.length);
     expect(inputs[2][0].text).toContain("[PDF第18页]");
   });
 

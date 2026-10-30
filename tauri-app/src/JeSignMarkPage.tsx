@@ -229,7 +229,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   // 历史记录「继续任务」：用存档参数重建草稿（含映射/批次/筛选），并自动
   // 重新读取文件——批次/标记/导出都以读取结果为显示前提，不重读用户看到
   // 的还是空页；读取完成后 restoredDraftRef 把存档映射与列筛选顶回建议值。
-  // 没有字段映射的存档（读取子步骤）不恢复，免得把现场覆盖成半成品。
+  // 读取子步骤没有映射时，从已保存的来源重新识别并使用新的建议映射。
   const autoReadKeyRef = useRef("");
   const [autoReadSeq, setAutoReadSeq] = useState(0);
   useTaskRestore(tool.id, (restore) => {
@@ -250,17 +250,14 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       p.mapping && typeof p.mapping === "object" && Object.keys(p.mapping).length
         ? p.mapping
         : undefined;
-    if (!mapping) return;
     const sheet = p.sheet ?? "";
     const columnFilters =
       p.columnFilters && typeof p.columnFilters === "object"
         ? p.columnFilters
         : {};
-    restoredDraftRef.current = {
-      key: `${p.inputPath}|${sheet.trim()}`,
-      mapping,
-      columnFilters,
-    };
+    restoredDraftRef.current = mapping
+      ? { key: `${p.inputPath}|${sheet.trim()}`, mapping, columnFilters }
+      : null;
     autoReadKeyRef.current = `${p.inputPath}|${sheet.trim()}`;
     setAutoReadSeq((value) => value + 1);
     llmGeneration.current += 1;
@@ -270,7 +267,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       sheet,
       headerRow: p.headerRow ?? 0,
       headerDepth: p.headerDepth ?? 1,
-      mapping,
+      mapping: mapping ?? EMPTY.mapping,
       batches:
         Array.isArray(p.targetBatches) && p.targetBatches.length
           ? p.targetBatches

@@ -22,6 +22,7 @@ use crate::dataflow::nodes::{aggregate, check, combine, inputs2, join, split};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// 引擎入口。method 只接受 "dataflow_preview" / "dataflow_run"，
@@ -110,7 +111,29 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
             .unwrap_or_else(|| id.to_owned())
     };
 
-    let mut anchors: HashMap<(String, String), Table> = HashMap::new();
+    // 全局锚点库存共享指针（Arc<Table>）：节点产出入库只复制指针，
+    // 下游按需引用，消掉每个锚点一次的整表深克隆。
+    let mut anchors: HashMap<(String, String), Arc<Table>> = HashMap::new();
+    // 下游消费计数（三重防线之一）：键 = (上游节点, 出口锚点)，值 = 本次
+    // 执行会取用该锚点的连线数。只计 edge.to ∈ 本次执行 order 的连线——
+    // uptoNodeId 过滤后闭包外的下游不执行也不取表，其连线不占计数；
+    // 重边（同一锚点连多条线到执行节点）自然计多次；自环连线已被拓扑
+    // 排序拒绝。入库时据此判定锚点是否终态（计数 0 ⇒ 只存样本表），
+    // 取表命中后递减、归零即释放整表。
+    let executed: HashSet<&str> = order.iter().map(String::as_str).collect();
+    let mut pending: HashMap<(String, String), usize> = HashMap::new();
+    for edge in &request.edges {
+        if !executed.contains(edge.to.as_str()) {
+            continue;
+        }
+        let key = (
+            edge.from.clone(),
+            edge.from_anchor
+                .clone()
+                .unwrap_or_else(|| "output".to_owned()),
+        );
+        *pending.entry(key).or_insert(0) += 1;
+    }
     let mut nodes_json = serde_json::Map::new();
     let mut outputs: Vec<Value> = Vec::new();
     let mut failure: Option<AppError> = None;
@@ -141,20 +164,20 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
                     input::run_csv_in(&display_name, &node.config, &context)
                 }
             }
-            "select" | "select_n" => single_input(&incoming, &anchors, &display_name, "字段选择", |table| {
+            "select" | "select_n" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "字段选择", |table| {
                 transform::run_select(&display_name, &node.config, table)
             }),
-            "clean" => single_input(&incoming, &anchors, &display_name, "字段清洗", |table| {
+            "clean" => single_input_mut(&incoming, &mut anchors, &mut pending, &display_name, "字段清洗", |table| {
                 transform::run_clean(&display_name, &node.config, table)
             }),
-            "formula" => single_input(&incoming, &anchors, &display_name, "公式", |table| {
+            "formula" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "公式", |table| {
                 transform::run_formula(&display_name, &node.config, table, &context)
             }),
-            "filter" | "filter_n" => single_input(&incoming, &anchors, &display_name, "筛选", |table| {
+            "filter" | "filter_n" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "筛选", |table| {
                 transform::run_filter(&display_name, &node.config, table)
             }),
             "excel_out" | "csv_out" => {
-                let tables = collect_inputs(&incoming, &anchors, &|id| node_name(id), &display_name);
+                let tables = collect_inputs(&incoming, &mut anchors, &mut pending, &|id| node_name(id), &display_name);
                 match tables {
                     Ok(tables) if tables.is_empty() => Err(AppError::new(
                         "DATAFLOW_CONFIG_INVALID",
@@ -171,11 +194,11 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
             }
             // ---------- 第二期节点 ----------
             "join" | "join_n" => {
-                let (left, right) = dual_input(&incoming, &anchors, &|id| node_name(id), &display_name)?;
+                let (left, right) = dual_input(&incoming, &mut anchors, &mut pending, &|id| node_name(id), &display_name)?;
                 join::run_join(&display_name, &node.config, &left, &right)
             }
             "union" | "union_n" => {
-                let tables = collect_inputs_with_ids(&incoming, &anchors, &|id| node_name(id), &display_name)?;
+                let tables = collect_inputs_with_ids(&incoming, &mut anchors, &mut pending, &|id| node_name(id), &display_name)?;
                 if tables.is_empty() {
                     Err(AppError::new(
                         "DATAFLOW_CONFIG_INVALID",
@@ -187,25 +210,25 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
                     combine::run_union(&display_name, &node.config, &tables)
                 }
             }
-            "unique" | "unique_n" => single_input(&incoming, &anchors, &display_name, "去重", |table| {
+            "unique" | "unique_n" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "去重", |table| {
                 combine::run_unique(&display_name, &node.config, table)
             }),
-            "sort" | "sort_n" => single_input(&incoming, &anchors, &display_name, "排序", |table| {
+            "sort" | "sort_n" => single_input_mut(&incoming, &mut anchors, &mut pending, &display_name, "排序", |table| {
                 combine::run_sort(&display_name, &node.config, table)
             }),
-            "summarize" => single_input(&incoming, &anchors, &display_name, "汇总", |table| {
+            "summarize" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "汇总", |table| {
                 aggregate::run_summarize(&display_name, &node.config, table)
             }),
-            "crosstab" => single_input(&incoming, &anchors, &display_name, "透视", |table| {
+            "crosstab" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "透视", |table| {
                 aggregate::run_crosstab(&display_name, &node.config, table)
             }),
-            "transpose" => single_input(&incoming, &anchors, &display_name, "宽转长", |table| {
+            "transpose" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "宽转长", |table| {
                 aggregate::run_transpose(&display_name, &node.config, table)
             }),
-            "split" => single_input(&incoming, &anchors, &display_name, "分列", |table| {
+            "split" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "分列", |table| {
                 split::run_split(&display_name, &node.config, table)
             }),
-            "check" | "check_n" => single_input(&incoming, &anchors, &display_name, "检查", |table| {
+            "check" | "check_n" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "检查", |table| {
                 check::run_check(&display_name, &node.config, table, &context)
             }),
             "manual_in" => {
@@ -254,9 +277,8 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
 
         match outcome {
             Ok(outcome) => {
-                for (anchor, table) in &outcome.anchors {
-                    anchors.insert((node_id.clone(), anchor.clone()), table.clone());
-                }
+                // 先只读借用 outcome：写 outputs、构建状态 JSON（采样逻辑
+                // 只读，不再因按值传参把整份结果报废）……
                 for file in &outcome.written {
                     outputs.push(json!({
                         "nodeId": node_id,
@@ -266,10 +288,17 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
                     }));
                 }
                 let status = if outcome.has_warnings { "warn" } else { "ok" };
-                nodes_json.insert(
-                    node_id.clone(),
-                    node_status_json(status, outcome, started),
-                );
+                let status_json = node_status_json(status, &outcome, started);
+                // ……再把 anchors 按值 move 入全局锚点库（Arc move，指针级）；
+                // 仍有下游待取的整表原样入库，终态锚点（计数 0）只存样本表。
+                // 入库发生在任何下游取表之前（拓扑序），store_anchor 判定时
+                // pending 恒为完整初始值。
+                for (anchor, table) in outcome.anchors {
+                    let key = (node_id.clone(), anchor.clone());
+                    let downstream = pending.get(&key).copied().unwrap_or(0);
+                    anchors.insert(key, store_anchor(downstream, table));
+                }
+                nodes_json.insert(node_id.clone(), status_json);
             }
             Err(error) => {
                 // 结构性错误：停止本次运行，已完成的节点结果保留。
@@ -282,7 +311,7 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
                     has_warnings: false,
                 };
                 failed.messages.push(format!("错误代码：{}", error.code));
-                nodes_json.insert(node_id.clone(), node_status_json("error", failed, started));
+                nodes_json.insert(node_id.clone(), node_status_json("error", &failed, started));
                 failure = Some(error);
                 break;
             }
@@ -305,69 +334,77 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
 }
 
 /// 输出节点按连线顺序收集输入表（锚点缺失为结构性错误）。
+/// 返回共享指针（Arc<Table>）：输出节点取上游锚点只复制指针，不做整表深克隆。
+/// 每次命中都对 pending 计数递减（见 consume_anchor）。
 fn collect_inputs(
     incoming: &[&crate::dataflow::model::Edge],
-    anchors: &HashMap<(String, String), Table>,
+    anchors: &mut HashMap<(String, String), Arc<Table>>,
+    pending: &mut HashMap<(String, String), usize>,
     node_name: &dyn Fn(&str) -> String,
     display_name: &str,
-) -> Result<Vec<(String, Table)>, AppError> {
+) -> Result<Vec<(String, Arc<Table>)>, AppError> {
     let mut tables = Vec::new();
     for edge in incoming {
         let anchor = edge.from_anchor.as_deref().unwrap_or("output");
-        match anchors.get(&(edge.from.clone(), anchor.to_owned())) {
-            Some(table) => tables.push((node_name(&edge.from), table.clone())),
-            None => {
-                return Err(AppError::new(
-                    "DATAFLOW_ANCHOR_MISSING",
-                    format!(
-                        "节点「{display_name}」的输入连线引用了上游“{}”的锚点“{anchor}”，该锚点不存在。",
-                        node_name(&edge.from)
-                    ),
-                    false,
-                    None,
-                ));
-            }
-        }
+        let key = (edge.from.clone(), anchor.to_owned());
+        let Some(table) = anchors.get(&key).cloned() else {
+            return Err(AppError::new(
+                "DATAFLOW_ANCHOR_MISSING",
+                format!(
+                    "节点「{display_name}」的输入连线引用了上游“{}”的锚点“{anchor}”，该锚点不存在。",
+                    node_name(&edge.from)
+                ),
+                false,
+                None,
+            ));
+        };
+        consume_anchor(anchors, pending, &key);
+        tables.push((node_name(&edge.from), table));
     }
     Ok(tables)
 }
 
 /// 同 collect_inputs，但附带上游节点 id（纵向合并按 order 配置重排时用 id 匹配）。
+/// 表同样以共享指针（Arc<Table>）传递，不做整表深克隆；命中后递减 pending。
 fn collect_inputs_with_ids(
     incoming: &[&crate::dataflow::model::Edge],
-    anchors: &HashMap<(String, String), Table>,
+    anchors: &mut HashMap<(String, String), Arc<Table>>,
+    pending: &mut HashMap<(String, String), usize>,
     node_name: &dyn Fn(&str) -> String,
     display_name: &str,
-) -> Result<Vec<(String, String, Table)>, AppError> {
+) -> Result<Vec<(String, String, Arc<Table>)>, AppError> {
     let mut tables = Vec::new();
     for edge in incoming {
         let anchor = edge.from_anchor.as_deref().unwrap_or("output");
-        match anchors.get(&(edge.from.clone(), anchor.to_owned())) {
-            Some(table) => tables.push((edge.from.clone(), node_name(&edge.from), table.clone())),
-            None => {
-                return Err(AppError::new(
-                    "DATAFLOW_ANCHOR_MISSING",
-                    format!(
-                        "节点「{display_name}」的输入连线引用了上游“{}”的锚点“{anchor}”，该锚点不存在。",
-                        node_name(&edge.from)
-                    ),
-                    false,
-                    None,
-                ));
-            }
-        }
+        let key = (edge.from.clone(), anchor.to_owned());
+        let Some(table) = anchors.get(&key).cloned() else {
+            return Err(AppError::new(
+                "DATAFLOW_ANCHOR_MISSING",
+                format!(
+                    "节点「{display_name}」的输入连线引用了上游“{}”的锚点“{anchor}”，该锚点不存在。",
+                    node_name(&edge.from)
+                ),
+                false,
+                None,
+            ));
+        };
+        consume_anchor(anchors, pending, &key);
+        tables.push((edge.from.clone(), node_name(&edge.from), table));
     }
     Ok(tables)
 }
 
 /// 关联节点的双输入：按 edge.toAnchor 区分 inL / inR；未标注锚点的连线按
 /// 连线顺序前左后右补位；锚点冲突或数量不是 2 条为结构性错误。
+/// 返回共享指针（Arc<Table>）：左右表取自锚点库时不做整表深克隆；
+/// 命中后递减 pending（左右表来自同一锚点时按两条连线各递减一次）。
 fn dual_input(
     incoming: &[&crate::dataflow::model::Edge],
-    anchors: &HashMap<(String, String), Table>,
+    anchors: &mut HashMap<(String, String), Arc<Table>>,
+    pending: &mut HashMap<(String, String), usize>,
     node_name: &dyn Fn(&str) -> String,
     display_name: &str,
-) -> Result<(Table, Table), AppError> {
+) -> Result<(Arc<Table>, Arc<Table>), AppError> {
     if incoming.len() != 2 {
         return Err(AppError::new(
             "DATAFLOW_CONFIG_INVALID",
@@ -379,22 +416,22 @@ fn dual_input(
             None,
         ));
     }
-    let fetch = |edge: &crate::dataflow::model::Edge| -> Result<Table, AppError> {
+    let mut fetch = |edge: &crate::dataflow::model::Edge| -> Result<Arc<Table>, AppError> {
         let anchor = edge.from_anchor.as_deref().unwrap_or("output");
-        anchors
-            .get(&(edge.from.clone(), anchor.to_owned()))
-            .cloned()
-            .ok_or_else(|| {
-                AppError::new(
-                    "DATAFLOW_ANCHOR_MISSING",
-                    format!(
-                        "节点「{display_name}」的输入连线引用了上游“{}”的锚点“{anchor}”，该锚点不存在。",
-                        node_name(&edge.from)
-                    ),
-                    false,
-                    None,
-                )
-            })
+        let key = (edge.from.clone(), anchor.to_owned());
+        let Some(table) = anchors.get(&key).cloned() else {
+            return Err(AppError::new(
+                "DATAFLOW_ANCHOR_MISSING",
+                format!(
+                    "节点「{display_name}」的输入连线引用了上游“{}”的锚点“{anchor}”，该锚点不存在。",
+                    node_name(&edge.from)
+                ),
+                false,
+                None,
+            ));
+        };
+        consume_anchor(anchors, pending, &key);
+        Ok(table)
     };
     #[derive(Clone, Copy, PartialEq)]
     enum Slot {
@@ -483,7 +520,9 @@ fn stringify_param(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn node_status_json(status: &str, outcome: NodeOutcome, started: Instant) -> Value {
+/// 组装节点状态 JSON。只读借用 outcome（含 ANCHOR_SAMPLE_ROWS=200 样例、
+/// rowCount 全量数），调用方随后仍可把 anchors 按值 move 入全局锚点库。
+fn node_status_json(status: &str, outcome: &NodeOutcome, started: Instant) -> Value {
     let mut anchors = serde_json::Map::new();
     for (key, table) in &outcome.anchors {
         let sample: Vec<Value> = table
@@ -512,9 +551,56 @@ fn node_status_json(status: &str, outcome: NodeOutcome, started: Instant) -> Val
     })
 }
 
+/// 锚点入库策略（三重防线之二）：仍有下游待取（pending_downstream > 0）时
+/// 原样 move 共享指针；已无下游（终态锚点——输出节点 sheet:名 / file:名、
+/// uptoNodeId 目标等无下游者）只保留样本表（前 ANCHOR_SAMPLE_ROWS 行），
+/// 全量表随最后一个 Arc 引用 drop 释放。
+/// 安全性：入库发生在任何下游取表之前（拓扑序），本函数判定时 pending 恒为
+/// 完整初始值；锚点库不进响应 JSON（响应只由 nodes_json / outputs / error
+/// 组装），节点状态 JSON 的 rowCount 在入库前已按全量行数采样。
+fn store_anchor(pending_downstream: usize, table: Arc<Table>) -> Arc<Table> {
+    if pending_downstream > 0 {
+        return table;
+    }
+    Arc::new(Table {
+        columns: table.columns.clone(),
+        types: table.types.clone(),
+        rows: table.rows.iter().take(ANCHOR_SAMPLE_ROWS).cloned().collect(),
+    })
+}
+
+/// 取表命中后的下游计数递减（三重防线之三）：某锚点的全部下游都取完表
+/// （计数归零）即从锚点库移除整表，让全量数据随最后一个 Arc 引用即时
+/// 释放（也使改写型节点的 make_mut 在末位消费者时零拷贝兑现）。
+/// get_mut 返回 None ⇒ 该锚点入库时被判终态（只存了样本表）却又被消费，
+/// 即 pending 初值算错——白盒探测器：debug_assert 在 cargo test 构建下
+/// 必炸，防止初值口径漂移后下游静默拿到 200 行样本。
+fn consume_anchor(
+    anchors: &mut HashMap<(String, String), Arc<Table>>,
+    pending: &mut HashMap<(String, String), usize>,
+    key: &(String, String),
+) {
+    match pending.get_mut(key) {
+        Some(remaining) => {
+            *remaining -= 1;
+            if *remaining == 0 {
+                pending.remove(key);
+                anchors.remove(key);
+            }
+        }
+        None => {
+            debug_assert!(
+                false,
+                "终态锚点被取用：pending 初值与实际取表数不一致（{key:?}）"
+            );
+        }
+    }
+}
+
 fn single_input(
     incoming: &[&crate::dataflow::model::Edge],
-    anchors: &HashMap<(String, String), Table>,
+    anchors: &mut HashMap<(String, String), Arc<Table>>,
+    pending: &mut HashMap<(String, String), usize>,
     display_name: &str,
     kind: &str,
     run: impl FnOnce(&Table) -> Result<NodeOutcome, AppError>,
@@ -529,8 +615,9 @@ fn single_input(
     }
     let edge = incoming[0];
     let anchor = edge.from_anchor.as_deref().unwrap_or("output");
-    let table = anchors.get(&(edge.from.clone(), anchor.to_owned())).ok_or_else(|| {
-        AppError::new(
+    let key = (edge.from.clone(), anchor.to_owned());
+    let Some(table) = anchors.get(&key).cloned() else {
+        return Err(AppError::new(
             "DATAFLOW_ANCHOR_MISSING",
             format!(
                 "节点「{display_name}」的输入连线引用了上游“{}”的锚点“{anchor}”，该锚点不存在。",
@@ -538,8 +625,50 @@ fn single_input(
             ),
             false,
             None,
-        )
-    })?;
+        ));
+    };
+    consume_anchor(anchors, pending, &key);
+    run(&table)
+}
+
+/// 改写型单输入节点（clean / sort）入口：与 single_input 相同的参数校验与
+/// 锚点缺失报错，但把锚点库中的共享表以 Arc 交给节点——节点经 Arc::make_mut
+/// 写时复制改写（锚点库仍持引用时 refcount ≥ 2，make_mut 克隆一次，与改造前
+/// input.rows.clone() 成本等价、行为一致；引用计数归 1 后自动退化为原地改写
+/// 零拷贝）。其余只读节点继续走 single_input(&Table)。
+fn single_input_mut(
+    incoming: &[&crate::dataflow::model::Edge],
+    anchors: &mut HashMap<(String, String), Arc<Table>>,
+    pending: &mut HashMap<(String, String), usize>,
+    display_name: &str,
+    kind: &str,
+    run: impl FnOnce(Arc<Table>) -> Result<NodeOutcome, AppError>,
+) -> Result<NodeOutcome, AppError> {
+    if incoming.len() != 1 {
+        return Err(AppError::new(
+            "DATAFLOW_CONFIG_INVALID",
+            format!("节点「{display_name}」（{kind}）需要恰好 1 条输入连线（当前 {} 条）。", incoming.len()),
+            false,
+            None,
+        ));
+    }
+    let edge = incoming[0];
+    let anchor = edge.from_anchor.as_deref().unwrap_or("output");
+    let key = (edge.from.clone(), anchor.to_owned());
+    let Some(table) = anchors.get(&key).cloned() else {
+        return Err(AppError::new(
+            "DATAFLOW_ANCHOR_MISSING",
+            format!(
+                "节点「{display_name}」的输入连线引用了上游“{}”的锚点“{anchor}”，该锚点不存在。",
+                edge.from
+            ),
+            false,
+            None,
+        ));
+    };
+    // 末位消费者：consume_anchor 归零后锚点库移除整表，make_mut 引用计数
+    // 为 1，改写型节点（clean / sort）原地改写零拷贝。
+    consume_anchor(anchors, pending, &key);
     run(table)
 }
 
@@ -736,6 +865,101 @@ mod tests {
     }
 
     // ---------- 伪 xls 文本（后缀 .xls 的分隔文本，走既有识别层） ----------
+
+    // 界面传驼峰运算符（startsWith 等）：白名单已全小写比对，大小写不再误报。
+    #[test]
+    fn filter_operators_case_insensitive() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("t.csv");
+        fs::write(&file, "名称
+苹果
+香蕉
+").unwrap();
+        let flow = workflow(
+            json!([
+                {"id": "in", "type": "csv_in", "name": "CSV输入", "config": {"path": file.to_string_lossy()}},
+                {"id": "fl", "type": "filter", "name": "筛选",
+                 "config": {"condition": {"op": "and", "rules": [
+                    {"field": "名称", "operator": "startsWith", "value": "香"}
+                 ]}}}
+            ]),
+            json!([{"from": "in", "to": "fl"}]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "fl"), "ok");
+        assert_eq!(row_count(&result, "fl", "T"), 1);
+    }
+
+    #[test]
+    fn edge_anchor_camelcase_honored_for_filter_t() {
+        // 前端连线带驼峰 fromAnchor（如从筛选的 T 口拉到输出）：曾因
+        // serde 漏配 rename 被静默当未填，引擎一律回落单输出口 "output"，
+        // 筛选→输出必报「锚点 output 不存在」——真实用户两次踩中。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("t.csv");
+        fs::write(&file, "名称
+苹果
+香蕉
+").unwrap();
+        let flow = workflow(
+            json!([
+                {"id": "in", "type": "csv_in", "name": "CSV输入", "config": {"path": file.to_string_lossy()}},
+                {"id": "fl", "type": "filter", "name": "筛选",
+                 "config": {"condition": {"op": "and", "rules": [
+                    {"field": "名称", "operator": "startsWith", "value": "香"}
+                 ]}}},
+                {"id": "out", "type": "csv_out", "name": "CSV输出",
+                 "config": {"fileName": file.with_file_name("t_out.csv").to_string_lossy(), "overwrite": "replace"}}
+            ]),
+            json!([
+                {"from": "in", "to": "fl", "fromAnchor": "output", "toAnchor": "in"},
+                {"from": "fl", "to": "out", "fromAnchor": "T", "toAnchor": "in"}
+            ]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "out"), "ok");
+        assert_eq!(row_count(&result, "out", "file:t_out.csv"), 1);
+    }
+
+    #[test]
+    fn filter_text_operators_match_date_as_text() {
+        // 日期列用「包含」筛选（如 包含 01 捞一月/一日凭证）按日期的
+        // 文本形式匹配，不要求条件值本身是完整日期。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("t.csv");
+        fs::write(&file, "记账日期
+2026-01-15
+2026-03-05
+2026-10-01
+").unwrap();
+        let flow = workflow(
+            json!([
+                {"id": "in", "type": "csv_in", "name": "CSV输入", "config": {"path": file.to_string_lossy()}},
+                {"id": "fl", "type": "filter", "name": "筛选",
+                 "config": {"condition": {"op": "and", "rules": [
+                    {"field": "记账日期", "operator": "contains", "value": "01"}
+                 ]}}}
+            ]),
+            json!([{"from": "in", "to": "fl"}]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "fl"), "ok");
+        assert_eq!(row_count(&result, "fl", "T"), 2);
+        assert_eq!(row_count(&result, "fl", "F"), 1);
+        // 对比类运算符仍然要求完整日期。
+        let flow_eq = workflow(
+            json!([
+                {"id": "in", "type": "csv_in", "name": "CSV输入", "config": {"path": file.to_string_lossy()}},
+                {"id": "fl", "type": "filter", "name": "筛选",
+                 "config": {"condition": {"op": "and", "rules": [
+                    {"field": "记账日期", "operator": "=", "value": "01"}
+                 ]}}}
+            ]),
+            json!([{"from": "in", "to": "fl"}]),
+        );
+        let result_eq = run("dataflow_preview", flow_eq);
+        assert_eq!(node_status(&result_eq, "fl"), "error");
+    }
 
     #[test]
     fn reads_pseudo_xls_text_via_unified_layer() {
@@ -1372,6 +1596,32 @@ mod tests {
     }
 
     #[test]
+    fn crosstab_count_funcs_use_engine_keys() {
+        // 透视聚合方式的引擎白名单只有 sum / countNonEmpty / distinctCount
+        // （前端下拉枚举与之同源）；两个计数键必须可直接运行，防止键名漂移。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("pc.csv");
+        fs::write(&file, "r,c,v\nA,X,1\nA,X,\nA,X,1\n").unwrap();
+        // A/X 三行值：1、空、1 → 非空计数 2；非空去重（只剩 1）计数 1。
+        for (func, expect_x) in [("countNonEmpty", json!(2)), ("distinctCount", json!(1))] {
+            let flow = workflow(
+                json!([
+                    csv_in_node("i", &file, json!({})),
+                    {"id": "p", "type": "crosstab", "name": "透视", "config": {
+                        "rowField": "r", "columnField": "c", "valueField": "v",
+                        "valueFunc": func, "fill": 0
+                    }}
+                ]),
+                json!([edge("i", "p", "in")]),
+            );
+            let result = run("dataflow_preview", flow);
+            assert_eq!(row_count(&result, "p", "output"), 1, "valueFunc={func}");
+            let x = col(&result, "p", "output", "X");
+            assert_eq!(cell(&result, "p", "output", 0, x), expect_x, "valueFunc={func}");
+        }
+    }
+
+    #[test]
     fn transpose_melts_columns_with_default_names() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("t.csv");
@@ -1477,6 +1727,63 @@ mod tests {
     }
 
     #[test]
+    fn check_rules_accept_frontend_form_type_discriminator_and_array_group_by() {
+        // 前端序列化形态（model.ts defaultCheckRule / normalizeCheckRule）：
+        // type 判别 + groupBy 字符串数组。本测试锁定前端→引擎契约：任一侧
+        // 漂移（判别字段只剩 kind，或分组只收单字符串）即失败。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("f.csv");
+        fs::write(&file, "凭,日,d,c\nP1,1,100,100\nP1,2,50,50\nP2,1,10,10\nP3,1,5,4\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "k", "type": "check_n", "name": "检查", "config": {
+                    "rules": [
+                        {"type": "balance", "groupBy": ["凭", "日"], "debitField": "d", "creditField": "c", "tolerance": 0},
+                        {"type": "unique", "field": "日", "groupBy": ["凭"]},
+                        {"type": "notEmpty", "fields": ["凭"]},
+                        {"type": "range", "field": "d", "min": 0, "max": 1000},
+                        {"type": "expression", "expression": "d >= 0"}
+                    ]
+                }}
+            ]),
+            json!([edge("i", "k", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "k"), "ok");
+        // 借贷平衡按（凭,日）复合分组：仅 P3/1 借 5 贷 4 差 1 超容差 0 进 NG；
+        // 其余四类规则本批数据全部通过。
+        assert_eq!(row_count(&result, "k", "NG"), 1);
+        assert_eq!(row_count(&result, "k", "P"), 3);
+    }
+
+    #[test]
+    fn check_rules_unknown_type_reports_chinese_config_error() {
+        // 配置错误必须给中文提示（不得把 serde 英文消息直达用户）。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("x.csv");
+        fs::write(&file, "a\n1\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("i", &file, json!({})),
+                {"id": "k", "type": "check_n", "name": "检查", "config": {
+                    "rules": [{"type": "乱写", "fields": ["a"]}]
+                }}
+            ]),
+            json!([edge("i", "k", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "k"), "error");
+        let message = result
+            .pointer("/error/userMessage")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        assert!(message.contains("无法识别"), "报错应指明类型无法识别：{message}");
+        assert!(message.contains("借贷合计一致"), "报错应列出支持的规则类型：{message}");
+    }
+
+    #[test]
     fn manual_in_converts_types_and_skips_bad_rows() {
         let flow = workflow(
             json!([
@@ -1572,5 +1879,290 @@ mod tests {
         assert!(result.pointer("/nodes/a").is_some());
         assert!(result.pointer("/nodes/b").is_some());
         assert!(result.pointer("/nodes/c").is_none(), "目标节点之后不应执行");
+    }
+
+    // ---------- 锚点表共享化（Arc）：关联路径零深拷的自动化证明 ----------
+
+    #[test]
+    fn dual_input_shares_arc_pointers_with_anchor_store() {
+        // dual_input 返回的左右表与锚点库中的原件必须是同一份 Arc
+        // （指针相等），即关联取数只复制指针、不做整表深克隆。
+        use crate::dataflow::value::{ColType, Value};
+        let left = Arc::new(Table {
+            columns: vec!["k".to_owned()],
+            types: vec![ColType::Text],
+            rows: vec![vec![Value::Text("a".to_owned())]],
+        });
+        let right = Arc::new(Table {
+            columns: vec!["k".to_owned()],
+            types: vec![ColType::Text],
+            rows: vec![vec![Value::Text("b".to_owned())]],
+        });
+        let mut store: HashMap<(String, String), Arc<Table>> = HashMap::new();
+        store.insert(("l".to_owned(), "output".to_owned()), Arc::clone(&left));
+        store.insert(("r".to_owned(), "output".to_owned()), Arc::clone(&right));
+        let left_edge = crate::dataflow::model::Edge {
+            from: "l".to_owned(),
+            from_anchor: None,
+            to: "j".to_owned(),
+            to_anchor: Some("inL".to_owned()),
+        };
+        let right_edge = crate::dataflow::model::Edge {
+            from: "r".to_owned(),
+            from_anchor: None,
+            to: "j".to_owned(),
+            to_anchor: Some("inR".to_owned()),
+        };
+        let incoming = vec![&left_edge, &right_edge];
+        let name = |id: &str| id.to_owned();
+        // pending 计数与连线一一对应（每个上游各 1 条消费连线）。
+        let mut pending: HashMap<(String, String), usize> = HashMap::new();
+        pending.insert(("l".to_owned(), "output".to_owned()), 1);
+        pending.insert(("r".to_owned(), "output".to_owned()), 1);
+        let (got_left, got_right) =
+            dual_input(&incoming, &mut store, &mut pending, &name, "关联").expect("双输入应成功");
+        assert!(
+            Arc::ptr_eq(&got_left, &left),
+            "左表应与锚点库中的原件共享同一 Arc 指针"
+        );
+        assert!(
+            Arc::ptr_eq(&got_right, &right),
+            "右表应与锚点库中的原件共享同一 Arc 指针"
+        );
+    }
+
+    /// 构造双上游锚点库与连线（供 collect 系指针共享断言用）：
+    /// 返回（锚点库, pending 计数, 存入的第 1 份原件, 第 2 份原件, 连线引用列表）。
+    fn two_upstream_anchors_and_edges()
+    -> (
+        HashMap<(String, String), Arc<Table>>,
+        HashMap<(String, String), usize>,
+        Arc<Table>,
+        Arc<Table>,
+        Vec<crate::dataflow::model::Edge>,
+    ) {
+        use crate::dataflow::value::{ColType, Value};
+        let make = |text: &str| {
+            Arc::new(Table {
+                columns: vec!["v".to_owned()],
+                types: vec![ColType::Text],
+                rows: vec![vec![Value::Text(text.to_owned())]],
+            })
+        };
+        let first = make("一");
+        let second = make("二");
+        let mut store: HashMap<(String, String), Arc<Table>> = HashMap::new();
+        store.insert(("n1".to_owned(), "output".to_owned()), Arc::clone(&first));
+        store.insert(("n2".to_owned(), "output".to_owned()), Arc::clone(&second));
+        // pending 计数与连线一一对应（每个上游各 1 条消费连线）。
+        let mut pending: HashMap<(String, String), usize> = HashMap::new();
+        pending.insert(("n1".to_owned(), "output".to_owned()), 1);
+        pending.insert(("n2".to_owned(), "output".to_owned()), 1);
+        let edges = vec![
+            crate::dataflow::model::Edge {
+                from: "n1".to_owned(),
+                from_anchor: None,
+                to: "o".to_owned(),
+                to_anchor: None,
+            },
+            crate::dataflow::model::Edge {
+                from: "n2".to_owned(),
+                from_anchor: None,
+                to: "o".to_owned(),
+                to_anchor: None,
+            },
+        ];
+        (store, pending, first, second, edges)
+    }
+
+    #[test]
+    fn collect_inputs_shares_arc_pointers_with_anchor_store() {
+        // 输出节点（excel_out / csv_out）的输入收集只复制 Arc 指针，
+        // 不做整表深克隆：返回的每个表与锚点库存入原件指针相等。
+        let (mut store, mut pending, first, second, edges) = two_upstream_anchors_and_edges();
+        let incoming: Vec<&crate::dataflow::model::Edge> = edges.iter().collect();
+        let name = |id: &str| id.to_owned();
+        let tables = collect_inputs(&incoming, &mut store, &mut pending, &name, "输出")
+            .expect("输入收集应成功");
+        assert_eq!(tables.len(), 2);
+        assert_eq!(tables[0].0, "n1");
+        assert!(
+            Arc::ptr_eq(&tables[0].1, &first),
+            "第 1 条输入应与锚点库原件共享同一 Arc 指针"
+        );
+        assert!(
+            Arc::ptr_eq(&tables[1].1, &second),
+            "第 2 条输入应与锚点库原件共享同一 Arc 指针"
+        );
+    }
+
+    #[test]
+    fn collect_inputs_with_ids_shares_arc_pointers_with_anchor_store() {
+        // 纵向合并（union）的输入收集同上：附带上游 id 供 order 重排匹配，
+        // 表仍是共享指针（指针相等），重排与投影不再复制整表。
+        let (mut store, mut pending, first, second, edges) = two_upstream_anchors_and_edges();
+        let incoming: Vec<&crate::dataflow::model::Edge> = edges.iter().collect();
+        let name = |id: &str| id.to_owned();
+        let tables = collect_inputs_with_ids(&incoming, &mut store, &mut pending, &name, "合并")
+            .expect("输入收集应成功");
+        assert_eq!(tables.len(), 2);
+        assert_eq!(tables[0].0, "n1");
+        assert_eq!(tables[1].0, "n2");
+        assert!(
+            Arc::ptr_eq(&tables[0].2, &first),
+            "合并第 1 条输入应与锚点库原件共享同一 Arc 指针"
+        );
+        assert!(
+            Arc::ptr_eq(&tables[1].2, &second),
+            "合并第 2 条输入应与锚点库原件共享同一 Arc 指针"
+        );
+    }
+
+    // ---------- 结果采样（波 4）：store_anchor 入库策略 + 三条黑盒哨兵 ----------
+
+    #[test]
+    fn store_anchor_passes_through_when_consumed_and_samples_terminal() {
+        // 入库策略单测：仍有下游待取 → Arc 直通（指针相等，零拷贝）；
+        // 终态 → 只留 ≤200 行样本且前 200 行与原表逐行一致，
+        // columns / types 完整保留（响应契约不因采样缺列缺类型）。
+        use crate::dataflow::value::{ColType, Value};
+        let rows: Vec<Vec<Value>> = (1..=305).map(|index| vec![Value::Int(index)]).collect();
+        let full = Arc::new(Table {
+            columns: vec!["序号".to_owned()],
+            types: vec![ColType::Integer],
+            rows,
+        });
+        let passed = store_anchor(1, Arc::clone(&full));
+        assert!(
+            Arc::ptr_eq(&passed, &full),
+            "仍有下游待取时应原样 move 共享指针"
+        );
+        let sampled = store_anchor(0, Arc::clone(&full));
+        assert!(!Arc::ptr_eq(&sampled, &full), "终态锚点应生成新的样本表");
+        assert!(
+            sampled.rows.len() <= ANCHOR_SAMPLE_ROWS,
+            "样本表行数不得超过样例上限"
+        );
+        assert_eq!(sampled.rows.len(), ANCHOR_SAMPLE_ROWS, "305 行应截到 200 行");
+        for (index, row) in sampled.rows.iter().enumerate() {
+            assert_eq!(*row, full.rows[index], "样本第 {index} 行应与原表一致");
+        }
+        assert_eq!(sampled.columns, full.columns);
+        assert_eq!(sampled.types, full.types);
+    }
+
+    #[test]
+    fn anchor_sampling_keeps_full_row_count_for_terminal_anchors() {
+        // 截断哨兵（205 行 > 200 样例上限才有探测力）：in→clean(trim) 与
+        // in→csv_out 双分支，clean 锚点与输出 file: 锚点均为终态（入库只留
+        // 样本），但响应 rowCount 必须仍是全量 205、样例首行取值正确——
+        // 任何把 rowCount 一并截断的静默截断都会在此暴露。
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("seq.csv");
+        let mut csv = String::from("值\n");
+        for index in 1..=205 {
+            csv.push_str(&format!("\" 值{index} \"\n"));
+        }
+        fs::write(&input, csv).unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("in", &input, json!({})),
+                {"id": "cl", "type": "clean", "name": "清洗",
+                 "config": {"actions": [{"field": "值", "ops": ["trim"]}]}},
+                {"id": "out", "type": "csv_out", "name": "CSV输出",
+                 "config": {"fileName": input.with_file_name("seq_out.csv").to_string_lossy(), "encoding": "utf8"}}
+            ]),
+            json!([
+                {"from": "in", "to": "cl"},
+                {"from": "in", "to": "out", "fromAnchor": "output", "toAnchor": "in"}
+            ]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "in"), "ok");
+        assert_eq!(node_status(&result, "cl"), "ok");
+        assert_eq!(node_status(&result, "out"), "ok");
+        assert_eq!(row_count(&result, "cl", "output"), 205, "清洗锚点 rowCount 应为全量 205");
+        assert_eq!(
+            row_count(&result, "out", "file:seq_out.csv"),
+            205,
+            "输出 file: 锚点 rowCount 应为全量 205"
+        );
+        assert_eq!(cell(&result, "cl", "output", 0, 0), json!("值1"), "清洗样例首行应为 trim 后的值");
+        assert_eq!(cell(&result, "out", "file:seq_out.csv", 0, 0), json!(" 值1 "), "输出样例首行应为改写前的原值");
+    }
+
+    #[test]
+    fn dual_mut_consumers_rewrite_isolated_on_shared_upstream() {
+        // 双改写哨兵：in→cleanA(trim 列X)→out1 与 in→cleanB(列Y 全角转半角)
+        // →out2。in 的锚点被两个改写型消费者先后取走，两路行数都等于全量、
+        // 互不污染——cleanA 锚点保留原 Y 值、cleanB 锚点保留原 X 值。
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("xy.csv");
+        fs::write(&input, "X,Y\n\" a \",Ａ\n\" b \",Ｂ\n\" c \",Ｃ\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("in", &input, json!({})),
+                {"id": "ca", "type": "clean", "name": "清洗A",
+                 "config": {"actions": [{"field": "X", "ops": ["trim"]}]}},
+                {"id": "cb", "type": "clean", "name": "清洗B",
+                 "config": {"actions": [{"field": "Y", "ops": ["toHalfWidth"]}]}},
+                {"id": "o1", "type": "csv_out", "name": "输出1",
+                 "config": {"fileName": input.with_file_name("out1.csv").to_string_lossy(), "encoding": "utf8"}},
+                {"id": "o2", "type": "csv_out", "name": "输出2",
+                 "config": {"fileName": input.with_file_name("out2.csv").to_string_lossy(), "encoding": "utf8"}}
+            ]),
+            json!([
+                {"from": "in", "to": "ca"},
+                {"from": "ca", "to": "o1", "fromAnchor": "output", "toAnchor": "in"},
+                {"from": "in", "to": "cb"},
+                {"from": "cb", "to": "o2", "fromAnchor": "output", "toAnchor": "in"}
+            ]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "ca"), "ok");
+        assert_eq!(node_status(&result, "cb"), "ok");
+        assert_eq!(node_status(&result, "o1"), "ok");
+        assert_eq!(node_status(&result, "o2"), "ok");
+        // 两路行数都等于全量。
+        assert_eq!(row_count(&result, "ca", "output"), 3);
+        assert_eq!(row_count(&result, "cb", "output"), 3);
+        assert_eq!(row_count(&result, "o1", "file:out1.csv"), 3);
+        assert_eq!(row_count(&result, "o2", "file:out2.csv"), 3);
+        // 互不污染：cleanA 只改 X、保留原 Y；cleanB 只改 Y、保留原 X。
+        assert_eq!(cell(&result, "ca", "output", 0, 0), json!("a"), "cleanA 应完成 X 的 trim");
+        assert_eq!(cell(&result, "ca", "output", 0, 1), json!("Ａ"), "cleanA 锚点应保留原 Y（全角）");
+        assert_eq!(cell(&result, "cb", "output", 0, 0), json!(" a "), "cleanB 锚点应保留原 X（含空格）");
+        assert_eq!(cell(&result, "cb", "output", 0, 1), json!("A"), "cleanB 应完成 Y 的全角转半角");
+    }
+
+    #[test]
+    fn shared_upstream_table_not_polluted_by_clean_rewrite() {
+        // 共享哨兵（自波 3 移入，波 4 释放落地后才具备隔离性探测力）：
+        // in→clean＋in→csv_out，csv_out 拿到的必须是 clean 改写前的原值。
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("raw.csv");
+        fs::write(&input, "名称\n\" 甲 \"\n\" 乙 \"\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("in", &input, json!({})),
+                {"id": "cl", "type": "clean", "name": "清洗",
+                 "config": {"actions": [{"field": "名称", "ops": ["trim"]}]}},
+                {"id": "out", "type": "csv_out", "name": "CSV输出",
+                 "config": {"fileName": input.with_file_name("raw_out.csv").to_string_lossy(), "encoding": "utf8"}}
+            ]),
+            json!([
+                {"from": "in", "to": "cl"},
+                {"from": "in", "to": "out", "fromAnchor": "output", "toAnchor": "in"}
+            ]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "cl"), "ok");
+        assert_eq!(node_status(&result, "out"), "ok");
+        assert_eq!(cell(&result, "cl", "output", 0, 0), json!("甲"), "clean 应完成 trim");
+        assert_eq!(
+            cell(&result, "out", "file:raw_out.csv", 0, 0),
+            json!(" 甲 "),
+            "csv_out 应拿到 clean 改写前的原值"
+        );
     }
 }

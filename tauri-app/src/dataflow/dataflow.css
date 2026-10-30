@@ -37,8 +37,12 @@
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  height: auto;
-  min-height: 560px;
+  /* 工作台整体限高一屏（顶部应用栏＋工具页头＋页内边距实测约 190px，再留
+     弹性伸展余量）：画布弹性伸缩、预览区钉在底部始终可见，用户不再滚动
+     窗口找预览信息（真实反馈 2026-10-30）。用 max-height 封顶而不是固定
+     height——外层弹性容器会把固定高度再撑大；极矮窗口时退化为少量滚动。 */
+  max-height: calc(100vh - 220px);
+  min-height: 420px;
   border: 1px solid var(--border-strong);
   border-radius: var(--r-lg);
   background: var(--surface);
@@ -246,9 +250,12 @@
 
 /* 配置区（左） */
 .df-config {
-  width: 288px;
+  width: var(--df-config-w, 288px);
   flex: none;
   overflow: auto;
+  /* 配置项多时限制自身高度、内部滚动（用户建议），不再把整个工作台
+     撑高——否则下方预览区被顶出屏幕，要滚很久才能看到结果。 */
+  max-height: calc(100vh - 250px);
   padding: var(--sp-3);
   background: var(--surface);
   border-right: 1px solid var(--border-strong);
@@ -405,6 +412,51 @@ textarea.df-in {
   background: var(--warning-bg);
   color: var(--warning-fg);
 }
+/* 输出位置行：路径省略显示 + 选择按钮。 */
+.df-outdir {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.df-outdir-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+/* 未填完整的条件行：浅红底提示，运行前会被拦下。 */
+.df-row-incomplete {
+  border-radius: var(--r-sm);
+  outline: 1px dashed var(--danger-fg);
+  outline-offset: 2px;
+  background: var(--danger-bg);
+}
+/* 折叠说明：默认一行小字「▸ 说明」，点开才显示完整灰字块。 */
+.df-note-fold {
+  margin: 0 0 var(--sp-2);
+}
+.df-note-fold > summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+.df-note-fold > summary::before {
+  content: "▸ ";
+}
+.df-note-fold[open] > summary::before {
+  content: "▾ ";
+}
+.df-note-fold > .df-note {
+  margin: var(--sp-1) 0 0;
+}
 .df-list-head {
   display: grid;
   gap: var(--sp-1);
@@ -531,6 +583,9 @@ textarea.df-in {
   flex: 1;
   overflow: hidden;
   touch-action: none;
+  /* 画布是拖拽面：不禁文字选择时，空白处按住左键拖动会被浏览器
+     当成框选文字，蓝色选区盖在画布上，看起来就像画布拖不动。 */
+  user-select: none;
   background-color: var(--surface-page);
   /* 点阵与底色拉开一档对比（原 --border-soft 与底色只差一档，形同虚设） */
   background-image: radial-gradient(
@@ -775,12 +830,32 @@ textarea.df-in {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  height: 236px;
+  height: var(--df-results-h, 236px);
   background: var(--surface);
   border-top: 1px solid var(--border-strong);
 }
 .df-results.df-collapsed {
   height: 37px;
+}
+/* 面板尺寸分隔条：拖动调整配置区宽度/结果区高度（双击恢复默认）。 */
+.df-split {
+  flex: none;
+  z-index: 5;
+  touch-action: none;
+  user-select: none;
+  background: transparent;
+  transition: background 0.12s;
+}
+.df-split:hover {
+  background: color-mix(in srgb, var(--df-run, #3d7fd6) 30%, transparent);
+}
+.df-split-v {
+  width: 7px;
+  cursor: col-resize;
+}
+.df-split-h {
+  height: 7px;
+  cursor: row-resize;
 }
 .df-results-head {
   flex: none;

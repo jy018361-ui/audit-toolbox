@@ -110,9 +110,20 @@ export const OcrConfigStatusSchema = z.object({
   llm: z.object({ ready: z.boolean(), visionReady: z.boolean() }),
 });
 export type OcrConfigStatus = z.infer<typeof OcrConfigStatusSchema>;
+export const OcrExtractionDiagnosticSchema = z.object({
+  sequence: z.number().int().nonnegative().max(1_000_000), attempt: z.number().int().nonnegative().max(16),
+  status: z.enum(["cached", "validated", "rejected", "transport_error"]), elapsedMs: durationMs.max(86_400_000),
+  promptChars: z.number().int().nonnegative().max(10_000_000), sourceChars: z.number().int().nonnegative().max(10_000_000),
+  reason: z.enum(["coverage", "evidence", "columns", "facts", "format", "transport"]).optional(),
+}).strict();
 
 /** Every OCR boundary is checked before the UI can treat a result as complete. */
 export const ocrResponseSchemas: Record<string, z.ZodType> = {
+  "ocr.extraction_context": z.object({ contextKey: z.string().regex(/^[a-f0-9]{64}$/) }),
+  "ocr.extraction_cache_get": z.object({ entry: z.object({ parsed: z.object({ coverage_complete: z.literal(true), items: z.array(z.record(z.string(), z.unknown())), columns: z.array(OcrColumnSchema).optional() }) }).nullable() }),
+  "ocr.extraction_cache_put": z.object({ saved: z.boolean() }),
+  "ocr.extraction_diagnostics_save": z.object({ saved: z.boolean() }),
+  "ocr.extraction_diagnostics": z.object({ runs: z.array(z.object({ runId: z.string(), entries: z.array(OcrExtractionDiagnosticSchema).max(512), updatedAt: z.string() })).max(20) }),
   "ocr.projects": z.object({ projects: z.array(OcrProjectSchema) }),
   "ocr.project_save": OcrProjectSchema,
   "ocr.project_delete": z.unknown(),

@@ -52,10 +52,17 @@ fn ocr_dispatch_workers_from_stdin() {
     let mut peak_running = 0;
     let mut pages = vec![];
     let mut events = vec![];
+    // Manual offline tail-latency acceptance: cancel only this page once every
+    // other page is terminal. Production cancellation/cleanup paths are used.
+    let defer_page = input["deferPage"].as_u64();
+    let mut page_jobs = HashMap::new();
+    let mut deferred_job = None;
+    let mut cancel_started = None;
     while next < pending.len() || !active.is_empty() {
-        while next < pending.len() && active.len() < 5 {
+        while next < pending.len() && active.len() < limit {
             let item = &pending[next];
             let id = service.start("ocr.recognize_page", item.clone()).unwrap();
+            page_jobs.insert(item["page"].as_u64().unwrap(), id.clone());
             active.insert(id);
             next += 1;
         }
@@ -72,6 +79,13 @@ fn ocr_dispatch_workers_from_stdin() {
             println!("已完成 {} / {} 页，经过 {:.2} 秒", pages.len(), pending.len(), started.elapsed().as_secs_f64());
         }
         events.push(event);
+        if defer_page.is_some() && cancel_started.is_none() && pages.len() + 1 == pending.len() {
+            if let Some(job) = defer_page.and_then(|page| page_jobs.get(&page)).filter(|job| active.contains(*job)) {
+                cancel_started = Some(Instant::now());
+                assert!(service.cancel(job), "单页取消未被接受");
+                deferred_job = Some(job.clone());
+            }
+        }
     }
     // monitor owns cleanup until the child has exited, just as in the app.
     let cleanup = Instant::now();
@@ -79,7 +93,11 @@ fn ocr_dispatch_workers_from_stdin() {
         thread::sleep(Duration::from_millis(20));
     }
     assert!(service.jobs.lock().is_empty(), "后台进程退出后未释放名额");
-    let report = json!({"wallSeconds":started.elapsed().as_secs_f64(),"ocrLimit":limit,"peakRunning":peak_running,"pages":pages,"events":events});
+    let report = json!({"wallSeconds":started.elapsed().as_secs_f64(),"ocrLimit":limit,"peakRunning":peak_running,"pages":pages,"events":events,
+        "deferredPage":defer_page,"cancelSeconds":cancel_started.map(|time| time.elapsed().as_secs_f64())});
     fs::write(output.join("dispatch-report.json"), serde_json::to_string_pretty(&report).unwrap()).unwrap();
-    assert!(report["pages"].as_array().unwrap().iter().all(|event| event["phase"] == "completed"), "部分 OCR 页失败，请检查本机报告");
+    assert!(report["pages"].as_array().unwrap().iter().all(|event| {
+        if deferred_job.as_deref() == event["jobId"].as_str() { event["phase"] == "cancelled" }
+        else { event["phase"] == "completed" }
+    }), "部分 OCR 页失败，请检查本机报告");
 }

@@ -225,7 +225,7 @@ export type JobDialogProviderProps = {
 };
 
 /**
- * 全局任务进度弹窗。任何后台任务一开始就弹出，显示进度并提供暂停/继续/停止；
+ * 全局任务进度弹窗。一般任务开始时展开，会议任务默认使用收起的任务条；
  * 「最小化」把它收成右下角一条，用户可以切去别的工具，点小条再展开。
  *
  * 用户暂停在前端记录，以便任务停在后端检查点期间按钮仍保持正确状态；
@@ -237,6 +237,7 @@ export function JobDialogProvider({
   children,
 }: JobDialogProviderProps) {
   const [minimized, setMinimized] = useState(false);
+  const [expandedMeetings, setExpandedMeetings] = useState(false);
   const minimizedButtonRef = useRef<HTMLButtonElement>(null);
   const [paused, setPaused] = useState<Record<string, boolean>>({});
   useAudiPickOperations();
@@ -342,7 +343,9 @@ export function JobDialogProvider({
     });
   };
 
-  const open = running.length > 0 && !minimized;
+  const meetingsOnly = running.length > 0 && running.every(job => job.toolId === "meeting_minutes");
+  const open = running.length > 0 && !minimized && (!meetingsOnly || expandedMeetings);
+  useEffect(() => { if (!running.some(job => job.toolId === "meeting_minutes")) setExpandedMeetings(false); }, [runningIds]);
   const first = running[0];
 
   useEffect(() => {
@@ -469,12 +472,12 @@ export function JobDialogProvider({
             </div>
           </DialogContent>
         </Dialog>
-        {running.length > 0 && minimized && first && (
+        {running.length > 0 && (minimized || (meetingsOnly && !expandedMeetings)) && first && (
           <button
             ref={minimizedButtonRef}
             type="button"
             className="job-dialog-pill"
-            onClick={() => setMinimized(false)}
+            onClick={() => { setMinimized(false); setExpandedMeetings(true); }}
             aria-label={`展开任务进度：${
               running.length > 1
                 ? `${running.length} 个任务进行中`

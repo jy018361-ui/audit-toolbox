@@ -44,20 +44,43 @@ fn file_label(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
-/// 简单通配符匹配（* 任意、? 单字符，Windows 下不区分大小写）。
+/// 简单通配符匹配（* 任意、? 单字节，Windows 下不区分大小写）。
+///
+/// 迭代式双指针 + 最近一个 `*` 位置回溯：失配时只回到最近的星号、
+/// 让它多吞一个字节重来，最坏 O(模式长×文件名长) 步内出结果。
+/// 此前为双分支递归（星号处「跳过星号」与「吞一个字节」两路展开），
+/// 多 `*` 病态模式是指数回溯——十几个 `*` 叠加配长文件名会让整次
+/// 运行卡死在阻塞线程上且无任何报错（F22）。
 fn pattern_matches(pattern: &[u8], name: &[u8]) -> bool {
-    match (pattern.first(), name.first()) {
-        (None, None) => true,
-        (Some(b'*'), _) => {
-            pattern_matches(&pattern[1..], name)
-                || name
-                    .first()
-                    .is_some_and(|_| pattern_matches(pattern, &name[1..]))
+    let mut pattern_at = 0usize;
+    let mut name_at = 0usize;
+    // 最近一个 `*` 之后的模式位置，与该 `*` 当前吞到的名字起点。
+    let mut star_after: Option<usize> = None;
+    let mut star_name = 0usize;
+    while name_at < name.len() {
+        if pattern_at < pattern.len() && pattern[pattern_at] == b'*' {
+            // 先尝试让星号吞零个字节；失配再回溯到这里多吞一个。
+            star_after = Some(pattern_at + 1);
+            star_name = name_at;
+            pattern_at += 1;
+        } else if pattern_at < pattern.len()
+            && (pattern[pattern_at] == b'?' || pattern[pattern_at] == name[name_at])
+        {
+            pattern_at += 1;
+            name_at += 1;
+        } else if let Some(resume) = star_after {
+            pattern_at = resume;
+            star_name += 1;
+            name_at = star_name;
+        } else {
+            return false;
         }
-        (Some(b'?'), Some(_)) => pattern_matches(&pattern[1..], &name[1..]),
-        (Some(want), Some(have)) if want == have => pattern_matches(&pattern[1..], &name[1..]),
-        _ => false,
     }
+    // 名字耗尽后，模式剩余部分必须全为 `*`（可吞零字节）。
+    while pattern_at < pattern.len() && pattern[pattern_at] == b'*' {
+        pattern_at += 1;
+    }
+    pattern_at == pattern.len()
 }
 
 fn excel_extensions() -> [&'static str; 6] {
@@ -287,39 +310,56 @@ fn infer_column_type(samples: &[String]) -> (ColType, Option<String>) {
 }
 
 /// 单元格转换：空串→空值；空格文本在非文本列按空值处理、文本列原样保留。
-fn convert_cell(raw: &str, kind: ColType) -> Result<Value, String> {
+/// 按值接收原文：Text 分支直接把原文移入返回值（不再 to_owned 双份堆）；
+/// 解析失败时 Err=(原文, 原因) 把原文带回，供外层组装含原文的用户消息
+/// （value.rs 各解析 Err 只含原因不含原文，原文只能由本通道带回）。
+fn convert_cell(raw: String, kind: ColType) -> Result<Value, (String, String)> {
     if raw.is_empty() {
         return Ok(Value::Null);
     }
     match kind {
-        ColType::Text => Ok(Value::Text(raw.to_owned())),
+        ColType::Text => Ok(Value::Text(raw)),
         ColType::Integer => {
             if raw.trim().is_empty() {
                 return Ok(Value::Null);
             }
-            parse_integer_strict(raw).map(Value::Int)
+            match parse_integer_strict(&raw) {
+                Ok(value) => Ok(Value::Int(value)),
+                Err(reason) => Err((raw, reason)),
+            }
         }
         ColType::Decimal => {
             if raw.trim().is_empty() {
                 return Ok(Value::Null);
             }
-            Dec::parse(raw).map(Value::Dec)
+            match Dec::parse(&raw) {
+                Ok(value) => Ok(Value::Dec(value)),
+                Err(reason) => Err((raw, reason)),
+            }
         }
         ColType::Date => {
             if raw.trim().is_empty() {
                 return Ok(Value::Null);
             }
-            parse_date_explicit(raw)
-                .map(Value::Date)
-                .ok_or_else(|| format!("无法识别为日期（“{raw}”）"))
+            match parse_date_explicit(&raw) {
+                Some(date) => Ok(Value::Date(date)),
+                None => {
+                    let reason = format!("无法识别为日期（“{raw}”）");
+                    Err((raw, reason))
+                }
+            }
         }
         ColType::Bool => {
             if raw.trim().is_empty() {
                 return Ok(Value::Null);
             }
-            parse_bool_strict(raw)
-                .map(Value::Bool)
-                .ok_or_else(|| format!("无法识别为布尔值（“{raw}”）"))
+            match parse_bool_strict(&raw) {
+                Some(value) => Ok(Value::Bool(value)),
+                None => {
+                    let reason = format!("无法识别为布尔值（“{raw}”）");
+                    Err((raw, reason))
+                }
+            }
         }
     }
 }
@@ -510,6 +550,16 @@ fn row_cap(context: &RunContext) -> usize {
     }
 }
 
+/// 第一遍（借用扫描）留下的每文件自有元数据：来源标识、列映射与行数。
+/// 采样与第二遍按值转换只依赖它＋collected 的借用/所有权，使每个文件
+/// 的 RawSheet 在第二遍逐行消费后即整体释放，不再活到函数尾。
+struct FileMeta {
+    label: String,
+    sheet: String,
+    mapping: Vec<Option<usize>>,
+    row_count: usize,
+}
+
 /// 多文件按字段名对齐（以第一个文件为基准，默认裁定第 1 条），
 /// 随后统一做类型建议、逐行转换并附加来源列。
 fn assemble_outcome(
@@ -557,7 +607,10 @@ fn assemble_outcome(
         messages.push(format!("表头{rename}"));
     }
     let width = base_header.len();
-    let mut files: Vec<(&str, &str, &RawSheet, Vec<Option<usize>>)> = Vec::new();
+    // 第一遍（借用）：建列映射、发对齐消息、累计总行数；只留下自有元数据
+    // FileMeta，不持有任何 RawSheet 引用。
+    let mut metas: Vec<FileMeta> = Vec::with_capacity(collected.len());
+    let mut total_rows = 0usize;
     for (label, sheet, raw) in &collected {
         let (names, renames) = normalize_header(&raw.header);
         for rename in &renames {
@@ -587,9 +640,14 @@ fn assemble_outcome(
             }
             messages.push(format!("{label} 与第一个文件字段不一致：{}", parts.join("；")));
         }
-        files.push((label, sheet, raw, mapping));
+        total_rows += raw.rows.len();
+        metas.push(FileMeta {
+            label: label.clone(),
+            sheet: sheet.clone(),
+            mapping,
+            row_count: raw.rows.len(),
+        });
     }
-    let total_rows: usize = files.iter().map(|(_, _, raw, _)| raw.rows.len()).sum();
     if total_rows > MAX_TABLE_ROWS {
         return Err(structural(
             "DATAFLOW_ROW_LIMIT",
@@ -606,13 +664,13 @@ fn assemble_outcome(
     let mut samples: Vec<Vec<String>> = vec![Vec::new(); width];
     let mut capped = vec![false; width];
     let mut open_columns = width;
-    'sample: for (_, _, raw, mapping) in &files {
+    'sample: for (meta, (_, _, raw)) in metas.iter().zip(collected.iter()) {
         for (_, cells) in &raw.rows {
             for index in 0..width {
                 if capped[index] {
                     continue;
                 }
-                let source = match mapping[index] {
+                let source = match meta.mapping[index] {
                     Some(source) => source,
                     None => continue,
                 };
@@ -642,23 +700,37 @@ fn assemble_outcome(
         }
         types.push(kind);
     }
+    // 定型完成，样例（每列 ≤1000 个克隆的单元格文本）立即释放，不再活到函数尾。
+    drop(samples);
 
     // 逐行投影并转换（单遍，不建中间副本）；行级错误按 onRowError 处理（默认停止）。
+    // 第二遍（所有权）：metas 与 collected 按值消费，raw.rows 逐行 into_iter，
+    // 单元格经 get_mut＋std::mem::take 安全移出——每个文件迭代结束其
+    // RawSheet 整体释放。
     let mut rows: Vec<Vec<Value>> = Vec::with_capacity(total_rows);
     let mut skipped = 0usize;
-    for (label, sheet, raw, mapping) in &files {
-        for (physical, cells) in &raw.rows {
+    for (meta, (_, _, raw)) in metas.into_iter().zip(collected.into_iter()) {
+        let FileMeta {
+            label,
+            sheet,
+            mapping,
+            row_count: _,
+        } = meta;
+        for (physical, mut cells) in raw.rows {
             let mut converted: Vec<Value> = Vec::with_capacity(width);
             let mut failure: Option<String> = None;
             for index in 0..width {
                 let cell = mapping[index]
-                    .and_then(|source| cells.get(source))
-                    .map(String::as_str)
-                    .unwrap_or("");
+                    .and_then(|source| cells.get_mut(source))
+                    .map(std::mem::take)
+                    .unwrap_or_default();
                 match convert_cell(cell, types[index]) {
                     Ok(value) => converted.push(value),
-                    Err(reason) => {
-                        failure = Some(format!("字段“{}”的值“{cell}”{reason}", base_header[index]));
+                    Err((text, reason)) => {
+                        failure = Some(format!(
+                            "字段“{}”的值“{text}”{reason}",
+                            base_header[index]
+                        ));
                         break;
                     }
                 }
@@ -682,9 +754,9 @@ fn assemble_outcome(
                 },
                 None => {
                     if attach {
-                        converted.push(Value::Text((*label).to_owned()));
-                        converted.push(Value::Text((*sheet).to_owned()));
-                        converted.push(Value::Int(*physical as i64));
+                        converted.push(Value::Text(label.clone()));
+                        converted.push(Value::Text(sheet.clone()));
+                        converted.push(Value::Int(physical as i64));
                     }
                     rows.push(converted);
                 }
@@ -1006,6 +1078,49 @@ mod tests {
         assert!(!pattern_matches(b"a*c", b"ab"));
     }
 
+    /// F22 语义回归：重写为迭代回溯后，匹配语义与原递归版完全一致。
+    #[test]
+    fn wildcard_matching_semantics_survive_rewrite() {
+        // 多星号组合：*a*b*c* 要求 a、b、c 依次出现。
+        assert!(pattern_matches(b"*a*b*c*", b"xabcybczc"));
+        assert!(!pattern_matches(b"*a*b*c*", b"acb"));
+        assert!(pattern_matches(b"*a*b*c*", b"abc"));
+        // 连续星号等价于单个星号。
+        assert!(pattern_matches(b"**a", b"xxa"));
+        assert!(pattern_matches(b"a**", b"axx"));
+        assert!(pattern_matches(b"a**b", b"ab"));
+        // 星号吞空与尾随星号。
+        assert!(pattern_matches(b"*csv*", b"2026-01.csv"));
+        assert!(pattern_matches(b"2026*", b"2026-01.csv"));
+        assert!(pattern_matches(b"*.csv", b".csv"));
+        // ? 是单字节通配：UTF-8 多字节字符按字节计数（与原实现一致）。
+        assert!(pattern_matches(b"???", "任".as_bytes()));
+        assert!(!pattern_matches(b"??", "任".as_bytes()));
+        // 空模式/空名字边界（原递归 (None, None) => true）。
+        assert!(pattern_matches(b"", b""));
+        assert!(!pattern_matches(b"", b"a"));
+        assert!(pattern_matches(b"*", b""));
+        assert!(!pattern_matches(b"a", b""));
+    }
+
+    /// F22 性能回归：病态模式（多个 * 叠加 + 长文件名）必须立即返回
+    /// 而非指数回溯。原双分支递归实现下本用例为天文数字次调用
+    /// （组合外推远超 1e18），实际表现为运行永久卡死且无报错；
+    /// 迭代回溯为 O(模式长×名字长)。
+    #[test]
+    fn pathological_wildcard_pattern_returns_promptly() {
+        let pattern = format!("{}z", "*a".repeat(16));
+        let name = "a".repeat(255); // Windows 文件名上限长度
+        let started = std::time::Instant::now();
+        let matched = pattern_matches(pattern.as_bytes(), name.as_bytes());
+        let elapsed = started.elapsed();
+        assert!(!matched, "名字里没有 z，模式必不匹配");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "病态模式应在毫秒级完成，实际耗时 {elapsed:?}"
+        );
+    }
+
     #[test]
     fn column_type_inference_follows_section9_rules() {
         let samples = |texts: &[&str]| texts.iter().map(|t| t.to_string()).collect::<Vec<_>>();
@@ -1020,5 +1135,213 @@ mod tests {
         assert_eq!(infer_column_type(&samples(&[])).0, ColType::Text);
         // 8 位连续数字不自动判日期（账号场景）。
         assert_eq!(infer_column_type(&samples(&["20261027", "20261028"])).0, ColType::Integer);
+    }
+
+    /// F6 回归：前端「列类型锁定」下拉提供 datetime（日期时间）选项，
+    /// 引擎此前不识别该值，用户一锁定整次运行即报
+    /// 「列"X"的锁定类型"datetime"无法识别」。修复后 datetime 按日期
+    /// 读入（第一期日期只到日），不再阻断运行。
+    #[test]
+    fn datetime_locked_column_reads_as_date_without_config_error() {
+        let context = RunContext {
+            mode: super::super::RunMode::Full,
+            today: chrono::NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(),
+            param_values: HashMap::new(),
+            preview_rows: PREVIEW_ROWS,
+            allowed_paths: None,
+        };
+        let collected = vec![(
+            "数据.csv".to_owned(),
+            "CSV".to_owned(),
+            RawSheet {
+                header: vec!["发生日期".to_owned()],
+                rows: vec![
+                    (2, vec!["2026-01-02".to_owned()]),
+                    (3, vec!["2026-01-03 00:00:00".to_owned()]),
+                ],
+            },
+        )];
+        let column_types = Some(HashMap::from([(
+            "发生日期".to_owned(),
+            "datetime".to_owned(),
+        )]));
+        let outcome = assemble_outcome(
+            "节点一",
+            "CSV 输入",
+            collected,
+            &column_types,
+            RowErrorPolicy::parse(None),
+            false,
+            &context,
+            Vec::new(),
+        )
+        .expect("锁定 datetime 不应再报「锁定类型无法识别」");
+        let (_, table) = &outcome.anchors[0];
+        assert_eq!(table.types, vec![ColType::Date]);
+        assert_eq!(
+            table.rows,
+            vec![
+                vec![Value::Date(
+                    chrono::NaiveDate::from_ymd_opt(2026, 1, 2).unwrap()
+                )],
+                vec![Value::Date(
+                    chrono::NaiveDate::from_ymd_opt(2026, 1, 3).unwrap()
+                )],
+            ]
+        );
+    }
+
+    /// 输入释放改造（第二遍按值消费 RawSheet）的等价性基准数据：
+    /// 两个文件、文本列（品名）＋数值列（金额，锁定 decimal——样例含坏值
+    /// "abc"，自然推断会退化为文本，锁定后坏值行触发 onRowError）＋
+    /// 第二个文件缺失「金额」列（按空值读取）。
+    fn two_file_collected() -> Vec<(String, String, RawSheet)> {
+        vec![
+            (
+                "甲.csv".to_owned(),
+                "CSV".to_owned(),
+                RawSheet {
+                    header: vec!["品名".to_owned(), "金额".to_owned()],
+                    rows: vec![
+                        (2, vec!["苹果".to_owned(), "10".to_owned()]),
+                        (3, vec!["香蕉".to_owned(), "abc".to_owned()]),
+                        (4, vec!["樱桃".to_owned(), "2.5".to_owned()]),
+                    ],
+                },
+            ),
+            (
+                "乙.csv".to_owned(),
+                "CSV".to_owned(),
+                RawSheet {
+                    header: vec!["品名".to_owned()],
+                    rows: vec![
+                        (2, vec!["葡萄".to_owned()]),
+                        (3, vec!["西瓜".to_owned()]),
+                    ],
+                },
+            ),
+        ]
+    }
+
+    fn full_run_context() -> RunContext {
+        RunContext {
+            mode: super::super::RunMode::Full,
+            today: chrono::NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(),
+            param_values: HashMap::new(),
+            preview_rows: PREVIEW_ROWS,
+            allowed_paths: None,
+        }
+    }
+
+    fn locked_decimal() -> Option<HashMap<String, String>> {
+        Some(HashMap::from([("金额".to_owned(), "decimal".to_owned())]))
+    }
+
+    /// 等价性档一（attach=false）：列名/类型/行值/跳过与缺失列消息与
+    /// 旧实现逐项一致——坏值 "abc" 的原文由 Err=(原文, 原因) 通道带回，
+    /// 跳过消息须与改造前逐字相同。
+    #[test]
+    fn two_files_skip_and_missing_column_match_legacy_output() {
+        let outcome = assemble_outcome(
+            "节点一",
+            "CSV 输入",
+            two_file_collected(),
+            &locked_decimal(),
+            RowErrorPolicy::parse(Some("skip")),
+            false,
+            &full_run_context(),
+            Vec::new(),
+        )
+        .expect("按值转换的两文件装配应成功");
+        let (_, table) = &outcome.anchors[0];
+        assert_eq!(table.columns, vec!["品名", "金额"]);
+        assert_eq!(table.types, vec![ColType::Text, ColType::Decimal]);
+        assert_eq!(
+            table.rows,
+            vec![
+                vec![
+                    Value::Text("苹果".to_owned()),
+                    Value::Dec(Dec::from_i64(10))
+                ],
+                vec![
+                    Value::Text("樱桃".to_owned()),
+                    Value::Dec(Dec::parse("2.5").unwrap())
+                ],
+                vec![Value::Text("葡萄".to_owned()), Value::Null],
+                vec![Value::Text("西瓜".to_owned()), Value::Null],
+            ]
+        );
+        assert!(outcome.messages.iter().any(|message| message
+            == "乙.csv 与第一个文件字段不一致：缺失字段（按空值读取）：金额"));
+        assert!(outcome.messages.iter().any(|message| message
+            == "跳过 甲.csv 第 3 行：字段“金额”的值“abc”不是有效的十进制数"));
+        assert!(outcome.stats.iter().any(|stat| stat == "跳过行数：1"));
+        assert!(outcome.has_warnings);
+    }
+
+    /// 等价性档二（attach=true）：来源文件/Sheet/原始行号三列在按值消费
+    /// 循环内附加（label/sheet 为自有 String），行值与旧行为一致。
+    #[test]
+    fn two_files_attach_source_columns_match_legacy_output() {
+        let outcome = assemble_outcome(
+            "节点一",
+            "CSV 输入",
+            two_file_collected(),
+            &locked_decimal(),
+            RowErrorPolicy::parse(Some("skip")),
+            true,
+            &full_run_context(),
+            Vec::new(),
+        )
+        .expect("按值转换的两文件装配应成功");
+        let (_, table) = &outcome.anchors[0];
+        assert_eq!(
+            table.columns,
+            vec!["品名", "金额", "来源文件", "Sheet", "原始行号"]
+        );
+        assert_eq!(
+            table.types,
+            vec![
+                ColType::Text,
+                ColType::Decimal,
+                ColType::Text,
+                ColType::Text,
+                ColType::Integer
+            ]
+        );
+        assert_eq!(
+            table.rows,
+            vec![
+                vec![
+                    Value::Text("苹果".to_owned()),
+                    Value::Dec(Dec::from_i64(10)),
+                    Value::Text("甲.csv".to_owned()),
+                    Value::Text("CSV".to_owned()),
+                    Value::Int(2),
+                ],
+                vec![
+                    Value::Text("樱桃".to_owned()),
+                    Value::Dec(Dec::parse("2.5").unwrap()),
+                    Value::Text("甲.csv".to_owned()),
+                    Value::Text("CSV".to_owned()),
+                    Value::Int(4),
+                ],
+                vec![
+                    Value::Text("葡萄".to_owned()),
+                    Value::Null,
+                    Value::Text("乙.csv".to_owned()),
+                    Value::Text("CSV".to_owned()),
+                    Value::Int(2),
+                ],
+                vec![
+                    Value::Text("西瓜".to_owned()),
+                    Value::Null,
+                    Value::Text("乙.csv".to_owned()),
+                    Value::Text("CSV".to_owned()),
+                    Value::Int(3),
+                ],
+            ]
+        );
+        assert!(outcome.has_warnings);
     }
 }

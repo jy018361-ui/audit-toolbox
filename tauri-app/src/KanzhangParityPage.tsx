@@ -283,22 +283,21 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   // 历史记录「继续任务」：用存档参数重建草稿（含映射与批次），并自动重新
   // 读取文件——映射预览/批次编辑/导出都以读取结果为显示前提，不重读用户
   // 看到的还是空页；读取完成后 restoredMappingRef 把存档映射顶回建议值。
-  // 没有字段映射的存档（读取/筛选子步骤）不恢复，免得把现场覆盖成半成品。
+  // 读取子步骤没有映射时，从已保存的来源重新识别并使用新的建议映射。
   const autoReadKeyRef=useRef("");
   const [autoReadSeq,setAutoReadSeq]=useState(0);
   useTaskRestore(tool.id,(restore)=>{
     const p=restore.params as Partial<Pick<KanzhangDraft,"inputPath"|"sheet"|"headerRow"|"headerDepth"|"mapping"|"batches"|"excludes"|"outputPath"|"markLossTransfer"|"includeCounterpart"|"includeSuite"|"pivotRows"|"pivotColumns"|"pivotValues">>&{targetBatches?:Batch[];excludeAccounts?:string[]};
     if(typeof p.inputPath!=="string"||!p.inputPath)return;
     const mapping=p.mapping&&typeof p.mapping==="object"&&Object.keys(p.mapping).length?p.mapping:undefined;
-    if(!mapping)return;
     const batches=Array.isArray(p.targetBatches)&&p.targetBatches.length?p.targetBatches:clearKanzhangBatches().batches;
     const sheet=p.sheet??"";
-    restoredMappingRef.current={key:`${p.inputPath}|${sheet.trim()}`,mapping,pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[]};
+    restoredMappingRef.current=mapping?{key:`${p.inputPath}|${sheet.trim()}`,mapping,pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[]}:null;
     autoReadKeyRef.current=`${p.inputPath}|${sheet.trim()}`;
     setAutoReadSeq(value=>value+1);
     llmGeneration.current+=1;
     const includeCounterpart=p.includeCounterpart??true;
-    setDraft({...EMPTY,inputPath:p.inputPath,sheet,headerRow:p.headerRow??0,headerDepth:p.headerDepth??1,mapping,batches,activeBatch:0,excludes:p.excludeAccounts??[],outputPath:p.outputPath??"",outputTouched:Boolean(p.outputPath),markLossTransfer:p.markLossTransfer??true,includeCounterpart,includeSuite:includeCounterpart&&(p.includeSuite??true),pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[],pivotValues:p.pivotValues??[]});
+    setDraft({...EMPTY,inputPath:p.inputPath,sheet,headerRow:p.headerRow??0,headerDepth:p.headerDepth??1,mapping:mapping??EMPTY.mapping,batches,activeBatch:0,excludes:p.excludeAccounts??[],outputPath:p.outputPath??"",outputTouched:Boolean(p.outputPath),markLossTransfer:p.markLossTransfer??true,includeCounterpart,includeSuite:includeCounterpart&&(p.includeSuite??true),pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[],pivotValues:p.pivotValues??[]});
     setAccounts([]);setAccountCodes([]);setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");setResult(undefined);setJob(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");
   });
   // 恢复的草稿提交到 state 后自动触发读取（setDraft 异步，恢复回调里直接

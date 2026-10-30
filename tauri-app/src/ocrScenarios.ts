@@ -1,5 +1,6 @@
 import registrySource from "../assets/audipick/rules/registry.js?raw";
-import { naturalRequirement, readableFieldLabel, readableLegacyRequirement, naturalOutputContract, responseColumns } from "./ocrRequirements";
+import { ocrExtractionKey, extractionFailureReason, type OcrExtractionCache, type OcrExtractionDiagnostic, type OcrVerifiedResponse } from "./ocrExtractionResume";
+import { naturalRequirement, readableFieldLabel, readableLegacyRequirement, naturalOutputContract, responseColumns, isOcrSourceTextField } from "./ocrRequirements";
 import { loadCaseLibraryState } from "./audipickCaseLibrary";
 import { classifyCovenant } from "./audipickCaseMatching";
 import {
@@ -50,8 +51,6 @@ const ORDER = [
 const SOURCE_FIELDS = [
   { key: "sourceFile", label: "来源文件" },
   { key: "sourcePage", label: "核实页码" },
-  { key: "evidence", label: "逐字证据" },
-  { key: "source_reference", label: "原文引用出处" },
 ];
 const OUTPUT_CONTRACT = `
 【OCR 摘录完整性与来源要求】
@@ -286,6 +285,7 @@ export function getOcrPromptStages(
 }
 
 type Row = Record<string, unknown>;
+type VerifiedRows = Row[] & { sourceResponse?: OcrVerifiedResponse };
 class RestrictiveRowRepair extends Error {
   constructor(message: string, readonly original: Row[], readonly invalid: number[]) { super(message); }
 }
@@ -614,6 +614,14 @@ function parsedResponse(response: Response): unknown {
       throw new Error("摘录未返回有效 JSON，不能将错误当作未发现内容。");
     }
   }
+  if (isObject(parsed) && Array.isArray(parsed.items)) {
+    // JSON numeric strings in line coordinates have one unambiguous meaning;
+    // convert only unsigned whole numbers, never business amounts/dates or roles.
+    return { ...parsed, items: parsed.items.map(item => isObject(item) && Array.isArray(item.evidence_refs)
+      ? { ...item, evidence_refs: item.evidence_refs.map(ref => isObject(ref) ? Object.fromEntries(Object.entries(ref).map(([key, value]) =>
+        [key, ["line_start", "line_end"].includes(key) && typeof value === "string" && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : value])) : ref) }
+      : item) };
+  }
   return parsed;
 }
 function parseRows(response: Response): Row[] {
@@ -762,6 +770,8 @@ export async function extractOcrScenario(options: {
   onProgress?: (message: string) => void;
   onWorkProgress?: (progress: { completed: number; total: number }) => void;
   checkpoint?: () => Promise<void>;
+  cache?: OcrExtractionCache;
+  onDiagnostic?: (entry: OcrExtractionDiagnostic) => void;
 }): Promise<{ rows: Row[]; columns: { key: string; label: string }[] }> {
   const { scenario, document } = options;
   const kind = scenario.baseScenarioId ?? scenario.id;
@@ -789,11 +799,51 @@ export async function extractOcrScenario(options: {
   const generatedColumns: { key: string; label: string }[][] = [];
   let consolidatedColumns: { key: string; label: string }[] | undefined;
   let requestNumber = 0;
+  let cacheWarningShown = false;
+  const { active } = kind === "loan_covenant" || kind === "loan_restrictive"
+    ? await loadCaseLibraryState() : { active: null };
+  const cacheScope = options.cache ? await ocrExtractionKey({ protocol: "ocr-verified-requests-v1", scenario,
+    requirements, pages, library: active?.library, context: options.cache.contextKey }) : "";
   async function requestVerified(
     prompt: string,
     text: string,
     validate: (rows: Row[]) => Row[],
-  ): Promise<Row[]> {
+    splitIncomplete = false,
+    onRequestKey?: (key: string) => void,
+  ): Promise<VerifiedRows> {
+    const cacheKey = options.cache ? await ocrExtractionKey({ cacheScope, prompt, text }) : "";
+    onRequestKey?.(cacheKey);
+    await options.checkpoint?.();
+    const accept = (response: Response, requestIndex: number) => {
+      const original = parseRows(response);
+      const columns = responseColumns(parsedResponse(response));
+      const derivedFinancial = new Set(kind === "loan_covenant" ? ["covenant_category", "trigger_standard", "clause_ref"] : []);
+      const missingKeys = columns?.filter(column => !derivedFinancial.has(column.key) && original.length && !original.some(row => Object.hasOwn(row, column.key)));
+      if (missingKeys?.length) throw new Error("缓存列与记录不一致，需重新核验。");
+      const validated = validate(structuredClone(original));
+      if (kind === "custom") validateNaturalFacts(validated, columns, requirements[0].prompt);
+      if (columns?.length && validated.length) generatedColumns[requestIndex] = columns;
+      return validated;
+    };
+    if (options.cache) {
+      let cached: OcrVerifiedResponse | null = null;
+      try { cached = await options.cache.get(cacheKey); } catch {
+        if (!cacheWarningShown) options.onProgress?.("断点暂不可读，将重新请求并核验；本次摘录继续");
+        cacheWarningShown = true;
+      }
+      if (cached) {
+        const started = performance.now();
+        try {
+          const result = accept(cached, requestNumber);
+          options.onDiagnostic?.({ sequence: ++requestNumber, attempt: 0, status: "cached", elapsedMs: performance.now() - started, promptChars: prompt.length, sourceChars: text.length });
+          options.onProgress?.("已复用并重新核验完成的分段，无需重复请求模型");
+          return Object.assign(result, { sourceResponse: cached });
+        } catch (error) {
+          const reason = extractionFailureReason(error instanceof Error ? error.message : "");
+          options.onProgress?.(`已保存分段未通过当前${reason === "coverage" ? "完整性" : reason === "columns" ? "表格字段" : reason === "facts" ? "业务事实" : reason === "evidence" ? "来源证据" : "格式"}复核，需要重新请求`);
+        }
+      }
+    }
     let failure = "";
     let rowRepair: RestrictiveRowRepair | undefined;
     let wholeRepairUsed = false;
@@ -807,17 +857,24 @@ export async function extractOcrScenario(options: {
       // A transport failure is not a malformed model response. Do not repeat
       // expensive timed-out requests or retry user cancellation here.
       const requestIndex = requestNumber++;
-      const response = await options.request({
+      const input = {
         prompt:
           prompt +
-          (scenario.internalPrompts ? naturalOutputContract(kind === "custom" ? [] : scenario.fields) : "") +
+          (scenario.internalPrompts ? naturalOutputContract(kind === "custom" || attempt ? [] : scenario.fields) : "") +
           (attempt
             ? `\n【本轮校验修复】\n上次返回未通过校验：${failure}\n` +
               (rowRepair instanceof RestrictiveCoverageRepair ? "本轮是定点补漏。其他记录已通过证据校验并由程序保留，不要重新输出；items仅返回上述遗漏义务的新增记录，仍用同一本轮原文L行号。coverage_complete只表示此次补漏是否完成。" : rowRepair ? `本轮是定点修复。其他记录已通过证据校验，不要重新输出。仅修复以下记录，仍用同一本轮原文L行号：${JSON.stringify(rowRepair.invalid.map((index) => rowRepair!.original[index]))}。不得原样返回已报错记录。若错误为后果缺证，应为同一来源行另加role为consequence的引用；没有具体后果则仅填“本条未明确”，不能在括号中补充无证据后果。items仅返回修复后的这些记录，保留义务，不因后果缺证而删掉真实义务。coverage_complete只表示本次定点修复是否完成，不要求再生成其他已通过记录。` : "请重新检查同一本轮来源后返回完整结果。") +
               "使用规定的行号/证据编号，不能改写证据或省略 coverage_complete。若未完成必须如实返回 false。"
             : ""),
         text,
-      });
+      };
+      const started = performance.now();
+      let response: Response;
+      try { response = await options.request(input); }
+      catch (error) {
+        options.onDiagnostic?.({ sequence: requestIndex + 1, attempt, status: "transport_error", elapsedMs: performance.now() - started, promptChars: input.prompt.length, sourceChars: text.length, reason: "transport" });
+        throw error;
+      }
       if (attempt && rowRepair instanceof RestrictiveCoverageRepair) coverageRepairUsed = true;
       else if (attempt && rowRepair) rowRepairUsed = true;
       try {
@@ -846,12 +903,23 @@ export async function extractOcrScenario(options: {
             return start(a) - start(b);
           });
         }
+        const cacheItems = structuredClone(returned);
         const validated = validate(returned);
         if (kind === "custom") validateNaturalFacts(validated, columns, requirements[0].prompt);
         // Empty source windows cannot declare unrelated blank result columns.
         if (columns?.length && validated.length) generatedColumns[requestIndex] = columns;
-        return validated;
+        options.onDiagnostic?.({ sequence: requestIndex + 1, attempt, status: "validated", elapsedMs: performance.now() - started, promptChars: input.prompt.length, sourceChars: text.length });
+        const sourceResponse: OcrVerifiedResponse = { parsed: { coverage_complete: true, items: cacheItems, ...(columns ? { columns } : {}) } };
+        if (options.cache) {
+          try { await options.cache.put(cacheKey, sourceResponse); }
+          catch { options.onProgress?.("本段已核验，断点保存暂不可用；本次摘录继续"); }
+        }
+        return Object.assign(validated, { sourceResponse });
       } catch (error) {
+        options.onDiagnostic?.({ sequence: requestIndex + 1, attempt, status: "rejected", elapsedMs: performance.now() - started, promptChars: input.prompt.length, sourceChars: text.length, reason: extractionFailureReason(error instanceof Error ? error.message : "") });
+        // An explicit incomplete response to a large source window should be
+        // split immediately, rather than repeat the same expensive window.
+        if (splitIncomplete && error instanceof Error && /模型未确认本段检查完整|摘录输出被截断/.test(error.message)) throw error;
         if (rowRepair && !(error instanceof RestrictiveRowRepair)) throw error;
         if (error instanceof NaturalFactError) {
           if (factRepairUsed) throw error;
@@ -869,15 +937,12 @@ export async function extractOcrScenario(options: {
           rowRepair = undefined;
         }
         failure = error instanceof Error ? error.message : "返回结构或证据无效";
-        options.onProgress?.("返回结果未通过完整性或证据校验，正在核验修复");
+        const reason = extractionFailureReason(failure);
+        options.onProgress?.(`返回结果未通过${reason === "coverage" ? "完整性" : reason === "columns" ? "表格字段" : reason === "facts" ? "业务事实" : reason === "evidence" ? "来源证据" : "格式"}校验，正在${rowRepair ? "定点" : "重新"}核验修复（第${attempt + 1}次）`);
       }
     }
     throw new Error("摘录结果校验未完成。");
   }
-  const { active } =
-    kind === "loan_covenant" || kind === "loan_restrictive"
-      ? await loadCaseLibraryState()
-      : { active: null };
   if (kind === "loan_covenant") {
     await options.checkpoint?.();
     const result = await extractFinancialMetrics({
@@ -902,6 +967,16 @@ export async function extractOcrScenario(options: {
               prompt + FINANCIAL_OUTPUT_CONTRACT,
               text,
               (items) => {
+                const availableLines = new Set([...text.matchAll(/^\[L(\d+)\]/gm)].map(match => Number(match[1])));
+                for (const row of items) {
+                  if (!Array.isArray(row.evidence) || !row.evidence.length) throw new Error("财务指标契约摘录缺少原文行号，请重试。");
+                  for (const ref of row.evidence) {
+                    if (!isObject(ref)) throw new Error("财务指标契约原文位置无效。");
+                    const start = Number(ref.line_start), end = Number(ref.line_end ?? ref.line_start);
+                    if (!Number.isInteger(start) || !Number.isInteger(end) || end < start || !availableLines.has(start) || !availableLines.has(end))
+                      throw new Error("财务指标契约原文位置超出本次来源范围。");
+                  }
+                }
                 const subjects = [
                   {
                     source: /对外投资限额.{0,16}\d+(?:\.\d+)?万元/,
@@ -985,7 +1060,7 @@ export async function extractOcrScenario(options: {
     options.onWorkProgress?.({ completed: 0, total: workTotal });
     const chunkRows: Row[][] = Array.from({ length: chunks.length }, () => []);
     let completedChunks = 0;
-    const processChunk = async (chunk: (typeof chunks)[number], index: number, canSplit = true): Promise<Row[]> => {
+    const processChunk = async (chunk: (typeof chunks)[number], index: number, canSplit = true): Promise<VerifiedRows> => {
       await options.checkpoint?.();
       options.onProgress?.(
         `摘录${scenario.name}：第 ${index + 1}/${chunks.length} 段`,
@@ -1007,6 +1082,8 @@ export async function extractOcrScenario(options: {
       const context = kind === "loan_restrictive"
         ? governingCovenantText(source, sourceLines[0]?.start ?? 0).trim().slice(0, 1200)
         : "";
+      let parentKey = "";
+      let validateChunk!: (items: Row[]) => Row[];
       const returned = await requestVerified(
         stages[0].prompt +
           (kind === "loan_restrictive" ? RESTRICTIVE_OUTPUT_CONTRACT :
@@ -1025,7 +1102,7 @@ export async function extractOcrScenario(options: {
                 `[L${number + 1}][PDF第${line.page}页]${line.text}`,
             )
             .join("\n"),
-        (items) => {
+        validateChunk = (items) => {
           if (kind === "loan_restrictive") {
             items = items.filter(row => {
               if (!Array.isArray(row.evidence_refs)) return true;
@@ -1093,12 +1170,14 @@ export async function extractOcrScenario(options: {
           }
           return result;
         },
-      ).catch(async (error: unknown): Promise<Row[]> => {
+        ["loan_restrictive", "custom"].includes(kind) && canSplit && chunk.text.length >= 2000,
+        key => { parentKey = key; },
+      ).catch(async (error: unknown): Promise<VerifiedRows> => {
         // A model that explicitly cannot finish a large segment gets smaller
         // source windows once. Keep the exact text and original offsets;
         // never reinterpret coverage=false as success.
         if (!["loan_restrictive", "custom"].includes(kind) || !canSplit || chunk.text.length < 2000 ||
-          !(error instanceof Error) || !error.message.includes("模型未确认本段检查完整")) throw error;
+          !(error instanceof Error) || !/模型未确认本段检查完整|摘录输出被截断/.test(error.message)) throw error;
         if (kind === "custom" && !needsConsolidation) {
           needsConsolidation = true;
           workTotal++;
@@ -1113,7 +1192,9 @@ export async function extractOcrScenario(options: {
           boundary = i + 1;
           if (size >= half) break;
         }
-        const result: Row[] = [];
+        const combinedItems: Row[] = [];
+        const combinedColumns: { key: string; label: string }[] = [];
+        let lineOffset = 0;
         for (const part of [sourceLines.slice(0, boundary), sourceLines.slice(boundary)]) {
           if (!part.length) throw error;
           const segments: SourceSegment[] = [];
@@ -1122,11 +1203,31 @@ export async function extractOcrScenario(options: {
             if (previous?.page === line.page) previous.text += "\n" + line.text;
             else segments.push({ page: line.page, text: line.text, start: line.start - pageStarts.get(line.page)! });
           }
-          result.push(...await processChunk({ text: segments.map(s => s.text).join("\n\n"), segments,
-            pages: chunk.pages.filter(p => segments.some(s => s.page === p.page)) }, index, false));
+          const child = await processChunk({ text: segments.map(s => s.text).join("\n\n"), segments,
+            pages: chunk.pages.filter(p => segments.some(s => s.page === p.page)) }, index, false);
+          for (const row of child.sourceResponse?.parsed.items ?? []) combinedItems.push({ ...row,
+            ...(Array.isArray(row.evidence_refs) ? { evidence_refs: row.evidence_refs.map(ref => isObject(ref) ? { ...ref,
+              line_start: Number(ref.line_start) + lineOffset, line_end: Number(ref.line_end) + lineOffset } : ref) } : {}) });
+          for (const column of child.sourceResponse?.parsed.columns ?? []) if (!combinedColumns.some(existing => existing.key === column.key)) combinedColumns.push(column);
+          lineOffset += part.length;
         }
-        return result;
+        // Reassemble exact parent-relative line references and validate the
+        // combined window before caching it, so retry never redoes its split.
+        if (kind === "custom" && combinedItems.length) combinedItems[0]._ocr_split_consolidate = true;
+        const verified = validateChunk(structuredClone(combinedItems));
+        if (kind === "custom") validateNaturalFacts(verified, combinedColumns, requirements[0].prompt);
+        const sourceResponse: OcrVerifiedResponse = { parsed: { coverage_complete: true, items: combinedItems,
+          ...(combinedColumns.length ? { columns: combinedColumns } : {}) } };
+        if (options.cache && parentKey) {
+          try { await options.cache.put(parentKey, sourceResponse); } catch { /* Child checkpoints remain available. */ }
+        }
+        return Object.assign(verified, { sourceResponse });
       });
+      if (kind === "custom" && !needsConsolidation && returned.sourceResponse?.parsed.items.some(row => row._ocr_split_consolidate === true)) {
+        needsConsolidation = true;
+        workTotal++;
+        options.onWorkProgress?.({ completed: completedChunks, total: workTotal });
+      }
       return returned;
     };
     let nextChunk = 0;
@@ -1273,13 +1374,13 @@ export async function extractOcrScenario(options: {
     options.onWorkProgress?.({ completed: workTotal, total: workTotal });
   }
   await options.checkpoint?.();
-  const internalFields = new Set(["pages", "page", "excerpt", "contract_excerpt", "source_excerpt", "evidence_quotes", "source_document_id", "source_documents", "covenant_category_id", "contract_classification", "is_financial", "covenant_scope"]);
+  const internalFields = new Set(["pages", "page", "excerpt", "contract_excerpt", "source_excerpt", "evidence", "source_reference", "evidence_quotes", "source_document_id", "source_documents", "covenant_category_id", "contract_classification", "is_financial", "covenant_scope"]);
   const sourceKeys = new Set(SOURCE_FIELDS.map(field => field.key));
   const labels = new Map([...scenario.fields, { key: "title", label: "事项" }, { key: "trigger_standard", label: "限制或触发标准" }, { key: "clause_ref", label: "条款位置" }].map(field => [field.key, field.label]));
   const inferred = [...new Set(rows.flatMap(row => Object.keys(row)))].filter(key => !key.startsWith("_") && !internalFields.has(key) && !sourceKeys.has(key));
   const declared = consolidatedColumns ?? generatedColumns.flat();
   const fields = declared.length ? declared : inferred.map(key => ({ key, label: labels.get(key) ?? key }));
-  const columns = [...fields.filter(field => !internalFields.has(field.key)), ...SOURCE_FIELDS].filter(
+  const columns = [...fields.filter(field => !internalFields.has(field.key) && !isOcrSourceTextField(field.key) && !isOcrSourceTextField(field.label)), ...SOURCE_FIELDS].filter(
     (field, index, all) =>
       all.findIndex((candidate) => candidate.key === field.key) === index,
   );
@@ -1289,6 +1390,6 @@ export async function extractOcrScenario(options: {
   // reappear in the user's Excel. Keep hidden audit metadata for replay.
   return { rows: rows.map(row => Object.fromEntries([
     ...columns.map(column => [column.key, row[column.key] ?? (sourceKeys.has(column.key) ? "" : "未明确")]),
-    ...Object.entries(row).filter(([key]) => key.startsWith("_") || key === "evidence_quotes"),
+    ...Object.entries(row).filter(([key]) => key.startsWith("_") || ["evidence", "source_reference", "evidence_quotes"].includes(key)),
   ])), columns };
 }

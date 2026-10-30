@@ -13,6 +13,10 @@ function render(ui: ReactElement) {
 }
 
 const mocks = vi.hoisted(() => ({
+  notify: vi.fn(async () => undefined),
+  historyList: vi.fn(async () => [] as import("../types").MeetingHistoryRow[]),
+  focused: vi.fn(async () => false),
+  notificationListener: undefined as ((jobId: string) => void) | undefined,
   listener: undefined as ((event: MeetingEvent) => void) | undefined,
   jobListener: undefined as ((event: JobEvent) => void) | undefined,
   jobStart: vi.fn(async () => "job-1"),
@@ -23,6 +27,8 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../api", () => ({
+  meetingNotify: mocks.notify,
+  listenMeetingNotificationOpen: vi.fn(async (handler: (jobId: string) => void) => { mocks.notificationListener = handler; return () => undefined; }),
   listenNativeFileDragEvents: vi.fn(async () => () => undefined),
   listenMeetingEvents: vi.fn(async (listener: (event: MeetingEvent) => void) => {
     mocks.listener = listener;
@@ -42,14 +48,14 @@ vi.mock("../api", () => ({
   runningInDesktopApp: vi.fn(() => true),
   meetingSetResident: vi.fn(async () => undefined),
   meetingReadMinutes: vi.fn(async () => ({ minutesMarkdown: "# 读入正文" })),
-  meetingHistoryList: vi.fn(async () => []),
+  meetingHistoryList: mocks.historyList,
   meetingHistoryGet: vi.fn(async () => ({})),
   meetingReadTranscript: vi.fn(async () => ""),
   jobCancel: vi.fn(), pickPath: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   WebviewWindow: { getByLabel: mocks.getByLabel },
-  getCurrentWebviewWindow: vi.fn(),
+  getCurrentWebviewWindow: vi.fn(() => ({ isFocused: mocks.focused, show: vi.fn(async () => {}), setFocus: vi.fn(async () => {}) })),
 }));
 vi.mock("@tauri-apps/plugin-notification", () => ({
   isPermissionGranted: vi.fn(), requestPermission: vi.fn(), sendNotification: vi.fn(),
@@ -57,6 +63,11 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
 
 beforeEach(() => {
   mocks.status.mockReset();
+  mocks.notify.mockClear();
+  mocks.historyList.mockReset().mockResolvedValue([]);
+  mocks.focused.mockResolvedValue(false);
+  mocks.notificationListener = undefined;
+  delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
   mocks.getByLabel.mockClear();
   mocks.listener = undefined;
   mocks.jobListener = undefined;
@@ -292,4 +303,54 @@ it("退会后立即再进会议，串行隐藏并复用小窗，不销毁 WebVie
   await act(async () => mocks.choiceListener?.(false));
   await waitFor(() => expect(window.hide).toHaveBeenCalledTimes(2));
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+
+it("开始和结束的质量警告不再发送桌面通知，后台完成只通知一次", async () => {
+  (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+  mocks.status.mockResolvedValue({ watchEnabled: true, inCall: false, recording: false });
+  render(<MeetingWatch />);
+  await waitFor(() => expect(mocks.status).toHaveBeenCalled());
+  await act(async () => {
+    mocks.listener?.({ type: "recording_started", at: "now", summary: { startedAt: "2026-10-29T10:00:00+08:00", warnings: ["系统回环", "备用设备"] } });
+    mocks.listener?.({ type: "recording_auto_finished", at: "end", summary: { audioPath: "C:/data/a.wav", durationSec: 20, startedAt: "2026-10-29T10:00:00+08:00", warnings: ["系统回环", "疑似无声"] } });
+  });
+  expect(mocks.notify).not.toHaveBeenCalled();
+  await act(async () => { mocks.jobListener?.(completed); mocks.jobListener?.(completed); });
+  await waitFor(() => expect(mocks.notify).toHaveBeenCalledTimes(1));
+  expect(mocks.notify).toHaveBeenCalledWith(completed.jobId, "会议纪要已生成", expect.any(String));
+});
+
+it("通知点击定位原任务而非最新会议，会议页不显示重复结果浮卡", async () => {
+  function Fixture() { const location = useLocation(); return <><MeetingWatch /><output data-testid="route">{location.pathname}:{(location.state as {meetingJob?: JobEvent})?.meetingJob?.jobId}</output></>; }
+  mocks.status.mockResolvedValue({ watchEnabled: true, inCall: false, recording: false });
+  render(<Fixture />);
+  await waitFor(() => expect(mocks.notificationListener).toBeDefined());
+  await act(async () => { mocks.jobListener?.(completed); mocks.jobListener?.({ ...completed, jobId: "other-meeting" }); });
+  await act(async () => mocks.notificationListener?.(completed.jobId));
+  expect(screen.getByTestId("route")).toHaveTextContent(`/tools/meeting_minutes:${completed.jobId}`);
+  expect(screen.queryByRole("button", { name: "关闭提示" })).not.toBeInTheDocument();
+});
+
+it("前台完成和用户主动取消都不发送桌面通知", async () => {
+  (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+  mocks.focused.mockResolvedValue(true);
+  mocks.status.mockResolvedValue({ watchEnabled: true, inCall: false, recording: false });
+  render(<MeetingWatch />);
+  await waitFor(() => expect(mocks.status).toHaveBeenCalled());
+  await act(async () => mocks.jobListener?.(completed));
+  mocks.focused.mockResolvedValue(false);
+  await act(async () => mocks.jobListener?.({ ...completed, jobId: "cancelled-meeting", phase: "cancelled" }));
+  expect(mocks.notify).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "关闭提示" })).not.toBeInTheDocument();
+});
+
+it("WebView 重载后点击通知按持久化任务编号查找对应会议", async () => {
+  mocks.status.mockResolvedValue({ watchEnabled: true, inCall: false, recording: false });
+  mocks.historyList.mockResolvedValue([{ id: "history-old", jobId: "old-job", title: "旧会议", startedAt: "2026-10-29T10:00:00Z", timeLabel: "生成时间", status: "completed", message: "" }]);
+  function Fixture() { const location = useLocation(); return <><MeetingWatch /><output data-testid="route">{location.pathname}{location.search}</output></>; }
+  render(<Fixture />);
+  await waitFor(() => expect(mocks.notificationListener).toBeDefined());
+  await act(async () => mocks.notificationListener?.("old-job"));
+  expect(screen.getByTestId("route")).toHaveTextContent("/tools/meeting_minutes?meeting=history-old&version=content");
 });

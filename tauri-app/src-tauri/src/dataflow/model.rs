@@ -63,10 +63,15 @@ pub(crate) struct Node {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Edge {
     pub from: String,
-    #[serde(default)]
+    /// 前端与流程文件用驼峰 fromAnchor/toAnchor；曾漏配 rename，
+    /// serde 把驼峰键静默当未填（default），引擎一律回落到单输出口
+    /// "output"——从筛选 T/F、关联 J/L/R 等多出口拉出的连线全部报
+    /// 「锚点 output 不存在」，单输出口连线碰巧不受影响。alias 兼容
+    /// 手工编辑流程文件时的下划线写法。
+    #[serde(default, rename = "fromAnchor", alias = "from_anchor")]
     pub from_anchor: Option<String>,
     pub to: String,
-    #[serde(default)]
+    #[serde(default, rename = "toAnchor", alias = "to_anchor")]
     pub to_anchor: Option<String>,
 }
 
@@ -426,15 +431,20 @@ pub(crate) struct SplitConfig {
 }
 
 /// 检查 Check 的规则（按 kind 区分五种形态；name 可选自定义规则名）。
+///
+/// 契约兼容（nodes/check.rs 运行前归一）：判别字段接受 `kind`（手写/历史
+/// 形态）与 `type`（前端表单序列化形态）；分组字段 groupBy 接受字符串数组
+/// （前端多选形态，规格文档第 18 节「分组字段多选」）与单个字符串（历史
+/// 形态），多列分组合并为复合分组键。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub(crate) enum CheckRule {
-    /// 借贷合计一致（groupBy 空 = 全表）。
+    /// 借贷合计一致（groupBy 空 = 全表，多列 = 复合分组键）。
     Balance {
         #[serde(default)]
         name: Option<String>,
         #[serde(default)]
-        group_by: Option<String>,
+        group_by: Vec<String>,
         debit_field: String,
         credit_field: String,
         /// 必须显式配置（设计文档）。
@@ -447,14 +457,15 @@ pub(crate) enum CheckRule {
         #[serde(default)]
         fields: Vec<String>,
     },
-    /// 编号唯一（groupBy 空 = 全表；空值不参与唯一性；重复整组进 NG）。
+    /// 编号唯一（groupBy 空 = 全表，多列 = 复合分组键；空值不参与唯一性；
+    /// 重复整组进 NG）。
     Unique {
         #[serde(default)]
         name: Option<String>,
         #[serde(default)]
         field: String,
         #[serde(default)]
-        group_by: Option<String>,
+        group_by: Vec<String>,
     },
     /// 数值区间（闭区间；空值判 NG 并标注「空值」）。
     Range {

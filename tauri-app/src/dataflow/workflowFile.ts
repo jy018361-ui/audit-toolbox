@@ -32,7 +32,14 @@ export async function saveWorkflowFile(workflow: DataflowWorkflow): Promise<Save
     downloadWorkflowJson(content, fileName);
     return { ok: true, message: "浏览器预览模式：流程文件已通过下载保存。" };
   }
-  const target = await pickPath("save", "保存数据流流程文件", ["json"], fileName);
+  // 系统保存对话框出错（如 IPC 异常）不能让「保存」静默无反应：
+  // 兜底转成失败结果，交给页面错误通道展示中文原因。
+  let target: Awaited<ReturnType<typeof pickPath>>;
+  try {
+    target = await pickPath("save", "保存数据流流程文件", ["json"], fileName);
+  } catch (error) {
+    return { ok: false, message: `打开保存窗口失败：${errorText(error)}` };
+  }
   if (typeof target !== "string" || !target) {
     return { ok: false, message: "已取消保存。" };
   }

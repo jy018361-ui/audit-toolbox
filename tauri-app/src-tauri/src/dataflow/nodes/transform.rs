@@ -13,6 +13,7 @@ use chrono::NaiveDate;
 use serde_json::Value as Json;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 字段选择节点（保留/删除、重命名、顺序；新增字段是否自动传递）。
 pub(crate) fn run_select(
@@ -83,10 +84,12 @@ pub(crate) fn run_select(
 
 /// 字段清洗节点（去空格、全角转半角、去不可见字符、文本替换、空值处理、
 /// 删除整行空记录）。文本操作只作用于文本值，空值不受影响。
+/// 输入以共享指针（Arc<Table>）传入：改写段经 Arc::make_mut 写时复制，
+/// 产出锚点复用 columns/types/rows，不再克隆整表。
 pub(crate) fn run_clean(
     node_name: &str,
     config: &Json,
-    input: &Table,
+    mut input: Arc<Table>,
 ) -> Result<NodeOutcome, AppError> {
     let config: CleanConfig = serde_json::from_value(config.clone())
         .map_err(|error| config_error("字段清洗", node_name, error.to_string()))?;
@@ -128,75 +131,80 @@ pub(crate) fn run_clean(
     }
     let mut counts: HashMap<&str, usize> = HashMap::new();
     let mut null_converted = 0usize;
-    let mut rows = input.rows.clone();
-    for action in &config.actions {
-        let column = index[&action.field];
-        let replace_from = action.replace_from.clone().unwrap_or_default();
-        let replace_to = action.replace_to.clone().unwrap_or_default();
-        for row in &mut rows {
-            if let Value::Text(text) = &mut row[column] {
-                let original = std::mem::take(text);
-                let mut updated = original.clone();
-                for op in &action.ops {
-                    match op.as_str() {
-                        "trim" => {
-                            let trimmed = trim_spaces(&updated).to_owned();
-                            if trimmed != updated {
-                                *counts.entry("去空格").or_default() += 1;
-                            }
-                            updated = trimmed;
-                        }
-                        "toHalfWidth" => {
-                            let half = string_to_half_width(&updated);
-                            if half != updated {
-                                *counts.entry("全角转半角").or_default() += 1;
-                            }
-                            updated = half;
-                        }
-                        "stripInvisible" => {
-                            let stripped = strip_invisible(&updated);
-                            if stripped != updated {
-                                *counts.entry("去不可见字符").or_default() += 1;
-                            }
-                            updated = stripped;
-                        }
-                        "replace" => {
-                            if updated.contains(&replace_from) {
-                                *counts.entry("文本替换").or_default() += 1;
-                                updated = updated.replace(&replace_from, &replace_to);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                *text = updated;
-            }
-        }
-    }
-    if config.null_text_to_null {
-        for row in &mut rows {
-            for cell in row.iter_mut() {
-                if let Value::Text(text) = cell {
-                    if trim_spaces(text).is_empty() {
-                        *cell = Value::Null;
-                        null_converted += 1;
-                    }
-                }
-            }
-        }
-    }
     let mut dropped = 0usize;
-    if config.drop_blank_rows {
-        let before = rows.len();
-        rows.retain(|row| {
-            row.iter().any(|cell| match cell {
-                Value::Null => false,
-                Value::Text(text) => !trim_spaces(text).is_empty(),
-                _ => true,
-            })
-        });
-        dropped = before - rows.len();
-    }
+    // 写时复制改写段：锚点库仍持引用（refcount ≥ 2）时 make_mut 克隆一次，
+    // 与改造前 input.rows.clone() 成本等价、行为一致；引用计数归 1 后自动
+    // 退化为原地改写零拷贝（配置校验段在上面经 Deref 只读，零改动）。
+    {
+        let table = Arc::make_mut(&mut input);
+        for action in &config.actions {
+            let column = index[&action.field];
+            let replace_from = action.replace_from.clone().unwrap_or_default();
+            let replace_to = action.replace_to.clone().unwrap_or_default();
+            for row in &mut table.rows {
+                if let Value::Text(text) = &mut row[column] {
+                    let original = std::mem::take(text);
+                    let mut updated = original.clone();
+                    for op in &action.ops {
+                        match op.as_str() {
+                            "trim" => {
+                                let trimmed = trim_spaces(&updated).to_owned();
+                                if trimmed != updated {
+                                    *counts.entry("去空格").or_default() += 1;
+                                }
+                                updated = trimmed;
+                            }
+                            "toHalfWidth" => {
+                                let half = string_to_half_width(&updated);
+                                if half != updated {
+                                    *counts.entry("全角转半角").or_default() += 1;
+                                }
+                                updated = half;
+                            }
+                            "stripInvisible" => {
+                                let stripped = strip_invisible(&updated);
+                                if stripped != updated {
+                                    *counts.entry("去不可见字符").or_default() += 1;
+                                }
+                                updated = stripped;
+                            }
+                            "replace" => {
+                                if updated.contains(&replace_from) {
+                                    *counts.entry("文本替换").or_default() += 1;
+                                    updated = updated.replace(&replace_from, &replace_to);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    *text = updated;
+                }
+            }
+        }
+        if config.null_text_to_null {
+            for row in &mut table.rows {
+                for cell in row.iter_mut() {
+                    if let Value::Text(text) = cell {
+                        if trim_spaces(text).is_empty() {
+                            *cell = Value::Null;
+                            null_converted += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if config.drop_blank_rows {
+            let before = table.rows.len();
+            table.rows.retain(|row| {
+                row.iter().any(|cell| match cell {
+                    Value::Null => false,
+                    Value::Text(text) => !trim_spaces(text).is_empty(),
+                    _ => true,
+                })
+            });
+            dropped = before - table.rows.len();
+        }
+    } // 写时复制改写段结束：此后 input 可作为共享锚点产出（columns/types/rows 全复用）
     let mut stats = Vec::new();
     for op in KNOWN_OPS {
         let label = match op {
@@ -215,14 +223,7 @@ pub(crate) fn run_clean(
     if config.drop_blank_rows {
         stats.push(format!("删除整行空记录：{dropped} 行"));
     }
-    let mut outcome = NodeOutcome::with_anchor(
-        "output",
-        Table {
-            columns: input.columns.clone(),
-            types: input.types.clone(),
-            rows,
-        },
-    );
+    let mut outcome = NodeOutcome::with_shared_anchor("output", input);
     outcome.stats = stats;
     Ok(outcome)
 }
@@ -407,9 +408,11 @@ pub(crate) fn run_filter(
         return Err(config_error("筛选", node_name, "至少需要 1 个条件。".into()));
     }
     let index = input.column_index();
+    // 输入运算符会先 to_lowercase 再比对，白名单必须全小写（曾写成驼峰导致
+    // 界面上的 startsWith/notContains 等条件必然报「无法识别」）。
     const OPERATORS: [&str; 13] = [
-        "=", "!=", "<>", ">", ">=", "<", "<=", "contains", "notContains", "startsWith",
-        "endsWith", "isEmpty", "isNotEmpty",
+        "=", "!=", "<>", ">", ">=", "<", "<=", "contains", "notcontains", "startswith",
+        "endswith", "isempty", "isnotempty",
     ];
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Cmp {
@@ -502,6 +505,17 @@ pub(crate) fn run_filter(
                 }
                 other => other.to_string(),
             };
+            if matches!(
+                parsed.kind,
+                RuleKind::Contains(_) | RuleKind::StartsWith | RuleKind::EndsWith
+            ) {
+                // 文字类运算符对任意列类型都按单元格的文本形式匹配
+                // （日期筛“包含 01”捞一月凭证、编号找尾号等），条件值保留原文，
+                // 不能再强迫解析成日期/数字，否则必然报「无法识别为日期」。
+                parsed.text = Some(as_text);
+                rules.push(parsed);
+                continue;
+            }
             match column_type {
                 ColType::Integer | ColType::Decimal => {
                     parsed.number = Some(Dec::parse(&as_text).map_err(|error| {
@@ -643,16 +657,16 @@ pub(crate) fn run_filter(
     let total = t_count + f_count;
     let outcome = NodeOutcome {
         anchors: vec![
-            ("T".to_owned(), Table {
+            ("T".to_owned(), Arc::new(Table {
                 columns: input.columns.clone(),
                 types: input.types.clone(),
                 rows: t_rows,
-            }),
-            ("F".to_owned(), Table {
+            })),
+            ("F".to_owned(), Arc::new(Table {
                 columns: input.columns.clone(),
                 types: input.types.clone(),
                 rows: f_rows,
-            }),
+            })),
         ],
         messages: Vec::new(),
         stats: vec![

@@ -36,7 +36,7 @@ import {
   toolCatalog,
   updateReleaseNotes,
 } from "./api";
-import { historyRowCanResume, publishTaskRestore } from "./restore";
+import { historyRowCanRestoreParams, publishTaskRestore } from "./restore";
 import type { ReleaseNotes } from "./updateNotes";
 import { Button } from "@/components/ui/button";
 import { errorText } from "@/lib/errors";
@@ -64,6 +64,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { RestoreBanner } from "@/components/RestoreBanner";
 import { WindowControls } from "@/components/WindowControls";
 import { PersistentToolPages } from "@/components/PersistentToolPages";
+import { ToolViewScrollRestoration } from "@/components/ToolViewScrollRestoration";
 import { markToolPageLive } from "./toolPageActivity";
 import { ToolRecoveryBoundary } from "@/components/ToolRecoveryBoundary";
 import { JobDialogProvider } from "@/components/JobDialog";
@@ -440,7 +441,7 @@ export default function App() {
     }
     if (next) {
       // 折叠后原按钮随侧边栏一起隐藏，焦点交给窄条上的菜单按钮。
-      window.setTimeout(() => toolDrawerButton.current?.focus(), 0);
+      window.setTimeout(() => toolDrawerButton.current?.focus({ preventScroll: true }), 0);
     } else {
       // 从折叠态展开：抽屉若开着就一并关掉，焦点回到展开后的折叠按钮。
       setToolDrawerOpen(false);
@@ -528,11 +529,8 @@ export default function App() {
   useEffect(() => {
     const routeChanged = previousPath.current !== location.pathname;
     if (routeChanged && toolDrawerOpen) {
-      window.setTimeout(() => toolDrawerButton.current?.focus(), 0);
+      window.setTimeout(() => toolDrawerButton.current?.focus({ preventScroll: true }), 0);
     }
-    // Settings and long tool pages share the document scroller. Without a
-    // reset, returning to the workspace can open with its heading cut off.
-    if (routeChanged) window.scrollTo(0, 0);
     previousPath.current = location.pathname;
     setToolDrawerOpen(false);
     // Closing is driven by route changes; including the open flag would close
@@ -879,6 +877,7 @@ export default function App() {
           tabIndex={-1}
           data-tauri-drag-region
         >
+          <ToolViewScrollRestoration />
           {!startupReady ? (
             <AppLoading />
           ) : startupError ? (
@@ -1512,8 +1511,18 @@ function History({ catalog }: { catalog: ToolManifest[] }) {
     setRestoreError("");
     setRestoringJobId(row.jobId);
     try {
-      // Rust 侧同时把仍存在的原输入路径重新授权，回填后即可直接运行。
-      const restore = await historyRestore(row.jobId);
+      // 有可用存档时由 Rust 重新授权原输入；旧记录和仅含辅助参数的记录
+      // 仍可进入工具页继续，但不拿不完整的参数覆盖当前现场。
+      const restore = historyRowCanRestoreParams(row)
+        ? await historyRestore(row.jobId)
+        : {
+            jobId: row.jobId,
+            toolId: row.toolId,
+            method: row.method,
+            params: {},
+            missingPaths: [],
+            authorizedPathCount: 0,
+          };
       publishTaskRestore(restore);
       navigate(tool.route, {
         state:
@@ -1563,11 +1572,7 @@ function History({ catalog }: { catalog: ToolManifest[] }) {
                 const outputCount = Array.isArray(row.outputPaths)
                   ? row.outputPaths.length
                   : 0;
-                // 读取/筛选这类子步骤的存档只有部分配置，不给恢复按钮。
-                const canResume = historyRowCanResume({
-                  method: row.method,
-                  params: row.params,
-                });
+                const canResume = catalog.some((tool) => tool.id === toolId);
                 const restoring = restoringJobId === row.jobId;
                 return (
                   <article className="task-row" key={String(row.jobId ?? index)}>

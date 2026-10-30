@@ -362,6 +362,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tauri-winrt-notification",
  "tempfile",
  "tiff 0.10.3",
  "tokio",

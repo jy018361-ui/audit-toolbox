@@ -92,10 +92,14 @@ export default function FileListDirectoryPage({
       sourceDir?: string;
       outputPath?: string;
     };
-    if (typeof params.sourceDir === "string" && params.sourceDir)
+    if (typeof params.sourceDir === "string" && params.sourceDir) {
       setSourceDir(params.sourceDir);
-    if (typeof params.outputPath === "string" && params.outputPath)
-      setOutputPath(params.outputPath);
+      setOutputPath(typeof params.outputPath === "string" ? params.outputPath : "");
+      setScan(undefined);
+      setStep(1);
+      setJob(undefined);
+      setError("");
+    }
   });
 
   useEffect(() => {

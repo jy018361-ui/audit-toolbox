@@ -54,8 +54,21 @@ function project(value: unknown): OcrProject {
   return found;
 }
 const failure = (message: string): never => { throw new Error(message); };
+const extractionCache = new Map<string, unknown>();
+const extractionDiagnostics = new Map<string, unknown[]>();
+// Demo engine handlers are synchronous; real contexts are hashed natively.
+// Each synthetic document mutation increments this isolated demo revision.
+const demoContext = (documentId: unknown) => detail(documentId).document.revision.toString(16).padStart(64, "0");
 
 export const handlers: Record<string, DemoHandler> = {
+  "ocr.extraction_context": params => ({ contextKey: demoContext(params.documentId) }),
+  "ocr.extraction_cache_get": params => ({ entry: params.contextKey === demoContext(params.documentId) ? clone(extractionCache.get(`${params.documentId}:${params.contextKey}:${params.key}`) ?? null) : null }),
+  "ocr.extraction_cache_put": params => {
+    if (params.contextKey !== demoContext(params.documentId)) return { saved: false };
+    extractionCache.set(`${params.documentId}:${params.contextKey}:${params.key}`, clone(params.entry)); return { saved: true };
+  },
+  "ocr.extraction_diagnostics_save": params => { detail(params.documentId); extractionDiagnostics.set(String(params.documentId), [{ runId: params.runId, entries: clone(params.entries), updatedAt: now() }]); return { saved: true }; },
+  "ocr.extraction_diagnostics": params => ({ runs: extractionDiagnostics.get(String(params.documentId)) ?? [] }),
   "ocr.projects": () => ({ projects: clone(projects) }),
   "ocr.config_status": () => ({ ocr: { ready: true, engine: "演示（不调用外部服务）" }, llm: { ready: true, visionReady: true } }),
   "ocr.project_save": (params) => {

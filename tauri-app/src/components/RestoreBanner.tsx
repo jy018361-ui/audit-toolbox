@@ -51,19 +51,26 @@ export function RestoreBanner({ catalog }: { catalog: ToolManifest[] }) {
   const toolName =
     catalog.find((tool) => tool.id === notice.toolId)?.name ?? "对应工具";
   const missing = notice.missingPaths;
-  const detail = missing.length > 0
-    ? `有 ${missing.length} 个原文件已不存在（如 ${missing[0]}），请重新选择后再运行。`
-    : notice.snapshotStatus === "valid"
-      ? "源文件未变化，已优先使用本机识别快照恢复。"
-      : notice.snapshotStatus === "stale"
-        ? "检测到源文件已有变化，页面将重新识别以避免使用旧数据。"
-        : notice.snapshotStatus === "missing"
-          ? "部分源文件已不存在，识别快照未被使用。"
-          : "文件内容如有变动，请在页面中重新读取后再运行。";
+  const hasParams = Object.keys(notice.params).length > 0;
+  const detail = !hasParams
+    ? "该记录没有可回填的输入参数，请在工具页选择或确认输入后继续。"
+    : missing.length > 0
+      ? `有 ${missing.length} 个原文件已不存在（如 ${missing[0]}），请重新选择后再运行。`
+      : notice.snapshotStatus === "valid"
+        ? "源文件未变化，已优先使用本机识别快照恢复。"
+        : notice.snapshotStatus === "stale"
+          ? "检测到源文件已有变化，页面将重新识别以避免使用旧数据。"
+          : notice.snapshotStatus === "missing"
+            ? "部分源文件已不存在，识别快照未被使用。"
+            : "文件内容如有变动，请在页面中重新读取后再运行。";
   return (
     <div className="restore-notice" role="status" aria-live="polite">
       <div>
-        <strong>已恢复「{toolName}」上次任务的输入。</strong>
+        <strong>
+          {hasParams
+            ? `已恢复「${toolName}」上次任务的输入。`
+            : `已打开「${toolName}」，可继续任务。`}
+        </strong>
         <p>
           {detail}
         </p>

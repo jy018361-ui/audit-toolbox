@@ -39,6 +39,11 @@ function anchorPos(
   };
 }
 
+/** 当前版本不认识的节点类型没有锚点定义，连线端点退化为节点中心。 */
+function nodeCenter(node: DataflowNode): { x: number; y: number } {
+  return { x: node.x + NODE_W / 2, y: node.y + NODE_H / 2 };
+}
+
 function bezierPath(a: { x: number; y: number }, b: { x: number; y: number }): string {
   const dx = Math.min(120, Math.max(40, Math.abs(b.x - a.x) * 0.5));
   return `M${a.x} ${a.y} C${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;
@@ -98,6 +103,10 @@ export interface DataflowCanvasProps {
   /** 节点真正开始被拖动前调用一次（撤销栈快照）。 */
   onNodeDragStart: () => void;
   onConnect: (edge: DataflowEdge) => void;
+  /** 最近新增节点的 id：若它落在当前视野外（视角曾被拖远），自动把视角对准它。 */
+  focusNodeId?: string | null;
+  /** 请求「适配视图」的令牌：恢复草稿/打开流程时递增，画布把全部节点缩放进视野。 */
+  fitKey?: number;
 }
 
 /** 数据流画布：拖动/连线/平移/缩放/点选，原生 DOM + SVG 实现。 */
@@ -110,6 +119,8 @@ export function DataflowCanvas({
   onMoveNode,
   onNodeDragStart,
   onConnect,
+  focusNodeId,
+  fitKey,
 }: DataflowCanvasProps) {
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const [camera, setCamera] = useState({ x: 24, y: 16, zoom: 1 });
@@ -129,26 +140,103 @@ export function DataflowCanvas({
     }
   };
 
-  // 滚轮缩放：以指针为锚点，clamp 0.35–2.2。需要 non-passive 才能阻止页面滚动。
+  // 滚轮/触摸板手势（用户裁定 2026-10-30）：双指滚动（含鼠标滚轮）＝
+  // 平移窗口；双指捏合（浏览器派发为 ctrl+wheel）＝以指针为锚点缩放，
+  // clamp 0.35–2.2。需要 non-passive 才能阻止页面滚动。
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      const mx = event.clientX - rect.left;
-      const my = event.clientY - rect.top;
       const current = cameraRef.current;
-      const nextZoom = Math.max(0.35, Math.min(2.2, current.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
-      setCamera({
-        zoom: nextZoom,
-        x: mx - ((mx - current.x) * nextZoom) / current.zoom,
-        y: my - ((my - current.y) * nextZoom) / current.zoom,
-      });
+      if (event.ctrlKey) {
+        const rect = canvas.getBoundingClientRect();
+        const mx = event.clientX - rect.left;
+        const my = event.clientY - rect.top;
+        // 捏合的 delta 很小、Ctrl+滚轮的 delta 约 ±100：指数因子对两者都平滑。
+        const factor = Math.exp(-event.deltaY * 0.005);
+        const nextZoom = Math.max(0.35, Math.min(2.2, current.zoom * factor));
+        setCamera({
+          zoom: nextZoom,
+          x: mx - ((mx - current.x) * nextZoom) / current.zoom,
+          y: my - ((my - current.y) * nextZoom) / current.zoom,
+        });
+      } else {
+        setCamera((camera) => ({
+          ...camera,
+          x: camera.x - event.deltaX,
+          y: camera.y - event.deltaY,
+        }));
+      }
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", onWheel);
   }, []);
+
+  // 新增节点必须落在视野内：节点坐标固定在原点附近，视角一旦被拖远
+  // （旧版拖动画布带文字选择假象时尤其容易反复拖），新节点全部画在
+  // 视野外，用户看到的就是「点了添加，画框里什么都没有」。这里在
+  // 新节点完整落于视野外时把视角平移到对准它（缩放保持不变）。
+  useEffect(() => {
+    if (!focusNodeId) return;
+    const node = workflow.nodes.find((item) => item.id === focusNodeId);
+    const canvas = canvasRef.current;
+    if (!node || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const cameraNow = cameraRef.current;
+    const screenX = cameraNow.x + node.x * cameraNow.zoom;
+    const screenY = cameraNow.y + node.y * cameraNow.zoom;
+    const w = NODE_W * cameraNow.zoom;
+    const h = NODE_H * cameraNow.zoom;
+    const visible =
+      screenX >= 0 && screenY >= 0 && screenX + w <= rect.width && screenY + h <= rect.height;
+    if (visible) return;
+    setCamera({
+      zoom: cameraNow.zoom,
+      x: rect.width / 2 - (node.x + NODE_W / 2) * cameraNow.zoom,
+      y: rect.height / 2 - (node.y + NODE_H / 2) * cameraNow.zoom,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusNodeId]);
+
+  /** 适配视图：把全部节点缩放进画布并居中。旧坐标可能来自更宽的窗口
+   *  （真实案例：节点横坐标 603/809/1026，当前画布仅约 670 宽），原先的
+   *  「重置视图」只把缩放平移归一，内容在视野外的问题原样保留——用户
+   *  看到的仍是空画布，点多少次重置都没用。空画布时恢复默认视角。 */
+  function fitToContent() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (!workflow.nodes.length) {
+      setCamera({ x: 24, y: 16, zoom: 1 });
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const minX = Math.min(...workflow.nodes.map((node) => node.x));
+    const minY = Math.min(...workflow.nodes.map((node) => node.y));
+    const maxX = Math.max(...workflow.nodes.map((node) => node.x + NODE_W));
+    const maxY = Math.max(...workflow.nodes.map((node) => node.y + NODE_H));
+    const w = Math.max(1, maxX - minX);
+    const h = Math.max(1, maxY - minY);
+    const padding = 36;
+    const zoom = Math.max(
+      0.35,
+      Math.min(
+        1.5,
+        Math.min((rect.width - padding * 2) / w, (rect.height - padding * 2) / h),
+      ),
+    );
+    setCamera({
+      zoom,
+      x: (rect.width - w * zoom) / 2 - minX * zoom,
+      y: (rect.height - h * zoom) / 2 - minY * zoom,
+    });
+  }
+
+  useEffect(() => {
+    if (!fitKey) return;
+    fitToContent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fitKey]);
 
   function worldFromEvent(event: React.PointerEvent): { x: number; y: number } {
     const rect = (canvasRef.current as HTMLDivElement).getBoundingClientRect();
@@ -166,6 +254,8 @@ export function DataflowCanvas({
     if (outAnchor) {
       const nodeEl = outAnchor.closest(".df-node") as HTMLElement | null;
       if (nodeEl) {
+        // 阻止指针按下衍生的默认行为（文字框选等），连线拖动才干净。
+        event.preventDefault();
         dragRef.current = {
           mode: "connect",
           from: nodeEl.dataset.id ?? "",
@@ -206,6 +296,9 @@ export function DataflowCanvas({
         return;
       }
     }
+    // 空白处按下即进入平移：掐掉浏览器默认的文字框选，否则拖动时
+    // 蓝色选区盖在画布上，用户看到的不是平移而是「选中了一堆文字」。
+    event.preventDefault();
     dragRef.current = { mode: "pan", moved: 0, lastX: event.clientX, lastY: event.clientY };
     capturePointer(event);
   }
@@ -285,6 +378,10 @@ export function DataflowCanvas({
   }
 
   const nodeById = new Map(workflow.nodes.map((node) => [node.id, node]));
+  // 未知类型节点（新版本工具保存/手工编辑的流程文件里出现，parseWorkflowFile 不拦截）：
+  // 此前静默不渲染，状态栏计数却含它们，运行报「节点类型未实现」时用户无从定位。
+  // 这里改为灰色占位块＋画布顶部明示，连线以虚线接到占位块中心。
+  const unknownNodes = workflow.nodes.filter((node) => !nodeSpec(node.type));
 
   return (
     <div className="df-canvas-wrap">
@@ -323,9 +420,11 @@ export function DataflowCanvas({
             {workflow.edges.map((edge) => {
               const from = nodeById.get(edge.from);
               const to = nodeById.get(edge.to);
-              const fromSpec = from ? nodeSpec(from.type) : undefined;
-              const toSpec = to ? nodeSpec(to.type) : undefined;
-              if (!from || !to || !fromSpec || !toSpec) return null;
+              if (!from || !to) return null;
+              const fromSpec = nodeSpec(from.type);
+              const toSpec = nodeSpec(to.type);
+              // 任一端是未知类型：仍渲染（虚线），端点退化为占位块中心，保证拓扑可见。
+              const unknownEnd = !fromSpec || !toSpec;
               const selected =
                 selection?.kind === "edge" &&
                 selection.edge.from === edge.from &&
@@ -335,12 +434,17 @@ export function DataflowCanvas({
               return (
                 <path
                   key={`${edge.from}:${edge.fromAnchor}->${edge.to}:${edge.toAnchor}`}
-                  className={`df-edge${selected ? " df-edge-selected" : ""}`}
+                  className={`df-edge${unknownEnd ? " df-edge-unknown" : ""}${
+                    selected ? " df-edge-selected" : ""
+                  }`}
                   d={bezierPath(
-                    anchorPos(from, fromSpec, "out", edge.fromAnchor),
-                    anchorPos(to, toSpec, "in", edge.toAnchor),
+                    fromSpec
+                      ? anchorPos(from, fromSpec, "out", edge.fromAnchor)
+                      : nodeCenter(from),
+                    toSpec ? anchorPos(to, toSpec, "in", edge.toAnchor) : nodeCenter(to),
                   )}
                   markerEnd="url(#df-edge-arrow)"
+                  strokeDasharray={unknownEnd ? "6 4" : undefined}
                   data-from={edge.from}
                   data-from-anchor={edge.fromAnchor}
                   data-to={edge.to}
@@ -357,11 +461,47 @@ export function DataflowCanvas({
           </svg>
           {workflow.nodes.map((node) => {
             const spec = nodeSpec(node.type);
-            if (!spec) return null;
             const status = statusOf(node.id);
+            const selected = selection?.kind === "node" && selection.id === node.id;
+            if (!spec) {
+              // 未知类型占位块：保留名称/位置/选中/拖动与运行错误状态，让用户能定位
+              // 「节点类型未实现」的出错节点；无锚点，不可从它发起连线。
+              const badge =
+                status === "run" ? "运行中…" : status === "error" ? "类型未实现" : "";
+              return (
+                <div
+                  key={node.id}
+                  className={`df-node df-node-unknown${selected ? " df-selected" : ""}${
+                    status !== "idle" ? ` df-st-${statusClass(status)}` : ""
+                  }`}
+                  data-id={node.id}
+                  title={`节点类型「${node.type}」当前版本不支持`}
+                  onClick={() => onSelect({ kind: "node", id: node.id })}
+                  style={{
+                    left: node.x,
+                    top: node.y,
+                    borderLeft: "4px dashed var(--muted-soft)",
+                  }}
+                >
+                  <div className="df-node-head">
+                    <DataflowIcon icon="flag" />
+                    <div className="df-node-names">
+                      <b>{node.name}</b>
+                      <span>未知类型：{node.type}</span>
+                    </div>
+                  </div>
+                  <div
+                    className={`df-node-badge df-b-${statusClass(status)}${
+                      badge ? " df-badge-show" : ""
+                    }`}
+                  >
+                    {badge}
+                  </div>
+                </div>
+              );
+            }
             const result = resultOf(node.id);
             const badge = status === "run" ? "运行中…" : badgeText(spec, result);
-            const selected = selection?.kind === "node" && selection.id === node.id;
             return (
               <div
                 key={node.id}
@@ -430,6 +570,24 @@ export function DataflowCanvas({
             );
           })}
         </div>
+        {unknownNodes.length > 0 && (
+          <div
+            className="df-note df-note-warn"
+            role="status"
+            style={{
+              position: "absolute",
+              top: "var(--sp-2)",
+              left: "var(--sp-2)",
+              right: "140px",
+              zIndex: 30,
+              margin: 0,
+            }}
+          >
+            检测到 {unknownNodes.length} 个节点类型当前版本不支持：
+            {[...new Set(unknownNodes.map((node) => node.type))].join("、")}
+            。已用灰色占位块显示在画布上（可选中、拖动定位），运行将报「节点类型未实现」。
+          </div>
+        )}
         {!workflow.nodes.length && (
           <div className="df-canvas-empty">
             <DataflowIcon icon="grid3x3" size={30} />
@@ -464,14 +622,15 @@ export function DataflowCanvas({
           <button
             type="button"
             className="df-tool"
-            onClick={() => setCamera({ x: 24, y: 16, zoom: 1 })}
+            title="把全部节点缩放进视野并居中（找不到内容时点这里）"
+            onClick={fitToContent}
           >
             <RotateCcw size={13} />
-            重置视图
+            适配视图
           </button>
         </div>
         <span className="df-hint">
-          空白处拖动平移 · 滚轮缩放 · 从节点右侧圆点拖到左侧圆点连线 · Delete 删除选中
+          空白处按住左键拖动或双指滚动＝平移 · 双指捏合（Ctrl+滚轮）＝缩放 · 从右侧圆点拖到左侧圆点连线 · Delete 删除选中
         </span>
       </div>
     </div>

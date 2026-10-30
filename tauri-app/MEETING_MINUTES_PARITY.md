@@ -1,4 +1,63 @@
+## 2026-10-30 · 说话人发言内容占比
+
+- 根据原始转写计算内容占比（有效Unicode字母／数字字符数，忽略时间、标签、标点、空白），在两版结果正文中的编号或用户姓名之后显示，姓名输入区域不显示；不按纪要中标签出现次数统计，不等同发言时长或声纹识别。百分比最多一位小数，四舍五入可能存在尾差；极小非零占比显示小于0.1%，非独占的极大占比不冒报100%。
+- 预读复用原有授权转写接口，不修改原始文件、不增加模型调用；未知归属内容计入分母并提示。无文件、读取失败、无有效说话人内容时提示不可用，不编造0%或100%。转写结果按会议／路径关联并丢弃迟到读取；切版本、改姓名、编辑摘要不改变占比。富文本正文及表格带占比，复制及邮件同样带占比；保存时身份标记仍还原编号来源，不把派生百分比重复追加到源稿。手工改写身份标记仍尊重用户正文，不反向替换普通同名文字。
+- 验证：`npx vitest run src/meetingSpeakerShares.test.ts src/MeetingMinutesPage.test.tsx src/meetingMinutesEditing.test.ts src/meetingMinutesAutoSave.test.ts src/meetingMinutesEditApi.test.ts src/meetingMinutesFormat.test.tsx`、`npm run build`、`node scripts/verify_meeting_speaker_shares_ui.cjs`；仅使用本地合成数据，正文显示、姓名替换／清空、富文本保存去重及浏览器验收记录在 `artifacts/meeting-speaker-shares-20261030/`。未改原生转写和录音流水线、未更新安装版。
+
+## 2026-10-30 · 手动与自动停录对照诊断
+
+- 用户反馈：正式版132中手动「停止并生成纪要」易出现短录音、自动结束正常；当前不能从旧summary确定点击前已断录还是点击后截断，不能把相关性写成已证实因果。
+- 核对：手动入口先等待原生 `meeting_record_stop` 返回再生成，自动入口同样先封盘再启动任务；两者共用 `meeting_record::finalize`，停止后等待全部采集线程退出再混音。新增实际WAV回归模拟停止时缓冲仍待写入，手动／自动均需保留全部样本。
+- 诊断增强：明确区分manual／automatic／app_exit，在发停止标记之前写入 `recording-stop-request.json`，保存请求时间、开启时长、各轨已落盘字节和编译版本；最终summary保留同一stopContext及版本。字节数允许有尚未落盘的缓冲，不能当作有效语音时长；诊断写入失败不阻止停录。原始音轨保留，不重试上传或改变停止行为。
+- 验证：`cargo --config profile.test.package.audit-toolbox.debug=0 test --lib meeting_`；合成样本覆盖两个入口的线程等待、封盘后完整混音与停止前证据，原生会议模块定向回归通过（日志：`artifacts/meeting-stop-comparison-20261030/rust-tests.log`）。此项补充诊断及回归，不宣称已在用户电脑复现或修复手动按钮特有的截断；自动重连修复仍需包含该代码的新版本验收。
+
+## 2026-10-29 · 详细度与重新生成入口
+
+- 详细度旁「生成纪要」的来源优先级为：已导入音视频、当前会议转写稿、当前会议保留录音。存在上传时不误用当前阅读的其他会议；无上传时允许自动录制结束后的结果或所选历史会议按新的详细度重新生成两版。有转写稿走 `meeting.summarize`，不再发起转写；仅有Markdown而没有转写或录音时仍禁用。
+- 页面显示来源提示，生成中提示等待；录制、任务运行、录音操作或历史结果读取期间禁止重复启动。未收到新任务事件的启动失败恢复原会议与选择，方便原地重试，不让迟到结果覆盖新的会议选择。
+- 显式浏览器演示模式增加合成的 `meeting.generate`／`meeting.summarize` 事件回放和正确toolId，允许在1420预览体验简要／标准／详细切换；普通浏览器模式仍禁用真实本机操作，演示不调用云端或处理用户文件。
+- 验证：`npx vitest run src/MeetingMinutesPage.test.tsx src/components/MeetingWatch.test.tsx src/preview/demoRegistry.test.ts src/apiJobDelivery.test.ts`、`npm run build`、`node scripts/verify_meeting_regeneration_ui.cjs`。覆盖自动完成后无上传、上传优先、历史录音回退、无来源、运行中／录制中禁用、启动失败及重复点击；浏览器检查无上传选择两档重出、再次生成、提示及无外网请求。记录在 `artifacts/meeting-regenerate-20261029/`。不改原生生成流水线，未调用真实服务或更新安装版。
+
+## 2026-10-29 · 提醒精简与通知点击
+
+- 取消检测到会议、录音开始成功、录音保存成功及开录／结束逐条质量桌面通知；保留录音询问窗，失败时才降级应用内询问。录音／保存状态共用胶囊位置；会议进度默认收起、可主动展开，不影响其他工具。
+- 完成或失败仅在主窗口非前台时通知，同任务终态去重，用户主动取消不通知；会议页直接展示结果，其他页面保留结果浮卡。录音收尾／任务启动关键故障后台提醒一次。质量诊断仍保留在页面与文件，设备重连不新增通知。
+- 当前通知插件 Windows 桌面实现无点击派发，新增独立原生 Toast 命令，复用同一 Windows 通知库。点击恢复主窗口并发送原任务编号；前端已收到的事件优先，重载后按历史 jobId 查询对应会议。路径访问继续经原历史和 AllowedPaths 授权，不从通知输入恢复文件权限。
+- 测试：`npx vitest run src/components/MeetingWatch.test.tsx src/components/JobDialog.test.tsx src/MeetingMinutesPage.test.tsx` 覆盖去重、前台静默、取消静默、质量不通知、旧通知定位原任务、会议页不重复浮卡、默认收起和普通工具行为；`npm run build`；原生会议模块定向编译回归均通过（日志：`artifacts/meeting-notifications-20261029/rust-tests.log`）。尚未进行已安装 Windows 程序真实 Toast 点击验收；用户完全退出进程后的旧通知冷启动激活不在本次实现内。未上传用户会议或更新安装包。
+
+## 2026-10-29 · 录音设备失效与无数据恢复
+
+- 用户诊断：16:30:28 开始，麦克风 159969 样本（约 10 秒）后报 Windows 0x88890004；系统声 162529 样本（约 10.16 秒），近乎无声。旧采集线程遇错直接退出、无数据不自检，初始化成功不代表全程正常。文件未含结束时间，不能从中推断整场实际长度或设备具体切换原因。
+- 设备读取错误后停止并释放旧 WASAPI 流，每两秒重新按 Teams 活跃设备选择策略初始化，直到成功或用户停止；写盘失败不按设备错误重试。连续十秒没有数据包也重新初始化（正常静音包不触发）。重连复用唯一 WAV writer，保留前段，以单调时间补零表达断录位置；补零不能恢复丢失声音。重连日志分轨追加时间、错误及新来源；实时状态及结束警告保留诊断，summary 新增 endedAt／wallDurationSec。
+- 验证：`cargo --config profile.test.package.audit-toolbox.debug=0 test --lib meeting_record::tests::`。本地合成 WAV 检查前段保留、中断时间轴、静音标志、停止中断重试和追加日志；未在用户电脑复现驱动失效或验证设备恢复效果，不宣称找回丢失音频。未上传用户录音或替换安装包。
+
 # 会议纪要原生功能验收矩阵
+
+## 2026-10-29 · 原位编辑、自动保存与时间版阅读调整（当前行为）
+
+- 此节替代下方手动编辑／保存入口及旧的时间轴、邮件标题规则。正文直接编辑标题、段落、列表和表格，无编辑或保存按钮；读取本身不重写纪要。中文输入法在组合完成后同步，输入后450ms合并自动保存，失焦或切换工具／版本时立即提交；每个文件的串行队列沿用上次成功修订，保存期间的新输入继续作为下一修订，不被迟到响应覆盖。
+- 姓名修改自动应用并保存两版，未加载版本按确切授权路径补读；仅保存修改过的源稿／姓名。原位HTML通过受控编号标记保留姓名来源，手工改写该处时转为普通文字；不会把正文原有姓名反替换为编号。富文本转回Markdown保留标题、列表、表格、加粗等结构；粘贴滤除脚本、外部图片与不可信身份标记。文件错误／外部修订冲突保留草稿、可重试或确认后重新载入；浏览器和无文件正文只保留本次页面修改，不伪造持久保存。
+- 时间版按发生顺序保留阶段和议题，去掉录音相对时间戳／时间区间，保留会议事实中的实际时间和截止日期；旧结果界面／复制／邮件同步清理，新生成提示词与原生返回正文也清理。原始转写稿保留时间戳。
+- 邮件正文一级标题去掉「（按内容）／（按时间）」，主题格式为「主题_会议纪要」。同一排版器和当前正文、姓名对应继续用于复制／邮件，所有变化无需用户先保存。
+- 验证：`npx vitest run src/meetingMinutesAutoSave.test.ts src/meetingMinutesEditing.test.ts src/MeetingMinutesPage.test.tsx src/meetingMinutesFormat.test.tsx`、`npm test`、`npm run build`、从 `src-tauri` 执行 `cargo test --lib meeting_`。`scripts/verify_meeting_edit_ui.cjs` 以合成文件在真实浏览器直接编辑正文／表格、自动保存失败重试、跨版本和重开、姓名修改及隔离；`scripts/verify_meeting_mail_ui.cjs` 核对复制、邮件、主题和无时间轴。记录在 `artifacts/meeting-inline-20261029/`。未操作真实会议或调用云端，未替换安装版。
+
+## 2026-10-29 · 带格式复制与 Outlook 邮件草稿
+
+- 共用 `meetingMinutesFormat.tsx` 将当前替换姓名后的纪要渲染为带内联样式的 HTML；默认微软雅黑（Microsoft YaHei），保留标题层级、加粗、列表、表格边框和浅色表头。HTML 原文不执行，图片与外链不加载。纯文本副本保留可读段落与制表分栏，不携带 Markdown 分隔符。
+- 「复制正文」优先通过 ClipboardItem 同时写入 `text/html`／`text/plain`，嵌入浏览器不支持时尝试 copy 事件；最终只能复制纯文本时明确提示。原始转写保持原文复制。复制和草稿均采用当前版本及尚未保存的编辑／姓名，不读取过时文件，不发起ASR或LLM任务。
+- 新增按钮「生成邮件草稿」，紧邻「打开输出文件夹」。主题取当前正文一级标题，移除末尾按内容／按时间标签，追加「会议纪要」，避免重复后缀。生成期间阻止重复，失败可重试，切换版本不展示前一版的迟到提示。
+- `meeting_create_mail_draft` 是单独的原生命令，验证标题与HTML边界后在专用STA线程创建经典Outlook的MailItem，设置HTML格式、Subject和HTMLBody，先Save再Display。接口不含收件人、附件、查邮箱或Send行为。保存成功但Display失败仍报告草稿已存在，避免用户误以为未创建；无经典版Outlook或账户不可用时明确报错，新版Outlook不支持此COM接口。
+- 验证命令：`npx vitest run src/meetingMinutesFormat.test.tsx src/MeetingMinutesPage.test.tsx src/meetingMinutesEditApi.test.ts`、`npm test`、`npm run build`、从 `src-tauri` 运行 `cargo test --lib meeting_`。`node scripts/generate_meeting_mail_sample.cjs` 用真实排版器生成合成HTML／EML；`node scripts/verify_meeting_mail_ui.cjs` 检查1440/900/390宽度的双格式剪贴板数据、姓名替换、正文与草稿一致、版本选择及按钮位置。原生可选测试 `meeting_mail_outlook_sample_file -- --ignored` 只创建合成MailItem并SaveAs到明确指定的MSG文件，不保存到邮箱文件夹或发送；检查主题、Outlook HTML属性、存储形式及空收件人。MSG可能将HTML封装为压缩RTF，不以缺少独立HTML属性流判定格式丢失。
+- 报告与合成样例：`artifacts/meeting-mail-20261029/`。未读取真实邮箱或会议、未发送邮件、未打包安装版；真实收件端的最终字体仍取决于是否安装微软雅黑。
+
+## 2026-10-29 · 正文编辑与本次会议姓名对应
+
+- 会议结果提供「编辑正文」：内容版、时间版和单版旧纪要可修改标题、段落及表格，保存后使用同一 Markdown 文件；复制使用当前修改正文。草稿按确切文件／版本隔离，切换工具、版本或历史会议不会串用；后台旧任务快照不覆盖已修改内容。未落盘的内联正文仍可编辑和复制，不把浏览器预览显示为本机保存。
+- 结果开头根据实际编号提供姓名输入区；回车或移出输入框后即时应用到两版纪要，未填编号保持原样。仅替换完整「说话人N」标签，避免1误替换10；姓名作为 Markdown 字面文本转义，不改变普通正文里已有的同名文字。清空恢复编号，修改姓名可再次投影；编辑源稿保留编号，预览和文件呈现姓名。
+- 「保存修改」保存当前版本；「保存姓名及全部修改」依次保存全部已有文件的版本，并保留各版本草稿。部分保存失败明确显示并可重试，成功版本按新修订继续保存。原始转写稿始终保留原文，不重新转写或调用LLM，不从姓名输入推断其他会议的身份。
+- 新增 `meeting_save_minutes`，使用既有 `AllowedPaths` 和原生 Markdown/UTF-8/2MB边界，选中文件仍只授权自身。保存前比对编辑时文件正文；写入唯一同目录临时文件并同步后再替换，失败清理临时文件并保留旧文件。外部修订冲突保留草稿并提示重新载入；载入替换未保存草稿需用户确认。
+- SQLite `meeting_documents` 保留按确切规范文件路径索引的编号源稿、已写入正文和姓名对应。重启后文件正文仍匹配已存修订才使用源稿重新投影，支持再次改名；外部改写使该溯源失效，不对普通姓名做反向全文替换。元数据与文件保存失败时不报告成功；无新增语音模型／运行库、声纹登记或跨会议匹配。
+- 验证：`npx vitest run src/MeetingMinutesPage.test.tsx src/meetingMinutesEditApi.test.ts src/components/MeetingWatch.test.tsx src/AppNavigationSettings.test.tsx`、`npm test`、`npm run build`、从 `src-tauri` 运行 `cargo test --lib meeting_` 及开发构建均通过。原生回归覆盖实际文件替换、占用失败保留原文、修订冲突、原稿与另一版本不变、确切文件授权、姓名转义、跨重启溯源及会议隔离；`node scripts/verify_meeting_edit_ui.cjs` 用隔离模拟文件在1440/900/390宽度检查编辑、版本草稿、保存失败重试、双版保存及重开、改名和原稿不变。开发EXE运行 `scripts/verify_meeting_vocabulary_worker.py` 通过合成转写稿的独立worker冒烟检查。记录位于 `artifacts/meeting-edit-20261029/`。未调用云端，未读取真实会议或更新安装版。
 
 ## 2026-10-28 · 可维护的专有词库
 

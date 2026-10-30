@@ -6,7 +6,7 @@ use crate::{
     excel_merger::PauseCheckpoint,
     ocr_store::{Document, Store, failure, io_error},
 };
-use rust_xlsxwriter::{Format, Workbook, Worksheet};
+use rust_xlsxwriter::{Format, FormatBorder, Url, Workbook, Worksheet};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
@@ -74,8 +74,8 @@ fn sheet<'a>(
     let s = book.add_worksheet();
     s.set_name(name).map_err(xlsx_error)?;
     s.set_freeze_panes(1, 0).map_err(xlsx_error)?;
-    s.set_column_width(0, 24).map_err(xlsx_error)?;
-    s.set_column_width(1, 60).map_err(xlsx_error)?;
+    s.set_column_width(0, 16).map_err(xlsx_error)?;
+    s.set_column_width(1, 8).map_err(xlsx_error)?;
     Ok(s)
 }
 fn row(s: &mut Worksheet, index: &mut u32, values: &[String]) -> Result<(), AppError> {
@@ -135,15 +135,30 @@ fn value_text(v: &Value) -> String {
             .join("\n"),
     }
 }
+fn source_text_field(key: &str) -> bool {
+    let compact: String = key.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if compact.contains("原文") || compact.contains("全文") || compact.contains("逐字证据") { return true; }
+    matches!(compact.to_ascii_lowercase().as_str(),
+        "quote" | "quotes" | "excerpt" | "contract_excerpt" | "source_excerpt"
+        | "evidence" | "evidence_quotes" | "evidence_refs" | "evidence_ids"
+        | "source_reference" | "source_text" | "sourcetext" | "original_text"
+        | "originaltext" | "full_text" | "fulltext" | "raw_text" | "rawtext"
+        | "contractexcerpt" | "sourceexcerpt" | "evidencequotes" | "evidencerefs"
+        | "evidenceids" | "sourcereference"
+        | "原文" | "原文摘录" | "合同原文" | "合同原文摘录" | "关键合同原文"
+        | "完整原文" | "原文内容" | "来源原文" | "逐字原文" | "逐字证据"
+        | "原文证据" | "证据原文" | "原文引用出处" | "原文引用" | "原文引用位置"
+        | "原文引用内容" | "原文引用来源" | "原文片段")
+}
 fn visible_field(key: &str) -> bool {
-    !key.starts_with('_') && !matches!(key,
+    !key.starts_with('_') && !source_text_field(key) && !matches!(key,
         "source_document_id" | "evidence_quotes" | "covenant_category_id"
         | "covenant_scope" | "contract_classification" | "is_financial")
 }
 fn canonical_field(key: &str) -> &str {
     match key {
         "source_documents" => "sourceFile",
-        "pages" => "sourcePage",
+        "page" | "pages" | "source_page" => "sourcePage",
         _ => key,
     }
 }
@@ -156,6 +171,7 @@ fn extraction_columns(extraction: &Value, source_file_first: bool) -> Vec<(Strin
     }
     for column in extraction["columns"].as_array().into_iter().flatten() {
         let Some(original_key) = column["key"].as_str().filter(|key| visible_field(key)) else { continue; };
+        if column["label"].as_str().is_some_and(source_text_field) { continue; }
         let key = canonical_field(original_key);
         if !seen.insert(key.to_string()) { continue; }
         let label = column["label"].as_str().unwrap_or(original_key);
@@ -224,7 +240,7 @@ fn readable_extraction_row(data: &Value) -> Value {
     let mut row = data.as_object().cloned().unwrap_or_default();
     // Old model output duplicates provenance under aliases. Prefer the already
     // verified canonical value; otherwise retain the alias's source information.
-    for (alias, canonical) in [("source_documents", "sourceFile"), ("pages", "sourcePage")] {
+    for (alias, canonical) in [("source_documents", "sourceFile"), ("pages", "sourcePage"), ("page", "sourcePage"), ("source_page", "sourcePage")] {
         if let Some(value) = row.remove(alias)
             && row.get(canonical).is_none_or(|v| value_text(v).trim().is_empty())
         {
@@ -238,18 +254,22 @@ fn readable_extraction_row(data: &Value) -> Value {
     {
         row.insert("review_note".into(), reason);
     }
-    if !["evidence", "excerpt", "contract_excerpt", "source_excerpt"]
-        .iter()
-        .any(|key| {
-            row.get(*key)
-                .is_some_and(|v| !value_text(v).trim().is_empty())
-        })
-        && let Some(quotes) = row.get("evidence_quotes").cloned()
-    {
-        row.insert("evidence".into(), quotes);
-    }
     row.retain(|key, _| visible_field(key));
     Value::Object(row)
+}
+fn extraction_row(extraction: &Value, data: &Value) -> Value {
+    let mut row = readable_extraction_row(data);
+    // A model-defined key may be opaque while its label clearly names an
+    // original-text column. Do not resurrect it through historical row-key
+    // discovery after the declared column was excluded.
+    if let Some(values) = row.as_object_mut() {
+        for column in extraction["columns"].as_array().into_iter().flatten() {
+            if column["label"].as_str().is_some_and(source_text_field)
+                && let Some(key) = column["key"].as_str()
+            { values.remove(key); }
+        }
+    }
+    row
 }
 fn section_row(s: &mut Worksheet, index: &mut u32, values: &[String]) -> Result<(), AppError> {
     let first = *index;
@@ -262,130 +282,168 @@ fn section_row(s: &mut Worksheet, index: &mut u32, values: &[String]) -> Result<
     Ok(())
 }
 
-/// Keep unlike table schemas in separate blocks. All content is written as
-/// strings, including long identifiers and text starting with an Excel formula.
-fn document_blocks(
-    store: &Store,
-    doc: &Document,
-    s: &mut Worksheet,
-    r: &mut u32,
-    pause: &PauseCheckpoint,
-) -> Result<(), AppError> {
-    pause.wait()?;
-    section_row(
-        s,
-        r,
-        &[
-            "来源文件".into(),
-            doc.name.clone(),
-        ],
-    )?;
-    let pages = store.pages(&doc.id)?;
-    for page in &pages {
-        pause.wait()?;
-        let number = page.page;
-        section_row(
-            s,
-            r,
-            &[
-                "来源文件".into(),
-                doc.name.clone(),
-                "来源页码".into(),
-                number.to_string(),
-                "完整原文".into(),
-            ],
-        )?;
-        for text in page.text.split('\n') {
-            pause.wait()?;
-            row(s, r, &[text.into()])?;
-        }
-        for (index, table) in page.tables.iter().enumerate() {
-            pause.wait()?;
-            section_row(
-                s,
-                r,
-                &[
-                    "表格".into(),
-                    if table.title.is_empty() {
-                        format!("表格 {}", index + 1)
-                    } else {
-                        table.title.clone()
-                    },
-                    "来源页码".into(),
-                    number.to_string(),
-                ],
-            )?;
-            let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0);
-            if columns > 16384 {
-                return Err(failure(
-                    "OCR_EXPORT_COLUMNS",
-                    "表格超过 Excel 列数限制，请拆分表格后导出。",
-                ));
-            }
-            for column in 0..columns {
-                s.set_column_width(column as u16, 26).map_err(xlsx_error)?;
-                s.set_column_format(
-                    column as u16,
-                    &Format::new().set_text_wrap().set_num_format("@"),
-                )
+/// Use only the original scan retained by the trusted store, never model
+/// output as a target. A missing file remains a plain filename in the workbook.
+fn source_link(store: &Store, doc: &Document) -> Result<Option<String>, AppError> {
+    let path = store.source(&doc.id)?;
+    if !path.is_file() { return Ok(None); }
+    let absolute = if path.is_absolute() { path } else { std::env::current_dir().map_err(io_error)?.join(path) };
+    Ok(reqwest::Url::from_file_path(absolute).ok().map(|url| url.to_string()).filter(|url| url.len() <= 2080))
+}
+
+/// Repeat provenance on every physical Excel row, including long-cell
+/// continuations. A continuation must never lose its file or page context.
+fn source_row(s: &mut Worksheet, r: &mut u32, file: &str, page: &str, values: &[String], link: Option<&str>) -> Result<(), AppError> {
+    let parts: Vec<_> = values.iter().map(|value| chunks(value)).collect();
+    for offset in 0..parts.iter().map(Vec::len).max().unwrap_or(1) {
+        let mut cells = vec![file.to_owned(), page.to_owned()];
+        cells.extend(parts.iter().map(|part| part.get(offset).cloned().unwrap_or_default()));
+        let index = *r;
+        row(s, r, &cells)?;
+        // Stay within Excel's hyperlink-count limit even for very large OCR
+        // exports. Later rows retain the filename without an active link.
+        if index < 65_530 && let Some(link) = link {
+            s.write_url_with_format(index, 0, Url::new(link).set_text(file),
+                &Format::new().set_font_color(0x0563C1).set_underline(rust_xlsxwriter::FormatUnderline::Single).set_num_format("@"))
                 .map_err(xlsx_error)?;
-            }
-            for cells in &table.rows {
-                pause.wait()?;
-                row(s, r, cells)?;
-            }
-            row(s, r, &[])?;
         }
     }
-    for extraction in store.extractions(&doc.id)? {
-        pause.wait()?;
-        section_row(
-            s,
-            r,
-            &[
-                "场景摘录".into(),
-                scenario_label(extraction["scenarioId"].as_str().unwrap_or("")).into(),
-                "摘录结果".into(),
-            ],
-        )?;
-        let rows: Vec<Value> = extraction["rows"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(readable_extraction_row)
-            .collect();
-        let mut columns = extraction_columns(&extraction, false);
-        let mut seen: BTreeSet<String> = columns.iter().map(|column| column.0.clone()).collect();
-        for data in &rows {
+    Ok(())
+}
+fn source_columns(s: &mut Worksheet, body_columns: usize) -> Result<(), AppError> {
+    if body_columns > 16382 { return Err(failure("OCR_EXPORT_COLUMNS", "表格超过 Excel 列数限制，请拆分表格后导出。")); }
+    s.set_column_width(0, 16).map_err(xlsx_error)?;
+    s.set_column_width(1, 8).map_err(xlsx_error)?;
+    for column in 0..body_columns + 2 {
+        if column >= 2 { s.set_column_width(column as u16, if column == 2 { 100 } else { 32 }).map_err(xlsx_error)?; }
+        let format = Format::new().set_num_format("@");
+        let format = if column >= 2 { format.set_text_wrap() } else { format };
+        s.set_column_format(column as u16, &format).map_err(xlsx_error)?;
+    }
+    Ok(())
+}
+fn table_source_row(s: &mut Worksheet, r: &mut u32, file: &str, page: &str, cells: &[String], link: Option<&str>) -> Result<(), AppError> {
+    if cells.len() > 16382 { return Err(failure("OCR_EXPORT_COLUMNS", "表格超过 Excel 列数限制，请拆分表格后导出。")); }
+    let first = *r;
+    source_row(s, r, file, page, cells, link)?;
+    if !cells.is_empty() {
+        s.set_range_format(first, 2, *r - 1, (cells.len() + 1) as u16,
+            &Format::new().set_border(FormatBorder::Thin).set_text_wrap().set_num_format("@"))
+            .map_err(xlsx_error)?;
+    }
+    Ok(())
+}
+fn extraction_business_columns(extractions: &[Value]) -> Vec<(String, String)> {
+    let mut columns = vec![];
+    let mut seen = BTreeSet::new();
+    for extraction in extractions {
+        for (key, label) in extraction_columns(extraction, false) {
+            if !matches!(canonical_field(&key), "sourceFile" | "sourcePage") && seen.insert(key.clone()) { columns.push((key, label)); }
+        }
+        for data in extraction["rows"].as_array().into_iter().flatten().map(|data| extraction_row(extraction, data)) {
             if let Some(object) = data.as_object() {
-                for key in object.keys() {
-                    if seen.insert(key.clone()) {
-                        columns.push((key.clone(), field_label(key).into()));
-                    }
+                for key in object.keys().filter(|key| visible_field(key)) {
+                    if !matches!(canonical_field(key), "sourceFile" | "sourcePage") && seen.insert(key.clone()) { columns.push((key.clone(), field_label(key).into())); }
                 }
             }
         }
-        row(
-            s,
-            r,
-            &columns
-                .iter()
-                .map(|column| column.1.clone())
-                .collect::<Vec<_>>(),
-        )?;
-        for data in rows {
-            pause.wait()?;
-            row(
-                s,
-                r,
-                &columns
-                    .iter()
-                    .map(|(key, _)| value_text(&data[key]))
-                    .collect::<Vec<_>>(),
-            )?;
+    }
+    if extractions.iter().any(|entry| entry["rows"].as_array().is_none_or(Vec::is_empty)) {
+        columns.push(("__empty_result".into(), "摘录说明".into()));
+    }
+    if columns.is_empty() { columns.push(("value".into(), "内容".into())); }
+    // Keep the principal business content in C; classification and scenario
+    // labels must not displace the content the user is trying to review.
+    if let Some(index) = ["requirement", "trigger_standard", "value", "description"]
+        .iter().find_map(|key| columns.iter().position(|(column, _)| column == key)) {
+        let content = columns.remove(index); columns.insert(0, content);
+    }
+    columns
+}
+fn extraction_header(s: &mut Worksheet, r: &mut u32, columns: &[(String, String)]) -> Result<(), AppError> {
+    let mut header = vec!["来源文件".into(), "页码".into()];
+    header.extend(columns.iter().map(|(_, label)| label.clone()));
+    header.push("场景".into());
+    section_row(s, r, &header)?;
+    source_columns(s, columns.len() + 1)?;
+    s.set_column_width(2, 32).map_err(xlsx_error)?;
+    Ok(())
+}
+fn extraction_rows(s: &mut Worksheet, r: &mut u32, doc: &Document, extraction: &Value, scenario: &str,
+    columns: &[(String, String)], pause: &PauseCheckpoint, link: Option<&str>) -> Result<(), AppError> {
+    let rows: Vec<_> = extraction["rows"].as_array().into_iter().flatten().map(|data| extraction_row(extraction, data)).collect();
+    if rows.is_empty() {
+        let mut cells: Vec<String> = columns.iter().map(|(key, _)| if key == "__empty_result" { "未发现符合场景事项".into() } else { String::new() }).collect();
+        cells.push(scenario.to_owned());
+        return source_row(s, r, &doc.name, "", &cells, link);
+    }
+    for data in rows {
+        pause.wait()?;
+        let page = value_text(&data["sourcePage"]);
+        let page = if page.trim().is_empty() { "具体出处待核对" } else { &page };
+        let mut cells: Vec<String> = columns.iter().map(|(key, _)| if key == "__empty_result" { String::new() } else { value_text(&data[key]) }).collect();
+        cells.push(scenario.to_owned());
+        source_row(s, r, &doc.name, page, &cells, link)?;
+    }
+    Ok(())
+}
+fn extraction_blocks(s: &mut Worksheet, r: &mut u32, doc: &Document, extraction: &Value, scenario: &str, pause: &PauseCheckpoint, link: Option<&str>) -> Result<(), AppError> {
+    let columns = extraction_business_columns(std::slice::from_ref(extraction));
+    extraction_header(s, r, &columns)?;
+    extraction_rows(s, r, doc, extraction, scenario, &columns, pause, link)
+}
+/// A native grid already embedded in the text is written at its exact source
+/// position as cells. Never infer tables by splitting arbitrary prose on tabs.
+fn page_rows(s: &mut Worksheet, r: &mut u32, doc: &Document, page: &crate::ocr_store::Page, pause: &PauseCheckpoint, link: Option<&str>) -> Result<(), AppError> {
+    let mut matches = vec![];
+    let mut placed = BTreeSet::new();
+    for (index, table) in page.tables.iter().enumerate() {
+        if table.rows.is_empty() || table.rows.iter().map(Vec::len).max().unwrap_or(0) < 2 { continue; }
+        for separator in ["\n", "\n\n"] {
+            let grid = table.rows.iter().map(|cells| cells.join("\t")).collect::<Vec<_>>().join(separator);
+            if grid.is_empty() { continue; }
+            let found = page.text.match_indices(&grid).find(|(start, _)| {
+                let end = start + grid.len();
+                (*start == 0 || page.text[..*start].ends_with('\n')) &&
+                    (end == page.text.len() || page.text[end..].starts_with('\n')) &&
+                    !matches.iter().any(|(from, to, _)| *start < *to && end > *from)
+            });
+            if let Some((start, _)) = found {
+                matches.push((start, start + grid.len(), index)); placed.insert(index); break;
+            }
         }
     }
-    row(s, r, &[])?;
+    matches.sort_by_key(|(start, _, _)| *start);
+    let number = page.page.to_string();
+    let mut cursor = 0;
+    for (start, end, index) in matches {
+        let prose = &page.text[cursor..start];
+        for line in prose.strip_suffix('\n').unwrap_or(prose).split_terminator('\n') {
+            pause.wait()?; source_row(s, r, &doc.name, &number, &[line.into()], link)?;
+        }
+        for cells in &page.tables[index].rows { pause.wait()?; table_source_row(s, r, &doc.name, &number, cells, link)?; }
+        cursor = end;
+        if page.text[cursor..].starts_with('\n') { cursor += 1; }
+    }
+    for line in page.text[cursor..].split_terminator('\n') {
+        pause.wait()?; source_row(s, r, &doc.name, &number, &[line.into()], link)?;
+    }
+    for (_, table) in page.tables.iter().enumerate().filter(|(index, _)| !placed.contains(index)) {
+        if !table.title.is_empty() { source_row(s, r, &doc.name, &number, &[table.title.clone()], link)?; }
+        for cells in &table.rows { pause.wait()?; table_source_row(s, r, &doc.name, &number, cells, link)?; }
+    }
+    source_columns(s, page.tables.iter().flat_map(|table| &table.rows).map(Vec::len).max().unwrap_or(1))
+}
+fn document_blocks(store: &Store, doc: &Document, s: &mut Worksheet, r: &mut u32, pause: &PauseCheckpoint) -> Result<(), AppError> {
+    if *r == 0 { section_row(s, r, &["来源文件".into(), "页码".into(), "内容".into()])?; }
+    let link = source_link(store, doc)?;
+    for page in store.pages(&doc.id)? { page_rows(s, r, doc, &page, pause, link.as_deref())?; }
+    for extraction in store.extractions(&doc.id)? {
+        extraction_blocks(s, r, doc, &extraction, scenario_label(extraction["scenarioId"].as_str().unwrap_or("")), pause, link.as_deref())?;
+    }
+    // Historical extracts can share an OCR sheet; its primary prose column
+    // keeps the wider OCR layout rather than the extraction-only width.
+    s.set_column_width(2, 100).map_err(xlsx_error)?;
     Ok(())
 }
 
@@ -426,8 +484,10 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
         .set_name(&directory)
         .map_err(xlsx_error)?;
     let mut entries = vec![];
+    let mut entry_links = vec![];
     for (dindex, doc) in docs.iter().enumerate() {
         pause.wait()?;
+        let link = source_link(store, doc)?;
         let pages = store.pages(&doc.id)?;
         let s = sheet(&mut book, &format!("{}_完整原文", dindex + 1), &mut names)?;
         let text_name = s.name();
@@ -442,14 +502,7 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
             &mut r,
             &["来源文件".into(), "页码".into(), "完整原文".into()],
         )?;
-        for page in &pages {
-            pause.wait()?;
-            for text in page.text.split('\n') {
-                for chunk in chunks(text) {
-                    row(s, &mut r, &[doc.name.clone(), page.page.to_string(), chunk])?;
-                }
-            }
-        }
+        for page in &pages { page_rows(s, &mut r, doc, page, pause, link.as_deref())?; }
         for page in &pages {
             for (tindex, table) in page.tables.iter().enumerate() {
                 pause.wait()?;
@@ -460,29 +513,10 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
                 )?;
                 let table_name = s.name();
                 let mut r = 0;
-                let columns = table.rows.iter().map(Vec::len).max().unwrap_or(1);
-                for column in 0..columns.min(16384) {
-                    s.set_column_width(column as u16, 26).map_err(xlsx_error)?;
-                    s.set_column_format(
-                        column as u16,
-                        &Format::new().set_text_wrap().set_num_format("@"),
-                    )
-                    .map_err(xlsx_error)?;
-                }
-                row(
-                    s,
-                    &mut r,
-                    &[
-                        "来源文件".into(),
-                        doc.name.clone(),
-                        "来源页码".into(),
-                        page.page.to_string(),
-                        table.title.clone(),
-                    ],
-                )?;
-                for cells in &table.rows {
-                    row(s, &mut r, cells)?;
-                }
+                source_columns(s, table.rows.iter().map(Vec::len).max().unwrap_or(1))?;
+                section_row(s, &mut r, &["来源文件".into(), "页码".into(), "表格内容".into()])?;
+                for cells in &table.rows { table_source_row(s, &mut r, &doc.name, &page.page.to_string(), cells, link.as_deref())?; }
+                entry_links.push(link.clone());
                 entries.push(vec![
                     doc.name.clone(),
                     page.page.to_string(),
@@ -501,55 +535,8 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
             )?;
             let extract_name = s.name();
             let mut r = 0;
-            row(
-                s,
-                &mut r,
-                &[
-                    "来源文件".into(),
-                    doc.name.clone(),
-                    "摘录结果".into(),
-                ],
-            )?;
-            let rows: Vec<Value> = extraction["rows"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(readable_extraction_row)
-                .collect();
-            let mut columns = extraction_columns(&extraction, false);
-            let mut seen: BTreeSet<String> = columns.iter().map(|v| v.0.clone()).collect();
-            for data in &rows {
-                if let Some(object) = data.as_object() {
-                    for key in object.keys() {
-                        if seen.insert(key.clone()) {
-                            columns.push((key.clone(), field_label(key).into()));
-                        }
-                    }
-                }
-            }
-            row(
-                s,
-                &mut r,
-                &columns.iter().map(|v| v.1.clone()).collect::<Vec<_>>(),
-            )?;
-            for column in 0..columns.len().min(16384) {
-                s.set_column_width(column as u16, 32).map_err(xlsx_error)?;
-                s.set_column_format(
-                    column as u16,
-                    &Format::new().set_text_wrap().set_num_format("@"),
-                )
-                .map_err(xlsx_error)?;
-            }
-            for data in rows {
-                row(
-                    s,
-                    &mut r,
-                    &columns
-                        .iter()
-                        .map(|(key, _)| value_text(&data[key]))
-                        .collect::<Vec<_>>(),
-                )?;
-            }
+            extraction_blocks(s, &mut r, doc, &extraction, scenario, pause, link.as_deref())?;
+            entry_links.push(link.clone());
             entries.push(vec![
                 doc.name.clone(),
                 String::new(),
@@ -557,6 +544,7 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
                 extract_name,
             ]);
         }
+        entry_links.push(link.clone());
         entries.push(vec![
             doc.name.clone(),
             pages.iter().map(|page| page.page.to_string()).collect::<Vec<_>>().join("、"),
@@ -576,10 +564,11 @@ fn build(store: &Store, docs: &[Document], pause: &PauseCheckpoint) -> Result<Ve
             "工作表".into(),
         ],
     )?;
-    for item in entries {
-        row(s, &mut r, &item)?;
+    for (item, link) in entries.iter().zip(&entry_links) {
+        source_row(s, &mut r, &item[0], &item[1], &item[2..], link.as_deref())?;
     }
-    s.set_column_width(0, 36).map_err(xlsx_error)?;
+    s.set_column_width(0, 16).map_err(xlsx_error)?;
+    s.set_column_width(1, 8).map_err(xlsx_error)?;
     s.set_column_width(2, 50).map_err(xlsx_error)?;
     let format = Format::new().set_bold();
     s.set_row_format(0, &format).map_err(xlsx_error)?;
@@ -611,6 +600,11 @@ fn build_extractions(store: &Store, docs: &[Document], ids: &BTreeSet<String>, s
     let mut found = BTreeSet::new();
     let mut shared_name = String::new();
     let mut shared_row = 0;
+    let mut selected = vec![];
+    for doc in docs {
+        selected.extend(store.extractions(&doc.id)?.into_iter().filter(|entry| entry["id"].as_str().is_some_and(|id| ids.contains(id))));
+    }
+    let columns = extraction_business_columns(&selected);
     for doc in docs {
         pause.wait()?;
         let extractions: Vec<Value> = store.extractions(&doc.id)?.into_iter()
@@ -626,42 +620,16 @@ fn build_extractions(store: &Store, docs: &[Document], ids: &BTreeSet<String>, s
             target
         };
         let mut r = if single_sheet { shared_row } else { 0 };
-        section_row(target, &mut r, &["来源文件".into(), doc.name.clone()])?;
+        if r == 0 { extraction_header(target, &mut r, &columns)?; }
         let project = store.project(&doc.project_id)?;
+        let link = source_link(store, doc)?;
         for extraction in extractions {
             found.insert(extraction["id"].as_str().unwrap_or("").to_owned());
             let scenario_id = extraction["scenarioId"].as_str().unwrap_or("");
             let scenario_name = project["customScenarios"].as_array().into_iter().flatten()
                 .find(|entry| entry["id"] == scenario_id).and_then(|entry| entry["name"].as_str()).unwrap_or_else(|| scenario_label(scenario_id));
-            section_row(target, &mut r, &["场景摘录".into(), scenario_name.into(), "本次摘录结果".into()])?;
-            let rows: Vec<Value> = extraction["rows"].as_array().into_iter().flatten().map(readable_extraction_row).collect();
-            if rows.is_empty() {
-                row(target, &mut r, &["未发现符合场景事项".into()])?;
-                continue;
-            }
-            let mut columns = extraction_columns(&extraction, true);
-            let mut seen: BTreeSet<String> = columns.iter().map(|column| column.0.clone()).collect();
-            for data in &rows {
-                if let Some(object) = data.as_object() {
-                    for key in object.keys().filter(|key| visible_field(key)) {
-                        if seen.insert(key.clone()) { columns.push((key.clone(), field_label(key).into())); }
-                    }
-                }
-            }
-            if !seen.contains("sourcePage") { columns.push(("sourcePage".into(), "来源页码".into())); }
-            row(target, &mut r, &columns.iter().map(|column| column.1.clone()).collect::<Vec<_>>())?;
-            for data in rows {
-                pause.wait()?;
-                row(target, &mut r, &columns.iter().map(|(key, _)| if key == "sourceFile" { doc.name.clone() }
-                    else if key == "sourcePage" && data[key].is_null() { "具体出处待核对".into() }
-                    else { value_text(&data[key]) }).collect::<Vec<_>>())?;
-            }
-            for column in 0..columns.len().min(16384) {
-                target.set_column_width(column as u16, if column == 0 { 36 } else { 45 }).map_err(xlsx_error)?;
-                target.set_column_format(column as u16, &Format::new().set_text_wrap().set_num_format("@")).map_err(xlsx_error)?;
-            }
+            extraction_rows(target, &mut r, doc, &extraction, scenario_name, &columns, pause, link.as_deref())?;
         }
-        row(target, &mut r, &[])?;
         if single_sheet { shared_row = r; }
     }
     if found != *ids { return Err(failure("OCR_EXTRACTION_NOT_FOUND", "本次摘录列表包含其他文件或不存在的记录。")); }
@@ -866,6 +834,68 @@ mod tests {
         assert_eq!(readable_extraction_row(&json!({"source_documents":["甲.pdf","乙.pdf"],"pages":[1,3]})),json!({"sourceFile":["甲.pdf","乙.pdf"],"sourcePage":[1,3]}));
     }
     #[test]
+    fn all_scenarios_exclude_source_text_aliases_and_labels_across_export_modes() {
+        use crate::ocr_store::Page;
+        use calamine::Reader;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("db")).unwrap();
+        let project = store.save_project(&json!({"name":"场景不附原文"})).unwrap();
+        let source = dir.path().join("合同.pdf"); fs::write(&source,b"synthetic").unwrap();
+        let doc = store.import(project["id"].as_str().unwrap(),&source).unwrap();
+        store.prepare(&doc.id,1).unwrap();
+        let grid = "单价\t数量\n0.57\t00123";
+        store.save_page(&doc.id,Page { metadata:Default::default(),page:1,
+            text:format!("直接识别正文保留\n{grid}"),original_text:String::new(),revision:0,status:"completed".into(),warnings:vec![],original_tables:vec![],
+            tables:vec![crate::ocr_store::Table{id:"table".into(),title:"".into(),rows:vec![vec!["单价".into(),"数量".into()],vec!["0.57".into(),"00123".into()]]}] },0,true).unwrap();
+        let aliases = ["quote","quotes","excerpt","contract_excerpt","source_excerpt","evidence","evidence_quotes","evidence_refs","evidence_ids","source_reference",
+            "sourceText","originalText","fullText","rawText","contractExcerpt","sourceExcerpt","evidenceQuotes","evidenceRefs","evidenceIds","sourceReference","_hiddenEvidence","原文片段"];
+        let hidden_labels = ["关键合同原文","完整原文","逐字证据","原文引用出处","原文摘录"," 合同 原文 ","补充条款原文","合同全文"];
+        let scenarios = ["loan_general","loan_covenant","loan_restrictive","revenue","procurement","invoicing_agreement","statement","invoice","warehouse_io","account_opening","tax_declaration","credit_report","tax_audit_report","custom"];
+        let mut ids = vec![];
+        for scenario in scenarios {
+            let mut row = json!({"description":"有效业务摘要","auditor_summary":"有效审计提示","sourcePage":"1","clause_ref":"第十条"});
+            let mut columns = vec![json!({"key":"description","label":"业务摘要"}),json!({"key":"auditor_summary","label":"审计提示"}),json!({"key":"clause_ref","label":"条款位置"})];
+            for alias in aliases { row[alias] = json!("附加原文禁止出现"); }
+            for (index,label) in hidden_labels.iter().enumerate() {
+                let key = format!("opaque_{index}"); row[&key] = json!("动态原文禁止出现");
+                columns.push(json!({"key":key,"label":label}));
+            }
+            // Exercise fallback discovery: source aliases need not be declared.
+            let saved = store.save_extraction(&json!({"documentId":doc.id,"sourceRevision":1,"scenarioId":scenario,"columns":columns,"rows":[row],"prompts":[]})).unwrap();
+            ids.push(saved["id"].as_str().unwrap().to_owned());
+        }
+        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        for mode in ["single_sheet","per_document","individual","combined"] {
+            for only in [true,false] {
+                let result = export(&store,&json!({"projectId":project["id"],"documentIds":[doc.id],"outputDir":dir.path(),"mode":mode,"extractionsOnly":only,"extractionIds":ids}),&|_,_,_,_|{},&pause).unwrap();
+                let mut all = String::new();
+                let mut summaries = 0;
+                for path in result["outputPaths"].as_array().unwrap() {
+                    let mut book = calamine::open_workbook_auto(path.as_str().unwrap()).unwrap();
+                    for name in book.sheet_names() {
+                        let range = book.worksheet_range(&name).unwrap();
+                        for row in range.rows() {
+                            if row.iter().any(|v|v.to_string()=="有效业务摘要") {
+                                summaries += 1;
+                                assert_eq!(row[0].to_string(),"合同.pdf");
+                                assert_eq!(row[1].to_string(),"1");
+                            }
+                            all.push_str(&row.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"));
+                            all.push('\n');
+                        }
+                    }
+                }
+                assert_eq!(summaries,scenarios.len(),"{mode}, only={only}");
+                for unwanted in ["附加原文禁止出现","动态原文禁止出现","关键合同原文","逐字证据","原文引用出处"] {
+                    assert!(!all.contains(unwanted),"{mode}, only={only}: {unwanted}");
+                }
+                assert!(all.contains("有效审计提示") && all.contains("第十条"));
+                assert_eq!(all.contains("直接识别正文保留"),!only);
+                if !only { assert!(all.contains("单价\n数量") && all.contains("0.57\n00123")); }
+            }
+        }
+    }
+    #[test]
     fn only_current_extractions_are_exported_with_sources_empty_results_and_timestamp() {
         use crate::ocr_store::Page;
         use calamine::Reader;
@@ -877,10 +907,10 @@ mod tests {
         let doc = store.import(project["id"].as_str().unwrap(), &source).unwrap();
         store.prepare(&doc.id, 2).unwrap();
         store.save_page(&doc.id, Page { metadata: Default::default(), page:1, text:"不得导出整篇正文".into(), original_text:"不得导出整篇正文".into(), tables:vec![], original_tables:vec![], revision:0,status:"needs_review".into(),warnings:vec!["方向待复核".into()] },0,true).unwrap();
-        let data = json!({"documentId":doc.id,"sourceRevision":1,"scenarioId":"saved-covenant","columns":[{"key":"excerpt","label":"合同原文摘录"},{"key":"sourcePage","label":"来源页码"}],"prompts":[]});
+        let data = json!({"documentId":doc.id,"sourceRevision":1,"scenarioId":"saved-covenant","columns":[{"key":"requirement","label":"限制内容"},{"key":"excerpt","label":"合同原文摘录"},{"key":"sourcePage","label":"来源页码"}],"prompts":[]});
         let mut historical = data.clone(); historical["rows"] = json!([{"excerpt":"不得包含历史结果"}]);
         store.save_extraction(&historical).unwrap();
-        let mut current = data.clone(); current["rows"] = json!([{"excerpt":"借款人负债率不得超过65%","sourcePage":"1"}]);
+        let mut current = data.clone(); current["rows"] = json!([{"requirement":"借款人负债率不得超过65%","excerpt":"原文证据不应附上","sourcePage":"1"}]);
         let saved = store.save_extraction(&current).unwrap();
         let mut empty = data; empty["rows"] = json!([]);
         let zero = store.save_extraction(&empty).unwrap();
@@ -898,8 +928,8 @@ mod tests {
         assert_eq!(book.sheet_names().len(),1);
         let range = book.worksheet_range(&book.sheet_names()[0]).unwrap();
         let text = range.rows().flat_map(|row| row.iter()).map(ToString::to_string).collect::<Vec<_>>().join("\n");
-        for expected in ["合同.pdf","来源页码","不得超过65%","未发现符合场景事项","我的财务限制"] { assert!(text.contains(expected),"缺少 {expected}"); }
-        for unwanted in ["尚未扫描页", "第1页待校对", "方向待复核", "不能认定", "已扫描", "摘录需要更新"] { assert!(!text.contains(unwanted), "不应插入诊断：{unwanted}"); }
+        for expected in ["合同.pdf","页码","不得超过65%","未发现符合场景事项","我的财务限制"] { assert!(text.contains(expected),"缺少 {expected}"); }
+        for unwanted in ["尚未扫描页", "第1页待校对", "方向待复核", "不能认定", "已扫描", "摘录需要更新", "原文证据不应附上", "合同原文摘录"] { assert!(!text.contains(unwanted), "不应插入诊断或证据：{unwanted}"); }
         assert_eq!(result["partial"], true);
         assert!(!text.contains("不得导出整篇正文"));
         assert!(!text.contains("不得包含历史结果"));
@@ -907,6 +937,152 @@ mod tests {
         let mut invalid = params; invalid["extractionIds"] = json!(["other-project-id"]);
         assert!(export(&store,&invalid,&|_,_,_,_|{},&pause).is_err());
         assert_eq!(store.project(project["id"].as_str().unwrap()).unwrap()["outputDirectory"],json!(dir.path().to_string_lossy()));
+    }
+    #[test]
+    fn extraction_exports_keep_fixed_source_columns_in_every_mode() {
+        use calamine::{Data, Reader};
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("db")).unwrap();
+        let project = store.save_project(&json!({"name":"分块摘录"})).unwrap();
+        let mut docs = vec![];
+        let mut ids = vec![];
+        let long = "业务😀".repeat(17000);
+        for name in ["甲合同.pdf", "乙合同.pdf"] {
+            let path = dir.path().join(name); fs::write(&path, b"synthetic").unwrap();
+            let doc = store.import(project["id"].as_str().unwrap(), &path).unwrap();
+            let saved = store.save_extraction(&json!({"documentId":doc.id,"sourceRevision":0,"scenarioId":"custom","prompts":[],
+                "columns":[{"key":"sourceFile","label":"来源文件"},{"key":"sourcePage","label":"来源页码"},{"key":"amount","label":"金额"},{"key":"description","label":"业务摘要"},{"key":"evidence","label":"逐字证据"}],
+                "rows":[{"sourceFile":"错误模型文件名.pdf","sourcePage":"2","amount":"00100","description":"同页第一项","evidence":"原文证据不可导出"},
+                    {"pages":[3,4],"amount":"=1+1","description":long,"evidence":"原文证据不可导出"},
+                    {"sourcePage":"2","amount":"00200","description":"同页第二项"},
+                    {"amount":"00300","description":"未定位业务摘要","_trace":"不可导出"}]})).unwrap();
+            ids.push(saved["id"].as_str().unwrap().to_owned()); docs.push(doc);
+        }
+        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        for mode in ["single_sheet", "per_document", "individual", "combined"] {
+            for only in [true, false] {
+                let result = export(&store,&json!({"projectId":project["id"],"documentIds":docs.iter().map(|d|&d.id).collect::<Vec<_>>(),"outputDir":dir.path(),"mode":mode,"extractionsOnly":only,"extractionIds":ids}),&|_,_,_,_|{},&pause).unwrap();
+                let mut headers = 0;
+                let mut entries = 0;
+                let mut restored = String::new();
+                for output in result["outputPaths"].as_array().unwrap() {
+                    let mut book = calamine::open_workbook_auto(output.as_str().unwrap()).unwrap();
+                    for name in book.sheet_names() {
+                        if !only && (name == "目录" || name.ends_with("完整原文")) { continue; }
+                        let range = book.worksheet_range(&name).unwrap();
+                        let lines = range.rows().collect::<Vec<_>>();
+                        for row in &lines {
+                            if row.first() == Some(&Data::String("来源文件".into())) && row.get(2) == Some(&Data::String("业务摘要".into())) {
+                                headers += 1;
+                                assert_eq!(row[1], Data::String("页码".into()));
+                                assert_eq!(row[3], Data::String("金额".into()));
+                                continue;
+                            }
+                            if matches!(row.first(), Some(Data::String(s)) if s == "甲合同.pdf" || s == "乙合同.pdf") {
+                                assert!(matches!(row.get(1), Some(Data::String(s)) if ["2", "3\n4", "具体出处待核对"].contains(&s.as_str())));
+                                assert!(row[4] == Data::String("自定义摘录".into()) || row[4] == Data::Empty);
+                            }
+                            if row.get(3).is_some_and(|v| matches!(v, Data::String(s) if ["00100","00200","00300","=1+1"].contains(&s.as_str()))) { entries += 1; }
+                            if let Some(Data::String(value)) = row.get(2) {
+                                if !value.is_empty() && value.chars().all(|ch| "业务😀".contains(ch)) {
+                                    assert!(matches!(row.first(), Some(Data::String(s)) if s == "甲合同.pdf" || s == "乙合同.pdf"));
+                                    assert_eq!(row[1], Data::String("3\n4".into()));
+                                    restored.push_str(value);
+                                }
+                            }
+                            assert!(!row.iter().any(|v| matches!(v, Data::String(s) if s == "错误模型文件名.pdf" || s == "不可导出" || s == "逐字证据" || s == "原文证据不可导出")));
+                        }
+                    }
+                }
+                assert_eq!(headers, if only && mode == "single_sheet" { 1 } else { 2 }, "{mode}, only={only}");
+                assert_eq!(entries, 8, "{mode}, only={only}");
+                assert_eq!(restored, long.repeat(2));
+            }
+        }
+    }
+    #[test]
+    fn original_tables_are_cells_in_source_order_with_fixed_provenance() {
+        use crate::ocr_store::{Page, Table};
+        use calamine::{Data, Reader};
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("db")).unwrap();
+        let project = store.save_project(&json!({"name":"原位表格"})).unwrap();
+        let path = dir.path().join("合同.pdf"); fs::write(&path, b"synthetic").unwrap();
+        let doc = store.import(project["id"].as_str().unwrap(), &path).unwrap();
+        store.prepare(&doc.id, 5).unwrap();
+        let rows = vec![vec!["提款时间".into(),"提款金额".into()],vec!["/".into(),"/".into()],vec!["/".into(),"/".into()],vec!["/".into(),"/".into()]];
+        let grid = rows.iter().map(|row| row.join("\t")).collect::<Vec<_>>().join("\n");
+        store.save_page(&doc.id, Page {metadata:Default::default(),page:5,text:format!("第一段\n{grid}\n第二段\n{grid}\n第三段\n普通文字\t不推断为表格"),original_text:String::new(),revision:0,status:"completed".into(),warnings:vec![],original_tables:vec![],
+            tables:vec![Table{id:"a".into(),title:String::new(),rows:rows.clone()},Table{id:"b".into(),title:String::new(),rows}]},0,true).unwrap();
+        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        for mode in ["single_sheet","per_document","combined","individual"] {
+            let result = export(&store,&json!({"projectId":project["id"],"documentIds":[doc.id],"mode":mode,"outputDir":dir.path()}),&|_,_,_,_|{},&pause).unwrap();
+            let mut book = calamine::open_workbook_auto(result["outputPaths"][0].as_str().unwrap()).unwrap();
+            let sheet_name = if matches!(mode,"combined"|"individual") { "1_完整原文".to_owned() } else { book.sheet_names()[0].clone() };
+            let range = book.worksheet_range(&sheet_name).unwrap();
+            let lines=range.rows().collect::<Vec<_>>();
+            assert_eq!(lines[0][0],Data::String("来源文件".into())); assert_eq!(lines[0][1],Data::String("页码".into()));
+            for row in lines.iter().skip(1) {
+                assert_eq!(row[0],Data::String("合同.pdf".into())); assert_eq!(row[1],Data::String("5".into()));
+            }
+            assert_eq!(lines.iter().filter(|row|row.get(2)==Some(&Data::String("提款时间".into()))).count(),2);
+            assert_eq!(lines[2][2],Data::String("提款时间".into())); assert_eq!(lines[2][3],Data::String("提款金额".into()));
+            assert_eq!(lines[3][2],Data::String("/".into())); assert_eq!(lines[3][3],Data::String("/".into()));
+            assert_eq!(lines[6][2],Data::String("第二段".into()));
+            assert!(lines.iter().any(|row|row.get(2)==Some(&Data::String("普通文字\t不推断为表格".into()))));
+            assert!(!lines.iter().flat_map(|row| row.iter()).any(|cell|cell==&Data::String("提款时间\t提款金额".into())));
+        }
+    }
+    #[test]
+    fn source_hyperlinks_use_retained_files_without_changing_display_or_missing_file_exports() {
+        use crate::ocr_store::Page;
+        use std::io::{Cursor, Read};
+        use calamine::{Data, Reader};
+        let temporary = tempfile::tempdir().unwrap();
+        let dir = temporary.path().join("原件 #100% 中文"); fs::create_dir(&dir).unwrap();
+        let mut store = Store::open(&dir.join("db.sqlite")).unwrap();
+        let project = store.save_project(&json!({"name":"原件链接"})).unwrap();
+        let path = dir.join("合同原件.pdf"); fs::write(&path, b"synthetic").unwrap();
+        let doc = store.import(project["id"].as_str().unwrap(), &path).unwrap();
+        store.prepare(&doc.id, 1).unwrap();
+        let long = "证据".repeat(18000);
+        store.save_page(&doc.id,Page{metadata:Default::default(),page:1,text:long.clone(),original_text:String::new(),tables:vec![],original_tables:vec![],revision:0,status:"completed".into(),warnings:vec![]},0,true).unwrap();
+        let extraction=store.save_extraction(&json!({"documentId":doc.id,"sourceRevision":1,"scenarioId":"custom","columns":[{"key":"description","label":"业务摘要"}],"rows":[{"sourcePage":"1","sourceFile":"https://model.invalid/","description":long}],"prompts":[]})).unwrap();
+        let link = source_link(&store,&doc).unwrap().unwrap();
+        assert_eq!(reqwest::Url::parse(&link).unwrap().to_file_path().unwrap(), store.source(&doc.id).unwrap());
+        assert!(link.contains("%23") && link.contains("%25") && link.contains("%20"));
+        assert!(reqwest::Url::parse(&link).unwrap().fragment().is_none());
+        // Moving the original user-selected file leaves the retained scan link usable.
+        fs::remove_file(&path).unwrap();
+        let pause=PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        for only in [false,true] {
+            for mode in ["single_sheet","per_document","individual","combined"] {
+                let result=export(&store,&json!({"projectId":project["id"],"documentIds":[doc.id],"outputDir":dir,"mode":mode,"extractionsOnly":only,"extractionIds":[extraction["id"]]}),&|_,_,_,_|{},&pause).unwrap();
+                let output=result["outputPaths"][0].as_str().unwrap();
+                let mut zip=zip::ZipArchive::new(Cursor::new(fs::read(output).unwrap())).unwrap();
+                let mut relations=String::new(); let mut worksheets=String::new();
+                for i in 0..zip.len() {
+                    let mut file=zip.by_index(i).unwrap(); let name=file.name().to_owned();
+                    if name.starts_with("xl/worksheets/") && name.ends_with(".rels") { file.read_to_string(&mut relations).unwrap(); }
+                    else if name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml") { file.read_to_string(&mut worksheets).unwrap(); }
+                }
+                assert!(relations.contains("TargetMode=\"External\""));
+                assert!(relations.contains("%23") && relations.contains("%25"));
+                assert!(worksheets.contains("ref=\"A2\"") && worksheets.contains("ref=\"A3\""));
+                assert!(!relations.contains("model.invalid"));
+                let mut book=calamine::open_workbook_auto(output).unwrap();
+                let range=book.worksheet_range(&book.sheet_names()[0]).unwrap();
+                if mode!="combined" && mode!="individual" || only {
+                    assert_eq!(range.get((1,0)),Some(&Data::String("合同原件.pdf".into())));
+                }
+            }
+        }
+        fs::remove_file(store.source(&doc.id).unwrap()).unwrap();
+        assert!(source_link(&store,&doc).unwrap().is_none());
+        let result=export(&store,&json!({"projectId":project["id"],"documentIds":[doc.id],"outputDir":dir,"mode":"per_document","extractionsOnly":true,"extractionIds":[extraction["id"]]}),&|_,_,_,_|{},&pause).unwrap();
+        let mut zip=zip::ZipArchive::new(Cursor::new(fs::read(result["outputPaths"][0].as_str().unwrap()).unwrap())).unwrap();
+        let mut xml=String::new(); zip.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut xml).unwrap();
+        assert!(!xml.contains("<hyperlink "));
     }
     #[test]
     fn unicode_chunks_are_lossless_and_within_excel_limit() {
@@ -986,12 +1162,12 @@ mod tests {
         let output = Path::new(result["outputPaths"][0].as_str().unwrap());
         let mut workbook = calamine::open_workbook_auto(output).unwrap();
         let table = workbook.worksheet_range("1_第1页_表1").unwrap();
-        assert_eq!(table.get((1, 0)), Some(&Data::String(account.into())));
-        assert_eq!(table.get((1, 1)), Some(&Data::String("=1+2".into())));
+        assert_eq!(table.get((1, 2)), Some(&Data::String(account.into())));
+        assert_eq!(table.get((1, 3)), Some(&Data::String("=1+2".into())));
         let restored = table
             .rows()
             .skip(1)
-            .filter_map(|r| r.get(3))
+            .filter_map(|r| r.get(5))
             .map(|c| c.to_string())
             .collect::<String>();
         assert_eq!(restored, long);
@@ -1190,12 +1366,13 @@ mod tests {
         }
         assert!(all.contains("复核提示"));
         assert!(all.contains("利率调整日待核对"));
-        assert!(all.contains("第一段逐字证据\n第二段逐字证据"));
+        assert!(!all.contains("第一段逐字证据"));
+        assert!(!all.contains("第二段逐字证据"));
         assert!(!all.contains(r"\underline"));
         assert!(!all.contains(r"\text{"));
         assert!(result.rows().flatten().any(|cell| cell == &Data::String("=1+1".into())));
         assert!(all.contains(r"\frac{a}{b}"));
-        assert!(all.contains("来源页码"));
+        assert!(all.contains("页码"));
         assert!(all.contains("事项"));
         assert!(all.contains("条款位置"));
         assert!(all.contains("独立投资限额"));
@@ -1206,10 +1383,7 @@ mod tests {
         assert!(!all.contains("实际使用的提示词"));
         assert!(!all.contains("场景规则版本"));
         assert!(!all.contains("{\""));
-        assert_eq!(
-            result.get((2, 0)),
-            Some(&Data::String("00123456789012345678901234567890".into()))
-        );
+        assert!(result.rows().flatten().any(|cell| cell == &Data::String("00123456789012345678901234567890".into())));
         assert_eq!(
             value_text(&json!({"condition":{"value":"=1+1","enabled":true}})),
             "条件：enabled：是\n内容：=1+1"

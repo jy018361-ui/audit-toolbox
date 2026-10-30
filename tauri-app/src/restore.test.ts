@@ -3,7 +3,7 @@ import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   consumeTaskRestore,
-  historyRowCanResume,
+  historyRowCanRestoreParams,
   publishTaskRestore,
   subscribeTaskRestore,
   useTaskRestore,
@@ -23,40 +23,42 @@ const make = (
 });
 
 describe("task restore channel", () => {
-  it("gates resume on params and method: sub-step jobs are not restorable", () => {
-    expect(historyRowCanResume({ method: "wp.generate", params: { folder: "C:\\x" } })).toBe(true);
-    // 没有参数存档（旧版本任务）不可恢复。
-    expect(historyRowCanResume({ method: "wp.generate", params: {} })).toBe(false);
-    expect(historyRowCanResume({ method: "", params: {} })).toBe(false);
-    // 读取/筛选子步骤有参数但配置不完整，不给恢复。
+  it("restores source steps but skips empty and auxiliary-only params", () => {
+    expect(historyRowCanRestoreParams({ method: "wp.generate", params: { folder: "C:\\x" } })).toBe(true);
+    // 没有参数存档（旧版本任务）不回填，由历史页打开工具提示补选。
+    expect(historyRowCanRestoreParams({ method: "wp.generate", params: {} })).toBe(false);
+    expect(historyRowCanRestoreParams({ method: "", params: {} })).toBe(false);
+    // 读取/筛选子步骤可以回填已有来源，继续补齐配置。
     expect(
-      historyRowCanResume({
+      historyRowCanRestoreParams({
         method: "kanzhang.inspect",
         params: { inputPath: "C:\\je.xlsx" },
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
-      historyRowCanResume({
+      historyRowCanRestoreParams({
         method: "ts.filter",
         params: { inputPath: "C:\\ts.xlsx" },
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
-      historyRowCanResume({
+      historyRowCanRestoreParams({
         method: "fuzzy.export",
         params: { jobId: "j1", outputPath: "C:\\out.xlsx" },
       }),
     ).toBe(false);
     // 主任务可恢复；method 缺失（老格式但有参数）默认可恢复。
     expect(
-      historyRowCanResume({
+      historyRowCanRestoreParams({
         method: "kanzhang.export",
         params: { inputPath: "C:\\je.xlsx", mapping: { date: "日期" } },
       }),
     ).toBe(true);
     expect(
-      historyRowCanResume({ params: { inputPath: "C:\\je.xlsx" } }),
+      historyRowCanRestoreParams({ params: { inputPath: "C:\\je.xlsx" } }),
     ).toBe(true);
+    expect(historyRowCanRestoreParams({ method: "file_list.scan", params: { sourceDir: "C:\\客户" } })).toBe(true);
+    expect(historyRowCanRestoreParams({ method: "kanzhang.mark_inspect", params: { inputPath: "C:\\je.xlsx" } })).toBe(true);
   });
 
   beforeEach(() => {

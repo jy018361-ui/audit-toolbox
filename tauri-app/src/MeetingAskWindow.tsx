@@ -21,12 +21,6 @@ export default function MeetingAskWindow() {
   const generation = useRef(0);
   const desktop = runningInDesktopApp();
 
-  // 透明小窗：全局样式给 body 铺了底色，这里必须换成透明。
-  useEffect(() => {
-    document.body.classList.add("meeting-ask-body");
-    return () => document.body.classList.remove("meeting-ask-body");
-  }, []);
-
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;

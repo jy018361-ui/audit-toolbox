@@ -20,11 +20,16 @@ if ("__TAURI_INTERNALS__" in window) {
   document.documentElement.classList.add("frameless");
 }
 
-const root = ReactDOM.createRoot(document.getElementById("root")!);
-const appRouter = createHashRouter([{ path: "*", element: <App /> }]);
 // 会议询问小窗（label=meeting-ask）不进 App 壳：没有侧栏/路由/巡游，
 // 只渲染一张居中询问卡片。按启动时的 hash 分流，小窗内不会发生导航。
 const isMeetingAskWindow = window.location.hash.startsWith("#/meeting-ask");
+// 首帧前让整个文档画布透明；只清 body 会透出 :root 的主题底色。
+if (isMeetingAskWindow) {
+  document.documentElement.classList.add("meeting-ask-root");
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root")!);
+const appRouter = createHashRouter([{ path: "*", element: <App /> }]);
 const askRouter = createHashRouter([{ path: "*", element: <MeetingAskWindow /> }]);
 
 async function renderApp() {

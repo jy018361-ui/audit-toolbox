@@ -76,8 +76,8 @@ describe("长合同自然语言分段与指标展示", () => {
     await expect(extractOcrScenario({ scenario: selected, stages: selected.defaultPrompts, document: doc,
       pages: [page(sources.join("\n"))], request })).rejects.toThrow("检查完整");
     expect(counts.size).toBe(2); // Original range, then the first smaller range; no recursive retry tree.
-    expect([...counts.values()]).toEqual([2, 2]);
-    expect(request).toHaveBeenCalledTimes(4);
+    expect([...counts.values()]).toEqual([1, 2]);
+    expect(request).toHaveBeenCalledTimes(3);
   });
 
   it("同证据中的投资、担保、融资三项保留三行，各自标准只展示本项且原文完整", async () => {

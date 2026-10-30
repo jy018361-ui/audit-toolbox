@@ -84,6 +84,14 @@ pub(crate) fn call(
                 json!({"document":store.document(id)?,"pages":store.pages(id)?,"extractions":store.extractions(id)?}),
             )
         }
+        "ocr.extraction_context" => Ok(json!({"contextKey":store.extraction_context(required(&params,"documentId")?, settings)?})),
+        "ocr.extraction_cache_get" => Ok(json!({"entry":store.extraction_cache_get(required(&params,"documentId")?, required(&params,"contextKey")?, required(&params,"key")?, settings)?})),
+        "ocr.extraction_cache_put" => Ok(json!({"saved":store.extraction_cache_put(required(&params,"documentId")?, required(&params,"contextKey")?, required(&params,"key")?, &params["entry"], settings)?})),
+        "ocr.extraction_diagnostics_save" => {
+            store.extraction_diagnostics_save(required(&params,"documentId")?, required(&params,"runId")?, &params["entries"])?;
+            Ok(json!({"saved":true}))
+        }
+        "ocr.extraction_diagnostics" => Ok(json!({"runs":store.extraction_diagnostics(required(&params,"documentId")?)?})),
         "ocr.document_delete" => store.delete_document(required(&params, "documentId")?),
         "ocr.document_prepare" => to_value(store.prepare(
             required(&params, "documentId")?,
@@ -230,17 +238,75 @@ fn image_error(_: impl std::fmt::Display) -> AppError {
 }
 fn png(image: &DynamicImage) -> Result<String, AppError> {
     use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    let packed = lossless_upload_channels(image);
     let mut output = Vec::new();
     // `write_to(Png)` uses Fast compression. These full-resolution scans are
     // uploaded over the same connection bandwidth by several workers, so use
-    // balanced DEFLATE compression. Dimensions, channels and every decoded
-    // pixel remain unchanged; do not trade OCR detail for smaller JPEGs.
-    image
+    // balanced DEFLATE compression. Dimensions and decoded RGBA pixel values
+    // remain unchanged. Redundant opaque alpha / equal RGB channels can
+    // be represented with fewer channels without changing decoded RGBA values.
+    packed
         .write_with_encoder(PngEncoder::new_with_quality(
             &mut output, CompressionType::Default, FilterType::Adaptive,
         ))
         .map_err(image_error)?;
     Ok(STANDARD.encode(output))
+}
+/// A rendered static PNG is already compressed. Reuse its bytes when no
+/// direction/crop change occurred, instead of decoding and encoding it again.
+/// Only pixel chunks and pixel-neutral DPI are accepted: EXIF, color profiles, animation and
+/// palette metadata go through the existing normalization path.
+fn upload_png(image: &DynamicImage, original: &[u8], unchanged_direction: bool) -> Result<String, AppError> {
+    let pixels = u64::from(image.width()) * u64::from(image.height());
+    if unchanged_direction && original.len() as u64 <= pixels && plain_png(original) {
+        Ok(STANDARD.encode(original))
+    } else {
+        png(image)
+    }
+}
+fn plain_png(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") { return false; }
+    let mut position = 8usize;
+    let mut header = false;
+    let mut data = false;
+    while let Some(chunk) = bytes.get(position..position.saturating_add(8)) {
+        let length = u32::from_be_bytes(chunk[..4].try_into().unwrap()) as usize;
+        let Some(end) = position.checked_add(12).and_then(|n| n.checked_add(length)) else { return false; };
+        if end > bytes.len() { return false; }
+        match &chunk[4..8] {
+            b"IHDR" if !header && position == 8 && length == 13 => header = true,
+            b"IDAT" if header => data = true,
+            b"pHYs" if header && !data && length == 9 => {},
+            b"IEND" if header && data && length == 0 => return end == bytes.len(),
+            _ => return false,
+        }
+        position = end;
+    }
+    false
+}
+fn lossless_upload_channels(image: &DynamicImage) -> std::borrow::Cow<'_, DynamicImage> {
+    use std::borrow::Cow;
+    let rgb = match image {
+        DynamicImage::ImageRgba8(pixels) if pixels.pixels().all(|p| p[3] == 255) => {
+            Some(image.to_rgb8())
+        }
+        DynamicImage::ImageRgb8(pixels) if pixels.pixels().all(|p| p[0] == p[1] && p[1] == p[2]) => {
+            return Cow::Owned(DynamicImage::ImageLuma8(image.to_luma8()));
+        }
+        _ => None,
+    };
+    if let Some(rgb) = rgb {
+        let packed = DynamicImage::ImageRgb8(rgb);
+        if let DynamicImage::ImageRgb8(pixels) = &packed {
+            if pixels.pixels().all(|p| p[0] == p[1] && p[1] == p[2]) {
+                return Cow::Owned(DynamicImage::ImageLuma8(packed.to_luma8()));
+            }
+        }
+        Cow::Owned(packed)
+    } else {
+        // Keep transparency, near-gray color and 16-bit precision intact.
+        Cow::Borrowed(image)
+    }
 }
 fn decode_base64(data: &str) -> Result<Vec<u8>, AppError> {
     STANDARD
@@ -552,7 +618,7 @@ pub(crate) fn run_job(
             let image = correction.image;
             pause.wait()?;
             let segments = match params["layout"].as_str().unwrap_or("full") {
-                "full" => vec![png(&image)?],
+                "full" => vec![upload_png(&image, &bytes, correction.metadata.auto_rotation == 0)?],
                 "spread" => {
                     if image.width() < 2 {
                         return Err(failure(
@@ -573,6 +639,8 @@ pub(crate) fn run_job(
             let mut tables = vec![];
             let mut warnings: Vec<String> = correction.warning.into_iter().collect();
             let mut diagnostics = vec![];
+            progress("ocr_request", number.saturating_sub(1) as usize, doc.total_pages as usize,
+                &format!("第 {number} 页正在请求识别服务，等待返回结果"));
             for (index, segment) in segments.iter().enumerate() {
                 let image = format!("data:image/png;base64,{segment}");
                 let (part, mut part_tables, mut part_warnings, diagnostic) = recognize_part(
@@ -608,6 +676,8 @@ pub(crate) fn run_job(
                 warnings,
                 metadata: correction.metadata,
             };
+            progress("ocr_save", number.saturating_sub(1) as usize, doc.total_pages as usize,
+                &format!("正在保存第 {number} 页识别结果"));
             let save_started = Instant::now();
             let saved = store.save_page(id, page, expected, true)?;
             store.save_recognition_diagnostics(id, number, saved.revision, &diagnostics)?;
@@ -644,6 +714,17 @@ pub(crate) fn run_job(
 #[cfg(test)]
 mod tests {
     #[test]
+    #[ignore = "手动隔离数据库摘录缓存及导出回放，不读取实际配置或调用模型"]
+    fn replay_extraction_cache_from_stdin() {
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        let request: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let method = request["method"].as_str().unwrap();
+        assert!(matches!(method, "ocr.extraction_context" | "ocr.extraction_cache_get" | "ocr.extraction_cache_put" | "ocr.extraction_diagnostics_save" | "ocr.extraction_diagnostics"));
+        let result = super::call(method, request["params"].clone(), std::path::Path::new(request["snapshotPath"].as_str().unwrap()), &request["settings"]).unwrap();
+        std::fs::write(request["reportPath"].as_str().unwrap(), serde_json::to_vec(&result).unwrap()).unwrap();
+    }
+    #[test]
     fn sparse_cloud_text_gets_review_warning_without_guessing_missing_content() {
         assert!(super::sparse_recognition_warning("编号：ABC000123", 180).is_some());
         assert!(super::sparse_recognition_warning("编号：ABC000123", 0).is_none());
@@ -673,26 +754,102 @@ mod tests {
     }
 
     #[test]
+    fn upload_png_removes_only_redundant_channels_without_changing_rgba_pixels() {
+        for (pixel, expected) in [
+            ([80, 80, 80, 255], image::ColorType::L8),
+            ([80, 81, 80, 255], image::ColorType::Rgb8),
+            ([80, 80, 80, 254], image::ColorType::Rgba8),
+        ] {
+            let input = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(9, 11, image::Rgba(pixel)));
+            let bytes = STANDARD.decode(png(&input).unwrap()).unwrap();
+            let decoded = image::load_from_memory(&bytes).unwrap();
+            assert_eq!(decoded.color(), expected);
+            assert_eq!(decoded.to_rgba8(), input.to_rgba8());
+        }
+        let input = DynamicImage::ImageRgb8(image::RgbImage::from_fn(256, 2, |x, _| image::Rgb([x as u8; 3])));
+        let decoded = image::load_from_memory(&STANDARD.decode(png(&input).unwrap()).unwrap()).unwrap();
+        assert_eq!(decoded.color(), image::ColorType::L8);
+        assert_eq!(decoded.to_rgba8(), input.to_rgba8());
+    }
+
+    #[test]
+    fn unchanged_plain_png_is_reused_but_changed_or_metadata_png_is_normalized() {
+        let input = DynamicImage::ImageRgb8(image::RgbImage::from_fn(96, 64, |x, y| image::Rgb([if x < 48 {255} else {80}, (y % 3) as u8, 30])));
+        let original = STANDARD.decode(png(&input).unwrap()).unwrap();
+        assert!(plain_png(&original));
+        assert_eq!(STANDARD.decode(upload_png(&input, &original, true).unwrap()).unwrap(), original);
+        let rotated = input.rotate90();
+        let normalized = STANDARD.decode(upload_png(&rotated, &original, false).unwrap()).unwrap();
+        assert_ne!(normalized, original);
+        assert_eq!(image::load_from_memory(&normalized).unwrap().to_rgba8(), rotated.to_rgba8());
+        let mut dpi = original.clone();
+        // The scanner checks chunk shape only; the caller has already decoded
+        // (and validated) the actual PNG before reaching this fast path.
+        dpi.splice(33..33, [0,0,0,9,b'p',b'H',b'Y',b's',0,0,14,196,0,0,14,196,1,0,0,0,0]);
+        assert!(plain_png(&dpi));
+        let mut metadata = original.clone();
+        // A valid synthetic eXIf header is not needed here: the chunk scanner
+        // must reject metadata before treating it as an unchanged plain PNG.
+        metadata.splice(33..33, [0,0,0,0,b'e',b'X',b'I',b'f',0,0,0,0]);
+        assert!(!plain_png(&metadata));
+        assert!(!plain_png(&original[..original.len()-1]));
+        assert!(!plain_png(b"\x89PNG\r\n\x1a\n\xff\xff\xff\xffIDAT"));
+        let mut trailing = original.clone(); trailing.push(0);
+        assert!(!plain_png(&trailing));
+    }
+
+    #[test]
+    #[ignore = "手动原图复用验收，需要 OCR_PNG_BENCH_IMAGE；不联网"]
+    fn benchmark_reused_upload_png_on_local_scan() {
+        let path = std::env::var_os("OCR_PNG_BENCH_IMAGE").expect("请设置 OCR_PNG_BENCH_IMAGE");
+        let original = fs::read(PathBuf::from(path)).unwrap();
+        let input = decode_image(&original).unwrap();
+        let started = Instant::now();
+        let uploaded = STANDARD.decode(upload_png(&input, &original, true).unwrap()).unwrap();
+        let upload_ms = elapsed_ms(started);
+        let decoded = image::load_from_memory(&uploaded).unwrap();
+        assert_eq!(decoded.to_rgba16(), input.to_rgba16());
+        assert_eq!((decoded.width(), decoded.height()), (input.width(), input.height()));
+        eprintln!("{}", json!({"sourceBytes":original.len(),"uploadBytes":uploaded.len(),
+            "uploadMs":upload_ms,"passedThrough":uploaded==original,"pixelsEqual":true,
+            "width":input.width(),"height":input.height()}));
+    }
+
+    #[test]
     #[ignore = "手动上传优化验收，需要 OCR_PNG_BENCH_IMAGE 指向本机样本；不联网"]
     fn benchmark_lossless_upload_png_on_local_scan() {
         use image::ImageFormat;
         let path = std::env::var_os("OCR_PNG_BENCH_IMAGE").expect("请设置 OCR_PNG_BENCH_IMAGE");
-        let input = decode_image(&fs::read(PathBuf::from(path)).unwrap()).unwrap();
+        let original = fs::read(PathBuf::from(path)).unwrap();
+        let input = decode_image(&original).unwrap();
         let fast_started = Instant::now();
         let mut fast = Cursor::new(Vec::new());
         input.write_to(&mut fast, ImageFormat::Png).unwrap();
         let fast_ms = elapsed_ms(fast_started);
+        let previous_started = Instant::now();
+        let mut previous = Vec::new();
+        input.write_with_encoder(image::codecs::png::PngEncoder::new_with_quality(
+            &mut previous, image::codecs::png::CompressionType::Default, image::codecs::png::FilterType::Adaptive,
+        )).unwrap();
+        let previous_ms = elapsed_ms(previous_started);
         let balanced_started = Instant::now();
         let balanced = STANDARD.decode(png(&input).unwrap()).unwrap();
         let balanced_ms = elapsed_ms(balanced_started);
-        assert_eq!(image::load_from_memory(&balanced).unwrap().as_bytes(), input.as_bytes());
+        let decoded = image::load_from_memory(&balanced).unwrap();
+        assert_eq!(decoded.to_rgba16(), input.to_rgba16());
+        let upload_started = Instant::now();
+        let uploaded = STANDARD.decode(upload_png(&input, &original, true).unwrap()).unwrap();
+        let upload_ms = elapsed_ms(upload_started);
+        assert_eq!(image::load_from_memory(&uploaded).unwrap().to_rgba16(), input.to_rgba16());
         if let Some(output) = std::env::var_os("OCR_PNG_BENCH_OUTPUT") {
             use std::io::Write;
             let mut file = fs::OpenOptions::new().write(true).create_new(true).open(PathBuf::from(output)).unwrap();
-            file.write_all(&balanced).unwrap();
+            file.write_all(&uploaded).unwrap();
         }
         eprintln!("{}", json!({"fastBytes":fast.get_ref().len(),"balancedBytes":balanced.len(),
-            "fastMs":fast_ms,"balancedMs":balanced_ms,"pixelsEqual":true,
+            "previousBytes":previous.len(),"previousMs":previous_ms,
+            "sourceBytes":original.len(),"uploadBytes":uploaded.len(),"uploadMs":upload_ms,"passedThrough":uploaded==original,
+            "fastMs":fast_ms,"balancedMs":balanced_ms,"pixelsEqual":true,"sourceColor":format!("{:?}",input.color()),"uploadColor":format!("{:?}",decoded.color()),
             "width":input.width(),"height":input.height()}));
     }
     #[test]

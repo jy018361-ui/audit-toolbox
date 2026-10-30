@@ -504,6 +504,17 @@ pub(crate) fn run_filter(
                 }
                 other => other.to_string(),
             };
+            if matches!(
+                parsed.kind,
+                RuleKind::Contains(_) | RuleKind::StartsWith | RuleKind::EndsWith
+            ) {
+                // 文字类运算符对任意列类型都按单元格的文本形式匹配
+                // （日期筛“包含 01”捞一月凭证、编号找尾号等），条件值保留原文，
+                // 不能再强迫解析成日期/数字，否则必然报「无法识别为日期」。
+                parsed.text = Some(as_text);
+                rules.push(parsed);
+                continue;
+            }
             match column_type {
                 ColType::Integer | ColType::Decimal => {
                     parsed.number = Some(Dec::parse(&as_text).map_err(|error| {

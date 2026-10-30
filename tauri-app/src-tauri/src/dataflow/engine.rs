@@ -762,6 +762,46 @@ mod tests {
     }
 
     #[test]
+    fn filter_text_operators_match_date_as_text() {
+        // 日期列用「包含」筛选（如 包含 01 捞一月/一日凭证）按日期的
+        // 文本形式匹配，不要求条件值本身是完整日期。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("t.csv");
+        fs::write(&file, "记账日期
+2026-01-15
+2026-03-05
+2026-10-01
+").unwrap();
+        let flow = workflow(
+            json!([
+                {"id": "in", "type": "csv_in", "name": "CSV输入", "config": {"path": file.to_string_lossy()}},
+                {"id": "fl", "type": "filter", "name": "筛选",
+                 "config": {"condition": {"op": "and", "rules": [
+                    {"field": "记账日期", "operator": "contains", "value": "01"}
+                 ]}}}
+            ]),
+            json!([{"from": "in", "to": "fl"}]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "fl"), "ok");
+        assert_eq!(row_count(&result, "fl", "T"), 2);
+        assert_eq!(row_count(&result, "fl", "F"), 1);
+        // 对比类运算符仍然要求完整日期。
+        let flow_eq = workflow(
+            json!([
+                {"id": "in", "type": "csv_in", "name": "CSV输入", "config": {"path": file.to_string_lossy()}},
+                {"id": "fl", "type": "filter", "name": "筛选",
+                 "config": {"condition": {"op": "and", "rules": [
+                    {"field": "记账日期", "operator": "=", "value": "01"}
+                 ]}}}
+            ]),
+            json!([{"from": "in", "to": "fl"}]),
+        );
+        let result_eq = run("dataflow_preview", flow_eq);
+        assert_eq!(node_status(&result_eq, "fl"), "error");
+    }
+
+    #[test]
     fn reads_pseudo_xls_text_via_unified_layer() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("台账.xls");

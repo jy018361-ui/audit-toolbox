@@ -140,22 +140,34 @@ export function DataflowCanvas({
     }
   };
 
-  // 滚轮缩放：以指针为锚点，clamp 0.35–2.2。需要 non-passive 才能阻止页面滚动。
+  // 滚轮/触摸板手势（用户裁定 2026-10-30）：双指滚动（含鼠标滚轮）＝
+  // 平移窗口；双指捏合（浏览器派发为 ctrl+wheel）＝以指针为锚点缩放，
+  // clamp 0.35–2.2。需要 non-passive 才能阻止页面滚动。
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      const mx = event.clientX - rect.left;
-      const my = event.clientY - rect.top;
       const current = cameraRef.current;
-      const nextZoom = Math.max(0.35, Math.min(2.2, current.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
-      setCamera({
-        zoom: nextZoom,
-        x: mx - ((mx - current.x) * nextZoom) / current.zoom,
-        y: my - ((my - current.y) * nextZoom) / current.zoom,
-      });
+      if (event.ctrlKey) {
+        const rect = canvas.getBoundingClientRect();
+        const mx = event.clientX - rect.left;
+        const my = event.clientY - rect.top;
+        // 捏合的 delta 很小、Ctrl+滚轮的 delta 约 ±100：指数因子对两者都平滑。
+        const factor = Math.exp(-event.deltaY * 0.005);
+        const nextZoom = Math.max(0.35, Math.min(2.2, current.zoom * factor));
+        setCamera({
+          zoom: nextZoom,
+          x: mx - ((mx - current.x) * nextZoom) / current.zoom,
+          y: my - ((my - current.y) * nextZoom) / current.zoom,
+        });
+      } else {
+        setCamera((camera) => ({
+          ...camera,
+          x: camera.x - event.deltaX,
+          y: camera.y - event.deltaY,
+        }));
+      }
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", onWheel);
@@ -618,7 +630,7 @@ export function DataflowCanvas({
           </button>
         </div>
         <span className="df-hint">
-          空白处拖动平移 · 滚轮缩放 · 从节点右侧圆点拖到左侧圆点连线 · Delete 删除选中
+          空白处按住左键拖动或双指滚动＝平移 · 双指捏合（Ctrl+滚轮）＝缩放 · 从右侧圆点拖到左侧圆点连线 · Delete 删除选中
         </span>
       </div>
     </div>

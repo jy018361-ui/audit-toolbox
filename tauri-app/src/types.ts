@@ -160,3 +160,4 @@ export const MeetingRecordStopSchema = z.object({
   warnings: z.array(z.string()).default([]),
 });
 export type MeetingRecordStop = z.infer<typeof MeetingRecordStopSchema>;
+export const DataflowSheetNamesSchema = z.array(z.string());

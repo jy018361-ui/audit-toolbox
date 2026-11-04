@@ -15,13 +15,15 @@ python scripts/gen_dataflow_fixtures.py                                         
 
 合成测试数据在 `tests/fixtures/DataFlow/`（用途逐文件见其 README：编码/分隔符矩阵、千分位、全角、前导零、18 位流水号、重复凭证号、伪 xls、关联用重复键映射表等）。
 
+真实工作簿只读选表探针：设置 `DATAFLOW_INPUT_PROBE_PATH`（文件路径）与可选 `DATAFLOW_INPUT_PROBE_HEADER`（表头行，默认 1），运行 `cargo test --manifest-path src-tauri/Cargo.toml --lib real_workbook_visible_sheet_probe -- --ignored --nocapture`。输出可见表、实际选表、表头行、样本行数和字段名，不输出原始数据或改写源文件。
+
 ## 第一期：8 节点最小闭环（已实现）
 
 | 能力 | 实现行为 | 验证 |
 | --- | --- | --- |
 | 工作流模型 | JSON 保存/打开往返、参数占位替换（路径与文件名）、连线校验（禁自环/重复/环/输入口占用）、草稿与撤销栈 | `npx vitest run src/dataflow`（model 相关用例） |
 | 画布交互 | 节点拖动、锚点连线、平移缩放、删除、状态着色与行数耗时角标、参数确认页；工作台限高一屏、预览区钉底始终可见（2026-10-30 修复：此前需滚动窗口才能看到预览信息）；连线两端可拖拽改接、中段点选删除，透明命中层保证细线可抓（2026-11-04）；画布整体禁文字选择（2026-10-29 修复：空白处左键拖动曾被浏览器默认框选盖住，看似画布拖不动）；未知节点类型渲染灰色占位块并明示（曾静默消失）；新节点落在视野外时视角自动对准；「适配视图」按内容包围盒缩放进画布并在恢复草稿/打开流程后自动执行（2026-10-29 修复：旧流程坐标可超出当前画布，重置视图不改变相对位置，用户点重置仍见空画布） | `DataFlowPageUi.test.tsx` |
-| Excel/CSV 输入 | 复用统一读取层：xlsx/xls/xlsm、伪 xls（文本/XML 内容按内容识别）、GBK/UTF-8/BOM/UTF-16 自动识别、分隔符自动、文件夹批量、表头行/起始行、来源列（文件/Sheet/行号）；表头行为空时自动下移找第一个非空行（≤30 行，统计明说用了哪行，全空仍报错，2026-10-30） | 引擎 `dataflow::nodes::input` 用例 |
+| Excel/CSV 输入 | 复用统一读取层：xlsx/xls/xlsm、伪 xls（文本/XML 内容按内容识别）、GBK/UTF-8/BOM/UTF-16 自动识别、分隔符自动、文件夹批量、表头行/起始行、来源列（文件/Sheet/行号）；表头行为空时自动下移找第一个非空行（≤30 行，统计明说用了哪行，全空仍报错，2026-10-30）。2026-11-04：自动选表跳过 hidden/veryHidden，在可见表中按顺序找有数据的表；按名称仍允许明确读取隐藏表，不存在的名称仍报错。候选接口 `dataflow_sheet_names` 在 lib.rs 验证路径授权后只读工作簿目录，文件夹与执行共用匹配规则、按名称去重；前端复用筛选字段的候选输入，支持手输、参数路径、切文件清单刷新、失败重试。复用目录层的边界：全隐藏工作簿仍回退全部表 | 引擎 `dataflow::nodes::input` 用例（含 `automatic_sheet_and_candidates_skip_hidden_internal_pages`、`sheet_candidates_follow_folder_pattern_and_deduplicate`）；`npx vitest run src/dataflow/ConfigPanel.test.tsx src/dataflowSheetNamesApi.test.ts` |
 | 类型规则 | 超 15 位整数保底文本、前导零保留、千分位金额解析、列类型锁定、空值/空文本区分 | 引擎 `column_type_inference_follows_section9_rules`、`thousand_separator_leading_zero_and_long_id_rules` 等 |
 | 字段选择/清洗 | 勾选保留/重命名/改序、新增字段自动传递；去空格/全半角/不可见字符/替换/删空行 | 引擎 clean/select 用例 |
 | 公式 | 定点十进制（0.1+0.2=0.3）、ROUND 中点远离零、IF 短路、空值三值逻辑、除零行级异常、日期函数与 TODAY 固定；DATEFORMAT 格式串支持中文（如 yyyy年mm月dd日，2026-10-29 修复非 ASCII 按 Latin-1 误拆产出乱码）、表达式嵌套深度有上限（超深括号/连续负号中文报错而非打爆线程栈）；行级异常策略可在公式节点独立配置 | 引擎 `dataflow::formula` 用例 |

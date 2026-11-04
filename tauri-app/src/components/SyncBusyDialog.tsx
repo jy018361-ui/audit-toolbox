@@ -34,6 +34,7 @@ const METHOD_LABELS: Record<string, string> = {
   "excel_merger.inspect": "检查文件",
   "excel_merger.scan_folder": "扫描文件夹",
   "excel_merger.expand_paths": "展开文件清单",
+  "dataflow_sheet_names": "读取 Sheet 名称候选",
   // FA 系列
   "fa.inspect": "读取底稿",
   "fa.review": "复核底稿",

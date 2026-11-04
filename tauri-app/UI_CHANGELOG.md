@@ -1,3 +1,10 @@
+## 2026-11-04 · 数据流 Sheet 名称候选与隐藏页自动排除
+
+- 目标：Sheet 名称应和筛选字段一样提供候选；修复自动读取 TB 时误选深度隐藏的内部说明页，导致余额表不能正常显示。
+- 设计决策：按名称指定时复用筛选字段的候选输入，路径确定后直接读取可见 Sheet 元数据，无需运行预览；手动输入继续可用，支持参数路径、加载提示、失败重试，切文件后丢弃旧请求。文件夹候选与实际运行共用文件匹配规则。自动模式改为按可见表顺序找有数据的 Sheet，跳过 hidden/veryHidden；明确输入隐藏页名称仍可读取。候选接口沿用文件仅授权自身、目录授权后代的路径校验。全隐藏工作簿沿用目录层回退全部表的行为。
+- 验证：`npx vitest run src/dataflow src/dataflowSheetNamesApi.test.ts`、`npx vitest run src/components/SyncBusyDialog.test.tsx`、`npm run build` 与最终 `tsc -b` 通过。Rust `cargo test --manifest-path src-tauri/Cargo.toml --lib dataflow::` 编译通过，首次启动受本机测试 EXE 缺少 Common Controls 6 清单阻碍；为生成的测试 EXE 补入已有清单后，直接执行同一 `dataflow::` 过滤器全部通过。真实 TB 只读探针通过：自动选中「汇总模板余额表MH」、第 9 行表头、414 行数据，确认读取出余额与借贷发生额字段；Skywind 为 veryHidden。探针直接从 PowerShell 传入原始中文路径，避免 MSVC 环境脚本重编码路径。未打包或替换安装版。
+- 待确认：无。
+
 ## 2026-10-30 · 数据流摘下「即将上线」标签，转为正式工具
 
 - 目标：用户要求去掉 DataFlow 旁边的「即将上线」标签。

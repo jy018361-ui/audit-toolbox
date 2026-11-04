@@ -218,7 +218,23 @@ fn read_sheet_rows(
     Ok((RawSheet { header, rows }, effective_header_row))
 }
 
-/// firstData：选每个文件第一个有数据的 Sheet（默认裁定第 2 条）。
+/// 自动与候选清单共用可见性规则；全隐藏工作簿沿用目录读取器的回退行为。
+pub(crate) fn sheet_names(path: &Path, folder: bool, pattern: Option<&str>) -> Result<Vec<String>, AppError> {
+    let files = if folder {
+        list_folder_files(path, pattern, &excel_extensions(), "Excel 输入")?
+    } else {
+        vec![path.to_path_buf()]
+    };
+    let mut names = Vec::new();
+    for file in files {
+        for name in crate::fa_sheet_pick::list_visible_sheets(&file)? {
+            if !names.contains(&name) { names.push(name); }
+        }
+    }
+    Ok(names)
+}
+
+/// firstData：选每个文件第一个有数据的可见 Sheet（默认裁定第 2 条）。
 fn pick_sheet(
     path: &Path,
     sheet_mode: &str,
@@ -239,10 +255,9 @@ fn pick_sheet(
         let (selected, _all) = crate::disk_table::workbook_sheets(path, Some(name))?;
         return Ok(selected);
     }
-    let (selected, all) = crate::disk_table::workbook_sheets(path, None)?;
-    if all.len() <= 1 {
-        return Ok(selected);
-    }
+    let all = crate::fa_sheet_pick::list_visible_sheets(path)?;
+    let selected = all.first().cloned().ok_or_else(|| structural("DATAFLOW_SHEET_EMPTY", "工作簿中没有可读取的 Sheet。"))?;
+    if all.len() == 1 { return Ok(selected); }
     for candidate in &all {
         let mut saw_data = false;
         let result = crate::disk_table::for_each_source_row(
@@ -1112,6 +1127,74 @@ fn sniff_decoded_delimiter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "需要 DATAFLOW_INPUT_PROBE_PATH 和可选 DATAFLOW_INPUT_PROBE_HEADER 环境变量"]
+    fn real_workbook_visible_sheet_probe() {
+        let path = std::env::var("DATAFLOW_INPUT_PROBE_PATH").expect("请设置样例文件路径");
+        let header = std::env::var("DATAFLOW_INPUT_PROBE_HEADER").unwrap_or_else(|_| "1".into()).parse::<usize>().unwrap();
+        let visible = sheet_names(Path::new(&path), false, None).unwrap();
+        let selected = pick_sheet(Path::new(&path), "firstData", None, header + 1).unwrap();
+        assert!(visible.contains(&selected));
+        let mut context = full_run_context();
+        context.mode = super::super::RunMode::Preview;
+        let outcome = run_excel_in("Excel 输入", &serde_json::json!({
+            "path": path, "sheetMode": "firstData", "headerRow": header,
+            "dataStartRow": header + 1,
+        }), &context).unwrap();
+        let table = &outcome.anchors[0].1;
+        assert!(!table.rows.is_empty());
+        println!("可见表：{visible:?}；自动选表：{selected}；表头行：{header}；样本行数：{}；字段：{:?}", table.rows.len(), table.columns);
+    }
+
+    #[test]
+    fn automatic_sheet_and_candidates_skip_hidden_internal_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("TB.xlsx");
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let hidden = book.add_worksheet();
+        hidden.set_name("Skywind").unwrap();
+        hidden.write_string(0, 0, "天风项目名称").unwrap();
+        hidden.write_string(1, 0, "内部说明").unwrap();
+        hidden.set_very_hidden(true);
+        let hidden = book.add_worksheet();
+        hidden.set_name("cache").unwrap();
+        hidden.write_string(0, 0, "缓存").unwrap();
+        hidden.write_string(1, 0, "内部数据").unwrap();
+        hidden.set_hidden(true);
+        book.add_worksheet().set_name("空白可见表").unwrap();
+        let tb = book.add_worksheet();
+        tb.set_name("汇总模板余额表MH").unwrap();
+        tb.set_active(true);
+        tb.write_string(0, 0, "科目编码").unwrap();
+        tb.write_string(0, 1, "余额").unwrap();
+        tb.write_string(1, 0, "1001").unwrap();
+        tb.write_number(1, 1, 123.0).unwrap();
+        book.save(&path).unwrap();
+
+        assert_eq!(sheet_names(&path, false, None).unwrap(), vec!["空白可见表", "汇总模板余额表MH"]);
+        assert_eq!(pick_sheet(&path, "firstData", None, 2).unwrap(), "汇总模板余额表MH");
+        // 仍允许明确指定隐藏表；不存在的名称必须报错，不能静默回退。
+        assert_eq!(pick_sheet(&path, "byName", Some("Skywind"), 2).unwrap(), "Skywind");
+        assert!(pick_sheet(&path, "byName", Some("不存在"), 2).is_err());
+        let outcome = run_excel_in("Excel 输入", &serde_json::json!({
+            "path": path, "sheetMode": "firstData", "headerRow": 1,
+        }), &full_run_context()).unwrap();
+        assert_eq!(outcome.anchors[0].1.columns[0], "科目编码");
+        assert_eq!(outcome.anchors[0].1.rows[0][0], Value::Int(1001));
+        assert!(outcome.stats.iter().any(|s| s.contains("Sheet：汇总模板余额表MH")));
+    }
+
+    #[test]
+    fn sheet_candidates_follow_folder_pattern_and_deduplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["一TB.xlsx", "二TB.xlsx", "排除.xlsx"] {
+            let mut book = rust_xlsxwriter::Workbook::new();
+            book.add_worksheet().set_name(if name == "排除.xlsx" { "排除页" } else { "余额表" }).unwrap();
+            book.save(dir.path().join(name)).unwrap();
+        }
+        assert_eq!(sheet_names(dir.path(), true, Some("*tb.xlsx")).unwrap(), vec!["余额表"]);
+    }
 
     #[test]
     fn wildcard_patterns_match_windows_names() {

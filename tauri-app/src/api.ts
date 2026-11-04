@@ -688,6 +688,14 @@ export async function listenPositionedFileDrops(
 // 以满足「api.ts 只在末尾追加、改动最小化」的约定。
 import { dataflowDemoResult } from "./dataflow/demoData";
 import { dataflowRunRequest } from "./dataflow/model";
+import { DataflowSheetNamesSchema } from "./types";
+
+/** 只读取可见 Sheet 清单；批量模式与运行时采用相同的文件匹配规则。 */
+export async function dataflowSheetNames(path: string, sourceType = "file", filePattern = ""): Promise<string[]> {
+  return DataflowSheetNamesSchema.parse(
+    await engineCall("dataflow_sheet_names", { path, sourceType, filePattern }, "读取 Sheet 名称候选"),
+  );
+}
 
 export type DataflowRunMode = "preview" | "full";
 

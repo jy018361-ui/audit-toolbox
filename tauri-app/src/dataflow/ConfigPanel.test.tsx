@@ -13,11 +13,12 @@ import {
 } from "./model";
 
 // db_in 表下拉的数据源：mock 掉 ../api，按用例给成功/失败实现。
-const { dbTablesMock } = vi.hoisted(() => ({ dbTablesMock: vi.fn() }));
-vi.mock("../api", () => ({ dataflowDbTables: dbTablesMock }));
+const { dbTablesMock, sheetNamesMock } = vi.hoisted(() => ({ dbTablesMock: vi.fn(), sheetNamesMock: vi.fn() }));
+vi.mock("../api", () => ({ dataflowDbTables: dbTablesMock, dataflowSheetNames: sheetNamesMock }));
 
 beforeEach(() => {
   dbTablesMock.mockReset();
+  sheetNamesMock.mockReset().mockResolvedValue(["科目余额表", "序时账", "说明"]);
 });
 
 afterEach(() => {
@@ -75,6 +76,58 @@ function renderLivePanel(type: string, initial: Record<string, unknown> = defaul
   render(<Harness />);
   return { onConfigChange };
 }
+
+describe("数据流配置区：Sheet 名称候选", () => {
+  function sheetOptions() {
+    const input = screen.getByLabelText("Sheet 名称");
+    const list = document.getElementById(input.getAttribute("list") ?? "");
+    return Array.from(list?.querySelectorAll("option") ?? []).map((option) => option.value);
+  }
+
+  it("未运行流程即可读取 Sheet 清单，点选回填并保留手输", async () => {
+    const { onConfigChange } = renderLivePanel("excel_in", {
+      ...defaultConfigFor("excel_in"), path: "C:/客户/TB.xlsx", sheetMode: "byName",
+    });
+    await waitFor(() => expect(sheetOptions()).toEqual(["科目余额表", "序时账", "说明"]));
+    expect(sheetNamesMock).toHaveBeenCalledWith("C:/客户/TB.xlsx", "file", "*.xlsx;*.xls;*.csv");
+    fireEvent.change(screen.getByLabelText("Sheet 名称"), { target: { value: "序时账" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ sheetName: "序时账" }));
+    fireEvent.change(screen.getByLabelText("Sheet 名称"), { target: { value: "{月份}余额表" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ sheetName: "{月份}余额表" }));
+    expect(sheetNamesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("切换文件清空旧候选，旧文件迟到结果不得覆盖新文件", async () => {
+    let finishOld!: (names: string[]) => void;
+    sheetNamesMock.mockImplementationOnce(() => new Promise<string[]>((resolve) => { finishOld = resolve; }))
+      .mockResolvedValueOnce(["新文件 Sheet"]);
+    renderLivePanel("excel_in", { ...defaultConfigFor("excel_in"), path: "C:/旧.xlsx", sheetMode: "byName" });
+    await waitFor(() => expect(sheetNamesMock).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByLabelText("数据文件"), { target: { value: "C:/新.xlsx" } });
+    expect(sheetOptions()).toEqual([]);
+    await waitFor(() => expect(sheetOptions()).toEqual(["新文件 Sheet"]));
+    finishOld(["旧文件 Sheet"]);
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+    expect(sheetOptions()).toEqual(["新文件 Sheet"]);
+  });
+
+  it("读取失败显示原因，允许手输与重试", async () => {
+    sheetNamesMock.mockRejectedValueOnce(new Error("文件被占用"));
+    renderLivePanel("excel_in", { ...defaultConfigFor("excel_in"), path: "C:/客户.xlsx", sheetMode: "byName", sheetName: "原有名称" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("文件被占用");
+    expect(screen.getByLabelText("Sheet 名称")).toHaveValue("原有名称");
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(sheetOptions()).toContain("科目余额表"));
+  });
+
+  it("未选路径时提示，自动 Sheet 模式无需读取候选", () => {
+    renderLivePanel("excel_in");
+    expect(sheetNamesMock).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Sheet"), { target: { value: "byName" } });
+    expect(screen.getByText(/先选择数据文件或文件夹/)).toBeInTheDocument();
+    expect(sheetNamesMock).not.toHaveBeenCalled();
+  });
+});
 
 describe("数据流配置区：检查规则编辑器（增删改）", () => {
   it("初始无规则给出提示；按所选类型添加规则", () => {

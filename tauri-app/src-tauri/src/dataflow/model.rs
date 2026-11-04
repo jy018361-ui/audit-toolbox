@@ -112,7 +112,7 @@ pub(crate) struct ExcelInConfig {
     pub path: String,
     #[serde(default)]
     pub file_pattern: Option<String>,
-    /// "firstData"（每个文件第一个有数据的 Sheet，默认）| "byName"。
+    /// "firstData"（每个文件第一个有数据的可见 Sheet，默认）| "byName"。
     #[serde(default)]
     pub sheet_mode: Option<String>,
     #[serde(default)]

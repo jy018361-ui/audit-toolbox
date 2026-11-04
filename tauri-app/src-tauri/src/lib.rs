@@ -621,7 +621,7 @@ async fn engine_call(
                 Some(e.to_string()),
             )
         })?
-    } else if method == "dataflow_db_tables" {
+    } else if method == "dataflow_db_tables" || method == "dataflow_sheet_names" {
         let target = params
             .get("path")
             .and_then(Value::as_str)
@@ -635,17 +635,28 @@ async fn engine_call(
         {
             return Err(AppError::new(
                 "PATH_NOT_AUTHORIZED",
-                "请先在工具中选择该数据库文件。",
+                "请先在工具中选择该数据文件或文件夹。",
                 false,
                 None,
             ));
         }
-        tauri::async_runtime::spawn_blocking(move || dataflow::db_tables(&target))
+        tauri::async_runtime::spawn_blocking(move || {
+            if method == "dataflow_sheet_names" {
+                let names = dataflow::nodes::input::sheet_names(
+                    std::path::Path::new(&target),
+                    params.get("sourceType").and_then(Value::as_str) == Some("folder"),
+                    params.get("filePattern").and_then(Value::as_str),
+                )?;
+                Ok(serde_json::json!(names))
+            } else {
+                dataflow::db_tables(&target)
+            }
+        })
             .await
             .map_err(|e| {
                 AppError::new(
                     "RUST_TASK_FAILED",
-                    "数据库表清单读取异常结束。",
+                    "数据文件清单读取异常结束。",
                     true,
                     Some(e.to_string()),
                 )

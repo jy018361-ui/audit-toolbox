@@ -3,7 +3,7 @@ import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { SwitchInput } from "@/components/SwitchInput";
 import { errorText } from "@/lib/errors";
-import { dataflowDbTables } from "../api";
+import { dataflowDbTables, dataflowSheetNames } from "../api";
 import { CATEGORY_COLOR } from "./Canvas";
 import {
   CHECK_RULE_TYPES,
@@ -12,6 +12,7 @@ import {
   MANUAL_COLUMN_TYPES,
   SUMMARIZE_FUNCS,
   defaultCheckRule,
+  applyParamPlaceholders,
   incompleteFilterRule,
   type CheckRuleConfig,
   type CheckRuleType,
@@ -131,6 +132,55 @@ function FieldIn({
           ))}
         </datalist>
       )}
+    </>
+  );
+}
+
+/** Sheet 名称复用筛选字段的候选输入，清单只取当前路径，迟到请求不得覆盖新文件。 */
+function SheetNameInput({ path, folder, pattern, value, onChange }: {
+  path: string;
+  folder: boolean;
+  pattern: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [names, setNames] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [reload, setReload] = useState(0);
+  const unresolved = /\{[^{}]+\}/.test(path);
+
+  useEffect(() => {
+    setNames([]);
+    setError("");
+    setLoading(false);
+    if (!path || unresolved) return;
+    let cancelled = false;
+    // 手输路径时合并连续按键，避免每次按键都发起文件读取。
+    setLoading(true);
+    const timer = window.setTimeout(() => {
+      dataflowSheetNames(path, folder ? "folder" : "file", pattern).then(
+        (list) => { if (!cancelled) { setNames(list); setLoading(false); } },
+        (caught) => { if (!cancelled) { setError(errorText(caught)); setLoading(false); } },
+      );
+    }, 250);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [path, folder, pattern, unresolved, reload]);
+
+  return (
+    <>
+      <Field label="Sheet 名称">
+        <FieldIn value={value} onChange={onChange} suggestions={names} placeholder="选择或输入 Sheet 名称" />
+      </Field>
+      {!path && <Note>先选择数据文件或文件夹，即可列出 Sheet 名称候选。</Note>}
+      {unresolved && <Note>请先填写路径中的参数值，即可读取 Sheet 名称候选。</Note>}
+      {loading && <div className="df-db-status" role="status">正在读取 Sheet 名称候选…</div>}
+      {error && <>
+        <div className="df-db-status df-db-err" role="alert">读取 Sheet 名称失败：{error}。仍可手动输入。</div>
+        <button type="button" className="df-btn-sm" onClick={() => setReload((tick) => tick + 1)}>重试</button>
+      </>}
+      {path && !unresolved && !loading && !error && names.length === 0 && <Note>未找到 Sheet 名称候选，可手动输入；CSV 文件无需指定 Sheet。</Note>}
+      {names.length > 0 && <Note>{folder ? "候选来自匹配文件的可见 Sheet，重名已合并。" : "候选仅列出可见 Sheet；隐藏 Sheet 可手动输入名称读取。"}</Note>}
     </>
   );
 }
@@ -667,19 +717,21 @@ export function ConfigPanel({
               <Sel
                 value={sheetMode}
                 options={[
-                  { value: "firstData", label: "自动：每个文件第一个有数据的 Sheet" },
+                  { value: "firstData", label: "自动：每个文件第一个有数据的可见 Sheet" },
                   { value: "byName", label: "按名称指定" },
                 ]}
                 onChange={(value) => setKey("sheetMode", value)}
               />
             </Field>
             {sheetMode === "byName" && (
-              <Field label="Sheet 名称">
-                <TextIn
-                  value={String(config.sheetName ?? "")}
-                  onChange={(value) => setKey("sheetName", value)}
-                />
-              </Field>
+              <SheetNameInput
+                key={node.id}
+                path={applyParamPlaceholders(String(config.path ?? ""), params)}
+                folder={config.sourceType === "folder"}
+                pattern={applyParamPlaceholders(String(config.filePattern ?? ""), params)}
+                value={String(config.sheetName ?? "")}
+                onChange={(value) => setKey("sheetName", value)}
+              />
             )}
             <div className="df-row2">
               <Field label="表头行">

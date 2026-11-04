@@ -5,6 +5,15 @@
   min-width: 0;
   color: var(--ink-strong);
 }
+.kz-prefix-form {
+  display: grid;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+.kz-prefix-field {
+  display: grid;
+  gap: var(--sp-2);
+}
 .kz-steps {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

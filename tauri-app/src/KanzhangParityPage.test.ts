@@ -875,7 +875,7 @@ describe("看账其他交互口径", () => {
     ).toEqual([]);
   });
 
-  it("全科目口径按一级科目分批并排除货币资金", () => {
+  it("全科目口径默认按编码前四位分批并排除货币资金", () => {
     const values = [
       "100201-货币资金-银行存款",
       "160101-固定资产-机器",
@@ -905,14 +905,86 @@ describe("看账其他交互口径", () => {
         group.accounts.length,
       ]),
     ).toEqual([
-      ["全科目｜固定资产", 2],
-      ["全科目｜管理费用", 1],
-      ["全科目｜应付账款", 1],
+      ["全科目｜1601 固定资产", 2],
+      ["全科目｜2202 应付账款", 1],
+      ["全科目｜6602 管理费用", 1],
     ]);
     expect(applied.summary.skippedCash).toEqual([values[0]]);
     expect(
       applied.batches.some((batch) => batch.accounts.includes(values[0])),
     ).toBe(false);
+  });
+
+  it("编码前缀相同的不同名称归为一批，同名但编码不同的科目分开", () => {
+    const result = applyAllPrimaryAccountBatches(
+      [], ["机器", "车辆", "其他设备"], ["160101", "160102", "160201"],
+      ["机器设备", "运输工具", "机器设备"], [],
+    );
+    expect(result.batches.map(batch => batch.accounts)).toEqual([["机器", "车辆"], ["其他设备"]]);
+    expect(result.summary.codeLength).toBe(4);
+  });
+
+  it("切换位数重新分组，并迁移旧名称分组，保留手工批次", () => {
+    const old = [
+      { name: "旧批次", presetId: "all_primary:固定资产", accounts: ["旧科目"] },
+      { name: "人工", accounts: ["自选"] },
+    ];
+    const result = applyAllPrimaryAccountBatches(
+      old, ["机器", "车辆", "配件"], ["16010101", "16010201", "16010102"],
+      ["固定资产", "固定资产", "固定资产"], [], 6,
+    );
+    expect(result.batches).toEqual([
+      old[1],
+      { name: "全科目｜160101 固定资产", presetId: "all_primary:code:160101", accounts: ["机器", "配件"] },
+      { name: "全科目｜160102 固定资产", presetId: "all_primary:code:160102", accounts: ["车辆"] },
+    ]);
+    expect(result.summary.removed).toBe(1);
+  });
+
+  it("有编码不足位数时跳过，无编码按名称分组，保留字母及前导零编码", () => {
+    const result = applyAllPrimaryAccountBatches(
+      [], ["160101-设备", "短编码", "正常1", "正常2", "字母编码", "例外"],
+      ["", "16", " 001201 ", "001202", "AB1201", "001299"], [], ["例外"], 4,
+    );
+    expect(result.batches.map(batch => [batch.presetId, batch.accounts])).toEqual([
+      ["all_primary:code:0012", ["正常1", "正常2"]], ["all_primary:code:AB12", ["字母编码"]],
+      ["all_primary:name:160101", ["160101-设备"]],
+    ]);
+    expect(result.summary.skippedCodes).toEqual(["短编码"]);
+    expect(result.summary.nameGroupCount).toBe(1);
+    expect(result.summary.skippedExcludes).toEqual(["例外"]);
+  });
+
+  it.each(["-", "/", "\\", "—", "–", "／", "|", ">", ":", "：", "\n", "\r\n\r\n"])("无编码时按分隔符 %j 取首个非空科目分类", separator => {
+    const values = [` ${separator} 固定资产 ${separator}机器`, "固定资产/车辆", "管理费用-差旅"];
+    const result = applyAllPrimaryAccountBatches([], values, [], [], []);
+    expect(result.batches.map(batch => batch.accounts)).toEqual([values.slice(0, 2), values.slice(2)]);
+    expect(result.summary.nameGroupCount).toBe(2);
+    expect(result.summary.skippedCodes).toEqual([]);
+  });
+
+  it("有编码和无编码的同名科目分别分组，取映射的首列名称优先", () => {
+    const result = applyAllPrimaryAccountBatches(
+      [], ["160101-固定资产-机器", "其他显示值", "固定资产\\车辆", " / - \n"],
+      ["160101", "", "", ""], ["固定资产", "固定资产/设备", "", ""], [],
+    );
+    expect(result.batches.map(batch => [batch.presetId, batch.accounts])).toEqual([
+      ["all_primary:code:1601", ["160101-固定资产-机器"]],
+      ["all_primary:name:固定资产", ["其他显示值", "固定资产\\车辆"]],
+    ]);
+    expect(result.summary.skippedNames).toEqual([" / - \n"]);
+  });
+
+  it("无编码名称分组仍排除货币资金与例外，重复生成刷新自动批次", () => {
+    const first = applyAllPrimaryAccountBatches([], ["固定资产-机器"], [], [], []);
+    const next = applyAllPrimaryAccountBatches(first.batches,
+      ["固定资产/车辆", "银行存款-工行", "管理费用-例外"], [], [], ["管理费用-例外"]);
+    expect(next.batches).toEqual([{ name: "全科目｜名称 固定资产", accounts: ["固定资产/车辆"], presetId: "all_primary:name:固定资产" }]);
+    expect(next.summary).toMatchObject({ updated: 1, created: 0, skippedCash: ["银行存款-工行"], skippedExcludes: ["管理费用-例外"] });
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity])("无效位数 %s 被拒绝", length => {
+    expect(() => applyAllPrimaryAccountBatches([], [], [], [], [], length)).toThrow("正整数");
   });
 
   it("重复生成全科目口径会刷新并移除过期的自动批次", () => {
@@ -936,11 +1008,11 @@ describe("看账其他交互口径", () => {
       removed: 1,
     });
     expect(
-      second.batches.find((batch) => batch.presetId === "all_primary:固定资产")
+      second.batches.find((batch) => batch.presetId === "all_primary:code:1601")
         ?.accounts,
     ).toEqual(["160102-固定资产"]);
     expect(
-      second.batches.some((batch) => batch.presetId === "all_primary:应付账款"),
+      second.batches.some((batch) => batch.presetId === "all_primary:code:2202"),
     ).toBe(false);
     expect(second.batches.some((batch) => batch.name === "人工")).toBe(true);
   });

@@ -37,7 +37,7 @@ const toNonEmptyString = (value: unknown): string =>
 
 // 科目显示值 = 科目编码 + 各级名称按 "-" 拼接（编码在前、名称在后，与
 // ledgerMapping.accountColumns 的口径一致）；第二个元素是一级科目名，
-// 对应引擎返回的 primaryNames（供「按一级科目生成全科目批次」使用）。
+// 对应引擎返回的 primaryNames（供全科目批次标签使用，分组依独立编码前缀）。
 const ACCOUNT_ROWS: Array<[value: string, primaryName: string]> = [
   ["1002010001-银行存款-工商银行-基本户-人民币存款", "银行存款"],
   ["1002010002-银行存款-建设银行-一般户-美元现汇账户", "银行存款"],

@@ -23,6 +23,9 @@ fn archived_result(value: &Value) -> Value {
         "transcriptPath",
         "minutesPath",
         "speakerCount",
+        "speakerDurationsMs",
+        "meetingStartedAt",
+        "meetingEndedAt",
         "minutesError",
     ] {
         if let Some(value) = value.get(key) {
@@ -252,6 +255,7 @@ impl Storage {
         let title = title
             .trim_end_matches("（按内容）")
             .trim_end_matches("（按时间）");
+        let previous_metadata = old.as_ref().and_then(|v|serde_json::from_str::<Value>(&v.2).ok()).unwrap_or(json!({}));
         let mut archived = old
             .as_ref()
             .and_then(|v| serde_json::from_str::<Value>(&v.2).ok())
@@ -266,6 +270,17 @@ impl Storage {
         }
         if !audio.is_empty() {
             archived["audioPath"] = json!(audio);
+        } else if archived.get("audioPath").is_none_or(Value::is_null) {
+            if let Some(previous_audio)=previous_metadata.get("audioPath") {archived["audioPath"]=previous_audio.clone();}
+        }
+        for key in crate::meeting_minutes::metadata::KEYS {
+            if archived.get(key).is_none() {
+                if let Some(value) = previous_metadata.get(key) { archived[key] = value.clone(); }
+            }
+        }
+        if archived.get("meetingStartedAt").is_none() {
+            let recording=crate::meeting_minutes::metadata::recording(Path::new(text(&archived,"audioPath")));
+            crate::meeting_minutes::metadata::merge(&mut archived, &recording);
         }
         let phase =
             if text(event, "phase") == "completed" && !text(&archived, "minutesError").is_empty() {
@@ -273,7 +288,8 @@ impl Storage {
             } else {
                 text(event, "phase")
             };
-        let label = if audio.contains("record-") || audio.is_empty() {
+        let meeting_started = text(&archived, "meetingStartedAt");
+        let label = if !meeting_started.is_empty() { "会议时间" } else if audio.contains("record-") || audio.is_empty() {
             "生成时间"
         } else {
             "导入时间"
@@ -282,20 +298,31 @@ impl Storage {
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET job_id=excluded.job_id,
             audio_key=CASE WHEN excluded.audio_key='' THEN meeting_history.audio_key ELSE excluded.audio_key END,
             transcript_key=CASE WHEN excluded.transcript_key='' THEN meeting_history.transcript_key ELSE excluded.transcript_key END,
-            title=excluded.title,status=excluded.status,message=excluded.message,result_json=excluded.result_json",
-            params![id,job,audio_key,transcript_key,title,started_at,label,phase,text(event,"message"),archived.to_string()])
+            title=excluded.title,status=excluded.status,message=excluded.message,result_json=excluded.result_json,
+            started_at=CASE WHEN excluded.time_label='会议时间' THEN excluded.started_at ELSE meeting_history.started_at END,
+            time_label=CASE WHEN excluded.time_label='会议时间' THEN excluded.time_label ELSE meeting_history.time_label END",
+            params![id,job,audio_key,transcript_key,title,if meeting_started.is_empty() { &started_at } else { meeting_started },label,phase,text(event,"message"),archived.to_string()])
             .map_err(db_error)?;
         Ok(())
     }
 
     pub fn meeting_history_list(&self) -> Result<Value, AppError> {
         let conn = self.conn.lock();
-        let mut statement = conn.prepare("SELECT id,job_id,title,started_at,time_label,status,message FROM meeting_history ORDER BY started_at DESC,id DESC")
+        let mut statement = conn.prepare("SELECT id,job_id,title,started_at,time_label,status,message,result_json FROM meeting_history ORDER BY started_at DESC,id DESC")
             .map_err(db_error)?;
-        let rows = statement.query_map([], |row| Ok(json!({"id":row.get::<_,String>(0)?,"jobId":row.get::<_,String>(1)?,
-            "title":row.get::<_,String>(2)?,"startedAt":row.get::<_,String>(3)?,"timeLabel":row.get::<_,String>(4)?,
-            "status":row.get::<_,String>(5)?,"message":row.get::<_,String>(6)?})))
+        let rows = statement.query_map([], |row| {
+            let mut metadata: Value = serde_json::from_str(&row.get::<_,String>(7)?).unwrap_or(json!({}));
+            if metadata.get("meetingStartedAt").is_none() {
+                let recording=crate::meeting_minutes::metadata::recording(Path::new(text(&metadata,"audioPath")));
+                crate::meeting_minutes::metadata::merge(&mut metadata,&recording);
+            }
+            let start=text(&metadata,"meetingStartedAt");
+            Ok(json!({"id":row.get::<_,String>(0)?,"jobId":row.get::<_,String>(1)?,
+            "title":row.get::<_,String>(2)?,"startedAt":if start.is_empty(){row.get::<_,String>(3)?}else{start.to_owned()},"timeLabel":if start.is_empty(){row.get::<_,String>(4)?}else{"会议时间".into()},
+            "status":row.get::<_,String>(5)?,"message":row.get::<_,String>(6)?}))})
             .map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
+        let mut rows = rows;
+        rows.sort_by_key(|row|std::cmp::Reverse(chrono::DateTime::parse_from_rfc3339(text(row,"startedAt")).map(|v|v.timestamp_millis()).unwrap_or(0)));
         Ok(json!(rows))
     }
 
@@ -318,13 +345,54 @@ impl Storage {
                 None,
             )
         })?;
-        serde_json::from_str(&raw).map_err(db_error)
+        let mut result: Value = serde_json::from_str(&raw).map_err(db_error)?;
+        if result.get("meetingStartedAt").is_none() {
+            let metadata = crate::meeting_minutes::metadata::recording(Path::new(text(&result,"audioPath")));
+            crate::meeting_minutes::metadata::merge(&mut result,&metadata);
+        }
+        Ok(result)
+    }
+
+    pub fn meeting_metadata_for_transcript(&self, path: &str) -> Result<Value, AppError> {
+        if path.trim().is_empty() {return Ok(json!({}));}
+        let id: Option<String> = self.conn.lock().query_row("SELECT id FROM meeting_history WHERE transcript_key=?1 LIMIT 1",[path_key(path)],|row|row.get(0)).optional().map_err(db_error)?;
+        let mut metadata=json!({});
+        if let Some(id)=id { crate::meeting_minutes::metadata::merge(&mut metadata,&self.meeting_history_result(&id)?); }
+        Ok(metadata)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meeting_history_recovers_recording_time_and_keeps_timing_through_regeneration() {
+        let dir=tempfile::tempdir().unwrap();
+        let storage=Storage::new(dir.path()).unwrap();
+        let record=dir.path().join("record-legacy");std::fs::create_dir(&record).unwrap();
+        let audio=record.join("audio-mix.wav").to_string_lossy().into_owned();
+        let transcript=record.join("transcript.txt").to_string_lossy().into_owned();
+        storage.record_job_params("initial","meeting_minutes","meeting.generate",&json!({"audioPath":audio})).unwrap();
+        storage.record_job_event(&json!({"jobId":"initial","toolId":"meeting_minutes","phase":"completed","result":{
+            "title":"实际会议","audioPath":audio,"transcriptPath":transcript,"speakerDurationsMs":{"1":8000,"2":2000}
+        }})).unwrap();
+        // Simulate a pre-existing history row whose recording metadata is recovered later.
+        std::fs::write(record.join("recording-summary.json"),json!({"startedAt":"2026-11-02T10:00:00+08:00","endedAt":"2026-11-02T11:00:00+08:00"}).to_string()).unwrap();
+        let rows=storage.meeting_history_list().unwrap();
+        assert_eq!(rows[0]["timeLabel"],"会议时间");
+        assert!(rows[0]["startedAt"].as_str().unwrap().starts_with("2026-11-02"));
+        let metadata=storage.meeting_metadata_for_transcript(&transcript).unwrap();
+        assert_eq!(metadata["speakerDurationsMs"]["1"],8000);
+        assert_eq!(metadata["meetingStartedAt"],"2026-11-02T10:00:00+08:00");
+        storage.record_job_params("regen","meeting_minutes","meeting.summarize",&json!({"transcriptPath":transcript})).unwrap();
+        storage.record_job_event(&json!({"jobId":"regen","toolId":"meeting_minutes","phase":"completed","result":{
+            "transcriptPath":transcript,"minutesPath":"C:/updated.md"
+        }})).unwrap();
+        let result=storage.meeting_history_result("initial").unwrap();
+        assert_eq!(result["speakerDurationsMs"]["1"],8000);
+        assert_eq!(storage.meeting_history_list().unwrap().as_array().unwrap().len(),1);
+    }
 
     #[test]
     fn meeting_history_survives_restart_and_groups_regeneration_without_large_bodies() {

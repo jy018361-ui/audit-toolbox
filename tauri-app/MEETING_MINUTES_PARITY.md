@@ -1,3 +1,10 @@
+## 2026-11-02 · 当前参会行占比与会议日期
+
+- 以下为当前行为，取代10月30日「所有说话人出现处显示占比」：仅「参会人员／参会人／与会人员」字段行（含加粗标签、表格）显示百分比，其他正文与责任人均不显示；复制及邮件使用相同规则，姓名替换与自动保存仍保留编号来源，不反复追加百分比。
+- 新转写结果保留每位说话人ASR片段累计毫秒数，同人重叠合并、异人重叠分别计时，剔除空白／无效区间；分母为所有有效说话人片段时长之和，不是整段录音或计费时长。元数据由结果、SQLite历史索引保存，主进程按转写路径读取后注入重新生成worker，worker不访问Tauri状态。旧转写只有起始时间而缺少结束时间，不能还原精确发言时长，继续明确显示文字占比；无说话人通道不虚构身份或占比。
+- 本机录音开始／结束记录通过固定录音目录中的小型元数据读取（文件大小有界，拒绝旁路目录链接），注入纪要上下文并在保存前填入会议时间（含周X）。历史读取可以恢复仍在原目录的旧录音时间，保留转写／录音关联，不产生重复会议。没有录音日期的导入或旧记录只写未提供，不把导入、生成时间或mtime当作会议发生时间。正文与历史列表星期按本机时区显示。
+- 验证：`npx vitest run src/MeetingMinutesPage.test.tsx src/meetingMinutesEditing.test.ts src/meetingMinutesEditApi.test.ts src/meetingSpeakerShares.test.ts src/meetingMinutesInfo.test.ts src/meetingMinutesAutoSave.test.ts src/meetingMinutesFormat.test.tsx`、`npm run build`、`cargo --config profile.test.package.audit-toolbox.debug=0 test --lib meeting_`、`node scripts/verify_meeting_speaker_shares_ui.cjs`。日志、截图：`artifacts/meeting-info-20261102/`；仅本地合成数据，未上传用户会议或更新安装包。
+
 ## 2026-10-30 · 说话人发言内容占比
 
 - 根据原始转写计算内容占比（有效Unicode字母／数字字符数，忽略时间、标签、标点、空白），在两版结果正文中的编号或用户姓名之后显示，姓名输入区域不显示；不按纪要中标签出现次数统计，不等同发言时长或声纹识别。百分比最多一位小数，四舍五入可能存在尾差；极小非零占比显示小于0.1%，非独占的极大占比不冒报100%。

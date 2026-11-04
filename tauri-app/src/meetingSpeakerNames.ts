@@ -1,3 +1,4 @@
+import { participantLine } from "./meetingMinutesInfo";
 export type SpeakerNames = Record<string, string>;
 const labelPattern = /说话人[ \t]*([1-9]\d{0,2})(?!\d)/g;
 
@@ -14,9 +15,9 @@ export function speakerDisplay(label: string, id: string, names: SpeakerNames, s
 }
 
 export function replaceSpeakerNames(markdown: string, names: SpeakerNames, shares: Record<string, string> = {}): string {
-  return markdown.replace(labelPattern, (label, id: string) => {
-    const display = speakerDisplay(label, id, names, shares);
+  return markdown.split("\n").map(line => line.replace(labelPattern, (label, id: string) => {
+    const display = speakerDisplay(label, id, names, participantLine.test(line) ? shares : {});
     // Names are literal text, including inside Markdown tables.
     return display === label ? label : display.replace(/[\\`*_{}\[\]()#+\-.!|>~<>]/g, "\\$&");
-  });
+  })).join("\n");
 }

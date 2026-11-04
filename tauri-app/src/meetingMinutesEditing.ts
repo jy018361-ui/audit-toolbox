@@ -1,5 +1,19 @@
 import { formatMeetingMinutes } from "./meetingMinutesFormat";
 import { speakerDisplay, type SpeakerNames } from "./meetingSpeakerNames";
+import { participantLine } from "./meetingMinutesInfo";
+
+function inParticipantLine(text: Node): boolean {
+  const block = text.parentElement?.closest("p,li,tr");
+  if (!block) return false;
+  if (block.tagName === "TR" && /^(?:参会人员|参会人|参会者|与会人员)\s*[:：]?$/.test(block.firstElementChild?.textContent?.trim() ?? "")) return true;
+  // A soft line break shares a paragraph in Markdown. Inspect this text node's
+  // own line plus preceding inline siblings, rather than the whole paragraph.
+  const range = text.ownerDocument!.createRange();
+  range.selectNodeContents(block);
+  range.setEndBefore(text);
+  const preceding = range.toString().split("\n").pop() ?? "";
+  return participantLine.test(preceding + (text.textContent ?? ""));
+}
 
 function escapeText(text: string) {
   return text.replace(/\u00a0/g, " ").replace(/[\\`*_{}\[\]<>|#!]/g, "\\$&");
@@ -24,7 +38,8 @@ export function editableMinutesHtml(source: string, names: SpeakerNames, shares:
       const span = doc.createElement("span");
       span.dataset.meetingSpeaker = match[1];
       span.dataset.speakerLabel = match[0];
-      span.dataset.speakerDisplay = speakerDisplay(match[0], match[1], names, shares);
+      if (inParticipantLine(text)) span.dataset.speakerShare = "true";
+      span.dataset.speakerDisplay = speakerDisplay(match[0], match[1], names, span.dataset.speakerShare ? shares : {});
       span.textContent = span.dataset.speakerDisplay;
       fragment.append(span);
       offset = match.index! + match[0].length;
@@ -39,7 +54,7 @@ export function editableMinutesHtml(source: string, names: SpeakerNames, shares:
 export function updateMinutesSpeakerDisplays(element: Element, names: SpeakerNames, shares: Record<string, string>) {
   element.querySelectorAll<HTMLElement>("[data-meeting-speaker]").forEach(span => {
     if (span.textContent !== span.dataset.speakerDisplay) return;
-    const display = speakerDisplay(span.dataset.speakerLabel || "", span.dataset.meetingSpeaker!, names, shares);
+    const display = speakerDisplay(span.dataset.speakerLabel || "", span.dataset.meetingSpeaker!, names, inParticipantLine(span) ? shares : {});
     if (span.textContent !== display) span.textContent = display;
     span.dataset.speakerDisplay = display;
   });

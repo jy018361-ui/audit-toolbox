@@ -1,3 +1,11 @@
+## 2026-11-02 · 参会人员占比收敛与会议时间星期
+
+- 目标：占比只在正文「参会人员」一行显示，其他发言、讨论及待办责任人不带百分比；补全有录音记录的会议时间，会议与历史日期显示周X。
+- 设计决策：两版正文、复制与邮件共用参会行范围判断（支持普通行、加粗标签和表格）。转写新增每位说话人有效片段时长统计，同一人重叠片段合并，不同人重叠分别计时；百分比按所有说话人累计片段时长计算，保存在会议索引供重新生成使用。旧转写缺少片段结束时间，保留文字占比并明确标明口径。
+- 时间来源：本机录音开始／结束元数据进入生成上下文和结果，落盘前确定性填入会议时间；历史可恢复仍保留的旧录音元数据，列表按会议时间显示，导入／生成日期仍保留原类型。页面兼容补全旧正文并显示「周一」等星期；没有可靠录音日期的导入文件写「未提供」，不拿文件修改时间或生成时间假充会议时间。
+- 验证：`npx vitest run src/MeetingMinutesPage.test.tsx src/meetingMinutesEditing.test.ts src/meetingMinutesEditApi.test.ts src/meetingSpeakerShares.test.ts src/meetingMinutesInfo.test.ts src/meetingMinutesAutoSave.test.ts src/meetingMinutesFormat.test.tsx`、`npm run build`、`cargo --config profile.test.package.audit-toolbox.debug=0 test --lib meeting_`、`node scripts/verify_meeting_speaker_shares_ui.cjs`。覆盖参会行范围、正文编辑去重、时长与文字占比差异、录音时间恢复、历史／重新生成保留数据，浏览器检查1440／900／390宽度。日志与截图在 `artifacts/meeting-info-20261102/`，仅合成数据，无真实云服务或安装包更新。
+- 待确认：无。
+
 ## 2026-10-30 · 数据流字段选择按场景适配单选/多选，透视行/列字段支持多选
 
 - 目标：用户反馈下拉框不应全部单选——多字段场景要能一次勾选多个；透视表行/列字段也应多选。

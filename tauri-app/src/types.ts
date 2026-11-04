@@ -114,6 +114,9 @@ export const MeetingResultSchema = z.object({
   transcriptPath: z.string().optional(),
   audioPath: z.string().nullish(),
   speakerCount: z.number().optional(),
+  speakerDurationsMs: z.record(z.string().regex(/^[1-9]\d{0,2}$/), z.number().nonnegative().finite()).optional(),
+  meetingStartedAt: z.string().optional(),
+  meetingEndedAt: z.string().optional(),
   minutesError: z.string().nullish(),
   minutesVersions: z.array(MeetingMinutesVersionSchema).optional(),
 });

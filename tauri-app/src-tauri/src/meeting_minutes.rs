@@ -21,6 +21,8 @@ use crate::{AppError, bailian_asr, bailian_plan_asr, excel_merger::PauseCheckpoi
 
 #[path = "meeting_media.rs"]
 mod media;
+#[path = "meeting_metadata.rs"]
+pub(crate) mod metadata;
 
 type Progress<'a> = bailian_asr::Progress<'a>;
 
@@ -208,9 +210,13 @@ fn generate(
             Some(e.to_string()),
         )
     })?;
-    let drafts = summarize_versions(params, &transcript, progress, cancel, 2, 5)?;
+    let mut context = metadata::recording(&audio_path);
+    metadata::merge(&mut context, &metadata::transcription(&transcription));
+    let mut enriched = params.clone();
+    enriched["__meetingMetadata"] = context.clone();
+    let drafts = summarize_versions(&enriched, &transcript, progress, cancel, 2, 5)?;
     progress("running", 4, 5, "正在保存两个版本的会议纪要…");
-    finish_output(
+    let mut result = finish_output(
         &output_dir,
         &stamp,
         &title,
@@ -219,7 +225,9 @@ fn generate(
         transcription.speakers,
         transcription.billed_ms,
         Some(&audio_path),
-    )
+    )?;
+    metadata::merge(&mut result, &context);
+    Ok(result)
 }
 
 fn summarize(
@@ -245,7 +253,7 @@ fn summarize(
     let output_dir = output_dir_for(&transcript_path, &stamp);
     let drafts = summarize_versions(params, &transcript, progress, cancel, 0, 3)?;
     progress("running", 2, 3, "正在保存两个版本的会议纪要…");
-    finish_output(
+    let mut result = finish_output(
         &output_dir,
         &stamp,
         &title,
@@ -254,7 +262,9 @@ fn summarize(
         0,
         0,
         None,
-    )
+    )?;
+    metadata::merge(&mut result, &params["__meetingMetadata"]);
+    Ok(result)
 }
 
 fn default_title() -> String {
@@ -293,7 +303,7 @@ fn output_dir_for(source: &Path, stamp: &str) -> PathBuf {
 fn build_minutes_prompt(detail: &str, has_speakers: bool, kind: MinutesKind) -> String {
     let detail_rules = match detail {
         "brief" => {
-            "本纪要为简要档：只输出「二、讨论要点」「三、会议结论」和「四、后续事项」，省略会议信息；讨论要点只保留关键内容。"
+            "本纪要为简要档：保留简短的「一、会议信息」（会议时间、参会人员），再输出「二、讨论要点」「三、会议结论」和「四、后续事项」；讨论要点只保留关键内容。"
         }
         "detailed" => {
             "本纪要为详细档：「二、讨论要点」按本版本的组织规则分小节详细展开，归纳各方发言立场与理由，可引用关键原话。"
@@ -316,8 +326,8 @@ fn build_minutes_prompt(detail: &str, has_speakers: bool, kind: MinutesKind) -> 
     format!(
         "你是会议秘书。请根据下面的会议转写稿，输出一份 Markdown 格式的会议纪要。\n\
         第一行必须为「# 根据内容拟定的会议标题」：自动概括核心议题，具体、简洁，80 字以内；不要使用此占位文字，不要用录音时间或「Teams 会议」作标题。内容不足时可用「会议开场与后续安排」等忠实概括。\n\n\
-        必须包含以下栏目（简要档按规则省略）：\n\
-        ## 一、会议信息\n（仅记录转写稿明确提及的会议时间、参会人及背景；缺失项标「未提及」）\n\
+        必须包含以下栏目：\n\
+        ## 一、会议信息\n会议时间：单独一行，采用附带的可靠录音时间（含星期），否则仅采用转写明确提及的日期时间；缺失写「未提供」。\n参会人员：单独一行，列出转写识别到的说话人编号或明确提及的参会者；说话人编号不代表完整参会名单，不猜测姓名。不要自行计算或输出百分比。\n\
         ## 二、讨论要点\n\
         ## 三、会议结论\n\
         ## 四、后续事项\n（将明确安排的待办和明确存在的未决事项、分歧、待补充信息合并为一张 Markdown 表格，列为：| 类型 | 事项 | 责任人 | 截止时间 | 交付结果 |；类型填「待办」或「待确认」。同一事项只列一次，尚待确认的问题不得写成已安排的待办。不再单列「待办事项」或「待确认问题」栏目；没有后续事项直接写「无」，不要生成全为「无」的表格行）\n\n\
@@ -367,6 +377,9 @@ fn summarize_with_llm(
     // 以转写稿里是否出现「说话人」判定，两种通道都成立。
     let has_speakers = transcript.contains("说话人");
     let prompt = build_minutes_prompt(detail, has_speakers, kind);
+    if let Some(time) = metadata::time_label(&params["__meetingMetadata"]) {
+        body.push_str(&format!("\n\n【应用录音元数据】\n会议时间：{time}\n以上来自本机录音开始／结束记录，用于会议信息。"));
+    }
     body.push_str(&crate::storage::meeting_vocabulary::minutes_context(params).map_err(|error| error.user_message)?);
     let markdown =
         crate::audipick::request_llm(&config, &prompt, &body, None).map_err(|error| {
@@ -379,7 +392,8 @@ fn summarize_with_llm(
     if minutes_title(markdown).is_none() {
         return Err("纪要生成结果缺少有效的内容标题，请从转写稿重新生成。".into());
     }
-    Ok(if kind == MinutesKind::Timeline { without_timeline_markers(markdown) } else { markdown.to_string() })
+    let markdown = if kind == MinutesKind::Timeline { without_timeline_markers(markdown) } else { markdown.to_string() };
+    Ok(metadata::apply(&markdown, &params["__meetingMetadata"]))
 }
 
 fn without_timeline_markers(markdown: &str) -> String {
@@ -642,7 +656,8 @@ mod tests {
             }
         }
         let brief = build_minutes_prompt("brief", true, MinutesKind::Content);
-        assert!(brief.contains("只输出「二、讨论要点」「三、会议结论」和「四、后续事项」"));
+        assert!(brief.contains("保留简短的「一、会议信息」（会议时间、参会人员）"));
+        assert!(brief.contains("参会人员：单独一行"));
         assert!(brief.contains("原样保留"));
     }
 

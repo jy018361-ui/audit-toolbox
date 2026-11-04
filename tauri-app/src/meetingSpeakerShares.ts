@@ -1,5 +1,5 @@
 /** Content share uses the original transcript, never the condensed/editable minutes. */
-export function meetingSpeakerShares(transcript: string | undefined) {
+export function meetingSpeakerShares(transcript: string | undefined, durations?: Record<string, number>) {
   const counts: Record<string, number> = {};
   let total = 0;
   let unattributed = 0;
@@ -16,6 +16,13 @@ export function meetingSpeakerShares(transcript: string | undefined) {
     total += length;
     if (currentSpeaker) counts[currentSpeaker] = (counts[currentSpeaker] ?? 0) + length;
     else unattributed += length;
+  }
+  const timed = Object.entries(durations ?? {}).filter(([,duration])=>Number.isFinite(duration) && duration>0);
+  if (timed.length) {
+    for (const id of Object.keys(counts)) delete counts[id];
+    total = 0;
+    for (const [id,duration] of timed) { counts[id]=duration; total+=duration; }
+    unattributed = 0;
   }
   const percentages: Record<string, string> = {};
   if (total) for (const [id, count] of Object.entries(counts)) {

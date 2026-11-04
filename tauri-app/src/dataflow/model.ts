@@ -967,6 +967,29 @@ export function repairWorkflowEdges(
   return { workflow: fixes.length ? { ...workflow, edges } : workflow, fixes };
 }
 
+/** 判断两条连线是否同一条（四元组相等）。 */
+export function sameEdge(a: DataflowEdge, b: DataflowEdge): boolean {
+  return (
+    a.from === b.from && a.fromAnchor === b.fromAnchor && a.to === b.to && a.toAnchor === b.toAnchor
+  );
+}
+
+/**
+ * 连线改接（用户拖连线端点换到别的锚点）：先移除旧线再校验新线——
+ * 改回原位（无变化）与改到刚空出来的槽位都应成功；自环/重复/占用
+ * 仍拒绝并给中文理由。失败时原样返回原工作流。
+ */
+export function rewireWorkflowEdge(
+  workflow: Pick<DataflowWorkflow, "nodes" | "edges">,
+  oldEdge: DataflowEdge,
+  nextEdge: DataflowEdge,
+): EdgeCheckResult & { workflow?: Pick<DataflowWorkflow, "nodes" | "edges"> } {
+  const edges = workflow.edges.filter((edge) => !sameEdge(edge, oldEdge));
+  const check = validateNewEdge({ nodes: workflow.nodes, edges }, nextEdge);
+  if (!check.ok) return check;
+  return { ok: true, edge: check.edge, workflow: { nodes: workflow.nodes, edges: [...edges, check.edge] } };
+}
+
 /**
  * 校验一条新连线：锚点存在、禁自环、禁重复、禁成环、
  * 单输入口（除 Excel 输出/纵向合并等多入口）不重复占用。

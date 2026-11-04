@@ -24,6 +24,8 @@ import {
   parseWorkflowFile,
   removeDraft,
   repairWorkflowEdges,
+  rewireWorkflowEdge,
+  sameEdge,
   saveDraft,
   validateNewEdge,
   type DataflowEdge,
@@ -263,6 +265,28 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     if (connectRejectedRef.current && error === connectRejectedRef.current) setError("");
     connectRejectedRef.current = "";
     setStatusText("已连线。");
+  }
+
+  /** 连线拖拽改接（拖连线端点换到别的锚点）：旧线换新线。校验先移除旧线，
+      因此改回原位或改到刚空出的槽位都合法；被拒时走与连线一致的可见错误通道。 */
+  function rewireEdge(oldEdge: DataflowEdge, nextEdge: DataflowEdge) {
+    const result = rewireWorkflowEdge(workflowRef.current, oldEdge, nextEdge);
+    if (!result.ok) {
+      const message = `连线改接未生效：${result.reason}`;
+      setError(message);
+      setStatusText(result.reason);
+      connectRejectedRef.current = message;
+      return;
+    }
+    const next = result.edge;
+    commit((current) => ({
+      ...current,
+      edges: current.edges.map((edge) => (sameEdge(edge, oldEdge) ? next : edge)),
+    }));
+    if (connectRejectedRef.current && error === connectRejectedRef.current) setError("");
+    connectRejectedRef.current = "";
+    setSelection({ kind: "edge", edge: next });
+    setStatusText("连线已改接。");
   }
 
   function deleteSelection() {
@@ -703,6 +727,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
             onMoveNode={moveNode}
             onNodeDragStart={snapshotForDrag}
             onConnect={connect}
+            onRewire={rewireEdge}
             focusNodeId={focusNodeId}
             fitKey={fitKey}
           />

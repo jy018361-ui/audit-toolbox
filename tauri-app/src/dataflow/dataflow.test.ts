@@ -30,6 +30,8 @@ import {
   saveDraft,
   listDrafts,
   serializeWorkflow,
+  rewireWorkflowEdge,
+  sameEdge,
   validateNewEdge,
   CROSSTAB_VALUE_FUNCS,
   SUMMARIZE_FUNCS,
@@ -1295,6 +1297,7 @@ describe("数据流：未知节点类型打开后占位显示而非静默消失"
         onMoveNode: () => {},
         onNodeDragStart: () => {},
         onConnect: () => {},
+        onRewire: () => {},
       }),
     );
   }
@@ -1730,5 +1733,58 @@ describe("输出文件名解析（留空自动命名、纯名字进输出位置�
     const resolved = resolveOutputPaths(wf, "");
     expect(resolved.needsDir).toBe(true);
     expect(resolved.workflow.nodes[0]).toBe(wf.nodes[0]);
+  });
+});
+
+describe("连线拖拽改接（rewireWorkflowEdge）", () => {
+  function flow() {
+    const workflow = createEmptyWorkflow("流程");
+    workflow.nodes = [
+      { id: "n1", type: "csv_in", name: "输入", x: 0, y: 0, config: defaultConfigFor("csv_in") },
+      { id: "n2", type: "filter_n", name: "筛选", x: 250, y: 0, config: defaultConfigFor("filter_n") },
+      { id: "n3", type: "csv_out", name: "输出A", x: 500, y: 0, config: defaultConfigFor("csv_out") },
+      { id: "n4", type: "csv_out", name: "输出B", x: 500, y: 200, config: defaultConfigFor("csv_out") },
+    ];
+    workflow.edges = [
+      { from: "n1", fromAnchor: "output", to: "n2", toAnchor: "in" },
+      { from: "n2", fromAnchor: "T", to: "n3", toAnchor: "in" },
+    ];
+    return workflow;
+  }
+
+  it("拖目标端到另一个输入口：旧线替换为新线", () => {
+    const workflow = flow();
+    const oldEdge = { from: "n2", fromAnchor: "T", to: "n3", toAnchor: "in" };
+    const result = rewireWorkflowEdge(workflow, oldEdge, { ...oldEdge, to: "n4" });
+    expect(result.ok).toBe(true);
+    if (!result.ok || !result.workflow) return;
+    expect(result.workflow.edges).toHaveLength(2);
+    expect(result.workflow.edges.some((edge) => sameEdge(edge, { ...oldEdge, to: "n4" }))).toBe(true);
+    expect(result.workflow.edges.some((edge) => sameEdge(edge, oldEdge))).toBe(false);
+    // 原工作流不被改写。
+    expect(workflow.edges).toHaveLength(2);
+  });
+
+  it("改回原位（无变化）合法：旧线先移除再校验，不判重复", () => {
+    const workflow = flow();
+    const oldEdge = { from: "n2", fromAnchor: "T", to: "n3", toAnchor: "in" };
+    expect(rewireWorkflowEdge(workflow, oldEdge, oldEdge).ok).toBe(true);
+  });
+
+  it("改到已被其他线占用的输入口被拒，并保留原线", () => {
+    const workflow = flow();
+    const oldEdge = { from: "n1", fromAnchor: "output", to: "n2", toAnchor: "in" };
+    // n2 的输入口被 oldEdge 自己占用；把 n2→n3 改到 n2 会与 oldEdge 冲突？不——
+    // 校验前先移除旧线。这里测真冲突：把 n1→n2 改成 n1→n3（n3 已被 n2→n3 占用）。
+    const result = rewireWorkflowEdge(workflow, oldEdge, { ...oldEdge, to: "n3" });
+    expect(result.ok).toBe(false);
+    expect(workflow.edges).toHaveLength(2);
+  });
+
+  it("拖成自环被拒", () => {
+    const workflow = flow();
+    const oldEdge = { from: "n1", fromAnchor: "output", to: "n2", toAnchor: "in" };
+    const result = rewireWorkflowEdge(workflow, oldEdge, { from: "n2", fromAnchor: "T", to: "n2", toAnchor: "in" });
+    expect(result.ok).toBe(false);
   });
 });

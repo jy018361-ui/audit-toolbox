@@ -412,6 +412,18 @@ textarea.df-in {
   background: var(--warning-bg);
   color: var(--warning-fg);
 }
+/* 连线透明加宽命中层：让 1-2px 的连线抓得住；两端拖＝改接、中段点＝选中。 */
+.df-edge-hit {
+  stroke: transparent;
+  stroke-width: 14;
+  fill: none;
+  pointer-events: stroke;
+  cursor: grab;
+}
+.df-edge-hit:active {
+  cursor: grabbing;
+}
+
 /* 多字段选择：标签 + 手输 + 勾选清单弹层。 */
 .df-tokenpick {
   display: flex;

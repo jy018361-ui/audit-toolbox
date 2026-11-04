@@ -91,6 +91,7 @@ type DragState =
       snapshotted: boolean;
     }
   | { mode: "connect"; from: string; fromAnchor: string; moved: number }
+  | { mode: "rewire"; edge: DataflowEdge; end: "from" | "to"; moved: number }
   | null;
 
 export interface DataflowCanvasProps {
@@ -103,6 +104,8 @@ export interface DataflowCanvasProps {
   /** 节点真正开始被拖动前调用一次（撤销栈快照）。 */
   onNodeDragStart: () => void;
   onConnect: (edge: DataflowEdge) => void;
+  /** 拖连线端点改接到新锚点（旧线换新线，页面负责校验与提示）。 */
+  onRewire: (oldEdge: DataflowEdge, nextEdge: DataflowEdge) => void;
   /** 最近新增节点的 id：若它落在当前视野外（视角曾被拖远），自动把视角对准它。 */
   focusNodeId?: string | null;
   /** 请求「适配视图」的令牌：恢复草稿/打开流程时递增，画布把全部节点缩放进视野。 */
@@ -119,6 +122,7 @@ export function DataflowCanvas({
   onMoveNode,
   onNodeDragStart,
   onConnect,
+  onRewire,
   focusNodeId,
   fitKey,
 }: DataflowCanvasProps) {
@@ -234,9 +238,59 @@ export function DataflowCanvas({
 
   useEffect(() => {
     if (!fitKey) return;
-    fitToContent();
+    // 布局未稳（结果区高度、分隔条、弹性伸缩仍在变化）时测量画布会偏，
+    // 内容可能被适配进一个"更大的画布"随后又顶出视野——多级延迟后到者
+    // 生效：两帧（常规）＋100ms＋350ms（慢布局/窗口初开），保证按最终
+    // 尺寸适配。
+    const timers: number[] = [];
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => fitToContent());
+    });
+    timers.push(window.setTimeout(() => fitToContent(), 100));
+    timers.push(window.setTimeout(() => fitToContent(), 350));
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fitKey]);
+
+  /** 连线某端的锚点世界坐标（节点或锚点规格缺失时退化为节点中心）。 */
+  function edgeEndWorld(
+    edge: Pick<DataflowEdge, "from" | "fromAnchor" | "to" | "toAnchor">,
+    end: "from" | "to",
+  ): { x: number; y: number } {
+    const node = workflow.nodes.find((item) => item.id === (end === "from" ? edge.from : edge.to));
+    if (!node) return { x: 0, y: 0 };
+    const spec = nodeSpec(node.type);
+    if (!spec) return nodeCenter(node);
+    return anchorPos(node, spec, end === "from" ? "out" : "in", end === "from" ? edge.fromAnchor : edge.toAnchor);
+  }
+
+  /** 屏幕坐标距连线哪一端更近（≤26px）：近端可拖拽改接，否则视为点选。 */
+  function nearestEdgeEnd(
+    edge: Pick<DataflowEdge, "from" | "fromAnchor" | "to" | "toAnchor">,
+    clientX: number,
+    clientY: number,
+  ): "from" | "to" | null {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    const cameraNow = cameraRef.current;
+    if (!rect) return null;
+    const dist = (end: "from" | "to") => {
+      const world = edgeEndWorld(edge, end);
+      const sx = rect.left + cameraNow.x + world.x * cameraNow.zoom;
+      const sy = rect.top + cameraNow.y + world.y * cameraNow.zoom;
+      return Math.hypot(clientX - sx, clientY - sy);
+    };
+    const dFrom = dist("from");
+    const dTo = dist("to");
+    const threshold = 26;
+    if (dFrom <= threshold && dFrom <= dTo) return "from";
+    if (dTo <= threshold) return "to";
+    return null;
+  }
 
   function worldFromEvent(event: React.PointerEvent): { x: number; y: number } {
     const rect = (canvasRef.current as HTMLDivElement).getBoundingClientRect();
@@ -266,17 +320,24 @@ export function DataflowCanvas({
         return;
       }
     }
-    const edgeEl = target.closest(".df-edge") as HTMLElement | null;
+    const edgeEl = target.closest(".df-edge, .df-edge-hit") as HTMLElement | null;
     if (edgeEl) {
-      onSelect({
-        kind: "edge",
-        edge: {
-          from: edgeEl.dataset.from ?? "",
-          fromAnchor: edgeEl.dataset.fromAnchor ?? "",
-          to: edgeEl.dataset.to ?? "",
-          toAnchor: edgeEl.dataset.toAnchor ?? "",
-        },
-      });
+      const edge: DataflowEdge = {
+        from: edgeEl.dataset.from ?? "",
+        fromAnchor: edgeEl.dataset.fromAnchor ?? "",
+        to: edgeEl.dataset.to ?? "",
+        toAnchor: edgeEl.dataset.toAnchor ?? "",
+      };
+      // 抓在连线两端附近＝拖拽改接（用户直觉：拖着箭头改去向）；
+      // 抓中段＝选中（可 Delete 删除）。
+      const nearEnd = nearestEdgeEnd(edge, event.clientX, event.clientY);
+      if (nearEnd) {
+        event.preventDefault();
+        dragRef.current = { mode: "rewire", edge, end: nearEnd, moved: 0 };
+        capturePointer(event);
+        return;
+      }
+      onSelect({ kind: "edge", edge });
       return;
     }
     const nodeEl = target.closest(".df-node") as HTMLElement | null;
@@ -332,6 +393,21 @@ export function DataflowCanvas({
       );
       return;
     }
+    if (drag.mode === "rewire") {
+      // 改接拖动：虚线从「固定端」画到指针，被拖的一端跟随鼠标。
+      drag.moved += 1;
+      if (drag.moved < 2) return;
+      const anchor = edgeEndWorld(drag.edge, drag.end === "to" ? "from" : "to");
+      if (!anchor) return;
+      const world = worldFromEvent(event);
+      const next =
+        drag.end === "to"
+          ? { x1: anchor.x, y1: anchor.y, x2: world.x, y2: world.y }
+          : { x1: world.x, y1: world.y, x2: anchor.x, y2: anchor.y };
+      tempEdgeRef.current = next;
+      setTempEdge(next);
+      return;
+    }
     // 连线拖动：临时虚线跟随指针。ref 同步写，保证快速拖动时 pointerup
     // 立即可读到最新路径。
     drag.moved += 1;
@@ -350,6 +426,35 @@ export function DataflowCanvas({
     const drag = dragRef.current;
     dragRef.current = null;
     if (!drag) return;
+    if (drag.mode === "rewire") {
+      if (tempEdgeRef.current) {
+        const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+        if (drag.end === "to") {
+          const inAnchor = element?.closest(".df-a-in") as HTMLElement | null;
+          const targetNode = inAnchor?.closest(".df-node") as HTMLElement | null;
+          if (inAnchor && targetNode?.dataset.id) {
+            onRewire(drag.edge, {
+              ...drag.edge,
+              to: targetNode.dataset.id,
+              toAnchor: inAnchor.dataset.key ?? "in",
+            });
+          }
+        } else {
+          const outAnchor = element?.closest(".df-a-out") as HTMLElement | null;
+          const sourceNode = outAnchor?.closest(".df-node") as HTMLElement | null;
+          if (outAnchor && sourceNode?.dataset.id) {
+            onRewire(drag.edge, {
+              ...drag.edge,
+              from: sourceNode.dataset.id,
+              fromAnchor: outAnchor.dataset.key ?? "output",
+            });
+          }
+        }
+      }
+      setTempEdge(null);
+      tempEdgeRef.current = null;
+      return;
+    }
     if (drag.mode === "connect") {
       if (tempEdgeRef.current) {
         const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
@@ -431,25 +536,31 @@ export function DataflowCanvas({
                 selection.edge.fromAnchor === edge.fromAnchor &&
                 selection.edge.to === edge.to &&
                 selection.edge.toAnchor === edge.toAnchor;
+              const path = bezierPath(
+                fromSpec ? anchorPos(from, fromSpec, "out", edge.fromAnchor) : nodeCenter(from),
+                toSpec ? anchorPos(to, toSpec, "in", edge.toAnchor) : nodeCenter(to),
+              );
               return (
-                <path
-                  key={`${edge.from}:${edge.fromAnchor}->${edge.to}:${edge.toAnchor}`}
-                  className={`df-edge${unknownEnd ? " df-edge-unknown" : ""}${
-                    selected ? " df-edge-selected" : ""
-                  }`}
-                  d={bezierPath(
-                    fromSpec
-                      ? anchorPos(from, fromSpec, "out", edge.fromAnchor)
-                      : nodeCenter(from),
-                    toSpec ? anchorPos(to, toSpec, "in", edge.toAnchor) : nodeCenter(to),
-                  )}
-                  markerEnd="url(#df-edge-arrow)"
-                  strokeDasharray={unknownEnd ? "6 4" : undefined}
-                  data-from={edge.from}
-                  data-from-anchor={edge.fromAnchor}
-                  data-to={edge.to}
-                  data-to-anchor={edge.toAnchor}
-                />
+                <g key={`${edge.from}:${edge.fromAnchor}->${edge.to}:${edge.toAnchor}`}>
+                  <path
+                    className={`df-edge${unknownEnd ? " df-edge-unknown" : ""}${
+                      selected ? " df-edge-selected" : ""
+                    }`}
+                    d={path}
+                    markerEnd="url(#df-edge-arrow)"
+                    strokeDasharray={unknownEnd ? "6 4" : undefined}
+                  />
+                  {/* 透明加宽命中层：连线只有 1-2px 宽很难抓；两端可拖改接、
+                      中段点选，见 handlePointerDown。 */}
+                  <path
+                    className={`df-edge-hit${selected ? " df-edge-hit-selected" : ""}`}
+                    d={path}
+                    data-from={edge.from}
+                    data-from-anchor={edge.fromAnchor}
+                    data-to={edge.to}
+                    data-to-anchor={edge.toAnchor}
+                  />
+                </g>
               );
             })}
             {tempEdge && (

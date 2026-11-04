@@ -94,7 +94,7 @@ pub(crate) fn run_clean(
     let config: CleanConfig = serde_json::from_value(config.clone())
         .map_err(|error| config_error("字段清洗", node_name, error.to_string()))?;
     let index = input.column_index();
-    const KNOWN_OPS: [&str; 4] = ["trim", "toHalfWidth", "stripInvisible", "replace"];
+    const KNOWN_OPS: [&str; 5] = ["trim", "toHalfWidth", "stripInvisible", "replace", "fillDown"];
     for action in &config.actions {
         if !index.contains_key(&action.field) {
             return Err(structural(
@@ -111,7 +111,7 @@ pub(crate) fn run_clean(
                 return Err(config_error(
                     "字段清洗",
                     node_name,
-                    format!("字段“{}”的清洗动作“{op}”无法识别（可选 trim / toHalfWidth / stripInvisible / replace）。", action.field),
+                    format!("字段“{}”的清洗动作“{op}”无法识别（可选 trim / toHalfWidth / stripInvisible / replace / fillDown）。", action.field),
                 ));
             }
         }
@@ -180,6 +180,25 @@ pub(crate) fn run_clean(
                     *text = updated;
                 }
             }
+            // 向下填充：空格子（空值/空文本）沿用本列上一个非空值——合并
+            // 单元格导出的账表只有每组首行有值，这是把它铺满整列的标准动作
+            // （2026-10-30 用户需求；放在文本清洗之后，填充的是清洗后的值）。
+            if action.ops.iter().any(|op| op == "fillDown") {
+                let mut last: Option<Value> = None;
+                for row in &mut table.rows {
+                    let cell = &mut row[column];
+                    let is_empty = matches!(cell, Value::Null)
+                        || matches!(cell, Value::Text(text) if trim_spaces(text).is_empty());
+                    if is_empty {
+                        if let Some(value) = &last {
+                            *counts.entry("向下填充").or_default() += 1;
+                            *cell = value.clone();
+                        }
+                    } else {
+                        last = Some(cell.clone());
+                    }
+                }
+            }
         }
         if config.null_text_to_null {
             for row in &mut table.rows {
@@ -211,6 +230,7 @@ pub(crate) fn run_clean(
             "trim" => "去空格",
             "toHalfWidth" => "全角转半角",
             "stripInvisible" => "去不可见字符",
+            "fillDown" => "向下填充",
             _ => "文本替换",
         };
         if let Some(count) = counts.get(label) {

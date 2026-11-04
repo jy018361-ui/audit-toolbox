@@ -40,6 +40,7 @@ const COLUMN_TYPE_OPTIONS = [
 ];
 
 const CLEAN_OPS: { value: string; label: string }[] = [
+  { value: "fillDown", label: "向下填充（空格子沿用上一个非空值）" },
   { value: "trim", label: "去空格" },
   { value: "toHalfWidth", label: "全角转半角" },
   { value: "stripInvisible", label: "去不可见字符" },

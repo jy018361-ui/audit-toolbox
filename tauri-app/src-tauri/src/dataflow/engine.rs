@@ -1085,6 +1085,50 @@ mod tests {
     // ---------- 去空格 / 全角转半角 ----------
 
     #[test]
+    fn clean_fill_down_carries_last_non_empty_value() {
+        // 2026-10-30 用户需求：合并单元格导出只有每组首行有值，空格子要
+        // 沿用本列上一个非空值（向下填充）。空值与空文本都算空；前面
+        // 没有非空值时保留原样；其他列不受影响。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("fd.csv");
+        fs::write(&file, "客商,金额\n甲,10\n,\n,20\n乙,30\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("in", &file, json!({})),
+                {"id": "c", "type": "clean", "name": "清理",
+                 "config": {"actions": [{"field": "客商", "ops": ["fillDown"]}]}}
+            ]),
+            json!([edge("in", "c", "in")]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "c"), "ok");
+        let col_client = col(&result, "c", "output", "客商");
+        assert_eq!(cell(&result, "c", "output", 0, col_client), json!("甲"));
+        assert_eq!(cell(&result, "c", "output", 1, col_client), json!("甲"));
+        assert_eq!(cell(&result, "c", "output", 2, col_client), json!("甲"));
+        assert_eq!(cell(&result, "c", "output", 3, col_client), json!("乙"));
+        // 统计里报告填充格数。
+        assert!(stats_of(&result, "c").iter().any(|line| line.contains("向下填充：2")));
+
+        // 首行之前无非空值：保留空，不回填后面的值。
+        let lead = root.path().join("lead.csv");
+        fs::write(&lead, "客商\n\n甲\n\n").unwrap();
+        let lead_flow = workflow(
+            json!([
+                csv_in_node("in", &lead, json!({})),
+                {"id": "c", "type": "clean", "name": "清理",
+                 "config": {"actions": [{"field": "客商", "ops": ["fillDown"]}]}}
+            ]),
+            json!([edge("in", "c", "in")]),
+        );
+        let lead_result = run("dataflow_preview", lead_flow);
+        let lead_col = col(&lead_result, "c", "output", "客商");
+        assert_eq!(cell(&lead_result, "c", "output", 0, lead_col), Value::Null);
+        assert_eq!(cell(&lead_result, "c", "output", 1, lead_col), json!("甲"));
+        assert_eq!(cell(&lead_result, "c", "output", 2, lead_col), json!("甲"));
+    }
+
+    #[test]
     fn clean_trims_spaces_and_converts_full_width() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("dirty.csv");

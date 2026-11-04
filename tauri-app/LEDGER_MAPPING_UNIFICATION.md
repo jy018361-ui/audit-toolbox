@@ -1,5 +1,13 @@
 # 账表映射统一方案
 
+## 2026-11-04：修正自动误加参照凭证号，处理遵循前端最终映射
+
+- 实测 SAP 表头在不调用 LLM 的初判阶段已把正式凭证号与参照凭证号同时映射为多列 ID。误命中的参考列因此进入已有填充及凭证分组，按科目分散的同一凭证被拆开，漏出对方分录。
+- 本次只修公共 JE 自动映射的误命中，并在 LLM 建议入口共用同一否定校验防止再次追加。参照／参考、清账、冲销、反向、预制及明确英文参考编号不自动加入当前 ID；正式 `GL Reference` 与凭证字＋凭证号多列组合保留。
+- 处理以页面当前最终映射为准，不静默改写人工映射、历史参数或后台补加编号。回归验证页面取消参考列后提交的 ID 与显示一致；worker 任务按提交映射生成完整凭证 CSV 与套表。
+- 原有向下填充、凭证分组执行规则及缓存版本不变。旧错误映射需重新读取后确认，旧结果需重新导出。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib voucher_reference`；真实 SAP 表头只读探针设置 `KANZHANG_VOUCHER_PROBE` 为前 50 行样本，运行 `--lib voucher_reference_real_headers_probe -- --ignored --nocapture`；前端 `npx vitest run src/KanzhangResume.test.tsx`。
+
 ## 2026-10-26：同任务复用完整磁盘 TB 分析
 
 - 公共 `disk_tb::analyze_shared` 共享已经完成的层级、符号、上下文结论及只读临时库；汇兑、存款、借款、FA TB＋JE、TBJE 的公共 TB 入口消费它。worker 作用域和同步 FX／存款命令作用域退出即释放；不引入跨任务永久分析缓存。

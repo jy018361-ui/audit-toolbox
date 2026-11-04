@@ -3596,6 +3596,21 @@ mod tests {
     }
 
     #[test]
+    fn voucher_reference_suggestions_are_blocked_before_llm_application() {
+        let payload = json!({
+            "headers": ["凭证编号", "参照伝票番号-参照凭证号", "GL Reference"],
+            "currentMapping": {"id": ["凭证编号"]},
+        });
+        let mut value = json!({
+            "fills": [{"role":"id", "suggestedColumn":"参照伝票番号-参照凭证号", "confidence":0.99}],
+            "reviews": [{"role":"id", "suggestedColumn":"参照伝票番号-参照凭证号", "confidence":0.99}],
+        });
+        sanitize_mapping_changes(&mut value, &payload, "je", ReviewDatePolicy::Strict);
+        assert!(value["fills"].as_array().unwrap().is_empty());
+        assert!(value["reviews"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
     fn 形态已完整成立时把结论告诉模型() {
         // 「序时账-1」的真实映射：方向 ＋ 金额，脚本判定 JE2 完整成立。
         // 不告诉模型这一点，它就会盯着「金额列全是正数」自由发挥，

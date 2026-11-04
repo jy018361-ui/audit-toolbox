@@ -10449,6 +10449,42 @@ mod tests {
     }
 
     #[test]
+    fn voucher_reference_worker_job_exports_complete_voucher_suite() {
+        let root = temp_dir("voucher-reference-worker");
+        let input = root.join("ledger.csv");
+        fs::write(&input, "公司代码,过账日期,伝票番号-凭证编号,参照伝票番号-参照凭证号,科目编码,科目名称,金额\nJP10,2026-06-01,1400020724,,1002011000,银行存款,3272805\nJP10,2026-06-01,1400020724,,1171010000,分店科目,-3272805\n").unwrap();
+        let table = load_text(&input, 1, 1).unwrap();
+        let mapping = suggest_mapping(&table.headers, &table.rows);
+        assert_eq!(mapping.id, ["伝票番号-凭证编号"]);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result = run_job("kanzhang.export", json!({
+            "inputPath":input,"headerRow":1,"mapping":mapping,"outputPath":root.join("out.csv"),
+            "targetBatches":[{"name":"分店科目","accounts":["1171010000-分店科目"]}],
+            "includeCounterpart":true,"includeSuite":true,"includePivot":true,"llmAnalysis":false,
+        }), &|_, _, _, _| {}, cancel.clone(), &PauseCheckpoint::unpaused(cancel)).unwrap();
+        let detail = PathBuf::from(result["outputPaths"][0].as_str().unwrap());
+        let records = csv::Reader::from_path(detail).unwrap().records().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(records.len(), 2);
+        let mut suite = open_workbook_auto(root.join("out_套表.xlsx")).unwrap();
+        let sheet = suite.worksheet_range("凭证").unwrap();
+        let rows: Vec<_> = sheet.rows().skip(1).collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.iter().map(|row| row.last().unwrap().to_string().parse::<f64>().unwrap()).sum::<f64>(), 0.0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore]
+    fn voucher_reference_real_headers_probe() {
+        let Ok(input) = std::env::var("KANZHANG_VOUCHER_PROBE") else { return; };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result = run_job("kanzhang.inspect", json!({"inputPath":input,"headerRow":1,"headerDepth":1}),
+            &|_, _, _, _| {}, cancel.clone(), &PauseCheckpoint::unpaused(cancel)).unwrap();
+        assert_eq!(result["suggestedMapping"]["id"], json!(["伝票番号-凭证编号"]));
+        eprintln!("实际 SAP 表头的凭证识别字段：{}", result["suggestedMapping"]["id"]);
+    }
+
+    #[test]
     fn kanzhang_single_side_disables_suite_even_when_requested() {
         let root = temp_dir("kanzhang-single-side-export");
         let input = root.join("ledger.csv");

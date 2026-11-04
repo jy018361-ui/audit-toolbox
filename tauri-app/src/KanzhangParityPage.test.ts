@@ -40,6 +40,7 @@ import {
   type KanzhangDraft,
   type Mapping,
   undoMappingChange,
+  updateKanzhangMapping,
   validKanzhangBatches,
 } from "./KanzhangParityPage";
 
@@ -66,6 +67,49 @@ const draft = (): KanzhangDraft => ({
   pivotColumns: [],
   pivotValues: [],
   step: 2,
+});
+
+describe("映射修正与默认透视联动", () => {
+  const original = (): KanzhangDraft => ({
+    ...draft(),
+    mapping: { id: ["凭证号"], accountCode: "录入时间", accountName: ["科目名称"], date: "旧日期" },
+    pivotRows: ["录入时间", "科目名称"],
+    pivotColumns: ["旧日期"],
+    pivotValues: ["金额"],
+  });
+
+  it("纠正错误科目编码与日期后，替换透视默认选择", () => {
+    const current = original();
+    const result = updateKanzhangMapping(current, { ...current.mapping, accountCode: "总账科目", date: ["年", "月", "日"] });
+    expect(result.pivotRows).toEqual(["总账科目", "科目名称"]);
+    expect(result.pivotColumns).toEqual(["年", "月", "日"]);
+    expect(result.pivotValues).toEqual(["金额"]);
+    expect(current.pivotRows).toEqual(["录入时间", "科目名称"]);
+  });
+
+  it("保留手工指定的行字段，同时更新仍为默认值的列字段", () => {
+    const current = { ...original(), pivotRows: ["部门", "录入时间"] };
+    const result = updateKanzhangMapping(current, { ...current.mapping, accountCode: "总账科目", date: "过账日期" });
+    expect(result.pivotRows).toEqual(["部门", "录入时间"]);
+    expect(result.pivotColumns).toEqual(["过账日期"]);
+  });
+
+  it("保留手工清空的行字段及自定义列字段", () => {
+    const current = { ...original(), pivotRows: [], pivotColumns: ["公司"] };
+    const result = updateKanzhangMapping(current, { ...current.mapping, accountCode: "总账科目", date: "过账日期" });
+    expect(result.pivotRows).toEqual([]);
+    expect(result.pivotColumns).toEqual(["公司"]);
+  });
+
+  it("清除和撤销映射时，默认透视跟随最新映射", () => {
+    const current = original();
+    const cleared = updateKanzhangMapping(current, { ...current.mapping, accountCode: undefined, date: undefined });
+    expect(cleared.pivotRows).toEqual(["科目名称"]);
+    expect(cleared.pivotColumns).toEqual([]);
+    const undone = updateKanzhangMapping(cleared, current.mapping);
+    expect(undone.pivotRows).toEqual(current.pivotRows);
+    expect(undone.pivotColumns).toEqual(current.pivotColumns);
+  });
 });
 
 describe("目标批次清空", () => {

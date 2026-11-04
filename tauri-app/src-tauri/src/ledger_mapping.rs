@@ -2871,9 +2871,26 @@ fn structured_amount_header_role(header: &str) -> Option<String> {
     ))
 }
 
+/// 参照、清账等编号描述其他业务凭证，不能仅因包含“凭证号”就拼入当前凭证键。
+/// GL Reference 是既有导出的正式凭证编号字段，保留其明确别名。
+pub(crate) fn is_secondary_voucher_reference_header(header: &str) -> bool {
+    let normalized = normalize_header(header);
+    if normalized == "glreference" {
+        return false;
+    }
+    [
+        "参照", "参考", "參考", "清账", "清帳", "冲销", "沖銷", "反向",
+        "预制", "預製", "reference", "refvoucher", "refdocument",
+        "clearingdocument", "reversaldocument", "parkeddocument",
+    ].iter().any(|word| normalized.contains(word))
+}
+
 pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
     let n = normalize_header(header);
     if n.is_empty() {
+        return None;
+    }
+    if role.name == "id" && is_secondary_voucher_reference_header(header) {
         return None;
     }
     if matches!(role.name, "accountCode" | "accountName") && two_way_account_header(header) {
@@ -6022,6 +6039,9 @@ pub(crate) fn role_rejects_header(kind: &str, role: &str, header: &str) -> bool 
     let n = normalize_header(header);
     if n.is_empty() {
         return false;
+    }
+    if role.name == "id" && is_secondary_voucher_reference_header(header) {
+        return true;
     }
     // 金额角色一律排除集团货币口径，与 [`alias_score`] 同口径。此前这里只查
     // 角色自己的冲突词，漏了这一条：实测模型建议把本年累计贷方指到
@@ -11213,6 +11233,22 @@ mod tests {
         let mapping = suggest_roles("je", &headers);
         assert_eq!(mapping.get(&0), Some(&"id"));
         assert_ne!(mapping.get(&1), Some(&"id"));
+    }
+
+    #[test]
+    fn voucher_reference_columns_are_not_current_voucher_ids() {
+        let headers = [
+            "伝票番号-凭证编号", "参照伝票番号-参照凭证号", "反対仕訳参照伝票番号-反向分录参照凭证号",
+            "清账凭证号", "预制凭证号", "Reference Voucher Number", "GL Reference", "凭证字",
+        ].map(str::to_owned).to_vec();
+        let mapping = suggest_roles("je", &headers);
+        assert_eq!(mapping.get(&0), Some(&"id"));
+        for index in 1..=5 {
+            assert_ne!(mapping.get(&index), Some(&"id"), "{}", headers[index]);
+            assert!(role_rejects_header("je", "id", &headers[index]));
+        }
+        assert_eq!(mapping.get(&6), Some(&"id"), "正式 GL Reference 别名仍保留");
+        assert_eq!(mapping.get(&7), Some(&"id"), "凭证字与凭证号仍可组成多列键");
     }
 
     #[test]

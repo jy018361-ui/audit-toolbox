@@ -91,6 +91,20 @@ export const addKanzhangNextBatch=(batches:Batch[],accounts:string[]):Pick<Kanzh
   activeBatch:batches.length,
 });
 export const invalidateKanzhangInspection=(current:KanzhangDraft,change:Partial<Pick<KanzhangDraft,"sheet"|"headerRow"|"headerDepth">>):KanzhangDraft=>({...current,...change,inspect:undefined,mapping:EMPTY_MAPPING,step:1});
+const defaultKanzhangPivotFields=(mapping:Mapping)=>({
+  pivotRows:accountColumns(mapping),
+  pivotColumns:Array.isArray(mapping.date)?mapping.date:mapping.date?[mapping.date]:[],
+});
+/** 默认透视跟随科目／日期映射；已偏离旧默认值的自定义选择保持原样。 */
+export function updateKanzhangMapping(current:KanzhangDraft,mapping:Mapping):KanzhangDraft{
+  const previous=defaultKanzhangPivotFields(current.mapping);
+  const next=defaultKanzhangPivotFields(mapping);
+  const same=(left:string[],right:string[])=>left.length===right.length&&left.every((value,index)=>value===right[index]);
+  return {...current,mapping,
+    pivotRows:same(current.pivotRows,previous.pivotRows)?next.pivotRows:current.pivotRows,
+    pivotColumns:same(current.pivotColumns,previous.pivotColumns)?next.pivotColumns:current.pivotColumns,
+  };
+}
 // 科目检索按旧版口径：在已载入的科目列表上即时过滤，不需要点"搜索"。
 export const filterAccounts=(values:string[],keyword:string):string[]=>{
   const kw=keyword.trim().toLowerCase();
@@ -346,7 +360,8 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   },[accounts,accountCodes,query,searchResults]);
   const available=useMemo(()=>pool.filter(value=>!batch.accounts.includes(value)&&!draft.excludes.includes(value)),[pool,batch.accounts,draft.excludes]);
   const truncated=accountTotal>accounts.length;
-  const setMap=(key:keyof Mapping,value:string|string[])=>patch({mapping:setKanzhangMapping(draft.mapping,key,value)});
+  const updateMapping=(change:(current:Mapping)=>Mapping)=>setDraft(current=>updateKanzhangMapping(current,change(current.mapping)));
+  const setMap=(key:keyof Mapping,value:string|string[])=>updateMapping(current=>setKanzhangMapping(current,key,value));
   async function chooseInput(){const value=await pickPath("file","选择凭证文件",["xlsx","xls","xlsm","csv","txt","parquet"]);if(typeof value==="string")resetSource(value);}
   function changeSourceHeader(change:Partial<Pick<KanzhangDraft,"sheet"|"headerRow"|"headerDepth">>){
     llmGeneration.current+=1;setLlmBusy(false);setLlmFailed(false);setLlmStatus("");setChanges([]);setPending([]);setResult(undefined);
@@ -364,7 +379,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     if(match)restoredMappingRef.current=null;
     const suggested=value.suggestedMapping??EMPTY.mapping;
     const effective=match?match.mapping:suggested;
-    setAccounts(value.accounts??[]);setAccountCodes(value.accountCodes??[]);setAccountTotal(value.accountCount??(value.accounts??[]).length);setAccountsKey(accountColumns(effective).join("|"));setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");patch({inspect:value,knownSheets:value.sheets??draft.knownSheets,sheet:value.selectedSheet??draft.sheet,mapping:effective,pivotRows:match?match.pivotRows:accountColumns(effective),pivotColumns:match?match.pivotColumns:(Array.isArray(effective.date)?effective.date:effective.date?[effective.date]:[]),step:1});setResult(undefined);
+    setAccounts(value.accounts??[]);setAccountCodes(value.accountCodes??[]);setAccountTotal(value.accountCount??(value.accounts??[]).length);setAccountsKey(accountColumns(effective).join("|"));setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");patch({inspect:value,knownSheets:value.sheets??draft.knownSheets,sheet:value.selectedSheet??draft.sheet,mapping:effective,...(match?{pivotRows:match.pivotRows,pivotColumns:match.pivotColumns}:defaultKanzhangPivotFields(effective)),step:1});setResult(undefined);
     // 脚本自动映射一出来就直接送 LLM 复核，不再要求用户额外点一次按钮。
     // 恢复的映射已经用户确认过，跳过复核。
     if(match)return;
@@ -402,13 +417,13 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     try{const value=await engineCall("kanzhang.llm_mapping",{mode:"mapping",payload:kanzhangReviewPayload(target.headers,target.preview,source)}) as LedgerReviewResponse;
       if(generation!==llmGeneration.current)return;
       const {mapping,changes:merged,pending:rest}=applyLedgerReviews(source,value);
-      patch({mapping});setChanges(merged);setPending(rest);setLlmStatus(kanzhangReviewSummary(merged.length,rest.length));}
+      updateMapping(()=>mapping);setChanges(merged);setPending(rest);setLlmStatus(kanzhangReviewSummary(merged.length,rest.length));}
     catch(e){if(generation!==llmGeneration.current)return;setLlmFailed(true);setLlmStatus(`${kanzhangErrorText(e).replace(/[。.]+$/,"")}。智能复核未完成，当前映射仍可手动核对后继续。`);}
     finally{if(generation===llmGeneration.current)setLlmBusy(false);}
   }
-  const undoChange=(target:MappingChange)=>{patch({mapping:undoMappingChange(draft.mapping,target)});setChanges(values=>values.filter(value=>value!==target));};
+  const undoChange=(target:MappingChange)=>{updateMapping(current=>undoMappingChange(current,target));setChanges(values=>values.filter(value=>value!==target));};
   // 采纳低把握建议后同样进变更清单，保留反悔的机会。
-  const acceptPending=(item:Review)=>{const before=draft.mapping[item.role];const after=item.action==="clear"?undefined:isMultiRole(item.role)?[item.suggestedColumn!.trim()]:item.suggestedColumn!.trim();if(item.action==="clear")patch({mapping:{...draft.mapping,[item.role]:undefined}});else setMap(item.role,after!);setChanges(values=>[...values,{role:item.role,before,after,source:item.action==="clear"?"replace":formatMappingValue(before)==="未映射"?"fill":"replace",reason:item.reason,confidence:item.confidence}]);setPending(values=>values.filter(value=>value!==item));};
+  const acceptPending=(item:Review)=>{const before=draft.mapping[item.role];const after=item.action==="clear"?undefined:isMultiRole(item.role)?[item.suggestedColumn!.trim()]:item.suggestedColumn!.trim();if(item.action==="clear")updateMapping(current=>({...current,[item.role]:undefined}));else setMap(item.role,after!);setChanges(values=>[...values,{role:item.role,before,after,source:item.action==="clear"?"replace":formatMappingValue(before)==="未映射"?"fill":"replace",reason:item.reason,confidence:item.confidence}]);setPending(values=>values.filter(value=>value!==item));};
   const updateBatch=(next:Partial<Batch>)=>patch({batches:draft.batches.map((value,index)=>index===draft.activeBatch?{...value,...next}:value)});
   // 拖拽状态提到页面这一层：三个穿梭区要能互相知道光标落在谁身上。
   const [drag,setDrag]=useState<ShuttleDrag>();

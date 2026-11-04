@@ -147,6 +147,9 @@ struct RawSheet {
 
 /// 从统一读取层读取一个文件的一个 Sheet。
 /// `row_cap` 为数据行上限（预览截样或行数预算），到达后立即早停。
+/// 返回原始表与实际使用的表头行号：配置的表头行为空时自动向下找第一个
+/// 非空行（最多 30 行），TB/JE 等导出文件顶部标题行数不固定，靠人数行
+/// 常常设错（真实反馈 2026-10-30：DATAFLOW_HEADER_EMPTY）。
 fn read_sheet_rows(
     path: &Path,
     sheet: Option<&str>,
@@ -154,19 +157,43 @@ fn read_sheet_rows(
     data_start: usize,
     row_cap: usize,
     node_name: &str,
-) -> Result<RawSheet, AppError> {
+) -> Result<(RawSheet, usize), AppError> {
     if !path.is_file() {
         return Err(structural(
             "DATAFLOW_PATH_NOT_FOUND",
             format!("节点「{node_name}」的文件不存在：{}", path.display()),
         ));
     }
+    const AUTO_HEADER_SCAN_LIMIT: usize = 30;
     let mut header: Option<Vec<String>> = None;
+    let mut effective_header_row = header_row;
     let mut rows: Vec<(usize, Vec<String>)> = Vec::new();
     let result = crate::disk_table::for_each_source_row(path, sheet, &NO_CANCEL, |cells, physical| {
-        if physical == header_row && header.is_none() {
+        if header.is_none() {
+            // 表头未定：配置行起跳过空行，第一个非空行即表头。
+            if physical < header_row {
+                return Ok(());
+            }
+            if cells.iter().all(|cell| cell.trim().is_empty()) {
+                if physical - header_row >= AUTO_HEADER_SCAN_LIMIT {
+                    return Err(structural(
+                        "DATAFLOW_HEADER_EMPTY",
+                        format!(
+                            "节点「{node_name}」读取 {} 时：表头行 {header_row} 起的 {} 行均为空，\
+                             请检查文件或调整表头行设置。",
+                            file_label(path),
+                            AUTO_HEADER_SCAN_LIMIT
+                        ),
+                    ));
+                }
+                return Ok(());
+            }
             header = Some(cells);
-        } else if physical >= data_start {
+            effective_header_row = physical;
+            return Ok(());
+        }
+        // 数据行：不早于用户设置的数据起始行，也不早于实际表头的下一行。
+        if physical >= data_start.max(effective_header_row + 1) {
             if rows.len() >= row_cap {
                 return Err(early_stop());
             }
@@ -188,7 +215,7 @@ fn read_sheet_rows(
             ),
         )
     })?;
-    Ok(RawSheet { header, rows })
+    Ok((RawSheet { header, rows }, effective_header_row))
 }
 
 /// firstData：选每个文件第一个有数据的 Sheet（默认裁定第 2 条）。
@@ -395,7 +422,7 @@ pub(crate) fn run_excel_in(
     let mut stats: Vec<String> = Vec::new();
     for file in &files {
         let sheet = pick_sheet(file, &sheet_mode, config.sheet_name.as_deref(), data_start)?;
-        let raw = read_sheet_rows(
+        let (raw, effective_header) = read_sheet_rows(
             file,
             Some(&sheet),
             config.header_row,
@@ -403,6 +430,14 @@ pub(crate) fn run_excel_in(
             row_cap(context),
             node_name,
         )?;
+        if effective_header != config.header_row {
+            stats.push(format!(
+                "{}（Sheet：{sheet}）：配置表头行 {} 为空，已自动使用第 {} 行",
+                file_label(file),
+                config.header_row,
+                effective_header
+            ));
+        }
         stats.push(format!(
             "{}（Sheet：{sheet}）：{} 行数据",
             file_label(file),
@@ -521,7 +556,16 @@ pub(crate) fn run_csv_in(
             collected.push((file_label(file), "CSV".to_owned(), RawSheet { header, rows }));
         } else {
             let (encoding, delimiter) = crate::spreadsheet_input::text_metadata(file)?;
-            let raw = read_sheet_rows(file, None, config.header_row, data_start, row_cap(context), node_name)?;
+            let (raw, effective_header) =
+                read_sheet_rows(file, None, config.header_row, data_start, row_cap(context), node_name)?;
+            if effective_header != config.header_row {
+                stats.push(format!(
+                    "{}：配置表头行 {} 为空，已自动使用第 {} 行",
+                    file_label(file),
+                    config.header_row,
+                    effective_header
+                ));
+            }
             stats.push(format!(
                 "{}：编码 {encoding}、分隔符“{delimiter}”（自动识别）：{} 行数据",
                 file_label(file),

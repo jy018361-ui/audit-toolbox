@@ -962,6 +962,53 @@ mod tests {
     }
 
     #[test]
+    fn header_row_empty_auto_advances_to_first_non_empty_row() {
+        // 2026-10-30 真实反馈：TB/JE 导出文件顶部标题行数不固定，配置的
+        // 表头行常落到空行上报 DATAFLOW_HEADER_EMPTY。现改为自动向下找
+        // 第一个非空行作表头（≤30 行），统计里明说用了哪行。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("tb.csv");
+        fs::write(&file, "\n\n名称,金额\n甲,10\n乙,20\n").unwrap();
+        let flow = workflow(
+            json!([{
+                "id": "in", "type": "csv_in", "name": "CSV输入",
+                "config": {"path": file.to_string_lossy(), "headerRow": 1, "attachSourceColumns": false}
+            }]),
+            json!([]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(node_status(&result, "in"), "ok");
+        // 表头＝第 3 行，数据从第 4 行起（标题空行不算数据）。
+        // 金额 10/20 均为整数：推断为 integer。
+        assert_eq!(types(&result, "in", "output"), ["text", "integer"]);
+        assert_eq!(row_count(&result, "in", "output"), 2);
+        assert!(stats_of(&result, "in")
+            .iter()
+            .any(|line| line.contains("已自动使用第 3 行")));
+    }
+
+    #[test]
+    fn header_row_all_blank_within_scan_limit_still_errors() {
+        // 30 行内全空＝真空白文件，仍明确报错（不猜表头）。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("blank.csv");
+        let blank = "\n".repeat(40);
+        fs::write(&file, blank).unwrap();
+        let flow = workflow(
+            json!([{
+                "id": "in", "type": "csv_in", "name": "CSV输入",
+                "config": {"path": file.to_string_lossy(), "headerRow": 1}
+            }]),
+            json!([]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert_eq!(
+            result.pointer("/error/code").and_then(Value::as_str),
+            Some("DATAFLOW_HEADER_EMPTY")
+        );
+    }
+
+    #[test]
     fn reads_pseudo_xls_text_via_unified_layer() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("台账.xls");

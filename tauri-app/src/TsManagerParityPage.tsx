@@ -195,14 +195,15 @@ function filterLookupParams(
   };
 }
 
-function canStartTsExport(headers: string[], outputPath: string) {
-  return headers.length > 0 && Boolean(outputPath.trim());
+function canStartTsExport(headers: string[]) {
+  return headers.length > 0;
 }
 
 export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   const [state, setState] = useState<TsDraft>(() => draft);
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [busy, setBusy] = useState(false);
+  const [exportPending, setExportPending] = useState(false);
   const [job, setJob] = useState<JobEvent>();
   const [error, setError] = useState("");
   const [dragHover, setDragHover] = useState(false);
@@ -518,25 +519,30 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   }
 
   async function chooseOutput() {
-    const selected = await pickPath("save", "保存 Timesheet 默认双 Sheet", [
-      "xlsx",
-    ]);
-    if (typeof selected === "string") patch({ outputPath: selected });
+    const selected = await pickPath(
+      "save",
+      "另存为工时报告（by经理 + by项目）",
+      ["xlsx"],
+      "工时报告.xlsx",
+    );
+    if (typeof selected !== "string" || !selected.trim()) return;
+    patch({ outputPath: selected });
+    return selected;
   }
 
   async function startExport() {
+    if (busy || exportPending) return;
     if (!state.inputPath || !state.inspect || !headers.length) {
       setError("请先加载 Timesheet 文件。");
       return;
     }
-    if (!state.outputPath.trim()) {
-      setError("请选择 TS 导出文件的保存路径。");
-      return;
-    }
-    setBusy(true);
+    setExportPending(true);
     setError("");
-    patch({ result: undefined });
     try {
+      const outputPath = state.outputPath.trim() || (await chooseOutput());
+      if (!outputPath) return;
+      setBusy(true);
+      patch({ result: undefined });
       const jobId = await jobStart("ts.export", {
         inputPath: state.inputPath,
         sheet: state.sheet || undefined,
@@ -544,7 +550,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
         headerDepth: state.headerDepth ?? 1,
         pivotMode: "dual_default",
         filters,
-        outputPath: state.outputPath,
+        outputPath,
       });
       setJob({
         jobId,
@@ -559,6 +565,8 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     } catch (caught) {
       setBusy(false);
       setError(messageOf(caught));
+    } finally {
+      setExportPending(false);
     }
   }
 
@@ -789,8 +797,11 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                 <Field label="输出文件">
                   <FileInput
                     value={state.outputPath}
-                    placeholder="请选择导出文件的保存路径"
-                    onBrowse={() => void chooseOutput()}
+                    placeholder="点击导出时选择保存位置"
+                    disabled={busy || exportPending}
+                    onBrowse={() => {
+                      void chooseOutput().catch((caught) => setError(messageOf(caught)));
+                    }}
                     onClear={
                       state.outputPath
                         ? () => patch({ outputPath: "" })
@@ -802,6 +813,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                 </Field>
                 <p className="hint">
                   将按 {filters.length} 个筛选条件导出，命中 {shownRows} 行。
+                  {!state.outputPath.trim() && "点击导出后选择保存位置。"}
                 </p>
                 <div className="actions" data-button-size="default">
                   <Button
@@ -825,20 +837,16 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     <Button
                       type="button"
                       variant="default"
-                      disabled={!canStartTsExport(headers, state.outputPath)}
+                      disabled={busy || exportPending || !canStartTsExport(headers)}
                       onClick={() => void startExport()}
                     >
                       导出默认双 Sheet
                     </Button>
                   )}
                 </div>
-                {/* 禁用不说原因等于让用户猜（UI 审核）：输出路径未选/文件未加载
-                    时，把不可导出的原因讲明白。 */}
-                {!canStartTsExport(headers, state.outputPath) && !busy && (
+                {!canStartTsExport(headers) && !busy && (
                   <p className="hint" role="status">
-                    {headers.length
-                      ? "请先选择导出文件的保存位置，再导出。"
-                      : "请先加载 Timesheet 文件。"}
+                    请先加载 Timesheet 文件。
                   </p>
                 )}
               </>

@@ -120,12 +120,8 @@ describe("TS legacy filter semantics", () => {
     ).toBe("D:\\Timesheet\\FY27");
   });
 
-  it("requires the user to choose an output path before export", () => {
-    expect(tsManagerParity.canStartTsExport(["Hours"], "")).toBe(false);
-    expect(tsManagerParity.canStartTsExport(["Hours"], "   ")).toBe(false);
-    expect(tsManagerParity.canStartTsExport([], "C:/data/result.xlsx")).toBe(false);
-    expect(
-      tsManagerParity.canStartTsExport(["Hours"], "C:/data/result.xlsx"),
-    ).toBe(true);
+  it("enables export once headers are loaded, before choosing a save path", () => {
+    expect(tsManagerParity.canStartTsExport([])).toBe(false);
+    expect(tsManagerParity.canStartTsExport(["Hours"])).toBe(true);
   });
 });

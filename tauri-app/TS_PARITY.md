@@ -1,5 +1,11 @@
 # TS 管理迁移一致性矩阵
 
+## 2026-11-04：点击导出后选择保存位置
+
+- 加载表头后即可点击「导出默认双 Sheet」；未预选输出文件时弹出原生「另存为」，预填「工时报告.xlsx」，确认后将所选完整文件路径传给 `ts.export`。保留预选路径复用；取消不启动任务，对话框异常显示错误且可重试，等待期间阻止重复提交。
+- Rust 输出路径必填规则、by经理／by项目聚合、Sheet 名和明细 CSV 输出保持原逻辑。本次不改 Rust；当前源码保存类型调用 `blocking_save_file`，用户安装版对话框现象未复现。
+- 验证：`npx vitest run src/TsManagerParityPage.test.ts src/TsManagerExport.test.tsx`、`npm run build`。未打包或替换安装版，未实测 Windows 原生对话框。
+
 ## 2026-10-26：Excel 2003 XML 输入兼容
 
 接入公共 SpreadsheetML 内容识别、数据读取及模板准备；包括 NetSuite 使用 `.XLS` 后缀的 XML 导出。保留现有字段映射与业务规则；数据读取不依赖 Excel，版式模板转换沿用本机 Excel。格式、缓存、预览／完整读取边界及验证命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。

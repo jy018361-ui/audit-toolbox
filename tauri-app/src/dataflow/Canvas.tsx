@@ -131,6 +131,10 @@ export function DataflowCanvas({
   const dragRef = useRef<DragState>(null);
   const cameraRef = useRef(camera);
   cameraRef.current = camera;
+  // 延迟适配的代数守卫：用户一旦亲自动视角（平移/缩放/改接），未完成的
+  // 延迟适配立即作废——否则恢复页后的 100/350ms 补跑适配会把用户刚做的
+  // 缩放拖拽弹回原样（真实反馈 2026-11-04：“放大缩小完全不管用”）。
+  const fitGuardRef = useRef(0);
   // 连线临时路径：渲染用 state、判定用 ref——快速拖动时 pointerup 可能先于
   // React 重渲染到达，读 state 会拿到旧值而丢线。
   const [tempEdge, setTempEdge] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
@@ -152,6 +156,8 @@ export function DataflowCanvas({
     if (!canvas) return;
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
+      // 滚轮/触摸板是视角操作：作废待执行的延迟适配，防止弹回。
+      fitGuardRef.current += 1;
       const current = cameraRef.current;
       if (event.ctrlKey) {
         const rect = canvas.getBoundingClientRect();
@@ -242,13 +248,17 @@ export function DataflowCanvas({
     // 内容可能被适配进一个"更大的画布"随后又顶出视野——多级延迟后到者
     // 生效：两帧（常规）＋100ms＋350ms（慢布局/窗口初开），保证按最终
     // 尺寸适配。
+    const generation = ++fitGuardRef.current;
+    const runIfStillCurrent = () => {
+      if (fitGuardRef.current === generation) fitToContent();
+    };
     const timers: number[] = [];
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => fitToContent());
+      raf2 = requestAnimationFrame(runIfStillCurrent);
     });
-    timers.push(window.setTimeout(() => fitToContent(), 100));
-    timers.push(window.setTimeout(() => fitToContent(), 350));
+    timers.push(window.setTimeout(runIfStillCurrent, 100));
+    timers.push(window.setTimeout(runIfStillCurrent, 350));
     return () => {
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
@@ -303,6 +313,8 @@ export function DataflowCanvas({
 
   function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return;
+    // 用户亲自下场操作视角/节点/连线：作废所有待执行的延迟适配。
+    fitGuardRef.current += 1;
     const target = event.target as HTMLElement;
     const outAnchor = target.closest(".df-a-out") as HTMLElement | null;
     if (outAnchor) {
@@ -714,9 +726,10 @@ export function DataflowCanvas({
             type="button"
             className="df-tool"
             aria-label="放大"
-            onClick={() =>
-              setCamera((current) => ({ ...current, zoom: Math.min(2.2, current.zoom * 1.15) }))
-            }
+            onClick={() => {
+              fitGuardRef.current += 1;
+              setCamera((current) => ({ ...current, zoom: Math.min(2.2, current.zoom * 1.15) }));
+            }}
           >
             <ZoomIn size={13} />
           </button>
@@ -724,9 +737,10 @@ export function DataflowCanvas({
             type="button"
             className="df-tool"
             aria-label="缩小"
-            onClick={() =>
-              setCamera((current) => ({ ...current, zoom: Math.max(0.35, current.zoom / 1.15) }))
-            }
+            onClick={() => {
+              fitGuardRef.current += 1;
+              setCamera((current) => ({ ...current, zoom: Math.max(0.35, current.zoom / 1.15) }));
+            }}
           >
             <ZoomOut size={13} />
           </button>

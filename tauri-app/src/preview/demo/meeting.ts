@@ -1,10 +1,15 @@
 // 仅显式浏览器演示模式使用；以下会议与正文均为合成示例。
 import type { DemoHandler, DemoJobHandler } from "../demoRegistry";
 
+const recordingMetadata = { meetingStartedAt:"2026-11-02T10:00:00+08:00", meetingEndedAt:"2026-11-02T11:00:00+08:00",
+  speakerDurationsMs:{"1":480_000,"2":120_000} };
+
 const content = `# 季度审计项目协调会（按内容）
 
 ## 一、会议信息
-本示例为界面演示，会议时间与参会人未提及。
+会议时间：未知
+
+参会人员：说话人1、说话人2
 
 ## 二、讨论要点
 ### 底稿准备与复核
@@ -33,8 +38,8 @@ export const handlers: Record<string, DemoHandler> = {
         id: "demo-review",
         jobId: "demo-review-job",
         title: "演示：季度审计项目协调会",
-        startedAt: today.toISOString(),
-        timeLabel: "生成时间",
+        startedAt: recordingMetadata.meetingStartedAt,
+        timeLabel: "会议时间",
         status: "completed",
         message: "两个版本已生成",
       },
@@ -62,6 +67,7 @@ export const handlers: Record<string, DemoHandler> = {
     id === "demo-failed"
       ? { audioPath: "C:/演示数据/资料交付.wav" }
       : {
+          ...recordingMetadata,
           title:
             id === "demo-partial" ? "存货盘点准备沟通" : "季度审计项目协调会",
           transcriptPath: "C:/演示数据/原始转写.txt",
@@ -99,6 +105,7 @@ const regenerate: DemoJobHandler = params => {
   return [
     {phase:"running",current:1,total:2,message:`演示：按${detail}档生成两个版本`,severity:"info",outputPaths:[]},
     {phase:"completed",current:2,total:2,message:`演示：${detail}档纪要已生成`,severity:"success",outputPaths:[],result:{
+      ...recordingMetadata,
       title:"季度审计项目协调会",transcriptPath:params.transcriptPath || "C:/演示数据/原始转写.txt",
       ...(params.audioPath ? {audioPath:params.audioPath} : {}),
       minutesVersions:[

@@ -18,25 +18,29 @@ it("粘贴过滤脚本图片和不可信姓名身份属性",()=>{
   expect(html).not.toMatch(/<script|<img|onclick|data-meeting-speaker/);
   expect(html).toContain("张三");
 });
-it("正文姓名后显示占比，自动保存保留编号来源，重新渲染不重复占比且不影响同名正文",()=>{
-  const source="说话人1发言，张三补充；说话人10回复。\n\n|责任人|\n|---|\n|说话人1|";
+it("占比只显示在参会人员行，讨论和责任人表格均不显示，保存保留编号来源",()=>{
+  const source="**参会人员**：**说话人1**、说话人10\n\n说话人1发言，张三补充；说话人10回复。\n\n|责任人|\n|---|\n|说话人1|";
   const shares={"1":"80%","10":"20%"};
   const div=document.createElement("div");div.innerHTML=editableMinutesHtml(source,{"1":"张三"},shares);
-  expect(div.textContent).toContain("张三（80%）发言，张三补充；说话人10（20%）回复。");
-  expect(div.querySelector("td")?.textContent).toBe("张三（80%）");
+  expect(div.querySelector("p")?.textContent).toContain("参会人员：张三（80%）、说话人10（20%）");
+  expect(div.textContent).toContain("张三发言，张三补充；说话人10回复。");
+  expect(div.querySelector("td")?.textContent).toBe("张三");
   const canonical=minutesElementToMarkdown(div);
   expect(canonical).toContain("说话人1发言，张三补充；说话人10回复。");
   expect(canonical).not.toContain("%");
   updateMinutesSpeakerDisplays(div,{"1":"李四"},shares);
-  expect(div.textContent).toContain("李四（80%）发言，张三补充");
+  expect(div.textContent).toContain("李四发言，张三补充");
+  expect(div.querySelector("p")?.textContent).toContain("李四（80%）");
   updateMinutesSpeakerDisplays(div,{},shares);
-  expect(div.textContent).toContain("说话人1（80%）发言");
+  expect(div.textContent).toContain("说话人1发言");
   expect(div.textContent).not.toContain("（80%）（80%）");
   div.querySelector("[data-meeting-speaker]")!.textContent="人工修订的人名";
   updateMinutesSpeakerDisplays(div,{"1":"王五"},shares);
-  expect(minutesElementToMarkdown(div)).toContain("人工修订的人名发言");
+  expect(minutesElementToMarkdown(div)).toContain("人工修订的人名");
   const exported=replaceSpeakerNames(source,{"1":"张三"},shares);
-  expect(exported).toContain("张三（80%）发言，张三补充；说话人10（20%）回复。");
+  expect(exported).toContain("**参会人员**：**张三（80%）**、说话人10（20%）");
+  expect(exported).toContain("张三发言，张三补充；说话人10回复。");
+  expect(exported).not.toContain("张三（80%）发言");
 });
 it("去掉录音时间轴保留先后顺序、实际会议时间和截止日期",()=>{
   const text="# 标题（按时间）\n\n### [00:01–02:30] 开场\n[02:30] 讨论\n- 03:10 补充\n会议时间：10:00–11:00\n截止时间：周五18:00\n[2026-10-29] 资料交付";
@@ -44,4 +48,14 @@ it("去掉录音时间轴保留先后顺序、实际会议时间和截止日期"
   expect(clean).toContain("### 开场");expect(clean).toContain("- 补充");
   expect(clean).not.toMatch(/00:01|02:30|03:10/);
   expect(clean).toContain("10:00–11:00");expect(clean).toContain("周五18:00");expect(clean).toContain("[2026-10-29]");
+});
+it("表格的参会人员行带占比，责任人行不带占比，导出与编辑一致",()=>{
+  const source="|字段|信息|\n|---|---|\n|参会人员|说话人1、说话人2|\n|责任人|说话人1|";
+  const div=document.createElement("div");div.innerHTML=editableMinutesHtml(source,{}, {"1":"80%","2":"20%"});
+  const rows=div.querySelectorAll("tbody tr");
+  expect(rows[0].textContent).toContain("说话人1（80%）、说话人2（20%）");
+  expect(rows[1].textContent).not.toContain("%");
+  const exported=replaceSpeakerNames(source,{}, {"1":"80%","2":"20%"});
+  expect(exported).toContain("|参会人员|说话人1（80%）、说话人2（20%）|");
+  expect(exported).toContain("|责任人|说话人1|");
 });

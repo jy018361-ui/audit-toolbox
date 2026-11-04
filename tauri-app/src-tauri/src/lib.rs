@@ -782,6 +782,8 @@ async fn job_start_inner(
     if method.starts_with("meeting.") {
         if let Value::Object(ref mut map) = params {
             map.insert("__meetingVocabulary".into(), json!(storage.meeting_vocabulary_list()?));
+            let context=storage.meeting_metadata_for_transcript(map.get("transcriptPath").and_then(Value::as_str).unwrap_or(""))?;
+            map.insert("__meetingMetadata".into(),context);
         }
     }
     if method.starts_with("fuzzy.") {

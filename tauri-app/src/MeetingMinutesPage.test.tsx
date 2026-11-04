@@ -107,29 +107,34 @@ describe("会议正文编辑及姓名对应", () => {
     fireEvent.input(article);
     return article;
   };
-  it("正文说话人显示内容占比，姓名输入区域无占比，编辑保存不重复追加百分比", async () => {
+  it("仅参会人员行带占比，输入区讨论表格均不带，复制邮件和改名保持一致", async () => {
     const api = await import("./api");
     vi.mocked(api.meetingReadTranscript).mockResolvedValue("[00:00] 说话人1：甲乙丙丁戊己庚辛\n[00:10] 说话人2：壬癸");
     await open();
     const region = screen.getByRole("region", {name:"说话人姓名对应"});
     const article = screen.getByRole("article", {name:"会议纪要正文"});
-    await waitFor(() => expect(article).toHaveTextContent("说话人1（80%）安排复核"));
+    await waitFor(() => expect(article).toHaveTextContent("参会人员：说话人1（80%）"));
+    expect(article).toHaveTextContent("说话人1安排复核");
+    expect(article).not.toHaveTextContent("说话人1（80%）安排复核");
     expect(article).toHaveTextContent("说话人2（20%）");
     expect(region).not.toHaveTextContent("%");
-    expect(screen.getByText(/不代表发言时长/)).toBeInTheDocument();
+    expect(screen.getByText(/旧转写无发言时长数据/)).toBeInTheDocument();
     expect(api.meetingSaveMinutes).not.toHaveBeenCalled();
     article.append(document.createTextNode("人工补充文字。")); fireEvent.input(article);
     const name = within(region).getByRole("textbox", {name:"说话人1姓名"});
     fireEvent.change(name,{target:{value:"张三"}}); fireEvent.blur(name);
-    await waitFor(() => expect(article).toHaveTextContent("张三（80%）安排复核"));
+    await waitFor(() => expect(article).toHaveTextContent("参会人员：张三（80%）"));
+    expect(article).toHaveTextContent("张三安排复核");
     fireEvent.click(screen.getByRole("button", {name:"生成邮件草稿"}));
-    await waitFor(() => expect(api.meetingCreateMailDraft).toHaveBeenCalledWith(expect.any(String),expect.stringContaining("张三（80%）安排复核")));
+    await waitFor(() => expect(api.meetingCreateMailDraft).toHaveBeenCalledWith(expect.any(String),expect.stringContaining("参会人员：张三（80%）")));
+    expect(vi.mocked(api.meetingCreateMailDraft).mock.calls[0][1]).not.toContain("张三（80%）安排复核");
     await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenCalled());
     for (const call of vi.mocked(api.meetingSaveMinutes).mock.calls) expect(call[1]).not.toContain("%");
     fireEvent.click(screen.getByRole("button", {name:"按时间"}));
-    expect(screen.getByRole("article")).toHaveTextContent("张三（80%）发言");
+    expect(screen.getByRole("article")).toHaveTextContent("参会人员：张三（80%）");
+    expect(screen.getByRole("article")).toHaveTextContent("张三发言");
     fireEvent.change(name,{target:{value:""}}); fireEvent.blur(name);
-    expect(screen.getByRole("article")).toHaveTextContent("说话人1（80%）发言");
+    expect(screen.getByRole("article")).toHaveTextContent("参会人员：说话人1（80%）");
     expect(screen.getByRole("article")).not.toHaveTextContent("（80%）（80%）");
     fireEvent.click(screen.getByRole("button", {name:"原始转写"}));
     await screen.findByRole("article", {name:"原始转写正文"});
@@ -144,6 +149,18 @@ describe("会议正文编辑及姓名对应", () => {
     expect(region).not.toHaveTextContent("%");
     expect(within(region).getByRole("textbox", {name:"说话人1姓名"})).toBeEnabled();
     expect(screen.getByRole("article")).toHaveTextContent("安排复核");
+  });
+  it("录音时间和历史日期均带星期，参会行用时长占比且讨论中不显示", async () => {
+    const api=await import("./api");
+    vi.mocked(api.meetingHistoryList).mockResolvedValue([{id:"timed",jobId:"timed",title:"录音会议",startedAt:"2026-11-02T10:00:00+08:00",timeLabel:"会议时间",status:"completed",message:""}]);
+    vi.mocked(api.meetingHistoryGet).mockResolvedValue({...result,meetingStartedAt:"2026-11-02T10:00:00+08:00",meetingEndedAt:"2026-11-02T11:00:00+08:00",speakerDurationsMs:{"1":8000,"2":2000}});
+    vi.mocked(api.meetingReadTranscript).mockResolvedValue("说话人1：甲\n说话人2：乙丙丁");
+    render(<MeetingMinutesPage tool={tool}/>);
+    const article=await screen.findByRole("article");
+    expect(article).toHaveTextContent("2026-11-02（周一）");
+    expect(article).toHaveTextContent("参会人员：说话人1（80%）、说话人2（20%）");
+    expect(article).not.toHaveTextContent("说话人1（80%）安排复核");
+    expect(screen.getByLabelText("会议历史列表")).toHaveTextContent("2026-11-02（周一）");
   });
   it("正文默认可直接编辑，自动保存且版本切换保留排版和草稿", async () => {
     const api = await open();

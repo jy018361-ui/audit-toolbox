@@ -46,6 +46,7 @@ import { markToolPageLive } from "./toolPageActivity";
 import { meetingOutputPath } from "./meetingMinutesResult";
 import { replaceSpeakerNames, speakerIds, type SpeakerNames } from "./meetingSpeakerNames";
 import { meetingSpeakerShares } from "./meetingSpeakerShares";
+import { meetingDateTime, withMeetingInfo } from "./meetingMinutesInfo";
 import { copyFormattedMinutes, formatMeetingMinutes } from "./meetingMinutesFormat";
 import {
   MeetingResultSchema,
@@ -86,24 +87,11 @@ export function displayAudioFileName(path: string) {
 }
 
 function historyTimestamp(value: string) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? "—"
-    : date.toLocaleString("zh-CN", {
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false,
-      });
+  return meetingDateTime(value) ?? "—";
 }
 
 function historyDateTime(value: string) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? "时间未知"
-    : date.toLocaleString("zh-CN", { hour12: false });
+  return meetingDateTime(value) ?? "时间未知";
 }
 
 function historyStatus(status: string, active: boolean) {
@@ -350,13 +338,14 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     expected: version.minutesMarkdown, names: version.speakerNames, timeline: version.kind === "timeline",
   })) : [document];
   const minutesEditor = useMeetingMinutesEditor(document, speakerNames, !previewMode);
-  const speakerShares = useMemo(() => meetingSpeakerShares(transcript), [transcript]);
-  const shareHint = !result?.transcriptPath ? "未保留原始转写稿，内容占比暂不可用。"
+  const speakerShares = useMemo(() => meetingSpeakerShares(transcript, result?.speakerDurationsMs), [transcript, result?.speakerDurationsMs]);
+  const hasDurations = Object.values(result?.speakerDurationsMs ?? {}).some(duration=>duration>0);
+  const shareHint = hasDurations ? "参会人员行显示发言时长占比（按转写片段起止时间统计，重叠发言分别计时）。"
+    : !result?.transcriptPath ? "未保留原始转写稿，内容占比暂不可用。"
     : transcriptError ? "原始转写稿读取失败，内容占比暂不可用。"
     : transcript === undefined ? "正在统计发言内容占比…"
     : !Object.keys(speakerShares.percentages).length ? "转写稿缺少可统计的说话人发言，内容占比暂不可用。"
-    : `内容占比按原始转写的有效文字量估算，忽略标点和空白，不代表发言时长。${speakerShares.hasUnattributed ? "未标注说话人的内容也计入总量。" : ""}`;
-  const visibleMinutes = minutesEditor.body == null ? undefined : replaceSpeakerNames(minutesEditor.body, speakerNames, speakerShares.percentages);
+    : `参会人员行显示内容占比：旧转写无发言时长数据，按有效文字量估算。${speakerShares.hasUnattributed ? "未标注说话人的内容也计入总量。" : ""}`;
   const saveErrors = minutesEditor.errorsFor(documents);
   const commitNames = (names: SpeakerNames) => {
     updateSpeakerNames(names);
@@ -370,7 +359,11 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     for (let id = 1; id <= result.speakerCount; id++) recognizedSpeakerIds.push(String(id));
   }
   for (const id of Object.keys(speakerNames)) if (!recognizedSpeakerIds.includes(id)) recognizedSpeakerIds.push(id);
+  for (const id of Object.keys(result?.speakerDurationsMs ?? {})) if (!recognizedSpeakerIds.includes(id)) recognizedSpeakerIds.push(id);
   recognizedSpeakerIds.sort((a, b) => Number(a) - Number(b));
+  const displayedSource = minutesEditor.body == null ? undefined : withMeetingInfo(minutesEditor.body, recognizedSpeakerIds,
+    result?.meetingStartedAt, result?.meetingEndedAt);
+  const visibleMinutes = displayedSource == null ? undefined : replaceSpeakerNames(displayedSource, speakerNames, speakerShares.percentages);
 
   useEffect(() => {
     setPreviewError("");
@@ -1250,7 +1243,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                       </article>
                     )
                   ) : visibleMinutes != null ? (
-                    <MeetingMinutesInlineEditor key={document.key} source={minutesEditor.body ?? ""}
+                    <MeetingMinutesInlineEditor key={document.key} source={displayedSource ?? ""}
                       names={speakerNames} shares={speakerShares.percentages} onChange={minutesEditor.change} onBlur={minutesEditor.flush} />
                   ) : minutesPath && !previewError ? (
                     <p role="status">正在读取纪要正文…</p>

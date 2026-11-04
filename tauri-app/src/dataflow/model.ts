@@ -415,7 +415,7 @@ export function defaultConfigFor(type: string): Record<string, unknown> {
         headerRow: 1,
         dataStartRow: 2,
         attachSourceColumns: true,
-        onRowError: "stop",
+        onRowError: "skip",
         columnTypes: {},
       };
     case "csv_in":
@@ -426,7 +426,7 @@ export function defaultConfigFor(type: string): Record<string, unknown> {
         delimiter: "auto",
         headerRow: 1,
         attachSourceColumns: true,
-        onRowError: "stop",
+        onRowError: "skip",
         columnTypes: {},
       };
     case "select_n":
@@ -444,7 +444,7 @@ export function defaultConfigFor(type: string): Record<string, unknown> {
       return {
         formulas: [] as FormulaConfig[],
         // 行级异常策略（除零、转换失败等）独立于输入节点，默认与引擎 RowErrorPolicy 一致。
-        onRowError: "stop",
+        onRowError: "skip",
       };
     case "filter_n":
       return {
@@ -529,14 +529,14 @@ export function defaultConfigFor(type: string): Record<string, unknown> {
       return {
         columns: [{ name: "列名", type: "text" }] as ManualColumnConfig[],
         rows: [[""]] as string[][],
-        onRowError: "stop",
+        onRowError: "skip",
       };
     case "db_in":
       return {
         path: "",
         table: "",
         fields: [] as string[],
-        onRowError: "stop",
+        onRowError: "skip",
       };
     case "parquet_in":
       return {
@@ -609,9 +609,9 @@ export function normalizeConfig(
   if (type === "clean" && !Array.isArray(coerced.actions)) coerced.actions = [];
   if (type === "formula" && !Array.isArray(coerced.formulas)) coerced.formulas = [];
   if (type === "formula") {
-    // 引擎 RowErrorPolicy 只认 stop/skip，乱值兜底回默认 stop。
+    // 引擎 RowErrorPolicy 只认 stop/skip，乱值兜底回默认 skip（2026-10-30 用户裁定）。
     if (coerced.onRowError !== "stop" && coerced.onRowError !== "skip") {
-      coerced.onRowError = "stop";
+      coerced.onRowError = "skip";
     }
   }
   if (type === "filter_n") {

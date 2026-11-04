@@ -29,6 +29,7 @@ import {
   saveDraft,
   validateNewEdge,
   type DataflowEdge,
+  type DataflowNode,
   type DataflowRunResult,
   type FilterRuleConfig,
   type DataflowWorkflow,
@@ -337,7 +338,9 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     setStatusText("已重做一步。");
   }
 
-  // 画布快捷键：Delete 删除选中、Ctrl+Z/Y 撤销重做；输入控件内不拦截。
+  // 画布快捷键：Delete 删除选中、Ctrl+Z/Y 撤销重做、Ctrl+C/V 复制粘贴节点；
+  // 输入控件内不拦截。
+  const clipboardRef = useRef<DataflowNode | null>(null);
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (paramsDialog) return;
@@ -355,6 +358,31 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
       ) {
         event.preventDefault();
         redo();
+      } else if ((event.ctrlKey || event.metaKey) && key === "c") {
+        // 复制选中节点（连线不复制：粘贴后按新拓扑重连更直观）。
+        if (selection?.kind === "node") {
+          const source = workflowRef.current.nodes.find((node) => node.id === selection.id);
+          if (source) {
+            clipboardRef.current = JSON.parse(JSON.stringify(source)) as DataflowNode;
+            setStatusText(`已复制节点「${source.name}」，按 Ctrl+V 粘贴。`);
+          }
+        }
+      } else if ((event.ctrlKey || event.metaKey) && key === "v") {
+        const source = clipboardRef.current;
+        if (!source) return;
+        event.preventDefault();
+        const wf = workflowRef.current;
+        const copy: DataflowNode = {
+          ...JSON.parse(JSON.stringify(source)) as DataflowNode,
+          id: nextNodeId(wf),
+          name: `${source.name} 副本`,
+          x: Math.max(4, Math.min(4600, source.x + 48)),
+          y: Math.max(4, Math.min(3600, source.y + 48)),
+        };
+        commit((current) => ({ ...current, nodes: [...current.nodes, copy] }));
+        setSelection({ kind: "node", id: copy.id });
+        setFocusNodeId(copy.id);
+        setStatusText(`已粘贴节点「${copy.name}」（配置与原节点一致，连线需重连）。`);
       } else if (event.key === "Delete" || event.key === "Backspace") {
         if (!selection) return;
         event.preventDefault();
@@ -603,6 +631,36 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     return runResult?.nodes[nodeId];
   }
 
+  /** 字段取值建议（筛选条件值等）：取全部上游（输入节点取自身）最近一次
+      运行结果的样本，按字段列去重统计、高频在前——用户不必再开 Excel 查
+      “这个字段下都有什么值”再手抄进条件里。基于预览样本（每锚点前 200 行），
+      界面提示语已注明。 */
+  function valueOptionsOf(nodeId: string | undefined, field: string): string[] {
+    if (!nodeId || !runResult || !field.trim()) return [];
+    const upstream = [...new Set(workflow.edges.filter((edge) => edge.to === nodeId).map((edge) => edge.from))];
+    const sourceIds = upstream.length ? upstream : [nodeId];
+    const counts = new Map<string, number>();
+    for (const id of sourceIds) {
+      const result = runResult.nodes[id];
+      if (!result) continue;
+      for (const anchor of Object.values(result.anchors)) {
+        const columnIndex = (anchor.columns ?? []).indexOf(field.trim());
+        if (columnIndex < 0) continue;
+        for (const row of anchor.sample ?? []) {
+          const cell = row[columnIndex];
+          if (cell === null || cell === undefined) continue;
+          const text = String(cell);
+          if (!text) continue;
+          counts.set(text, (counts.get(text) ?? 0) + 1);
+        }
+      }
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 100)
+      .map(([value]) => value);
+  }
+
   /** 选中节点的字段下拉建议：取全部上游（无上游＝输入节点自身）最近一次
       运行结果的列名，按连线顺序去重合并——设置好标题行并跑过一次后，
       各功能区的字段输入框就能直接选，不必照着表格手抄。 */
@@ -692,6 +750,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
             outputDir={outputDir}
             onPickOutputDir={() => void handlePickOutputDir()}
             fieldOptions={fieldOptionsOf(selectedNode?.id)}
+            valueOptionsOf={(field) => valueOptionsOf(selectedNode?.id, field)}
           />
           <div
             className="df-split df-split-v"

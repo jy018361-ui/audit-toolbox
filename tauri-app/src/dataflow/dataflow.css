@@ -788,9 +788,14 @@ textarea.df-in {
   white-space: nowrap;
 }
 .df-node-names span {
+  display: block;
   font-size: var(--fs-xs);
   color: var(--text-muted);
   white-space: nowrap;
+  /* 类型名过长（如“CSV/文本输入 Input”）时省略号截断——此前溢出卡片，
+     与两侧锚点标签（T 符合/F 不符合）串行重叠（用户反馈 2026-10-30）。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* 运行状态徽标：彩色胶囊（currentColor 12% 混面板底），沿用各状态前景色。 */
 .df-node-badge {

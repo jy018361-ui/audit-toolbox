@@ -391,3 +391,21 @@ it("恢复坐标超出当前画布的草稿：自动适配视角，全部节点�
     expect(transform).toContain("scale(0.35)");
   });
 });
+
+it("Ctrl+C/Ctrl+V 复制粘贴节点：副本带相同配置、名称加「副本」、落在偏移位置", async () => {
+  // 用户需求 2026-10-30：画布应支持快捷键复制粘贴节点。
+  render(<DataFlowPage tool={dataflowTool} />);
+  await addNodeFromMenu("输入", "Excel 输入");
+  // 选中节点（添加后已自动选中），复制再粘贴。
+  const before = document.querySelectorAll(".df-node").length;
+  fireEvent.keyDown(window, { key: "c", ctrlKey: true });
+  fireEvent.keyDown(window, { key: "v", ctrlKey: true });
+  await waitFor(() => expect(document.querySelectorAll(".df-node").length).toBe(before + 1));
+  const copy = document.querySelectorAll(".df-node")[before]!;
+  expect(copy.querySelector("b")?.textContent).toContain("副本");
+  // 粘贴后自动选中并聚焦，可继续拖动。
+  expect(copy.classList.contains("df-selected")).toBe(true);
+  // 再按一次 V：还可以继续粘贴（剪贴板保留）。
+  fireEvent.keyDown(window, { key: "v", ctrlKey: true });
+  await waitFor(() => expect(document.querySelectorAll(".df-node").length).toBe(before + 2));
+});

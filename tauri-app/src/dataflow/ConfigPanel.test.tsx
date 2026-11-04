@@ -41,6 +41,7 @@ function renderPanel(type: string, config: Record<string, unknown> = defaultConf
       outputDir="D:\审计底稿"
       onPickOutputDir={() => undefined}
       fieldOptions={["凭证号", "金额", "客商名称"]}
+      valueOptionsOf={() => ["收", "付", "转"]}
     />,
   );
   return { onConfigChange };
@@ -67,6 +68,7 @@ function renderLivePanel(type: string, initial: Record<string, unknown> = defaul
       outputDir="D:\审计底稿"
       onPickOutputDir={() => undefined}
       fieldOptions={["凭证号", "金额", "客商名称"]}
+      valueOptionsOf={() => ["收", "付", "转"]}
       />
     );
   }
@@ -148,7 +150,7 @@ describe("数据流配置区：手工输入内嵌小表", () => {
         { name: "列名", type: "text" },
       ],
       rows: [["", ""]],
-      onRowError: "stop",
+      onRowError: "skip",
     });
 
     fireEvent.click(screen.getByRole("button", { name: "添加行" }));
@@ -161,7 +163,7 @@ describe("数据流配置区：手工输入内嵌小表", () => {
         ["", ""],
         ["", ""],
       ],
-      onRowError: "stop",
+      onRowError: "skip",
     });
   });
 
@@ -172,7 +174,7 @@ describe("数据流配置区：手工输入内嵌小表", () => {
         { name: "金额", type: "decimal" },
       ],
       rows: [["1002", "1250"]],
-      onRowError: "stop",
+      onRowError: "skip",
     });
     fireEvent.change(screen.getByLabelText("单元格 1 行 1 列（科目编码）"), {
       target: { value: "100201" },
@@ -186,7 +188,7 @@ describe("数据流配置区：手工输入内嵌小表", () => {
         { name: "金额", type: "date" },
       ],
       rows: [["100201", "1250"]],
-      onRowError: "stop",
+      onRowError: "skip",
     });
   });
 
@@ -197,14 +199,14 @@ describe("数据流配置区：手工输入内嵌小表", () => {
         { name: "金额", type: "decimal" },
       ],
       rows: [["1002", "1250"]],
-      onRowError: "stop",
+      onRowError: "skip",
     });
     // 列定义区在前、数据行区在后（DOM 顺序），第一个「删除此行」删的是第一列。
     fireEvent.click(screen.getAllByRole("button", { name: "删除此行" })[0]);
     expect(onConfigChange).toHaveBeenLastCalledWith({
       columns: [{ name: "金额", type: "decimal" }],
       rows: [["1250"]],
-      onRowError: "stop",
+      onRowError: "skip",
     });
     // 只剩一列后删列禁用，但删行可用。
     const after = screen.getAllByRole("button", { name: "删除此行" });
@@ -213,7 +215,7 @@ describe("数据流配置区：手工输入内嵌小表", () => {
     expect(onConfigChange).toHaveBeenLastCalledWith({
       columns: [{ name: "金额", type: "decimal" }],
       rows: [],
-      onRowError: "stop",
+      onRowError: "skip",
     });
   });
 });
@@ -390,14 +392,14 @@ describe("数据流配置区：CSV 输出覆盖保护（与 Excel 输出对齐�
 });
 
 describe("数据流配置区：公式节点行级异常策略（onRowError 独立生效）", () => {
-  it("公式表单有「异常处理」下拉，旧文件无该字段回显默认 stop，选项与引擎白名单一致", () => {
+  it("公式表单有「异常处理」下拉，旧文件无该字段回显默认 skip，选项与引擎白名单一致", () => {
     // 模拟修复前的旧流程文件：formula config 不含 onRowError。
     renderPanel("formula", { formulas: [{ target: "差额", expression: "借方金额 - 贷方金额" }] });
     const select = screen.getByLabelText("异常处理（行级错误）") as HTMLSelectElement;
-    // 引擎 RowErrorPolicy::parse 只认 stop（默认）/ skip；
+    // 引擎 RowErrorPolicy::parse 默认 skip（2026-10-30 用户裁定）；
     // 公式节点的策略从自身 config 解析，与输入节点设置无关。
-    expect(Array.from(select.options).map((option) => option.value)).toEqual(["stop", "skip"]);
-    expect(select.value).toBe("stop");
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(["skip", "stop"]);
+    expect(select.value).toBe("skip");
   });
 
   it("选「跳过整行并记录」写入 config.onRowError＝skip（不再中止整次运行）", () => {
@@ -408,12 +410,12 @@ describe("数据流配置区：公式节点行级异常策略（onRowError 独�
     );
   });
 
-  it("契约与默认值：onRowError 纳入 formula 契约，默认 stop，乱值规整回 stop", () => {
-    expect(defaultConfigFor("formula").onRowError).toBe("stop");
+  it("契约与默认值：onRowError 纳入 formula 契约，默认 skip，乱值规整回 skip", () => {
+    expect(defaultConfigFor("formula").onRowError).toBe("skip");
     // 修复前 formula 契约清单仅 [\"formulas\"]，配置了 onRowError 的节点会被保存前自检判越界。
     expect(configKeysWithinContract("formula", defaultConfigFor("formula"))).toBe(true);
     expect(normalizeConfig("formula", { formulas: [], onRowError: "skip" }).onRowError).toBe("skip");
-    expect(normalizeConfig("formula", { formulas: [], onRowError: "乱写" }).onRowError).toBe("stop");
+    expect(normalizeConfig("formula", { formulas: [], onRowError: "乱写" }).onRowError).toBe("skip");
   });
 
   it("底部文案不再对公式节点宣称「由输入节点决定」，改为独立生效说明", () => {
@@ -452,6 +454,7 @@ it("没有上游列名时字段输入框退化为普通输入（不挂 datalist�
       outputDir=""
       onPickOutputDir={() => undefined}
       fieldOptions={[]}
+      valueOptionsOf={() => []}
     />,
   );
   const fieldInput = screen.getByPlaceholderText("字段（可下拉选）");
@@ -481,6 +484,7 @@ it("多字段输入（如透视行字段）：点「选择」出勾选清单，�
         outputDir=""
         onPickOutputDir={() => undefined}
         fieldOptions={["客商名称", "期间", "科目编码"]}
+        valueOptionsOf={() => []}
       />
     );
   }
@@ -500,4 +504,16 @@ it("多字段输入（如透视行字段）：点「选择」出勾选清单，�
   const manual = screen.getAllByPlaceholderText("点「选择」勾选，或输入字段名")[0]!;
   fireEvent.change(manual, { target: { value: "科目编码、备注" } });
   expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ rowField: ["科目编码", "备注"] }));
+});
+
+it("筛选条件的「值」输入框带字段取值建议：选了字段后可直接下拉挑常见值", () => {
+  // 用户需求 2026-10-30：不必打开 Excel 查字段下有哪些值再手抄。
+  renderPanel("filter_n", {
+    condition: { op: "and", rules: [{ field: "凭证字", operator: "=", value: "" }] },
+  });
+  const valueInput = screen.getByPlaceholderText("值（为空/不为空时无需填；可下拉选）");
+  const listId = valueInput.getAttribute("list");
+  expect(listId).toMatch(/^df-field-list-/);
+  const options = [...document.querySelectorAll<HTMLOptionElement>(`datalist#${listId} option`)].map((o) => o.value);
+  expect(options).toEqual(["收", "付", "转"]);
 });

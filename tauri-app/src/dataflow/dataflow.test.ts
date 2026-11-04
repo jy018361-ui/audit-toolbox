@@ -413,7 +413,7 @@ describe("数据流：config 序列化", () => {
       headerRow: 1,
       dataStartRow: 2,
       attachSourceColumns: true,
-      onRowError: "stop",
+      onRowError: "skip",
       columnTypes: {},
     });
   });
@@ -426,7 +426,7 @@ describe("数据流：config 序列化", () => {
       delimiter: "auto",
       headerRow: 1,
       attachSourceColumns: true,
-      onRowError: "stop",
+      onRowError: "skip",
       columnTypes: {},
     });
     expect(defaultConfigFor("excel_out")).toEqual({
@@ -504,13 +504,13 @@ describe("数据流：config 序列化", () => {
     expect(defaultConfigFor("manual_in")).toEqual({
       columns: [{ name: "列名", type: "text" }],
       rows: [[""]],
-      onRowError: "stop",
+      onRowError: "skip",
     });
     expect(defaultConfigFor("db_in")).toEqual({
       path: "",
       table: "",
       fields: [],
-      onRowError: "stop",
+      onRowError: "skip",
     });
     expect(defaultConfigFor("parquet_in")).toEqual({ path: "", fields: [] });
   });
@@ -563,7 +563,7 @@ describe("数据流：config 序列化", () => {
         rows: [["1002", "1250.00"], ["1122", "468.20"]],
         onRowError: "skip",
       },
-      db_in: { path: "D:\\审计\\账套.db", table: "序时账_2026", fields: ["凭证号", "金额"], onRowError: "stop" },
+      db_in: { path: "D:\\审计\\账套.db", table: "序时账_2026", fields: ["凭证号", "金额"], onRowError: "skip" },
       parquet_in: { path: "D:\\缓存\\明细.parquet", fields: [] },
     };
     for (const [type, config] of Object.entries(edited)) {

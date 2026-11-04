@@ -75,7 +75,7 @@ pub(crate) struct Edge {
     pub to_anchor: Option<String>,
 }
 
-/// 行级异常策略：停止（默认）或跳过整行并记录。
+/// 行级异常策略：跳过整行并记录（默认）或停止。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RowErrorPolicy {
     Stop,
@@ -84,9 +84,11 @@ pub(crate) enum RowErrorPolicy {
 
 impl RowErrorPolicy {
     pub(crate) fn parse(value: Option<&str>) -> Self {
-        match value.unwrap_or("stop").to_ascii_lowercase().as_str() {
-            "skip" => RowErrorPolicy::Skip,
-            _ => RowErrorPolicy::Stop,
+        // 默认跳过并记录（2026-10-30 用户裁定）：审计数据常混有合计行等
+        // “脏行”，默认停止会让整次运行频繁中断；要严格校验时显式选停止。
+        match value.unwrap_or("skip").to_ascii_lowercase().as_str() {
+            "stop" => RowErrorPolicy::Stop,
+            _ => RowErrorPolicy::Skip,
         }
     }
 }

@@ -63,6 +63,8 @@ export interface ConfigPanelProps {
   onPickOutputDir: () => void;
   /** 上游（或输入节点自身）最近一次运行的列名：字段输入框的下拉建议来源。 */
   fieldOptions: string[];
+  /** 字段取值建议（基于预览样本去重、高频在前）：筛选条件值等输入框的下拉来源。 */
+  valueOptionsOf: (field: string) => string[];
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -484,6 +486,7 @@ export function ConfigPanel({
   outputDir,
   onPickOutputDir,
   fieldOptions,
+  valueOptionsOf,
 }: ConfigPanelProps) {
   // 检查规则编辑器「新增规则类型」的记忆值；hook 须位于所有提前 return 之前。
   const [newCheckRuleType, setNewCheckRuleType] = useState<CheckRuleType>("balance");
@@ -626,10 +629,10 @@ export function ConfigPanel({
   const onRowErrorField = () => (
     <Field label="异常处理（行级错误）">
       <Sel
-        value={String(config.onRowError ?? "stop")}
+        value={String(config.onRowError ?? "skip")}
         options={[
-          { value: "stop", label: "停止并报告（默认）" },
-          { value: "skip", label: "跳过整行并记录" },
+          { value: "skip", label: "跳过整行并记录（默认）" },
+          { value: "stop", label: "停止并报告" },
         ]}
         onChange={(value) => setKey("onRowError", value)}
       />
@@ -1016,9 +1019,10 @@ export function ConfigPanel({
                       })
                     }
                   />
-                  <TextIn
+                  <FieldIn
+                    suggestions={valueOptionsOf(rule.field)}
                     value={rule.value}
-                    placeholder="值（为空/不为空时无需填）"
+                    placeholder="值（为空/不为空时无需填；可下拉选）"
                     onChange={(value) =>
                       setCondition({
                         ...condition,

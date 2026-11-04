@@ -8,7 +8,7 @@
 //!   其余契约不变（设计文档第 7 节「运行到选中节点」）；
 //! - 结构性错误（文件缺失、字段缺失、配置无效）停止整次运行：已执行节点的
 //!   状态保留在 `nodes`，失败信息写入 `error`（中文 userMessage）；
-//! - 行级错误（转换失败、除零）按节点 onRowError 停止（默认）或跳过并记录。
+//! - 行级错误（转换失败、除零）按节点 onRowError 跳过整行并记录（默认）或停止。
 
 use crate::AppError;
 use crate::dataflow::model::RunRequest;
@@ -1104,7 +1104,8 @@ mod tests {
             json!([
                 csv_in_node("in", &file, json!({})),
                 {"id": "f", "type": "formula", "name": "公式",
-                 "config": {"formulas": [{"target": "商", "expression": "[被除数] / [除数]"}]}}
+                 "config": {"formulas": [{"target": "商", "expression": "[被除数] / [除数]"}],
+                            "onRowError": "stop"}}
             ]),
             json!([{"from": "in", "to": "f"}]),
         );
@@ -1114,6 +1115,27 @@ mod tests {
             Some("DATAFLOW_ROW_ERROR")
         );
         assert_eq!(node_status(&result, "f"), "error");
+    }
+
+    #[test]
+    fn division_by_zero_defaults_to_skip_and_records() {
+        // 2026-10-30 用户裁定：行级异常默认从「停止并报告」改为「跳过整行并记录」
+        // ——审计数据常混有合计行等脏行，默认停止会频繁中断整次运行。
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("div.csv");
+        fs::write(&file, "被除数,除数\n10,0\n8,2\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("in", &file, json!({})),
+                {"id": "f", "type": "formula", "name": "公式",
+                 "config": {"formulas": [{"target": "商", "expression": "[被除数] / [除数]"}]}}
+            ]),
+            json!([{"from": "in", "to": "f"}]),
+        );
+        let result = run("dataflow_preview", flow);
+        assert!(result.pointer("/error").unwrap().is_null(), "默认不再中止");
+        assert_eq!(node_status(&result, "f"), "warn");
+        assert_eq!(row_count(&result, "f", "output"), 1, "除零行被跳过");
     }
 
     // ---------- 筛选 T/F 行数守恒、空值进 F 路 ----------
@@ -1357,9 +1379,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("typed.csv");
         fs::write(&file, "数量\n12\nabc\n30\n").unwrap();
-        // 停止（默认）。
+        // 停止（需显式选择；默认已改为跳过并记录，2026-10-30 用户裁定）。
         let stop_flow = workflow(
-            json!([csv_in_node("in", &file, json!({"columnTypes": {"数量": "integer"}}))]),
+            json!([csv_in_node("in", &file, json!({"columnTypes": {"数量": "integer"}, "onRowError": "stop"}))]),
             json!([]),
         );
         let stopped = run("dataflow_preview", stop_flow);

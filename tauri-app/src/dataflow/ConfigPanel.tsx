@@ -1139,11 +1139,11 @@ export function ConfigPanel({
           {paramHint(params)}
           <Field label="编码">
             <Sel
-              value={String(config.encoding ?? "gbk")}
+              value={String(config.encoding ?? "utf8bom")}
               options={[
-                { value: "gbk", label: "GBK（默认）" },
-                { value: "utf8bom", label: "UTF-8（带 BOM）" },
+                { value: "utf8bom", label: "UTF-8（带 BOM，默认）" },
                 { value: "utf8", label: "UTF-8" },
+                { value: "gbk", label: "GBK（兼容老系统，遇无法表示的字符会报错）" },
               ]}
               onChange={(value) => setKey("encoding", value)}
             />

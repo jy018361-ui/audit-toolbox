@@ -1298,6 +1298,34 @@ mod tests {
     }
 
     #[test]
+    fn csv_out_defaults_to_utf8bom_and_keeps_rare_characters() {
+        // 2026-10-30 用户裁定：默认编码从 GBK 改为 UTF-8（带 BOM）——
+        // 生僻字符/表情不再让整次输出失败，Excel 双击打开也不乱码。
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("in.csv");
+        fs::write(&input, "名称\n含表情😀的文本\n").unwrap();
+        let flow = workflow(
+            json!([
+                csv_in_node("in", &input, json!({})),
+                {"id": "out", "type": "csv_out", "name": "CSV输出",
+                 // 不带 encoding 字段：走默认。
+                 "config": {"fileName": root.path().join("out.csv").to_string_lossy()}}
+            ]),
+            json!([{"from": "in", "to": "out"}]),
+        );
+        let result = run("dataflow_run", flow);
+        assert_eq!(node_status(&result, "out"), "ok");
+        let path = result
+            .pointer("/outputs/0/path")
+            .and_then(Value::as_str)
+            .unwrap();
+        let bytes = fs::read(path).unwrap();
+        assert!(bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "应写 UTF-8 BOM");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("含表情😀的文本"), "生僻字符应原样保留：{text}");
+    }
+
+    #[test]
     fn gbk_unrepresentable_characters_fail_clearly() {
         let root = tempfile::tempdir().unwrap();
         let input = root.path().join("in.csv");

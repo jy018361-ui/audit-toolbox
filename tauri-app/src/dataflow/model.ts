@@ -463,7 +463,8 @@ export function defaultConfigFor(type: string): Record<string, unknown> {
     case "csv_out":
       return {
         fileName: "",
-        encoding: "gbk",
+        // 默认 UTF-8（带 BOM）：Excel 双击不乱码、生僻字符不丢；GBK 为显式兼容选项。
+        encoding: "utf8bom",
         delimiter: "comma",
         splitRows: 0,
       };

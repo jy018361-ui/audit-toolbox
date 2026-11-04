@@ -602,10 +602,13 @@ pub(crate) fn run_csv_out(
     if inputs.is_empty() {
         return Err(config_error("CSV 输出", node_name, "输出节点缺少输入连线。".into()));
     }
+    // 默认编码＝UTF-8（带 BOM）（2026-10-30 用户裁定）：Excel 双击打开不乱码、
+    // 任何字符都可表示，不再一遇生僻字符就整次失败；GBK 保留为显式选项
+    // （兼容老系统，遇不可表示字符按原样明确报错）。
     let encoding_key = config
         .encoding
         .clone()
-        .unwrap_or_else(|| "gbk".to_owned())
+        .unwrap_or_else(|| "utf8bom".to_owned())
         .to_lowercase();
     if !matches!(encoding_key.as_str(), "gbk" | "utf8" | "utf8bom") {
         return Err(config_error(

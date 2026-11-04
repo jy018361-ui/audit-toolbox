@@ -435,7 +435,7 @@ describe("数据流：config 序列化", () => {
     });
     expect(defaultConfigFor("csv_out")).toEqual({
       fileName: "",
-      encoding: "gbk",
+      encoding: "utf8bom",
       delimiter: "comma",
       splitRows: 0,
     });

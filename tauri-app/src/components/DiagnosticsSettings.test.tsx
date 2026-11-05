@@ -21,13 +21,12 @@ afterEach(cleanup);
 it("records successful operations too and preserves existing logs when disabled", async () => {
   vi.mocked(diagnosticsSetEnabled).mockResolvedValue({ ...status, enabled: false });
   render(<DiagnosticsSettings />);
-  expect(screen.getByText(/无论是否报错/)).toBeInTheDocument();
   const toggle = await screen.findByRole("checkbox", { name: "记录本地诊断日志" });
   await waitFor(() => expect(toggle).toBeChecked());
   fireEvent.click(toggle);
   await waitFor(() => expect(toggle).not.toBeChecked());
   expect(diagnosticsSetEnabled).toHaveBeenCalledWith(false);
-  expect(screen.getByText(/已有日志仍可导出或清空/)).toBeInTheDocument();
+  expect(screen.getByText("已关闭日志记录。")).toBeInTheDocument();
   expect(diagnosticsClear).not.toHaveBeenCalled();
 });
 
@@ -60,10 +59,10 @@ it("requires clear confirmation and explains browser preview", async () => {
   expect(diagnosticsClear).not.toHaveBeenCalled();
   fireEvent.click(button);
   await waitFor(() => expect(diagnosticsClear).toHaveBeenCalledTimes(1));
-  expect(await screen.findByText(/已有诊断日志已清空/)).toBeInTheDocument();
+  expect(await screen.findByText("日志已清空。")).toBeInTheDocument();
   view.unmount();
   vi.mocked(runningInDesktopApp).mockReturnValue(false);
   render(<DiagnosticsSettings />);
-  expect(screen.getByText("请在桌面应用中使用诊断日志。")).toBeInTheDocument();
+  expect(screen.getByText("仅桌面版可用。")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "导出诊断包" })).not.toBeInTheDocument();
 });

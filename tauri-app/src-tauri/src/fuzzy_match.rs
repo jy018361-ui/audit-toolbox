@@ -8,10 +8,10 @@
 //! 2. 公司名解析 [`parse_company`]——剥后缀 → 剥行政区划前缀 → 剥行业词，
 //!    剩余即字号（brand，匹配主键）；
 //! 3. 粗筛 [`CoarseIndex`]——对 B 侧建 bigram 倒排索引，A 行按「命中的不同
-//!    bigram 数」取 top 200 候选 + 三倍长度过滤，避免 O(n²) 全量精算；
+//!    bigram 数」取 top 200 候选（归一值完全一致者优先）+ 三倍长度过滤；
 //! 4. 精算 [`score_pair`]——Levenshtein 比率 / LCS 比率 / bigram Dice 按
-//!    0.40/0.35/0.25 加权，叠加「字号包含提分」与「行政区域不一致降级」两条
-//!    规则，按阈值分级，每行保留 topK 候选供疑似确认。
+//!    0.40/0.35/0.25 加权，叠加「字号包含待确认」与「行政区域不一致降级」两条
+//!    规则；仅字号/简称包含的非精确项须人工确认，每行保留 topK 候选。
 //!
 //! 词表资源全部内嵌自 `assets/fuzzy-match/`（与 roll-forward、wp 资源同构，
 //! 来源与协议见该目录 SOURCES.md），加载点集中在 [`asset_texts`] 一处；
@@ -49,8 +49,6 @@ const CANCEL_BATCH: usize = 256;
 const W_CHAR: f64 = 0.40;
 const W_LCS: f64 = 0.35;
 const W_TOKEN: f64 = 0.25;
-/// 字号包含规则给到的保底分（≥ 默认自动阈值 90，仍受区域冲突降级约束）。
-const BRAND_CONTAIN_SCORE: f64 = 93.0;
 
 // ============================================================
 // 对外入口（签名由接线任务依赖，勿改）
@@ -478,7 +476,7 @@ fn industry_table() -> &'static Vec<String> {
     TABLE.get_or_init(|| sorted_by_len_desc(INDUSTRY_WORDS.iter().map(|s| (*s).into()).collect()))
 }
 
-/// 公司后缀词表：剥离词（长度降序）+ 归一映射（保持文件顺序）。
+/// 公司后缀词表：剥离词 + 归一映射均按长度降序、字典序固定排序。
 struct SuffixTable {
     strip: Vec<String>,
     normalize: Vec<(String, String)>,
@@ -500,11 +498,7 @@ fn suffix_table() -> &'static SuffixTable {
             Some(f) if !f.strip_words.is_empty() => SuffixTable {
                 // 词表文件本身按长度降序，这里再兜底排一次，防止后续被人为打乱。
                 strip: sorted_by_len_desc(f.strip_words),
-                normalize: f
-                    .normalize_map
-                    .into_iter()
-                    .map(|(k, v)| (base_normalize(&k), base_normalize(&v)))
-                    .collect(),
+                normalize: normalized_suffix_rules(f.normalize_map),
             },
             _ => {
                 // 词表文件缺失/损坏：降级内置表（词组覆盖面小，但不阻塞任务）。
@@ -513,14 +507,31 @@ fn suffix_table() -> &'static SuffixTable {
                         .iter()
                         .map(|s| (*s).into())
                         .collect(),
-                    normalize: FALLBACK_NORMALIZE_MAP
-                        .iter()
-                        .map(|(k, v)| (base_normalize(k), base_normalize(v)))
-                        .collect(),
+                    normalize: normalized_suffix_rules(
+                        FALLBACK_NORMALIZE_MAP.iter().map(|(k, v)| (k.to_string(), v.to_string())),
+                    ),
                 }
             }
         }
     })
+}
+
+/// HashMap 顺序不能决定替换结果；重复归一键也按目标值固定择一。
+fn normalized_suffix_rules(
+    rules: impl IntoIterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    let mut rules: Vec<_> = rules
+        .into_iter()
+        .map(|(k, v)| (base_normalize(&k), base_normalize(&v)))
+        .filter(|(k, _)| !k.is_empty())
+        .collect();
+    rules.sort_by(|a, b| {
+        b.0.chars().count().cmp(&a.0.chars().count())
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    rules.dedup_by(|a, b| a.0 == b.0);
+    rules
 }
 
 /// 行政区划表：省/市两级名称与常用别称（区县级不参与——同名区县与常见字号
@@ -671,8 +682,27 @@ fn once<T>(x: T) -> std::iter::Once<T> {
 /// 全角→半角（NFKC 的全角 ASCII 区）、全角空格、顿号统一为半角逗号、
 /// 小写、去全部空白与零宽字符、间隔号变体统一为「·」。
 fn base_normalize(raw: &str) -> String {
+    base_normalize_with_spaces(raw, false)
+}
+
+/// 英文规则执行前保留空白作为单词边界，执行后再统一去掉。
+fn base_normalize_with_spaces(raw: &str, keep_spaces: bool) -> String {
     let mut out = String::with_capacity(raw.len());
-    for c in raw.chars() {
+    let mut input = raw.chars().peekable();
+    while let Some(c) = input.next() {
+        if keep_spaces && c.is_whitespace() {
+            // 仅英文词边界需要保留；中文词内空白仍先移除，避免破坏繁简词组匹配。
+            let is_word = |c: char| {
+                c.is_ascii_alphanumeric() || c == '_'
+                    || matches!(c, '０'..='９' | 'Ａ'..='Ｚ' | 'ａ'..='ｚ' | '＿')
+            };
+            if out.chars().next_back().is_some_and(is_word)
+                || input.peek().copied().is_some_and(is_word)
+            {
+                out.push(' ');
+            }
+            continue;
+        }
         match c {
             // 全角 ASCII 区 U+FF01..=U+FF5E 平移到 U+0021..=U+007E：
             // 全角字母/数字/括号/逗号/句点等一次归一。
@@ -766,16 +796,61 @@ fn strip_person_titles(norm: &str) -> String {
     s
 }
 
-/// 完整归一化管线（顺序敏感）：
-/// 基础归一 → 繁→简 → 公司后缀归一映射 →（person）称谓剥离。
-fn normalize(raw: &str, match_type: &str) -> String {
-    let mut s = base_normalize(raw);
-    s = traditional_to_simplified(&s);
-    for (from, to) in &suffix_table().normalize {
-        if !from.is_empty() && s.contains(from.as_str()) {
-            s = s.replace(from.as_str(), to);
+/// 单次最长匹配替换，不让替换生成的文本再次触发其他规则。
+/// 英文词必须有词边界；点分缩写允许点与字母之间存在空白。
+fn normalize_suffixes(text: &str, rules: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut start = 0;
+    while start < text.len() {
+        let matched = rules.iter().find_map(|(from, to)| {
+            suffix_rule_end(text, start, from).map(|end| (end, to))
+        });
+        if let Some((end, to)) = matched {
+            out.push_str(to);
+            start = end;
+        } else {
+            let c = text[start..].chars().next().unwrap();
+            out.push(c);
+            start += c.len_utf8();
         }
     }
+    out
+}
+
+fn suffix_rule_end(text: &str, start: usize, from: &str) -> Option<usize> {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let english = from.starts_with(|c: char| c.is_ascii_alphabetic());
+    if english && text[..start].chars().next_back().is_some_and(is_word) {
+        return None;
+    }
+    let skip_spaces = !english || from.contains('·');
+    let mut input = text[start..].char_indices().peekable();
+    let mut end = start;
+    for expected in from.chars() {
+        if skip_spaces {
+            while input.peek().is_some_and(|(_, c)| c.is_whitespace()) {
+                input.next();
+            }
+        }
+        let (offset, actual) = input.next()?;
+        if actual != expected {
+            return None;
+        }
+        end = start + offset + actual.len_utf8();
+    }
+    if english && text[end..].chars().next().is_some_and(is_word) {
+        return None;
+    }
+    Some(end)
+}
+
+/// 完整归一化管线：保留英文边界的基础归一 → 繁→简 → 后缀最长匹配 →
+/// 去空白 →（person）称谓剥离。
+fn normalize(raw: &str, match_type: &str) -> String {
+    let mut s = base_normalize_with_spaces(raw, true);
+    s = traditional_to_simplified(&s);
+    s = normalize_suffixes(&s, &suffix_table().normalize);
+    s = base_normalize(&s);
     if match_type == "person" {
         s = strip_person_titles(&s);
     }
@@ -983,7 +1058,7 @@ fn bigram_dice(a: &[char], b: &[char]) -> f64 {
 }
 
 /// 简称豁免：长度比超限但短串（≥2 字）完整嵌在长串里（如「华为」在
-/// 「华为技术有限公司」中）——这正是字号包含规则要提分的简称场景，
+/// 「华为技术有限公司」中）——这是应保留供人工确认的简称场景，
 /// 粗筛不能按长度差滤掉。
 fn shorter_embedded(a: &SideRow, b: &SideRow) -> bool {
     let (short, long) = if a.norm.chars().count() <= b.norm.chars().count() {
@@ -997,6 +1072,7 @@ fn shorter_embedded(a: &SideRow, b: &SideRow) -> bool {
 /// 打分明细：三项基础分 + 加权总分 + 命中原因（中文，供前端与导出展示）。
 #[derive(Clone)]
 struct ScoreBreakdown {
+    exact: bool,
     char_sim: f64,
     lcs_sim: f64,
     token_overlap: f64,
@@ -1016,7 +1092,7 @@ impl ScoreBreakdown {
     }
 }
 
-/// 单对精算：三算法加权，叠加「字号包含提分」与「行政区域不一致降级」。
+/// 单对精算：三算法加权；非精确的字号/简称包含只保留为疑似候选。
 fn score_pair(
     a_norm: &str,
     a_chars: &[char],
@@ -1040,19 +1116,22 @@ fn score_pair(
             && (b_norm.contains(brand_a) || brand_b.contains(brand_a)))
             || (brand_b.chars().count() >= 2
                 && (a_norm.contains(brand_b) || brand_a.contains(brand_b)));
-        if contains && total < BRAND_CONTAIN_SCORE {
-            total = BRAND_CONTAIN_SCORE;
-            reasons.push("字号包含".into());
+        // 以显示精度向下取严格低于自动阈值的上界，避免 round1 再舍入成自动档。
+        let suspect_ceiling = ((opts.auto_threshold * 10.0).ceil() - 1.0) / 10.0;
+        if a_norm != b_norm && contains {
+            total = total.max(opts.suspect_threshold).min(suspect_ceiling);
+            reasons.push("字号相同或包含，需人工确认".into());
         }
         // 行政区域不一致：即使分数达到自动阈值也强制降为疑似。
         let region_a = a_seg.map(|s| s.region.as_str()).unwrap_or("");
         let region_b = b_seg.map(|s| s.region.as_str()).unwrap_or("");
-        if region_conflict(region_a, region_b) && total >= opts.auto_threshold {
-            total = opts.auto_threshold - 1.0;
+        if region_conflict(region_a, region_b) {
+            total = total.min(suspect_ceiling);
             reasons.push("行政区域不一致，需人工确认".into());
         }
     }
     ScoreBreakdown {
+        exact: a_norm == b_norm,
         char_sim,
         lcs_sim,
         token_overlap,
@@ -1063,6 +1142,13 @@ fn score_pair(
 
 fn round1(x: f64) -> f64 {
     (x * 10.0).round() / 10.0
+}
+
+/// 分数因显示精度并列时仍优先精确项，避免长文本近似项舍入到100后抢占首位。
+fn score_order(a: &ScoreBreakdown, b: &ScoreBreakdown) -> std::cmp::Ordering {
+    b.total.partial_cmp(&a.total)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then(b.exact.cmp(&a.exact))
 }
 
 // ============================================================
@@ -1131,8 +1217,8 @@ impl CoarseScanner {
         }
     }
 
-    /// A 行的候选：按「命中的不同 bigram 数」降序取 top [`CANDIDATE_LIMIT`]，
-    /// 并应用三倍长度过滤。返回 (命中数, B 行下标)。
+    /// A 行的候选：归一值完全相同者优先，再按命中数降序、B 行序升序；
+    /// 应用三倍长度过滤后取 top [`CANDIDATE_LIMIT`]。返回 (命中数, B 行下标)。
     fn scan(&mut self, a: &SideRow, index: &CoarseIndex, b_rows: &[SideRow]) -> Vec<(u32, u32)> {
         for &j in &self.touched {
             self.counts[j as usize] = 0;
@@ -1164,7 +1250,13 @@ impl CoarseScanner {
                     || shorter_embedded(a, b)
             })
             .collect();
-        cands.sort_unstable_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)));
+        cands.sort_unstable_by(|x, y| {
+            let exact_x = b_rows[x.1 as usize].norm == a.norm;
+            let exact_y = b_rows[y.1 as usize].norm == a.norm;
+            exact_y.cmp(&exact_x)
+                .then(y.0.cmp(&x.0))
+                .then(x.1.cmp(&y.1))
+        });
         cands.truncate(CANDIDATE_LIMIT);
         cands
     }
@@ -1294,12 +1386,7 @@ fn match_flow(
                 scored.push((j, sc));
             }
         }
-        scored.sort_by(|x, y| {
-            y.1.total
-                .partial_cmp(&x.1.total)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(x.0.cmp(&y.0))
-        });
+        scored.sort_by(|x, y| score_order(&x.1, &y.1).then(x.0.cmp(&y.0)));
         scored.truncate(opts.top_k);
         let level = scored
             .first()
@@ -2653,12 +2740,7 @@ mod tests {
                     scored.push((j, sc));
                 }
             }
-            scored.sort_by(|x, y| {
-                y.1.total
-                    .partial_cmp(&x.1.total)
-                    .unwrap()
-                    .then(x.0.cmp(&y.0))
-            });
+            scored.sort_by(|x, y| score_order(&x.1, &y.1).then(x.0.cmp(&y.0)));
             scored.truncate(options.top_k);
             let level = scored
                 .first()
@@ -2775,6 +2857,43 @@ mod tests {
     }
 
     #[test]
+    fn 英文归一保留单词边界与缩写空白() {
+        for kind in ["company", "generic", "address", "person"] {
+            for (raw, expected) in [
+                ("Unlimited", "unlimited"), ("Accompany", "accompany"),
+                ("limited2", "limited2"), ("my_company", "my_company"),
+                ("Acme Limited", "acmeltd"), ("Acme Company", "acmeco"),
+                ("Acme     Limited", "acmeltd"),
+                ("Acme Technologies Co. Ltd.", "acmetechcoltd"),
+                ("ＡＣＭＥ Ｌｉｍｉｔｅｄ", "acmeltd"),
+                ("ACME G.M.B.H.", "acmegmbh"),
+                ("ACME G.M.B.H", "acmegmbh"),
+                ("ACME G. M. B. H.", "acmegmbh"),
+                ("ACME S.A.R.L.", "acmesarl"),
+                ("ACME SDN. BHD.", "acmesdnbhd"),
+                ("华辰有限责任 公司", "华辰有限公司"),
+                ("乾   隆有限责任公司", "乾隆有限公司"),
+            ] {
+                assert_eq!(normalize(raw, kind), expected, "{kind}: {raw}");
+            }
+        }
+    }
+
+    #[test]
+    fn 归一规则不受哈希遍历顺序影响() {
+        let input: HashMap<String, String> = serde_json::from_str::<Value>(asset_texts().0)
+            .unwrap()["normalize_map"].as_object().unwrap().iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap().into())).collect();
+        let forward: Vec<_> = input.into_iter().collect();
+        let reversed: Vec<_> = forward.iter().rev().cloned().collect();
+        let a = normalized_suffix_rules(forward);
+        let b = normalized_suffix_rules(reversed);
+        assert_eq!(a, b);
+        assert_eq!(normalize_suffixes("acme g·m·b·h·", &a), "acme gmbh");
+        assert_eq!(normalize_suffixes("acme s·a·r·l·", &b), "acme sarl");
+    }
+
+    #[test]
     fn 无效值判定() {
         assert!(is_invalid_value(""));
         assert!(is_invalid_value("12345"));
@@ -2863,18 +2982,18 @@ mod tests {
     }
 
     #[test]
-    fn 简称包含提分且单字不误报() {
+    fn 简称仅疑似且单字不误报() {
         let result = match_columns(
             vec!["华为技术有限公司"],
             vec!["华为", "华"],
             &opts("company"),
         );
         let row = &result["rows"][0];
-        assert_eq!(row["level"].as_str().unwrap(), "auto");
+        assert_eq!(row["level"].as_str().unwrap(), "suspect");
         let m = &row["matches"][0];
         assert_eq!(m["bValue"].as_str().unwrap(), "华为");
         let total = m["total"].as_f64().unwrap();
-        assert!(total >= 93.0, "字号包含应保底 93，实际 {total}");
+        assert!((70.0..90.0).contains(&total), "简称仅供人工确认，实际 {total}");
         // 「华」单字号行是无效值（单字符），绝不能进入匹配候选。
         let values: Vec<&str> = row["matches"]
             .as_array()
@@ -2885,6 +3004,23 @@ mod tests {
         assert!(!values.contains(&"华"), "单字字号不得误报：{values:?}");
         // 无效值行计数在 B 侧行内不参与（rowsB 仍统计原始行数）。
         assert_eq!(result["summary"]["rowsB"].as_u64().unwrap(), 2);
+    }
+
+    #[test]
+    fn 同字号不同行业与字号包含不得自动认定同一主体() {
+        for b in ["上海星河贸易有限公司", "上海星河星辰科技有限公司"] {
+            let result = match_columns(vec!["上海星河科技有限公司"], vec![b], &opts("company"));
+            assert_eq!(first_level(&result, 0), "suspect", "{b}");
+            let candidate = &result["rows"][0]["matches"][0];
+            assert!(candidate["total"].as_f64().unwrap() < 90.0);
+            assert!(candidate["reasons"].as_array().unwrap().iter()
+                .any(|r| r.as_str().unwrap().contains("需人工确认")));
+        }
+        let mut o = opts("company");
+        o.auto_threshold = 75.05;
+        let result = match_columns(vec!["上海星河科技有限公司"], vec!["上海星河贸易有限公司"], &o);
+        assert_eq!(first_level(&result, 0), "suspect", "舍入后也不能进入自动档");
+        assert_eq!(result["rows"][0]["matches"][0]["total"], 75.0);
     }
 
     #[test]
@@ -2964,12 +3100,12 @@ mod tests {
 
     #[test]
     fn 阈值参数化生效() {
-        // 93 分对（字号包含保底）：默认 90 下 auto，95 下 suspect。
-        let mut strict = opts("company");
-        strict.auto_threshold = 95.0;
-        strict.suspect_threshold = 80.0;
-        let default = match_columns(vec!["华为技术有限公司"], vec!["华为"], &opts("company"));
-        let strict_result = match_columns(vec!["华为技术有限公司"], vec!["华为"], &strict);
+        // 通用文本跨自动阈值：自动阈值80时自动，默认90时疑似。
+        let strict = opts("generic");
+        let mut loose_auto = opts("generic");
+        loose_auto.auto_threshold = 80.0;
+        let default = match_columns(vec!["审计工具箱开发工作小组"], vec!["审计工具箱开发工做小组"], &loose_auto);
+        let strict_result = match_columns(vec!["审计工具箱开发工作小组"], vec!["审计工具箱开发工做小组"], &strict);
         assert_eq!(first_level(&default, 0), "auto");
         assert_eq!(first_level(&strict_result, 0), "suspect");
 
@@ -3124,7 +3260,7 @@ mod tests {
         .unwrap();
         let rows = result["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["level"].as_str().unwrap(), "auto");
+        assert_eq!(rows[0]["level"].as_str().unwrap(), "suspect");
         assert_eq!(rows[1]["level"].as_str().unwrap(), "suspect");
         let summary = &result["summary"];
         assert_eq!(summary["rowsA"].as_u64().unwrap(), 2);
@@ -3218,7 +3354,7 @@ mod tests {
             .rows()
             .map(|r| r.iter().map(data_text).collect())
             .collect();
-        assert_eq!(suspect.len(), 2); // 表头 + 北京华辰科技
+        assert_eq!(suspect.len(), 3); // 表头 + 简称 + 北京华辰科技
         let unmatched: Vec<Vec<String>> = book
             .worksheet_range("未匹配清单")
             .unwrap()
@@ -3231,14 +3367,36 @@ mod tests {
         assert_eq!(all[0][5], "匹配级别");
         // 疑似行原因列应含行政区域不一致，且级别列正确。
         assert_eq!(suspect[1][5], "疑似匹配");
-        assert!(
-            suspect[1][10].contains("行政区域不一致"),
-            "实际：{:?}",
-            suspect[1]
-        );
+        let region_row = suspect.iter().skip(1).find(|r| r[2] == "北京华辰科技").unwrap();
+        assert!(region_row[10].contains("行政区域不一致"), "实际：{region_row:?}");
+        assert!(suspect[1][10].contains("字号相同或包含"));
     }
 
     // ---------- 粗筛正确性 ----------
+
+    #[test]
+    fn 精确项不被前二百条近似候选挤掉() {
+        let mut b = vec!["星河星河"; CANDIDATE_LIMIT];
+        b.extend(["星河", "星河"]);
+        for kind in ["generic", "company"] {
+            let result = match_columns(vec!["星河"], b.clone(), &opts(kind));
+            assert_eq!(first_level(&result, 0), "auto");
+            assert_eq!(result["rows"][0]["matches"][0]["bIndex"], 201);
+            assert_eq!(result["rows"][0]["matches"][1]["bIndex"], 202);
+            assert_eq!(result["rows"][0]["matches"][0]["total"], 100.0);
+            assert_eq!(result["summary"]["estimatedComparisons"], CANDIDATE_LIMIT);
+        }
+    }
+
+    #[test]
+    fn 舍入同分仍优先精确项() {
+        let exact = "甲甲乙乙".repeat(400);
+        let mut near = exact.clone();
+        near.replace_range(near.len()-'乙'.len_utf8().., "甲");
+        let result = match_columns(vec![&exact], vec![&near, &exact], &opts("generic"));
+        assert_eq!(result["rows"][0]["matches"][0]["bIndex"], 2);
+        assert_eq!(result["rows"][0]["matches"][1]["total"], 100.0);
+    }
 
     #[test]
     fn 粗筛长度过滤与top限制() {
@@ -3318,7 +3476,7 @@ mod tests {
             base_names.push(format!("{brand}{suffix}"));
         }
         // A 侧：一半注入字号内的错别字（第 2 字换成「囧」——不在字池，保证
-        // 扰动后字号仍唯一，且不会触发字号包含提分）。
+        // 扰动后字号仍唯一，且不会触发字号包含候选规则）。
         let a: Vec<String> = base_names
             .iter()
             .enumerate()
@@ -3381,7 +3539,7 @@ mod tests {
                 "扰动行 {i} 最优候选应是原行"
             );
         }
-        // 扰动行字号已变（囧），不应触发字号包含提分到 93。
+        // 扰动行字号已变（囧），不应自动匹配。
         let disturbed_total = rows[0]["matches"][0]["total"].as_f64().unwrap();
         assert!(
             disturbed_total < 90.0,
@@ -3449,7 +3607,7 @@ mod tests {
             .collect();
         assert_eq!(
             expected_levels,
-            vec!["auto", "auto", "suspect", "unmatched"]
+            vec!["auto", "suspect", "suspect", "unmatched"]
         );
 
         // 临时库没有 task_history → summary 走行级统计重建路径。
@@ -3459,8 +3617,8 @@ mod tests {
             result["rows"].as_array().unwrap().len()
         );
         assert_eq!(back["summary"]["rowsA"], 4);
-        assert_eq!(back["summary"]["autoCount"], 2);
-        assert_eq!(back["summary"]["suspectCount"], 1);
+        assert_eq!(back["summary"]["autoCount"], 1);
+        assert_eq!(back["summary"]["suspectCount"], 2);
         assert_eq!(back["summary"]["unmatchedCount"], 1);
         assert_eq!(back["confirmations"].as_array().unwrap().len(), 0);
         // 行级数据反序列化回 matches，候选结构完整。

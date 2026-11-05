@@ -120,13 +120,13 @@ fn fuzzy_match_confirm_export_roundtrip() {
     .expect("fuzzy.match 应成功");
     assert_eq!(result["summary"]["rowsA"], A_ROWS.len());
     assert_eq!(result["summary"]["rowsB"], B_ROWS.len());
-    assert_eq!(result["summary"]["autoCount"], 3, "两对全半角 + 一对简称");
-    assert_eq!(result["summary"]["suspectCount"], 1, "异地同字号应降级疑似");
+    assert_eq!(result["summary"]["autoCount"], 2, "两对全半角");
+    assert_eq!(result["summary"]["suspectCount"], 2, "简称与异地同字号均需确认");
     assert_eq!(result["summary"]["unmatchedCount"], 6);
     assert_eq!(result["summary"]["invalidCount"], 0);
     assert_eq!(level_of(&result, 0), "auto");
     assert_eq!(level_of(&result, 1), "auto");
-    assert_eq!(level_of(&result, 2), "auto", "简称（字号包含）应自动匹配");
+    assert_eq!(level_of(&result, 2), "suspect", "简称（字号包含）须人工确认");
     assert_eq!(level_of(&result, 3), "suspect", "异地同字号必须人工确认");
     for i in 4..A_ROWS.len() {
         assert_eq!(level_of(&result, i), "unmatched", "无关行 {i} 不应匹配");
@@ -157,8 +157,8 @@ fn fuzzy_match_confirm_export_roundtrip() {
     );
     // 临时库没有 task_history → summary 走行级统计重建路径。
     assert_eq!(back["summary"]["rowsA"], A_ROWS.len());
-    assert_eq!(back["summary"]["autoCount"], 3);
-    assert_eq!(back["summary"]["suspectCount"], 1);
+    assert_eq!(back["summary"]["autoCount"], 2);
+    assert_eq!(back["summary"]["suspectCount"], 2);
     assert_eq!(back["summary"]["unmatchedCount"], 6);
     let confirmations = back["confirmations"].as_array().unwrap();
     assert_eq!(confirmations.len(), 1);
@@ -218,8 +218,8 @@ fn fuzzy_match_confirm_export_roundtrip() {
     let suspect_sheet = sheet_rows(&output_path, "疑似确认记录");
     assert_eq!(
         suspect_sheet.len(),
-        2,
-        "疑似 Sheet 应只有表头 + 1 行：{suspect_sheet:?}"
+        3,
+        "疑似 Sheet 应含表头、简称和异地同字号：{suspect_sheet:?}"
     );
     assert_eq!(suspect_sheet[1][5], "疑似匹配");
     let unmatched_sheet = sheet_rows(&output_path, "未匹配清单");

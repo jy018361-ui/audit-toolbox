@@ -200,10 +200,10 @@ pub(super) fn match_flow(
                 )
                 .map_err(sql)?;
             }
-            // 先按命中数和原 B 行号排序，再过滤长度并截 200，保持 CoarseScanner 语义。
+            // 精确项优先，再按命中数和原 B 行号排序；过滤长度后截 200。
             // 聚合与排序使用磁盘临时页；Rust 每次只保留当前候选和最终 topK。
-            let mut query = work.prepare_cached("SELECT b.id,b.value FROM grams g JOIN a_grams a ON a.gram=g.gram JOIN b_rows b ON b.id=g.b_id GROUP BY b.id ORDER BY count(*) DESC,b.id ASC").map_err(sql)?;
-            let mut candidates = query.query([]).map_err(sql)?;
+            let mut query = work.prepare_cached("SELECT b.id,b.value FROM grams g JOIN a_grams a ON a.gram=g.gram JOIN b_rows b ON b.id=g.b_id GROUP BY b.id ORDER BY (b.norm=?1) DESC,count(*) DESC,b.id ASC").map_err(sql)?;
+            let mut candidates = query.query([&a.norm]).map_err(sql)?;
             let mut accepted = 0;
             while let Some(candidate) = candidates.next().map_err(sql)? {
                 let j = candidate.get::<_, i64>(0).map_err(sql)? as usize;
@@ -233,12 +233,7 @@ pub(super) fn match_flow(
                 }
             }
         }
-        scored.sort_by(|x, y| {
-            y.2.total
-                .partial_cmp(&x.2.total)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(x.0.cmp(&y.0))
-        });
+        scored.sort_by(|x, y| score_order(&x.2, &y.2).then(x.0.cmp(&y.0)));
         scored.truncate(opts.top_k);
         let level = if a.invalid {
             "invalid"
@@ -398,6 +393,33 @@ mod tests {
                 }
             }
             let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn 精确项与英文和字号修复在两条路径逐候选等价() {
+        for xlsx in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut p = params(dir.path(), xlsx);
+            fixture(Path::new(p["sourceA"]["path"].as_str().unwrap()),
+                &["星河", "上海星河科技有限公司", "ACME G. M. B. H.", "Unlimited", "Accompany"], xlsx);
+            let mut b = vec!["星河星河"; CANDIDATE_LIMIT];
+            b.extend(["星河", "上海星河贸易有限公司", "Acme GmbH", "Unlimited", "Accompany"]);
+            fixture(Path::new(p["sourceB"]["path"].as_str().unwrap()), &b, xlsx);
+            let cancel = AtomicBool::new(false);
+            let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+            for kind in ["generic", "company"] {
+                p["matchType"] = json!(kind);
+                let memory = super::super::match_flow(&p, &|_,_,_,_|{}, &cancel, &pause).unwrap();
+                let disk = super::match_flow(&p, &|_,_,_,_|{}, &cancel, &pause).unwrap();
+                assert_eq!(disk["rows"], memory["rows"], "xlsx={xlsx} kind={kind}");
+                assert_eq!(disk["summary"]["estimatedComparisons"], memory["summary"]["estimatedComparisons"]);
+                assert_eq!(disk["rows"][0]["matches"][0]["bIndex"], 201);
+                assert_eq!(disk["rows"][1]["level"], "suspect");
+                for i in [0,2,3,4] {
+                    assert_eq!(disk["rows"][i]["level"], "auto", "{kind}: {i}");
+                }
+            }
         }
     }
 

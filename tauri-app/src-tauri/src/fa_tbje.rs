@@ -2333,8 +2333,10 @@ fn write_workbook_from(path: &Path, a: &Analysis, views: &PreparedAnalysisViews,
     write_tb_hidden(wb.add_worksheet(), a)?;
     let auxiliary_rows = &views.auxiliary;
     if !auxiliary_rows.is_empty() {
+        let money = formats().1;
         let sheet = wb.add_worksheet();
         sheet.set_name("辅助核算金额勾稽").map_err(xlsx)?;
+        for column in 3..=6 { sheet.set_column_width(column, 24).map_err(xlsx)?; }
         for (column, title) in [
             "主体",
             "科目",
@@ -2364,10 +2366,11 @@ fn write_workbook_from(path: &Path, a: &Analysis, views: &PreparedAnalysisViews,
                 .enumerate()
             {
                 sheet
-                    .write_number(
+                    .write_number_with_format(
                         index as u32 + 1,
                         column as u16 + 3,
                         row[*field].as_f64().unwrap_or(0.0),
+                        &money,
                     )
                     .map_err(xlsx)?;
             }
@@ -4489,6 +4492,25 @@ mod tests {
     use crate::deposit_interest;
     use calamine::{DataType, Reader, open_workbook_auto};
     use std::io::Read;
+
+    #[test]
+    fn thousands_auxiliary_sheet_formats_all_four_money_columns() {
+        let (dir, _, params) = fixture();
+        let analysis = analyze(&params, &AtomicBool::new(false)).unwrap();
+        let mut views = PreparedAnalysisViews::new(&analysis);
+        views.auxiliary = vec![json!({"entity":"A","account":"1601","auxiliary":"00123",
+            "opening":1234567.89,"movement":-1234.56,"closing":1233333.33,"difference":0.0})];
+        let output = dir.join("千分位辅助勾稽.xlsx");
+        write_workbook_from(&output, &analysis, &views, &AtomicBool::new(false)).unwrap();
+        let bytes = std::fs::read(&output).unwrap();
+        for cell in ["D2", "E2", "F2", "G2"] {
+            crate::xlsx_numbers::assert_cell_format(&bytes, 8, cell, "#,##0.00;[Red]-#,##0.00;-");
+        }
+        let mut book = open_workbook_auto(&output).unwrap();
+        let range = book.worksheet_range("辅助核算金额勾稽").unwrap();
+        assert_eq!(range[(1, 2)], calamine::Data::String("00123".into()));
+        assert_eq!(range[(1, 3)], calamine::Data::Float(1234567.89));
+    }
 
     #[test]
     fn ordinary_mode_fa_calculates_under_low_memory_without_disk_gate() {

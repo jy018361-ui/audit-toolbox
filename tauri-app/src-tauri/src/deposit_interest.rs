@@ -6237,8 +6237,8 @@ fn write_monthly(
                     &percent,
                 )
                 .map_err(xlsx)?;
-            sheet.write_number(y, 12, month.days).map_err(xlsx)?;
-            sheet.write_number(y, 13, month.denominator).map_err(xlsx)?;
+            sheet.write_number_with_format(y, 12, month.days, crate::xlsx_numbers::integer_format()).map_err(xlsx)?;
+            sheet.write_number_with_format(y, 13, month.denominator, crate::xlsx_numbers::integer_format()).map_err(xlsx)?;
             // 月均余额为负的月份写死 0 而不是挂公式：利率格是可改写的输入，
             // 挂公式会让用户在汇总表改利率时把这些月份的负利息"改回来"，
             // 底稿合计就与界面测算合计对不上了。

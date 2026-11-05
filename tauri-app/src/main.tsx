@@ -10,6 +10,9 @@ import "./fa-dep-calc.css";
 import "./table-resize.css";
 import { restoreSavedTheme } from "./theme";
 import { ApplicationErrorBoundary } from "./components/ApplicationErrorBoundary";
+import { installFrontendDiagnostics } from "./diagnostics";
+
+installFrontendDiagnostics();
 
 // Before the first paint, so the window never flashes the default theme.
 restoreSavedTheme();

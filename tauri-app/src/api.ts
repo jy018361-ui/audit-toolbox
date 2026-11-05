@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { diagnosticInvoke as invoke } from "./diagnostics";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ReleaseNotesSchema } from "./updateNotes";

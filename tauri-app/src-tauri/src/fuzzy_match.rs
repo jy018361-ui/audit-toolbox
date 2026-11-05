@@ -1570,6 +1570,15 @@ fn export_workbook_from(rows: &ExportSource<'_>, path: &Path) -> Result<PathBuf,
         for (c, width) in widths.iter().enumerate() {
             ws.set_column_width(c as u16, f64::from(*width)).map_err(xlsx)?;
         }
+        // Row numbers remain identifiers; only the four numeric scores use
+        // the common thousands format, retaining their fractional precision.
+        if headers.len() == match_headers.len() {
+            let number = Format::new().set_num_format(crate::xlsx_numbers::NUMBER_FORMAT);
+            for column in 6..=9 {
+                ws.set_column_format(column, &number).map_err(xlsx)?;
+                ws.set_column_width(column, 20).map_err(xlsx)?;
+            }
+        }
     }
     // Each worksheet flushes its own rows. Read/decode saved results only once,
     // routing each candidate to the applicable sheets in the original order.
@@ -2541,6 +2550,25 @@ fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppE
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thousands_scores_preserve_numeric_precision_and_source_identifiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("匹配结果.xlsx");
+        let rows = vec![json!({"aIndex":1234,"aValue":"001234","level":"suspect","matches":[
+            {"bIndex":5678,"bValue":"005678","level":"suspect","breakdown":
+                {"total":0.9123456789,"charSim":0.9,"lcsSim":0.8,"tokenOverlap":0.7}}]})];
+        export_workbook(&rows, &output).unwrap();
+        let bytes = std::fs::read(&output).unwrap();
+        for sheet in [1, 2] {
+            for cell in ["G2", "H2", "I2", "J2"] {
+                crate::xlsx_numbers::assert_cell_format(&bytes, sheet, cell, crate::xlsx_numbers::NUMBER_FORMAT);
+            }
+        }
+        let mut book = open_workbook_auto(&output).unwrap();
+        let range = book.worksheet_range("全部结果").unwrap();
+        assert_eq!(range[(1, 2)], Data::String("001234".into()));
+        assert_eq!(range[(1, 6)], Data::Float(0.9123456789));
+    }
     #[test]
     fn 通用表头模糊匹配首条名称与金额不能充当下层() {
         let path = std::env::temp_dir().join(format!("fuzzy-body-{}.csv", uuid::Uuid::new_v4()));

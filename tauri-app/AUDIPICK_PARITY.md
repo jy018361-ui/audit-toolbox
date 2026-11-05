@@ -1,3 +1,8 @@
+## 2026-11-05：合同底稿数值格式
+
+- 单份及分组底稿共用数值写出：可安全识别的普通数值写为带千分位的数值单元格，保留可选小数；编号、长账号、日期、比例／利率、前导零及空值保留文本。独立 OCR 导出不接入此逻辑。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib thousands`、`--lib audipick::`，覆盖金额、原带逗号金额、账号、百分比与空值。
+
 ## 2026-10-28 · 官方 Qwen 思考开关参数适配
 
 - 问题：统一模型请求此前仅发送 `thinking.type`。本机 Dev 已保存 `thinking_enabled=false`，但官方 Qwen Chat 接口使用顶层 `enable_thinking`；`qwen3.8-flash` 为默认启用思考、可切换的混合思考模型。因此旧请求不能据其发送了 `thinking.type=disabled` 就认定服务已关闭思考。

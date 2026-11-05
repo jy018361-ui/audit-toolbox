@@ -11,6 +11,7 @@ mod confirmation;
 mod covenant_cases;
 mod dataflow;
 mod deposit_interest;
+mod diagnostics;
 mod disk_table;
 mod table_read_cache;
 #[cfg(windows)]
@@ -58,6 +59,7 @@ mod wp;
 #[cfg(test)]
 mod xls_input_tests;
 mod xls_sample;
+mod xlsx_numbers;
 
 use directories::ProjectDirs;
 use parking_lot::Mutex;
@@ -97,19 +99,22 @@ pub struct AppError {
 }
 
 impl AppError {
+    #[track_caller]
     fn new(
         code: &str,
         message: impl Into<String>,
         retryable: bool,
         detail: Option<String>,
     ) -> Self {
-        Self {
+        let error = Self {
             code: code.into(),
             user_message: message.into(),
             retryable,
             diagnostic_id: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
             detail,
-        }
+        };
+        diagnostics::app_error(&error, std::panic::Location::caller());
+        error
     }
 }
 
@@ -167,6 +172,19 @@ fn tool_catalog() -> Result<Value, AppError> {
 
 #[tauri::command]
 async fn engine_call(
+    excel_merger: State<'_, ExcelMergerService>,
+    storage: State<'_, Storage>,
+    allowed: State<'_, AllowedPaths>,
+    method: String,
+    params: Value,
+) -> Result<Value, AppError> {
+    let span = diagnostics::Span::start("engine", &method, &params);
+    let result = engine_call_inner(excel_merger, storage, allowed, method, params).await;
+    span.finish(&result, None, result.as_ref().ok());
+    result
+}
+
+async fn engine_call_inner(
     _excel_merger: State<'_, ExcelMergerService>,
     storage: State<'_, Storage>,
     allowed: State<'_, AllowedPaths>,
@@ -717,6 +735,19 @@ async fn job_start(
     method: String,
     params: Value,
 ) -> Result<String, AppError> {
+    let span = diagnostics::Span::start("job", &method, &params);
+    let result = job_start_logged(excel_merger, storage, allowed, method, params).await;
+    span.finish(&result, result.as_ref().ok().map(String::as_str), None);
+    result
+}
+
+async fn job_start_logged(
+    excel_merger: State<'_, ExcelMergerService>,
+    storage: State<'_, Storage>,
+    allowed: State<'_, AllowedPaths>,
+    method: String,
+    params: Value,
+) -> Result<String, AppError> {
     validate_ocr_paths(&allowed, &method, &params)?;
     // 历史记录「继续任务」要能还原现场：在注入 __settings/__llmOptions/
     // __dbPath/textPath 之前克隆用户原始参数存档。存档失败不拦任务本身，
@@ -964,7 +995,60 @@ fn settings_get(storage: State<'_, Storage>) -> Result<Value, AppError> {
 
 #[tauri::command]
 fn settings_set(storage: State<'_, Storage>, settings: Value) -> Result<(), AppError> {
-    storage.settings_set(settings)
+    let snapshot = diagnostics::summary(&settings);
+    let result = storage.settings_set(settings);
+    if result.is_ok() { diagnostics::record("settings_change", json!({"settings":snapshot})); }
+    result
+}
+
+#[tauri::command]
+fn diagnostics_status() -> Result<Value, AppError> { diagnostics::status() }
+
+#[tauri::command]
+fn diagnostics_set_enabled(enabled: bool) -> Result<Value, AppError> {
+    diagnostics::set_enabled(enabled)?;
+    diagnostics::record("logging_enabled", json!({"enabled":enabled}));
+    diagnostics::status()
+}
+
+#[tauri::command]
+fn diagnostics_clear() -> Result<Value, AppError> {
+    diagnostics::clear()?;
+    diagnostics::status()
+}
+
+#[tauri::command]
+async fn diagnostics_export(allowed: State<'_, AllowedPaths>, path: String) -> Result<(), AppError> {
+    let path = PathBuf::from(path);
+    if !allowed.0.lock().iter().any(|p| path_is_permitted(&path, p))
+        || !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        return Err(AppError::new("PATH_NOT_AUTHORIZED", "请先选择诊断包 ZIP 的保存位置。", false, None));
+    }
+    tauri::async_runtime::spawn_blocking(move || diagnostics::export(&path)).await
+        .map_err(|_| AppError::new("DIAGNOSTICS_EXPORT_FAILED", "导出诊断包失败，请重试。", true, None))?
+}
+
+#[tauri::command]
+fn diagnostics_frontend(event: String, data: Value) -> Result<(), AppError> {
+    if !matches!(event.as_str(), "frontend_error" | "frontend_call" | "navigation" | "ui_action") {
+        return Err(AppError::new("DIAGNOSTICS_EVENT_DENIED", "不支持的诊断事件。", false, None));
+    }
+    // Only a closed set of technical identifiers may be stored verbatim.
+    let mut safe = serde_json::Map::new();
+    for key in ["command", "method", "callId", "jobId", "diagnosticId", "code", "route", "action"] {
+        if let Some(value) = data.get(key).and_then(Value::as_str) { safe.insert(key.into(), json!(diagnostics::identifier(value))); }
+    }
+    for key in ["ok", "elapsedMs", "line", "column", "checked", "selectedIndex", "viewportWidth", "viewportHeight", "pixelRatio", "x", "y", "deltaX", "deltaY", "ctrlKey", "shiftKey"] {
+        if let Some(value) = data.get(key).filter(|v| v.is_boolean() || v.as_f64().is_some_and(|n| n.is_finite() && n.abs() <= 100_000_000.0)) { safe.insert(key.into(), value.clone()); }
+    }
+    // Stack is an array of basename:line:column extracted from static application assets.
+    if let Some(frames) = data.get("frames").and_then(Value::as_array) {
+        safe.insert("frames".into(), json!(frames.iter().take(40).filter_map(Value::as_str).map(diagnostics::identifier).collect::<Vec<_>>()));
+    }
+    if let Some(error) = data.get("error") { safe.insert("error".into(), diagnostics::summary(error)); }
+    diagnostics::record(&event, Value::Object(safe));
+    Ok(())
 }
 
 /// 使用统计入口（前端只允许报「打开工具」；启动/任务/退出由 Rust 侧自己记录，
@@ -1676,6 +1760,7 @@ fn pick_path(
             allowed.0.lock().insert(PathBuf::from(item));
         }
     }
+    diagnostics::record("path_selection", json!({"kind":diagnostics::identifier(&kind),"selection":diagnostics::summary(&value),"cancelled":value.is_null()}));
     Ok(value)
 }
 
@@ -2098,6 +2183,13 @@ fn install_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+pub fn initialize_process_diagnostics() {
+    if let Ok(dirs) = project_dirs() { diagnostics::init(dirs.data_local_dir().join("diagnostics")); }
+    diagnostics::install_panic_hook();
+    let worker = std::env::args().any(|arg| arg == "--excel-merger-worker" || arg == "--rust-table-worker");
+    diagnostics::record("process_start", json!({"worker":worker,"arch":std::env::consts::ARCH,"debug":cfg!(debug_assertions)}));
+}
+
 pub fn run() {
     let dirs = project_dirs().expect("AuditToolbox data directory");
     std::fs::create_dir_all(dirs.data_local_dir()).expect("create data directory");
@@ -2217,6 +2309,11 @@ pub fn run() {
             open_reference_url,
             settings_get,
             settings_set,
+            diagnostics_status,
+            diagnostics_set_enabled,
+            diagnostics_export,
+            diagnostics_clear,
+            diagnostics_frontend,
             telemetry_track,
             llm_test,
             audipick_ocr_test,
@@ -2255,6 +2352,7 @@ pub fn run() {
         .run(|handle, event| {
             // 退出时记会话时长并尽力补发，超时即放弃（不拖慢关窗）。
             if let tauri::RunEvent::Exit = event {
+                diagnostics::record("process_exit", json!({}));
                 let telemetry = handle.state::<telemetry::Telemetry>();
                 telemetry.track("app_exit", None, None, None, Some(telemetry.session_ms()));
                 telemetry.shutdown();

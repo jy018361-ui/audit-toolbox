@@ -1,5 +1,9 @@
 # 存款利息上传识别行为与性能回归
 
+## 2026-11-05：月度天数列补齐整数格式
+
+- 月度余额页的计息天数和年天数使用整数千分位格式；金额、利率、天数本身及计息公式保持。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib deposit_interest::`。
+
 ## 2026-10-26：Excel 2003 XML 输入兼容
 
 接入公共 SpreadsheetML 内容识别、数据读取及模板准备；包括 NetSuite 使用 `.XLS` 后缀的 XML 导出。保留现有字段映射与业务规则；数据读取不依赖 Excel，版式模板转换沿用本机 Excel。格式、缓存、预览／完整读取边界及验证命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。

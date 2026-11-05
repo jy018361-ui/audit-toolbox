@@ -438,6 +438,7 @@ impl ExcelMergerService {
                 return;
             }
         };
+        crate::diagnostics::record("worker_spawn", json!({"jobId":job_id,"method":request.method,"workerPid":child.id()}));
         let _worker_lifetime = if monitored {
             match crate::resource_budget::WorkerLifetime::attach(&child) {
                 Ok(limit) => Some(limit),
@@ -601,6 +602,7 @@ impl ExcelMergerService {
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    crate::diagnostics::record("worker_exit", json!({"jobId":job_id,"workerPid":child.id(),"exitCode":status.code(),"success":status.success()}));
                     while let Ok(payload) = receiver.recv_timeout(Duration::from_millis(100)) {
                         terminal |=
                             payload
@@ -676,6 +678,15 @@ impl ExcelMergerService {
     }
 
     fn emit(&self, mut payload: Value) {
+        // Log only technical progress metadata, never output data or business messages.
+        crate::diagnostics::record("job_event", json!({
+            "jobId":payload.get("jobId"),"toolId":payload.get("toolId"),"phase":payload.get("phase"),
+            "current":payload.get("current"),"total":payload.get("total"),"severity":payload.get("severity"),
+            "message":crate::diagnostics::summary(&payload["message"]),
+            "result":if matches!(payload["phase"].as_str(),Some("completed" | "failed")) { crate::diagnostics::summary(&payload["result"]) } else { Value::Null },
+            "errorCode":payload.pointer("/result/code").and_then(Value::as_str).map(crate::diagnostics::identifier),
+            "outputCount":payload.get("outputPaths").and_then(Value::as_array).map(Vec::len)
+        }));
         let background = payload.get("jobId").and_then(Value::as_str)
             .and_then(|id| self.jobs.lock().get(id).map(|(_, _, method, _)| method == "loan.inspect_full"))
             .unwrap_or(false);
@@ -890,6 +901,7 @@ pub fn worker_main() -> i32 {
         Ok(value) => value,
         Err(_) => return 2,
     };
+    crate::diagnostics::record("worker_request", json!({"jobId":request.job_id,"method":request.method,"memoryProtected":request.memory_protected}));
     let cancel_path = PathBuf::from(&request.cancel_path);
     let cancel = Arc::new(AtomicBool::new(cancel_path.exists()));
     let watch = cancel.clone();
@@ -3058,7 +3070,8 @@ fn merge_workbook_exact(
     }
     crate::excel_com::copy_sheets_exact(&plans, output, params.add_hyperlinks, progress, &|| {
         check_cancel(cancel)
-    })
+    })?;
+    crate::xlsx_numbers::normalize_copied_workbook(output, &|| check_cancel(cancel))
 }
 
 #[cfg(not(windows))]
@@ -3249,13 +3262,17 @@ fn write_cell(
                 .map_err(xlsx_error)?;
         }
         Cell::Float(value) => {
+            worksheet.set_column_width(col as u16, 24).map_err(xlsx_error)?;
             worksheet
-                .write_number(row as u32, col as u16, *value)
+                .write_number_with_format(row as u32, col as u16, *value,
+                    crate::xlsx_numbers::number_format())
                 .map_err(xlsx_error)?;
         }
         Cell::Int(value) => {
+            worksheet.set_column_width(col as u16, 24).map_err(xlsx_error)?;
             worksheet
-                .write_number(row as u32, col as u16, *value as f64)
+                .write_number_with_format(row as u32, col as u16, *value as f64,
+                    crate::xlsx_numbers::integer_format())
                 .map_err(xlsx_error)?;
         }
         Cell::Bool(value) => {
@@ -3641,6 +3658,28 @@ mod tests {
     use super::*;
     use calamine::Reader;
     use std::io::Read;
+
+    #[test]
+    fn thousands_export_preserves_values_text_dates_and_booleans() {
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        for (column, value) in [
+            Cell::Float(1234567.891234), Cell::Int(-1234567),
+            Cell::String("001234567890123456".into()), Cell::Bool(true),
+            Cell::DateTime(chrono::NaiveDate::from_ymd_opt(2026, 11, 5).unwrap().and_hms_opt(0, 0, 0).unwrap()),
+        ].iter().enumerate() {
+            write_cell(sheet, 0, column, value).unwrap();
+        }
+        let bytes = book.save_to_buffer().unwrap();
+        crate::xlsx_numbers::assert_cell_format(&bytes, 1, "A1", crate::xlsx_numbers::NUMBER_FORMAT);
+        crate::xlsx_numbers::assert_cell_format(&bytes, 1, "B1", "#,##0");
+        crate::xlsx_numbers::assert_cell_format(&bytes, 1, "E1", "yyyy-mm-dd");
+        let mut read = calamine::Xlsx::new(std::io::Cursor::new(bytes)).unwrap();
+        let range = read.worksheet_range("Sheet1").unwrap();
+        assert_eq!(range[(0, 0)], Data::Float(1234567.891234));
+        assert_eq!(range[(0, 2)], Data::String("001234567890123456".into()));
+        assert_eq!(range[(0, 3)], Data::Bool(true));
+    }
     include!("excel_merger_header_tests.rs");
     include!("excel_merger_dispatch_tests.rs");
 
@@ -4961,6 +5000,7 @@ mod tests {
         ];
         crate::excel_com::copy_sheets_exact(&plans, &output, true, &|_, _, _, _| {}, &|| Ok(()))
             .unwrap();
+        crate::xlsx_numbers::normalize_copied_workbook(&output, &|| Ok(())).unwrap();
         let mut workbook = open_workbook_auto(&output).unwrap();
         assert_eq!(workbook.sheet_names(), &["Reference", "甲", "乙"]);
         let formulas = workbook.worksheet_formula("甲").unwrap();

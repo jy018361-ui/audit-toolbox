@@ -13983,7 +13983,7 @@ fn write_classification_adjustment_sheet(
                 .map_err(xlsx_err)?;
         }
         sheet
-            .write_number(row, 1, items.len() as f64)
+            .write_number_with_format(row, 1, items.len() as f64, crate::xlsx_numbers::integer_format())
             .map_err(xlsx_err)?;
         sheet
             .write_string_with_format(row, 7, classification, &input)

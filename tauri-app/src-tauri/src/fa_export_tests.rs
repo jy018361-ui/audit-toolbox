@@ -2,6 +2,35 @@ use super::*;
 use std::cell::Cell;
 
 #[test]
+fn thousands_unmatched_export_converts_amounts_without_changing_codes_or_rates() {
+    use calamine::Reader;
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("新增补充.xlsx");
+    let headers = ["资产编号", "原值", "账号", "启用日期", "残值率", "数量"];
+    let row = ["001234", "1,234,567.89", "123456789012345678", "2026-11-05", "5%", "1234"];
+    let mut book = Workbook::new();
+    let sheet = book.add_worksheet();
+    for (column, header) in headers.iter().enumerate() {
+        sheet.write_string(0, column as u16, *header).unwrap();
+        sheet.write_string(1, column as u16, row[column]).unwrap();
+    }
+    book.save(&source).unwrap();
+    let (mut result, mut params) = deep_export_fixture(&[]);
+    result.unmatched_addition = vec![row.map(str::to_owned).to_vec()];
+    params["additionSupplement"] = json!({"path":source,"headerRow":1,"headerDepth":1});
+    let output = dir.path().join("未匹配.xlsx");
+    write_unmatched(&output, &result, &params, &AtomicBool::new(false)).unwrap();
+    let bytes = fs::read(&output).unwrap();
+    for cell in ["B2", "F2"] { crate::xlsx_numbers::assert_cell_format(&bytes, 2, cell, MONEY_NUMBER_FORMAT); }
+    let mut read = calamine::Xlsx::new(std::io::Cursor::new(bytes)).unwrap();
+    let range = read.worksheet_range("未匹配新增清单").unwrap();
+    assert_eq!(range[(1, 0)], calamine::Data::String("001234".into()));
+    assert_eq!(range[(1, 1)], calamine::Data::Float(1234567.89));
+    assert_eq!(range[(1, 2)], calamine::Data::String("123456789012345678".into()));
+    assert_eq!(range[(1, 4)], calamine::Data::String("5%".into()));
+}
+
+#[test]
 fn correction_check_keeps_original_source_counts_amounts_years_and_noise_exclusion() {
     let (mut result, mut params) = deep_export_fixture(&["3", "5", "0"]);
     for table in [&mut result.begin, &mut result.end] {

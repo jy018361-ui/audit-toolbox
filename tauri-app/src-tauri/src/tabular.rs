@@ -6017,7 +6017,12 @@ fn data_text(v: &Data) -> String {
     }
 }
 fn parse_month(value: &str) -> Option<String> {
-    let cleaned = value.trim().trim_end_matches(".0");
+    // 与普通透视共用日期解析能力；CSV 的日期常带 00:00:00，不能当成未知月份。
+    if let Some(date) = ledger_mapping::parse_date(value) {
+        return Some(date.format("%Y-%m").to_string());
+    }
+    let trimmed = value.trim();
+    let cleaned = trimmed.strip_suffix(".0").unwrap_or(trimmed);
     if cleaned.is_empty() {
         return None;
     }
@@ -8669,6 +8674,23 @@ mod tests {
         // 真实底稿里月日不补零的写法也要认，否则整张凭证的月份分布会被丢成 0。
         assert_eq!(parse_month("2026-1-23").as_deref(), Some("2026-01"));
         assert_eq!(parse_month("2026/1/3").as_deref(), Some("2026-01"));
+    }
+
+    #[test]
+    fn datetime_pivot_months_use_shared_date_parser() {
+        for (raw, month) in [
+            ("2026-05-01 00:00:00", "2026-05"),
+            ("2026-06-30 23:59:59", "2026-06"),
+            ("2026-05-01T12:30:00", "2026-05"),
+            (" 2026/5/1 00:00:00 ", "2026-05"),
+            ("2026-05-01 12:30:00.123", "2026-05"),
+            ("46020.0", "2025-12"),
+        ] {
+            assert_eq!(parse_month(raw).as_deref(), Some(month), "{raw}");
+        }
+        for raw in ["", "过账日期", "2026-13-01 00:00:00", "not-a-date"] {
+            assert_eq!(parse_month(raw), None, "{raw}");
+        }
     }
 
     /// 裸「月」「日」分列的账型：自动建议直接把两列组成 date，不再要求

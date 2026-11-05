@@ -141,10 +141,12 @@ it("does not overwrite settings before a failed initial read is retried", async 
   render(<Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />);
   expect(await screen.findByRole("alert")).toHaveTextContent("配置读取失败：配置读取异常");
   expect(screen.getByLabelText("模型")).toBeDisabled();
+  expect(screen.getByRole("heading", {name:"诊断日志"}).closest("fieldset[disabled]")).toBeNull();
   expect(settingsSet).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", {name:"重试"}));
   await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
   expect(screen.getByLabelText("模型")).toBeEnabled();
+  expect(screen.getAllByRole("heading", {name:"诊断日志"})).toHaveLength(1);
   expect(settingsSet).not.toHaveBeenCalled();
 });
 

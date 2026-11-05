@@ -16,6 +16,27 @@ use std::{
 
 use crate::AppError;
 
+fn write_export_value(
+    sheet: &mut rust_xlsxwriter::Worksheet,
+    row: u32,
+    column: u16,
+    header: &str,
+    value: &Value,
+) -> Result<(), AppError> {
+    let text = match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    if let Some(number) = crate::xlsx_numbers::number_from_text(header, &text) {
+        sheet.write_number_with_format(row, column, number, crate::xlsx_numbers::number_format())
+            .map_err(xlsx_error)?;
+    } else {
+        sheet.write_string(row, column, &text).map_err(xlsx_error)?;
+    }
+    Ok(())
+}
+
 pub fn call(method: &str, params: Value, settings: Value) -> Result<Value, AppError> {
     match method {
         "audipick.config_status" => config_status(&settings),
@@ -376,14 +397,7 @@ fn export_workpaper(params: &Value) -> Result<Value, AppError> {
     for (row_index, row) in rows.iter().enumerate() {
         for (column, key) in columns.iter().enumerate() {
             let value = row.get(key).cloned().unwrap_or(Value::Null);
-            let text = match value {
-                Value::Null => String::new(),
-                Value::String(value) => value,
-                other => other.to_string(),
-            };
-            sheet
-                .write_string((row_index + 1) as u32, column as u16, &text)
-                .map_err(xlsx_error)?;
+            write_export_value(sheet, (row_index + 1) as u32, column as u16, key, &value)?;
         }
     }
     sheet.set_freeze_panes(1, 0).map_err(xlsx_error)?;
@@ -506,14 +520,7 @@ fn export_workpaper_bundle(params: &Value) -> Result<Value, AppError> {
         for (row_index, row) in rows.iter().enumerate() {
             for (column, key) in columns.iter().enumerate() {
                 let value = row.get(key).cloned().unwrap_or(Value::Null);
-                let text = match value {
-                    Value::Null => String::new(),
-                    Value::String(value) => value,
-                    other => other.to_string(),
-                };
-                sheet
-                    .write_string((row_index + 1) as u32, column as u16, &text)
-                    .map_err(xlsx_error)?;
+                write_export_value(sheet, (row_index + 1) as u32, column as u16, key, &value)?;
             }
         }
         sheet.set_freeze_panes(1, 0).map_err(xlsx_error)?;
@@ -3349,6 +3356,30 @@ fn error(code: &str, message: &str, detail: Option<String>) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn thousands_workpaper_keeps_long_ids_dates_rates_and_empty_values_text() {
+        use calamine::Reader;
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        for (column, (header, value)) in [
+            ("合同金额", json!(1234567.89)), ("未税金额", json!("1,234.56")),
+            ("合同编号", json!("001234")), ("银行账号", json!("123456789012345678")),
+            ("日期", json!("2026-11-05")), ("税率", json!("13%")), ("金额", Value::Null),
+        ].iter().enumerate() {
+            write_export_value(sheet, 0, column as u16, header, value).unwrap();
+        }
+        let bytes = book.save_to_buffer().unwrap();
+        for cell in ["A1", "B1"] {
+            crate::xlsx_numbers::assert_cell_format(&bytes, 1, cell, crate::xlsx_numbers::NUMBER_FORMAT);
+        }
+        let mut read = calamine::Xlsx::new(std::io::Cursor::new(bytes)).unwrap();
+        let range = read.worksheet_range("Sheet1").unwrap();
+        assert_eq!(range[(0, 0)], calamine::Data::Float(1234567.89));
+        assert_eq!(range[(0, 2)], calamine::Data::String("001234".into()));
+        assert_eq!(range[(0, 3)], calamine::Data::String("123456789012345678".into()));
+        assert_eq!(range[(0, 5)], calamine::Data::String("13%".into()));
+        assert!(range.get_value((0, 6)).map(ToString::to_string).unwrap_or_default().is_empty());
+    }
     #[test]
     fn independent_ocr_uses_global_profile_and_keeps_failed_structure() {
         let settings = json!({"llm":{"enabled":false},"audipickLlm":{"mode":"dedicated","enabled":true,"model":"must-not-use"}});

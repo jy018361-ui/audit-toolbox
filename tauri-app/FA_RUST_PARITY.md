@@ -1,5 +1,10 @@
 # FA List Rust 迁移覆盖矩阵
 
+## 2026-11-05：TB＋JE 辅助勾稽附表的金额格式
+
+- 「辅助核算金额勾稽」的期初、JE净发生、期末、差异补齐 `#,##0.00;[Red]-#,##0.00;-`，与主底稿金额格式一致；辅助编码保留文本，计算、映射及分类不变。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib thousands`、`--lib fa_tbje::`；生成实际底稿检查全部四列样式、金额及前导零辅助编码。
+
 ## 2026-10-26：Excel 2003 XML 输入兼容
 
 接入公共 SpreadsheetML 内容识别、数据读取及模板准备；包括 NetSuite 使用 `.XLS` 后缀的 XML 导出。保留现有字段映射与业务规则；数据读取不依赖 Excel，版式模板转换沿用本机 Excel。格式、缓存、预览／完整读取边界及验证命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。

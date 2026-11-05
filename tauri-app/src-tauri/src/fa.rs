@@ -3764,7 +3764,7 @@ fn write_xlsx_with_progress(
                         None => {
                             match cell {
                                 MergedCell::Text(text) => { ws.write_string(excel_row, c as u16, text).map_err(xlsx_error)?; }
-                                MergedCell::Number(number) => { ws.write_number(excel_row, c as u16, number).map_err(xlsx_error)?; }
+                                MergedCell::Number(number) => { ws.write_number_with_format(excel_row, c as u16, number, &money).map_err(xlsx_error)?; }
                                 MergedCell::Null => { ws.write_string(excel_row, c as u16, "null").map_err(xlsx_error)?; }
                                 MergedCell::Missing => {}
                             }
@@ -6629,7 +6629,7 @@ fn append_depreciation_formulas_chunk(
                 )
                 .map_err(xlsx_error)?;
             } else {
-                ws.write_formula(r as u32 + 2, (start + offset) as u16, formula.as_str())
+                ws.write_formula_with_format(r as u32 + 2, (start + offset) as u16, formula.as_str(), &money_format)
                     .map_err(xlsx_error)?;
             }
         }
@@ -7246,6 +7246,7 @@ fn write_unmatched(path: &Path, result: &MergeResult, params: &Value, cancel: &A
         fs::create_dir_all(parent).map_err(io_error)?;
     }
     let mut wb = Workbook::new();
+    let number_format = Format::new().set_num_format(MONEY_NUMBER_FORMAT);
     let header = Format::new()
         .set_bold()
         .set_background_color(LEGACY_HEADER_FILL)
@@ -7307,8 +7308,13 @@ fn write_unmatched(path: &Path, result: &MergeResult, params: &Value, cancel: &A
                 check_cancel(cancel)?;
             }
             for (c, v) in row.iter().enumerate() {
-                ws.write_string((r + 1) as u32, c as u16, v)
-                    .map_err(xlsx_error)?;
+                let header = headers.get(c).map(String::as_str).unwrap_or("");
+                if let Some(number) = crate::xlsx_numbers::number_from_text(header, v) {
+                    ws.write_number_with_format((r + 1) as u32, c as u16, number, &number_format)
+                        .map_err(xlsx_error)?;
+                } else {
+                    ws.write_string((r + 1) as u32, c as u16, v).map_err(xlsx_error)?;
+                }
             }
         }
         ws.autofit();

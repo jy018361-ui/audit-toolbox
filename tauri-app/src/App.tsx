@@ -45,6 +45,7 @@ import { formatCount } from "./lib/numberFormat";
 import { SwitchInput } from "@/components/SwitchInput";
 import { SecretInput } from "@/components/SecretInput";
 import { SettingsAutoSave, type AutoSaveState } from "./settingsAutoSave";
+import { DiagnosticsSettings } from "./components/DiagnosticsSettings";
 import { BAILIAN_OCR_BASE_URL, BAILIAN_OCR_MODEL, createOcrTestImage } from "./ocrConfig";
 import { DateInput } from "@/components/DateInput";
 import { demoDataEnabled } from "./preview/demoRegistry";
@@ -2393,6 +2394,7 @@ export function Settings({
         </section>
       )}
       {/* 单页双栏：左栏放要填写的（LLM / OCR），右栏放要选择的（主题、新手模式、缓存）；窄窗口自动落回单栏 */}
+      {loadError && !ready && <DiagnosticsSettings />}
       <fieldset className="settings-columns" disabled={!ready}>
         <div className="settings-col">
           <section className="list-card">
@@ -2874,6 +2876,7 @@ export function Settings({
             </div>
             {cacheMessage && <p className="cache-result">{cacheMessage}</p>}
           </section>
+          {ready && <DiagnosticsSettings />}
         </div>
        </fieldset>
       {message && (

@@ -1,5 +1,9 @@
 # 汇兑导出专项一致性记录
 
+## 2026-11-05：分类复核笔数格式
+
+- 分类调整页的汇总笔数补齐整数千分位；金额、汇率、源行号及计算规则保持。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib fx::`。
+
 ## 2026-10-26：Excel 2003 XML 输入兼容
 
 接入公共 SpreadsheetML 内容识别、数据读取及模板准备；包括 NetSuite 使用 `.XLS` 后缀的 XML 导出。保留现有字段映射与业务规则；数据读取不依赖 Excel，版式模板转换沿用本机 Excel。格式、缓存、预览／完整读取边界及验证命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。

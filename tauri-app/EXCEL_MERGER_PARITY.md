@@ -1,5 +1,17 @@
 # Excel 批量合并迁移差异记录
 
+## 2026-11-05：Excel 数值统一千分位
+
+- 普通横向／纵向合并的整数使用 `#,##0`，浮点数使用保留可选小数的千分位格式；数值列加宽至 24，避免普通金额添加逗号后显示为井号。保留数值、文本、布尔值及原有日期类型，不改 CSV。
+- 多 Sheet 复制后仅重写输出包的 `xl/styles.xml`：General、整数和普通小数格式增加千分位，已有小数位保留；日期、百分比及其他专用格式保持。其他包部件原压缩复制，公式、对象、超链接和来源文件不改。此项明确调整原样复制的普通数字显示格式。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib thousands`、`--lib excel_merger::`。覆盖实际 XLSX 数值及类型、样式解析、缺少自定义格式表、复制后除样式外所有部件逐字节一致；真实 COM 链路另运行 `--lib excel_com_preserves_formula_and_sheet_order -- --ignored`。
+
+## 2026-11-05 · 公共 worker 诊断记录
+
+- 主进程记录 worker 启动/退出（含 pid、jobId、退出码）及任务阶段、进度和终态结果结构；worker 记录请求身份、AppError 位置和 panic 代码栈。成功完成的任务同样记录，普通同阶段进度限频，日志失败不影响业务。无文件内容或任务结果原文写入日志。
+- 取消、暂停、调度、事件交付、输出和既有任务历史行为保留；不提供自动回放或原始数据复原。导出包与隐私/轮换说明见 `DIAGNOSTICS.md`。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib diagnostics::`、`cargo test --manifest-path src-tauri/Cargo.toml --lib excel_merger::`。
+
 ## 2026-10-26：Excel 2003 XML 输入兼容
 
 接入公共 SpreadsheetML 内容识别、数据读取及模板准备；包括 NetSuite 使用 `.XLS` 后缀的 XML 导出。保留现有字段映射与业务规则；数据读取不依赖 Excel，版式模板转换沿用本机 Excel。格式、缓存、预览／完整读取边界及验证命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。

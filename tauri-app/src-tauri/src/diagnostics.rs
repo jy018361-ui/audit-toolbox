@@ -1,7 +1,8 @@
 //! Local, bounded diagnostics. Arbitrary strings and data are never written verbatim.
 use crate::AppError;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -14,6 +15,7 @@ use std::{
 
 const FILE_LIMIT: u64 = 2 * 1024 * 1024;
 const FILE_COUNT: usize = 12;
+const RECENT_LIMIT: usize = 200;
 const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 static LOGGER: OnceLock<Mutex<Logger>> = OnceLock::new();
 
@@ -317,21 +319,22 @@ fn summarize_bounded(
     match value {
         Value::Null | Value::Bool(_) => value.clone(),
         Value::Number(_)
-            if depth <= 2 && matches!(
-                key,
-                "headerRow"
-                    | "headerRows"
-                    | "startRow"
-                    | "endRow"
-                    | "timeout"
-                    | "prefixLength"
-                    | "rowCount"
-                    | "columnCount"
-                    | "fileCount"
-                    | "count"
-                    | "total"
-                    | "current"
-            ) =>
+            if depth <= 2
+                && matches!(
+                    key,
+                    "headerRow"
+                        | "headerRows"
+                        | "startRow"
+                        | "endRow"
+                        | "timeout"
+                        | "prefixLength"
+                        | "rowCount"
+                        | "columnCount"
+                        | "fileCount"
+                        | "count"
+                        | "total"
+                        | "current"
+                ) =>
         {
             value.clone()
         }
@@ -429,6 +432,51 @@ pub fn status() -> Result<Value, AppError> {
         json!({"enabled":logger.enabled(),"bytes":files.iter().map(|f| f.2).sum::<u64>(),"files":files.len(),
         "retentionDays":7,"maxBytes":FILE_LIMIT * FILE_COUNT as u64,"writeError":logger.last_error}),
     )
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct LogEntry {
+    at: DateTime<Utc>,
+    session: String,
+    pid: u32,
+    version: String,
+    event: String,
+    data: serde_json::Map<String, Value>,
+}
+
+pub fn recent() -> Result<Vec<LogEntry>, AppError> {
+    let logger = LOGGER.get().ok_or_else(unavailable)?.lock().clone();
+    recent_entries(&logger)
+}
+
+fn recent_entries(logger: &Logger) -> Result<Vec<LogEntry>, AppError> {
+    logger.prune().map_err(io_error)?;
+    let mut entries = Vec::new();
+    for (_, path, _) in logger.files().map_err(io_error)? {
+        let file = match fs::File::open(path) {
+            Ok(file) => file,
+            // A worker may rotate a file after we list the directory.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error(error)),
+        };
+        let mut bytes = Vec::new();
+        file.take(FILE_LIMIT)
+            .read_to_end(&mut bytes)
+            .map_err(io_error)?;
+        // The writer may still be appending the last record.
+        let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
+            continue;
+        };
+        entries.extend(
+            bytes[..last_newline]
+                .rsplit(|byte| *byte == b'\n')
+                .filter_map(|line| serde_json::from_slice::<LogEntry>(line).ok())
+                .take(RECENT_LIMIT),
+        );
+    }
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.at));
+    entries.truncate(RECENT_LIMIT);
+    Ok(entries)
 }
 
 pub fn set_enabled(enabled: bool) -> Result<(), AppError> {
@@ -549,6 +597,38 @@ fn windows_build() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_logs_merge_sessions_and_skip_incomplete_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Logger::new(dir.path().to_path_buf()).unwrap();
+        let entry = |offset: usize| {
+            json!({
+                "at": DateTime::from_timestamp(1_780_000_000 + offset as i64, 0).unwrap(),
+                "session": "test", "pid": 42, "version": "test", "event": "call_start",
+                "data": {"offset": offset}
+            })
+        };
+        let first: String = (0..RECENT_LIMIT)
+            .map(|i| format!("{}\n", entry(i)))
+            .collect();
+        fs::write(dir.path().join("events-main.jsonl"), first).unwrap();
+        fs::write(
+            dir.path().join("events-worker.jsonl"),
+            format!(
+                "invalid\n{}\n{}",
+                entry(RECENT_LIMIT),
+                entry(RECENT_LIMIT + 1)
+            ),
+        )
+        .unwrap();
+        fs::write(dir.path().join("disabled"), "").unwrap();
+        let logs = recent_entries(&logger).unwrap();
+        assert_eq!(logs.len(), RECENT_LIMIT);
+        assert_eq!(logs[0].data["offset"], json!(RECENT_LIMIT));
+        assert_eq!(logs.last().unwrap().data["offset"], json!(1));
+    }
+
     #[test]
     fn summaries_remove_secrets_paths_dynamic_keys_and_business_values() {
         let input = json!({"path":"C:\\客户甲\\工资.xlsx","apiKey":"sk-private","__settings":{"password":"pass"},

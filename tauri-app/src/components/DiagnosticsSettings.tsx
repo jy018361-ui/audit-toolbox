@@ -5,6 +5,7 @@ import { errorText } from "../lib/errors";
 import { SwitchInput } from "./SwitchInput";
 import { Button } from "./ui/button";
 import { confirmDialog } from "./ConfirmDialog";
+import { DiagnosticsLogDialog } from "./DiagnosticsLogDialog";
 
 const size = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
@@ -14,6 +15,7 @@ export function DiagnosticsSettings() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [exportPath, setExportPath] = useState("");
+  const [logOpen, setLogOpen] = useState(false);
   const desktop = runningInDesktopApp();
 
   async function refresh() {
@@ -46,6 +48,7 @@ export function DiagnosticsSettings() {
       </label>
       {status && <p className="cache-usage" aria-live="polite">已记录 {size(status.bytes)} · {status.files} 个日志文件</p>}
       <div className="actions">
+        <Button variant="outline" disabled={busy} onClick={() => setLogOpen(true)}>查看日志</Button>
         <Button variant="outline" disabled={busy || !status} onClick={() => void run(async () => {
           const path = await pickPath("save", "导出诊断包", ["zip"], `审计工具箱诊断-${new Date().toISOString().slice(0, 10)}.zip`);
           if (typeof path !== "string") return;
@@ -60,6 +63,7 @@ export function DiagnosticsSettings() {
         })}>清空日志</Button>
         {exportPath && <Button variant="outline" disabled={busy} onClick={() => void run(() => openOutput(exportPath))}>打开所在文件夹</Button>}
       </div>
+      <DiagnosticsLogDialog open={logOpen} onOpenChange={setLogOpen} />
       {message && <p role="status" className="settings-note">{message}</p>}
       {(error || status?.writeError) && <div role="alert" className="settings-auto-error">
         <span>{error || status?.writeError}</span><Button variant="outline" size="sm" disabled={busy} onClick={() => void refresh()}>重试读取</Button>

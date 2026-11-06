@@ -1005,6 +1005,13 @@ fn settings_set(storage: State<'_, Storage>, settings: Value) -> Result<(), AppE
 fn diagnostics_status() -> Result<Value, AppError> { diagnostics::status() }
 
 #[tauri::command]
+async fn diagnostics_recent() -> Result<Vec<diagnostics::LogEntry>, AppError> {
+    tauri::async_runtime::spawn_blocking(diagnostics::recent)
+        .await
+        .map_err(|_| AppError::new("DIAGNOSTICS_READ_FAILED", "无法读取诊断日志，请重试。", true, None))?
+}
+
+#[tauri::command]
 fn diagnostics_set_enabled(enabled: bool) -> Result<Value, AppError> {
     diagnostics::set_enabled(enabled)?;
     diagnostics::record("logging_enabled", json!({"enabled":enabled}));
@@ -2310,6 +2317,7 @@ pub fn run() {
             settings_get,
             settings_set,
             diagnostics_status,
+            diagnostics_recent,
             diagnostics_set_enabled,
             diagnostics_export,
             diagnostics_clear,

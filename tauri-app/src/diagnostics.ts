@@ -6,6 +6,15 @@ const StatusSchema = z.object({
   maxBytes: z.number(), writeError: z.string().nullable(),
 });
 export type DiagnosticsStatus = z.infer<typeof StatusSchema>;
+const LogEntrySchema = z.object({
+  at: z.iso.datetime({ offset: true }),
+  session: z.string(),
+  pid: z.number(),
+  version: z.string(),
+  event: z.string(),
+  data: z.record(z.string(), z.unknown()),
+});
+export type DiagnosticsLogEntry = z.infer<typeof LogEntrySchema>;
 const desktop = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 let installed = false;
 
@@ -17,6 +26,8 @@ export const diagnosticsSetEnabled = async (enabled: boolean) =>
   StatusSchema.parse(await nativeInvoke("diagnostics_set_enabled", { enabled }));
 export const diagnosticsClear = async () => StatusSchema.parse(await nativeInvoke("diagnostics_clear"));
 export const diagnosticsExport = (path: string) => nativeInvoke<void>("diagnostics_export", { path });
+export const diagnosticsRecent = async () =>
+  LogEntrySchema.array().parse(await nativeInvoke("diagnostics_recent"));
 
 function record(event: string, data: Record<string, unknown>) {
   if (!installed || !desktop()) return;

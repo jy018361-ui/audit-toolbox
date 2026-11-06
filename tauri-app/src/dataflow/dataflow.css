@@ -705,6 +705,9 @@ textarea.df-in {
 }
 .df-banner {
   position: absolute;
+  /* 横幅是纯提示文字：不拦截鼠标，让下方的画布平移/点击照常工作
+     （曾致横幅覆盖区域的空白拖拽失效）。 */
+  pointer-events: none;
   top: var(--sp-2);
   left: 50%;
   transform: translateX(-50%);

@@ -352,6 +352,12 @@ export function DataflowCanvas({
       onSelect({ kind: "edge", edge });
       return;
     }
+    // 交互元素（工具条按钮、分隔条等）不进入平移：平移分支的
+    // preventDefault 会吞掉浏览器随后派发的 click，按钮就成了"看得见
+    // 点不着"（安装版真实反馈：缩放/适配按钮全失效、日志无点击记录）。
+    if (target.closest("button, a, input, textarea, select, label, [role='separator']")) {
+      return;
+    }
     const nodeEl = target.closest(".df-node") as HTMLElement | null;
     if (nodeEl && nodeEl.dataset.id) {
       const node = workflow.nodes.find((item) => item.id === nodeEl.dataset.id);

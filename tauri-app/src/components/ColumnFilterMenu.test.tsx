@@ -113,3 +113,96 @@ it("切换路由时关闭已打开的筛选浮层", () => {
   fireEvent(window, new PopStateEvent("popstate"));
   expect(onClose).toHaveBeenCalledOnce();
 });
+
+it("未截断的取值在本地即时过滤，不触发引擎检索", () => {
+  const onSearch = vi.fn();
+  const onApply = vi.fn();
+  anchor = document.createElement("button");
+  document.body.appendChild(anchor);
+  render(
+    <ColumnFilterMenu
+      field="Employee Department Name"
+      anchor={anchor}
+      loading={false}
+      data={{
+        values: ["ASU Delivery Center DL - WP", "ASU Q&RM", "Assurance GZ Group 2"],
+        total: 3,
+        truncated: false,
+        keyword: "",
+      }}
+      selected={[]}
+      onSearch={onSearch}
+      onApply={onApply}
+      onClose={() => undefined}
+    />,
+  );
+  const input = screen.getByRole("textbox", { name: "搜索Employee Department Name" });
+  fireEvent.change(input, { target: { value: "WP" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  // 列表即时只剩含 WP 的取值；回车与按钮都不再请求引擎（按钮不渲染）。
+  expect(screen.getByRole("checkbox", { name: "ASU Delivery Center DL - WP" })).toBeTruthy();
+  expect(
+    screen.queryByRole("checkbox", { name: "ASU Q&RM" }),
+  ).toBeNull();
+  expect(onSearch).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "检索" })).toBeNull();
+});
+
+it("仅勾选当前结果：把勾选收敛到当前过滤出的取值", () => {
+  const onApply = vi.fn();
+  anchor = document.createElement("button");
+  document.body.appendChild(anchor);
+  render(
+    <ColumnFilterMenu
+      field="Employee Department Name"
+      anchor={anchor}
+      loading={false}
+      data={{
+        values: ["ASU Delivery Center DL - WP", "ASU Q&RM", "Assurance GZ Group 2"],
+        total: 3,
+        truncated: false,
+        keyword: "",
+        fullTotal: 3,
+      }}
+      // 初次加载默认全勾——这是“确认后其实什么都没筛”的源头。
+      selected={["ASU Delivery Center DL - WP", "ASU Q&RM", "Assurance GZ Group 2"]}
+      onSearch={() => undefined}
+      onApply={onApply}
+      onClose={() => undefined}
+    />,
+  );
+  const input = screen.getByRole("textbox", { name: "搜索Employee Department Name" });
+  fireEvent.change(input, { target: { value: "WP" } });
+  fireEvent.click(screen.getByRole("button", { name: "仅勾选当前结果" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认选择" }));
+
+  expect(onApply).toHaveBeenCalledWith(["ASU Delivery Center DL - WP"]);
+});
+
+it("截断的取值保留「检索」按钮并交给引擎按关键词重查", () => {
+  const onSearch = vi.fn();
+  anchor = document.createElement("button");
+  document.body.appendChild(anchor);
+  render(
+    <ColumnFilterMenu
+      field="Engagement Name"
+      anchor={anchor}
+      loading={false}
+      data={{
+        values: Array.from({ length: 5 }, (_, i) => `项目${i}`),
+        total: 30_000,
+        truncated: true,
+        keyword: "",
+      }}
+      selected={[]}
+      onSearch={onSearch}
+      onApply={() => undefined}
+      onClose={() => undefined}
+    />,
+  );
+  const input = screen.getByRole("textbox", { name: "搜索Engagement Name" });
+  fireEvent.change(input, { target: { value: "审计" } });
+  fireEvent.click(screen.getByRole("button", { name: "检索" }));
+  expect(onSearch).toHaveBeenCalledWith("审计");
+});

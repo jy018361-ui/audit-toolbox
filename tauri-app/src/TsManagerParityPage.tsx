@@ -151,17 +151,23 @@ function nextSelections(
   selections: Record<string, string[]>,
   field: string,
   checked: string[],
-  known: { total: number; truncated: boolean; keyword?: string },
+  known: {
+    total: number;
+    truncated: boolean;
+    keyword?: string;
+    /** 不带关键词那次读取的整列去重值总数；搜索后 total 会被命中数覆盖。 */
+    fullTotal?: number;
+  },
 ) {
   const next = { ...selections };
-  // 只有“未搜索时，完整取值列表全勾”才等于整列不筛选。
-  // 搜索后的 total 只是命中关键词的取值数，把它当整列总数会导致用户
-  // 勾完搜索结果点应用后，条件被误删。
+  // 「整列取值全勾」才等于不筛选。判定认全量口径 fullTotal（未截断列才可信）：
+  // 搜索后的 total 只是命中关键词的取值数，拿它判断会把用户真想筛的整列全勾
+  // 误判成不筛选；反过来，搜索后全勾若覆盖的正是全量取值，条件实际什么都没
+  // 筛掉，界面却显示“已设筛选”，误导——也要按不筛选处理。
+  const fullTotal =
+    known.fullTotal ?? (!(known.keyword ?? "").trim() ? known.total : 0);
   const selectsEverything =
-    !(known.keyword ?? "").trim() &&
-    !known.truncated &&
-    known.total > 0 &&
-    checked.length >= known.total;
+    !known.truncated && fullTotal > 0 && checked.length >= fullTotal;
   if (!checked.length || selectsEverything) delete next[field];
   else next[field] = checked;
   return next;
@@ -454,6 +460,10 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
             total: value.total ?? values.length,
             truncated: Boolean(value.truncated),
             keyword,
+            // 全量口径只在“不带关键词”的读取里可靠；搜索后沿用上次的记录。
+            fullTotal: keyword.trim()
+              ? current[field]?.fullTotal
+              : value.total ?? values.length,
           },
         }));
       } catch (caught) {
@@ -500,6 +510,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
       total: known?.total ?? 0,
       truncated: known?.truncated ?? false,
       keyword: known?.keyword,
+      fullTotal: known?.fullTotal,
     });
     setMenu(undefined);
     patch({ selections: next });

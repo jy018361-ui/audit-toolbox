@@ -46,6 +46,8 @@ const METHOD_LABELS: Record<string, string> = {
   "kanzhang.accounts": "读取科目",
   "kanzhang.llm_mapping": "识别字段映射",
   "kanzhang.mark_sign_report": "生成标记报告",
+  // TS 管理：列筛选下拉的取值检索
+  "ts.filter": "检索取值",
   // 函证 / 存款 / 外汇 / 借款 / 模糊匹配
   "confirmation.inspect": "读取函证清单",
   "deposit.classify_source": "识别存款来源",

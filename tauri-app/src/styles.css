@@ -2559,8 +2559,32 @@ summary:focus-visible {
 }
 .ts-filter-all {
   padding: var(--sp-1) var(--sp-2);
-  border-bottom: 1px solid var(--border-soft);
   font-weight: 600;
+}
+/* 「（全选）」与「仅勾选当前结果」同行：搜索后一键只留当前结果。 */
+.ts-filter-all-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+.ts-filter-keep-visible {
+  margin-right: var(--sp-2);
+  padding: 2px 6px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--control-bg);
+  color: var(--foreground);
+  font-size: var(--fs-xs, 12px);
+  cursor: pointer;
+}
+.ts-filter-keep-visible:hover:not(:disabled) {
+  background: var(--surface-sunken);
+}
+.ts-filter-keep-visible:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .ts-filter-values {
   flex: 1 1 auto;

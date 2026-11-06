@@ -1,5 +1,13 @@
 # TS 管理迁移一致性矩阵
 
+## 2026-11-06：FY27 新表头兼容、读取进度与列式提速
+
+- **FY27 格式变化**（实测 2026-10-30 导出的 FY27 Timesheet，133 列）：部门列 `Department Name` → `Employee Department Name`，工时列 `Hours` → `Charge Hours`（另有 `Transaction Cycle Date`、`Month`、9 个默认行字段仍原名存在）。`ts_defaults` 改为别名表匹配两代列名，且**返回实际表头文本**（旧版返回字面量，表头写法不同时会在同一列造出两个条件键）；默认部门筛选值 `ASU Delivery Center ZZ-WP` 只在表里真实存在时才预设（`ts_default_filter`，值不存在时不设默认筛选，不再静默筛出 0 行）。
+- **读取进度与取消**：xlsx 首读按「已读字节/文件大小」上报真实百分比（zip 内部寻址会跳跃，累计读取字节数才是单调进度），阶段划分为解析→整理行列→转列式→写缓存，开头提示文件体积与预计耗时；解析中途「停止」秒级生效（取消以读取错误冒泡，先于读取失败被识别）。此前 `ts.inspect` 全程 0% 直到完成。
+- **列式提速**（此前检索取值 10–24 秒/次、确认筛选约 1 分钟、导出约 82 秒，均为整表逐行转字符串再扫描）：取值检索只读缓存中目标一列去重（`cached_ts_headers`/`cached_column_strings`）；确认筛选与导出走 `cached_filtered_frame`（布尔掩码筛选，口径与 `apply_filters` 逐字一致）+ `TsPivotInput::from_frame`（从列式帧直接透视）；`load_parquet` 改列式提取。缓存未命中时回退整表路径并照旧补写缓存。注意：不用 `Expr::is_in`——实测开启 polars `is_in` 特性后 Windows 测试进程报 `STATUS_ENTRYPOINT_NOT_FOUND`（Cargo.toml 特性未开启，掩码方案不依赖它）。
+- **筛选确认语义**（前端，与正负数凭证标记共用组件）：取值未截断（≤2 万）时关键词本地即时过滤、按钮不再触发引擎，按钮文案「读取」→「检索」；新增「仅勾选当前结果」一键只留当前搜索到的值；「全勾等于不筛选」的判定改认全量取值数 `fullTotal`（搜索后的 `total` 只是命中数）——修复「66 个部门全勾确认后界面显示已设筛选、实际命中全部行」的误导。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib tabular::ts`、`ts_filter_values_prefers`、`columnar_ts`、`ts_pivot_input_from_frame`；前端 `npx vitest run src/components/ColumnFilterMenu.test.tsx src/TsManagerParityPage.test.ts`。真实 459MB FY27 文件冷启动冒烟：进度事件按字节推进。
+
 ## 2026-11-04：点击导出后选择保存位置
 
 - 加载表头后即可点击「导出默认双 Sheet」；未预选输出文件时弹出原生「另存为」，预填「工时报告.xlsx」，确认后将所选完整文件路径传给 `ts.export`。保留预选路径复用；取消不启动任务，对话框异常显示错误且可重试，等待期间阻止重复提交。
@@ -56,13 +64,13 @@
 | Sheet | 多 Sheet 时选择，单 Sheet 默认首张 | 已实现，读取后列出所有 Sheet | `ts.inspect` |
 | 标题行 | 1–50，默认 1 | 已实现并校验越界 | 页面 + `HEADER_ROW_INVALID` |
 | CSV 编码/分隔符 | UTF-8/GB18030/UTF-16；逗号、Tab、分号、竖线 | 已实现自动探测 | `load_text` |
-| 默认筛选 | Department Name = ASU Delivery Center ZZ-WP | 已实现，并保留旧版 27 项部门快捷值 | 前端单测 |
+| 默认筛选 | Department Name = ASU Delivery Center ZZ-WP | 已实现：部门列按别名认 `Department Name`／`Employee Department Name`（FY27），默认值在表里存在才预设；旧版 27 项部门快捷值未迁移（现界面为表头漏斗多选） | Rust 单测 `ts_defaults_recognizes_fy27_renamed_columns` |
 | 组合筛选 | **旧版主界面只有一行筛选（一个字段一个值），无增删按钮**；多条件代码只存在于已停用入口 | 已实现多行筛选：同字段多值 OR、不同字段 AND、支持空白，可增删筛选行并读取 distinct 值 | Rust/前端单测。**这是能力增强，不是与旧版持平** |
 | 默认字段 | COE Manager 等 9 个字段 | 已按原顺序实现，缺失时回退前 4 列 | `ts_defaults` |
 | by经理 | Employee Name 固定第二顺位 | 已实现 | `ts_defaults` |
 | by项目 | Engagement Name 第一、Employee Name 第二 | 已实现 | `ts_defaults` |
 | 列字段 | Transaction Cycle Date，回退 Month | 已实现 | `ts_defaults` |
-| 值字段 | Hours，回退首列 | 已实现 | `ts_defaults` |
+| 值字段 | Hours，回退首列 | 已实现；FY27 表 `Hours` 改名 `Charge Hours`，按别名两者都认，仍回退首列 | `ts_defaults` |
 | 聚合 | sum；内核兼容 count | 已实现 Rust Polars group-by/pivot | Rust 单测 |
 | 宽表保护 | 透视列去重值最多 180 | 已实现同一上限及用户提示 | Rust 单测 |
 | 默认导出 | by经理 + by项目 两张 Sheet | 已实现；页面只暴露原版正式入口 | Rust 导出单测 |
@@ -71,7 +79,7 @@
 | 默认文件名 | `Timesheet_Default_Dual_时间戳.xlsx` | 已实现 | `output_path` |
 | 缓存 | 源文件/mtime/大小/Sheet/标题行隔离的 Parquet | 已实现稳定 Rust Polars Parquet，损坏自动重建、原子替换 | Rust 缓存单测 |
 | UNC 路径 | 支持网络共享，缓存后避免重复回源 | 原路径直接读取，缓存键保留 canonical/UNC 身份；缓存命中不再回源读取数据 | `load_ts_cached` |
-| 进度/取消 | 后台任务阶段进度、用户取消 | 已实现统一任务事件与协作取消 | `ts.export` job |
+| 进度/取消 | 后台任务阶段进度、用户取消 | 已实现统一任务事件与协作取消；xlsx 首读按已读字节报真实百分比且中途可停 | `ts.inspect`/`ts.export` job |
 | 选文件起始目录 | 对话框默认打开 FY27 网络共享目录，选过一次后记住上次文件所在目录 | 已实现：上次目录（sessionStorage）→ FY27 UNC 常量 → 系统默认；不可达时静默退回，不报错 | 前端单测 `pickerStartDirectory` / `parentDirectory`、Rust `dialog_start_directory` |
 | 选完自动读取 | 选中文件立即读取并建缓存（`_confirm_selected_file`），不需要再点按钮 | 已实现：选中后自动触发 `ts.inspect` 任务；「加载文件」按钮保留供改 Sheet/标题行后重读 | `chooseInput` → `inspect(selected)` |
 | 页面缓存 | 工具间切换不丢输入 | 已实现窗口生命周期内草稿缓存 | 模块级 draft |

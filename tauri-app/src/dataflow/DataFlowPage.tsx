@@ -131,7 +131,10 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   // 恢复不再弹窗确认——「忽略并清除」式的二选一曾让用户误删整个流程；
   // 要重新开始请点工具栏「新建」（显式清除当前流程名的草稿）。
   useEffect(() => {
-    const draft = listDrafts().find((item) => item.workflow.nodes.length);
+    // 多份草稿并存时恢复最新一份（保存时间倒序），而不是枚举顺序碰到的第一份。
+    const draft = listDrafts()
+      .sort((a, b) => (a.savedAt < b.savedAt ? 1 : -1))
+      .find((item) => item.workflow.nodes.length);
     if (!draft) return;
     // 跨版本草稿可能带过期锚点名，恢复时即修正，别等运行才炸。
     const { workflow, fixes } = repairWorkflowEdges(draft.workflow);
@@ -616,17 +619,26 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     if (workflow.params.length) setParamsDialog("confirm");
   }
 
-  /** 新建空白流程：显式清掉当前流程名的草稿，避免下次进页面又被自动恢复。 */
+  /** 新建空白流程。不再删除原草稿（用户需求 2026-11-06：草稿应自动保存、
+   *  新建不该丢失上一份）——改为给新流程一个不重名的名字，旧草稿留在
+   *  「草稿」下拉里随时可加载；要删除请用下拉里的 ×。 */
   function startNewFlow() {
-    removeDraft(workflowRef.current.name);
-    replaceWorkflow(createEmptyWorkflow(), true);
+    const previousName = workflowRef.current.name;
+    const taken = new Set(listDrafts().map((draft) => draft.name));
+    let name = "新建流程";
+    for (let serial = 2; taken.has(name); serial += 1) name = `新建流程${serial}`;
+    const fresh = createEmptyWorkflow(name);
+    fresh.name = name;
+    replaceWorkflow(fresh, true);
     setSelection(null);
     setRunResult(null);
     setLastRunMode(null);
     setRanUpTo(null);
     setError("");
     setAutosaveNote("");
-    setStatusText("已新建空白流程（原草稿已清除）。");
+    setStatusText(
+      `已新建空白流程《${name}》。原流程《${previousName}》的草稿已保留，可从「草稿」下拉随时加载。`,
+    );
   }
 
   async function handlePickPath(

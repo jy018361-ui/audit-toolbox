@@ -76,6 +76,17 @@ export function DataflowToolbar({
 }: DataflowToolbarProps) {
   const [openCategory, setOpenCategory] = useState<DataflowCategory | null>(null);
   const catsRef = useRef<HTMLDivElement | null>(null);
+  const draftsRef = useRef<HTMLSpanElement | null>(null);
+
+  // 草稿下拉：点击下拉以外任意位置收起（选中加载/删除后由页面侧自行关闭）。
+  useEffect(() => {
+    if (!draftsOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!draftsRef.current?.contains(event.target as Node)) onDraftsToggle();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [draftsOpen, onDraftsToggle]);
 
   // 点击分类区以外任意位置收起菜单。
   useEffect(() => {
@@ -103,7 +114,7 @@ export function DataflowToolbar({
             title={flowName}
             onChange={(event) => onFlowNameChange(event.target.value)}
           />
-          <span className="df-drafts">
+          <span className="df-drafts" ref={draftsRef}>
             <button
               type="button"
               className="df-tool"

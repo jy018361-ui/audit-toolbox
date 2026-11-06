@@ -208,7 +208,9 @@ it("存在草稿时进入页面自动恢复（不再弹窗，杜绝误点忽略�
   expect(screen.getByText(/已自动恢复未保存的流程/)).toBeInTheDocument();
 });
 
-it("点「新建」清空画布并清除草稿，下次进入不再自动恢复", async () => {
+it("点「新建」清空画布但保留原草稿，重进页面自动恢复最新一份", async () => {
+  // 2026-11-06 用户裁定：新建不应删除上一份草稿——草稿自动保存，
+  // 想删用「草稿」下拉里的 ×。重进页面恢复最新含节点草稿。
   saveDraft({
     version: 1,
     name: "草稿流程",
@@ -222,14 +224,19 @@ it("点「新建」清空画布并清除草稿，下次进入不再自动恢复"
   const view = render(<DataFlowPage tool={dataflowTool} />);
   await waitFor(() => expect(screen.getByText("流水")).toBeInTheDocument());
   fireEvent.click(screen.getByRole("button", { name: /新建/ }));
-  await waitFor(() => expect(screen.getByText(/已新建空白流程/)).toBeInTheDocument());
+  await waitFor(() => {
+    const status = document.querySelector(".df-status-text")?.textContent ?? "";
+    expect(status).toContain("已新建空白流程《新建流程》");
+    expect(status).toContain("原流程《草稿流程》的草稿已保留");
+  });
   expect(screen.queryByText("流水")).not.toBeInTheDocument();
   view.unmount();
   render(<DataFlowPage tool={dataflowTool} />);
+  // 原草稿仍在：重进页面自动恢复（空白新流程无节点、不落草稿）。
   await waitFor(() =>
-    expect(screen.getByText(/就绪 · 编辑过程会自动保存草稿/)).toBeInTheDocument(),
+    expect(screen.getByText(/已自动恢复未保存的流程《草稿流程》/)).toBeInTheDocument(),
   );
-  expect(screen.queryByText("流水")).not.toBeInTheDocument();
+  expect(screen.getByText("流水")).toBeInTheDocument();
 });
 
 it("拖线自环被拒时走可见错误通道：错误样式状态栏＋结果区红卡，且线不出现", async () => {

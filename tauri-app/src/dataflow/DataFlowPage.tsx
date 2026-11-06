@@ -28,6 +28,7 @@ import {
   sameEdge,
   saveDraft,
   validateNewEdge,
+  type DataflowDraft,
   type DataflowEdge,
   type DataflowNode,
   type DataflowRunResult,
@@ -543,6 +544,40 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
+  // 草稿下拉：查询本机保存的全部草稿，可加载、删除（用户需求 2026-11-06）。
+  const [draftsOpen, setDraftsOpen] = useState(false);
+  const [draftList, setDraftList] = useState<DataflowDraft[]>([]);
+
+  function toggleDrafts() {
+    setDraftList(listDrafts().sort((a, b) => (a.savedAt < b.savedAt ? 1 : -1)));
+    setDraftsOpen((open) => !open);
+  }
+
+  function loadDraftByName(name: string) {
+    const draft = listDrafts().find((item) => item.name === name);
+    if (!draft) return;
+    const { workflow, fixes } = repairWorkflowEdges(draft.workflow);
+    replaceWorkflow(workflow, true);
+    setSelection(null);
+    setRunResult(null);
+    setLastRunMode(null);
+    setRanUpTo(null);
+    setError("");
+    setFitKey((key) => key + 1);
+    setDraftsOpen(false);
+    setStatusText(
+      `已加载草稿《${draft.name}》（${workflow.nodes.length} 个节点，保存于 ${draft.savedAt
+        .replace("T", " ")
+        .slice(0, 19)}）${fixes.length ? `，已修正 ${fixes.length} 条过期连线` : ""}。继续编辑会自动保存到这份草稿。`,
+    );
+  }
+
+  function deleteDraftByName(name: string) {
+    removeDraft(name);
+    setDraftList(listDrafts().sort((a, b) => (a.savedAt < b.savedAt ? 1 : -1)));
+    setStatusText(`已删除草稿《${name}》。`);
+  }
+
   /** 选择默认输出文件夹（设定一次即记住）：输出文件名留空/只填名字时自动保存到这里。 */
   async function handlePickOutputDir() {
     const picked = await pickPath("folder", "选择输出文件夹（输出文件将自动保存到这里）");
@@ -713,6 +748,11 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
           onOpen={() => void handleOpen()}
           onPreviewRun={() => void runFlow("preview")}
           onFullRun={() => void runFlow("full")}
+          drafts={draftList}
+          draftsOpen={draftsOpen}
+          onDraftsToggle={toggleDrafts}
+          onLoadDraft={loadDraftByName}
+          onDeleteDraft={deleteDraftByName}
           onRunToNode={() => {
             if (selection?.kind === "node") void runFlow("full", selection.id);
           }}

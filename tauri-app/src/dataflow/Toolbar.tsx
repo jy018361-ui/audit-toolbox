@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { DataflowIcon } from "./icons";
+import type { DataflowDraft } from "./model";
 import {
   DATAFLOW_CATEGORIES,
   categoryNodes,
@@ -40,6 +41,12 @@ export interface DataflowToolbarProps {
   /** 画布上有选中节点时才可用。 */
   canRunToNode: boolean;
   running: boolean;
+  /** 本机已保存的草稿（含名称/保存时间/工作流），供标题旁下拉查询、加载、删除。 */
+  drafts: DataflowDraft[];
+  draftsOpen: boolean;
+  onDraftsToggle: () => void;
+  onLoadDraft: (name: string) => void;
+  onDeleteDraft: (name: string) => void;
 }
 
 /** 顶部工具栏：7 个分类菜单（20 节点全部可选）＋右侧操作按钮。 */
@@ -61,6 +68,11 @@ export function DataflowToolbar({
   onRunToNode,
   canRunToNode,
   running,
+  drafts,
+  draftsOpen,
+  onDraftsToggle,
+  onLoadDraft,
+  onDeleteDraft,
 }: DataflowToolbarProps) {
   const [openCategory, setOpenCategory] = useState<DataflowCategory | null>(null);
   const catsRef = useRef<HTMLDivElement | null>(null);
@@ -91,6 +103,46 @@ export function DataflowToolbar({
             title={flowName}
             onChange={(event) => onFlowNameChange(event.target.value)}
           />
+          <span className="df-drafts">
+            <button
+              type="button"
+              className="df-tool"
+              title="查看本机保存的全部草稿：可加载或删除"
+              onClick={onDraftsToggle}
+            >
+              草稿
+              <ChevronDown size={12} />
+            </button>
+            {draftsOpen && (
+              <span className="df-drafts-pop" role="menu" aria-label="已保存的草稿">
+                {drafts.length === 0 && <span className="df-note">本机还没有保存过的草稿。</span>}
+                {drafts.map((draft) => (
+                  <span className="df-draft-row" key={draft.name} role="menuitem">
+                    <button
+                      type="button"
+                      className="df-draft-load"
+                      title="在画布上打开这份草稿"
+                      onClick={() => onLoadDraft(draft.name)}
+                    >
+                      <b>{draft.name}</b>
+                      <i>
+                        {draft.savedAt.replace("T", " ").slice(0, 16)} · {draft.workflow.nodes.length} 个节点
+                      </i>
+                    </button>
+                    <button
+                      type="button"
+                      className="df-draft-del"
+                      aria-label={`删除草稿 ${draft.name}`}
+                      title="删除这份草稿"
+                      onClick={() => onDeleteDraft(draft.name)}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </span>
+            )}
+          </span>
           {autosaveNote && <span className="df-autosave">{autosaveNote}</span>}
         </span>
         <div className="df-tb-right">

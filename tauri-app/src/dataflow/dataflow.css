@@ -424,6 +424,74 @@ textarea.df-in {
   cursor: grabbing;
 }
 
+/* 标题旁草稿下拉：查询/加载/删除本机保存的草稿。 */
+.df-drafts {
+  position: relative;
+  flex: none;
+}
+.df-drafts-pop {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 4px);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 300px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-card);
+}
+.df-draft-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--r-sm);
+}
+.df-draft-row:hover {
+  background: var(--surface-muted);
+}
+.df-draft-load {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 4px 6px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+.df-draft-load b {
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.df-draft-load i {
+  font-style: normal;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+.df-draft-del {
+  flex: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  padding: 2px 8px 2px 4px;
+}
+.df-draft-del:hover {
+  color: var(--danger-fg);
+}
 /* 多字段选择：标签 + 手输 + 勾选清单弹层。 */
 .df-tokenpick {
   display: flex;

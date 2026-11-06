@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { DataFlowPage } from "./DataFlowPage";
@@ -408,4 +408,37 @@ it("Ctrl+C/Ctrl+V 复制粘贴节点：副本带相同配置、名称加「副�
   // 再按一次 V：还可以继续粘贴（剪贴板保留）。
   fireEvent.keyDown(window, { key: "v", ctrlKey: true });
   await waitFor(() => expect(document.querySelectorAll(".df-node").length).toBe(before + 2));
+});
+
+it("标题旁「草稿」下拉：列出本机草稿，可加载与删除", async () => {
+  // 用户需求 2026-11-06：新开项目都应能查询、加载、删除已保存草稿。
+  const first = createEmptyWorkflow("底稿A");
+  first.nodes = [{ id: "n1", type: "excel_in", name: "输入A", x: 60, y: 60, config: defaultConfigFor("excel_in") }];
+  saveDraft(first);
+  const second = createEmptyWorkflow("底稿B");
+  second.nodes = [
+    { id: "n1", type: "csv_in", name: "输入B", x: 60, y: 60, config: defaultConfigFor("csv_in") },
+    { id: "n2", type: "filter_n", name: "筛选B", x: 260, y: 60, config: defaultConfigFor("filter_n") },
+  ];
+  saveDraft(second);
+  render(<DataFlowPage tool={dataflowTool} />);
+  // 自动恢复最新含节点草稿（底稿B），标题旁打开草稿下拉。
+  await screen.findByText(/已自动恢复未保存的流程/);
+  fireEvent.click(screen.getByRole("button", { name: /草稿/ }));
+  const menu = await screen.findByRole("menu", { name: "已保存的草稿" });
+  const rows = within(menu).getAllByRole("menuitem");
+  expect(rows.length).toBe(2);
+  // 加载底稿A：画布切换为它的节点。
+  fireEvent.click(within(menu).getByRole("button", { name: /^底稿A/ }));
+  await waitFor(() => {
+    expect(document.querySelectorAll(".df-node").length).toBe(1);
+  });
+  expect(screen.getByText("输入A", { selector: ".df-node-names b" })).toBeInTheDocument();
+  // 删除底稿B：清单少一条。
+  fireEvent.click(screen.getByRole("button", { name: /草稿/ }));
+  const menu2 = await screen.findByRole("menu", { name: "已保存的草稿" });
+  fireEvent.click(within(menu2).getByRole("button", { name: "删除草稿 底稿B" }));
+  await waitFor(() => {
+    expect(screen.getByText(/已删除草稿《底稿B》/)).toBeInTheDocument();
+  });
 });

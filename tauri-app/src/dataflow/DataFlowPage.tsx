@@ -17,6 +17,7 @@ import {
   defaultNodeName,
   incompleteFilterRule,
   loadRowLimit,
+  ROW_LIMIT_AUTO,
   ROW_LIMIT_OPTIONS,
   saveRowLimit,
   loadOutputDir,
@@ -769,7 +770,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
           onRowLimitChange={(value) => {
             setRowLimit(value);
             saveRowLimit(value);
-            setStatusText(`行数上限已设为 ${(value / 10000).toLocaleString("zh-CN")} 万行（已记住）。`);
+            setStatusText(value === ROW_LIMIT_AUTO ? "行数上限已设为自动（按本机内存推导，已记住）。" : `行数上限已设为 ${(value / 10000).toLocaleString("zh-CN")} 万行（已记住）。`);
           }}
           drafts={draftList}
           draftsOpen={draftsOpen}

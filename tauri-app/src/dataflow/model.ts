@@ -822,20 +822,23 @@ export function dataflowRunRequest(
     paramOverrides,
   };
   if (uptoNodeId) payload.uptoNodeId = uptoNodeId;
-  // 行数上限可调（2026-11-07 用户需求：日常千万级行）；不传＝引擎默认 100 万。
-  if (rowLimit && Number.isFinite(rowLimit)) payload.rowLimit = rowLimit;
+  // 行数上限可调（2026-11-07）；不传＝引擎按本机可用内存自动推导（推荐默认）。
+  if (rowLimit && Number.isFinite(rowLimit) && rowLimit > 0) payload.rowLimit = rowLimit;
   return payload;
 }
 
 /** 行数上限档位（记忆在本机）：默认 100 万，最高 2000 万（再往上需三期流式落盘）。 */
 export const ROW_LIMIT_KEY = "audit-toolbox:dataflow:row-limit";
 
+/** 0＝自动（按本机内存，引擎推导），不再要求用户手动设置（2026-11-07）。 */
+export const ROW_LIMIT_AUTO = 0;
+
 export function loadRowLimit(): number {
   try {
     const value = Number(window.localStorage.getItem(ROW_LIMIT_KEY));
-    return ROW_LIMIT_OPTIONS.some((option) => option.value === value) ? value : 1_000_000;
+    return ROW_LIMIT_OPTIONS.some((option) => option.value === value) ? value : ROW_LIMIT_AUTO;
   } catch {
-    return 1_000_000;
+    return ROW_LIMIT_AUTO;
   }
 }
 
@@ -848,7 +851,7 @@ export function saveRowLimit(value: number): void {
 }
 
 export const ROW_LIMIT_OPTIONS: { value: number; label: string }[] = [
-  { value: 1_000_000, label: "100 万（默认）" },
+  { value: ROW_LIMIT_AUTO, label: "自动（按本机内存，推荐）" },
   { value: 5_000_000, label: "500 万" },
   { value: 10_000_000, label: "1000 万" },
   { value: 20_000_000, label: "2000 万（需大内存）" },

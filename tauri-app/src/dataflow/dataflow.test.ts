@@ -42,6 +42,7 @@ import {
   type DataflowWorkflow,
   resolveOutputPaths,
   loadRowLimit,
+  ROW_LIMIT_AUTO,
   saveRowLimit,
   ROW_LIMIT_KEY
 } from "./model";
@@ -1793,12 +1794,12 @@ describe("连线拖拽改接（rewireWorkflowEdge）", () => {
 });
 
 describe("行数上限可调（用户需求 2026-11-07）", () => {
-  it("档位记忆与非法值回落默认 100 万", () => {
-    expect(loadRowLimit()).toBe(1_000_000);
+  it("档位记忆：默认自动（0），非法值回落自动，手动档记住", () => {
+    expect(loadRowLimit()).toBe(ROW_LIMIT_AUTO);
     saveRowLimit(10_000_000);
     expect(loadRowLimit()).toBe(10_000_000);
     saveRowLimit(7_777_777);
-    expect(loadRowLimit()).toBe(1_000_000);
+    expect(loadRowLimit()).toBe(ROW_LIMIT_AUTO);
     window.localStorage.removeItem(ROW_LIMIT_KEY);
   });
 

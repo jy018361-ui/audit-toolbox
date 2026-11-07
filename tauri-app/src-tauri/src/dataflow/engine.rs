@@ -28,6 +28,21 @@ use std::time::Instant;
 /// 引擎入口。method 只接受 "dataflow_preview" / "dataflow_run"，
 /// params 为完整工作流 JSON（顶层 {version,name,params,nodes,edges,notes}，
 /// 可选 paramOverrides 覆盖参数默认值、uptoNodeId 指定「运行到选中节点」）。
+/// 默认行数上限＝按本机可用内存自动推导（2026-11-07 用户需求：不应让用户
+/// 手动设）。每行按约 2KB 预算（20 列 × 每格约 100 字节量级），只留可用
+/// 内存的一半给数据（另一半留给系统与其他表并存）；夹在 100 万–5000 万。
+/// 查询失败回落静态默认 100 万。
+fn auto_row_limit() -> usize {
+    const PER_ROW_BUDGET: u64 = 2 * 1024;
+    let usable = crate::resource_budget::memory_status()
+        .map(|status| status.available / 2)
+        .unwrap_or(0);
+    if usable == 0 {
+        return super::nodes::MAX_TABLE_ROWS;
+    }
+    (usable / PER_ROW_BUDGET).clamp(1_000_000, 50_000_000) as usize
+}
+
 pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppError> {
     let mode = match method {
         "dataflow_preview" => RunMode::Preview,
@@ -59,7 +74,7 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
         .get("rowLimit")
         .and_then(Value::as_u64)
         .map(|value| value.clamp(1_000, 50_000_000) as usize)
-        .unwrap_or(super::nodes::MAX_TABLE_ROWS);
+        .unwrap_or_else(auto_row_limit);
     let request: RunRequest = serde_json::from_value(params).map_err(|error| {
         AppError::new(
             "DATAFLOW_WORKFLOW_INVALID",

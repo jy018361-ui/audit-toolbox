@@ -159,4 +159,13 @@ describe("TS legacy filter semantics", () => {
     expect(tsManagerParity.canStartTsExport([])).toBe(false);
     expect(tsManagerParity.canStartTsExport(["Hours"])).toBe(true);
   });
+
+  it("suggests a timestamped export file name so repeated exports never overwrite", () => {
+    expect(
+      tsManagerParity.defaultExportFileName(new Date(2026, 10, 7, 9, 5, 3)),
+    ).toBe("工时报告_20261107_090503.xlsx");
+    expect(
+      tsManagerParity.defaultExportFileName(new Date(2026, 0, 2, 23, 59, 59)),
+    ).toBe("工时报告_20260102_235959.xlsx");
+  });
 });

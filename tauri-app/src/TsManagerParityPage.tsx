@@ -205,6 +205,17 @@ function canStartTsExport(headers: string[]) {
   return headers.length > 0;
 }
 
+/** 导出建议文件名带生成时刻的时间戳（工时报告_20261107_093012.xlsx）：
+ * 同一批数据多次导出不再互相覆盖，明细 CSV 跟随主文件名自动带同一时间戳。 */
+function defaultExportFileName(now = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const stamp = [
+    `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`,
+    `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`,
+  ].join("_");
+  return `工时报告_${stamp}.xlsx`;
+}
+
 export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   const [state, setState] = useState<TsDraft>(() => draft);
   const [step, setStep] = useState<1 | 2 | 3>(1);
@@ -440,6 +451,8 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
         (defaultField && defaultValue ? { [defaultField]: [defaultValue] } : {}),
       filtered: undefined,
     }));
+    // 加载成功即进入「条件筛选」：选完文件还要手动点「下一步」是多余的。
+    if ((value.headers ?? []).length) setStep(2);
   }
 
   const loadValues = useCallback(
@@ -534,7 +547,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
       "save",
       "另存为工时报告（by经理 + by项目）",
       ["xlsx"],
-      "工时报告.xlsx",
+      defaultExportFileName(),
     );
     if (typeof selected !== "string" || !selected.trim()) return;
     patch({ outputPath: selected });
@@ -999,6 +1012,7 @@ export const tsManagerParity = {
   parentDirectory,
   pickerStartDirectory,
   canStartTsExport,
+  defaultExportFileName,
   BLANK_TOKEN,
   LEGACY_DEFAULT_FOLDER,
 };

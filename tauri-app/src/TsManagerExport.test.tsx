@@ -56,7 +56,7 @@ describe("TS 点击导出后选择保存位置", () => {
     vi.mocked(pickPath).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     vi.mocked(jobStart).mockResolvedValue("export-1");
     fireEvent.click(button);
-    expect(pickPath).toHaveBeenCalledWith("save", "另存为工时报告（by经理 + by项目）", ["xlsx"], "工时报告.xlsx");
+    expect(pickPath).toHaveBeenCalledWith("save", "另存为工时报告（by经理 + by项目）", ["xlsx"], expect.stringMatching(/^工时报告_\d{8}_\d{6}\.xlsx$/));
     expect(button).toBeDisabled();
     fireEvent.click(button);
     expect(pickPath).toHaveBeenCalledTimes(1);

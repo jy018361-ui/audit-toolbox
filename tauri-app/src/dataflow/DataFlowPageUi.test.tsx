@@ -368,10 +368,10 @@ it("视角被拖远后新增节点：画布自动把视角对准新节点，不�
   // jsdom 没有布局（画布尺寸恒为 0×0），新增节点永远判定为「在视野外」，
   // 因此这里锁定确定性的对准行为：新节点落在视野外时视角对准它。
   // （视角拖远后自动回焦的完整路径在真实浏览器里验证。）
-  // 节点 1（Excel 输入）位于 (60, 60)，宽 156 高 78：对准后相机
-  // x = -60-78 = -138、y = -60-39 = -99。
+  // 节点 1（Excel 输入）位于 (60, 60)，宽 156 高 84（2026-11-07 加高防叠压）：
+  // 对准后相机 x = -60-78 = -138、y = -60-42 = -102。
   const transform = (document.querySelector(".df-world") as HTMLElement).style.transform;
-  expect(transform).toBe("translate(-138px, -99px) scale(1)");
+  expect(transform).toBe("translate(-138px, -102px) scale(1)");
 });
 
 it("恢复坐标超出当前画布的草稿：自动适配视角，全部节点进入视野（不再打开即空白）", async () => {

@@ -938,6 +938,18 @@ textarea.df-in {
   background: var(--surface);
   z-index: 5;
   touch-action: none;
+  /* 可视 11px、命中 24px：圆点太小太难拖中（连线经常失效的真实反馈）。 */
+  --hit: 24px;
+}
+.df-a::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--hit);
+  height: var(--hit);
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
 }
 .df-a.df-a-in { left: -7px; }
 .df-a.df-a-out { right: -7px; cursor: crosshair; }
@@ -950,6 +962,12 @@ textarea.df-in {
   font-size: var(--fs-xs);
   color: var(--text-muted);
   pointer-events: none;
+  /* 默认隐藏防与卡片文字叠压（真实反馈 2026-11-07），悬停节点时显示。 */
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.df-node:hover .df-a-lbl {
+  opacity: 1;
   white-space: nowrap;
 }
 .df-a-lbl.df-a-lbl-out { right: 11px; }

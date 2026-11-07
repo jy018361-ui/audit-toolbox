@@ -12,7 +12,7 @@ import { nodeSpec, type DataflowNodeSpec } from "./nodeSpecs";
 
 /** 画布几何常量：节点宽度与默认高度，锚点纵向分布按此计算。 */
 const NODE_W = 156;
-const NODE_H = 78;
+const NODE_H = 84;
 
 export type NodeRunStatus = "idle" | "run" | "ok" | "warn" | "error";
 
@@ -429,7 +429,7 @@ export function DataflowCanvas({
     // 连线拖动：临时虚线跟随指针。ref 同步写，保证快速拖动时 pointerup
     // 立即可读到最新路径。
     drag.moved += 1;
-    if (drag.moved < 3) return;
+    if (drag.moved < 2) return;
     const fromNode = workflow.nodes.find((item) => item.id === drag.from);
     const fromSpec = fromNode ? nodeSpec(fromNode.type) : undefined;
     if (!fromNode || !fromSpec) return;
@@ -477,13 +477,29 @@ export function DataflowCanvas({
       if (tempEdgeRef.current) {
         const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
         const inAnchor = element?.closest(".df-a-in") as HTMLElement | null;
-        const targetNode = inAnchor?.closest(".df-node") as HTMLElement | null;
-        if (inAnchor && targetNode?.dataset.id) {
+        // 拖到节点卡片上任意位置也接受（真实反馈 2026-11-07：11px 圆点太难命中，
+        // 连线经常失效）：优先精确锚点，否则取该节点第一个输入口，占用校验在页面侧。
+        let targetNode = inAnchor?.closest(".df-node") as HTMLElement | null;
+        let anchorKey = inAnchor?.dataset.key;
+        if (!inAnchor) {
+          const fallbackNode = element?.closest(".df-node") as HTMLElement | null;
+          if (fallbackNode?.dataset.id) {
+            const spec = nodeSpec(
+              workflow.nodes.find((item) => item.id === fallbackNode.dataset.id)?.type ?? "",
+            );
+            const fallbackKey = spec?.inputs[0]?.key;
+            if (fallbackKey) {
+              targetNode = fallbackNode;
+              anchorKey = fallbackKey;
+            }
+          }
+        }
+        if (targetNode?.dataset.id && anchorKey) {
           onConnect({
             from: drag.from,
             fromAnchor: drag.fromAnchor,
             to: targetNode.dataset.id,
-            toAnchor: inAnchor.dataset.key ?? "in",
+            toAnchor: anchorKey,
           });
         }
       }

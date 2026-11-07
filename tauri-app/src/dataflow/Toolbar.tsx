@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 
 import { DataflowIcon } from "./icons";
-import type { DataflowDraft } from "./model";
+import { ROW_LIMIT_OPTIONS, type DataflowDraft } from "./model";
 import {
   DATAFLOW_CATEGORIES,
   categoryNodes,
@@ -43,6 +43,9 @@ export interface DataflowToolbarProps {
   running: boolean;
   /** 本机已保存的草稿（含名称/保存时间/工作流），供标题旁下拉查询、加载、删除。 */
   drafts: DataflowDraft[];
+  /** 单节点行数上限（用户可调并记住），随运行请求传给引擎。 */
+  rowLimit: number;
+  onRowLimitChange: (value: number) => void;
   draftsOpen: boolean;
   onDraftsToggle: () => void;
   onLoadDraft: (name: string) => void;
@@ -69,6 +72,8 @@ export function DataflowToolbar({
   canRunToNode,
   running,
   drafts,
+  rowLimit,
+  onRowLimitChange,
   draftsOpen,
   onDraftsToggle,
   onLoadDraft,
@@ -165,6 +170,19 @@ export function DataflowToolbar({
             <Settings2 size={13} />
             参数
           </button>
+          <label className="df-row-limit" title="单节点处理行数上限：超出即报错不静默截断。数据量大时调大，需较大内存。">
+            行数上限
+            <select
+              value={rowLimit}
+              onChange={(event) => onRowLimitChange(Number(event.target.value))}
+            >
+              {ROW_LIMIT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <button type="button" className="df-tool" onClick={onSave}>
             <Save size={13} />
             保存

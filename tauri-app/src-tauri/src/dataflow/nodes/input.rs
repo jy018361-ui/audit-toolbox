@@ -605,7 +605,9 @@ fn row_cap(context: &RunContext) -> usize {
     if context.mode == super::RunMode::Preview {
         context.preview_rows
     } else {
-        MAX_TABLE_ROWS + 1
+        // 全量读取预算＝本次运行上限＋1（读满即由 total_rows 检查把关并报错；
+        // 上限可调后这里必须跟随，否则调大上限也读不进足够的行）。
+        context.row_limit + 1
     }
 }
 
@@ -707,11 +709,12 @@ fn assemble_outcome(
             row_count: raw.rows.len(),
         });
     }
-    if total_rows > MAX_TABLE_ROWS {
+    if total_rows > context.row_limit {
         return Err(structural(
             "DATAFLOW_ROW_LIMIT",
             format!(
-                "节点「{node_name}」读取的数据行数（{total_rows}）超出第一期内网上限（{MAX_TABLE_ROWS} 行）。                 第一期在内存中完整处理数据，不会静默截断；请缩小数据范围，或等待第三期磁盘执行路径。"
+                "节点「{node_name}」读取的数据行数（{total_rows}）超出本次运行上限（{} 行，可在画布右上角「行数上限」调大）。引擎在内存中完整处理数据、不会静默截断；上限已支持千万级，更大规模请等待三期流式方案。",
+                context.row_limit
             ),
         ));
     }
@@ -1275,6 +1278,7 @@ mod tests {
             today: chrono::NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(),
             param_values: HashMap::new(),
             preview_rows: PREVIEW_ROWS,
+            row_limit: MAX_TABLE_ROWS,
             allowed_paths: None,
         };
         let collected = vec![(
@@ -1356,6 +1360,7 @@ mod tests {
             today: chrono::NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(),
             param_values: HashMap::new(),
             preview_rows: PREVIEW_ROWS,
+            row_limit: MAX_TABLE_ROWS,
             allowed_paths: None,
         }
     }

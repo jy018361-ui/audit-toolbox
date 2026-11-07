@@ -68,6 +68,7 @@ pub(crate) fn run_join(
     config: &Json,
     left: &Table,
     right: &Table,
+    row_limit: usize,
 ) -> Result<NodeOutcome, AppError> {
     let config: JoinConfig = serde_json::from_value(config.clone())
         .map_err(|error| config_error("关联", node_name, error.to_string()))?;
@@ -218,18 +219,18 @@ pub(crate) fn run_join(
         Some(partners) => acc.saturating_add(count.saturating_mul(partners.len())),
         None => acc,
     });
-    if j_total > MAX_TABLE_ROWS {
+    if j_total > row_limit {
         return Err(structural(
             "DATAFLOW_ROW_LIMIT",
             format!(
                 "节点「{node_name}」的 J 路（匹配）预计行数（{j_total}）\
-                 超出内网上限（{MAX_TABLE_ROWS} 行），多对多组合膨胀明显超出资源预算。\
+                 超出本次运行上限（{row_limit} 行，可在画布右上角「行数上限」调大），多对多组合膨胀明显。\
                  请先去重关联键或缩小数据范围。",
             ),
         ));
     }
 
-    let mut j_rows: Vec<Vec<Value>> = Vec::with_capacity(j_total.min(MAX_TABLE_ROWS));
+    let mut j_rows: Vec<Vec<Value>> = Vec::with_capacity(j_total.min(row_limit));
     let mut l_rows: Vec<Vec<Value>> = Vec::new();
     let mut left_matched_rows = 0usize;
     for row in &left.rows {
@@ -246,12 +247,12 @@ pub(crate) fn run_join(
                 for &partner in partners {
                     // 双保险：预检按构造与实际 push 数一致，但这里在每次 push 前
                     // 再拦一次已达上限的组合，保证任何路径下都不超限物化。
-                    if j_rows.len() >= MAX_TABLE_ROWS {
+                    if j_rows.len() >= row_limit {
                         return Err(structural(
                             "DATAFLOW_ROW_LIMIT",
                             format!(
-                                "节点「{node_name}」的 J 路（匹配）行数已达内网上限\
-                                 （{MAX_TABLE_ROWS} 行），多对多组合膨胀明显超出资源预算，\
+                                "节点「{node_name}」的 J 路（匹配）行数已达本次运行上限\
+                                 （{row_limit} 行），多对多组合膨胀明显，\
                                  已提前中止。请先去重关联键或缩小数据范围。",
                             ),
                         ));
@@ -411,7 +412,7 @@ mod tests {
             types: vec![ColType::Integer, ColType::Text],
             rows: (0..4).map(|i| vec![Value::Int(1), Value::Text(format!("x{i}"))]).collect(),
         };
-        let outcome = run_join("关联", &key_config(), &left, &right).unwrap();
+        let outcome = run_join("关联", &key_config(), &left, &right, 1_000_000).unwrap();
         let j = anchor(&outcome, "J");
         assert_eq!(j.rows.len(), 12, "同一键左 3 × 右 4 应得 12 行组合");
         assert_eq!(anchor(&outcome, "L").rows.len(), 0);
@@ -440,11 +441,11 @@ mod tests {
             types: vec![ColType::Integer, ColType::Integer],
             rows: (0..1000).map(|i| vec![Value::Int(1), Value::Int(i)]).collect(),
         };
-        let error = expect_row_limit(run_join("关联", &key_config(), &left, &right));
+        let error = expect_row_limit(run_join("关联", &key_config(), &left, &right, 1_000_000));
         let payload = serde_json::to_value(&error).unwrap();
         assert_eq!(payload["code"], "DATAFLOW_ROW_LIMIT");
         let message = payload["userMessage"].as_str().unwrap();
-        assert!(message.contains("超出内网上限"), "应给出中文上限提示：{message}");
+        assert!(message.contains("超出本次运行上限"), "应给出中文上限提示：{message}");
         assert!(message.contains("1500000"), "应报告预计组合行数 150 万：{message}");
         assert!(message.contains("去重关联键"), "应给出处理建议：{message}");
     }
@@ -463,7 +464,7 @@ mod tests {
             types: vec![ColType::Text, ColType::Integer],
             rows: (0..1000).map(|i| vec![Value::Text(String::new()), Value::Int(i)]).collect(),
         };
-        let error = expect_row_limit(run_join("关联", &key_config(), &left, &right));
+        let error = expect_row_limit(run_join("关联", &key_config(), &left, &right, 1_000_000));
         let payload = serde_json::to_value(&error).unwrap();
         assert_eq!(payload["code"], "DATAFLOW_ROW_LIMIT");
         let message = payload["userMessage"].as_str().unwrap();

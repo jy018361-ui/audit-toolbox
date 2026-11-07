@@ -726,11 +726,12 @@ export async function dataflowRun(
   workflow: unknown,
   paramOverrides: Record<string, string> = {},
   uptoNodeId?: string,
+  rowLimit?: number,
 ): Promise<unknown> {
   if (!inTauri()) return dataflowDemoResult("full", workflow, paramOverrides, uptoNodeId);
   return engineCall(
     "dataflow_run",
-    dataflowRunRequest(workflow, "full", paramOverrides, uptoNodeId),
+    dataflowRunRequest(workflow, "full", paramOverrides, uptoNodeId, rowLimit),
     uptoNodeId ? "数据流运行到选中节点" : "数据流全量运行",
   );
 }

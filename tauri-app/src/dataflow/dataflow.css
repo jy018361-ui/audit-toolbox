@@ -1342,3 +1342,15 @@ textarea.df-in {
 .df-db-status.df-db-err {
   color: var(--danger-fg);
 }
+/* 行数上限选择（工具栏） */
+.df-row-limit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+.df-row-limit select {
+  font-size: var(--fs-xs);
+  padding: 1px 4px;
+}

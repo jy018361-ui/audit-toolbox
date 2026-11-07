@@ -30,6 +30,7 @@ pub(crate) fn run_union(
     node_name: &str,
     config: &Json,
     inputs: &[(String, String, Arc<Table>)],
+    row_limit: usize,
 ) -> Result<NodeOutcome, AppError> {
     let config: UnionConfig = serde_json::from_value(config.clone())
         .map_err(|error| config_error("纵向合并", node_name, error.to_string()))?;
@@ -230,11 +231,11 @@ pub(crate) fn run_union(
     // 行数之和，可先于投影物化算出——多表合计超限时立即报错，不再先白占
     // 内存与时间把全部行投影完再丢弃（守恒核对用同一数值）。
     let total: usize = inputs.iter().map(|(_, _, table)| table.rows.len()).sum();
-    if total > MAX_TABLE_ROWS {
+    if total > row_limit {
         return Err(structural(
             "DATAFLOW_ROW_LIMIT",
             format!(
-                "节点「{node_name}」合并后行数（{total}）超出内网上限（{MAX_TABLE_ROWS} 行）。",
+                "节点「{node_name}」合并后行数（{total}）超出本次运行上限（{row_limit} 行，可在画布右上角「行数上限」调大）。",
             ),
         ));
     }
@@ -417,6 +418,7 @@ pub(crate) fn run_sort(
     node_name: &str,
     config: &Json,
     mut input: Arc<Table>,
+    _row_limit: usize,
 ) -> Result<NodeOutcome, AppError> {
     let config: SortConfig = serde_json::from_value(config.clone())
         .map_err(|error| config_error("排序", node_name, error.to_string()))?;
@@ -577,7 +579,7 @@ mod tests {
                 rows: vec![vec![Value::Text("y".into()), Value::Text("z".into())]],
             }),
         );
-        let outcome = run_union("纵向合并", &json!({}), &[t1, t2]).unwrap();
+        let outcome = run_union("纵向合并", &json!({}), &[t1, t2], MAX_TABLE_ROWS).unwrap();
         let table = output_anchor(&outcome);
         assert_eq!(table.columns, vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]);
         assert_eq!(
@@ -606,11 +608,11 @@ mod tests {
             )
         };
         let inputs = [int_table("n1", 500_000), int_table("n2", 500_001)];
-        let error = expect_row_limit(run_union("纵向合并", &json!({}), &inputs));
+        let error = expect_row_limit(run_union("纵向合并", &json!({}), &inputs, MAX_TABLE_ROWS));
         let payload = serde_json::to_value(&error).unwrap();
         assert_eq!(payload["code"], "DATAFLOW_ROW_LIMIT");
         let message = payload["userMessage"].as_str().unwrap();
-        assert!(message.contains("超出内网上限"), "应给出中文上限提示：{message}");
+        assert!(message.contains("超出本次运行上限"), "应给出中文上限提示：{message}");
         assert!(message.contains("1000001"), "应报告合并后总行数 1000001：{message}");
     }
 
@@ -629,7 +631,7 @@ mod tests {
             )
         };
         let inputs = [int_table("n1", 500_000), int_table("n2", 500_000)];
-        let outcome = run_union("纵向合并", &json!({}), &inputs).unwrap();
+        let outcome = run_union("纵向合并", &json!({}), &inputs, MAX_TABLE_ROWS).unwrap();
         assert_eq!(output_anchor(&outcome).rows.len(), 1_000_000);
     }
 }

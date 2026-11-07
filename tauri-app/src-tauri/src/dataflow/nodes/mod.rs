@@ -157,6 +157,10 @@ pub(crate) struct RunContext {
     pub param_values: HashMap<String, String>,
     /// 预览行数上限（默认 PREVIEW_ROWS）。
     pub preview_rows: usize,
+    /// 单节点行数上限（默认 MAX_TABLE_ROWS＝100 万；2026-11-07 用户需求改为
+    /// 可调：日常有千万级数据，请求可携带 rowLimit 覆盖，各节点的上限检查
+    /// 与提示统一用它）。
+    pub row_limit: usize,
     /// lib.rs engine_call 注入的已授权路径；None＝未注入（单元测试直调），
     /// 不启用授权门。
     pub allowed_paths: Option<Vec<PathBuf>>,

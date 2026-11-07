@@ -44,6 +44,7 @@ pub(crate) fn run_summarize(
     node_name: &str,
     config: &Json,
     input: &Table,
+    row_limit: usize,
 ) -> Result<NodeOutcome, AppError> {
     let config: SummarizeConfig = serde_json::from_value(config.clone())
         .map_err(|error| config_error("汇总", node_name, error.to_string()))?;
@@ -215,11 +216,11 @@ pub(crate) fn run_summarize(
             }
         }
     }
-    if groups.len() > MAX_TABLE_ROWS {
+    if groups.len() > row_limit {
         return Err(structural(
             "DATAFLOW_ROW_LIMIT",
             format!(
-                "节点「{node_name}」分组数（{}）超出内网上限（{MAX_TABLE_ROWS} 组）。\
+                "节点「{node_name}」分组数（{}）超出本次运行上限（{row_limit} 组，可在画布右上角「行数上限」调大）。\
                  高分组数量场景请先筛选或拆分数据。",
                 groups.len()
             ),
@@ -402,6 +403,7 @@ pub(crate) fn run_crosstab(
     node_name: &str,
     config: &Json,
     input: &Table,
+    row_limit: usize,
 ) -> Result<NodeOutcome, AppError> {
     let config: CrosstabConfig = serde_json::from_value(config.clone())
         .map_err(|error| config_error("透视", node_name, error.to_string()))?;
@@ -539,12 +541,12 @@ pub(crate) fn run_crosstab(
     // 单据号×科目）缺失组合照样逐格物化，必须先于物化拦截，否则数千万至
     // 十亿个 Value 先堆满内存（参照宽转长 transpose 的乘积预检范式）。
     let total_cells = row_order.len().saturating_mul(column_order.len());
-    if total_cells > MAX_TABLE_ROWS {
+    if total_cells > row_limit {
         return Err(structural(
             "DATAFLOW_ROW_LIMIT",
             format!(
                 "节点「{node_name}」透视输出规模（{} 行 × {} 列 = {total_cells} 个单元格）\
-                 超出内网上限（{MAX_TABLE_ROWS}）。行字段与列字段取值组合过多\
+                 超出本次运行上限（{row_limit}，可在画布右上角「行数上限」调大）。行字段与列字段取值组合过多\
                  （如单据号×科目），请先筛选取值或改用汇总+导出。",
                 row_order.len(),
                 column_order.len()
@@ -655,6 +657,7 @@ pub(crate) fn run_transpose(
     node_name: &str,
     config: &Json,
     input: &Table,
+    row_limit: usize,
 ) -> Result<NodeOutcome, AppError> {
     let config: TransposeConfig = serde_json::from_value(config.clone())
         .map_err(|error| config_error("宽转长", node_name, error.to_string()))?;
@@ -751,12 +754,12 @@ pub(crate) fn run_transpose(
     };
 
     let total_rows = input.rows.len().saturating_mul(value_columns.len());
-    if total_rows > MAX_TABLE_ROWS {
+    if total_rows > row_limit {
         return Err(structural(
             "DATAFLOW_ROW_LIMIT",
             format!(
                 "节点「{node_name}」宽转长后行数（{total_rows} = 输入 {} 行 × 转入 {} 列）\
-                 超出内网上限（{MAX_TABLE_ROWS} 行）。",
+                 超出本次运行上限（{row_limit} 行，可在画布右上角「行数上限」调大）。",
                 input.rows.len(),
                 value_columns.len()
             ),
@@ -833,7 +836,7 @@ mod tests {
             vec![Value::Text("r1".into()), Value::Text("c2".into()), Value::Int(20)],
             vec![Value::Text("r2".into()), Value::Text("c1".into()), Value::Int(30)],
         ]);
-        let outcome = run_crosstab("透视", &crosstab_config(), &input).unwrap();
+        let outcome = run_crosstab("透视", &crosstab_config(), &input, MAX_TABLE_ROWS).unwrap();
         let (key, table) = outcome
             .anchors
             .iter()
@@ -863,11 +866,11 @@ mod tests {
                 ]
             })
             .collect();
-        let error = expect_row_limit(run_crosstab("透视", &crosstab_config(), &input_table(rows)));
+        let error = expect_row_limit(run_crosstab("透视", &crosstab_config(), &input_table(rows), MAX_TABLE_ROWS));
         let payload = serde_json::to_value(&error).unwrap();
         assert_eq!(payload["code"], "DATAFLOW_ROW_LIMIT");
         let message = payload["userMessage"].as_str().unwrap();
-        assert!(message.contains("内网上限"), "应给出中文上限提示：{message}");
+        assert!(message.contains("本次运行上限"), "应给出中文上限提示：{message}");
         assert!(message.contains("1100000"), "应报告单元格总数 110 万：{message}");
     }
 
@@ -884,7 +887,7 @@ mod tests {
                 ]
             })
             .collect();
-        let outcome = run_crosstab("透视", &crosstab_config(), &input_table(rows)).unwrap();
+        let outcome = run_crosstab("透视", &crosstab_config(), &input_table(rows), MAX_TABLE_ROWS).unwrap();
         let table = &outcome
             .anchors
             .iter()

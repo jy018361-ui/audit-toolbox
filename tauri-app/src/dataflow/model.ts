@@ -814,6 +814,7 @@ export function dataflowRunRequest(
   runMode: "preview" | "full",
   paramOverrides: Record<string, string>,
   uptoNodeId?: string,
+  rowLimit?: number,
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     ...(workflow as Record<string, unknown>),
@@ -821,8 +822,37 @@ export function dataflowRunRequest(
     paramOverrides,
   };
   if (uptoNodeId) payload.uptoNodeId = uptoNodeId;
+  // 行数上限可调（2026-11-07 用户需求：日常千万级行）；不传＝引擎默认 100 万。
+  if (rowLimit && Number.isFinite(rowLimit)) payload.rowLimit = rowLimit;
   return payload;
 }
+
+/** 行数上限档位（记忆在本机）：默认 100 万，最高 2000 万（再往上需三期流式落盘）。 */
+export const ROW_LIMIT_KEY = "audit-toolbox:dataflow:row-limit";
+
+export function loadRowLimit(): number {
+  try {
+    const value = Number(window.localStorage.getItem(ROW_LIMIT_KEY));
+    return ROW_LIMIT_OPTIONS.some((option) => option.value === value) ? value : 1_000_000;
+  } catch {
+    return 1_000_000;
+  }
+}
+
+export function saveRowLimit(value: number): void {
+  try {
+    window.localStorage.setItem(ROW_LIMIT_KEY, String(value));
+  } catch {
+    // 存储不可用时静默跳过：本次运行仍可用，只是不记忆。
+  }
+}
+
+export const ROW_LIMIT_OPTIONS: { value: number; label: string }[] = [
+  { value: 1_000_000, label: "100 万（默认）" },
+  { value: 5_000_000, label: "500 万" },
+  { value: 10_000_000, label: "1000 万" },
+  { value: 20_000_000, label: "2000 万（需大内存）" },
+];
 
 /** 解析流程文件文本。版本不识别时明确报错，绝不静默打开。 */
 export function parseWorkflowFile(text: string): ParseWorkflowResult {

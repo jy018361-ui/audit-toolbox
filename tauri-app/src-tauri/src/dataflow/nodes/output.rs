@@ -762,6 +762,7 @@ mod tests {
             today: chrono::NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(),
             param_values: std::collections::HashMap::new(),
             preview_rows: 1000,
+            row_limit: 1_000_000,
             allowed_paths: allowed,
         }
     }

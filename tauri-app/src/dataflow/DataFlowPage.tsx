@@ -16,6 +16,9 @@ import {
   defaultConfigFor,
   defaultNodeName,
   incompleteFilterRule,
+  loadRowLimit,
+  ROW_LIMIT_OPTIONS,
+  saveRowLimit,
   loadOutputDir,
   resolveOutputPaths,
   saveOutputDir,
@@ -101,6 +104,8 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
   resultsHeightRef.current = resultsHeight;
   // 输出位置：用户设定一次即记住，输出文件名留空/只填名字时自动保存到这里。
   const [outputDir, setOutputDir] = useState<string>(() => loadOutputDir());
+  // 行数上限（用户可调并记住）：随每次运行请求传给引擎。
+  const [rowLimit, setRowLimit] = useState<number>(() => loadRowLimit());
   const outputDirRef = useRef(outputDir);
   outputDirRef.current = outputDir;
   const [paramsDialog, setParamsDialog] = useState<null | "edit" | "confirm">(null);
@@ -494,7 +499,7 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
       const raw =
         mode === "preview"
           ? await dataflowPreview(runWf, overrides)
-          : await dataflowRun(runWf, overrides, uptoNodeId);
+          : await dataflowRun(runWf, overrides, uptoNodeId, rowLimit);
       const parsed = DataflowRunResultSchema.safeParse(raw);
       if (!parsed.success) {
         setError("引擎返回的数据不符合数据流契约，请更新应用后重试。");
@@ -760,6 +765,12 @@ export function DataFlowPage({ tool }: { tool: ToolManifest }) {
           onOpen={() => void handleOpen()}
           onPreviewRun={() => void runFlow("preview")}
           onFullRun={() => void runFlow("full")}
+          rowLimit={rowLimit}
+          onRowLimitChange={(value) => {
+            setRowLimit(value);
+            saveRowLimit(value);
+            setStatusText(`行数上限已设为 ${(value / 10000).toLocaleString("zh-CN")} 万行（已记住）。`);
+          }}
           drafts={draftList}
           draftsOpen={draftsOpen}
           onDraftsToggle={toggleDrafts}

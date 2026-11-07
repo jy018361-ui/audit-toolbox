@@ -41,6 +41,9 @@ import {
   type DataflowRunResult,
   type DataflowWorkflow,
   resolveOutputPaths,
+  loadRowLimit,
+  saveRowLimit,
+  ROW_LIMIT_KEY
 } from "./model";
 import { dataflowDemoResult } from "./demoData";
 import { ResultsPanel } from "./ResultsPanel";
@@ -1786,5 +1789,23 @@ describe("连线拖拽改接（rewireWorkflowEdge）", () => {
     const oldEdge = { from: "n1", fromAnchor: "output", to: "n2", toAnchor: "in" };
     const result = rewireWorkflowEdge(workflow, oldEdge, { from: "n2", fromAnchor: "T", to: "n2", toAnchor: "in" });
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("行数上限可调（用户需求 2026-11-07）", () => {
+  it("档位记忆与非法值回落默认 100 万", () => {
+    expect(loadRowLimit()).toBe(1_000_000);
+    saveRowLimit(10_000_000);
+    expect(loadRowLimit()).toBe(10_000_000);
+    saveRowLimit(7_777_777);
+    expect(loadRowLimit()).toBe(1_000_000);
+    window.localStorage.removeItem(ROW_LIMIT_KEY);
+  });
+
+  it("运行请求体带 rowLimit；不传则不带该字段（引擎走默认）", () => {
+    const wf = createEmptyWorkflow("上限流程");
+    expect(dataflowRunRequest(wf, "full", {}, undefined, 5_000_000)).toMatchObject({ rowLimit: 5_000_000 });
+    const without = dataflowRunRequest(wf, "full", {});
+    expect("rowLimit" in without).toBe(false);
   });
 });

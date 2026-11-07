@@ -51,6 +51,15 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
                 .map(PathBuf::from)
                 .collect()
         });
+    // 行数上限可调（2026-11-07 用户需求：日常有千万级行）。默认 MAX_TABLE_ROWS
+    // （100 万）；请求 rowLimit 覆盖，夹在 [1_000, 50_000_000]——下限保护测试与
+    // 误填，上限按当前内存引擎的承受力（再往上需三期流式落盘）。
+    // 必须在 params 被 from_value 消费前读取。
+    let row_limit = params
+        .get("rowLimit")
+        .and_then(Value::as_u64)
+        .map(|value| value.clamp(1_000, 50_000_000) as usize)
+        .unwrap_or(super::nodes::MAX_TABLE_ROWS);
     let request: RunRequest = serde_json::from_value(params).map_err(|error| {
         AppError::new(
             "DATAFLOW_WORKFLOW_INVALID",
@@ -86,6 +95,7 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
         today: chrono::Local::now().date_naive(),
         param_values,
         preview_rows: PREVIEW_ROWS,
+        row_limit,
         allowed_paths,
     };
 
@@ -195,7 +205,7 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
             // ---------- 第二期节点 ----------
             "join" | "join_n" => {
                 let (left, right) = dual_input(&incoming, &mut anchors, &mut pending, &|id| node_name(id), &display_name)?;
-                join::run_join(&display_name, &node.config, &left, &right)
+                join::run_join(&display_name, &node.config, &left, &right, context.row_limit)
             }
             "union" | "union_n" => {
                 let tables = collect_inputs_with_ids(&incoming, &mut anchors, &mut pending, &|id| node_name(id), &display_name)?;
@@ -207,23 +217,23 @@ pub(crate) fn run_workflow(method: &str, params: Value) -> Result<Value, AppErro
                         None,
                     ))
                 } else {
-                    combine::run_union(&display_name, &node.config, &tables)
+                    combine::run_union(&display_name, &node.config, &tables, context.row_limit)
                 }
             }
             "unique" | "unique_n" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "去重", |table| {
                 combine::run_unique(&display_name, &node.config, table)
             }),
             "sort" | "sort_n" => single_input_mut(&incoming, &mut anchors, &mut pending, &display_name, "排序", |table| {
-                combine::run_sort(&display_name, &node.config, table)
+                combine::run_sort(&display_name, &node.config, table, context.row_limit)
             }),
             "summarize" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "汇总", |table| {
-                aggregate::run_summarize(&display_name, &node.config, table)
+                aggregate::run_summarize(&display_name, &node.config, table, context.row_limit)
             }),
             "crosstab" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "透视", |table| {
-                aggregate::run_crosstab(&display_name, &node.config, table)
+                aggregate::run_crosstab(&display_name, &node.config, table, context.row_limit)
             }),
             "transpose" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "宽转长", |table| {
-                aggregate::run_transpose(&display_name, &node.config, table)
+                aggregate::run_transpose(&display_name, &node.config, table, context.row_limit)
             }),
             "split" => single_input(&incoming, &mut anchors, &mut pending, &display_name, "分列", |table| {
                 split::run_split(&display_name, &node.config, table)
@@ -2066,6 +2076,7 @@ mod tests {
     }
 
     #[test]
+
     fn upto_node_id_runs_only_upstream_closure() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("c.csv");

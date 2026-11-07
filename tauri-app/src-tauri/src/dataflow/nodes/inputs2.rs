@@ -513,7 +513,7 @@ pub(crate) fn run_db_in(
     let row_cap = if context.mode == super::RunMode::Preview {
         context.preview_rows
     } else {
-        MAX_TABLE_ROWS + 1
+        context.row_limit + 1
     };
     let mut rows: Vec<Vec<Value>> = Vec::new();
     let mut real_cells = 0usize;
@@ -531,7 +531,8 @@ pub(crate) fn run_db_in(
                     return Err(structural(
                         "DATAFLOW_ROW_LIMIT",
                         format!(
-                            "节点「{node_name}」读取的行数超出内网上限（{MAX_TABLE_ROWS} 行）。"
+                            "节点「{node_name}」读取的行数超出本次运行上限（{} 行，可在画布右上角「行数上限」调大）。",
+                            context.row_limit
                         ),
                     ));
                 }
@@ -740,15 +741,16 @@ pub(crate) fn run_parquet_in(
     let row_cap = if context.mode == super::RunMode::Preview {
         context.preview_rows
     } else {
-        MAX_TABLE_ROWS + 1
+        context.row_limit + 1
     };
     let height = frame.height();
     let take = height.min(row_cap);
-    if height > MAX_TABLE_ROWS && context.mode != super::RunMode::Preview {
+    if height > context.row_limit && context.mode != super::RunMode::Preview {
         return Err(structural(
             "DATAFLOW_ROW_LIMIT",
             format!(
-                "节点「{node_name}」读取的行数（{height}）超出内网上限（{MAX_TABLE_ROWS} 行）。"
+                "节点「{node_name}」读取的行数（{height}）超出本次运行上限（{} 行，可在画布右上角「行数上限」调大）。",
+                context.row_limit
             ),
         ));
     }

@@ -1,5 +1,11 @@
 # TS 管理迁移一致性矩阵
 
+## 2026-11-07：导出文件名带时间戳、加载后自动进入筛选步骤
+
+- 导出「另存为」对话框的默认文件名从固定的「工时报告.xlsx」改为「工时报告_YYYYMMDD_HHMMSS.xlsx」（点击导出那一刻生成）；多次导出不再互相覆盖，明细 CSV 跟随主文件名自动带同一时间戳。用户手动改过文件名则完全尊重所选名称。
+- 文件加载成功后自动从第 1 步跳到第 2 步「条件筛选」，去掉一次手动「下一步」；加载失败、取消不跳转。
+- 回归：`npx vitest run src/TsManagerParityPage.test.ts src/TsManagerParityPageUi.test.tsx src/TsManagerExport.test.tsx`。
+
 ## 2026-11-06：FY27 新表头兼容、读取进度与列式提速
 
 - **FY27 格式变化**（实测 2026-10-30 导出的 FY27 Timesheet，133 列）：部门列 `Department Name` → `Employee Department Name`，工时列 `Hours` → `Charge Hours`（另有 `Transaction Cycle Date`、`Month`、9 个默认行字段仍原名存在）。`ts_defaults` 改为别名表匹配两代列名，且**返回实际表头文本**（旧版返回字面量，表头写法不同时会在同一列造出两个条件键）；默认部门筛选值 `ASU Delivery Center ZZ-WP` 只在表里真实存在时才预设（`ts_default_filter`，值不存在时不设默认筛选，不再静默筛出 0 行）。

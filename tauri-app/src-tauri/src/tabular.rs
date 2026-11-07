@@ -31,6 +31,7 @@ const TS_MAX_PIVOT_COLUMN_VALUES: usize = 180;
 mod disk_ledger;
 mod disk_suite;
 mod large_csv;
+mod ts_read;
 
 pub(crate) type Progress<'a> = &'a dyn Fn(&str, usize, usize, &str);
 
@@ -294,60 +295,7 @@ fn inspect_ts_with_progress(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
-    let source: SourceParams = parse(params, "TS 参数不完整。")?;
-    let started = Instant::now();
-    let path = Path::new(&source.input_path);
-    // 大工时表（数百 MB）首次读取要一两分钟：开头就把体量说清楚，进度条再
-    // 按已读字节推进，「0% 假死」的观感就没了。
-    let size_note = fs::metadata(path)
-        .ok()
-        .filter(|meta| meta.is_file())
-        .map(|meta| format!("（{:.0} MB，首次读取约需 1–2 分钟，可随时停止）", meta.len() as f64 / 1_048_576.0))
-        .unwrap_or_default();
-    progress("read", 0, 10_000, &format!("正在读取文件…{size_note}"));
-    // 解析阶段映射到 3%–70%（十万分制）；其余阶段由 load_ts_cached_tracked 上报。
-    let on_bytes = |seen: u64, total: u64| {
-        let ratio = if total > 0 {
-            (seen as f64 / total as f64).min(1.0)
-        } else {
-            0.0
-        };
-        let current = 300 + (ratio * 6_700.0) as usize;
-        progress(
-            "read",
-            current.min(9_900),
-            10_000,
-            &format!("正在解析工作表数据…已读 {:.0}%", ratio * 100.0),
-        );
-    };
-    // Populate the stable parquet cache on the very first read.  Loading
-    // without it meant the same workbook was parsed from scratch again for the
-    // filter values and once more for the export — three full reads of a file
-    // that is often on a network share.
-    let (table, cache_hit, cache) = load_ts_cached_tracked(
-        path,
-        source.sheet.as_deref(),
-        source.header_row,
-        source.header_depth,
-        true,
-        Some(cancel),
-        Some(&on_bytes),
-        Some(progress),
-    )?;
-    let mut defaults = ts_defaults(&table.headers);
-    let (filter_field, filter_value) = ts_default_filter(&table.headers, &table.rows);
-    defaults["filterField"] = json!(filter_field);
-    defaults["filterValue"] = json!(filter_value);
-    Ok(json!({
-        "engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path, &table.sheet, source.header_row, source.header_depth)?,
-        "headerDepth":source.header_depth,
-        "path":table.path, "sheets":table.sheets, "selectedSheet":table.sheet,
-        "headers":table.headers, "preview":table.rows.iter().take(20).collect::<Vec<_>>(),
-        "dimensions":{"rows":table.rows.len(),"columns":table.headers.len()},
-        "encoding":table.encoding, "delimiter":table.delimiter.map(|v|v.to_string()),
-        "defaults":defaults, "cacheHit":cache_hit, "cachePath":cache,
-        "timings":{"readMs":started.elapsed().as_millis()}
-    }))
+    ts_read::inspect(parse(params, "TS 参数不完整。")?, progress, cancel)
 }
 
 fn inspect_kanzhang(params: Value) -> Result<Value, AppError> {
@@ -718,7 +666,7 @@ fn ts_filter_values(params: Value) -> Result<Value, AppError> {
     let path = Path::new(&source.input_path);
     // 列式快路径：稳定缓存（首次加载已写好）里只取目标一列去重——不再把
     // 整表逐行转成字符串再全表扫描，取值检索从十几秒降到 1 秒内。
-    if let Ok((_sheet, _sheets, cache)) =
+    if let Ok((_sheet, _sheets, cache, _key)) =
         ts_cache_identity(path, source.sheet.as_deref(), source.header_row, source.header_depth)
     {
         if cache.is_file() {
@@ -4010,7 +3958,6 @@ fn load_table(
 }
 
 /// 单元格区 → Table 的公共尾部：标题行校验、双层表头合并、行宽对齐。
-/// 首读（可带进度）与普通读取共用，保证两种路径读出的表完全一致。
 fn finish_table(
     path: &Path,
     sheet: String,
@@ -4027,13 +3974,15 @@ fn finish_table(
     // 双层表头沿用汇兑损益的合并规则（首行横向补齐合并单元格，再逐列
     // 「上级-下级」拼接），保证各工具读出的列名口径一致。
     let depth = header_depth.max(1).min(all.len() - header_index);
-    let headers = if depth > 1 {
-        let raw: Vec<Vec<String>> = all[header_index..header_index + depth].to_vec();
-        crate::fx::merge_headers(&raw, width)
-    } else {
-        normalize_headers(&all[header_index], width)
-    };
-    let rows = normalize_rows(&all[header_index + depth..], width);
+    let headers = crate::fx::merge_headers(&all[header_index..header_index + depth], width);
+    let rows = all
+        .into_iter()
+        .skip(header_index + depth)
+        .map(|mut row| {
+            row.resize(width, String::new());
+            row
+        })
+        .collect();
     Ok(Table {
         path: path.to_path_buf(),
         sheet,
@@ -4043,115 +3992,6 @@ fn finish_table(
         encoding: None,
         delimiter: None,
     })
-}
-
-/// xlsx 首读的进度/取消代理。zip 内部会前后跳跃地寻址，文件位置不能当进度；
-/// 但解析工作表 XML 时底层读取是顺序的，**累计读到的字节数**单调前进，
-/// 用「已读字节 / 文件大小」映射百分比最接近真实解析进度。
-struct TrackedFile<'a> {
-    inner: File,
-    size: u64,
-    read_total: u64,
-    last_report: Instant,
-    on_bytes: Box<dyn FnMut(u64, u64) + 'a>,
-    cancel: Option<&'a AtomicBool>,
-    /// 读到一半被取消时置位；读取器被 calamine 收走，靠这个共享标志向外传递。
-    interrupted: Arc<AtomicBool>,
-}
-
-impl TrackedFile<'_> {
-    fn note_read(&mut self, count: usize) {
-        if count == 0 {
-            return;
-        }
-        self.read_total = self.read_total.saturating_add(count as u64);
-        if self.last_report.elapsed() >= Duration::from_millis(300) {
-            self.last_report = Instant::now();
-            let seen = self.read_total.min(self.size.max(1));
-            (self.on_bytes)(seen, self.size);
-        }
-    }
-}
-
-impl std::io::Read for TrackedFile<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if let Some(cancel) = &self.cancel {
-            if cancel.load(Ordering::Relaxed) {
-                self.interrupted.store(true, Ordering::Relaxed);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "任务已取消",
-                ));
-            }
-        }
-        let count = self.inner.read(buf)?;
-        self.note_read(count);
-        Ok(count)
-    }
-}
-
-impl std::io::Seek for TrackedFile<'_> {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        self.inner.seek(pos)
-    }
-}
-
-/// 带「已读字节」进度与取消检查的 xlsx 读取。只服务于稳定缓存未命中时的
-/// 首读——那一步要完整解析几十上百 MB 的压缩 XML，是整个工具最长的等待。
-fn load_xlsx_tracked(
-    path: &Path,
-    sheet: Option<&str>,
-    header_row: usize,
-    header_depth: usize,
-    cancel: Option<&AtomicBool>,
-    on_bytes: Option<&(dyn Fn(u64, u64))>,
-) -> Result<Table, AppError> {
-    let read_path = local_read_path(path)?;
-    let file = File::open(&read_path).map_err(io_error)?;
-    let size = file.metadata().map_err(io_error)?.len();
-    let reporter: Box<dyn FnMut(u64, u64) + '_> = match on_bytes {
-        Some(callback) => Box::new(move |seen: u64, total: u64| callback(seen, total)),
-        None => Box::new(|_seen: u64, _total: u64| {}),
-    };
-    let interrupted = Arc::new(AtomicBool::new(false));
-    let mut workbook = calamine::Xlsx::new(TrackedFile {
-        inner: file,
-        size,
-        read_total: 0,
-        last_report: Instant::now(),
-        on_bytes: reporter,
-        cancel,
-        interrupted: interrupted.clone(),
-    })
-    .map_err(|e| {
-        error(
-            "WORKBOOK_READ_FAILED",
-            "无法读取工作簿。",
-            Some(e.to_string()),
-        )
-    })?;
-    let was_cancelled = || {
-        cancel.map(|flag| flag.load(Ordering::Relaxed)).unwrap_or(false)
-            || interrupted.load(Ordering::Relaxed)
-    };
-    let sheets = workbook.sheet_names().to_vec();
-    let selected = resolve_xlsx_sheet(path, sheet, &sheets)?;
-    let range = workbook.worksheet_range(&selected).map_err(|e| {
-        // 取消会以读取错误的形式冒出来，先认取消再报读取失败。
-        if was_cancelled() {
-            return error("JOB_CANCELLED", "任务已取消。", None);
-        }
-        error(
-            "WORKBOOK_READ_FAILED",
-            "无法读取指定 Sheet。",
-            Some(e.to_string()),
-        )
-    })?;
-    if was_cancelled() {
-        return Err(error("JOB_CANCELLED", "任务已取消。", None));
-    }
-    let all = physical_workbook_rows(&range, None);
-    finish_table(path, selected, sheets, all, header_row, header_depth)
 }
 
 /// Narrow bridge used by the FX tool for formats whose decoding already lives
@@ -4537,14 +4377,14 @@ pub(crate) fn open_prepared_disk_ledger_with_sheet(
     Ok(PreparedDiskLedger { inner, header_row })
 }
 
-/// 稳定缓存的身份信息：选定的 Sheet、Sheet 清单与缓存文件路径。取值检索、
+/// 稳定缓存的身份信息：选定的 Sheet、Sheet 清单、缓存文件路径与源指纹。取值检索、
 /// 筛选预览、导出的列式快路径都以它为前提。
 fn ts_cache_identity(
     path: &Path,
     sheet: Option<&str>,
     header_row: usize,
     header_depth: usize,
-) -> Result<(String, Vec<String>, PathBuf), AppError> {
+) -> Result<(String, Vec<String>, PathBuf, String), AppError> {
     if !path.is_file() {
         return Err(error(
             "PATH_NOT_FOUND",
@@ -4558,7 +4398,8 @@ fn ts_cache_identity(
         .unwrap_or("")
         .to_lowercase();
     if extension == "parquet" {
-        return Ok(("Parquet".to_owned(), Vec::new(), path.to_path_buf()));
+        let key = fingerprint(path, "Parquet", header_row, header_depth)?;
+        return Ok(("Parquet".to_owned(), Vec::new(), path.to_path_buf(), key));
     }
     let (selected_sheet, sheets) = if crate::spreadsheet_input::is_text(path.as_ref()) {
         ("CSV".to_owned(), Vec::new())
@@ -4584,7 +4425,7 @@ fn ts_cache_identity(
         (selected, names)
     };
     let key = fingerprint(path, &selected_sheet, header_row, header_depth)?;
-    Ok((selected_sheet, sheets, cache_path("ts", &key)?))
+    Ok((selected_sheet, sheets, cache_path("ts", &key)?, key))
 }
 
 /// 只读稳定缓存的列名（不读数据）。缓存不可用返回 None。
@@ -4681,7 +4522,7 @@ fn cached_filtered_frame(
     header_depth: usize,
     filters: &[FilterSpec],
 ) -> Option<Result<(Vec<String>, DataFrame, PathBuf), AppError>> {
-    let (_selected, _sheets, cache) =
+    let (_selected, _sheets, cache, _key) =
         ts_cache_identity(path, sheet, header_row, header_depth).ok()?;
     if !cache.is_file() {
         return None;
@@ -4731,82 +4572,11 @@ fn load_ts_cached(
     header_depth: usize,
     populate_on_miss: bool,
 ) -> Result<(Table, bool, PathBuf), AppError> {
-    load_ts_cached_tracked(path, sheet, header_row, header_depth, populate_on_miss, None, None, None)
-}
-
-/// 与 `load_ts_cached` 同一套缓存语义，另带三个可选钩子：
-/// - `cancel`：xlsx 首读中途可停（点「停止」后秒级返回，不再等全读完）；
-/// - `on_bytes`：xlsx 解析进度（已读字节/文件大小），映射真实百分比；
-/// - `progress`：阶段事件（缓存命中/整理行列/转列式/写缓存）。
-/// 进度统一用十万分制（10_000 = 完成），只读缓存的快速路径不再全程 0%。
-#[allow(clippy::too_many_arguments)]
-fn load_ts_cached_tracked(
-    path: &Path,
-    sheet: Option<&str>,
-    header_row: usize,
-    header_depth: usize,
-    populate_on_miss: bool,
-    cancel: Option<&AtomicBool>,
-    on_bytes: Option<&(dyn Fn(u64, u64))>,
-    progress: Option<Progress<'_>>,
-) -> Result<(Table, bool, PathBuf), AppError> {
-    if let Some(progress) = progress {
-        progress("read", 0, 10_000, "正在核对读取缓存…");
+    let (selected_sheet, sheets, cache, _key) = ts_cache_identity(path, sheet, header_row, header_depth)?;
+    if cache == path {
+        return Ok((load_table(path, sheet, header_row, header_depth)?, true, cache));
     }
-    if !path.is_file() {
-        return Err(error(
-            "PATH_NOT_FOUND",
-            "找不到输入文件。",
-            Some(path.display().to_string()),
-        ));
-    }
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    if extension == "parquet" {
-        if header_depth > 1 {
-            return Err(error(
-                "PARQUET_DOUBLE_HEADER",
-                "Parquet 缓存文件是单层列名，不支持双层表头。",
-                None,
-            ));
-        }
-        let table = load_parquet(path)?;
-        return Ok((table, true, path.to_path_buf()));
-    }
-
-    let (selected_sheet, sheets) = if crate::spreadsheet_input::is_text(path.as_ref()) {
-        ("CSV".to_owned(), Vec::new())
-    } else if is_ooxml(path) {
-        let (_, names) = crate::disk_table::workbook_sheets(path, None)?;
-        let selected = resolve_xlsx_sheet(path, sheet, &names)?;
-        (selected, names)
-    } else {
-        let read_path = local_read_path(path)?;
-        let mut workbook = open_workbook_auto(&read_path).map_err(|e| {
-            error(
-                "WORKBOOK_READ_FAILED",
-                "无法读取工作簿。",
-                Some(e.to_string()),
-            )
-        })?;
-        let names = workbook.sheet_names().to_vec();
-        // 用户指定了表名就照用；没指定（或表名不在工作簿里）才走引擎打分挑正表。
-        let selected = sheet
-            .filter(|name| names.iter().any(|value| value == name))
-            .map(str::to_owned)
-            .or_else(|| pick_auto_sheet(path, &mut workbook, &names))
-            .ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿中没有 Sheet。", None))?;
-        (selected, names)
-    };
-    let key = fingerprint(path, &selected_sheet, header_row, header_depth)?;
-    let cache = cache_path("ts", &key)?;
     if cache.is_file() {
-        if let Some(progress) = progress {
-            progress("read", 7_000, 10_000, "已命中读取缓存，正在快速加载…");
-        }
         match load_parquet(&cache) {
             Ok(mut table) => {
                 table.path = path.to_path_buf();
@@ -4823,20 +4593,9 @@ fn load_ts_cached_tracked(
             }
         }
     }
-    // 首读：xlsx 走字节进度代理，其他格式维持原路（TS 的工时表几乎都是 xlsx）。
-    let table = if is_ooxml(path) && (on_bytes.is_some() || cancel.is_some()) {
-        load_xlsx_tracked(path, Some(&selected_sheet), header_row, header_depth, cancel, on_bytes)?
-    } else {
-        load_table(path, Some(&selected_sheet), header_row, header_depth)?
-    };
+    let table = load_table(path, Some(&selected_sheet), header_row, header_depth)?;
     if populate_on_miss {
-        if let Some(progress) = progress {
-            progress("convert", 8_600, 10_000, "正在转换为列式数据…");
-        }
         let mut frame = table_to_frame(&table)?;
-        if let Some(progress) = progress {
-            progress("cache", 9_300, 10_000, "正在写入读取缓存（下次秒级加载）…");
-        }
         write_frame_cache(&cache, &mut frame)?;
     }
     Ok((table, false, cache))
@@ -6532,18 +6291,6 @@ fn validate_mapping_required(m: &LedgerMapping) -> Result<(), AppError> {
 fn normalize_headers(row: &[String], width: usize) -> Vec<String> {
     // 确认后的 Polars 路径必须与自动识别、磁盘路径使用同一空标题和换行规则。
     crate::fx::merge_headers(&[row.to_vec()], width)
-}
-fn normalize_rows(rows: &[Vec<String>], width: usize) -> Vec<Vec<String>> {
-    rows.iter()
-        .map(|row| {
-            let mut r = row.clone();
-            r.resize(width, String::new());
-            r.truncate(width);
-            // 内部整行空白是账表的结构信息：TBJE 用它区分正文与表尾手工
-            // 草稿。不能在公共 Polars 缓存前删掉，否则下游再也无法恢复边界。
-            r
-        })
-        .collect()
 }
 fn data_text(v: &Data) -> String {
     match v {

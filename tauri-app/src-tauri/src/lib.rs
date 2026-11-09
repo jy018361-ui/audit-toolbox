@@ -4,6 +4,7 @@ mod account_confirmation;
 #[cfg(test)]
 mod account_classification_tests;
 mod audipick;
+mod audipick_tax;
 mod bailian_asr;
 mod bailian_ocr;
 mod bailian_plan_asr;
@@ -296,6 +297,17 @@ async fn engine_call_inner(
             .unwrap_or("");
         let path = params.get("path").and_then(Value::as_str).unwrap_or("");
         storage.audipick_document_import_folder(project_id, Path::new(path))
+    } else if method == "audipick.tax_export" {
+        let requested = Path::new(params.get("outputPath").and_then(Value::as_str).unwrap_or(""));
+        if !tax_output_is_permitted(requested, &allowed.0.lock()) {
+            return Err(AppError::new("PATH_NOT_AUTHORIZED", "请通过保存对话框选择纳税申报表输出文件。", false, None));
+        }
+        let value = tauri::async_runtime::spawn_blocking(move || audipick_tax::export(&params))
+            .await.map_err(|e| AppError::new("AUDIPICK_TASK_FAILED", "纳税申报表导出异常结束。", true, Some(e.to_string())))??;
+        if let Some(path) = value.get("outputPath").and_then(Value::as_str) {
+            allowed.0.lock().insert(PathBuf::from(path));
+        }
+        Ok(value)
     } else if matches!(
         method.as_str(),
         "fx.classify_source_llm" | "deposit.classify_source_llm" | "fa_tbje.classify_source_llm"
@@ -1888,6 +1900,19 @@ fn path_is_permitted(requested: &Path, allowed: &Path) -> bool {
     requested == normalized || (normalized.is_dir() && requested.starts_with(&normalized))
 }
 
+fn tax_output_is_permitted(requested: &Path, allowed: &HashSet<PathBuf>) -> bool {
+    // Save targets usually do not exist yet. Resolve their existing parent so
+    // an allowed directory cannot authorize a sibling via `..` or a symlink.
+    fn resolved(path: &Path) -> Option<PathBuf> {
+        if !path.is_absolute() { return None; }
+        path.canonicalize().ok().or_else(|| {
+            Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?))
+        })
+    }
+    let Some(requested) = resolved(requested) else { return false; };
+    allowed.iter().filter_map(|path| resolved(path)).any(|path| path_is_permitted(&requested, &path))
+}
+
 #[cfg(windows)]
 fn webview2_available() -> bool {
     use winreg::{RegKey, enums::HKEY_LOCAL_MACHINE};
@@ -2802,6 +2827,22 @@ mod tests {
         assert!(path_is_permitted(&nested, &selected_dir));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tax_export_requires_selected_output_and_rejects_parent_traversal() {
+        let root = std::env::temp_dir().join(format!("audit-tax-auth-{}", uuid::Uuid::new_v4()));
+        let selected_dir = root.join("selected");
+        std::fs::create_dir_all(&selected_dir).unwrap();
+        let selected_file = selected_dir.join("chosen.xlsx");
+        let file_allowlist = HashSet::from([selected_file.clone()]);
+        assert!(tax_output_is_permitted(&selected_file, &file_allowlist));
+        assert!(!tax_output_is_permitted(&selected_dir.join("other.xlsx"), &file_allowlist));
+        assert!(!tax_output_is_permitted(Path::new("relative.xlsx"), &file_allowlist));
+        let dir_allowlist = HashSet::from([selected_dir.clone()]);
+        assert!(tax_output_is_permitted(&selected_file, &dir_allowlist));
+        assert!(!tax_output_is_permitted(&selected_dir.join("..").join("outside.xlsx"), &dir_allowlist));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

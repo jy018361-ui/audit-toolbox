@@ -44,6 +44,7 @@ pub fn call(method: &str, params: Value, settings: Value) -> Result<Value, AppEr
         "audipick.ocr" => ocr(&params, &settings),
         "audipick.export" => export_workpaper(&params),
         "audipick.export_bundle" => export_workpaper_bundle(&params),
+        "audipick.tax_export" => crate::audipick_tax::export(&params),
         _ => Err(error(
             "METHOD_NOT_ALLOWED",
             "不允许调用该 AudiPick 接口。",
@@ -2840,13 +2841,35 @@ fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
             None,
         ));
     }
-    let content = request_llm(
-        &llm,
-        "请逐字识别图片中的中文和数字，只返回识别文字，不要解释。",
-        "",
-        Some(params["imageBase64"].as_str().unwrap_or(image)),
-    )?;
+    let tax_table = params.get("taxTable").and_then(Value::as_bool).unwrap_or(false);
+    let image = params["imageBase64"].as_str().unwrap_or(image);
+    let content = if tax_table {
+        request_llm_reply_with_key(&llm, ocr_prompt(true), "", Some(image), None, tax_ocr_output_limit())
+            .map(|reply| reply.content)
+            .map_err(|mut failure| {
+                if llm["__source"] == "dedicated" {
+                    failure.user_message = format!("AudiPick 专用模型：{} 未切换到工具箱模型。", failure.user_message);
+                }
+                failure
+            })?
+    } else {
+        request_llm(&llm, ocr_prompt(false), "", Some(image))?
+    };
     Ok(json!({"text": content, "engine": "ai"}))
+}
+
+fn ocr_prompt(tax_table: bool) -> &'static str {
+    if tax_table {
+        "请逐格识别纳税申报表，只返回 HTML 表格片段，不要解释、Markdown 或代码围栏。使用<table>、<tr>、<th>、<td>保留原表全部行、列、行次、多级表头和表尾。原表纵向合并用rowspan、横向合并用colspan；合并内容仅在左上角单元格输出一次，被覆盖的位置不要再增加单元格。展开rowspan/colspan后每行的逻辑列数必须相同。不得把视觉换行拆成新行列，也不得把独立的表尾金额列吞进说明文字的合并范围。空白格仍输出空的<td>，0、*、负数、百分比及金额原样保留。不得串行串列、补数或猜测；无法辨认的格填【待复核】。表格外公司名称、所属期、表单编号和说明按原文放在<p>中，不要丢失或复制到表内。仅允许table、thead、tbody、tfoot、tr、th、td、p、br标签和rowspan/colspan属性；禁止脚本、事件属性、样式、外链、图片或嵌入内容。"
+    } else {
+        "请逐字识别图片中的中文和数字，只返回识别文字，不要解释。"
+    }
+}
+
+fn tax_ocr_output_limit() -> Option<u64> {
+    // A finite limit also enables the shared reply parser's truncation gate.
+    // Partial rows must never enter the tax page cache as complete OCR.
+    Some(8_000)
 }
 
 fn bailian_ocr(image: &str, settings: &Value, api_key: Option<&str>) -> Result<Value, AppError> {
@@ -2923,6 +2946,12 @@ fn local_ocr(image: &str) -> Result<Value, AppError> {
         result["warnings"] = value.get("warnings").cloned().unwrap_or(json!([]));
     }
     Ok(result)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LlmReply {
+    content: String,
+    finish_reason: Option<String>,
 }
 
 pub(crate) fn request_llm(
@@ -3010,6 +3039,18 @@ fn request_llm_with_key(
     image: Option<&str>,
     api_key: Option<&str>,
 ) -> Result<String, AppError> {
+    request_llm_reply_with_key(config, prompt, text, image, api_key, None)
+        .map(|reply| reply.content)
+}
+
+fn request_llm_reply_with_key(
+    config: &Value,
+    prompt: &str,
+    text: &str,
+    image: Option<&str>,
+    api_key: Option<&str>,
+    max_tokens: Option<u64>,
+) -> Result<LlmReply, AppError> {
     let api_type = config
         .get("api_type")
         .and_then(Value::as_str)
@@ -3054,11 +3095,7 @@ fn request_llm_with_key(
         let query = format!("{prompt}\n\n{text}");
         let response = client.post(url).bearer_auth(key).json(&json!({"inputs":{},"query":query,"response_mode":"blocking","user":"audit-toolbox"})).send().map_err(|failure| llm_request_error(failure, timeout))?;
         let value = read_llm_response(response, "Dify 提取请求失败。", timeout)?;
-        return Ok(value
-            .get("answer")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string());
+        return parse_dify_reply(&value, max_tokens.is_some());
     }
     let key = api_key
         .map(str::to_owned)
@@ -3081,6 +3118,31 @@ fn request_llm_with_key(
     } else {
         request = request.bearer_auth(key);
     }
+    let body = openai_chat_body(config, base, prompt, user_content, max_tokens);
+    let response = request
+        .json(&body)
+        .send()
+        .map_err(|failure| llm_request_error(failure, timeout))?;
+    let value = read_llm_response(response, "LLM 提取请求失败。", timeout)?;
+    if config["__rejectTruncated"] == true
+        && value.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length")
+    {
+        return Err(error(
+            "OCR_MODEL_TRUNCATED",
+            "模型输出被截断，请拆分页面或缩短摘录范围后重试。",
+            None,
+        ));
+    }
+    parse_openai_reply(&value, max_tokens.is_some())
+}
+
+fn openai_chat_body(
+    config: &Value,
+    base: &str,
+    prompt: &str,
+    user_content: Value,
+    max_tokens: Option<u64>,
+) -> Value {
     // 同 fa.rs：旧版每次调用都关闭思维链、对 DeepSeek 打开 JSON 输出模式，
     // 迁移时两个参数都漏了。
     let json_prompt = json_response_prompt(base, prompt);
@@ -3095,11 +3157,17 @@ fn request_llm_with_key(
     if json_prompt.is_some() {
         body["response_format"] = json!({"type": "json_object"});
     }
-    let response = request.json(&body).send().map_err(|failure| llm_request_error(failure, timeout))?;
-    let value = read_llm_response(response, "LLM 提取请求失败。", timeout)?;
-    if config["__rejectTruncated"] == true && value.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length") {
-        return Err(error("OCR_MODEL_TRUNCATED", "模型输出被截断，请拆分页面或缩短摘录范围后重试。", None));
+    if let Some(max_tokens) = max_tokens {
+        body["max_tokens"] = json!(max_tokens);
     }
+    body
+}
+
+fn parse_openai_reply(value: &Value, reject_truncated: bool) -> Result<LlmReply, AppError> {
+    let finish_reason = value
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let content = value
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -3107,7 +3175,47 @@ fn request_llm_with_key(
     if content.trim().is_empty() {
         return Err(empty_content_error(&value));
     }
-    Ok(content.to_string())
+    if reject_truncated
+        && finish_reason
+        .as_deref()
+        .is_some_and(|reason| matches!(reason, "length" | "max_tokens" | "max_output_tokens"))
+    {
+        return Err(error(
+            "LLM_OUTPUT_TRUNCATED",
+            "模型输出因额度限制被截断，本次提取结果未保存。请缩短资料后重试。",
+            Some(format!(
+                "finish_reason={}；已返回正文{}字",
+                finish_reason.as_deref().unwrap_or(""),
+                content.chars().count()
+            )),
+        ));
+    }
+    Ok(LlmReply {
+        content: content.to_owned(),
+        finish_reason,
+    })
+}
+
+fn parse_dify_reply(value: &Value, reject_empty: bool) -> Result<LlmReply, AppError> {
+    let content = value
+        .get("answer")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    if reject_empty && content.trim().is_empty() {
+        return Err(error(
+            "EMPTY_ASSISTANT_CONTENT",
+            "模型返回正文为空。请检查模型配置后重试。",
+            None,
+        ));
+    }
+    Ok(LlmReply {
+        content,
+        finish_reason: value
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
 }
 
 /// Error for a response whose assistant message carried no text.
@@ -3356,6 +3464,30 @@ fn error(code: &str, message: &str, detail: Option<String>) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tax_table_ocr_prompt_preserves_grid_without_changing_contract_ocr() {
+        assert_eq!(ocr_prompt(false), "请逐字识别图片中的中文和数字，只返回识别文字，不要解释。");
+        assert!(ocr_prompt(true).contains("<table>"));
+        assert!(ocr_prompt(true).contains("rowspan"));
+        assert!(ocr_prompt(true).contains("colspan"));
+        assert!(ocr_prompt(true).contains("<p>"));
+        assert!(ocr_prompt(true).contains("禁止脚本"));
+        assert!(ocr_prompt(true).contains("不得串行串列、补数或猜测"));
+    }
+
+    #[test]
+    fn tax_table_ocr_rejects_partial_response_before_it_can_be_cached() {
+        for reason in ["length", "max_tokens", "max_output_tokens"] {
+            let value = json!({"choices":[{"finish_reason":reason,"message":{"content":"| 行次 | 金额 |\n| 1 | 100 |"}}]});
+            let failure = parse_openai_reply(&value, tax_ocr_output_limit().is_some()).unwrap_err();
+            assert_eq!(failure.code, "LLM_OUTPUT_TRUNCATED");
+            // Ordinary OCR keeps its existing shared parser behavior.
+            assert!(parse_openai_reply(&value, false).is_ok());
+        }
+        let full = json!({"choices":[{"finish_reason":"stop","message":{"content":"| 行次 | 金额 |\n| 1 | 100 |"}}]});
+        assert!(parse_openai_reply(&full, tax_ocr_output_limit().is_some()).is_ok());
+    }
     #[test]
     fn thousands_workpaper_keeps_long_ids_dates_rates_and_empty_values_text() {
         use calamine::Reader;

@@ -67,6 +67,9 @@ import {
 import { beginAudiPickOperation, type AudiPickOperationHandle } from "./audipickOperation";
 import { runAudiPickExtractJob } from "./audipickExtractJob";
 import { documentsByRequestedOrder } from "./audipickDocumentOrder";
+import { AudiPickTaxWorkflow, type AudiPickTaxWorkflowState } from "./AudiPickTaxWorkflow";
+import { isTaxRuleId, probeTaxDocument } from "./audipickTaxImport";
+import type { TaxDocumentIndex } from "./audipickTax";
 import {
   AudiPickLegacyLoanAudit,
   buildAudiPickLoanAuditModel,
@@ -144,6 +147,7 @@ type AudiPickFieldDialogRequest = {
   documentIds: string[];
 };
 type AudiPickProjectData = {
+  taxWorkflow?: AudiPickTaxWorkflowState;
   project: {
     id: string;
     name: string;
@@ -328,6 +332,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     Record<string, string>
   >({});
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
+  const [taxWorkflowOpen, setTaxWorkflowOpen] = useState(false);
+  const [taxDocumentIds, setTaxDocumentIds] = useState<string[]>([]);
+  const taxSaveQueue = useRef(Promise.resolve());
   const extractingDocumentIdsRef = useRef(new Set<string>());
   const [extractingDocumentIds, setExtractingDocumentIds] = useState<Set<string>>(
     new Set(),
@@ -963,7 +970,10 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     const queueKey = `${projectId}:${documentId}`;
     const previous =
       contractMetaSaveQueueRef.current.get(queueKey) ?? Promise.resolve();
-    const task = previous.catch(() => undefined).then(async () => {
+    // Tax progress and contract metadata both write the complete project JSON.
+    // Serialize them so a late classifier cannot overwrite newly saved tables.
+    const sharedPrevious = taxSaveQueue.current;
+    const task = Promise.all([previous.catch(() => undefined), sharedPrevious.catch(() => undefined)]).then(async () => {
       const target = projectsRef.current.find(
         (item) => item.project.id === projectId,
       );
@@ -992,6 +1002,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       );
     });
     contractMetaSaveQueueRef.current.set(queueKey, task);
+    taxSaveQueue.current = task;
     try {
       await task;
     } finally {
@@ -1073,7 +1084,58 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
-  async function importPaths(paths: string[]) {
+  function openTaxWorkflow(ids = documents.map((item) => item.id)) {
+    setTaxDocumentIds(ids);
+    setTaxWorkflowOpen(true);
+    setSelectedDocument("");
+    setFieldDialogRequest(undefined);
+  }
+  function requestExtraction(mode: "single" | "batch", ids: string[]) {
+    const taxIds = ids.filter((id) => isTaxRuleId(getContractMeta(id).ruleId ?? selected?.project.defaultRuleId) || Boolean(selected?.taxWorkflow?.indexes[id]));
+    if (taxIds.length) {
+      if (taxIds.length !== ids.length) {
+        setError("税表和合同使用不同提取流程，请分别勾选后提取。");
+        return;
+      }
+      openTaxWorkflow(taxIds);
+    } else setFieldDialogRequest({ mode, documentIds: ids });
+  }
+  async function saveTaxWorkflowState(state: AudiPickTaxWorkflowState, projectId = selectedId) {
+    const task = taxSaveQueue.current.catch(() => undefined).then(async () => {
+      const target = projectsRef.current.find((item) => item.project.id === projectId);
+      if (!target) throw new Error("项目已不存在，未保存税表进度。");
+      const saved = { ...target, taxWorkflow: state, project: { ...target.project, updatedAt: new Date().toISOString() } };
+      await engineCall("audipick.project_save", saved);
+      projectsRef.current = projectsRef.current.map((item) => item.project.id === projectId ? saved : item);
+      setProjects(projectsRef.current);
+    });
+    taxSaveQueue.current = task;
+    await task;
+  }
+  async function saveTaxIndex(index: TaxDocumentIndex, id: string, projectId: string) {
+    const state = projectsRef.current.find((item) => item.project.id === projectId)?.taxWorkflow;
+    await saveTaxWorkflowState({
+      indexes: { ...state?.indexes, [id]: index }, tables: state?.tables ?? [],
+      pageTexts: state?.pageTexts ?? {}, pageTextVersions: state?.pageTextVersions ?? {}, selectedFormKeys: state?.selectedFormKeys ?? [], pageOverrides: state?.pageOverrides ?? {}, diagnostics: state?.diagnostics ?? {},
+    }, projectId);
+    const taxRule = index.taxType === "vat" ? "tax_vat" : index.taxType === "corporate_income" ? "tax_corporate_income" : "tax_declaration";
+    const meta = contractMetaFor(projectId, id);
+    await saveContractMeta(id, { ocrPending: false,
+      ...(!templateIsUserLocked(meta) ? { ruleId: taxRule, detectedRuleId: taxRule, detectedConfidence: index.taxType === "unknown" ? "low" : "high", detectedLabel: "纳税申报表" } : {}),
+    }, projectId);
+  }
+  async function recognizeTaxHeader(page: any, id: string, total: number, operation: AudiPickOperationHandle) {
+    const viewport = page.getViewport({ scale: 1.6 });
+    const image = document.createElement("canvas");
+    image.width = Math.ceil(viewport.width); image.height = Math.ceil(viewport.height * 0.22);
+    try {
+      const context = image.getContext("2d");
+      if (!context) throw new Error("无法创建税表标题识别画布。");
+      await page.render({ canvasContext: context, viewport }).promise;
+      return await recognizePdfPage({ documentId: id, page: 1, totalPages: total, pageRegion: "tax_header", imageBase64: image.toDataURL("image/jpeg", 0.9).split(",")[1] }, operation);
+    } finally { image.width = 0; image.height = 0; }
+  }
+  async function importPaths(paths: string[], taxUpload = false) {
     const projectId = selectedId;
     if (!projectId || !paths.length || importingRef.current || preparingRef.current) return;
     importingRef.current = true;
@@ -1099,7 +1161,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       setProjectDocumentCounts((current) => ({ ...current, [projectId]: value.documents.length }));
       const unique = [...new Map(imported.map((item) => [item.id, item])).values()];
       addLog(`${unique.length} 份 PDF`, "导入", "文件已导入，开始读取文字及扫描页", "done");
-      await prepareDocuments(unique, projectId);
+      await prepareDocuments(unique, projectId, taxUpload);
       if (failures.length) setError(`部分文件导入失败：${failures.join("；")}`);
     } catch (cause) { setError(errorText(cause)); }
     finally { importingRef.current = false; setBusy(false); }
@@ -1108,6 +1170,11 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     if (!selectedId) { setError("请先选择项目。"); return; }
     const paths = await pickPath("files", "导入合同 PDF", ["pdf"]);
     if (Array.isArray(paths)) await importPaths(paths);
+  }
+  async function importTaxPdfs() {
+    if (!selectedId) return;
+    const paths = await pickPath("files", "导入纳税申报表 PDF（先选表单，再识别内容）", ["pdf"]);
+    if (Array.isArray(paths)) await importPaths(paths, true);
   }
   async function importDroppedPaths(paths: string[]) { await importPaths(paths); }
   async function importPdfFolder() {
@@ -1138,8 +1205,17 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             ),
           }))
           .filter((group) => group.members.length > 0);
+        const tax = selected.taxWorkflow;
         const saved: AudiPickProjectData = {
           ...selected,
+          ...(tax ? { taxWorkflow: { ...tax,
+            indexes: Object.fromEntries(Object.entries(tax.indexes).filter(([id]) => id !== documentId)),
+            pageTexts: Object.fromEntries(Object.entries(tax.pageTexts).filter(([id]) => id !== documentId)),
+            pageTextVersions: Object.fromEntries(Object.entries(tax.pageTextVersions ?? {}).filter(([id]) => id !== documentId)),
+            pageOverrides: Object.fromEntries(Object.entries(tax.pageOverrides ?? {}).filter(([id]) => id !== documentId)),
+            diagnostics: Object.fromEntries(Object.entries(tax.diagnostics ?? {}).filter(([id]) => id !== documentId)),
+            tables: tax.tables.filter((table) => table.documentId !== documentId),
+          } } : {}),
           project: {
             ...selected.project,
             relationGroups,
@@ -1242,7 +1318,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       ocrLayoutVersion: prepared.missing.length ? undefined : PDF_OCR_LAYOUT_VERSION }, projectId);
     return prepared;
   }
-  async function prepareDocuments(items: Array<{ id: string; name: string }>, projectId: string) {
+  async function prepareDocuments(items: Array<{ id: string; name: string }>, projectId: string, taxUpload = false) {
     if (preparingRef.current || !items.length) return;
     preparingRef.current = true; setBusy(true); setError("");
     const operation = beginAudiPickOperation("合同文字读取 / OCR", true);
@@ -1251,11 +1327,25 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     try {
       // Mark every accepted file before processing so interrupted batches can be resumed.
       for (const item of items) await saveContractMeta(item.id, { ocrPending: true }, projectId);
+      const taxIds: string[] = [];
       for (const item of items) {
         await operation.checkpoint();
         setPreparationStatus(`正在处理 ${item.name}（${completed + 1}/${items.length}）…`);
         const pdf = await loadPdf(item.id);
         try {
+          const status = await engineCall("audipick.config_status", {}) as AudiPickConfigStatus;
+          const forceTax = taxUpload || isTaxRuleId(contractMetaFor(projectId, item.id).ruleId ?? projectsRef.current.find((value) => value.project.id === projectId)?.project.defaultRuleId);
+          const taxIndex = await probeTaxDocument(pdf, item.name, {
+            forceTax,
+            operation,
+            recognizeHeader: (forceTax || /纳税|增值税|所得税/.test(item.name)) && status.ocr?.ready ? (page) => recognizeTaxHeader(page, item.id, pdf.numPages, operation) : undefined,
+          });
+          if (taxIndex) {
+            await saveTaxIndex(taxIndex, item.id, projectId);
+            taxIds.push(item.id); completed++;
+            addLog(item.name, "税表预检", "已建立页面目录，等待选择表单后进行完整表格识别", "done");
+            continue;
+          }
           const prepared = await readDocumentText(item.id, projectId, pdf, item.name, operation);
           if (prepared.missing.length) throw new Error(`${item.name} 第 ${prepared.missing.join("、")} 页需要 OCR。请完成 OCR 配置后在合同列表点击“继续识别”。`);
           void suggestRule(item.id, prepared.text, projectId, item.name);
@@ -1264,8 +1354,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           addLog(item.name, "文字识别", `已保存 ${pdf.numPages} 页，其中 OCR ${prepared.ocrPages} 页，复用 ${prepared.resumedPages} 页`, "done");
         } finally { await pdf.destroy?.(); }
       }
-      setPreparationStatus(`已完成 ${completed} 份合同的文字读取/识别，可选择模板开始提取。`);
-      operation.finish("completed", `已保存 ${completed} 份合同的文字，可开始提取。`);
+      setPreparationStatus(taxIds.length ? `已预检 ${taxIds.length} 份税表，请选择要提取的表单；其他文件沿用合同提取流程。` : `已完成 ${completed} 份合同的文字读取/识别，可选择模板开始提取。`);
+      if (taxIds.length && selectedIdRef.current === projectId) openTaxWorkflow(taxIds);
+      operation.finish("completed", `已完成 ${completed} 份文件的准备。`);
     } catch (cause) {
       const message = errorText(cause);
       operation.finish(/取消|停止/.test(message) ? "cancelled" : "failed", message);
@@ -1279,6 +1370,10 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     }
   }
   async function openDocument(id: string) {
+    if (isTaxRuleId(contractMetaFor(selectedId, id).ruleId ?? selected?.project.defaultRuleId) || selected?.taxWorkflow?.indexes[id]) {
+      openTaxWorkflow([id]);
+      return;
+    }
     if (preparingRef.current) return;
     preparingRef.current = true;
     setBusy(true); setError(""); setSelectedDocument(id); setPdfText("");
@@ -3420,7 +3515,8 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   const dashboardProjects: LegacyDashboardProject[] = projects.map((item) => {
     const fileCount = projectDocumentCounts[item.project.id] ?? 0;
     const extractedIds = new Set((item.results ?? []).map((row) => String(row.contractId ?? "")));
-    const reviewTotal = item.results?.length ?? 0;
+    for (const table of item.taxWorkflow?.tables ?? []) extractedIds.add(table.documentId);
+    const reviewTotal = (item.results?.length ?? 0) + (item.taxWorkflow?.tables.length ?? 0);
     const reviewed = (item.results ?? []).filter((row) => row.reviewed).length;
     const extracted = extractedIds.size;
     const complete = item.project.status === "completed";
@@ -3446,7 +3542,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       createdAt: item.project.createdAt ?? item.project.t ?? item.project.date,
       updatedAt,
       fileCount,
-      templateCount: new Set((item.results ?? []).map((row) => String(row.ruleId ?? ""))).size,
+      templateCount: new Set([...(item.results ?? []).map((row) => String(row.ruleId ?? "")), ...(item.taxWorkflow?.tables ?? []).map((table) => `tax:${item.taxWorkflow?.indexes[table.documentId]?.taxType ?? "unknown"}`)]).size,
       defaultTemplateName: rules.find((candidate) => candidate.id === item.project.defaultRuleId)?.name,
       progress: {
         ...phase,
@@ -3472,6 +3568,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   const legacyProjectDocuments = documents.map((document) => {
     const meta = getContractMeta(document.id);
     const rows = selected?.results?.filter((row) => row.contractId === document.id) ?? [];
+    const taxTables = selected?.taxWorkflow?.tables.filter((table) => table.documentId === document.id) ?? [];
     return {
       id: document.id,
       name: document.name,
@@ -3479,8 +3576,8 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       isScanned: meta.isScanned,
       ocrPending: meta.ocrPending,
       status: document.status,
-      resultCount: rows.length,
-      appliedRuleCount: new Set(rows.map((row) => String(row.ruleId ?? ""))).size,
+      resultCount: rows.length + taxTables.length,
+      appliedRuleCount: new Set([...rows.map((row) => String(row.ruleId ?? "")), ...taxTables.map(() => meta.ruleId ?? "tax_declaration")]).size,
       ruleId: meta.ruleId ?? selected?.project.defaultRuleId,
       ruleConfirmed: meta.ruleConfirmed,
       detectedRuleId: meta.detectedRuleId,
@@ -3549,6 +3646,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       logCount={workLog.length}
       logOpen={logOpen}
       onNavigate={(page) => {
+        setTaxWorkflowOpen(false);
         setViewMode(page);
         setLoanAuditOpen(false);
         if (page !== "workbench") {
@@ -3623,9 +3721,29 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           />
         </>
       )}
-      {viewMode === "workbench" && selected && !selectedDocument && !loanAuditOpen && (
+      {viewMode === "workbench" && selected && taxWorkflowOpen && (
+        <AudiPickTaxWorkflow
+          key={`${selected.project.id}:${taxDocumentIds.join("|")}`}
+          documents={documents.filter((item) => taxDocumentIds.includes(item.id))}
+          loadPdf={loadPdf}
+          initialIndexes={selected.taxWorkflow?.indexes}
+          initialTables={selected.taxWorkflow?.tables}
+          initialPageTexts={selected.taxWorkflow?.pageTexts}
+          initialPageTextVersions={selected.taxWorkflow?.pageTextVersions}
+          initialSelectedFormKeys={selected.taxWorkflow?.selectedFormKeys}
+          initialPageOverrides={selected.taxWorkflow?.pageOverrides}
+          initialDiagnostics={selected.taxWorkflow?.diagnostics}
+          onSave={(state) => saveTaxWorkflowState(state, selected.project.id)}
+          onClose={() => setTaxWorkflowOpen(false)}
+        />
+      )}
+      {viewMode === "workbench" && selected && !selectedDocument && !loanAuditOpen && !taxWorkflowOpen && (
         <>
           {error && <div className="error-box">{error}</div>}
+          <div className="actions" style={{ padding: "12px 0" }}>
+            <button className="primary" disabled={busy} onClick={() => void importTaxPdfs()}>上传纳税申报表</button>
+            <button className="secondary" disabled={busy || !documents.length} onClick={() => openTaxWorkflow(selectedDocumentIds.length ? selectedDocumentIds : documents.map((item) => item.id))}>纳税申报表：选表单／页码提取</button>
+          </div>
           <AudiPickLegacyProject
             project={{ id: selected.project.id, name: selected.project.name, client: selected.project.client, date: selected.project.date, defaultRuleName: rules.find((item) => item.id === selected.project.defaultRuleId)?.name }}
             documents={legacyProjectDocuments}
@@ -3643,8 +3761,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             onSelectionChange={setSelectedDocumentIds}
             actions={{
               onBack: () => { setSelectedId(""); setSelectedDocument(""); },
-              onBatchExtract: (ids) =>
-                setFieldDialogRequest({ mode: "batch", documentIds: ids }),
+              onBatchExtract: (ids) => requestExtraction("batch", ids),
               onOpenLoanAudit: () => setLoanAuditOpen(true),
               onExportProject: () => exportProjectResults("project"),
               onPickPdfs: importPdfs,
@@ -3665,8 +3782,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               onDeleteDocument: deleteDocument,
               onRuleChange: async (id, nextRuleId) => { await saveContractRuleSelection(id, nextRuleId, false); },
               onConfirmRule: async (id, nextRuleId) => { await saveContractRuleSelection(id, nextRuleId, true); },
-              onExtractDocument: (id) =>
-                setFieldDialogRequest({ mode: "single", documentIds: [id] }),
+              onExtractDocument: (id) => requestExtraction("single", [id]),
               onViewWorkpaper: async (id, nextRuleId) => { setRuleId(nextRuleId ?? getContractMeta(id).ruleId ?? selected.project.defaultRuleId ?? "loan_covenant"); setContractView("workpaper"); await openDocument(id); },
               onManageAssociation: async (id) => { setAssociationSuggestion(undefined); setAssociationAnchor(id); },
               onRemoveAssociation: removeAssociation,
@@ -3851,11 +3967,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               onRuleChange: (nextRuleId) => { setRuleId(nextRuleId); void saveContractRuleSelection(selectedDocument, nextRuleId, false); },
               onConfirmRule: (nextRuleId) => void saveContractRuleSelection(selectedDocument, nextRuleId, true),
               onManageAssociation: () => { setAssociationSuggestion(undefined); setAssociationAnchor(selectedDocument); },
-              onExtract: () =>
-                setFieldDialogRequest({
-                  mode: "single",
-                  documentIds: [selectedDocument],
-                }),
+              onExtract: () => requestExtraction("single", [selectedDocument]),
               onExportCurrent: () => void exportResults(),
               onExportAll: () => void exportProjectResults("document"),
             }}

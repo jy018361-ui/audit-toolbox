@@ -8,25 +8,18 @@ import type { TaskRestore } from "./types";
 // 二次进入不会重跑 useState 初始化；订阅 + 待取双通道才能两头都接住。
 
 /**
- * 这些方法是工具内部的读取/筛选子步骤，存档里只有部分配置（如看账的
- * inspect 只有文件路径没有字段映射）——恢复它们等于把现场覆盖成半成品。
- * 历史页只对主任务方法显示「继续任务」。
+ * 这些辅助步骤的参数不包含工具的源文件配置，不能直接用于回填。
+ * 读取、筛选和扫描步骤则可以恢复已有输入，缺少的配置由用户继续补齐。
  */
 const RESTORE_BLOCKED_METHODS = new Set([
-  "kanzhang.inspect",
-  "kanzhang.filter",
-  "kanzhang.mark_inspect",
-  "ts.inspect",
-  "ts.filter",
-  "file_list.scan",
   "fuzzy.export",
   // 汇率拉取/导出是测算的辅助步骤，存档里没有账表配置。
   "fx.fetch_rates",
   "fx.export_rates",
 ]);
 
-/** 历史行是否可恢复：有参数存档，且不是被排除的子步骤方法。 */
-export function historyRowCanResume(row: {
+/** 是否可以回填存档参数；没有可用参数时仍可进入工具页继续。 */
+export function historyRowCanRestoreParams(row: {
   method?: string;
   params?: Record<string, unknown> | null;
 }): boolean {

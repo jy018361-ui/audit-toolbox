@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
@@ -67,14 +68,13 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   const [addHyperlinks, setAddHyperlinks] = useState(true);
   // 智能表头匹配恒定开启（纵向合并成一张大表时必经确认页），不再提供开关。
   const [templatePath, setTemplatePath] = useState("");
+  const [templateSheet, setTemplateSheet] = useState("");
   const [matchPreview, setMatchPreview] = useState<HeaderMatchPreview>();
   const [showMatch, setShowMatch] = useState(false);
   const [matchBusy, setMatchBusy] = useState(false);
   // 合并任务失败后允许一键返回匹配网格：网格常挂载（hidden 而非卸载），
   // 已有的人工调整全部保留，改完就能重试。
   const [gridReturnable, setGridReturnable] = useState(false);
-  // 上传过的外部模板在下拉里保持可选，切走也能切回来。
-  const [externalTemplate, setExternalTemplate] = useState("");
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState<JobEvent>();
   const [error, setError] = useState("");
@@ -160,6 +160,10 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     setNotice("");
     activeJobId.current = "";
     setShowMatch(false);
+    if (!paths.length || (templatePath && !paths.includes(templatePath) && !matchPreview?.template.external)) {
+      setTemplatePath("");
+      setTemplateSheet("");
+    }
   }, [paths]);
   useEffect(() => {
     if (!outputDirectoryTouched)
@@ -282,11 +286,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
       setOutputDirectoryTouched(true);
     }
   }
-  useEffect(() => {
-    if (!paths.some((path) => path === templatePath)) setTemplatePath(paths[0] ?? "");
-  }, [paths, templatePath]);
-
-  async function startMatchPreview(templateOverride?: string) {
+  async function startMatchPreview(templateOverride?: string, sheetOverride?: string) {
     if (!paths.length) {
       setError("请先添加需要合并的文件。");
       return;
@@ -296,16 +296,19 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
       return;
     }
     const template = templateOverride ?? templatePath ?? paths[0];
+    const sheet = templateOverride === undefined ? templateSheet : sheetOverride;
     setMatchBusy(true);
     setError("");
     try {
       const value = (await engineCall("excel_merger.match_preview", {
         inputPaths: paths,
         templatePath: template || undefined,
+        templateSheet: sheet || undefined,
         sheetAction,
         targetSheets,
       })) as HeaderMatchPreview;
       setTemplatePath(value.template.path);
+      setTemplateSheet(value.template.sheet);
       setMatchPreview(value);
       setShowMatch(true);
       setGridReturnable(false);
@@ -359,7 +362,6 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
       "xlsm",
     ]);
     if (typeof picked === "string") {
-      setExternalTemplate(picked);
       void startMatchPreview(picked);
     }
   }
@@ -422,6 +424,11 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     );
   }
   const currentStep = excelMergerStep(paths.length, files.length, Boolean(job));
+  // 检查结果的增量信息：合并成什么取决于 Sheet 而不是文件个数。
+  const inspectSheetTotal = files.reduce(
+    (sum, file) => sum + file.sheets.length,
+    0,
+  );
   // 智能表头匹配恒定开启：纵向合并成一张大表时必经匹配确认页。
   const headerMatchAvailable =
     outputMode === "one_sheet" && direction === "vertical";
@@ -442,7 +449,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   return (
     <>
       <PageHeader
-        eyebrow="批量 Excel 合并"
+        eyebrow="批量合并"
         title={tool.name}
         detail="批量合并 Excel、CSV 与 TXT，可按 Sheet 范围和拼接方向生成结果。"
       />
@@ -450,15 +457,16 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         steps={[
           { key: "1", label: "文件源", disabled: true },
           { key: "2", label: "合并规则", disabled: true },
-          { key: "3", label: "执行合并", disabled: true },
+          { key: "3", label: "执行合并", disabled: true, status: job?.phase === "completed" ? "done" : job?.phase === "failed" ? "error" : undefined },
         ]}
         current={currentStep}
       />
       <div className="merger-layout">
         <section className="form-card merger-source">
           <div className="section-title">
-            <h2>1. 文件源</h2>
-            <span>{paths.length} 个文件</span>
+            {/* 步骤条已编号，卡题不再重复「1. 2.」（UI 审核）。 */}
+            <h2>文件源</h2>
+            <span>{formatCount(paths.length)} 个文件</span>
           </div>
           <button
             type="button"
@@ -542,16 +550,12 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
                 );
               })
             ) : (
-              <EmptyState
-                compact
-                title="尚未添加文件"
-                description="添加文件或扫描文件夹后，可检查 Sheet 并设置合并顺序。"
-              />
+              <EmptyState compact title="尚未添加文件" />
             )}
           </div>
           <div className="actions">
             <Button
-              variant="secondary"
+              variant="default"
               disabled={busy || !paths.length}
               onClick={() => void inspect()}
             >
@@ -561,10 +565,10 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         </section>
         <section className="form-card merger-rules">
           <div className="section-title">
-            <h2>2. 合并规则</h2>
+            <h2>合并规则</h2>
             <span>
               {files.length
-                ? `已检查 ${files.length} 个文件`
+                ? `已检查 ${formatCount(files.length)} 个文件`
                 : "检查后配置规则"}
             </span>
           </div>
@@ -723,10 +727,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             )}
           </div>
           <p className="output-hint">
-            {outputDirectoryTouched
-              ? "已指定输出目录。"
-              : "默认保存到第一个输入文件所在目录。"}
-            文件名自动生成：Excel合并结果_日期_时间.
+            文件名：Excel合并结果_日期_时间.
             {outputMode === "one_workbook" ? "xlsx" : outputFormat}
           </p>
           {error && job?.phase !== "failed" && <div className="error-box">{error}</div>}
@@ -776,7 +777,20 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             {result && <ResultView value={result} />}
           </>
         ) : result ? (
-          <ResultView value={result} />
+          /* 结构检查的结果不用 ResultView：那里没有动作可宣布时只会说
+             「运行结束。」并把文件数当指标，增量信息其实是 Sheet 总数（UI 审核）。 */
+          <div className="merger-inspect-summary" role="status">
+            <p>
+              <strong>结构检查完成，可配置合并规则。</strong>
+            </p>
+            <p className="merger-inspect-detail">
+              {formatCount(files.length)} 个文件 · 共{" "}
+              {formatCount(inspectSheetTotal)} 个 Sheet
+              {files.some((file) => file.error)
+                ? "；存在读取失败的文件，合并前请先处理"
+                : ""}
+            </p>
+          </div>
         ) : (
           <EmptyState
             compact
@@ -789,10 +803,10 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             }
             description={
               !paths.length
-                ? "添加文件或扫描文件夹后，可在这里查看检查结果与合并进度。"
+                ? undefined
                 : !files.length
-                  ? "先检查文件与 Sheet，确认结构后再设置合并规则。"
-                  : "规则已就绪，开始合并后可在这里查看进度与输出结果。"
+                  ? "文件结构尚未检查。"
+                  : undefined
             }
           />
         )}
@@ -801,22 +815,9 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         <div hidden={!showMatch}>
           <HeaderMatchGrid
             preview={matchPreview}
-            busy={busy}
-            files={[
-              ...paths.map((path) => ({
-                path,
-                name: path.split(/[\\/]/).pop() ?? path,
-              })),
-              ...(externalTemplate && !paths.includes(externalTemplate)
-                ? [
-                    {
-                      path: externalTemplate,
-                      name: `${externalTemplate.split(/[\\/]/).pop() ?? externalTemplate}（外部）`,
-                    },
-                  ]
-                : []),
-            ]}
-            onTemplateChange={(path) => void startMatchPreview(path)}
+            busy={busy || matchBusy}
+            error={error}
+            onTemplateChange={(path, sheet) => void startMatchPreview(path, sheet)}
             onExternalTemplate={() => void chooseExternalTemplate()}
             onImportAliases={importAliases}
             onRematch={rematchColumns}

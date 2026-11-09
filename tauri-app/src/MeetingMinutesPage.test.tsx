@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render as renderUi, screen, waitFor, within } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { MemoryRouter } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   displayAudioFileName,
   MeetingMinutesPage,
 } from "./MeetingMinutesPage";
-import type { ToolManifest } from "./types";
+import type { MeetingHistoryRow, ToolManifest } from "./types";
 
 vi.mock("./api", () => ({
   jobCancel: vi.fn(async () => true),
@@ -34,9 +36,18 @@ vi.mock("./api", () => ({
     recording: false,
   })),
   meetingSetResident: vi.fn(async () => undefined),
+  meetingReadMinutes: vi.fn(async (path: string) => ({
+    minutesPath: path, minutesMarkdown: "# 已有纪要标题\n\n原有纪要内容。",
+  })),
+  meetingSaveMinutes: vi.fn(async (path: string, minutesMarkdown: string) => ({ minutesPath: path, minutesMarkdown })),
+  meetingCreateMailDraft: vi.fn(async () => ({saved:true as const,displayed:true,message:"已生成 Outlook 邮件草稿。"})),
+  meetingHistoryList: vi.fn(async () => []),
+  meetingHistoryGet: vi.fn(async () => ({})),
+  meetingReadTranscript: vi.fn(async () => "[00:00] 原始发言。"),
   openOutput: vi.fn(async () => true),
   pickPath: vi.fn(async () => null),
   listenJobEvents: vi.fn(async () => () => undefined),
+  listenNativeFileDragEvents: vi.fn(async () => () => undefined),
   runningInDesktopApp: vi.fn(() => true),
 }));
 vi.mock("./toolPageActivity", () => ({
@@ -53,23 +64,509 @@ const tool: ToolManifest = {
   migrationStatus: "preview",
 };
 
+function render(ui: ReactElement) {
+  return renderUi(<MemoryRouter initialEntries={[tool.route]}>{ui}</MemoryRouter>);
+}
+
+beforeEach(async () => {
+  const api = await import("./api");
+  vi.mocked(api.meetingHistoryList).mockResolvedValue([]);
+  vi.mocked(api.meetingHistoryGet).mockResolvedValue({});
+  vi.mocked(api.meetingReadTranscript).mockResolvedValue("[00:00] 原始发言。");
+  vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
+  vi.mocked(api.meetingSaveMinutes).mockImplementation(async (path, minutesMarkdown, _expected, speakerNames = {}) => ({
+    minutesPath: path, minutesMarkdown: replaceSpeakerNames(minutesMarkdown, speakerNames), sourceMarkdown: minutesMarkdown, speakerNames,
+  }));
+});
+
+import { replaceSpeakerNames } from "./meetingSpeakerNames";
+import { ConfirmDialogHost } from "./components/ConfirmDialog";
+
+describe("会议正文编辑及姓名对应", () => {
+  const content = "# 内容版\n\n说话人1安排复核，张三提供资料。说话人10补充意见。\n\n|责任人|事项|\n|---|---|\n|说话人2|核对金额|";
+  const timeline = "# 时间版\n\n[00:00] 说话人1发言。\n[00:10] 说话人2回复。";
+  const result = {
+    transcriptPath: "C:/data/meeting-a.txt",
+    minutesVersions: [
+      { kind: "content" as const, label: "按内容", minutesPath: "C:/data/content.md", minutesMarkdown: content },
+      { kind: "timeline" as const, label: "按时间", minutesPath: "C:/data/timeline.md", minutesMarkdown: timeline },
+    ],
+  };
+  async function open() {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false,
+      latestJob: {jobId:"edit-job",toolId:tool.id,phase:"completed",current:1,total:1,message:"完成",severity:"success",outputPaths:[],result}});
+    render(<><MeetingMinutesPage tool={tool}/><ConfirmDialogHost/></>);
+    await screen.findByRole("article", { name: "会议纪要正文" });
+    return api;
+  }
+
+  const editBody = (html: string) => {
+    const article = screen.getByRole("article", {name:"会议纪要正文"});
+    article.innerHTML = html;
+    fireEvent.input(article);
+    return article;
+  };
+  it("仅参会人员行带占比，输入区讨论表格均不带，复制邮件和改名保持一致", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingReadTranscript).mockResolvedValue("[00:00] 说话人1：甲乙丙丁戊己庚辛\n[00:10] 说话人2：壬癸");
+    await open();
+    const region = screen.getByRole("region", {name:"说话人姓名对应"});
+    const article = screen.getByRole("article", {name:"会议纪要正文"});
+    await waitFor(() => expect(article).toHaveTextContent("参会人员：说话人1（80%）"));
+    expect(article).toHaveTextContent("说话人1安排复核");
+    expect(article).not.toHaveTextContent("说话人1（80%）安排复核");
+    expect(article).toHaveTextContent("说话人2（20%）");
+    expect(region).not.toHaveTextContent("%");
+    expect(screen.getByText(/旧转写无发言时长数据/)).toBeInTheDocument();
+    expect(api.meetingSaveMinutes).not.toHaveBeenCalled();
+    article.append(document.createTextNode("人工补充文字。")); fireEvent.input(article);
+    const name = within(region).getByRole("textbox", {name:"说话人1姓名"});
+    fireEvent.change(name,{target:{value:"张三"}}); fireEvent.blur(name);
+    await waitFor(() => expect(article).toHaveTextContent("参会人员：张三（80%）"));
+    expect(article).toHaveTextContent("张三安排复核");
+    fireEvent.click(screen.getByRole("button", {name:"生成邮件草稿"}));
+    await waitFor(() => expect(api.meetingCreateMailDraft).toHaveBeenCalledWith(expect.any(String),expect.stringContaining("参会人员：张三（80%）")));
+    expect(vi.mocked(api.meetingCreateMailDraft).mock.calls[0][1]).not.toContain("张三（80%）安排复核");
+    await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenCalled());
+    for (const call of vi.mocked(api.meetingSaveMinutes).mock.calls) expect(call[1]).not.toContain("%");
+    fireEvent.click(screen.getByRole("button", {name:"按时间"}));
+    expect(screen.getByRole("article")).toHaveTextContent("参会人员：张三（80%）");
+    expect(screen.getByRole("article")).toHaveTextContent("张三发言");
+    fireEvent.change(name,{target:{value:""}}); fireEvent.blur(name);
+    expect(screen.getByRole("article")).toHaveTextContent("参会人员：说话人1（80%）");
+    expect(screen.getByRole("article")).not.toHaveTextContent("（80%）（80%）");
+    fireEvent.click(screen.getByRole("button", {name:"原始转写"}));
+    await screen.findByRole("article", {name:"原始转写正文"});
+    expect(api.meetingReadTranscript).toHaveBeenCalledTimes(1);
+  });
+  it("转写不可读时保留姓名编辑，不虚构占比", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingReadTranscript).mockRejectedValueOnce(new Error("文件不存在"));
+    await open();
+    const region = screen.getByRole("region", {name:"说话人姓名对应"});
+    expect(await screen.findByText(/读取失败，内容占比暂不可用/)).toBeInTheDocument();
+    expect(region).not.toHaveTextContent("%");
+    expect(within(region).getByRole("textbox", {name:"说话人1姓名"})).toBeEnabled();
+    expect(screen.getByRole("article")).toHaveTextContent("安排复核");
+  });
+  it("录音时间和历史日期均带星期，参会行用时长占比且讨论中不显示", async () => {
+    const api=await import("./api");
+    vi.mocked(api.meetingHistoryList).mockResolvedValue([{id:"timed",jobId:"timed",title:"录音会议",startedAt:"2026-11-02T10:00:00+08:00",timeLabel:"会议时间",status:"completed",message:""}]);
+    vi.mocked(api.meetingHistoryGet).mockResolvedValue({...result,meetingStartedAt:"2026-11-02T10:00:00+08:00",meetingEndedAt:"2026-11-02T11:00:00+08:00",speakerDurationsMs:{"1":8000,"2":2000}});
+    vi.mocked(api.meetingReadTranscript).mockResolvedValue("说话人1：甲\n说话人2：乙丙丁");
+    render(<MeetingMinutesPage tool={tool}/>);
+    const article=await screen.findByRole("article");
+    expect(article).toHaveTextContent("2026-11-02（周一）");
+    expect(article).toHaveTextContent("参会人员：说话人1（80%）、说话人2（20%）");
+    expect(article).not.toHaveTextContent("说话人1（80%）安排复核");
+    expect(screen.getByLabelText("会议历史列表")).toHaveTextContent("2026-11-02（周一）");
+  });
+  it("正文默认可直接编辑，自动保存且版本切换保留排版和草稿", async () => {
+    const api = await open();
+    expect(screen.getByRole("article")).toHaveAttribute("contenteditable", "true");
+    expect(screen.queryByRole("button", {name:"编辑正文"})).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", {name:"保存姓名及全部修改"})).not.toBeInTheDocument();
+    editBody("<h1>人工修订</h1><p>修改后的正文。</p><table><tr><th>事项</th></tr><tr><td>复核</td></tr></table>");
+    fireEvent.click(screen.getByRole("button", {name:"按时间"}));
+    expect(screen.getByRole("article")).not.toHaveTextContent("[00:00]");
+    fireEvent.click(screen.getByRole("button", {name:"按内容"}));
+    expect(screen.getByRole("article")).toHaveTextContent("人工修订");
+    await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenCalledWith("C:/data/content.md", expect.stringContaining("修改后的正文"), content, {}));
+    expect(within(screen.getByRole("article")).getByRole("table")).toBeInTheDocument();
+    expect(await screen.findByText("已自动保存")).toBeInTheDocument();
+  });
+  it("自动保存失败保留当前编辑，可重试，成功前不冒报已保存", async () => {
+    const api = await open();
+    vi.mocked(api.meetingSaveMinutes).mockRejectedValueOnce({userMessage:"文件被占用"});
+    editBody("<h1>不应丢失的修改</h1>");
+    expect(await screen.findByRole("alert")).toHaveTextContent("文件被占用");
+    expect(screen.getByRole("article")).toHaveTextContent("不应丢失的修改");
+    fireEvent.click(screen.getByRole("button", {name:"重试自动保存"}));
+    await screen.findByText("已自动保存");
+  });
+  it("姓名自动保存至两版，改名和清空可逆且不替换普通姓名", async () => {
+    const api = await open();
+    const input = screen.getByRole("textbox", {name:"说话人1姓名"});
+    fireEvent.change(input,{target:{value:"王五"}});fireEvent.blur(input);
+    await waitFor(() => expect(screen.getByRole("article")).toHaveTextContent("王五安排复核，张三提供资料。说话人10补充意见。"));
+    await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenCalledWith("C:/data/content.md", content, content, {"1":"王五"}));
+    await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenCalledWith("C:/data/timeline.md", expect.not.stringContaining("[00:00]"), timeline, {"1":"王五"}));
+    fireEvent.change(input,{target:{value:""}});fireEvent.blur(input);
+    expect(screen.getByRole("article")).toHaveTextContent("说话人1安排复核，张三提供资料。");
+    await waitFor(() => expect(api.meetingSaveMinutes).toHaveBeenLastCalledWith("C:/data/timeline.md", expect.any(String), expect.stringContaining("王五发言"), {}));
+  });
+  it("正文和姓名使用当前修订生成HTML邮件，时间版不含录音时间轴", async () => {
+    const api = await open();
+    editBody("<h1>预算评审（按内容）</h1><p><span data-meeting-speaker='1' data-speaker-label='说话人1' data-speaker-display='说话人1'>说话人1</span>负责<strong>复核</strong>。</p>");
+    const name = screen.getByRole("textbox",{name:"说话人1姓名"});
+    fireEvent.change(name,{target:{value:"王五"}});fireEvent.blur(name);
+    const folder = screen.getByRole("button", {name:"打开输出文件夹"});
+    const mail = screen.getByRole("button", {name:"生成邮件草稿"});
+    expect(folder.nextElementSibling).toBe(mail);
+    fireEvent.click(mail);
+    await waitFor(() => expect(api.meetingCreateMailDraft).toHaveBeenCalledWith("预算评审_会议纪要",expect.stringContaining("王五负责<strong>复核</strong>")));
+    expect(vi.mocked(api.meetingCreateMailDraft).mock.calls[0][1]).not.toContain("（按内容）");
+    fireEvent.click(screen.getByRole("button",{name:"按时间"}));
+    fireEvent.click(mail);
+    await waitFor(() => expect(api.meetingCreateMailDraft).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.meetingCreateMailDraft).mock.calls[1][1]).not.toMatch(/00:00|00:10/);
+    expect(api.jobStart).not.toHaveBeenCalled();
+  });
+  it("Outlook失败可重试，创建期间禁用防止重复，切换版本不串用完成提示", async () => {
+    const api = await open();
+    vi.mocked(api.meetingCreateMailDraft).mockRejectedValueOnce({userMessage:"Outlook暂不可用"});
+    fireEvent.click(screen.getByRole("button", {name:"生成邮件草稿"}));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Outlook暂不可用");
+    let resolve!: (value: {saved:true;displayed:boolean;message:string}) => void;
+    vi.mocked(api.meetingCreateMailDraft).mockImplementationOnce(() => new Promise(done => {resolve=done;}));
+    fireEvent.click(screen.getByRole("button", {name:"生成邮件草稿"}));
+    expect(screen.getByRole("button", {name:"正在生成邮件草稿…"})).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", {name:"按时间"}));
+    await act(async () => resolve({saved:true,displayed:true,message:"内容版草稿已创建"}));
+    expect(screen.queryByText("内容版草稿已创建")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", {name:"原始转写"}));
+    expect(screen.queryByRole("button", {name:"生成邮件草稿"})).not.toBeInTheDocument();
+  });
+});
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
 
 describe("MeetingMinutesPage", () => {
-  it("渲染页头与三个步骤卡片", async () => {
+  const savedRows: MeetingHistoryRow[] = [
+    { id:"new", jobId:"new-job", title:"预算评审", startedAt:"2026-10-26T10:30:00+08:00", timeLabel:"生成时间", status:"completed", message:"已完成" },
+    { id:"old", jobId:"old-job", title:"项目周报", startedAt:"2026-10-20T09:00:00+08:00", timeLabel:"导入时间", status:"completed", message:"已完成" },
+  ];
+
+  it("自动会议完成后无上传文件也可从详细度旁重新生成，复用转写稿", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false,
+      latestJob:{jobId:"automatic",toolId:tool.id,phase:"completed",current:1,total:1,message:"完成",severity:"success",outputPaths:[],
+        result:{title:"项目协调",transcriptPath:"C:/data/auto.txt",audioPath:"C:/data/auto.wav",minutesMarkdown:"# 项目协调\n自动会议纪要"}}});
+    render(<MeetingMinutesPage tool={tool}/>);
+    await screen.findByRole("article");
+    const generate = screen.getByRole("button",{name:"生成纪要"});
+    expect(generate).toBeEnabled();
+    expect(screen.getByText(/本次生成：当前会议「项目协调」/)).toHaveTextContent("复用已有转写稿");
+    fireEvent.change(screen.getByRole("combobox",{name:"纪要详细度"}),{target:{value:"detailed"}});
+    fireEvent.click(generate);fireEvent.click(generate);
+    await waitFor(()=>expect(api.jobStart).toHaveBeenCalledWith("meeting.summarize",{transcriptPath:"C:/data/auto.txt",detailLevel:"detailed"}));
+    expect(api.jobStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("无上传时按当前选择的历史会议生成，仅有录音时回退到录音",async()=>{
+    const api=await import("./api");
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockImplementation(async id=>id==="new"
+      ? {title:"预算评审",transcriptPath:"C:/data/new.txt",minutesMarkdown:"# 预算评审"}
+      : {title:"项目周报",audioPath:"C:/data/old.wav",minutesMarkdown:"# 项目周报"});
+    render(<MeetingMinutesPage tool={tool}/>);
+    await screen.findByRole("article");
+    fireEvent.click(screen.getByRole("button",{name:/项目周报/}));
+    await waitFor(()=>expect(screen.getByRole("article")).toHaveTextContent("项目周报"));
+    expect(screen.getByText(/本次生成：当前会议「项目周报」/)).toHaveTextContent("从保留的录音重新生成");
+    fireEvent.change(screen.getByRole("combobox",{name:"纪要详细度"}),{target:{value:"brief"}});
+    fireEvent.click(screen.getByRole("button",{name:"生成纪要"}));
+    await waitFor(()=>expect(api.jobStart).toHaveBeenCalledWith("meeting.generate",{audioPath:"C:/data/old.wav",detailLevel:"brief"}));
+  });
+
+  it("已导入文件优先于当前查看的会议，来源提示明确且启动参数一致",async()=>{
+    const api=await import("./api");
+    vi.mocked(api.pickPath).mockResolvedValueOnce("C:/upload/新录音.mp4");
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockResolvedValue({title:"预算评审",transcriptPath:"C:/data/previous.txt",minutesMarkdown:"# 原会议"});
+    render(<MeetingMinutesPage tool={tool}/>);
+    await screen.findByRole("article");
+    fireEvent.click(screen.getByRole("button",{name:/拖放或点击选择会议音频或视频/}));
+    await screen.findByText("新录音.mp4");
+    fireEvent.click(screen.getByRole("button",{name:/预算评审/}));
+    await screen.findByRole("article");
+    expect(screen.getByText(/本次生成：已导入的文件「新录音.mp4」/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button",{name:"生成纪要"}));
+    await waitFor(()=>expect(api.jobStart).toHaveBeenCalledWith("meeting.generate",{audioPath:"C:/upload/新录音.mp4",detailLevel:"standard"}));
+  });
+
+  it("仅有Markdown时仍禁用生成，启动失败保留已有会议供重试",async()=>{
+    const api=await import("./api");
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockImplementation(async id=>id==="new"
+      ? {minutesMarkdown:"# 仅有纪要"} : {transcriptPath:"C:/old.txt",minutesMarkdown:"# 可重新生成"});
+    render(<MeetingMinutesPage tool={tool}/>);
+    await screen.findByRole("article");
+    expect(screen.getByRole("button",{name:"生成纪要"})).toBeDisabled();
+    fireEvent.click(screen.getByRole("button",{name:/项目周报/}));
+    await waitFor(()=>expect(screen.getByRole("article")).toHaveTextContent("可重新生成"));
+    vi.mocked(api.jobStart).mockRejectedValueOnce({userMessage:"任务暂时无法启动"});
+    fireEvent.click(screen.getByRole("button",{name:"生成纪要"}));
+    await screen.findByText("任务暂时无法启动");
+    expect(screen.getByRole("article")).toHaveTextContent("可重新生成");
+    expect(screen.getByRole("button",{name:"生成纪要"})).toBeEnabled();
+  });
+
+  it.each(["recording","running"])("已有会议在%s时仍不能重复生成",async phase=>{
+    const api=await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:true,logFound:true,recording:phase==="recording"});
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockResolvedValue({transcriptPath:"C:/saved.txt",minutesMarkdown:"# 历史会议"});
+    render(<MeetingMinutesPage tool={tool}/>);
+    await screen.findByRole("article");
+    if(phase==="running"){
+      const listener=vi.mocked(api.listenJobEvents).mock.calls.at(-1)![0];
+      await act(async()=>listener({jobId:"inflight",toolId:tool.id,phase:"running",current:1,total:4,message:"生成中",severity:"info",outputPaths:[]}));
+    }
+    expect(screen.getByRole("button",{name:"生成纪要"})).toBeDisabled();
+    expect(api.jobStart).not.toHaveBeenCalled();
+  });
+
+  it("重开页面读取归档历史，按标题搜索并点击查看结果，不发起云端任务", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockImplementation(async (id) => ({title:id === "old" ? "项目周报" : "预算评审", minutesMarkdown:`# ${id}\n归档正文`, transcriptPath:`C:/data/${id}.txt`}));
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByRole("article")).toHaveTextContent("new");
+    fireEvent.change(screen.getByRole("searchbox", {name:"搜索会议标题"}), {target:{value:"周报"}});
+    const list = screen.getByLabelText("会议历史列表");
+    expect(within(list).queryByRole("button", {name:/预算评审/})).not.toBeInTheDocument();
+    fireEvent.click(within(list).getByRole("button", {name:/项目周报/}));
+    expect(await screen.findByRole("article")).toHaveTextContent("old");
+    expect(api.meetingHistoryGet).toHaveBeenLastCalledWith("old");
+    expect(api.jobStart).not.toHaveBeenCalled();
+  });
+
+  it("快速切换会议时丢弃迟到的上一场读取结果", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    let resolveNew!: (value: {minutesMarkdown:string}) => void;
+    vi.mocked(api.meetingHistoryGet).mockImplementation((id) => id === "new" ? new Promise((resolve) => {resolveNew = resolve;}) : Promise.resolve({minutesMarkdown:"# 已选择的旧会议"}));
+    render(<MeetingMinutesPage tool={tool} />);
+    await waitFor(() => expect(api.meetingHistoryGet).toHaveBeenCalledWith("new"));
+    fireEvent.click(screen.getByRole("button", {name:/项目周报/}));
+    expect(await screen.findByRole("article")).toHaveTextContent("已选择的旧会议");
+    await act(async () => resolveNew({minutesMarkdown:"# 迟到的新会议"}));
+    expect(screen.getByRole("article")).toHaveTextContent("已选择的旧会议");
+    expect(screen.queryByText("迟到的新会议")).not.toBeInTheDocument();
+  });
+
+  it("切换会议后迟到的转写不会覆盖当前会议占比", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockImplementation(async id => ({
+      transcriptPath:`C:/data/${id}.txt`,minutesMarkdown:`# ${id}\n说话人1发言，说话人2回复。`,
+    }));
+    let resolveNew!: (text: string) => void;
+    vi.mocked(api.meetingReadTranscript).mockImplementation(path => path.endsWith("new.txt")
+      ? new Promise(resolve => {resolveNew=resolve;})
+      : Promise.resolve("说话人1：甲\n说话人2：乙丙丁"));
+    render(<MeetingMinutesPage tool={tool} />);
+    await waitFor(() => expect(api.meetingReadTranscript).toHaveBeenCalledWith("C:/data/new.txt"));
+    fireEvent.click(screen.getByRole("button", {name:/项目周报/}));
+    const article = await screen.findByRole("article");
+    await waitFor(() => expect(article).toHaveTextContent("说话人1（25%）"));
+    await act(async () => resolveNew("说话人1：甲乙丙丁\n说话人2：戊"));
+    expect(article).toHaveTextContent("说话人1（25%）");
+    expect(article).not.toHaveTextContent("80%");
+  });
+
+  it("阅读历史时后台任务的进度和完成事件不覆盖正文", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockResolvedValue({minutesMarkdown:"# 正在阅读的历史"});
+    render(<MeetingMinutesPage tool={tool} />);
+    await screen.findByRole("article");
+    const listener = vi.mocked(api.listenJobEvents).mock.calls.at(-1)![0];
+    await act(async () => {
+      listener({jobId:"background",toolId:tool.id,phase:"running",current:1,total:4,message:"正在转写新会议",severity:"info",outputPaths:[]});
+    });
+    expect(screen.getByRole("article")).toHaveTextContent("正在阅读的历史");
+    await act(async () => {
+      listener({jobId:"background",toolId:tool.id,phase:"completed",current:4,total:4,message:"新会议已完成",severity:"success",outputPaths:[],result:{minutesMarkdown:"# 新会议正文"}});
+    });
+    expect(screen.getByRole("article")).toHaveTextContent("正在阅读的历史");
+    expect(screen.queryByRole("heading", {name:"新会议正文"})).not.toBeInTheDocument();
+  });
+
+  it("原始转写预读用于占比，切换后以纯文本展示且支持复制正文", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockResolvedValue({minutesMarkdown:"# 会议纪要", transcriptPath:"C:/data/raw.txt"});
+    vi.mocked(api.meetingReadTranscript).mockResolvedValue("[00:00] <script>原始发言</script>");
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator,"clipboard",{configurable:true,value:{writeText}});
+    render(<MeetingMinutesPage tool={tool} />);
+    await screen.findByRole("article");
+    await waitFor(() => expect(api.meetingReadTranscript).toHaveBeenCalledWith("C:/data/raw.txt"));
+    fireEvent.click(screen.getByRole("button", {name:"原始转写"}));
+    expect(await screen.findByRole("article",{name:"原始转写正文"})).toHaveTextContent("<script>原始发言</script>");
+    expect(document.querySelector("article script")).toBeNull();
+    expect(api.meetingReadTranscript).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button",{name:"复制正文"}));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("[00:00] <script>原始发言</script>"));
+  });
+
+  it("一条历史读取失败后仍可选择其他会议", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockRejectedValueOnce(new Error("文件已被删除"))
+      .mockResolvedValue({minutesMarkdown:"# 另一场会议"});
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("文件已被删除");
+    fireEvent.click(screen.getByRole("button",{name:/项目周报/}));
+    expect(await screen.findByRole("article")).toHaveTextContent("另一场会议");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("从历史重新生成时不会自动跳回旧会议，等待新任务结果", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
+    vi.mocked(api.meetingHistoryList).mockResolvedValue(savedRows);
+    vi.mocked(api.meetingHistoryGet).mockResolvedValue({minutesMarkdown:"# 旧会议正文",transcriptPath:"C:/data/old.txt"});
+    render(<MeetingMinutesPage tool={tool} />);
+    await screen.findByRole("article");
+    fireEvent.click(screen.getByRole("button", {name:"从转写稿重新生成"}));
+    await waitFor(() => expect(api.jobStart).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("button", {name:"手动开始记录"})).toBeDisabled());
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+    expect(api.meetingHistoryGet).toHaveBeenCalledTimes(1);
+  });
+
+  it("生成过程中打开已有纪要不会丢失运行任务或允许重复启动", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false});
+    vi.mocked(api.pickPath).mockResolvedValueOnce("C:/data/local.md");
+    render(<MeetingMinutesPage tool={tool} />);
+    await waitFor(() => expect(api.listenJobEvents).toHaveBeenCalled());
+    const listener = vi.mocked(api.listenJobEvents).mock.calls.at(-1)![0];
+    await act(async () => listener({jobId:"live",toolId:tool.id,phase:"running",current:1,total:4,message:"正在转写",severity:"info",outputPaths:[]}));
+    fireEvent.click(screen.getByRole("button",{name:"查看已有纪要"}));
+    expect(await screen.findByRole("article")).toHaveTextContent("原有纪要内容。");
+    expect(screen.getByRole("button",{name:"手动开始记录"})).toBeDisabled();
+    expect(api.jobStart).not.toHaveBeenCalled();
+  });
+
+  it("合并配置与生成按钮，按配置、历史、结果排列且不再显示步骤条", async () => {
     render(<MeetingMinutesPage tool={tool} />);
     expect(
       screen.getByRole("heading", { level: 1, name: tool.name }),
     ).toBeInTheDocument();
-    expect(screen.getByText("1. 会议记录")).toBeInTheDocument();
-    expect(screen.getByText("2. 纪要选项")).toBeInTheDocument();
-    expect(screen.getByText("3. 结果")).toBeInTheDocument();
+    expect(screen.getByRole("heading", {name:"会议记录配置"})).toBeInTheDocument();
+    expect(screen.getByRole("heading", {name:"历史记录"})).toBeInTheDocument();
+    expect(screen.getByRole("heading", {name:"会议结果"})).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "纪要详细度" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: /会议标题|参会人/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", {name:"处理步骤"})).not.toBeInTheDocument();
+    const config = screen.getByRole("region", {name:"会议记录配置"});
+    expect(within(config).getByRole("combobox", {name:"纪要详细度"})).toBeInTheDocument();
+    expect(within(config).getByRole("button", {name:"生成纪要"})).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByText("自动检测已开启，正在等待会议开始。")).toBeInTheDocument(),
     );
+  });
+
+  it("导入录音拖放框文案与实际交互一致（整框点击或拖入）", () => {
+    render(<MeetingMinutesPage tool={tool} />);
+    // 视觉审核 S8：不再指向不存在的「右侧浏览」按钮。
+    expect(
+      screen.getByText("拖放或点击选择会议音频或视频"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/点击右侧浏览/)).not.toBeInTheDocument();
+  });
+
+  it.each(["mp4", "WMV", "AVI"])("原生拖入 %s 视频后可生成纪要，文件路径传给任务", async (extension) => {
+    const api = await import("./api");
+    const activity = await import("./toolPageActivity");
+    render(<MeetingMinutesPage tool={tool} />);
+    await waitFor(() => expect(api.listenNativeFileDragEvents).toHaveBeenCalled());
+    const listener = vi.mocked(api.listenNativeFileDragEvents).mock.calls.at(-1)![0];
+    await act(async () => listener({ type: "enter", paths: [`C:/data/会议.${extension}`] }));
+    expect(screen.getByText("拖放或点击选择会议音频或视频").closest(".file-drop-input")).toHaveClass("drag-hover");
+    await act(async () => listener({ type: "drop", paths: [`C:/data/会议.${extension}`] }));
+    expect(screen.getByRole("button", { name: `重新选择文件：会议.${extension}` })).toBeInTheDocument();
+    expect(screen.getByText(`会议.${extension}`).closest(".file-drop-input")).not.toHaveClass("drag-hover");
+    expect(activity.markToolPageLive).toHaveBeenCalledWith(tool.id);
+    fireEvent.click(screen.getByRole("button", { name: "生成纪要" }));
+    await waitFor(() => expect(api.jobStart).toHaveBeenCalledWith("meeting.generate", {
+      audioPath: `C:/data/会议.${extension}`, detailLevel: "standard",
+    }));
+  });
+
+  it("点击上传的选择器包含音视频格式，并处理取消和选择错误", async () => {
+    const api = await import("./api");
+    render(<MeetingMinutesPage tool={tool} />);
+    const upload = screen.getByRole("button", { name: "拖放或点击选择会议音频或视频" });
+    vi.mocked(api.pickPath).mockResolvedValueOnce(null);
+    fireEvent.click(upload);
+    await waitFor(() => expect(api.pickPath).toHaveBeenCalledWith("file", "选择会议音频或视频", expect.arrayContaining(["mp4", "wmv", "avi", "mp3"])));
+    expect(screen.getByRole("button", { name: "生成纪要" })).toBeDisabled();
+    vi.mocked(api.pickPath).mockRejectedValueOnce(new Error("文件选择失败"));
+    fireEvent.click(upload);
+    expect(await screen.findByRole("alert")).toHaveTextContent("文件选择失败");
+    vi.mocked(api.pickPath).mockResolvedValueOnce("C:/data/选择的视频.wmv");
+    fireEvent.click(upload);
+    expect(await screen.findByRole("button", { name: "重新选择文件：选择的视频.wmv" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("不支持或多个拖入文件保留原输入和已显示结果，换成合法文件才清除结果", async () => {
+    const api = await import("./api");
+    vi.mocked(api.meetingStatus).mockResolvedValue({
+      watchEnabled:true,resident:false,inCall:false,logFound:true,recording:false,
+      latestJob: { jobId:"old",toolId:tool.id,phase:"completed",current:1,total:1,
+        message:"已完成",severity:"success",outputPaths:[],result:{minutesMarkdown:"# 旧会议结果"} },
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByRole("article")).toHaveTextContent("旧会议结果");
+    const listener = vi.mocked(api.listenNativeFileDragEvents).mock.calls.at(-1)![0];
+    await act(async () => listener({type:"drop",paths:["C:/data/会议.pdf"]}));
+    expect(screen.getByRole("alert")).toHaveTextContent("请选择支持的会议音频或视频文件");
+    expect(screen.getByRole("article")).toHaveTextContent("旧会议结果");
+    await act(async () => listener({type:"drop",paths:["C:/data/1.mp4","C:/data/2.mp3"]}));
+    expect(screen.getByRole("alert")).toHaveTextContent("每次只支持导入一个");
+    expect(screen.getByRole("article")).toHaveTextContent("旧会议结果");
+    await act(async () => listener({type:"drop",paths:["C:/data/新会议.avi"]}));
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await act(async () => listener({type:"drop",paths:["C:/data/无效.txt"]}));
+    expect(screen.getByRole("button", {name:"重新选择文件：新会议.avi"})).toBeInTheDocument();
+  });
+
+  it("选择器未返回时新拖入的文件优先，迟到的选择不覆盖当前输入", async () => {
+    const api = await import("./api");
+    let resolveSelection!: (value: string) => void;
+    vi.mocked(api.pickPath).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSelection = resolve;
+    }));
+    render(<MeetingMinutesPage tool={tool} />);
+    await waitFor(() => expect(api.listenNativeFileDragEvents).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", {name:"拖放或点击选择会议音频或视频"}));
+    const listener = vi.mocked(api.listenNativeFileDragEvents).mock.calls.at(-1)![0];
+    await act(async () => listener({type:"drop",paths:["C:/data/刚拖入.mp4"]}));
+    await act(async () => resolveSelection("C:/data/迟到.wav"));
+    expect(screen.getByRole("button", {name:"重新选择文件：刚拖入.mp4"})).toBeInTheDocument();
+    expect(screen.queryByText("迟到.wav")).not.toBeInTheDocument();
+  });
+
+  it.each(["recording", "generating", "hidden"])("%s 时原生拖放不替换输入", async (state) => {
+    const api = await import("./api");
+    if (state === "recording") vi.mocked(api.meetingStatus).mockResolvedValue({watchEnabled:true,resident:false,inCall:false,logFound:true,recording:true});
+    const view = render(<div hidden={state === "hidden"}><MeetingMinutesPage tool={tool} /></div>);
+    await waitFor(() => expect(api.listenNativeFileDragEvents).toHaveBeenCalled());
+    if (state === "recording") await screen.findByRole("button", {name:"停止并生成纪要"});
+    if (state === "generating") {
+      const jobListener = vi.mocked(api.listenJobEvents).mock.calls.at(-1)![0];
+      await act(async () => jobListener({jobId:"busy",toolId:tool.id,phase:"running",current:1,total:4,message:"转写中",severity:"info",outputPaths:[]}));
+    }
+    const listener = vi.mocked(api.listenNativeFileDragEvents).mock.calls.at(-1)![0];
+    await act(async () => listener({type:"drop",paths:["C:/data/不应导入.mp4"]}));
+    expect(view.container).not.toHaveTextContent("不应导入.mp4");
+    expect(api.jobStart).not.toHaveBeenCalled();
   });
 
   it("检测关闭时给出设置指引", async () => {
@@ -146,15 +643,40 @@ describe("MeetingMinutesPage", () => {
     expect(
       screen.getByText(/浏览器中预览界面，Teams 检测、录音与生成纪要需在桌面应用中使用/),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/浏览器预览模式：界面仅供查看/),
-    ).toBeInTheDocument();
+    expect(screen.queryByText(/浏览器预览模式：界面仅供查看/)).toBeNull();
     expect(
       screen.getByRole("button", { name: "手动开始记录" }),
     ).toBeDisabled();
     expect(
-      screen.getByRole("button", { name: "从导入录音生成纪要" }),
+      screen.getByRole("button", { name: "生成纪要" }),
     ).toBeDisabled();
+  });
+
+  it("转写启动后仍保留空录提醒", async () => {
+    const { meetingStatus, meetingRecordStop, jobStart } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValue({
+      watchEnabled: true, resident: false, inCall: true, logFound: true, recording: true,
+    });
+    vi.mocked(meetingRecordStop).mockResolvedValueOnce({
+      audioPath: "C:/data/record-1/audio-mix.wav", recordDir: "C:/data/record-1",
+      durationSec: 600, sizeBytes: 19200000, startedAt: "2026-09-26T10:00:00+08:00",
+      warnings: ["录音里疑似没有录到人声"],
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    (await screen.findByRole("button", { name: "停止并生成纪要" })).click();
+    await waitFor(() => expect(jobStart).toHaveBeenCalled());
+    expect(screen.getByText("录音里疑似没有录到人声")).toBeInTheDocument();
+  });
+
+  it("没有 SlimCore 日志时仍可通过音频会话等待会议", async () => {
+    const { meetingStatus } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValueOnce({
+      watchEnabled: true, resident: false, inCall: false, logFound: false,
+      audioDetectionAvailable: true, recording: false,
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByText("自动检测已开启，正在等待会议开始。")).toBeInTheDocument();
+    expect(screen.queryByText(/未找到新版 Teams 日志/)).not.toBeInTheDocument();
   });
 
   it("displayAudioFileName 只显示文件名", () => {
@@ -164,4 +686,223 @@ describe("MeetingMinutesPage", () => {
     expect(displayAudioFileName("/home/me/meeting.mp3")).toBe("meeting.mp3");
     expect(displayAudioFileName("裸文件名.m4a")).toBe("裸文件名.m4a");
   });
+
+  it("页面晚于自动任务打开时从后台快照显示结果", async () => {
+    const { meetingStatus, openOutput } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValueOnce({
+      watchEnabled: true, resident: true, inCall: false, logFound: true, recording: false,
+      latestJob: {
+        jobId: "auto-job", toolId: tool.id, phase: "completed", current: 4, total: 4,
+        message: "会议纪要已生成", severity: "success", outputPaths: ["C:/data/纪要.md"],
+        result: { title: "项目周会", minutesPath: "C:/data/纪要.md", transcriptPath: "C:/data/转写.txt" },
+      },
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByText("项目周会")).toBeInTheDocument();
+    expect(await screen.findByRole("article", { name: "会议纪要正文" })).toHaveTextContent("原有纪要内容。");
+    (await screen.findByRole("button", { name: "打开输出文件夹" })).click();
+    await waitFor(() => expect(openOutput).toHaveBeenCalledWith("C:/data/纪要.md"));
+  });
+
+  it("后台自动任务未能启动时显示原因", async () => {
+    const { meetingStatus } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValueOnce({
+      watchEnabled: true, resident: true, inCall: false, logFound: true, recording: false,
+      processingError: "纪要任务启动失败：无法读取配置",
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByText("纪要任务启动失败：无法读取配置")).toBeInTheDocument();
+  });
+
+  it("自动录音手动停止后，转写失败显示服务端详细原因和任务编号", async () => {
+    const { meetingStatus, jobStart, listenJobEvents } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValue({
+      watchEnabled: true, resident: false, inCall: true, logFound: true, recording: true,
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    (await screen.findByRole("button", { name: "停止并生成纪要" })).click();
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("meeting.generate", expect.anything()));
+    const listener = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+    expect(listener).toBeDefined();
+    await act(async () => listener?.({
+      jobId: "job-1", toolId: tool.id, phase: "failed", current: 1, total: 1,
+      message: "百炼转写任务失败。", severity: "error", outputPaths: [],
+      result: { error: { code: "ASR_TASK_FAILED", userMessage: "百炼转写任务失败。",
+        detail: "InvalidFile.DownloadFailed；任务编号：task-123", retryable: true, diagnosticId: "test" } },
+    }));
+    expect(screen.getByRole("alert")).toHaveTextContent("InvalidFile.DownloadFailed");
+    expect(screen.getByRole("alert")).toHaveTextContent("task-123");
+  });
+
+  it("重新打开页面从失败快照恢复详细原因", async () => {
+    const { meetingStatus } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValueOnce({
+      watchEnabled: true, resident: true, inCall: false, logFound: true, recording: false,
+      latestJob: {
+        jobId: "failed-job", toolId: tool.id, phase: "failed", current: 1, total: 1,
+        message: "网络请求失败", severity: "error", outputPaths: [],
+        result: { error: { code: "NETWORK_ERROR", userMessage: "网络请求失败",
+          detail: "连接超时，任务编号：task-456", retryable: true, diagnosticId: "test" } },
+      },
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByText(/连接超时，任务编号：task-456/)).toBeInTheDocument();
+  });
+
+  it("完成事件直接渲染正文与待办表格，重新生成只提交详细度和转写路径", async () => {
+    const { meetingStatus, listenJobEvents, jobStart, meetingReadMinutes } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValue({
+      watchEnabled: true, resident: false, inCall: false, logFound: true, recording: false,
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    await waitFor(() => expect(listenJobEvents).toHaveBeenCalled());
+    const listener = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+    await act(async () => listener?.({
+      jobId: "complete-job", toolId: tool.id, phase: "completed", current: 4, total: 4,
+      message: "会议纪要已生成", severity: "success", outputPaths: [],
+      result: { title: "健康课程", minutesPath: "C:/data/纪要.md", transcriptPath: "C:/data/转写.txt",
+        minutesMarkdown: "# 健康课程\n\n## 四、后续事项\n\n| 类型 | 事项 | 责任人 | 截止时间 | 交付结果 |\n| --- | --- | --- | --- | --- |\n| 待办 | 复核材料 | 未提及 | 周三 | 清单 |\n| 待确认 | 确认复核负责人 | 未提及 | 未提及 | 未提及 |\n\n<script>alert(1)</script>\n\n![图片](https://example.com/private.png)\n\n[链接](https://example.com)",
+      },
+    }));
+    const article = screen.getByRole("article", { name: "会议纪要正文" });
+    expect(within(article).getByRole("heading", { name: "健康课程" })).toBeInTheDocument();
+    expect(within(article).getByRole("cell", { name: "复核材料" })).toBeInTheDocument();
+    expect(within(article).getByRole("columnheader", { name: "交付结果" })).toBeInTheDocument();
+    expect(within(article).getByRole("heading", { name: "四、后续事项" })).toBeInTheDocument();
+    expect(within(article).getByRole("cell", { name: /^待确认$/ })).toBeInTheDocument();
+    expect(article.querySelector("script, img, a")).toBeNull();
+    expect(meetingReadMinutes).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("combobox", { name: "纪要详细度" }), { target: { value: "detailed" } });
+    fireEvent.click(screen.getByRole("button", { name: "从转写稿重新生成" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("meeting.summarize", {
+      transcriptPath: "C:/data/转写.txt", detailLevel: "detailed",
+    }));
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+  });
+
+  it("已有纪要可在界面本地查看，无需启动转写任务", async () => {
+    const { meetingStatus, pickPath, meetingReadMinutes, jobStart } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValue({
+      watchEnabled: true, resident: false, inCall: false, logFound: true, recording: false,
+    });
+    vi.mocked(pickPath).mockResolvedValueOnce("C:/data/已有纪要.md");
+    render(<MeetingMinutesPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", { name: "查看已有纪要" }));
+    expect(await screen.findByRole("article", { name: "会议纪要正文" })).toHaveTextContent("原有纪要内容。");
+    expect(meetingReadMinutes).toHaveBeenCalledWith("C:/data/已有纪要.md");
+    expect(jobStart).not.toHaveBeenCalled();
+  });
+
+  it("旧结果正文读取失败时保留打开文件和重试生成入口", async () => {
+    const { meetingStatus, meetingReadMinutes } = await import("./api");
+    vi.mocked(meetingReadMinutes).mockRejectedValueOnce(new Error("文件已被移动"));
+    vi.mocked(meetingStatus).mockResolvedValueOnce({
+      watchEnabled: true, resident: false, inCall: false, logFound: true, recording: false,
+      latestJob: {
+        jobId: "old-job", toolId: tool.id, phase: "completed", current: 4, total: 4,
+        message: "已完成", severity: "success", outputPaths: [],
+        result: { minutesPath: "C:/data/旧纪要.md", transcriptPath: "C:/data/转写.txt" },
+      },
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByText("文件已被移动")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开输出文件夹" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "从转写稿重新生成" })).toBeEnabled();
+  });
+
+  it("一次完成事件展示两个版本，切换正文与文件并一次重出两版", async () => {
+    const { meetingStatus, listenJobEvents, openOutput, jobStart } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValue({
+      watchEnabled: true, resident: false, inCall: false, logFound: true, recording: false,
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    await waitFor(() => expect(listenJobEvents).toHaveBeenCalled());
+    const listener = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+    await act(async () => listener?.({
+      jobId: "dual-job", toolId: tool.id, phase: "completed", current: 1, total: 1,
+      message: "已完成", severity: "success", outputPaths: [], result: {
+        transcriptPath: "C:/data/转写.txt",
+        minutesVersions: [
+          { kind: "content", label: "按内容", minutesPath: "C:/data/按内容.md", minutesMarkdown: "# 按内容纪要\n\n合并同类议题。" },
+          { kind: "timeline", label: "按时间", minutesPath: "C:/data/按时间.md", minutesMarkdown: "# 按时间纪要\n\n[00:08] 开场。\n\n[00:25] 调整方案。" },
+        ],
+      },
+    }));
+    expect(screen.getByRole("article")).toHaveTextContent("合并同类议题。");
+    expect(screen.getByRole("button", { name: "按内容", pressed: true })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "打开输出文件夹" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "打开转写稿" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "打开输出文件夹" }));
+    await waitFor(() => expect(openOutput).toHaveBeenCalledWith("C:/data/按内容.md"));
+    fireEvent.click(screen.getByRole("button", { name: "按时间", pressed: false }));
+    expect(screen.getByRole("article")).toHaveTextContent("开场。");
+    expect(screen.getByRole("article")).not.toHaveTextContent("[00:08]");
+    expect(screen.getByRole("article")).not.toHaveTextContent("合并同类议题。");
+    expect(openOutput).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByRole("button", { name: "打开输出文件夹" })).toHaveLength(1);
+    fireEvent.change(screen.getByRole("combobox", { name: "纪要详细度" }), { target: { value: "brief" } });
+    fireEvent.click(screen.getByRole("button", { name: "从转写稿重新生成两个版本" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("meeting.summarize", {
+      transcriptPath: "C:/data/转写.txt", detailLevel: "brief",
+    }));
+    expect(jobStart).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("group", { name: "纪要版本" })).not.toBeInTheDocument();
+  });
+
+  it("快照恢复部分成功的两个版本，默认显示成功版并能查看失败原因", async () => {
+    const { meetingStatus } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValueOnce({
+      watchEnabled: true, resident: false, inCall: false, logFound: true, recording: false,
+      latestJob: {
+        jobId: "partial-dual", toolId: tool.id, phase: "completed", current: 1, total: 1,
+        message: "已完成", severity: "success", outputPaths: [], result: {
+          transcriptPath: "C:/data/转写.txt", minutesPath: "C:/data/按时间.md",
+          minutesVersions: [
+            { kind: "content", label: "按内容", minutesError: "按内容版服务超时" },
+            { kind: "timeline", label: "按时间", minutesPath: "C:/data/按时间.md", minutesMarkdown: "# 按时间纪要\n\n成功版本内容。" },
+          ],
+        },
+      },
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    expect(await screen.findByRole("article")).toHaveTextContent("成功版本内容。");
+    expect(screen.getByRole("button", { name: "按时间", pressed: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "按内容（未生成）" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("按内容版服务超时");
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /打开按.*版纪要/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "从转写稿重新生成两个版本" })).toBeEnabled();
+  });
+
+  it("新输入撤下两版正文，后台旧快照不会回填", async () => {
+    const { meetingStatus, pickPath } = await import("./api");
+    vi.mocked(meetingStatus).mockResolvedValue({
+      watchEnabled: true, resident: false, inCall: false, logFound: true, recording: false,
+      latestJob: { jobId: "old-dual", toolId: tool.id, phase: "completed", current: 1, total: 1,
+        message: "已完成", severity: "success", outputPaths: [], result: {
+          minutesVersions: [
+            { kind: "content", label: "按内容", minutesMarkdown: "# 旧按内容\n正文" },
+            { kind: "timeline", label: "按时间", minutesMarkdown: "# 旧按时间\n正文" },
+          ],
+        },
+      },
+    });
+    render(<MeetingMinutesPage tool={tool} />);
+    await screen.findByRole("group", { name: "纪要版本" });
+    vi.mocked(pickPath).mockResolvedValueOnce("C:/data/新会议.wav");
+    fireEvent.click(screen.getByRole("button", { name: /拖放或点击选择会议音频或视频/ }));
+    await waitFor(() => expect(screen.queryByRole("article")).not.toBeInTheDocument());
+    expect(screen.queryByRole("group", { name: "纪要版本" })).not.toBeInTheDocument();
+  });
+});
+
+it("通知历史链接直接读取指定会议，不先打开最新会议", async () => {
+  const api = await import("./api");
+  vi.mocked(api.meetingHistoryList).mockResolvedValue([
+    { id: "new", jobId: "new-job", title: "新会议", startedAt: "2026-10-29T12:00:00Z", timeLabel: "生成时间", status: "completed", message: "" },
+    { id: "old", jobId: "old-job", title: "旧会议", startedAt: "2026-10-29T10:00:00Z", timeLabel: "生成时间", status: "completed", message: "" },
+  ]);
+  const calls = vi.mocked(api.meetingHistoryGet).mock.calls.length;
+  renderUi(<MemoryRouter initialEntries={[`${tool.route}?meeting=old&version=content`]}><MeetingMinutesPage tool={tool} /></MemoryRouter>);
+  await waitFor(() => expect(vi.mocked(api.meetingHistoryGet).mock.calls.slice(calls)).toEqual([["old"]]));
 });

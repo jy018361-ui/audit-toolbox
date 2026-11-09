@@ -17,6 +17,7 @@ export type JobPresentation = {
   tone: "info" | "warning" | "danger" | "success";
   terminal: boolean;
   percent: number | null;
+  message?: string;
 };
 
 const PARTIAL_RESULT_KEYS = [
@@ -45,6 +46,29 @@ export function jobPresentation(job: JobEvent): JobPresentation {
     (job.severity === "warning" ||
       Boolean(result && PARTIAL_RESULT_KEYS.some((key) => nonEmptyList(result[key]))) ||
       result?.valid === false);
+  const tbjeGroups = job.toolId === "tbje_check" ? result?.groups ?? result?.exports : undefined;
+  const failedGroups = Array.isArray(tbjeGroups)
+    ? tbjeGroups.filter((group) => group?.ok === false).length : 0;
+  const batchTotal = Array.isArray(tbjeGroups) ? tbjeGroups.length : 0;
+  const unresolvedDepositRates = job.toolId === "deposit_interest" && Array.isArray(result?.rows)
+    ? result.rows.filter((row) => row && typeof row === "object" && (row as Record<string, unknown>).rateResolved === false).length
+    : 0;
+  if (job.phase === "completed" && unresolvedDepositRates > 0) {
+    return {
+      state: "partial", label: "待补利率", tone: "warning", terminal: true,
+      percent: null,
+      message: `已生成测算结果；${unresolvedDepositRates} 个账户利率待补，请补齐后重算。`,
+    };
+  }
+  if (job.phase === "completed" && failedGroups > 0) {
+    const succeeded = batchTotal - failedGroups;
+    return succeeded === 0
+      ? { state: "failed", label: "处理失败", tone: "danger", terminal: true, percent: null,
+          message: `处理失败：共 ${batchTotal} 组，均未成功处理，请检查各组原因后重试。` }
+      : { state: "partial", label: "部分完成", tone: "warning", terminal: true,
+          percent: Math.min(99, Math.round(succeeded / batchTotal * 100)),
+          message: `部分完成：已处理 ${succeeded} / ${batchTotal} 组，${failedGroups} 组未成功，请检查各组原因后重试。` };
+  }
   const max = Math.max(job.total, 1);
   const calculatedPercent =
     job.total > 0

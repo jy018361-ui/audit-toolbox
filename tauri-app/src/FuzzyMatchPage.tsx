@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import type { JobEvent, ToolManifest } from "./types";
 import { useTaskRestore } from "./restore";
 import {
@@ -16,6 +17,8 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Badge } from "@/components/ui/badge";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { SourceTableControls } from "@/components/SourceTableControls";
+import { displayFileName } from "@/fileDisplay";
 import { JargonTip } from "@/components/JargonTip";
 import { Button } from "@/components/ui/button";
 import {
@@ -78,6 +81,7 @@ export type FuzzySummary = {
 export type ScoreBand = "all" | "70-80" | "80-90";
 type RowLevel = "auto" | "suspect" | "unmatched";
 type Inspection = {
+  previewOnly?: boolean;
   headerRow?: number;
   headerDepth?: number;
   headers: string[];
@@ -301,7 +305,6 @@ const ROW_LEVEL_LABEL: Record<RowLevel | "invalid", string> = {
 };
 const formatScore = (value: number) =>
   Number.isFinite(value) ? String(Math.round(value)) : "—";
-const formatCount = (value: number) => value.toLocaleString("zh-CN");
 
 export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   const emptySource = (): SourceState => ({
@@ -330,6 +333,11 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   const [jobId, setJobId] = useState("");
   const [summary, setSummary] = useState<FuzzySummary>();
   const [rows, setRows] = useState<FuzzyResultRow[]>([]);
+  const [pagedResults, setPagedResults] = useState(false);
+  const [resultOffset, setResultOffset] = useState(0);
+  const [resultTotal, setResultTotal] = useState(0);
+  const [pageBusy, setPageBusy] = useState(false);
+  const resultGeneration = useRef(0);
   const [confirmations, setConfirmations] = useState<Confirmation[]>([]);
   const [statusFilter, setStatusFilter] = useState<
     RowLevel | "invalid" | "all"
@@ -356,6 +364,9 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   const rowsA = sources.a.inspection?.rowCount ?? 0;
   const rowsB = sources.b.inspection?.rowCount ?? 0;
   const estimate = estimateComparisons(rowsA, rowsB);
+  const sampledSources = Boolean(
+    sources.a.inspection?.previewOnly || sources.b.inspection?.previewOnly,
+  );
 
   const confirmMap = useMemo(
     () => new Map(confirmations.map((c) => [c.aIndex, c])),
@@ -441,11 +452,17 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
           summary?: FuzzySummary;
           rows?: FuzzyResultRow[];
           outputPaths?: string[];
+          processingMode?: string;
+          hasMore?: boolean;
+          total?: number;
         };
         if (r.summary) {
           setSummary(r.summary);
           setRows(r.rows ?? []);
           setJobId(e.jobId);
+          setPagedResults(r.processingMode === "disk" || r.hasMore === true);
+          setResultOffset(0);
+          setResultTotal(r.total ?? r.summary.rowsA);
           setStatusFilter("all");
         }
         // 事件级与结果级 outputPaths 通常是同一个文件（Rust 两侧都会下发），
@@ -484,9 +501,13 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
           summary?: FuzzySummary;
           rows?: FuzzyResultRow[];
           confirmations?: Confirmation[];
+          hasMore?: boolean;
+          total?: number;
         };
         if (x.summary) setSummary(x.summary);
         if (x.rows) setRows(x.rows);
+        setPagedResults(x.hasMore === true || (x.total ?? 0) > (x.rows?.length ?? 0));
+        setResultTotal(x.total ?? x.rows?.length ?? 0);
         setConfirmations(
           mergeConfirmations(x.confirmations ?? [], draft.confirmations),
         );
@@ -497,6 +518,27 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         ),
       );
   }, []);
+
+  useEffect(() => {
+    if (!pagedResults || !jobId) return;
+    const generation = ++resultGeneration.current;
+    setPageBusy(true);
+    void engineCall("fuzzy.get_results", {
+      jobId, offset: resultOffset, limit: 200,
+      ...(statusFilter !== "all" ? { level: statusFilter } : {}),
+    }).then((value) => {
+      if (generation !== resultGeneration.current) return;
+      const result = value as { rows?: FuzzyResultRow[]; total?: number; confirmations?: Confirmation[] };
+      setRows(result.rows ?? []);
+      setResultTotal(result.total ?? 0);
+      setConfirmations((current) => mergeConfirmations(result.confirmations ?? [], current));
+    }).catch((reason) => {
+      if (generation === resultGeneration.current) setError(errorText(reason));
+    }).finally(() => {
+      if (generation === resultGeneration.current) setPageBusy(false);
+    });
+    return () => { resultGeneration.current += 1; };
+  }, [pagedResults, jobId, resultOffset, statusFilter]);
 
   // 确认进度草稿：jobId 与确认列表任一变化就落一份，页面重挂载即可接续。
   useEffect(() => {
@@ -523,6 +565,9 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     setJobId("");
     setSummary(undefined);
     setRows([]);
+    setPagedResults(false);
+    setResultOffset(0);
+    setResultTotal(0);
     setConfirmations([]);
     setStatusFilter("all");
     setBand("all");
@@ -536,7 +581,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
 
   async function inspect(
     kind: Kind,
-    over: { path?: string; sheet?: string; headerRow?: number },
+    over: { path?: string; sheet?: string; headerRow?: number; headerDepth?: number },
   ) {
     const current = sources[kind];
     const path = over.path ?? current.path;
@@ -548,7 +593,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     try {
       const x = (await engineCall("fuzzy.inspect", {
         kind,
-        source: { inputPath: path, sheet, headerRow, headerDepth: headerRow === 0 ? 0 : current.inspection?.headerDepth ?? current.headerDepth ?? 1 },
+        source: { inputPath: path, sheet, headerRow, headerDepth: over.headerDepth ?? (headerRow === 0 ? 0 : current.inspection?.headerDepth ?? current.headerDepth ?? 1) },
       })) as Inspection;
       // 历史恢复后重新读取同一文件：存档的选中列顶回（一次性消费，换文件
       // 照旧清空待选）。
@@ -652,6 +697,9 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
       setConfirmations([]);
       setSummary(undefined);
       setRows([]);
+      setPagedResults(false);
+      setResultOffset(0);
+      setResultTotal(0);
       setExportOutputs([]);
       setStatusFilter("all");
       setRestoreNote("");
@@ -714,7 +762,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
       <PageHeader
         eyebrow="审计核对"
         title={tool.name}
-        detail="对两列公司名称、人名、地址或通用文本做模糊匹配：高相似度自动采纳，疑似项逐条人工确认，确认进度可续作并导出底稿。"
+        detail="比较两列文本，高相似度自动匹配，疑似项留待确认。"
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
       {job?.phase === "cancelled" && (
@@ -764,49 +812,18 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                     />
                   </div>
                   {s.inspection && (
-                    <div className="fuzzy-source-meta">
-                      <span>
-                        已识别 {formatCount(s.inspection.rowCount)} 行 ·{" "}
-                        {s.inspection.sheet}
-                      </span>
-                      <label>
-                        Sheet
-                        <select
-                          value={s.inspection.sheet}
-                          disabled={busy}
-                          onChange={(e) =>
-                            void inspect(kind, { sheet: e.target.value })
-                          }
-                        >
-                          {s.inspection.sheets.length ? (
-                            s.inspection.sheets.map((x) => (
-                              <option key={x}>{x}</option>
-                            ))
-                          ) : (
-                            <option>{s.inspection.sheet}</option>
-                          )}
-                        </select>
-                      </label>
-                      <label>
-                        表头行
-                        <input
-                          type="number"
-                          min={1}
-                          disabled={busy}
-                          value={s.headerRow}
-                          onChange={(e) =>
-                            void inspect(kind, {
-                              headerRow: Number(e.target.value),
-                            })
-                          }
-                        />
-                      </label>
-                    </div>
-                  )}
-                  {s.inspection && (
                     <MappingPanel
                       title={`${SOURCE_LABEL[kind]}匹配列`}
-                      note={`${formatCount(s.inspection.rowCount)} 行 × ${s.inspection.headers.length} 列`}
+                      sourceName={displayFileName(s.path)}
+                      // 面板头部固定输出「N 行预览 · M 列」，note 只补差量信息
+                      // （全量读取时的总行数），不再把同一组数字说两遍（UI 审核）。
+                      note={
+                        s.inspection.previewOnly
+                          ? ""
+                          : s.inspection.rowCount !== s.inspection.preview.length
+                            ? `共 ${formatCount(s.inspection.rowCount)} 行`
+                            : ""
+                      }
                       headers={s.inspection.headers}
                       rows={s.inspection.preview}
                       mapping={s.mapping}
@@ -815,6 +832,16 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                       busy={busy}
                       maxHeight={260}
                       resizeKey={`fuzzy.preview.${kind}`}
+                      toolbar={
+                        <SourceTableControls
+                          sheet={s.inspection.sheet} sheets={s.inspection.sheets}
+                          headerRow={s.headerRow} disabled={busy}
+                          headerDepth={s.inspection.headerDepth ?? s.headerDepth ?? 1}
+                          onHeaderDepthChange={(headerDepth) => void inspect(kind, { headerDepth })}
+                          onSheetChange={(sheet) => void inspect(kind, { sheet, headerRow: 0, headerDepth: 0 })}
+                          onHeaderRowChange={(row) => void inspect(kind, { headerRow: Number(row) })}
+                        />
+                      }
                       onChange={(next) => setSource(kind, { mapping: next })}
                     />
                   )}
@@ -892,21 +919,18 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
               <p className="fa-missing-hint">{thresholdProblem}</p>
             )}
           </details>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>预估与启动</CardTitle>
-        </CardHeader>
-        <CardContent>
+          {/* 「预估与启动」并入设置卡底部：独立一卡曾多出一整屏滚动（UI 审核）。 */}
           <div className="fuzzy-estimate">
-            <p>
-              A 侧 {formatCount(rowsA)} 行 / B 侧 {formatCount(rowsB)}{" "}
-              行，预计候选比对约 <b>{formatCount(estimate)}</b> 次（A 每行最多与
-              B 侧前 {COMPARISON_CAP} 行精算比对）。
-            </p>
-            {estimate > COMPARISON_WARN_AT && (
+            {sampledSources ? (
+              <p>两侧样例已就绪，完整行数和比对次数将在匹配完成后显示。</p>
+            ) : (
+              <p>
+                A 侧 {formatCount(rowsA)} 行 / B 侧 {formatCount(rowsB)}{" "}
+                行，预计候选比对约 <b>{formatCount(estimate)}</b> 次（A 每行最多与
+                B 侧前 {COMPARISON_CAP} 行精算比对）。
+              </p>
+            )}
+            {!sampledSources && estimate > COMPARISON_WARN_AT && (
               <p className="fuzzy-estimate-warn">
                 预计比对次数超过 50 万，匹配可能耗时较长；建议先按 Sheet
                 或期间拆分文件、分批核对。
@@ -963,9 +987,11 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                     key={level}
                     type="button"
                     className={`fuzzy-pill${statusFilter === level ? " active" : ""}`}
-                    onClick={() =>
-                      setStatusFilter(statusFilter === level ? "all" : level)
-                    }
+                    disabled={pageBusy}
+                    onClick={() => {
+                      setResultOffset(0);
+                      setStatusFilter(statusFilter === level ? "all" : level);
+                    }}
                   >
                     <span>{ROW_LEVEL_LABEL[level]}</span>
                     <strong>{formatCount(value)}</strong>
@@ -979,11 +1005,22 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
             statusFilter={statusFilter}
             confirmMap={confirmMap}
           />
+          {pagedResults && (
+            <div className="fuzzy-confirm-toolbar" aria-label="匹配结果分页">
+              <Button variant="secondary" disabled={pageBusy || resultOffset === 0}
+                onClick={() => setResultOffset((offset) => Math.max(0, offset - 200))}>上一页</Button>
+              <span role="status">{pageBusy ? "正在读取…" : `第 ${resultTotal === 0 ? 0 : resultOffset + 1}–${Math.min(resultOffset + rows.length, resultTotal)} 行，共 ${formatCount(resultTotal)} 行`}</span>
+              <Button variant="secondary" disabled={pageBusy || resultOffset + rows.length >= resultTotal}
+                onClick={() => setResultOffset((offset) => offset + 200)}>下一页</Button>
+              <span>疑似确认及批量采纳适用于当前页，导出包含全部结果。</span>
+            </div>
+          )}
         </section>
       )}
 
       {summary && (
         <ConfirmQueue
+          paged={pagedResults}
           rows={rows}
           confirmations={confirmations}
           band={band}
@@ -1085,8 +1122,46 @@ function FuzzyResultTable({
   const resize = useTableColumnResize<HTMLDivElement>({
     storageKey: "fuzzy.results",
   });
+  // 底缘/右缘还有未滚到的内容时给容器挂 data 属性，页面 CSS 据此渲染渐隐
+  // 提示——与公共 DataTable 同一做法，但本表不在 DataTable 体系内，须自带。
+  // WebView2 的覆盖式滚动条会自动隐藏，被裁一半的行列看起来像渲染坏了。
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const frame = frameRef.current;
+    const el = scrollRef.current;
+    if (!frame || !el) return;
+    const update = () => {
+      const beyondRight =
+        el.scrollWidth - el.clientWidth - el.scrollLeft > 4;
+      const beyondBottom =
+        el.scrollHeight - el.clientHeight - el.scrollTop > 4;
+      frame.dataset.moreBottom = beyondBottom ? "true" : "false";
+      frame.dataset.moreRight = beyondRight ? "true" : "false";
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(update);
+      observer.observe(el);
+    }
+    return () => {
+      el.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+      observer?.disconnect();
+    };
+  }, [rows, statusFilter]);
   return (
-    <div className="fuzzy-table" ref={resize.ref}>
+    <div className="fuzzy-table-frame" ref={frameRef}>
+    <div
+      className="fuzzy-table"
+      ref={(node) => {
+        resize.ref.current = node;
+        scrollRef.current = node;
+      }}
+    >
       <table>
         <thead>
           <tr>
@@ -1153,10 +1228,12 @@ function FuzzyResultTable({
         </tbody>
       </table>
     </div>
+    </div>
   );
 }
 
 function ConfirmQueue(props: {
+  paged?: boolean;
   rows: FuzzyResultRow[];
   confirmations: Confirmation[];
   band: ScoreBand;
@@ -1185,13 +1262,13 @@ function ConfirmQueue(props: {
         <div className="fx-result-heading">
           <div>
             <h3>疑似确认</h3>
-            <p>本次匹配没有需要人工确认的疑似行。</p>
+            <p>{props.paged ? "当前页没有疑似行，可筛选疑似匹配或翻页继续查看。" : "本次匹配没有需要人工确认的疑似行。"}</p>
           </div>
         </div>
         <EmptyState
           compact
           title="无需人工确认"
-          description="所有有效结果均已自动归类，可直接复核明细并导出底稿。"
+          description={props.paged ? "确认状态已保存。" : undefined}
         />
       </section>
     );
@@ -1200,8 +1277,8 @@ function ConfirmQueue(props: {
     <section className="fuzzy-result">
       <div className="fx-result-heading">
         <div>
-          <h3>疑似确认</h3>
-          <p>逐条核对候选：点选右侧任一候选即采纳，「都不是」表示拒绝匹配。</p>
+          <h3>{props.paged ? "本页疑似确认" : "疑似确认"}</h3>
+          <p>选中候选即采纳；「都不是」表示拒绝匹配。</p>
         </div>
       </div>
       <div className="fuzzy-confirm-toolbar">
@@ -1235,7 +1312,7 @@ function ConfirmQueue(props: {
           disabled={!props.batchCount}
           onClick={props.onBatch}
         >
-          相似度≥{AUTO_ACCEPT_THRESHOLD} 全部采纳（{props.batchCount}）
+          相似度≥{AUTO_ACCEPT_THRESHOLD} {props.paged ? "本页采纳" : "全部采纳"}（{props.batchCount}）
         </Button>
       </div>
       <div className="fuzzy-cards">

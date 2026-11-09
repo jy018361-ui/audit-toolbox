@@ -15,14 +15,14 @@
   var META = {
     loan_covenant: {
       id: 'loan_covenant',
-      name: '借款·财务契约',
-      shortName: '财务契约',
+      name: '借款·财务指标契约',
+      shortName: '财务指标契约',
       category: 'loan',
       docKind: 'clause',
-      version: '4.2',
+      version: '4.3',
       readonly: true,
       description: '按案例库摘录有财务指标或量化财务门槛的限制性契约，保留原文与出处。',
-      useCase: '收录财务指标及带金额、比例或财务报表基数门槛的限制；排除期限、提款、还款、利率、资本金、账户归集和无量化门槛事项。',
+      useCase: '收录财务指标及带金额、比例或财务报表基数门槛的限制；排除期限、提款、还款、利率、资本金、账户归集、无量化门槛事项及仅决定通知/报送时点的金额比例。',
       example: { category: 'C01 财务报表指标', quote: '资产负债率不得超过65%……', hint: '四列展示类型、触发标准、合同原文和引用出处' }
     },
     loan_general: {

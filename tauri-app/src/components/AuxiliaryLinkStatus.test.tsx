@@ -12,9 +12,6 @@ function result(overrides: Partial<AuxiliaryLinkResult>): AuxiliaryLinkResult {
     tbAuxMapped: true,
     status: "verified",
     column: "部门",
-    anchorHits: 3,
-    anchorTotal: 3,
-    coverage: 0.82,
     competingColumns: [],
     warnings: [],
     ...overrides,
@@ -26,7 +23,7 @@ describe("AuxiliaryLinkStatusView 降级提示", () => {
     render(<AuxiliaryLinkStatusView result={result({
       groups: [
         { ...result({}), entity: "A", account: "1002" },
-        { ...result({ status: "partialCoverage", anchorHits: 2 }), entity: "A", account: "2001" },
+        { ...result({ status: "partialCoverage" }), entity: "A", account: "2001" },
       ],
     })} />);
     expect(screen.getByText("TB/JE 辅助核算有 1 项无法匹配，已退回按主体＋科目计算；其余 1 项按辅助核算细分。")).toBeInTheDocument();

@@ -13,6 +13,7 @@ import {
   type SyncBusyEntry,
 } from "@/api";
 import { isAudiPickBusyManaged, subscribeAudiPickOperations } from "../audipickOperation";
+import { useOcrScanProgressDialog } from "../ocrProgress";
 
 /** 短于这个时间的调用不弹窗：快操作弹一下就关只会闪。 */
 const SHOW_DELAY_MS = 1000;
@@ -33,6 +34,7 @@ const METHOD_LABELS: Record<string, string> = {
   "excel_merger.inspect": "检查文件",
   "excel_merger.scan_folder": "扫描文件夹",
   "excel_merger.expand_paths": "展开文件清单",
+  "dataflow_sheet_names": "读取 Sheet 名称候选",
   // FA 系列
   "fa.inspect": "读取底稿",
   "fa.review": "复核底稿",
@@ -44,6 +46,8 @@ const METHOD_LABELS: Record<string, string> = {
   "kanzhang.accounts": "读取科目",
   "kanzhang.llm_mapping": "识别字段映射",
   "kanzhang.mark_sign_report": "生成标记报告",
+  // TS 管理：列筛选下拉的取值检索
+  "ts.filter": "检索取值",
   // 函证 / 存款 / 外汇 / 借款 / 模糊匹配
   "confirmation.inspect": "读取函证清单",
   "deposit.classify_source": "识别存款来源",
@@ -146,6 +150,7 @@ export function SyncBusyDialog({
   /** 仅供开发态几何夹具直接呈现「最小化后的小条」形态。 */
   fixtureMinimized?: boolean;
 } = {}) {
+  const { active: ocrManaged } = useOcrScanProgressDialog();
   const [visible, setVisible] = useState(
     () => Boolean(fixtureEntries?.length) && !fixtureMinimized,
   );
@@ -178,7 +183,8 @@ export function SyncBusyDialog({
       }
       let latest: SyncBusyEntry[] = [];
       const refresh = () => {
-        const next = latest.filter((entry) => !isAudiPickBusyManaged(entry.method));
+        const next = latest.filter((entry) => !isAudiPickBusyManaged(entry.method)
+          && !(ocrManaged && entry.method.startsWith("ocr.")));
         const wasIdle = entriesRef.current.length === 0;
         entriesRef.current = next;
         setEntries(next);
@@ -213,7 +219,7 @@ export function SyncBusyDialog({
       const offOperation = subscribeAudiPickOperations(refresh);
       return () => { offBusy(); offOperation(); };
     },
-    [fixtureEntries, fixtureMinimized],
+    [fixtureEntries, fixtureMinimized, ocrManaged],
   );
 
   // 卸载时清掉计时器，避免测试环境泄漏。

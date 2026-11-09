@@ -8,21 +8,6 @@ export function shouldShowFaAdditionFields(additionMethod?: string): boolean {
   return Boolean(additionMethod?.trim());
 }
 
-export function shouldAutoPrefillFaAddition(
-  additionMethod: string | undefined,
-  endOnlyRows: number,
-  alreadyHandled: boolean,
-): boolean {
-  // A date-like column alone is not proof that the ending file is an addition
-  // list. The legacy prefill is only safe once the addition-method mapping is
-  // explicit and the merge actually contains ending-only rows.
-  return (
-    !alreadyHandled &&
-    endOnlyRows > 0 &&
-    shouldShowFaAdditionFields(additionMethod)
-  );
-}
-
 /// Whether 步骤2 的「应用补充映射并继续」可以点。
 ///
 /// A supplement does not have to be a separate workbook.  When file2 itself
@@ -43,12 +28,56 @@ export function canApplyFaSupplements(
   );
 }
 
+/// 一张补充清单是否已完成 Sheet 选择并读取（自动与手动复核共用的最小判断）。
+export function faSupplementSideReviewReady(
+  config: { path: string; sheet: string },
+  info?: { sheets: string[]; selectedSheet?: string },
+): boolean {
+  return Boolean(
+    config.path &&
+      info &&
+      (!info.sheets.length ||
+        (config.sheet && info.selectedSheet === config.sheet)),
+  );
+}
+
+/// Whether 步骤2 的「重新复核补充清单」可以点。
+///
+/// 自动复核对新增、处置两张表保持「都就绪后统一触发」，避免单张表抢跑、
+/// 另一张随后加入时重复复核；但手动复核只要求已加载的表都完成读取——
+/// 本期只有处置清单（如资产减少业务查询导出）时同样能手动发起 LLM 复核。
+export function faSupplementManualReviewReady(
+  addition: { path: string; sheet: string },
+  disposal: { path: string; sheet: string },
+  additionInfo?: { sheets: string[]; selectedSheet?: string },
+  disposalInfo?: { sheets: string[]; selectedSheet?: string },
+): boolean {
+  return Boolean(
+    (addition.path || disposal.path) &&
+      (!addition.path ||
+        faSupplementSideReviewReady(addition, additionInfo)) &&
+      (!disposal.path || faSupplementSideReviewReady(disposal, disposalInfo)),
+  );
+}
+
 export function isFaMatchDisabled(
   hasInspection: boolean,
   businessJobBusy: boolean,
 ): boolean {
   // LLM review is advisory and must never lock the deterministic merge path.
   return !hasInspection || businessJobBusy;
+}
+
+/// 主清单读取完成后是否自动发起 LLM 复核。
+///
+/// 两侧工作簿的可见 Sheet 都 ≤1 张时没什么可选错，保持自动复核；任一侧
+/// 多 Sheet 时自动选表可能选错（把封面/汇总页当明细），应停下来等用户
+/// 确认两侧 Sheet 后手动点「读表并复核」。
+export function shouldAutoReviewFaInspection(
+  beginSheetCount: number,
+  endSheetCount: number,
+): boolean {
+  return beginSheetCount <= 1 && endSheetCount <= 1;
 }
 
 export function faOutputPathAfterSourceSelection(
@@ -89,15 +118,6 @@ export function faDefaultOutputPath(endPath: string, now = new Date()): string {
   if (!directory) return "";
   const separator = directory.endsWith("\\") || directory.endsWith("/") ? "" : "\\";
   return `${directory}${separator}${faDefaultOutputName(now)}`;
-}
-
-export function shouldShowFaPreviewWorkspace(
-  step: 1 | 2 | 3,
-  _hasMatchResult: boolean,
-): boolean {
-  // 文件配置和补充清单配置都需要随时对照原表。匹配完成不应把预览换走，
-  // 否则用户在继续核对字段时会失去数据上下文；只有导出步骤展示结果区。
-  return step === 1 || step === 2;
 }
 
 export function faHeaderOption(header: string): {
@@ -242,11 +262,56 @@ export function faMissingOptionalRoles<T extends readonly [string, string]>(
     })
     .map(([, label]) => label);
 }
+// —— 两期组合键逐位命中结论（fa.inspect / fa.key_check 的 keyPairing）——
+// begin/end 是两侧资产ID组合键按下标配对的列名，hit 表示该位键值在
+// 两期清单里真实碰上（至少有一条资产能按这组键对号入座）。
+export type FaKeyPairing = { begin: string; end: string; hit: boolean };
+
+/// 把 Rust 返回的 keyPairing 顶层字段整理成可信数组：字段缺失返回
+/// undefined（旧版 EXE），数组里形状不对的条目直接丢弃，避免半成品
+/// 数据渲染出错误的命中徽章。
+export function normalizeFaKeyPairing(
+  value: unknown,
+): FaKeyPairing[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const entries: FaKeyPairing[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const entry = item as Record<string, unknown>;
+    if (typeof entry.begin !== "string" || typeof entry.end !== "string") continue;
+    entries.push({ begin: entry.begin, end: entry.end, hit: entry.hit === true });
+  }
+  return entries;
+}
+
+/// 组合键第 index 位（按下标与对方文件配对）的碰撞结论。
+/// 键位没有对应数据——刚增删键位导致 keyPairing 过期、或该键位上的
+/// 列已被换掉——返回 undefined，界面不渲染徽章，等 fa.key_check 刷新
+/// 后自然出现；列名比对做 trim，与表头下拉按去空格列名占用的口径一致。
+export function faKeyPairingAt(
+  pairing: readonly FaKeyPairing[] | undefined,
+  side: FaSide,
+  index: number,
+  key: string | undefined,
+): FaKeyPairing | undefined {
+  if (!pairing || index < 0 || index >= pairing.length) return undefined;
+  if (key === undefined) return undefined;
+  const entry = pairing[index];
+  const column = side === "begin" ? entry.begin : entry.end;
+  return column.trim() === key.trim() ? entry : undefined;
+}
+
 export const FA_LOW_CONFIDENCE = 0.7;
 // 仅高于 75% 才自动改；明确低于可见门槛的结果直接隐藏。
 export const FA_AUTO_APPLY_MIN = AUTO_ACCEPT_LLM_CONFIDENCE;
 export const shouldAutoApplyFa = (confidence?: number) =>
   shouldAutoAcceptLlmReview(confidence);
+
+/** 清空已有映射使用更高门槛；模型返回的 autoClearSafe 不作为授权依据。 */
+export const shouldAutoApplyFaField = (item: { confidence?: number; action?: string }) =>
+  item.action === "clear"
+    ? item.confidence !== undefined && Number.isFinite(item.confidence) && item.confidence >= 0.9
+    : shouldAutoApplyFa(item.confidence);
 export type FaPendingSuggestion = {
   id: string;
   label: string;
@@ -314,12 +379,13 @@ export type FaLlmPlan = {
   pending: FaPendingSuggestion[];
 };
 
-const faValueText = (value?: string | string[] | boolean): string => {
+const faValueText = (value?: string | string[] | boolean | number): string => {
   if (Array.isArray(value)) {
     const items = value.map((item) => item?.trim()).filter(Boolean);
     return items.length ? items.join(" + ") : "未映射";
   }
   if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "number") return String(value);
   return value?.trim() ? value.trim() : "未映射";
 };
 const sideLabel = (side: FaSide) => (side === "begin" ? "期初" : "期末");
@@ -387,8 +453,7 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
     if (faValueText(before) === faValueText(column)) return;
     if (
       input.autoApply !== false &&
-      shouldAutoApplyFa(item.confidence) &&
-      (item.action !== "clear" || item.autoClearSafe === true)
+      shouldAutoApplyFaField(item)
     ) {
       record(side, key, column, item);
       return;
@@ -513,7 +578,7 @@ export type FaSupplementChange = Omit<FaMappingChange, "restore"> & {
 };
 export type FaSupplementSideState = Record<
   string,
-  string | string[] | boolean | undefined
+  string | string[] | boolean | number | undefined
 > & {
   keys?: string[];
   matchKeysVerified?: boolean;
@@ -588,8 +653,7 @@ export function planFaSupplementChanges(
     if (faValueText(before) === faValueText(column)) return;
     if (
       input.autoApply !== false &&
-      shouldAutoApplyFa(item.confidence) &&
-      (item.action !== "clear" || item.autoClearSafe === true)
+      shouldAutoApplyFaField(item)
     ) {
       record(role, column, item);
       return;
@@ -718,6 +782,12 @@ export function faReviewDisplayMessage(
         ? "LLM 复核失败。"
         : "LLM 未启用，已保留当前自动映射。")
     );
+  }
+  // 卫生校验拒绝了建议时，不能把“保留原映射”说成“与 LLM 判断一致”。
+  if (original.includes("已忽略")) {
+    return applied || pending
+      ? `${faReviewSummary(applied, pending)} ${original}`
+      : original;
   }
   return faReviewSummary(applied, pending);
 }

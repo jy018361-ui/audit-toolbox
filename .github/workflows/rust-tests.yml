@@ -5,10 +5,14 @@ name: Rust tests
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "dev", "feat/**", "chore/isolated-release-channels"]
     paths:
       - "tauri-app/src-tauri/**"
       - ".github/workflows/rust-tests.yml"
+      - ".github/workflows/release.yml"
+      - "tauri-app/scripts/*channel*"
+  pull_request:
+    branches: ["main", "dev"]
   workflow_dispatch:
 
 permissions:
@@ -33,6 +37,17 @@ jobs:
       - name: Install frontend dependencies
         working-directory: tauri-app
         run: npm ci
+
+      - name: Check release channels
+        shell: pwsh
+        run: |
+          python tauri-app/scripts/test_release_channels.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tauri-app/scripts/publish_channel_release.check.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tauri-app/scripts/check_import_case.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm --prefix tauri-app test
 
       - name: Build frontend (dist-web is required by tauri::generate_context)
         working-directory: tauri-app

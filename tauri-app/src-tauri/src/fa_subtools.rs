@@ -100,10 +100,10 @@ pub(crate) fn run_job(
 /// 复用同一套预览与映射 UI。
 fn dep_inspect(params: Value) -> Result<Value, AppError> {
     let path = fa::required_path(&params, "path")?;
-    let table = fa::load_table(
+    let table = fa::load_review_table(
         &path,
         params.get("sheet").and_then(Value::as_str),
-        fa::optional_header(&params, "headerRow")?,
+        fa::HeaderOptions::params(&params, "headerRow", "headerDepth")?,
         true,
     )?;
     let suggested = fa::suggest_mapping(&table);
@@ -143,16 +143,18 @@ fn dep_review(params: Value) -> Result<Value, AppError> {
         );
     }
     let path = fa::required_path(&params, "path")?;
-    let table = fa::load_table(
+    let table = fa::load_review_table(
         &path,
         params.get("sheet").and_then(Value::as_str),
-        fa::optional_header(&params, "headerRow")?,
+        fa::HeaderOptions::params(&params, "headerRow", "headerDepth")?,
         false,
     )?;
     let mapping = params.get("mapping").cloned().unwrap_or(json!({}));
     let payload = dep_llm_payload(&table, &mapping);
     let system = "你是固定资产折旧测算字段映射复核助手。只能使用 payload.file2.headers 中的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}]}。suggested_mapping 必须是 JSON 对象，例如 {\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep；file_side 固定为 file2；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因表头规整就宣称全部映射正确。已有映射必须结合 samples 逐项复核：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side=file2，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组。";
-    let content = fa::request_fa_llm(&settings, system, &payload.to_string())?;
+    let system = format!("{system}\n{}depreciation 表示截至期末的累计折旧余额，供累计折旧差异测算使用，绝不是当月、上月、本年或本期计提额；current_year_dep 表示本年度累计计提额。不得因月度样例金额看起来合理，就把 depreciation 从累计折旧列替换为当月折旧列。逐项检查，但只输出需要调整的项目；相容的 keep 项不逐条输出，没有可信候选的未映射项维持空缺。同一调整只放在 suggestions 或 fieldReviews 中一次，reason 最多一句话。", fa::FA_DATE_REVIEW_INSTRUCTION);
+    let system = format!("{system}{}", fa::FA_NORMALIZATION_REVIEW_INSTRUCTION);
+    let content = fa::request_fa_llm(&settings, &system, &payload.to_string())?;
     let parsed = fa::parse_llm_json(&content).ok_or_else(|| {
         error(
             "LLM_RESPONSE_INVALID",
@@ -185,7 +187,7 @@ fn dep_llm_payload(table: &fa::Table, mapping: &Value) -> Value {
     json!({
         "file2": {
             "headers": table.headers,
-            "samples": fa::sample_columns(table),
+            "samples": fa::review_sample_columns(table),
             "mapping": mapping,
             "unmappedRoles": unmapped_roles,
             "unmappedCandidates": unmapped_candidates,
@@ -227,6 +229,34 @@ fn dep_review_item_is_applicable(item: &mut Value) -> bool {
     true
 }
 
+/// 累计余额与期间计提额不能互换；只拦截列名明确冲突的建议，不按金额大小猜口径。
+fn dep_sanitize_depreciation_scope(item: &mut Value) {
+    if item.get("role").and_then(Value::as_str) != Some("depreciation") {
+        return;
+    }
+    let incompatible = |column: &str| {
+        let normalized = column.split_whitespace().collect::<String>().to_lowercase();
+        [
+            "当月折旧", "本月折旧", "上月折旧", "月折旧额", "月计提折旧",
+            "本年折旧", "当年折旧", "本期折旧", "当期折旧",
+            "monthlydepreciation", "currentyeardepreciation",
+        ].iter().any(|token| normalized.contains(token))
+    };
+    let rejected = item.get("suggested_column").and_then(Value::as_str)
+        .is_some_and(incompatible)
+        || item.get("suggested_mapping").and_then(Value::as_object)
+            .is_some_and(|mapping| mapping.values().filter_map(Value::as_str).any(incompatible));
+    if rejected {
+        let Some(object) = item.as_object_mut() else { return; };
+        object.remove("suggested_column");
+        object.remove("suggested_mapping");
+        object.insert("confidence".into(), json!(0.0));
+        object.insert("action".into(), json!("review"));
+        object.insert("rejectedByDepreciationScope".into(), json!(true));
+        object.insert("reason".into(), json!("已忽略折旧口径冲突的建议：累计折旧必须取累计余额，不能使用当月或本年计提额；保留当前映射。"));
+    }
+}
+
 /// 单文件版 `finalize_llm_review`：同一套 sanitize → 适用性过滤 → 本地兜底 →
 /// 0.85+fill 自动应用分流；matchReview 固定 keep（单文件没有匹配键），保证
 /// 前端复用主工具的复核 UI 时不走匹配键分支。
@@ -239,7 +269,9 @@ fn dep_finalize_review(parsed: Value, payload: Value) -> Value {
         .into_iter()
         .filter_map(|mut item| {
             fa::sanitize_llm_review_item(&mut item, &payload);
-            dep_review_item_is_applicable(&mut item).then_some(item)
+            dep_sanitize_depreciation_scope(&mut item);
+            (fa::llm_review_preserves_normalized_columns(&mut item, &payload)
+                && dep_review_item_is_applicable(&mut item)).then_some(item)
         })
         .collect::<Vec<_>>();
     let mut reviews = parsed
@@ -251,7 +283,9 @@ fn dep_finalize_review(parsed: Value, payload: Value) -> Value {
         .into_iter()
         .filter_map(|mut item| {
             fa::sanitize_llm_review_item(&mut item, &payload);
-            dep_review_item_is_applicable(&mut item).then_some(item)
+            dep_sanitize_depreciation_scope(&mut item);
+            (fa::llm_review_preserves_normalized_columns(&mut item, &payload)
+                && dep_review_item_is_applicable(&mut item)).then_some(item)
         })
         .collect::<Vec<_>>();
     for mut fallback in fa::local_unmapped_suggestions(&payload) {
@@ -287,7 +321,13 @@ fn dep_finalize_review(parsed: Value, payload: Value) -> Value {
             reviews.push(item);
         }
     }
-    let message = if auto.is_empty() && reviews.is_empty() {
+    let rejected_dates = reviews.iter().any(|item| item.get("rejectedByDateValidation").and_then(Value::as_bool) == Some(true));
+    let rejected_depreciation = reviews.iter().any(|item| item.get("rejectedByDepreciationScope").and_then(Value::as_bool) == Some(true));
+    let message = if rejected_depreciation {
+        "LLM 复核完成：已忽略折旧口径冲突的建议，累计折旧仍按原映射取数；请核对累计余额列。"
+    } else if rejected_dates {
+        "LLM 复核完成：已忽略与日期取值不符的建议，当前映射未因此改动；请人工确认真实日期列。"
+    } else if auto.is_empty() && reviews.is_empty() {
         "LLM 复核完成：现有脚本映射无需补充。"
     } else {
         "折旧测算 LLM 复核完成。"
@@ -335,12 +375,20 @@ fn dep_export(
         ));
     }
     progress("load", 0, 3, "正在读取期末固定资产清单");
-    let table = fa::load_table(
-        &path,
-        params.get("sheet").and_then(Value::as_str),
-        fa::optional_header(&params, "headerRow")?,
-        false,
-    )?;
+    // 单文件测算逐行写出公式，没有两期连接和合并行，只计源表读取工作集。
+    let use_disk=crate::disk_table::forced_disk_allowed(&[&path], params.get("__forceDisk").and_then(Value::as_bool).unwrap_or(false))
+        || fa::resources::uses_disk(&[(&path, params.get("sheet").and_then(Value::as_str))], fa::resources::Phase::Read);
+    let (table,disk)=if use_disk {
+        let (table,disk)=fa::disk::load_input(&path,params.get("sheet").and_then(Value::as_str),fa::HeaderOptions::params(&params,"headerRow","headerDepth")?,progress,&cancel)?;
+        (table,Some(disk))
+    } else {
+        (fa::load_table(&path,params.get("sheet").and_then(Value::as_str),fa::HeaderOptions::params(&params,"headerRow","headerDepth")?,false)?,None)
+    };
+    let read=||->Box<dyn Iterator<Item=Result<Vec<String>,AppError>>+'_> {
+        if let Some(disk)=disk.as_ref() {
+            Box::new(fa::disk::SourceIter::open(&disk.cache_path).filter_map(|row|match row {Ok(mut row)=>{if row.iter().all(|v|v.trim().is_empty()){return None;}row.resize(table.headers.len(),String::new());row.truncate(table.headers.len());Some(Ok(row))},Err(error)=>Some(Err(error))}))
+        } else {Box::new(table.rows.iter().cloned().map(Ok))}
+    };
     pause.wait()?;
     // 前置校验：公式块依赖六个映射列。fa.rs 的公式块在表头不齐时会静默跳过，
     // 专用工具必须在导出前把缺失说清楚，而不是产出一个没有测算列的"成功"文件。
@@ -392,18 +440,40 @@ fn dep_export(
     let life_index = column_of("life");
     let residual_index = column_of("residualRate");
     let current_index = column_of("currentYearDep");
-    // 使用寿命按整列判定年→月换算（与主工具 life_scale_for_column 同口径）。
-    let life_scale = life_index
-        .and_then(|index| mapped_header("life").map(|header| (index, header)))
-        .map(|(index, header)| {
-            let values = table
-                .rows
-                .iter()
-                .filter_map(|row| fa::parse_life_cell(fa::cell(row, index)))
-                .collect::<Vec<_>>();
-            fa::life_scale_for_column(header, &values)
+    // 折旧起提日优先实际投入使用：清单同时给出「使用日期/开始使用日期」类列时，
+    // 每行取其与映射日期中更早的非空日期——在建转固晚于投产的资产（实测锂电
+    // 产线 7 月投产、12 月转固）账面自投产月起提，只认入账日期会整段漏提，
+    // 制造大额"少提差异"。映射列本身即使用类日期、使用日期为空或不更早时
+    // 一律维持映射值，人工映射保持可见、可预期。
+    let use_start_index = table
+        .headers
+        .iter()
+        .position(|header| {
+            is_use_start_header(header) && Some(header.as_str()) != mapped_header("startDate")
+        });
+    // 源清单末尾的总计/合计行没有任何资产属性，混进测算会把整行金额变成假差异
+    // （实测某清单的"总计"行仅本年折旧有值，差异列凭空多出 +459 万）。与主工具
+    // 口径一致：文本合计行与无身份行（类别、名称、日期、寿命、原值全空）不参与测算。
+    let asset_read = || {
+        read().filter_map(|row| match row {
+            Ok(row) if dep_row_is_noise(&row, category_index, name_index, original_index, start_index, life_index) => None,
+            other => Some(other),
         })
-        .unwrap_or(1.0);
+    };
+    // 使用寿命按整列判定年→月换算（与主工具 life_scale_for_column 同口径）；
+    // 同一遍扫描顺带清点参与测算的资产行数，作为完成消息里的 rows。
+    let mut asset_rows = 0usize;
+    let mut life_stats = fa::LifeScaleStats::default();
+    for row in asset_read() {
+        let row = row?;
+        asset_rows += 1;
+        if let Some(index) = life_index {
+            if let Some(value) = fa::parse_life_cell(fa::cell(&row, index)) {
+                life_stats.push(value);
+            }
+        }
+    }
+    let life_scale = life_stats.scale(mapped_header("life").unwrap_or(""));
     // 残值率归一：表头明示"残值"（金额列）时除以原值，其余按比率归一——
     // 与主工具 mapped_residual_rate 的判定逐字一致。必须写小数：写表器对
     // 残值率列套 0.00% 格式，写 5 会显示成 500%。
@@ -414,11 +484,7 @@ fn dep_export(
             || normalized.contains("salvagevalue")
     };
     progress("export", 1, 3, "正在生成折旧测算表");
-    let mut rows = Vec::with_capacity(table.rows.len());
-    for (row_index, row) in table.rows.iter().enumerate() {
-        if row_index % 256 == 0 {
-            fa::check_cancel(&cancel)?;
-        }
+    let convert=|row:&[String]| {
         let original = original_index
             .map(|index| fa::number(fa::cell(row, index)))
             .unwrap_or(0.0);
@@ -441,7 +507,7 @@ fn dep_export(
                 _ => 0.0,
             })
             .unwrap_or(0.0);
-        rows.push(vec![
+        vec![
             category_index
                 .map(|index| fa::cell(row, index).trim().to_owned())
                 .unwrap_or_default(),
@@ -450,25 +516,29 @@ fn dep_export(
                 .unwrap_or_default(),
             fa::display_number(original),
             fa::display_number(depreciation),
-            start_index
-                .map(|index| fa::display_date(fa::cell(row, index)))
-                .unwrap_or_default(),
+            match (start_index, use_start_index) {
+                (Some(index), Some(alt)) => {
+                    earlier_start_date(fa::cell(row, index), fa::cell(row, alt))
+                }
+                (Some(index), None) => fa::display_date(fa::cell(row, index)),
+                _ => String::new(),
+            },
             fa::display_number(life_months),
             fa::display_number(residual),
             current_index
                 .map(|index| fa::number(fa::cell(row, index)))
                 .map(fa::display_number)
                 .unwrap_or_else(|| "0".into()),
-        ]);
-    }
+        ]
+    };
     let output = subtool_output_path(&params, &table.path, "折旧测算")?;
     let mut wb = Workbook::new();
     let header = header_format();
-    fa::write_string_sheet_labelled(
+    fa::write_string_sheet_stream(
         &mut wb,
         "折旧测算",
         &DEP_SHEET_HEADERS,
-        &rows,
+        || asset_read().map(|row|row.map(|row|convert(&row))),
         &header,
         Some(&balance_sheet_date),
         Some(&cancel),
@@ -481,9 +551,79 @@ fn dep_export(
     Ok(json!({
         "engine": "rust-fa",
         "message": "折旧测算导出完成。",
-        "rows": rows.len(),
+        "rows": asset_rows,
         "outputPaths": [output.to_string_lossy()],
     }))
+}
+
+/// 判断折旧测算源表的一行是否为非资产行：文本合计行（任意单元格为
+/// 合计/小计/总计，与主工具 `values_are_summary_noise` 同一判定）或无身份行
+/// （类别、名称、起提日期全空且原值、寿命为零）——后者正是清单末尾
+/// "只在金额列有值的总计行"，混进测算会把整列金额变成假差异。
+fn dep_row_is_noise(
+    row: &[String],
+    category_index: Option<usize>,
+    name_index: Option<usize>,
+    original_index: Option<usize>,
+    start_index: Option<usize>,
+    life_index: Option<usize>,
+) -> bool {
+    if row
+        .iter()
+        .any(|value| !value.trim().is_empty() && fa::is_summary_noise(value))
+    {
+        return true;
+    }
+    let text = |index: Option<usize>| -> String {
+        index
+            .and_then(|index| row.get(index))
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let empty_or_zero = |index: Option<usize>| -> bool {
+        match index.and_then(|index| row.get(index)) {
+            Some(value) => fa::number(value.trim()) == 0.0,
+            None => true,
+        }
+    };
+    text(category_index).is_empty()
+        && text(name_index).is_empty()
+        && empty_or_zero(original_index)
+        && text(start_index).is_empty()
+        && empty_or_zero(life_index)
+}
+
+/// 表头（去空白与括号、小写后）恰为"实际投入使用"类日期叫法。只用全等匹配：
+/// 入账日期、新增日期、购置日期等一律不算，避免把转固口径误当成投产口径。
+fn is_use_start_header(header: &str) -> bool {
+    let normalized = fa::normalize_header(header);
+    [
+        "使用日期",
+        "使用时间",
+        "开始使用日期",
+        "开始使用时间",
+        "启用日期",
+        "启用时间",
+        "投用日期",
+        "投用时间",
+        "inservicedate",
+    ]
+    .iter()
+    .any(|word| normalized == *word)
+}
+
+/// 映射的起提日期与"使用日期"类列并存时，取更早的非空日期：使用列可解析且
+/// （映射列为空或使用日期更早）即采用使用日期，否则维持映射值。
+fn earlier_start_date(mapped: &str, use_start: &str) -> String {
+    match (
+        fa::parse_fa_date(mapped.trim()),
+        fa::parse_fa_date(use_start.trim()),
+    ) {
+        (mapped_date, Some(use_date)) if mapped_date.map_or(true, |mapped| use_date < mapped) => {
+            fa::display_date(use_start.trim())
+        }
+        _ => fa::display_date(mapped),
+    }
 }
 
 /// `fa.policy_export`：期初+期末合并 → 单工作簿两页（折旧政策对比 + 税法参考）。
@@ -500,9 +640,8 @@ fn policy_export(
     let result = fa::merge(&params, progress, &cancel)?;
     pause.wait()?;
     fa::check_cancel(&cancel)?;
-    let policy_rows = fa::build_depreciation_period(&result, &params);
     progress("analyze", 3, 5, "正在分析税法最低折旧年限");
-    let tax_analysis = build_policy_tax_analysis(&policy_rows, &params, &cancel, pause)?;
+    let prepared = prepare_policy_export(&result, &params, &cancel, pause)?;
     pause.wait()?;
     fa::check_cancel(&cancel)?;
     progress("export", 4, 5, "正在生成折旧政策对比与税法参考");
@@ -512,13 +651,13 @@ fn policy_export(
     let header = header_format();
     write_depreciation_period_tax_sheet(
         &mut wb,
-        &result,
         &params,
         &header,
         &cancel,
         "折旧政策对比",
-        &tax_analysis.rows,
+        &prepared,
     )?;
+    result.rows.check()?;
     fa::check_cancel(&cancel)?;
     write_tax_reference_sheet(&mut wb, &header)?;
     pause.wait()?;
@@ -529,7 +668,7 @@ fn policy_export(
     Ok(json!({
         "engine": "rust-fa",
         "message": message,
-        "taxAnalysisCompleted": tax_analysis.completed,
+        "taxAnalysisCompleted": prepared.tax.completed,
         "outputPaths": [output.to_string_lossy()],
     }))
 }
@@ -583,6 +722,19 @@ const TAX_STANDARD_RULES: [TaxStandardRule; 5] = [
 pub(crate) struct PolicyTaxAnalysis {
     pub(crate) rows: Vec<Vec<String>>,
     pub(crate) completed: bool,
+}
+
+pub(crate) struct PreparedPolicyExport {
+    pub(crate) base_rows: Vec<Vec<String>>,
+    pub(crate) tax: PolicyTaxAnalysis,
+}
+
+pub(crate) fn prepare_policy_export(result: &fa::MergeResult, params: &Value, cancel: &AtomicBool, pause: &PauseCheckpoint) -> Result<PreparedPolicyExport, AppError> {
+    fa::check_cancel(cancel)?;
+    let base_rows = fa::build_depreciation_period(result, params)?;
+    result.rows.check()?;
+    let tax = build_policy_tax_analysis(&base_rows, params, cancel, pause)?;
+    Ok(PreparedPolicyExport { base_rows, tax })
 }
 
 const DEFAULT_TAX_RULE_INDEX: usize = 2;
@@ -739,17 +891,16 @@ pub(crate) fn build_policy_tax_analysis(
 
 pub(crate) fn write_depreciation_period_tax_sheet(
     wb: &mut Workbook,
-    result: &fa::MergeResult,
     params: &Value,
     header: &Format,
     cancel: &AtomicBool,
     sheet_name: &str,
-    tax_rows: &[Vec<String>],
+    prepared: &PreparedPolicyExport,
 ) -> Result<(), AppError> {
-    let mut rows = fa::build_depreciation_period(result, params);
+    let mut rows = prepared.base_rows.clone();
     for (index, row) in rows.iter_mut().enumerate() {
         row.extend(
-            tax_rows
+            prepared.tax.rows
                 .get(index)
                 .cloned()
                 .unwrap_or_else(|| vec![String::new(), String::new(), String::new()]),
@@ -1292,6 +1443,7 @@ fn xlsx_error(e: rust_xlsxwriter::XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use calamine::Reader;
     use std::io::Read;
 
     fn run_job_quiet(method: &str, params: Value) -> Result<Value, AppError> {
@@ -1473,6 +1625,22 @@ mod tests {
     }
 
     #[test]
+    fn dep_review_keeps_year_life_and_residual_amount_normalization() {
+        let payload = json!({"file2":{
+            "headers":["计划使用年","累计折旧月份","残值","残值率"],
+            "mapping":{"life":"计划使用年","residualRate":"残值"}
+        }});
+        let reviewed = dep_finalize_review(json!({"suggestions":[
+            {"role":"life","file_side":"file2","suggested_column":"累计折旧月份","action":"replace","confidence":0.99}
+        ],"fieldReviews":[
+            {"role":"residual","suggested_mapping":{"file2":"残值率"},"action":"replace","confidence":0.99}
+        ]}), payload);
+        assert_eq!(reviewed["autoApplied"], json!([]));
+        assert_eq!(reviewed["fieldReviews"], json!([]));
+        assert_eq!(reviewed["passed"], true);
+    }
+
+    #[test]
     fn dep_review_finalizes_roles_sides_and_local_fallbacks() {
         let dir = temp_dir("fa-subtools-dep-review");
         let source = dir.join("期末清单.csv");
@@ -1521,6 +1689,40 @@ mod tests {
         // matchReview 固定 keep，前端规划器不会进入匹配键分支。
         assert_eq!(value["matchReview"]["action"], json!("keep"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dep_review_rejects_period_amount_as_accumulated_depreciation() {
+        let payload = json!({"file2": {
+            "headers": ["累计折旧", "当月折旧", "本年折旧", "期末累计折旧"],
+            "mapping": {"depreciation": "累计折旧"},
+            "samples": {"累计折旧": ["60598.58"], "当月折旧": ["2019.95"]}
+        }});
+        for column in ["当月折旧", "本年折旧"] {
+            for field in ["suggestions", "fieldReviews"] {
+                for item in [
+                    json!({"role":"depreciation", "file_side":"file2", "suggested_column":column, "confidence":0.99, "action":"replace"}),
+                    json!({"role":"depreciation", "suggested_mapping":{"file2":column}, "confidence":0.99, "action":"replace"}),
+                ] {
+                    let value = dep_finalize_review(json!({field:[item]}), payload.clone());
+                    assert_eq!(value["autoApplied"], json!([]));
+                    let review = &value["fieldReviews"][0];
+                    assert_eq!(review["confidence"], 0.0);
+                    assert_eq!(review["rejectedByDepreciationScope"], true);
+                    assert!(review.get("suggested_column").is_none());
+                    assert!(review.get("suggested_mapping").is_none());
+                    assert!(value["message"].as_str().unwrap().contains("已忽略折旧口径"));
+                    assert_eq!(value["passed"], false);
+                }
+            }
+        }
+        // 真正的累计余额替换、本年计提额的补齐仍可执行。
+        let value = dep_finalize_review(json!({"suggestions":[
+            {"role":"depreciation", "file_side":"file2", "suggested_column":"期末累计折旧", "confidence":0.99, "action":"replace"},
+            {"role":"current_year_dep", "file_side":"file2", "suggested_column":"本年折旧", "confidence":0.99, "action":"fill"}
+        ]}), payload);
+        assert_eq!(value["fieldReviews"][0]["suggested_column"], "期末累计折旧");
+        assert_eq!(value["autoApplied"][0]["suggested_column"], "本年折旧");
     }
 
     #[test]
@@ -1585,9 +1787,121 @@ mod tests {
         assert!(sheet.contains("r=\"J12\""));
         assert!(!sheet.contains("r=\"J13\""));
         assert!(
-            zip_entry(Path::new(output), "xl/sharedStrings.xml").contains("【导出提速】折旧测算")
+            sheet.contains("【导出提速】折旧测算") || zip_entry(Path::new(output), "xl/sharedStrings.xml").contains("【导出提速】折旧测算")
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dep_export_drops_summary_and_total_rows() {
+        let dir = temp_dir("fa-subtools-dep-noise");
+        let source = dir.join("期末清单.csv");
+        fs::write(
+            &source,
+            "资产类别,资产名称,原值,累计折旧,入账开始日期,使用寿命,残值率,本年折旧\n\
+             电子设备,服务器A,1000,100,2024-01-01,36,5%,10\n\
+             ,,0,0,,0,,4592397.05\n\
+             合计,,,,100,,5%,10\n",
+        )
+        .unwrap();
+        let params = json!({
+            "path": source.to_string_lossy(),
+            "headerRow": 1,
+            "mapping": {
+                "category": "资产类别",
+                "name": "资产名称",
+                "originalValue": "原值",
+                "depreciation": "累计折旧",
+                "startDate": "入账开始日期",
+                "life": "使用寿命",
+                "residualRate": "残值率",
+                "currentYearDep": "本年折旧"
+            },
+            "balanceSheetDate": "2025-12-31",
+            "outputPath": dir.join("折旧测算.xlsx").to_string_lossy(),
+        });
+        let value = run_job_quiet("fa.dep_export", params).unwrap();
+        // 只有真实资产行参与测算：无身份的总计行与"合计"文本行都被剔除，
+        // 完成消息的 rows 也只数资产行。
+        assert_eq!(value["rows"], json!(1));
+        let mut workbook = calamine::open_workbook_auto(dir.join("折旧测算.xlsx")).unwrap();
+        let range = workbook.worksheet_range("折旧测算").unwrap();
+        let rows: Vec<Vec<String>> = range
+            .rows()
+            .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+            .collect();
+        // 表头、来源标注之后的第一条数据必须是唯一的真实资产；表尾另有说明行。
+        assert!(rows.len() > 2);
+        assert!(rows[2].iter().any(|value| value.contains("服务器A")));
+        let all_text = rows.iter().flat_map(|row| row.iter());
+        assert!(all_text.clone().all(|value| !value.contains("4592397")));
+        assert_eq!(all_text.filter(|value| value.contains("服务器A")).count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dep_export_prefers_earlier_use_start_date() {
+        let dir = temp_dir("fa-subtools-dep-use-start");
+        let source = dir.join("期末清单.csv");
+        fs::write(
+            &source,
+            "资产类别,资产名称,原值,累计折旧,入账开始日期,使用寿命,残值率,本年折旧,使用日期\n\
+             机器设备,锂电5线,7406121.62,296244.87,2025-12-31,120,5%,296244.87,2025-07-01\n\
+             机器设备,晚投产资产,1000,100,2024-01-01,60,5%,10,2025-06-01\n\
+             机器设备,使用日期为空,1000,100,2024-01-01,60,5%,10,\n",
+        )
+        .unwrap();
+        let params = json!({
+            "path": source.to_string_lossy(),
+            "headerRow": 1,
+            "mapping": {
+                "category": "资产类别",
+                "name": "资产名称",
+                "originalValue": "原值",
+                "depreciation": "累计折旧",
+                "startDate": "入账开始日期",
+                "life": "使用寿命",
+                "residualRate": "残值率",
+                "currentYearDep": "本年折旧"
+            },
+            "balanceSheetDate": "2025-12-31",
+            "outputPath": dir.join("折旧测算.xlsx").to_string_lossy(),
+        });
+        run_job_quiet("fa.dep_export", params).unwrap();
+        let mut workbook = calamine::open_workbook_auto(dir.join("折旧测算.xlsx")).unwrap();
+        let range = workbook.worksheet_range("折旧测算").unwrap();
+        let start_at = |row: usize| {
+            range
+                .get((row, 4))
+                .map(|cell| cell.to_string())
+                .unwrap_or_default()
+        };
+        // 投产早于转固 → 起提日采用更早的使用日期；使用日期更晚或为空 → 维持映射的入账日期。
+        assert_eq!(start_at(2), "2025-07-01");
+        assert_eq!(start_at(3), "2024-01-01");
+        assert_eq!(start_at(4), "2024-01-01");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dep_disk_export_keeps_csv_xlsx_values_formulas_and_whole_column_life_decision() {
+        for xlsx in [false,true] {
+            let dir=temp_dir("fa-subtools-dep-disk-equivalence");
+            let mut params=dep_params(&dir);
+            if xlsx {
+                let path=dir.join("期末清单.xlsx");let mut wb=Workbook::new();let ws=wb.add_worksheet();
+                for(r,line) in DEP_CSV.lines().enumerate(){for(c,value)in line.split(',').enumerate(){ws.write_string(r as u32,c as u16,value).unwrap();}}
+                // 真正的Excel日期序号必须与内存入口采用相同展示日期。
+                ws.write_datetime_with_format(1,4,&rust_xlsxwriter::ExcelDateTime::from_ymd(2020,1,1).unwrap(),&Format::new().set_num_format("yyyy-mm-dd")).unwrap();
+                wb.save(&path).unwrap();params["path"]=json!(path);
+            }
+            let memory=dir.join("内存.xlsx");params["outputPath"]=json!(memory);run_job_quiet("fa.dep_export",params.clone()).unwrap();
+            let disk=dir.join("磁盘.xlsx");params["outputPath"]=json!(disk);params["__forceDisk"]=json!(true);run_job_quiet("fa.dep_export",params).unwrap();
+            let mut a=calamine::open_workbook_auto(&memory).unwrap();let mut b=calamine::open_workbook_auto(&disk).unwrap();
+            assert_eq!(a.worksheet_range("折旧测算").unwrap(),b.worksheet_range("折旧测算").unwrap());
+            assert_eq!(a.worksheet_formula("折旧测算").unwrap(),b.worksheet_formula("折旧测算").unwrap());
+            let _=fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

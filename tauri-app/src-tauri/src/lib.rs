@@ -1,19 +1,29 @@
 #![recursion_limit = "256"]
 
 mod account_confirmation;
+#[cfg(test)]
+mod account_classification_tests;
 mod audipick;
 mod audipick_tax;
 mod bailian_asr;
+mod bailian_ocr;
 mod bailian_plan_asr;
 mod confirmation;
 mod covenant_cases;
+mod dataflow;
 mod deposit_interest;
+mod diagnostics;
+mod disk_table;
+mod table_read_cache;
 #[cfg(windows)]
 mod excel_com;
 mod excel_header_match;
 mod excel_merger;
 mod fa;
+mod fa_merge_snapshot;
+mod fa_sheet_pick;
 mod fa_subtools;
+mod fa_table_cache;
 mod fa_tbje;
 mod file_list;
 mod fuzzy_match;
@@ -24,13 +34,22 @@ mod ledger_engine_parity_tests;
 mod ledger_mapping;
 mod loan_interest;
 mod lpr;
+mod meeting_audio;
 mod meeting_minutes;
+mod meeting_outlook;
 mod meeting_record;
+mod meeting_notifications;
 mod meeting_watch;
+mod ocr;
+mod ocr_orientation;
+mod ocr_store;
+mod ocr_export;
 mod pdf_to_excel;
+mod release_channel;
 mod resource_budget;
 mod roll_forward;
 mod spreadsheet_input;
+mod spreadsheet_xml;
 mod storage;
 mod tabular;
 mod tbje_check;
@@ -41,9 +60,11 @@ mod wp;
 #[cfg(test)]
 mod xls_input_tests;
 mod xls_sample;
+mod xlsx_numbers;
 
 use directories::ProjectDirs;
 use parking_lot::Mutex;
+mod job_dispatch;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -79,24 +100,27 @@ pub struct AppError {
 }
 
 impl AppError {
+    #[track_caller]
     fn new(
         code: &str,
         message: impl Into<String>,
         retryable: bool,
         detail: Option<String>,
     ) -> Self {
-        Self {
+        let error = Self {
             code: code.into(),
             user_message: message.into(),
             retryable,
             diagnostic_id: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
             detail,
-        }
+        };
+        diagnostics::app_error(&error, std::panic::Location::caller());
+        error
     }
 }
 
 fn project_dirs() -> Result<ProjectDirs, AppError> {
-    ProjectDirs::from("com", "AuditToolbox", "AuditToolbox").ok_or_else(|| {
+    ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name()).ok_or_else(|| {
         AppError::new(
             "DATA_DIR_UNAVAILABLE",
             "无法确定本机数据目录。",
@@ -149,6 +173,19 @@ fn tool_catalog() -> Result<Value, AppError> {
 
 #[tauri::command]
 async fn engine_call(
+    excel_merger: State<'_, ExcelMergerService>,
+    storage: State<'_, Storage>,
+    allowed: State<'_, AllowedPaths>,
+    method: String,
+    params: Value,
+) -> Result<Value, AppError> {
+    let span = diagnostics::Span::start("engine", &method, &params);
+    let result = engine_call_inner(excel_merger, storage, allowed, method, params).await;
+    span.finish(&result, None, result.as_ref().ok());
+    result
+}
+
+async fn engine_call_inner(
     _excel_merger: State<'_, ExcelMergerService>,
     storage: State<'_, Storage>,
     allowed: State<'_, AllowedPaths>,
@@ -188,6 +225,22 @@ async fn engine_call(
                     Some(e.to_string()),
                 )
             })?
+    } else if method.starts_with("ocr.") {
+        validate_ocr_paths(&allowed, &method, &params)?;
+        let db_path = storage.db_path();
+        let settings = storage.settings_get()?;
+        let grants = allowed.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let result = ocr::call(&method, params, &db_path, &settings)?;
+            if method == "ocr.output_directory" {
+                if let Some(directory) = result["outputDir"].as_str() {
+                    grants.0.lock().insert(PathBuf::from(directory));
+                }
+            }
+            Ok(result)
+        })
+            .await
+            .map_err(|_| AppError::new("OCR_TASK_FAILED", "OCR 处理异常结束，请重试。", true, None))?
     } else if method == "audipick.projects" {
         storage.audipick_projects()
     } else if method == "audipick.backup_export" {
@@ -381,7 +434,23 @@ async fn engine_call(
     } else if method == "ledger.auxiliary_link" {
         // 辅助核算联动验证（锚点反查认定 JE 辅助列）：映射阶段公共入口，
         // 计算侧（TBJE 完整性／存款）复核同一份公共判定逻辑。
-        fx::auxiliary_link_check(&params)
+        // [临时日志] 现场排查前端黄框：记录成败与错误原文，测完即删。
+        let outcome = fx::auxiliary_link_check(&params);
+        match &outcome {
+            Ok(value) => eprintln!(
+                "[联动验证] 成功 status={}",
+                value.get("status").and_then(Value::as_str).unwrap_or("?")
+            ),
+            Err(e) => eprintln!(
+                "[联动验证] 抛错 code={} userMessage={} diag={:?} tbSource={} jeSource={}",
+                e.code,
+                e.user_message,
+                e.diagnostic_id,
+                params.get("tbSource").map(|v| v.to_string()).unwrap_or_default(),
+                params.get("jeSource").map(|v| v.to_string()).unwrap_or_default()
+            ),
+        }
+        outcome
     } else if method == "ledger.currency_link" {
         // 多币种账户映射阶段验证：只检查用户已映射的 JE 币种列中是否存在
         // TB 外币锚点，不要求整列非空，也不质疑用户选择的列。
@@ -530,6 +599,98 @@ async fn engine_call(
                     Some(e.to_string()),
                 )
             })?
+    } else if method == "dataflow_preview" || method == "dataflow_run" {
+        // 数据流：注入本会话已授权路径，引擎对输入/输出路径执行与
+        // pick_path 相同语义的授权检查（选中目录授权后代、文件仅自身）。
+        let allowed_list: Vec<Value> = allowed
+            .0
+            .lock()
+            .iter()
+            .map(|path| Value::String(path.display().to_string()))
+            .collect();
+        params["__allowedPaths"] = Value::Array(allowed_list);
+        tauri::async_runtime::spawn_blocking(move || dataflow::run_workflow(&method, params))
+            .await
+            .map_err(|e| {
+                AppError::new(
+                    "RUST_TASK_FAILED",
+                    "数据流任务异常结束。",
+                    true,
+                    Some(e.to_string()),
+                )
+            })?
+    } else if method == "dataflow_save_workflow" {
+        let target = PathBuf::from(params.get("path").and_then(Value::as_str).unwrap_or(""));
+        let content = params
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if !allowed
+            .0
+            .lock()
+            .iter()
+            .any(|path| path_is_permitted(&target, path))
+        {
+            return Err(AppError::new(
+                "PATH_NOT_AUTHORIZED",
+                "请先通过保存对话框选择流程文件位置。",
+                false,
+                None,
+            ));
+        }
+        tauri::async_runtime::spawn_blocking(move || {
+            dataflow::save_workflow(&target.display().to_string(), &content)
+        })
+        .await
+        .map_err(|e| {
+            AppError::new(
+                "RUST_TASK_FAILED",
+                "流程文件保存异常结束。",
+                true,
+                Some(e.to_string()),
+            )
+        })?
+    } else if method == "dataflow_db_tables" || method == "dataflow_sheet_names" {
+        let target = params
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if !allowed
+            .0
+            .lock()
+            .iter()
+            .any(|path| path_is_permitted(&PathBuf::from(&target), path))
+        {
+            return Err(AppError::new(
+                "PATH_NOT_AUTHORIZED",
+                "请先在工具中选择该数据文件或文件夹。",
+                false,
+                None,
+            ));
+        }
+        tauri::async_runtime::spawn_blocking(move || {
+            if method == "dataflow_sheet_names" {
+                let names = dataflow::nodes::input::sheet_names(
+                    std::path::Path::new(&target),
+                    params.get("sourceType").and_then(Value::as_str) == Some("folder"),
+                    params.get("filePattern").and_then(Value::as_str),
+                )?;
+                Ok(serde_json::json!(names))
+            } else {
+                dataflow::db_tables(&target)
+            }
+        })
+            .await
+            .map_err(|e| {
+                AppError::new(
+                    "RUST_TASK_FAILED",
+                    "数据文件清单读取异常结束。",
+                    true,
+                    Some(e.to_string()),
+                )
+            })?
     } else {
         Err(AppError::new(
             "METHOD_NOT_FOUND",
@@ -547,6 +708,7 @@ async fn engine_call(
 /// `file_list.scan` 与 `tbje_check.*` 都这么栽过。测试里有一致性断言。
 fn is_direct_job_method(method: &str) -> bool {
     method == "wp.generate"
+        || matches!(method, "ocr.recognize_page" | "ocr.extract" | "ocr.export")
         || method == "audipick.extract"
         || method == "audipick.ocr_page"
         || method == "confirmation.process"
@@ -564,7 +726,7 @@ fn is_direct_job_method(method: &str) -> bool {
             method,
             "fx.fetch_rates" | "fx.preview" | "fx.export" | "fx.export_rates"
         )
-        || matches!(method, "loan.preview" | "loan.export")
+        || matches!(method, "loan.preview" | "loan.export" | "loan.inspect_full")
         || matches!(method, "deposit.preview" | "deposit.export")
         || method == "pdf2excel.convert"
         // 两列匹配：跑匹配要落结果库，导出要从结果库读回，都走任务通道。
@@ -581,9 +743,24 @@ fn is_direct_job_method(method: &str) -> bool {
 async fn job_start(
     excel_merger: State<'_, ExcelMergerService>,
     storage: State<'_, Storage>,
+    allowed: State<'_, AllowedPaths>,
     method: String,
     params: Value,
 ) -> Result<String, AppError> {
+    let span = diagnostics::Span::start("job", &method, &params);
+    let result = job_start_logged(excel_merger, storage, allowed, method, params).await;
+    span.finish(&result, result.as_ref().ok().map(String::as_str), None);
+    result
+}
+
+async fn job_start_logged(
+    excel_merger: State<'_, ExcelMergerService>,
+    storage: State<'_, Storage>,
+    allowed: State<'_, AllowedPaths>,
+    method: String,
+    params: Value,
+) -> Result<String, AppError> {
+    validate_ocr_paths(&allowed, &method, &params)?;
     // 历史记录「继续任务」要能还原现场：在注入 __settings/__llmOptions/
     // __dbPath/textPath 之前克隆用户原始参数存档。存档失败不拦任务本身，
     // 只是该条历史记录没有恢复按钮。
@@ -593,9 +770,10 @@ async fn job_start(
         object.remove("__restoreSnapshot");
     }
     let job_id = job_start_inner(excel_merger, &storage, &method, worker_params).await?;
-    if !matches!(method.as_str(), "audipick.ocr_page" | "audipick.extract") {
-        // OCR images and contract extraction text are transient, sensitive task
-        // inputs. Neither belongs in resumable job history.
+    // 上传读取与敏感 OCR/合同抽取均不写入可恢复任务历史。
+    if method != "loan.inspect_full"
+        && !matches!(method.as_str(), "audipick.ocr_page" | "audipick.extract" | "ocr.recognize_page" | "ocr.extract")
+    {
         let _ = storage.record_job_params(
             &job_id,
             excel_merger::tool_id(&method),
@@ -612,6 +790,10 @@ async fn job_start_inner(
     method: &str,
     mut params: Value,
 ) -> Result<String, AppError> {
+    if matches!(method, "ocr.recognize_page" | "ocr.extract" | "ocr.export") {
+        let params = ocr::worker_params(params, &storage.db_path(), storage.settings_get()?)?;
+        return excel_merger.start(method, params);
+    }
     if method == "audipick.batch_extract" {
         if let Value::Object(ref mut map) = params {
             map.insert("__settings".into(), storage.settings_get()?);
@@ -649,6 +831,13 @@ async fn job_start_inner(
     {
         if let Value::Object(ref mut map) = params {
             map.insert("__settings".into(), storage.settings_get()?);
+        }
+    }
+    if method.starts_with("meeting.") {
+        if let Value::Object(ref mut map) = params {
+            map.insert("__meetingVocabulary".into(), json!(storage.meeting_vocabulary_list()?));
+            let context=storage.meeting_metadata_for_transcript(map.get("transcriptPath").and_then(Value::as_str).unwrap_or(""))?;
+            map.insert("__meetingMetadata".into(),context);
         }
     }
     if method.starts_with("fuzzy.") {
@@ -754,7 +943,7 @@ fn inject_roll_forward_llm(storage: &Storage, params: &mut Value) -> Result<(), 
     } else {
         "llm_api_key"
     };
-    let api_key = keyring::Entry::new("AuditToolbox", secret_name)
+    let api_key = keyring::Entry::new(crate::release_channel::credential_service(), secret_name)
         .and_then(|entry| entry.get_password())
         .unwrap_or_default();
     if let Value::Object(map) = params {
@@ -818,7 +1007,67 @@ fn settings_get(storage: State<'_, Storage>) -> Result<Value, AppError> {
 
 #[tauri::command]
 fn settings_set(storage: State<'_, Storage>, settings: Value) -> Result<(), AppError> {
-    storage.settings_set(settings)
+    let snapshot = diagnostics::summary(&settings);
+    let result = storage.settings_set(settings);
+    if result.is_ok() { diagnostics::record("settings_change", json!({"settings":snapshot})); }
+    result
+}
+
+#[tauri::command]
+fn diagnostics_status() -> Result<Value, AppError> { diagnostics::status() }
+
+#[tauri::command]
+async fn diagnostics_recent() -> Result<Vec<diagnostics::LogEntry>, AppError> {
+    tauri::async_runtime::spawn_blocking(diagnostics::recent)
+        .await
+        .map_err(|_| AppError::new("DIAGNOSTICS_READ_FAILED", "无法读取诊断日志，请重试。", true, None))?
+}
+
+#[tauri::command]
+fn diagnostics_set_enabled(enabled: bool) -> Result<Value, AppError> {
+    diagnostics::set_enabled(enabled)?;
+    diagnostics::record("logging_enabled", json!({"enabled":enabled}));
+    diagnostics::status()
+}
+
+#[tauri::command]
+fn diagnostics_clear() -> Result<Value, AppError> {
+    diagnostics::clear()?;
+    diagnostics::status()
+}
+
+#[tauri::command]
+async fn diagnostics_export(allowed: State<'_, AllowedPaths>, path: String) -> Result<(), AppError> {
+    let path = PathBuf::from(path);
+    if !allowed.0.lock().iter().any(|p| path_is_permitted(&path, p))
+        || !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        return Err(AppError::new("PATH_NOT_AUTHORIZED", "请先选择诊断包 ZIP 的保存位置。", false, None));
+    }
+    tauri::async_runtime::spawn_blocking(move || diagnostics::export(&path)).await
+        .map_err(|_| AppError::new("DIAGNOSTICS_EXPORT_FAILED", "导出诊断包失败，请重试。", true, None))?
+}
+
+#[tauri::command]
+fn diagnostics_frontend(event: String, data: Value) -> Result<(), AppError> {
+    if !matches!(event.as_str(), "frontend_error" | "frontend_call" | "navigation" | "ui_action") {
+        return Err(AppError::new("DIAGNOSTICS_EVENT_DENIED", "不支持的诊断事件。", false, None));
+    }
+    // Only a closed set of technical identifiers may be stored verbatim.
+    let mut safe = serde_json::Map::new();
+    for key in ["command", "method", "callId", "jobId", "diagnosticId", "code", "route", "action"] {
+        if let Some(value) = data.get(key).and_then(Value::as_str) { safe.insert(key.into(), json!(diagnostics::identifier(value))); }
+    }
+    for key in ["ok", "elapsedMs", "line", "column", "checked", "selectedIndex", "viewportWidth", "viewportHeight", "pixelRatio", "x", "y", "deltaX", "deltaY", "ctrlKey", "shiftKey"] {
+        if let Some(value) = data.get(key).filter(|v| v.is_boolean() || v.as_f64().is_some_and(|n| n.is_finite() && n.abs() <= 100_000_000.0)) { safe.insert(key.into(), value.clone()); }
+    }
+    // Stack is an array of basename:line:column extracted from static application assets.
+    if let Some(frames) = data.get("frames").and_then(Value::as_array) {
+        safe.insert("frames".into(), json!(frames.iter().take(40).filter_map(Value::as_str).map(diagnostics::identifier).collect::<Vec<_>>()));
+    }
+    if let Some(error) = data.get("error") { safe.insert("error".into(), diagnostics::summary(error)); }
+    diagnostics::record(&event, Value::Object(safe));
+    Ok(())
 }
 
 /// 使用统计入口（前端只允许报「打开工具」；启动/任务/退出由 Rust 侧自己记录，
@@ -855,6 +1104,8 @@ async fn audipick_ocr_test(
     image_base64: String,
     api_key: Option<String>,
     secret_key: Option<String>,
+    ocr_config: Option<Value>,
+    use_global_llm: Option<bool>,
 ) -> Result<Value, AppError> {
     let settings = storage.settings_get()?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -864,6 +1115,8 @@ async fn audipick_ocr_test(
             &image_base64,
             api_key.as_deref(),
             secret_key.as_deref(),
+            ocr_config.as_ref(),
+            use_global_llm.unwrap_or(false),
         )
     })
     .await
@@ -1016,19 +1269,46 @@ fn audipick_pdf_bytes(
     ))
 }
 
-#[tauri::command]
-fn secret_set(name: String, value: String) -> Result<(), AppError> {
-    if !matches!(
-        name.as_str(),
+fn secret_name_allowed(name: &str) -> bool {
+    matches!(
+        name,
         "llm_api_key"
             | "dify_api_key"
             | "baidu_ocr_key"
             | "baidu_ocr_secret"
+            | "bailian_ocr_key"
             | "bailian_asr_key"
             | "bailian_plan_asr_key"
             | "audipick_llm_api_key"
             | "audipick_dify_api_key"
-    ) {
+    )
+}
+
+#[tauri::command]
+fn secret_get(name: String) -> Result<Option<String>, AppError> {
+    if !secret_name_allowed(&name) {
+        return Err(AppError::new(
+            "SECRET_NAME_DENIED",
+            "不允许读取该类型的凭据。",
+            false,
+            None,
+        ));
+    }
+    match keyring::Entry::new(crate::release_channel::credential_service(), &name).and_then(|entry| entry.get_password()) {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(_) => Err(AppError::new(
+            "CREDENTIAL_READ_FAILED",
+            "无法读取 Windows 凭据管理器，请稍后重试。",
+            true,
+            None,
+        )),
+    }
+}
+
+#[tauri::command]
+fn secret_set(name: String, value: String) -> Result<(), AppError> {
+    if !secret_name_allowed(&name) {
         return Err(AppError::new(
             "SECRET_NAME_DENIED",
             "不允许保存该类型的凭据。",
@@ -1036,7 +1316,7 @@ fn secret_set(name: String, value: String) -> Result<(), AppError> {
             None,
         ));
     }
-    keyring::Entry::new("AuditToolbox", &name)
+    keyring::Entry::new(crate::release_channel::credential_service(), &name)
         .and_then(|entry| entry.set_password(&value))
         .map_err(|e| {
             AppError::new(
@@ -1057,6 +1337,7 @@ fn secret_delete(name: String) -> Result<(), AppError> {
             | "dify_api_key"
             | "baidu_ocr_key"
             | "baidu_ocr_secret"
+            | "bailian_ocr_key"
             | "bailian_asr_key"
             | "bailian_plan_asr_key"
     ) {
@@ -1067,7 +1348,7 @@ fn secret_delete(name: String) -> Result<(), AppError> {
             None,
         ));
     }
-    keyring::Entry::new("AuditToolbox", &name)
+    keyring::Entry::new(crate::release_channel::credential_service(), &name)
         .and_then(|entry| entry.delete_credential())
         .map_err(|e| {
             AppError::new(
@@ -1140,15 +1421,127 @@ fn meeting_status(meeting: State<'_, Arc<meeting_watch::MeetingState>>) -> Value
 }
 
 #[tauri::command]
+async fn meeting_create_mail_draft(subject: String, html_body: String) -> Result<Value, AppError> {
+    tauri::async_runtime::spawn_blocking(move || meeting_outlook::create_draft(subject, html_body))
+        .await.map_err(|_| AppError::new("MEETING_MAIL_FAILED", "生成 Outlook 邮件草稿异常结束，请重试。", true, None))?
+}
+
+#[tauri::command]
+fn meeting_read_minutes(allowed: State<'_, AllowedPaths>, storage: State<'_, Storage>, path: String) -> Result<Value, AppError> {
+    let path = Path::new(&path);
+    storage.meeting_document_read(path, read_authorized_meeting_minutes(&allowed, path)?)
+}
+
+#[tauri::command]
+fn meeting_save_minutes(allowed: State<'_, AllowedPaths>, storage: State<'_, Storage>, path: String, minutes_markdown: String, expected_markdown: String,
+    speaker_names: Option<storage::meeting_documents::SpeakerNames>) -> Result<Value, AppError> {
+    save_authorized_meeting_minutes(&allowed, &storage, Path::new(&path), &minutes_markdown, &expected_markdown, &speaker_names.unwrap_or_default())
+}
+
+fn save_authorized_meeting_minutes(allowed: &AllowedPaths, storage: &Storage, path: &Path, markdown: &str, expected: &str,
+    names: &storage::meeting_documents::SpeakerNames) -> Result<Value, AppError> {
+    // Authorize before opening the metadata database or touching the file.
+    read_authorized_meeting_minutes(allowed, path)?;
+    storage.meeting_document_save(path, markdown, expected, names)
+}
+
+#[tauri::command]
+fn meeting_history_list(storage: State<'_, Storage>) -> Result<Value, AppError> {
+    storage.meeting_history_list()
+}
+
+#[tauri::command]
+fn meeting_vocabulary_list(storage: State<'_, Storage>) -> Result<Value, AppError> {
+    Ok(json!(storage.meeting_vocabulary_list()?))
+}
+
+#[tauri::command]
+fn meeting_vocabulary_save(storage: State<'_, Storage>, entry: storage::meeting_vocabulary::VocabularyEntry) -> Result<Value, AppError> {
+    Ok(json!(storage.meeting_vocabulary_save(entry)?))
+}
+
+#[tauri::command]
+fn meeting_vocabulary_delete(storage: State<'_, Storage>, id: String) -> Result<Value, AppError> {
+    Ok(json!(storage.meeting_vocabulary_delete(&id)?))
+}
+
+#[tauri::command]
+fn meeting_history_get(storage: State<'_, Storage>, allowed: State<'_, AllowedPaths>, id: String) -> Result<Value, AppError> {
+    let result = storage.meeting_history_result(&id)?;
+    authorize_meeting_history_files(&allowed, &result);
+    Ok(result)
+}
+
+// 从可信后台归档恢复确切文件授权；不把文件所在目录加入白名单。
+fn authorize_meeting_history_files(allowed: &AllowedPaths, result: &Value) {
+    let mut paths = Vec::new();
+    for key in ["audioPath", "transcriptPath", "minutesPath"] {
+        if let Some(path) = result.get(key).and_then(Value::as_str).filter(|v| !v.is_empty()) {
+            paths.push(PathBuf::from(path));
+        }
+    }
+    if let Some(versions) = result.get("minutesVersions").and_then(Value::as_array) {
+        for version in versions {
+            if let Some(path) = version.get("minutesPath").and_then(Value::as_str).filter(|v| !v.is_empty()) {
+                paths.push(PathBuf::from(path));
+            }
+        }
+    }
+    // 即使记录遭删除或路径后来变成目录，也不能借文件恢复授权扩大到目录。
+    allowed.0.lock().extend(paths.into_iter().filter(|path| path.is_file()));
+}
+
+#[tauri::command]
+fn meeting_read_transcript(allowed: State<'_, AllowedPaths>, path: String) -> Result<String, AppError> {
+    read_authorized_meeting_transcript(&allowed, Path::new(&path))
+}
+
+fn read_authorized_meeting_transcript(allowed: &AllowedPaths, path: &Path) -> Result<String, AppError> {
+    if !allowed.0.lock().iter().any(|selected| path_is_permitted(path, selected)) {
+        return Err(AppError::new("PATH_NOT_AUTHORIZED", "请先选择要查看的会议记录。", false, None));
+    }
+    if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("txt")) {
+        return Err(AppError::new("MEETING_TRANSCRIPT_FORMAT", "转写稿需为 TXT 文本文件。", false, None));
+    }
+    use std::io::Read;
+    let read_error = |error: std::io::Error| AppError::new("MEETING_TRANSCRIPT_READ_FAILED", "无法读取转写稿，文件可能已被移动或删除。", true, Some(error.to_string()));
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).map_err(read_error)?.take(2 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(read_error)?;
+    if bytes.len() > 2 * 1024 * 1024 {
+        return Err(AppError::new("MEETING_TRANSCRIPT_TOO_LARGE", "转写稿超过 2 MB，请使用外部编辑器打开。", false, None));
+    }
+    String::from_utf8(bytes).map_err(|_| AppError::new("MEETING_TRANSCRIPT_ENCODING", "转写稿需使用 UTF-8 编码。", false, None))
+}
+
+fn read_authorized_meeting_minutes(allowed: &AllowedPaths, path: &Path) -> Result<Value, AppError> {
+    if !allowed
+        .0
+        .lock()
+        .iter()
+        .any(|selected| path_is_permitted(path, selected))
+    {
+        return Err(AppError::new(
+            "PATH_NOT_AUTHORIZED",
+            "请先选择要查看的会议纪要文件。",
+            false,
+            None,
+        ));
+    }
+    meeting_minutes::read_minutes(path)
+}
+
+#[tauri::command]
 fn meeting_detect_set_enabled(meeting: State<'_, Arc<meeting_watch::MeetingState>>, enabled: bool) {
     meeting.set_watch_enabled(enabled);
 }
 
-/// 连接测试按设置页选中的通道分流：给了套餐参数走 realtime 连接测试，
+/// 连接测试按设置页选中的通道分流：套餐按模型选择 HTTP 样音识别或实时会话测试，
 /// 否则按通用通道验证上传凭证密钥。
 #[tauri::command]
 async fn meeting_asr_test(
     api_key: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
     plan_base_url: Option<String>,
     plan_model: Option<String>,
     plan_api_key: Option<String>,
@@ -1162,7 +1555,8 @@ async fn meeting_asr_test(
             };
             bailian_plan_asr::test_connection(&params)
         } else {
-            bailian_asr::test_connection(api_key.as_deref())
+            let config = bailian_asr::AsrConfig::new(base_url.as_deref(), model.as_deref())?;
+            bailian_asr::test_connection(api_key.as_deref(), &config)
         }
     })
     .await
@@ -1385,6 +1779,7 @@ fn pick_path(
             allowed.0.lock().insert(PathBuf::from(item));
         }
     }
+    diagnostics::record("path_selection", json!({"kind":diagnostics::identifier(&kind),"selection":diagnostics::summary(&value),"cancelled":value.is_null()}));
     Ok(value)
 }
 
@@ -1433,16 +1828,19 @@ fn open_output(
         })
 }
 
-/// Opens one of the built-in official rate-lookup entry points in the system
-/// browser.  The URL must be on `deposit_interest::REFERENCE_LINKS`; the
-/// frontend cannot use this command to reach an arbitrary address, mirroring
-/// the AllowedPaths rule that governs local files.
+fn is_builtin_reference_url(url: &str) -> bool {
+    deposit_interest::is_reference_url(url)
+        || url == include_str!("../../assets/roll-forward/download-url.txt").trim()
+}
+
+/// Opens a built-in reference or tool download URL in the system browser.
+/// Only exact matches are allowed; arbitrary addresses remain forbidden.
 #[tauri::command]
 fn open_reference_url(app: tauri::AppHandle, url: String) -> Result<(), AppError> {
-    if !deposit_interest::is_reference_url(&url) {
+    if !is_builtin_reference_url(&url) {
         return Err(AppError::new(
             "URL_NOT_ALLOWED",
-            "只能打开工具内置的官方利率查询入口。",
+            "只能打开工具内置的参考或下载链接。",
             false,
             Some(url),
         ));
@@ -1467,6 +1865,31 @@ fn dialog_start_directory(requested: Option<&str>) -> Option<&str> {
 /// A selected directory authorizes its descendants, while a selected/generated
 /// file only authorizes that exact file.  In particular, an authorized file
 /// must never authorize one of its ancestor directories (for example `C:\`).
+fn validate_ocr_paths(allowed: &AllowedPaths, method: &str, params: &Value) -> Result<(), AppError> {
+    let mut paths = Vec::new();
+    if method == "ocr.document_import" {
+        if let Some(items) = params.get("paths").and_then(Value::as_array) {
+            for item in items {
+                let path = item.as_str().filter(|v| !v.trim().is_empty()).ok_or_else(|| AppError::new("INVALID_ARGUMENT", "请选择有效的单证文件。", false, None))?;
+                paths.push(PathBuf::from(path));
+            }
+        }
+        if let Some(folder) = params.get("folder").and_then(Value::as_str).filter(|v| !v.is_empty()) {
+            paths.push(PathBuf::from(folder));
+        }
+    } else if method == "ocr.export" {
+        let output = params.get("outputDir").and_then(Value::as_str).filter(|v| !v.is_empty()).ok_or_else(|| AppError::new("INVALID_ARGUMENT", "请选择 Excel 保存文件夹。", false, None))?;
+        let output = PathBuf::from(output);
+        if !output.is_dir() { return Err(AppError::new("INVALID_ARGUMENT", "Excel 保存位置必须是文件夹。", false, None)); }
+        paths.push(output);
+    }
+    let granted = allowed.0.lock();
+    if paths.iter().any(|path| !granted.iter().any(|selected| path_is_permitted(path, selected))) {
+        return Err(AppError::new("PATH_NOT_AUTHORIZED", "请先选择需要导入的文件或 Excel 保存文件夹。", false, None));
+    }
+    Ok(())
+}
+
 fn path_is_permitted(requested: &Path, allowed: &Path) -> bool {
     let requested = requested
         .canonicalize()
@@ -1599,6 +2022,7 @@ pub fn engine_call_for_test(
             || rest.starts_with("inspect")
             || rest == "rate_tiers"
             || rest == "account_currencies"
+            || rest == "matching_fallback"
         {
             return deposit_interest::call(method, params);
         }
@@ -1791,6 +2215,13 @@ fn install_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+pub fn initialize_process_diagnostics() {
+    if let Ok(dirs) = project_dirs() { diagnostics::init(dirs.data_local_dir().join("diagnostics")); }
+    diagnostics::install_panic_hook();
+    let worker = std::env::args().any(|arg| arg == "--excel-merger-worker" || arg == "--rust-table-worker");
+    diagnostics::record("process_start", json!({"worker":worker,"arch":std::env::consts::ARCH,"debug":cfg!(debug_assertions)}));
+}
+
 pub fn run() {
     let dirs = project_dirs().expect("AuditToolbox data directory");
     std::fs::create_dir_all(dirs.data_local_dir()).expect("create data directory");
@@ -1826,7 +2257,22 @@ pub fn run() {
         // 后台常驻开启时，关闭主窗口只是隐藏到托盘；检测与录音继续。
         // 常驻关闭则放行关闭，应用照旧退出。
         .on_window_event(|window, event| {
+            // Only native file-drop events grant paths; front-end JSON cannot grant itself access.
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                if let Some(allowed) = window.app_handle().try_state::<AllowedPaths>() {
+                    allowed.0.lock().extend(paths.iter().cloned());
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "meeting-ask" {
+                    // 询问窗保持单例：系统关闭也隐藏，避免同标签快速重建留下失效 IPC。
+                    api.prevent_close();
+                    let _ = window.hide();
+                    let _ = window
+                        .app_handle()
+                        .emit("meeting-ask-choice", json!({"accepted": false}));
+                    return;
+                }
                 if window.label() != "main" {
                     return;
                 }
@@ -1837,6 +2283,9 @@ pub fn run() {
                 if resident {
                     api.prevent_close();
                     let _ = window.hide();
+                } else if let Some(ask) = window.app_handle().get_webview_window("meeting-ask") {
+                    // 隐藏询问窗不能阻止「关主窗口即退出」；退出时才真正销毁。
+                    let _ = ask.destroy();
                 }
             }
         })
@@ -1892,6 +2341,12 @@ pub fn run() {
             open_reference_url,
             settings_get,
             settings_set,
+            diagnostics_status,
+            diagnostics_recent,
+            diagnostics_set_enabled,
+            diagnostics_export,
+            diagnostics_clear,
+            diagnostics_frontend,
             telemetry_track,
             llm_test,
             audipick_ocr_test,
@@ -1901,6 +2356,7 @@ pub fn run() {
             history_restore,
             audipick_pdf_bytes,
             secret_set,
+            secret_get,
             secret_delete,
             legacy_import,
             pick_path,
@@ -1908,6 +2364,16 @@ pub fn run() {
             meeting_record_start,
             meeting_record_stop,
             meeting_status,
+            meeting_notifications::meeting_notify,
+            meeting_create_mail_draft,
+            meeting_read_minutes,
+            meeting_save_minutes,
+            meeting_history_list,
+            meeting_vocabulary_list,
+            meeting_vocabulary_save,
+            meeting_vocabulary_delete,
+            meeting_history_get,
+            meeting_read_transcript,
             meeting_detect_set_enabled,
             meeting_set_resident,
             meeting_autostart_status,
@@ -1919,6 +2385,7 @@ pub fn run() {
         .run(|handle, event| {
             // 退出时记会话时长并尽力补发，超时即放弃（不拖慢关窗）。
             if let tauri::RunEvent::Exit = event {
+                diagnostics::record("process_exit", json!({}));
                 let telemetry = handle.state::<telemetry::Telemetry>();
                 telemetry.track("app_exit", None, None, None, Some(telemetry.session_ms()));
                 telemetry.shutdown();
@@ -1937,6 +2404,17 @@ pub fn run_excel_merger_worker() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_reference_urls_require_exact_matches() {
+        let download = include_str!("../../assets/roll-forward/download-url.txt").trim();
+        assert!(is_builtin_reference_url(download));
+        assert!(is_builtin_reference_url("https://www.chinamoney.com.cn/"));
+        assert!(!is_builtin_reference_url(&format!("{download}&other=1")));
+        assert!(!is_builtin_reference_url("https://eychinamanaged.sharepoint.cn/"));
+        assert!(!is_builtin_reference_url("https://example.com/"));
+        assert!(!is_builtin_reference_url(""));
+    }
 
     #[test]
     fn collect_path_like_only_takes_absolute_windows_paths() {
@@ -2072,10 +2550,40 @@ mod tests {
     fn bundled_catalog_contains_unique_tools() {
         let catalog = tool_catalog().unwrap();
         let rows = catalog.as_array().unwrap();
-        assert_eq!(rows.len(), 19);
+        assert_eq!(rows.len(), 21);
         let ids: HashSet<_> = rows.iter().filter_map(|row| row["id"].as_str()).collect();
-        assert_eq!(ids.len(), 19);
+        assert_eq!(ids.len(), rows.len());
+        assert!(ids.contains("ocr"));
         assert!(rows.iter().all(|row| row["route"].as_str().is_some()));
+    }
+
+    #[test]
+    fn ocr_import_and_export_require_selected_paths_without_parent_grants() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().join("已选.png");
+        let sibling = root.path().join("未选.png");
+        std::fs::write(&selected, b"synthetic").unwrap();
+        std::fs::write(&sibling, b"synthetic").unwrap();
+        let allowed = AllowedPaths(Arc::new(Mutex::new(HashSet::new())));
+        allowed.0.lock().insert(selected.clone());
+        assert!(validate_ocr_paths(&allowed, "ocr.document_import", &json!({"paths":[selected]})).is_ok());
+        assert_eq!(validate_ocr_paths(&allowed, "ocr.document_import", &json!({"paths":[sibling]})).unwrap_err().code, "PATH_NOT_AUTHORIZED");
+        assert!(validate_ocr_paths(&allowed, "ocr.document_import", &json!({"folder":root.path()})).is_err());
+        assert!(validate_ocr_paths(&allowed, "ocr.export", &json!({"outputDir":root.path()})).is_err());
+        allowed.0.lock().insert(root.path().to_path_buf());
+        assert!(validate_ocr_paths(&allowed, "ocr.export", &json!({"outputDir":root.path()})).is_ok());
+        assert!(validate_ocr_paths(&allowed, "ocr.document_import", &json!({"folder":root.path()})).is_ok());
+    }
+
+    #[test]
+    fn ocr_jobs_have_consistent_routing_and_reject_unknown_methods() {
+        for method in ["ocr.recognize_page", "ocr.extract", "ocr.export"] {
+            assert!(is_direct_job_method(method));
+            assert!(excel_merger::SUPPORTED_JOB_METHODS.contains(&method));
+            assert_eq!(excel_merger::tool_id(method), "ocr");
+        }
+        assert!(!is_direct_job_method("ocr.unknown"));
+        assert!(!excel_merger::SUPPORTED_JOB_METHODS.contains(&"ocr.unknown"));
     }
 
     /// 凭据写入有四名白名单，删除此前可对任意名字调用 keyring——
@@ -2085,6 +2593,90 @@ mod tests {
         let err = secret_delete("arbitrary_secret".into()).unwrap_err();
         assert_eq!(err.code, "SECRET_NAME_DENIED");
         assert_eq!(err.user_message, "不允许删除该类型的凭据。");
+    }
+
+    #[test]
+    fn credential_read_rejects_unknown_names_before_accessing_keyring() {
+        let error = secret_get("arbitrary_secret".into()).unwrap_err();
+        assert_eq!(error.code, "SECRET_NAME_DENIED");
+        assert_eq!(error.user_message, "不允许读取该类型的凭据。");
+        assert!(secret_name_allowed("bailian_asr_key"));
+        assert!(secret_name_allowed("bailian_ocr_key"));
+        assert!(secret_name_allowed("bailian_plan_asr_key"));
+        assert!(secret_name_allowed("audipick_llm_api_key"));
+        assert!(!secret_name_allowed("other_app_key"));
+    }
+
+    #[test]
+    fn meeting_minutes_preview_requires_explicit_file_or_directory_authorization() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("选中.md");
+        let sibling = dir.path().join("其他.md");
+        std::fs::write(&selected, "# 选中纪要\n正文").unwrap();
+        std::fs::write(&sibling, "# 其他纪要\n正文").unwrap();
+        let allowed = AllowedPaths(Arc::new(Mutex::new(HashSet::new())));
+        assert_eq!(
+            read_authorized_meeting_minutes(&allowed, &selected)
+                .unwrap_err()
+                .code,
+            "PATH_NOT_AUTHORIZED"
+        );
+        allowed.0.lock().insert(selected.clone());
+        assert_eq!(
+            read_authorized_meeting_minutes(&allowed, &selected).unwrap()["title"],
+            "选中纪要"
+        );
+        assert_eq!(
+            read_authorized_meeting_minutes(&allowed, &sibling)
+                .unwrap_err()
+                .code,
+            "PATH_NOT_AUTHORIZED"
+        );
+        allowed.0.lock().insert(dir.path().to_path_buf());
+        assert!(read_authorized_meeting_minutes(&allowed, &sibling).is_ok());
+    }
+
+    #[test]
+    fn meeting_minutes_edit_requires_exact_file_authorization() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("选中.md");
+        let sibling = dir.path().join("其他.md");
+        std::fs::write(&selected, "# 选中").unwrap();
+        std::fs::write(&sibling, "# 其他").unwrap();
+        let allowed = AllowedPaths(Arc::new(Mutex::new(HashSet::new())));
+        let storage = Storage::new(&dir.path().join("data")).unwrap();
+        let names = storage::meeting_documents::SpeakerNames::new();
+        assert_eq!(save_authorized_meeting_minutes(&allowed, &storage, &selected, "# 修改", "# 选中", &names).unwrap_err().code, "PATH_NOT_AUTHORIZED");
+        allowed.0.lock().insert(selected.clone());
+        save_authorized_meeting_minutes(&allowed, &storage, &selected, "# 修改", "# 选中", &names).unwrap();
+        assert_eq!(save_authorized_meeting_minutes(&allowed, &storage, &sibling, "# 不应保存", "# 其他", &names).unwrap_err().code, "PATH_NOT_AUTHORIZED");
+        assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "# 其他");
+        assert_eq!(std::fs::read_to_string(&selected).unwrap(), "# 修改");
+    }
+
+    #[test]
+    fn meeting_history_restores_only_exact_files_and_bounds_transcript_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let minutes = dir.path().join("会议纪要.md");
+        let transcript = dir.path().join("转写稿.txt");
+        let sibling = dir.path().join("另一场会议.txt");
+        std::fs::write(&minutes, "# 会议标题").unwrap();
+        std::fs::write(&transcript, "[00:00] 原始发言").unwrap();
+        std::fs::write(&sibling, "未授权正文").unwrap();
+        let allowed = AllowedPaths(Arc::new(Mutex::new(HashSet::new())));
+        authorize_meeting_history_files(&allowed, &json!({"transcriptPath":transcript,
+            "minutesVersions":[{"minutesPath":minutes}],"audioPath":dir.path()}));
+        assert!(!allowed.0.lock().contains(dir.path()));
+        assert!(read_authorized_meeting_minutes(&allowed, &minutes).is_ok());
+        assert_eq!(read_authorized_meeting_transcript(&allowed, &transcript).unwrap(), "[00:00] 原始发言");
+        assert_eq!(read_authorized_meeting_transcript(&allowed, &sibling).unwrap_err().code, "PATH_NOT_AUTHORIZED");
+        assert_eq!(read_authorized_meeting_transcript(&allowed, &minutes).unwrap_err().code, "MEETING_TRANSCRIPT_FORMAT");
+        std::fs::write(&transcript, vec![b'x'; 2 * 1024 * 1024 + 1]).unwrap();
+        assert_eq!(read_authorized_meeting_transcript(&allowed, &transcript).unwrap_err().code, "MEETING_TRANSCRIPT_TOO_LARGE");
+        std::fs::write(&transcript, [0xff, 0xfe]).unwrap();
+        assert_eq!(read_authorized_meeting_transcript(&allowed, &transcript).unwrap_err().code, "MEETING_TRANSCRIPT_ENCODING");
+        std::fs::remove_file(&transcript).unwrap();
+        assert_eq!(read_authorized_meeting_transcript(&allowed, &transcript).unwrap_err().code, "MEETING_TRANSCRIPT_READ_FAILED");
     }
 
     /// 页面直开常驻开关只应合并 meeting 命名空间的单个键，

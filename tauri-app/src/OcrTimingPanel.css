@@ -1,0 +1,12 @@
+.ocr-http-timing[open] {
+  width: 320px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.ocr-http-timing p {
+  margin-block: 6px;
+}
+.ocr-timings .ocr-retry-failed {
+  margin-inline-start: 12px;
+  vertical-align: middle;
+}

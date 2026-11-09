@@ -11,6 +11,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FileListDirectoryPage from "./FileListDirectoryPage";
+import { publishTaskRestore } from "./restore";
 import { jobStart, listenJobEvents } from "./api";
 import type { ToolManifest } from "./types";
 
@@ -20,6 +21,9 @@ vi.mock("./api", () => ({
   listenJobEvents: vi.fn().mockResolvedValue(() => undefined),
   openOutput: vi.fn(),
   pickPath: vi.fn().mockResolvedValue(null),
+}));
+vi.mock("./components/ConfirmDialog", () => ({
+  confirmDialog: vi.fn().mockResolvedValue(true),
 }));
 
 const tool: ToolManifest = {
@@ -34,7 +38,7 @@ const tool: ToolManifest = {
 
 describe("FileListDirectoryPage", () => {
   beforeEach(() => {
-    vi.mocked(jobStart).mockResolvedValue("job-scan");
+    vi.mocked(jobStart).mockReset().mockResolvedValue("job-scan");
     sessionStorage.setItem(
       "audit-toolbox:file-list-directory:v1",
       JSON.stringify({
@@ -58,6 +62,21 @@ describe("FileListDirectoryPage", () => {
     sessionStorage.clear();
   });
 
+  it("restores a scan-only task and clears another directory's cached result", async () => {
+    publishTaskRestore({
+      jobId: "old-scan", toolId: tool.id, method: "file_list.scan",
+      params: { sourceDir: "C:\\新的目录" }, missingPaths: [], authorizedPathCount: 1,
+    });
+    render(<FileListDirectoryPage tool={tool} />);
+    await waitFor(() => {
+      const draft = JSON.parse(sessionStorage.getItem("audit-toolbox:file-list-directory:v1") ?? "{}");
+      expect(draft.sourceDir).toBe("C:\\新的目录");
+      expect(draft.scan).toBeUndefined();
+      expect(draft.outputPath).toBe("");
+    });
+    expect(jobStart).not.toHaveBeenCalled();
+  });
+
   it("uses two steps and generates directly from the output step", async () => {
     const { container } = render(<FileListDirectoryPage tool={tool} />);
     const steps = container.querySelector(".step-indicator");
@@ -70,7 +89,10 @@ describe("FileListDirectoryPage", () => {
     await waitFor(() => expect(next).toBeEnabled());
     fireEvent.click(next);
 
-    expect(screen.getByText("2. 确认输出并生成")).toBeInTheDocument();
+    // 步骤条第 2 格与卡题同词（步骤条、新手提示、卡题会出现同名词）
+    expect(
+      screen.getByText("确认并生成", { selector: "[data-slot='card-title']" }),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText("输出 Excel 文件")).toHaveValue(
       "客户资料List.xlsx",
     );
@@ -92,6 +114,26 @@ describe("FileListDirectoryPage", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("记录导出编号后继续使用原订阅，结束立即恢复生成按钮", async () => {
+    const before = vi.mocked(listenJobEvents).mock.calls.length;
+    render(<FileListDirectoryPage tool={tool} />);
+    await waitFor(() => expect(vi.mocked(listenJobEvents).mock.calls.length).toBe(before + 1));
+    const callback = vi.mocked(listenJobEvents).mock.calls.at(-1)![0];
+    fireEvent.click(await screen.findByRole("button", { name: "下一步：输出文件" }));
+    vi.mocked(jobStart).mockResolvedValueOnce("fast-export");
+    fireEvent.click(screen.getByRole("button", { name: "生成文件清单" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("file_list.export", expect.anything()));
+    await act(async () => undefined);
+    act(() => callback({
+      jobId: "fast-export", toolId: "file_list_directory", phase: "completed",
+      current: 1, total: 1, message: "清单导出完成", severity: "success",
+      outputPaths: ["C:/客户资料List.xlsx"],
+    }));
+    expect(vi.mocked(listenJobEvents).mock.calls.length).toBe(before + 1);
+    expect(screen.getByRole("button", { name: "生成文件清单" })).toBeEnabled();
+    expect(screen.getByText("清单导出完成")).toBeVisible();
+  });
+
   it.each(["failed", "cancelled"])("扫描 %s 后首屏显示明确终态与重试方向", async (phase) => {
     sessionStorage.clear();
     render(<FileListDirectoryPage tool={tool} />);
@@ -99,7 +141,7 @@ describe("FileListDirectoryPage", () => {
     vi.mocked(pickPath).mockResolvedValueOnce("C:\\客户资料");
     fireEvent.click(screen.getByRole("button", { name: "源文件夹 *" }));
     await waitFor(() => expect(jobStart).toHaveBeenCalledWith("file_list.scan", { sourceDir: "C:\\客户资料" }));
-    await waitFor(() => expect(vi.mocked(listenJobEvents).mock.calls.length).toBeGreaterThan(1));
+    await waitFor(() => expect(vi.mocked(listenJobEvents).mock.calls.length).toBeGreaterThan(0));
     const callback = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
     act(() => callback?.({
       jobId: "job-scan",
@@ -118,5 +160,108 @@ describe("FileListDirectoryPage", () => {
       expect(document.querySelector(".job-progress-error")).toBeNull();
       expect(screen.getAllByText("已取消").find((node) => node.getAttribute("data-variant") === "warning")).toBeInTheDocument();
     }
+  });
+
+  /* UI 审核：扫描完成后底部不得再挂「部分完成 100%」横幅；摘要要点明
+     子目录深度；屏上预览删去与文件名称、层级逐行重复的「相对路径」列
+    （导出 Excel 不受影响），整列为空的层级列自动隐藏。 */
+  it("扫描完成后不残留进度横幅，预览表只留层级与文件名称", async () => {
+    sessionStorage.clear();
+    render(<FileListDirectoryPage tool={tool} />);
+    const { pickPath } = await import("./api");
+    vi.mocked(pickPath).mockResolvedValueOnce("C:\\客户资料");
+    fireEvent.click(screen.getByRole("button", { name: "源文件夹 *" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("file_list.scan", { sourceDir: "C:\\客户资料" }));
+    const callback = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+    act(() => callback?.({
+      jobId: "job-scan",
+      toolId: "file_list_directory",
+      phase: "completed",
+      current: 1,
+      total: 1,
+      message: "扫描完成：2 个文件，最深 1 级目录。",
+      severity: "success",
+      outputPaths: [],
+      result: {
+        sourceDir: "C:\\客户资料",
+        rootName: "客户资料",
+        fileCount: 2,
+        maxDepth: 1,
+        previewLimit: 50,
+        outputPath: "C:\\客户资料List.xlsx",
+        preview: [
+          {
+            name: "银行日记账.xlsx",
+            relativePath: "底稿\\银行日记账.xlsx",
+            fullPath: "C:\\客户资料\\底稿\\银行日记账.xlsx",
+            levels: ["底稿"],
+          },
+        ],
+        skippedPaths: ["C:\\客户资料\\历史归档"],
+      },
+    }));
+    expect(document.querySelector(".job-progress")).toBeNull();
+    expect(screen.getByText("2 个文件 · 最深 1 级子目录")).toBeVisible();
+    // 「相对路径」列不再出现在屏上表格里
+    expect(screen.queryByTitle("底稿\\银行日记账.xlsx")).toBeNull();
+    expect(screen.queryByText("相对路径")).toBeNull();
+    // 第 2 级文件夹整列为空：该列自动隐藏
+    expect(screen.getByText("1级文件夹")).toBeVisible();
+    expect(screen.queryByText("2级文件夹")).toBeNull();
+    expect(screen.getByTitle("底稿")).toHaveTextContent("底稿");
+    expect(screen.getByTitle("银行日记账.xlsx")).toHaveTextContent(
+      "银行日记账.xlsx",
+    );
+  });
+
+  it("导出完成后绿色成功横幅落在生成按钮之后，跳过路径不再顶琥珀部分完成", async () => {
+    sessionStorage.clear();
+    render(<FileListDirectoryPage tool={tool} />);
+    const { pickPath } = await import("./api");
+    vi.mocked(pickPath).mockResolvedValueOnce("C:\\客户资料");
+    fireEvent.click(screen.getByRole("button", { name: "源文件夹 *" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("file_list.scan", { sourceDir: "C:\\客户资料" }));
+    const callback = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+    // 先给一份扫描结果，才能进入输出步骤
+    act(() => callback?.({
+      jobId: "job-scan",
+      toolId: "file_list_directory",
+      phase: "completed",
+      current: 1,
+      total: 1,
+      message: "扫描完成",
+      severity: "success",
+      outputPaths: [],
+      result: {
+        sourceDir: "C:\\客户资料",
+        rootName: "客户资料",
+        fileCount: 1,
+        maxDepth: 0,
+        previewLimit: 50,
+        outputPath: "C:\\客户资料List.xlsx",
+        preview: [
+          { name: "凭证.pdf", relativePath: "凭证.pdf", fullPath: "C:\\客户资料\\凭证.pdf", levels: [] },
+        ],
+      },
+    }));
+    fireEvent.click(await screen.findByRole("button", { name: "下一步：输出文件" }));
+    vi.mocked(jobStart).mockResolvedValueOnce("export-job");
+    fireEvent.click(screen.getByRole("button", { name: "生成文件清单" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("file_list.export", expect.anything()));
+    await act(async () => undefined);
+    act(() => callback?.({
+      jobId: "export-job", toolId: "file_list_directory", phase: "completed",
+      current: 1, total: 1, message: "处理完成。", severity: "success",
+      outputPaths: ["C:/客户资料List.xlsx"],
+      result: { fileCount: 3, maxDepth: 0, skippedPaths: ["C:/客户资料/锁定"], outputPaths: ["C:/客户资料List.xlsx"] },
+    }));
+    // 成功横幅：绿色成功层 + 固定结论，引擎的「处理完成。」套话不再重复
+    expect(screen.getByText("清单已生成")).toBeVisible();
+    expect(screen.queryByText("处理完成。")).toBeNull();
+    expect(screen.getByText(/1 个路径无法访问、已跳过/)).toBeVisible();
+    // 任务条不再以「部分完成 100%」与成功结论同框
+    expect(document.querySelector(".job-banner.warning")).toBeNull();
+    // 结果文件入口仍在「扫描预览」卡内
+    expect(screen.getByRole("button", { name: "打开结果：客户资料List.xlsx" })).toBeVisible();
   });
 });

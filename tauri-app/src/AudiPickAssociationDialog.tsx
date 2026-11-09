@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "./components/ui/dialog";
 import { errorText } from "./lib/errors";
+import { Button } from "./components/ui/button";
 
 export type AssociationMember = { fileId: string; role: string; [key: string]: unknown };
 export type AssociationGroup = { id: string; anchorFileId: string; members: AssociationMember[] };
@@ -90,7 +91,7 @@ export function AudiPickAssociationDialog({ anchorId, documents, groups, suggest
       </div>
       <div className="border-t border-[var(--border-soft)] pt-3">
         {error && <p role="alert" className="error-box">{error}</p>}
-        <div className="flex flex-wrap justify-end gap-2"><button className="ghost" disabled={busy} onClick={onClose}>取消</button><button className="primary min-h-10 rounded-md px-4" disabled={busy || anchorOccupied} onClick={() => void save()}>{busy ? "保存中…" : "保存关联"}</button></div>
+        <div className="flex flex-wrap justify-end gap-2" data-button-size="default"><Button variant="ghost" disabled={busy} onClick={onClose}>取消</Button><Button disabled={busy || anchorOccupied} onClick={() => void save()}>{busy ? "保存中…" : "保存关联"}</Button></div>
       </div>
     </DialogContent>
   </Dialog>;

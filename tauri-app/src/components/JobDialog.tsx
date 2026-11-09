@@ -5,6 +5,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useMemo,
 } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,10 +18,21 @@ import {
 import { jobCancel, jobPause } from "@/api";
 import { errorText, isJobGone } from "@/lib/errors";
 import type { JobEvent } from "@/types";
-import { isAudiPickOperationJob, useAudiPickOperations } from "../audipickOperation";
+import {
+  isAudiPickOperationJob,
+  useAudiPickOperations,
+} from "../audipickOperation";
 import { AudiPickOperationPanel } from "./AudiPickOperationPanel";
 import { jobStatusText } from "./JobProgress";
+import { ScrollFadeBox } from "./ScrollFade";
 import "./JobDialog.css";
+import {
+  OcrScanProgressContext,
+  isOcrScanJob,
+  type OcrProgress,
+} from "../ocrProgress";
+import { OcrScanProgressDialog } from "./OcrScanProgressDialog";
+import { OcrTaskProgressDialog } from "./OcrTaskProgressDialog";
 
 /** 结束态的三个 phase 由 Rust 侧统一约定（excel_merger.rs）。 */
 const FINISHED = ["completed", "failed", "cancelled"];
@@ -103,6 +115,8 @@ type JobRowProps = {
   label: string;
   paused: boolean;
   memoryPaused: boolean;
+  /** 并发任务多时的紧凑形态：描述压成一行，弹窗列表可滚。 */
+  compact?: boolean;
   onTogglePause: () => void;
   onStop: () => void;
   pending?: "pause" | "stop";
@@ -110,7 +124,18 @@ type JobRowProps = {
   operationError?: string;
 };
 
-function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop, pending, stopRequested, operationError }: JobRowProps) {
+function JobRow({
+  job,
+  label,
+  paused,
+  memoryPaused,
+  compact,
+  onTogglePause,
+  onStop,
+  pending,
+  stopRequested,
+  operationError,
+}: JobRowProps) {
   const [messageExpanded, setMessageExpanded] = useState(false);
   const pct = percent(job);
   const tone = toneOf(job);
@@ -119,9 +144,25 @@ function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop, pendi
     <section className="job-dialog-row" aria-label={`${label}任务进度`}>
       <div className="job-dialog-row-head">
         <strong title={label}>{label}</strong>
-        <span className="job-pct">{memoryPaused ? "内存等待" : paused ? "已暂停" : job.phase === "queued" ? "排队中" : job.total > 0 ? `${pct}%` : "处理中"}</span>
+        <span className="job-pct">
+          {memoryPaused
+            ? "内存等待"
+            : paused
+              ? "已暂停"
+              : job.phase === "queued"
+                ? "排队中"
+                : job.total > 0
+                  ? `${pct}%`
+                  : "处理中"}
+        </span>
       </div>
-      <p className={`job-dialog-message ${longMessage && !messageExpanded ? "job-dialog-message--clamped" : ""}`} aria-live="polite" aria-atomic="true">{job.message}</p>
+      <p
+        className={`job-dialog-message ${longMessage && !messageExpanded ? "job-dialog-message--clamped" : ""} ${compact ? "job-dialog-message--compact" : ""}`}
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {job.message}
+      </p>
       {longMessage && (
         <Button
           type="button"
@@ -148,13 +189,29 @@ function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop, pendi
           onClick={onTogglePause}
           disabled={Boolean(pending) || stopRequested}
         >
-          {pending === "pause" ? "正在发送…" : memoryPaused ? "尝试继续" : paused ? "继续" : "暂停"}
+          {pending === "pause"
+            ? "正在发送…"
+            : memoryPaused
+              ? "尝试继续"
+              : paused
+                ? "继续"
+                : "暂停"}
         </Button>
-        <Button type="button" variant="destructive" size="sm" onClick={onStop} disabled={Boolean(pending) || stopRequested}>
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          onClick={onStop}
+          disabled={Boolean(pending) || stopRequested}
+        >
           {pending === "stop" || stopRequested ? "停止中…" : "停止"}
         </Button>
       </div>
-      {operationError && <p className="job-dialog-operation-error" role="alert">{operationError}</p>}
+      {operationError && (
+        <p className="job-dialog-operation-error" role="alert">
+          {operationError}
+        </p>
+      )}
     </section>
   );
 }
@@ -168,7 +225,7 @@ export type JobDialogProviderProps = {
 };
 
 /**
- * 全局任务进度弹窗。任何后台任务一开始就弹出，显示进度并提供暂停/继续/停止；
+ * 全局任务进度弹窗。一般任务开始时展开，会议任务默认使用收起的任务条；
  * 「最小化」把它收成右下角一条，用户可以切去别的工具，点小条再展开。
  *
  * 用户暂停在前端记录，以便任务停在后端检查点期间按钮仍保持正确状态；
@@ -180,14 +237,31 @@ export function JobDialogProvider({
   children,
 }: JobDialogProviderProps) {
   const [minimized, setMinimized] = useState(false);
+  const [expandedMeetings, setExpandedMeetings] = useState(false);
   const minimizedButtonRef = useRef<HTMLButtonElement>(null);
   const [paused, setPaused] = useState<Record<string, boolean>>({});
   useAudiPickOperations();
   const [pending, setPending] = useState<Record<string, "pause" | "stop">>({});
   const pendingIds = useRef(new Set<string>());
-  const [stopRequested, setStopRequested] = useState<Record<string, boolean>>({});
-  const [operationErrors, setOperationErrors] = useState<Record<string, string>>({});
-  const running = jobs.filter((job) => isJobRunning(job) && !isAudiPickOperationJob(job.jobId));
+  const [stopRequested, setStopRequested] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [operationErrors, setOperationErrors] = useState<
+    Record<string, string>
+  >({});
+  const [ocrScan, setOcrScan] = useState<OcrProgress>();
+  const ocrProgressApi = useMemo(
+    () => ({ available: true, active: Boolean(ocrScan), setProgress: setOcrScan }),
+    [Boolean(ocrScan)],
+  );
+  const running = jobs.filter(
+    (job) =>
+      isJobRunning(job) &&
+      !job.background &&
+      !isAudiPickOperationJob(job.jobId) &&
+      !isOcrScanJob(job.jobId) &&
+      !(ocrScan && job.toolId === "ocr"),
+  );
   const runningIds = running.map((job) => job.jobId).join("|");
 
   // 任务跑完就把最小化和暂停记录归零：下一个任务应当重新弹出来，
@@ -210,14 +284,19 @@ export function JobDialogProvider({
     [runningIds],
   );
 
-  const runCommand = async (jobId: string, command: "pause" | "stop", request: () => Promise<boolean>) => {
+  const runCommand = async (
+    jobId: string,
+    command: "pause" | "stop",
+    request: () => Promise<boolean>,
+  ) => {
     if (pendingIds.current.has(jobId) || stopRequested[jobId]) return false;
     pendingIds.current.add(jobId);
     setPending((current) => ({ ...current, [jobId]: command }));
     setOperationErrors((current) => ({ ...current, [jobId]: "" }));
     try {
       const accepted = await request();
-      if (!accepted) throw new Error("任务可能已结束，指令未被接受。请检查任务状态后重试。");
+      if (!accepted)
+        throw new Error("任务可能已结束，指令未被接受。请检查任务状态后重试。");
       return true;
     } catch (error) {
       setOperationErrors((current) => ({
@@ -242,118 +321,183 @@ export function JobDialogProvider({
       (job) => job.jobId === jobId && job.phase === "memory_paused",
     );
     const next = memoryPaused ? false : !paused[jobId];
-    void runCommand(jobId, "pause", () => jobPause(jobId, next)).then((accepted) => {
-      if (accepted) setPaused((current) => ({ ...current, [jobId]: next }));
-    });
+    void runCommand(jobId, "pause", () => jobPause(jobId, next)).then(
+      (accepted) => {
+        if (accepted) setPaused((current) => ({ ...current, [jobId]: next }));
+      },
+    );
   };
 
   const retryAfterMemoryPause = (jobId: string) => {
-    void runCommand(jobId, "pause", () => jobPause(jobId, false)).then((accepted) => {
-      if (accepted) setPaused((current) => ({ ...current, [jobId]: false }));
-    });
+    void runCommand(jobId, "pause", () => jobPause(jobId, false)).then(
+      (accepted) => {
+        if (accepted) setPaused((current) => ({ ...current, [jobId]: false }));
+      },
+    );
   };
 
   const stop = (jobId: string) => {
     void runCommand(jobId, "stop", () => jobCancel(jobId)).then((accepted) => {
-      if (accepted) setStopRequested((current) => ({ ...current, [jobId]: true }));
+      if (accepted)
+        setStopRequested((current) => ({ ...current, [jobId]: true }));
     });
   };
 
-  const open = running.length > 0 && !minimized;
+  const meetingsOnly = running.length > 0 && running.every(job => job.toolId === "meeting_minutes");
+  const open = running.length > 0 && !minimized && (!meetingsOnly || expandedMeetings);
+  useEffect(() => { if (!running.some(job => job.toolId === "meeting_minutes")) setExpandedMeetings(false); }, [runningIds]);
   const first = running[0];
 
   useEffect(() => {
     if (!minimized) return;
     // Radix 关闭弹窗时也会恢复焦点；下一帧再把焦点交给真正替代弹窗的任务条。
-    const timer = window.setTimeout(() => minimizedButtonRef.current?.focus(), 0);
+    const timer = window.setTimeout(
+      () => minimizedButtonRef.current?.focus(),
+      0,
+    );
     return () => window.clearTimeout(timer);
   }, [minimized]);
 
   return (
-    <JobDialogContext.Provider
-      value={{
-        owns,
-        isPaused: (jobId) => Boolean(paused[jobId])
-          || running.some((job) => job.jobId === jobId && job.phase === "memory_paused"),
-        togglePause,
-      }}
-    >
-      {children}
-      <AudiPickOperationPanel raised={running.length > 0} />
-      <Dialog open={open}>
-        <DialogContent
-          showCloseButton={false}
-          className="job-dialog"
-          // 任务还在跑，ESC 和点击遮罩关掉弹窗只会让人以为任务停了。
-          // 唯一的收起方式是「最小化」，唯一的终止方式是「停止」。
-          onEscapeKeyDown={(event) => event.preventDefault()}
-          onPointerDownOutside={(event) => event.preventDefault()}
-          onInteractOutside={(event) => event.preventDefault()}
-        >
-          <DialogHeader>
-            <DialogTitle>
-              {running.length > 1
-                ? `${running.length} 个任务进行中`
-                : first?.phase === "queued" ? "任务排队中" : "正在处理"}
-            </DialogTitle>
-            <DialogDescription>
-              可最小化继续使用。停止后将请求取消任务。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="job-dialog-rows" role="list" aria-label="进行中的任务">
-            {running.map((job) => (
-              <div role="listitem" key={job.jobId}>
-                <JobRow
-                  job={job}
-                  label={nameOf(job.toolId)}
-                  paused={Boolean(paused[job.jobId]) || job.phase === "memory_paused"}
-                  memoryPaused={job.phase === "memory_paused"}
-                  onTogglePause={() => job.phase === "memory_paused"
-                    ? retryAfterMemoryPause(job.jobId)
-                    : togglePause(job.jobId)}
-                  onStop={() => stop(job.jobId)}
-                  pending={pending[job.jobId]}
-                  stopRequested={Boolean(stopRequested[job.jobId])}
-                  operationError={operationErrors[job.jobId]}
+    <OcrScanProgressContext.Provider value={ocrProgressApi}>
+      <JobDialogContext.Provider
+        value={{
+          owns,
+          isPaused: (jobId) =>
+            Boolean(paused[jobId]) ||
+            running.some(
+              (job) => job.jobId === jobId && job.phase === "memory_paused",
+            ),
+          togglePause,
+        }}
+      >
+        {children}
+        <AudiPickOperationPanel raised={running.length > 0} />
+        <OcrScanProgressDialog
+          progress={ocrScan && !("kind" in ocrScan) ? ocrScan : undefined}
+          obscured={open}
+          raised={running.length > 0}
+        />
+        <OcrTaskProgressDialog
+          progress={ocrScan && "kind" in ocrScan ? ocrScan : undefined}
+          obscured={open}
+          raised={running.length > 0}
+        />
+        <Dialog open={open}>
+          <DialogContent
+            showCloseButton={false}
+            className="job-dialog"
+            // 任务还在跑，ESC 和点击遮罩关掉弹窗只会让人以为任务停了。
+            // 唯一的收起方式是「最小化」，唯一的终止方式是「停止」。
+            onEscapeKeyDown={(event) => event.preventDefault()}
+            onPointerDownOutside={(event) => event.preventDefault()}
+            onInteractOutside={(event) => event.preventDefault()}
+          >
+            <DialogHeader>
+              <DialogTitle>
+                {running.length > 1
+                  ? `${running.length} 个任务进行中`
+                  : first?.phase === "queued"
+                    ? "任务排队中"
+                    : "正在处理"}
+              </DialogTitle>
+              <DialogDescription>
+                可最小化继续使用。停止后将请求取消任务。
+              </DialogDescription>
+            </DialogHeader>
+            {/* 并发多任务时先给一条合计进度：此前 8 张卡各自为战，整体
+              完成度无从判断；红「停止」×8 也把危险色稀释成背景噪声。 */}
+            {running.length > 1 && (
+              <div className="job-dialog-aggregate">
+                <span>
+                  {running.length} 个任务 · 合计进度{" "}
+                  {Math.round(
+                    running.reduce((sum, job) => sum + percent(job), 0) /
+                      running.length,
+                  )}
+                  %
+                </span>
+                <progress
+                  aria-label="合计进度"
+                  max={100}
+                  value={Math.round(
+                    running.reduce((sum, job) => sum + percent(job), 0) /
+                      running.length,
+                  )}
                 />
               </div>
-            ))}
-          </div>
-          <div className="job-dialog-footer">
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={() => setMinimized(true)}
-            >
-              最小化
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-      {running.length > 0 && minimized && first && (
-        <button
-          ref={minimizedButtonRef}
-          type="button"
-          className="job-dialog-pill"
-          onClick={() => setMinimized(false)}
-          aria-label={`展开任务进度：${
-            running.length > 1 ? `${running.length} 个任务进行中` : nameOf(first.toolId)
-          }`}
-        >
-          <span className="job-dialog-pill-dot" aria-hidden="true" />
-          <span className="job-dialog-pill-text">
-            {running.length > 1
-              ? `${running.length} 个任务进行中`
-              : `${nameOf(first.toolId)} · ${pillStatusText(first, Boolean(paused[first.jobId]))}`}
-          </span>
-          {running.length > 1 && (
-            <span className="job-pct">
-              {pillStatusText(first, Boolean(paused[first.jobId]))}
+            )}
+            {/* 任务再多也只占限高区域：列表内部滚动（此前 8 个并发任务
+              会把弹窗顶出屏幕、末尾任务卡被底边裁半）。 */}
+            <ScrollFadeBox maxHeight="min(440px, 52dvh)">
+              <div
+                className="job-dialog-rows"
+                role="list"
+                aria-label="进行中的任务"
+              >
+                {running.map((job) => (
+                  <div role="listitem" key={job.jobId}>
+                    <JobRow
+                      job={job}
+                      label={nameOf(job.toolId)}
+                      paused={
+                        Boolean(paused[job.jobId]) ||
+                        job.phase === "memory_paused"
+                      }
+                      memoryPaused={job.phase === "memory_paused"}
+                      compact={running.length >= 4}
+                      onTogglePause={() =>
+                        job.phase === "memory_paused"
+                          ? retryAfterMemoryPause(job.jobId)
+                          : togglePause(job.jobId)
+                      }
+                      onStop={() => stop(job.jobId)}
+                      pending={pending[job.jobId]}
+                      stopRequested={Boolean(stopRequested[job.jobId])}
+                      operationError={operationErrors[job.jobId]}
+                    />
+                  </div>
+                ))}
+              </div>
+            </ScrollFadeBox>
+            <div className="job-dialog-footer">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => setMinimized(true)}
+              >
+                最小化
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+        {running.length > 0 && (minimized || (meetingsOnly && !expandedMeetings)) && first && (
+          <button
+            ref={minimizedButtonRef}
+            type="button"
+            className="job-dialog-pill"
+            onClick={() => { setMinimized(false); setExpandedMeetings(true); }}
+            aria-label={`展开任务进度：${
+              running.length > 1
+                ? `${running.length} 个任务进行中`
+                : nameOf(first.toolId)
+            }`}
+          >
+            <span className="job-dialog-pill-dot" aria-hidden="true" />
+            <span className="job-dialog-pill-text">
+              {running.length > 1
+                ? `${running.length} 个任务进行中`
+                : `${nameOf(first.toolId)} · ${pillStatusText(first, Boolean(paused[first.jobId]))}`}
             </span>
-          )}
-        </button>
-      )}
-    </JobDialogContext.Provider>
+            {running.length > 1 && (
+              <span className="job-pct">
+                {pillStatusText(first, Boolean(paused[first.jobId]))}
+              </span>
+            )}
+          </button>
+        )}
+      </JobDialogContext.Provider>
+    </OcrScanProgressContext.Provider>
   );
 }

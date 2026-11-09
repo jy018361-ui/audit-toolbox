@@ -1,0 +1,1 @@
+import{a as n,n as s}from"./index-BcFyuI-b.js";function i({className:r}){return n.jsx("svg",{className:s("busy-spinner",r),viewBox:"0 0 24 24","aria-hidden":"true",children:n.jsx("circle",{cx:"12",cy:"12",r:"10",pathLength:360})})}export{i as B};

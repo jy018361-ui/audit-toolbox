@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { reportFrontendError } from "../diagnostics";
 
 type Props = { children: ReactNode };
 type State = { failed: boolean };
@@ -12,6 +13,7 @@ export class ApplicationErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
+    reportFrontendError(error);
     console.error("应用界面渲染失败", error, info);
   }
 

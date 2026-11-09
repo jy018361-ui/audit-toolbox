@@ -8,6 +8,8 @@
     "core:default",
     "core:event:allow-emit",
     "core:event:allow-listen",
-    "core:window:allow-close"
+    "core:window:allow-close",
+    "core:window:allow-hide",
+    "core:window:allow-start-dragging"
   ]
 }

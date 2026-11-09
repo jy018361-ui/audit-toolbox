@@ -149,11 +149,94 @@ fn shared_strings(parts: Vec<&[u8]>) -> Option<Vec<String>> {
 }
 
 fn sheet_name(data: &[u8]) -> Option<(usize, String)> {
+    // BIFF8 BOUNDSHEET：lbPlyPos(4) grbit(2) ShortXLUnicodeString
+    // （cch 1 字节 + 宽度标志 1 字节 + 名称），与 SST 的 2 字节 cch 不同。
     let offset = u32_at(data, 0)? as usize;
     let count = *data.get(6)? as usize;
-    let wide = data.get(7)? & 1 != 0;
+    let wide = *data.get(7)? & 1 != 0;
     let name = unicode_chars(data.get(8..)?, count, wide)?;
     Some((offset, name))
+}
+
+fn next_record<S: Read>(stream: &mut S, limit: usize) -> Option<(u16, Vec<u8>)> {
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header).ok()?;
+    let typ = u16::from_le_bytes([header[0], header[1]]);
+    let len = u16::from_le_bytes([header[2], header[3]]) as usize;
+    if len > limit {
+        return None;
+    }
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).ok()?;
+    Some((typ, payload))
+}
+
+/// 只读 BOUNDSHEET 与 DIMENSIONS 记录的工作表真实行列（行数、单元格数），
+/// 供磁盘分流前的内存体量估算；不解析单元格与共享字符串。
+/// 指定 sheet 时只统计该表；解析遇到任何意外返回 None，由调用方回退旧口径。
+pub(crate) fn sheet_shape(path: &Path, sheet: Option<&str>) -> Option<(u64, u64)> {
+    use std::io::{Seek, SeekFrom};
+    let file = fs::File::open(path).ok()?;
+    let mut ole = cfb::CompoundFile::open(file).ok()?;
+    let mut workbook = ole
+        .open_stream("/Workbook")
+        .or_else(|_| ole.open_stream("/Book"))
+        .ok()?;
+    // 全局区扫到共享字符串表/EOF 为止：表清单总在字符串表之前，
+    // 不必读入庞大的字符串表即可拿到全部表名与子流偏移。
+    let mut sheets: Vec<(u64, String)> = Vec::new();
+    for _ in 0..4096 {
+        let (typ, payload) = next_record(&mut workbook, 8192)?;
+        if typ == 0x00FC || typ == 0x000A {
+            break;
+        }
+        if typ == 0x0085 {
+            if let Some((offset, name)) = sheet_name(&payload) {
+                sheets.push((offset as u64, name));
+            }
+        }
+    }
+    let chosen: Vec<(u64, String)> = match sheet.filter(|name| !name.trim().is_empty()) {
+        Some(wanted) => vec![sheets.into_iter().find(|(_, name)| name == wanted)?],
+        None => sheets,
+    };
+    let mut rows = 0_u64;
+    let mut cells = 0_u64;
+    for (offset, _) in chosen {
+        workbook.seek(SeekFrom::Start(offset)).ok()?;
+        // 表子流以 BOF 开头，DIMENSIONS 紧随其后、先于首条行记录；
+        // 见不到或数值离谱就整体回退旧口径。
+        next_record(&mut workbook, 8192)?;
+        let mut found = false;
+        for _ in 0..32 {
+            let (typ, payload) = next_record(&mut workbook, 8192)?;
+            if typ == 0x0200 {
+                let shape = if payload.len() >= 14 {
+                    // BIFF8：rwMic(4) rwMac(4) colMic(2) colMac(2) 保留(2)，后三项均含 +1。
+                    Some((u32_at(&payload, 4)? as u64, u16_at(&payload, 10)? as u64))
+                } else if payload.len() >= 8 {
+                    // BIFF5/7：四个 u16。
+                    Some((u16_at(&payload, 2)? as u64, u16_at(&payload, 6)? as u64))
+                } else {
+                    None
+                };
+                let (last_row, last_col) = shape?;
+                if (1..=65_537).contains(&last_row) && (1..=256).contains(&last_col) {
+                    rows += last_row;
+                    cells += last_row.saturating_mul(last_col);
+                    found = true;
+                }
+                break;
+            }
+            if typ == 0x0208 || typ == 0x000A {
+                break;
+            }
+        }
+        if !found {
+            return None;
+        }
+    }
+    (rows > 0).then_some((rows, cells))
 }
 
 fn text_number(number: f64, xf: usize, date_xfs: &[bool], epoch_1904: bool) -> String {
@@ -381,6 +464,82 @@ pub(crate) fn read(path: &Path, requested: Option<&str>) -> Result<Vec<SheetSamp
 mod tests {
     use super::*;
     use calamine::{Reader, open_workbook_auto};
+    use std::io::Write;
+
+    #[test]
+    fn sheet_shape_reads_dimensions_and_selects_by_name() {
+        fn record_bytes(typ: u16, payload: &[u8]) -> Vec<u8> {
+            let mut out = typ.to_le_bytes().to_vec();
+            out.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+            out.extend_from_slice(payload);
+            out
+        }
+        fn dimensions(rows: u32, cols: u16) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&rows.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&cols.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out
+        }
+        fn boundsheet(pos: u32, name: &str, wide: bool) -> Vec<u8> {
+            let text: Vec<u8> = if wide {
+                name.encode_utf16().flat_map(u16::to_le_bytes).collect()
+            } else {
+                name.bytes().collect()
+            };
+            // ShortXLUnicodeString：cch 1 字节 + 宽度标志 1 字节 + 名称。
+            let mut out = pos.to_le_bytes().to_vec();
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.push((text.len() / if wide { 2 } else { 1 }) as u8);
+            out.push(u8::from(wide));
+            out.extend_from_slice(&text);
+            out
+        }
+        let bof_globals = record_bytes(0x0809, &[0x00, 0x06, 0x05, 0x00]);
+        let bof_sheet = record_bytes(0x0809, &[0x00, 0x06, 0x10, 0x00]);
+        let sheet1 = [
+            bof_sheet.clone(),
+            record_bytes(0x0200, &dimensions(1000, 12)),
+            record_bytes(0x000A, &[]),
+        ]
+        .concat();
+        let sheet2 = [
+            bof_sheet,
+            record_bytes(0x0200, &dimensions(5, 2)),
+            record_bytes(0x000A, &[]),
+        ]
+        .concat();
+        // 宽字符中文表名 + 窄字符英文表名各一张，验证 ShortXLUnicodeString 布局。
+        let bs1 = boundsheet(0, "序时账", true);
+        let bs2 = boundsheet(0, "Notes", false);
+        // globals_len = BOF + 两条带记录头的 BOUNDSHEET + EOF，即表1子流的起始偏移。
+        let globals_len = bof_globals.len() + 4 + bs1.len() + 4 + bs2.len() + 4;
+        let bs1 = boundsheet(globals_len as u32, "序时账", true);
+        let bs2 = boundsheet((globals_len + sheet1.len()) as u32, "Notes", false);
+        let stream = [
+            bof_globals,
+            record_bytes(0x0085, &bs1),
+            record_bytes(0x0085, &bs2),
+            record_bytes(0x000A, &[]),
+            sheet1,
+            sheet2,
+        ]
+        .concat();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("台账.xls");
+        let mut ole = cfb::create(&path).unwrap();
+        let mut book = ole.create_new_stream("Workbook").unwrap();
+        book.write_all(&stream).unwrap();
+        drop(book);
+        drop(ole);
+
+        assert_eq!(sheet_shape(&path, None), Some((1005, 1000 * 12 + 5 * 2)));
+        assert_eq!(sheet_shape(&path, Some("序时账")), Some((1000, 12000)));
+        assert_eq!(sheet_shape(&path, Some("Notes")), Some((5, 10)));
+        assert_eq!(sheet_shape(&path, Some("不存在")), None);
+    }
 
     #[test]
     fn fixture_biff8_prefix_matches_full_reader() {

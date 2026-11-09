@@ -19,14 +19,28 @@ const tauri = vi.hoisted(() => {
 });
 vi.mock("@tauri-apps/api/core", () => ({ invoke: tauri.invokeMock }));
 
-import { engineCall } from "@/api";
+import { engineCall, syncBusyAbortAll } from "@/api";
 import { SyncBusyDialog } from "./SyncBusyDialog";
+import { OcrScanProgressContext } from "../ocrProgress";
 
 function flush() {
   return act(async () => {});
 }
 
 describe("同步操作等待弹窗", () => {
+  it("OCR 整批进度接管后，读取与保存不再额外弹同步等待窗，其他工具仍提示", async () => {
+    render(<OcrScanProgressContext.Provider value={{ available: true, active: true, setProgress: () => {} }}>
+      <SyncBusyDialog />
+    </OcrScanProgressContext.Provider>);
+    let pending: Promise<unknown>;
+    act(() => { pending = engineCall("ocr.extraction_save", {}); });
+    act(() => vi.advanceTimersByTime(1500));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await act(async () => { tauri.state.resolvers[0]({}); await pending; });
+    act(() => { pending = engineCall("loan.inspect", {}); });
+    act(() => vi.advanceTimersByTime(1500));
+    expect(screen.getByText("正在读取借款数据")).toBeTruthy();
+  });
   beforeEach(() => {
     vi.useFakeTimers();
     vi.stubGlobal("__TAURI_INTERNALS__", {});
@@ -220,6 +234,7 @@ describe("同步操作等待弹窗", () => {
     await flush();
     expect(caught).toHaveLength(1);
     expect((caught[0] as Error).message).toContain("已停止等待");
+    expect(caught[0]).toMatchObject({ code: "SYNC_BUSY_ABORTED" });
     // 弹窗关闭，也不留右下角小条：终止就是不要了。
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByText(/点击展开/)).toBeNull();
@@ -231,6 +246,28 @@ describe("同步操作等待弹窗", () => {
     await flush();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByText(/点击展开/)).toBeNull();
+  });
+
+  it.each([
+    "deposit.inspect_tb", "deposit.classify_source", "deposit.inspect_je",
+    "fx.inspect_tb", "fx.inspect_je", "fx.classify_source",
+    "loan.inspect", "loan.tb_accounts",
+  ])("停止等待后重传同一来源复用未结束的 Rust 读取：%s", async (method) => {
+    const params = { source: { inputPath: "TB.xls", sheet: "sheet1", headerRow: 0 } };
+    const first = engineCall(method, params).catch(() => undefined);
+    expect(tauri.invokeMock).toHaveBeenCalledTimes(1);
+    syncBusyAbortAll();
+    await first;
+
+    const second = engineCall(method, params);
+    expect(tauri.invokeMock).toHaveBeenCalledTimes(1);
+    tauri.state.resolvers[0]({ rowCount: 10 });
+    await expect(second).resolves.toEqual({ rowCount: 10 });
+
+    const third = engineCall(method, params);
+    expect(tauri.invokeMock).toHaveBeenCalledTimes(2);
+    tauri.state.resolvers[1]({ rowCount: 11 });
+    await expect(third).resolves.toEqual({ rowCount: 11 });
   });
 
   it("最小化收成右下角小条：点小条展开回来，清空后小条自动消失", async () => {

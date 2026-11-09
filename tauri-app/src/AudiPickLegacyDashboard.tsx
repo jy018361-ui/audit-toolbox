@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import "./AudiPickLegacyDashboard.css";
 
 export type AudiPickLegacyProjectStatus = "active" | "completed";
@@ -440,7 +441,7 @@ export function AudiPickLegacyDashboard({
           onClick={() => updatePreferences({ status: "all" })}
         >
           <span>项目总数</span>
-          <strong>{projects.length}</strong>
+          <strong>{formatCount(projects.length)}</strong>
         </button>
         <button
           aria-pressed={preferences.status === "active"}
@@ -467,7 +468,7 @@ export function AudiPickLegacyDashboard({
           <div>
             <h2>审计项目</h2>
             <p>
-              当前显示 {visibleProjects.length}/{projects.length} 个项目
+              当前显示 {formatCount(visibleProjects.length)}/{formatCount(projects.length)} 个项目
             </p>
           </div>
           <div className="ap146-project-filters">

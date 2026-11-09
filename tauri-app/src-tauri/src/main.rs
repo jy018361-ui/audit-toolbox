@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    audit_toolbox_lib::initialize_process_diagnostics();
     if std::env::args().any(|arg| arg == "--excel-merger-worker" || arg == "--rust-table-worker") {
         std::process::exit(audit_toolbox_lib::run_excel_merger_worker());
     }

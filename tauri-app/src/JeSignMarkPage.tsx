@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
@@ -19,12 +20,11 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
-import { JargonTip } from "@/components/JargonTip";
 import { SwitchInput } from "@/components/SwitchInput";
 import { CircleMinus, Equal, Search } from "lucide-react";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { JobProgress } from "@/components/JobProgress";
-import { LedgerSourceCard } from "@/components/LedgerSourceCard";
+import { LedgerSourceCard, LedgerSourceControls } from "@/components/LedgerSourceCard";
 import { LedgerLlmReview } from "@/components/LedgerLlmReview";
 import { LedgerMappingPreview } from "@/components/LedgerMappingPreview";
 import { displayFileName } from "@/fileDisplay";
@@ -35,7 +35,6 @@ import {
   type ColumnFilterValues,
 } from "@/components/ColumnFilterMenu";
 import {
-  activeAmountScheme,
   applyLedgerReviews,
   EMPTY_MAPPING,
   formatMappingValue,
@@ -147,6 +146,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   const [signReport, setSignReport] = useState<SignReport>();
   const [signLoading, setSignLoading] = useState(false);
   const [signError, setSignError] = useState("");
+  const [signRetry, setSignRetry] = useState(0);
   const signGeneration = useRef(0);
   const [renamingBatch, setRenamingBatch] = useState(false);
   const [batchNameDraft, setBatchNameDraft] = useState("");
@@ -155,11 +155,11 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   const patch = (value: Partial<JeMarkDraft>) =>
     setDraft((current) => ({ ...current, ...value }));
   const batch = draft.batches[draft.activeBatch] ?? draft.batches[0];
-  const scheme = activeAmountScheme(draft.mapping);
   const missingRequired = missingKanzhangRequiredRoles(draft.mapping);
   const showReview =
     llmBusy ||
     llmFailed ||
+    Boolean(llmStatus) ||
     changes.length > 0 ||
     pending.length > 0;
   const ready = Boolean(draft.inspect) && missingRequired.length === 0;
@@ -229,7 +229,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   // 历史记录「继续任务」：用存档参数重建草稿（含映射/批次/筛选），并自动
   // 重新读取文件——批次/标记/导出都以读取结果为显示前提，不重读用户看到
   // 的还是空页；读取完成后 restoredDraftRef 把存档映射与列筛选顶回建议值。
-  // 没有字段映射的存档（读取子步骤）不恢复，免得把现场覆盖成半成品。
+  // 读取子步骤没有映射时，从已保存的来源重新识别并使用新的建议映射。
   const autoReadKeyRef = useRef("");
   const [autoReadSeq, setAutoReadSeq] = useState(0);
   useTaskRestore(tool.id, (restore) => {
@@ -250,17 +250,14 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       p.mapping && typeof p.mapping === "object" && Object.keys(p.mapping).length
         ? p.mapping
         : undefined;
-    if (!mapping) return;
     const sheet = p.sheet ?? "";
     const columnFilters =
       p.columnFilters && typeof p.columnFilters === "object"
         ? p.columnFilters
         : {};
-    restoredDraftRef.current = {
-      key: `${p.inputPath}|${sheet.trim()}`,
-      mapping,
-      columnFilters,
-    };
+    restoredDraftRef.current = mapping
+      ? { key: `${p.inputPath}|${sheet.trim()}`, mapping, columnFilters }
+      : null;
     autoReadKeyRef.current = `${p.inputPath}|${sheet.trim()}`;
     setAutoReadSeq((value) => value + 1);
     llmGeneration.current += 1;
@@ -270,7 +267,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       sheet,
       headerRow: p.headerRow ?? 0,
       headerDepth: p.headerDepth ?? 1,
-      mapping,
+      mapping: mapping ?? EMPTY.mapping,
       batches:
         Array.isArray(p.targetBatches) && p.targetBatches.length
           ? p.targetBatches
@@ -390,6 +387,13 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   function invalidate(
     change: Partial<Pick<JeMarkDraft, "sheet" | "headerRow" | "headerDepth">>,
   ) {
+    llmGeneration.current += 1;
+    setLlmBusy(false);
+    setLlmFailed(false);
+    setLlmStatus("");
+    setChanges([]);
+    setPending([]);
+    setResult(undefined);
     setValueCache({});
     setMenu(undefined);
     setDraft((current) => ({
@@ -474,7 +478,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     patch({ mapping: setKanzhangMapping(draft.mapping, key, value) });
 
   // 金额符号口径报告：读完文件、金额/凭证相关映射一变就重查。
-  // 报告与导出走同一套后端检测，看到的口径就是实际采用的口径。
+  // 报告与导出走同一套后端检测；正常识别不展示，仅提示需要处理的情况。
   const signKey = draft.inspect
     ? JSON.stringify([
         draft.inputPath,
@@ -523,7 +527,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       .finally(() => {
         if (generation === signGeneration.current) setSignLoading(false);
       });
-  }, [signKey, draft.inspect]);
+  }, [signKey, draft.inspect, signRetry]);
 
   // 手动口径只服务于“所有凭证均为单边”的文件；一旦重新映射后检测到
   // 完整凭证，立即回到自动检测，避免隐藏的旧选择继续影响导出。
@@ -575,7 +579,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       if (generation !== llmGeneration.current) return;
       setLlmFailed(true);
       setLlmStatus(
-        `${ledgerErrorText(e).replace(/[。.]+$/, "")}。脚本自动映射已完成，可直接核对后继续；LLM 复核只是可选的辅助检查。`,
+        `${ledgerErrorText(e).replace(/[。.]+$/, "")}。智能复核未完成，当前映射仍可手动核对后继续。`,
       );
     } finally {
       if (generation === llmGeneration.current) setLlmBusy(false);
@@ -758,33 +762,19 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
 
   const filterCount = activeColumnFilters(draft.columnFilters).length;
 
-  // 金额符号口径：选择器只在有歧义的格式（方案 A/B）出现；
-  // 单一金额列天然已带符号，不提供选择。
-  const signLabels: Record<"auto" | "unsigned" | "signed", string> = {
-    auto: "自动检测",
-    unsigned: "借贷符号一样",
-    signed: "已带符号（借正贷负）",
-  };
+  // 只在单边文件需要确认、识别异常或映射可疑时展示。
   const signAllowsChoice =
     allVouchersOneSided &&
     (signReport?.scheme === "A" || signReport?.scheme === "B");
-  const signApplied =
-    draft.signChoice === "auto"
-      ? signReport?.detected === "signed"
-        ? "已带符号（借正贷负）"
-        : signReport?.detected === "unsigned"
-          ? "借贷符号一样（正数）"
-          : "无法自动判定，导出将按「借贷符号一样」处理"
-      : `${signLabels[draft.signChoice]}（已手动指定）`;
   const signWarnings = [
     signReport?.keySuspect
-      ? "多数凭证在两种口径下都无法配平——凭证识别字段可能组错了（比如缺公司或日期），请检查字段映射。"
+      ? "凭证无法配平，请检查凭证识别字段及金额字段映射。"
       : "",
-    signReport?.filtered
-      ? "多数凭证只有借方或只有贷方——这本账多半是按科目筛选后导出的，另一半分录不在文件里。这不是映射问题；口径按下方依据推断，请确认或手动指定。"
+    signAllowsChoice
+      ? "文件仅含单边分录，请确认金额记录方式。"
       : "",
-    draft.signChoice === "auto" && signReport && signReport.detected === null
-      ? "数据无法自动判定符号口径，建议手动指定。"
+    !signAllowsChoice && !signReport?.keySuspect && signReport?.detected === null
+      ? "无法识别金额正负号的含义，请检查金额与借贷方向字段映射。"
       : "",
   ].filter(Boolean);
 
@@ -801,20 +791,11 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       <LedgerSourceCard
         className={draft.inspect ? "jm-source-loaded" : undefined}
         inputPath={draft.inputPath}
-        sheet={draft.sheet}
-        knownSheets={draft.knownSheets}
-        headerRow={draft.headerRow}
-        headerDepth={draft.headerDepth}
-        detectedHeaderRow={draft.headerRow === 0 ? draft.inspect?.headerRow : undefined}
         dragHover={dragHover}
         busy={busy}
         job={job}
-        needsReload={!draft.inspect && draft.knownSheets.length > 0}
         onBrowse={chooseInput}
         onClear={clearAll}
-        onSheetChange={(value) => invalidate({ sheet: value, headerRow: 0, headerDepth: 0 })}
-        onHeaderRowChange={(value) => invalidate({ headerRow: value })}
-        onHeaderDepthChange={(value) => invalidate({ headerDepth: value })}
         onInspect={inspect}
         onCancel={(jobId) => jobCancel(jobId)}
       >
@@ -838,79 +819,6 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                 }
               />
             )}
-            {scheme && (
-              <p className="kz-hint">
-                金额方案{scheme}已生效；切换前请先清空当前方案的字段。
-                <JargonTip
-                  term="金额方案"
-                  text="金额记在一列并配借贷方向列（方案A），或分借方、贷方两列（方案B），二选一即可。"
-                />
-              </p>
-            )}
-            <div className="jm-source-footer">
-            {(signReport || signError || signLoading) && (
-              <div className={`jm-sign${signWarnings.length ? " warn" : ""}`}>
-                <div className="jm-sign-head">
-                  <span className="jm-sign-title">金额符号口径</span>
-                  {signAllowsChoice && (
-                    <span
-                      className="jm-sign-choices"
-                      role="group"
-                      aria-label="金额符号口径选择"
-                    >
-                      <button
-                        type="button"
-                        className={draft.signChoice === "unsigned" ? "active" : ""}
-                        aria-pressed={draft.signChoice === "unsigned"}
-                        title="适用于借方、贷方金额都以正数记录，借贷方向由分列或方向字段区分的单边凭证文件。再次点击可恢复自动检测。"
-                        onClick={() => patch({ signChoice: draft.signChoice === "unsigned" ? "auto" : "unsigned" })}
-                      >
-                        <Equal size={16} aria-hidden="true" />
-                        借贷符号一样
-                      </button>
-                      <button
-                        type="button"
-                        className={draft.signChoice === "signed" ? "active" : ""}
-                        aria-pressed={draft.signChoice === "signed"}
-                        title="适用于金额本身已表达方向（借方为正、贷方为负）的单边凭证文件。再次点击可恢复自动检测。"
-                        onClick={() => patch({ signChoice: draft.signChoice === "signed" ? "auto" : "signed" })}
-                      >
-                        <CircleMinus size={16} aria-hidden="true" />
-                        已带符号
-                      </button>
-                    </span>
-                  )}
-                </div>
-                <p className="jm-sign-applied">
-                  {signLoading
-                    ? "正在检测金额符号口径…"
-                    : signError
-                      ? signError
-                      : signApplied}
-                </p>
-                {!signLoading && !signError && signReport && (
-                  <details className="jm-sign-basis">
-                    <summary>查看判定依据</summary>
-                    <p>{signReport.basis}</p>
-                  </details>
-                )}
-                {signWarnings.map((text) => (
-                  <p key={text} className="jm-sign-warning">
-                    {text}
-                  </p>
-                ))}
-              </div>
-            )}
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={busy || llmBusy}
-                onClick={() => void reviewMapping()}
-                aria-label="重新进行 LLM 复核"
-              >
-                {llmBusy ? "复核中…" : "复核映射"}
-              </Button>
-            </div>
             {missingRequired.length > 0 && (
               <p className="fa-missing-hint">
                 尚未映射：{missingRequired.join("、")}
@@ -924,6 +832,56 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       {draft.inspect && (
         <section className="kz-card jm-batches">
           <h2>批次与目标科目</h2>
+          {/* 目标科目是本卡必做动作，提为首行并挂「必做」徽标；批次 chips 退居其后。 */}
+          <div className="jm-account-block">
+            <span className="jm-account-label">
+              目标科目
+              <Badge variant="warning">必做</Badge>
+            </span>
+            <div className="jm-account-row">
+              <Button
+                type="button"
+                variant={batch.accounts.length ? "outline" : "default"}
+                data-ts-filter-trigger=""
+                className="jm-account-picker"
+                disabled={llmBusy || missingRequired.length > 0}
+                aria-expanded={menu?.field === ACCOUNT_MENU}
+                onClick={(event) => {
+                  if (menu?.field === ACCOUNT_MENU) {
+                    setMenu(undefined);
+                    return;
+                  }
+                  openMenu(ACCOUNT_MENU, event.currentTarget);
+                }}
+              >
+                {llmBusy
+                  ? "正在确定科目字段…"
+                  : batch.accounts.length
+                    ? "修改目标科目"
+                    : "选择目标科目"}
+                <Search size={16} aria-hidden="true" />
+              </Button>
+              <span className="jm-account-summary" title={batch.accounts.join("、")}>
+                {batch.accounts.length
+                  ? `已选 ${batch.accounts.length} 个：${batch.accounts.slice(0, 2).join("、")}${batch.accounts.length > 2 ? "…" : ""}`
+                  : missingRequired.length > 0
+                    ? "请先完成预览表中的科目字段映射"
+                    : "尚未选择"}
+              </span>
+            </div>
+            {filterCount > 0 && (
+              <div className="jm-filter-note">
+                另有 {filterCount} 列设了筛选条件，对所有批次一致生效
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => patch({ columnFilters: {} })}
+                >
+                  清除列筛选
+                </Button>
+              </div>
+            )}
+          </div>
           <div className="jm-batch-row">
             <div className="kz-tabs" aria-label="标记批次">
               {draft.batches.map((value, index) => (
@@ -981,8 +939,6 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               </div>
             ) : (
               <div className="jm-current-batch">
-                <span className="jm-current-batch-label">当前批次</span>
-                <strong title={batch.name}>{batch.name}</strong>
                 <Button
                   type="button"
                   variant="ghost"
@@ -1021,52 +977,6 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               {draft.batches.length === 1 ? "清空批次" : "删除批次"}
             </Button>
           </div>
-          <div className="jm-account-block">
-            <span className="jm-account-label">目标科目</span>
-            <div className="jm-account-row">
-              <Button
-                type="button"
-                variant={batch.accounts.length ? "outline" : "default"}
-                data-ts-filter-trigger=""
-                className="jm-account-picker"
-                disabled={llmBusy || missingRequired.length > 0}
-                aria-expanded={menu?.field === ACCOUNT_MENU}
-                onClick={(event) => {
-                  if (menu?.field === ACCOUNT_MENU) {
-                    setMenu(undefined);
-                    return;
-                  }
-                  openMenu(ACCOUNT_MENU, event.currentTarget);
-                }}
-              >
-                {llmBusy
-                  ? "正在确定科目字段…"
-                  : batch.accounts.length
-                    ? "修改目标科目"
-                    : "选择目标科目"}
-                <Search size={16} aria-hidden="true" />
-              </Button>
-              <span className="jm-account-summary" title={batch.accounts.join("、")}>
-                {batch.accounts.length
-                  ? `已选 ${batch.accounts.length} 个：${batch.accounts.slice(0, 2).join("、")}${batch.accounts.length > 2 ? "…" : ""}`
-                  : missingRequired.length > 0
-                    ? "请先完成预览表中的科目字段映射"
-                    : "尚未选择"}
-              </span>
-            </div>
-            {filterCount > 0 && (
-              <div className="jm-filter-note">
-                另有 {filterCount} 列设了筛选条件，对所有批次一致生效
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => patch({ columnFilters: {} })}
-                >
-                  清除列筛选
-                </Button>
-              </div>
-            )}
-          </div>
           <p className="kz-note jm-rule-note">
             标记只应用于所选科目行；表头筛选对整张凭证生效。
           </p>
@@ -1074,10 +984,77 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       )}
 
       <LedgerMappingPreview
+        sourceName={draft.inputPath.split(/[\\/]/).pop()}
         inspect={draft.inspect}
         mapping={draft.mapping}
         setMap={setMap}
         llmBusy={llmBusy}
+        sourceNote={draft.inspect && draft.headerRow === 0 ? <p className="fx-hint">已自动按第 {draft.inspect.headerRow} 行识别表头。</p> : !draft.inspect && draft.inputPath ? <p className="fx-hint">请读取文件以刷新预览和映射。</p> : undefined}
+        toolbar={<>
+          {draft.inputPath && <LedgerSourceControls
+            sheet={draft.sheet} knownSheets={draft.knownSheets} headerRow={draft.headerRow} headerDepth={draft.headerDepth} busy={busy || llmBusy}
+            onSheetChange={(sheet) => invalidate({ sheet, headerRow: 0, headerDepth: 0 })}
+            onHeaderRowChange={(headerRow) => invalidate({ headerRow })}
+            onHeaderDepthChange={(headerDepth) => invalidate({ headerDepth })}
+          />}
+          {draft.inspect && (
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={busy || llmBusy}
+            onClick={() => void reviewMapping()}
+          >
+            {llmBusy ? "复核中…" : "复核映射"}
+          </Button>
+          )}
+        </>}
+        banner={!signLoading && (signError || signWarnings.length > 0) ? (
+          <div className="jm-sign" role="alert">
+            {signError ? (
+              <>
+                <p className="jm-sign-warning">金额识别失败：{signError}</p>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => setSignRetry((value) => value + 1)}
+                >
+                  重新检测
+                </Button>
+              </>
+            ) : (
+              <>
+                {signWarnings.map((text) => (
+                  <p key={text} className="jm-sign-warning">{text}</p>
+                ))}
+                {signAllowsChoice && (
+                  <span className="jm-sign-choices" role="group" aria-label="金额符号口径选择">
+                    <button
+                      type="button"
+                      className={draft.signChoice === "unsigned" ? "active" : ""}
+                      aria-pressed={draft.signChoice === "unsigned"}
+                      title="适用于借方、贷方金额都以正数记录，借贷方向由分列或方向字段区分的单边凭证文件。再次点击可恢复自动检测。"
+                      onClick={() => patch({ signChoice: draft.signChoice === "unsigned" ? "auto" : "unsigned" })}
+                    >
+                      <Equal size={16} aria-hidden="true" />
+                      借贷符号一样
+                    </button>
+                    <button
+                      type="button"
+                      className={draft.signChoice === "signed" ? "active" : ""}
+                      aria-pressed={draft.signChoice === "signed"}
+                      title="适用于金额本身已表达方向（借方为正、贷方为负）的单边凭证文件。再次点击可恢复自动检测。"
+                      onClick={() => patch({ signChoice: draft.signChoice === "signed" ? "auto" : "signed" })}
+                    >
+                      <CircleMinus size={16} aria-hidden="true" />
+                      已带符号
+                    </button>
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+        ) : undefined}
         headerExtras={(header) => {
           // 科目的选择入口只留批次区上方那一个按钮；预览表头的科目列
           // 不再重复挂漏斗，避免两个入口指到同一个面板。
@@ -1139,9 +1116,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
           <details className="jm-export-help">
             <summary>导出文件格式与列说明</summary>
             <p className="kz-hint">
-            {draft.outputTouched
-              ? "已指定保存位置，导出会以这个文件名为基准。"
-              : "默认保存到凭证文件所在目录，文件名为「正负数标记_源文件名[_工作表]_<时间戳>.csv」（导出时按当前时间生成）。"}
+            {!draft.outputTouched &&
+              "默认保存到凭证文件所在目录。"}
             每个批次单独出一个文件，选 .csv 出 CSV、选 .xlsx
             出工作簿；明细最前面是
             {draft.markLossTransfer ? "【损益结转】" : ""}
@@ -1153,11 +1129,11 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               请先在上方选择至少一个目标科目。
             </p>
           )}
-          <div className="kz-actions">
+          <div className="kz-actions" data-button-size="default">
             {busy && job ? (
               <Button
                 variant="secondary"
-                size="sm"
+                size="default"
                 onClick={() => void cancelJobWithFeedback(job.jobId)}
               >
                 停止
@@ -1232,18 +1208,10 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
   const batches = Array.isArray(object?.batches)
     ? (object.batches as Record<string, unknown>[])
     : [];
-  const sign =
-    object?.signConvention && typeof object.signConvention === "object"
-      ? (object.signConvention as {
-          applied?: string;
-          basis?: string;
-          choice?: string;
-        })
-      : undefined;
   const showProgress = shouldShowKanzhangJobProgress(job?.phase);
   // 读取文件也会产生 job/result，但只有标记导出才有值得展示的结果。
   // 失败或取消后上方已显示任务反馈，这里不再留下空白结果卡。
-  if (!showProgress && !paths.length && !batches.length && !sign?.applied) return null;
+  if (!showProgress && !paths.length && !batches.length) return null;
   return (
     <Card variant="workspace" className="kz-result">
       <CardHeader>
@@ -1278,24 +1246,14 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
             {batches.map((item, index) => (
               <div key={index}>
                 <b>{String(item.name ?? `批次${index + 1}`)}</b>
-                <span>明细 {String(item.rows ?? 0)} 行</span>
-                <span>直接匹配 {String(item.matchedPairs ?? 0)} 对</span>
-                <span>跨凭证匹配 {String(item.crossMatchedPairs ?? 0)} 对</span>
-                <span>未匹配 {String(item.unmatchedRows ?? 0)} 行</span>
-                <span>损益结转 {String(item.lossTransferVouchers ?? 0)} 笔</span>
+                <span>明细 {formatCount(item.rows ?? 0)} 行</span>
+                <span>直接匹配 {formatCount(item.matchedPairs ?? 0)} 对</span>
+                <span>跨凭证匹配 {formatCount(item.crossMatchedPairs ?? 0)} 对</span>
+                <span>未匹配 {formatCount(item.unmatchedRows ?? 0)} 行</span>
+                <span>损益结转 {formatCount(item.lossTransferVouchers ?? 0)} 笔</span>
               </div>
             ))}
           </div>
-        )}
-        {sign?.applied && (
-          <p className="kz-hint">
-            本次导出金额符号口径：
-            {sign.applied === "signed"
-              ? "已带符号（借正贷负）"
-              : "借贷符号一样（正数）"}
-            {sign.choice && sign.choice !== "auto" ? "（手动指定）" : ""}
-            {sign.basis ? `。依据：${sign.basis}` : ""}
-          </p>
         )}
       </CardContent>
     </Card>

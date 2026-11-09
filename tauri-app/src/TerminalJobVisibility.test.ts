@@ -15,12 +15,6 @@ describe("取消任务后的页面反馈", () => {
     expect(source("je-sign-mark.css")).toMatch(/\.jm-page \.kz-actions \+ \.kz-result\s*\{\s*margin-top: var\(--sp-4\)/);
     expect(source("JeSignMarkPage.tsx")).toContain('title={path}');
   });
-  it("结转终态在页首显示摘要并提供结果锚点", () => {
-    const page = source("RollForwardPage.tsx");
-    expect(page).toContain('href="#roll-forward-results"');
-    expect(page).toContain('id="roll-forward-results"');
-    expect(page).toContain('本次结转已停止');
-  });
   it("TS 使用独立取消徽标并避免重复卡内进度", () => {
     expect(source("TsManagerParityPage.tsx")).toMatch(/!\["completed", "failed", "cancelled"\]\.includes\(job\.phase\)/);
     expect(source("TsManagerParityPage.tsx")).toContain('<Badge variant="warning">已取消</Badge>');

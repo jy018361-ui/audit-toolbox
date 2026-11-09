@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canApplyFaSupplements,
   faDefaultOutputPath,
+  faKeyPairingAt,
   faMappedRolesForColumn,
   faMissingOptionalRoles,
   faOutputPathAfterSourceSelection,
@@ -12,15 +13,17 @@ import {
   faReviewSummary,
   faRolesForSide,
   faSelectColumnRole,
+  faSupplementManualReviewReady,
+  faSupplementSideReviewReady,
   isFaMatchDisabled,
+  normalizeFaKeyPairing,
   normalizeFaSuggestedMapping,
   planFaLlmChanges,
   planFaSupplementChanges,
   sanitizeFaBeginMapping,
   shouldAutoApplyFa,
-  shouldAutoPrefillFaAddition,
+  shouldAutoReviewFaInspection,
   shouldShowFaAdditionFields,
-  shouldShowFaPreviewWorkspace,
 } from "./faListUi";
 
 const roleLabels = {
@@ -37,6 +40,19 @@ const baseInput = {
   endKeys: ["编号"],
   roleLabels,
 };
+
+it("LLM 可将公司名称表头映射为现有资产 ID", () => {
+  const plan = planFaLlmChanges({
+    ...baseInput,
+    matchReview: { action: "replace", confidence: 0.95,
+      suggested_file1_columns: ["资产编号", "公司名称"],
+      suggested_file2_columns: ["编号", "企业名称"] },
+  });
+  expect(plan.beginKeys).toEqual(["资产编号", "公司名称"]);
+  expect(plan.endKeys).toEqual(["编号", "企业名称"]);
+  expect(plan.beginMapping).toEqual(baseInput.beginMapping);
+  expect(plan.endMapping).toEqual(baseInput.endMapping);
+});
 
 describe("FA List migration parity", () => {
   it("仅高于 75% 的字段建议自动采纳", () => {
@@ -55,6 +71,18 @@ describe("FA List migration parity", () => {
     expect(isFaMatchDisabled(true, false)).toBe(false);
     expect(isFaMatchDisabled(false, false)).toBe(true);
     expect(isFaMatchDisabled(true, true)).toBe(true);
+  });
+
+  it("两侧可见 Sheet 均 ≤1 张时保持 inspect 后自动 LLM 复核", () => {
+    expect(shouldAutoReviewFaInspection(0, 0)).toBe(true);
+    expect(shouldAutoReviewFaInspection(1, 1)).toBe(true);
+    expect(shouldAutoReviewFaInspection(1, 0)).toBe(true);
+  });
+
+  it("任一侧可见 Sheet 多于 1 张时不自动复核，等用户确认后手动发起", () => {
+    expect(shouldAutoReviewFaInspection(2, 1)).toBe(false);
+    expect(shouldAutoReviewFaInspection(1, 2)).toBe(false);
+    expect(shouldAutoReviewFaInspection(3, 5)).toBe(false);
   });
 
   it("clears a prior sample's save target when either source workbook changes", () => {
@@ -100,12 +128,48 @@ describe("FA List migration parity", () => {
     expect(canApplyFaSupplements("", "C:/处置.xlsx", undefined)).toBe(true);
   });
 
-  it("does not treat an addition date alone as a supplemental addition list", () => {
-    expect(shouldAutoPrefillFaAddition(undefined, 12, false)).toBe(false);
-    expect(shouldAutoPrefillFaAddition("", 12, false)).toBe(false);
-    expect(shouldAutoPrefillFaAddition("新增方式", 0, false)).toBe(false);
-    expect(shouldAutoPrefillFaAddition("新增方式", 12, true)).toBe(false);
-    expect(shouldAutoPrefillFaAddition("新增方式", 12, false)).toBe(true);
+  it("单张补充表读取完成即可手动发起 LLM 复核", () => {
+    const ready = {
+      path: "C:/资产减少业务查询.xlsx",
+      sheet: "Sheet1",
+    };
+    const info = { sheets: ["Sheet1"], selectedSheet: "Sheet1" };
+    // 未选文件、未确认 Sheet 时都不能复核。
+    expect(faSupplementSideReviewReady({ path: "", sheet: "" })).toBe(false);
+    expect(faSupplementSideReviewReady(ready)).toBe(false);
+    expect(faSupplementSideReviewReady(ready, info)).toBe(true);
+    // 本期只有处置清单：手动复核可用（自动复核仍等两张表齐）。
+    expect(
+      faSupplementManualReviewReady({ path: "", sheet: "" }, ready, undefined, info),
+    ).toBe(true);
+    expect(
+      faSupplementManualReviewReady(ready, { path: "", sheet: "" }, info, undefined),
+    ).toBe(true);
+    // 已加载但 Sheet 未确认：不可复核。
+    expect(
+      faSupplementManualReviewReady(
+        { path: "C:/新增.xlsx", sheet: "" },
+        ready,
+        { sheets: ["明细", "汇总"], selectedSheet: undefined },
+        info,
+      ),
+    ).toBe(false);
+    // 两张都没加载：无复核对象。
+    expect(
+      faSupplementManualReviewReady(
+        { path: "", sheet: "" },
+        { path: "", sheet: "" },
+      ),
+    ).toBe(false);
+    // 单 Sheet 工作簿无需选表，读取完成即算就绪。
+    expect(
+      faSupplementManualReviewReady(
+        ready,
+        { path: "C:/新增.xlsx", sheet: "" },
+        info,
+        { sheets: [], selectedSheet: undefined },
+      ),
+    ).toBe(true);
   });
 
   it("preserves whitespace in an Excel header value while trimming its label", () => {
@@ -117,13 +181,6 @@ describe("FA List migration parity", () => {
       value: " 残值率 ",
       label: "残值率",
     });
-  });
-
-  it("keeps the right preview workspace throughout file and supplement setup", () => {
-    expect(shouldShowFaPreviewWorkspace(1, false)).toBe(true);
-    expect(shouldShowFaPreviewWorkspace(1, true)).toBe(true);
-    expect(shouldShowFaPreviewWorkspace(2, true)).toBe(true);
-    expect(shouldShowFaPreviewWorkspace(3, true)).toBe(false);
   });
 
   it("never renders a malformed LLM mapping string character by character", () => {
@@ -169,7 +226,7 @@ describe("FA LLM 复核先改后核", () => {
     });
   });
 
-  it("clear 能删除确定错误且无替代列的已有映射", () => {
+  it.each([0.6, 0.89, 0.8999, 0.9, 0.96, 1])("clear 置信度 %s 按 90% 门槛自动清除并保留撤销信息", (confidence) => {
     const plan = planFaLlmChanges({
       ...baseInput,
       fieldReviews: [
@@ -177,11 +234,21 @@ describe("FA LLM 复核先改后核", () => {
           role: "category",
           file_side: "file1",
           action: "clear",
-          confidence: 0.96,
+          confidence,
+          autoClearSafe: true,
           reason: "当前列是编码且没有可信类别列",
         },
       ],
     });
+    if (confidence >= 0.9) {
+      expect(plan.beginMapping.category).toBeUndefined();
+      expect(plan.pending).toEqual([]);
+      expect(plan.changes[0]).toMatchObject({
+        before: "类别", after: "未映射",
+        restore: { kind: "mapping", side: "begin", key: "category", value: "类别" },
+      });
+      return;
+    }
     expect(plan.beginMapping.category).toBe("类别");
     expect(plan.pending[0]).toMatchObject({
       id: "begin.category",
@@ -528,6 +595,24 @@ describe("FA LLM 复核先改后核", () => {
 });
 
 describe("FA 补充清单 LLM 复核先改后核", () => {
+  it.each([0.89, 0.9, 1])("补充清单 clear 置信度 %s 按 90% 门槛处理", (confidence) => {
+    const plan = planFaSupplementChanges({
+      addition: { date: "入账日期" }, disposal: {},
+      fieldReviews: [{ role: "addition_date", file_side: "file1", action: "clear", confidence }],
+    });
+    expect(plan.addition.date).toBe(confidence >= 0.9 ? undefined : "入账日期");
+    expect(plan.pending).toHaveLength(confidence >= 0.9 ? 0 : 1);
+    if (confidence >= 0.9) expect(plan.changes[0].restore).toMatchObject({ value: "入账日期" });
+  });
+
+  it("关闭自动应用时高置信度清空也等待确认", () => {
+    const plan = planFaLlmChanges({ ...baseInput, autoApply: false,
+      fieldReviews: [{ role: "category", file_side: "file1", action: "clear", confidence: 1 }],
+    });
+    expect(plan.beginMapping.category).toBe("类别");
+    expect(plan.pending).toHaveLength(1);
+  });
+
   const supplement = () => ({
     addition: { method: "变动方式", date: "", keys: ["资产编号"] },
     disposal: {
@@ -862,5 +947,41 @@ describe("列头下拉选角色只做加法", () => {
     );
     expect(cleared.mapping.method).toBeUndefined();
     expect(cleared.keys).toEqual(["资产编号"]);
+  });
+});
+
+describe("两期组合键命中徽章", () => {
+  const pairing = [
+    { begin: "资产编号", end: "编号", hit: true },
+    { begin: "类别", end: "资产类别", hit: false },
+  ];
+
+  it("按下标取键位碰撞结论，命中与否都返回该条目", () => {
+    expect(faKeyPairingAt(pairing, "begin", 0, "资产编号")?.hit).toBe(true);
+    expect(faKeyPairingAt(pairing, "end", 1, "资产类别")?.hit).toBe(false);
+  });
+
+  it("键位增删导致 keyPairing 过期时返回 undefined（该键位不显示徽章）", () => {
+    expect(faKeyPairingAt(pairing, "begin", 2, "新增列")).toBeUndefined();
+    expect(faKeyPairingAt(pairing, "end", -1, "编号")).toBeUndefined();
+    expect(faKeyPairingAt(undefined, "begin", 0, "资产编号")).toBeUndefined();
+  });
+
+  it("键位上的列已换人时同样不显示，避免旧结论贴到新列上", () => {
+    expect(faKeyPairingAt(pairing, "begin", 0, "换过的列")).toBeUndefined();
+    // 列名比对按去空格口径，与表头下拉一致。
+    expect(faKeyPairingAt(pairing, "begin", 0, " 资产编号 ")?.hit).toBe(true);
+  });
+
+  it("normalizeFaKeyPairing 字段缺失返回 undefined、丢弃形状不对的条目", () => {
+    expect(normalizeFaKeyPairing(undefined)).toBeUndefined();
+    expect(normalizeFaKeyPairing({ keyPairing: [] })).toBeUndefined();
+    expect(
+      normalizeFaKeyPairing([
+        { begin: "资产编号", end: "编号", hit: true },
+        { begin: "缺 end" },
+        null,
+      ]),
+    ).toEqual([{ begin: "资产编号", end: "编号", hit: true }]);
   });
 });

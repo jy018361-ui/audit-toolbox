@@ -89,7 +89,10 @@ describe("ConfirmDialog", () => {
     expect(title).toHaveClass("line-clamp-2");
     expect(title).toHaveAttribute("title", "超长确认标题".repeat(20));
     expect(screen.getByText(/已合并 7 条重复信息/)).toBeInTheDocument();
-    expect(document.querySelector(".confirm-dialog-body")).toHaveClass("overflow-y-auto");
+    // 正文滚动收进 ScrollFadeBox 的内层滚动区（带底缘渐隐提示），行为不变。
+    const scroller = document.querySelector(".confirm-dialog-body .scroll-fade-scroll");
+    expect(scroller).toBeTruthy();
+    expect(scroller).toHaveStyle({ maxHeight: "min(52dvh, 420px)" });
     expect(document.querySelector(".confirm-dialog-footer")).toHaveClass("shrink-0");
   });
 });

@@ -4,9 +4,11 @@ import { StepTourHint } from "./tour/StepTourHint";
 export type Step = {
   key: string;
   label: string;
+  /** 步骤名称旁的状态标签，同时作为辅助技术的描述。 */
+  badge?: string;
   disabled?: boolean;
   /** 该步骤执行失败：显示警示标记而非序号/对勾，优先级高于 active/done。 */
-  status?: "error";
+  status?: "error" | "done";
 };
 
 export type StepIndicatorProps = {
@@ -47,8 +49,8 @@ export function StepIndicator({
       <ol className="step-indicator-list">
         {steps.map((step, index) => {
         const failed = step.status === "error";
-        const done = showCompleted && index < current && !failed;
-        const active = index === current && !failed;
+        const done = !failed && (step.status === "done" || (showCompleted && index < current));
+        const active = index === current && !failed && !done;
         // disabled 只由外部传入的 step.disabled 决定。
         // 不能用 (!done && !active) 自动禁用：FA 的步骤 2/3 的可用性由
         // 业务条件（如 !faStats）控制，匹配完成后应可点击进入。
@@ -62,10 +64,11 @@ export function StepIndicator({
                   active && "active",
                   done && "done",
                   failed && "error",
-                  disabled && "disabled",
+                  disabled && !done && !active && "disabled",
                 )}
                 aria-current={active ? "step" : undefined}
                 aria-label={`${index + 1} ${step.label}${done ? "（已完成）" : ""}${failed ? "（失败）" : ""}`}
+                aria-description={step.badge}
                 disabled={disabled}
                 onClick={() => onStepClick?.(index)}
               >
@@ -89,6 +92,7 @@ export function StepIndicator({
                   )}
                 </span>
                 <span className="step-indicator-label">{step.label}</span>
+                {step.badge && <span className="step-indicator-badge">{step.badge}</span>}
                 {done ? <span className="sr-only">（已完成）</span> : null}
                 {failed ? <span className="sr-only">（失败）</span> : null}
               </button>

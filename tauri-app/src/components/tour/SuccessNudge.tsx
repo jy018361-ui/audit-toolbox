@@ -4,8 +4,10 @@ import { CircleCheck } from "lucide-react";
 import { openOutput } from "@/api";
 import type { JobEvent } from "@/types";
 import { loadTourState } from "./tourState";
+import { TOUR_COPY, formatTourText } from "./tourCopy";
 import "./success-nudge.css";
 import { isAudiPickOperationJob } from "../../audipickOperation";
+import { isOcrScanJob } from "../../ocrProgress";
 
 type SuccessNudgeProps = {
   /** App 收集到的全部任务事件（含已结束的，这里只关心 completed 的那些）。 */
@@ -42,7 +44,12 @@ export function SuccessNudge({
       .reverse()
       .find(
         (job) =>
-          job.phase === "completed" && !isAudiPickOperationJob(job.jobId) && !celebratedIds.current.has(job.jobId),
+          job.phase === "completed" &&
+          // 完整读取等后台准备任务结束，不代表整个工具已完成。
+          !job.background &&
+          !isAudiPickOperationJob(job.jobId) &&
+          !isOcrScanJob(job.jobId) &&
+          !celebratedIds.current.has(job.jobId),
       );
     if (!next) return;
     celebratedIds.current.add(next.jobId);
@@ -83,7 +90,7 @@ export function SuccessNudge({
         <CircleCheck size={18} />
       </span>
       <p className="success-nudge-text">
-        {toolNameOf(celebrating.toolId)}已完成
+        {formatTourText(TOUR_COPY.success, { toolName: toolNameOf(celebrating.toolId) })}
       </p>
       <div className="success-nudge-actions">
         {outputPath && (
@@ -103,7 +110,7 @@ export function SuccessNudge({
                 .catch(() => setOpenError(true));
             }}
           >
-            打开结果
+            {TOUR_COPY.openResult}
           </button>
         )}
         <button
@@ -114,21 +121,21 @@ export function SuccessNudge({
             navigate("/");
           }}
         >
-          返回工作台
+          {TOUR_COPY.returnWorkspace}
         </button>
       </div>
       {openError && (
         <p className="success-nudge-error" role="alert">
-          无法打开结果文件。文件可能已移动或删除，请在历史记录中确认输出位置。
+          {TOUR_COPY.openError}
         </p>
       )}
       <button
         type="button"
         className="success-nudge-close"
-        aria-label="关闭完成提示"
+        aria-label={TOUR_COPY.closeSuccess}
         onClick={() => setCelebrating(null)}
       >
-        ×
+        {TOUR_COPY.closeSymbol}
       </button>
     </div>
   );

@@ -5,7 +5,7 @@ import { covenantExportRows } from "./audipickCovenant";
 import { extractFinancialMetrics } from "./audipickCovenantExtraction";
 import { handlers } from "./preview/demo/audipick";
 
-describe("AudiPick 财务契约浏览器预览", () => {
+describe("AudiPick 财务指标契约浏览器预览", () => {
   it("模板详情只显示正式四列，不再回退为 c1-c10", () => {
     const window: Record<string, unknown> = {};
     const context = vm.createContext({ window });
@@ -19,7 +19,7 @@ describe("AudiPick 财务契约浏览器预览", () => {
       getFieldsForRule: (ruleId: string) => Array<{ key: string; label: string }>;
     };
     expect(engine.getFieldsForRule("loan_covenant")).toEqual([
-      { key: "covenant_category", label: "财务契约类型" },
+      { key: "covenant_category", label: "财务指标契约类型" },
       { key: "trigger_standard", label: "限制或触发标准" },
       { key: "excerpt", label: "合同原文摘录" },
       { key: "source_reference", label: "原文引用出处" },
@@ -38,7 +38,7 @@ describe("AudiPick 财务契约浏览器预览", () => {
     expect(exported).toHaveLength(2);
     expect(pending).toHaveLength(1);
     expect(Object.keys(exported[0])).toEqual([
-      "财务契约类型",
+      "财务指标契约类型",
       "限制或触发标准",
       "合同原文摘录",
       "原文引用出处",

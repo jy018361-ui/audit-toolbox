@@ -38,6 +38,11 @@ const pick = (select: HTMLSelectElement, role: string) =>
   fireEvent.change(select, { target: { value: role } });
 
 describe("共用字段映射面板", () => {
+  it("手选辅助列记录确认，改为其他角色时清除确认", () => {
+    const { onChange, selects } = panel({ roles: [...ROLES, ["auxiliary", "辅助核算"]], multi: new Set(["auxiliary"]) });
+    pick(selects[0], "auxiliary");
+    expect(onChange.mock.calls[0][0]).toEqual({ auxiliary: ["会计科目"], __manualAuxiliary: '{"auxiliary":["会计科目"]}' });
+  });
   it("每一列给一个角色下拉，选中后回写映射", () => {
     const { onChange, selects } = panel();
     expect(screen.getByText("文件预览").closest("section")).toHaveClass(
@@ -106,6 +111,17 @@ describe("共用字段映射面板", () => {
       accountCode: "科目",
       accountName: ["科目"],
     });
+  });
+
+  it("连字符组合科目允许双映射，数字辅助编码不套用", () => {
+    const { onChange, selects } = panel({
+      headers: ["会计科目"],
+      rows: [["1219000101-其他应收款-应收单位及个人款"], ["1002010109-人民币存款-民生银行"], ["5001010101-教育事业费用"], ["1002010103-人民币存款-建设银行"]],
+      mapping: { accountName: ["会计科目"] },
+      multi: new Set(["accountName"]),
+    });
+    pick(selects[0], "accountCode");
+    expect(onChange).toHaveBeenCalledWith({ accountCode: "会计科目", accountName: ["会计科目"] });
   });
 
   it("借款页的字符串映射也能保存混写列双角色且不产生数组状态", () => {
@@ -251,8 +267,8 @@ describe("共用字段映射面板", () => {
             ? "optional"
             : undefined,
     });
-    expect(screen.getByText(/为必填字段/)).toHaveTextContent(
-      "＊ 为必填字段；（选填）须按当前分组的整组规则补充。",
+    expect(screen.getByText(/为必填/)).toHaveTextContent(
+      "＊ 为必填；（选填）须按当前分组的整组规则补充。",
     );
     expect(
       selects[0].querySelector('option[value="functionalAmount"]'),
@@ -319,6 +335,53 @@ describe("共用字段映射面板", () => {
     );
   });
 
+  it("二选一槽位标注备选字段，对方已映射时灰显并注明已选对方", () => {
+    const alternatesOf = (role: string) =>
+      role === "functionalAmount"
+        ? ["currencyText"]
+        : role === "currencyText"
+          ? ["functionalAmount"]
+          : undefined;
+    const first = panel({
+      groups: [
+        {
+          title: "台账-类型A",
+          roles: ["functionalAmount", "currencyText"],
+          required: ["functionalAmount", "currencyText"],
+        },
+      ],
+      alternatesOf,
+    });
+    const option = first.selects[0].querySelector(
+      'option[value="functionalAmount"]',
+    );
+    expect(option?.textContent).toContain("本位币净额＊（与币种线索文本二选一）");
+    cleanup();
+
+    // 对方已映射：本条灰显、不再标＊，改注「已选对方」；仍可选择。
+    const second = panel({
+      mapping: { functionalAmount: "本位币金额" },
+      alternatesOf,
+      requirementOf: (role: string) =>
+        role === "functionalAmount" ? "required" : undefined,
+    });
+    const spared = second.selects[0].querySelector(
+      'option[value="currencyText"]',
+    );
+    expect(spared?.textContent).toContain(
+      "币种线索文本（与本位币净额二选一，已选本位币净额）",
+    );
+    expect(spared).toHaveClass("dt-role-taken");
+    expect(spared?.textContent).not.toContain("＊");
+    // 已映射的一方照常标＊和（已用）。
+    const taken = second.selects[0].querySelector(
+      'option[value="functionalAmount"]',
+    );
+    expect(taken?.textContent).toContain(
+      "本位币净额＊（与币种线索文本二选一）（已用）",
+    );
+  });
+
   it("toggle 模式下一列可以叠加多个角色，并显示已承担的语义", () => {
     // 汇兑损益的场景：账户币种写在科目名称里（银行存款-中行朝阳支行美元户），
     // 那一列同时是科目名称与币种线索文本。按「一列一角色」会丢掉这个能力。
@@ -353,4 +416,13 @@ describe("共用字段映射面板", () => {
     pick(selects[1], "accountCode");
     expect(onToggle).toHaveBeenCalledWith("科目文本", "accountCode");
   });
+});
+
+
+it("不完整形态或缺少工具必填字段时使用公共警示色", () => {
+  panel({ formNote: "最接近 JE-类型A，还缺贷方", formComplete: false });
+  expect(screen.getByText("最接近 JE-类型A，还缺贷方")).toHaveClass("mapping-form-note-incomplete");
+  cleanup();
+  panel({ formNote: "已识别为 JE-类型A", formComplete: true, missing: ["原币币种"] });
+  expect(screen.getByText("已识别为 JE-类型A")).toHaveClass("mapping-form-note-incomplete");
 });

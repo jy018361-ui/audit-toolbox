@@ -1,7 +1,7 @@
 //! 阿里云百炼（DashScope）语音转写客户端。
 //!
 //! 流程：本地文件 → 获取上传凭证 → 直传百炼临时 OSS（`oss://` URL，48 小时
-//! 有效）→ 提交异步转写任务（paraformer-v2，开说话人分离）→ 轮询任务 →
+//! 有效）→ 提交异步转写任务（默认 paraformer-v2，开说话人分离）→ 轮询任务 →
 //! 下载转写结果 JSON。转写按语音内容时长计费，非语音部分不计费。
 
 use serde_json::{Value, json};
@@ -16,8 +16,70 @@ use std::{
 
 use crate::AppError;
 
-const BASE: &str = "https://dashscope.aliyuncs.com";
-const MODEL: &str = "paraformer-v2";
+const DEFAULT_BASE_URL: &str = "https://dashscope.aliyuncs.com";
+const DEFAULT_MODEL: &str = "paraformer-v2";
+
+/// 设置页测试与 worker 转写共用配置，旧设置和空值沿用原默认值。
+#[derive(Debug)]
+pub(crate) struct AsrConfig {
+    base_url: String,
+    model: String,
+    pub(crate) vocabulary: Value,
+}
+
+impl AsrConfig {
+    pub(crate) fn new(base_url: Option<&str>, model: Option<&str>) -> Result<Self, AppError> {
+        let base_url = base_url
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_BASE_URL)
+            .trim_end_matches('/');
+        let parsed = reqwest::Url::parse(base_url).map_err(|_| {
+            asr_error(
+                "ASR_URL_INVALID",
+                "通用转写服务地址格式不正确，请填写以 https:// 或 http:// 开头的服务根地址。",
+                None,
+            )
+        })?;
+        if !matches!(parsed.scheme(), "https" | "http")
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(asr_error(
+                "ASR_URL_INVALID",
+                "通用转写服务地址需为 HTTP(S) 服务根地址，不能包含账号、密码、查询参数或片段。",
+                None,
+            ));
+        }
+        Ok(Self {
+            vocabulary: json!({}),
+            base_url: base_url.to_owned(),
+            model: model
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(DEFAULT_MODEL)
+                .to_owned(),
+        })
+    }
+
+    pub(crate) fn from_settings(settings: &Value) -> Result<Self, AppError> {
+        Self::new(
+            settings
+                .pointer("/meeting/asr_base_url")
+                .and_then(Value::as_str),
+            settings
+                .pointer("/meeting/asr_model")
+                .and_then(Value::as_str),
+        )
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        format!("{}{path}", self.base_url)
+    }
+}
 /// 百炼临时存储单文件上限 1GB；说话人分离建议音频不超过 2 小时。
 const MAX_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -53,30 +115,70 @@ pub(crate) fn load_api_key(param: Option<&str>) -> Result<String, AppError> {
     if let Some(key) = param.filter(|key| !key.trim().is_empty()) {
         return Ok(key.trim().to_string());
     }
-    keyring::Entry::new("AuditToolbox", "bailian_asr_key")
-        .and_then(|entry| entry.get_password())
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-        .ok_or_else(|| {
-            asr_error(
-                "ASR_KEY_MISSING",
-                "未配置百炼语音转写 API 密钥，请到设置页「语音转写（百炼）」卡片填写。",
-                None,
-            )
-        })
+    keyring::Entry::new(
+        crate::release_channel::credential_service(),
+        "bailian_asr_key",
+    )
+    .and_then(|entry| entry.get_password())
+    .ok()
+    .filter(|key| !key.trim().is_empty())
+    .ok_or_else(|| {
+        asr_error(
+            "ASR_KEY_MISSING",
+            "未配置百炼语音转写 API 密钥，请到设置页「语音转写（百炼）」卡片填写。",
+            None,
+        )
+    })
 }
 
-/// 设置页「测试连接」：调上传凭证接口验证密钥有效性。
-pub(crate) fn test_connection(api_key: Option<&str>) -> Result<Value, AppError> {
+// 两条通道只共享 HTTP 音频编码与传输；凭据仍由各自入口读取。
+fn general_flash_error(mut error: AppError) -> AppError {
+    error.code = error.code.replace("PLAN_ASR_", "ASR_");
+    error.user_message = error
+        .user_message
+        .replace("套餐专用密钥", "百炼 API 密钥")
+        .replace("套餐额度", "账户额度")
+        .replace("套餐", "百炼");
+    error
+}
+
+fn flash_config(config: &AsrConfig) -> crate::bailian_plan_asr::PlanAsrConfig {
+    crate::bailian_plan_asr::PlanAsrConfig {
+        base_url: config.base_url.clone(),
+        model: config.model.clone(),
+        vocabulary: config.vocabulary.clone(),
+    }
+}
+
+/// Flash 发送内置样音验证识别；文件转写模型验证上传凭证。
+pub(crate) fn test_connection(
+    api_key: Option<&str>,
+    config: &AsrConfig,
+) -> Result<Value, AppError> {
     let started = std::time::Instant::now();
     let key = load_api_key(api_key)?;
+    if crate::bailian_plan_asr::uses_http_asr(&config.model) {
+        let mut result =
+            crate::bailian_plan_asr::test_connection(&crate::bailian_plan_asr::PlanTestParams {
+                base_url: config.base_url.clone(),
+                model: config.model.clone(),
+                api_key: Some(key),
+            })
+            .map_err(general_flash_error)?;
+        result["message"] = json!(format!(
+            "百炼语音识别测试成功（模型 {}，已识别内置短样音，产生少量转写费用）。",
+            config.model
+        ));
+        return Ok(result);
+    }
+
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(network_error)?;
     let response = client
-        .get(format!("{BASE}/api/v1/uploads"))
-        .query(&[("action", "getPolicy"), ("model", MODEL)])
+        .get(config.endpoint("/api/v1/uploads"))
+        .query(&[("action", "getPolicy"), ("model", config.model.as_str())])
         .bearer_auth(&key)
         .send()
         .map_err(network_error)?;
@@ -145,10 +247,14 @@ struct UploadPolicy {
     max_file_size_mb: Option<u64>,
 }
 
-fn get_policy(client: &reqwest::blocking::Client, key: &str) -> Result<UploadPolicy, AppError> {
+fn get_policy(
+    client: &reqwest::blocking::Client,
+    key: &str,
+    config: &AsrConfig,
+) -> Result<UploadPolicy, AppError> {
     let response = client
-        .get(format!("{BASE}/api/v1/uploads"))
-        .query(&[("action", "getPolicy"), ("model", MODEL)])
+        .get(config.endpoint("/api/v1/uploads"))
+        .query(&[("action", "getPolicy"), ("model", config.model.as_str())])
         .bearer_auth(key)
         .send()
         .map_err(network_error)?;
@@ -186,13 +292,7 @@ fn read_json_response(
     if !status.is_success() {
         let detail = serde_json::from_str::<Value>(&body)
             .ok()
-            .and_then(|value| {
-                value
-                    .pointer("/message")
-                    .or_else(|| value.get("message"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
+            .map(|value| task_error_detail(&value, None))
             .unwrap_or_else(|| snippet(&body));
         let code = if status.as_u16() == 401 || status.as_u16() == 403 {
             "ASR_KEY_INVALID"
@@ -219,8 +319,9 @@ fn upload_audio(
     key: &str,
     path: &Path,
     progress: Progress,
+    config: &AsrConfig,
 ) -> Result<String, AppError> {
-    let policy = get_policy(client, key)?;
+    let policy = get_policy(client, key, config)?;
     let size = std::fs::metadata(path)
         .map(|meta| meta.len())
         .map_err(|e| {
@@ -285,21 +386,38 @@ fn upload_audio(
     Ok(format!("oss://{object_key}"))
 }
 
+fn transcription_parameters(config: &AsrConfig) -> Value {
+    let mut parameters = json!({"diarization_enabled": true});
+    // language_hints 仅适用于 paraformer-v2；自定义兼容模型沿用其默认语言识别。
+    if config.model == DEFAULT_MODEL {
+        parameters["language_hints"] = json!(["zh", "en"]);
+    }
+    // 仅已核对支持即时热词的文件模型接收 vocabulary。
+    if matches!(config.model.as_str(), "qwen-audio-3.0-asr-flash-filetrans" | "qwen-audio-3.1-asr-flash-filetrans")
+        && config.vocabulary.as_object().is_some_and(|words| !words.is_empty())
+    {
+        parameters["vocabulary"] = config.vocabulary.clone();
+    }
+    parameters
+}
+
 fn submit_transcription(
     client: &reqwest::blocking::Client,
     key: &str,
     oss_url: &str,
+    config: &AsrConfig,
 ) -> Result<String, AppError> {
+    let parameters = transcription_parameters(config);
     let response = client
-        .post(format!("{BASE}/api/v1/services/audio/asr/transcription"))
+        .post(config.endpoint("/api/v1/services/audio/asr/transcription"))
         .bearer_auth(key)
         .header("X-DashScope-Async", "enable")
         // oss:// 临时地址需要服务端代为解析。
         .header("X-DashScope-OssResourceResolve", "enable")
         .json(&json!({
-            "model": MODEL,
+            "model": config.model,
             "input": {"file_urls": [oss_url]},
-            "parameters": {"language_hints": ["zh", "en"], "diarization_enabled": true}
+            "parameters": parameters
         }))
         .send()
         .map_err(network_error)?;
@@ -308,7 +426,13 @@ fn submit_transcription(
         .pointer("/output/task_id")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| asr_error("ASR_SUBMIT_INVALID", "百炼未返回任务编号。", None))
+        .ok_or_else(|| {
+            asr_error(
+                "ASR_SUBMIT_INVALID",
+                "百炼未返回任务编号。",
+                Some(task_error_detail(&value, None)),
+            )
+        })
 }
 
 fn poll_transcription(
@@ -317,38 +441,17 @@ fn poll_transcription(
     task_id: &str,
     progress: Progress,
     cancel: &Arc<AtomicBool>,
+    config: &AsrConfig,
 ) -> Result<Value, AppError> {
     let started = std::time::Instant::now();
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(cancelled_error());
         }
-        let value = query_task(client, key, task_id)?;
-        let status = value
-            .pointer("/output/task_status")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        match status {
-            "SUCCEEDED" => return Ok(value),
-            "FAILED" | "CANCELED" | "CANCELLED" => {
-                let message = value
-                    .pointer("/output/message")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .or_else(|| {
-                        value
-                            .pointer("/results/0/message")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .unwrap_or_else(|| "任务失败".into());
-                return Err(asr_error(
-                    "ASR_TASK_FAILED",
-                    "百炼转写任务失败。",
-                    Some(message),
-                ));
-            }
-            _ => {
+        let value = query_task(client, key, task_id, config)?;
+        match task_finished(&value, task_id)? {
+            true => return Ok(value),
+            false => {
                 let elapsed = started.elapsed().as_secs() / 60;
                 progress(
                     "running",
@@ -373,70 +476,192 @@ fn query_task(
     client: &reqwest::blocking::Client,
     key: &str,
     task_id: &str,
+    config: &AsrConfig,
 ) -> Result<Value, AppError> {
     let response = client
-        .post(format!("{BASE}/api/v1/tasks/{task_id}"))
+        .get(config.endpoint(&format!("/api/v1/tasks/{task_id}")))
         .bearer_auth(key)
         .send()
         .map_err(network_error)?;
     read_json_response(response, "查询百炼转写任务失败。")
 }
 
-/// 任务已成功却拿不到结果地址：常见于录音过短/无人声（`results` 为空数组）
-/// 或单文件识别失败（`results[0]` 带 code/message）。要给出说得通的原因，
-/// 不再把“没有返回结果地址”这类排查向文案直接甩给用户。
-fn missing_url_error(task: &Value) -> AppError {
-    let results = task.pointer("/results").and_then(Value::as_array);
-    if results.is_none_or(|rows| rows.is_empty()) {
+/// HTTP 正式响应在 output.results；兼容已有的扁平任务快照。
+/// 缺字段是协议/结果异常，不能据此断言录音中没有人声。
+fn task_results(task: &Value) -> Option<&Vec<Value>> {
+    task.pointer("/output/results")
+        .or_else(|| task.get("results"))?
+        .as_array()
+}
+
+fn nonempty_string<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value
+        .get(field)?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// 只保留诊断字段，不把临时文件 URL、签名或整个响应当作错误详情。
+fn task_error_detail(task: &Value, task_id: Option<&str>) -> String {
+    let mut reasons = Vec::new();
+    let mut add_reason = |value: &Value| {
+        let code = nonempty_string(value, "code");
+        let message = nonempty_string(value, "message").filter(|message| Some(*message) != code);
+        let reason = [code, message]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("：");
+        if !reason.is_empty() && !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
+    };
+    if let Some(output) = task.get("output") {
+        add_reason(output);
+    }
+    add_reason(task);
+    if let Some(rows) = task_results(task) {
+        for row in rows {
+            add_reason(row);
+        }
+    }
+    if reasons.is_empty() {
+        reasons.push("服务端未返回具体失败原因".into());
+    }
+    let output = task.get("output").unwrap_or(task);
+    if let Some(status) = nonempty_string(output, "task_status") {
+        reasons.push(format!("任务状态：{status}"));
+    }
+    if let Some(id) = nonempty_string(output, "task_id").or(task_id) {
+        reasons.push(format!("任务编号：{id}"));
+    }
+    if let Some(id) = nonempty_string(task, "request_id") {
+        reasons.push(format!("请求编号：{id}"));
+    }
+    reasons.join("；")
+}
+
+fn failed_task_error(task: &Value, task_id: Option<&str>) -> AppError {
+    let no_speech = std::iter::once(task)
+        .chain(task.get("output"))
+        .chain(task_results(task).into_iter().flatten())
+        .any(|value| nonempty_string(value, "code") == Some("SUCCESS_WITH_NO_VALID_FRAGMENT"));
+    if no_speech {
         return asr_error(
             "ASR_EMPTY_TRANSCRIPT",
-            "录音中没有识别到语音内容（录音过短或无人说话），请确认录音有效后再试。",
+            "百炼未检测到有效语音。请先回放原录音；若无声请检查录音设备后重新录制，若有清晰讲话请保留录音排查识别问题。",
+            Some(task_error_detail(task, task_id)),
+        );
+    }
+    asr_error(
+        "ASR_TASK_FAILED",
+        "百炼转写任务失败，原录音已保留，可重新导入重试。",
+        Some(task_error_detail(task, task_id)),
+    )
+}
+
+/// 兼容 HTTP 信封和扁平快照；明确失败立即退出，缺状态不再轮询一小时。
+fn task_finished(task: &Value, task_id: &str) -> Result<bool, AppError> {
+    let output = task.get("output").unwrap_or(task);
+    let file_failed = task_results(task)
+        .and_then(|rows| rows.first())
+        .is_some_and(|row| {
+            matches!(
+                nonempty_string(row, "subtask_status"),
+                Some("FAILED" | "CANCELED" | "CANCELLED")
+            ) || nonempty_string(row, "code").is_some()
+        });
+    match nonempty_string(output, "task_status") {
+        Some("FAILED" | "CANCELED" | "CANCELLED") => Err(failed_task_error(task, Some(task_id))),
+        Some("SUCCEEDED") if file_failed => Err(failed_task_error(task, Some(task_id))),
+        Some("SUCCEEDED") => Ok(true),
+        Some("PENDING" | "RUNNING") => Ok(false),
+        _ if nonempty_string(task, "code").is_some()
+            || nonempty_string(output, "code").is_some() =>
+        {
+            Err(failed_task_error(task, Some(task_id)))
+        }
+        _ => Err(asr_error(
+            "ASR_RESPONSE_INVALID",
+            "百炼返回了无法识别的任务状态，请稍后重试。",
+            Some(task_error_detail(task, Some(task_id))),
+        )),
+    }
+}
+
+fn transcription_url(task: &Value) -> Option<&str> {
+    task_results(task)?
+        .first()?
+        .get("transcription_url")?
+        .as_str()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+}
+
+fn missing_url_error(task: &Value) -> AppError {
+    let results = task_results(task);
+    if results.is_some_and(|rows| rows.is_empty()) {
+        return asr_error(
+            "ASR_RESULT_MISSING",
+            "转写服务未返回文件识别结果，原录音已保留，请稍后重试。",
             None,
         );
     }
     if let Some(first) = results.and_then(|rows| rows.first()) {
-        let code = first.get("code").and_then(Value::as_str).unwrap_or("");
-        let message = first
-            .pointer("/message")
-            .or_else(|| first.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if !code.is_empty() || !message.is_empty() {
-            return asr_error(
-                "ASR_TASK_FAILED",
-                "这段录音未能完成转写。",
-                Some(format!("{code} {message}").trim().to_owned()),
-            );
+        if nonempty_string(first, "code").is_some() || nonempty_string(first, "message").is_some() {
+            return failed_task_error(task, None);
         }
     }
     asr_error(
         "ASR_RESULT_MISSING",
         "百炼任务成功但没有返回结果地址。",
-        Some(task.to_string()),
+        Some(task_error_detail(task, None)),
     )
 }
 
-/// 转写主入口：上传 → 提交 → 轮询 → 下载结果。
+/// 转写主入口：Flash 内嵌音频同步识别，其余模型上传、提交并轮询下载。
 pub(crate) fn transcribe_file(
     path: &Path,
     progress: Progress,
     cancel: &Arc<AtomicBool>,
+    config: &AsrConfig,
 ) -> Result<TranscriptionResult, AppError> {
     let key = load_api_key(None)?;
+    transcribe_file_with_key(path, progress, cancel, config, &key)
+}
+
+fn transcribe_file_with_key(
+    path: &Path,
+    progress: Progress,
+    cancel: &Arc<AtomicBool>,
+    config: &AsrConfig,
+    key: &str,
+) -> Result<TranscriptionResult, AppError> {
+    if crate::bailian_plan_asr::uses_http_asr(&config.model) {
+        return crate::bailian_plan_asr::transcribe_file_with_key(
+            path,
+            &|state, step, total, message| {
+                progress(state, step, total, &message.replace("套餐通道", "百炼通道"))
+            },
+            cancel,
+            &flash_config(config),
+            key,
+        )
+        .map_err(general_flash_error);
+    }
+
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15 * 60))
         .build()
         .map_err(network_error)?;
-    let oss_url = upload_audio(&client, &key, path, progress)?;
-    let task_id = submit_transcription(&client, &key, &oss_url)?;
-    let mut task = poll_transcription(&client, &key, &task_id, progress, cancel)?;
+    let oss_url = upload_audio(&client, &key, path, progress, config)?;
+    let task_id = submit_transcription(&client, &key, &oss_url, config)?;
+    let mut task = poll_transcription(&client, &key, &task_id, progress, cancel, config)?;
     // 任务标记成功后结果地址偶尔滞后一步：补拉几次再判缺失。
     let mut retries = 3u8;
     let transcription_url = loop {
-        if let Some(url) = task
-            .pointer("/results/0/transcription_url")
-            .and_then(Value::as_str)
-        {
+        if let Some(url) = transcription_url(&task) {
             break url.to_owned();
         }
         if retries == 0 {
@@ -447,7 +672,8 @@ pub(crate) fn transcribe_file(
         if cancel.load(Ordering::Relaxed) {
             return Err(cancelled_error());
         }
-        task = query_task(&client, &key, &task_id)?;
+        task = query_task(&client, &key, &task_id, config)?;
+        task_finished(&task, &task_id)?;
     };
     let download = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
@@ -536,6 +762,270 @@ pub(crate) fn format_timestamp(ms: i64) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn vocabulary_is_forwarded_only_to_supported_models() {
+        for model in ["qwen-audio-3.0-asr-flash-filetrans", "qwen-audio-3.1-asr-flash-filetrans", "paraformer-v2", "custom-file-model"] {
+            let mut config = AsrConfig::new(None, Some(model)).unwrap();
+            config.vocabulary = json!({"CSDC":4, "清Q":4});
+            let parameters = transcription_parameters(&config);
+            if model.ends_with("-filetrans") {
+                assert_eq!(parameters["vocabulary"], config.vocabulary);
+            } else {
+                assert!(parameters.get("vocabulary").is_none());
+            }
+            if model == "paraformer-v2" { assert_eq!(parameters["language_hints"], json!(["zh", "en"])); }
+        }
+        let mut flash = AsrConfig::new(None, Some("qwen-audio-3.1-asr-flash")).unwrap();
+        flash.vocabulary = json!({"函证":4});
+        assert_eq!(flash_config(&flash).vocabulary, flash.vocabulary);
+    }
+
+    #[test]
+    fn general_flash_31_uses_inline_audio_for_test_and_real_transcription() {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            for index in 0..3 {
+                let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "未收到 Flash 请求");
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = std::io::BufReader::new(socket.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert_eq!(
+                    line.trim(),
+                    "POST /api/v1/services/aigc/multimodal-generation/generation HTTP/1.1"
+                );
+                let mut length = 0;
+                let mut authorization = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    let (name, value) = line.split_once(':').unwrap();
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                    if name.eq_ignore_ascii_case("authorization") {
+                        authorization = value.trim().into();
+                    }
+                }
+                assert_eq!(authorization, "Bearer general-test-key");
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(value["model"], "qwen-audio-3.1-asr-flash");
+                assert_eq!(value["parameters"]["format"], "wav");
+                if index != 1 {
+                    assert!(value["parameters"].get("vocabulary").is_none());
+                } else {
+                    assert_eq!(value["parameters"]["vocabulary"], json!({"清Q":4}));
+                }
+                assert!(
+                    value
+                        .pointer("/input/messages/0/content/0/input_audio/data")
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .starts_with("data:audio/wav;base64,")
+                );
+                assert!(value.pointer("/input/file_urls").is_none());
+                let (status, response) = if index == 2 {
+                    (
+                        400,
+                        json!({"code":"InvalidParameter", "message":"private-audio"}),
+                    )
+                } else {
+                    (200, json!({"output":{"text":"会议识别成功"}}))
+                };
+                let response = response.to_string();
+                write!(socket, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            }
+        });
+        let mut config = AsrConfig::new(
+            Some(&format!("http://{address}")),
+            Some("qwen-audio-3.1-asr-flash"),
+        )
+        .unwrap();
+        let test = test_connection(Some("general-test-key"), &config).unwrap();
+        config.vocabulary = json!({"清Q":4});
+        assert!(test["message"].as_str().unwrap().contains("内置短样音"));
+        assert!(!test["message"].as_str().unwrap().contains("套餐"));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meeting.wav");
+        std::fs::write(
+            &path,
+            include_bytes!("../../assets/asr/connection-test.wav"),
+        )
+        .unwrap();
+        let result = transcribe_file_with_key(
+            &path,
+            &|_, _, _, message| assert!(!message.contains("套餐")),
+            &Arc::new(AtomicBool::new(false)),
+            &config,
+            "general-test-key",
+        )
+        .unwrap();
+        assert_eq!(result.sentences[0].text, "会议识别成功");
+        assert_eq!(result.speakers, 0);
+        let error = test_connection(Some("general-test-key"), &config).unwrap_err();
+        assert_eq!(error.code, "ASR_SERVER_ERROR");
+        assert!(!error.user_message.contains("套餐"));
+        assert!(!error.detail.unwrap().contains("private-audio"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn general_config_defaults_and_custom_values() {
+        for settings in [
+            json!({}),
+            json!({"meeting": {"asr_base_url": " ", "asr_model": ""}}),
+        ] {
+            let config = AsrConfig::from_settings(&settings).unwrap();
+            assert_eq!(config.base_url, DEFAULT_BASE_URL);
+            assert_eq!(config.model, DEFAULT_MODEL);
+        }
+        let config = AsrConfig::from_settings(&json!({"meeting": {
+            "asr_base_url": " https://example.cn/proxy/// ", "asr_model": " custom-file-model ",
+            "plan_base_url": "https://other.cn", "plan_model": "other-model"
+        }}))
+        .unwrap();
+        assert_eq!(config.base_url, "https://example.cn/proxy");
+        assert_eq!(config.model, "custom-file-model");
+        for address in [
+            "bad",
+            "file:///c:/audio",
+            "wss://example.cn",
+            "https://u:p@example.cn",
+            "https://example.cn?key=hidden",
+            "https://example.cn/#hidden",
+        ] {
+            let error = AsrConfig::new(Some(address), None).unwrap_err();
+            assert_eq!(error.code, "ASR_URL_INVALID");
+            assert!(error.detail.is_none());
+        }
+    }
+
+    #[test]
+    fn custom_config_is_used_for_connection_policy_submission_and_polling() {
+        check_filetrans_protocol("custom-file-model");
+        check_filetrans_protocol("qwen-audio-3.1-asr-flash-filetrans");
+    }
+
+    fn check_filetrans_protocol(model: &str) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..4 {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "未收到预期的本地请求");
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut socket);
+                let mut first_line = String::new();
+                reader.read_line(&mut first_line).unwrap();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse().unwrap();
+                        }
+                    }
+                }
+                let mut bytes = vec![0; length];
+                reader.read_exact(&mut bytes).unwrap();
+                let body = if length == 0 {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&bytes).unwrap()
+                };
+                let response = if first_line.contains("/uploads?") {
+                    json!({"data": {"upload_host": "http://127.0.0.1", "upload_dir": "tmp", "oss_access_key_id": "test", "policy": "test", "signature": "test"}})
+                } else if first_line.contains("/transcription ") {
+                    json!({"output": {"task_id": "test-task"}})
+                } else {
+                    json!({"output": {"task_status": "SUCCEEDED"}})
+                }.to_string();
+                requests.push((first_line.trim().to_owned(), body));
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            }
+            requests
+        });
+        let config =
+            AsrConfig::new(Some(&format!("http://{address}/proxy/")), Some(model)).unwrap();
+        assert_eq!(
+            test_connection(Some("test-only-key"), &config).unwrap()["ok"],
+            true
+        );
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        get_policy(&client, "test-only-key", &config).unwrap();
+        let task_id =
+            submit_transcription(&client, "test-only-key", "oss://test.wav", &config).unwrap();
+        let task = poll_transcription(
+            &client,
+            "test-only-key",
+            &task_id,
+            &|_, _, _, _| {},
+            &Arc::new(AtomicBool::new(false)),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(task["output"]["task_status"], "SUCCEEDED");
+        let requests = server.join().unwrap();
+        for request in &requests[..2] {
+            assert!(request.0.starts_with("GET /proxy/api/v1/uploads?"));
+            assert!(request.0.contains(&format!("model={model}")));
+        }
+        assert_eq!(
+            requests[2].0,
+            "POST /proxy/api/v1/services/audio/asr/transcription HTTP/1.1"
+        );
+        assert_eq!(requests[2].1["model"], model);
+        assert_eq!(requests[2].1["input"]["file_urls"][0], "oss://test.wav");
+        assert_eq!(requests[2].1["parameters"]["diarization_enabled"], true);
+        assert!(requests[2].1["parameters"].get("language_hints").is_none());
+        assert_eq!(requests[3].0, "GET /proxy/api/v1/tasks/test-task HTTP/1.1");
+    }
+
     fn sentence(text: &str, speaker_id: i64, begin_ms: i64) -> Sentence {
         Sentence {
             text: text.into(),
@@ -590,24 +1080,52 @@ mod tests {
         assert_eq!(format_timestamp(3_661_000), "61:01");
     }
 
-    /// 成功任务 + 空 results：短录音/无语音的典型形态，要说人话而不是
-    /// 「没有返回结果地址」。
+    #[test]
+    fn http_success_extracts_nested_result_url() {
+        // HTTP 查询接口的完整信封；此前测试只造顶层 results，漏掉真实契约。
+        let task = json!({"request_id": "request", "output": {
+            "task_status": "SUCCEEDED", "results": [{
+                "subtask_status": "SUCCEEDED", "transcription_url": "https://example.com/result.json"
+            }]
+        }});
+        assert_eq!(
+            transcription_url(&task),
+            Some("https://example.com/result.json")
+        );
+        let flat = json!({"results": [{"transcription_url": "https://example.com/flat.json"}]});
+        assert_eq!(
+            transcription_url(&flat),
+            Some("https://example.com/flat.json")
+        );
+        assert_eq!(
+            transcription_url(&json!({"output": {"results": [{"transcription_url": " "}]}})),
+            None
+        );
+    }
+
+    #[test]
+    fn missing_results_field_does_not_claim_silent_recording() {
+        let error = missing_url_error(&json!({"output": {"task_status": "SUCCEEDED"}}));
+        assert_eq!(error.code, "ASR_RESULT_MISSING");
+        assert!(!error.user_message.contains("无人说话"));
+    }
+
     #[test]
     fn missing_url_error_explains_empty_results() {
         let task: Value =
-            serde_json::from_str(r#"{"output": {"task_status": "SUCCEEDED"}, "results": []}"#)
+            serde_json::from_str(r#"{"output": {"task_status": "SUCCEEDED", "results": []}}"#)
                 .unwrap();
         let error = missing_url_error(&task);
-        assert_eq!(error.code, "ASR_EMPTY_TRANSCRIPT");
-        assert!(error.user_message.contains("录音过短或无人说话"));
+        assert_eq!(error.code, "ASR_RESULT_MISSING");
+        assert!(error.user_message.contains("原录音已保留"));
     }
 
     #[test]
     fn missing_url_error_surfaces_per_file_failure() {
         let task: Value = serde_json::from_str(
-            r#"{"output": {"task_status": "SUCCEEDED"}, "results": [
+            r#"{"output": {"task_status": "SUCCEEDED", "results": [
                 {"code": "AUDIO_FILE_INVALID", "message": "audio too short"}
-            ]}"#,
+            ]}}"#,
         )
         .unwrap();
         let error = missing_url_error(&task);
@@ -625,5 +1143,140 @@ mod tests {
         .unwrap();
         let error = missing_url_error(&task);
         assert_eq!(error.code, "ASR_RESULT_MISSING");
+    }
+
+    #[test]
+    fn failed_task_keeps_top_level_reason_and_tracking_ids() {
+        let task = json!({
+            "request_id": "request-123", "code": "InvalidApiKey", "message": "Invalid API-key",
+            "output": {"task_id": "task-123", "task_status": "FAILED", "message": " "}
+        });
+        let error = task_finished(&task, "fallback-task").unwrap_err();
+        assert_eq!(error.code, "ASR_TASK_FAILED");
+        let detail = error.detail.unwrap();
+        for expected in [
+            "InvalidApiKey",
+            "Invalid API-key",
+            "task-123",
+            "request-123",
+            "FAILED",
+        ] {
+            assert!(detail.contains(expected), "缺少 {expected}：{detail}");
+        }
+    }
+
+    #[test]
+    fn no_valid_fragment_explains_provider_vad_without_claiming_recording_is_silent() {
+        let code = "SUCCESS_WITH_NO_VALID_FRAGMENT";
+        for task in [
+            json!({"code": code, "message": code, "output": {"task_status": "FAILED"}, "request_id": "request-vad"}),
+            json!({"output": {"task_status": "FAILED", "code": code, "message": code}}),
+            json!({"output": {"task_status": "SUCCEEDED", "results": [{"subtask_status": "FAILED", "code": code, "message": code}]}}),
+        ] {
+            let error = task_finished(&task, "task-vad").unwrap_err();
+            assert_eq!(error.code, "ASR_EMPTY_TRANSCRIPT");
+            assert!(error.user_message.contains("百炼未检测到有效语音"));
+            assert!(error.user_message.contains("若有清晰讲话"));
+            let detail = error.detail.unwrap();
+            assert_eq!(detail.matches(code).count(), 1, "不应重复输出相同错误码");
+            assert!(detail.contains("task-vad"));
+        }
+    }
+
+    #[test]
+    fn failed_task_keeps_nested_and_file_reasons_without_urls() {
+        let task = json!({"output": {
+            "task_status": "FAILED", "code": "TaskFailed", "message": "转写服务异常",
+            "results": [{"subtask_status": "FAILED", "code": "InvalidFile.DownloadFailed",
+                "message": "The audio file cannot be downloaded.",
+                "file_url": "oss://private-file", "transcription_url": "https://example.com/?Signature=secret"}]
+        }});
+        let error = task_finished(&task, "submitted-task").unwrap_err();
+        let detail = error.detail.unwrap();
+        assert!(detail.contains("转写服务异常"));
+        assert!(detail.contains("InvalidFile.DownloadFailed"));
+        assert!(detail.contains("submitted-task"));
+        assert!(!detail.contains("private-file"));
+        assert!(!detail.contains("secret"));
+    }
+
+    #[test]
+    fn successful_task_with_failed_file_is_not_retried_as_missing_url() {
+        let task = json!({"task_id": "flat-task", "task_status": "SUCCEEDED", "results": [{
+            "subtask_status": "FAILED", "code": "InvalidFile.AudioFormatError", "message": "Invalid audio format"
+        }]});
+        let error = task_finished(&task, "flat-task").unwrap_err();
+        assert_eq!(error.code, "ASR_TASK_FAILED");
+        assert!(
+            error
+                .detail
+                .unwrap()
+                .contains("InvalidFile.AudioFormatError")
+        );
+    }
+
+    #[test]
+    fn failed_task_without_reason_still_has_tracking_context() {
+        for status in ["FAILED", "CANCELED", "CANCELLED"] {
+            let error =
+                task_finished(&json!({"output": {"task_status": status}}), "task-123").unwrap_err();
+            let detail = error.detail.unwrap();
+            assert!(detail.contains("服务端未返回具体失败原因"));
+            assert!(detail.contains("task-123"));
+            assert!(detail.contains(status));
+        }
+    }
+
+    #[test]
+    fn task_status_checks_waiting_success_and_invalid_responses() {
+        for status in ["PENDING", "RUNNING"] {
+            assert!(!task_finished(&json!({"output": {"task_status": status}}), "id").unwrap());
+        }
+        assert!(task_finished(&json!({"task_status": "SUCCEEDED"}), "id").unwrap());
+        let error = task_finished(
+            &json!({"request_id": "req", "code": "AccessDenied", "message": "No permission"}),
+            "id",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "ASR_TASK_FAILED");
+        assert!(error.detail.unwrap().contains("AccessDenied"));
+        for task in [json!({}), json!({"output": {"task_status": "UNKNOWN"}})] {
+            assert_eq!(
+                task_finished(&task, "id").unwrap_err().code,
+                "ASR_RESPONSE_INVALID"
+            );
+        }
+    }
+
+    #[test]
+    fn http_error_keeps_provider_code_and_request_id() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 2048];
+            socket.read(&mut request).unwrap();
+            let body = r#"{"code":"Throttling","message":"Rate limit exceeded","request_id":"request-http"}"#;
+            write!(socket, "HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let response = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .unwrap();
+        let error = read_json_response(response, "查询百炼转写任务失败。").unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.code, "ASR_REQUEST_FAILED");
+        let detail = error.detail.unwrap();
+        for expected in ["429", "Throttling", "Rate limit exceeded", "request-http"] {
+            assert!(detail.contains(expected));
+        }
     }
 }

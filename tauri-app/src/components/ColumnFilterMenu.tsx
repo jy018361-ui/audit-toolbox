@@ -16,6 +16,12 @@ export type ColumnFilterValues = {
   total: number;
   truncated: boolean;
   keyword: string;
+  /**
+   * 不带关键词那次读取得到的整列去重值总数。搜索后 total 会被覆盖成命中数，
+   * 「全勾等于不筛选」的判定要认这个全量口径，否则搜索后确认会留下一个
+   * 实际什么都没筛掉的条件。
+   */
+  fullTotal?: number;
 };
 
 /**
@@ -165,12 +171,23 @@ export function ColumnFilterMenu({
   }, [anchor, data?.values.length, data?.truncated, loading]);
 
   const values = data?.values ?? [];
+  // 取值未截断时手里已经是整列去重值，关键词在本地即时过滤即可，不必再跑
+  // 一趟引擎；截断的列（去重值超过上限）才保留「检索」按钮走后端。
+  const localSearch = Boolean(data && !data.truncated);
+  const needle = keyword.trim().toLowerCase();
+  const entries = values.map((value, index) => ({ value, index }));
+  const shownEntries = localSearch && needle
+    ? entries.filter((entry) => entry.value.toLowerCase().includes(needle))
+    : entries;
   // 本批取值里已勾中的数量决定"（全选）"的三态；用户勾过、但不在本批里的值
   // （关键词换过）不算进来，但提交时要保留，否则搜一次就把别的勾选清了。
-  const visibleChecked = values.filter((value) => checked.has(value));
-  const allChecked = values.length > 0 && visibleChecked.length === values.length;
+  const visibleChecked = shownEntries.filter(
+    (entry) => checked.has(entry.value),
+  );
+  const allChecked =
+    shownEntries.length > 0 && visibleChecked.length === shownEntries.length;
   const someChecked = visibleChecked.length > 0 && !allChecked;
-  const visibleValues = new Set(values);
+  const visibleValues = new Set(shownEntries.map((entry) => entry.value));
   const hiddenChecked = [...checked].filter((value) => !visibleValues.has(value));
 
   function toggle(value: string) {
@@ -204,7 +221,12 @@ export function ColumnFilterMenu({
         <input
           ref={searchInput}
           value={keyword}
-          placeholder={searchPlaceholder ?? "搜索取值，回车重新读取…"}
+          placeholder={
+            searchPlaceholder ??
+            (data?.truncated
+              ? "取值过多，输入关键词后点「检索」"
+              : "输入关键词即时筛选")
+          }
           aria-label={`搜索${field}`}
           name={`column-filter-${field}`}
           autoComplete="off"
@@ -212,47 +234,65 @@ export function ColumnFilterMenu({
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
             event.preventDefault();
-            onSearch(keyword);
+            // 未截断时列表已在本地即时过滤，回车不再请求引擎。
+            if (data?.truncated) onSearch(keyword);
           }}
         />
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          disabled={loading}
-          onClick={() => onSearch(keyword)}
-        >
-          {loading ? "读取中…" : "读取"}
-        </Button>
+        {data?.truncated && (
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={loading}
+            onClick={() => onSearch(keyword)}
+          >
+            {loading ? "检索中…" : "检索"}
+          </Button>
+        )}
       </div>
-      <label className="ts-filter-all">
-        <input
-          type="checkbox"
-          checked={allChecked}
-          ref={(node) => {
-            if (node) node.indeterminate = someChecked;
-          }}
-          disabled={!values.length}
-          onChange={(event) =>
-            setChecked((current) => {
-              const next = new Set(current);
-              for (const value of values) {
-                if (event.target.checked) next.add(value);
-                else next.delete(value);
-              }
-              return next;
-            })
-          }
-        />
-        <span>（全选）</span>
-      </label>
+      <div className="ts-filter-all-row">
+        <label className="ts-filter-all">
+          <input
+            type="checkbox"
+            checked={allChecked}
+            ref={(node) => {
+              if (node) node.indeterminate = someChecked;
+            }}
+            disabled={!shownEntries.length}
+            onChange={(event) =>
+              setChecked((current) => {
+                const next = new Set(current);
+                for (const entry of shownEntries) {
+                  if (event.target.checked) next.add(entry.value);
+                  else next.delete(entry.value);
+                }
+                return next;
+              })
+            }
+          />
+          <span>（全选）</span>
+        </label>
+        {keyword.trim() && (
+          <button
+            type="button"
+            className="ts-filter-keep-visible"
+            disabled={!shownEntries.length}
+            title="取消勾选当前结果之外的取值"
+            onClick={() =>
+              setChecked(new Set(shownEntries.map((entry) => entry.value)))
+            }
+          >
+            仅勾选当前结果
+          </button>
+        )}
+      </div>
       <div className="ts-filter-values">
         {loading && !values.length ? (
           <div className="ts-filter-empty">正在读取取值…</div>
         ) : !values.length ? (
           <div className="ts-filter-empty">没有匹配的取值</div>
         ) : (
-          values.map((value, index) => {
+          shownEntries.map(({ value, index }) => {
             // 科目面板把值拆成「编码 名称」两段：拼接串按首段编码拆开；值里没有
             // 编码（纯名称）而引擎另给了编码时补在前面。编码只作展示，勾选提交的
             // 仍是原值，后端按原值匹配，口径不变。
@@ -286,7 +326,7 @@ export function ColumnFilterMenu({
       </div>
       {data?.truncated && (
         <div className="ts-filter-note">
-          共 {data.total} 个取值，只列出前 {values.length} 个，请输入关键词后重新读取。
+          共 {data.total} 个取值，只列出前 {values.length} 个，请输入关键词后点「检索」。
         </div>
       )}
       {hiddenChecked.length > 0 && (

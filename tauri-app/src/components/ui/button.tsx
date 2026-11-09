@@ -6,7 +6,7 @@ import { Slot } from "radix-ui";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "group/button inline-flex shrink-0 items-center justify-center rounded-lg border border-transparent bg-clip-padding text-sm font-medium whitespace-nowrap transition-[color,background-color,border-color,box-shadow,transform] outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-[var(--disabled-opacity)] aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  "group/button inline-flex shrink-0 items-center justify-center rounded-lg border border-transparent bg-clip-padding py-0 text-sm leading-5 font-medium whitespace-nowrap transition-[color,background-color,border-color,box-shadow,transform] outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-[var(--disabled-opacity)] aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {
@@ -19,7 +19,9 @@ const buttonVariants = cva(
         ghost:
           "text-muted-foreground hover:bg-muted hover:text-primary aria-expanded:bg-muted aria-expanded:text-primary",
         destructive:
-          "bg-destructive/10 text-destructive border border-destructive hover:bg-destructive/20 focus-visible:border-destructive focus-visible:ring-destructive",
+          // 危险操作用实心红：视觉分量必须不低于主按钮（停止/删除做错
+          // 代价高，浅色描边此前反而比普通确认按钮更弱）。
+          "bg-destructive text-primary-foreground shadow-[var(--shadow-button)] hover:bg-destructive/85 focus-visible:ring-destructive/40",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {

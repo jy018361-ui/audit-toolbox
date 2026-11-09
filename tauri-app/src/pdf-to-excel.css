@@ -1,3 +1,43 @@
 .pdf-convert-stack [data-slot="card-content"] > .error-box + .drop-zone {
   margin-top: var(--sp-3);
 }
+
+/* === 设计评审决议（2026-10-25）：结果横幅语义分色 ===
+   转换完成是 success 绿；失败份数以红色数字跳出，成功/失败一眼分流。
+   「打开输出」并入横幅右侧（成功态的交付物入口置顶）。
+   用双类选择器压过 merger.css 里的同名中性底样式，不依赖加载顺序。 */
+.pdf-result-callout.pdf-result-toned {
+  border-color: color-mix(in srgb, var(--success-fg) 30%, transparent);
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+.pdf-result-callout.pdf-result-toned strong {
+  color: inherit;
+}
+.pdf-result-fail-count {
+  color: var(--danger-fg);
+}
+.pdf-result-callout.pdf-result-toned > [data-slot="button"] {
+  margin-left: auto;
+}
+
+/* 卡 3 空态压到单行约 80px：等待位不需要一整块虚线占位。 */
+.pdf-convert-stack .empty-state--compact {
+  padding: var(--sp-3);
+}
+
+/* 失败原因行：整行浅红底，允许两行显示——关键诊断曾被单行省略号截断。 */
+.data-table-table tr.pdf-row-failed > td {
+  background: color-mix(in srgb, var(--danger-bg) 62%, var(--surface));
+}
+.data-table-table td.pdf-error-cell {
+  white-space: normal;
+  max-width: 360px;
+}
+.pdf-error-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}

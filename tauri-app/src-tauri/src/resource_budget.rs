@@ -1,4 +1,4 @@
-//! Windows worker memory protection. Limits are installed before sending stdin.
+//! Windows worker resource monitoring and process lifetime protection.
 use crate::AppError;
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -24,8 +24,7 @@ pub(crate) struct MemoryBudget {
 }
 
 fn safety_reserve(total: u64) -> u64 {
-    // 忙碌主机仍至少给 Windows 留出约 10% 物理内存；上限避免大内存主机被
-    // 不必要地挡住。剩余余量仍留出 30% 吸收系统波动。
+    // 仅用于调节吞吐量，不是任务准入线；实际压力由运行期检查负责。
     (total / 10).clamp(GIB, 4 * GIB)
 }
 
@@ -34,35 +33,58 @@ pub(crate) fn plan(total: u64, available: u64, commit_available: u64) -> MemoryB
     let usable = |bytes: u64| bytes.saturating_sub(reserve).saturating_mul(7) / 10;
     let worker = (total / 3)
         .min(usable(available))
-        .min(usable(commit_available));
-    let batch = if worker < 256 * MIB {
-        0
-    } else {
-        (worker / 12).clamp(8 * MIB, 256 * MIB)
-    };
+        .min(usable(commit_available))
+        .max(16 * MIB);
+    // 预算很小时仍提供可推进的批次，不能把磁盘分流再次变成启动拒绝。
+    let batch = (worker / 12).clamp(256 * 1024, 256 * MIB);
     MemoryBudget {
         total_bytes: total,
         available_bytes: available,
         reserve_bytes: reserve,
         worker_bytes: worker,
         batch_bytes: batch,
-        sqlite_cache_kib: if batch == 0 {
-            0
-        } else {
-            (batch / 1024).clamp(16_384, 262_144)
-        },
+        sqlite_cache_kib: (batch / 1024).clamp(256, 262_144),
     }
 }
 
 pub(crate) fn budget() -> Result<MemoryBudget, AppError> {
-    let memory = available()?;
-    let result = plan(memory.total, memory.available, memory.commit_available);
-    if result.worker_bytes < 256 * MIB {
-        return Err(failure(
-            "当前剩余内存不足以安全处理，请关闭其他大型程序后重试。",
-        ));
+    #[cfg(test)]
+    if synthetic_test_budget_enabled() {
+        // Explicit opt-in for small synthetic fixtures only. The production
+        // binary has no override; physical safety is still checked below.
+        let memory = available()?;
+        if memory.available < 512 * MIB { return Err(failure("可用内存不足以运行合成小样本测试。")); }
+        return Ok(MemoryBudget { total_bytes:memory.total, available_bytes:memory.available,
+            reserve_bytes:memory.total/10, worker_bytes:256*MIB, batch_bytes:16*MIB, sqlite_cache_kib:16384 });
     }
-    Ok(result)
+    let memory = available()?;
+    Ok(plan(memory.total, memory.available, memory.commit_available))
+}
+
+/// 共享业务逻辑只在磁盘模式时申请批次预算，估算预算不决定任务准入。
+pub(crate) fn budget_for_disk(disk_mode: bool) -> Result<Option<MemoryBudget>, AppError> {
+    if disk_mode { budget().map(Some) } else { Ok(None) }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_MEMORY: std::cell::Cell<Option<MemoryStatus>> = const { std::cell::Cell::new(None) };
+}
+
+/// 仅测试使用，按线程模拟内存压力，避免实际占满内存或干扰并行测试。
+#[cfg(test)]
+pub(crate) fn with_test_memory<T>(memory: MemoryStatus, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<MemoryStatus>);
+    impl Drop for Restore {
+        fn drop(&mut self) { TEST_MEMORY.with(|slot| slot.set(self.0)); }
+    }
+    let _restore = Restore(TEST_MEMORY.with(|slot| slot.replace(Some(memory))));
+    run()
+}
+
+#[cfg(test)]
+fn synthetic_test_budget_enabled() -> bool {
+    std::env::var_os("AUDIT_TOOLBOX_SYNTHETIC_TEST_BUDGET").is_some_and(|value| value == "1")
 }
 
 fn parallelism_for(worker_bytes: u64, logical_processors: usize) -> usize {
@@ -92,8 +114,8 @@ fn physical_pause_floor(total: u64) -> u64 {
 
 fn runtime_memory_critical(total: u64, available: u64, commit_available: u64) -> bool {
     // 启动时按 safety_reserve 计算 worker 上限；运行中先在系统接近失稳时暂停。
-    // 两者若共用同一条保留线，Windows 的正常缓存波动就会把已经受 Job Object
-    // 限制的磁盘任务误杀。阈值仍随总内存变化，并为提交余量保留独立底线。
+    // 两者若共用同一条保留线，Windows 的正常缓存波动就会误暂停磁盘任务。
+    // 阈值仍随总内存变化，并为提交余量保留独立底线。
     available < physical_pause_floor(total) || commit_available < GIB
 }
 
@@ -164,6 +186,11 @@ fn failure(message: &str) -> AppError {
     AppError::new("MEMORY_PROTECTION", message, true, None)
 }
 fn available() -> Result<Memory, AppError> {
+    #[cfg(test)]
+    if let Some(memory) = TEST_MEMORY.with(|slot| slot.get()) {
+        return Ok(Memory { total: memory.total, available: memory.available,
+            commit_available: memory.commit_available, ..Default::default() });
+    }
     let mut memory = Memory {
         length: size_of::<Memory>() as u32,
         ..Default::default()
@@ -204,7 +231,7 @@ impl MemoryStatus {
     }
 
     pub(crate) fn can_start_worker(self) -> bool {
-        self.worker_bytes() >= 256 * MIB
+        !self.should_pause()
     }
 
     pub(crate) fn worker_bytes(self) -> u64 {
@@ -233,6 +260,10 @@ pub(crate) fn memory_retry_path(pause_path: &Path) -> PathBuf {
 }
 
 pub(crate) fn check_available() -> Result<(), AppError> {
+    #[cfg(test)]
+    if synthetic_test_budget_enabled() && RUNTIME_MEMORY_CONTROL.get().is_none() {
+        return budget().map(|_| ());
+    }
     let memory = available()?;
     if !runtime_memory_critical(memory.total, memory.available, memory.commit_available) {
         if let Some(control) = RUNTIME_MEMORY_CONTROL.get() {
@@ -316,24 +347,21 @@ pub(crate) fn check_disk_space(path: &std::path::Path, estimated: u64) -> Result
     }
     Ok(())
 }
-pub(crate) struct WorkerLimit(*mut c_void);
-impl WorkerLimit {
-    pub(crate) fn attach(child: &std::process::Child, worker_bytes: u64) -> Result<Self, AppError> {
+// Job Object only owns the worker lifetime. Estimated working-set budgets must
+// not become OS allocation ceilings; actual system pressure controls pause/resume.
+fn worker_lifetime_limits() -> Limits {
+    Limits { basic: Basic { flags: 0x2000, ..Default::default() }, ..Default::default() }
+}
+pub(crate) struct WorkerLifetime(*mut c_void);
+impl WorkerLifetime {
+    pub(crate) fn attach(child: &std::process::Child) -> Result<Self, AppError> {
         use std::os::windows::io::AsRawHandle;
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
-            return Err(failure("无法启用任务内存保护，未开始读取。"));
+            return Err(failure("无法启用任务进程保护，未开始读取。"));
         }
         let guard = Self(handle);
-        let limits = Limits {
-            basic: Basic {
-                flags: 0x100 | 0x200 | 0x2000,
-                ..Default::default()
-            },
-            process_memory: worker_bytes as usize,
-            job_memory: worker_bytes as usize,
-            ..Default::default()
-        };
+        let limits = worker_lifetime_limits();
         if unsafe {
             SetInformationJobObject(
                 handle,
@@ -344,12 +372,12 @@ impl WorkerLimit {
         } == 0
             || unsafe { AssignProcessToJobObject(handle, child.as_raw_handle()) } == 0
         {
-            return Err(failure("无法安装任务内存上限，未开始读取。"));
+            return Err(failure("无法安装任务进程保护，未开始读取。"));
         }
         Ok(guard)
     }
 }
-impl Drop for WorkerLimit {
+impl Drop for WorkerLifetime {
     fn drop(&mut self) {
         unsafe {
             CloseHandle(self.0);
@@ -360,6 +388,24 @@ impl Drop for WorkerLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn worker_job_owns_lifetime_without_estimated_memory_ceiling() {
+        let limits = worker_lifetime_limits();
+        assert_eq!(limits.basic.flags, 0x2000);
+        assert_eq!(limits.process_memory, 0);
+        assert_eq!(limits.job_memory, 0);
+    }
+    #[test]
+    fn ordinary_mode_skips_budget_and_disk_mode_uses_small_batches() {
+        with_test_memory(MemoryStatus { total: 16 * GIB, available: 128 * MIB, commit_available: 128 * MIB }, || {
+            assert!(budget_for_disk(false).unwrap().is_none());
+            let disk = budget_for_disk(true).unwrap().unwrap();
+            assert!(disk.batch_bytes > 0 && disk.batch_bytes < 8 * MIB);
+            assert!(disk.sqlite_cache_kib > 0 && disk.sqlite_cache_kib < 16_384);
+            // 估算预算不拒绝分批；实际系统压力依旧阻止 worker 启动。
+            assert!(!memory_status().unwrap().can_start_worker());
+        });
+    }
     #[test]
     fn adaptive_budget_scales_with_host_memory() {
         let mut previous = 0;
@@ -385,9 +431,23 @@ mod tests {
             plan(64 * GIB, 48 * GIB, GIB),
             plan(0, 0, 0),
         ] {
-            assert_eq!(p.worker_bytes, 0);
-            assert_eq!(p.batch_bytes, 0);
+            assert_eq!(p.worker_bytes, 16 * MIB);
+            assert!(p.batch_bytes > 0 && p.batch_bytes < 8 * MIB);
         }
+    }
+
+    #[test]
+    fn worker_starts_below_estimated_reserve_and_scales_down() {
+        let memory = MemoryStatus { total: 16 * GIB, available: 158 * GIB / 100, commit_available: 8 * GIB };
+        assert!(memory.can_start_worker());
+        let small = plan(memory.total, memory.available, memory.commit_available);
+        let ample = plan(16 * GIB, 8 * GIB, 8 * GIB);
+        assert!(small.worker_bytes < 256 * MIB);
+        assert!(small.batch_bytes < ample.batch_bytes);
+        assert!(small.sqlite_cache_kib < ample.sqlite_cache_kib);
+        assert_eq!(parallelism_for(small.worker_bytes, 8), 1);
+        assert!(!MemoryStatus { available: 400 * MIB, ..memory }.can_start_worker());
+        assert!(!MemoryStatus { commit_available: 512 * MIB, ..memory }.can_start_worker());
     }
 
     #[test]

@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>已识别卡片 · 椭圆背景（不改动布局）效果图</title>
+<style>
+  /*
+   * 需求收敛（v4）：椭圆背景；文字布局与间距一概不动。
+   * 实现口径：椭圆全部为绝对定位的背景层，标题文字仍在原位原字号，
+   * 卡片高度、内容位置与现状完全一致。只变椭圆的「颜色 / 大小 / 描边」。
+   */
+  :root {
+    --ink: #182626;
+    --brand: #1e6267;
+    --success-bg: #dcf3e7;
+    --success-fg: #176642;
+    --danger-fg: #983d2f;
+    --border: #cbd7d2;
+    --border-soft: #e4e9e7;
+    --surface-page: #edf1ee;
+    --pill-border: #99b7aa;
+    --pill-bg: #e8f7ef;
+    --card-border: #afccc5;
+    --bar-bg: #ebf8f1;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    background: var(--surface-page);
+    color: var(--ink);
+    padding: 44px 48px 64px;
+  }
+  .page { max-width: 1400px; margin: 0 auto; }
+  h1 { font-size: 24px; font-weight: 700; color: #173a3e; }
+  .lede { margin-top: 8px; font-size: 13px; color: #5d706d; line-height: 1.7; }
+
+  /* ===== 放大对照区 ===== */
+  .zoom-row {
+    display: flex;
+    gap: 28px;
+    margin-top: 24px;
+    padding: 24px 32px 20px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: #fff;
+  }
+  .zoom-cell { flex: 1; min-width: 0; }
+  .zoom-stage { height: 110px; display: flex; align-items: center; }
+  .zoom-stage .demo { transform: scale(1.6); transform-origin: left center; }
+  .zoom-cell > b { display: block; font-size: 13px; color: #173a3e; margin-top: 10px; }
+  .zoom-cell > p { margin-top: 4px; font-size: 12px; color: #5d706d; line-height: 1.6; }
+
+  /* ===== 变体区 ===== */
+  .variant { margin-top: 36px; }
+  .variant-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  .variant-tag {
+    flex: none;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: var(--brand);
+    color: #eef6f2;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+  }
+  .variant-tag.ghost { background: #83908e; }
+  .variant-tag.reco { background: #176642; }
+  .variant-head b { font-size: 16px; color: #173a3e; }
+  .variant-desc { font-size: 13px; color: #5d706d; margin-bottom: 16px; line-height: 1.7; }
+
+  .fx-source-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    align-items: stretch;
+  }
+  .fx-card {
+    position: relative;
+    background: #fff;
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    box-shadow: 0 10px 28px rgba(30, 98, 103, 0.07);
+    padding: 24px;
+    overflow: hidden;
+  }
+  .fx-card-header { position: relative; z-index: 1; display: flex; align-items: center; }
+  .fx-card-title { position: relative; z-index: 1; font-size: 16px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+  .fx-card-content { position: relative; z-index: 1; margin-top: 22px; }
+
+  /* 现状 */
+  .fx-card.bar .fx-card-header {
+    margin: 0 -24px;
+    padding: 9px 24px;
+    background: var(--bar-bg);
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .fx-detected-file {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 13px 16px;
+    border: 1px solid var(--pill-border);
+    border-radius: 11px;
+    background: var(--pill-bg);
+  }
+  .fx-detected-file .name {
+    flex: 1;
+    min-width: 0;
+    color: var(--success-fg);
+    font-weight: 650;
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .fx-detected-file .acts { display: flex; gap: 22px; flex: none; }
+  .fx-detected-file button {
+    border: 0;
+    background: none;
+    padding: 0;
+    font: inherit;
+    font-size: 14px;
+    color: var(--danger-fg);
+    cursor: pointer;
+  }
+  .fx-meta { margin-top: 16px; font-size: 14px; color: var(--ink); }
+  .fx-meta + .fx-meta { margin-top: 12px; }
+
+  /* ===== 椭圆背景：绝对定位，不影响任何布局 =====
+     贴合款：高 32px（文字行 22px，上下各探出 5px，落在原有留白内），
+     左右各比文字多出 16px。 */
+  .oval { position: relative; display: inline-block; }
+  .oval::before {
+    content: "";
+    position: absolute;
+    z-index: 0;
+    left: -16px;
+    right: -16px;
+    top: 50%;
+    height: 32px;
+    transform: translateY(-50%);
+    border-radius: 50%;
+  }
+  /* 方案一：现状横条同色（视觉上=横条缩成一个椭圆） */
+  .oval.same::before { background: var(--bar-bg); }
+  /* 方案二：标准主题浅绿，轮廓更清楚 */
+  .oval.tint::before { background: var(--success-bg); }
+  /* 方案四：横条同色 + 一圈细描边 */
+  .oval.lined::before { background: var(--bar-bg); border: 1px solid #bfe0cf; }
+  /* 方案三：加宽加高的椭圆（上下探出 8px，仍在留白内） */
+  .oval.roomy::before {
+    left: -26px;
+    right: -26px;
+    height: 38px;
+    background: var(--success-bg);
+  }
+
+  .footnote {
+    margin-top: 40px;
+    padding: 16px 20px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: #fff;
+    font-size: 13px;
+    color: #5d706d;
+    line-height: 1.9;
+  }
+  .footnote b { color: #173a3e; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>「已识别」卡片 · 椭圆背景效果图（布局零改动）</h1>
+  <p class="lede">
+    四个方案都是椭圆垫在标题文字后面：文字位置、字号、卡片高度、内容间距与现状完全相同，
+    只换椭圆的颜色、大小和描边。上排是放大局部，下面看整卡效果。
+  </p>
+
+  <!-- 放大对照 -->
+  <div class="zoom-row">
+    <div class="zoom-cell">
+      <div class="zoom-stage">
+        <div class="demo"><span class="oval same"><span class="fx-card-title">已识别：JE 序时账</span></span></div>
+      </div>
+      <b>一 · 横条同色椭圆</b>
+      <p>颜色和现在的绿条一模一样，相当于把横条缩成一个椭圆。</p>
+    </div>
+    <div class="zoom-cell">
+      <div class="zoom-stage">
+        <div class="demo"><span class="oval tint"><span class="fx-card-title">已识别：JE 序时账</span></span></div>
+      </div>
+      <b>二 · 标准浅绿椭圆</b>
+      <p>主题标准浅绿，比横条稍实一点，椭圆轮廓更清楚。</p>
+    </div>
+    <div class="zoom-cell">
+      <div class="zoom-stage">
+        <div class="demo"><span class="oval roomy"><span class="fx-card-title">已识别：JE 序时账</span></span></div>
+      </div>
+      <b>三 · 加宽椭圆</b>
+      <p>同一颜色，椭圆四周更宽松一些，弧度更明显。</p>
+    </div>
+    <div class="zoom-cell">
+      <div class="zoom-stage">
+        <div class="demo"><span class="oval lined"><span class="fx-card-title">已识别：JE 序时账</span></span></div>
+      </div>
+      <b>四 · 同色椭圆 + 细描边</b>
+      <p>淡绿填充加一圈极细的绿描边，靠线条勾勒椭圆。</p>
+    </div>
+  </div>
+
+  <!-- 现状 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag ghost">现状</span>
+      <b>绿色横条（对照用）</b>
+    </div>
+    <div class="fx-source-grid">
+      <div class="fx-card bar">
+        <div class="fx-card-header"><span class="fx-card-title">已识别：JE 序时账</span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card bar">
+        <div class="fx-card-header"><span class="fx-card-title">已识别：TB 科目余额表</span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 方案一 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag reco">方案一 · 推荐</span>
+      <b>横条同色椭圆 · 相当于把横条缩成椭圆</b>
+    </div>
+    <p class="variant-desc">最保守：颜色与现状完全一致，只是绿色范围从「整条」缩到「文字四周一圈」，
+      视觉负担最小，接受度最高。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header"><span class="oval same"><span class="fx-card-title">已识别：JE 序时账</span></span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header"><span class="oval same"><span class="fx-card-title">已识别：TB 科目余额表</span></span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 方案二 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag">方案二</span>
+      <b>标准浅绿椭圆 · 轮廓更清楚</b>
+    </div>
+    <p class="variant-desc">主题标准浅绿（和下方文件胶囊同源），椭圆的形状一眼可辨，
+      和胶囊的呼应也自然。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header"><span class="oval tint"><span class="fx-card-title">已识别：JE 序时账</span></span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header"><span class="oval tint"><span class="fx-card-title">已识别：TB 科目余额表</span></span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 方案三 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag">方案三</span>
+      <b>加宽椭圆 · 弧度更明显</b>
+    </div>
+    <p class="variant-desc">方案二的放大版：左右各多留 10px、上下探出多一点（仍在原有留白内，不推挤任何内容），
+      椭圆的「圆」感更强。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header"><span class="oval roomy"><span class="fx-card-title">已识别：JE 序时账</span></span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header"><span class="oval roomy"><span class="fx-card-title">已识别：TB 科目余额表</span></span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 方案四 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag">方案四</span>
+      <b>同色椭圆 + 细描边</b>
+    </div>
+    <p class="variant-desc">填色保持横条原有的淡，另加一圈极细的绿描边把椭圆勾出来；
+      想要「几乎无色但看得出形状」时选这版。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header"><span class="oval lined"><span class="fx-card-title">已识别：JE 序时账</span></span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header"><span class="oval lined"><span class="fx-card-title">已识别：TB 科目余额表</span></span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="footnote">
+    <b>说明</b><br>
+    ① 四个方案的文字位置、字号、卡片高度、内容间距与现状完全一致，椭圆只是背景层。<br>
+    ② 选定后同样是一次改动，借款利息 / 存款利息 / 汇兑损益三个页面同时生效。
+  </div>
+</div>
+</body>
+</html>

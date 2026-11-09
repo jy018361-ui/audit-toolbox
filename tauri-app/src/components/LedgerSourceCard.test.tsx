@@ -2,31 +2,34 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { LedgerSourceCard } from "./LedgerSourceCard";
+import { LedgerSourceCard, LedgerSourceControls } from "./LedgerSourceCard";
+import { LedgerMappingPreview } from "./LedgerMappingPreview";
+
+vi.mock("@/ledgerForms", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/ledgerForms")>(),
+  useLedgerForms: () => [],
+}));
 
 afterEach(cleanup);
 
-function renderCard(props: Partial<Parameters<typeof LedgerSourceCard>[0]> = {}) {
+function renderControls(props: Partial<Parameters<typeof LedgerSourceControls>[0]> = {}) {
   const onHeaderRowChange = vi.fn();
   render(
-    <LedgerSourceCard
-      inputPath="C:\\t\\je.xlsx"
+    <LedgerSourceControls
       sheet=""
       knownSheets={[]}
       headerRow={0}
-      onBrowse={() => {}}
       onSheetChange={() => {}}
       onHeaderRowChange={onHeaderRowChange}
-      onInspect={() => {}}
       {...props}
     />,
   );
   return { onHeaderRowChange };
 }
 
-describe("LedgerSourceCard 标题行", () => {
+describe("凭证预览读取设置", () => {
   it("默认「自动识别」，改成具体行号后原样回传", () => {
-    const { onHeaderRowChange } = renderCard();
+    const { onHeaderRowChange } = renderControls();
     const select = screen.getByLabelText("标题行") as HTMLSelectElement;
     expect(select.value).toBe("0");
     expect(screen.getByRole("option", { name: "自动识别" })).toBeTruthy();
@@ -34,20 +37,32 @@ describe("LedgerSourceCard 标题行", () => {
     expect(onHeaderRowChange).toHaveBeenCalledWith(3);
   });
 
-  it("自动模式下回显后端探测到的行号，手选行号时不显示", () => {
-    renderCard({ headerRow: 0, detectedHeaderRow: 4 });
-    expect(screen.getByText("已自动按第 4 行识别表头。")).toBeTruthy();
-    cleanup();
-    renderCard({ headerRow: 4, detectedHeaderRow: 4 });
-    expect(screen.queryByText("已自动按第 4 行识别表头。")).toBeNull();
+  it("上传区不重复设置，预览清空后设置仍可操作", () => {
+    const onSheetChange = vi.fn();
+    const { container } = render(<>
+      <LedgerSourceCard inputPath="C:/t/je.xlsx" onBrowse={() => {}} onInspect={() => {}} />
+      <LedgerMappingPreview toolbar={<LedgerSourceControls sheet="明细" knownSheets={["明细", "总账"]} headerRow={0}
+        onSheetChange={onSheetChange} onHeaderRowChange={() => {}} />} />
+    </>);
+    const source = screen.getByText("加载数据").closest("section");
+    expect(source?.querySelector("select")).toBeNull();
+    const sheet = screen.getByLabelText("Sheet");
+    expect(container.querySelector(".mapping-panel")?.contains(sheet)).toBe(true);
+    fireEvent.change(sheet, { target: { value: "总账" } });
+    expect(onSheetChange).toHaveBeenCalledWith("总账");
   });
 
   it("表头层数可自动识别，也可人工覆盖", () => {
     const onHeaderDepthChange = vi.fn();
-    renderCard({ headerDepth: 0, onHeaderDepthChange });
+    renderControls({ headerDepth: 0, onHeaderDepthChange });
     const select = screen.getByLabelText("表头层数") as HTMLSelectElement;
     expect(select.value).toBe("0");
     fireEvent.change(select, { target: { value: "2" } });
     expect(onHeaderDepthChange).toHaveBeenCalledWith(2);
+  });
+
+  it("手选非预设标题行仍能回显，不丢失已恢复的行号", () => {
+    renderControls({ headerRow: 25 });
+    expect((screen.getByLabelText("标题行") as HTMLSelectElement).value).toBe("25");
   });
 });

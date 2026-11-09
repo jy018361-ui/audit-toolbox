@@ -1,5 +1,6 @@
 use crate::spreadsheet_input::is_text;
-use calamine::{Data, Reader, open_workbook_auto};
+use calamine::{Data, Reader};
+use crate::spreadsheet_input::open_workbook_auto;
 use chrono::{Local, NaiveDateTime, NaiveTime};
 #[cfg(test)]
 use encoding_rs::GBK;
@@ -27,6 +28,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use walkdir::WalkDir;
 
 use crate::{AllowedPaths, AppError, storage::Storage};
+use crate::job_dispatch::WorkerLanes;
 
 const SUPPORTED: &[&str] = &["xlsx", "xls", "xlsm", "csv", "txt"];
 const EXCEL_MAX_ROWS: usize = 1_048_576;
@@ -36,15 +38,27 @@ const EXCEL_MAX_COLS: usize = 16_384;
 /// source column degrades to plain text, exactly like the legacy writer did.
 const EXCEL_MAX_HYPERLINKS: usize = 65_530;
 
+#[path = "job_read_plan.rs"]
+mod read_plan;
+
 #[derive(Clone)]
 pub(crate) struct ExcelMergerService {
-    app: AppHandle,
+    events: JobEventTarget,
     allowed: AllowedPaths,
     jobs: Arc<Mutex<HashMap<String, (PathBuf, PathBuf, String, bool)>>>,
     /// 每个任务的启动时刻，终态事件到达时用于计算「执行任务」统计的耗时。
     job_starts: Arc<Mutex<HashMap<String, Instant>>>,
-    heavy: Arc<Mutex<()>>,
+    lanes: Arc<WorkerLanes>,
     cancel_root: PathBuf,
+    #[cfg(test)]
+    worker_exe: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+enum JobEventTarget {
+    App(AppHandle),
+    #[cfg(test)]
+    Test(Arc<dyn Fn(Value) + Send + Sync>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,6 +72,8 @@ struct WorkerRequest {
     pause_path: String,
     #[serde(default)]
     memory_protected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    read_plan: Option<crate::disk_table::ReadPlan>,
 }
 
 /// Cooperative pause gate shared by all native heavy jobs.
@@ -116,12 +132,14 @@ impl ExcelMergerService {
             .join("rust-job-cancel");
         let _ = fs::create_dir_all(&cancel_root);
         Self {
-            app,
+            events: JobEventTarget::App(app),
             allowed,
             jobs: Arc::new(Mutex::new(HashMap::new())),
             job_starts: Arc::new(Mutex::new(HashMap::new())),
-            heavy: Arc::new(Mutex::new(())),
+            lanes: Arc::new(WorkerLanes::new()),
             cancel_root,
+            #[cfg(test)]
+            worker_exe: None,
         }
     }
 
@@ -136,7 +154,11 @@ impl ExcelMergerService {
         let job_id = uuid::Uuid::new_v4().simple().to_string();
         let cancel_path = self.cancel_root.join(format!("{job_id}.cancel"));
         let pause_path = self.cancel_root.join(format!("{job_id}.pause"));
-        let memory_protected = hard_memory_limited_job(method, &params);
+        let read_plan = read_plan::for_job(method, &params);
+        let memory_protected = read_plan.as_ref().map_or_else(
+            || hard_memory_limited_job(method, &params),
+            crate::disk_table::ReadPlan::uses_disk,
+        );
         let _ = fs::remove_file(&cancel_path);
         let _ = fs::remove_file(&pause_path);
         self.jobs.lock().insert(
@@ -161,6 +183,7 @@ impl ExcelMergerService {
                 params,
                 cancel_path,
                 memory_protected,
+                read_plan,
             )
         });
         Ok(job_id)
@@ -239,7 +262,9 @@ impl ExcelMergerService {
         params: Value,
         cancel_path: PathBuf,
         memory_protected: bool,
+        read_plan: Option<crate::disk_table::ReadPlan>,
     ) {
+        let queued_at = Instant::now();
         let worker_tool_id = tool_id(&method);
         self.emit(event_for(
             worker_tool_id,
@@ -252,7 +277,8 @@ impl ExcelMergerService {
             Vec::new(),
             None,
         ));
-        let _guard = self.heavy.lock();
+        let _guard = self.lanes.acquire(&method, &cancel_path);
+        let queue_ms = queued_at.elapsed().as_secs_f64() * 1000.0;
         if cancel_path.exists() {
             self.emit(event_for(
                 worker_tool_id,
@@ -270,9 +296,8 @@ impl ExcelMergerService {
         }
         let pause_path = self.cancel_root.join(format!("{job_id}.pause"));
         let memory_retry_path = crate::resource_budget::memory_retry_path(&pause_path);
-        let hard_limited = memory_protected;
         let monitored = memory_protected;
-        let available_worker_memory = if monitored {
+        let _available_worker_memory = if monitored {
             let mut last_notice = None::<Instant>;
             Some(loop {
                 if cancel_path.exists() {
@@ -340,8 +365,9 @@ impl ExcelMergerService {
             cancel_path: cancel_path.to_string_lossy().into_owned(),
             pause_path: pause_path.to_string_lossy().into_owned(),
             memory_protected: monitored,
+            read_plan,
         };
-        let mut command = match std::env::current_exe() {
+        let mut command = match self.worker_executable() {
             // 重任务靠"再启动一份自己"来跑。程序文件在运行期间被移走或重新构建过时
             // （开发机上很常见），这里会失败——直接说清楚该怎么办，
             // 否则用户只看到"无法启动"，无从下手。
@@ -412,11 +438,9 @@ impl ExcelMergerService {
                 return;
             }
         };
-        let _memory_limit = if hard_limited {
-            match crate::resource_budget::WorkerLimit::attach(
-                &child,
-                available_worker_memory.expect("硬限制任务必须有内存上限"),
-            ) {
+        crate::diagnostics::record("worker_spawn", json!({"jobId":job_id,"method":request.method,"workerPid":child.id()}));
+        let _worker_lifetime = if monitored {
+            match crate::resource_budget::WorkerLifetime::attach(&child) {
                 Ok(limit) => Some(limit),
                 Err(err) => {
                     terminate_process_tree(&mut child);
@@ -482,7 +506,7 @@ impl ExcelMergerService {
                     .get("phase")
                     .and_then(Value::as_str)
                     .is_some_and(|phase| matches!(phase, "completed" | "failed" | "cancelled"));
-                self.emit(payload);
+                self.emit_worker_event(payload, queue_ms);
             }
             if monitored && !terminal {
                 if let Ok(memory) = crate::resource_budget::memory_status() {
@@ -578,6 +602,7 @@ impl ExcelMergerService {
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    crate::diagnostics::record("worker_exit", json!({"jobId":job_id,"workerPid":child.id(),"exitCode":status.code(),"success":status.success()}));
                     while let Ok(payload) = receiver.recv_timeout(Duration::from_millis(100)) {
                         terminal |=
                             payload
@@ -586,7 +611,7 @@ impl ExcelMergerService {
                                 .is_some_and(|phase| {
                                     matches!(phase, "completed" | "failed" | "cancelled")
                                 });
-                        self.emit(payload);
+                        self.emit_worker_event(payload, queue_ms);
                         if terminal {
                             break;
                         }
@@ -598,9 +623,7 @@ impl ExcelMergerService {
                             (
                                 "failed",
                                 "error",
-                                if hard_limited {
-                                    "数据处理任务异常退出，可能达到内存保护上限。请减小数据范围后重试。"
-                                } else if params_have_excel_input(&request.params) {
+                                if params_have_excel_input(&request.params) {
                                     "Excel 数据处理进程异常退出。请重试；若持续发生，请查看诊断记录。"
                                 } else {
                                     "Rust Excel 处理进程异常退出。"
@@ -641,13 +664,44 @@ impl ExcelMergerService {
         self.finish(&job_id, &cancel_path);
     }
 
-    fn emit(&self, payload: Value) {
+    fn worker_executable(&self) -> std::io::Result<PathBuf> {
+        #[cfg(test)]
+        if let Some(exe) = &self.worker_exe { return Ok(exe.clone()); }
+        std::env::current_exe()
+    }
+
+    fn emit_worker_event(&self, mut payload: Value, queue_ms: f64) {
+        if let Some(timings) = payload.pointer_mut("/result/timings").and_then(Value::as_object_mut) {
+            timings.insert("queueMs".into(), json!(queue_ms));
+        }
+        self.emit(payload);
+    }
+
+    fn emit(&self, mut payload: Value) {
+        // Log only technical progress metadata, never output data or business messages.
+        crate::diagnostics::record("job_event", json!({
+            "jobId":payload.get("jobId"),"toolId":payload.get("toolId"),"phase":payload.get("phase"),
+            "current":payload.get("current"),"total":payload.get("total"),"severity":payload.get("severity"),
+            "message":crate::diagnostics::summary(&payload["message"]),
+            "result":if matches!(payload["phase"].as_str(),Some("completed" | "failed")) { crate::diagnostics::summary(&payload["result"]) } else { Value::Null },
+            "errorCode":payload.pointer("/result/code").and_then(Value::as_str).map(crate::diagnostics::identifier),
+            "outputCount":payload.get("outputPaths").and_then(Value::as_array).map(Vec::len)
+        }));
+        let background = payload.get("jobId").and_then(Value::as_str)
+            .and_then(|id| self.jobs.lock().get(id).map(|(_, _, method, _)| method == "loan.inspect_full"))
+            .unwrap_or(false);
+        if background { payload["background"] = json!(true); }
         if let Some(paths) = payload.get("outputPaths").and_then(Value::as_array) {
             for path in paths.iter().filter_map(Value::as_str) {
                 self.allowed.0.lock().insert(PathBuf::from(path));
             }
         }
-        let _ = self.app.state::<Storage>().record_job_event(&payload);
+        let app = match &self.events {
+            JobEventTarget::App(app) => app,
+            #[cfg(test)]
+            JobEventTarget::Test(sink) => { sink(payload); return; }
+        };
+        if !background { let _ = app.state::<Storage>().record_job_event(&payload); }
         // 使用统计：任务首次到达终态时记一条 job_run（取消/失败都算未成功）。
         // 从 job_starts 里取走时刻天然去重——同一任务重复的终态事件不会重复上报。
         let phase = payload.get("phase").and_then(Value::as_str);
@@ -657,7 +711,7 @@ impl ExcelMergerService {
                 payload.get("jobId").and_then(Value::as_str),
             ) {
                 if let Some(started) = self.job_starts.lock().remove(job_id) {
-                    if let Some(telemetry) = self.app.try_state::<crate::telemetry::Telemetry>() {
+                    if let Some(telemetry) = app.try_state::<crate::telemetry::Telemetry>() {
                         telemetry.track(
                             "job_run",
                             Some(tool_id),
@@ -669,7 +723,13 @@ impl ExcelMergerService {
                 }
             }
         }
-        let _ = self.app.emit("job-event", payload);
+        if payload.get("toolId").and_then(Value::as_str) == Some("meeting_minutes") {
+            if let Some(meeting) = app.try_state::<Arc<crate::meeting_watch::MeetingState>>() {
+                // 页面晚打开、WebView 重载时也能从快照取回进度与完整结果。
+                meeting.update_job(&payload);
+            }
+        }
+        let _ = app.emit("job-event", payload);
     }
 
     fn finish(&self, job_id: &str, cancel_path: &Path) {
@@ -711,6 +771,9 @@ pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
     "audipick.extract",
     "audipick.batch_extract",
     "audipick.ocr_page",
+    "ocr.recognize_page",
+    "ocr.extract",
+    "ocr.export",
     "fa.match",
     "fa.preview",
     "fa.export",
@@ -725,6 +788,7 @@ pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
     "fx.export",
     "fx.export_rates",
     "loan.preview",
+    "loan.inspect_full",
     "loan.export",
     "deposit.preview",
     "deposit.export",
@@ -743,17 +807,16 @@ fn is_supported_job_method(method: &str) -> bool {
     SUPPORTED_JOB_METHODS.contains(&method)
 }
 
-/// 可以消费 JE 的长任务。是否实际启用内存保护还取决于本次文本输入总大小。
+/// 可能处理大表格的任务；实际保护由本次全部输入的联合预算决定。
 fn memory_protected_method(method: &str) -> bool {
     method.starts_with("kanzhang.")
         || method.starts_with("fx.")
         || method.starts_with("loan.")
         || method.starts_with("deposit.")
-        || method.starts_with("fa.tbje_")
+        || method.starts_with("fa.")
+        || method.starts_with("fuzzy.")
         || method.starts_with("tbje_check.")
 }
-
-const LARGE_TEXT_INPUT_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// 只收集明确的输入路径字段，避免把 outputPath 或结果目录计入保护阈值。
 /// 递归扫描可同时覆盖直接参数、批量任务及各工具嵌套的 source。
@@ -762,9 +825,12 @@ fn collect_input_paths(value: &Value, paths: &mut HashSet<PathBuf>) {
         Value::Object(values) => {
             for (key, value) in values {
                 let normalized = key.to_ascii_lowercase();
+                if matches!(normalized.as_str(), "sourcea" | "sourceb") {
+                    if let Some(path) = value.get("path").and_then(Value::as_str) { paths.insert(PathBuf::from(path)); }
+                }
                 if matches!(
                     normalized.as_str(),
-                    "inputpath" | "jepath" | "tbpath" | "sourcepath" | "ledgerpath"
+                    "inputpath" | "jepath" | "tbpath" | "sourcepath" | "ledgerpath" | "beginpath" | "endpath"
                 ) {
                     if let Some(path) = value.as_str() {
                         paths.insert(PathBuf::from(path));
@@ -802,38 +868,23 @@ fn params_have_excel_input(value: &Value) -> bool {
     paths.iter().any(|path| is_excel_input_path(path))
 }
 
-fn is_protected_text_input_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            ["csv", "txt", "tsv"]
-                .iter()
-                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-        })
-}
-
-fn text_input_bytes_with(value: &Value, size_of: impl Fn(&Path) -> Option<u64>) -> u64 {
-    let mut paths = HashSet::new();
-    collect_input_paths(value, &mut paths);
-    paths
-        .iter()
-        .filter(|path| is_protected_text_input_path(path))
-        .filter_map(|path| size_of(path))
-        .fold(0_u64, u64::saturating_add)
-}
-
-fn text_input_bytes(value: &Value) -> u64 {
-    text_input_bytes_with(value, |path| fs::metadata(path).ok().map(|meta| meta.len()))
-}
-
-fn memory_protected_for_text_bytes(method: &str, bytes: u64) -> bool {
-    memory_protected_method(method) && bytes > LARGE_TEXT_INPUT_BYTES
-}
-
-/// Excel 输入不启用公共内存拦截。CSV/TXT/TSV 按本次任务去重后的输入总大小计，
-/// 只有严格超过 1 GiB 才启用启动等待、运行监测和 Job Object 硬上限。
+/// 内存保护统一跟随大文件磁盘分流，不再仅凭文本文件超过 1 GiB 单独开启。
 fn memory_protected_job(method: &str, params: &Value) -> bool {
-    memory_protected_for_text_bytes(method, text_input_bytes(params))
+    if !memory_protected_method(method) { return false; }
+    if let Some(plan) = read_plan::for_job(method, params) {
+        return plan.uses_disk();
+    }
+    if method.starts_with("fa.") && !method.starts_with("fa.tbje_") {
+        return crate::fa::resources::job_uses_disk(method, params);
+    }
+    let mut paths = HashSet::new();
+    collect_input_paths(params, &mut paths);
+    let paths = paths.iter().filter(|p| p.is_file()).map(PathBuf::as_path).collect::<Vec<_>>();
+    let factor = if method.starts_with("fa.tbje_") { 8 }
+        else if method.starts_with("fuzzy.") || method.starts_with("deposit.") { 2 }
+        else if method.starts_with("loan.") || method.starts_with("tbje_check.") || method.starts_with("fx.") { 4 }
+        else { 1 };
+    !paths.is_empty() && crate::disk_table::should_use_disk(&paths, factor)
 }
 
 fn hard_memory_limited_job(method: &str, params: &Value) -> bool {
@@ -841,6 +892,7 @@ fn hard_memory_limited_job(method: &str, params: &Value) -> bool {
 }
 
 pub fn worker_main() -> i32 {
+    let _tb_analysis = crate::ledger_mapping::disk_tb::AnalysisScope::begin();
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {
         return 2;
@@ -849,9 +901,10 @@ pub fn worker_main() -> i32 {
         Ok(value) => value,
         Err(_) => return 2,
     };
-    let cancel = Arc::new(AtomicBool::new(false));
-    let watch = cancel.clone();
+    crate::diagnostics::record("worker_request", json!({"jobId":request.job_id,"method":request.method,"memoryProtected":request.memory_protected}));
     let cancel_path = PathBuf::from(&request.cancel_path);
+    let cancel = Arc::new(AtomicBool::new(cancel_path.exists()));
+    let watch = cancel.clone();
     thread::spawn(move || {
         while !watch.load(Ordering::Relaxed) {
             if cancel_path.exists() {
@@ -864,7 +917,13 @@ pub fn worker_main() -> i32 {
     let job_id = request.job_id.clone();
     let worker_tool_id = tool_id(&request.method);
     let pause = PauseCheckpoint::new(PathBuf::from(&request.pause_path), cancel.clone());
-    if request.memory_protected {
+    // 发布 EXE 的独立 worker 入口没有父进程计划时，也只在这里生成一次。
+    let read_plan = request.read_plan.clone().or_else(||
+        read_plan::for_job(&request.method, &request.params));
+    let memory_protected = read_plan.as_ref().map_or(request.memory_protected,
+        crate::disk_table::ReadPlan::uses_disk);
+    let _read_plan_guard = read_plan.map(crate::disk_table::ReadPlan::enter);
+    if memory_protected {
         crate::resource_budget::install_runtime_memory_control(
             cancel.clone(),
             crate::resource_budget::memory_retry_path(Path::new(&request.pause_path)),
@@ -887,7 +946,9 @@ pub fn worker_main() -> i32 {
             None,
         ));
     };
-    let running_message = if request.method == "audipick.ocr_page" {
+    let running_message = if request.method.starts_with("ocr.") {
+        "OCR 工具正在处理…"
+    } else if request.method == "audipick.ocr_page" {
         "正在识别合同扫描页…"
     } else if request.method == "audipick.extract" {
         "正在提取合同条款…"
@@ -925,7 +986,9 @@ pub fn worker_main() -> i32 {
         Vec::new(),
         None,
     ));
-    let result = if request.method == "wp.generate" {
+    let result = if request.method.starts_with("ocr.") {
+        crate::ocr::run_job(&request.method, request.params, &progress, cancel, &pause)
+    } else if request.method == "wp.generate" {
         crate::wp::run_job(&request.method, request.params, &progress, cancel, &pause)
     } else if request.method == "confirmation.process" {
         crate::confirmation::run_job(&request.method, request.params, &progress, cancel, &pause)
@@ -985,6 +1048,14 @@ pub fn worker_main() -> i32 {
     };
     match result {
         Ok(result) => {
+            let incomplete = if matches!(request.method.as_str(), "tbje_check.run_batch" | "tbje_check.export_batch") {
+                crate::tbje_check::incomplete_batch(&result)
+            } else { None };
+            let (phase, severity, current, total, message) = match incomplete.as_ref() {
+                Some((0, total, message)) => ("failed", "error", 0, *total, message.as_str()),
+                Some((current, total, message)) => ("completed", "warning", *current, *total, message.as_str()),
+                None => ("completed", "success", 1, 1, "处理完成。"),
+            };
             let outputs = result
                 .get("outputPaths")
                 .and_then(Value::as_array)
@@ -999,15 +1070,15 @@ pub fn worker_main() -> i32 {
             print_event(event_for(
                 worker_tool_id,
                 &request.job_id,
-                "completed",
-                1,
-                1,
-                "处理完成。",
-                "success",
+                phase,
+                current,
+                total,
+                message,
+                severity,
                 outputs,
                 Some(result),
             ));
-            0
+            if phase == "failed" { 1 } else { 0 }
         }
         Err(err) if err.code == "JOB_CANCELLED" => {
             print_event(event_for(
@@ -1071,6 +1142,8 @@ pub(crate) fn tool_id(method: &str) -> &'static str {
         "kanzhang"
     } else if method.starts_with("audipick.") {
         "audipick"
+    } else if method.starts_with("ocr.") {
+        "ocr"
     } else if method.starts_with("tbje_check.") {
         "tbje_check"
     } else if method.starts_with("fa.dep_") {
@@ -1105,7 +1178,9 @@ fn print_event(value: Value) {
 
 #[cfg(windows)]
 fn terminate_process_tree(child: &mut std::process::Child) {
+    use std::os::windows::process::CommandExt;
     let _ = Command::new("taskkill.exe")
+        .creation_flags(0x08000000)
         .args(["/PID", &child.id().to_string(), "/T", "/F"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1204,9 +1279,6 @@ impl Cell {
             Cell::Float(value) => value.to_string(),
             Cell::Int(value) => value.to_string(),
             Cell::Bool(value) => value.to_string(),
-            Cell::DateTime(value) if value.time() == NaiveTime::MIN => {
-                value.format("%Y-%m-%d").to_string()
-            }
             Cell::DateTime(value) => value.format("%Y-%m-%d %H:%M:%S").to_string(),
         }
     }
@@ -1509,9 +1581,9 @@ fn inspect(paths: &[PathBuf]) -> Result<Value, AppError> {
         let mut issue = None;
         let text_input = is_text(&path);
         if !text_input {
-            match open_workbook_auto(&path) {
-                Ok(workbook) => sheets = workbook.sheet_names().to_vec(),
-                Err(err) => issue = Some(format!("无法读取工作簿：{err}")),
+            match crate::disk_table::workbook_sheets(&path, None) {
+                Ok((_, names)) => sheets = names,
+                Err(err) => issue = Some(format!("无法读取工作簿：{}", err.user_message)),
             }
         }
         for sheet in &sheets {
@@ -1549,10 +1621,10 @@ fn inspect(paths: &[PathBuf]) -> Result<Value, AppError> {
 /// 只读前若干行），前端进匹配网格前调用。
 fn match_preview(params: &Value) -> Result<Value, AppError> {
     use crate::excel_header_match::{
-        detect_header_with_merges, flatten_two_layer, load_aliases, match_columns,
+        detect_header_with_merges, load_aliases, match_columns,
     };
 
-    const PREVIEW_ROWS: usize = 24;
+    const PREVIEW_ROWS: usize = 34;
     const DATA_PREVIEW_ROWS: usize = 3;
 
     let paths = parse_input_paths(params)?;
@@ -1618,37 +1690,74 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
     let external = !inputs.iter().any(|path| path == &template_path);
 
     let header_detection_json = |detection: &Option<crate::excel_header_match::HeaderDetection>,
-                                 fallback_row: usize|
+                                 fallback_row: usize, confirmed_empty: bool|
      -> Value {
         match detection {
             Some(detection) => json!({
+                "kind": detection.kind,
                 "headerRow": detection.header_row,
                 "headerRowsCount": detection.header_rows_count,
                 "confidence": detection.confidence,
                 "needsReview": detection.needs_review,
             }),
             None => json!({
+                "kind": if confirmed_empty { "empty" } else { "uncertain" },
                 "headerRow": fallback_row,
                 "headerRowsCount": 1,
                 "confidence": 0.0,
-                "needsReview": true,
+                "needsReview": !confirmed_empty,
             }),
         }
     };
 
-    let (template_rows, template_headers, template_detection) = if external {
-        let (rows, merges) = read_sheet_preview_rows(&template_path, None, PREVIEW_ROWS)?;
-        let detection = detect_header_with_merges(&display_rows(&rows), &merges);
-        let headers = flattened_headers(&rows, &detection);
-        (rows, headers, detection)
+    // 基准由文件 + Sheet 唯一确定；显式选表必须精确读取，不能回退首表。
+    let requested_sheet = params
+        .get("templateSheet")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty());
+    let mut template_sheet = if is_text(&template_path) {
+        if requested_sheet.is_some_and(|name| name != "CSV") {
+            return Err(error("SHEET_READ_FAILED", "文本文件仅支持 CSV 工作表。", None));
+        }
+        "CSV".to_string()
     } else {
-        let first_sheet = first_target_sheet(&template_path, &probe);
-        let (rows, merges) =
-            read_sheet_preview_rows(&template_path, first_sheet.as_deref(), PREVIEW_ROWS)?;
-        let detection = detect_header_with_merges(&display_rows(&rows), &merges);
-        let headers = flattened_headers(&rows, &detection);
-        (rows, headers, detection)
+        let (_, names) = crate::disk_table::workbook_sheets(&template_path, None).map_err(|err| {
+            error("WORKBOOK_READ_FAILED", &format!("无法读取基准工作簿：{}", err.user_message), None)
+        })?;
+        match requested_sheet {
+            Some(name) if names.iter().any(|sheet| sheet == name) => name.to_string(),
+            Some(name) => return Err(error(
+                "SHEET_READ_FAILED",
+                &format!("基准工作簿中未找到工作表「{name}」，请重新选择。"),
+                Some(template_path.display().to_string()),
+            )),
+            None => {
+                let candidates = if external { names } else { target_sheet_names(&names, &probe) };
+                candidates.first().cloned().ok_or_else(|| error(
+                    "MERGER_NO_TARGET_SHEET", "基准工作簿中没有符合条件的工作表。", None,
+                ))?
+            }
+        }
     };
+    let (mut template_rows, mut template_merges) =
+        read_sheet_preview_rows(&template_path, Some(&template_sheet), PREVIEW_ROWS)?;
+    if requested_sheet.is_none() && !is_text(&template_path)
+        && detect_header_with_merges(&display_rows(&template_rows), &template_merges)
+            .is_none_or(|d| d.header_rows_count == 0) {
+        let (_, names) = crate::disk_table::workbook_sheets(&template_path, None)?;
+        let candidates = if external { names } else { target_sheet_names(&names, &probe) };
+        for name in candidates {
+            let (rows, merges) = read_sheet_preview_rows(&template_path, Some(&name), PREVIEW_ROWS)?;
+            if detect_header_with_merges(&display_rows(&rows), &merges).is_some_and(|d| d.header_rows_count > 0) {
+                template_sheet = name; template_rows = rows; template_merges = merges; break;
+            }
+        }
+    }
+    let template_detection = detect_header_with_merges(&display_rows(&template_rows), &template_merges);
+    if template_detection.as_ref().is_some_and(|d| d.header_rows_count == 0) {
+        return Err(error("HEADER_TEMPLATE_UNREADABLE", "该工作表是参数／说明页，没有常规表头。请选择数据表作为基准。", None));
+    }
+    let template_headers = flattened_headers(&template_rows, &template_detection);
     if template_headers
         .iter()
         .all(|header| header.trim().is_empty())
@@ -1685,28 +1794,32 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
                 .take(DATA_PREVIEW_ROWS)
                 .map(|row| row.iter().map(Cell::display).collect::<Vec<_>>())
                 .collect::<Vec<_>>();
-            let matches = match_columns(&template_headers, &headers, &aliases);
+            let matches = if detection.as_ref().is_some_and(|d| d.header_rows_count == 0) {
+                headers.iter().map(|_| crate::excel_header_match::ColumnMatch {
+                    target: None, confidence: 0.0, reason: "无常规表头，从首行原样保留".into(),
+                }).collect()
+            } else { match_columns(&template_headers, &headers, &aliases) };
             file_rows.push(json!({
                 "path": path.to_string_lossy(), "name": name, "sheet": "CSV",
                 "headers": headers,
-                "detection": header_detection_json(&detection, 0),
+                "detection": header_detection_json(&detection, 0, rows.is_empty()),
                 "matches": matches,
                 "preview": preview,
                 "rawRows": raw_rows_json(&rows),
             }));
             continue;
         }
-        let mut workbook = match open_workbook_auto(path) {
-            Ok(workbook) => workbook,
+        let (_, all_names) = match crate::disk_table::workbook_sheets(path, None) {
+            Ok(names) => names,
             Err(err) => {
                 return Err(error(
                     "WORKBOOK_READ_FAILED",
-                    &format!("无法读取工作簿：{err}"),
+                    &format!("无法读取工作簿：{}", err.user_message),
                     Some(path.display().to_string()),
                 ));
             }
         };
-        let names = target_sheet_names(&workbook.sheet_names(), &probe);
+        let names = target_sheet_names(&all_names, &probe);
         if names.is_empty() {
             return Err(error(
                 "MERGER_NO_TARGET_SHEET",
@@ -1728,11 +1841,15 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
                 .take(DATA_PREVIEW_ROWS)
                 .map(|row| row.iter().map(Cell::display).collect::<Vec<_>>())
                 .collect::<Vec<_>>();
-            let matches = match_columns(&template_headers, &headers, &aliases);
+            let matches = if detection.as_ref().is_some_and(|d| d.header_rows_count == 0) {
+                headers.iter().map(|_| crate::excel_header_match::ColumnMatch {
+                    target: None, confidence: 0.0, reason: "无常规表头，从首行原样保留".into(),
+                }).collect()
+            } else { match_columns(&template_headers, &headers, &aliases) };
             file_rows.push(json!({
                 "path": path.to_string_lossy(), "name": name, "sheet": sheet,
                 "headers": headers,
-                "detection": header_detection_json(&detection, 0),
+                "detection": header_detection_json(&detection, 0, rows.is_empty()),
                 "matches": matches,
                 "preview": preview,
                 "rawRows": raw_rows_json(&rows),
@@ -1745,8 +1862,9 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
         "template": {
             "path": template_path.to_string_lossy(),
             "name": file_name(&template_path),
+            "sheet": template_sheet,
             "headers": template_headers,
-            "detection": header_detection_json(&template_detection, 0),
+            "detection": header_detection_json(&template_detection, 0, template_rows.is_empty()),
             "external": external,
             "rawRows": raw_rows_json(&template_rows),
         },
@@ -1755,86 +1873,68 @@ fn match_preview(params: &Value) -> Result<Value, AppError> {
     }))
 }
 
-/// 读一个 Sheet（或文本文件）的前 `limit` 行与横向合并单元格清单（供两层
-/// 表头判定）。`sheet` 为 None 时：文本文件直接读，Excel 取第一张 Sheet
-/// （外部模板场景）。
+/// 只读一个 Sheet（或文本文件）的前 `limit` 个物理行。公共结构判定不再
+/// 需要合并区域，保留空清单以兼容调用形状；省略 Sheet 时沿用首张表。
 fn read_sheet_preview_rows(
     path: &Path,
     sheet: Option<&str>,
     limit: usize,
 ) -> Result<(Vec<Vec<Cell>>, Vec<(u32, u32, u32, u32)>), AppError> {
-    if is_text(path) {
-        let mut rows = Vec::new();
-        let mut count = 0usize;
-        for_each_text_row(path, &AtomicBool::new(false), |row| {
-            if count >= limit {
-                return Ok(());
-            }
-            count += 1;
-            rows.push(row);
-            Ok(())
-        })?;
-        return Ok((rows, Vec::new()));
-    }
-    let mut workbook = open_workbook_auto(path).map_err(|err| {
-        error(
-            "WORKBOOK_READ_FAILED",
-            &format!("无法读取工作簿：{err}"),
-            Some(path.display().to_string()),
-        )
-    })?;
-    let name = match sheet {
-        Some(name) => name.to_string(),
-        None => workbook
-            .sheet_names()
-            .first()
-            .cloned()
-            .ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿没有 Sheet。", None))?,
-    };
-    let merges = merge_regions(&mut workbook, &name);
-    let range = workbook.worksheet_range(&name).map_err(|err| {
-        error(
-            "SHEET_READ_FAILED",
-            &format!("无法读取 Sheet：{err}"),
-            Some(format!("{} / {name}", path.display())),
-        )
-    })?;
-    Ok((
-        range
-            .rows()
-            .take(limit)
-            .map(|row| row.iter().map(Cell::from_excel).collect())
-            .collect(),
-        merges,
-    ))
+    // 表头判定已统一为公共结构候选，合并区域参数不再参与判断。
+    // 不为尾部的 mergeCells 解析整张表；目录、前部行和同源基准均复用有界缓存。
+    let (_, names) = crate::disk_table::workbook_sheets(path, sheet)?;
+    let selected = sheet.or_else(|| names.first().map(String::as_str));
+    let (_, _, rows) = crate::disk_table::preview_source(path, selected, limit)?;
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let rows = rows.into_iter().map(|mut row| {
+        row.resize(width, String::new());
+        row.into_iter().map(Cell::String).collect()
+    }).collect();
+    Ok((rows, Vec::new()))
 }
 
-/// XLSX/XLS 的合并单元格清单；XLSB/ODS 读不到就当没有（两层判定退化为
-/// 启发式）。
-fn merge_regions(
-    workbook: &mut calamine::Sheets<std::io::BufReader<std::fs::File>>,
-    name: &str,
-) -> Vec<(u32, u32, u32, u32)> {
-    use calamine::Sheets;
-    let regions = match workbook {
-        Sheets::Xlsx(book) => book.merge_cells_by_sheet_name(name).unwrap_or_default(),
-        Sheets::Xls(book) => book.merge_cells_by_sheet_name(name).unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    regions
-        .iter()
-        .map(|dims| (dims.start.0, dims.start.1, dims.end.0, dims.end.1))
-        .collect()
+#[test]
+fn excel_preview_does_not_parse_tail_or_change_header_cells() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("合并预览.xlsx");
+    crate::table_read_cache::workbook_with_bad_tail(&path, &["资产编号", "资产名称", "原值"]);
+    let (rows, _) = read_sheet_preview_rows(&path, Some("数据"), 34).unwrap();
+    assert_eq!(rows.len(), 34);
+    assert_eq!(display_rows(&rows)[0], ["资产编号", "资产名称", "原值"]);
+    assert!(read_sheet_preview_rows(&path, Some("不存在"), 34).is_err());
 }
 
-fn first_target_sheet(path: &Path, probe: &MergeParams) -> Option<String> {
-    if is_text(path) {
-        return None;
-    }
-    let workbook = open_workbook_auto(path).ok()?;
-    target_sheet_names(&workbook.sheet_names(), probe)
-        .first()
-        .cloned()
+#[test]
+fn excel_preview_date_header_matches_export_snapshot_display() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("日期表头.xlsx");
+    let mut workbook = rust_xlsxwriter::Workbook::new();
+    let sheet = workbook.add_worksheet();
+    let date = rust_xlsxwriter::ExcelDateTime::from_ymd(2025, 12, 31).unwrap();
+    sheet.write_datetime_with_format(0, 0, &date,
+        &rust_xlsxwriter::Format::new().set_num_format("yyyy-mm-dd")).unwrap();
+    sheet.write_string(0, 1, "金额").unwrap();
+    sheet.write_string(1, 0, "资产A").unwrap();
+    workbook.save(&path).unwrap();
+    let (preview, _) = read_sheet_preview_rows(&path, None, 34).unwrap();
+    let mut book = open_workbook_auto(&path).unwrap();
+    let range = book.worksheet_range("Sheet1").unwrap();
+    let formal = physical_cell_rows(&range, None);
+    assert_eq!(display_rows(&preview), display_rows(&formal));
+}
+
+/// Calamine 的 range 从首个非空格开始；预览和导出均恢复物理行列。
+fn physical_cell_rows(range: &calamine::Range<Data>, limit: Option<usize>) -> Vec<Vec<Cell>> {
+    let cap = limit.unwrap_or(usize::MAX);
+    let (start_row, start_col) = range.start().unwrap_or((0, 0));
+    let mut rows = vec![Vec::new(); (start_row as usize).min(cap)];
+    let remaining = cap.saturating_sub(rows.len());
+    rows.extend(range.rows().take(remaining).map(|row| {
+        let mut cells = vec![Cell::String(String::new()); start_col as usize];
+        cells.extend(row.iter().map(Cell::from_excel));
+        cells
+    }));
+    rows
 }
 
 fn display_rows(rows: &[Vec<Cell>]) -> Vec<Vec<String>> {
@@ -1852,6 +1952,10 @@ fn flattened_headers(
         return Vec::new();
     };
     let as_strings = |row: &[Cell]| -> Vec<String> { row.iter().map(Cell::display).collect() };
+    if detection.header_rows_count == 0 {
+        return (0..rows.iter().map(Vec::len).max().unwrap_or(0))
+            .map(|i| format!("原样列{}", i + 1)).collect();
+    }
     if detection.header_rows_count >= 2 {
         let first = rows
             .get(detection.header_row)
@@ -1863,9 +1967,9 @@ fn flattened_headers(
             .unwrap_or_default();
         crate::excel_header_match::flatten_two_layer(&first, &second)
     } else {
-        rows.get(detection.header_row)
-            .map(|row| as_strings(row))
-            .unwrap_or_default()
+        crate::excel_header_match::single_layer_headers(
+            &rows.get(detection.header_row).map(|row| as_strings(row)).unwrap_or_default(),
+        )
     }
 }
 
@@ -1887,18 +1991,23 @@ fn load_selected_sheets(
         );
         if is_text(path) {
             let mut rows = Vec::new();
-            let read = for_each_text_row(path, cancel, |row| {
+            let read = for_each_text_row_reported(path, cancel, |row| {
                 rows.push(row);
                 Ok(())
             });
             match read {
-                Ok(()) => result.push(SheetRows {
-                    file_path: path.clone(),
-                    file_name: file_name(path),
-                    sheet_name: "CSV".into(),
-                    include_sheet_column: params.sheet_action != "default",
-                    rows,
-                }),
+                Ok(report) => {
+                    if report.replaced_chars > 0 {
+                        warnings.push(replaced_chars_warning(path, report.replaced_chars));
+                    }
+                    result.push(SheetRows {
+                        file_path: path.clone(),
+                        file_name: file_name(path),
+                        sheet_name: "CSV".into(),
+                        include_sheet_column: params.sheet_action != "default",
+                        rows,
+                    })
+                }
                 Err(err) if err.code == "JOB_CANCELLED" => return Err(err),
                 Err(err) => warnings.push(format!("{}: {}", file_name(path), err.user_message)),
             }
@@ -1926,10 +2035,11 @@ fn load_selected_sheets(
                     continue;
                 }
             };
-            let rows = range
-                .rows()
-                .map(|row| row.iter().map(Cell::from_excel).collect())
-                .collect();
+            let rows = if params.header_matching.is_some() {
+                physical_cell_rows(&range, None)
+            } else {
+                range.rows().map(|row| row.iter().map(Cell::from_excel).collect()).collect()
+            };
             result.push(SheetRows {
                 file_path: path.clone(),
                 file_name: file_name(path),
@@ -1996,7 +2106,7 @@ fn write_vertical_xlsx_stream(
             // 预览确认后文件可能被改动：跳过表头前的行时顺手收集当前表头，
             // 与计划快照比对，不一致宁可停下也不按旧列位错排。
             let mut snapshot = HeaderSnapshot::new(assignment, path, "CSV");
-            for_each_text_row(path, cancel, |row| {
+            let report = for_each_text_row_reported(path, cancel, |row| {
                 if count < skip {
                     count += 1;
                     snapshot.push(&row)?;
@@ -2007,7 +2117,7 @@ fn write_vertical_xlsx_stream(
                     if let (Some(layout), Some(assignment), Some(pos)) =
                         (matched.as_ref(), assignment, assignment_pos)
                     {
-                        reorder_matched_row(&mut reorder_buffer, &row, assignment, pos, layout);
+                        reorder_matched_row(&mut reorder_buffer, &row, assignment, pos, layout)?;
                         write_matched_vertical_row(
                             &mut workbook,
                             &mut worksheet,
@@ -2035,6 +2145,9 @@ fn write_vertical_xlsx_stream(
                 }
                 Ok(())
             })?;
+            if report.replaced_chars > 0 {
+                warnings.push(replaced_chars_warning(path, report.replaced_chars));
+            }
             continue;
         }
         let mut source_workbook = match open_workbook_auto(path) {
@@ -2085,22 +2198,15 @@ fn write_vertical_xlsx_stream(
                 assignment.map(|a| a.header_row + a.header_rows_count),
             )?;
             if let Some(assignment) = assignment {
-                let current: Vec<Vec<String>> = range
-                    .rows()
-                    .skip(assignment.header_row)
-                    .take(assignment.header_rows_count)
-                    .map(|row| {
-                        row.iter()
-                            .map(Cell::from_excel)
-                            .map(|cell| cell.display())
-                            .collect()
-                    })
-                    .collect();
+                let current = display_rows(&physical_cell_rows(
+                    &range, Some(assignment.header_row + assignment.header_rows_count),
+                )).into_iter().skip(assignment.header_row).collect::<Vec<_>>();
                 verify_current_headers(&current, path, &name, assignment)?;
             }
             let mut reorder_buffer = Vec::new();
+            let (start_row, start_col) = range.start().unwrap_or((0, 0));
             for (row_index, data_row) in range.rows().enumerate() {
-                if row_index < skip {
+                if row_index + (start_row as usize) < skip {
                     continue;
                 }
                 if !data_row.iter().any(|cell| {
@@ -2108,11 +2214,13 @@ fn write_vertical_xlsx_stream(
                 }) {
                     continue;
                 }
-                let cells = data_row.iter().map(Cell::from_excel).collect::<Vec<_>>();
+                let mut cells = vec![Cell::String(String::new());
+                    if matched.is_some() { start_col as usize } else { 0 }];
+                cells.extend(data_row.iter().map(Cell::from_excel));
                 if let (Some(layout), Some(assignment), Some(pos)) =
                     (matched.as_ref(), assignment, assignment_pos)
                 {
-                    reorder_matched_row(&mut reorder_buffer, &cells, assignment, pos, layout);
+                    reorder_matched_row(&mut reorder_buffer, &cells, assignment, pos, layout)?;
                     write_matched_vertical_row(
                         &mut workbook,
                         &mut worksheet,
@@ -2189,13 +2297,17 @@ fn verify_current_headers(
     sheet: &str,
     assignment: &crate::excel_header_match::FileAssignment,
 ) -> Result<(), AppError> {
+    // 无表头页从首行保留，不能拿占位列名去和参数内容复核。
+    if assignment.header_rows_count == 0 { return Ok(()); }
     let flattened = if assignment.header_rows_count >= 2 {
         crate::excel_header_match::flatten_two_layer(
             current_rows.first().map(Vec::as_slice).unwrap_or(&[]),
             current_rows.get(1).map(Vec::as_slice).unwrap_or(&[]),
         )
     } else {
-        current_rows.first().cloned().unwrap_or_default()
+        crate::excel_header_match::single_layer_headers(
+            current_rows.first().map(Vec::as_slice).unwrap_or(&[]),
+        )
     };
     let same = flattened.len() == assignment.headers.len()
         && flattened
@@ -2208,7 +2320,7 @@ fn verify_current_headers(
     Err(error(
         "HEADER_PLAN_STALE",
         &format!(
-            "「{} / {}」的表头与预览确认时不一致（文件可能在预览后被修改）。请返回匹配界面重新预览确认。",
+            "「{} / {}」合并时读取到的表头与已确认表头不同，已停止导出以避免错列。请返回匹配网格核对表头行与层数后重试。",
             file_name(path),
             sheet
         ),
@@ -2222,6 +2334,7 @@ struct HeaderSnapshot<'a> {
     path: PathBuf,
     sheet: String,
     rows: Vec<Vec<String>>,
+    seen: usize,
 }
 
 impl<'a> HeaderSnapshot<'a> {
@@ -2235,6 +2348,7 @@ impl<'a> HeaderSnapshot<'a> {
             path: path.to_path_buf(),
             sheet: sheet.to_string(),
             rows: Vec::new(),
+            seen: 0,
         }
     }
 
@@ -2242,6 +2356,11 @@ impl<'a> HeaderSnapshot<'a> {
         let Some(assignment) = self.assignment else {
             return Ok(());
         };
+        let row_index = self.seen;
+        self.seen += 1;
+        if row_index < assignment.header_row {
+            return Ok(());
+        }
         if self.rows.len() >= assignment.header_rows_count {
             return Ok(());
         }
@@ -2368,7 +2487,13 @@ fn reorder_matched_row(
     assignment: &crate::excel_header_match::FileAssignment,
     assignment_index: usize,
     layout: &MatchedLayout,
-) {
+) -> Result<(), AppError> {
+    if assignment.headers.is_empty() && row.iter().any(|v| !v.is_empty()) {
+        return Err(error("HEADER_PLAN_STALE", "预览中未识别到表头的工作表实际含有数据，请重新指定表头或选择原样保留后导出。", None));
+    }
+    if assignment.header_rows_count == 0 && row.iter().skip(assignment.headers.len()).any(|v| !v.is_empty()) {
+        return Err(error("HEADER_PLAN_STALE", "原样保留页出现预览范围外的新列，请重新检查文件列数后导出。", None));
+    }
     let width = layout.template_headers.len() + layout.independent.len();
     buffer.clear();
     buffer.resize(width, Cell::Empty);
@@ -2392,6 +2517,7 @@ fn reorder_matched_row(
             }
         }
     }
+    Ok(())
 }
 
 /// 匹配模式的表头行：来源文件、来源Sheet、模板列、独立列，加粗。
@@ -2660,7 +2786,7 @@ fn write_vertical_csv_stream(
                     })?;
                 let assignment = layout.ordered[position].clone();
                 let mut buffer = Vec::new();
-                reorder_matched_row(&mut buffer, row, &assignment, position, layout);
+                reorder_matched_row(&mut buffer, row, &assignment, position, layout)?;
                 let mut record = vec![source.file_name.clone(), source.sheet_name.clone()];
                 record.extend(buffer.iter().map(Cell::display));
                 writer.write_record(record).map_err(csv_error)?;
@@ -2690,7 +2816,7 @@ fn write_vertical_csv_stream(
             let mut seen = 0usize;
             let mut snapshot = HeaderSnapshot::new(assignment, path, "CSV");
             // A late text decoding error must abort, never publish a partially read file.
-            for_each_text_row(path, cancel, |row| {
+            let report = for_each_text_row_reported(path, cancel, |row| {
                 if seen < skip {
                     seen += 1;
                     snapshot.push(&row)?;
@@ -2699,6 +2825,9 @@ fn write_vertical_csv_stream(
                 seen += 1;
                 write_row(&source, &row)
             })?;
+            if report.replaced_chars > 0 {
+                warnings.push(replaced_chars_warning(path, report.replaced_chars));
+            }
         } else {
             match load_selected_sheets(std::slice::from_ref(path), params, progress, cancel) {
                 Ok((sheets, issues)) => {
@@ -2941,7 +3070,8 @@ fn merge_workbook_exact(
     }
     crate::excel_com::copy_sheets_exact(&plans, output, params.add_hyperlinks, progress, &|| {
         check_cancel(cancel)
-    })
+    })?;
+    crate::xlsx_numbers::normalize_copied_workbook(output, &|| check_cancel(cancel))
 }
 
 #[cfg(not(windows))]
@@ -3018,6 +3148,27 @@ fn for_each_text_row(
     crate::spreadsheet_input::for_each_text_row(path, cancel, |row| {
         visit(row.into_iter().map(Cell::String).collect())
     })
+}
+
+/// 逐行读取文本表格，带回替换留痕：源文件里解不出的字符已按 U+FFFD
+/// 占位读入，调用方要把它转成结果里用户可见的警告。
+fn for_each_text_row_reported(
+    path: &Path,
+    cancel: &AtomicBool,
+    mut visit: impl FnMut(Vec<Cell>) -> Result<(), AppError>,
+) -> Result<crate::spreadsheet_input::TextReadReport, AppError> {
+    crate::spreadsheet_input::for_each_text_row_reported(path, cancel, |row| {
+        visit(row.into_iter().map(Cell::String).collect())
+    })
+}
+
+/// 源文本存在编码瑕疵时的统一警告话术（审计留痕：替换了多少处要写明）。
+fn replaced_chars_warning(path: &Path, replaced_chars: u64) -> String {
+    format!(
+        "{}：源文件有 {} 处字符无法按检测编码解读，已用「�」占位继续处理，建议向数据提供方索取 UTF-8 版本复核该等字段。",
+        file_name(path),
+        replaced_chars
+    )
 }
 
 fn text_source(path: &Path, params: &MergeParams) -> SheetRows {
@@ -3111,13 +3262,17 @@ fn write_cell(
                 .map_err(xlsx_error)?;
         }
         Cell::Float(value) => {
+            worksheet.set_column_width(col as u16, 24).map_err(xlsx_error)?;
             worksheet
-                .write_number(row as u32, col as u16, *value)
+                .write_number_with_format(row as u32, col as u16, *value,
+                    crate::xlsx_numbers::number_format())
                 .map_err(xlsx_error)?;
         }
         Cell::Int(value) => {
+            worksheet.set_column_width(col as u16, 24).map_err(xlsx_error)?;
             worksheet
-                .write_number(row as u32, col as u16, *value as f64)
+                .write_number_with_format(row as u32, col as u16, *value as f64,
+                    crate::xlsx_numbers::integer_format())
                 .map_err(xlsx_error)?;
         }
         Cell::Bool(value) => {
@@ -3503,6 +3658,30 @@ mod tests {
     use super::*;
     use calamine::Reader;
     use std::io::Read;
+
+    #[test]
+    fn thousands_export_preserves_values_text_dates_and_booleans() {
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        for (column, value) in [
+            Cell::Float(1234567.891234), Cell::Int(-1234567),
+            Cell::String("001234567890123456".into()), Cell::Bool(true),
+            Cell::DateTime(chrono::NaiveDate::from_ymd_opt(2026, 11, 5).unwrap().and_hms_opt(0, 0, 0).unwrap()),
+        ].iter().enumerate() {
+            write_cell(sheet, 0, column, value).unwrap();
+        }
+        let bytes = book.save_to_buffer().unwrap();
+        crate::xlsx_numbers::assert_cell_format(&bytes, 1, "A1", crate::xlsx_numbers::NUMBER_FORMAT);
+        crate::xlsx_numbers::assert_cell_format(&bytes, 1, "B1", "#,##0");
+        crate::xlsx_numbers::assert_cell_format(&bytes, 1, "E1", "yyyy-mm-dd");
+        let mut read = calamine::Xlsx::new(std::io::Cursor::new(bytes)).unwrap();
+        let range = read.worksheet_range("Sheet1").unwrap();
+        assert_eq!(range[(0, 0)], Data::Float(1234567.891234));
+        assert_eq!(range[(0, 2)], Data::String("001234567890123456".into()));
+        assert_eq!(range[(0, 3)], Data::Bool(true));
+    }
+    include!("excel_merger_header_tests.rs");
+    include!("excel_merger_dispatch_tests.rs");
 
     fn test_merge(params: Value, cancel: Arc<AtomicBool>) -> Result<Value, AppError> {
         let pause = PauseCheckpoint::unpaused(cancel.clone());
@@ -4060,6 +4239,88 @@ mod tests {
     }
 
     #[test]
+    fn match_preview_selects_exact_template_sheet_and_exports_its_column_order() {
+        let root = std::env::temp_dir().join(format!("audit-match-sheet-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("多工作表.xlsx");
+        let mut workbook = Workbook::new();
+        for (name, headers, values) in [
+            ("原表", ["日期", "凭证号", "金额"], ["2026-01-01", "记-001", "100"]),
+            ("新增清单", ["金额", "日期", "凭证号"], ["200", "2026-02-01", "记-002"]),
+        ] {
+            let sheet = workbook.add_worksheet();
+            sheet.set_name(name).unwrap();
+            for (col, header) in headers.iter().enumerate() {
+                sheet.write_string(0, col as u16, *header).unwrap();
+                sheet.write_string(1, col as u16, values[col]).unwrap();
+            }
+        }
+        workbook.save(&input).unwrap();
+        let request = json!({
+            "inputPaths": [input.to_string_lossy()], "templatePath": input.to_string_lossy(),
+            "templateSheet": "新增清单", "sheetAction": "merge_all",
+        });
+        let preview = match_preview(&request).unwrap();
+        assert_eq!(preview["template"]["sheet"], "新增清单");
+        assert_eq!(preview["template"]["headers"], json!(["金额", "日期", "凭证号"]));
+        assert_eq!(preview["template"]["rawRows"][1][0], "200");
+        assert_eq!(preview["rows"][0]["sheet"], "原表");
+        assert_eq!(preview["rows"][0]["matches"][0]["target"], 1);
+        assert_eq!(preview["rows"][1]["matches"][0]["target"], 0);
+        let assignments: Vec<Value> = preview["rows"].as_array().unwrap().iter().map(|row| {
+            let columns: Vec<Value> = row["matches"].as_array().unwrap().iter().enumerate()
+                .map(|(source, matched)| json!({
+                    "source": source, "target": matched["target"], "discard": false,
+                    "manual": false, "reason": matched["reason"],
+                })).collect();
+            json!({
+                "path": row["path"], "sheet": row["sheet"], "headers": row["headers"],
+                "headerRow": row["detection"]["headerRow"],
+                "headerRowsCount": row["detection"]["headerRowsCount"], "columns": columns,
+            })
+        }).collect();
+        let output = root.join("切换后导出.xlsx");
+        let mut params = base_params(&[input.clone()], &output);
+        params["sheetAction"] = json!("merge_all");
+        params["headerMatching"] = json!({
+            "templatePath": input.to_string_lossy(), "templateHeaders": preview["template"]["headers"],
+            "rememberAliases": [], "assignments": assignments,
+        });
+        test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+        let rows = read_merged_sheet(&output, "Merged");
+        assert_eq!(rows[0], vec!["来源文件", "来源Sheet", "金额", "日期", "凭证号"]);
+        assert_eq!(&rows[1][2..], &["100", "2026-01-01", "记-001"]);
+        assert_eq!(&rows[2][2..], &["200", "2026-02-01", "记-002"]);
+
+        let mut invalid = request.clone();
+        invalid["templateSheet"] = json!("不存在");
+        assert_eq!(match_preview(&invalid).unwrap_err().code, "SHEET_READ_FAILED");
+
+        let mut default_request = request.clone();
+        default_request.as_object_mut().unwrap().remove("templateSheet");
+        assert_eq!(match_preview(&default_request).unwrap()["template"]["sheet"], "原表");
+        default_request["sheetAction"] = json!("match_selected");
+        default_request["targetSheets"] = json!(["新增清单"]);
+        assert_eq!(match_preview(&default_request).unwrap()["template"]["sheet"], "新增清单");
+
+        // 外部模板同样精确按 Sheet 取表头，数据只来自输入清单。
+        let text = root.join("明细.csv");
+        fs::write(&text, "日期,凭证号,金额\n2026-03-01,记-003,300\n").unwrap();
+        let mut external = request;
+        external["inputPaths"] = json!([text.to_string_lossy()]);
+        let external_preview = match_preview(&external).unwrap();
+        assert_eq!(external_preview["template"]["sheet"], "新增清单");
+        assert_eq!(external_preview["template"]["external"], true);
+        assert_eq!(external_preview["rows"].as_array().unwrap().len(), 1);
+        external["templatePath"] = json!(text.to_string_lossy());
+        external["templateSheet"] = json!("CSV");
+        assert_eq!(match_preview(&external).unwrap()["template"]["sheet"], "CSV");
+        external["templateSheet"] = json!("不存在");
+        assert_eq!(match_preview(&external).unwrap_err().code, "SHEET_READ_FAILED");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn match_preview_reports_detection_and_suggestions() {
         let root = std::env::temp_dir().join(format!("audit-match-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -4250,10 +4511,25 @@ mod tests {
         bytes.push(0x81); // dangling GBK lead byte, beyond the sniff sample
         fs::write(&input, bytes).unwrap();
         let output = root.join("结果.csv");
+        let mut params = base_params(&[input.clone()], &output);
+        params["outputFormat"] = "csv".into();
+        // 零星编码瑕疵（如导出时个别字符写坏）：不再整档报错，替换为 U+FFFD
+        // 继续合并，并在结果警告里留痕。
+        let summary = test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+        let warnings = summary["warnings"].as_array().unwrap();
+        assert!(warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("占位继续处理")));
+        assert!(output.exists());
+        // 大面积解码替换说明编码判断错了：仍然中止，绝不发布读了一半的文件。
+        fs::remove_file(&output).unwrap();
+        let mut dense = GBK.encode(&text).0.into_owned();
+        dense.extend(std::iter::repeat(0xFF).take(120 * 1024));
+        fs::write(&input, dense).unwrap();
         let mut params = base_params(&[input], &output);
         params["outputFormat"] = "csv".into();
         let err = test_merge(params, Arc::new(AtomicBool::new(false))).unwrap_err();
-        assert_eq!(err.code, "TEXT_READ_FAILED");
+        assert_eq!(err.code, "TEXT_ENCODING_INVALID");
         assert!(err.user_message.contains("长文本.XLS"));
         assert!(!output.exists());
         assert!(!partial_output_path(&output).exists());
@@ -4341,12 +4617,17 @@ mod tests {
         assert!(memory_protected_method("fa.tbje_export"));
         assert!(memory_protected_method("tbje_check.run"));
         assert!(memory_protected_method("tbje_check.export_batch"));
+        for method in ["fa.dep_calculate", "fa.policy_compare", "fa.match", "fuzzy.match", "fuzzy.export"] {
+            assert!(memory_protected_method(method));
+        }
         assert!(!memory_protected_method("file_list.export"));
     }
 
     #[test]
-    fn excel_inputs_skip_all_memory_interception_across_tools() {
+    fn missing_excel_paths_do_not_force_worker_memory_limits() {
         let cases = [
+            ("loan.inspect_full", json!({"kind":"je","source":{"inputPath":"C:\\data\\missing-je.xlsx"}})),
+            ("loan.preview", json!({"mode":"ledger","ledgerSource":{"source":{"inputPath":"C:\\data\\missing-ledger.xlsx"}}})),
             ("kanzhang.inspect", json!({"inputPath":"C:\\data\\je.xlsx"})),
             (
                 "fx.preview",
@@ -4372,48 +4653,155 @@ mod tests {
 
         for (method, params) in cases {
             assert!(memory_protected_method(method));
-            assert_eq!(
-                text_input_bytes_with(&params, |_| Some(8 * LARGE_TEXT_INPUT_BYTES)),
-                0
-            );
             assert!(!memory_protected_job(method, &params));
             assert!(!hard_memory_limited_job(method, &params));
         }
     }
 
     #[test]
-    fn text_inputs_are_protected_only_when_combined_size_exceeds_one_gib() {
-        let params = json!({
-            "jeSource":{"inputPath":"C:\\data\\je.csv"},
-            "tbSource":{"inputPath":"C:\\data\\tb.tsv"},
-            "inputPaths":["C:\\data\\je.csv", "C:\\data\\notes.txt", "C:\\data\\reference.xlsx"],
-            "outputPath":"C:\\output\\result.xlsx"
-        });
-        let size = |path: &Path| match path.file_name().and_then(|name| name.to_str()) {
-            Some("je.csv") => Some(600 * 1024 * 1024),
-            Some("tb.tsv") => Some(400 * 1024 * 1024),
-            Some("notes.txt") => Some(25 * 1024 * 1024),
-            _ => Some(20 * LARGE_TEXT_INPUT_BYTES),
-        };
-        // je.csv appears twice but is counted once. outputPath is ignored.
-        let bytes = text_input_bytes_with(&params, size);
-        assert_eq!(bytes, 1025 * 1024 * 1024);
-        assert!(memory_protected_for_text_bytes("kanzhang.export", bytes));
-        assert!(!memory_protected_for_text_bytes("file_list.export", bytes));
+    fn tbje_mapping_preflight_uses_the_same_read_plan_as_the_check() {
+        let params = json!({"prepareMappings":true,"groups":[
+            {"tbSource":{"inputPath":"C:/not-yet-read/tb.csv"},"jeSource":{"inputPath":"C:/not-yet-read/je.csv"}}
+        ]});
+        assert!(!hard_memory_limited_job("tbje_check.run_batch", &params));
+        assert!(!hard_memory_limited_job("tbje_check.run_batch", &json!({"groups":[]})));
     }
 
     #[test]
-    fn one_gib_text_input_is_not_yet_protected() {
-        let params = json!({"inputPath":"C:\\data\\je.csv"});
-        assert_eq!(
-            text_input_bytes_with(&params, |_| Some(LARGE_TEXT_INPUT_BYTES)),
-            LARGE_TEXT_INPUT_BYTES
-        );
-        // The product rule is strictly greater than 1 GiB.
-        assert!(!memory_protected_for_text_bytes(
-            "kanzhang.export",
-            LARGE_TEXT_INPUT_BYTES
-        ));
+    fn joint_input_discovery_covers_card_lists_fuzzy_and_nested_sources() {
+        let params=json!({"beginPath":"begin.xlsx","endPath":"end.xlsx",
+            "sourceA":{"path":"a.csv"},"sourceB":{"path":"b.xlsx"},
+            "tbSource":{"source":{"inputPath":"tb.xlsx"}},"inputPaths":["a.csv","other.csv"],
+            "outputPath":"result.xlsx","snapshot":{"path":"cache.json"}});
+        let mut paths=HashSet::new();collect_input_paths(&params,&mut paths);
+        let expected=["begin.xlsx","end.xlsx","a.csv","b.xlsx","tb.xlsx","other.csv"].into_iter().map(PathBuf::from).collect();
+        assert_eq!(paths,expected);
+    }
+
+    #[test]
+    fn loan_read_plan_matches_reader_and_survives_worker_transfer() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("多表读取策略.xlsx");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&input).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, body) in [
+            ("xl/workbook.xml", "<workbook><sheets><sheet name=\"序时账\" r:id=\"r1\"/><sheet name=\"其他\" r:id=\"r2\"/></sheets></workbook>"),
+            ("xl/_rels/workbook.xml.rels", "<Relationships><Relationship Id=\"r1\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"r2\" Target=\"worksheets/sheet2.xml\"/></Relationships>"),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(body.as_bytes()).unwrap();
+        }
+        for (name, blocks) in [("sheet1.xml", 192), ("sheet2.xml", 1024)] {
+            archive.start_file(format!("xl/worksheets/{name}"), options).unwrap();
+            archive.write_all(b"<worksheet><sheetData/>").unwrap();
+            for _ in 0..blocks { archive.write_all(&[b' '; 65536]).unwrap(); }
+            archive.write_all(b"</worksheet>").unwrap();
+        }
+        crate::disk_table::pad_policy_test_archive(&mut archive);
+        archive.finish().unwrap();
+        let gib = 1024_u64 * 1024 * 1024;
+        let params = json!({"kind":"je","source":{"inputPath":input,"sheet":"序时账"}});
+        let low = crate::resource_budget::MemoryStatus {
+            total:16*gib, available:gib/8, commit_available:gib/8,
+        };
+        let normal = crate::resource_budget::with_test_memory(low, || {
+            // 复现旧监控乘4判磁盘，而实际JE读取乘1仍为普通模式。
+            assert!(crate::disk_table::should_use_disk(&[&input], 4));
+            assert!(!crate::disk_table::should_use_disk_for_sheets(&[(&input, Some("序时账"))], 1));
+            assert!(!hard_memory_limited_job("loan.inspect_full", &params));
+            crate::loan_interest::job_read_plan("loan.inspect_full", &params).unwrap()
+        });
+        assert!(!normal.uses_disk());
+        let request = WorkerRequest {
+            job_id:"read-plan".into(), method:"loan.inspect_full".into(), params:params.clone(),
+            cancel_path:String::new(), pause_path:String::new(), memory_protected:false,
+            read_plan:Some(normal),
+        };
+        let transferred: WorkerRequest = serde_json::from_value(serde_json::to_value(request).unwrap()).unwrap();
+        let guard = transferred.read_plan.unwrap().enter();
+        crate::resource_budget::with_test_memory(low, || {
+            // worker内包括公共嵌套读表也遵守计划，不重新按整本/其他倍数判磁盘。
+            assert!(!crate::disk_table::should_use_disk(&[&input], 4));
+            assert!(!crate::tabular::disk_ledger_applies(&input));
+        });
+        drop(guard);
+        let disk = crate::resource_budget::with_test_memory(low, || {
+            let tb = json!({"kind":"tb","source":{"inputPath":input,"sheet":"序时账"}});
+            assert!(hard_memory_limited_job("loan.inspect_full", &tb));
+            let other = json!({"kind":"je","source":{"inputPath":input,"sheet":"其他"}});
+            assert!(hard_memory_limited_job("loan.inspect_full", &other));
+            crate::loan_interest::job_read_plan("loan.inspect_full", &other).unwrap()
+        });
+        let guard = disk.enter();
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total:64*gib, available:60*gib, commit_available:60*gib,
+        }, || {
+            assert!(crate::disk_table::should_use_disk(&[&input], 1), "内存恢复也不切回整表读取");
+        });
+        drop(guard);
+        crate::resource_budget::with_test_memory(low, || {
+            assert!(crate::disk_table::should_use_disk(&[&input], 4), "计划作用域结束后恢复动态判断");
+        });
+    }
+
+    #[test]
+    fn loan_read_plan_preserves_joint_tb_je_and_ledger_policies() {
+        let dir = tempfile::tempdir().unwrap();
+        let tb = dir.path().join("tb.csv");
+        let je = dir.path().join("je.csv");
+        // 每份恰好50MiB：单份普通，TB+JE乘4的联合工作集进入磁盘。
+        fs::File::create(&tb).unwrap().set_len(50*1024*1024).unwrap();
+        fs::File::create(&je).unwrap().set_len(50*1024*1024).unwrap();
+        let gib = 1024_u64 * 1024 * 1024;
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total:16*gib, available:45*gib/10, commit_available:8*gib,
+        }, || {
+            assert!(!crate::disk_table::should_use_disk(&[&tb], 4));
+            for method in ["loan.preview", "loan.export"] {
+                let params = json!({"mode":"tb","tbSource":{"source":{"inputPath":tb}},
+                    "jeSource":{"source":{"inputPath":je}}});
+                let plan = crate::loan_interest::job_read_plan(method, &params).unwrap();
+                assert!(hard_memory_limited_job(method, &params));
+                let _guard = plan.enter();
+                assert!(crate::disk_table::should_use_disk(&[&tb], 4));
+                assert!(crate::tabular::disk_ledger_applies(&je));
+            }
+            let params = json!({"mode":"ledger","ledgerSource":{"source":{"inputPath":tb}},
+                "tbSource":{"source":{"inputPath":tb}}, "jeSource":{"source":{"inputPath":je}},
+                "rateLedgerSource":{"source":{"inputPath":je}}});
+            assert!(!hard_memory_limited_job("loan.preview", &params), "台账不沿用TB+JE的乘4口径");
+            let plan = crate::loan_interest::job_read_plan("loan.export", &params).unwrap();
+            assert!(!plan.uses_disk());
+            let _guard = plan.enter();
+            assert!(!crate::tabular::disk_ledger_applies(&tb));
+            assert!(!crate::tabular::disk_ledger_applies(&je));
+        });
+    }
+
+    #[test]
+    fn ordinary_mode_workers_skip_low_memory_gate_but_disk_inputs_remain_protected() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small.csv");
+        fs::write(&small, "科目,金额\n1002,10\n").unwrap();
+        let expanded = dir.path().join("expanded.xlsx");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&expanded).unwrap());
+        archive.start_file("xl/worksheets/sheet1.xml", zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)).unwrap();
+        for _ in 0..1024 { archive.write_all(&[b' '; 65536]).unwrap(); }
+        crate::disk_table::pad_policy_test_archive(&mut archive);
+        archive.finish().unwrap();
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total: 16 * 1024 * 1024 * 1024, available: 128 * 1024 * 1024, commit_available: 128 * 1024 * 1024,
+        }, || {
+            for method in ["loan.preview", "deposit.preview", "fx.preview", "fa.tbje_preview", "tbje_check.run", "kanzhang.export", "fuzzy.match"] {
+                assert!(!hard_memory_limited_job(method, &json!({"inputPath":small})), "{method}");
+                assert!(hard_memory_limited_job(method, &json!({"inputPath":expanded})), "{method}");
+            }
+            assert!(!hard_memory_limited_job("file_list.export", &json!({"inputPath":expanded})));
+        });
     }
 
     /// FA 子工具的 job 事件必须路由到各自的页面（useJobEvents 按 toolId 过滤），
@@ -4612,6 +5000,7 @@ mod tests {
         ];
         crate::excel_com::copy_sheets_exact(&plans, &output, true, &|_, _, _, _| {}, &|| Ok(()))
             .unwrap();
+        crate::xlsx_numbers::normalize_copied_workbook(&output, &|| Ok(())).unwrap();
         let mut workbook = open_workbook_auto(&output).unwrap();
         assert_eq!(workbook.sheet_names(), &["Reference", "甲", "乙"]);
         let formulas = workbook.worksheet_formula("甲").unwrap();

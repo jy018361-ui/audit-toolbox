@@ -1,4 +1,5 @@
-use calamine::{Data, Reader, Sheets, open_workbook_auto};
+use calamine::{Data, Reader, Sheets};
+use crate::spreadsheet_input::open_workbook_auto;
 use chrono::Local;
 use directories::ProjectDirs;
 use polars::prelude::*;
@@ -30,6 +31,7 @@ const TS_MAX_PIVOT_COLUMN_VALUES: usize = 180;
 mod disk_ledger;
 mod disk_suite;
 mod large_csv;
+mod ts_read;
 
 pub(crate) type Progress<'a> = &'a dyn Fn(&str, usize, usize, &str);
 
@@ -88,7 +90,7 @@ struct TsJobParams {
     sheet: Option<String>,
     #[serde(default = "one")]
     header_row: usize,
-    /// TS 不暴露双层表头入口，恒为 1；字段与看账共用读取链路才对齐。
+    /// 与预览、筛选使用同一表头层数，默认 1。
     #[serde(default = "one")]
     header_depth: usize,
     output_path: Option<String>,
@@ -246,8 +248,7 @@ pub(crate) fn run_job(
     let result = match method {
         // 读取阶段现在也走任务通道，才能报进度、才能中途取消。
         "ts.inspect" => {
-            progress("read", 0, 1, "正在读取文件…");
-            let value = inspect_ts(params);
+            let value = inspect_ts_with_progress(params, progress, &cancel);
             check_cancel(&cancel)?;
             value
         }
@@ -286,30 +287,15 @@ pub(crate) fn run_job(
 }
 
 fn inspect_ts(params: Value) -> Result<Value, AppError> {
-    let source: SourceParams = parse(params, "TS 参数不完整。")?;
-    let started = Instant::now();
-    // Populate the stable parquet cache on the very first read.  Loading
-    // without it meant the same workbook was parsed from scratch again for the
-    // filter values and once more for the export — three full reads of a file
-    // that is often on a network share.
-    let (table, cache_hit, cache) = load_ts_cached(
-        Path::new(&source.input_path),
-        source.sheet.as_deref(),
-        source.header_row,
-        source.header_depth,
-        true,
-    )?;
-    let defaults = ts_defaults(&table.headers);
-    Ok(json!({
-        "engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path, &table.sheet, source.header_row, source.header_depth)?,
-        "headerDepth":source.header_depth,
-        "path":table.path, "sheets":table.sheets, "selectedSheet":table.sheet,
-        "headers":table.headers, "preview":table.rows.iter().take(20).collect::<Vec<_>>(),
-        "dimensions":{"rows":table.rows.len(),"columns":table.headers.len()},
-        "encoding":table.encoding, "delimiter":table.delimiter.map(|v|v.to_string()),
-        "defaults":defaults, "cacheHit":cache_hit, "cachePath":cache,
-        "timings":{"readMs":started.elapsed().as_millis()}
-    }))
+    inspect_ts_with_progress(params, &|_, _, _, _| {}, &AtomicBool::new(false))
+}
+
+fn inspect_ts_with_progress(
+    params: Value,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<Value, AppError> {
+    ts_read::inspect(parse(params, "TS 参数不完整。")?, progress, cancel)
 }
 
 fn inspect_kanzhang(params: Value) -> Result<Value, AppError> {
@@ -677,8 +663,45 @@ fn ts_filter_values(params: Value) -> Result<Value, AppError> {
         .and_then(Value::as_u64)
         .unwrap_or(1_000)
         .min(20_000) as usize;
+    let path = Path::new(&source.input_path);
+    // 列式快路径：稳定缓存（首次加载已写好）里只取目标一列去重——不再把
+    // 整表逐行转成字符串再全表扫描，取值检索从十几秒降到 1 秒内。
+    if let Ok((_sheet, _sheets, cache, _key)) =
+        ts_cache_identity(path, source.sheet.as_deref(), source.header_row, source.header_depth)
+    {
+        if cache.is_file() {
+            if let Some(headers) = cached_ts_headers(&cache) {
+                if let Some(index) = header_index(&headers, &field) {
+                    if let Some(raw) = cached_column_strings(&cache, &headers, index) {
+                        let mut distinct = BTreeSet::new();
+                        for value in raw {
+                            if keyword.is_empty() || value.to_lowercase().contains(&keyword) {
+                                distinct.insert(value);
+                            }
+                        }
+                        let total = distinct.len();
+                        let values = distinct
+                            .into_iter()
+                            .take(limit)
+                            .map(|value| {
+                                if value.is_empty() {
+                                    "<空白>".to_owned()
+                                } else {
+                                    value
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        return Ok(
+                            json!({"engine":"rust-polars","values":values,"total":total,"truncated":total>limit,"cacheHit":true}),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // 回退：缓存未建好时整表读取（老路径，会顺带补写缓存）。
     let (table, cache_hit, _) = load_ts_cached(
-        Path::new(&source.input_path),
+        path,
         source.sheet.as_deref(),
         source.header_row,
         source.header_depth,
@@ -736,7 +759,24 @@ fn ts_filter_preview(
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
     let job: TsJobParams = parse(params, "TS 参数不完整。")?;
-    progress("read", 0, 2, "正在读取 Timesheet 数据…");
+    progress("read", 0, 2, "正在按筛选条件统计命中行…");
+    check_cancel(cancel)?;
+    // 列式快路径：确认筛选只做「命中行数 + 前 50 行预览」，向量化的列式
+    // 筛选几秒内完成，不再整表转字符串（老路径确认一次要一分钟）。
+    if let Some(result) = cached_filtered_frame(
+        Path::new(&job.input_path),
+        job.sheet.as_deref(),
+        job.header_row,
+        job.header_depth,
+        &job.filters,
+    ) {
+        let (headers, frame, _cache) = result?;
+        let preview = frame_string_rows(&frame, 50);
+        progress("filter", 2, 2, "筛选完成。");
+        return Ok(
+            json!({"engine":"rust-polars","rows":frame.height(),"columns":headers.len(),"headers":headers,"preview":preview,"cacheHit":true,"outputPaths":[]}),
+        );
+    }
     let (table, cache_hit, _) = load_ts_cached(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
@@ -746,10 +786,9 @@ fn ts_filter_preview(
     )?;
     check_cancel(cancel)?;
     let rows = apply_filters(&table, &job.filters);
-    let frame = rows_to_frame(&table.headers, &rows)?;
     progress("filter", 2, 2, "筛选完成。");
     Ok(
-        json!({"engine":"rust-polars","rows":frame.height(),"columns":frame.width(),"headers":frame.get_column_names().iter().map(|v|v.as_str()).collect::<Vec<_>>(),"preview":rows.iter().take(50).collect::<Vec<_>>(),"cacheHit":cache_hit,"outputPaths":[]}),
+        json!({"engine":"rust-polars","rows":rows.len(),"columns":table.headers.len(),"headers":table.headers,"preview":rows.iter().take(50).collect::<Vec<_>>(),"cacheHit":cache_hit,"outputPaths":[]}),
     )
 }
 
@@ -766,21 +805,58 @@ fn export_ts(
         .ok_or_else(|| error("TS_OUTPUT_REQUIRED", "请选择 TS 导出文件的保存路径。", None))?;
     let total_started = Instant::now();
     progress("read", 0, 5, "正在读取 Timesheet 数据…");
-    let (table, cache_hit, cache) = load_ts_cached(
-        Path::new(&job.input_path),
-        job.sheet.as_deref(),
-        job.header_row,
-        job.header_depth,
-        true,
-    )?;
     check_cancel(cancel)?;
-    let filtered = apply_filters(&table, &job.filters);
+    // 优先列式快路径：缓存命中时筛选与透视都在列式数据上完成，不再把
+    // 65 万行整表转成字符串（老路径导出一次要一分多钟）。
+    enum ExportData {
+        Rows {
+            headers: Vec<String>,
+            rows: Vec<Vec<String>>,
+        },
+        Frame {
+            headers: Vec<String>,
+            frame: DataFrame,
+        },
+    }
+    let (data, cache_hit, cache): (ExportData, bool, PathBuf) =
+        match cached_filtered_frame(
+            Path::new(&job.input_path),
+            job.sheet.as_deref(),
+            job.header_row,
+            job.header_depth,
+            &job.filters,
+        ) {
+            Some(Ok((headers, frame, cache))) => (ExportData::Frame { headers, frame }, true, cache),
+            Some(Err(err)) => return Err(err),
+            None => {
+                let (table, cache_hit, cache) = load_ts_cached(
+                    Path::new(&job.input_path),
+                    job.sheet.as_deref(),
+                    job.header_row,
+                    job.header_depth,
+                    true,
+                )?;
+                check_cancel(cancel)?;
+                let filtered = apply_filters(&table, &job.filters);
+                (
+                    ExportData::Rows {
+                        headers: table.headers,
+                        rows: filtered,
+                    },
+                    cache_hit,
+                    cache,
+                )
+            }
+        };
+    let headers = match &data {
+        ExportData::Rows { headers, .. } | ExportData::Frame { headers, .. } => headers,
+    };
     progress("polars", 1, 5, "Rust Polars 正在计算透视结果…");
-    let defaults = ts_defaults(&table.headers);
+    let defaults = ts_defaults(headers);
     let value_field = job
         .value_field
         .clone()
-        .filter(|v| header_index(&table.headers, v).is_some())
+        .filter(|v| header_index(headers, v).is_some())
         .or_else(|| {
             defaults
                 .get("valueField")
@@ -797,7 +873,7 @@ fn export_ts(
     let column_field = job
         .column_field
         .clone()
-        .filter(|v| header_index(&table.headers, v).is_some())
+        .filter(|v| header_index(headers, v).is_some())
         .or_else(|| {
             defaults
                 .get("columnField")
@@ -808,11 +884,23 @@ fn export_ts(
     let project_fields = string_array(defaults.get("projectRowFields"));
     let agg = job.agg.as_deref().unwrap_or("sum");
     let mode = job.pivot_mode.as_deref().unwrap_or("dual_default");
+    let fields = if mode == "custom" && !job.row_fields.is_empty() { job.row_fields.clone() }
+        else if mode == "manager" { manager_fields.clone() }
+        else if mode == "project" { project_fields.clone() }
+        else { manager_fields.iter().chain(&project_fields).cloned().collect() };
+    let pivot_input = match &data {
+        ExportData::Rows { headers, rows } => {
+            TsPivotInput::new(headers, rows, &fields, column_field.as_deref(), &value_field, agg)?
+        }
+        ExportData::Frame { headers, frame } => {
+            TsPivotInput::from_frame(headers, frame, &fields, column_field.as_deref(), &value_field, agg)?
+        }
+    };
     let (manager, project) = if mode == "custom" && !job.row_fields.is_empty() {
         (
-            pivot_rows(
-                &table.headers,
-                &filtered,
+            pivot_rows_from(
+                headers,
+                &pivot_input,
                 &job.row_fields,
                 column_field.as_deref(),
                 &value_field,
@@ -822,9 +910,9 @@ fn export_ts(
         )
     } else if mode == "manager" {
         (
-            pivot_rows(
-                &table.headers,
-                &filtered,
+            pivot_rows_from(
+                headers,
+                &pivot_input,
                 &manager_fields,
                 column_field.as_deref(),
                 &value_field,
@@ -834,9 +922,9 @@ fn export_ts(
         )
     } else if mode == "project" {
         (
-            pivot_rows(
-                &table.headers,
-                &filtered,
+            pivot_rows_from(
+                headers,
+                &pivot_input,
                 &project_fields,
                 column_field.as_deref(),
                 &value_field,
@@ -846,17 +934,17 @@ fn export_ts(
         )
     } else {
         (
-            pivot_rows(
-                &table.headers,
-                &filtered,
+            pivot_rows_from(
+                headers,
+                &pivot_input,
                 &manager_fields,
                 column_field.as_deref(),
                 &value_field,
                 agg,
             )?,
-            Some(pivot_rows(
-                &table.headers,
-                &filtered,
+            Some(pivot_rows_from(
+                headers,
+                &pivot_input,
                 &project_fields,
                 column_field.as_deref(),
                 &value_field,
@@ -872,17 +960,26 @@ fn export_ts(
         "xlsx",
     )?;
     let partial = partial_path(&output);
-    progress("write", 3, 5, "正在写出 Timesheet 透视工作簿…");
+    progress("write", 2, 5, "正在写出 Timesheet 透视工作簿…");
     write_ts_workbook(&partial, &manager, project.as_ref(), agg, cancel)?;
     replace_file(&partial, &output)?;
     let mut outputs = vec![output.to_string_lossy().into_owned()];
-    progress("raw", 4, 5, "正在写出对应明细数据…");
+    progress("raw", 3, 5, "正在写出对应明细数据…");
     let raw = output.with_file_name(format!(
         "{}_data.csv",
         output.file_stem().unwrap_or_default().to_string_lossy()
     ));
-    write_csv_table(&raw, &table.headers, &filtered, cancel)?;
-    let raw_rows = filtered.len();
+    let raw_rows = match &data {
+        ExportData::Rows { headers, rows } => {
+            write_csv_table(&raw, headers, rows, cancel)?;
+            rows.len()
+        }
+        ExportData::Frame { headers, frame } => {
+            let rows = frame_string_rows(frame, frame.height());
+            write_csv_table(&raw, headers, &rows, cancel)?;
+            rows.len()
+        }
+    };
     outputs.push(raw.to_string_lossy().into_owned());
     Ok(
         json!({"engine":"rust-polars","outputPaths":outputs,"rowsManager":manager.rows.len(),"rowsProject":project.as_ref().map(|p|p.rows.len()).unwrap_or(0),"rawRows":raw_rows,"cacheHit":cache_hit,"cachePath":cache,"timings":{"totalMs":total_started.elapsed().as_millis()}}),
@@ -1415,9 +1512,80 @@ struct LedgerAmounts {
     allow_cross_match: bool,
 }
 
+struct TsPivotInput {
+    columns: BTreeMap<usize, Column>,
+    metric: Column,
+    rows: usize,
+}
+
+impl TsPivotInput {
+    fn new(headers: &[String], rows: &[Vec<String>], fields: &[String], column_field: Option<&str>, value_field: &str, agg: &str) -> Result<Self, AppError> {
+        if !matches!(agg, "sum" | "count") {
+            return Err(error("TS_AGG_INVALID", "汇总方式仅支持 sum 或 count。", Some(agg.to_owned())));
+        }
+        if !fields.iter().any(|field| header_index(headers, field).is_some()) {
+            return Err(error("TS_ROW_FIELDS_MISSING", "没有找到有效的透视行字段。", None));
+        }
+        let value_index = header_index(headers, value_field).ok_or_else(||error("COLUMN_NOT_FOUND", "值字段不存在。", Some(value_field.into())))?;
+        let indexes = fields.iter().filter_map(|field|header_index(headers,field))
+            .chain(column_field.and_then(|field|header_index(headers,field))).collect::<BTreeSet<_>>();
+        let columns = indexes.into_iter().map(|index| (index, Column::new(format!("__source_{index}").into(),
+            rows.iter().map(|row|row.get(index).cloned().unwrap_or_default()).collect::<Vec<_>>() ))).collect();
+        let metrics = rows.iter().map(|row| {
+            let value = row.get(value_index).map(String::as_str).unwrap_or("");
+            if agg == "count" { if value.trim().is_empty() {0.0} else {1.0} } else {parse_number(value)}
+        }).collect::<Vec<_>>();
+        Ok(Self { columns, metric: Column::new("__metric".into(), metrics), rows: rows.len() })
+    }
+
+    /// 从列式 DataFrame 直接构建透视输入（导出快路径）：维度列克隆字符串
+    /// Series（Arc 内部共享，开销极小），数值列口径与行版完全一致。
+    fn from_frame(headers: &[String], frame: &DataFrame, fields: &[String], column_field: Option<&str>, value_field: &str, agg: &str) -> Result<Self, AppError> {
+        if !matches!(agg, "sum" | "count") {
+            return Err(error("TS_AGG_INVALID", "汇总方式仅支持 sum 或 count。", Some(agg.to_owned())));
+        }
+        if !fields.iter().any(|field| header_index(headers, field).is_some()) {
+            return Err(error("TS_ROW_FIELDS_MISSING", "没有找到有效的透视行字段。", None));
+        }
+        let value_index = header_index(headers, value_field).ok_or_else(||error("COLUMN_NOT_FOUND", "值字段不存在。", Some(value_field.into())))?;
+        let indexes = fields.iter().filter_map(|field|header_index(headers,field))
+            .chain(column_field.and_then(|field|header_index(headers,field))).collect::<BTreeSet<_>>();
+        let columns = indexes.into_iter().map(|index| {
+            let series = frame.columns()[index].as_materialized_series().clone();
+            (index, Column::new(format!("__source_{index}").into(), series))
+        }).collect();
+        let metric = {
+            let series = frame.columns()[value_index].as_materialized_series();
+            let metrics: Vec<f64> = if let Ok(chunked) = series.str() {
+                chunked.iter().map(|value| {
+                    let value = value.unwrap_or("");
+                    if agg == "count" { if value.trim().is_empty() {0.0} else {1.0} } else {parse_number(value)}
+                }).collect()
+            } else {
+                // 稳定缓存整表都是字符串列；万一遇到其他类型按 0 计，不改变字符串口径。
+                vec![0.0; series.len()]
+            };
+            Column::new("__metric".into(), metrics)
+        };
+        Ok(Self { columns, metric, rows: frame.height() })
+    }
+}
+
 fn pivot_rows(
     headers: &[String],
     rows: &[Vec<String>],
+    row_fields: &[String],
+    column_field: Option<&str>,
+    value_field: &str,
+    agg: &str,
+) -> Result<PivotResult, AppError> {
+    let prepared = TsPivotInput::new(headers, rows, row_fields, column_field, value_field, agg)?;
+    pivot_rows_from(headers, &prepared, row_fields, column_field, value_field, agg)
+}
+
+fn pivot_rows_from(
+    headers: &[String],
+    prepared: &TsPivotInput,
     row_fields: &[String],
     column_field: Option<&str>,
     value_field: &str,
@@ -1441,7 +1609,7 @@ fn pivot_rows(
             None,
         ));
     }
-    let value_index = header_index(headers, value_field).ok_or_else(|| {
+    let _value_index = header_index(headers, value_field).ok_or_else(|| {
         error(
             "COLUMN_NOT_FOUND",
             "值字段不存在。",
@@ -1458,34 +1626,17 @@ fn pivot_rows(
     }
     let mut columns = Vec::new();
     for (position, (_, index)) in row_indexes.iter().enumerate() {
-        columns.push(Column::new(
-            format!("__row_{position}").into(),
-            rows.iter()
-                .map(|row| row.get(*index).cloned().unwrap_or_default())
-                .collect::<Vec<_>>(),
-        ));
+        let mut column = prepared.columns[index].clone();
+        column.rename(format!("__row_{position}").into());
+        columns.push(column);
     }
     if let Some(index) = column_index {
-        columns.push(Column::new(
-            "__pivot".into(),
-            rows.iter()
-                .map(|row| row.get(index).cloned().unwrap_or_default())
-                .collect::<Vec<_>>(),
-        ));
+        let mut column = prepared.columns[&index].clone();
+        column.rename("__pivot".into());
+        columns.push(column);
     }
-    let metrics = rows
-        .iter()
-        .map(|row| {
-            let value = row.get(value_index).map(String::as_str).unwrap_or("");
-            if agg == "count" {
-                if value.trim().is_empty() { 0.0 } else { 1.0 }
-            } else {
-                parse_number(value)
-            }
-        })
-        .collect::<Vec<_>>();
-    columns.push(Column::new("__metric".into(), metrics));
-    let frame = DataFrame::new(rows.len(), columns).map_err(polars_error)?;
+    columns.push(prepared.metric.clone());
+    let frame = DataFrame::new(prepared.rows, columns).map_err(polars_error)?;
     let mut group_exprs = (0..row_indexes.len())
         .map(|i| col(format!("__row_{i}")))
         .collect::<Vec<_>>();
@@ -1824,7 +1975,7 @@ fn preprocess_ledger(
     // 普通平铺 JE 的顺序不能反：先按公共引擎剔噪声行（表尾小计/手工草稿、
     // 有钱没身份的游离行），再做非金额列的向下填充。分段明细账已在上一步用
     // 精确结构标签和“凭证号＋金额”先拆出正文，避免期初余额锚点被当垃圾行删掉。
-    let keep = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
+    let keep = ledger_mapping::ledger_fill_mask(&table.headers, &table.rows, &|role| {
         ledger_role_columns(mapping, role)
     });
     let mut kept_rows = Vec::with_capacity(table.rows.len());
@@ -3444,6 +3595,30 @@ fn dedup_strings(values: &[String]) -> Vec<String> {
 // `is_auxiliary_sheet_name`），这里只负责逐张表算「表头分 + 有数行数」两个输入，
 // 口径与 fx.rs 的选择循环一致。
 
+fn is_ooxml(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("xlsx") || ext.eq_ignore_ascii_case("xlsm"))
+        && !crate::spreadsheet_input::is_xml_workbook(path)
+}
+
+fn resolve_xlsx_sheet(path: &Path, requested: Option<&str>, names: &[String]) -> Result<String, AppError> {
+    if let Some(name) = requested.filter(|name| names.iter().any(|value| value == name)) {
+        return Ok(name.to_owned());
+    }
+    if names.len() == 1 { return Ok(names[0].clone()); }
+    if let Ok(memo) = auto_sheet_memo_path(path) {
+        if let Some(name) = fs::read_to_string(&memo).ok()
+            .filter(|name| names.iter().any(|value| value == name.trim())) {
+            touch_cache(&memo);
+            return Ok(name.trim().to_owned());
+        }
+    }
+    let selected = crate::table_read_cache::read(path, "ledger-auto-sheet-v1", &(), || {
+        crate::fx::lightweight_xlsx_header_layout(path, None).map(|(name, _, _)| name)
+    })?;
+    remember_auto_sheet(path, &selected);
+    Ok(selected)
+}
+
 /// `open_workbook_auto` 按扩展名分派出来的读取器，选表打分要用它逐张读。
 type AutoWorkbook = Sheets<BufReader<File>>;
 
@@ -3516,9 +3691,7 @@ fn auto_select_sheet(workbook: &mut AutoWorkbook, sheets: &[String]) -> Option<S
         if !has_any {
             continue;
         }
-        let header = (0..head.len().min(30))
-            .map(|index| ledger_mapping::header_row_score(&head, index))
-            .fold(0.0_f64, f64::max);
+        let header = crate::header_detection::table_score(&head);
         let score = ledger_mapping::sheet_score(header, populated, name);
         if best.as_ref().is_none_or(|(_, current)| score > *current) {
             best = Some((name.clone(), score));
@@ -3544,7 +3717,8 @@ fn auto_sheet_memo_path(path: &Path) -> Result<PathBuf, AppError> {
     hasher.update(canonical.to_string_lossy().as_bytes());
     hasher.update(meta.len().to_le_bytes());
     hasher.update(modified.to_le_bytes());
-    hasher.update(b"auto-sheet-v1");
+    hasher.update(b"auto-sheet-v2-bounded");
+    hasher.update(crate::header_detection::RULE_VERSION.as_bytes());
     let key = hex::encode(hasher.finalize());
     Ok(cache_root()?
         .join("ts")
@@ -3571,6 +3745,7 @@ fn auto_header_memo_path(path: &Path, sheet: Option<&str>) -> Result<PathBuf, Ap
     hasher.update(sheet.unwrap_or("<auto>").as_bytes());
     // v2 同时记住行号与层数，并废弃曾把重复的合并标题记为第 1 行的旧结论。
     hasher.update(b"auto-header-v2");
+    hasher.update(crate::header_detection::RULE_VERSION.as_bytes());
     let key = hex::encode(hasher.finalize());
     Ok(cache_root()?
         .join("ts")
@@ -3657,10 +3832,7 @@ fn resolve_auto_header_layout(
         }
     }
     let rows: Vec<Vec<String>> = if crate::spreadsheet_input::is_text(path) {
-        crate::spreadsheet_input::read_rows(path)?
-            .into_iter()
-            .take(31)
-            .collect()
+        crate::spreadsheet_input::read_rows_head(path, 31)?.0
     } else {
         let read_path = local_read_path(path)?;
         let mut workbook = open_workbook_auto(&read_path).map_err(|e| {
@@ -3683,12 +3855,9 @@ fn resolve_auto_header_layout(
                 Some(e.to_string()),
             )
         })?;
-        range
-            .rows()
-            .take(31)
-            .map(|row| row.iter().map(data_text).collect::<Vec<_>>())
-            .collect()
+        physical_workbook_rows(&range, Some(31))
     };
+    crate::header_detection::require_tabular(&rows, true)?;
     let resolved = if rows.is_empty() {
         (1, 1)
     } else {
@@ -3713,6 +3882,19 @@ fn parse_ledger_source(params: Value, message: &str) -> Result<SourceParams, App
         source.header_depth = depth;
     }
     Ok(source)
+}
+
+fn physical_workbook_rows(range: &calamine::Range<Data>, limit: Option<usize>) -> Vec<Vec<String>> {
+    let (start_row, start_col) = range.start().unwrap_or((0, 0));
+    let cap = limit.unwrap_or(usize::MAX);
+    let mut rows = vec![Vec::new(); (start_row as usize).min(cap)];
+    let remaining = cap.saturating_sub(rows.len());
+    rows.extend(range.rows().take(remaining).map(|cells| {
+        let mut row = vec![String::new(); start_col as usize];
+        row.extend(cells.iter().map(data_text));
+        row
+    }));
+    rows
 }
 
 fn load_table(
@@ -3756,11 +3938,14 @@ fn load_table(
     })?;
     let sheets = workbook.sheet_names().to_vec();
     // 用户指定了表名就照用；没指定（或表名不在工作簿里）才走引擎打分挑正表。
-    let selected = sheet
-        .filter(|name| sheets.iter().any(|value| value == name))
-        .map(str::to_owned)
-        .or_else(|| pick_auto_sheet(path, &mut workbook, &sheets))
-        .ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿中没有 Sheet。", None))?;
+    let selected = if is_ooxml(path) {
+        resolve_xlsx_sheet(path, sheet, &sheets)?
+    } else {
+        sheet.filter(|name| sheets.iter().any(|value| value == name))
+            .map(str::to_owned)
+            .or_else(|| pick_auto_sheet(path, &mut workbook, &sheets))
+            .ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿中没有 Sheet。", None))?
+    };
     let range = workbook.worksheet_range(&selected).map_err(|e| {
         error(
             "WORKBOOK_READ_FAILED",
@@ -3768,10 +3953,19 @@ fn load_table(
             Some(e.to_string()),
         )
     })?;
-    let all = range
-        .rows()
-        .map(|row| row.iter().map(data_text).collect::<Vec<_>>())
-        .collect::<Vec<_>>();
+    let all = physical_workbook_rows(&range, None);
+    finish_table(path, selected, sheets, all, header_row, header_depth)
+}
+
+/// 单元格区 → Table 的公共尾部：标题行校验、双层表头合并、行宽对齐。
+fn finish_table(
+    path: &Path,
+    sheet: String,
+    sheets: Vec<String>,
+    all: Vec<Vec<String>>,
+    header_row: usize,
+    header_depth: usize,
+) -> Result<Table, AppError> {
     let header_index = header_row.saturating_sub(1);
     if all.len() <= header_index {
         return Err(error("HEADER_ROW_INVALID", "标题行超出数据范围。", None));
@@ -3780,16 +3974,18 @@ fn load_table(
     // 双层表头沿用汇兑损益的合并规则（首行横向补齐合并单元格，再逐列
     // 「上级-下级」拼接），保证各工具读出的列名口径一致。
     let depth = header_depth.max(1).min(all.len() - header_index);
-    let headers = if depth > 1 {
-        let raw: Vec<Vec<String>> = all[header_index..header_index + depth].to_vec();
-        crate::fx::merge_headers(&raw, width)
-    } else {
-        normalize_headers(&all[header_index], width)
-    };
-    let rows = normalize_rows(&all[header_index + depth..], width);
+    let headers = crate::fx::merge_headers(&all[header_index..header_index + depth], width);
+    let rows = all
+        .into_iter()
+        .skip(header_index + depth)
+        .map(|mut row| {
+            row.resize(width, String::new());
+            row
+        })
+        .collect();
     Ok(Table {
         path: path.to_path_buf(),
-        sheet: selected,
+        sheet,
         headers,
         rows,
         sheets,
@@ -3849,9 +4045,7 @@ fn load_ledger_cached(
     header_row: usize,
     header_depth: usize,
 ) -> Result<Table, AppError> {
-    if large_csv::applies(path) {
-        return Err(large_csv::full_table_error());
-    }
+    // 调用方已选择读取模式；这里不因内存波动再次改判并拒绝整表读取。
     load_ts_cached(path, sheet, header_row, header_depth, true).map(|(table, _, _)| table)
 }
 
@@ -3902,6 +4096,17 @@ pub(crate) fn open_disk_ledger(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<DiskLedger, AppError> {
+    open_disk_ledger_with_sheet(path, None, header_row, 1, progress, cancel)
+}
+
+pub(crate) fn open_disk_ledger_with_sheet(
+    path: &Path,
+    sheet: Option<&str>,
+    header_row: usize,
+    header_depth: usize,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<DiskLedger, AppError> {
     if !large_csv::applies(path) {
         return Err(error(
             "DISK_LEDGER_NOT_REQUIRED",
@@ -3912,11 +4117,12 @@ pub(crate) fn open_disk_ledger(
     let header_row = header_row.max(1);
     let source = SourceParams {
         input_path: path.to_string_lossy().into_owned(),
-        sheet: None,
+        sheet: sheet.map(str::to_owned),
         header_row,
-        header_depth: 1,
+        header_depth: header_depth.max(1),
     };
     let cache = large_csv::load(&source, progress, cancel)?;
+    let header_row = header_row + header_depth.max(1) - 1;
     Ok(DiskLedger { cache, header_row })
 }
 
@@ -4112,21 +4318,26 @@ pub(crate) fn open_prepared_disk_ledger(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<PreparedDiskLedger, AppError> {
-    if header_depth > 1 {
-        return Err(error(
-            "LARGE_CSV_DOUBLE_HEADER",
-            "超大 CSV 暂不支持双层标题，请先整理为单层标题后重试。",
-            None,
-        ));
-    }
+    open_prepared_disk_ledger_with_sheet(path, None, header_row, header_depth, mapping, progress, cancel)
+}
+
+pub(crate) fn open_prepared_disk_ledger_with_sheet(
+    path: &Path,
+    sheet: Option<&str>,
+    header_row: usize,
+    header_depth: usize,
+    mapping: &Map<String, Value>,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<PreparedDiskLedger, AppError> {
     // CSV 的自动标题行目前固定为第 1 行。在公共入口收口，避免任何工具把
     // `0` 与 `1` 写成两份原始缓存和凭证分析缓存。
     let header_row = header_row.max(1);
     let source = SourceParams {
         input_path: path.to_string_lossy().into_owned(),
-        sheet: None,
+        sheet: sheet.map(str::to_owned),
         header_row,
-        header_depth: 1,
+        header_depth: header_depth.max(1),
     };
     let cache_progress = |phase: &str, current: usize, total: usize, message: &str| {
         scaled_progress(progress, 0, 300, phase, current, total, message)
@@ -4135,6 +4346,7 @@ pub(crate) fn open_prepared_disk_ledger(
         scaled_progress(progress, 300, 1000, phase, current, total, message)
     };
     let cache = large_csv::load(&source, &cache_progress, cancel)?;
+    let header_row = header_row + header_depth.max(1) - 1;
     let core = prepared_mapping(mapping);
     let mut fill_columns = [
         "date",
@@ -4165,13 +4377,14 @@ pub(crate) fn open_prepared_disk_ledger(
     Ok(PreparedDiskLedger { inner, header_row })
 }
 
-fn load_ts_cached(
+/// 稳定缓存的身份信息：选定的 Sheet、Sheet 清单、缓存文件路径与源指纹。取值检索、
+/// 筛选预览、导出的列式快路径都以它为前提。
+fn ts_cache_identity(
     path: &Path,
     sheet: Option<&str>,
     header_row: usize,
     header_depth: usize,
-    populate_on_miss: bool,
-) -> Result<(Table, bool, PathBuf), AppError> {
+) -> Result<(String, Vec<String>, PathBuf, String), AppError> {
     if !path.is_file() {
         return Err(error(
             "PATH_NOT_FOUND",
@@ -4185,19 +4398,15 @@ fn load_ts_cached(
         .unwrap_or("")
         .to_lowercase();
     if extension == "parquet" {
-        if header_depth > 1 {
-            return Err(error(
-                "PARQUET_DOUBLE_HEADER",
-                "Parquet 缓存文件是单层列名，不支持双层表头。",
-                None,
-            ));
-        }
-        let table = load_parquet(path)?;
-        return Ok((table, true, path.to_path_buf()));
+        let key = fingerprint(path, "Parquet", header_row, header_depth)?;
+        return Ok(("Parquet".to_owned(), Vec::new(), path.to_path_buf(), key));
     }
-
     let (selected_sheet, sheets) = if crate::spreadsheet_input::is_text(path.as_ref()) {
         ("CSV".to_owned(), Vec::new())
+    } else if is_ooxml(path) {
+        let (_, names) = crate::disk_table::workbook_sheets(path, None)?;
+        let selected = resolve_xlsx_sheet(path, sheet, &names)?;
+        (selected, names)
     } else {
         let read_path = local_read_path(path)?;
         let mut workbook = open_workbook_auto(&read_path).map_err(|e| {
@@ -4208,7 +4417,6 @@ fn load_ts_cached(
             )
         })?;
         let names = workbook.sheet_names().to_vec();
-        // 用户指定了表名就照用；没指定（或表名不在工作簿里）才走引擎打分挑正表。
         let selected = sheet
             .filter(|name| names.iter().any(|value| value == name))
             .map(str::to_owned)
@@ -4217,7 +4425,157 @@ fn load_ts_cached(
         (selected, names)
     };
     let key = fingerprint(path, &selected_sheet, header_row, header_depth)?;
-    let cache = cache_path("ts", &key)?;
+    Ok((selected_sheet, sheets, cache_path("ts", &key)?, key))
+}
+
+/// 只读稳定缓存的列名（不读数据）。缓存不可用返回 None。
+fn cached_ts_headers(cache: &Path) -> Option<Vec<String>> {
+    let mut lf = LazyFrame::scan_parquet(
+        PlRefPath::try_from_path(cache).ok()?,
+        ScanArgsParquet::default(),
+    )
+    .ok()?;
+    let schema = lf.collect_schema().ok()?;
+    Some(schema.iter_names().map(|name| name.to_string()).collect())
+}
+
+/// 只读稳定缓存中的一列原始字符串值（不去重、不过滤）。
+/// 65 万行 × 133 列的整表转换要十几秒，单列直读不到 1 秒。
+fn cached_column_strings(
+    cache: &Path,
+    headers: &[String],
+    index: usize,
+) -> Option<Vec<String>> {
+    let lf = LazyFrame::scan_parquet(
+        PlRefPath::try_from_path(cache).ok()?,
+        ScanArgsParquet::default(),
+    )
+    .ok()?;
+    let name = headers.get(index)?.clone();
+    let frame = lf.select([col(name.clone())]).collect().ok()?;
+    let series = frame.column(&name).ok()?.as_materialized_series();
+    let chunked = series.str().ok()?;
+    Some(
+        chunked
+            .iter()
+            .map(|value| value.unwrap_or("").to_owned())
+            .collect(),
+    )
+}
+
+/// 与 [`apply_filters`] 完全同口径的列式筛选（字段缺失静默丢弃、`<空白>`
+/// 即空串、同列多值取或、跨列取且），在缓存的列式数据上以布尔掩码执行：
+/// 每个条件把该列的取值做一次哈希查找得到行掩码，再逐条件做与。
+/// （不用 Expr::is_in——开启 polars 的 is_in 特性后 Windows 加载器报
+/// STATUS_ENTRYPOINT_NOT_FOUND，见 Cargo.toml 注释。）
+fn filter_frame(
+    frame: &DataFrame,
+    headers: &[String],
+    filters: &[FilterSpec],
+) -> Option<DataFrame> {
+    let mut combined: Option<BooleanChunked> = None;
+    for spec in filters {
+        // 字段不存在的条件静默丢弃（与行版一致），不让整条快路径失效。
+        let Some(index) = header_index(headers, &spec.field) else {
+            continue;
+        };
+        // 与行版逐字对齐：`<空白>` 映射为空串；原始空串值保留（匹配空单元格）；
+        // 只丢弃「一个值都没有」的整条条件。
+        let values: HashSet<String> = spec
+            .values
+            .iter()
+            .map(|value| {
+                if value == "<空白>" {
+                    String::new()
+                } else {
+                    value.clone()
+                }
+            })
+            .collect();
+        if values.is_empty() {
+            continue;
+        }
+        let series = frame.columns()[index].as_materialized_series();
+        let chunked = series.str().ok()?;
+        let mask: BooleanChunked = chunked
+            .iter()
+            .map(|value| values.contains(value.unwrap_or("")))
+            .collect();
+        combined = Some(match combined {
+            None => mask,
+            Some(previous) => &previous & &mask,
+        });
+    }
+    match combined {
+        // 全部条件都无效（字段缺失/没有值）= 不筛选，整表返回。
+        None => Some(frame.clone()),
+        Some(mask) => frame.filter(&mask).ok(),
+    }
+}
+
+/// 命中稳定缓存时的列式筛选快路径：返回 (表头, 筛选后 DataFrame, 缓存路径)。
+/// 缓存缺失或暂不可读返回 None，调用方回退整表路径（那条路会顺带补写缓存）。
+fn cached_filtered_frame(
+    path: &Path,
+    sheet: Option<&str>,
+    header_row: usize,
+    header_depth: usize,
+    filters: &[FilterSpec],
+) -> Option<Result<(Vec<String>, DataFrame, PathBuf), AppError>> {
+    let (_selected, _sheets, cache, _key) =
+        ts_cache_identity(path, sheet, header_row, header_depth).ok()?;
+    if !cache.is_file() {
+        return None;
+    }
+    let frame = ParquetReader::new(File::open(&cache).ok()?)
+        .finish()
+        .ok()?;
+    let headers = frame
+        .get_column_names()
+        .iter()
+        .map(|v| v.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let frame = filter_frame(&frame, &headers, filters)?;
+    Some(Ok((headers, frame, cache)))
+}
+
+/// DataFrame → 字符串行。列式提取（逐列转字符串）比逐行 `get_row` 快数倍；
+/// `limit` 控制最多取多少行，预览只需要前几十行。
+fn frame_string_rows(frame: &DataFrame, limit: usize) -> Vec<Vec<String>> {
+    let take = limit.min(frame.height());
+    let width = frame.width();
+    let mut rows = vec![Vec::with_capacity(width); take];
+    for column in frame.columns() {
+        let series = column.as_materialized_series();
+        if let Ok(chunked) = series.str() {
+            for row in 0..take {
+                rows[row].push(chunked.get(row).unwrap_or("").to_owned());
+            }
+        } else {
+            for row in 0..take {
+                let value = series
+                    .get(row)
+                    .ok()
+                    .map(|any| any_to_string(&any))
+                    .unwrap_or_default();
+                rows[row].push(value);
+            }
+        }
+    }
+    rows
+}
+
+fn load_ts_cached(
+    path: &Path,
+    sheet: Option<&str>,
+    header_row: usize,
+    header_depth: usize,
+    populate_on_miss: bool,
+) -> Result<(Table, bool, PathBuf), AppError> {
+    let (selected_sheet, sheets, cache, _key) = ts_cache_identity(path, sheet, header_row, header_depth)?;
+    if cache == path {
+        return Ok((load_table(path, sheet, header_row, header_depth)?, true, cache));
+    }
     if cache.is_file() {
         match load_parquet(&cache) {
             Ok(mut table) => {
@@ -4260,7 +4618,7 @@ fn local_read_path(path: &Path) -> Result<PathBuf, AppError> {
     hasher.update(metadata.len().to_le_bytes());
     hasher.update(modified.to_le_bytes());
     let identity = hex::encode(hasher.finalize());
-    let dirs = ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
+    let dirs = ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name())
         .ok_or_else(|| error("DATA_DIR_UNAVAILABLE", "无法确定缓存目录。", None))?;
     let directory = dirs.cache_dir().join("ts").join("source");
     fs::create_dir_all(&directory).map_err(io_error)?;
@@ -4337,18 +4695,8 @@ fn load_parquet(path: &Path) -> Result<Table, AppError> {
         .iter()
         .map(|v| v.as_str().to_owned())
         .collect::<Vec<_>>();
-    let mut rows = Vec::with_capacity(frame.height());
-    for index in 0..frame.height() {
-        rows.push(
-            frame
-                .get_row(index)
-                .map_err(polars_error)?
-                .0
-                .iter()
-                .map(any_to_string)
-                .collect(),
-        );
-    }
+    // 逐行 get_row 每格都要过一次 AnyValue，65 万行要几十秒；列式提取快数倍。
+    let rows = frame_string_rows(&frame, frame.height());
     Ok(Table {
         path: path.to_path_buf(),
         sheet: "Parquet".into(),
@@ -5313,6 +5661,42 @@ fn write_csv_table(
     writer.flush().map_err(io_error)
 }
 
+/// TS 关键列的候选名。FY27 起部门列由 `Department Name` 改名
+/// `Employee Department Name`、工时列由 `Hours` 改名 `Charge Hours`；
+/// 旧表按旧名、新表按新名，两代格式都要认。
+const TS_DEPARTMENT_ALIASES: &[&str] = &["Department Name", "Employee Department Name"];
+const TS_VALUE_ALIASES: &[&str] = &["Hours", "Charge Hours"];
+/// 旧版加载后自动预设的部门筛选值；只在表里真实存在时才启用。
+const TS_DEFAULT_DEPARTMENT_VALUE: &str = "ASU Delivery Center ZZ-WP";
+
+/// 按候选名找列，返回**表里的实际表头文本**。筛选条件、漏斗徽标都以实际
+/// 表头为键：返回字面量会在表头写法不同时造出同列两个条件键，互相「且」
+/// 之后命中 0 行。
+fn header_alias(headers: &[String], aliases: &[&str]) -> Option<String> {
+    aliases.iter().find_map(|alias| {
+        header_index(headers, alias).map(|index| headers[index].clone())
+    })
+}
+
+/// 默认部门筛选：部门列认新旧两种列名，默认值**只在表里真实存在时**返回。
+/// 值不存在时宁可不给默认筛选，也不能带着用户静默筛出 0 行。
+fn ts_default_filter(headers: &[String], rows: &[Vec<String>]) -> (String, String) {
+    let Some(field) = header_alias(headers, TS_DEPARTMENT_ALIASES) else {
+        return (String::new(), String::new());
+    };
+    let index = header_index(headers, &field).unwrap_or_default();
+    let present = rows.iter().any(|row| {
+        row.get(index)
+            .map(|value| value.as_str() == TS_DEFAULT_DEPARTMENT_VALUE)
+            .unwrap_or(false)
+    });
+    if present {
+        (field, TS_DEFAULT_DEPARTMENT_VALUE.to_owned())
+    } else {
+        (String::new(), String::new())
+    }
+}
+
 fn ts_defaults(headers: &[String]) -> Value {
     let base = [
         "COE Manager",
@@ -5325,38 +5709,41 @@ fn ts_defaults(headers: &[String]) -> Value {
         "Employee GPN",
         "COE Senior",
     ];
+    // 字段清单记录实际表头文本，别名只用于查找。
     let mut manager = base
         .iter()
-        .filter(|v| header_index(headers, v).is_some())
-        .map(|v| (*v).to_owned())
+        .filter_map(|name| header_alias(headers, &[name]))
         .collect::<Vec<_>>();
     if manager.is_empty() {
         manager = headers.iter().take(4).cloned().collect();
     }
-    if let Some(pos) = manager.iter().position(|v| v == "Employee Name") {
-        let v = manager.remove(pos);
-        manager.insert(1.min(manager.len()), v);
+    let employee_name = header_alias(headers, &["Employee Name"]).unwrap_or_default();
+    if !employee_name.is_empty() {
+        if let Some(pos) = manager.iter().position(|v| *v == employee_name) {
+            let v = manager.remove(pos);
+            manager.insert(1.min(manager.len()), v);
+        }
     }
     let mut project = manager.clone();
-    if let Some(pos) = project.iter().position(|v| v == "Engagement Name") {
-        let v = project.remove(pos);
-        project.insert(0, v);
+    let engagement_name = header_alias(headers, &["Engagement Name"]).unwrap_or_default();
+    if !engagement_name.is_empty() {
+        if let Some(pos) = project.iter().position(|v| *v == engagement_name) {
+            let v = project.remove(pos);
+            project.insert(0, v);
+        }
+        if let Some(pos) = project.iter().position(|v| *v == employee_name) {
+            let v = project.remove(pos);
+            project.insert(1.min(project.len()), v);
+        }
     }
-    if let Some(pos) = project.iter().position(|v| v == "Employee Name") {
-        let v = project.remove(pos);
-        project.insert(1.min(project.len()), v);
-    }
-    let value = headers
-        .iter()
-        .find(|v| v.as_str() == "Hours")
-        .cloned()
-        .or_else(|| headers.first().cloned());
+    let value = header_alias(headers, TS_VALUE_ALIASES).or_else(|| headers.first().cloned());
     let column = headers
         .iter()
         .find(|v| v.as_str() == "Transaction Cycle Date")
         .cloned()
         .or_else(|| headers.iter().find(|v| v.as_str() == "Month").cloned());
-    json!({"filterField":if header_index(headers,"Department Name").is_some(){"Department Name"}else{""},"filterValue":if header_index(headers,"Department Name").is_some(){"ASU Delivery Center ZZ-WP"}else{""},"valueField":value,"columnField":column,"managerRowFields":manager,"projectRowFields":project})
+    // 默认筛选字段/值需要看数据行校验存在性，由 inspect_ts 用 ts_default_filter 覆写。
+    json!({"filterField":"","filterValue":"","valueField":value,"columnField":column,"managerRowFields":manager,"projectRowFields":project})
 }
 
 /// 表头识别走统一映射内核，与汇兑损益、存款利息、借款利息共用同一份别名库。
@@ -5902,36 +6289,8 @@ fn validate_mapping_required(m: &LedgerMapping) -> Result<(), AppError> {
 }
 
 fn normalize_headers(row: &[String], width: usize) -> Vec<String> {
-    let mut used = HashMap::<String, usize>::new();
-    (0..width)
-        .map(|i| {
-            let base = row
-                .get(i)
-                .map(|v| v.trim())
-                .filter(|v| !v.is_empty())
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("Column_{}", i + 1));
-            let count = used.entry(base.clone()).or_default();
-            *count += 1;
-            if *count == 1 {
-                base
-            } else {
-                format!("{base}_{}", *count)
-            }
-        })
-        .collect()
-}
-fn normalize_rows(rows: &[Vec<String>], width: usize) -> Vec<Vec<String>> {
-    rows.iter()
-        .map(|row| {
-            let mut r = row.clone();
-            r.resize(width, String::new());
-            r.truncate(width);
-            // 内部整行空白是账表的结构信息：TBJE 用它区分正文与表尾手工
-            // 草稿。不能在公共 Polars 缓存前删掉，否则下游再也无法恢复边界。
-            r
-        })
-        .collect()
+    // 确认后的 Polars 路径必须与自动识别、磁盘路径使用同一空标题和换行规则。
+    crate::fx::merge_headers(&[row.to_vec()], width)
 }
 fn data_text(v: &Data) -> String {
     match v {
@@ -5954,7 +6313,12 @@ fn data_text(v: &Data) -> String {
     }
 }
 fn parse_month(value: &str) -> Option<String> {
-    let cleaned = value.trim().trim_end_matches(".0");
+    // 与普通透视共用日期解析能力；CSV 的日期常带 00:00:00，不能当成未知月份。
+    if let Some(date) = ledger_mapping::parse_date(value) {
+        return Some(date.format("%Y-%m").to_string());
+    }
+    let trimmed = value.trim();
+    let cleaned = trimmed.strip_suffix(".0").unwrap_or(trimmed);
     if cleaned.is_empty() {
         return None;
     }
@@ -6052,12 +6416,13 @@ fn fingerprint(
     // 双层表头会改变合并后的列名，同文件同 Sheet 换层数必须落不同的缓存。
     h.update(header_depth.to_le_bytes());
     // Shared strict text decoding must not reuse rows decoded lossily by older versions.
-    h.update(b"rust-polars-v3-shared-spreadsheet-input");
+    h.update(b"rust-polars-v5-shared-spreadsheet-physical-range");
+    h.update(crate::header_detection::RULE_VERSION.as_bytes());
     Ok(hex::encode(h.finalize()))
 }
 /// 缓存根目录：`%LOCALAPPDATA%/AuditToolbox/AuditToolbox/cache`。
-fn cache_root() -> Result<PathBuf, AppError> {
-    let dirs = ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
+pub(crate) fn cache_root() -> Result<PathBuf, AppError> {
+    let dirs = ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name())
         .ok_or_else(|| error("DATA_DIR_UNAVAILABLE", "无法确定缓存目录。", None))?;
     Ok(dirs.cache_dir().to_path_buf())
 }
@@ -6084,7 +6449,8 @@ fn cache_entries() -> Result<Vec<(PathBuf, SystemTime, u64)>, AppError> {
                 path.extension().and_then(|v| v.to_str()),
                 // `.sheet` 是自动选表结论的小记事文件，跟着 Parquet 缓存一起
                 // 统计、清空与扫除，不然会在缓存目录里悄悄攒下来。
-                Some("parquet") | Some("sheet") | Some("header") | Some("sqlite")
+                Some("parquet") | Some("sheet") | Some("header") | Some("sqlite") | Some("catalog")
+                    | Some("json") | Some("xlsx") | Some("sha256")
             ) {
                 let used = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 out.push((path, used, meta.len()));
@@ -6182,7 +6548,7 @@ fn cache_sweep(params: Value) -> Result<Value, AppError> {
 }
 
 fn cache_path(tool: &str, key: &str) -> Result<PathBuf, AppError> {
-    let dirs = ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
+    let dirs = ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name())
         .ok_or_else(|| error("DATA_DIR_UNAVAILABLE", "无法确定缓存目录。", None))?;
     Ok(dirs
         .cache_dir()
@@ -6298,7 +6664,7 @@ fn partial_path(output: &Path) -> PathBuf {
         output.extension().and_then(|v| v.to_str()).unwrap_or("tmp")
     ))
 }
-fn replace_file(partial: &Path, output: &Path) -> Result<(), AppError> {
+pub(crate) fn replace_file(partial: &Path, output: &Path) -> Result<(), AppError> {
     if output.exists() {
         fs::remove_file(output).map_err(io_error)?;
     }
@@ -6968,6 +7334,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dual_ts_pivots_share_prepared_metrics_and_dimensions_without_source() {
+        let headers = ["经理", "项目", "月份", "工时"].map(str::to_owned).to_vec();
+        let source = [["甲", "项目一", "一月", "1,200.5"], ["甲", "项目二", "二月", "  "], ["乙", "项目一", "一月", "-20"], ["乙", "项目一", "二月", "abc"]]
+            .map(|row|row.map(str::to_owned).to_vec()).to_vec();
+        let manager = vec!["经理".to_owned()];
+        let project = vec!["项目".to_owned()];
+        for agg in ["sum", "count"] {
+            let expected = [&manager, &project].map(|fields|pivot_rows(&headers, &source, fields, Some("月份"), "工时", agg).unwrap());
+            let mut owned = source.clone();
+            let prepared = TsPivotInput::new(&headers, &owned, &["经理".into(), "项目".into()], Some("月份"), "工时", agg).unwrap();
+            owned.clear();
+            assert_eq!(prepared.columns.len(), 3);
+            for (fields, expected) in [&manager, &project].into_iter().zip(expected) {
+                let actual = pivot_rows_from(&headers, &prepared, fields, Some("月份"), "工时", agg).unwrap();
+                assert_eq!(actual.headers, expected.headers);
+                assert_eq!(actual.rows, expected.rows);
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_disk_xlsx_keeps_selected_sheet_double_header_and_physical_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("多表双层.xlsx");
+        let mut wb = Workbook::new();
+        for (name, account) in [("第一页", "1001 现金"), ("第二页", "1002 银行存款")] {
+            let ws = wb.add_worksheet();
+            ws.set_name(name).unwrap();
+            ws.write_string(0, 0, "资料说明").unwrap();
+            for (col, val) in ["凭证号", "科目名称", "发生额", "发生额"].iter().enumerate() { ws.write_string(1,col as u16,*val).unwrap(); }
+            ws.write_string(2, 2, "借方").unwrap(); ws.write_string(2, 3, "贷方").unwrap();
+            ws.write_string(3,0,"V1").unwrap(); ws.write_string(3,1,account).unwrap(); ws.write_number(3,2,100.0).unwrap(); ws.write_number(3,3,0.0).unwrap();
+            ws.write_string(5,0,"V1").unwrap(); ws.write_string(5,1,"2001 应付款").unwrap(); ws.write_number(5,2,0.0).unwrap(); ws.write_number(5,3,100.0).unwrap();
+        }
+        wb.save(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mapping = json!({"id":["凭证号"],"accountName":["科目名称"],"functionalDebit":"发生额-借方","functionalCredit":"发生额-贷方"});
+        for (sheet, expected) in [("第一页","1001 现金"),("第二页","1002 银行存款")] {
+            let prepared = open_prepared_disk_ledger_with_sheet(&path,Some(sheet),2,2,mapping.as_object().unwrap(),&|_,_,_,_|{},&cancel).unwrap();
+            let mut rows = Vec::new();
+            prepared.visit(false,&cancel,|row|{rows.push((row.source_row,row.account,row.net));Ok(())}).unwrap();
+            assert_eq!(rows,vec![(4,expected.to_owned(),100.0),(6,"2001 应付款".to_owned(),-100.0)]);
+        }
+    }
+
+    #[test]
     fn disk_export_subprogress_is_scaled_into_its_overall_range() {
         let events = std::cell::RefCell::new(Vec::new());
         let record = |phase: &str, current: usize, total: usize, message: &str| {
@@ -7301,7 +7713,7 @@ mod tests {
     fn headers_are_stable_and_unique() {
         assert_eq!(
             normalize_headers(&["".into(), "Name".into(), "Name".into()], 3),
-            vec!["Column_1", "Name", "Name_2"]
+            vec!["列1", "Name", "Name_2"]
         );
     }
     #[test]
@@ -8141,6 +8553,171 @@ mod tests {
         assert!(rows.iter().all(|row| row[1] == "01"));
     }
     #[test]
+    fn ts_defaults_recognizes_fy27_renamed_columns() {
+        // FY27 起部门列 Department Name → Employee Department Name、
+        // 工时列 Hours → Charge Hours；两代格式都要认，字段返回实际表头文本。
+        let fy27 = [
+            "Employee GPN",
+            "Employee Name",
+            "Employee Rank Name",
+            "Employee Department Code",
+            "Employee Department Name",
+            "Engagement Name",
+            "Engagement Code",
+            "Engagement Type",
+            "Time Type Desc",
+            "COE Manager",
+            "COE Senior",
+            "Charge Hours",
+            "Transaction Cycle Date",
+        ]
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>();
+        let defaults = ts_defaults(&fy27);
+        assert_eq!(defaults["valueField"], "Charge Hours");
+        assert_eq!(defaults["columnField"], "Transaction Cycle Date");
+        // by经理 第 2 位固定是 Employee Name（用实际表头文本）。
+        let manager = defaults["managerRowFields"].as_array().unwrap();
+        assert_eq!(manager[0], "COE Manager");
+        assert_eq!(manager[1], "Employee Name");
+        // by项目 第 1 位是 Engagement Name、第 2 位是 Employee Name（用实际表头文本）。
+        let project = defaults["projectRowFields"].as_array().unwrap();
+        assert_eq!(project[0], "Engagement Name");
+        assert_eq!(project[1], "Employee Name");
+
+        // 默认筛选：值在表里存在才返回，字段用实际表头。
+        let rows_with_wp = vec![vec![
+            "x".to_string(),
+            "x".to_string(),
+            "x".to_string(),
+            "CHN01".to_string(),
+            "ASU Delivery Center ZZ-WP".to_string(),
+        ]];
+        // 上面行宽只到第 5 列（Employee Department Name 在索引 4）。
+        let (field, value) = ts_default_filter(&fy27, &rows_with_wp);
+        assert_eq!(field, "Employee Department Name");
+        assert_eq!(value, "ASU Delivery Center ZZ-WP");
+        let rows_without_wp = vec![vec![
+            "x".to_string(),
+            "x".to_string(),
+            "x".to_string(),
+            "CHN01".to_string(),
+            "ASU Delivery Center KM - WP".to_string(),
+        ]];
+        let (field, value) = ts_default_filter(&fy27, &rows_without_wp);
+        assert_eq!(field, "");
+        assert_eq!(value, "");
+
+        // FY26 旧列名继续可用。
+        let fy26 = ["Employee Name", "Department Name", "Hours", "Month"]
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(ts_defaults(&fy26)["valueField"], "Hours");
+        let fy26_rows = vec![vec![
+            "A".to_string(),
+            "ASU Delivery Center ZZ-WP".to_string(),
+            "1".to_string(),
+            "01".to_string(),
+        ]];
+        let (field, value) = ts_default_filter(&fy26, &fy26_rows);
+        assert_eq!(field, "Department Name");
+        assert_eq!(value, "ASU Delivery Center ZZ-WP");
+    }
+    #[test]
+    fn columnar_ts_filter_matches_row_filter_semantics() {
+        let table = Table {
+            path: PathBuf::new(),
+            sheet: "CSV".into(),
+            headers: vec!["Employee Department Name".into(), "Month".into(), "Charge Hours".into()],
+            rows: vec![
+                vec!["ASU Delivery Center DL - WP".into(), "01".into(), "1".into()],
+                vec!["ASU Q&RM".into(), "01".into(), "2".into()],
+                vec!["".into(), "02".into(), "3".into()],
+                vec!["ASU Q&RM".into(), "02".into(), "4".into()],
+            ],
+            sheets: vec![],
+            encoding: Some("utf-8".into()),
+            delimiter: Some(','),
+        };
+        let filters = vec![
+            FilterSpec {
+                field: "Employee Department Name".into(),
+                values: vec!["ASU Q&RM".into(), "<空白>".into(), "ASU Delivery Center DL - WP".into()],
+            },
+            // 字段不存在的条件静默丢弃；一个值都没有的条件也丢弃。
+            FilterSpec { field: "不存在的列".into(), values: vec!["X".into()] },
+            FilterSpec { field: "Charge Hours".into(), values: vec![] },
+            // 原始空串值按行版语义保留（匹配空单元格）。
+            FilterSpec { field: "Month".into(), values: vec!["".into(), "02".into()] },
+        ];
+        let frame = rows_to_frame(&table.headers, &table.rows).unwrap();
+        let filtered = filter_frame(&frame, &table.headers, &filters).unwrap();
+        let got = frame_string_rows(&filtered, filtered.height());
+        let expected = apply_filters(&table, &filters);
+        assert_eq!(got, expected);
+        // 部门条件（含 <空白>）命中全部 4 行，月条件命中 02 的 2 行，取且 → 2 行。
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0][0], ""); // 第 2 行数据的部门为空，由 <空白> 条件保住
+        assert_eq!(got[1][0], "ASU Q&RM");
+    }
+    #[test]
+    fn ts_pivot_input_from_frame_matches_row_version() {
+        let headers = vec!["COE Manager".into(), "Employee Name".into(), "Month".into(), "Charge Hours".into()];
+        let rows: Vec<Vec<String>> = (0..6)
+            .map(|i| {
+                vec![
+                    format!("M{}", i % 2),
+                    format!("E{}", i % 3),
+                    format!("2026-{:02}", i % 2 + 1),
+                    format!("{}.5", i),
+                ]
+            })
+            .collect();
+        let frame = rows_to_frame(&headers, &rows).unwrap();
+        let from_rows = TsPivotInput::new(&headers, &rows, &["COE Manager".into(), "Employee Name".into()], Some("Month"), "Charge Hours", "sum").unwrap();
+        let from_frame = TsPivotInput::from_frame(&headers, &frame, &["COE Manager".into(), "Employee Name".into()], Some("Month"), "Charge Hours", "sum").unwrap();
+        let pivot_rows_version = pivot_rows_from(&headers, &from_rows, &["COE Manager".into(), "Employee Name".into()], Some("Month"), "Charge Hours", "sum").unwrap();
+        let pivot_frame_version = pivot_rows_from(&headers, &from_frame, &["COE Manager".into(), "Employee Name".into()], Some("Month"), "Charge Hours", "sum").unwrap();
+        assert_eq!(pivot_rows_version.headers, pivot_frame_version.headers);
+        assert_eq!(pivot_rows_version.rows, pivot_frame_version.rows);
+    }
+    #[test]
+    fn ts_filter_values_prefers_single_column_cache_path() {
+        let root = temp_dir("ts-values");
+        let input = root.join("timesheet.csv");
+        fs::write(
+            &input,
+            "Employee Department Name,Charge Hours\nASU Delivery Center ZZ-WP,1\nASU Q&RM,2\nASU Delivery Center ZZ-WP,3\n",
+        )
+        .unwrap();
+        // 第一次：缓存未建 → 整表回退路径，顺带写稳定缓存；取值去重有序。
+        let first = ts_filter_values(json!({
+            "inputPath": input, "field": "Employee Department Name", "keyword": "", "limit": 1000
+        }))
+        .unwrap();
+        assert_eq!(
+            first["values"].as_array().unwrap(),
+            &["ASU Delivery Center ZZ-WP".to_string(), "ASU Q&RM".to_string()]
+        );
+        let key = fingerprint(&input, "CSV", 1, 1).unwrap();
+        let cache = cache_path("ts", &key).unwrap();
+        assert!(cache.is_file(), "首次取值应顺带写稳定缓存");
+        // 第二次（带关键词）：只读目标一列的快路径，结果口径与整表一致。
+        let second = ts_filter_values(json!({
+            "inputPath": input, "field": "Employee Department Name", "keyword": "q&r", "limit": 1000
+        }))
+        .unwrap();
+        assert_eq!(second["cacheHit"], true);
+        assert_eq!(
+            second["values"].as_array().unwrap(),
+            &["ASU Q&RM".to_string()]
+        );
+        let _ = fs::remove_file(cache);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
     fn ts_pivot_rejects_more_than_legacy_column_limit() {
         let headers = vec!["Manager".into(), "Month".into(), "Hours".into()];
         let rows = (0..=TS_MAX_PIVOT_COLUMN_VALUES)
@@ -8558,6 +9135,23 @@ mod tests {
         // 真实底稿里月日不补零的写法也要认，否则整张凭证的月份分布会被丢成 0。
         assert_eq!(parse_month("2026-1-23").as_deref(), Some("2026-01"));
         assert_eq!(parse_month("2026/1/3").as_deref(), Some("2026-01"));
+    }
+
+    #[test]
+    fn datetime_pivot_months_use_shared_date_parser() {
+        for (raw, month) in [
+            ("2026-05-01 00:00:00", "2026-05"),
+            ("2026-06-30 23:59:59", "2026-06"),
+            ("2026-05-01T12:30:00", "2026-05"),
+            (" 2026/5/1 00:00:00 ", "2026-05"),
+            ("2026-05-01 12:30:00.123", "2026-05"),
+            ("46020.0", "2025-12"),
+        ] {
+            assert_eq!(parse_month(raw).as_deref(), Some(month), "{raw}");
+        }
+        for raw in ["", "过账日期", "2026-13-01 00:00:00", "not-a-date"] {
+            assert_eq!(parse_month(raw), None, "{raw}");
+        }
     }
 
     /// 裸「月」「日」分列的账型：自动建议直接把两列组成 date，不再要求
@@ -10335,6 +10929,42 @@ mod tests {
         assert!(outputs[1].ends_with("_剔除明细.csv"), "{outputs:?}");
         assert!(outputs[2].ends_with("_套表.xlsx"), "{outputs:?}");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn voucher_reference_worker_job_exports_complete_voucher_suite() {
+        let root = temp_dir("voucher-reference-worker");
+        let input = root.join("ledger.csv");
+        fs::write(&input, "公司代码,过账日期,伝票番号-凭证编号,参照伝票番号-参照凭证号,科目编码,科目名称,金额\nJP10,2026-06-01,1400020724,,1002011000,银行存款,3272805\nJP10,2026-06-01,1400020724,,1171010000,分店科目,-3272805\n").unwrap();
+        let table = load_text(&input, 1, 1).unwrap();
+        let mapping = suggest_mapping(&table.headers, &table.rows);
+        assert_eq!(mapping.id, ["伝票番号-凭证编号"]);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result = run_job("kanzhang.export", json!({
+            "inputPath":input,"headerRow":1,"mapping":mapping,"outputPath":root.join("out.csv"),
+            "targetBatches":[{"name":"分店科目","accounts":["1171010000-分店科目"]}],
+            "includeCounterpart":true,"includeSuite":true,"includePivot":true,"llmAnalysis":false,
+        }), &|_, _, _, _| {}, cancel.clone(), &PauseCheckpoint::unpaused(cancel)).unwrap();
+        let detail = PathBuf::from(result["outputPaths"][0].as_str().unwrap());
+        let records = csv::Reader::from_path(detail).unwrap().records().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(records.len(), 2);
+        let mut suite = open_workbook_auto(root.join("out_套表.xlsx")).unwrap();
+        let sheet = suite.worksheet_range("凭证").unwrap();
+        let rows: Vec<_> = sheet.rows().skip(1).collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.iter().map(|row| row.last().unwrap().to_string().parse::<f64>().unwrap()).sum::<f64>(), 0.0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore]
+    fn voucher_reference_real_headers_probe() {
+        let Ok(input) = std::env::var("KANZHANG_VOUCHER_PROBE") else { return; };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result = run_job("kanzhang.inspect", json!({"inputPath":input,"headerRow":1,"headerDepth":1}),
+            &|_, _, _, _| {}, cancel.clone(), &PauseCheckpoint::unpaused(cancel)).unwrap();
+        assert_eq!(result["suggestedMapping"]["id"], json!(["伝票番号-凭证编号"]));
+        eprintln!("实际 SAP 表头的凭证识别字段：{}", result["suggestedMapping"]["id"]);
     }
 
     #[test]

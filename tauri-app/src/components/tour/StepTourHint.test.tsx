@@ -20,11 +20,73 @@ const steps = [
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   window.localStorage.clear();
   document.querySelectorAll(".tour-layer").forEach((el) => el.remove());
 });
 
 describe("StepTourHint", () => {
+  it("从有提示步骤返回精简模式的静默步骤时立即移除旧卡片及遮罩", () => {
+    const depositSteps = [{ key: "source", label: "上传与识别" }, { key: "accounts", label: "科目与利率确认" }];
+    const { rerender } = render(<ToolTourProvider toolId="deposit_interest"><StepTourHint steps={depositSteps} current={0} /></ToolTourProvider>);
+    rerender(<ToolTourProvider toolId="deposit_interest"><StepTourHint steps={depositSteps} current={1} /></ToolTourProvider>);
+    expect(screen.getByText("科目与利率确认")).toBeInTheDocument();
+    rerender(<ToolTourProvider toolId="deposit_interest"><StepTourHint steps={depositSteps} current={0} /></ToolTourProvider>);
+    expect(document.querySelector(".step-hint")).toBeNull();
+    expect(document.querySelector(".step-hint-veil")).toBeNull();
+  });
+
+  it("切到禁用步骤或原步骤被替换后不保留上一条提示", () => {
+    const { rerender } = render(<StepTourHint steps={steps} current={0} />);
+    rerender(<StepTourHint steps={steps} current={1} />);
+    expect(screen.getByText("确认输入")).toBeInTheDocument();
+    rerender(<StepTourHint steps={steps.map(step => ({ ...step, disabled: true }))} current={2} />);
+    expect(document.querySelector(".step-hint-veil")).toBeNull();
+    rerender(<StepTourHint steps={steps} current={1} />);
+    expect(screen.getByText("确认输入")).toBeInTheDocument();
+    rerender(<StepTourHint steps={[steps[0], { key: "replacement", label: "已更换的流程" }, steps[2]]} current={1} />);
+    expect(document.querySelector(".step-hint")).toBeNull();
+  });
+
+  it("键盘焦点离开提示卡后恢复自动关闭", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<StepTourHint steps={steps} current={0} autoDismissMs={1000} />);
+    rerender(<StepTourHint steps={steps} current={1} autoDismissMs={1000} />);
+    const close = screen.getByRole("button", { name: "关闭本步提示" });
+    act(() => close.focus());
+    act(() => vi.advanceTimersByTime(2000));
+    expect(screen.getByText("确认输入")).toBeInTheDocument();
+    act(() => close.blur());
+    act(() => vi.advanceTimersByTime(1001));
+    expect(document.querySelector(".step-hint-veil")).toBeNull();
+  });
+
+  it("当前步骤失效后重新启用也不重现旧提示", () => {
+    const { rerender } = render(<StepTourHint steps={steps} current={0} />);
+    rerender(<StepTourHint steps={steps} current={1} />);
+    expect(screen.getByText("确认输入")).toBeInTheDocument();
+    rerender(<StepTourHint steps={steps.map(step => ({ ...step, disabled: true }))} current={1} />);
+    expect(document.querySelector(".step-hint-veil")).toBeNull();
+    rerender(<StepTourHint steps={steps} current={1} />);
+    expect(document.querySelector(".step-hint")).toBeNull();
+  });
+
+  it("鼠标移出时若键盘焦点仍在卡片内，继续暂停自动关闭", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<StepTourHint steps={steps} current={0} autoDismissMs={1000} />);
+    rerender(<StepTourHint steps={steps} current={1} autoDismissMs={1000} />);
+    const card = document.querySelector(".step-hint")!;
+    const close = screen.getByRole("button", { name: "关闭本步提示" });
+    fireEvent.mouseEnter(card);
+    act(() => close.focus());
+    fireEvent.mouseLeave(card);
+    act(() => vi.advanceTimersByTime(2000));
+    expect(screen.getByText("确认输入")).toBeInTheDocument();
+    act(() => close.blur());
+    act(() => vi.advanceTimersByTime(1001));
+    expect(document.querySelector(".step-hint-veil")).toBeNull();
+  });
+
   it("首次挂载不弹提示，切换到第二步时弹出该步说明", () => {
     const { rerender } = render(<StepTourHint steps={steps} current={0} />);
     expect(screen.queryByText("确认输入")).not.toBeInTheDocument();
@@ -84,7 +146,7 @@ describe("StepTourHint", () => {
     rerender(<StepTourHint steps={steps} current={2} />);
     expect(
       screen.getByText(
-        "最后一步：完成它就能看到结果。想改前面的内容，点步骤条随时回去。",
+        "按页面提示完成测算或导出，再查看结果；修改输入后请重新运行，确保结果与当前设置一致。",
       ),
     ).toBeInTheDocument();
   });
@@ -123,7 +185,31 @@ describe("StepTourHint", () => {
         <StepTourHint steps={fallbackSteps} current={1} />
       </ToolTourProvider>,
     );
-    expect(screen.getByText(/完成这一步的操作后/)).toBeInTheDocument();
+    expect(screen.getByText(/按页面提示完成当前操作/)).toBeInTheDocument();
+  });
+
+  it("会议纪要导览文案覆盖历史查询与结果阅读", () => {
+    const meetingSteps = [
+      { key: "record", label: "会议记录" },
+      { key: "history", label: "历史记录" },
+      { key: "result", label: "结果" },
+    ];
+    const { rerender } = render(
+      <ToolTourProvider toolId="meeting_minutes"><StepTourHint steps={meetingSteps} current={0} /></ToolTourProvider>,
+    );
+    rerender(<ToolTourProvider toolId="meeting_minutes"><StepTourHint steps={meetingSteps} current={1} /></ToolTourProvider>);
+    expect(screen.getByText(/历史记录按日期和标题排列，可搜索会议标题/)).toBeInTheDocument();
+    rerender(<ToolTourProvider toolId="meeting_minutes"><StepTourHint steps={meetingSteps} current={2} /></ToolTourProvider>);
+    expect(screen.getByText(/从转写稿重新生成/)).toBeInTheDocument();
+    expect(screen.queryByText(/按页面提示完成当前操作/)).not.toBeInTheDocument();
+  });
+
+  it("FA 默认 TB＋JE 模式在科目复核时显示对应提示", () => {
+    const faSteps = [{ key: "source", label: "上传与映射" }, { key: "accounts", label: "科目复核" }, { key: "output", label: "预览与导出" }];
+    const { rerender } = render(<ToolTourProvider toolId="fa_list"><StepTourHint steps={faSteps} current={0} /></ToolTourProvider>);
+    rerender(<ToolTourProvider toolId="fa_list"><StepTourHint steps={faSteps} current={1} /></ToolTourProvider>);
+    expect(screen.getByText(/确认哪些科目属于固定资产原值/)).toBeInTheDocument();
+    expect(screen.queryByText(/年初、年末清单/)).not.toBeInTheDocument();
   });
 
   it("精简提示的工具：没写提示的步骤保持安静，写到的照常弹出", () => {
@@ -152,7 +238,7 @@ describe("StepTourHint", () => {
       </ToolTourProvider>,
     );
     expect(screen.queryByText("上传与识别")).not.toBeInTheDocument();
-    expect(screen.queryByText(/完成这一步的操作后/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/按页面提示完成当前操作/)).not.toBeInTheDocument();
   });
 
   it("整工具精简（如折旧测算）任何步骤都不弹提示", () => {
@@ -170,7 +256,7 @@ describe("StepTourHint", () => {
         <StepTourHint steps={depSteps} current={1} />
       </ToolTourProvider>,
     );
-    expect(screen.queryByText(/完成这一步的操作后/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/按页面提示完成当前操作/)).not.toBeInTheDocument();
     expect(screen.queryByText("读取清单")).not.toBeInTheDocument();
     expect(screen.queryByText("核对字段映射")).not.toBeInTheDocument();
   });

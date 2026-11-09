@@ -2,6 +2,7 @@ const { chromium } = require("playwright-core");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { auditButtonSizes } = require("./button-size-contract.cjs");
 
 /*
  * Real-page workflow geometry gate.
@@ -281,7 +282,10 @@ async function captureState(page, tool, viewport, stateLabel, results) {
       scrollOwner?.scrollTo({ top, behavior: "instant" });
     }, position);
     await settle(page);
-    const issues = await evaluateStable(page, auditGeometry);
+    const issues = [
+      ...await evaluateStable(page, auditGeometry),
+      ...await evaluateStable(page, auditButtonSizes),
+    ];
     const observedTaskStates = await evaluateStable(page, () => {
       const visible = (element) => element.getClientRects().length > 0 &&
         getComputedStyle(element).visibility !== "hidden";

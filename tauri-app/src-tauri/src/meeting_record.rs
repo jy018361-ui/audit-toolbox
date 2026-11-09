@@ -1,6 +1,13 @@
-//! 会议录音：WASAPI 双轨采集（系统回环声 + 麦克风），申请 16 kHz 单声道
+//! 会议录音：双轨采集（会议系统声 + 麦克风），申请 16 kHz 单声道
 //! 16 位格式（共享模式 autoconvert，由 Windows 音频引擎完成格式转换），
 //! 两条轨各自落 WAV，停止时混音出上传转写用的成品。
+//!
+//! 设备选择的教训（真机 2026-09-28 复盘：系统声轨 14 秒后无数据、麦克风
+//! 轨 2.6 小时近乎无声）：不能按「系统默认设备」录——Teams 常单独选用
+//! 耳机播放/收音，默认扬声器没声音可录、默认麦克风离人很远。因此：
+//! - 系统声轨优先按 Teams 活跃播放会话选实际设备，避免进程回环打开成功却无声；
+//!   设备不可用才退回进程回环，最后使用默认通信／播放设备；
+//! - 麦克风优先按 Teams 活跃采集会话选设备；无法确定时再用音量与默认通信设备。
 //!
 //! `profile.release` 是 `panic = "abort"`：采集线程里任何错误都必须走
 //! `Result` 返回，不允许 panic 带崩整个应用。
@@ -19,9 +26,11 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
-use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
+use wasapi::{
+    AudioClient, Device, DeviceEnumerator, Direction, Role, SampleType, StreamMode, WaveFormat,
+};
 
 use crate::AppError;
 
@@ -29,13 +38,52 @@ const SAMPLE_RATE: u32 = 16_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// 共享模式缓冲 200ms（单位 100ns）。
 const BUFFER_DURATION_HNS: i64 = 2_000_000;
-const INIT_TIMEOUT: Duration = Duration::from_secs(5);
+const INIT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 麦克风选设备的音量峰值采样：总时长与判定阈值。正常说话峰值在 0.05
+/// 以上，无输入流的设备恒为 0；会刚开始的几秒总有人在说话。
+const MIC_METER_TOTAL: Duration = Duration::from_millis(1500);
+const MIC_METER_STEP: Duration = Duration::from_millis(30);
+const MIC_ACTIVE_PEAK_MIN: f32 = 0.005;
+
+/// 一路采集就绪后回报的来源说明（前端展示与诊断用）。
+#[derive(Debug, Clone)]
+struct CaptureMeta {
+    source: String,
+    /// 采集可用但有疑点（如退回了默认设备），开录即提示用户。
+    caution: Option<String>,
+}
+
+impl CaptureMeta {
+    fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            caution: None,
+        }
+    }
+
+    fn with_caution(mut self, caution: String) -> Self {
+        self.caution = Some(caution);
+        self
+    }
+
+    fn opt_caution(mut self, caution: Option<String>) -> Self {
+        self.caution = caution;
+        self
+    }
+}
 
 struct Track {
     label: &'static str,
     path: PathBuf,
     ok: bool,
     error: Option<String>,
+    /// 实际采用的采集来源（如「Teams 进程音频（PID 123）」「麦克风（xxx）」）。
+    source: Option<String>,
+    /// 采集可用但有疑点（如退回了默认设备），开录即提示用户。
+    caution: Option<String>,
+    /// 初始化成功后的中途失败（设备被拔、进程退出等）：线程仍持有 WAV，
+    /// 只能先记下来，收尾时并进 warnings 告诉用户。
+    late_error: Arc<Mutex<Option<String>>>,
 }
 
 /// 一次进行中的录音会话。
@@ -65,7 +113,7 @@ pub(crate) fn start(data_dir: &Path) -> Result<ActiveRecording, AppError> {
         )
     })?;
     let stop = Arc::new(AtomicBool::new(false));
-    let (ready_tx, ready_rx) = mpsc::channel::<(&'static str, Result<(), String>)>();
+    let (ready_tx, ready_rx) = mpsc::channel::<(&'static str, Result<CaptureMeta, String>)>();
     let mut handles = Vec::new();
     let tracks = Mutex::new(Vec::new());
     for (label, device_direction, file_name) in [
@@ -73,15 +121,24 @@ pub(crate) fn start(data_dir: &Path) -> Result<ActiveRecording, AppError> {
         ("mic", Direction::Capture, "track-mic.wav"),
     ] {
         let path = dir.join(file_name);
+        let track_path = path.clone();
         let stop_flag = stop.clone();
         let sender = ready_tx.clone();
+        let late_error = Arc::new(Mutex::new(None));
+        let late_error_slot = late_error.clone();
         let handle = thread::Builder::new()
             .name(format!("meeting-record-{label}"))
             .spawn(move || {
                 // run_capture 正常返回（无论成败）都会经 ready 通道上报一次；
                 // 这里只兜 panic 没能上报的情况，避免重复消息。
                 if catch_unwind(AssertUnwindSafe(|| {
-                    run_capture(device_direction, &stop_flag, &path, &sender)
+                    run_capture(
+                        device_direction,
+                        &stop_flag,
+                        &path,
+                        &sender,
+                        &late_error_slot,
+                    )
                 }))
                 .is_err()
                 {
@@ -98,22 +155,32 @@ pub(crate) fn start(data_dir: &Path) -> Result<ActiveRecording, AppError> {
                 ));
             }
         }
+        tracks.lock().push(Track {
+            label,
+            path: track_path,
+            ok: false,
+            error: None,
+            source: None,
+            caution: None,
+            late_error,
+        });
     }
     drop(ready_tx);
     let mut initialized = Vec::new();
     while initialized.len() < 2 {
         match ready_rx.recv_timeout(INIT_TIMEOUT) {
             Ok((label, result)) => {
-                tracks.lock().push(Track {
-                    label,
-                    path: dir.join(if label == "system" {
-                        "track-system.wav"
-                    } else {
-                        "track-mic.wav"
-                    }),
-                    ok: result.is_ok(),
-                    error: result.err(),
-                });
+                let mut guard = tracks.lock();
+                if let Some(track) = guard.iter_mut().find(|track| track.label == label) {
+                    track.ok = result.is_ok();
+                    match result {
+                        Ok(meta) => {
+                            track.source = Some(meta.source);
+                            track.caution = meta.caution;
+                        }
+                        Err(message) => track.error = Some(message),
+                    }
+                }
                 initialized.push(label);
             }
             Err(_) => break,
@@ -136,28 +203,107 @@ pub(crate) fn start(data_dir: &Path) -> Result<ActiveRecording, AppError> {
             Some(detail),
         ));
     }
-    Ok(ActiveRecording {
+    let active = ActiveRecording {
         stop,
         dir,
         started_at: chrono::Local::now(),
         handles: Mutex::new(handles),
         tracks,
-    })
+    };
+    // 来源与告警保存在录音旁，后续无需依赖当时是否看到了桌面通知。
+    let _ = fs::write(
+        active.dir.join("recording-start.json"),
+        recording_summary(&active).to_string(),
+    );
+    Ok(active)
 }
 
 pub(crate) fn recording_summary(active: &ActiveRecording) -> Value {
     let tracks = active.tracks.lock();
+    let source_of = |label: &str| {
+        tracks
+            .iter()
+            .find(|t| t.label == label)
+            .and_then(|t| t.source.clone())
+    };
     json!({
         "startedAt": active.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "recordDir": active.dir.to_string_lossy(),
+        "appVersion": env!("CARGO_PKG_VERSION"),
         "systemOk": tracks.iter().any(|t| t.label == "system" && t.ok),
         "micOk": tracks.iter().any(|t| t.label == "mic" && t.ok),
-        "warnings": tracks.iter().filter(|t| !t.ok).filter_map(|t| t.error.clone()).collect::<Vec<_>>(),
+        "systemSource": source_of("system"),
+        "micSource": source_of("mic"),
+        "warnings": warnings_of(&tracks),
     })
 }
 
+/// 一路录音轨的疑点汇总：初始化告警 + 中途失败。
+fn warnings_of(tracks: &[Track]) -> Vec<String> {
+    let mut warnings: Vec<String> = tracks
+        .iter()
+        .filter(|track| !track.ok)
+        .filter_map(|track| track.error.clone())
+        .collect();
+    for track in tracks {
+        if let Some(caution) = &track.caution {
+            warnings.push(caution.clone());
+        }
+        if let Some(late) = track.late_error.lock().clone() {
+            warnings.push(format!(
+                "{}轨采集诊断：{}",
+                if track.label == "system" {
+                    "系统声"
+                } else {
+                    "麦克风"
+                },
+                late
+            ));
+        }
+    }
+    warnings
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum StopReason {
+    Manual,
+    Automatic,
+    AppExit,
+}
+impl StopReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Automatic => "automatic",
+            Self::AppExit => "app_exit",
+        }
+    }
+}
+
 /// 停止录音并混音出成品，返回给前端的结果（audioPath 即混音文件）。
-pub(crate) fn finalize(active: Arc<ActiveRecording>) -> Result<Value, AppError> {
+pub(crate) fn finalize(
+    active: Arc<ActiveRecording>,
+    reason: StopReason,
+) -> Result<Value, AppError> {
+    // 停止标记之前留证：文件长度是已写入字节，可能有少量缓冲尚未落盘，不是语音时长。
+    let requested_at = chrono::Local::now();
+    let size_of = |name: &str| {
+        fs::metadata(active.dir.join(name))
+            .ok()
+            .map(|meta| meta.len())
+    };
+    let stop_context = json!({
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "stopReason": reason.as_str(),
+        "stopRequestedAt": requested_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "wallDurationBeforeStopSec": (requested_at - active.started_at).num_seconds().max(0),
+        "trackBytesBeforeStop": {"system": size_of("track-system.wav"), "mic": size_of("track-mic.wav")},
+    });
+    // 诊断写入失败不能阻止真正停录与封盘。
+    let _ = fs::write(
+        active.dir.join("recording-stop-request.json"),
+        stop_context.to_string(),
+    );
     active.stop.store(true, Ordering::Relaxed);
     let handles: Vec<_> = active.handles.lock().drain(..).collect();
     for handle in handles {
@@ -171,26 +317,97 @@ pub(crate) fn finalize(active: Arc<ActiveRecording>) -> Result<Value, AppError> 
     )?;
     let duration_sec = frames / SAMPLE_RATE as u64;
     let size_bytes = fs::metadata(&mix_path).map(|meta| meta.len()).unwrap_or(0);
-    let tracks = active.tracks.lock();
-    let mut warnings: Vec<String> = tracks
-        .iter()
-        .filter(|track| !track.ok)
-        .filter_map(|track| track.error.clone())
-        .collect();
+    let mut warnings = warnings_of(&active.tracks.lock());
     // 停录即体检：设备没选对（如 Teams 用耳机、系统默认是扬声器）时两轨
     // 都近乎静音，混音里自然没有语音。与其等转写服务报「没有识别到语音
     // 内容」再让用户猜，不如当场把疑点说出来。
-    if let Some(hint) = silence_hint(&mix_path, duration_sec) {
+    if frames == 0 {
+        warnings.push("录音文件没有采集到音频数据，请检查 Teams 与工具箱的音频设备设置。".into());
+    } else if let Some(hint) = silence_hint(&mix_path, duration_sec) {
         warnings.push(hint);
     }
-    Ok(json!({
+    let ended_at = chrono::Local::now();
+    let wall_duration_sec = (ended_at - active.started_at).num_seconds().max(0);
+    if wall_duration_sec > duration_sec as i64 + 10 {
+        warnings.push(format!("录音开启了 {wall_duration_sec} 秒，但音频文件仅 {duration_sec} 秒，存在采集缺失；未采集到的声音无法通过重新转写恢复。"));
+    }
+    let summary = json!({
+        "stopContext": stop_context,
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "endedAt": ended_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "wallDurationSec": wall_duration_sec,
         "audioPath": mix_path.to_string_lossy(),
         "recordDir": active.dir.to_string_lossy(),
         "durationSec": duration_sec,
         "sizeBytes": size_bytes,
         "startedAt": active.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "warnings": warnings,
-    }))
+        "sources": recording_summary(&active),
+        "audioStats": {
+            "system": audio_stats(&active.dir.join("track-system.wav")),
+            "mic": audio_stats(&active.dir.join("track-mic.wav")),
+            "mix": audio_stats(&mix_path),
+        },
+    });
+    let _ = fs::write(
+        active.dir.join("recording-summary.json"),
+        summary.to_string(),
+    );
+    Ok(summary)
+}
+
+/// 只分析可准确读取的 16 位 PCM WAV；不把音量阈值当作语音检测。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AudioStats {
+    sample_count: u64,
+    nonzero_sample_count: u64,
+    peak: f64,
+    rms: f64,
+}
+
+pub(crate) fn audio_stats(path: &Path) -> Option<AudioStats> {
+    let mut reader = WavReader::open(path).ok()?;
+    if reader.spec().sample_format != SampleFormat::Int || reader.spec().bits_per_sample != 16 {
+        return None;
+    }
+    let mut stats = AudioStats {
+        sample_count: 0,
+        nonzero_sample_count: 0,
+        peak: 0.0,
+        rms: 0.0,
+    };
+    let mut sum_sq = 0.0;
+    for sample in reader.samples::<i16>() {
+        let sample = sample.ok()?;
+        let normalized = f64::from(sample) / 32768.0;
+        stats.sample_count += 1;
+        stats.nonzero_sample_count += u64::from(sample != 0);
+        stats.peak = stats.peak.max(normalized.abs());
+        sum_sq += normalized * normalized;
+    }
+    if stats.sample_count > 0 {
+        stats.rms = (sum_sq / stats.sample_count as f64).sqrt();
+    }
+    Some(stats)
+}
+
+/// 仅拦截可确认的空数据／全零样本，安静或低音量录音仍交给识别服务。
+pub(crate) fn check_transcription_audio(path: &Path) -> Result<(), AppError> {
+    if let Some(stats) = audio_stats(path) {
+        if stats.nonzero_sample_count == 0 {
+            return Err(record_error(
+                "MEETING_AUDIO_SILENT",
+                "录音未采集到声音，已停止上传转写。原录音已保留，请检查 Teams 的播放设备、麦克风及耳机静音开关后重新录制。",
+                Some(format!(
+                    "录音文件：{}；样本数：{}；非零样本数：0",
+                    path.display(),
+                    stats.sample_count
+                )),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 单秒窗口判「有声」的 RMS 阈值（-42dB ≈ 0.008）：正常说话每秒在
@@ -242,9 +459,9 @@ fn silence_hint(mix_path: &Path, duration_sec: u64) -> Option<String> {
     let fraction = loud_windows as f64 / windows as f64;
     (fraction < SPEECH_FRACTION_MIN).then(|| {
         format!(
-            "录音里疑似没有录到人声（有声时间仅约 {:.0}%）：录音用的是系统默认扬声器和麦克风，\
-             若会议时佩戴耳机，Teams 可能单独选了耳机设备，导致两轨都没录到声音；\
-             请把耳机设为系统默认设备（或在 Teams 中改用系统默认），或改用扬声器/内置麦克风重新录制。",
+            "录音里疑似没有录到人声（有声时间仅约 {:.0}%）。设备初始化成功不代表实际录到了声音；\
+             请先回放原录音，核对 Teams 的播放设备、麦克风及耳机静音开关。\
+             若回放有清晰讲话，可重新导入转写；若没有声音，需要调整设备后重新录制。",
             fraction * 100.0
         )
     })
@@ -313,21 +530,29 @@ fn write_err(error: impl std::fmt::Display) -> AppError {
 /// 已完成初始化的采集会话：进入轮询循环前创建，就绪信号在此时发回启动方。
 struct PreparedCapture {
     capture: wasapi::AudioCaptureClient,
-    writer: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
     client: wasapi::AudioClient,
 }
 
-fn prepare_capture(device_direction: Direction, path: &Path) -> Result<PreparedCapture, String> {
-    let enumerator = DeviceEnumerator::new().map_err(stringify)?;
-    let device = enumerator
-        .get_default_device(&device_direction)
-        .map_err(stringify)?;
-    let mut client = device.get_iaudioclient().map_err(stringify)?;
-    let format = WaveFormat::new(16, 16, &SampleType::Int, SAMPLE_RATE as usize, 1, None);
-    // 回环：Render 设备 + Capture 方向 + 共享模式 = AUDCLNT_STREAMFLAGS_LOOPBACK。
+fn target_spec() -> WavSpec {
+    WavSpec {
+        channels: 1,
+        sample_rate: SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    }
+}
+
+fn target_format() -> WaveFormat {
+    WaveFormat::new(16, 16, &SampleType::Int, SAMPLE_RATE as usize, 1, None)
+}
+
+/// 用给定的 AudioClient 建采集流（16k 单声道）；WAV 由录音会话独立持有，重连不覆盖。
+/// Render 设备 + Capture 方向 + 共享模式 = AUDCLNT_STREAMFLAGS_LOOPBACK；
+/// 进程回环客户端同样按 Capture 方向初始化（激活时已绑定回环语义）。
+fn open_stream(mut client: AudioClient, _path: &Path) -> Result<PreparedCapture, String> {
     client
         .initialize_client(
-            &format,
+            &target_format(),
             &Direction::Capture,
             &StreamMode::PollingShared {
                 autoconvert: true,
@@ -338,85 +563,468 @@ fn prepare_capture(device_direction: Direction, path: &Path) -> Result<PreparedC
     let capture = client.get_audiocaptureclient().map_err(stringify)?;
     // WASAPI 初始化后必须显式 Start 才有数据包流动，否则永远读到空。
     client.start_stream().map_err(stringify)?;
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate: SAMPLE_RATE,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
+    Ok(PreparedCapture { capture, client })
+}
+
+/// 最后兜底：优先默认通信播放设备，再用默认播放设备。
+fn default_render_loopback(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
+    let enumerator = DeviceEnumerator::new().map_err(stringify)?;
+    let device = enumerator
+        .get_default_device_for_role(&Direction::Render, &Role::Communications)
+        .or_else(|_| enumerator.get_default_device(&Direction::Render))
+        .map_err(stringify)?;
+    let name = device
+        .get_friendlyname()
+        .unwrap_or_else(|_| "默认播放设备".into());
+    let client = device.get_iaudioclient().map_err(stringify)?;
+    let prepared = open_stream(client, path)?;
+    Ok((
+        prepared,
+        CaptureMeta::new(format!("默认通信／播放设备（{name}）回环")),
+    ))
+}
+
+/// 进程回环无法证明目标树确实有播放流，只作为实际播放设备不可用时的兜底。
+fn process_or_default_system(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
+    if let Some(pid) = find_teams_main_pid() {
+        let attempt = AudioClient::new_application_loopback_client(pid, true)
+            .map_err(stringify)
+            .and_then(|client| open_stream(client, path));
+        return match attempt {
+            Ok(prepared) => Ok((
+                prepared,
+                CaptureMeta::new(format!("Teams 进程声音（PID {pid}，含子进程）")),
+            )),
+            Err(error) => {
+                let (prepared, meta) = default_render_loopback(path)?;
+                Ok((
+                    prepared,
+                    meta.with_caution(format!(
+                        "按 Teams 进程采集失败（{error}），已改用默认通信／播放设备。"
+                    )),
+                ))
+            }
+        };
+    }
+    let (prepared, meta) = default_render_loopback(path)?;
+    Ok((
+        prepared,
+        meta.with_caution(
+            "未找到运行中的 Teams，已按默认通信／播放设备录制；Teams 没在放声音时此轨会没有内容。"
+                .into(),
+        ),
+    ))
+}
+
+fn prepare_system(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
+    prefer_teams_render(
+        || {
+            let enumerator = DeviceEnumerator::new().map_err(stringify)?;
+            let Some(device) = crate::meeting_audio::active_render_device(&enumerator) else {
+                return Ok(None);
+            };
+            let name = device
+                .get_friendlyname()
+                .unwrap_or_else(|_| "Teams 播放设备".into());
+            let prepared = open_stream(device.get_iaudioclient().map_err(stringify)?, path)?;
+            Ok(Some((
+                prepared,
+                CaptureMeta::new(format!("Teams 正在使用的播放设备（{name}）回环")).with_caution(
+                    "系统声按 Teams 播放设备采集，同一设备上其他应用的声音也会被录入。".into(),
+                ),
+            )))
+        },
+        || process_or_default_system(path),
+    )
+}
+
+fn prefer_teams_render<T>(
+    endpoint: impl FnOnce() -> Result<Option<(T, CaptureMeta)>, String>,
+    fallback: impl FnOnce() -> Result<(T, CaptureMeta), String>,
+) -> Result<(T, CaptureMeta), String> {
+    match endpoint() {
+        Ok(Some(prepared)) => Ok(prepared),
+        result => {
+            let (prepared, mut meta) = fallback()?;
+            let reason = match result {
+                Err(error) => format!("无法采集 Teams 实际播放设备（{error}）"),
+                _ => "未找到 Teams 活跃播放会话".into(),
+            };
+            let caution = format!(
+                "{reason}，已使用备用系统声来源；请先录制短片确认有声。{}",
+                meta.caution.as_deref().unwrap_or("")
+            );
+            meta.caution = Some(caution);
+            Ok((prepared, meta))
+        }
+    }
+}
+
+/// 麦克风轨：自动挑「正在收音」的设备（会议中 Teams 一直占用所选麦克风）。
+fn prepare_mic(path: &Path) -> Result<(PreparedCapture, CaptureMeta), String> {
+    let enumerator = DeviceEnumerator::new().map_err(stringify)?;
+    // 音量为零不等于没使用：会议刚开场、Teams 静音时仍能从会话归属确定
+    // 正确设备。先按设备 ID 选 Teams 实际占用的麦克风，再考虑音量兜底。
+    let teams_device = crate::meeting_audio::active_capture_device(&enumerator);
+    if let Some(device) = teams_device {
+        let name = device
+            .get_friendlyname()
+            .unwrap_or_else(|_| "Teams 麦克风".into());
+        let prepared = open_stream(device.get_iaudioclient().map_err(stringify)?, path)?;
+        return Ok((
+            prepared,
+            CaptureMeta::new(format!("Teams 正在使用的麦克风（{name}）")),
+        ));
+    }
+    let default = enumerator
+        .get_default_device_for_role(&Direction::Capture, &Role::Communications)
+        .or_else(|_| enumerator.get_default_device(&Direction::Capture))
+        .map_err(stringify)?;
+    let default_name = default
+        .get_friendlyname()
+        .unwrap_or_else(|_| "默认麦克风".into());
+    let picked = pick_active_capture_device(&enumerator, &default_name);
+    let (device, name, caution) = match picked {
+        Some(picked) => picked,
+        None => {
+            let caution = format!(
+                "无法确认 Teams 正在使用的麦克风，且未检测到明显输入，已使用默认通信麦克风「{default_name}」。请确认与 Teams 的麦克风设置一致。"
+            );
+            (default, default_name, Some(caution))
+        }
     };
-    let writer = WavWriter::create(path, spec).map_err(|e| e.to_string())?;
-    Ok(PreparedCapture {
-        capture,
-        writer,
-        client,
-    })
+    let client = device.get_iaudioclient().map_err(stringify)?;
+    let prepared = open_stream(client, path)?;
+    let meta = CaptureMeta::new(format!("麦克风（{name}）")).opt_caution(caution);
+    Ok((prepared, meta))
+}
+
+/// 各麦克风的音量表同时采样一小段时间，找出「正在收音」的那个：
+/// 无输入流的设备峰值恒为 0，会议刚开始总有人在说话。全都无声则返回
+/// None，由调用方退回系统默认（与旧行为一致，不强猜）。
+fn pick_active_capture_device(
+    enumerator: &DeviceEnumerator,
+    default_name: &str,
+) -> Option<(Device, String, Option<String>)> {
+    let collection = enumerator.get_device_collection(&Direction::Capture).ok()?;
+    let count = collection.get_nbr_devices().ok()?;
+    let mut candidates: Vec<(Device, String, wasapi::AudioMeterInformation, f32)> = Vec::new();
+    for idx in 0..count {
+        let Ok(device) = collection.get_device_at_index(idx) else {
+            continue;
+        };
+        let Ok(name) = device.get_friendlyname() else {
+            continue;
+        };
+        let Ok(meter) = device.get_audiometerinformation() else {
+            continue;
+        };
+        candidates.push((device, name, meter, 0.0));
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    let steps = (MIC_METER_TOTAL.as_millis() / MIC_METER_STEP.as_millis()).max(1);
+    for _ in 0..steps {
+        for (_, _, meter, peak) in candidates.iter_mut() {
+            if let Ok(value) = meter.get_peak_value() {
+                *peak = peak.max(value);
+            }
+        }
+        thread::sleep(MIC_METER_STEP);
+    }
+    let mut best_idx: Option<usize> = None;
+    for idx in 0..candidates.len() {
+        let better = best_idx.is_none_or(|best| {
+            candidates[idx]
+                .3
+                .partial_cmp(&candidates[best].3)
+                .is_some_and(|order| order == std::cmp::Ordering::Greater)
+        });
+        if better {
+            best_idx = Some(idx);
+        }
+    }
+    let idx = best_idx?;
+    if candidates[idx].3 < MIC_ACTIVE_PEAK_MIN {
+        return None;
+    }
+    let (device, name, _, _) = candidates.swap_remove(idx);
+    let caution = (name != default_name).then(|| {
+        format!(
+            "检测到麦克风「{name}」正在收音（系统默认是「{default_name}」），已自动改用它录制。"
+        )
+    });
+    Some((device, name, caution))
+}
+
+/// 找 ms-teams.exe 主进程：新版 Teams 开多个同名进程，媒体渲染在子进程
+/// 里，进程回环必须从主进程开始并带上整棵进程树才能全部录到。
+fn find_teams_main_pid() -> Option<u32> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    let mut procs: Vec<(u32, u32, String)> = Vec::new();
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return None;
+        };
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let name_len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&ch| ch == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..name_len]);
+                procs.push((entry.th32ProcessID, entry.th32ParentProcessID, name));
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    pick_teams_main(&procs)
+}
+
+/// 纯函数便于单测：进程表里挑 Teams 主进程——父进程不是 ms-teams.exe 的
+/// 那个（多个则取最小 pid）；全是子进程的异常表里退回任取最小 pid。
+fn pick_teams_main(procs: &[(u32, u32, String)]) -> Option<u32> {
+    let is_teams = |name: &str| name.eq_ignore_ascii_case("ms-teams.exe");
+    let team_pids: std::collections::HashSet<u32> = procs
+        .iter()
+        .filter(|(_, _, name)| is_teams(name))
+        .map(|(pid, _, _)| *pid)
+        .collect();
+    procs
+        .iter()
+        .filter(|(_, ppid, name)| is_teams(name) && !team_pids.contains(ppid))
+        .map(|(pid, _, _)| *pid)
+        .min()
+        .or_else(|| team_pids.into_iter().min())
+}
+
+type TrackWriter = hound::WavWriter<std::io::BufWriter<std::fs::File>>;
+
+const PACKET_STALL_TIMEOUT: Duration = Duration::from_secs(10);
+const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+
+#[derive(Debug)]
+enum CaptureFailure {
+    Device(String),
+    Write(String),
+}
+
+/// 重连后按单调时钟补齐缺失位置，保留旧音频，不把断录两侧的发言拼到一起。
+/// 补零只表达没有采集到的时间，不能恢复这段声音。
+fn pad_track_to(writer: &mut TrackWriter, elapsed: Duration) -> Result<(), String> {
+    let target = (elapsed.as_secs_f64() * SAMPLE_RATE as f64) as u64;
+    let current = writer.duration() as u64;
+    for _ in current..target {
+        writer.write_sample(0i16).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn packet_stalled(last_packet: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(last_packet) >= PACKET_STALL_TIMEOUT
+}
+
+fn write_capture_packet(
+    writer: &mut TrackWriter,
+    bytes: &[u8],
+    silent: bool,
+) -> Result<(), String> {
+    for pair in bytes.chunks_exact(2) {
+        let sample = if silent {
+            0
+        } else {
+            i16::from_le_bytes([pair[0], pair[1]])
+        };
+        writer.write_sample(sample).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn capture_loop(
     capture: &wasapi::AudioCaptureClient,
-    writer: &mut hound::WavWriter<std::io::BufWriter<std::fs::File>>,
+    writer: &mut TrackWriter,
     stop: &AtomicBool,
-) -> Result<(), String> {
+) -> Result<(), CaptureFailure> {
+    let mut last_packet = Instant::now();
     loop {
         if stop.load(Ordering::Relaxed) {
-            break;
+            return Ok(());
         }
         loop {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
             match capture.get_next_packet_size() {
                 Ok(Some(0)) | Ok(None) => break,
                 Ok(Some(frames)) => {
                     let mut buffer = vec![0u8; frames as usize * 2];
-                    let (read, _info) = capture.read_from_device(&mut buffer).map_err(stringify)?;
-                    for pair in buffer[..read as usize * 2].chunks_exact(2) {
-                        let sample = i16::from_le_bytes([pair[0], pair[1]]);
-                        writer.write_sample(sample).map_err(|e| e.to_string())?;
+                    let (read, info) = capture
+                        .read_from_device(&mut buffer)
+                        .map_err(|e| CaptureFailure::Device(stringify(e)))?;
+                    write_capture_packet(writer, &buffer[..read as usize * 2], info.flags.silent)
+                        .map_err(CaptureFailure::Write)?;
+                    if read > 0 {
+                        last_packet = Instant::now();
                     }
                 }
-                Err(error) => return Err(stringify(error)),
+                Err(error) => return Err(CaptureFailure::Device(stringify(error))),
             }
+        }
+        if packet_stalled(last_packet, Instant::now()) {
+            return Err(CaptureFailure::Device(
+                "连续十秒未收到音频数据包，重新连接录音设备（可能是设备切换或播放设备暂时空闲）。"
+                    .into(),
+            ));
         }
         thread::sleep(POLL_INTERVAL);
     }
-    Ok(())
+}
+
+fn wait_reconnect(stop: &AtomicBool) -> bool {
+    let deadline = Instant::now() + RECONNECT_DELAY;
+    while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+    }
+    !stop.load(Ordering::Relaxed)
+}
+
+fn retry_capture<T>(
+    stop: &AtomicBool,
+    mut prepare: impl FnMut() -> Result<T, String>,
+    mut wait: impl FnMut(&AtomicBool) -> bool,
+    mut on_error: impl FnMut(&str),
+) -> Option<T> {
+    while !stop.load(Ordering::Relaxed) && wait(stop) {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        match prepare() {
+            Ok(value) => return Some(value),
+            Err(message) => on_error(&message),
+        }
+    }
+    None
+}
+
+fn capture_event(path: &Path, label: &str, event: &str, detail: &str) {
+    // 每条轨独立日志，避免两个采集线程交错写入一行；不包含录音内容。
+    let log_path = path.with_extension("events.jsonl");
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        let value = json!({"at": chrono::Local::now().to_rfc3339(), "track": label,
+            "event": event, "detail": detail});
+        let _ = writeln!(file, "{value}");
+    }
 }
 
 fn run_capture(
     device_direction: Direction,
     stop: &AtomicBool,
     path: &Path,
-    ready: &mpsc::Sender<(&'static str, Result<(), String>)>,
+    ready: &mpsc::Sender<(&'static str, Result<CaptureMeta, String>)>,
+    late_error: &Mutex<Option<String>>,
 ) -> Result<(), String> {
-    let label: &'static str = match device_direction {
+    let label = match device_direction {
         Direction::Render => "system",
         Direction::Capture => "mic",
     };
-    // COM 多线程套间：本线程独占使用，线程结束时随线程释放。
     if wasapi::initialize_mta().is_err() {
         let message = "初始化 Windows 音频组件失败。".to_string();
         ready.send((label, Err(message.clone()))).ok();
         return Err(message);
     }
-    // 就绪信号必须在进入采集循环【之前】发回：启动方只等 5 秒，
-    // 放到循环结束后发会让每次开录都超时误报"无法打开设备"。
-    let prepared = match prepare_capture(device_direction, path) {
-        Ok(prepared) => {
-            ready.send((label, Ok(()))).ok();
-            prepared
-        }
+    let prepare = || match device_direction {
+        Direction::Render => prepare_system(path),
+        Direction::Capture => prepare_mic(path),
+    };
+    let (mut prepared, meta) = match prepare() {
+        Ok(value) => value,
         Err(message) => {
             ready.send((label, Err(message.clone()))).ok();
             return Err(message);
         }
     };
-    let PreparedCapture {
-        capture,
-        mut writer,
-        client,
-    } = prepared;
-    capture_loop(&capture, &mut writer, stop)?;
-    let _ = client.stop_stream();
-    writer.finalize().map_err(|e| e.to_string())?;
-    Ok(())
+    let mut writer = match WavWriter::create(path, target_spec()) {
+        Ok(writer) => writer,
+        Err(error) => {
+            let _ = prepared.client.stop_stream();
+            let message = error.to_string();
+            ready.send((label, Err(message.clone()))).ok();
+            return Err(message);
+        }
+    };
+    let epoch = Instant::now();
+    capture_event(path, label, "started", &meta.source);
+    ready.send((label, Ok(meta))).ok();
+    let mut interruptions = 0;
+    let result = loop {
+        match capture_loop(&prepared.capture, &mut writer, stop) {
+            Ok(()) => {
+                let _ = prepared.client.stop_stream();
+                break Ok(());
+            }
+            Err(CaptureFailure::Write(message)) => {
+                let _ = prepared.client.stop_stream();
+                *late_error.lock() = Some(format!("写入音轨失败：{message}"));
+                break Err(message);
+            }
+            Err(CaptureFailure::Device(message)) => {
+                interruptions += 1;
+                *late_error.lock() = Some(format!("音频采集已中断，正在重连：{message}"));
+                capture_event(path, label, "interrupted", &message);
+                let _ = prepared.client.stop_stream();
+                // 先释放旧端点和流，再重新枚举 Teams 当前使用的设备。
+                drop(prepared);
+                let next = retry_capture(stop, &prepare, wait_reconnect, |message| {
+                    *late_error.lock() = Some(format!("音频采集仍未恢复，正在重试：{message}"));
+                    capture_event(path, label, "retry_failed", message);
+                });
+                let Some((next, meta)) = next else {
+                    break Ok(());
+                };
+                prepared = next;
+                capture_event(path, label, "reconnected", &meta.source);
+                *late_error.lock() = Some(format!(
+                    "曾中断 {interruptions} 次，已重新连接：{}；中断期间声音无法补录。",
+                    meta.source
+                ));
+                if let Err(message) = pad_track_to(&mut writer, epoch.elapsed()) {
+                    let _ = prepared.client.stop_stream();
+                    *late_error.lock() = Some(format!("恢复音轨时间轴失败：{message}"));
+                    break Err(message);
+                }
+            }
+        }
+    };
+    capture_event(
+        path,
+        label,
+        "stopped",
+        &format!(
+            "运行 {} 秒；实际写入 {} 个样本",
+            epoch.elapsed().as_secs(),
+            writer.duration()
+        ),
+    );
+    let finalized = writer.finalize().map_err(|e| {
+        *late_error.lock() = Some(format!("音轨保存失败：{e}"));
+        e.to_string()
+    });
+    result.and(finalized)
 }
 
 fn stringify(error: impl std::fmt::Debug) -> String {
@@ -449,6 +1057,268 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn manual_and_automatic_stop_both_wait_for_track_flush_before_mixing() {
+        for reason in [StopReason::Manual, StopReason::Automatic] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("track-mic.wav");
+            let mut writer = WavWriter::create(&path, target_spec()).unwrap();
+            for _ in 0..200 {
+                writer.write_sample(200i16).unwrap();
+            }
+            writer.flush().unwrap();
+            let before_stop = fs::metadata(&path).unwrap().len();
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = stop.clone();
+            let handle = thread::spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                // 模拟停止时仍有缓冲数据需要写完。
+                for _ in 0..400 {
+                    writer.write_sample(300i16).unwrap();
+                }
+                writer.finalize().unwrap();
+            });
+            let summary = finalize(
+                Arc::new(ActiveRecording {
+                    stop,
+                    dir: dir.path().to_path_buf(),
+                    started_at: chrono::Local::now() - chrono::Duration::minutes(30),
+                    handles: Mutex::new(vec![handle]),
+                    tracks: Mutex::new(vec![]),
+                }),
+                reason,
+            )
+            .unwrap();
+            let samples = read_wav_samples(&dir.path().join("audio-mix.wav"));
+            assert_eq!(samples.len(), 600);
+            assert_eq!(&samples[..200], &vec![200; 200]);
+            assert_eq!(&samples[200..], &vec![300; 400]);
+            let context: Value = serde_json::from_slice(
+                &fs::read(dir.path().join("recording-stop-request.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(context["stopReason"], reason.as_str());
+            assert_eq!(context["trackBytesBeforeStop"]["mic"], before_stop);
+            assert_eq!(context, summary["stopContext"]);
+            assert!(context["wallDurationBeforeStopSec"].as_i64().unwrap() >= 1800);
+            assert_eq!(summary["appVersion"], env!("CARGO_PKG_VERSION"));
+        }
+    }
+
+    #[test]
+    fn reconnect_retries_failed_devices_and_stops_without_opening_another_stream() {
+        let stop = AtomicBool::new(false);
+        let mut attempts = 0;
+        let mut errors = Vec::new();
+        let value = retry_capture(
+            &stop,
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err("设备暂不可用".into())
+                } else {
+                    Ok("新端点")
+                }
+            },
+            |_| true,
+            |message| errors.push(message.to_owned()),
+        );
+        assert_eq!(value, Some("新端点"));
+        assert_eq!(attempts, 3);
+        assert_eq!(errors.len(), 2);
+        let value: Option<()> = retry_capture(
+            &stop,
+            || panic!("等待期间已停止，不得重新打开设备"),
+            |stop| {
+                stop.store(true, Ordering::Relaxed);
+                true
+            },
+            |_| {},
+        );
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn finalize_reports_long_running_recording_with_only_ten_seconds_of_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        write_test_wav(&dir.path().join("track-mic.wav"), &vec![100i16; 160_000]);
+        let summary = finalize(
+            Arc::new(ActiveRecording {
+                stop: Arc::new(AtomicBool::new(false)),
+                dir: dir.path().to_path_buf(),
+                started_at: chrono::Local::now() - chrono::Duration::minutes(30),
+                handles: Mutex::new(vec![]),
+                tracks: Mutex::new(vec![]),
+            }),
+            StopReason::Manual,
+        )
+        .unwrap();
+        assert_eq!(summary["durationSec"], 10);
+        assert!(summary["wallDurationSec"].as_i64().unwrap() >= 1800);
+        assert!(summary["endedAt"].is_string());
+        assert!(
+            summary["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str().unwrap().contains("存在采集缺失"))
+        );
+    }
+
+    #[test]
+    fn recovered_track_preserves_audio_and_places_new_packets_after_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("track.wav");
+        let mut writer = WavWriter::create(&path, target_spec()).unwrap();
+        write_capture_packet(&mut writer, &[1, 0, 2, 0], false).unwrap();
+        pad_track_to(&mut writer, Duration::from_millis(10)).unwrap();
+        assert_eq!(writer.duration(), 160);
+        // 时钟暂时落后时不得截掉已写样本。
+        pad_track_to(&mut writer, Duration::from_millis(1)).unwrap();
+        write_capture_packet(&mut writer, &[3, 0], false).unwrap();
+        // WASAPI 静音包即使缓冲有非零字节，也必须落为零。
+        write_capture_packet(&mut writer, &[255, 127], true).unwrap();
+        writer.finalize().unwrap();
+        let samples = read_wav_samples(&path);
+        assert_eq!(&samples[..2], &[1, 2]);
+        assert!(samples[2..160].iter().all(|sample| *sample == 0));
+        assert_eq!(&samples[160..], &[3, 0]);
+    }
+
+    #[test]
+    fn stalled_capture_checks_packets_not_volume_and_stop_cancels_retry() {
+        let now = Instant::now();
+        assert!(!packet_stalled(now, now + Duration::from_secs(9)));
+        assert!(packet_stalled(now, now + Duration::from_secs(10)));
+        assert!(!wait_reconnect(&AtomicBool::new(true)));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("track.wav");
+        capture_event(&path, "mic", "interrupted", "0x88890004");
+        capture_event(&path, "mic", "reconnected", "新设备");
+        let content = fs::read_to_string(path.with_extension("events.jsonl")).unwrap();
+        let events: Vec<Value> = content
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events[0]["event"], "interrupted");
+        assert_eq!(events[1]["event"], "reconnected");
+    }
+
+    #[test]
+    fn teams_render_endpoint_wins_over_successful_process_fallback() {
+        let (value, meta) = prefer_teams_render(
+            || Ok(Some(("headset", CaptureMeta::new("Teams 耳机")))),
+            || panic!("已识别 Teams 实际播放设备，不应退回可能无声的进程来源"),
+        )
+        .unwrap();
+        assert_eq!(value, "headset");
+        assert_eq!(meta.source, "Teams 耳机");
+    }
+
+    #[test]
+    fn unavailable_render_endpoint_keeps_fallback_and_explains_source() {
+        for endpoint in [Ok(None), Err("设备已断开".to_string())] {
+            let (value, meta) = prefer_teams_render(
+                || endpoint,
+                || {
+                    Ok((
+                        "process",
+                        CaptureMeta::new("进程").with_caution("原有提醒".into()),
+                    ))
+                },
+            )
+            .unwrap();
+            assert_eq!(value, "process");
+            let caution = meta.caution.unwrap();
+            assert!(caution.contains("备用系统声来源"));
+            assert!(caution.contains("原有提醒"));
+        }
+        let error =
+            prefer_teams_render::<()>(|| Ok(None), || Err("两种来源均不可用".into())).unwrap_err();
+        assert_eq!(error, "两种来源均不可用");
+    }
+
+    #[test]
+    fn pcm_stats_distinguish_silence_quiet_audio_and_full_negative_peak() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audio.wav");
+        write_test_wav(&path, &[0, 0]);
+        let stats = audio_stats(&path).unwrap();
+        assert_eq!(stats.sample_count, 2);
+        assert_eq!(stats.nonzero_sample_count, 0);
+        assert_eq!(stats.peak, 0.0);
+        assert_eq!(stats.rms, 0.0);
+        assert_eq!(
+            check_transcription_audio(&path).unwrap_err().code,
+            "MEETING_AUDIO_SILENT"
+        );
+        write_test_wav(&path, &[0, 1, -1, 0]);
+        assert_eq!(audio_stats(&path).unwrap().nonzero_sample_count, 2);
+        assert!(
+            check_transcription_audio(&path).is_ok(),
+            "低音量不等于无有效语音，不能拦截"
+        );
+        write_test_wav(&path, &[i16::MIN]);
+        let stats = audio_stats(&path).unwrap();
+        assert_eq!(stats.peak, 1.0);
+        assert_eq!(stats.rms, 1.0);
+        write_test_wav(&path, &[]);
+        assert_eq!(
+            check_transcription_audio(&path).unwrap_err().code,
+            "MEETING_AUDIO_SILENT"
+        );
+        assert!(audio_stats(&dir.path().join("missing.wav")).is_none());
+    }
+
+    #[test]
+    fn unsupported_audio_still_goes_to_existing_cloud_decoder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("import.mp3");
+        fs::write(&path, b"ID3test").unwrap();
+        assert!(check_transcription_audio(&path).is_ok());
+        let path = dir.path().join("float.wav");
+        let mut writer = WavWriter::create(
+            &path,
+            WavSpec {
+                bits_per_sample: 32,
+                sample_format: SampleFormat::Float,
+                ..target_spec()
+            },
+        )
+        .unwrap();
+        writer.write_sample(0.0f32).unwrap();
+        writer.finalize().unwrap();
+        assert!(audio_stats(&path).is_none());
+        assert!(check_transcription_audio(&path).is_ok());
+    }
+
+    #[test]
+    fn finalized_silent_recording_keeps_per_track_stats_and_original_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for track in ["track-system.wav", "track-mic.wav"] {
+            write_test_wav(&dir.path().join(track), &[0; 160]);
+        }
+        let active = Arc::new(ActiveRecording {
+            stop: Arc::new(AtomicBool::new(false)),
+            dir: dir.path().to_path_buf(),
+            started_at: chrono::Local::now(),
+            handles: Mutex::new(vec![]),
+            tracks: Mutex::new(vec![]),
+        });
+        let summary = finalize(active, StopReason::Manual).unwrap();
+        for track in ["system", "mic", "mix"] {
+            assert_eq!(summary["audioStats"][track]["sampleCount"], 160);
+            assert_eq!(summary["audioStats"][track]["nonzeroSampleCount"], 0);
+        }
+        assert!(dir.path().join("audio-mix.wav").is_file());
+        let saved: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("recording-summary.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["audioStats"], summary["audioStats"]);
+    }
+
     /// 空录体检：全程静音的「会议」必须被点名，且提示里要说清设备原因。
     #[test]
     fn silence_hint_flags_quiet_recording() {
@@ -460,7 +1330,7 @@ mod tests {
         write_test_wav(&path, &samples);
         let hint = silence_hint(&path, 10).expect("疑似空录应给出提示");
         assert!(hint.contains("疑似没有录到人声"));
-        assert!(hint.contains("耳机"));
+        assert!(hint.contains("Teams"));
     }
 
     /// 正常会议（大部分时间有人说话）不应误报。
@@ -473,6 +1343,7 @@ mod tests {
         let mut samples = quiet.clone();
         samples.extend_from_slice(&loud);
         samples.extend_from_slice(&quiet);
+        write_test_wav(&path, &samples);
         assert_eq!(silence_hint(&path, 12), None);
     }
 
@@ -545,6 +1416,42 @@ mod tests {
         let _ = std::io::sink().write_all(&bytes);
     }
 
+    fn procs(list: &[(u32, u32, &str)]) -> Vec<(u32, u32, String)> {
+        list.iter()
+            .map(|(pid, ppid, name)| (*pid, *ppid, name.to_string()))
+            .collect()
+    }
+
+    /// 真机 2026-10-09 快照：explorer 下挂一个 Teams 主进程，主进程下再挂
+    /// 两个同名子进程——回环必须选主进程（父进程不是 ms-teams.exe 的那个）。
+    #[test]
+    fn teams_main_pid_prefers_process_tree_root() {
+        let table = procs(&[
+            (1000, 900, "explorer.exe"),
+            (79600, 1000, "ms-teams.exe"),
+            (83148, 79600, "ms-teams.exe"),
+            (85276, 79600, "MS-Teams.exe"),
+        ]);
+        assert_eq!(pick_teams_main(&table), Some(79600));
+    }
+
+    /// 全是子进程（主进程已退出、父 pid 失效）时退回任取一个，不能 None：
+    /// 子进程带 include_tree 依然能录到整棵树的播放。
+    #[test]
+    fn teams_main_pid_falls_back_to_any_teams_process() {
+        let table = procs(&[
+            (83148, 79600, "ms-teams.exe"),
+            (85276, 83148, "ms-teams.exe"),
+        ]);
+        assert_eq!(pick_teams_main(&table), Some(83148));
+    }
+
+    #[test]
+    fn teams_main_pid_none_without_teams() {
+        let table = procs(&[(1000, 900, "explorer.exe"), (2000, 1000, "OUTLOOK.EXE")]);
+        assert_eq!(pick_teams_main(&table), None);
+    }
+
     /// 真实设备链路诊断（手动运行）：
     /// `cargo test --lib meeting_record -- --ignored --nocapture`
     #[test]
@@ -557,7 +1464,7 @@ mod tests {
                 println!("启动成功: {}", recording_summary(&recording));
                 std::thread::sleep(std::time::Duration::from_secs(3));
                 let active = Arc::new(recording);
-                match finalize(active) {
+                match finalize(active, StopReason::Manual) {
                     Ok(result) => println!("收尾成功: {result}"),
                     Err(error) => {
                         println!("收尾失败: code={} detail={:?}", error.code, error.detail)

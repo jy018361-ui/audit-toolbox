@@ -119,9 +119,9 @@ describe("history resume", () => {
     ).toBeVisible();
   });
 
-  it("keeps rows without archived params action-free and surfaces restore errors", async () => {
+  it("opens the tool for old rows without params and explains that inputs must be selected", async () => {
     vi.mocked(historyGet).mockResolvedValue([
-      completedRow({ jobId: "job-old", params: {} }),
+      completedRow({ jobId: "job-old", params: {}, outputPaths: [] }),
     ]);
     const first = render(
       <MemoryRouter initialEntries={["/history"]}>
@@ -129,11 +129,14 @@ describe("history resume", () => {
       </MemoryRouter>,
     );
     await first.findByText("已生成服务单");
-    expect(
-      first.queryByRole("button", { name: "继续任务" }),
-    ).not.toBeInTheDocument();
-    first.unmount();
+    fireEvent.click(await first.findByRole("button", { name: "继续任务" }));
+    expect(await screen.findByRole("heading", { name: wpTool.name })).toBeVisible();
+    expect(screen.getByText("该记录没有可回填的输入参数，请在工具页选择或确认输入后继续。")).toBeVisible();
+    expect(screen.queryByText(/已恢复.*上次任务的输入/)).not.toBeInTheDocument();
+    expect(historyRestore).not.toHaveBeenCalled();
+  });
 
+  it("surfaces restore errors instead of silently opening an empty tool", async () => {
     // 新版本记录恢复失败时留在历史页，把后端的中文错误讲给用户。
     vi.mocked(historyGet).mockResolvedValue([completedRow()]);
     vi.mocked(historyRestore).mockRejectedValue({
@@ -151,9 +154,17 @@ describe("history resume", () => {
     expect(await screen.findByText("未找到该任务，无法恢复。")).toBeVisible();
   });
 
-  it("hides the resume action for sub-step jobs like kanzhang.inspect", async () => {
-    // 看账的「读取文件」子步骤也有参数存档，但只有文件路径没有字段映射，
-    // 恢复它等于把现场覆盖成半成品——这类记录不显示按钮。
+  it("opens auxiliary-only tasks without applying their unrelated params", async () => {
+    const fuzzyTool = catalog.find((tool) => tool.id === "fuzzy_match")!;
+    vi.mocked(historyGet).mockResolvedValue([completedRow({ toolId: fuzzyTool.id, method: "fuzzy.export", outputPaths: [], params: { jobId: "transient" } })]);
+    render(<MemoryRouter initialEntries={["/history"]}><App /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "继续任务" }));
+    expect(await screen.findByRole("heading", { name: fuzzyTool.name })).toBeVisible();
+    expect(screen.getByText("该记录没有可回填的输入参数，请在工具页选择或确认输入后继续。")).toBeVisible();
+    expect(historyRestore).not.toHaveBeenCalled();
+  });
+
+  it("offers resume for source-reading steps without output files", async () => {
     vi.mocked(historyGet).mockResolvedValue([
       completedRow({
         jobId: "job-kz-read",
@@ -161,6 +172,7 @@ describe("history resume", () => {
         message: "已读取文件",
         params: { inputPath: "C:\\je.xlsx", headerRow: 1 },
         method: "kanzhang.inspect",
+        outputPaths: [],
       }),
       completedRow({
         jobId: "job-kz-export",
@@ -182,6 +194,21 @@ describe("history resume", () => {
     await screen.findByText("已读取文件");
     expect(screen.getByText("导出完成")).toBeVisible();
     const buttons = screen.getAllByRole("button", { name: "继续任务" });
-    expect(buttons).toHaveLength(1);
+    expect(buttons).toHaveLength(2);
+    expect(screen.getByText("无输出文件")).toBeVisible();
+  });
+
+  it.each(["completed", "failed", "cancelled", "paused"])("restores %s tasks without output files", async (status) => {
+    vi.mocked(historyGet).mockResolvedValue([completedRow({ status, outputPaths: [] })]);
+    vi.mocked(historyRestore).mockResolvedValue({
+      jobId: "job-wp-1", toolId: wpTool.id, method: "wp.generate",
+      params: { folder: "C:\\客户A\\WP" }, missingPaths: [], authorizedPathCount: 1,
+    });
+    render(<MemoryRouter initialEntries={["/history"]}><App /></MemoryRouter>);
+    expect(await screen.findByText("无输出文件")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "继续任务" }));
+    expect(await screen.findByRole("heading", { name: wpTool.name })).toBeVisible();
+    expect(historyRestore).toHaveBeenCalledWith("job-wp-1");
+    expect(screen.getByText("已恢复「FY27 WP服务单生成工具」上次任务的输入。")).toBeVisible();
   });
 });

@@ -49,7 +49,9 @@
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-overlay);
-  max-height: calc(100dvh - 16px);
+  /* 引导是「气泡」不是「文章」：限高保持气泡形态，超长内容在卡内滚动
+     （此前上限就是整屏高度，长文案把卡片撑成几乎满屏）。 */
+  max-height: min(600px, calc(100dvh - 32px));
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -121,6 +123,11 @@
   font-weight: var(--fw-strong);
   color: var(--ink-strong);
   line-height: var(--lh-card-title);
+  /* 标题最多两行省略：标题区不应比正文还高。 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .tour-body {
@@ -242,7 +249,12 @@
 }
 
 .step-hint-title {
-  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  /* 引导标题最多两行省略：标题区不能比正文还高（长文件名步骤名
+     曾把提示卡撑成大半屏文字墙）。 */
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   margin: var(--sp-1) 0;
   font-size: var(--fs-md);
   font-weight: var(--fw-strong);
@@ -391,4 +403,22 @@
   .tour-card {
     animation: none;
   }
+}
+
+/* 引导正文折行与展开（见 BeginnerTour.TourBody）。 */
+.tour-body--clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  overflow: hidden;
+}
+.tour-body-toggle {
+  margin-top: var(--sp-1);
+  min-height: 24px;
+  padding: 0 var(--sp-1);
+  border: none;
+  background: none;
+  color: var(--brand-link);
+  font-size: var(--fs-xs);
+  cursor: pointer;
 }

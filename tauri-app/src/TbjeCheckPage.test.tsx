@@ -56,8 +56,53 @@ it("批量核对仅对完整组合生成自动复核身份，替换任一文件�
 });
 
 describe("TbjeCheckPage", () => {
-  afterEach(() => {
+  it.each([false, true])("辅助联动失败后仅保留手选映射，核对导出及返回第二步一致（人工：%s）", async (manual) => {
+    const { engineCall, jobStart, listenJobEvents, pickPath } = await import("./api");
+    vi.mocked(pickPath).mockResolvedValueOnce(["C:/samples/01TB.xlsx", "C:/samples/01JE.xlsx"]).mockResolvedValueOnce("C:/exports");
+    vi.mocked(engineCall).mockImplementation(async (method, params) => {
+      if (method === "ledger.forms") return [];
+      if (method === "ledger.review_pair_mapping") return { tbChanges: [], jeChanges: [] };
+      if (method === "ledger.check_mapping_alignment") return { aligned: true };
+      if (method === "ledger.auxiliary_link") return { tbAuxMapped: true, status: "noMatch", warnings: [] };
+      const tb = String((params as {source:{inputPath:string}}).source.inputPath).includes("TB");
+      if (method === "deposit.classify_source") return { kind: tb ? "tb" : "je", sheet: "Sheet1", headerRow: 1, headerDepth: 1 };
+      return { sheet: "Sheet1", sheets: ["Sheet1"], headerRow: 1, headerDepth: 1, rowCount: 1,
+        headers: ["科目编码", "核算维度编码"], preview: [["1002", "BANK-A"]],
+        suggestedMapping: { accountCode: "科目编码", ...(tb ? {auxiliary:["核算维度编码"]} : {}) } };
+    });
+    let emit: ((e: never) => void) | undefined;
+    vi.mocked(listenJobEvents).mockImplementation(async cb => { emit = cb as typeof emit; return () => {}; });
+    const { container } = render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", {name:/把多组 TB 与 JE 一起拖进来/}));
+    await screen.findByText("01TB.xlsx");
+    fireEvent.click(screen.getAllByText("查看字段映射")[0]);
+    const select = () => screen.getByLabelText("将「核算维度编码」映射为字段");
+    if (manual) fireEvent.change(select(), {target:{value:"auxiliary"}});
+    await waitFor(() => expect(screen.getByRole("button", {name:"开始核对 1 组"})).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", {name:"开始核对 1 组"}));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("tbje_check.run_batch", expect.anything()));
+    const run = vi.mocked(jobStart).mock.calls.find(c => c[0] === "tbje_check.run_batch")![1] as {groups:{tbMapping:Record<string,unknown>}[]};
+    expect(run.groups[0].tbMapping.auxiliary).toEqual(["核算维度编码"]);
+    expect(run).toMatchObject({ prepareMappings: true });
+    const correctedMapping = { ...run.groups[0].tbMapping };
+    if (!manual) delete correctedMapping.auxiliary;
+    act(() => emit?.({jobId:"job-1", toolId:"tbje_check", phase:"completed", current:1,total:1,message:"完成",severity:"success",outputPaths:[], result:{
+      preparedGroups:[{groupId:(run.groups[0] as {groupId?:string}).groupId,tbMapping:correctedMapping,auxiliaryLink:{tbAuxMapped:true,status:"noMatch"}}],
+      groups:[{label:"1",ok:true,result:{rollforward:{performed:true,passed:true},tbVsJe:{performed:true,passed:true},equation:{performed:true,passed:true}}}]}} as never));
+    fireEvent.click(await screen.findByRole("button", {name:"导出全部结果"}));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("tbje_check.export_batch", expect.anything()));
+    const exported = vi.mocked(jobStart).mock.calls.find(c => c[0] === "tbje_check.export_batch")![1] as typeof run;
+    expect(exported.groups[0].tbMapping).toEqual(correctedMapping);
+    act(() => emit?.({jobId:"job-1",toolId:"tbje_check",phase:"completed",current:1,total:1,message:"导出完成",severity:"success",outputPaths:[],result:{outputDirectory:"C:/exports"}} as never));
+    const steps = container.querySelector(".step-indicator") as HTMLElement;
+    fireEvent.click(within(steps).getByRole("button", {name:/确认配对/}));
+    expect(select()).toHaveValue(manual ? "auxiliary" : "");
+  });
+  afterEach(async () => {
     cleanup();
+    const { pickPath } = await import("./api");
+    // Clear queued one-shot picker responses as well as call counts.
+    vi.mocked(pickPath).mockReset().mockResolvedValue(null);
     vi.clearAllMocks();
   });
 
@@ -78,7 +123,7 @@ describe("TbjeCheckPage", () => {
     expect(buttons[1]).toBeDisabled();
     expect(buttons[2]).toBeDisabled();
     expect(
-      screen.getByRole("heading", { level: 2, name: "1. 添加 TB 与 JE 文件" }),
+      screen.getByRole("heading", { level: 2, name: "添加 TB 与 JE 文件" }),
     ).toBeInTheDocument();
   });
 
@@ -91,6 +136,8 @@ describe("TbjeCheckPage", () => {
     vi.mocked(engineCall).mockImplementation(
       async (method: string, params: unknown) => {
         if (method === "ledger.forms") return [];
+        if (method === "ledger.review_pair_mapping")
+          return { tbChanges: [], jeChanges: [] };
         if (method === "ledger.check_mapping_alignment")
           return { aligned: true, warnings: [] };
         const source = (params as { source: { inputPath: string } }).source;
@@ -116,13 +163,12 @@ describe("TbjeCheckPage", () => {
     );
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
 
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+        screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
       ).toBeInTheDocument(),
     );
     const pairingList = container.querySelector(".tbje-pairing-list");
@@ -130,11 +176,15 @@ describe("TbjeCheckPage", () => {
     expect(
       screen.queryByRole("heading", {
         level: 2,
-        name: "1. 添加 TB 与 JE 文件",
+        name: "添加 TB 与 JE 文件",
       }),
     ).not.toBeInTheDocument();
     expect(pairingList).toHaveTextContent("科目余额表 TB");
     expect(pairingList).not.toHaveTextContent("配对依据");
+    await waitFor(() => {
+      expect(container.querySelector(".tbje-group-llm-result")).toHaveTextContent("仍缺");
+    });
+    expect(container.querySelector(".tbje-group-llm-result")).not.toHaveTextContent("无调整");
     expect(pairingList).toHaveTextContent("序时账 JE");
     expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
     expect(screen.getByLabelText("为第 1 组选择序时账")).toBeInTheDocument();
@@ -177,11 +227,11 @@ describe("TbjeCheckPage", () => {
     ).toBeEnabled();
     fireEvent.click(within(steps).getByRole("button", { name: /添加文件/ }));
     expect(
-      screen.getByRole("heading", { level: 2, name: "1. 添加 TB 与 JE 文件" }),
+      screen.getByRole("heading", { level: 2, name: "添加 TB 与 JE 文件" }),
     ).toBeVisible();
     // 配对区在第一步原样保留，用户回来时仍能看到并管理已导入的文件。
     expect(
-      screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+      screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
     ).toBeVisible();
   });
 
@@ -217,12 +267,11 @@ describe("TbjeCheckPage", () => {
     );
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+        screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
       ).toBeInTheDocument(),
     );
 
@@ -232,7 +281,7 @@ describe("TbjeCheckPage", () => {
       within(steps).getByRole("button", { name: /添加文件/ }),
     );
     expect(
-      screen.getByRole("heading", { level: 2, name: "1. 添加 TB 与 JE 文件" }),
+      screen.getByRole("heading", { level: 2, name: "添加 TB 与 JE 文件" }),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "01TB.xlsx" })).toBeVisible();
     expect(screen.getByRole("button", { name: "01JE.xlsx" })).toBeVisible();
@@ -244,7 +293,7 @@ describe("TbjeCheckPage", () => {
     expect(
       screen.queryByRole("heading", {
         level: 2,
-        name: "1. 添加 TB 与 JE 文件",
+        name: "添加 TB 与 JE 文件",
       }),
     ).not.toBeInTheDocument();
   });
@@ -308,15 +357,18 @@ describe("TbjeCheckPage", () => {
     );
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await screen.findByText("03科目余额表.xlsx");
     fireEvent.click(
       screen.getByRole("button", { name: "LLM 一键联合复核 1 组" }),
     );
     await screen.findByText("联合复核完成：已复核 1 组。");
-    expect(screen.getByText("已复核 · 无需调整")).toBeVisible();
+    expect(screen.getAllByText("已复核 · 无调整").length).toBeGreaterThan(0);
+    // 分组内也必须保留完成提示，不能只在顶部按钮附近或收起的映射徽标中显示。
+    expect(container.querySelector(".tbje-group-llm-result")).toHaveTextContent(
+      "已复核 · 无调整",
+    );
     expect(
       vi.mocked(engineCall).mock.calls.some(([method]) => method === "ledger.auxiliary_link"),
     ).toBe(false);
@@ -338,7 +390,7 @@ describe("TbjeCheckPage", () => {
     );
     expect(
       vi.mocked(engineCall).mock.calls.some(([method]) => method === "ledger.auxiliary_link"),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("allows LLM review to compose the TBJE voucher date from month and day columns", async () => {
@@ -421,9 +473,8 @@ describe("TbjeCheckPage", () => {
     );
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await screen.findByText("09科目余额表.xlsx");
     expect(screen.getByRole("button", { name: /JE 缺少 1 项必填映射/ })).toBeVisible();
 
@@ -454,8 +505,90 @@ describe("TbjeCheckPage", () => {
     );
   });
 
-  it("names the failed group and still checks the rest when alignment fails", async () => {
-    const { engineCall, jobStart, pickPath } = await import("./api");
+  it.each([false, true])("同名组按身份预览与导出，不带入跳过的组（旧 worker：%s）", async (legacyWorker) => {
+    const { engineCall, jobStart, listenJobEvents, pickPath } = await import("./api");
+    vi.mocked(pickPath)
+      .mockResolvedValueOnce(["甲", "乙", "丙"].flatMap((name) => [
+        `C:/samples/${name}/02科目余额表.xlsx`, `C:/samples/${name}/02序时账.xlsx`,
+      ]))
+      .mockResolvedValueOnce("C:/exports/乙.xlsx")
+      .mockResolvedValueOnce("C:/exports");
+    vi.mocked(engineCall).mockImplementation(async (method, params) => {
+      if (method === "ledger.forms") return [];
+      if (method === "ledger.review_pair_mapping") return { tbChanges: [], jeChanges: [] };
+      if (method === "ledger.auxiliary_link") return { status: "notNeeded", warnings: [] };
+      if (method === "ledger.check_mapping_alignment") {
+        const path = (params as { tbSource: { inputPath: string } }).tbSource.inputPath;
+        return { aligned: !path.includes("丙"), errors: ["科目无法对齐"] };
+      }
+      const path = (params as { source: { inputPath: string } }).source.inputPath;
+      if (method === "deposit.classify_source") return {
+        kind: path.includes("科目余额表") ? "tb" : "je", sheet: "Sheet1", headerRow: 1, headerDepth: 1,
+      };
+      return {
+        sheet: "Sheet1", sheets: ["Sheet1"], headerRow: 1, headerDepth: 1,
+        headers: ["科目编码"], preview: [], entities: [path.split("/")[2]],
+        suggestedMapping: { accountCode: "科目编码" },
+      };
+    });
+    let emit: ((event: never) => void) | undefined;
+    vi.mocked(listenJobEvents).mockImplementation(async (callback) => {
+      emit = callback as typeof emit;
+      return () => {};
+    });
+    const { container } = render(<TbjeCheckPage tool={tool} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
+    await screen.findByRole("button", { name: "开始核对 3 组" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "开始核对 3 组" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "开始核对 3 组" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("tbje_check.run_batch", expect.anything()));
+    type Group = { groupId: string; label: string; tbSource: { inputPath: string } };
+    const run = vi.mocked(jobStart).mock.calls.find(([method]) => method === "tbje_check.run_batch")![1] as { groups: Group[] };
+    expect(run.groups).toHaveLength(3);
+    expect(run.groups.map((group) => group.label)).toEqual(["2", "2", "2"]);
+    expect(new Set(run.groups.map((group) => group.groupId)).size).toBe(3);
+    const emitDone = (result: unknown) => act(() => emit?.({
+      jobId: "job-1", toolId: "tbje_check", phase: "completed", current: 1, total: 1,
+      severity: "success", message: "完成", outputPaths: [], result,
+    } as never));
+    const results = run.groups.slice(0, 2).map((group, index) => ({
+      ...(legacyWorker ? {} : { groupId: group.groupId }), label: group.label, ok: true,
+      result: {
+        rollforward: { performed: true, passed: true },
+        tbVsJe: { performed: true, passed: false, mismatched: index + 1, accounts: 10 },
+        equation: { performed: true, passed: true },
+      },
+    }));
+    // 新 worker 按返回身份关联，即使顺序变化也不会串组；旧 worker 按实际提交顺序兼容。
+    const failed = { ...(legacyWorker ? {} : {groupId:run.groups[2].groupId}),label:"2",ok:false,error:"科目无法对齐" };
+    emitDone({ groups: [...(legacyWorker ? results : [...results].reverse()), failed] });
+    const table = await screen.findByRole("table", { name: "TB/JE 完整性核对结果" });
+    const firstRow = within(table).getByText(legacyWorker ? "1 / 10 科目" : "2 / 10 科目").closest("tr")!;
+    const secondRow = within(table).getByText(legacyWorker ? "2 / 10 科目" : "1 / 10 科目").closest("tr")!;
+    fireEvent.click(within(firstRow).getByRole("button", { name: "预览明细" }));
+    fireEvent.click(within(secondRow).getByRole("button", { name: "预览明细" }));
+    expect(within(firstRow).getByRole("button", { name: "预览明细" })).toHaveAttribute("aria-expanded", "false");
+    expect(within(secondRow).getByRole("button", { name: "收起明细" })).toHaveAttribute("aria-expanded", "true");
+
+    const target = run.groups.find((group) => group.tbSource.inputPath.includes("乙"))!;
+    const targetRow = within(table).getByText("2 / 10 科目").closest("tr")!;
+    fireEvent.click(within(targetRow).getByRole("button", { name: "导出明细" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("tbje_check.export", expect.objectContaining({ groupId: target.groupId, tbSource: target.tbSource })));
+    emitDone({ outputPath: "C:/exports/乙.xlsx" });
+    fireEvent.click(screen.getByRole("button", { name: "导出全部结果" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("tbje_check.export_batch", expect.anything()));
+    const exported = vi.mocked(jobStart).mock.calls.find(([method]) => method === "tbje_check.export_batch")![1] as typeof run;
+    expect(exported.groups).toEqual(run.groups.slice(0, 2));
+    expect(exported.groups.some((group) => group.tbSource.inputPath.includes("丙"))).toBe(false);
+    emitDone({ outputDirectory: "C:/exports" });
+    fireEvent.click(within(targetRow).getByRole("button", { name: "检查映射" }));
+    const expanded = container.querySelector(".tbje-group-mapping")!;
+    expect(expanded.id).toBe(`tbje-mapping-${target.groupId}-tb`);
+  });
+
+  it.each(["内存等待后完成", "真实映射错误"])("全部组进入同一任务：%s", async (scenario) => {
+    const { engineCall, jobStart, pickPath, listenJobEvents } = await import("./api");
     vi.mocked(pickPath).mockResolvedValue([
       "C:/samples/01科目余额表.xlsx",
       "C:/samples/01序时账.xlsx",
@@ -514,31 +647,51 @@ describe("TbjeCheckPage", () => {
       },
     );
 
+    let emit: ((event: never) => void) | undefined;
+    vi.mocked(listenJobEvents).mockImplementation(async (callback) => {
+      emit = callback as typeof emit;
+      return () => {};
+    });
     render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await screen.findByText("02科目余额表.xlsx");
     fireEvent.click(screen.getByRole("button", { name: "开始核对 2 组" }));
 
-    await waitFor(() =>
-      expect(jobStart).toHaveBeenCalledWith(
-        "tbje_check.run_batch",
-        expect.objectContaining({
-          groups: [
-            expect.objectContaining({
-              tbSource: expect.objectContaining({
-                inputPath: "C:/samples/02科目余额表.xlsx",
-              }),
-            }),
-          ],
-        }),
-      ),
-    );
-    const banner = await screen.findByText(/已跳过/, { exact: false });
-    expect(banner.textContent).toContain(
-      "「1」组（01科目余额表.xlsx × 01序时账.xlsx）：科目字段无法对齐的错误说明。",
-    );
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("tbje_check.run_batch", expect.objectContaining({prepareMappings:true})));
+    const submitted = vi.mocked(jobStart).mock.calls.find(([method]) => method === "tbje_check.run_batch")![1] as {groups:Array<{groupId:string;label:string}>};
+    expect(submitted.groups).toHaveLength(2);
+    expect(vi.mocked(engineCall).mock.calls.some(([method]) => method === "ledger.check_mapping_alignment" || method === "ledger.auxiliary_link")).toBe(false);
+    const event = (overrides: Record<string, unknown>) => act(() => emit?.({
+      jobId:"job-1",toolId:"tbje_check",phase:"running",current:0,total:2,
+      severity:"info",message:"正在核对…",outputPaths:[],...overrides,
+    } as never));
+    event({phase:"memory_paused",severity:"warning",message:"内存紧张，正在等待恢复，恢复后自动继续。"});
+    expect(screen.getByText(/正在等待恢复/)).toBeVisible();
+    expect(screen.queryByText(/已跳过|处理完成/)).not.toBeInTheDocument();
+    expect(screen.queryByText("100%")).not.toBeInTheDocument();
+    expect(screen.getByRole("button",{name:"取消任务"})).toBeEnabled();
+    event({phase:"check",current:2,total:2,message:"正在核对第 2 / 2 组…"});
+    expect(screen.queryByText("100%")).not.toBeInTheDocument();
+    const results = submitted.groups.map((group,index) => ({...group,
+      ok:scenario !== "真实映射错误" || index !== 0,
+      ...(scenario === "真实映射错误" && index === 0 ? {error:"科目字段无法对齐的错误说明。"} : {result:{
+        rollforward:{performed:true,passed:true},tbVsJe:{performed:true,passed:true},equation:{performed:true,passed:true},
+      }}),
+    }));
+    event({phase:"completed",current:1,total:1,severity:"success",message:"处理完成。",result:{groups:results}});
+    await screen.findByRole("table",{name:"TB/JE 完整性核对结果"});
+    if (scenario === "内存等待后完成") {
+      expect(screen.getByText("处理完成。")).toBeVisible();
+      expect(screen.getByText("100%")).toBeVisible();
+      expect(screen.queryByText(/已跳过|部分完成/)).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByText(/已处理 1 \/ 2 组/)).toBeVisible();
+      expect(screen.getByText("科目字段无法对齐的错误说明。")).toBeVisible();
+      expect(screen.queryByText("处理完成。")).not.toBeInTheDocument();
+      expect(screen.queryByText("100%")).not.toBeInTheDocument();
+    }
+
   });
 
   it("keeps result columns aligned and explains a zero balance with unclassified accounts", async () => {
@@ -598,9 +751,8 @@ describe("TbjeCheckPage", () => {
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
 
-    await screen.findByRole("heading", { level: 2, name: "3. 查看核对结果" });
+    await screen.findByRole("heading", { level: 2, name: "查看核对结果" });
     const table = screen.getByRole("table", { name: "TB/JE 完整性核对结果" });
-    expect(screen.getByText(/结果表可左右滚动/)).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "核对结果表，可横向滚动" })).toHaveAttribute("tabindex", "0");
     expect(table.querySelectorAll("colgroup col")).toHaveLength(5);
     for (const name of [
@@ -668,9 +820,8 @@ describe("TbjeCheckPage", () => {
     });
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await screen.findByText("01TB.xlsx");
     await waitFor(() => expect(emit).toBeTypeOf("function"));
     act(() => {
@@ -686,6 +837,7 @@ describe("TbjeCheckPage", () => {
         result: {
           groups: [
             {
+              groupId: pairingFileKey({ path: "C:/samples/01TB.xlsx", sheet: "Sheet1" }),
               label: "1",
               ok: true,
               result: {
@@ -709,6 +861,7 @@ describe("TbjeCheckPage", () => {
         groups: [
           {
             accountMatchPolicy: "tbjeIntegrity",
+            groupId: pairingFileKey({ path: "C:/samples/01TB.xlsx", sheet: "Sheet1" }),
             label: "1",
             tbSource: {
               inputPath: "C:/samples/01TB.xlsx",
@@ -795,9 +948,8 @@ describe("TbjeCheckPage", () => {
         <ConfirmDialogHost />
       </>,
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await screen.findByRole("button", { name: "移除全部" });
 
     // 取消路径：对话框出现后点「取消」，分组保持原样。
@@ -861,12 +1013,11 @@ describe("TbjeCheckPage", () => {
     );
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+        screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
       ).toBeInTheDocument(),
     );
     expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
@@ -880,9 +1031,8 @@ describe("TbjeCheckPage", () => {
     // 回到第 1 步，二次添加另一组文件。
     const steps = container.querySelector(".step-indicator") as HTMLElement;
     fireEvent.click(within(steps).getByRole("button", { name: /添加文件/ }));
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
 
     await waitFor(() =>
       expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(3),
@@ -901,7 +1051,7 @@ describe("TbjeCheckPage", () => {
       pairingFileKey({ path: "C:/samples/02JE.xlsx", sheet: "Sheet1" }),
     );
     expect(
-      screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+      screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
     ).toBeInTheDocument();
     expect(
       screen.getAllByRole("button", { name: /查看并调整 JE 映射/ }).length,
@@ -948,6 +1098,7 @@ describe("TbjeCheckPage", () => {
     render(<TbjeCheckPage tool={tool} />);
     fireEvent.click(screen.getByRole("button", { name: "手动添加 TB 组" }));
     await screen.findByRole("button", { name: "TB-4800.xlsx" });
+    fireEvent.click(screen.getByRole("button", { name: "查看并调整 TB 映射" }));
     expect(screen.getByLabelText("余额表使用的工作表")).toHaveValue("Sheet1");
     fireEvent.change(screen.getByLabelText("余额表使用的工作表"), {
       target: { value: "tb种类" },
@@ -963,14 +1114,16 @@ describe("TbjeCheckPage", () => {
       // 第三个参数是给等待弹窗的明细（文件名 / Sheet），不进引擎参数。
       "TB-4800.xlsx / tb种类",
     );
-    fireEvent.click(screen.getByRole("button", { name: "查看并调整 TB 映射" }));
     const tbPanel = screen.getByText("科目余额表字段映射").closest("section")!;
+    expect(tbPanel).toContainElement(screen.getByLabelText("余额表使用的工作表"));
     const subjectSelect = () => tbPanel.querySelector(".dt-header-control select") as HTMLSelectElement;
     fireEvent.change(subjectSelect(), { target: { value: "accountCode" } });
     fireEvent.change(subjectSelect(), { target: { value: "accountName" } });
     expect(subjectSelect().querySelector("option")?.textContent).toBe("科目编码 ＋ 科目名称");
+    await waitFor(() => expect(screen.getByRole("button", { name: "选择 JE Excel" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "选择 JE Excel" }));
     await screen.findByRole("button", { name: "4800_JE.xlsx" });
+    fireEvent.click(screen.getByRole("button", { name: "查看并调整 JE 映射" }));
     expect(screen.getByLabelText("序时账使用的工作表")).toHaveValue("JE");
     expect(
       screen.queryByRole("button", { name: "更换 Excel" }),
@@ -992,10 +1145,15 @@ describe("TbjeCheckPage", () => {
     });
     render(<TbjeCheckPage tool={tool} />);
     fireEvent.click(screen.getByRole("button", { name: "手动添加 TB 组" }));
+    await screen.findByRole("button", { name: "01TB.xlsx" });
+    fireEvent.click(screen.getByRole("button", { name: "查看并调整 TB 映射" }));
     const tb = await screen.findByLabelText("余额表使用的工作表");
-    fireEvent.click(screen.getByRole("button", { name: "选择 JE Excel" }));
-    const je = await screen.findByLabelText("序时账使用的工作表");
     expect(tb).toBeDisabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "选择 JE Excel" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "选择 JE Excel" }));
+    await screen.findByRole("button", { name: "01JE.xlsx" });
+    fireEvent.click(screen.getByRole("button", { name: "查看并调整 JE 映射" }));
+    const je = await screen.findByLabelText("序时账使用的工作表");
     expect(je).toBeDisabled();
   });
 
@@ -1034,9 +1192,8 @@ describe("TbjeCheckPage", () => {
     );
 
     const { container } = render(<TbjeCheckPage tool={tool} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await waitFor(() =>
       expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1),
     );
@@ -1048,12 +1205,11 @@ describe("TbjeCheckPage", () => {
     // 重复选入同一份 TB：不再重新识别，配对原样保留。
     const steps = container.querySelector(".step-indicator") as HTMLElement;
     fireEvent.click(within(steps).getByRole("button", { name: /添加文件/ }));
-    fireEvent.click(
-      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }));
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+        screen.getByRole("heading", { level: 2, name: /确认配对与字段/ }),
       ).toBeInTheDocument(),
     );
     expect(classifyCalls).toEqual([

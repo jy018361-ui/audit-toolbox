@@ -350,6 +350,8 @@
   flex-wrap: wrap;
   gap: var(--sp-3);
   margin-top: var(--sp-4);
+  /* 主按钮贴内容区右下：与全站 CTA 落点一致。 */
+  justify-content: flex-end;
 }
 
 .tbje-status {
@@ -390,14 +392,7 @@
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
-.tbje-result-scroll-hint {
-  display: none;
-  margin: 0 0 var(--sp-2);
-  color: var(--ink-muted);
-  font-size: var(--fs-xs);
-}
 @media (max-width: 1400px) {
-  .tbje-result-scroll-hint { display: block; }
   .tbje-result-table [data-slot="table-head"]:last-child,
   .tbje-result-table [data-slot="table-cell"]:last-child {
     position: sticky;

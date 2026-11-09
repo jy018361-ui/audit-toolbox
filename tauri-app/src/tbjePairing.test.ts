@@ -95,6 +95,54 @@ describe("批量配对", () => {
     expect(groups.every((group) => group.tb && group.je)).toBe(true);
   });
 
+  it("金蝶科目余额表与金蝶序时账按共同名称自动配对", () => {
+    const groups = pairLedgerFiles([
+      { path: "C:/x/金蝶_科目余额表.xlsx", kind: "tb" },
+      { path: "C:/x/金蝶_序时账.xlsx", kind: "je" },
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].je?.path).toContain("金蝶_序时账");
+    expect(groups[0].needsReview).toBe(false);
+    expect(groups[0].reasons).toContain("文件名主体词 金蝶");
+  });
+
+  it("TB/JE 与中文或年份连写时也剔除类型标记", () => {
+    const groups = pairLedgerFiles([
+      { path: "C:/x/金蝶TB2024_科目余额表.xlsx", kind: "tb" },
+      { path: "C:/x/金蝶JE2024_序时账.xlsx", kind: "je" },
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].je).toBeDefined();
+    expect(groups[0].reasons).toContain("文件名主体词 金蝶");
+  });
+
+  it("共同名称可容纳一侧短修饰词，但不同期间不配", () => {
+    const paired = pairLedgerFiles([
+      { path: "C:/x/华兴集团_科目余额表.xlsx", kind: "tb" },
+      { path: "C:/x/华兴集团股份_序时账.xlsx", kind: "je" },
+    ]);
+    expect(paired).toHaveLength(1);
+    expect(paired[0].je).toBeDefined();
+
+    const conflicted = pairLedgerFiles([
+      { path: "C:/x/金蝶_科目余额表_2024.1-3.xlsx", kind: "tb", entities: ["A"] },
+      { path: "C:/x/金蝶_序时账_2024.4-12.xlsx", kind: "je", entities: ["A"] },
+    ]);
+    expect(conflicted.find((group) => group.tb)?.je).toBeUndefined();
+  });
+
+  it("同名候选不唯一时保留未配对，不依赖文件导入顺序", () => {
+    const files: PairingFile[] = [
+      { path: "C:/x/金蝶_科目余额表.xlsx", kind: "tb" },
+      { path: "C:/x/金蝶_科目余额表_副本.xlsx", kind: "tb" },
+      { path: "C:/x/金蝶_序时账.xlsx", kind: "je" },
+    ];
+    for (const input of [files, [...files].reverse()]) {
+      const groups = pairLedgerFiles(input);
+      expect(groups.filter((group) => group.tb && group.je)).toHaveLength(0);
+    }
+  });
+
   it("06 套按期间分成两组，不会把 1-3 月的余额表配到 4-12 月的序时账", () => {
     const groups = pairLedgerFiles(样例文件()).filter((group) =>
       group.label.startsWith("6"),
@@ -168,6 +216,17 @@ describe("批量配对", () => {
     ]);
     expect(groups[0].needsReview).toBe(true);
     expect(groups[0].reasons.join()).toContain("两边主体不同");
+  });
+
+  it("主体交集可跨编号配对，但必须提示复核", () => {
+    const groups = pairLedgerFiles([
+      { path: "C:/x/01余额表.xlsx", kind: "tb", entities: ["A"] },
+      { path: "C:/x/05序时账.xlsx", kind: "je", entities: ["A"] },
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].je).toBeDefined();
+    expect(groups[0].needsReview).toBe(true);
+    expect(groups[0].reasons.join()).toContain("文件编号不同");
   });
 
   it("待确认的排在前面", () => {

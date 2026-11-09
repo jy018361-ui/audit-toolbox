@@ -45,6 +45,10 @@
   font-weight: var(--fw-strong);
   color: var(--ink-strong);
   overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .success-nudge-actions {

@@ -42,16 +42,51 @@ describe("TS legacy filter semantics", () => {
     ).toEqual({ "Department Name": ["A", "B"] });
   });
 
-  it("keeps all checked search results as an explicit filter", () => {
+  it("keeps all checked search results as an explicit filter when the full universe is unknown", () => {
     expect(
       tsManagerParity.nextSelections(
         {},
-        "Department Name",
+        "Employee Department Name",
         ["Delivery Center A", "Delivery Center B"],
         { total: 2, truncated: false, keyword: "delivery center" },
       ),
     ).toEqual({
-      "Department Name": ["Delivery Center A", "Delivery Center B"],
+      "Employee Department Name": ["Delivery Center A", "Delivery Center B"],
+    });
+  });
+
+  it("treats a search-time confirmation that covers every distinct value as no filter", () => {
+    // 搜索后 total 是命中数（2），但全量口径 fullTotal=2 表明这已是整列全部
+    // 取值：全勾等于不筛选，不能再留一个“什么都没筛掉”的条件误导界面。
+    expect(
+      tsManagerParity.nextSelections(
+        { Month: ["01"] },
+        "Employee Department Name",
+        ["Delivery Center A", "Delivery Center B"],
+        {
+          total: 2,
+          truncated: false,
+          keyword: "delivery center",
+          fullTotal: 2,
+        },
+      ),
+    ).toEqual({ Month: ["01"] });
+
+    // 全量口径大于勾选数时是真实筛选，必须保留。
+    expect(
+      tsManagerParity.nextSelections(
+        {},
+        "Employee Department Name",
+        ["Delivery Center A", "Delivery Center B"],
+        {
+          total: 2,
+          truncated: false,
+          keyword: "delivery center",
+          fullTotal: 66,
+        },
+      ),
+    ).toEqual({
+      "Employee Department Name": ["Delivery Center A", "Delivery Center B"],
     });
   });
 
@@ -84,6 +119,7 @@ describe("TS legacy filter semantics", () => {
           inputPath: "C:/data/ts.xlsx",
           sheet: "Data",
           headerRow: "2",
+          headerDepth: 2,
         },
         "Department Name",
         "delivery center",
@@ -91,6 +127,7 @@ describe("TS legacy filter semantics", () => {
     ).toMatchObject({
       sheet: "Data",
       headerRow: 2,
+      headerDepth: 2,
       field: "Department Name",
       keyword: "delivery center",
     });
@@ -118,12 +155,17 @@ describe("TS legacy filter semantics", () => {
     ).toBe("D:\\Timesheet\\FY27");
   });
 
-  it("requires the user to choose an output path before export", () => {
-    expect(tsManagerParity.canStartTsExport(["Hours"], "")).toBe(false);
-    expect(tsManagerParity.canStartTsExport(["Hours"], "   ")).toBe(false);
-    expect(tsManagerParity.canStartTsExport([], "C:/data/result.xlsx")).toBe(false);
+  it("enables export once headers are loaded, before choosing a save path", () => {
+    expect(tsManagerParity.canStartTsExport([])).toBe(false);
+    expect(tsManagerParity.canStartTsExport(["Hours"])).toBe(true);
+  });
+
+  it("suggests a timestamped export file name so repeated exports never overwrite", () => {
     expect(
-      tsManagerParity.canStartTsExport(["Hours"], "C:/data/result.xlsx"),
-    ).toBe(true);
+      tsManagerParity.defaultExportFileName(new Date(2026, 10, 7, 9, 5, 3)),
+    ).toBe("工时报告_20261107_090503.xlsx");
+    expect(
+      tsManagerParity.defaultExportFileName(new Date(2026, 0, 2, 23, 59, 59)),
+    ).toBe("工时报告_20260102_235959.xlsx");
   });
 });

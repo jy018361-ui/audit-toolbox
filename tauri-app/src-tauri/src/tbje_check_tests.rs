@@ -8,6 +8,194 @@ use serde_json::json;
 use std::sync::atomic::AtomicBool;
 
 #[test]
+fn batch_preflight_runs_all_groups_and_returns_final_mappings() {
+    let dir = fixture(&format!("worker-preflight-{}", uuid::Uuid::new_v4()));
+    平的账(&dir);
+    let mut first = params(&dir, true);
+    first["groupId"] = json!("第一组");
+    let mut second = first.clone();
+    second["groupId"] = json!("第二组");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let pause = PauseCheckpoint::unpaused(cancel.clone());
+    let result = run_job("tbje_check.run_batch", json!({
+        "prepareMappings":true,"groups":[first,second],
+    }), &|_,_,_,_| {}, cancel, &pause).unwrap();
+    assert_eq!(result["groups"].as_array().unwrap().len(), 2);
+    assert!(result["groups"].as_array().unwrap().iter().all(|group| group["ok"] == true), "{result}");
+    assert_eq!(result["preparedGroups"].as_array().unwrap().len(), 2);
+    assert_eq!(result["preparedGroups"][1]["groupId"], "第二组");
+    assert!(incomplete_batch(&result).is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn batch_preflight_preserves_only_confirmed_auxiliary_when_link_fails() {
+    let dir = fixture(&format!("preflight-aux-{}", uuid::Uuid::new_v4()));
+    std::fs::write(dir.join("tb.csv"), "科目编码,科目名称,辅助核算,期初余额,本年借方,本年贷方,期末余额\n1002,银行存款,A部门,0,100,0,100\n1002,银行存款,B部门,0,50,0,50\n").unwrap();
+    std::fs::write(dir.join("je.csv"), "日期,凭证号,科目编码,科目名称,摘要,借方,贷方\n2025-03-01,V1,1002,银行存款,收往来款,150,0\n").unwrap();
+    for manual in [false, true] {
+        let mut group = auxiliary_params(&dir, None);
+        if manual { group["tbMapping"]["__manualAuxiliary"] = json!("{\"auxiliary\":[\"辅助核算\"]}"); }
+        let auxiliary = prepare_batch_group(&mut group).unwrap();
+        assert_ne!(auxiliary["status"], "verified");
+        assert_eq!(group["tbMapping"].get("auxiliary").is_some(), manual);
+        assert!(group.get("auxiliaryPlan").is_none());
+    }
+    std::fs::write(dir.join("je.csv"), "日期,凭证号,科目编码,科目名称,部门,借方,贷方\n2025-03-01,V1,1002,银行存款,A部门,100,0\n2025-03-01,V2,1002,银行存款,B部门,50,0\n").unwrap();
+    let mut verified = auxiliary_params(&dir, None);
+    let auxiliary = prepare_batch_group(&mut verified).unwrap();
+    assert_eq!(auxiliary["status"], "verified", "{auxiliary}");
+    assert_eq!(verified["auxiliaryPlan"]["planKey"], auxiliary["planKey"]);
+    assert_eq!(verified["auxiliaryPlan"]["groups"][0]["jeColumn"], "部门");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn batch_execution_failures_are_not_successful_completion() {
+    for key in ["groups", "exports"] {
+        assert!(incomplete_batch(&json!({key:[{"ok":true,"result":{"tbVsJe":{"passed":false}}}]})).is_none());
+        let partial = incomplete_batch(&json!({key:[{"ok":true},{"ok":false}]})).unwrap();
+        assert_eq!((partial.0, partial.1), (1, 2));
+        assert!(partial.2.starts_with("部分完成"));
+        let failed = incomplete_batch(&json!({key:[{"ok":false}]})).unwrap();
+        assert_eq!((failed.0, failed.1), (0, 1));
+        assert!(failed.2.starts_with("处理失败"));
+    }
+}
+
+#[test]
+fn three_fixes_combined_account_mapping_checks_and_amounts_agree_in_memory_and_disk() {
+    let dir = fixture("three-fixes-combined-account");
+    std::fs::write(dir.join("tb.csv"), "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n1002,银行存款,100,5,0,105\n4001,实收资本,-100,0,5,-105\n").unwrap();
+    std::fs::write(dir.join("je.csv"), "日期,凭证号,会计科目,借方,贷方\n2026-01-01,记1,1002-银行存款,5,0\n2026-01-01,记1,4001-实收资本,0,5\n").unwrap();
+    let mut input = params(&dir, true);
+    input["jeMapping"]["accountCode"] = json!("会计科目");
+    input["jeMapping"]["accountName"] = json!("会计科目");
+    let alignment = crate::fx::check_mapping_alignment(&input).unwrap();
+    assert_eq!(alignment["aligned"], json!(true), "{alignment}");
+    for disk in [false, true] {
+        input["__testForceDiskTb"] = json!(disk);
+        input["__testForceDiskLedger"] = json!(disk);
+        let result = run_all_accounts(&input, &AtomicBool::new(false)).unwrap();
+        assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result}");
+        assert_eq!(result["tbVsJe"]["accounts"], json!(2));
+        assert!(result["mappingWarnings"].as_array().unwrap().iter().all(|v| !v.as_str().unwrap().contains("不符合科目编码")), "{result}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "需设置 TBJE_THREE_FIXES_PARAMS 指向原始请求；不构建应用 EXE"]
+fn three_fixes_original_tbje_requests() {
+    let path = std::env::var("TBJE_THREE_FIXES_PARAMS").unwrap();
+    let input: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let mut results = Vec::new();
+    for case in input.as_array().unwrap() {
+        let params = &case["params"];
+        let result = run_all_accounts(params, &AtomicBool::new(false)).unwrap();
+        if case["name"] == "10" {
+            assert_eq!(result["equation"]["balancePassed"], json!(true), "{result}");
+            assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result}");
+        } else {
+            assert_eq!(result["tbVsJe"]["performed"], json!(true), "{result}");
+            assert!(result["tbVsJe"]["items"].as_array().unwrap().iter().any(|r| r["code"] == "1002010109"));
+        }
+        if let Some(output) = case["output"].as_str() {
+            let prepared = prepare_with_control(params, &AtomicBool::new(false), &|_,_,_,_| {}).unwrap();
+            let mut export_params = params.clone();
+            export_params["outputPath"] = json!(output);
+            export(&export_params, &result, &prepared).unwrap();
+        }
+        results.push(json!({"name":case["name"],"result":result}));
+    }
+    std::fs::write(std::env::var("TBJE_THREE_FIXES_OUTPUT").unwrap(), serde_json::to_vec_pretty(&results).unwrap()).unwrap();
+}
+
+#[test]
+#[ignore = "需设置 TBJE_UNIVERSITY_REQUEST/OUTPUT_DIR，完整读取大学原件；仅库测试，不打包应用 EXE"]
+fn university_name_path_original_tbje_and_export_agree_in_memory_and_disk() {
+    let input: Value = serde_json::from_slice(&std::fs::read(
+        std::env::var("TBJE_UNIVERSITY_REQUEST").unwrap()).unwrap()).unwrap();
+    let dir = std::path::PathBuf::from(std::env::var("TBJE_UNIVERSITY_OUTPUT_DIR").unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut memory = None;
+    for disk in [false, true] {
+        let mut params = input.clone();
+        params["__testForceDiskTb"] = json!(disk);
+        params["__testForceDiskLedger"] = json!(disk);
+        let prepared = prepare_with_control(&params, &cancel, &|_, _, _, _| {}).unwrap();
+        let result = evaluate(&prepared, &cancel, true).unwrap();
+        assert_eq!(result["rollforward"]["passed"], json!(true), "{result}");
+        assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result}");
+        assert_eq!(result["tbVsJe"]["accounts"], json!(158));
+        assert_eq!(result["tbVsJe"]["mismatched"], json!(0));
+        assert_eq!(result["equation"]["passed"], json!(true), "{result}");
+        for period in ["opening", "closing"] {
+            assert!(result["equation"][period]["total"].as_f64().unwrap().abs() < 0.01);
+        }
+        for (code, expected) in [("1601", false), ("160101", false),
+            ("1601000101", true), ("1601000107", true), ("1601000108", true)] {
+            let row = prepared.tb_identities.iter().position(|(_, c, _)| c == code).unwrap();
+            assert_eq!(prepared.tb_leaf[row], expected, "大学科目 {code}，disk={disk}");
+        }
+        let tag = if disk { "disk" } else { "memory" };
+        params["outputPath"] = json!(dir.join(format!("大学_修复验证_{tag}.xlsx")));
+        export(&params, &result, &prepared).unwrap();
+        std::fs::write(dir.join(format!("original-result-{tag}.json")),
+            serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+        if let Some(ref expected) = memory {
+            assert_eq!(&result, expected, "大学内存/磁盘结果必须逐字段一致");
+        } else {
+            memory = Some(result);
+        }
+    }
+}
+
+#[test]
+fn tbje_disk_domains_large_unique_unmapped_values_do_not_block_checks() {
+    let dir = fixture("disk-key-domains-unrelated-text");
+    平的账(&dir);
+    let original = std::fs::read_to_string(dir.join("je.csv")).unwrap();
+    let first = original.lines().next().unwrap();
+    let seed = original.lines().skip(1).collect::<Vec<_>>();
+    let path = dir.join("large-je.csv");
+    let mut writer = csv::Writer::from_path(&path).unwrap();
+    let mut headers = first.split(',').map(str::to_owned).collect::<Vec<_>>();
+    headers.extend(["不参与匹配的长摘要".into(),"不参与匹配的流水号".into()]);
+    writer.write_record(headers).unwrap();
+    for i in 0..12000 {
+        let mut values = seed[i % seed.len()].split(',').map(str::to_owned).collect::<Vec<_>>();
+        values.extend([format!("{i}{}","独立摘要".repeat(1000)),format!("seq{i}")]);
+        writer.write_record(values).unwrap();
+    }
+    writer.flush().unwrap();
+    let mut input = params(&dir,true);
+    input["jeSource"]["inputPath"] = json!(path);
+    let memory = run(&input,&AtomicBool::new(false)).unwrap();
+    input["__testForceDiskTb"] = json!(true);
+    input["__testForceDiskLedger"] = json!(true);
+    let disk = run(&input,&AtomicBool::new(false)).unwrap();
+    assert_eq!(disk,memory);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "需指定 TBJE_ACCEPTANCE_PARAMS，完整读取真实账表"]
+fn tbje_disk_domains_real_3080_acceptance() {
+    let file = std::env::var("TBJE_ACCEPTANCE_PARAMS").unwrap();
+    let mut params: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    params["__testForceDiskTb"] = json!(true);
+    params["__testForceDiskLedger"] = json!(true);
+    let result = run(&params,&AtomicBool::new(false)).unwrap();
+    let path = std::env::var("TBJE_ACCEPTANCE_OUTPUT").unwrap();
+    std::fs::write(path,serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+    assert!(result.get("rollforward").is_some());
+    assert!(result.get("tbVsJe").is_some());
+    assert!(result.get("equation").is_some());
+}
+
+#[test]
 fn 完整性独立策略保留旧编码匹配与双侧名称细分() {
     let identities = |names: &[&str]| {
         names
@@ -144,6 +332,13 @@ fn params(dir: &std::path::Path, with_je: bool) -> Value {
     value
 }
 
+/// 与 `run` 同口径，但 tbVsJe 的 items 列出全部科目（含对平的），
+/// 便于断言「静默换列/摘除主体」后分组键里的 entity 实际取值。
+fn run_all_accounts(params: &Value, cancel: &AtomicBool) -> Result<Value, AppError> {
+    let prepared = prepare_with_control(params, cancel, &|_, _, _, _| {})?;
+    evaluate(&prepared, cancel, true)
+}
+
 /// 一套自洽的账：勾稽成立、恒等式成立、TB 与 JE 完全对得上。
 fn 平的账(dir: &std::path::Path) {
     std::fs::write(
@@ -181,6 +376,34 @@ fn 三条核对都通过时不报任何差异() {
         result["equation"]["closing"]["total"].as_f64().unwrap(),
         0.0
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn missing_account_name_je_retains_code_and_reconciles_both_paths() {
+    let dir = fixture(&format!("missing-account-name-{}", uuid::Uuid::new_v4()));
+    平的账(&dir);
+    let mut request = params(&dir, true);
+    request["jeMapping"]
+        .as_object_mut()
+        .unwrap()
+        .remove("accountName");
+    for disk in [false, true] {
+        request["__testForceDiskLedger"] = json!(disk);
+        let prepared = prepare(&request).unwrap();
+        let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+        assert_eq!(result["tbVsJe"]["passed"], true, "{result:#}");
+        let spec: SourceSpec = serde_json::from_value(request["jeSource"].clone()).unwrap();
+        let table = fx::load_fx_table(&spec).unwrap();
+        let identity = identity_parts(
+            &table,
+            &table.rows[0],
+            request["jeMapping"].as_object().unwrap(),
+            "默认主体",
+        );
+        assert_eq!(identity.1, "1001");
+        assert!(identity.2.is_empty());
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -548,6 +771,89 @@ fn add_entity_mappings(value: &mut Value, both_sides: bool) {
 }
 
 #[test]
+fn 双侧主体值域错配时自动换到同口径列() {
+    let dir = fixture("entity-mismatch-repair");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "主体代码,主体名称,科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         01,甲公司,1001,库存现金,0,100,0,100\n",
+    )
+    .unwrap();
+    // JE 主体故意映射到名称列（TB 是代码口径）：TB 侧应自动换到「主体名称」。
+    std::fs::write(
+        dir.join("je.csv"),
+        "公司代码,公司名称,日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         01,甲公司,2025-01-01,V1,1001,库存现金,100,0\n",
+    )
+    .unwrap();
+    let mut input = params(&dir, true);
+    input["tbMapping"]["entity"] = json!("主体代码");
+    input["jeMapping"]["entity"] = json!("公司名称");
+    let result = run_all_accounts(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    // 换列是后台静默规则：不得出现任何主体相关提示。
+    assert!(
+        result["mappingWarnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|warning| !warning.as_str().unwrap_or("").contains("主体")),
+        "{result:#}"
+    );
+    // 通过结果口径验证换列生效：分组键的 entity 取到换到的名称口径值「甲公司」；
+    // 若没换列（TB 停在代码口径 01），两侧分组完全对不上，passed 不可能为 true。
+    let entities = result["tbVsJe"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["entity"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(entities, ["甲公司"].into_iter().collect(), "{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 双侧主体值域错配且无替代列时退回默认主体() {
+    let dir = fixture("entity-mismatch-fallback");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "主体代码,科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         01,1001,库存现金,0,100,0,100\n",
+    )
+    .unwrap();
+    // JE 只有名称口径且没有代码列：两侧都对不上，应退回默认主体而不是拆碎核对。
+    std::fs::write(
+        dir.join("je.csv"),
+        "公司名称,日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         甲公司,2025-01-01,V1,1001,库存现金,100,0\n",
+    )
+    .unwrap();
+    let mut input = params(&dir, true);
+    input["tbMapping"]["entity"] = json!("主体代码");
+    input["jeMapping"]["entity"] = json!("公司名称");
+    let result = run_all_accounts(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    // 摘除双侧主体同样是静默规则：不得出现任何主体相关提示。
+    assert!(
+        result["mappingWarnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|warning| !warning.as_str().unwrap_or("").contains("主体")),
+        "{result:#}"
+    );
+    // 摘除后双方统一归入默认主体，核对按（默认主体, 科目）分组通过。
+    let entities = result["tbVsJe"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["entity"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(entities, ["默认主体"].into_iter().collect(), "{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn 双侧映射主体后同科目不得跨主体抵销差异() {
     let dir = fixture("entity-key-both");
     std::fs::write(
@@ -597,14 +903,25 @@ fn 单侧映射主体时双方统一归入默认主体() {
     .unwrap();
     let mut input = params(&dir, true);
     add_entity_mappings(&mut input, false);
-    let result = run(&input, &AtomicBool::new(false)).unwrap();
+    let result = run_all_accounts(&input, &AtomicBool::new(false)).unwrap();
     assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    // 单侧主体退回默认主体是静默规则：不得出现任何主体相关提示。
     assert!(
-        result["mappingWarnings"][0]
-            .as_str()
+        result["mappingWarnings"]
+            .as_array()
             .unwrap()
-            .contains("默认主体")
+            .iter()
+            .all(|warning| !warning.as_str().unwrap_or("").contains("主体")),
+        "{result:#}"
     );
+    // 双方统一按默认主体分组：TB 的 A/B 两个主体合计与 JE 的汇总值对平。
+    let entities = result["tbVsJe"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["entity"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(entities, ["默认主体"].into_iter().collect(), "{result:#}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -900,6 +1217,91 @@ fn 大csv磁盘路径与内存路径输出完全一致() {
     let disk = run(&input, &AtomicBool::new(false)).unwrap();
     assert_eq!(disk, memory);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn tb_disk_tbje_all_checks_and_exports_match_memory() {
+    let dir = fixture("disk-tb-all-checks");
+    平的账(&dir);
+    let mut input = params(&dir, true);
+    let memory_prepared = prepare(&input).unwrap();
+    let memory = evaluate_with_full_items(&memory_prepared, &AtomicBool::new(false)).unwrap();
+    input["__testForceDiskTb"] = json!(true);
+    let disk_prepared = prepare(&input).unwrap();
+    assert!(disk_prepared.tb.disk.is_some());
+    let disk = evaluate_with_full_items(&disk_prepared, &AtomicBool::new(false)).unwrap();
+    assert_eq!(disk, memory);
+    let memory_path = dir.join("memory.xlsx");
+    let disk_path = dir.join("disk.xlsx");
+    let mut memory_input = input.clone();
+    memory_input["outputPath"] = json!(memory_path);
+    input["outputPath"] = json!(disk_path);
+    export(&memory_input, &memory, &memory_prepared).unwrap();
+    export(&input, &disk, &disk_prepared).unwrap();
+    use calamine::Reader;
+    let mut a = calamine::open_workbook_auto(&memory_path).unwrap();
+    let mut b = calamine::open_workbook_auto(&disk_path).unwrap();
+    for sheet in a.sheet_names().to_vec() {
+        let ar = a.worksheet_range(&sheet).unwrap();
+        let br = b.worksheet_range(&sheet).unwrap();
+        assert_eq!(ar, br, "{sheet}");
+        assert_eq!(
+            a.worksheet_formula(&sheet).unwrap(),
+            b.worksheet_formula(&sheet).unwrap(),
+            "{sheet} formulas"
+        );
+    }
+}
+
+#[test]
+fn tb_disk_tbje_selected_xlsx_full_tail_and_mapping_domains() {
+    let dir = fixture("disk-tb-xlsx-tail");
+    平的账(&dir);
+    let mut input = params(&dir, false);
+    let path = dir.join("余额.xlsx");
+    let mut book = rust_xlsxwriter::Workbook::new();
+    book.add_worksheet()
+        .set_name("无关页")
+        .unwrap()
+        .write_string(0, 0, "不应读取")
+        .unwrap();
+    let sheet = book.add_worksheet();
+    sheet.set_name("完整TB").unwrap();
+    for (i, h) in [
+        "科目编码",
+        "科目名称",
+        "期初余额",
+        "本年借方",
+        "本年贷方",
+        "期末余额",
+    ]
+    .iter()
+    .enumerate()
+    {
+        sheet.write_string(2, i as u16, *h).unwrap();
+    }
+    for i in 0..260u32 {
+        sheet.write_string(i + 3, 0, format!("1001{i:04}")).unwrap();
+        sheet.write_string(i + 3, 1, format!("现金户{i}")).unwrap();
+        sheet.write_number(i + 3, 2, 10.0).unwrap();
+        sheet.write_number(i + 3, 3, 2.0).unwrap();
+        sheet.write_number(i + 3, 4, 0.0).unwrap();
+        sheet
+            .write_number(i + 3, 5, if i == 259 { 19.0 } else { 12.0 })
+            .unwrap();
+    }
+    book.save(&path).unwrap();
+    input["tbSource"] = json!({"inputPath":path,"sheet":"完整TB","headerRow":3,"headerDepth":1});
+    let memory = run(&input, &AtomicBool::new(false)).unwrap();
+    input["__testForceDiskTb"] = json!(true);
+    let disk = run(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(disk, memory);
+    assert_eq!(disk["rollforward"]["checked"], 260);
+    assert_eq!(disk["rollforward"]["mismatched"], 1);
+    assert_eq!(
+        disk["rollforward"]["units"][0]["items"][0]["sourceRow"],
+        263
+    );
 }
 
 #[test]
@@ -1340,15 +1742,25 @@ fn je计量单位误映射为主体时移除后再判方向() {
     let mut value = params(&dir, true);
     value["tbMapping"]["entity"] = json!("公司");
     value["jeMapping"]["entity"] = json!("单位");
-    let result = run(&value, &AtomicBool::new(false)).unwrap();
+    let result = run_all_accounts(&value, &AtomicBool::new(false)).unwrap();
     assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    // 计量单位摘除已撤为静默规则：不得再出现任何计量单位相关提示。
     assert!(
         result["mappingWarnings"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|warning| warning.as_str().unwrap_or("").contains("计量单位"))
+            .all(|warning| !warning.as_str().unwrap_or("").contains("计量单位")),
+        "{result:#}"
     );
+    // JE 主体摘除后单侧口径生效：双方统一归入默认主体后核对通过。
+    let entities = result["tbVsJe"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["entity"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(entities, ["默认主体"].into_iter().collect(), "{result:#}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1661,7 +2073,7 @@ fn 导出的发生额余额勾稽按主体映射增减主体列() {
     assert_eq!(sheet.get_cell((9, 7)).unwrap().get_formula(), "F7+G7-H7");
     assert_eq!(sheet.get_cell((11, 7)).unwrap().get_formula(), "I7-J7");
     let verdict = sheet.get_cell((12, 7)).unwrap().get_formula();
-    assert!(verdict.contains("ABS(K7)"), "{verdict}");
+    assert_eq!(verdict, "IF(ABS(K7)<=MAX($B$3,MAX(ABS(F7),ABS(I7),ABS(J7))*1E-8),\"通过\",\"差异\")");
 
     // 未映射主体时整表回到旧布局，第一列仍是币种，公式列不变。
     let plain = json!({
@@ -2170,16 +2582,7 @@ fn 二零零二真实样例的流水级导出不折叠() {
     let prepared = prepare(&value).unwrap();
     let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
 
-    // 口径提示必须带上：核对范围与旧结果不同，用户需要知道原因。
-    assert!(
-        result["mappingWarnings"]
-            .as_array()
-            .is_some_and(|warnings| warnings.iter().any(|warning| warning
-                .as_str()
-                .is_some_and(|text| text.contains("流水级导出")))),
-        "应提示已识别流水级导出并跳过汇总勾稽折叠：{result:#}"
-    );
-
+    // 按各组维度证据验证；不再根据期间／列数判整表“没有汇总”。
     // 1405000000：TB 与 JE 的借贷发生额必须分毫一致（真值均为
     // 借 28,132,424.67 / 贷 27,816,003.21）。
     let item = result["tbVsJe"]["items"]
@@ -2362,8 +2765,6 @@ fn 辅助核算锚点认定成功时勾稽细化到维度() {
             "account": group["account"],
             "tbColumn": group["tbColumn"],
             "jeColumn": group["column"],
-            "anchorHits": group["anchorHits"],
-            "anchorTotal": group["anchorTotal"],
         })).collect::<Vec<_>>()
     });
     let reused_result = run(&reused, &AtomicBool::new(false)).unwrap();
@@ -2473,7 +2874,7 @@ fn je无对应辅助列时静默降级并提示() {
 }
 
 #[test]
-fn 手选je辅助列对不上按无匹配降级不换列() {
+fn 手选je辅助列值域错配时静默换到同值域列() {
     let dir = fixture("aux-manual-wrong");
     std::fs::write(
         dir.join("tb.csv"),
@@ -2487,8 +2888,9 @@ fn 手选je辅助列对不上按无匹配降级不换列() {
          2025-03-01,V1,1002,银行存款,A部门,日常收付,100,0\n",
     )
     .unwrap();
-    // 用户手选摘要列当辅助列：值对不上，必须 noMatch 降级——即使「部门」
-    // 列本来能对上也不许悄悄换列，用户才知道自己的选择没生效。
+    // 用户手选摘要列当辅助列：与 TB 辅助值域零交集、且 JE 里存在值域对得上
+    // 的「部门」列。按已定稿的静默规则，映射期即自动换到同值域列，维度按
+    // 一致口径细分勾稽——零提示、零告警、不留任何降级文案。
     let result = run(
         &auxiliary_params(&dir, Some("摘要")),
         &AtomicBool::new(false),
@@ -2497,16 +2899,62 @@ fn 手选je辅助列对不上按无匹配降级不换列() {
     let tb_vs_je = &result["tbVsJe"];
     assert_eq!(
         tb_vs_je["auxiliaryMatch"]["status"],
-        json!("noMatch"),
+        json!("verified"),
         "{result:#?}"
     );
-    assert_eq!(tb_vs_je["auxiliaryRefined"], json!(false));
+    assert_eq!(tb_vs_je["auxiliaryRefined"], json!(true), "{result:#?}");
+    assert_eq!(tb_vs_je["accounts"], json!(1), "{result:#?}");
+    assert_eq!(tb_vs_je["mismatched"], json!(0), "{result:#?}");
+    assert_eq!(tb_vs_je["passed"], json!(true), "{result:#?}");
     let warnings = result["mappingWarnings"].as_array().unwrap();
     assert!(
         warnings
             .iter()
-            .any(|warning| warning.as_str().unwrap_or("").contains("JE 无对应列")),
-        "对不上要有降级提示: {warnings:?}"
+            .all(|warning| !warning.as_str().unwrap_or("").contains("辅助")),
+        "静默换列不得产生任何辅助相关提示: {warnings:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 辅助列代码名称口径错配时静默换列细分勾稽() {
+    let dir = fixture("aux-code-name-caliber");
+    // TB 辅助列是代码口径（01/02）；JE 同时有代码列与名称列，映射故意选了
+    // 名称列。双侧值域零交集：静默把 JE 换到代码列，维度按一致口径细分；
+    // 两侧逐维度金额一致，mismatched 应为 0 且无任何辅助相关提示。
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,辅助编码,期初余额,本年借方,本年贷方,期末余额\n\
+         1002,银行存款,01,0,100,0,100\n\
+         1002,银行存款,02,0,50,0,50\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,辅助编码,辅助名称,借方,贷方\n\
+         2025-03-01,V1,1002,银行存款,01,A部门,100,0\n\
+         2025-03-01,V2,1002,银行存款,02,B部门,50,0\n",
+    )
+    .unwrap();
+    let mut params = auxiliary_params(&dir, Some("辅助名称"));
+    params["tbMapping"]["auxiliary"] = json!("辅助编码");
+    let result = run(&params, &AtomicBool::new(false)).unwrap();
+    let tb_vs_je = &result["tbVsJe"];
+    assert_eq!(tb_vs_je["auxiliaryRefined"], json!(true), "{result:#?}");
+    assert_eq!(
+        tb_vs_je["auxiliaryMatch"]["status"],
+        json!("verified"),
+        "{result:#?}"
+    );
+    assert_eq!(tb_vs_je["accounts"], json!(2), "{result:#?}");
+    assert_eq!(tb_vs_je["mismatched"], json!(0), "{result:#?}");
+    assert_eq!(tb_vs_je["passed"], json!(true), "{result:#?}");
+    let warnings = result["mappingWarnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| !warning.as_str().unwrap_or("").contains("辅助")),
+        "静默换列不得产生任何辅助相关提示: {warnings:?}"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2659,6 +3107,22 @@ fn 中期表同时映射本期与本年累计时按通过率整表选用本期()
     // TB 侧发生额确为本期列的值（1001 借 500），不是本年累计的 1500。
     // run() 只返回有差异的科目，全对平时用 include_all 展开验证取数口径。
     let prepared = prepare(&value).unwrap();
+    assert_eq!(
+        prepared.tb_leaf,
+        ledger_mapping::tb_leaf_mask(&prepared.tb.headers, &prepared.tb.rows, &|role| columns(
+            &prepared.tb_map,
+            role
+        ))
+    );
+    assert_eq!(
+        prepared.tb_identities,
+        prepared
+            .tb
+            .rows
+            .iter()
+            .map(|row| identity_parts(&prepared.tb, row, &prepared.tb_map, &prepared.tb_fixed))
+            .collect::<Vec<_>>()
+    );
     let all = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
     let items = all["tbVsJe"]["items"].as_array().unwrap();
     let cash = items
@@ -2726,5 +3190,347 @@ fn 本期列不平时不切换仍用本年累计() {
         .filter_map(Value::as_str)
         .any(|text| text.contains("已整表统一采用"));
     assert!(!switched, "本期列更差时不得切换：{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// ────────────────────────── 核对结果快照 ──────────────────────────
+
+/// 逐 Sheet 逐格提取工作簿文本（值＋公式），供两份导出比对。
+fn workbook_cells(path: &std::path::Path) -> Vec<(String, Vec<String>)> {
+    let book = umya_spreadsheet::reader::xlsx::read(path).unwrap();
+    book.get_sheet_collection()
+        .iter()
+        .map(|sheet| {
+            let mut cells = Vec::new();
+            for row in 1..=sheet.get_highest_row() {
+                for column in 1..=sheet.get_highest_column() {
+                    cells.push(
+                        sheet
+                            .get_cell((column, row))
+                            .map(|cell| format!("{}|{}", cell.get_value(), cell.get_formula()))
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+            (sheet.get_name().to_owned(), cells)
+        })
+        .collect()
+}
+
+#[test]
+fn 同名组传回身份且导出避让重名并复用底稿() {
+    let dir = fixture(&format!("duplicate-group-{}", uuid::Uuid::new_v4()));
+    平的账(&dir);
+    let mut first = params(&dir, true);
+    first["groupId"] = json!("来源甲");
+    first["label"] = json!("2");
+    let mut second = params(&dir, false);
+    second["groupId"] = json!("来源乙");
+    second["label"] = json!("2");
+    let mut failed = first.clone();
+    failed["groupId"] = json!("来源丙");
+    failed["tbSource"]["inputPath"] = json!(dir.join("不存在.csv"));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let pause = PauseCheckpoint::unpaused(cancel.clone());
+    let checked = run_job("tbje_check.run_batch",
+        json!({"groups": [first.clone(), second.clone(), failed]}),
+        &|_,_,_,_| {}, cancel.clone(), &pause).unwrap();
+    for (index, id) in ["来源甲", "来源乙", "来源丙"].iter().enumerate() {
+        assert_eq!(checked["groups"][index]["groupId"], json!(id));
+    }
+    assert_eq!(checked["groups"][0]["ok"], true);
+    assert_eq!(checked["groups"][1]["ok"], true);
+    assert_eq!(checked["groups"][2]["ok"], false);
+
+    let output = dir.join("导出");
+    std::fs::create_dir_all(&output).unwrap();
+    let existing = output.join("第2组_完整性核对.xlsx");
+    std::fs::write(&existing, b"keep existing file").unwrap();
+    let mut groups = vec![first.clone(), second.clone()];
+    // 非法字符替换后的同名，以及 Windows 大小写等价的文件名也须避让。
+    for (index, label) in ["2/", "2:", "ABC", "abc"].iter().enumerate() {
+        let mut group = first.clone();
+        group["groupId"] = json!(format!("附加来源{index}"));
+        group["label"] = json!(label);
+        assert_eq!(check_result_fingerprint(&group), check_result_fingerprint(&first),
+            "组身份和显示名不得使有效缓存失效");
+        groups.push(group);
+    }
+    let prepare_count = PREPARE_CALLS.with(|c| c.get());
+    let exported = run_job("tbje_check.export_batch",
+        json!({"groups": groups, "outputDirectory": output}),
+        &|_,_,_,_| {}, cancel, &pause).unwrap();
+    assert_eq!(PREPARE_CALLS.with(|c| c.get()), prepare_count, "导出不能重复准备或计算");
+    let exports = exported["exports"].as_array().unwrap();
+    assert_eq!(exports.len(), groups.len());
+    let mut names = HashSet::new();
+    for (group, result) in groups.iter().zip(exports) {
+        assert_eq!(result["ok"], true, "{result:#}");
+        assert_eq!(result["groupId"], group["groupId"]);
+        let path = PathBuf::from(result["outputPath"].as_str().unwrap());
+        assert!(names.insert(path.file_name().unwrap().to_string_lossy().to_lowercase()));
+        assert_eq!(std::fs::read(&path).unwrap(), std::fs::read(cached_workbook(group).unwrap()).unwrap(),
+            "各组输出必须来自其自己的完整底稿缓存");
+    }
+    assert_eq!(std::fs::read(existing).unwrap(), b"keep existing file");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 核对结果快照导出复用且映射修改后重算() {
+    let dir = fixture("result-snapshot");
+    // 一套带差异的账：1001 的 TB 借方 500 对 JE 借方 400，保证 items 有实质
+    // 内容，且 run 模式过滤后仍保留该差异行。
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,100,500,300,300\n\
+         2202,应付账款,-100,300,500,-300\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,400,0\n\
+         2025-03-01,V1,2202,应付账款,0,500\n\
+         2025-06-01,V2,2202,应付账款,300,0\n\
+         2025-06-01,V2,1001,库存现金,0,300\n",
+    )
+    .unwrap();
+    let mut group = params(&dir, true);
+    group["label"] = json!("一");
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let pause = PauseCheckpoint::unpaused(cancel.clone());
+
+    // 1) 批量核对：每组把完整结果落成快照；返回给前端的 items 仍按旧口径
+    //    过滤（只剩 1001 这一条差异）。
+    let checked = run_job(
+        "tbje_check.run_batch",
+        json!({ "groups": [group.clone()] }),
+        &|_, _, _, _| {},
+        cancel.clone(),
+        &pause,
+    )
+    .unwrap();
+    assert_eq!(checked["groups"][0]["ok"], json!(true), "{checked:#}");
+    let run_items = checked["groups"][0]["result"]["tbVsJe"]["items"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        run_items.len(),
+        1,
+        "run 模式仍只保留差异科目：{run_items:#?}"
+    );
+    assert_eq!(run_items[0]["code"], json!("1001"));
+    assert_eq!(run_items[0]["jeDebit"], json!(400.0));
+    let print = check_result_fingerprint(&group).unwrap();
+    let snapshot_path = snapshot_dir().unwrap().join(format!("{print}.json"));
+    assert!(snapshot_path.is_file(), "核对完成必须落结果快照");
+
+    // 2) 立刻批量导出：命中快照跳过 evaluate，进度里明示复用。
+    let prepare_count = PREPARE_CALLS.with(|c| c.get());
+    let reuse_dir = dir.join("复用导出");
+    let messages = std::cell::RefCell::new(Vec::new());
+    let exported = run_job(
+        "tbje_check.export_batch",
+        json!({ "groups": [group.clone()], "outputDirectory": reuse_dir }),
+        &|_, _, _, message| messages.borrow_mut().push(message.to_owned()),
+        cancel.clone(),
+        &pause,
+    )
+    .unwrap();
+    assert_eq!(exported["exports"][0]["ok"], json!(true), "{exported:#}");
+    assert!(
+        messages
+            .borrow()
+            .iter()
+            .any(|message| message.contains("复用第 一 组核对结果")),
+        "快照命中时进度必须提示复用：{:?}",
+        messages.borrow()
+    );
+    assert_eq!(PREPARE_CALLS.with(|c| c.get()), prepare_count, "导出不得重新读账或分析末级");
+    let reused_book = reuse_dir.join("第一组_完整性核对.xlsx");
+    assert!(reused_book.is_file());
+
+    // 3) 删掉快照重导：按现行流程重算并刷新快照；工作簿与复用版逐格一致。
+    std::fs::write(snapshot_dir().unwrap().join(format!("{print}.xlsx")), "损坏缓存".as_bytes()).unwrap();
+    std::fs::remove_file(&snapshot_path).unwrap();
+    let recalc_dir = dir.join("重算导出");
+    let recalc_messages = std::cell::RefCell::new(Vec::new());
+    let exported_again = run_job(
+        "tbje_check.export_batch",
+        json!({ "groups": [group.clone()], "outputDirectory": recalc_dir }),
+        &|_, _, _, message| recalc_messages.borrow_mut().push(message.to_owned()),
+        cancel.clone(),
+        &pause,
+    )
+    .unwrap();
+    assert_eq!(exported_again["exports"][0]["ok"], json!(true));
+    assert!(
+        !recalc_messages
+            .borrow()
+            .iter()
+            .any(|message| message.contains("复用")),
+        "无快照时不得提示复用：{:?}",
+        recalc_messages.borrow()
+    );
+    assert!(snapshot_path.is_file(), "未命中重算后必须刷新快照");
+    let recalc_book = recalc_dir.join("第一组_完整性核对.xlsx");
+    assert!(recalc_book.is_file());
+    assert_eq!(
+        workbook_cells(&reused_book),
+        workbook_cells(&recalc_book),
+        "命中快照导出的工作簿必须与重算导出逐格一致"
+    );
+
+    // 4) 改一处 JE 映射（不重新核对）再导出：指纹变化 → 按现行行为重算，
+    //    新指纹另落一份快照，工作簿反映新映射（JE 借贷互换后 1001 的
+    //    JE 借方由 400 变 300）。
+    let mut changed = group.clone();
+    changed["jeMapping"]["functionalDebit"] = json!("贷方");
+    changed["jeMapping"]["functionalCredit"] = json!("借方");
+    let print_changed = check_result_fingerprint(&changed).unwrap();
+    assert_ne!(print, print_changed, "映射变化必须改变输入指纹");
+    let changed_dir = dir.join("改映射导出");
+    let changed_messages = std::cell::RefCell::new(Vec::new());
+    let exported_changed = run_job(
+        "tbje_check.export_batch",
+        json!({ "groups": [changed.clone()], "outputDirectory": changed_dir }),
+        &|_, _, _, message| changed_messages.borrow_mut().push(message.to_owned()),
+        cancel.clone(),
+        &pause,
+    )
+    .unwrap();
+    assert_eq!(exported_changed["exports"][0]["ok"], json!(true));
+    assert!(
+        !changed_messages
+            .borrow()
+            .iter()
+            .any(|message| message.contains("复用")),
+        "指纹变化后不得复用旧快照：{:?}",
+        changed_messages.borrow()
+    );
+    assert!(
+        snapshot_dir()
+            .unwrap()
+            .join(format!("{print_changed}.json"))
+            .is_file(),
+        "重算后必须按新指纹落快照"
+    );
+    let changed_book = changed_dir.join("第一组_完整性核对.xlsx");
+    assert_ne!(
+        workbook_cells(&recalc_book),
+        workbook_cells(&changed_book),
+        "改映射后必须按现行行为重算，工作簿不得与旧映射版相同"
+    );
+    let je_debit_of_first_item = |book_path: &std::path::Path| -> f64 {
+        let book = umya_spreadsheet::reader::xlsx::read(book_path).unwrap();
+        let sheet = book.get_sheet_by_name("TB与JE发生额勾稽").unwrap();
+        sheet
+            .get_cell((7, 7))
+            .map(|cell| cell.get_value().parse::<f64>().unwrap_or(f64::NAN))
+            .unwrap_or(f64::NAN)
+    };
+    assert_eq!(je_debit_of_first_item(&recalc_book), 400.0);
+    assert_eq!(je_debit_of_first_item(&changed_book), 300.0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 单组导出也复用核对结果快照() {
+    let dir = fixture("result-snapshot-single");
+    平的账(&dir);
+    let mut value = params(&dir, true);
+    value["outputPath"] = json!(dir.join("单组核对.xlsx").to_string_lossy());
+    // 先核对落快照，再走 run_job 单组导出入口：命中快照时进度明示复用。
+    run(&value, &AtomicBool::new(false)).unwrap();
+    let prepare_count = PREPARE_CALLS.with(|c| c.get());
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let pause = PauseCheckpoint::unpaused(cancel.clone());
+    let messages = std::cell::RefCell::new(Vec::new());
+    run_job(
+        "tbje_check.export",
+        value.clone(),
+        &|_, _, _, message| messages.borrow_mut().push(message.to_owned()),
+        cancel,
+        &pause,
+    )
+    .unwrap();
+    assert_eq!(PREPARE_CALLS.with(|c| c.get()), prepare_count);
+    assert!(dir.join("单组核对.xlsx").is_file());
+    assert!(
+        messages
+            .borrow()
+            .iter()
+            .any(|message| message.contains("复用")),
+        "单组导出命中快照时进度必须提示复用：{:?}",
+        messages.borrow()
+    );
+    // 结果 JSON 仍在，仅完整工作簿被破坏：必须验证哈希并回退重算。
+    let key = check_result_fingerprint(&value).unwrap();
+    std::fs::write(snapshot_dir().unwrap().join(format!("{key}.xlsx")), b"broken").unwrap();
+    let pause = PauseCheckpoint::unpaused(std::sync::Arc::new(AtomicBool::new(false)));
+    run_job("tbje_check.export", value.clone(), &|_,_,_,_| {},
+        std::sync::Arc::new(AtomicBool::new(false)), &pause).unwrap();
+    assert_eq!(PREPARE_CALLS.with(|c| c.get()), prepare_count + 1);
+    assert!(cached_workbook(&value).is_some());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn tbje币种金额文本与纯数值在内存磁盘三项核对等价() {
+    let plain = fixture(&format!("currency-plain-{}", uuid::Uuid::new_v4()));
+    let decorated = fixture(&format!("currency-text-{}", uuid::Uuid::new_v4()));
+    平的账(&plain);
+    for file in ["tb.csv", "je.csv"] {
+        let mut reader = csv::Reader::from_path(plain.join(file)).unwrap();
+        let headers = reader.headers().unwrap().clone();
+        let mut writer = csv::Writer::from_path(decorated.join(file)).unwrap();
+        writer.write_record(&headers).unwrap();
+        for record in reader.records() {
+            let record = record.unwrap();
+            let row = record.iter().enumerate().map(|(i, value)| {
+                let header = headers.get(i).unwrap();
+                if header.contains("余额") || header == "借方" || header == "贷方" || header.starts_with("本年") {
+                    let number = value.parse::<f64>().unwrap();
+                    if number < 0.0 { format!("CNY({:.2})", -number) } else { format!("{number:.2} CNY") }
+                } else { value.to_owned() }
+            }).collect::<Vec<_>>();
+            writer.write_record(&row).unwrap();
+        }
+        writer.flush().unwrap();
+    }
+    let expected = run_all_accounts(&params(&plain, true), &AtomicBool::new(false)).unwrap();
+    for disk in [false, true] {
+        let mut request = params(&decorated, true);
+        request["__testForceDiskTb"] = json!(disk);
+        request["__testForceDiskLedger"] = json!(disk);
+        let actual = run_all_accounts(&request, &AtomicBool::new(false)).unwrap();
+        for key in ["rollforward", "tbVsJe", "equation", "currencyScope", "entityScope"] {
+            assert_eq!(actual[key], expected[key], "disk={disk},section={key}");
+        }
+        assert_eq!(actual["tbVsJe"]["passed"], true);
+    }
+    let _ = std::fs::remove_dir_all(plain);
+    let _ = std::fs::remove_dir_all(decorated);
+}
+
+#[test]
+fn tbje币种金额文本中夹杂业务文字仍在两条路径拒绝() {
+    let dir = fixture(&format!("currency-invalid-{}", uuid::Uuid::new_v4()));
+    平的账(&dir);
+    let path = dir.join("tb.csv");
+    let content = std::fs::read_to_string(&path).unwrap()
+        .replace("1001,库存现金,100,", "1001,库存现金,CNY待确认100,");
+    std::fs::write(path, content).unwrap();
+    for disk in [false, true] {
+        let mut request = params(&dir, true);
+        request["__testForceDiskTb"] = json!(disk);
+        request["__testForceDiskLedger"] = json!(disk);
+        let failure = run(&request, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(failure.code, "AMOUNT_VALUE_INVALID");
+        assert!(failure.user_message.contains("CNY待确认100"));
+    }
     let _ = std::fs::remove_dir_all(dir);
 }

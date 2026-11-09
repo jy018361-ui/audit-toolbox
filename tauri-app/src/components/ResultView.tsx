@@ -1,5 +1,8 @@
+import { useState } from "react";
 import { openOutput } from "@/api";
 import { displayFileName } from "@/fileDisplay";
+import { formatCount } from "@/lib/numberFormat";
+import { Button } from "@/components/ui/button";
 import "./task-state.css";
 
 const RESULT_COUNT_LABELS: Record<string, string> = {
@@ -35,13 +38,68 @@ function stringList(value: unknown): string[] {
     : [];
 }
 
+/** 折叠时最多直出的条数：更多时给「展开全部」而不是无声截断。 */
+const SUMMARY_LIST_PREVIEW = 8;
+
+/**
+ * 结果摘要里的长清单：默认只显示前几条，一键展开后完整列出并在
+ * 固定高度内滚动。旧行为是硬截 20 条加一句「另有 N 项未显示」，
+ * 用户既看不全也没有出口。展开按钮放在滚动区外——按钮在框内会
+ * 随长清单滚出视野，等于没有出口。
+ */
+function SummaryList({
+  title,
+  items,
+  renderItem,
+}: {
+  title: string;
+  items: unknown[];
+  renderItem: (item: unknown, index: number) => React.ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? items : items.slice(0, SUMMARY_LIST_PREVIEW);
+  const expandable = items.length > SUMMARY_LIST_PREVIEW;
+  return (
+    <div className="warning-box result-summary-list">
+      <strong>{title}</strong>
+      {expandable ? (
+        <div className="result-summary-list-scroll">
+          <ul>
+            {visible.map((item, index) => (
+              <li key={index}>{renderItem(item, index)}</li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <ul>
+          {visible.map((item, index) => (
+            <li key={index}>{renderItem(item, index)}</li>
+          ))}
+        </ul>
+      )}
+      {expandable && (
+        <Button
+          variant="secondary"
+          size="xs"
+          type="button"
+          className="result-summary-list-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "收起" : `展开全部（共 ${formatCount(items.length)} 项）`}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 /**
  * 通用的任务结果展示（输出链接 + 指标 + 警告 + 跳过路径）。
  * 从 App.tsx 抽出供 FaListPage 等页面共用，避免页面抽取时的循环依赖。
  *
  * 默认文案不宣称"处理完成"：本组件不知道展示的结果来自刚成功的任务，
- * 还是失败/取消后残留的上次结果（甚至是失败任务中途写出的部分产物），
- * 只有"结果文件已生成、可打开核对"是各种场景下都真实的中性表述。
+ * 还是失败/取消后残留的上次结果（甚至是失败任务中途写出的部分产物）。
+ * 有结果文件时不写概要句，让下面的文件链接自己说明；没有文件才说"运行结束"。
  * 页面若知道最近一次任务未成功，传 stale 显示醒目提示。
  */
 export function ResultView({
@@ -83,19 +141,18 @@ export function ResultView({
     ? (obj.outlookDifferences as Array<Record<string, unknown>>)
     : [];
   const valid = typeof obj.valid === "boolean" ? obj.valid : undefined;
-  const limited = (items: string[]) => items.slice(0, 20);
+  const summaryText =
+    message ??
+    (valid === true
+      ? "输入检查通过。"
+      : valid === false
+        ? "输入检查未通过。"
+        : outputPaths.length
+          ? null
+          : "运行结束。");
   return (
     <div className="result-summary" role="status" aria-live="polite">
-      <p>
-        {message ??
-          (valid === true
-            ? "输入检查通过。"
-            : valid === false
-              ? "输入检查未通过。"
-              : outputPaths.length
-                ? "以下为已生成的结果文件，可打开核对。"
-                : "运行结束。")}
-      </p>
+      {summaryText && <p>{summaryText}</p>}
       {stale && (
         <p className="result-stale-note" role="note">
           注意：最近一次任务未成功完成，以下结果可能不完整或来自上次成功运行，请核对后再使用。
@@ -105,63 +162,48 @@ export function ResultView({
         <div className="result-metrics">
           {counts.map((item) => (
             <span key={item.label}>
-              <b>{item.value}</b>
+              <b>{formatCount(item.value)}</b>
               {item.label}
             </span>
           ))}
         </div>
       )}
       {!!warnings.length && (
-        <div className="warning-box result-summary-list">
-          <strong>需要注意（{warnings.length}）</strong>
-          <ul>
-            {limited(warnings).map((item, index) => (
-              <li key={`${item}-${index}`}>{displayFileName(item)}</li>
-            ))}
-          </ul>
-          {warnings.length > 20 && <p>另有 {warnings.length - 20} 项未显示。</p>}
-        </div>
+        <SummaryList
+          title={`需要注意（${formatCount(warnings.length)}）`}
+          items={warnings}
+          renderItem={(item) => displayFileName(String(item))}
+        />
       )}
       {!!unmatched.length && (
-        <div className="warning-box result-summary-list">
-          <strong>
-            未在 Section List 中匹配到的服务单（{unmatched.length}）
-          </strong>
-          <ul>
-            {limited(unmatched).map((item, index) => (
-              <li key={`${item}-${index}`}>{item}</li>
-            ))}
-          </ul>
-          {unmatched.length > 20 && <p>另有 {unmatched.length - 20} 项未显示。</p>}
-        </div>
+        <SummaryList
+          title={`未在 Section List 中匹配到的服务单（${formatCount(unmatched.length)}）`}
+          items={unmatched}
+          renderItem={(item) => String(item)}
+        />
       )}
       {!!differences.length && (
-        <div className="warning-box result-summary-list">
-          <strong>Outlook Hours 核对不一致（{differences.length}）</strong>
-          <ul>
-            {differences.slice(0, 20).map((item, index) => (
-              <li key={`${String(item.serviceNumber ?? index)}`}>
-                {String(item.serviceNumber ?? "")}{" "}
-                {String(item.engagementName ?? "")}： 方案{" "}
-                {String(item.calculated ?? "")} / 源表{" "}
-                {String(item.source ?? "")}， 差额{" "}
-                {String(item.difference ?? "")}
-              </li>
-            ))}
-          </ul>
-          {differences.length > 20 && <p>另有 {differences.length - 20} 项未显示。</p>}
-        </div>
+        <SummaryList
+          title={`Outlook Hours 核对不一致（${formatCount(differences.length)}）`}
+          items={differences}
+          renderItem={(item) => {
+            const row = item as Record<string, unknown>;
+            return `${String(row.serviceNumber ?? "")} ${String(row.engagementName ?? "")}： 方案 ${formatCount(
+              row.calculated,
+              { maxFractionDigits: 2 },
+            )} / 源表 ${formatCount(row.source, { maxFractionDigits: 2 })}， 差额 ${formatCount(
+              row.difference,
+              { maxFractionDigits: 2 },
+            )}`;
+          }}
+        />
       )}
       {!!skipped.length && (
-        <div className="warning-box result-summary-list">
-          <strong>无法访问、已跳过的路径（{skipped.length}）</strong>
-          <ul>
-            {skipped.slice(0, 20).map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-          {skipped.length > 20 && <p>另有 {skipped.length - 20} 项未显示。</p>}
-        </div>
+        <SummaryList
+          title={`无法访问、已跳过的路径（${formatCount(skipped.length)}）`}
+          items={skipped}
+          renderItem={(item) => String(item)}
+        />
       )}
       {!!outputPaths.length && (
         <div className="result-output-list" aria-label="输出文件">

@@ -507,7 +507,7 @@ export function covenantExportRows(
     .map((row) => {
       const advice = covenantProcedure(row);
       if (row._financial_metrics_only === true) return {
-        财务契约类型: formalCovenantCategory(row) || "待分类",
+        财务指标契约类型: formalCovenantCategory(row) || "待分类",
         限制或触发标准: covenantTriggerStandard(row),
         合同原文摘录: covenantOriginalExcerpt(row),
         原文引用出处: covenantSourceReference(row, fileName(row)),
@@ -571,4 +571,4 @@ export function covenantDiagnosticGroups(rows: Row[]): CovenantDiagnostic[] {
   }));
 }
 
-export const FINANCIAL_METRIC_LABELS = { covenant_category: "财务契约类型", trigger_standard: "限制或触发标准", excerpt: "合同原文摘录", source_reference: "原文引用出处" };
+export const FINANCIAL_METRIC_LABELS = { covenant_category: "财务指标契约类型", trigger_standard: "限制或触发标准", excerpt: "合同原文摘录", source_reference: "原文引用出处" };

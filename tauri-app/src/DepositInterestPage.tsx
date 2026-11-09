@@ -1,4 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { formatMoney } from "@/lib/numberFormat";
+import { z } from "zod";
 import type { ToolManifest, JobEvent } from "./types";
 import { useTaskRestore } from "./restore";
 import {
@@ -26,10 +28,12 @@ import {
   verifyCurrencyLink,
   type CurrencyLinkResult,
 } from "@/ledgerMapping";
-import { errorText } from "@/lib/errors";
+import { errorText, isSyncBusyAborted } from "@/lib/errors";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress, terminalJobError } from "@/components/JobProgress";
+import { useScrollFadeFlags } from "@/components/ScrollFade";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -51,11 +55,13 @@ import {
   type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
 import { MappingPanel } from "@/components/MappingPanel";
+import { SourceTableControls } from "@/components/SourceTableControls";
 import { useTableColumnResize } from "@/components/useTableColumnResize";
 import { BusySpinner } from "@/components/BusySpinner";
 import {
   describeForm,
   formGroups,
+  interestLedgerForms,
   resolveForm,
   roleRequirement,
   useLedgerForms,
@@ -73,6 +79,8 @@ import {
   CurrencyFallbackDialog,
   type CurrencyFallbackMode,
 } from "@/components/CurrencyFallbackDialog";
+import { MatchingFallbackDialog, type MatchingFallbackMode, type MatchingFallbackGroup } from "@/components/MatchingFallbackDialog";
+import { NoticeStack, type NoticeItem } from "@/components/NoticeStack";
 
 /** 可多列的角色与统一内核一致；`account` 是历史保存映射的旧槽位。 */
 const DEPOSIT_MULTI = new Set([
@@ -83,6 +91,14 @@ const DEPOSIT_MULTI = new Set([
   "date",
 ]);
 const ACCOUNT_REVIEW_PAGE_SIZE = 250;
+const auxiliaryFallbackAccountsSchema = z.array(z.object({
+  key: z.string(),
+  entity: z.string(),
+  account: z.string(),
+  currency: z.string(),
+  auxiliaries: z.array(z.string()),
+  reason: z.string(),
+}));
 import "./fx-audit.css";
 import "./deposit-interest.css";
 import { AccountConfirmationActions, type ConfirmationRow } from "./AccountConfirmationActions";
@@ -125,6 +141,11 @@ export type Inspection = {
     account: string;
     auxiliary: string;
     currency: string;
+    classificationContext?: string;
+    parentAccountName?: string;
+    parentAccountNames?: string[];
+    suggestedDepositRole?: string;
+    suggestedFxRole?: string;
   }>;
   suggestedMapping: Record<string, string | string[]>;
   /** 引擎随识别结果全量下发的角色标签（`{name,label}`）；缺失时回落本页的标签表。 */
@@ -361,9 +382,11 @@ type DepositAccountReviewRow = {
   auxiliary?: string;
   auxiliaryKey?: string;
   currency?: string;
+  suggestedRole?: string;
+  parentAccountName?: string;
 };
 
-type SourceReviewIdentity = { entity: string; account: string; auxiliary: string; currency: string };
+type SourceReviewIdentity = { entity: string; account: string; auxiliary: string; currency: string; suggestedDepositRole?: string; parentAccountName?: string };
 
 const depositDetailKey = (entity: string, account: string, auxiliary: string) =>
   `${entity}\u001f${account}\u001f${auxiliary}`;
@@ -395,7 +418,8 @@ export function depositAccountReviewRows(
       seen.add(key);
       return [{ key, account: identity.account, entity,
         auxiliary: auxiliary || undefined, auxiliaryKey: auxiliary || undefined,
-        currency: identity.currency }];
+        currency: identity.currency, ...(identity.suggestedDepositRole ? { suggestedRole: identity.suggestedDepositRole } : {}),
+        ...(identity.parentAccountName ? { parentAccountName: identity.parentAccountName } : {}) }];
     });
   }
   const codeCounts = new Map<string, number>();
@@ -617,11 +641,7 @@ export function depositPercentToRate(text: string) {
 }
 
 export function depositDisplayAmount(value: number | null | undefined) {
-  if (value == null || !Number.isFinite(value)) return "—";
-  return new Intl.NumberFormat("zh-CN", {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  }).format(Object.is(value, -0) ? 0 : value);
+  return formatMoney(value);
 }
 export function depositReportStart(balanceSheetDate: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(balanceSheetDate)
@@ -742,6 +762,23 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     CurrencyFallbackMode | ""
   >("");
   const [currencyDialogOpen, setCurrencyDialogOpen] = useState(false);
+  const [matchingChoice, setMatchingChoice] = useState<{ key: string; mode: MatchingFallbackMode } | null>(null);
+  const [matchingCheck, setMatchingCheck] = useState<{ key: string; groups: MatchingFallbackGroup[] } | null>(null);
+  const [matchingPromptKey, setMatchingPromptKey] = useState<string | null>(null);
+  const [matchingDraft, setMatchingDraft] = useState<MatchingFallbackMode | "">("");
+  const [matchingBusy, setMatchingBusy] = useState(false);
+  // 人工分类后停用第二步的自动准备；重读来源或映射后才恢复首次准备。
+  const [classificationEdited, setClassificationEdited] = useState(false);
+  const preparationGeneration = useRef(0);
+  function recordClassification() {
+    ++preparationGeneration.current;
+    setClassificationEdited(true);
+    setMatchingBusy(false);
+    activeJob.current = "";
+    setResult(undefined);
+    setRows([]);
+    setJob(undefined);
+  }
   function resetCurrencyFallback() {
     setCurrencyLink(null);
     setCurrencyFallbackMode("");
@@ -781,6 +818,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     Record<string, number>
   >({});
   const [expanded, setExpanded] = useState("");
+  // 结果出来后「测算与底稿」收成摘要条，点「修改」才重新展开表单——
+  // 参数改完一次就不该一直占着半屏。
+  const [runFormOpen, setRunFormOpen] = useState(false);
   const [result, setResult] = useState<Record<string, unknown>>();
   const [outputPath, setOutputPath] = useState("");
   const [sourceStatus, setSourceStatus] = useState("");
@@ -804,11 +844,13 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   // 三步导引，与汇兑损益／FA 一致：上传识别 → 科目分类 → 测算与底稿。
   const [step, setStep] = useState(0);
   const [error, setError] = useState("");
+  const [currencyValidationNotice, setCurrencyValidationNotice] = useState("");
   const [validationWarnings, setValidationWarnings] = useState<
     Record<string, string>
   >({});
   const [job, setJob] = useState<JobEvent>();
   const activeJob = useRef("");
+  const startingJobEvents = useRef<Map<string, JobEvent> | null>(null);
   const lastRunMethod = useRef<"deposit.preview" | "deposit.export">(
     "deposit.preview",
   );
@@ -843,10 +885,14 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
 
   /**
    * 文件身份变化时统一清理全部派生状态。档位字典和用户维护的档位基准利率
-   * 是工具级配置，保留；科目／明细分类、逐户档位与利率都绑定旧文件，必须清空。
+   * 是工具级配置，保留；科目／明细分类、逐户档位与利率都绑定旧文件，必须清空；
+   * 手选的保存位置也一并放弃，默认落点跟新文件走。
    * 历史同源恢复不走这里，由 useTaskRestore 明确回填存档状态。
    */
   function resetFileDerivedState() {
+    ++preparationGeneration.current;
+    setOutputPath("");
+    setClassificationEdited(false);
     setAccountRoles({});
     setAccountRoleOverrides({});
     setAccountTierOverrides({});
@@ -858,6 +904,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     resetCurrencyFallback();
     setAccountCurrencyRows([]);
     setRows([]);
+    setRunFormOpen(false);
     setExpanded("");
     setResult(undefined);
     setJob(undefined);
@@ -876,12 +923,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     ["deposit", "other_monetary", "cash_on_hand"].includes(
       accountRoles[a] ?? "",
     ),
-  );
-  const interestBearingDepositAccountCount = accounts.filter((a) =>
-    ["deposit", "other_monetary"].includes(accountRoles[a] ?? ""),
-  ).length;
-  const interestAccounts = accounts.filter(
-    (a) => (accountRoles[a] ?? "") === "interest_income",
   );
   // 科目分类清单的关键词筛选：只影响展示，不改变上方的分类计数和测算口径。
   const accountMatches = useMemo(
@@ -907,7 +948,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const reviewRole = (row: DepositAccountReviewRow) =>
     accountDetailRoleOverrides[row.key]
     ?? (row.auxiliaryKey ? accountDetailRoleOverrides[depositDetailKey(row.entity ?? "", depositAccountCode(row.account), row.auxiliaryKey)] : undefined)
-    ?? accountRoles[row.account] ?? "";
+    ?? accountRoleOverrides[row.account] ?? row.suggestedRole ?? accountRoles[row.account] ?? "";
+  const interestBearingDepositAccountCount = reviewAccounts.filter(row =>
+    ["deposit", "other_monetary"].includes(reviewRole(row)),
+  ).length;
+  const interestAccounts = reviewAccounts.filter(row => reviewRole(row) === "interest_income");
   // 账户级覆盖的键：读写两侧统一走 depositAccountOverrideKey（模块级导出，
   // 回传处理与测试同源），防止写入键与读取键错位。
   const accountOverrideKey = depositAccountOverrideKey;
@@ -920,7 +965,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       reviewAccounts
         .filter((row) =>
           accountMatches(
-            `${row.account} ${row.entity ?? ""} ${row.auxiliary ?? ""}`,
+            `${row.account} ${row.parentAccountName ?? ""} ${row.entity ?? ""} ${row.auxiliary ?? ""}`,
           ),
         )
         .sort((a, b) => Number(activeAccount(b)) - Number(activeAccount(a))),
@@ -947,8 +992,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         ),
       );
   }, []);
-  // 两侧映射齐了就认定辅助列联动。金额/币种/日期映射不影响结论；
-  // 计息科目分类会改变验证范围，必须进入键，避免把旧计划复用到新选中的科目。
+  // 两侧映射齐了就认定辅助列联动。分类影响验证范围，但人工调整不逐项重验，
+  // 而是废弃旧计划的计算复用，在第三步测算时验证当前选择。
   const auxiliaryValidationRequired = Boolean(
     tb && je && ledgerHasMappedRole(tbMapping, "auxiliary"),
   );
@@ -960,12 +1005,15 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       })
     : null;
   useEffect(() => {
+    // 人工分类只记录；保留已有辅助行，正式测算按最新选择重新验证。
+    if (classificationEdited) return;
     if (!auxiliaryValidationRequired || !tb || !je || auxLinkKey === null) {
       setAuxLink(null);
       setValidationWarning("auxiliary");
       return;
     }
     setAuxLink(null);
+    const generation = preparationGeneration.current;
     let cancelled = false;
     void verifyAuxiliaryLink({
       ...payload(),
@@ -975,7 +1023,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         )
         .map(([account]) => ({ account })),
     }).then((result) => {
-      if (cancelled) return;
+      if (cancelled || generation !== preparationGeneration.current) return;
       setAuxLink(result);
       if (!result) {
         setValidationWarning(
@@ -991,8 +1039,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auxLinkKey]);
-  // 测算前行清单（含分币种拆行与引擎行键）：身份输入一变就重取，
+  }, [auxLinkKey, classificationEdited]);
+  // 首次测算前行清单（含分币种拆行与引擎行键）：来源和映射变化时重取，
+  // 人工分类沿用现有清单的行键，不在编辑时读取账表。
   // 键与测算结果行一致，第二步的逐行利率与第三步逐户改价共用同一键空间。
   const accountCurrencyKey = tb
     ? JSON.stringify({
@@ -1000,11 +1049,18 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         je: [jePath, je?.sheet ?? "", je?.headerRow ?? 0, je?.headerDepth ?? 0, jeMapping],
         roles: [accountRoles, accountRoleOverrides, accountDetailRoleOverrides],
         currencyFallbackMode,
+        reportEnd,
         entityScope: entityScope.selection,
         auxiliaryPlan: je ? [auxLink?.planKey ?? null, auxLink?.status ?? null] : null,
       })
     : null;
+  const matchingFallbackMode = matchingChoice?.key === accountCurrencyKey ? matchingChoice.mode : "";
+  const matchingGroups = matchingCheck?.key === accountCurrencyKey ? matchingCheck.groups : [];
+  const matchingKeyRef = useRef(accountCurrencyKey);
+  matchingKeyRef.current = accountCurrencyKey;
   useEffect(() => {
+    setMatchingBusy(false);
+    if (classificationEdited) return;
     if (accountCurrencyKey === null) {
       setAccountCurrencyRows([]);
       return;
@@ -1019,27 +1075,47 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       return;
     }
     let cancelled = false;
+    const generation = preparationGeneration.current;
     void engineCall("deposit.account_currencies", payload())
-      .then((x) => {
-        if (cancelled) return;
+      .then(async (x) => {
+        if (cancelled || generation !== preparationGeneration.current) return;
+        const candidates = (x as { matchingFallbackCandidates?: MatchingFallbackGroup[] }).matchingFallbackCandidates ?? [];
+        let groups = matchingCheck?.key === accountCurrencyKey ? matchingCheck.groups : [];
+        if (candidates.length && matchingCheck?.key !== accountCurrencyKey) {
+          setMatchingBusy(true);
+          const request: Record<string, unknown> = payload();
+          delete request.matchingFallbackMode;
+          delete request.matchingFallbackGroups;
+          const check = await engineCall("deposit.matching_fallback", request, "检查存款明细衔接") as { matchingFallbackGroups: MatchingFallbackGroup[] };
+          if (cancelled || generation !== preparationGeneration.current || accountCurrencyKey !== matchingKeyRef.current) return;
+          groups = check.matchingFallbackGroups;
+          setMatchingCheck({ key: accountCurrencyKey, groups });
+        }
+        if (groups.length && !matchingFallbackMode) {
+          setMatchingDraft("");
+          setMatchingPromptKey(accountCurrencyKey);
+          setAccountCurrencyRows([]);
+          setValidationWarning("accounts", "请先选择存款明细无法衔接时的测算口径。");
+          return;
+        }
         const list = (x as { rows?: typeof accountCurrencyRows }).rows;
         setAccountCurrencyRows(Array.isArray(list) ? list : []);
         setValidationWarning("accounts");
       })
       .catch(() => {
-        if (!cancelled) {
+        if (!cancelled && generation === preparationGeneration.current) {
           setAccountCurrencyRows([]);
           setValidationWarning(
             "accounts",
             "逐账户币种清单加载失败，暂时无法自动带出逐户利率；可手工填写利率后继续。",
           );
         }
-      });
+      }).finally(() => { if (!cancelled) setMatchingBusy(false); });
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountCurrencyKey, step]);
+  }, [accountCurrencyKey, step, matchingFallbackMode, classificationEdited]);
   useEffect(() => {
     resetCurrencyFallback();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1073,6 +1149,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const restoreGeneration = useRef(0);
   const catalogRefreshGeneration = useRef({ tb: 0, je: 0 });
   useTaskRestore(tool.id, (restore) => {
+    ++preparationGeneration.current;
+    setClassificationEdited(false);
     const generation = ++restoreGeneration.current;
     type DepositSourceParams = {
       inputPath?: string;
@@ -1262,6 +1340,28 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     })();
   });
+  function applyJobEvent(event: JobEvent) {
+    if (event.jobId !== activeJob.current) return;
+    setJob(event);
+    if (event.phase === "completed") {
+      activeJob.current = "";
+      setBusy(false);
+      const next = (event.result ?? {}) as Record<string, unknown>;
+      setResult((current) => ({ ...current, ...next }));
+      setRows((next.rows ?? []) as AccountRow[]);
+      // 测算/导出成功即证明可以出结果：进入第二步时「逐账户币种清单加载
+      // 失败」的黄条不能再滞留到成功页（视觉审核：一边报失败一边展示成功）。
+      // 利率缺口由结果行自身的「待填利率」标注继续提示。
+      setValidationWarning("accounts");
+    } else if (event.phase === "failed" || event.phase === "cancelled") {
+      activeJob.current = "";
+      setBusy(false);
+      const payload = event.result as
+        { error?: { userMessage?: string } } | undefined;
+      setError(payload?.error ? errorText(payload.error) : event.message);
+    }
+  }
+
   useEffect(() => {
     const drops = listenPositionedFileDrops(({ paths, x, y }) => {
       if (
@@ -1275,19 +1375,16 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       void classifyAndInspect(paths);
     });
     const jobs = listenJobEvents((event) => {
-      if (event.jobId !== activeJob.current) return;
-      setJob(event);
-      if (event.phase === "completed") {
-        setBusy(false);
-        const next = event.result as Record<string, unknown>;
-        setResult((current) => ({ ...current, ...next }));
-        setRows((next.rows ?? []) as AccountRow[]);
-      } else if (event.phase === "failed" || event.phase === "cancelled") {
-        setBusy(false);
-        const payload = event.result as
-          { error?: { userMessage?: string } } | undefined;
-        setError(payload?.error ? errorText(payload.error) : event.message);
+      if (event.toolId !== tool.id) return;
+      const early = startingJobEvents.current;
+      if (early) {
+        const previous = early.get(event.jobId);
+        if (!previous || !["completed", "failed", "cancelled"].includes(previous.phase))
+          early.set(event.jobId, event);
+        if (early.size > 64) early.delete(early.keys().next().value!);
+        return;
       }
+      applyJobEvent(event);
     });
     return () => {
       void drops.then((x) => x());
@@ -1387,7 +1484,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       }
       setSourceStatus(
         scan.hiddenSheets
-          ? `${scan.hiddenSheets} 张低置信度 Sheet 已忽略，请核对已选工作表。`
+          ? `${scan.hiddenSheets} 张空白或低置信度 Sheet 已忽略，请核对已选工作表。`
           : "",
       );
       if (failures.length) setError(failures.join("；"));
@@ -1396,6 +1493,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     }
   }
   function applyInspection(kind: Kind, path: string, response: Inspection) {
+    setClassificationEdited(false);
     catalogRefreshGeneration.current[kind] += 1;
     resetCurrencyFallback();
     // 历史恢复后重新识别同一文件：用存档映射与科目分类顶回建议值，
@@ -1471,8 +1569,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     kind: Kind,
     mapping: Record<string, string | string[]>,
   ) {
-    resetCurrencyFallback();
     const current = kind === "tb" ? tbMapping : jeMapping;
+    if (JSON.stringify(current) !== JSON.stringify(mapping)) setClassificationEdited(false);
+    resetCurrencyFallback();
     if (kind === "tb") setTbMapping(mapping);
     else setJeMapping(mapping);
     if (
@@ -1617,7 +1716,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       rateOverrides,
       accountRateOverrides,
       tierRates,
-      ...(tb && je && auxLink?.planKey
+      ...(tb && je && auxLink?.planKey && !classificationEdited
         ? {
             auxiliaryPlan: {
               planKey: auxLink.planKey,
@@ -1639,6 +1738,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           }
         : {}),
       ...(currencyFallbackMode ? { currencyFallbackMode } : {}),
+      ...(matchingFallbackMode ? { matchingFallbackMode } : {}),
+      matchingFallbackGroups: matchingGroups,
+      requireMatchingFallbackChoice: true,
       entityScope: entityScope.selection,
       ...(outputPath ? { outputPath } : {}),
       __restoreSnapshot: {
@@ -1672,6 +1774,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     ]);
   }
   async function advanceToConfirmation(): Promise<boolean> {
+    setCurrencyValidationNotice("");
     const key = currencyCheckKey();
     const cached =
       currencyCheckRef.current.key === key
@@ -1695,7 +1798,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       const check = await verifyCurrencyLink({
         ...payload(),
         selectedAccounts: depositAccounts.map((account) => ({ account })),
-      });
+      }, { throwOnError: true });
       if (!check) {
         setError("暂时无法验证 TB 与 JE 的外币币种对应关系，请稍后重试。");
         return false;
@@ -1709,6 +1812,13 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       setCurrencyFallbackMode("");
       setStep(1);
       return true;
+    } catch (error) {
+      if (isSyncBusyAborted(error)) {
+        setCurrencyValidationNotice("已停止币种衔接验证，当前映射已保留。");
+      } else {
+        setError(`TB 与 JE 的币种衔接验证失败：${errorText(error)}`);
+      }
+      return false;
     } finally {
       setBusy(false);
     }
@@ -1739,8 +1849,16 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       );
       return;
     }
-    if (!depositAccounts.length) {
+    if (!interestBearingDepositAccountCount) {
       setError("请先确认至少一个银行存款或其他货币资金科目。");
+      return;
+    }
+    if (!classificationEdited && (matchingBusy || (matchingGroups.length > 0 && !matchingFallbackMode))) {
+      setError("请先完成存款明细衔接检查并选择测算口径。");
+      return;
+    }
+    if (!classificationEdited && matchingFallbackMode === "accountJe" && accountCurrencyRows.some(row => row.account.includes("存款科目汇总") && engineRateOf(row.key) === undefined)) {
+      setError("请先为存款科目汇总填写统一年利率。");
       return;
     }
     setError("");
@@ -1748,6 +1866,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   }
   async function run(method: "deposit.preview" | "deposit.export") {
     setError("");
+    if (!classificationEdited && (matchingBusy || (matchingGroups.length > 0 && !matchingFallbackMode))) return setError("请先完成存款明细衔接检查并选择测算口径。");
+    if (!classificationEdited && matchingFallbackMode === "accountJe" && accountCurrencyRows.some(row => row.account.includes("存款科目汇总") && engineRateOf(row.key) === undefined)) return setError("请先为存款科目汇总填写统一年利率。");
     if (!tb) return setError("请先上传并识别 TB 科目余额表。");
     if (!reportEnd) return setError("请选择资产负债表日。");
     const tbMissing = depositMissingDetails("tb", tbMapping, Boolean(jePath));
@@ -1762,17 +1882,62 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           `序时账尚未映射：${jeMissing.join("、")}。请先在预览表头完成字段映射。`,
         );
     }
-    if (!depositAccounts.length)
+    if (!interestBearingDepositAccountCount)
       return setError(
         "科目分类里没有任何计息的货币资金科目，请先确认银行存款/其他货币资金科目。",
       );
     setBusy(true);
+    let started = false;
+    const key = accountCurrencyKey;
+    const generation = preparationGeneration.current;
     try {
+      const request = payload();
+      if (classificationEdited && jePath && key !== null) {
+        let groups = matchingCheck?.key === key ? matchingCheck.groups : null;
+        if (groups === null) {
+          const check = await engineCall("deposit.matching_fallback", request, "检查存款明细衔接") as { matchingFallbackGroups: MatchingFallbackGroup[] };
+          if (key !== matchingKeyRef.current || generation !== preparationGeneration.current) return;
+          groups = check.matchingFallbackGroups;
+          setMatchingCheck({ key, groups });
+        }
+        request.matchingFallbackGroups = groups;
+        if (groups.length && !matchingFallbackMode) {
+          setMatchingDraft("");
+          setMatchingPromptKey(key);
+          return;
+        }
+        if (groups.length && matchingFallbackMode === "accountJe") {
+          const prepared = await engineCall("deposit.account_currencies", request) as { rows: typeof accountCurrencyRows };
+          if (key !== matchingKeyRef.current || generation !== preparationGeneration.current) return;
+          setAccountCurrencyRows(prepared.rows);
+          const summaries = prepared.rows.filter(row => row.account.includes("存款科目汇总"));
+          if (!summaries.length) throw new Error("尚未生成存款科目汇总，请重试。");
+          if (summaries.some(row => engineRateOf(row.key) === undefined)) {
+            setError("请先为存款科目汇总填写统一年利率。");
+            return;
+          }
+        }
+      }
       lastRunMethod.current = method;
-      activeJob.current = await jobStart(method, payload());
+      const early = new Map<string, JobEvent>();
+      startingJobEvents.current = early;
+      activeJob.current = "";
+      setJob(undefined);
+      try {
+        const id = await jobStart(method, request);
+        if (generation !== preparationGeneration.current) return;
+        activeJob.current = id;
+        started = true;
+        startingJobEvents.current = null;
+        const event = early.get(id);
+        if (event) applyJobEvent(event);
+      } finally {
+        if (startingJobEvents.current === early) startingJobEvents.current = null;
+      }
     } catch (e) {
-      setBusy(false);
-      setError(errorText(e));
+      if (key === matchingKeyRef.current && generation === preparationGeneration.current) setError(errorText(e));
+    } finally {
+      if (!started) setBusy(false);
     }
   }
   /** 第二步逐户利率：清空即回到该户当前档位的默认利率。 */
@@ -1883,6 +2048,46 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   );
   const multiEntity = ledgerEntityKeyEnabled(tbMapping, jeMapping) && entitySet.size > 1;
   const showReviewCurrency = ledgerHasMappedRole(tbMapping, "currency");
+  // 确认弹层的上下文键与行清单：全量科目的拼串建组只随真正影响内容的输入
+  // 重算，切步骤等整页重渲染不再重复跑一遍（大账套下是每次渲染的大头）。
+  const confirmationContext = useMemo(
+    () =>
+      JSON.stringify([
+        "review-layout-v2",
+        tbPath,
+        jePath,
+        tbMapping,
+        jeMapping,
+        reviewAccounts.map((row) => row.key),
+      ]),
+    [tbPath, jePath, tbMapping, jeMapping, reviewAccounts],
+  );
+  const confirmationRows = useMemo(
+    () =>
+      reviewAccounts.map((row) => {
+        const tier = (tiers?.tiers ?? []).find((item) => item.key === reviewTier(row));
+        const manualRate = accountRateOverrides[accountOverrideKey(row)];
+        const effectiveRate = Number.isFinite(manualRate)
+          ? manualRate
+          : depositEffectiveTierRate(tier, tierRates);
+        const isRateRow = ["deposit", "other_monetary"].includes(reviewRole(row));
+        return { key: row.key, values: [
+          ...(multiEntity ? [row.entity ?? ""] : []),
+          ledgerReviewAccountLabel(row.account, row.auxiliary, row.parentAccountName),
+          ...(showReviewCurrency ? [row.currency ?? ""] : []),
+          ROLE_OPTIONS.find(([key]) => key === reviewRole(row))?.[1] ?? "",
+          (tiers?.categories ?? []).find((item) => item.key === tier?.category)?.label ?? "",
+          tier?.termLabel ?? "",
+          isRateRow ? depositRateToPercent(effectiveRate) : "",
+        ] };
+      }),
+    // reviewRole/reviewTier 读角色与期限覆盖表，accountTier 读 tb/je 建议，均列入依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [reviewAccounts, tiers, accountRateOverrides, tierRates,
+      accountRoleOverrides, accountDetailRoleOverrides, accountRoles,
+      accountTierOverrides, accountDetailTierOverrides, tb, je,
+      multiEntity, showReviewCurrency],
+  );
   // 引擎下发的测算行按科目编码归组，确认表据此按币种（或主体）拆行展示。
   const engineRowsByCode = useMemo(() => {
     const map = new Map<string, typeof accountCurrencyRows>();
@@ -1977,6 +2182,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         detail="按月均余额重算存款利息，并与 TB 勾稽。"
       />
       <ErrorBox error={step === 2 && error === terminalJobError(job) ? "" : error} onDismiss={() => setError("")} />
+      {step === 0 && currencyValidationNotice && <p className="fx-source-status" role="status">{currencyValidationNotice}</p>}
       {Object.keys(validationWarnings).length > 0 && (
         <details className="deposit-validation-warnings" role="status" aria-live="polite">
           <summary>
@@ -2217,6 +2423,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             {tb && (
               <MappingPreview
                 title="TB 文件预览与字段映射"
+                sourceName={fileName(tbPath)}
                 kind="tb"
                 inspection={tb}
                 mapping={tbMapping}
@@ -2255,6 +2462,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             {je && (
               <MappingPreview
                 title="序时账文件预览与字段映射"
+                sourceName={fileName(jePath)}
                 kind="je"
                 inspection={je}
                 mapping={jeMapping}
@@ -2299,8 +2507,24 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           </div>
         </>
       )}
+      {step > 0 && (
+        <>
+          {matchingGroups.length > 0 && <section className="deposit-currency-mode" role="status">
+            <span>{matchingFallbackMode === "accountJe" ? "明细衔接口径：JE 本位币科目汇总，按月均余额测算" : matchingFallbackMode === "tbAverage" ? "明细衔接口径：保留 TB 明细，按年初年末平均测算" : "请先选择存款明细衔接测算口径"}</span>
+            <Button variant="secondary" onClick={() => {setMatchingDraft(matchingFallbackMode);setMatchingPromptKey(accountCurrencyKey);}}>选择明细衔接口径</Button>
+          </section>}
+          {matchingFallbackMode === "accountJe" && <section className="deposit-currency-mode">
+            <p>所涉银行已合并为科目汇总。请统一填写年利率；原银行明细的利率不用于汇总测算。</p>
+            {accountCurrencyRows.filter(row => row.account.includes("存款科目汇总")).map(row => <label key={row.key}>
+              {row.entity} / {row.account} 统一年利率（%）
+              <input type="number" step="0.0001" aria-label={`${row.entity} / ${row.account}的统一年利率`} value={engineRateOf(row.key) === undefined ? "" : engineRateOf(row.key)! * 100} onChange={event => overrideRow(row.key, {annualRate:depositPercentToRate(event.target.value)})} />
+            </label>)}
+          </section>}
+        </>
+      )}
       {step === 1 && (
         <>
+          {classificationEdited && <p className="fx-hint" role="status">科目分类已记录，将在下一步测算时生效。</p>}
           {currencyFallbackMode && (
             <section className="deposit-currency-mode" role="status">
               <span>
@@ -2345,7 +2569,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               <CardHeader>
                 <div className="deposit-confirm-heading">
                   <div>
-                    <span className="deposit-section-kicker">第 2 项</span>
                     <CardTitle>科目分类与存款类型</CardTitle>
                   </div>
                   <div className="deposit-account-summary">
@@ -2393,7 +2616,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                           </th>
                           <th aria-label="发生额">
                             发生额
-                            <HelpTip text="优先取本年累计借贷发生额，其次取本期借贷发生额；已结转的损益科目按登记方向还原。第三步有发生额时用发生额比较，没有发生额列时才使用余额。" />
+                            <HelpTip text="分类前即可查看 TB 发生额；优先取本年累计，其次取本期，已结转的损益科目按登记方向还原，悬停金额可看取数依据。未取得金额显示“—”，真实零值显示0；分类决定是否纳入第三步比较，不影响这里的金额展示。" />
                           </th>
                           <th aria-label="存款类型">存款类型</th>
                           <th aria-label="利率（%）">
@@ -2419,8 +2642,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                           const isDepositRow = ["deposit", "other_monetary"].includes(
                             reviewRole(row),
                           );
-                          const isInterestIncomeRow =
-                            reviewRole(row) === "interest_income";
                           const variants = engineVariantsOf(row);
                           // 引擎行按币种（多主体时含主体）拆成多行；没有引擎
                           // 行的（旧后端／仅在序时账出现）保持科目整行一条。
@@ -2448,8 +2669,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                                     : "—"}
                               </td>
                             )}
-                            <td title={ledgerReviewAccountLabel(row.account, row.auxiliary)}>
-                              {ledgerReviewAccountLabel(row.account, row.auxiliary)}
+                            <td className="deposit-review-account-name" title={ledgerReviewAccountLabel(row.account, row.auxiliary, row.parentAccountName)}>
+                              {ledgerReviewAccountLabel(row.account, row.auxiliary, row.parentAccountName)}
                             </td>
                             {showReviewCurrency && <td>{currency || "—"}</td>}
                             {index === 0 ? (
@@ -2464,6 +2685,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                                       : (accountRoleOverrides[row.account] ?? "")
                                   }
                                   onChange={(e) => {
+                                    recordClassification();
                                     const value = e.target.value;
                                     const setter = (tb?.reviewAccounts?.length || row.auxiliaryKey)
                                       ? setAccountDetailRoleOverrides
@@ -2546,7 +2768,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                                         ?.occurrenceBasis ?? undefined
                                 }
                               >
-                                {!isInterestIncomeRow || row.auxiliary
+                                {row.auxiliary
                                   ? "—"
                                   : depositDisplayAmount(
                                       row.entity
@@ -2659,7 +2881,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                                 <td>
                                   <span className="deposit-pct">
                                     <NumberInput
-                                      label={`${ledgerReviewAccountLabel(row.account, row.auxiliary)}${currency ? `（${currency}）` : ""}的年利率`}
+                                      label={`${ledgerReviewAccountLabel(row.account, row.auxiliary, row.parentAccountName)}${currency ? `（${currency}）` : ""}的年利率`}
                                       step="0.01"
                                       min="0"
                                       max="20"
@@ -2724,7 +2946,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   <AccountConfirmationActions
                     tool="deposit"
                     title="存款利息"
-                    context={JSON.stringify(["review-layout-v2", tbPath, jePath, tbMapping, jeMapping, reviewAccounts.map((row) => row.key)])}
+                    context={confirmationContext}
                     columns={[
                       ...(multiEntity ? [{ key: "entity", title: "主体" }] : []),
                       { key: "account", title: "科目" },
@@ -2734,23 +2956,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                       { key: "term", title: "存款期限", editable: true, options: [...new Set((tiers?.tiers ?? []).map((tier) => tier.termLabel))] },
                       { key: "rate", title: "利率（%）", editable: true },
                     ]}
-                    rows={reviewAccounts.map((row) => {
-                      const tier = (tiers?.tiers ?? []).find((item) => item.key === reviewTier(row));
-                      const manualRate = accountRateOverrides[accountOverrideKey(row)];
-                      const effectiveRate = Number.isFinite(manualRate)
-                        ? manualRate
-                        : depositEffectiveTierRate(tier, tierRates);
-                      const isRateRow = ["deposit", "other_monetary"].includes(reviewRole(row));
-                      return { key: row.key, values: [
-                        ...(multiEntity ? [row.entity ?? ""] : []),
-                        ledgerReviewAccountLabel(row.account, row.auxiliary),
-                        ...(showReviewCurrency ? [row.currency ?? ""] : []),
-                        ROLE_OPTIONS.find(([key]) => key === reviewRole(row))?.[1] ?? "",
-                        (tiers?.categories ?? []).find((item) => item.key === tier?.category)?.label ?? "",
-                        tier?.termLabel ?? "",
-                        isRateRow ? depositRateToPercent(effectiveRate) : "",
-                      ] };
-                    })}
+                    rows={confirmationRows}
                     onImport={(changed) => {
                       const byKey = new Map(reviewAccounts.map((row) => [row.key, row]));
                       const reviewValueOffset = Number(multiEntity) + Number(showReviewCurrency);
@@ -2763,6 +2969,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                         tiers ?? null,
                         Boolean(tb?.reviewAccounts?.length),
                       );
+                      recordClassification();
                       setAccountRoleOverrides((current) => ({ ...current, ...plan.roleAccountUpdates }));
                       setAccountDetailRoleOverrides((current) => ({ ...current, ...plan.roleDetailUpdates }));
                       setAccountTierOverrides((current) => ({ ...current, ...plan.tierAccountUpdates }));
@@ -2814,6 +3021,82 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       {step === 2 && (
         <>
           {entityScope.panel}
+          {rows.length > 0 && !runFormOpen ? (
+            <section className="deposit-run-summary" aria-label="测算与底稿">
+              {currencyFallbackMode && (
+                <section className="deposit-currency-mode" role="status">
+                  <span>
+                    多币种口径：
+                    <b>
+                      {currencyFallbackMode === "functional"
+                        ? "统一使用本位币匡算"
+                        : "按币种使用年初、年末平均值"}
+                    </b>
+                  </span>
+                  <Button
+                    variant="secondary"
+                    onClick={() => setCurrencyDialogOpen(true)}
+                  >
+                    更改口径
+                  </Button>
+                </section>
+              )}
+              <div className="deposit-run-summary-line">
+                <span>
+                  资产负债表日 <b>{reportEnd}</b>
+                  <span aria-hidden="true"> · </span>
+                  输出：{outputPath ? displayFileName(outputPath) : "源文件目录"}
+                </span>
+                <Button variant="secondary" size="sm" onClick={() => setRunFormOpen(true)}>
+                  修改
+                </Button>
+              </div>
+              <div className="fx-actions">
+                <Button
+                  variant="secondary"
+                  disabled={
+                    busy || reviewingAny || requiredMappingsMissing.length > 0
+                  }
+                  onClick={() => void run("deposit.preview")}
+                >
+                  {busy && <BusySpinner />}测算预览
+                </Button>
+                <Button
+                  disabled={
+                    busy || reviewingAny || requiredMappingsMissing.length > 0
+                  }
+                  onClick={() => void run("deposit.export")}
+                >
+                  {busy && <BusySpinner />}生成 Excel 底稿
+                </Button>
+              </div>
+              {job && (
+                <JobProgress
+                  job={job}
+                  detail={step === 2 && error === terminalJobError(job) ? error : undefined}
+                  onCancel={busy ? (id) => jobCancel(id) : undefined}
+                />
+              )}
+              {((result?.outputPaths ?? []) as string[]).length > 0 && (
+                <div className="deposit-export-done">
+                  <p>
+                    导出的 Excel
+                    中，「测算汇总」黄色“年利率”单元格可直接改写；月度利息、测算利息合计及与
+                    TB 的勾稽差异会即时重算。
+                  </p>
+                  {((result?.outputPaths ?? []) as string[]).map((path) => (
+                    <Button
+                      key={path}
+                      variant="secondary"
+                      onClick={() => void openOutput(path)}
+                    >
+                      打开 Excel 底稿
+                    </Button>
+                  ))}
+                </div>
+              )}
+            </section>
+          ) : (
           <Card>
             <CardHeader>
               <CardTitle>
@@ -2877,12 +3160,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   </span>
                 </label>
               </div>
-              {jePath && (
-                <p className="deposit-layout">
-                  当前序时账布局：{JE_LAYOUT_LABEL[depositJeLayout(jeMapping)]}
-                  （由你映射的列决定）；金额符号记法由系统按凭证配平自动识别，测算结果中会披露判定依据。
-                </p>
-              )}
               {requiredMappingsMissing.length > 0 && (
                 <p className="fx-warning" aria-live="polite">
                   还不能测算：{requiredMappingsMissing.join("、")}。请回到
@@ -2942,6 +3219,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               )}
             </CardContent>
           </Card>
+          )}
 
           {rows.length > 0 && (
             <Results
@@ -3000,6 +3278,17 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           </div>
         </>
       )}
+      <MatchingFallbackDialog kind="deposit" open={accountCurrencyKey !== null && matchingPromptKey === accountCurrencyKey}
+        groups={matchingGroups} value={matchingDraft} onChange={setMatchingDraft}
+        onCancel={() => {setMatchingPromptKey(null);setMatchingDraft("");}}
+        onContinue={() => {
+          if (!matchingDraft || !accountCurrencyKey || matchingPromptKey !== accountCurrencyKey) return;
+          setMatchingChoice({key:accountCurrencyKey,mode:matchingDraft});
+          setMatchingPromptKey(null);
+          setResult(undefined);
+          setRows([]);
+          if (!classificationEdited) setStep(1);
+        }} />
       <CurrencyFallbackDialog
         open={currencyDialogOpen}
         affectedGroupCount={currencyLink?.affectedGroupCount ?? 0}
@@ -3041,7 +3330,6 @@ function RateTierCard({
         <CardHeader>
           <div className="deposit-confirm-heading">
             <div>
-              <span className="deposit-section-kicker">第 1 项</span>
               <CardTitle>存款利率档位</CardTitle>
             </div>
           </div>
@@ -3060,14 +3348,14 @@ function RateTierCard({
       <CardHeader>
         <div className="deposit-confirm-heading">
           <div>
-            <span className="deposit-section-kicker">第 1 项</span>
             <CardTitle>存款利率档位</CardTitle>
           </div>
         </div>
       </CardHeader>
       <CardContent>
         <p className="deposit-rate-limit-hint">
-          「本次采用」默认取市场中枢暂估利率：活期、保证金维持大行挂牌水平，协定、通知、定期、大额存单取实务常见区间中部（挂牌价接近市场下限，直接套用会低估利息收入）。利率输入单位为百分比，页面上限为 20%；若合同利率确实超过 20%，请先核对是否把小数利率误填成百分数。
+          默认利率为暂估值，请按协议核对。
+          <HelpTip text="活期、保证金取大行挂牌水平；其他类型取实务常见区间中部。输入单位为百分比，上限 20%；超限时请核对是否误将小数利率填成百分数。" />
         </p>
         {/* 容器复用 .deposit-tier-table（CSS 有 > table 直接子选择器，不能在
             表格外再插一层 div）；resize 只接管容器里的 table，折叠按钮不受影响。 */}
@@ -3084,10 +3372,9 @@ function RateTierCard({
                   大行挂牌<small>{tiers.listedDate} · 参考下限</small>
                 </th>
                 <th aria-label="实务常见区间">实务常见区间</th>
-                <th aria-label="本次采用（%，可修改）">
-                  本次采用（%，可修改）<small>默认＝市场中枢</small>
+                <th aria-label="本次采用利率，单位百分比，可修改">
+                  本次采用（%）<small>可修改</small>
                 </th>
-                <th aria-label="实务说明">实务说明</th>
               </tr>
             </thead>
             <tbody id="deposit-rate-tier-rows">
@@ -3101,7 +3388,7 @@ function RateTierCard({
                       applied === undefined ? "deposit-tier-unset" : undefined
                     }
                   >
-                    <td>{tier.categoryLabel}</td>
+                    <td>{tier.categoryLabel} {tier.practiceNote && <HelpTip text={tier.practiceNote} />}</td>
                     <td>{tier.termLabel || "—"}</td>
                     <td>{pct(tier.benchmarkRate, "央行未公布")}</td>
                     <td>{pct(tier.listedRate, "按存款协议")}</td>
@@ -3129,7 +3416,6 @@ function RateTierCard({
                         <b>%</b>
                       </span>
                     </td>
-                    <td className="deposit-tier-note">{tier.practiceNote}</td>
                   </tr>
                 );
               })}
@@ -3159,7 +3445,7 @@ function RateTierCard({
         )}
         <ReferenceLinks tiers={tiers} />
         <p className="deposit-tier-note">
-          利率来源与口径说明
+          利率依据
           <HelpTip
             text={`央行基准：${tiers.benchmarkSource}；大行挂牌：${tiers.listedSource}；实务常见区间：${tiers.practiceSource}；审计依据：${tiers.authority}`}
           />
@@ -3327,6 +3613,7 @@ function SourceCard(props: {
 
 function MappingPreview(props: {
   title: string;
+  sourceName: string;
   kind: "je" | "tb";
   inspection: Inspection;
   mapping: Record<string, string | string[]>;
@@ -3345,74 +3632,37 @@ function MappingPreview(props: {
   // 标签优先取引擎随识别结果下发的 roles，未下发（或没有该角色）回落本地表。
   const labels = resolveRoleLabels(props.inspection.roles, props.labels);
   const roles = Object.entries(labels);
-  const forms = useLedgerForms(props.kind);
+  const forms = interestLedgerForms(props.kind, useLedgerForms(props.kind), "deposit");
   const formMatch = forms.length
     ? resolveForm(props.kind, forms, props.mapping)
     : undefined;
   return (
     <MappingPanel
       title={props.title}
+      sourceName={props.sourceName}
       headers={props.inspection.headers}
       rows={props.inspection.preview}
       mapping={props.mapping}
       roles={roles}
       groups={formGroups(props.kind, roles, forms, props.mapping)}
       requirementOf={(role) => roleRequirement(formMatch, role)}
+      alternatesOf={(role) => formMatch?.form.anyOf.find((slot) => slot.includes(role) && slot.length > 1)?.filter((other) => other !== role)}
       formNote={describeForm(formMatch, (role) => labels[role] ?? role)}
+      formComplete={formMatch?.complete}
       multi={DEPOSIT_MULTI}
       missing={props.missing}
       banner={props.banner}
       busy={props.reviewBusy}
       resizeKey={`deposit.mapping.${props.kind}`}
       toolbar={
-        <>
-          <label>
-            Sheet
-            <select
-              value={props.inspection.sheet}
-              onChange={(e) => props.onHeaderChange(0, 0, e.target.value)}
-            >
-              {(props.inspection.sheets.length
-                ? props.inspection.sheets
-                : [props.inspection.sheet]
-              ).map((sheet) => (
-                <option key={sheet}>{sheet}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            标题行
-            <Input
-              controlSize="sm"
-              type="number"
-              min={1}
-              value={props.inspection.headerRow}
-              onChange={(e) =>
-                props.onHeaderChange(
-                  Number(e.target.value),
-                  props.inspection.headerDepth,
-                  props.inspection.sheet,
-                )
-              }
-            />
-          </label>
-          <label>
-            表头层数
-            <select
-              value={props.inspection.headerDepth}
-              onChange={(e) =>
-                props.onHeaderChange(
-                  props.inspection.headerRow,
-                  Number(e.target.value),
-                  props.inspection.sheet,
-                )
-              }
-            >
-              <option value={1}>1层</option>
-              <option value={2}>2层</option>
-            </select>
-          </label>
-        </>
+        <SourceTableControls
+          sheet={props.inspection.sheet} sheets={props.inspection.sheets}
+          headerRow={props.inspection.headerRow} headerDepth={props.inspection.headerDepth}
+          disabled={props.reviewBusy}
+          onSheetChange={(sheet) => props.onHeaderChange(0, 0, sheet)}
+          onHeaderRowChange={(row) => props.onHeaderChange(Number(row), props.inspection.headerDepth, props.inspection.sheet)}
+          onHeaderDepthChange={(depth) => props.onHeaderChange(props.inspection.headerRow, depth, props.inspection.sheet)}
+        />
       }
       onChange={(next) =>
         props.onMappingChange(next as Record<string, string | string[]>)
@@ -3450,11 +3700,7 @@ export function Results({
     storageKey: "deposit.results",
   });
   const summary = (result?.summary ?? {}) as Record<string, unknown>;
-  const amount = (value: unknown) =>
-    new Intl.NumberFormat("zh-CN", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(Number(value ?? 0));
+  const amount = (value: unknown) => formatMoney(value ?? 0);
   const percent = (value: unknown) =>
     value == null
       ? "无法计算"
@@ -3492,29 +3738,52 @@ export function Results({
           0,
         )
       : 0;
-  const liveTotal = rows
-    .filter((row) => row.rateResolved)
-    .reduce((sum, row) => sum + rowInterest(row), 0);
-  const missing = rows.filter((row) => !row.rateResolved);
+  // 合计与筛选只随行数据/筛选条件重算，切步骤等整页重渲染不再全表扫一遍。
+  const liveTotal = useMemo(
+    () =>
+      rows
+        .filter((row) => row.rateResolved)
+        .reduce((sum, row) => sum + rowInterest(row), 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows],
+  );
+  const missing = useMemo(
+    () => rows.filter((row) => !row.rateResolved),
+    [rows],
+  );
   // 来源文案已统一，是否"系统预设暂估"看引擎标记位。
-  const provisional = rows.filter((row) => row.rateProvisional === true);
-  const resultMatches = keywordFilterPredicate(resultQuery);
-  const visibleRows = rows.filter((row) => {
-    if (
-      !resultMatches(
-        `${row.entity} ${row.account} ${row.auxiliary ?? ""} ${row.currency ?? ""}`,
+  const provisional = useMemo(
+    () => rows.filter((row) => row.rateProvisional === true),
+    [rows],
+  );
+  const visibleRows = useMemo(() => {
+    const resultMatches = keywordFilterPredicate(resultQuery);
+    return rows.filter((row) => {
+      if (
+        !resultMatches(
+          `${row.entity} ${row.account} ${row.auxiliary ?? ""} ${row.currency ?? ""}`,
+        )
       )
-    )
-      return false;
-    if (!reviewOnly) return true;
-    return (
-      depositBalanceCheckStatus(row) !== "已勾稽" ||
-      depositRateCheckStatus(row) !== "已填利率"
-    );
-  });
+        return false;
+      if (!reviewOnly) return true;
+      return (
+        depositBalanceCheckStatus(row) !== "已勾稽" ||
+        depositRateCheckStatus(row) !== "已填利率"
+      );
+    });
+  }, [rows, resultQuery, reviewOnly]);
+  // 结果表分批显示：行数据全量保留，界面先画首批（与科目复核 250 条/批同款），
+  // 避免几千户结果一次性铺开拖慢切步与首绘。
+  const [resultLimit, setResultLimit] = useState(ACCOUNT_REVIEW_PAGE_SIZE);
+  useEffect(() => {
+    setResultLimit(ACCOUNT_REVIEW_PAGE_SIZE);
+  }, [resultQuery, reviewOnly, rows]);
+  const renderedRows = visibleRows.slice(0, resultLimit);
   const auxiliaryWarnings = Array.isArray(summary.auxiliaryWarnings)
     ? summary.auxiliaryWarnings.map(String).filter(Boolean)
     : [];
+  const auxiliaryDetails = auxiliaryFallbackAccountsSchema.safeParse(summary.auxiliaryFallbackAccounts);
+  const auxiliaryFallbackAccounts = auxiliaryDetails.success ? auxiliaryDetails.data : [];
   const stale =
     Math.abs(liveTotal - Number(summary.calculatedInterest ?? 0)) > 0.005;
   const jeCurrencyAllocationWarning = String(
@@ -3572,7 +3841,7 @@ export function Results({
           }
         >
           {missing.length
-            ? "测算未完整"
+            ? "待补利率"
             : provisional.length
               ? "利率待确认"
               : stale
@@ -3598,52 +3867,89 @@ export function Results({
         </span>
       </div>
 
-      {missing.length > 0 && (
-        <p className="deposit-stale">
-          <b>{missing.length} 个账户尚未确定利率，测算尚不完整</b>
-          <span>
-            涉及 {[...new Set(missing.map((row) => row.tierLabel))].join("、")}
-            ，月均余额合计{" "}
-            {amount(missing.reduce((sum, row) => sum + row.averageBalance, 0))}
-            。
-            这些档位的利率是逐笔合同约定的，请按存款协议、银行对账单或利息清单填入实际利率——填之前它们的利息不计入下方合计和与
-            TB 的比较。
-          </span>
-        </p>
-      )}
-      {provisional.length > 0 && (
-        <section className="deposit-notice" aria-label="暂估利率待确认">
-          <h4>{provisional.length} 个账户已采用系统预设利率，请确认</h4>
-        </section>
-      )}
+      {(() => {
+        // 结果页提示聚合：只有「待补利率」是行动条，其余口径说明默认折叠，
+        // 不再让四连黄条把绿色结论挤到第四落点（设计评审 2026-10-25）。
+        const notices: NoticeItem[] = [];
+        if (missing.length > 0) {
+          notices.push({
+            tone: "warning",
+            actionable: true,
+            children: (
+              <>
+                <b>{missing.length} 户利率待补</b>
+                <span>
+                  这些档位的利率逐笔约定，请按存款协议、银行对账单或利息清单填入实际利率；补齐前它们的利息不计入合计和与
+                  TB 的比较。
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    requestAnimationFrame(() =>
+                      document.querySelector<HTMLInputElement>(".deposit-table input.deposit-rate-missing")?.focus(),
+                    )
+                  }
+                >
+                  补充利率
+                </Button>
+              </>
+            ),
+          });
+        }
+        if (provisional.length > 0) {
+          notices.push({
+            tone: "info",
+            children: (
+              <span>
+                {provisional.length} 个账户已采用系统预设利率（市场中枢暂估），已纳入测算；请按协议或对账单确认。
+              </span>
+            ),
+          });
+        }
+        if (jeUncoveredEntities.length > 0) {
+          notices.push({
+            tone: "info",
+            children: (
+              <span>
+                序时账未覆盖核算主体 {jeUncoveredEntities.join("、")}
+                ：这些主体的账户已直接按（期初＋期末）÷2 暂估全年平均余额（共
+                {Number(summary.jeUncoveredAccountCount ?? 0)}
+                户）；如需逐月勾稽，请补充对应主体的序时账。
+              </span>
+            ),
+          });
+        }
+        if (auxiliaryWarnings.length > 0 || auxiliaryFallbackAccounts.length > 0) {
+          notices.push({
+            tone: "info",
+            children: (
+              <details className="deposit-auxiliary-notice" aria-label="辅助核算联动">
+                <summary>
+                  辅助核算联动：{auxiliaryFallbackAccounts.length > 0 ? `${auxiliaryFallbackAccounts.length} 个账户` : "账户"}未按辅助核算拆分，已按主体＋科目测算（查看明细）
+                </summary>
+                <div className="deposit-auxiliary-details">
+                  {auxiliaryWarnings.length > 0 && <ul>
+                    {auxiliaryWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+                  </ul>}
+                  {auxiliaryFallbackAccounts.length > 0 ? <ul className="deposit-auxiliary-accounts">
+                    {auxiliaryFallbackAccounts.map((account) => <li key={account.key}>
+                      <strong>{account.entity === DEFAULT_ENTITY ? "未区分主体" : account.entity} / {account.account} / {account.currency || "未标币种"}</strong>
+                      <p>未拆分原因：{account.reason}</p>
+                      <p>TB 辅助明细（{account.auxiliaries.length} 项）：{account.auxiliaries.join("、")}</p>
+                    </li>)}
+                  </ul> : !auxiliaryDetails.success && <p>此历史结果未记录受影响账户，请重新测算查看明细。</p>}
+                </div>
+              </details>
+            ),
+          });
+        }
+        return <NoticeStack items={notices} />;
+      })()}
       {jeCurrencyAllocationWarning && (
         <p className="deposit-stale" role="alert">
           <b>JE 发生额无法按币种分配</b>
           <span>{jeCurrencyAllocationWarning}</span>
-        </p>
-      )}
-      {auxiliaryWarnings.length > 0 && (
-        <section className="deposit-notice" aria-label="辅助核算联动">
-          <h4>辅助核算联动</h4>
-          <p>以下账户未按辅助核算拆分，已按主体＋科目执行测算：</p>
-          <ul>
-            {auxiliaryWarnings.map((warning) => (
-              <li key={warning}>{warning}</li>
-            ))}
-          </ul>
-        </section>
-      )}
-      {jeUncoveredEntities.length > 0 && (
-        <p className="deposit-stale" role="alert">
-          <b>序时账未覆盖核算主体</b>
-          <span>
-            序时账期间内没有匹配到主体
-            {jeUncoveredEntities.join("、")}
-            的任何发生额，这些主体的账户已直接按（期初＋期末）÷2
-            暂估全年平均余额（共
-            {Number(summary.jeUncoveredAccountCount ?? 0)}
-            户），不推导月末余额；如需逐月勾稽，请补充对应主体的序时账。
-          </span>
         </p>
       )}
       <div className="fx-bridge-step">
@@ -3686,8 +3992,10 @@ export function Results({
             !booked
               ? "TB 中未识别到利息收入科目"
               : missing.length
-                ? `差异率 ${percent(summary.differenceRatio)}；尚有 ${missing.length} 户未定利率`
-                : `差异率 ${percent(summary.differenceRatio)}`,
+                ? `${summary.differenceRatio == null ? "账面收入为零，差异率不适用" : `差异率 ${percent(summary.differenceRatio)}`}；尚有 ${missing.length} 户未定利率`
+                : summary.differenceRatio == null
+                  ? "账面收入为零，差异率不适用"
+                  : `差异率 ${percent(summary.differenceRatio)}`,
             booked && summary.reconciliationPassed === true
               ? "pass"
               : "warning",
@@ -3699,7 +4007,7 @@ export function Results({
         <div>
           <h4>逐户余额勾稽与利息测算</h4>
           <p>
-            当前显示 {visibleRows.length} / {rows.length} 户；年利率输入上限为 20%，超过时请先核对单位。
+            当前显示 {renderedRows.length} / {visibleRows.length} 户（筛选自 {rows.length} 户）；年利率输入上限为 20%，超过时请先核对单位。
           </p>
         </div>
         <Button variant="secondary" disabled={busy} onClick={onRecalculate}>
@@ -3758,7 +4066,7 @@ export function Results({
             </tr>
           </thead>
           <tbody>
-            {visibleRows.map((row) => (
+            {renderedRows.map((row) => (
               <Fragment key={row.key}>
                 <tr
                   className={
@@ -3981,13 +4289,26 @@ export function Results({
           </tbody>
         </table>
       </div>
+      {renderedRows.length < visibleRows.length && (
+        <div className="deposit-account-more">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() =>
+              setResultLimit((current) => current + ACCOUNT_REVIEW_PAGE_SIZE)
+            }
+          >
+            继续显示（已显示 {renderedRows.length} / {visibleRows.length}）
+          </Button>
+        </div>
+      )}
     </section>
   );
 }
 
 /**
- * 条件渲染数据表的列宽调整容器：复用原容器 div（className 不变），只多挂
- * resize ref，DOM 结构与样式完全不动。列宽 hook 在挂载时绑定容器，而本页
+ * 条件渲染数据表的列宽调整容器：内层保留原 className 和 resize ref，
+ * 外框独立绘制渐隐，避免提示随表格滚入内容区。列宽 hook 在挂载时绑定容器，而本页
  * 的表随步骤切换反复卸载重挂，页面级 hook 只会在首次挂载时绑定一次，所以
  * 由本组件的每次挂载重新接管（表格晚于容器出现时 hook 也会自动观察补接）。
  */
@@ -4001,9 +4322,18 @@ function ResizableTableBox({
   children: ReactNode;
 }) {
   const resize = useTableColumnResize<HTMLDivElement>({ storageKey: resizeKey });
+  const { ref: fadeRef, ...fadeFlags } = useScrollFadeFlags<HTMLDivElement>();
   return (
-    <div className={className} ref={resize.ref}>
-      {children}
+    <div className="scroll-fade-x" {...fadeFlags}>
+      <div
+        className={cn("scroll-fade-x-scroll", className)}
+        ref={(node) => {
+          resize.ref.current = node;
+          fadeRef.current = node;
+        }}
+      >
+        {children}
+      </div>
     </div>
   );
 }

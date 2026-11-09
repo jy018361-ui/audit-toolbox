@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>真实样式核验 · 椭圆标题</title>
+<link rel="stylesheet" href="../dist-web/assets/index-BapVkzvm.css">
+<link rel="stylesheet" href="../dist-web/assets/fx-audit-C7U1K2qv.css">
+<style>
+  /* 仅页面骨架：模拟应用内容区宽度，不干预卡片本身样式 */
+  .stage { max-width: 1430px; margin: 0 auto; padding: 28px 24px; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="fx-source-grid">
+    <div class="fx-source-slot fx-source-slot-je">
+      <div data-slot="card" data-size="default" data-variant="default" class="group/card flex min-w-0 flex-col gap-(--card-spacing) overflow-hidden rounded-xl bg-card py-(--card-spacing) text-sm text-card-foreground shadow-card [--card-spacing:--spacing(6)] has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:--spacing(3)] data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl border border-border/70 shadow-card fx-source-card">
+        <div data-slot="card-header" class="group/card-header @container/card-header grid auto-rows-min items-start gap-1 rounded-t-xl px-(--card-spacing) has-data-[slot=card-action]:grid-cols-[1fr_auto] has-data-[slot=card-description]:grid-rows-[auto_auto] [.border-b]:pb-(--card-spacing)">
+          <div data-slot="card-title" class="font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm">已识别：JE 序时账</div>
+        </div>
+        <div data-slot="card-content" class="min-w-0 px-(--card-spacing)">
+          <div class="fx-detected-file">
+            <button class="fx-file-name-button" type="button">04JE.XLSX</button>
+            <button type="button">移除</button>
+            <button type="button">更正为 TB</button>
+          </div>
+          <p style="margin-top:16px">164,420 行 × 61 列</p>
+          <p style="margin-top:12px">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+    <div class="fx-source-slot fx-source-slot-tb">
+      <div data-slot="card" data-size="default" data-variant="default" class="group/card flex min-w-0 flex-col gap-(--card-spacing) overflow-hidden rounded-xl bg-card py-(--card-spacing) text-sm text-card-foreground shadow-card [--card-spacing:--spacing(6)] has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:--spacing(3)] data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl border border-border/70 shadow-card fx-source-card">
+        <div data-slot="card-header" class="group/card-header @container/card-header grid auto-rows-min items-start gap-1 rounded-t-xl px-(--card-spacing) has-data-[slot=card-action]:grid-cols-[1fr_auto] has-data-[slot=card-description]:grid-rows-[auto_auto] [.border-b]:pb-(--card-spacing)">
+          <div data-slot="card-title" class="font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm">已识别：TB 科目余额表</div>
+        </div>
+        <div data-slot="card-content" class="min-w-0 px-(--card-spacing)">
+          <div class="fx-detected-file">
+            <button class="fx-file-name-button" type="button">04TB.XLSX</button>
+            <button type="button">移除</button>
+            <button type="button">更正为 JE</button>
+          </div>
+          <p style="margin-top:16px">580 行 × 11 列</p>
+          <p style="margin-top:12px">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

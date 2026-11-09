@@ -1,0 +1,1 @@
+import{a as e}from"./index-BcFyuI-b.js";function c({label:l,required:a,hint:s,children:i,className:r}){return e.jsxs("label",{className:`field ${r??""}`,children:[e.jsxs("span",{className:"field-label",children:[l,a&&e.jsx("b",{className:"field-required",children:"*"})]}),i,s&&e.jsx("small",{className:"field-hint",children:s})]})}export{c as F};

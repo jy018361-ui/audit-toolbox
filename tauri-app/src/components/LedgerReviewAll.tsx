@@ -44,6 +44,7 @@ function outcomeStatus(outcome: LedgerReviewOutcome): string {
 export function useLedgerDictReviews(
   call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
   sourceKeys?: Partial<Record<"je" | "tb", string>>,
+  mappings?: Partial<Record<"je" | "tb", Record<string, string | string[] | undefined>>>,
 ) {
   const [reviewing, setReviewing] = useState<Record<"je" | "tb", boolean>>({
     je: false,
@@ -60,6 +61,11 @@ export function useLedgerDictReviews(
   const slotsRef = useRef<Partial<Record<"je" | "tb", LedgerReviewSlot>>>({});
   const mounted = useRef(true);
   const previousSources = useRef(sourceKeys);
+  const mappingKey = (mapping: Record<string, unknown> | undefined) => JSON.stringify(
+    Object.entries(mapping ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+  );
+  const mappingKeys = { tb: mappingKey(mappings?.tb), je: mappingKey(mappings?.je) };
+  const previousMappings = useRef(mappingKeys);
   /** 开始换文件/重新识别时即调用；旧请求仍可结束，但不得再回写。 */
   const clearReview = useCallback((kind: "je" | "tb") => {
     generation.current[kind] += 1;
@@ -84,6 +90,16 @@ export function useLedgerDictReviews(
     }
     previousSources.current = sourceKeys;
   }, [sourceKeys?.je, sourceKeys?.tb, clearReview]);
+  useLayoutEffect(() => {
+    for (const kind of ["je", "tb"] as const) {
+      // 自动采纳、撤销和确认建议已同时更新 outcome，不应清掉刚得到的新结论。
+      // 手工修改或其他映射变化则使旧结论及迟到的请求立即失效。
+      if (previousMappings.current[kind] !== mappingKeys[kind] &&
+          mappingKeys[kind] !== mappingKey(results[kind]?.mapping))
+        clearReview(kind);
+    }
+    previousMappings.current = mappingKeys;
+  }, [mappingKeys.je, mappingKeys.tb, clearReview]);
   const reviewAll = useCallback(
     async (
       slots: Partial<Record<"je" | "tb", LedgerReviewSlot>>,
@@ -310,30 +326,13 @@ export function LedgerReviewAll(props: {
     latestReview.current();
   }, [props.autoReviewKey, props.autoReviewOwner, props.disabled]);
   const reviewingAny = props.present.some((kind) => props.reviewing[kind]);
-  const both = props.present.length > 1;
-  const subject = props.present
-    .map((kind) => props.names[kind])
-    .join(both ? "＋" : "");
-  const statusKinds = props.present.filter((kind) => {
-    const result = props.results?.[kind];
-    return !result || result.failed || props.reviewing[kind] || result.applied.length > 0 ||
-      result.pending.length > 0 || Boolean(result.missingAfter?.length) || Boolean(result.mappingWarnings?.length);
-  });
+  const subject = props.present.map((kind) => props.names[kind]).join("＋");
   return (
     <section className="fx-review-all" aria-label="字段映射一键复核">
       <div>
         <h2>字段映射一键复核</h2>
-        {props.showDescription !== false && (
-          <p>
-            点击一次，
-            {both
-              ? `同时复核 ${subject} 两个文件的字段映射`
-              : `复核 ${subject} 的字段映射`}
-            。
-          </p>
-        )}
-        {statusKinds.length > 0 && <div className="fx-review-states" aria-live="polite">
-          {statusKinds.map((kind) =>
+        {props.present.length > 0 && <div className="fx-review-states" aria-live="polite">
+          {props.present.map((kind) =>
             (() => {
               const result = props.results?.[kind];
               const presentation = result

@@ -41,12 +41,15 @@ function storedPayload(storageKey: string): { labels: string[]; widths: number[]
 /**
  * 测试库的 fireEvent.pointerDown 在 jsdom 里造出的是没有 button 字段的裸 Event，
  * 这里直接派发 MouseEvent 指定事件类型，带上真实浏览器 PointerEvent 携带的坐标与按键。
+ * `via` 是途经的中间坐标：真实拖拽会触发一连串 pointermove，每个都要参与计算。
  */
-function drag(handle: Element, fromX: number, toX: number): void {
+function drag(handle: Element, fromX: number, toX: number, via: number[] = []): void {
   handle.dispatchEvent(
     new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: fromX }),
   );
-  window.dispatchEvent(new MouseEvent("pointermove", { clientX: toX }));
+  for (const x of [...via, toX]) {
+    window.dispatchEvent(new MouseEvent("pointermove", { clientX: x }));
+  }
   window.dispatchEvent(new MouseEvent("pointerup", {}));
 }
 
@@ -62,6 +65,11 @@ describe("列宽调整纯逻辑", () => {
     expect(clampWidth(Number.NaN, 56)).toBe(56);
   });
 
+  it("clampWidth 默认带上限保险丝，也可显式放开", () => {
+    expect(clampWidth(5000, 56)).toBe(1600);
+    expect(clampWidth(5000, 56, Number.POSITIVE_INFINITY)).toBe(5000);
+  });
+
   it("记忆读写按表头校验：列名或列数不符时作废", () => {
     writeStoredWidths("unit.case", ["甲", "乙"], [100, 200]);
     expect(readStoredWidths("unit.case", ["甲", "乙"])).toEqual([100, 200]);
@@ -69,6 +77,11 @@ describe("列宽调整纯逻辑", () => {
     expect(readStoredWidths("unit.case", ["甲"])).toBeNull();
     window.localStorage.setItem(columnWidthsStorageKey("unit.bad"), "{oops");
     expect(readStoredWidths("unit.bad", ["甲"])).toBeNull();
+  });
+
+  it("旧版本存下的超宽坏记忆读回时压回上限，自愈", () => {
+    writeStoredWidths("unit.heal", ["甲"], [5200]);
+    expect(readStoredWidths("unit.heal", ["甲"])).toEqual([1600]);
   });
 });
 
@@ -118,6 +131,61 @@ describe("useTableColumnResize + DataTable 接入", () => {
     drag(firstHandle, 200, -500);
 
     expect((table.querySelectorAll("colgroup col")[0] as HTMLElement).style.width).toBe("56px");
+  });
+
+  it("真实拖拽的连续 pointermove 只按总位移计算，不重复叠加", () => {
+    // 旧缺陷：每次 move 都把「起点至今的总位移」加到「已加过增量的宽度」上，
+    // 同一段 45px 位移经 4 个事件会滚成 205px，观感就是一拖失控变宽
+    const { container } = render(
+      <DataTable resizeKey="demo.multi" columns={["列A", "列B"]} rows={[["1", "2"]]} />,
+    );
+    const table = container.querySelector("table")!;
+    setCellWidths(table, [100, 100]);
+    const [firstHandle] = Array.from(container.querySelectorAll<HTMLDivElement>(".tcr-handle"));
+
+    drag(firstHandle, 200, 245, [210, 220, 230]);
+
+    expect((table.querySelectorAll("colgroup col")[0] as HTMLElement).style.width).toBe("145px");
+    expect(storedPayload("demo.multi")?.widths).toEqual([145, 100]);
+  });
+
+  it("向左拖同样只按总位移收缩，中途多个事件不会把列瞬间压没", () => {
+    const { container } = render(
+      <DataTable resizeKey="demo.shrinkDrag" columns={["列A", "列B"]} rows={[["1", "2"]]} />,
+    );
+    const table = container.querySelector("table")!;
+    setCellWidths(table, [300, 100]);
+    const [firstHandle] = Array.from(container.querySelectorAll<HTMLDivElement>(".tcr-handle"));
+
+    drag(firstHandle, 400, 370, [395, 388, 380]);
+
+    expect((table.querySelectorAll("colgroup col")[0] as HTMLElement).style.width).toBe("270px");
+  });
+
+  it("拖动宽度有上限保险丝，误拖不会把列撑到不可用", () => {
+    const { container } = render(
+      <DataTable resizeKey="demo.dragCap" columns={["列A"]} rows={[["1"]]} />,
+    );
+    const table = container.querySelector("table")!;
+    setCellWidths(table, [100]);
+    const [handle] = Array.from(container.querySelectorAll<HTMLDivElement>(".tcr-handle"));
+
+    drag(handle, 200, 5000, [1500, 3000]);
+
+    expect((table.querySelectorAll("colgroup col")[0] as HTMLElement).style.width).toBe("1600px");
+  });
+
+  it("起拖时已超上限的列不强制收回，往窄拖不跳变", () => {
+    const { container } = render(
+      <DataTable resizeKey="demo.overwide" columns={["列A"]} rows={[["1"]]} />,
+    );
+    const table = container.querySelector("table")!;
+    setCellWidths(table, [1800]);
+    const [handle] = Array.from(container.querySelectorAll<HTMLDivElement>(".tcr-handle"));
+
+    drag(handle, 200, 150);
+
+    expect((table.querySelectorAll("colgroup col")[0] as HTMLElement).style.width).toBe("1750px");
   });
 
   it("重新挂载后按记忆恢复列宽", () => {

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { formatMoney } from "@/lib/numberFormat";
 import "./AudiPickLegacyLoanAudit.css";
 
 export type AudiPickLoanAuditProject = {
@@ -285,7 +286,7 @@ function parseAmount(value: unknown, fallbackCurrency?: unknown) {
 function formatAmount(amount: number | null, currency: string): string {
   if (amount === null) return "待明确";
   const name = CURRENCY_NAMES[currency] ?? currency;
-  return `${name ? `${name} ` : ""}${amount.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}`;
+  return `${name ? `${name} ` : ""}${formatMoney(amount)}`;
 }
 
 function addMonths(date: Date, count: number): Date {

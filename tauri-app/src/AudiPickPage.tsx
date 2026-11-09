@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { useNavigate } from "react-router-dom";
 import {
   audipickPdfBytes,
@@ -1376,6 +1377,8 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     if (preparingRef.current) return;
     preparingRef.current = true;
     setBusy(true); setError(""); setSelectedDocument(id); setPdfText("");
+    // 上一份文档的 AI 模板建议不得带到新文档上，新文档的分类返回后会重新给出。
+    setSuggestedRule(undefined);
     selectedDocumentRef.current = id;
     const projectId = selectedId;
     const existingPdf = pdfDocument;
@@ -2303,7 +2306,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         const supplementaryItems = filterCovenantScope(outcome.items, "supplementary").length;
         const diagnostic = outcome.unresolvedCount ? `（原始失败记录 ${outcome.unresolvedRecordCount} 条，原因见底稿诊断）` : "";
         const pendingCount = outcome.items.filter(row => row._covenant_pending_case === true).length;
-        const message = `已保存财务契约 ${repaymentItems} 项${pendingCount ? `，待新增案例 ${pendingCount} 项` : ""}。${diagnostic}`;
+        const message = `已保存财务指标契约 ${repaymentItems} 项${pendingCount ? `，待新增案例 ${pendingCount} 项` : ""}。${diagnostic}`;
         setResult({ items: outcome.items.length, repaymentItems, supplementaryItems, unresolvedItems: outcome.unresolvedCount });
         addLog(bundle[0].name, "契约关联提取", message, outcome.unresolvedCount ? "warn" : "done");
         operation.finish(outcome.unresolvedCount ? "failed" : "completed", message);
@@ -2729,7 +2732,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               addLog(
                 anchor.name,
                 "批量契约关联提取",
-                `已保存财务契约 ${repaymentItems} 项，待新增案例 ${outcome.items.filter(row => row._covenant_pending_case === true).length} 项${outcome.unresolvedCount ? `（原始失败记录 ${outcome.unresolvedRecordCount} 条，原因见底稿诊断）` : ""}`,
+                `已保存财务指标契约 ${repaymentItems} 项，待新增案例 ${outcome.items.filter(row => row._covenant_pending_case === true).length} 项${outcome.unresolvedCount ? `（原始失败记录 ${outcome.unresolvedRecordCount} 条，原因见底稿诊断）` : ""}`,
                 outcome.unresolvedCount ? "warn" : "done",
               );
               if (outcome.unresolvedCount) throw new Error(`${anchor.name} 已保存可核实结果，但有 ${outcome.unresolvedCount} 组关联未完成（原始失败记录 ${outcome.unresolvedRecordCount} 条），请查看底稿诊断。`);
@@ -3618,7 +3621,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       filterCovenantScope(currentResults, scope as CovenantScopeFilter).length,
     ]),
   );
-  const ocrDisplayLabel = configStatus.ocr?.engine === "baidu"
+  const ocrDisplayLabel = configStatus.ocr?.engine === "bailian"
+    ? "百炼OCR"
+    : configStatus.ocr?.engine === "baidu"
     ? "百度OCR"
     : configStatus.ocr?.engine === "local"
       ? "本机OCR"
@@ -3669,6 +3674,10 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           onCreateProject={(values) => create(values)}
           onContinueProject={(project) => {
             const source = dashboardById.get(project.id);
+            // 切项目＝切换数据现场：上一项目的上传状态与错误提示不带过来。
+            setError("");
+            setPreparationStatus("");
+            setSuggestedRule(undefined);
             setSelectedId(project.id);
             setSelectedDocument("");
             setRuleId(source?.project.defaultRuleId ?? "loan_covenant");
@@ -4003,7 +4012,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                 revenueMissingTasks.length > 0 ? (
                   <div className="error-box aplc-revenue-missing">
                     <strong>
-                      收入底稿待补资料（{revenueMissingTasks.length}）
+                      收入底稿待补资料（{formatCount(revenueMissingTasks.length)}）
                     </strong>
                     {revenueMissingTasks
                       .slice(0, 8)
@@ -4182,7 +4191,6 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               <div className="section-title">
                 <div>
                   <h2>项目工作台</h2>
-                  <p className="hint">查找项目、查看处理进度或新建摘录任务。</p>
                 </div>
                 <div className="actions compact">
                   <button className="secondary" disabled={busy} onClick={() => void refresh()}>刷新</button>
@@ -4549,7 +4557,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           {batchFailures.length > 0 && (
             <div className="error-box">
               <strong>
-                批量提取失败 {batchFailures.length} 份（成功 {batchSuccessCount}{" "}
+                批量提取失败 {formatCount(batchFailures.length)} 份（成功 {formatCount(batchSuccessCount)}{" "}
                 份）
               </strong>
               {batchFailures.slice(0, 10).map((item, index) => (
@@ -4676,7 +4684,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           )}
           {revenueMissingTasks.length > 0 && (
             <div className="error-box">
-              <strong>收入底稿待补资料（{revenueMissingTasks.length}）</strong>
+              <strong>收入底稿待补资料（{formatCount(revenueMissingTasks.length)}）</strong>
               {/* The rule module reports `text` / `questionNos` / `blocking`.
                   Reading `title` first meant every row fell through to the
                   placeholder, so the panel never said what was missing. */}
@@ -4703,7 +4711,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             <>
               <div className="ap-result-heading">
                 <div>
-                  <h3>当前底稿结果（{currentResults.length}）</h3>
+                  <h3>当前底稿结果（{formatCount(currentResults.length)}）</h3>
                   <small>重新提取不会覆盖历史版本；人工修改只作用于当前版本。</small>
                 </div>
                 {resultRuns.length > 0 && (
@@ -4822,7 +4830,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               />
             </label>
             <p className="hint">
-              共 {rules.length} 个模板 · 点击卡片查看右侧详情
+              共 {formatCount(rules.length)} 个模板 · 点击卡片查看右侧详情
             </p>
             <div className="ap-template-list">
               {rules
@@ -4997,7 +5005,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             </div>
           </div>
           {workLog.length === 0 ? (
-            <EmptyState compact title="暂无处理记录" description="导入 PDF、文字识别和智能提取的处理记录会显示在这里。" />
+            <EmptyState compact title="暂无处理记录" />
           ) : (
             <div className="worklog-list">
               {workLog.map((entry) => (

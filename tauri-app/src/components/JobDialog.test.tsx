@@ -32,6 +32,13 @@ function job(overrides: Partial<JobEvent> = {}): JobEvent {
 const nameOf = (toolId: string) =>
   toolId === "Excel_Merger" ? "Excel 批量合并" : toolId;
 
+it("后台补齐任务显示页内进度，不弹出阻挡字段编辑的等待窗", () => {
+  const background = job({ background: true });
+  render(<JobDialogProvider jobs={[background]} nameOf={nameOf}><JobProgress job={background} /></JobDialogProvider>);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getByText(background.message)).toBeTruthy();
+});
+
 function renderDialog(jobs: JobEvent[]) {
   return render(
     <JobDialogProvider jobs={jobs} nameOf={nameOf}>
@@ -195,4 +202,13 @@ describe("任务进度弹窗", () => {
     expect(screen.getByText("Excel 批量合并 · 处理中 30%")).toBeTruthy();
     expect(screen.queryByText("正在合并第 3 个文件")).toBeNull();
   });
+});
+
+it("会议任务默认收起，可展开，普通任务仍直接显示进度", () => {
+  const view = renderDialog([job({ toolId: "meeting_minutes" })]);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /展开任务进度/ }));
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  view.rerender(<JobDialogProvider jobs={[job()]} nameOf={nameOf}><div>页面内容</div></JobDialogProvider>);
+  expect(screen.getByRole("dialog")).toBeTruthy();
 });

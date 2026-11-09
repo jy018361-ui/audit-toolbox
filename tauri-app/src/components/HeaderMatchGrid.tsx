@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ConfirmDialog";
 
 export type HeaderMatchDetection = {
+  kind?: "table" | "key_value" | "empty" | "uncertain";
   headerRow: number;
   headerRowsCount: number;
   confidence: number;
@@ -13,6 +14,7 @@ export type HeaderMatchPreview = {
   template: {
     path: string;
     name: string;
+    sheet: string;
     headers: string[];
     detection: HeaderMatchDetection;
     external: boolean;
@@ -85,8 +87,8 @@ export function flattenTwoLayerHeader(
   let parent = "";
   for (let index = 0; index < width; index += 1) {
     const top = (first[index] ?? "").trim();
-    if (top) parent = top;
-    const child = (second[index] ?? "").trim();
+    if (top) parent = top.replace(/[\n\r]/g, " ");
+    const child = (second[index] ?? "").trim().replace(/[\n\r]/g, " ");
     const name = !parent
       ? child
       : !child || child === parent
@@ -144,13 +146,11 @@ type DragInfo =
   | { kind: "cell"; row: number; col: number; label: string }
   | { kind: "template"; col: number; label: string };
 
-const EXTERNAL_PICK = "__pick_external__";
-
 export function HeaderMatchGrid(props: {
   preview: HeaderMatchPreview;
-  files: { path: string; name: string }[];
   busy?: boolean;
-  onTemplateChange: (path: string) => void;
+  error?: string;
+  onTemplateChange: (path: string, sheet: string) => void;
   onExternalTemplate: () => void;
   /** 导入对照表：返回给用户看的结果文案；用户取消返回 null。 */
   onImportAliases?: () => Promise<string | null>;
@@ -163,7 +163,7 @@ export function HeaderMatchGrid(props: {
   onCancel: () => void;
   onConfirm: (plan: HeaderMatchingPlanJson) => void;
 }) {
-  const { preview, files, busy } = props;
+  const { preview, busy } = props;
   const [template, setTemplate] = useState(() => ({
     headers: [...preview.template.headers],
     detection: { ...preview.template.detection },
@@ -213,6 +213,7 @@ export function HeaderMatchGrid(props: {
     let yellow = 0;
     let unmatched = 0;
     for (const row of rows) {
+      if (row.detection.kind === "empty" || row.detection.headerRowsCount === 0) continue;
       for (const cell of row.cells) {
         if (cell.discard) continue;
         // 人工移入未匹配区的列按「未匹配」计——核对待办时不能被匹配数误导。
@@ -327,19 +328,6 @@ export function HeaderMatchGrid(props: {
     setToast("已重置全部手动修改");
   }
 
-  function acceptAll() {
-    setRows((current) =>
-      current.map((state) => ({
-        ...state,
-        cells: state.cells.map((cell) =>
-          cell.target != null && cell.confidence < GREEN_THRESHOLD
-            ? { ...cell, manual: true, reason: "已确认建议" }
-            : cell,
-        ),
-      })),
-    );
-  }
-
   function confirmCell(row: number, col: number) {
     setRows((current) =>
       current.map((state, index) =>
@@ -355,34 +343,6 @@ export function HeaderMatchGrid(props: {
           : state,
       ),
     );
-  }
-
-  function jumpNextPending() {
-    for (let index = 0; index < rows.length; index += 1) {
-      const col = rows[index].cells.findIndex(
-        (cell) =>
-          !cell.manual &&
-          !cell.discard &&
-          cell.target != null &&
-          cell.confidence < GREEN_THRESHOLD,
-      );
-      if (col >= 0) {
-        const cellNode = gridRef.current?.querySelector<HTMLDivElement>(
-          `[data-cell="${index}-${col}"]`,
-        );
-        cellNode?.scrollIntoView?.({ block: "center", inline: "center" });
-        cellNode?.focus();
-        cellNode?.animate?.(
-          [
-            { boxShadow: "0 0 0 3px rgba(234,179,8,.9)" },
-            { boxShadow: "0 0 0 3px rgba(234,179,8,0)" },
-          ],
-          { duration: 1200 },
-        );
-        return;
-      }
-    }
-    setToast("没有待确认的黄色格子了");
   }
 
   /** 移出模板列（延迟生效）：格子原地不动，点「重新匹配」才批量清到未匹配区。 */
@@ -431,6 +391,7 @@ export function HeaderMatchGrid(props: {
       });
       for (let row = 0; row < rows.length; row += 1) {
         const state = rows[row];
+        if (state.detection.kind === "empty" || state.detection.headerRowsCount === 0) continue;
         const matches = await props.onRematch(template.headers, state.headers, hints);
         setRows((current) =>
           current.map((item, index) => {
@@ -478,11 +439,14 @@ export function HeaderMatchGrid(props: {
     headerRow: number,
     headerRowsCount: number,
   ) {
-    const reflatten = (raw: string[][]) => {
-      if (headerRowsCount >= 2) {
-        return flattenTwoLayerHeader(raw[headerRow] ?? [], raw[headerRow + 1] ?? []);
+    const reflatten = (raw: string[][], start = headerRow, depth = headerRowsCount) => {
+      if (depth === 0) return Array.from({ length: Math.max(0, ...raw.map(r => r.length)) }, (_, i) => `原样列${i + 1}`);
+      if (depth >= 2) {
+        return flattenTwoLayerHeader(raw[start] ?? [], raw[start + 1] ?? []);
       }
-      return [...(raw[headerRow] ?? [])];
+      return (raw[start] ?? []).map((value, index) =>
+        value.trim().replace(/[\n\r]/g, " ") || `列${index + 1}`,
+      );
     };
     // 修改前的人工配对快照（源列名 → 目标列名），重跑后按名字恢复。
     const manualPairs = new Map<string, string>();
@@ -528,12 +492,21 @@ export function HeaderMatchGrid(props: {
       before.forEach(collectManual);
       const nextRows: RowState[] = [];
       for (const state of before) {
-        const rowHeaders = reflatten(state.rawRows);
+        if (state.detection.kind === "empty" || state.detection.headerRowsCount === 0) { nextRows.push(state); continue; }
+        const isTemplateSource = !preview.template.external && state.path === preview.template.path
+          && state.sheet === preview.template.sheet;
+        const detection = isTemplateSource
+          ? { ...state.detection, headerRow, headerRowsCount, needsReview: false }
+          : state.detection;
+        const rowHeaders = reflatten(state.rawRows, detection.headerRow, detection.headerRowsCount);
         const matches = await props.onRematch(nextTemplate, rowHeaders, []);
         const cells = rebuildCells(rowHeaders, matches, nextTemplate);
         nextRows.push({
           ...state,
           headers: rowHeaders,
+          detection,
+          preview: state.rawRows.slice(detection.headerRow + detection.headerRowsCount,
+            detection.headerRow + detection.headerRowsCount + 3),
           cells,
           unmatchedOrder: unmatchedColumnsOf(cells),
         });
@@ -541,7 +514,7 @@ export function HeaderMatchGrid(props: {
       setTemplate((current) => ({
         ...current,
         headers,
-        detection: { ...current.detection, headerRow, headerRowsCount },
+        detection: { ...current.detection, headerRow, headerRowsCount, needsReview: false },
       }));
       setExcluded(new Set());
       setRows(nextRows);
@@ -552,7 +525,9 @@ export function HeaderMatchGrid(props: {
     if (!state) return;
     collectManual(state);
     const rowHeaders = reflatten(state.rawRows);
-    const matches = await props.onRematch(template.headers, rowHeaders, []);
+    const matches = headerRowsCount === 0
+      ? rowHeaders.map(() => ({ target: null, confidence: 0, reason: "无常规表头，从首行原样保留" }))
+      : await props.onRematch(template.headers, rowHeaders, []);
     const cells = rebuildCells(rowHeaders, matches, template.headers);
     setRows((current) =>
       current.map((item, index) =>
@@ -560,7 +535,8 @@ export function HeaderMatchGrid(props: {
           ? {
               ...item,
               headers: rowHeaders,
-              detection: { ...item.detection, headerRow, headerRowsCount },
+              detection: { ...item.detection, kind: headerRowsCount === 0 ? "key_value" : "table", headerRow, headerRowsCount, needsReview: false },
+              preview: item.rawRows.slice(headerRow + headerRowsCount, headerRow + headerRowsCount + 3),
               cells,
               unmatchedOrder: unmatchedColumnsOf(cells),
             }
@@ -574,8 +550,8 @@ export function HeaderMatchGrid(props: {
     if (stats.yellow > 0) {
       const ok = await confirmDialog({
         title: "还有未确认的黄色建议",
-        message: `还有 ${stats.yellow} 项黄色建议未确认，将直接按建议执行，确定开始合并吗？`,
-        confirmLabel: "按建议合并",
+        message: `还有 ${stats.yellow} 项黄色建议未确认，调整后导出将按这些建议排列对应列。`,
+        confirmLabel: "调整后导出",
         tone: "danger",
       });
       if (!ok) return null;
@@ -635,6 +611,30 @@ export function HeaderMatchGrid(props: {
   async function handleConfirm() {
     const plan = await buildPlan();
     if (plan) props.onConfirm(plan);
+  }
+
+  function exportOriginalOrder() {
+    // 用完整列宽按位置映射，忽略网格配对、丢弃和对照表设置。
+    const width = Math.max(template.headers.length, ...rows.map((row) => row.headers.length));
+    const templateHeaders = Array.from({ length: width }, (_, index) =>
+      template.headers[index] || rows.find((row) => row.headers[index])?.headers[index] || `列${index + 1}`,
+    );
+    props.onConfirm({
+      templatePath: preview.template.path,
+      templateHeaders,
+      rememberAliases: [],
+      assignments: rows.map((state) => ({
+        path: state.path,
+        sheet: state.sheet,
+        headerRow: state.detection.headerRow,
+        headerRowsCount: state.detection.headerRowsCount,
+        headers: state.headers,
+        independentOrder: [],
+        columns: state.headers.map((_, source) => ({
+          source, target: source, discard: false, manual: false, reason: "按原列顺序",
+        })),
+      })),
+    });
   }
 
   // ───────────────────────── 指针拖拽（替代 HTML5 DnD） ─────────────────────────
@@ -772,7 +772,7 @@ export function HeaderMatchGrid(props: {
         }
       }}
     >
-      <div className="hmg-panel">
+      <div className="hmg-panel" aria-busy={busy || rematchBusy}>
         <div className="hmg-topbar">
           <div className="hmg-title">
             <strong>表头匹配</strong>
@@ -792,32 +792,14 @@ export function HeaderMatchGrid(props: {
             </span>
           </div>
           <div className="hmg-template">
-            <label>
-              模板：
-              <select
-                value={preview.template.path}
-                disabled={busy}
-                onChange={(event) => {
-                  if (event.target.value === EXTERNAL_PICK) {
-                    props.onExternalTemplate();
-                    return;
-                  }
-                  props.onTemplateChange(event.target.value);
-                }}
-              >
-                {files.map((file) => (
-                  <option key={file.path} value={file.path}>
-                    {file.name}
-                  </option>
-                ))}
-                {preview.template.external && (
-                  <option value={preview.template.path}>
-                    {preview.template.name}（外部）
-                  </option>
-                )}
-                <option value={EXTERNAL_PICK}>从外部文件选择…</option>
-              </select>
-            </label>
+            <span className="hmg-template-label" title={`${preview.template.path} / ${preview.template.sheet}`}>
+              当前基准：{preview.template.name} / {preview.template.sheet}
+              {preview.template.external ? "（外部）" : ""}
+            </span>
+            {busy && <span role="status">正在更新匹配…</span>}
+            <Button variant="secondary" size="sm" disabled={busy || rematchBusy} onClick={props.onExternalTemplate}>
+              选择外部基准…
+            </Button>
             {props.onImportAliases && (
               <Button
                 variant="secondary"
@@ -832,12 +814,14 @@ export function HeaderMatchGrid(props: {
         </div>
 
         <div className="hmg-actions">
+          <span className="hmg-baseline-hint">右键文件名或工作表名 → 设为基准（切换会重置列匹配）</span>
           <details className="hmg-help">
             <summary>操作说明</summary>
             <p className="hmg-hint">
               左键拖拽格子到目标列；未匹配列可在本行内排序，顺序即输出顺序。
               右键格子、列头或文件名打开菜单；拖入丢弃区可移除列，模板列头拖到未匹配区可移出。
               键盘 Tab 定位格子，Enter 确认建议。
+              「按原列顺序导出」按列位置拼接，保留表头行设置，忽略匹配和丢弃设置；「调整后导出」按当前网格输出。
             </p>
           </details>
           <Button
@@ -858,19 +842,22 @@ export function HeaderMatchGrid(props: {
           <Button variant="ghost" size="sm" onClick={() => setExpanded(new Set())}>
             全部收起
           </Button>
-          <Button variant="secondary" size="sm" disabled={!stats.yellow || busy} onClick={acceptAll}>
-            全部按建议执行（{stats.yellow}）
-          </Button>
-          <Button variant="secondary" size="sm" onClick={jumpNextPending}>
-            下一处待确认
-          </Button>
           <Button variant="ghost" size="sm" onClick={resetAll}>
             ↺ 重置手动调整
           </Button>
         </div>
 
         <div className="hmg-grid-wrap" ref={gridRef}>
-          <table className="hmg-grid">
+          <table
+            className="hmg-grid"
+            style={{ minWidth: 200 + (template.headers.length + unmatchedSlots) * 135 + 3 }}
+          >
+            <colgroup>
+              <col style={{ width: 200 }} />
+              {Array.from({ length: template.headers.length + unmatchedSlots }, (_, col) => (
+                <col key={col} />
+              ))}
+            </colgroup>
             <thead>
               <tr>
                 <th className="hmg-file-col">文件</th>
@@ -912,9 +899,11 @@ export function HeaderMatchGrid(props: {
             <tbody>
               <tr className="hmg-template-row">
                 <td className="hmg-file-cell">
-                  <span className="hmg-badge">基准</span>
-                  {preview.template.name}
-                  <span className="hmg-sheet-tag">{preview.template.external ? "外部模板" : ""}</span>
+                  <div className="hmg-file-content">
+                    <span className="hmg-badge">基准</span>
+                    <span title={preview.template.name}>{preview.template.name}</span>
+                    <span className="hmg-sheet-tag">{preview.template.sheet}{preview.template.external ? "（外部）" : ""}</span>
+                  </div>
                 </td>
                 {template.headers.map((header, col) => (
                   <td
@@ -972,33 +961,47 @@ export function HeaderMatchGrid(props: {
                     <tr>
                       <td
                         className="hmg-file-cell"
+                        tabIndex={0}
+                        aria-label={`${state.name} / ${state.sheet}，右键设为基准`}
+                        onKeyDown={(event) => {
+                          if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                            event.preventDefault();
+                            closeMenus();
+                            const rect = event.currentTarget.getBoundingClientRect();
+                            setFileMenu({ row, x: rect.left, y: rect.bottom });
+                          }
+                        }}
                         onContextMenu={(event) => {
                           event.preventDefault();
                           closeMenus();
                           setFileMenu({ row, x: event.clientX, y: event.clientY });
                         }}
                       >
-                        <button
-                          type="button"
-                          className="hmg-expand"
-                          aria-label={isExpanded ? "折叠数据预览" : "展开数据预览"}
-                          aria-expanded={isExpanded}
-                          onClick={() =>
-                            setExpanded((current) => {
-                              const next = new Set(current);
-                              if (next.has(row)) next.delete(row);
-                              else next.add(row);
-                              return next;
-                            })
-                          }
-                        >
-                          {isExpanded ? "▼" : "▶"}
-                        </button>
-                        {state.detection.needsReview && (
-                          <span className="hmg-review-dot" title="表头行识别拿不准，请展开确认" />
-                        )}
-                        <span title={`${state.path} / ${state.sheet}`}>{state.name}</span>
-                        <span className="hmg-sheet-tag">{state.sheet}</span>
+                        <div className="hmg-file-content">
+                          <button
+                            type="button"
+                            className="hmg-expand"
+                            aria-label={isExpanded ? "折叠数据预览" : "展开数据预览"}
+                            aria-expanded={isExpanded}
+                            onClick={() =>
+                              setExpanded((current) => {
+                                const next = new Set(current);
+                                if (next.has(row)) next.delete(row);
+                                else next.add(row);
+                                return next;
+                              })
+                            }
+                          >
+                            {isExpanded ? "▼" : "▶"}
+                          </button>
+                          {state.detection.needsReview && (
+                            <span className="hmg-review-dot" title="表头行识别拿不准，请展开确认" />
+                          )}
+                          <span title={`${state.path} / ${state.sheet}`}>{state.name}</span>
+                          <span className="hmg-sheet-tag" title={state.sheet}>{state.sheet}</span>
+                        </div>
+                        {state.detection.kind === "empty" && <div className="hmg-source-note">空表 · 已跳过</div>}
+                        {state.detection.headerRowsCount === 0 && <div className="hmg-source-note" title="未自动推断表头，从第一行保留全部内容；展开后可手动指定表头">无常规表头 · 原样保留</div>}
                       </td>
                       {template.headers.map((_, col) => {
                         const occupant = slots.get(col);
@@ -1085,26 +1088,32 @@ export function HeaderMatchGrid(props: {
                     </tr>
                     {isExpanded && (
                       <tr className="hmg-preview-row">
-                        <td colSpan={template.headers.length + unmatchedSlots + 1}>
-                          <div className="hmg-preview">
-                            <div className="hmg-preview-cols">
-                              {state.headers.map((header, col) => (
-                                <div key={col} className="hmg-preview-col">
-                                  <strong title={header}>{header}</strong>
-                                  {state.preview.slice(0, 3).map((values, index) => (
-                                    <span key={index}>{values[col] ?? ""}</span>
-                                  ))}
-                                </div>
-                              ))}
-                            </div>
-                            <DetectionEditor
-                              detection={state.detection}
-                              onApply={(headerRow, count) =>
-                                applyDetectionEdit(false, row, headerRow, count)
-                              }
-                            />
-                          </div>
+                        <td className="hmg-preview-file">
+                          {state.detection.kind === "empty" ? <span>空表，无数据可导出</span> : <DetectionEditor
+                            detection={state.detection}
+                            onApply={(headerRow, count) =>
+                              applyDetectionEdit(false, row, headerRow, count)
+                            }
+                          />}
                         </td>
+                        {/* 与匹配格共用表格列，并按当前映射取源列；空槽不能挤掉后面的列。 */}
+                        {[
+                          ...template.headers.map((_, col) => slots.get(col)),
+                          ...Array.from({ length: unmatchedSlots }, (_, slot) => zone[slot]),
+                        ].map((source, col) => (
+                          <td key={col} className="hmg-preview-slot">
+                            {source != null && (
+                              <div className="hmg-preview-col">
+                                <strong title={state.headers[source]}>{state.headers[source]}</strong>
+                                {state.preview.slice(0, 3).map((values, index) => (
+                                  <span key={index} title={values[source] ?? ""}>
+                                    {values[source] ?? ""}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                        ))}
                       </tr>
                     )}
                   </Fragment>
@@ -1130,9 +1139,13 @@ export function HeaderMatchGrid(props: {
             <Button variant="secondary" onClick={props.onCancel} disabled={busy}>
               取消
             </Button>
-            <Button onClick={() => void handleConfirm()} disabled={busy}>
-              开始合并
-              {stats.yellow > 0 ? `（${stats.yellow} 项黄色将按建议执行）` : ""}
+            <Button variant="secondary" onClick={exportOriginalOrder} disabled={busy || rematchBusy}
+              title="按 A 列对 A 列、B 列对 B 列拼接；保留表头行设置，忽略列匹配和丢弃设置">
+              按原列顺序导出
+            </Button>
+            <Button onClick={() => void handleConfirm()} disabled={busy || rematchBusy}
+              title="按当前网格中的列对应关系和丢弃设置导出">
+              调整后导出
             </Button>
           </div>
         </div>
@@ -1148,6 +1161,7 @@ export function HeaderMatchGrid(props: {
           </div>
         )}
 
+        {props.error && <div className="hmg-toast hmg-error" role="alert">{props.error}</div>}
         {toast && <div className="hmg-toast">{toast}</div>}
         {ghost && (
           <div className="hmg-ghost" style={{ left: ghost.x + 10, top: ghost.y + 10 }}>
@@ -1288,20 +1302,22 @@ export function HeaderMatchGrid(props: {
             <div className="hmg-menu-title">
               {rows[fileMenu.row].name} / {rows[fileMenu.row].sheet}
             </div>
-            {!(
-              rows[fileMenu.row].path === preview.template.path &&
-              !preview.template.external
-            ) && (
-              <button
-                type="button"
-                onClick={() => {
-                  props.onTemplateChange(rows[fileMenu.row].path);
-                  closeMenus();
-                }}
-              >
-                设为模板
-              </button>
-            )}
+            <button
+              type="button"
+              disabled={busy || rematchBusy || rows[fileMenu.row].detection.kind === "empty" || rows[fileMenu.row].detection.headerRowsCount === 0 || (
+                rows[fileMenu.row].path === preview.template.path
+                && rows[fileMenu.row].sheet === preview.template.sheet
+                && !preview.template.external
+              )}
+              onClick={() => {
+                props.onTemplateChange(rows[fileMenu.row].path, rows[fileMenu.row].sheet);
+                closeMenus();
+              }}
+            >
+              {rows[fileMenu.row].path === preview.template.path
+                && rows[fileMenu.row].sheet === preview.template.sheet
+                && !preview.template.external ? "当前基准" : "设为基准"}
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -1337,19 +1353,21 @@ function DetectionEditor(props: {
   }, [detection]);
   return (
     <span className={compact ? "hmg-detect-edit hmg-detect-edit-compact" : "hmg-detect-edit"}>
-      表头识别于第
-      <input
+      {count === "0" ? "无常规表头，从首行保留" : "表头识别于第"}
+      {count !== "0" && <><input
         value={row}
+        disabled={count === "0"}
         aria-label="表头所在行号"
         onChange={(event) => setRow(event.target.value.replace(/[^0-9]/g, ""))}
         className="hmg-detect-input"
       />
-      行 ·
+      行 ·</>}
       <select
         value={count}
         aria-label="表头层数"
         onChange={(event) => setCount(event.target.value)}
       >
+        {!compact && <option value="0">原样（无表头）</option>}
         <option value="1">单层</option>
         <option value="2">两层</option>
       </select>
@@ -1357,8 +1375,8 @@ function DetectionEditor(props: {
         variant="ghost"
         size="xs"
         onClick={() => {
-          const headerRow = Math.max(1, Number.parseInt(row, 10) || 1) - 1;
-          const headerRowsCount = count === "2" ? 2 : 1;
+          const headerRow = count === "0" ? 0 : Math.max(1, Number.parseInt(row, 10) || 1) - 1;
+          const headerRowsCount = count === "0" ? 0 : count === "2" ? 2 : 1;
           onApply(headerRow, headerRowsCount);
         }}
       >

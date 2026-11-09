@@ -15,6 +15,13 @@ export function isJobGone(error: unknown): boolean {
   return (error as { code?: string } | null)?.code === "JOB_NOT_FOUND";
 }
 
+/** 主动停止同步等待不代表账表校验失败，也不能视作校验通过。 */
+export function isSyncBusyAborted(error: unknown): boolean {
+  const value = error as { code?: string; message?: string } | null;
+  return value?.code === "SYNC_BUSY_ABORTED" ||
+    (typeof value?.message === "string" && value.message.startsWith("已停止等待："));
+}
+
 export function errorText(error: unknown): string {
   if (!error) return "操作失败，请检查输入后重试。";
   if (typeof error === "string") return error;
@@ -26,6 +33,15 @@ export function errorText(error: unknown): string {
   if (e?.message) return e.message;
   if (e?.detail) return e.detail;
   return "操作失败，请检查输入后重试。";
+}
+
+/** 会议任务的云端失败原因常放在 detail，录音页、通知和失败快照统一保留。 */
+export function meetingErrorText(error: unknown): string {
+  const message = errorText(error);
+  const detail = (error as { detail?: unknown } | null)?.detail;
+  return typeof detail === "string" && detail.trim() && !message.includes(detail.trim())
+    ? `${message} 详细原因：${detail.trim()}`
+    : message;
 }
 
 /** 校验未通过时，把后端塞在 detail 里的那段 `{errors:[...]}` JSON 拆成人话。 */

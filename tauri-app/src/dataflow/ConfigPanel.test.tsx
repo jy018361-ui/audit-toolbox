@@ -1,0 +1,572 @@
+// @vitest-environment jsdom
+import "@testing-library/jest-dom/vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
+
+import { ConfigPanel } from "./ConfigPanel";
+import {
+  configKeysWithinContract,
+  defaultConfigFor,
+  normalizeConfig,
+  type DataflowNode,
+} from "./model";
+
+// db_in 表下拉的数据源：mock 掉 ../api，按用例给成功/失败实现。
+const { dbTablesMock, sheetNamesMock } = vi.hoisted(() => ({ dbTablesMock: vi.fn(), sheetNamesMock: vi.fn() }));
+vi.mock("../api", () => ({ dataflowDbTables: dbTablesMock, dataflowSheetNames: sheetNamesMock }));
+
+beforeEach(() => {
+  dbTablesMock.mockReset();
+  sheetNamesMock.mockReset().mockResolvedValue(["科目余额表", "序时账", "说明"]);
+});
+
+afterEach(() => {
+  cleanup();
+});
+
+/** 静态渲染：适合单步交互断言（表单不随 onConfigChange 更新）。 */
+function renderPanel(type: string, config: Record<string, unknown> = defaultConfigFor(type)) {
+  const onConfigChange = vi.fn();
+  const node: DataflowNode = { id: "n1", type, name: "节点", x: 0, y: 0, config };
+  render(
+    <ConfigPanel
+      node={node}
+      params={[]}
+      collapsed={false}
+      onToggleCollapse={() => undefined}
+      onRename={() => undefined}
+      onConfigChange={onConfigChange}
+      onDelete={() => undefined}
+      onPickPath={() => undefined}
+      outputDir="D:\审计底稿"
+      onPickOutputDir={() => undefined}
+      fieldOptions={["凭证号", "金额", "客商名称"]}
+      valueOptionsOf={() => ["收", "付", "转"]}
+    />,
+  );
+  return { onConfigChange };
+}
+
+/** 状态化渲染：onConfigChange 直接回灌组件，模拟页面真实联动（多步编辑用）。 */
+function renderLivePanel(type: string, initial: Record<string, unknown> = defaultConfigFor(type)) {
+  const onConfigChange = vi.fn();
+  function Harness() {
+    const [config, setConfig] = useState<Record<string, unknown>>(initial);
+    return (
+      <ConfigPanel
+        node={{ id: "n1", type, name: "节点", x: 0, y: 0, config }}
+        params={[]}
+        collapsed={false}
+        onToggleCollapse={() => undefined}
+        onRename={() => undefined}
+        onConfigChange={(next) => {
+          onConfigChange(next);
+          setConfig(next);
+        }}
+        onDelete={() => undefined}
+        onPickPath={() => undefined}
+      outputDir="D:\审计底稿"
+      onPickOutputDir={() => undefined}
+      fieldOptions={["凭证号", "金额", "客商名称"]}
+      valueOptionsOf={() => ["收", "付", "转"]}
+      />
+    );
+  }
+  render(<Harness />);
+  return { onConfigChange };
+}
+
+describe("数据流配置区：Sheet 名称候选", () => {
+  function sheetOptions() {
+    const input = screen.getByLabelText("Sheet 名称");
+    const list = document.getElementById(input.getAttribute("list") ?? "");
+    return Array.from(list?.querySelectorAll("option") ?? []).map((option) => option.value);
+  }
+
+  it("未运行流程即可读取 Sheet 清单，点选回填并保留手输", async () => {
+    const { onConfigChange } = renderLivePanel("excel_in", {
+      ...defaultConfigFor("excel_in"), path: "C:/客户/TB.xlsx", sheetMode: "byName",
+    });
+    await waitFor(() => expect(sheetOptions()).toEqual(["科目余额表", "序时账", "说明"]));
+    expect(sheetNamesMock).toHaveBeenCalledWith("C:/客户/TB.xlsx", "file", "*.xlsx;*.xls;*.csv");
+    fireEvent.change(screen.getByLabelText("Sheet 名称"), { target: { value: "序时账" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ sheetName: "序时账" }));
+    fireEvent.change(screen.getByLabelText("Sheet 名称"), { target: { value: "{月份}余额表" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ sheetName: "{月份}余额表" }));
+    expect(sheetNamesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("切换文件清空旧候选，旧文件迟到结果不得覆盖新文件", async () => {
+    let finishOld!: (names: string[]) => void;
+    sheetNamesMock.mockImplementationOnce(() => new Promise<string[]>((resolve) => { finishOld = resolve; }))
+      .mockResolvedValueOnce(["新文件 Sheet"]);
+    renderLivePanel("excel_in", { ...defaultConfigFor("excel_in"), path: "C:/旧.xlsx", sheetMode: "byName" });
+    await waitFor(() => expect(sheetNamesMock).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByLabelText("数据文件"), { target: { value: "C:/新.xlsx" } });
+    expect(sheetOptions()).toEqual([]);
+    await waitFor(() => expect(sheetOptions()).toEqual(["新文件 Sheet"]));
+    finishOld(["旧文件 Sheet"]);
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+    expect(sheetOptions()).toEqual(["新文件 Sheet"]);
+  });
+
+  it("读取失败显示原因，允许手输与重试", async () => {
+    sheetNamesMock.mockRejectedValueOnce(new Error("文件被占用"));
+    renderLivePanel("excel_in", { ...defaultConfigFor("excel_in"), path: "C:/客户.xlsx", sheetMode: "byName", sheetName: "原有名称" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("文件被占用");
+    expect(screen.getByLabelText("Sheet 名称")).toHaveValue("原有名称");
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(sheetOptions()).toContain("科目余额表"));
+  });
+
+  it("未选路径时提示，自动 Sheet 模式无需读取候选", () => {
+    renderLivePanel("excel_in");
+    expect(sheetNamesMock).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Sheet"), { target: { value: "byName" } });
+    expect(screen.getByText(/先选择数据文件或文件夹/)).toBeInTheDocument();
+    expect(sheetNamesMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("数据流配置区：检查规则编辑器（增删改）", () => {
+  it("初始无规则给出提示；按所选类型添加规则", () => {
+    const { onConfigChange } = renderPanel("check_n");
+    expect(screen.getByText(/尚未配置规则/)).toBeInTheDocument();
+    // 底部「新增规则类型」下拉默认借贷平衡，切到「唯一」后添加。
+    fireEvent.change(screen.getByDisplayValue("借贷平衡"), { target: { value: "unique" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加规则" }));
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      rules: [{ type: "unique", field: "", groupBy: [] }],
+    });
+  });
+
+  it("修改借贷平衡规则：分组、借贷字段、容差（支持小数）", () => {
+    const { onConfigChange } = renderLivePanel("check_n", {
+      rules: [{ type: "balance", groupBy: [], debitField: "", creditField: "", tolerance: 0 }],
+    });
+    fireEvent.change(screen.getByPlaceholderText("分组字段（留空＝全表），如 凭证号"), {
+      target: { value: "凭证号" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("借方金额字段"), { target: { value: "借方金额" } });
+    fireEvent.change(screen.getByPlaceholderText("贷方金额字段"), { target: { value: "贷方金额" } });
+    fireEvent.change(screen.getByRole("spinbutton"), { target: { value: "0.01" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      rules: [
+        {
+          type: "balance",
+          groupBy: ["凭证号"],
+          debitField: "借方金额",
+          creditField: "贷方金额",
+          tolerance: 0.01,
+        },
+      ],
+    });
+  });
+
+  it("区间规则的上下限可留空（null）并回填数字", () => {
+    const { onConfigChange } = renderLivePanel("check_n", {
+      rules: [{ type: "range", field: "金额", min: null, max: null }],
+    });
+    const limits = screen.getAllByPlaceholderText(/限（/);
+    expect(limits).toHaveLength(2);
+    fireEvent.change(limits[0], { target: { value: "0" } });
+    fireEvent.change(limits[1], { target: { value: "100" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      rules: [{ type: "range", field: "金额", min: 0, max: 100 }],
+    });
+  });
+
+  it("切换规则类型＝整条重建；删除规则从列表移除", () => {
+    const { onConfigChange } = renderLivePanel("check_n", {
+      rules: [{ type: "expression", expression: "金额 > 0" }],
+    });
+    // 规则行内的类型下拉当前显示「表达式」。
+    fireEvent.change(screen.getByDisplayValue("表达式"), { target: { value: "range" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      rules: [{ type: "range", field: "", min: null, max: null }],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "删除此行" }));
+    expect(onConfigChange).toHaveBeenLastCalledWith({ rules: [] });
+  });
+});
+
+describe("数据流配置区：手工输入内嵌小表", () => {
+  it("顶部提示小表随流程文件保存；加列补齐单元格、加行按列数生成", () => {
+    const { onConfigChange } = renderLivePanel("manual_in");
+    expect(screen.getByText("小表随流程文件保存，分享时会一并发出。")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "添加列" }));
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      columns: [
+        { name: "列名", type: "text" },
+        { name: "列名", type: "text" },
+      ],
+      rows: [["", ""]],
+      onRowError: "skip",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "添加行" }));
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      columns: [
+        { name: "列名", type: "text" },
+        { name: "列名", type: "text" },
+      ],
+      rows: [
+        ["", ""],
+        ["", ""],
+      ],
+      onRowError: "skip",
+    });
+  });
+
+  it("编辑单元格与列名/列类型存入 config", () => {
+    const { onConfigChange } = renderLivePanel("manual_in", {
+      columns: [
+        { name: "科目编码", type: "text" },
+        { name: "金额", type: "decimal" },
+      ],
+      rows: [["1002", "1250"]],
+      onRowError: "skip",
+    });
+    fireEvent.change(screen.getByLabelText("单元格 1 行 1 列（科目编码）"), {
+      target: { value: "100201" },
+    });
+    // 两列的列名输入框同占位符，取第一列（科目编码）改名。
+    fireEvent.change(screen.getAllByPlaceholderText("列名")[0], { target: { value: "科目代码" } });
+    fireEvent.change(screen.getByDisplayValue("十进制小数"), { target: { value: "date" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      columns: [
+        { name: "科目代码", type: "text" },
+        { name: "金额", type: "date" },
+      ],
+      rows: [["100201", "1250"]],
+      onRowError: "skip",
+    });
+  });
+
+  it("删除列时行内单元格同步裁齐；仅剩一列时禁删列、仍可删行", () => {
+    const { onConfigChange } = renderLivePanel("manual_in", {
+      columns: [
+        { name: "科目编码", type: "text" },
+        { name: "金额", type: "decimal" },
+      ],
+      rows: [["1002", "1250"]],
+      onRowError: "skip",
+    });
+    // 列定义区在前、数据行区在后（DOM 顺序），第一个「删除此行」删的是第一列。
+    fireEvent.click(screen.getAllByRole("button", { name: "删除此行" })[0]);
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      columns: [{ name: "金额", type: "decimal" }],
+      rows: [["1250"]],
+      onRowError: "skip",
+    });
+    // 只剩一列后删列禁用，但删行可用。
+    const after = screen.getAllByRole("button", { name: "删除此行" });
+    expect(after[0]).toBeDisabled();
+    fireEvent.click(after[1]);
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      columns: [{ name: "金额", type: "decimal" }],
+      rows: [],
+      onRowError: "skip",
+    });
+  });
+});
+
+describe("数据流配置区：db_in 表下拉（加载与错误态）", () => {
+  it("未选文件时提示先选择 .db 文件", () => {
+    renderPanel("db_in", defaultConfigFor("db_in"));
+    expect(screen.getByText(/请先选择 \.db 文件/)).toBeInTheDocument();
+  });
+
+  it("选择文件后列出表名并写入 config.table", async () => {
+    dbTablesMock.mockResolvedValue(["序时账_2026", "科目余额表"]);
+    const { onConfigChange } = renderPanel("db_in", {
+      ...defaultConfigFor("db_in"),
+      path: "D:\\审计\\账套.db",
+    });
+    const tableSelect = await screen.findByLabelText("数据表");
+    await waitFor(() => {
+      expect(screen.getByRole("option", { name: "序时账_2026" })).toBeInTheDocument();
+    });
+    expect(dbTablesMock).toHaveBeenCalledWith("D:\\审计\\账套.db");
+    fireEvent.change(tableSelect, { target: { value: "科目余额表" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ table: "科目余额表" }),
+    );
+  });
+
+  it("读取失败展示中文诊断并支持重试", async () => {
+    dbTablesMock.mockRejectedValue({ code: "APP_ERROR", userMessage: "不是有效的 SQLite 文件" });
+    renderPanel("db_in", { ...defaultConfigFor("db_in"), path: "D:\\审计\\加密.db" });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("读取表清单失败");
+    expect(alert.textContent).toContain("不是有效的 SQLite 文件");
+    dbTablesMock.mockResolvedValue(["凭证表"]);
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => {
+      expect(screen.getByRole("option", { name: "凭证表" })).toBeInTheDocument();
+    });
+    expect(dbTablesMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("数据流配置区：其余新节点表单关键控件", () => {
+  it("关联：键配对多行可增删，左右字段分别录入", () => {
+    const { onConfigChange } = renderLivePanel("join_n", {
+      keys: [
+        { left: "科目编码", right: "科目代码" },
+        { left: "", right: "" },
+      ],
+      leftFields: [],
+      rightFields: [],
+      sameNameSuffix: "_右",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加配对" }));
+    expect(onConfigChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        keys: [
+          { left: "科目编码", right: "科目代码" },
+          { left: "", right: "" },
+          { left: "", right: "" },
+        ],
+      }),
+    );
+    fireEvent.change(screen.getByPlaceholderText("左表字段名，多个用「、」分隔"), {
+      target: { value: "凭证号、摘要" },
+    });
+    expect(onConfigChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ leftFields: ["凭证号", "摘要"] }),
+    );
+  });
+
+  it("分列：宽度模式可增删宽度行", () => {
+    const { onConfigChange } = renderLivePanel("split", {
+      ...defaultConfigFor("split"),
+      mode: "fixedWidth",
+      widths: [4],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加宽度" }));
+    expect(onConfigChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ widths: [4, 4] }),
+    );
+  });
+
+  it("汇总：聚合行的输出名与函数可编辑", () => {
+    const { onConfigChange } = renderLivePanel("summarize", {
+      groupBy: ["客商名称"],
+      aggregations: [{ field: "借方金额", func: "sum", output: "" }],
+    });
+    fireEvent.change(screen.getByPlaceholderText("输出字段名（可空）"), {
+      target: { value: "借方合计" },
+    });
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      groupBy: ["客商名称"],
+      aggregations: [{ field: "借方金额", func: "sum", output: "借方合计" }],
+    });
+  });
+
+  it("汇总：聚合方式选「非空计数」写入引擎键名 countNonEmpty（非 countNotNull）", () => {
+    const { onConfigChange } = renderLivePanel("summarize", {
+      groupBy: ["客商名称"],
+      aggregations: [{ field: "借方金额", func: "sum", output: "" }],
+    });
+    fireEvent.change(screen.getByDisplayValue("求和"), { target: { value: "countNonEmpty" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      groupBy: ["客商名称"],
+      aggregations: [{ field: "借方金额", func: "countNonEmpty", output: "" }],
+    });
+  });
+
+  it("透视：聚合方式仅列引擎支持的 3 项，选「非空计数」写入 countNonEmpty", () => {
+    const { onConfigChange } = renderLivePanel("crosstab", {
+      rowField: "客商名称",
+      columnField: "期间",
+      valueField: "借方金额",
+      valueFunc: "sum",
+      fill: 0,
+    });
+    const select = screen.getByLabelText("聚合方式") as HTMLSelectElement;
+    // 引擎 run_crosstab 白名单只有 sum / countNonEmpty / distinctCount，
+    // 界面不得复用汇总的全量 7 项（countAll/avg/min/max 一选运行必报错）。
+    expect(Array.from(select.options).map((option) => option.value)).toEqual([
+      "sum",
+      "countNonEmpty",
+      "distinctCount",
+    ]);
+    fireEvent.change(select, { target: { value: "countNonEmpty" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith({
+      rowField: "客商名称",
+      columnField: "期间",
+      valueField: "借方金额",
+      valueFunc: "countNonEmpty",
+      fill: 0,
+    });
+  });
+});
+
+describe("数据流配置区：CSV 输出覆盖保护（与 Excel 输出对齐）", () => {
+  it("csv_out 表单有「覆盖保护」下拉，旧文件无该字段时回显默认 error，选项与引擎白名单一致", () => {
+    // 模拟修复前的旧流程文件：csv_out config 不含 overwrite。
+    renderPanel("csv_out", { fileName: "明细.csv", encoding: "gbk", delimiter: "comma", splitRows: 0 });
+    const select = screen.getByLabelText("覆盖保护") as HTMLSelectElement;
+    // 引擎 run_csv_out 只认 error / timestamp / replace（默认 error＝目标文件已存在即报错），
+    // 缺这个下拉时用户改不了策略，重跑同名 CSV 只能手动改名。
+    expect(Array.from(select.options).map((option) => option.value)).toEqual([
+      "error",
+      "timestamp",
+      "replace",
+    ]);
+    expect(select.value).toBe("error");
+  });
+
+  it("选「已存在：自动加时间戳」写入 config.overwrite＝timestamp", () => {
+    const { onConfigChange } = renderPanel("csv_out", defaultConfigFor("csv_out"));
+    fireEvent.change(screen.getByLabelText("覆盖保护"), { target: { value: "timestamp" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ overwrite: "timestamp" }),
+    );
+  });
+
+  it("契约：overwrite 属于 csv_out 契约字段（含它的 config 通过保存前自检，越界字段仍拦截）", () => {
+    // 修复前 csv_out 契约清单不含 overwrite，手工配置了该字段的节点会被保存前自检判为越界。
+    expect(
+      configKeysWithinContract("csv_out", { ...defaultConfigFor("csv_out"), overwrite: "replace" }),
+    ).toBe(true);
+    // 自检本身仍严格：契约外字段照样拦下。
+    expect(
+      configKeysWithinContract("csv_out", {
+        ...defaultConfigFor("csv_out"),
+        overwrite: "replace",
+        bogus: 1,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("数据流配置区：公式节点行级异常策略（onRowError 独立生效）", () => {
+  it("公式表单有「异常处理」下拉，旧文件无该字段回显默认 skip，选项与引擎白名单一致", () => {
+    // 模拟修复前的旧流程文件：formula config 不含 onRowError。
+    renderPanel("formula", { formulas: [{ target: "差额", expression: "借方金额 - 贷方金额" }] });
+    const select = screen.getByLabelText("异常处理（行级错误）") as HTMLSelectElement;
+    // 引擎 RowErrorPolicy::parse 默认 skip（2026-10-30 用户裁定）；
+    // 公式节点的策略从自身 config 解析，与输入节点设置无关。
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(["skip", "stop"]);
+    expect(select.value).toBe("skip");
+  });
+
+  it("选「跳过整行并记录」写入 config.onRowError＝skip（不再中止整次运行）", () => {
+    const { onConfigChange } = renderPanel("formula", defaultConfigFor("formula"));
+    fireEvent.change(screen.getByLabelText("异常处理（行级错误）"), { target: { value: "skip" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ onRowError: "skip" }),
+    );
+  });
+
+  it("契约与默认值：onRowError 纳入 formula 契约，默认 skip，乱值规整回 skip", () => {
+    expect(defaultConfigFor("formula").onRowError).toBe("skip");
+    // 修复前 formula 契约清单仅 [\"formulas\"]，配置了 onRowError 的节点会被保存前自检判越界。
+    expect(configKeysWithinContract("formula", defaultConfigFor("formula"))).toBe(true);
+    expect(normalizeConfig("formula", { formulas: [], onRowError: "skip" }).onRowError).toBe("skip");
+    expect(normalizeConfig("formula", { formulas: [], onRowError: "乱写" }).onRowError).toBe("skip");
+  });
+
+  it("底部文案不再对公式节点宣称「由输入节点决定」，改为独立生效说明", () => {
+    renderPanel("formula", defaultConfigFor("formula"));
+    expect(
+      screen.queryByText(/行级异常策略由输入节点的「异常处理」设置决定/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/与输入节点的设置无关/)).toBeInTheDocument();
+  });
+});
+
+it("字段输入框带上游列名下拉建议（datalist）：跑过一次后可直接选列名", () => {
+  // 用户需求 2026-10-30：字段不用手抄，设置标题行后从下拉里选。
+  renderPanel("filter_n");
+  const fieldInput = screen.getByPlaceholderText("字段（可下拉选）");
+  expect(fieldInput.getAttribute("list")).toMatch(/^df-field-list-/);
+  const options = document.querySelectorAll(`datalist#${fieldInput.getAttribute("list")} option`);
+  expect([...options].map((o) => o.getAttribute("value"))).toEqual(["凭证号", "金额", "客商名称"]);
+});
+
+it("没有上游列名时字段输入框退化为普通输入（不挂 datalist）", () => {
+  renderPanel("filter_n");
+  // renderPanel 固定传了 fieldOptions；这里再渲染一个无建议面板验证退化。
+  cleanup();
+  const node: DataflowNode = { id: "n2", type: "filter_n", name: "筛选", x: 0, y: 0, config: defaultConfigFor("filter_n") };
+  render(
+    <ConfigPanel
+      node={node}
+      params={[]}
+      collapsed={false}
+      onToggleCollapse={() => undefined}
+      onRename={() => undefined}
+      onConfigChange={() => undefined}
+      onDelete={() => undefined}
+      onPickPath={() => undefined}
+      outputDir=""
+      onPickOutputDir={() => undefined}
+      fieldOptions={[]}
+      valueOptionsOf={() => []}
+    />,
+  );
+  const fieldInput = screen.getByPlaceholderText("字段（可下拉选）");
+  expect(fieldInput.getAttribute("list")).toBeNull();
+});
+
+it("多字段输入（如透视行字段）：点「选择」出勾选清单，勾选即加标签、再点移除；手输仍可用", async () => {
+  // 用户需求 2026-10-30：多字段场景应多选（选一个加一个），不是单选。
+  // ConfigPanel 受控：用带状态的壳回写配置，才能验证连续勾选的追加语义。
+  const onConfigChange = vi.fn();
+  function Harness() {
+    const [config, setConfig] = useState({ ...defaultConfigFor("crosstab"), valueField: "借方" });
+    const apply = (next: Record<string, unknown>) => {
+      onConfigChange(next);
+      setConfig(next as typeof config);
+    };
+    return (
+      <ConfigPanel
+        node={{ id: "ct", type: "crosstab", name: "透视", x: 0, y: 0, config }}
+        params={[]}
+        collapsed={false}
+        onToggleCollapse={() => undefined}
+        onRename={() => undefined}
+        onConfigChange={apply}
+        onDelete={() => undefined}
+        onPickPath={() => undefined}
+        outputDir=""
+        onPickOutputDir={() => undefined}
+        fieldOptions={["客商名称", "期间", "科目编码"]}
+        valueOptionsOf={() => []}
+      />
+    );
+  }
+  render(<Harness />);
+  // 行字段区域点「选择」展开勾选清单
+  const selectButtons = await screen.findAllByRole("button", { name: "选择" });
+  fireEvent.click(selectButtons[0]!);
+  fireEvent.click(screen.getByLabelText("客商名称"));
+  expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ rowField: ["客商名称"] }));
+  // 再勾一个：追加而不是替换（多选语义）。
+  fireEvent.click(screen.getByLabelText("期间"));
+  expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ rowField: ["客商名称", "期间"] }));
+  // 取消勾选：从数组移除。
+  fireEvent.click(screen.getByLabelText("客商名称"));
+  expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ rowField: ["期间"] }));
+  // 手输解析仍可用。
+  const manual = screen.getAllByPlaceholderText("点「选择」勾选，或输入字段名")[0]!;
+  fireEvent.change(manual, { target: { value: "科目编码、备注" } });
+  expect(onConfigChange).toHaveBeenLastCalledWith(expect.objectContaining({ rowField: ["科目编码", "备注"] }));
+});
+
+it("筛选条件的「值」输入框带字段取值建议：选了字段后可直接下拉挑常见值", () => {
+  // 用户需求 2026-10-30：不必打开 Excel 查字段下有哪些值再手抄。
+  renderPanel("filter_n", {
+    condition: { op: "and", rules: [{ field: "凭证字", operator: "=", value: "" }] },
+  });
+  const valueInput = screen.getByPlaceholderText("值（为空/不为空时无需填；可下拉选）");
+  const listId = valueInput.getAttribute("list");
+  expect(listId).toMatch(/^df-field-list-/);
+  const options = [...document.querySelectorAll<HTMLOptionElement>(`datalist#${listId} option`)].map((o) => o.value);
+  expect(options).toEqual(["收", "付", "转"]);
+});

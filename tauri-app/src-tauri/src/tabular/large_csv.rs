@@ -42,13 +42,23 @@ fn sql_error(e: rusqlite::Error) -> AppError {
 }
 
 pub(super) fn applies(path: &Path) -> bool {
+    if path.is_file() && (crate::spreadsheet_input::is_text(path)
+        || path.extension().is_some_and(|s| ["xlsx","xlsm","xls","xlsb","ods"].iter().any(|extension|s.eq_ignore_ascii_case(extension)))) {
+        return crate::disk_table::should_use_disk(&[path], 1);
+    }
+    false
+}
+
+#[cfg(test)]
+fn legacy_text_policy(path: &Path) -> bool {
     let delimited = path.extension().and_then(|s| s.to_str()).is_some_and(|s| {
         ["csv", "txt", "tsv"]
             .iter()
             .any(|ext| s.eq_ignore_ascii_case(ext))
     });
     if !delimited {
-        return false;
+        return path.extension().is_some_and(|s| s.eq_ignore_ascii_case("xlsx") || s.eq_ignore_ascii_case("xlsm"))
+            && crate::disk_table::should_use_disk(&[path], 1);
     }
     let Ok(metadata) = fs::metadata(path) else {
         return false;
@@ -123,14 +133,6 @@ fn estimate_peak_bytes(path: &Path, file_bytes: u64) -> Option<u64> {
     )
 }
 
-pub(super) fn full_table_error() -> AppError {
-    error(
-        "KANZHANG_MEMORY_BUDGET",
-        "该文件已超过当前电脑的安全内存预算，已阻止整表读取以保护电脑。当前工具尚未接入大文件磁盘计算，请改用看账工具处理，或缩小文件后重试。",
-        None,
-    )
-}
-
 pub(super) struct Cache {
     pub(super) db: Connection,
     pub(super) path: PathBuf,
@@ -152,6 +154,9 @@ pub(super) fn load(
     cancel: &AtomicBool,
 ) -> Result<Cache, AppError> {
     check_cancel(cancel)?;
+    if !crate::spreadsheet_input::is_text(Path::new(&source.input_path)) || source.header_depth > 1 {
+        return load_generic(source, progress, cancel);
+    }
     let source_path = Path::new(&source.input_path);
     // 大 CSV 的自动标题行 `0` 与实际第 1 行语义相同。缓存键也必须相同，
     // 否则不同工具/阶段参数回传形式不同时会重新扫描整个源文件。
@@ -190,6 +195,46 @@ pub(super) fn load(
     if result.is_err() {
         let _ = fs::remove_file(&partial);
     }
+    result
+}
+
+/// Adapt the common physical-row source to the existing sequential raw-cache
+/// contract. The voucher index joins rowid=seq+1, so it must not attach a table
+/// whose row IDs include headers or whose sheet identity has been discarded.
+fn load_generic(source: &SourceParams, progress: Progress<'_>, cancel: &AtomicBool) -> Result<Cache, AppError> {
+    let path = Path::new(&source.input_path);
+    let table = crate::disk_table::DiskTable::open(path, source.sheet.as_deref(), source.header_row, source.header_depth, progress, cancel)?;
+    let key = fingerprint(path, &table.sheet, table.header_row, table.header_depth)?;
+    let output = cache_path("ledger-stream-formats-v2-header-width", &key)?.with_extension("sqlite");
+    fs::create_dir_all(output.parent().unwrap()).map_err(io_error)?;
+    if let Ok(mut cache) = read_cache(&output, path) {
+        cache.table.sheet = table.sheet;
+        cache.table.sheets = table.sheets;
+        return Ok(cache);
+    }
+    let partial = output.with_extension(format!("{}.partial", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut db = open(&partial)?;
+        db.execute_batch("CREATE TABLE rows(data TEXT NOT NULL); CREATE TABLE meta(value TEXT NOT NULL);").map_err(sql_error)?;
+        let tx = db.transaction().map_err(sql_error)?;
+        let mut insert = tx.prepare("INSERT INTO rows VALUES (?1)").map_err(sql_error)?;
+        table.visit(cancel, |row, _| {
+            insert.execute([serde_json::to_string(row).map_err(|e| error("LEDGER_CACHE_FAILED", "无法编码缓存行。", Some(e.to_string())))?]).map_err(sql_error)?;
+            Ok(())
+        })?;
+        drop(insert);
+        let meta = json!({"version":1,"headers":table.headers,"rows":table.row_count,"encoding":null,"delimiter":null});
+        tx.execute("INSERT INTO meta VALUES (?1)", [meta.to_string()]).map_err(sql_error)?;
+        check_cancel(cancel)?;
+        tx.commit().map_err(sql_error)?;
+        drop(db);
+        replace_file(&partial, &output)?;
+        let mut cache = read_cache(&output, path)?;
+        cache.table.sheet = table.sheet;
+        cache.table.sheets = table.sheets;
+        Ok(cache)
+    })();
+    if result.is_err() { let _ = fs::remove_file(&partial); }
     result
 }
 
@@ -540,15 +585,22 @@ mod tests {
     }
 
     #[test]
-    fn large_csv_cannot_fall_back_to_whole_table_loading() {
+    fn explicitly_selected_reader_does_not_reject_by_a_second_budget_decision() {
         let root = fixture();
-        let input = root.join("large.csv");
-        File::create(&input)
-            .unwrap()
-            .set_len(ALWAYS_DISK_BYTES)
-            .unwrap();
-        let err = load_ledger_cached(&input, None, 1, 1).unwrap_err();
-        assert_eq!(err.code, "KANZHANG_MEMORY_BUDGET");
+        let input = root.join("selected-reader.csv");
+        let mut writer = csv::Writer::from_path(&input).unwrap();
+        writer.write_record(["编码","说明"]).unwrap();
+        // 样本须超过公共 50 MiB 普通模式门槛，才能验证动态磁盘分流。
+        for _ in 0..60000 { writer.write_record(["1002",&"X".repeat(1024)]).unwrap(); }
+        writer.flush().unwrap();
+        crate::resource_budget::with_test_memory(crate::resource_budget::MemoryStatus {
+            total: 16 * 1024 * 1024 * 1024, available: 128 * 1024 * 1024, commit_available: 128 * 1024 * 1024,
+        }, || {
+            assert!(applies(&input)); // 上层仍会自动分流；显式选定的读取器不二次拒绝。
+            let table = load_ledger_cached(&input, None, 1, 1).unwrap();
+            assert_eq!(table.rows.len(),60000);
+            assert_eq!(table.rows[59999][1].len(),1024);
+        });
         fs::remove_dir_all(root).unwrap();
     }
 }
@@ -797,7 +849,6 @@ impl Cache {
         let mut codes = Vec::new();
         let mut names = Vec::new();
         let mut total = 0;
-        let mut bytes = 0usize;
         let mut stmt = self
             .db
             .prepare(&format!(
@@ -822,14 +873,6 @@ impl Cache {
             total += 1;
             if values.len() < limit {
                 let name: String = row.get(2).map_err(sql_error)?;
-                bytes += value.len() + code.len() + name.len();
-                if bytes > 16 * 1024 * 1024 {
-                    return Err(error(
-                        "KANZHANG_RESULT_TOO_LARGE",
-                        "科目列表超过安全预算，请检查科目映射或缩小查询范围。",
-                        None,
-                    ));
-                }
                 values.push(value);
                 codes.push(code);
                 names.push(name);

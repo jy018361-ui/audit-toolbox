@@ -8,21 +8,23 @@
 //! 2. 公司名解析 [`parse_company`]——剥后缀 → 剥行政区划前缀 → 剥行业词，
 //!    剩余即字号（brand，匹配主键）；
 //! 3. 粗筛 [`CoarseIndex`]——对 B 侧建 bigram 倒排索引，A 行按「命中的不同
-//!    bigram 数」取 top 200 候选 + 三倍长度过滤，避免 O(n²) 全量精算；
+//!    bigram 数」取 top 200 候选（归一值完全一致者优先）+ 三倍长度过滤；
 //! 4. 精算 [`score_pair`]——Levenshtein 比率 / LCS 比率 / bigram Dice 按
-//!    0.40/0.35/0.25 加权，叠加「字号包含提分」与「行政区域不一致降级」两条
-//!    规则，按阈值分级，每行保留 topK 候选供疑似确认。
+//!    0.40/0.35/0.25 加权，叠加「字号包含待确认」与「行政区域不一致降级」两条
+//!    规则；仅字号/简称包含的非精确项须人工确认，每行保留 topK 候选。
 //!
 //! 词表资源全部内嵌自 `assets/fuzzy-match/`（与 roll-forward、wp 资源同构，
 //! 来源与协议见该目录 SOURCES.md），加载点集中在 [`asset_texts`] 一处；
 //! 文件解析失败时降级到本文件内的内置精简词表（见各 `FALLBACK_` 常量），不阻塞任务。
 
 use crate::{AppError, excel_merger::PauseCheckpoint, storage::Storage};
-use calamine::{Data, Reader, open_workbook_auto};
+#[cfg(test)]
+use calamine::{Data, Reader};
+use crate::spreadsheet_input::open_workbook_auto;
 use chrono::{Local, Utc};
 use rusqlite::{Connection, params};
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -35,6 +37,8 @@ use std::{
     time::Instant,
 };
 
+mod disk;
+
 /// 粗筛后进入精算的候选上限（规格约定 200）。
 const CANDIDATE_LIMIT: usize = 200;
 /// 粗筛长度过滤：两侧字符数相差超过 3 倍即跳过。
@@ -45,8 +49,6 @@ const CANCEL_BATCH: usize = 256;
 const W_CHAR: f64 = 0.40;
 const W_LCS: f64 = 0.35;
 const W_TOKEN: f64 = 0.25;
-/// 字号包含规则给到的保底分（≥ 默认自动阈值 90，仍受区域冲突降级约束）。
-const BRAND_CONTAIN_SCORE: f64 = 93.0;
 
 // ============================================================
 // 对外入口（签名由接线任务依赖，勿改）
@@ -80,7 +82,11 @@ pub(crate) fn run_job(
         "fuzzy.match" => {
             checkpoint(&cancel, pause)?;
             progress("load", 1, 4, "正在读取 A 侧数据…");
-            let out = match_flow(&params, progress, &cancel, pause)?;
+            let out = if disk::applies(&params)? {
+                disk::match_flow(&params, progress, &cancel, pause)?
+            } else {
+                match_flow(&params, progress, &cancel, pause)?
+            };
             checkpoint(&cancel, pause)?;
             persist_if_wired(&params, &out)?;
             progress("done", 4, 4, "两列匹配完成。");
@@ -470,7 +476,7 @@ fn industry_table() -> &'static Vec<String> {
     TABLE.get_or_init(|| sorted_by_len_desc(INDUSTRY_WORDS.iter().map(|s| (*s).into()).collect()))
 }
 
-/// 公司后缀词表：剥离词（长度降序）+ 归一映射（保持文件顺序）。
+/// 公司后缀词表：剥离词 + 归一映射均按长度降序、字典序固定排序。
 struct SuffixTable {
     strip: Vec<String>,
     normalize: Vec<(String, String)>,
@@ -492,11 +498,7 @@ fn suffix_table() -> &'static SuffixTable {
             Some(f) if !f.strip_words.is_empty() => SuffixTable {
                 // 词表文件本身按长度降序，这里再兜底排一次，防止后续被人为打乱。
                 strip: sorted_by_len_desc(f.strip_words),
-                normalize: f
-                    .normalize_map
-                    .into_iter()
-                    .map(|(k, v)| (base_normalize(&k), base_normalize(&v)))
-                    .collect(),
+                normalize: normalized_suffix_rules(f.normalize_map),
             },
             _ => {
                 // 词表文件缺失/损坏：降级内置表（词组覆盖面小，但不阻塞任务）。
@@ -505,14 +507,31 @@ fn suffix_table() -> &'static SuffixTable {
                         .iter()
                         .map(|s| (*s).into())
                         .collect(),
-                    normalize: FALLBACK_NORMALIZE_MAP
-                        .iter()
-                        .map(|(k, v)| (base_normalize(k), base_normalize(v)))
-                        .collect(),
+                    normalize: normalized_suffix_rules(
+                        FALLBACK_NORMALIZE_MAP.iter().map(|(k, v)| (k.to_string(), v.to_string())),
+                    ),
                 }
             }
         }
     })
+}
+
+/// HashMap 顺序不能决定替换结果；重复归一键也按目标值固定择一。
+fn normalized_suffix_rules(
+    rules: impl IntoIterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    let mut rules: Vec<_> = rules
+        .into_iter()
+        .map(|(k, v)| (base_normalize(&k), base_normalize(&v)))
+        .filter(|(k, _)| !k.is_empty())
+        .collect();
+    rules.sort_by(|a, b| {
+        b.0.chars().count().cmp(&a.0.chars().count())
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    rules.dedup_by(|a, b| a.0 == b.0);
+    rules
 }
 
 /// 行政区划表：省/市两级名称与常用别称（区县级不参与——同名区县与常见字号
@@ -663,8 +682,27 @@ fn once<T>(x: T) -> std::iter::Once<T> {
 /// 全角→半角（NFKC 的全角 ASCII 区）、全角空格、顿号统一为半角逗号、
 /// 小写、去全部空白与零宽字符、间隔号变体统一为「·」。
 fn base_normalize(raw: &str) -> String {
+    base_normalize_with_spaces(raw, false)
+}
+
+/// 英文规则执行前保留空白作为单词边界，执行后再统一去掉。
+fn base_normalize_with_spaces(raw: &str, keep_spaces: bool) -> String {
     let mut out = String::with_capacity(raw.len());
-    for c in raw.chars() {
+    let mut input = raw.chars().peekable();
+    while let Some(c) = input.next() {
+        if keep_spaces && c.is_whitespace() {
+            // 仅英文词边界需要保留；中文词内空白仍先移除，避免破坏繁简词组匹配。
+            let is_word = |c: char| {
+                c.is_ascii_alphanumeric() || c == '_'
+                    || matches!(c, '０'..='９' | 'Ａ'..='Ｚ' | 'ａ'..='ｚ' | '＿')
+            };
+            if out.chars().next_back().is_some_and(is_word)
+                || input.peek().copied().is_some_and(is_word)
+            {
+                out.push(' ');
+            }
+            continue;
+        }
         match c {
             // 全角 ASCII 区 U+FF01..=U+FF5E 平移到 U+0021..=U+007E：
             // 全角字母/数字/括号/逗号/句点等一次归一。
@@ -758,16 +796,61 @@ fn strip_person_titles(norm: &str) -> String {
     s
 }
 
-/// 完整归一化管线（顺序敏感）：
-/// 基础归一 → 繁→简 → 公司后缀归一映射 →（person）称谓剥离。
-fn normalize(raw: &str, match_type: &str) -> String {
-    let mut s = base_normalize(raw);
-    s = traditional_to_simplified(&s);
-    for (from, to) in &suffix_table().normalize {
-        if !from.is_empty() && s.contains(from.as_str()) {
-            s = s.replace(from.as_str(), to);
+/// 单次最长匹配替换，不让替换生成的文本再次触发其他规则。
+/// 英文词必须有词边界；点分缩写允许点与字母之间存在空白。
+fn normalize_suffixes(text: &str, rules: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut start = 0;
+    while start < text.len() {
+        let matched = rules.iter().find_map(|(from, to)| {
+            suffix_rule_end(text, start, from).map(|end| (end, to))
+        });
+        if let Some((end, to)) = matched {
+            out.push_str(to);
+            start = end;
+        } else {
+            let c = text[start..].chars().next().unwrap();
+            out.push(c);
+            start += c.len_utf8();
         }
     }
+    out
+}
+
+fn suffix_rule_end(text: &str, start: usize, from: &str) -> Option<usize> {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let english = from.starts_with(|c: char| c.is_ascii_alphabetic());
+    if english && text[..start].chars().next_back().is_some_and(is_word) {
+        return None;
+    }
+    let skip_spaces = !english || from.contains('·');
+    let mut input = text[start..].char_indices().peekable();
+    let mut end = start;
+    for expected in from.chars() {
+        if skip_spaces {
+            while input.peek().is_some_and(|(_, c)| c.is_whitespace()) {
+                input.next();
+            }
+        }
+        let (offset, actual) = input.next()?;
+        if actual != expected {
+            return None;
+        }
+        end = start + offset + actual.len_utf8();
+    }
+    if english && text[end..].chars().next().is_some_and(is_word) {
+        return None;
+    }
+    Some(end)
+}
+
+/// 完整归一化管线：保留英文边界的基础归一 → 繁→简 → 后缀最长匹配 →
+/// 去空白 →（person）称谓剥离。
+fn normalize(raw: &str, match_type: &str) -> String {
+    let mut s = base_normalize_with_spaces(raw, true);
+    s = traditional_to_simplified(&s);
+    s = normalize_suffixes(&s, &suffix_table().normalize);
+    s = base_normalize(&s);
     if match_type == "person" {
         s = strip_person_titles(&s);
     }
@@ -975,7 +1058,7 @@ fn bigram_dice(a: &[char], b: &[char]) -> f64 {
 }
 
 /// 简称豁免：长度比超限但短串（≥2 字）完整嵌在长串里（如「华为」在
-/// 「华为技术有限公司」中）——这正是字号包含规则要提分的简称场景，
+/// 「华为技术有限公司」中）——这是应保留供人工确认的简称场景，
 /// 粗筛不能按长度差滤掉。
 fn shorter_embedded(a: &SideRow, b: &SideRow) -> bool {
     let (short, long) = if a.norm.chars().count() <= b.norm.chars().count() {
@@ -989,6 +1072,7 @@ fn shorter_embedded(a: &SideRow, b: &SideRow) -> bool {
 /// 打分明细：三项基础分 + 加权总分 + 命中原因（中文，供前端与导出展示）。
 #[derive(Clone)]
 struct ScoreBreakdown {
+    exact: bool,
     char_sim: f64,
     lcs_sim: f64,
     token_overlap: f64,
@@ -1008,7 +1092,7 @@ impl ScoreBreakdown {
     }
 }
 
-/// 单对精算：三算法加权，叠加「字号包含提分」与「行政区域不一致降级」。
+/// 单对精算：三算法加权；非精确的字号/简称包含只保留为疑似候选。
 fn score_pair(
     a_norm: &str,
     a_chars: &[char],
@@ -1032,19 +1116,22 @@ fn score_pair(
             && (b_norm.contains(brand_a) || brand_b.contains(brand_a)))
             || (brand_b.chars().count() >= 2
                 && (a_norm.contains(brand_b) || brand_a.contains(brand_b)));
-        if contains && total < BRAND_CONTAIN_SCORE {
-            total = BRAND_CONTAIN_SCORE;
-            reasons.push("字号包含".into());
+        // 以显示精度向下取严格低于自动阈值的上界，避免 round1 再舍入成自动档。
+        let suspect_ceiling = ((opts.auto_threshold * 10.0).ceil() - 1.0) / 10.0;
+        if a_norm != b_norm && contains {
+            total = total.max(opts.suspect_threshold).min(suspect_ceiling);
+            reasons.push("字号相同或包含，需人工确认".into());
         }
         // 行政区域不一致：即使分数达到自动阈值也强制降为疑似。
         let region_a = a_seg.map(|s| s.region.as_str()).unwrap_or("");
         let region_b = b_seg.map(|s| s.region.as_str()).unwrap_or("");
-        if region_conflict(region_a, region_b) && total >= opts.auto_threshold {
-            total = opts.auto_threshold - 1.0;
+        if region_conflict(region_a, region_b) {
+            total = total.min(suspect_ceiling);
             reasons.push("行政区域不一致，需人工确认".into());
         }
     }
     ScoreBreakdown {
+        exact: a_norm == b_norm,
         char_sim,
         lcs_sim,
         token_overlap,
@@ -1055,6 +1142,13 @@ fn score_pair(
 
 fn round1(x: f64) -> f64 {
     (x * 10.0).round() / 10.0
+}
+
+/// 分数因显示精度并列时仍优先精确项，避免长文本近似项舍入到100后抢占首位。
+fn score_order(a: &ScoreBreakdown, b: &ScoreBreakdown) -> std::cmp::Ordering {
+    b.total.partial_cmp(&a.total)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then(b.exact.cmp(&a.exact))
 }
 
 // ============================================================
@@ -1123,8 +1217,8 @@ impl CoarseScanner {
         }
     }
 
-    /// A 行的候选：按「命中的不同 bigram 数」降序取 top [`CANDIDATE_LIMIT`]，
-    /// 并应用三倍长度过滤。返回 (命中数, B 行下标)。
+    /// A 行的候选：归一值完全相同者优先，再按命中数降序、B 行序升序；
+    /// 应用三倍长度过滤后取 top [`CANDIDATE_LIMIT`]。返回 (命中数, B 行下标)。
     fn scan(&mut self, a: &SideRow, index: &CoarseIndex, b_rows: &[SideRow]) -> Vec<(u32, u32)> {
         for &j in &self.touched {
             self.counts[j as usize] = 0;
@@ -1156,7 +1250,13 @@ impl CoarseScanner {
                     || shorter_embedded(a, b)
             })
             .collect();
-        cands.sort_unstable_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)));
+        cands.sort_unstable_by(|x, y| {
+            let exact_x = b_rows[x.1 as usize].norm == a.norm;
+            let exact_y = b_rows[y.1 as usize].norm == a.norm;
+            exact_y.cmp(&exact_x)
+                .then(y.0.cmp(&x.0))
+                .then(x.1.cmp(&y.1))
+        });
         cands.truncate(CANDIDATE_LIMIT);
         cands
     }
@@ -1286,12 +1386,7 @@ fn match_flow(
                 scored.push((j, sc));
             }
         }
-        scored.sort_by(|x, y| {
-            y.1.total
-                .partial_cmp(&x.1.total)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(x.0.cmp(&y.0))
-        });
+        scored.sort_by(|x, y| score_order(&x.1, &y.1).then(x.0.cmp(&y.0)));
         scored.truncate(opts.top_k);
         let level = scored
             .first()
@@ -1359,7 +1454,9 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
         .ok_or_else(|| error("MISSING_SOURCE", "缺少文件参数。", None))?;
     let spec: SourceSpec = serde_json::from_value(spec_value)
         .map_err(|e| error("INVALID_PARAMS", "文件参数不完整。", Some(e.to_string())))?;
-    let table = load_table(&spec)?;
+    // 所有格式/文件大小均只读取预览窗口，不用完整行数阻塞选列。
+    let preview_only = true;
+    let table = disk::preview(&spec)?;
     let suggested = suggested_column(&table.headers)
         .map(|h| json!({"column": h}))
         .unwrap_or(Value::Null);
@@ -1371,8 +1468,34 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
         "headers": table.headers,
         "preview": table.rows.iter().take(8).collect::<Vec<_>>(),
         "rowCount": table.rows.len(),
+        "previewOnly": preview_only,
         "suggestedMapping": suggested,
     }))
+}
+
+#[test]
+fn fuzzy_preview_reads_head_and_formal_column_still_checks_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("模糊匹配.xlsx");
+    crate::table_read_cache::workbook_with_bad_tail(&path, &["资产编号", "资产名称"]);
+    let source = json!({"path": path, "sheet": "数据", "headerRow": 1, "headerDepth": 1, "column": "资产编号"});
+    let result = inspect(&json!({"source": source})).unwrap();
+    assert_eq!(result["previewOnly"], true);
+    assert_eq!(result["preview"].as_array().unwrap().len(), 8);
+    assert!(load_column(&json!({"sourceA": source}), "sourceA").is_err());
+}
+
+#[test]
+fn fuzzy_selected_column_preserves_blank_values_and_header_beyond_default_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("列.csv");
+    fs::write(&path, format!("{}名称,编号\n甲,A1\n乙,\n,,\n丙,A3\n", "\n".repeat(80))).unwrap();
+    let source = json!({"path":path,"headerRow":81,"headerDepth":1,"column":"编号"});
+    let result = inspect(&json!({"source":source})).unwrap();
+    assert_eq!(result["headerRow"], 81);
+    let values = load_column(&json!({"sourceA":source}), "sourceA").unwrap();
+    assert_eq!(values, ["A1", "", "A3"]);
+    assert_eq!(load_column(&json!({"sourceA":source}), "sourceA").unwrap(), values);
 }
 
 /// 建议匹配列：首个含名称类关键词的表头（公司/单位/客户/户名/姓名等）。
@@ -1420,9 +1543,8 @@ fn export_flow(params: &Value) -> Result<Value, AppError> {
         });
     // rows 直传（进程内调用与单测）优先；正常前端链路只传 jobId，靠接线层
     // 注入的 __dbPath 从本机结果库读回，并叠加人工确认状态。
-    let rows_owned: Vec<Value>;
-    let rows: &[Value] = match params.get("rows").and_then(Value::as_array) {
-        Some(rows) => rows,
+    let out = match params.get("rows").and_then(Value::as_array) {
+        Some(rows) => export_workbook(rows, &path)?,
         None => {
             let job_id = required_job_id(params)?;
             let db = injected(params, "__dbPath").ok_or_else(|| {
@@ -1433,21 +1555,45 @@ fn export_flow(params: &Value) -> Result<Value, AppError> {
                 )
             })?;
             let conn = open_db(Path::new(db))?;
-            let mut loaded = load_result_rows(&conn, &job_id)?;
-            if loaded.is_empty() {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM fuzzy_match_results WHERE job_id=?1",
+                    [&job_id],
+                    |r| r.get(0),
+                )
+                .map_err(disk_sql_error)?;
+            if count == 0 {
                 return Err(error(
                     "RESULTS_NOT_FOUND",
                     "该任务在本机没有保存匹配结果，请先完成匹配再导出。",
                     Some(job_id),
                 ));
             }
-            let confirmations = load_confirmations(&conn, &job_id)?;
-            apply_confirmations(&mut loaded, &confirmations);
-            rows_owned = loaded;
-            &rows_owned
+            export_workbook_from(
+                &|visitor| {
+                    // 分页只服务导出缓冲，不读取完整结果或完整确认列表。
+                    let mut after = 0;
+                    loop {
+                        let mut page =
+                            load_result_window(&conn, &job_id, 0, disk::PAGE_SIZE, "", after)?;
+                        if page.is_empty() {
+                            break;
+                        }
+                        let first = page.first().and_then(|r| r["aIndex"].as_u64()).unwrap_or(1);
+                        let last = page.last().and_then(|r| r["aIndex"].as_u64()).unwrap_or(0);
+                        let confirmations = load_confirmation_range(&conn, &job_id, first, last)?;
+                        apply_confirmations(&mut page, &confirmations);
+                        for row in &page {
+                            visitor(row)?;
+                        }
+                        after = last as usize;
+                    }
+                    Ok(())
+                },
+                &path,
+            )?
         }
     };
-    let out = export_workbook(rows, &path)?;
     // outputPaths 数组是 worker 事件协议的落点：monitor 靠它把产物加入
     // AllowedPaths，前端据此才能打开产物所在目录。
     Ok(json!({
@@ -1474,213 +1620,133 @@ fn confirmed_cn(v: &Value) -> &'static str {
 }
 
 fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
+    export_workbook_from(
+        &|visitor| {
+            for row in rows {
+                visitor(row)?;
+            }
+            Ok(())
+        },
+        path,
+    )
+}
+
+type ExportVisitor<'a> = dyn FnMut(&Value) -> Result<(), AppError> + 'a;
+type ExportSource<'a> = dyn Fn(&mut ExportVisitor<'_>) -> Result<(), AppError> + 'a;
+
+fn export_workbook_from(rows: &ExportSource<'_>, path: &Path) -> Result<PathBuf, AppError> {
     let mut wb = Workbook::new();
     let header = Format::new()
-        .set_bold()
-        .set_align(FormatAlign::Center)
-        .set_border(FormatBorder::Thin)
-        .set_background_color("#D9EAD3");
-    // Sheet1 全部结果：每个候选一行；无候选的行也占一行（匹配对象留空）。
-    {
+        .set_bold().set_align(FormatAlign::Center)
+        .set_border(FormatBorder::Thin).set_background_color("#D9EAD3");
+    let match_headers = ["序号", "A行号", "A列原始值", "B行号", "B列匹配值", "匹配级别",
+        "总分", "字符相似", "最长公共子序列", "词组重叠", "判定原因", "确认标记"];
+    let unmatched_headers = ["序号", "A行号", "A列原始值", "级别", "原因"];
+    let match_widths = [6, 8, 30, 8, 30, 10, 8, 10, 16, 10, 28, 10];
+    let unmatched_widths = [6, 8, 40, 10, 32];
+    for (name, headers, widths) in [
+        ("全部结果", match_headers.as_slice(), match_widths.as_slice()),
+        ("疑似确认记录", match_headers.as_slice(), match_widths.as_slice()),
+        ("未匹配清单", unmatched_headers.as_slice(), unmatched_widths.as_slice()),
+    ] {
         let ws = wb.add_worksheet_with_constant_memory();
-        ws.set_name("全部结果").map_err(xlsx)?;
-        let headers = [
-            "序号",
-            "A行号",
-            "A列原始值",
-            "B行号",
-            "B列匹配值",
-            "匹配级别",
-            "总分",
-            "字符相似",
-            "最长公共子序列",
-            "词组重叠",
-            "判定原因",
-            "确认标记",
-        ];
+        ws.set_name(name).map_err(xlsx)?;
         for (c, h) in headers.iter().enumerate() {
-            ws.write_string_with_format(0, c as u16, *h, &header)
-                .map_err(xlsx)?;
+            ws.write_string_with_format(0, c as u16, *h, &header).map_err(xlsx)?;
         }
-        // 常量内存模式不支持 autofit，手动设列宽。
-        let widths = [6, 8, 30, 8, 30, 10, 8, 10, 16, 10, 28, 10];
-        for (c, w) in widths.iter().enumerate() {
-            ws.set_column_width(c as u16, *w).map_err(xlsx)?;
+        for (c, width) in widths.iter().enumerate() {
+            ws.set_column_width(c as u16, f64::from(*width)).map_err(xlsx)?;
         }
-        let mut y = 1u32;
-        let mut seq = 0u64;
-        for row in rows {
-            let a_index = row.get("aIndex").and_then(Value::as_u64).unwrap_or(0);
-            let a_value = row.get("aValue").and_then(Value::as_str).unwrap_or("");
-            let level = row.get("level").and_then(Value::as_str).unwrap_or("");
-            let matches = row
-                .get("matches")
-                .and_then(Value::as_array)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
-            if matches.is_empty() {
-                seq += 1;
-                let reasons = row
-                    .get("reasons")
-                    .and_then(Value::as_array)
-                    .map(|r| {
-                        r.iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join("；")
-                    })
-                    .unwrap_or_default();
-                write_match_row(
-                    ws, y, seq, a_index, a_value, 0, "", level, None, &reasons, "",
-                )?;
-                y += 1;
-                continue;
-            }
-            for m in matches {
-                seq += 1;
-                write_match_row(
-                    ws,
-                    y,
-                    seq,
-                    a_index,
-                    a_value,
-                    m.get("bIndex").and_then(Value::as_u64).unwrap_or(0),
-                    m.get("bValue").and_then(Value::as_str).unwrap_or(""),
-                    m.get("level").and_then(Value::as_str).unwrap_or(""),
-                    m.get("breakdown"),
-                    &m.get("reasons")
-                        .and_then(Value::as_array)
-                        .map(|r| {
-                            r.iter()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join("；")
-                        })
-                        .unwrap_or_default(),
-                    m.get("confirmed").map(confirmed_cn).unwrap_or("未确认"),
-                )?;
-                y += 1;
+        // Row numbers remain identifiers; only the four numeric scores use
+        // the common thousands format, retaining their fractional precision.
+        if headers.len() == match_headers.len() {
+            let number = Format::new().set_num_format(crate::xlsx_numbers::NUMBER_FORMAT);
+            for column in 6..=9 {
+                ws.set_column_format(column, &number).map_err(xlsx)?;
+                ws.set_column_width(column, 20).map_err(xlsx)?;
             }
         }
     }
-    // Sheet2 疑似确认记录：只列 suspect 行的全部 topK 候选（列布局与 Sheet1
-    // 一致，便于并排核对；confirmed 列即确认操作落点）。
-    {
-        let ws = wb.add_worksheet_with_constant_memory();
-        ws.set_name("疑似确认记录").map_err(xlsx)?;
-        let headers = [
-            "序号",
-            "A行号",
-            "A列原始值",
-            "B行号",
-            "B列匹配值",
-            "匹配级别",
-            "总分",
-            "字符相似",
-            "最长公共子序列",
-            "词组重叠",
-            "判定原因",
-            "确认标记",
-        ];
-        for (c, h) in headers.iter().enumerate() {
-            ws.write_string_with_format(0, c as u16, *h, &header)
-                .map_err(xlsx)?;
+    // Each worksheet flushes its own rows. Read/decode saved results only once,
+    // routing each candidate to the applicable sheets in the original order.
+    let [all, suspect, unmatched] = wb.worksheets_mut().as_mut_slice() else { unreachable!() };
+    let mut all_y = 1u32;
+    let mut suspect_y = 1u32;
+    let mut unmatched_y = 1u32;
+    rows(&mut |row| {
+        let a_index = row.get("aIndex").and_then(Value::as_u64).unwrap_or(0);
+        let a_value = row.get("aValue").and_then(Value::as_str).unwrap_or("");
+        let level = row.get("level").and_then(Value::as_str).unwrap_or("");
+        let reasons = |value: &Value| value.get("reasons").and_then(Value::as_array)
+            .map(|r| r.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("；"))
+            .unwrap_or_default();
+        let matches = row.get("matches").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+        if matches.is_empty() {
+            write_match_row(all, all_y, u64::from(all_y), a_index, a_value, 0, "", level, None, &reasons(row), "")?;
+            all_y += 1;
         }
-        let widths = [6, 8, 30, 8, 30, 10, 8, 10, 16, 10, 28, 10];
-        for (c, w) in widths.iter().enumerate() {
-            ws.set_column_width(c as u16, *w).map_err(xlsx)?;
-        }
-        let mut y = 1u32;
-        let mut seq = 0u64;
-        for row in rows {
-            if row.get("level").and_then(Value::as_str) != Some("suspect") {
-                continue;
-            }
-            let a_index = row.get("aIndex").and_then(Value::as_u64).unwrap_or(0);
-            let a_value = row.get("aValue").and_then(Value::as_str).unwrap_or("");
-            let matches = row
-                .get("matches")
-                .and_then(Value::as_array)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
-            for m in matches {
-                seq += 1;
-                write_match_row(
-                    ws,
-                    y,
-                    seq,
-                    a_index,
-                    a_value,
-                    m.get("bIndex").and_then(Value::as_u64).unwrap_or(0),
-                    m.get("bValue").and_then(Value::as_str).unwrap_or(""),
-                    "suspect",
-                    m.get("breakdown"),
-                    &m.get("reasons")
-                        .and_then(Value::as_array)
-                        .map(|r| {
-                            r.iter()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join("；")
-                        })
-                        .unwrap_or_default(),
-                    m.get("confirmed").map(confirmed_cn).unwrap_or("未确认"),
-                )?;
-                y += 1;
+        for candidate in matches {
+            let b_index = candidate.get("bIndex").and_then(Value::as_u64).unwrap_or(0);
+            let b_value = candidate.get("bValue").and_then(Value::as_str).unwrap_or("");
+            let candidate_level = candidate.get("level").and_then(Value::as_str).unwrap_or("");
+            let reason = reasons(candidate);
+            let confirmed = candidate.get("confirmed").map(confirmed_cn).unwrap_or("未确认");
+            write_match_row(all, all_y, u64::from(all_y), a_index, a_value, b_index, b_value,
+                candidate_level, candidate.get("breakdown"), &reason, confirmed)?;
+            all_y += 1;
+            if level == "suspect" {
+                write_match_row(suspect, suspect_y, u64::from(suspect_y), a_index, a_value, b_index, b_value,
+                    "suspect", candidate.get("breakdown"), &reason, confirmed)?;
+                suspect_y += 1;
             }
         }
-    }
-    // Sheet3 未匹配清单：unmatched + invalid 行。
-    {
-        let ws = wb.add_worksheet_with_constant_memory();
-        ws.set_name("未匹配清单").map_err(xlsx)?;
-        let headers = ["序号", "A行号", "A列原始值", "级别", "原因"];
-        for (c, h) in headers.iter().enumerate() {
-            ws.write_string_with_format(0, c as u16, *h, &header)
-                .map_err(xlsx)?;
+        if !matches!(level, "auto" | "suspect") {
+            unmatched.write_number(unmatched_y, 0, f64::from(unmatched_y)).map_err(xlsx)?;
+            unmatched.write_number(unmatched_y, 1, a_index as f64).map_err(xlsx)?;
+            unmatched.write_string(unmatched_y, 2, a_value).map_err(xlsx)?;
+            unmatched.write_string(unmatched_y, 3, level_cn(level)).map_err(xlsx)?;
+            unmatched.write_string(unmatched_y, 4, reasons(row)).map_err(xlsx)?;
+            unmatched_y += 1;
         }
-        let widths = [6, 8, 40, 10, 32];
-        for (c, w) in widths.iter().enumerate() {
-            ws.set_column_width(c as u16, *w).map_err(xlsx)?;
-        }
-        let mut y = 1u32;
-        let mut seq = 0u64;
-        for row in rows {
-            let level = row.get("level").and_then(Value::as_str).unwrap_or("");
-            if matches!(level, "auto" | "suspect") {
-                continue;
-            }
-            seq += 1;
-            let reasons = row
-                .get("reasons")
-                .and_then(Value::as_array)
-                .map(|r| {
-                    r.iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join("；")
-                })
-                .unwrap_or_default();
-            ws.write_number(y, 0, seq as f64).map_err(xlsx)?;
-            ws.write_number(
-                y,
-                1,
-                row.get("aIndex").and_then(Value::as_u64).unwrap_or(0) as f64,
-            )
-            .map_err(xlsx)?;
-            ws.write_string(
-                y,
-                2,
-                row.get("aValue").and_then(Value::as_str).unwrap_or(""),
-            )
-            .map_err(xlsx)?;
-            ws.write_string(y, 3, level_cn(level)).map_err(xlsx)?;
-            ws.write_string(y, 4, &reasons).map_err(xlsx)?;
-            y += 1;
-        }
-    }
+        Ok(())
+    })?;
     wb.save(path).map_err(xlsx)?;
     Ok(path.to_path_buf())
+}
+
+#[cfg(test)]
+#[test]
+fn export_reads_results_once_and_routes_candidates_in_order() {
+    let calls = std::cell::Cell::new(0);
+    let rows = vec![
+        json!({"aIndex":1,"aValue":"甲","level":"suspect","matches":[
+            {"bIndex":3,"bValue":"甲一","level":"auto","confirmed":true,"reasons":["理由一"]},
+            {"bIndex":4,"bValue":"甲二","level":"suspect","confirmed":false,"reasons":["理由二"]}]}),
+        json!({"aIndex":2,"aValue":"乙","level":"unmatched","reasons":["无候选"]}),
+        json!({"aIndex":3,"aValue":"","level":"invalid","reasons":["空值"]}),
+        json!({"aIndex":4,"aValue":"丙","level":"auto","matches":[{"bIndex":9,"bValue":"丙","level":"auto"}]}),
+    ];
+    let path = std::env::temp_dir().join(format!("fuzzy-once-{}.xlsx",uuid::Uuid::new_v4().simple()));
+    export_workbook_from(&|visitor| {
+        calls.set(calls.get()+1);
+        for row in &rows { visitor(row)?; }
+        Ok(())
+    }, &path).unwrap();
+    assert_eq!(calls.get(), 1);
+    let mut book = calamine::open_workbook_auto(&path).unwrap();
+    let all = book.worksheet_range("全部结果").unwrap();
+    let suspect = book.worksheet_range("疑似确认记录").unwrap();
+    let unmatched = book.worksheet_range("未匹配清单").unwrap();
+    assert_eq!(all.height(), 6);
+    assert_eq!(suspect.height(), 3);
+    assert_eq!(unmatched.height(), 3);
+    assert_eq!(all.get_value((1,5)).unwrap().to_string(), "自动匹配");
+    assert_eq!(suspect.get_value((1,5)).unwrap().to_string(), "疑似匹配");
+    assert_eq!(suspect.get_value((1,11)).unwrap().to_string(), "已确认");
+    assert_eq!(suspect.get_value((2,11)).unwrap().to_string(), "已否决");
+    assert_eq!(unmatched.get_value((2,1)).unwrap().to_string(), "3");
+    drop(book);
+    fs::remove_file(path).unwrap();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1781,6 +1847,9 @@ fn injected<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
 /// 单测直调不注入则跳过）。保存失败让任务失败：导出与跨会话恢复都依赖
 /// 这份行级结果，静默跳过只会让后续步骤报更难懂的错。
 fn persist_if_wired(params: &Value, result: &Value) -> Result<(), AppError> {
+    if result.get("processingMode").and_then(Value::as_str) == Some("disk") {
+        return Ok(());
+    }
     let (Some(db), Some(job)) = (injected(params, "__dbPath"), injected(params, "__jobId")) else {
         return Ok(());
     };
@@ -1803,7 +1872,8 @@ fn open_db(db_path: &Path) -> Result<Connection, AppError> {
     conn.execute_batch(
         "PRAGMA busy_timeout=5000;
          CREATE TABLE IF NOT EXISTS fuzzy_match_results(job_id TEXT NOT NULL,a_index INTEGER NOT NULL,a_value TEXT NOT NULL,level TEXT NOT NULL,match_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(job_id,a_index));
-         CREATE TABLE IF NOT EXISTS fuzzy_match_confirmations(job_id TEXT NOT NULL,a_index INTEGER NOT NULL,b_index INTEGER,action TEXT NOT NULL,note TEXT,confirmed_at TEXT NOT NULL,PRIMARY KEY(job_id,a_index));",
+         CREATE TABLE IF NOT EXISTS fuzzy_match_confirmations(job_id TEXT NOT NULL,a_index INTEGER NOT NULL,b_index INTEGER,action TEXT NOT NULL,note TEXT,confirmed_at TEXT NOT NULL,PRIMARY KEY(job_id,a_index));
+         CREATE TABLE IF NOT EXISTS fuzzy_match_summaries(job_id TEXT PRIMARY KEY,summary_json TEXT NOT NULL);",
     )
     .map_err(open_error)?;
     Ok(conn)
@@ -1873,6 +1943,13 @@ fn persist_results(db_path: &Path, job_id: &str, result: &Value) -> Result<(), A
             .map_err(write_error)?;
         }
     }
+    if let Some(summary) = result.get("summary") {
+        tx.execute(
+            "INSERT OR REPLACE INTO fuzzy_match_summaries(job_id,summary_json) VALUES(?1,?2)",
+            params![job_id, summary.to_string()],
+        )
+        .map_err(write_error)?;
+    }
     tx.commit().map_err(write_error)?;
     Ok(())
 }
@@ -1881,29 +1958,179 @@ fn persist_results(db_path: &Path, job_id: &str, result: &Value) -> Result<(), A
 /// 行级结果与确认全部从库读回，summary 优先取 task_history 完成事件里
 /// monitor 存的完整口径（含 rowsB/elapsedMs），取不到再按行级统计重建
 /// （rowsB/elapsedMs 无法从行级还原，以 0 兜底——前端类型要求 number）。
+const RESULT_FILTER: &str = "r.job_id=?1 AND (?2='' OR r.level=?2)
+    AND (?3='all' OR (?3='70-80' AND json_extract(r.match_json,'$[0].total')>=70 AND json_extract(r.match_json,'$[0].total')<80)
+      OR (?3='80-90' AND json_extract(r.match_json,'$[0].total')>=80 AND json_extract(r.match_json,'$[0].total')<90))
+    AND (?4=0 OR NOT EXISTS(SELECT 1 FROM fuzzy_match_confirmations c WHERE c.job_id=r.job_id AND c.a_index=r.a_index))";
+
+struct ResultFilter<'a> {
+    level: &'a str,
+    band: &'a str,
+    pending: bool,
+}
+impl Default for ResultFilter<'_> {
+    fn default() -> Self {
+        Self {
+            level: "",
+            band: "all",
+            pending: false,
+        }
+    }
+}
+
 fn get_results(db_path: &Path, params: &Value) -> Result<Value, AppError> {
     let job_id = required_job_id(params)?;
     let conn = open_db(db_path)?;
-    let rows = load_result_rows(&conn, &job_id)?;
-    if rows.is_empty() {
+    let level = if params.get("onlySuspect").and_then(Value::as_bool) == Some(true) {
+        "suspect"
+    } else {
+        params.get("level").and_then(Value::as_str).unwrap_or("")
+    };
+    if !matches!(level, "" | "auto" | "suspect" | "unmatched" | "invalid") {
+        return Err(error("INVALID_PARAMS", "匹配级别筛选无效。", None));
+    }
+    let band = params.get("band").and_then(Value::as_str).unwrap_or("all");
+    if !matches!(band, "all" | "70-80" | "80-90") {
+        return Err(error("INVALID_PARAMS", "分数区间筛选无效。", None));
+    }
+    let filter = ResultFilter {
+        level,
+        band,
+        pending: params
+            .get("onlyPending")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+    let total: i64 = conn
+        .query_row(
+            &format!("SELECT count(*) FROM fuzzy_match_results r WHERE {RESULT_FILTER}"),
+            params![job_id, level, band, filter.pending],
+            |r| r.get(0),
+        )
+        .map_err(disk_sql_error)?;
+    let overall: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM fuzzy_match_results WHERE job_id=?1",
+            [&job_id],
+            |r| r.get(0),
+        )
+        .map_err(disk_sql_error)?;
+    let saved_summary = conn
+        .query_row(
+            "SELECT summary_json FROM fuzzy_match_summaries WHERE job_id=?1",
+            [&job_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    if overall == 0 && saved_summary.is_none() {
         return Err(error(
             "RESULTS_NOT_FOUND",
             "该任务在本机没有保存匹配结果，请重新运行匹配。",
             Some(job_id),
         ));
     }
-    let confirmations = load_confirmations(&conn, &job_id)?;
-    let summary = summary_from_history(&conn, &job_id).unwrap_or_else(|| rebuild_summary(&rows));
-    Ok(json!({"summary": summary, "rows": rows, "confirmations": confirmations}))
+    let offset = params
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(i64::MAX as u64) as usize;
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(if overall <= 1000 {
+            1000
+        } else {
+            disk::PAGE_SIZE as u64
+        })
+        .clamp(1, 1000) as usize;
+    let rows = load_filtered_window(&conn, &job_id, offset, limit, &filter, 0)?;
+    let confirmations = confirmation_page(&conn, &job_id, offset, limit, &filter)?;
+    let summary = saved_summary
+        .or_else(|| summary_from_history(&conn, &job_id))
+        .unwrap_or_else(|| summary_from_database(&conn, &job_id));
+    Ok(
+        json!({"summary": summary, "rows": rows, "confirmations": confirmations,"offset":offset,"limit":limit,"total":total,"hasMore":offset.saturating_add(limit)<total as usize}),
+    )
+}
+
+fn disk_sql_error(e: rusqlite::Error) -> AppError {
+    error(
+        "STORAGE_ERROR",
+        "本机数据存储操作失败。",
+        Some(e.to_string()),
+    )
+}
+
+fn summary_from_database(conn: &Connection, job_id: &str) -> Value {
+    let mut summary = rebuild_summary(&[]);
+    if let Ok(mut stmt) = conn
+        .prepare("SELECT level,count(*) FROM fuzzy_match_results WHERE job_id=?1 GROUP BY level")
+    {
+        if let Ok(queried) = stmt.query_map([job_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?))
+        }) {
+            let mut total = 0;
+            for (level, count) in queried.flatten() {
+                total += count;
+                let key = match level.as_str() {
+                    "auto" => "autoCount",
+                    "suspect" => "suspectCount",
+                    "invalid" => "invalidCount",
+                    _ => "unmatchedCount",
+                };
+                summary[key] = json!(count);
+            }
+            summary["rowsA"] = json!(total);
+        }
+    }
+    summary
 }
 
 /// 逐行读回 fuzzy_match_results：match_json 反序列化回 matches；行级
 /// reasons 库里没存，invalid 行的文案是固定的，读回时按 level 重建。
-fn load_result_rows(conn: &Connection, job_id: &str) -> Result<Vec<Value>, AppError> {
+fn load_result_page(
+    conn: &Connection,
+    job_id: &str,
+    offset: usize,
+    limit: usize,
+    level: &str,
+) -> Result<Vec<Value>, AppError> {
+    load_result_window(conn, job_id, offset, limit, level, 0)
+}
+
+fn load_result_window(
+    conn: &Connection,
+    job_id: &str,
+    offset: usize,
+    limit: usize,
+    level: &str,
+    after: usize,
+) -> Result<Vec<Value>, AppError> {
+    load_filtered_window(
+        conn,
+        job_id,
+        offset,
+        limit,
+        &ResultFilter {
+            level,
+            ..Default::default()
+        },
+        after,
+    )
+}
+
+fn load_filtered_window(
+    conn: &Connection,
+    job_id: &str,
+    offset: usize,
+    limit: usize,
+    filter: &ResultFilter<'_>,
+    after: usize,
+) -> Result<Vec<Value>, AppError> {
     let mut stmt = conn
         .prepare(
-            "SELECT a_index,a_value,level,match_json FROM fuzzy_match_results
-             WHERE job_id=?1 ORDER BY a_index",
+            &format!("SELECT r.a_index,r.a_value,r.level,r.match_json FROM fuzzy_match_results r WHERE {RESULT_FILTER} AND r.a_index>?5 ORDER BY r.a_index LIMIT ?6 OFFSET ?7"),
         )
         .map_err(|e| {
             error(
@@ -1913,14 +2140,25 @@ fn load_result_rows(conn: &Connection, job_id: &str) -> Result<Vec<Value>, AppEr
             )
         })?;
     let queried = stmt
-        .query_map([job_id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        })
+        .query_map(
+            params![
+                job_id,
+                filter.level,
+                filter.band,
+                filter.pending,
+                after as i64,
+                limit as i64,
+                offset as i64
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
         .map_err(|e| {
             error(
                 "STORAGE_ERROR",
@@ -1954,12 +2192,29 @@ fn load_result_rows(conn: &Connection, job_id: &str) -> Result<Vec<Value>, AppEr
     Ok(out)
 }
 
-/// 确认记录全量读回（bIndex null 表示「确认该行确无匹配」的整行否决）。
-fn load_confirmations(conn: &Connection, job_id: &str) -> Result<Vec<Value>, AppError> {
+/// 只读当前筛选页的确认记录，避免确认列表随任务总行数增长。
+fn confirmation_page(
+    conn: &Connection,
+    job: &str,
+    offset: usize,
+    limit: usize,
+    filter: &ResultFilter<'_>,
+) -> Result<Vec<Value>, AppError> {
+    let mut stmt=conn.prepare(&format!("SELECT c.a_index,c.b_index,c.action,c.note FROM fuzzy_match_confirmations c JOIN (SELECT r.a_index FROM fuzzy_match_results r WHERE {RESULT_FILTER} ORDER BY r.a_index LIMIT ?5 OFFSET ?6) page ON page.a_index=c.a_index WHERE c.job_id=?1 ORDER BY c.a_index")).map_err(disk_sql_error)?;
+    let rows=stmt.query_map(params![job,filter.level,filter.band,filter.pending,limit as i64,offset as i64],|r|Ok(json!({"aIndex":r.get::<_,i64>(0)?,"bIndex":r.get::<_,Option<i64>>(1)?,"action":r.get::<_,String>(2)?,"note":r.get::<_,Option<String>>(3)?}))).map_err(disk_sql_error)?;
+    rows.map(|r| r.map_err(disk_sql_error)).collect()
+}
+
+fn load_confirmation_range(
+    conn: &Connection,
+    job_id: &str,
+    first: u64,
+    last: u64,
+) -> Result<Vec<Value>, AppError> {
     let mut stmt = conn
         .prepare(
             "SELECT a_index,b_index,action,note FROM fuzzy_match_confirmations
-             WHERE job_id=?1 ORDER BY a_index",
+             WHERE job_id=?1 AND a_index>=?2 AND a_index<=?3 ORDER BY a_index",
         )
         .map_err(|e| {
             error(
@@ -1969,7 +2224,7 @@ fn load_confirmations(conn: &Connection, job_id: &str) -> Result<Vec<Value>, App
             )
         })?;
     let queried = stmt
-        .query_map([job_id], |r| {
+        .query_map(params![job_id, first as i64, last as i64], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, Option<i64>>(1)?,
@@ -2135,7 +2390,7 @@ fn apply_confirmations(rows: &mut [Value], confirmations: &[Value]) {
 // 表头探测 + 文本表格兜底；不跨模块引用，便于各自演进）
 // ============================================================
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SourceSpec {
     /// 兼容旧字段名 inputPath。
@@ -2174,15 +2429,14 @@ fn load_column(params: &Value, key: &str) -> Result<Vec<String>, AppError> {
         .ok_or_else(|| error("MISSING_SOURCE", format!("缺少 {} 数据源。", key), None))?;
     let spec: SourceSpec = serde_json::from_value(spec_value)
         .map_err(|e| error("INVALID_PARAMS", "数据源参数不完整。", Some(e.to_string())))?;
-    let table = load_table(&spec)?;
-    let idx = pick_column(&spec, &table)?;
-    // 该列为空的行也保留（行序即 aIndex/bIndex 口径：跳过表头后的第 N 个
-    // 数据行）——空值由 prepare_row 归入「无效值」，不能在这里悄悄丢行。
-    Ok(table
-        .rows
-        .iter()
-        .map(|r| r.get(idx).cloned().unwrap_or_default().trim().to_string())
-        .collect())
+    crate::table_read_cache::read(Path::new(&spec.path), "fuzzy-selected-column-v1", &spec, || {
+        let mut values = Vec::new();
+        disk::visit_column(&spec, &AtomicBool::new(false), |_, value| {
+            values.push(value);
+            Ok(())
+        })?;
+        Ok(values)
+    })
 }
 
 /// 选列：先按表头名精确匹配，再按 1 起的列号，缺省取建议列。
@@ -2204,6 +2458,7 @@ fn pick_column(spec: &SourceSpec, table: &Table) -> Result<usize, AppError> {
     Err(error("NO_COLUMN", format!("未找到匹配列「{col}」。"), None))
 }
 
+#[cfg(test)]
 fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
     let path = PathBuf::from(&spec.path);
     if !path.is_file() {
@@ -2239,15 +2494,16 @@ fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
                 Some(e.to_string()),
             )
         })?;
+        let start=range.start().unwrap_or((0,0));
+        let mut physical_rows=vec![Vec::new();start.0 as usize];
+        physical_rows.extend(range.rows().map(|r|{let mut row=vec![String::new();start.1 as usize];row.extend(r.iter().map(data_text));row}));
         (
             selected,
             sheets,
-            range
-                .rows()
-                .map(|r| r.iter().map(data_text).collect())
-                .collect(),
+            physical_rows,
         )
     };
+    crate::header_detection::require_tabular(&all, spec.header_row == 0)?;
     let (header_index, inferred_depth) = crate::header_detection::layout(
         &all,
         30,
@@ -2304,6 +2560,7 @@ fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
     })
 }
 
+#[cfg(test)]
 fn read_text(path: &Path) -> Result<Vec<Vec<String>>, AppError> {
     crate::spreadsheet_input::read_rows(path)
 }
@@ -2342,6 +2599,7 @@ fn header_cell_hit(v: &str) -> bool {
     !s.is_empty() && s.chars().count() <= 12 && KEYWORDS.iter().any(|k| s.contains(k))
 }
 
+#[cfg(test)]
 fn data_text(v: &Data) -> String {
     match v {
         Data::Empty => String::new(),
@@ -2379,6 +2637,39 @@ fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppE
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thousands_scores_preserve_numeric_precision_and_source_identifiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("匹配结果.xlsx");
+        let rows = vec![json!({"aIndex":1234,"aValue":"001234","level":"suspect","matches":[
+            {"bIndex":5678,"bValue":"005678","level":"suspect","breakdown":
+                {"total":0.9123456789,"charSim":0.9,"lcsSim":0.8,"tokenOverlap":0.7}}]})];
+        export_workbook(&rows, &output).unwrap();
+        let bytes = std::fs::read(&output).unwrap();
+        for sheet in [1, 2] {
+            for cell in ["G2", "H2", "I2", "J2"] {
+                crate::xlsx_numbers::assert_cell_format(&bytes, sheet, cell, crate::xlsx_numbers::NUMBER_FORMAT);
+            }
+        }
+        let mut book = open_workbook_auto(&output).unwrap();
+        let range = book.worksheet_range("全部结果").unwrap();
+        assert_eq!(range[(1, 2)], Data::String("001234".into()));
+        assert_eq!(range[(1, 6)], Data::Float(0.9123456789));
+    }
+    #[test]
+    fn 通用表头模糊匹配首条名称与金额不能充当下层() {
+        let path = std::env::temp_dir().join(format!("fuzzy-body-{}.csv", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "客户名称,编号,金额,备注,\n客户甲,客户编号,100,备注说明,辅助名称\n客户乙,002,200,正常,其他\n").unwrap();
+        let spec: super::SourceSpec = serde_json::from_value(serde_json::json!({"inputPath":path,"headerRow":0,"headerDepth":0})).unwrap();
+        let auto = super::load_table(&spec).unwrap();
+        assert_eq!((auto.header_row, auto.header_depth), (1, 1));
+        assert_eq!(auto.rows.len(), 2);
+        assert_eq!(auto.rows[0][0], "客户甲");
+        let disk = super::disk::preview(&spec).unwrap();
+        assert_eq!(disk.headers, auto.headers);
+        assert_eq!(disk.rows, auto.rows);
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn 通用表头模糊匹配双层不混入正文() {
         let path = std::env::temp_dir().join(format!("fuzzy-header-{}.csv", uuid::Uuid::new_v4()));
@@ -2449,12 +2740,7 @@ mod tests {
                     scored.push((j, sc));
                 }
             }
-            scored.sort_by(|x, y| {
-                y.1.total
-                    .partial_cmp(&x.1.total)
-                    .unwrap()
-                    .then(x.0.cmp(&y.0))
-            });
+            scored.sort_by(|x, y| score_order(&x.1, &y.1).then(x.0.cmp(&y.0)));
             scored.truncate(options.top_k);
             let level = scored
                 .first()
@@ -2571,6 +2857,43 @@ mod tests {
     }
 
     #[test]
+    fn 英文归一保留单词边界与缩写空白() {
+        for kind in ["company", "generic", "address", "person"] {
+            for (raw, expected) in [
+                ("Unlimited", "unlimited"), ("Accompany", "accompany"),
+                ("limited2", "limited2"), ("my_company", "my_company"),
+                ("Acme Limited", "acmeltd"), ("Acme Company", "acmeco"),
+                ("Acme     Limited", "acmeltd"),
+                ("Acme Technologies Co. Ltd.", "acmetechcoltd"),
+                ("ＡＣＭＥ Ｌｉｍｉｔｅｄ", "acmeltd"),
+                ("ACME G.M.B.H.", "acmegmbh"),
+                ("ACME G.M.B.H", "acmegmbh"),
+                ("ACME G. M. B. H.", "acmegmbh"),
+                ("ACME S.A.R.L.", "acmesarl"),
+                ("ACME SDN. BHD.", "acmesdnbhd"),
+                ("华辰有限责任 公司", "华辰有限公司"),
+                ("乾   隆有限责任公司", "乾隆有限公司"),
+            ] {
+                assert_eq!(normalize(raw, kind), expected, "{kind}: {raw}");
+            }
+        }
+    }
+
+    #[test]
+    fn 归一规则不受哈希遍历顺序影响() {
+        let input: HashMap<String, String> = serde_json::from_str::<Value>(asset_texts().0)
+            .unwrap()["normalize_map"].as_object().unwrap().iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap().into())).collect();
+        let forward: Vec<_> = input.into_iter().collect();
+        let reversed: Vec<_> = forward.iter().rev().cloned().collect();
+        let a = normalized_suffix_rules(forward);
+        let b = normalized_suffix_rules(reversed);
+        assert_eq!(a, b);
+        assert_eq!(normalize_suffixes("acme g·m·b·h·", &a), "acme gmbh");
+        assert_eq!(normalize_suffixes("acme s·a·r·l·", &b), "acme sarl");
+    }
+
+    #[test]
     fn 无效值判定() {
         assert!(is_invalid_value(""));
         assert!(is_invalid_value("12345"));
@@ -2659,18 +2982,18 @@ mod tests {
     }
 
     #[test]
-    fn 简称包含提分且单字不误报() {
+    fn 简称仅疑似且单字不误报() {
         let result = match_columns(
             vec!["华为技术有限公司"],
             vec!["华为", "华"],
             &opts("company"),
         );
         let row = &result["rows"][0];
-        assert_eq!(row["level"].as_str().unwrap(), "auto");
+        assert_eq!(row["level"].as_str().unwrap(), "suspect");
         let m = &row["matches"][0];
         assert_eq!(m["bValue"].as_str().unwrap(), "华为");
         let total = m["total"].as_f64().unwrap();
-        assert!(total >= 93.0, "字号包含应保底 93，实际 {total}");
+        assert!((70.0..90.0).contains(&total), "简称仅供人工确认，实际 {total}");
         // 「华」单字号行是无效值（单字符），绝不能进入匹配候选。
         let values: Vec<&str> = row["matches"]
             .as_array()
@@ -2681,6 +3004,23 @@ mod tests {
         assert!(!values.contains(&"华"), "单字字号不得误报：{values:?}");
         // 无效值行计数在 B 侧行内不参与（rowsB 仍统计原始行数）。
         assert_eq!(result["summary"]["rowsB"].as_u64().unwrap(), 2);
+    }
+
+    #[test]
+    fn 同字号不同行业与字号包含不得自动认定同一主体() {
+        for b in ["上海星河贸易有限公司", "上海星河星辰科技有限公司"] {
+            let result = match_columns(vec!["上海星河科技有限公司"], vec![b], &opts("company"));
+            assert_eq!(first_level(&result, 0), "suspect", "{b}");
+            let candidate = &result["rows"][0]["matches"][0];
+            assert!(candidate["total"].as_f64().unwrap() < 90.0);
+            assert!(candidate["reasons"].as_array().unwrap().iter()
+                .any(|r| r.as_str().unwrap().contains("需人工确认")));
+        }
+        let mut o = opts("company");
+        o.auto_threshold = 75.05;
+        let result = match_columns(vec!["上海星河科技有限公司"], vec!["上海星河贸易有限公司"], &o);
+        assert_eq!(first_level(&result, 0), "suspect", "舍入后也不能进入自动档");
+        assert_eq!(result["rows"][0]["matches"][0]["total"], 75.0);
     }
 
     #[test]
@@ -2760,12 +3100,12 @@ mod tests {
 
     #[test]
     fn 阈值参数化生效() {
-        // 93 分对（字号包含保底）：默认 90 下 auto，95 下 suspect。
-        let mut strict = opts("company");
-        strict.auto_threshold = 95.0;
-        strict.suspect_threshold = 80.0;
-        let default = match_columns(vec!["华为技术有限公司"], vec!["华为"], &opts("company"));
-        let strict_result = match_columns(vec!["华为技术有限公司"], vec!["华为"], &strict);
+        // 通用文本跨自动阈值：自动阈值80时自动，默认90时疑似。
+        let strict = opts("generic");
+        let mut loose_auto = opts("generic");
+        loose_auto.auto_threshold = 80.0;
+        let default = match_columns(vec!["审计工具箱开发工作小组"], vec!["审计工具箱开发工做小组"], &loose_auto);
+        let strict_result = match_columns(vec!["审计工具箱开发工作小组"], vec!["审计工具箱开发工做小组"], &strict);
         assert_eq!(first_level(&default, 0), "auto");
         assert_eq!(first_level(&strict_result, 0), "suspect");
 
@@ -2920,7 +3260,7 @@ mod tests {
         .unwrap();
         let rows = result["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["level"].as_str().unwrap(), "auto");
+        assert_eq!(rows[0]["level"].as_str().unwrap(), "suspect");
         assert_eq!(rows[1]["level"].as_str().unwrap(), "suspect");
         let summary = &result["summary"];
         assert_eq!(summary["rowsA"].as_u64().unwrap(), 2);
@@ -3014,7 +3354,7 @@ mod tests {
             .rows()
             .map(|r| r.iter().map(data_text).collect())
             .collect();
-        assert_eq!(suspect.len(), 2); // 表头 + 北京华辰科技
+        assert_eq!(suspect.len(), 3); // 表头 + 简称 + 北京华辰科技
         let unmatched: Vec<Vec<String>> = book
             .worksheet_range("未匹配清单")
             .unwrap()
@@ -3027,14 +3367,36 @@ mod tests {
         assert_eq!(all[0][5], "匹配级别");
         // 疑似行原因列应含行政区域不一致，且级别列正确。
         assert_eq!(suspect[1][5], "疑似匹配");
-        assert!(
-            suspect[1][10].contains("行政区域不一致"),
-            "实际：{:?}",
-            suspect[1]
-        );
+        let region_row = suspect.iter().skip(1).find(|r| r[2] == "北京华辰科技").unwrap();
+        assert!(region_row[10].contains("行政区域不一致"), "实际：{region_row:?}");
+        assert!(suspect[1][10].contains("字号相同或包含"));
     }
 
     // ---------- 粗筛正确性 ----------
+
+    #[test]
+    fn 精确项不被前二百条近似候选挤掉() {
+        let mut b = vec!["星河星河"; CANDIDATE_LIMIT];
+        b.extend(["星河", "星河"]);
+        for kind in ["generic", "company"] {
+            let result = match_columns(vec!["星河"], b.clone(), &opts(kind));
+            assert_eq!(first_level(&result, 0), "auto");
+            assert_eq!(result["rows"][0]["matches"][0]["bIndex"], 201);
+            assert_eq!(result["rows"][0]["matches"][1]["bIndex"], 202);
+            assert_eq!(result["rows"][0]["matches"][0]["total"], 100.0);
+            assert_eq!(result["summary"]["estimatedComparisons"], CANDIDATE_LIMIT);
+        }
+    }
+
+    #[test]
+    fn 舍入同分仍优先精确项() {
+        let exact = "甲甲乙乙".repeat(400);
+        let mut near = exact.clone();
+        near.replace_range(near.len()-'乙'.len_utf8().., "甲");
+        let result = match_columns(vec![&exact], vec![&near, &exact], &opts("generic"));
+        assert_eq!(result["rows"][0]["matches"][0]["bIndex"], 2);
+        assert_eq!(result["rows"][0]["matches"][1]["total"], 100.0);
+    }
 
     #[test]
     fn 粗筛长度过滤与top限制() {
@@ -3114,7 +3476,7 @@ mod tests {
             base_names.push(format!("{brand}{suffix}"));
         }
         // A 侧：一半注入字号内的错别字（第 2 字换成「囧」——不在字池，保证
-        // 扰动后字号仍唯一，且不会触发字号包含提分）。
+        // 扰动后字号仍唯一，且不会触发字号包含候选规则）。
         let a: Vec<String> = base_names
             .iter()
             .enumerate()
@@ -3177,7 +3539,7 @@ mod tests {
                 "扰动行 {i} 最优候选应是原行"
             );
         }
-        // 扰动行字号已变（囧），不应触发字号包含提分到 93。
+        // 扰动行字号已变（囧），不应自动匹配。
         let disturbed_total = rows[0]["matches"][0]["total"].as_f64().unwrap();
         assert!(
             disturbed_total < 90.0,
@@ -3245,7 +3607,7 @@ mod tests {
             .collect();
         assert_eq!(
             expected_levels,
-            vec!["auto", "auto", "suspect", "unmatched"]
+            vec!["auto", "suspect", "suspect", "unmatched"]
         );
 
         // 临时库没有 task_history → summary 走行级统计重建路径。
@@ -3255,8 +3617,8 @@ mod tests {
             result["rows"].as_array().unwrap().len()
         );
         assert_eq!(back["summary"]["rowsA"], 4);
-        assert_eq!(back["summary"]["autoCount"], 2);
-        assert_eq!(back["summary"]["suspectCount"], 1);
+        assert_eq!(back["summary"]["autoCount"], 1);
+        assert_eq!(back["summary"]["suspectCount"], 2);
         assert_eq!(back["summary"]["unmatchedCount"], 1);
         assert_eq!(back["confirmations"].as_array().unwrap().len(), 0);
         // 行级数据反序列化回 matches，候选结构完整。
@@ -3405,9 +3767,7 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// 5 万行结果落库再整包取回的耗时基线（跨会话恢复路径）。
-    /// 打印实际耗时（--nocapture 可见）；断言只设防挂死的宽上限，
-    /// 是否需要 onlySuspect 按实测数字在接线报告里给结论。
+    /// 大结果默认只回首屏，统计覆盖全库；分页与筛选在数据库执行。
     #[test]
     fn 五万行get_results耗时基线() {
         let (db, dir) = temp_db("perf");
@@ -3453,9 +3813,52 @@ mod tests {
         let t1 = Instant::now();
         let back = storage_call(&db, "fuzzy.get_results", json!({"jobId": "job-perf"})).unwrap();
         let read_elapsed = t1.elapsed();
-        assert_eq!(back["rows"].as_array().unwrap().len(), N);
+        assert_eq!(back["rows"].as_array().unwrap().len(), disk::PAGE_SIZE);
         assert_eq!(back["summary"]["rowsA"], N);
-        println!("fuzzy.get_results 5万行：写库 {write_elapsed:?}，读回+重建 {read_elapsed:?}");
+        assert_eq!(back["total"], N);
+        assert_eq!(back["hasMore"], true);
+        let tail = storage_call(
+            &db,
+            "fuzzy.get_results",
+            json!({"jobId":"job-perf","offset":N-10,"limit":20}),
+        )
+        .unwrap();
+        assert_eq!(tail["rows"].as_array().unwrap().len(), 10);
+        assert_eq!(tail["hasMore"], false);
+        let suspects = storage_call(
+            &db,
+            "fuzzy.get_results",
+            json!({"jobId":"job-perf","onlySuspect":true,"limit":50}),
+        )
+        .unwrap();
+        assert_eq!(suspects["total"], 10_000);
+        assert!(
+            suspects["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["level"] == "suspect")
+        );
+        save_confirm(&db,&json!({"jobId":"job-perf","confirmations":[{"aIndex":7,"bIndex":7,"action":"accept"}]})).unwrap();
+        let pending=storage_call(&db,"fuzzy.get_results",json!({"jobId":"job-perf","onlySuspect":true,"onlyPending":true,"band":"70-80","limit":50})).unwrap();
+        assert_eq!(pending["total"], 9_999);
+        assert!(
+            pending["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["aIndex"] != 7)
+        );
+        assert_eq!(pending["confirmations"], json!([]));
+        let empty_band = storage_call(
+            &db,
+            "fuzzy.get_results",
+            json!({"jobId":"job-perf","onlySuspect":true,"band":"80-90"}),
+        )
+        .unwrap();
+        assert_eq!(empty_band["total"], 0);
+        assert_eq!(empty_band["rows"], json!([]));
+        println!("fuzzy.get_results 5万行：写库 {write_elapsed:?}，首屏+全库统计 {read_elapsed:?}");
         assert!(
             read_elapsed.as_secs() < 30,
             "5 万行读回异常缓慢：{read_elapsed:?}"

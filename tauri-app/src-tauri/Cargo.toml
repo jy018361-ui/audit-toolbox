@@ -1,6 +1,6 @@
 [package]
 name = "audit-toolbox"
-version = "2.0.0-alpha.101"
+version = "2.0.0-alpha.131"
 description = "统一的 Tauri 审计工具箱"
 authors = ["Audit Toolbox"]
 edition = "2024"
@@ -40,6 +40,7 @@ calamine = { version = "=0.36.0", features = ["dates"] }
 cfb = "=0.14.0"
 rust_xlsxwriter = { version = "=0.96.0", features = ["constant_memory", "chrono"] }
 csv = "1.3"
+quick-xml = "=0.41.0"
 encoding_rs = "0.8"
 walkdir = "2.5"
 polars = { version = "=0.54.4", default-features = false, features = ["lazy", "parquet", "rows"] }
@@ -51,11 +52,15 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 umya-spreadsheet = "=3.0.1"
 pdfplumber = "0.3"
 regex = "1"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_Media_MediaFoundation", "Win32_System_WinRT", "Media_Ocr", "Graphics_Imaging", "Storage_Streams", "Globalization"] }
 wasapi = "0.24.0"
 hound = "3.5.1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
+tiff = "0.10"
 # 套餐转写通道：realtime 协议是 WebSocket，用一次性 current-thread runtime
 # 驱动 tokio-tungstenite（TLS 后端与 reqwest 同为 rustls）。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-platform-verifier = "0.7"
 tokio = { version = "1", features = ["rt", "time", "net", "macros"] }
 tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
@@ -64,6 +69,7 @@ tauri-plugin-autostart = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+tauri-winrt-notification = "0.7.3"
 
 [dev-dependencies]
 tempfile = "3"
@@ -74,3 +80,20 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# 大表写出与 ZIP 热路径优先速度；应用其余代码仍采用上方的体积优化。
+# 同 XML / 同压缩等级的优化构建对照见 artifacts/export-deep-20261025/。
+[profile.release.package.rust_xlsxwriter]
+opt-level = 3
+
+[profile.release.package.zip]
+opt-level = 3
+
+[profile.release.package.flate2]
+opt-level = 3
+
+[profile.release.package.zlib-rs]
+opt-level = 3
+
+[profile.release.package.crc32fast]
+opt-level = 3

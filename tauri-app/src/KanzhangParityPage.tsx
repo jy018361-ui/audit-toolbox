@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import { engineCall, jobCancel, jobStart, listenJobEvents, openOutput, pickPath } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
@@ -8,13 +9,14 @@ import "./kanzhang-parity.css";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { displayFileName } from "@/fileDisplay";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StepIndicator } from "@/components/StepIndicator";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
-import { LedgerSourceCard } from "@/components/LedgerSourceCard";
+import { LedgerSourceCard, LedgerSourceControls } from "@/components/LedgerSourceCard";
 import { LedgerLlmReview } from "@/components/LedgerLlmReview";
 import { LedgerMappingPreview } from "@/components/LedgerMappingPreview";
 import { confirmDialog } from "@/components/ConfirmDialog";
@@ -75,7 +77,7 @@ export {
 export type { Mapping, MappingChange, MappingChangeSource } from "./ledgerMapping";
 
 export type Batch = { name: string; accounts: string[]; presetId?: string };
-export type KanzhangDraft = { inputPath: string; sheet: string; knownSheets:string[]; headerRow: number; headerDepth: number; inspect?: Inspect; mapping: Mapping; batches: Batch[]; activeBatch: number; excludes: string[]; outputPath: string; outputTouched: boolean; includePivot: boolean; includeVoucherTypes: boolean; includeCounterpart:boolean; includeSuite:boolean; markLossTransfer: boolean; llmAnalysis:boolean; pivotRows: string[]; pivotColumns: string[]; pivotValues: string[]; step: number };
+export type KanzhangDraft = { inputPath: string; sheet: string; knownSheets:string[]; headerRow: number; headerDepth: number; inspect?: Inspect; mapping: Mapping; batches: Batch[]; activeBatch: number; excludes: string[]; primaryCodeLength?: number; outputPath: string; outputTouched: boolean; includePivot: boolean; includeVoucherTypes: boolean; includeCounterpart:boolean; includeSuite:boolean; markLossTransfer: boolean; llmAnalysis:boolean; pivotRows: string[]; pivotColumns: string[]; pivotValues: string[]; step: number };
 const EMPTY: KanzhangDraft = { inputPath:"",sheet:"",knownSheets:[],headerRow:0,headerDepth:0,mapping:EMPTY_MAPPING,batches:[{name:"批次1",accounts:[]}],activeBatch:0,excludes:[],outputPath:"",outputTouched:false,includePivot:true,includeVoucherTypes:true,includeCounterpart:true,includeSuite:true,markLossTransfer:true,llmAnalysis:false,pivotRows:[],pivotColumns:[],pivotValues:[],step:1 };
 const CACHE="audit-toolbox.kanzhang.draft.v4";
 export const setCounterpartMode=(enabled:boolean):Pick<KanzhangDraft,"includeCounterpart"|"includeSuite">=>({includeCounterpart:enabled,includeSuite:enabled});
@@ -89,6 +91,20 @@ export const addKanzhangNextBatch=(batches:Batch[],accounts:string[]):Pick<Kanzh
   activeBatch:batches.length,
 });
 export const invalidateKanzhangInspection=(current:KanzhangDraft,change:Partial<Pick<KanzhangDraft,"sheet"|"headerRow"|"headerDepth">>):KanzhangDraft=>({...current,...change,inspect:undefined,mapping:EMPTY_MAPPING,step:1});
+const defaultKanzhangPivotFields=(mapping:Mapping)=>({
+  pivotRows:accountColumns(mapping),
+  pivotColumns:Array.isArray(mapping.date)?mapping.date:mapping.date?[mapping.date]:[],
+});
+/** 默认透视跟随科目／日期映射；已偏离旧默认值的自定义选择保持原样。 */
+export function updateKanzhangMapping(current:KanzhangDraft,mapping:Mapping):KanzhangDraft{
+  const previous=defaultKanzhangPivotFields(current.mapping);
+  const next=defaultKanzhangPivotFields(mapping);
+  const same=(left:string[],right:string[])=>left.length===right.length&&left.every((value,index)=>value===right[index]);
+  return {...current,mapping,
+    pivotRows:same(current.pivotRows,previous.pivotRows)?next.pivotRows:current.pivotRows,
+    pivotColumns:same(current.pivotColumns,previous.pivotColumns)?next.pivotColumns:current.pivotColumns,
+  };
+}
 // 科目检索按旧版口径：在已载入的科目列表上即时过滤，不需要点"搜索"。
 export const filterAccounts=(values:string[],keyword:string):string[]=>{
   const kw=keyword.trim().toLowerCase();
@@ -191,28 +207,35 @@ export function applyAuditFocusPresetBatches(batches:Batch[],values:string[],cod
   }
   return {batches:next,summary:{matches,skippedExcludes,created,updated}};
 }
-export type PrimaryPresetSummary={groups:{name:string;accounts:string[]}[];skippedCash:string[];skippedExcludes:string[];created:number;updated:number;removed:number};
-const primaryCode=(code:string)=>{const digits=code.trim().match(/^\d{4}/)?.[0];return digits??"";};
+export type PrimaryPresetSummary={groups:{name:string;accounts:string[]}[];codeLength:number;nameGroupCount:number;skippedCodes:string[];skippedNames:string[];skippedCash:string[];skippedExcludes:string[];created:number;updated:number;removed:number};
+export const validPrimaryCodeLength=(length:number)=>Number.isSafeInteger(length)&&length>0;
+const primaryNameCategory=(name:string)=>name.split(/[-—–>／/\\|:：\r\n]+/).map(part=>part.trim()).find(Boolean)??"";
 const primaryLabel=(value:string,code:string,primaryName:string)=>{
-  const preferred=primaryName.trim();
-  if(preferred)return preferred.split(/[-—–>／/|]/)[0].trim()||preferred;
+  const preferred=primaryNameCategory(primaryName);
+  if(preferred)return preferred;
   let display=value.trim();const exactCode=code.trim();
   if(exactCode&&display.startsWith(exactCode))display=display.slice(exactCode.length).replace(/^[-—–>／/|\s]+/,"");
-  return display.split(/[-—–>／/|]/)[0].trim()||primaryCode(code)||"未命名科目";
+  return primaryNameCategory(display)||code.trim()||"未命名科目";
 };
-export function applyAllPrimaryAccountBatches(batches:Batch[],values:string[],codes:string[],primaryNames:string[],excludes:string[]):{batches:Batch[];summary:PrimaryPresetSummary}{
-  const excluded=new Set(excludes);const groups=new Map<string,{name:string;accounts:string[]}>();const skippedCash:string[]=[];const skippedExcludes:string[]=[];
+export function applyAllPrimaryAccountBatches(batches:Batch[],values:string[],codes:string[],primaryNames:string[],excludes:string[],codeLength=4):{batches:Batch[];summary:PrimaryPresetSummary}{
+  if(!validPrimaryCodeLength(codeLength))throw new Error("科目编码位数必须为正整数。");
+  const excluded=new Set(excludes);const groups=new Map<string,{name:string;accounts:string[]}>();const skippedCash:string[]=[];const skippedExcludes:string[]=[];const skippedCodes:string[]=[];const skippedNames:string[]=[];
   values.forEach((value,index)=>{
     const code=(codes[index]??"").trim();const name=primaryNames[index]??"";
     const cash=CASH_PRESET_RULE.pattern.test(`${name} ${value}`)||CASH_PRESET_RULE.codePrefixes.some(prefix=>code.startsWith(prefix));
     if(cash){skippedCash.push(value);return;}if(excluded.has(value)){skippedExcludes.push(value);return;}
-    const label=primaryLabel(value,code,name);const key=name.trim()?label.toLowerCase():primaryCode(code)||label.toLowerCase();
-    const current=groups.get(key)??{name:`全科目｜${label}`,accounts:[]};current.accounts.push(value);groups.set(key,current);
+    // 有编码按前 N 位；无编码按名称首个非空分类。两种分组保持独立。
+    if(code&&code.length<codeLength){skippedCodes.push(value);return;}
+    const category=primaryNameCategory(name)||primaryNameCategory(value);
+    if(!code&&!category){skippedNames.push(value);return;}
+    const prefix=code.slice(0,codeLength);const key=code?`code:${prefix}`:`name:${category}`;
+    const label=code?`全科目｜${prefix} ${primaryLabel(value,code,name)}`:`全科目｜名称 ${category}`;
+    const current=groups.get(key)??{name:label,accounts:[]};current.accounts.push(value);groups.set(key,current);
   });
   const auditIds=new Set<string>(AUDIT_FOCUS_PRESETS.map(preset=>preset.id));
   const managed=batches.filter(batch=>!batch.presetId||(!batch.presetId.startsWith("all_primary:")&&!auditIds.has(batch.presetId)&&batch.presetId!=="cash"));const previous=new Map(batches.filter(batch=>batch.presetId?.startsWith("all_primary:")).map(batch=>[batch.presetId,batch]));
   let created=0;let updated=0;const generated=[...groups.entries()].sort(([a],[b])=>a.localeCompare(b,"zh-Hans-CN")).map(([key,group])=>{const presetId=`all_primary:${key}`;if(previous.has(presetId))updated+=1;else created+=1;return{name:group.name,accounts:[...new Set(group.accounts)],presetId};});
-  return {batches:[...managed,...generated],summary:{groups:generated,skippedCash:[...new Set(skippedCash)],skippedExcludes:[...new Set(skippedExcludes)],created,updated,removed:Math.max(0,previous.size-updated)}};
+  return {batches:[...managed,...generated],summary:{groups:generated,codeLength,nameGroupCount:[...groups.keys()].filter(key=>key.startsWith("name:")).length,skippedCodes:[...new Set(skippedCodes)],skippedNames:[...new Set(skippedNames)],skippedCash:[...new Set(skippedCash)],skippedExcludes:[...new Set(skippedExcludes)],created,updated,removed:Math.max(0,previous.size-updated)}};
 }
 // 与旧版 _build_default_save_name 一致：看账导出_<源文件名>[_工作表<Sheet>]_<时间戳>.csv
 export function defaultKanzhangOutputName(inputPath:string,sheet:string,now=new Date()):string{
@@ -268,6 +291,8 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const [busy,setBusy]=useState(false); const [error,setError]=useState(""); const [job,setJob]=useState<JobEvent>(); const [result,setResult]=useState<unknown>();
   const [presetSummary,setPresetSummary]=useState<PresetApplySummary>();
   const [primaryPresetSummary,setPrimaryPresetSummary]=useState<PrimaryPresetSummary>();
+  const [primaryDialogOpen,setPrimaryDialogOpen]=useState(false);
+  const [primaryCodeLength,setPrimaryCodeLength]=useState("4");
   const patch=(value:Partial<KanzhangDraft>)=>setDraft(current=>({...current,...value}));
   const clearAll=()=>{llmGeneration.current+=1;setDraft({...EMPTY,batches:[{name:"批次1",accounts:[]}]});setAccounts([]);setAccountCodes([]);setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setQuery("");setResult(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");setLlmBusy(false);setLlmFailed(false);};
   const resetSource=(inputPath:string)=>{llmGeneration.current+=1;setDraft({...EMPTY,inputPath,batches:[{name:"批次1",accounts:[]}]});setAccounts([]);setAccountCodes([]);setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");setResult(undefined);setJob(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");setLlmBusy(false);setLlmFailed(false);setError("");};
@@ -282,22 +307,21 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   // 历史记录「继续任务」：用存档参数重建草稿（含映射与批次），并自动重新
   // 读取文件——映射预览/批次编辑/导出都以读取结果为显示前提，不重读用户
   // 看到的还是空页；读取完成后 restoredMappingRef 把存档映射顶回建议值。
-  // 没有字段映射的存档（读取/筛选子步骤）不恢复，免得把现场覆盖成半成品。
+  // 读取子步骤没有映射时，从已保存的来源重新识别并使用新的建议映射。
   const autoReadKeyRef=useRef("");
   const [autoReadSeq,setAutoReadSeq]=useState(0);
   useTaskRestore(tool.id,(restore)=>{
     const p=restore.params as Partial<Pick<KanzhangDraft,"inputPath"|"sheet"|"headerRow"|"headerDepth"|"mapping"|"batches"|"excludes"|"outputPath"|"markLossTransfer"|"includeCounterpart"|"includeSuite"|"pivotRows"|"pivotColumns"|"pivotValues">>&{targetBatches?:Batch[];excludeAccounts?:string[]};
     if(typeof p.inputPath!=="string"||!p.inputPath)return;
     const mapping=p.mapping&&typeof p.mapping==="object"&&Object.keys(p.mapping).length?p.mapping:undefined;
-    if(!mapping)return;
     const batches=Array.isArray(p.targetBatches)&&p.targetBatches.length?p.targetBatches:clearKanzhangBatches().batches;
     const sheet=p.sheet??"";
-    restoredMappingRef.current={key:`${p.inputPath}|${sheet.trim()}`,mapping,pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[]};
+    restoredMappingRef.current=mapping?{key:`${p.inputPath}|${sheet.trim()}`,mapping,pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[]}:null;
     autoReadKeyRef.current=`${p.inputPath}|${sheet.trim()}`;
     setAutoReadSeq(value=>value+1);
     llmGeneration.current+=1;
     const includeCounterpart=p.includeCounterpart??true;
-    setDraft({...EMPTY,inputPath:p.inputPath,sheet,headerRow:p.headerRow??0,headerDepth:p.headerDepth??1,mapping,batches,activeBatch:0,excludes:p.excludeAccounts??[],outputPath:p.outputPath??"",outputTouched:Boolean(p.outputPath),markLossTransfer:p.markLossTransfer??true,includeCounterpart,includeSuite:includeCounterpart&&(p.includeSuite??true),pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[],pivotValues:p.pivotValues??[]});
+    setDraft({...EMPTY,inputPath:p.inputPath,sheet,headerRow:p.headerRow??0,headerDepth:p.headerDepth??1,mapping:mapping??EMPTY.mapping,batches,activeBatch:0,excludes:p.excludeAccounts??[],outputPath:p.outputPath??"",outputTouched:Boolean(p.outputPath),markLossTransfer:p.markLossTransfer??true,includeCounterpart,includeSuite:includeCounterpart&&(p.includeSuite??true),pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[],pivotValues:p.pivotValues??[]});
     setAccounts([]);setAccountCodes([]);setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");setResult(undefined);setJob(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");
   });
   // 恢复的草稿提交到 state 后自动触发读取（setDraft 异步，恢复回调里直接
@@ -336,8 +360,13 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   },[accounts,accountCodes,query,searchResults]);
   const available=useMemo(()=>pool.filter(value=>!batch.accounts.includes(value)&&!draft.excludes.includes(value)),[pool,batch.accounts,draft.excludes]);
   const truncated=accountTotal>accounts.length;
-  const setMap=(key:keyof Mapping,value:string|string[])=>patch({mapping:setKanzhangMapping(draft.mapping,key,value)});
+  const updateMapping=(change:(current:Mapping)=>Mapping)=>setDraft(current=>updateKanzhangMapping(current,change(current.mapping)));
+  const setMap=(key:keyof Mapping,value:string|string[])=>updateMapping(current=>setKanzhangMapping(current,key,value));
   async function chooseInput(){const value=await pickPath("file","选择凭证文件",["xlsx","xls","xlsm","csv","txt","parquet"]);if(typeof value==="string")resetSource(value);}
+  function changeSourceHeader(change:Partial<Pick<KanzhangDraft,"sheet"|"headerRow"|"headerDepth">>){
+    llmGeneration.current+=1;setLlmBusy(false);setLlmFailed(false);setLlmStatus("");setChanges([]);setPending([]);setResult(undefined);
+    setDraft(current=>invalidateKanzhangInspection(current,change));
+  }
   async function inspect(){if(!draft.inputPath){setError("请选择凭证文件。");return;}setBusy(true);setError("");inspectKeyRef.current=`${draft.inputPath}|${(draft.sheet||"").trim()}`;try{await jobStart("kanzhang.inspect",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth});return;}catch(e){setError(kanzhangErrorText(e));setBusy(false);}}
   // 读取任务回来后套用表结构；改走任务通道是为了让大凭证文件的读取能报进度、能取消。
   // 透视默认只按科目名称分行——旧版就是这个口径。之前把公司也塞进行字段，
@@ -350,7 +379,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     if(match)restoredMappingRef.current=null;
     const suggested=value.suggestedMapping??EMPTY.mapping;
     const effective=match?match.mapping:suggested;
-    setAccounts(value.accounts??[]);setAccountCodes(value.accountCodes??[]);setAccountTotal(value.accountCount??(value.accounts??[]).length);setAccountsKey(accountColumns(effective).join("|"));setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");patch({inspect:value,knownSheets:value.sheets??draft.knownSheets,sheet:value.selectedSheet??draft.sheet,mapping:effective,pivotRows:match?match.pivotRows:accountColumns(effective),pivotColumns:match?match.pivotColumns:(Array.isArray(effective.date)?effective.date:effective.date?[effective.date]:[]),step:1});setResult(undefined);
+    setAccounts(value.accounts??[]);setAccountCodes(value.accountCodes??[]);setAccountTotal(value.accountCount??(value.accounts??[]).length);setAccountsKey(accountColumns(effective).join("|"));setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");patch({inspect:value,knownSheets:value.sheets??draft.knownSheets,sheet:value.selectedSheet??draft.sheet,mapping:effective,...(match?{pivotRows:match.pivotRows,pivotColumns:match.pivotColumns}:defaultKanzhangPivotFields(effective)),step:1});setResult(undefined);
     // 脚本自动映射一出来就直接送 LLM 复核，不再要求用户额外点一次按钮。
     // 恢复的映射已经用户确认过，跳过复核。
     if(match)return;
@@ -388,13 +417,13 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     try{const value=await engineCall("kanzhang.llm_mapping",{mode:"mapping",payload:kanzhangReviewPayload(target.headers,target.preview,source)}) as LedgerReviewResponse;
       if(generation!==llmGeneration.current)return;
       const {mapping,changes:merged,pending:rest}=applyLedgerReviews(source,value);
-      patch({mapping});setChanges(merged);setPending(rest);setLlmStatus(kanzhangReviewSummary(merged.length,rest.length));}
-    catch(e){if(generation!==llmGeneration.current)return;setLlmFailed(true);setLlmStatus(`${kanzhangErrorText(e).replace(/[。.]+$/,"")}。脚本自动映射已完成，可直接核对后继续；LLM 复核只是可选的辅助检查。`);}
+      updateMapping(()=>mapping);setChanges(merged);setPending(rest);setLlmStatus(kanzhangReviewSummary(merged.length,rest.length));}
+    catch(e){if(generation!==llmGeneration.current)return;setLlmFailed(true);setLlmStatus(`${kanzhangErrorText(e).replace(/[。.]+$/,"")}。智能复核未完成，当前映射仍可手动核对后继续。`);}
     finally{if(generation===llmGeneration.current)setLlmBusy(false);}
   }
-  const undoChange=(target:MappingChange)=>{patch({mapping:undoMappingChange(draft.mapping,target)});setChanges(values=>values.filter(value=>value!==target));};
+  const undoChange=(target:MappingChange)=>{updateMapping(current=>undoMappingChange(current,target));setChanges(values=>values.filter(value=>value!==target));};
   // 采纳低把握建议后同样进变更清单，保留反悔的机会。
-  const acceptPending=(item:Review)=>{const before=draft.mapping[item.role];const after=item.action==="clear"?undefined:isMultiRole(item.role)?[item.suggestedColumn!.trim()]:item.suggestedColumn!.trim();if(item.action==="clear")patch({mapping:{...draft.mapping,[item.role]:undefined}});else setMap(item.role,after!);setChanges(values=>[...values,{role:item.role,before,after,source:item.action==="clear"?"replace":formatMappingValue(before)==="未映射"?"fill":"replace",reason:item.reason,confidence:item.confidence}]);setPending(values=>values.filter(value=>value!==item));};
+  const acceptPending=(item:Review)=>{const before=draft.mapping[item.role];const after=item.action==="clear"?undefined:isMultiRole(item.role)?[item.suggestedColumn!.trim()]:item.suggestedColumn!.trim();if(item.action==="clear")updateMapping(current=>({...current,[item.role]:undefined}));else setMap(item.role,after!);setChanges(values=>[...values,{role:item.role,before,after,source:item.action==="clear"?"replace":formatMappingValue(before)==="未映射"?"fill":"replace",reason:item.reason,confidence:item.confidence}]);setPending(values=>values.filter(value=>value!==item));};
   const updateBatch=(next:Partial<Batch>)=>patch({batches:draft.batches.map((value,index)=>index===draft.activeBatch?{...value,...next}:value)});
   // 拖拽状态提到页面这一层：三个穿梭区要能互相知道光标落在谁身上。
   const [drag,setDrag]=useState<ShuttleDrag>();
@@ -474,8 +503,8 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     const accepted=await confirmDialog({
       title:`删除「${batch.name}」？`,
       message:draft.batches.length===1
-        ?`将清空当前批次已选的 ${batch.accounts.length} 个目标科目。原始文件不会受影响。`
-        :`将移除当前批次及其已选的 ${batch.accounts.length} 个目标科目。原始文件不会受影响。`,
+        ?`将清空当前批次已选的 ${formatCount(batch.accounts.length)} 个目标科目。原始文件不会受影响。`
+        :`将移除当前批次及其已选的 ${formatCount(batch.accounts.length)} 个目标科目。原始文件不会受影响。`,
       confirmLabel:"删除批次",
       tone:"danger",
     });
@@ -487,7 +516,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const addNextBatch=()=>{patch(addKanzhangNextBatch(draft.batches,selectedAvailable));setSelectedAvailable([]);setSelectedTarget([]);};
   const clearBatches=async()=>{
     const accepted=await confirmDialog({
-      title:`删除全部 ${draft.batches.length} 个批次？`,
+      title:`删除全部 ${formatCount(draft.batches.length)} 个批次？`,
       message:"将清空所有批次及已选目标科目。原始文件不会受影响。",
       confirmLabel:"删除全部批次",
       tone:"danger",
@@ -508,14 +537,15 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     }catch(e){setError(kanzhangErrorText(e));}
     finally{setAccountsBusy(false);}
   }
-  async function applyAllPrimaryAccounts(){
+  async function applyAllPrimaryAccounts(codeLength:number){
     setAccountsBusy(true);setError("");
     try{
       const source=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth,mapping:draft.mapping,keyword:"",limit:1,all:true}) as {values:string[];codes?:string[];primaryNames?:string[]};
-      const applied=applyAllPrimaryAccountBatches(draft.batches,source.values,source.codes??[],source.primaryNames??[],draft.excludes);
+      const applied=applyAllPrimaryAccountBatches(draft.batches,source.values,source.codes??[],source.primaryNames??[],draft.excludes,codeLength);
+      if(!applied.summary.groups.length&&(applied.summary.skippedCodes.length||applied.summary.skippedNames.length))throw new Error("没有可分组的科目，请检查科目编码位数或名称内容。原有批次已保留。");
       const firstPreset=applied.batches.findIndex(value=>value.presetId?.startsWith("all_primary:"));
       const outputPath=!draft.outputTouched&&draft.inputPath?defaultKanzhangOutputPath(draft.inputPath,draft.sheet).replace(/\.csv$/i,".xlsx"):draft.outputPath;
-      patch({batches:applied.batches,activeBatch:firstPreset>=0?firstPreset:draft.activeBatch,outputPath});
+      patch({batches:applied.batches.length?applied.batches:clearKanzhangBatches().batches,activeBatch:firstPreset>=0?firstPreset:0,primaryCodeLength:codeLength,outputPath});
       setPrimaryPresetSummary(applied.summary);setPresetSummary(undefined);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);
     }catch(e){setError(kanzhangErrorText(e));}
     finally{setAccountsBusy(false);}
@@ -541,42 +571,69 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const missingRequired=missingKanzhangRequiredRoles(draft.mapping);
   const showReview=llmBusy||llmFailed||Boolean(llmStatus)||changes.length>0||pending.length>0;
   return <div className="kz-page">
-    <PageHeader eyebrow="凭证映射与科目筛选" title={tool.name} detail="按三步流程完成字段映射、科目穿梭、多批次、凭证类型、损益结转与导出。" />
+    <PageHeader eyebrow="凭证映射与科目筛选" title={tool.name} />
     <StepIndicator steps={[{key:"1",label:"加载与映射"},{key:"2",label:"科目筛选",disabled:!draft.inspect||missingRequired.length>0},{key:"3",label:"透视与导出",disabled:!draft.inspect||missingRequired.length>0}]} current={draft.step-1} onStepClick={(index)=>patch({step:index+1})} />
     {error&&<ErrorBox error={error} onDismiss={()=>setError("")} />}
     {job?.phase==="cancelled"&&<div className="flex flex-wrap items-center gap-2" role="status"><Badge variant="warning">已取消</Badge><span className="hint">本次任务已停止；文件与设置仍保留，可重新读取或运行。</span></div>}
     {draft.step===1&&<div className="fa-stack">
       <LedgerSourceCard
-        inputPath={draft.inputPath} sheet={draft.sheet} knownSheets={draft.knownSheets} headerRow={draft.headerRow} headerDepth={draft.headerDepth}
-        detectedHeaderRow={draft.headerRow===0?draft.inspect?.headerRow:undefined}
-        dragHover={dragHover} busy={busy} job={job} needsReload={!draft.inspect&&draft.knownSheets.length>0}
+        className={draft.inputPath?undefined:"kz-needs-file"}
+        inputPath={draft.inputPath}
+        dragHover={dragHover} busy={busy} job={job}
         onBrowse={chooseInput} onClear={clearAll}
-        onSheetChange={value=>setDraft(current=>invalidateKanzhangInspection({...current,headerRow:0,headerDepth:0},{sheet:value}))}
-        onHeaderRowChange={value=>setDraft(current=>invalidateKanzhangInspection(current,{headerRow:value}))}
-        onHeaderDepthChange={value=>setDraft(current=>invalidateKanzhangInspection(current,{headerDepth:value}))}
         onInspect={inspect} onCancel={(jobId)=>jobCancel(jobId)}
       >
+      {!draft.inputPath&&<p className="kz-hint" role="status">请先选择凭证文件。</p>}
       {draft.inspect&&<>
         {showReview&&<LedgerLlmReview busy={llmBusy} failed={llmFailed} status={llmStatus} mapping={draft.mapping} changes={changes} pending={pending} onSkip={skipReview} onUndo={undoChange} onAccept={acceptPending} onKeep={item=>setPending(values=>values.filter(value=>value!==item))}/>}
         {scheme&&<p className="kz-hint">金额口径已按方案{scheme}成立，方案{scheme==="A"?"B":"A"}的字段已停用；如需切换，先清空当前方案的字段。</p>}
         {missingRequired.length>0&&<p className="fa-missing-hint">尚未映射：{missingRequired.join("、")}（请在各列顶部的下拉框中选择对应字段）</p>}
-        <div className="kz-actions"><Button variant="secondary" size="sm" disabled={busy||llmBusy} onClick={()=>void reviewMapping()}>{llmBusy?"LLM 正在复核…":"重新进行 LLM 复核"}</Button><Button variant="default" disabled={llmBusy||missingRequired.length>0} onClick={()=>patch({step:2})}>下一步：科目筛选</Button></div>
+        <div className="kz-actions" data-button-size="default"><Button variant="secondary" size="default" disabled={busy||llmBusy} onClick={()=>void reviewMapping()}>{llmBusy?"LLM 正在复核…":"重新进行 LLM 复核"}</Button><Button variant="default" disabled={llmBusy||missingRequired.length>0} onClick={()=>patch({step:2})}>下一步：科目筛选</Button></div>
       </>}
       </LedgerSourceCard>
-      <LedgerMappingPreview inspect={draft.inspect} mapping={draft.mapping} setMap={setMap} llmBusy={llmBusy}/></div>}
-    {draft.step===2&&<div className="kz-grid kz-filter-grid"><section className="kz-card"><h2>目标批次</h2><div className="kz-row"><Button variant="secondary" size="sm" disabled={accountsBusy||!accounts.length} onClick={()=>void applyAuditFocusPresets()}>{accountsBusy?"正在生成批次…":"套用审计关注科目预设（8类）"}</Button><Button variant="secondary" size="sm" disabled={accountsBusy||!accounts.length} onClick={()=>void applyAllPrimaryAccounts()}>按一级科目生成全科目批次（不含货币资金）</Button><Button variant="secondary" size="sm" onClick={deleteBatch}>删除当前批次</Button><Button variant="secondary" size="sm" disabled={draft.batches.length===1&&!draft.batches[0]?.accounts.length} onClick={clearBatches}>一键删除全部批次</Button></div>{presetSummary&&<PresetSummary summary={presetSummary}/>} {primaryPresetSummary&&<PrimaryPresetSummary summary={primaryPresetSummary}/>}<div className="kz-tabs">{draft.batches.map((value,index)=><button className={index===draft.activeBatch?"active":""} onClick={()=>patch({activeBatch:index})} key={`${value.presetId??value.name}-${index}`}>{value.name} ({value.accounts.length})</button>)}</div><label>批次名称<Input value={batch.name} onChange={e=>updateBatch({name:e.target.value})}/></label>
+      <LedgerMappingPreview inspect={draft.inspect} mapping={draft.mapping} setMap={setMap} llmBusy={llmBusy}
+        sourceName={displayFileName(draft.inputPath)}
+        toolbar={draft.inputPath && <LedgerSourceControls
+          sheet={draft.sheet} knownSheets={draft.knownSheets} headerRow={draft.headerRow} headerDepth={draft.headerDepth} busy={busy||llmBusy}
+          onSheetChange={sheet=>changeSourceHeader({sheet,headerRow:0,headerDepth:0})}
+          onHeaderRowChange={headerRow=>changeSourceHeader({headerRow})}
+          onHeaderDepthChange={headerDepth=>changeSourceHeader({headerDepth})}
+        />}
+        sourceNote={draft.inspect && draft.headerRow===0 ? <p className="fx-hint">已自动按第 {draft.inspect.headerRow} 行识别表头。</p> : !draft.inspect && draft.inputPath ? <p className="fx-hint">请读取文件以刷新预览和映射。</p> : undefined}
+      /></div>}
+    <Dialog open={primaryDialogOpen} onOpenChange={setPrimaryDialogOpen}>
+      <DialogContent>
+        <form className="kz-prefix-form" onSubmit={event=>{event.preventDefault();const length=Number(primaryCodeLength);if(!validPrimaryCodeLength(length)||accountsBusy)return;setPrimaryDialogOpen(false);void applyAllPrimaryAccounts(length);}}>
+          <DialogHeader>
+            <DialogTitle>生成全科目批次</DialogTitle>
+            <DialogDescription>有编码时，前 N 位相同的科目归入同一批次；无编码时，按名称中分隔符或换行前的第一个非空分类分组。</DialogDescription>
+          </DialogHeader>
+          <label className="kz-prefix-field" htmlFor="kz-primary-code-length">使用科目编码前几位
+            <Input id="kz-primary-code-length" type="number" min={1} step={1} required value={primaryCodeLength} onChange={event=>setPrimaryCodeLength(event.target.value)} aria-invalid={!validPrimaryCodeLength(Number(primaryCodeLength))} aria-describedby="kz-primary-code-help"/>
+          </label>
+          {!validPrimaryCodeLength(Number(primaryCodeLength))&&<p role="alert" className="fa-missing-hint">请输入大于 0 的整数。</p>}
+          {!draft.mapping.accountCode&&<p className="hint">未映射科目编码列，将按名称首段分组。</p>}
+          <p id="kz-primary-code-help" className="hint">名称支持 -、/、\、—、|、&gt;、冒号及换行分隔，例如“固定资产/车辆”与“固定资产-机器”归入同一名称批次。有编码和无编码的科目分别分组；货币资金及剔除/例外科目不参与分组。有编码但不足所选位数时跳过并提示。生成后替换已有自动批次，保留手工批次。</p>
+          <DialogFooter>
+            <Button type="button" variant="secondary" onClick={()=>setPrimaryDialogOpen(false)}>取消</Button>
+            <Button type="submit" disabled={accountsBusy||!validPrimaryCodeLength(Number(primaryCodeLength))}>生成批次</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+    {draft.step===2&&<div className="kz-grid kz-filter-grid"><section className="kz-card"><h2>目标批次</h2><div className="kz-row"><Button variant="secondary" size="sm" disabled={accountsBusy||!accounts.length} onClick={()=>void applyAuditFocusPresets()}>{accountsBusy?"正在生成批次…":"套用审计关注科目预设（8类）"}</Button><Button variant="secondary" size="sm" disabled={accountsBusy||!accounts.length} onClick={()=>{setPrimaryCodeLength(String(draft.primaryCodeLength??4));setPrimaryDialogOpen(true);}}>生成全科目批次（不含货币资金）</Button><Button variant="secondary" size="sm" onClick={deleteBatch}>删除当前批次</Button><Button variant="secondary" size="sm" disabled={draft.batches.length===1&&!draft.batches[0]?.accounts.length} onClick={clearBatches}>一键删除全部批次</Button></div>{presetSummary&&<PresetSummary summary={presetSummary}/>} {primaryPresetSummary&&<PrimaryPresetSummary summary={primaryPresetSummary}/>}<div className="kz-tabs">{draft.batches.map((value,index)=><button className={index===draft.activeBatch?"kz-batch-chip-active":""} aria-pressed={index===draft.activeBatch} onClick={()=>patch({activeBatch:index})} key={`${value.presetId??value.name}-${index}`}>{value.name} ({formatCount(value.accounts.length)})</button>)}</div><label>批次名称<Input value={batch.name} onChange={e=>updateBatch({name:e.target.value})}/></label>
       <div className="kz-search"><Input value={query} placeholder="输入科目编码或名称，如 1601、固定资产" title="纯编码按前缀筛选，名称按关键词筛选；多个编码可用逗号分隔" onChange={e=>{setQuery(e.target.value);setSearchResults([]);}} onKeyDown={e=>{if(e.key==="Enter"&&truncated)void searchAccounts();}}/>{truncated&&<Button variant="secondary" size="sm" onClick={searchAccounts}>到全库检索</Button>}<Button variant="secondary" size="sm" onClick={()=>{setQuery("");setSearchResults([]);}}>清除</Button></div>
-      <div className="kz-source-panel"><h3>待选科目 ({available.length}{truncated?` / 共 ${accountTotal}`:""})</h3>{accountsBusy&&<p className="kz-hint">正在载入全部科目…</p>}{truncated&&<p className="kz-hint">科目过多，仅载入前 {accounts.length} 个；未命中时回车或点"到全库检索"。</p>}
+      <div className="kz-source-panel"><h3>待选科目 ({formatCount(available.length)}{truncated?` / 共 ${formatCount(accountTotal)}`:""})</h3>{accountsBusy&&<p className="kz-hint">正在载入全部科目…</p>}{truncated&&<p className="kz-hint">科目过多，仅载入前 {formatCount(accounts.length)} 个；未命中时回车或点"到全库检索"。</p>}
         <ShuttleList zone="source" values={available} selected={selectedAvailable} onSelect={setSelectedAvailable} onDragBegin={beginDrag} drag={drag} emptyText="没有匹配的科目。"/>
-        <small>单击选中、Ctrl 加选、Shift 连选、Ctrl+A 全选；选好后直接拖到右侧任一列表，或用下面的按钮。</small>
-        <div className="kz-source-actions"><Button variant="secondary" size="sm" disabled={!available.length} onClick={()=>setSelectedAvailable(available)}>全选当前结果</Button><Button variant="secondary" size="sm" disabled={!selectedAvailable.length} onClick={()=>setSelectedAvailable([])}>清除选择</Button><Button variant="default" disabled={!selectedAvailable.length} onClick={()=>moveAccounts(selectedAvailable,"source","target")}>加入目标批次</Button><Button variant="secondary" size="sm" disabled={!selectedAvailable.length} onClick={addNextBatch}>加入下一批次</Button><Button variant="secondary" size="sm" disabled={!selectedAvailable.length} onClick={()=>moveAccounts(selectedAvailable,"source","exclude")}>加入剔除/例外</Button></div></div>
+        <small>可拖动科目，或使用下方按钮加入批次。</small>
+        <div className="kz-source-actions" data-button-size="sm"><Button variant="secondary" size="sm" disabled={!available.length} onClick={()=>setSelectedAvailable(available)}>全选当前结果</Button><Button variant="secondary" size="sm" disabled={!selectedAvailable.length} onClick={()=>setSelectedAvailable([])}>清除选择</Button><Button variant="default" disabled={!selectedAvailable.length} onClick={()=>moveAccounts(selectedAvailable,"source","target")} size="sm">加入目标批次</Button><Button variant="secondary" size="sm" disabled={!selectedAvailable.length} onClick={addNextBatch}>加入下一批次</Button><Button variant="secondary" size="sm" disabled={!selectedAvailable.length} onClick={()=>moveAccounts(selectedAvailable,"source","exclude")}>加入剔除/例外</Button></div></div>
       <div className="kz-assigned-grid">
-        <div><div className="kz-row"><h3>目标匹配 ({batch.accounts.length})</h3><Button variant="secondary" size="sm" disabled={!selectedTarget.length} onClick={()=>moveAccounts(selectedTarget,"target","source")}>移回待选</Button></div>
+        <div><div className="kz-row"><h3>目标匹配 ({formatCount(batch.accounts.length)})</h3><Button variant="secondary" size="sm" disabled={!selectedTarget.length} onClick={()=>moveAccounts(selectedTarget,"target","source")}>移回待选</Button></div>
           <ShuttleList zone="target" values={batch.accounts} selected={selectedTarget} onSelect={setSelectedTarget} onDragBegin={beginDrag} drag={drag} emptyText="把待选科目拖进来。"/></div>
-        <div><div className="kz-row"><h3>剔除/例外（独立导出） ({draft.excludes.length})</h3><Button variant="secondary" size="sm" disabled={!selectedExclude.length||!showExcludes} onClick={()=>moveAccounts(selectedExclude,"exclude","source")}>移回待选</Button><Button variant="secondary" size="sm" onClick={()=>setShowExcludes(value=>!value)}>{showExcludes?"折叠":"展开"}</Button></div>{showExcludes?<ShuttleList zone="exclude" values={draft.excludes} selected={selectedExclude} onSelect={setSelectedExclude} onDragBegin={beginDrag} drag={drag} emptyText="把不参与分析的科目拖进来。"/>:<p className="kz-hint">已选剔除项会保留，展开后可编辑或拖拽。</p>}</div>
-      </div><p className="kz-note"><b>目标匹配</b>：命中该科目的整张凭证进入分析。<b>剔除/例外</b>：不作为目标科目，单独输出例外明细供复核。</p><div className="kz-actions"><Button variant="secondary" size="sm" onClick={()=>patch({step:1})}>返回映射</Button><Button variant="secondary" size="sm" disabled={busy} onClick={()=>void start("kanzhang.filter")}>筛选预览</Button><Button variant="default" onClick={()=>patch({step:3})}>下一步：透视与导出</Button></div></section><Result job={job} result={result}/></div>}
-    {draft.step===3&&<><div className="kz-export-grid"><section className="kz-card"><h2>透视设计</h2><div className="kz-two"><label>行字段（Ctrl 可多选）<select disabled={!draft.includeSuite} multiple value={draft.pivotRows} onChange={e=>patch({pivotRows:[...e.target.selectedOptions].map(option=>option.value)})}>{headers.map(value=><option key={value}>{value}</option>)}</select></label><label>列字段（日期自动转月份）<select disabled={!draft.includeSuite} multiple value={draft.pivotColumns} onChange={e=>patch({pivotColumns:[...e.target.selectedOptions].map(option=>option.value)})}>{headers.map(value=><option key={value}>{value}</option>)}</select></label><label>值字段（留空=净额，可多选）<select disabled={!draft.includeSuite} multiple value={draft.pivotValues} onChange={e=>patch({pivotValues:[...e.target.selectedOptions].map(option=>option.value)})}><option value={NET_VALUE_FIELD}>净额（{NET_VALUE_FIELD}）</option>{headers.map(value=><option key={value}>{value}</option>)}</select><small>{draft.includeSuite?"净额按当前金额方案算出，不在源表列里；与原始金额列可以同时选，各占一列。":"未包含套表，透视设置暂不可用。"}</small></label></div></section><section className="kz-card"><h2>导出设置</h2>
-      <div className="kz-options"><Check label="含对方科目" value={draft.includeCounterpart} onChange={value=>patch(setCounterpartMode(value))}/><Check label="包含套表（凭证分析及对方科目汇总表）" value={draft.includeSuite} disabled={!draft.includeCounterpart} onChange={value=>patch({includeSuite:value})}/><Check label="标记损益结转凭证" value={draft.markLossTransfer} onChange={value=>patch({markLossTransfer:value})}/></div><p className="kz-hint">{draft.includeCounterpart?"含对方科目：导出命中目标科目的完整凭证。":"单边模式：只导出命中目标科目的明细行。套表需要完整凭证，因此已关闭。"}</p><label>输出文件<div className="kz-path"><Input readOnly value={displayFileName(draft.outputPath)} title={draft.outputPath} placeholder="选择凭证文件后自动填入默认保存位置"/><Button variant="secondary" size="sm" onClick={chooseOutput}>选择</Button>{draft.outputTouched&&<Button variant="secondary" size="sm" onClick={resetOutput}>恢复默认</Button>}</div></label><p className="kz-hint">{draft.outputTouched?"已指定保存位置，导出会以这个文件名为基准。":draft.batches.some(batch=>batch.presetId)?"预设批次默认导出为 XLSX；每个有效批次使用独立文件名。":"默认保存到凭证文件所在目录，文件名为「看账导出_源文件名[_工作表]_<时间戳>.csv」（导出时按当前时间生成）。"}{draft.includeSuite?"每批次的凭证明细单独一个文件，凭证分析及对方科目汇总另出该批次对应的「_套表.xlsx」。":"每批次仅导出凭证明细。"}有剔除科目时另输出剔除明细。需要正负数对冲标记请用「正负数凭证标记」工具。</p><div className="kz-actions"><Button variant="secondary" size="sm" onClick={()=>patch({step:2})}>返回筛选</Button>{busy&&job?<Button variant="secondary" size="sm" onClick={()=>void cancelJobWithFeedback(job.jobId)}>停止</Button>:<Button variant="default" onClick={()=>void start("kanzhang.export")}>导出结果</Button>}</div></section></div><Result job={job} result={result}/></>}
+        <div><div className="kz-row"><h3>剔除/例外（独立导出） ({formatCount(draft.excludes.length)})</h3><Button variant="secondary" size="sm" disabled={!selectedExclude.length||!showExcludes} onClick={()=>moveAccounts(selectedExclude,"exclude","source")}>移回待选</Button><Button variant="secondary" size="sm" onClick={()=>setShowExcludes(value=>!value)}>{showExcludes?"折叠":"展开"}</Button></div>{showExcludes?<ShuttleList zone="exclude" values={draft.excludes} selected={selectedExclude} onSelect={setSelectedExclude} onDragBegin={beginDrag} drag={drag} emptyText="把不参与分析的科目拖进来。"/>:<p className="kz-hint">已选 {formatCount(draft.excludes.length)} 项，展开后可编辑。</p>}</div>
+      </div><p className="kz-note"><b>目标匹配</b>：命中该科目的整张凭证进入分析。<b>剔除/例外</b>：不作为目标科目，单独输出例外明细供复核。</p><div className="kz-actions" data-button-size="default"><Button variant="secondary" size="default" onClick={()=>patch({step:1})}>返回映射</Button><Button variant="secondary" size="default" disabled={busy} onClick={()=>void start("kanzhang.filter")}>筛选预览</Button><Button variant="default" onClick={()=>patch({step:3})}>下一步：透视与导出</Button></div></section><Result job={job} result={result}/></div>}
+    {draft.step===3&&<><div className="kz-export-grid"><section className="kz-card"><h2>透视设计</h2><div className="kz-two"><label>行字段（Ctrl 可多选）<select disabled={!draft.includeSuite} multiple size={12} value={draft.pivotRows} onChange={e=>patch({pivotRows:[...e.target.selectedOptions].map(option=>option.value)})}>{headers.map(value=><option key={value}>{value}</option>)}</select></label><label>列字段（日期自动转月份）<select disabled={!draft.includeSuite} multiple size={12} value={draft.pivotColumns} onChange={e=>patch({pivotColumns:[...e.target.selectedOptions].map(option=>option.value)})}>{headers.map(value=><option key={value}>{value}</option>)}</select></label><label>值字段（留空=净额，可多选）<select disabled={!draft.includeSuite} multiple size={12} value={draft.pivotValues} onChange={e=>patch({pivotValues:[...e.target.selectedOptions].map(option=>option.value)})}><option value={NET_VALUE_FIELD}>净额（{NET_VALUE_FIELD}）</option>{headers.map(value=><option key={value}>{value}</option>)}</select><small>{draft.includeSuite?"净额按当前金额方案算出，不在源表列里；与原始金额列可以同时选，各占一列。":"未包含套表，透视设置暂不可用。"}</small></label></div></section><section className="kz-card"><h2>导出设置</h2>
+      <div className="kz-options"><Check label="含对方科目" value={draft.includeCounterpart} onChange={value=>patch(setCounterpartMode(value))}/><Check label="包含套表（凭证分析及对方科目汇总表）" value={draft.includeSuite} disabled={!draft.includeCounterpart} onChange={value=>patch({includeSuite:value})}/><Check label="标记损益结转凭证" value={draft.markLossTransfer} onChange={value=>patch({markLossTransfer:value})}/></div><p className="kz-hint">{draft.includeCounterpart?"导出完整凭证。":"仅导出命中行；套表已关闭。"}</p><label>输出文件<div className="kz-path"><Input readOnly value={displayFileName(draft.outputPath)} title={draft.outputPath} placeholder="选择凭证文件后自动填入默认保存位置"/><Button variant="secondary" size="sm" onClick={chooseOutput}>选择</Button>{draft.outputTouched&&<Button variant="secondary" size="sm" onClick={resetOutput}>恢复默认</Button>}</div></label><p className="kz-hint">{draft.includeSuite?"每批次另出「_套表.xlsx」。":"每批次一份明细文件。"}</p><div className="kz-actions" data-button-size="default"><Button variant="secondary" size="default" onClick={()=>patch({step:2})}>返回筛选</Button>{busy&&job?<Button variant="secondary" size="default" onClick={()=>void cancelJobWithFeedback(job.jobId)}>停止</Button>:<Button variant="default" onClick={()=>void start("kanzhang.export")}>导出结果</Button>}</div></section></div><Result job={job} result={result}/></>}
     {drag&&<div className="kz-drag-ghost" style={{left:drag.x,top:drag.y}}>{drag.values.length===1?drag.values[0]:`${drag.values.length} 个科目`}</div>}
   </div>;
 }
@@ -675,6 +732,8 @@ function ShuttleList({zone,values,selected,onSelect,onDragBegin,drag,emptyText}:
   </div>;
 }
 function Check({label,value,onChange,disabled=false}:{label:string;value:boolean;onChange:(value:boolean)=>void;disabled?:boolean}){return <label aria-disabled={disabled}><SwitchInput checked={value} disabled={disabled} onChange={onChange} ariaLabel={label}/>{label}</label>}
-function PresetSummary({summary}:{summary:PresetApplySummary}){const empty=summary.matches.filter(value=>!value.accounts.length);return <div className="kz-hint" role="status"><b>预设已套用：</b>新增 {summary.created} 个、更新 {summary.updated} 个预设批次。{summary.matches.map(value=><span key={value.preset.id}> {value.preset.name.replace("预设｜","")} {value.accounts.length} 个；</span>)}{empty.length>0&&<span>未命中：{empty.map(value=>value.preset.name.replace("预设｜","")).join("、")}。</span>}{summary.skippedExcludes.length>0&&<span> 已在剔除/例外中而未加入：{summary.skippedExcludes.join("、")}。</span>}</div>}
-function PrimaryPresetSummary({summary}:{summary:PrimaryPresetSummary}){return <div className="kz-hint" role="status"><b>全科目批次已生成：</b>共 {summary.groups.length} 个一级科目；新增 {summary.created} 个、更新 {summary.updated} 个、移除 {summary.removed} 个旧的全科目预设批次。已排除货币资金 {summary.skippedCash.length} 个科目{summary.skippedExcludes.length>0&&`，另跳过剔除/例外 ${summary.skippedExcludes.length} 个科目`}。</div>}
-function Result({job,result}:{job?:JobEvent;result?:unknown}){const object=result&&typeof result==="object"?result as Record<string,unknown>:undefined;const paths=[...new Set([...(job?.outputPaths??[]),...(Array.isArray(object?.outputPaths)?object.outputPaths.filter((value):value is string=>typeof value==="string"):[])])];const warnings=Array.isArray(object?.warnings)?object.warnings.filter((value):value is string=>typeof value==="string"):[];const batches=Array.isArray(object?.batches)?object.batches as Record<string,unknown>[]:[];const rows=typeof object?.rows==="number"?object.rows:undefined;const showProgress=shouldShowKanzhangJobProgress(job?.phase);if(!showProgress&&warnings.length===0&&rows===undefined&&paths.length===0&&batches.length===0)return null;return <Card variant="workspace" className="kz-result"><CardHeader><CardTitle>预览与结果</CardTitle></CardHeader><CardContent>{job&&showProgress&&<JobProgress job={job} onCancel={(jobId)=>jobCancel(jobId)} cancelLabel="取消任务"/>}{warnings.length>0&&<div className="warning-box"><b>明细已导出，但有部分结果未生成：</b><ul>{warnings.map((value,index)=><li key={index}>{value}</li>)}</ul></div>}{rows!==undefined&&<p>{paths.length ? "已导出" : "筛选后共"} <b>{rows}</b> 行{paths.length ? "，可打开结果文件复核。" : "，可继续调整科目或进入导出。"}</p>}{paths.length>0&&<div className="kz-outputs">{paths.map(path=><Button key={path} variant="secondary" size="sm" title={path} onClick={()=>void openOutput(path)}><span>打开：</span><span>{displayFileName(path)}</span></Button>)}</div>}{batches.length>0&&<div className="kz-summary">{batches.map((batch,index)=><div key={index}><b>{String(batch.name??`批次${index+1}`)}</b><span>明细 {String(batch.rows??0)} 行</span><span>损益结转 {String(batch.lossTransferVouchers??0)} 笔</span></div>)}</div>}</CardContent></Card>}
+// 每个预设批次的命中明细已在 chips 上逐枚显示，汇总行只报总数；
+// 「未命中」「已在剔除/例外中」是 chips 上没有的事实，保留。
+function PresetSummary({summary}:{summary:PresetApplySummary}){const empty=summary.matches.filter(value=>!value.accounts.length);return <div className="kz-hint" role="status">已套用 {formatCount(summary.created+summary.updated)} 个预设批次。{empty.length>0&&<span>未命中：{empty.map(value=>value.preset.name.replace("预设｜","")).join("、")}。</span>}{summary.skippedExcludes.length>0&&<span>已在剔除/例外中而未加入：{summary.skippedExcludes.join("、")}。</span>}</div>}
+function PrimaryPresetSummary({summary}:{summary:PrimaryPresetSummary}){return <div className="kz-hint" role="status">已生成 {formatCount(summary.groups.length)} 个全科目批次：按编码前 {summary.codeLength} 位 {formatCount(summary.groups.length-summary.nameGroupCount)} 个，按名称首段 {formatCount(summary.nameGroupCount)} 个{summary.skippedCodes.length>0&&`，跳过编码不足 ${summary.codeLength} 位的科目 ${formatCount(summary.skippedCodes.length)} 个`}{summary.skippedNames.length>0&&`，跳过缺少有效名称的科目 ${formatCount(summary.skippedNames.length)} 个`}，已排除货币资金 {formatCount(summary.skippedCash.length)} 个科目{summary.skippedExcludes.length>0&&`，另跳过剔除/例外 ${formatCount(summary.skippedExcludes.length)} 个科目`}。</div>}
+function Result({job,result}:{job?:JobEvent;result?:unknown}){const object=result&&typeof result==="object"?result as Record<string,unknown>:undefined;const paths=[...new Set([...(job?.outputPaths??[]),...(Array.isArray(object?.outputPaths)?object.outputPaths.filter((value):value is string=>typeof value==="string"):[])])];const warnings=Array.isArray(object?.warnings)?object.warnings.filter((value):value is string=>typeof value==="string"):[];const batches=Array.isArray(object?.batches)?object.batches as Record<string,unknown>[]:[];const rows=typeof object?.rows==="number"?object.rows:undefined;const showProgress=shouldShowKanzhangJobProgress(job?.phase);if(!showProgress&&warnings.length===0&&rows===undefined&&paths.length===0&&batches.length===0)return null;return <Card variant="workspace" className="kz-result"><CardHeader><CardTitle>预览与结果</CardTitle></CardHeader><CardContent>{job&&showProgress&&<JobProgress job={job} onCancel={(jobId)=>jobCancel(jobId)} cancelLabel="取消任务"/>}{warnings.length>0&&<div className="warning-box"><b>明细已导出，但有部分结果未生成：</b><ul>{warnings.map((value,index)=><li key={index}>{value}</li>)}</ul></div>}{rows!==undefined&&<p className="kz-hint kz-result-lines">{paths.length ? "已导出" : "筛选后共"} <b className="kz-result-rows">{formatCount(rows)}</b> 行{paths.length ? "，可打开结果文件复核。" : "，可继续调整科目或进入导出。"}</p>}{paths.length>0&&<div className="kz-outputs">{paths.map(path=><Button key={path} variant="secondary" size="sm" title={path} onClick={()=>void openOutput(path)}><span>打开：</span><span>{displayFileName(path)}</span></Button>)}</div>}{batches.length>0&&<div className="kz-summary"><div className="kz-summary-head" aria-hidden="true"><span>批次</span><span>明细行数</span><span>损益结转笔数</span></div>{batches.map((batch,index)=><div key={index}><b>{String(batch.name??`批次${index+1}`)}</b><span>{formatCount(batch.rows??0)}</span><span>{formatCount(batch.lossTransferVouchers??0)}</span></div>)}</div>}</CardContent></Card>}

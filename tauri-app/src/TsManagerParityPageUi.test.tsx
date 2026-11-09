@@ -25,7 +25,8 @@ const tool: ToolManifest = {
 };
 it("空文件状态不虚报就绪并显示资料指引", () => {
   render(<TsManagerParityPage tool={tool} />);
-  expect(screen.getByText("待加载文件")).toBeVisible();
+  // 徽标用词与固定资产页统一为「等待文件」（UI 审核）。
+  expect(screen.getByText("等待文件")).toBeVisible();
   expect(screen.queryByText("已就绪")).not.toBeInTheDocument();
   expect(screen.getByRole("region", { name: "准备工时数据" })).toBeVisible();
   expect(screen.getByRole("button", { name: "加载文件" })).toBeDisabled();
@@ -38,4 +39,22 @@ it("取消后页首独立显示状态和重试方向，不重复卡内进度", a
   expect(screen.getByText("已取消")).toHaveAttribute("data-variant", "warning");
   expect(container.querySelector('[data-variant="warning"]')?.closest('[role="status"]')).toHaveTextContent("可重新加载或导出");
   expect(container.querySelector('[data-job-state="cancelled"]')).toBeNull();
+});
+it("文件加载成功后自动进入条件筛选步骤", async () => {
+  const { listenJobEvents } = await import("./api");
+  render(<TsManagerParityPage tool={tool} />);
+  const callback = vi.mocked(listenJobEvents).mock.calls.at(-1)?.[0];
+  expect(screen.getByText("1. 目标文件选择")).toBeVisible();
+  act(() => callback?.({
+    toolId: "ts_manager", jobId: "load-1", phase: "completed", current: 1,
+    total: 1, message: "处理完成。", severity: "success", outputPaths: [],
+    result: {
+      headers: ["Employee Name", "Charge Hours"], sheets: ["Timesheet"],
+      selectedSheet: "Timesheet", preview: [["A", "1"]],
+      dimensions: { rows: 1, columns: 2 }, defaults: {},
+    },
+  }));
+  // 卡片标题切换为第 2 步：加载完直接筛选，不再要求手动点「下一步」。
+  expect(screen.getByText("2. 条件筛选（在预览表头按列勾选）")).toBeVisible();
+  expect(screen.queryByText("1. 目标文件选择")).toBeNull();
 });

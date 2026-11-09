@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { KanzhangParityPage } from "./KanzhangParityPage";
 import { publishTaskRestore } from "./restore";
-import { jobStart } from "./api";
+import { engineCall, jobStart } from "./api";
 import type { ToolManifest } from "./types";
 
 let jobEventsCallback: ((event: Record<string, unknown>) => void) | undefined;
@@ -43,7 +43,64 @@ describe("kanzhang history resume", () => {
     cleanup();
     sessionStorage.clear();
     vi.clearAllMocks();
+    vi.mocked(engineCall).mockResolvedValue({ values: [], total: 0 });
     jobEventsCallback = undefined;
+  });
+
+  it.each([0.95, 0.7])("复核修正科目编码后更新默认透视选中项（把握 %s）", async confidence => {
+    vi.mocked(engineCall).mockImplementation(async method => method === "kanzhang.llm_mapping" ? {
+      reviews: [{ role: "accountCode", currentColumn: "录入时间", suggestedColumn: "总账科目", confidence, reason: "原列为时间，应使用科目编码列" }],
+    } : { values: [], total: 0 });
+    publishTaskRestore({
+      jobId: "pivot-inspect", toolId: "kanzhang", method: "kanzhang.inspect",
+      params: { inputPath: "C:/tmp/je.xlsx", headerRow: 1 }, missingPaths: [], authorizedPathCount: 1,
+    });
+    render(<KanzhangParityPage tool={tool}/>);
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("kanzhang.inspect", expect.anything()));
+    await act(async () => jobEventsCallback?.({
+      toolId: "kanzhang", jobId: "job-restore-1", phase: "completed", current: 1, total: 1, message: "已读取", outputPaths: [], severity: "info",
+      result: {
+        headers: ["凭证日期", "录入时间", "总账科目", "科目名称", "凭证号", "金额"],
+        preview: [["2026-05-01", "12:30:00", "160101", "固定资产", "1", "100"]],
+        suggestedMapping: { id: ["凭证号"], date: "凭证日期", accountCode: "录入时间", accountName: ["科目名称"], functionalAmount: "金额" },
+      },
+    }));
+    if(confidence < 0.8)fireEvent.click(await screen.findByRole("button", { name: "采纳" }));
+    await waitFor(() => {
+      const saved = JSON.parse(sessionStorage.getItem(DRAFT_CACHE) ?? "{}");
+      expect(saved.mapping.accountCode).toBe("总账科目");
+      expect(saved.pivotRows).toEqual(["总账科目", "科目名称"]);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /透视与导出/ }));
+    const rows = screen.getByLabelText("行字段（Ctrl 可多选）") as HTMLSelectElement;
+    expect([...rows.selectedOptions].map(option => option.value)).toEqual(["总账科目", "科目名称"]);
+    expect([...rows.options].find(option => option.value === "录入时间")?.selected).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: /加载与映射/ }));
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    await waitFor(() => expect(JSON.parse(sessionStorage.getItem(DRAFT_CACHE) ?? "{}").pivotRows).toEqual(["录入时间", "科目名称"]));
+  });
+
+  it("导出严格使用前端最终显示的编号映射，不恢复已取消的参考列", async () => {
+    sessionStorage.setItem(DRAFT_CACHE, JSON.stringify({
+      inputPath: "C:/tmp/je.csv", step: 1,
+      inspect: {
+        headers: ["凭证编号", "参照凭证号", "日期", "科目名称", "金额"],
+        preview: [["1", "", "2026-06-01", "固定资产", "100"]],
+      },
+      mapping: { id: ["凭证编号", "参照凭证号"], date: ["日期"], accountName: ["科目名称"], functionalAmount: "金额" },
+      batches: [{ name: "固定资产", accounts: ["固定资产"] }],
+    }));
+    render(<KanzhangParityPage tool={tool}/>);
+    const reference = screen.getByRole("combobox", { name: "将「参照凭证号」映射为字段" });
+    expect(reference).toHaveValue("id");
+    fireEvent.change(reference, { target: { value: "" } });
+    expect(reference).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "将「凭证编号」映射为字段" })).toHaveValue("id");
+    fireEvent.click(screen.getByRole("button", { name: /透视与导出/ }));
+    fireEvent.click(screen.getByRole("button", { name: "导出结果" }));
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("kanzhang.export", expect.objectContaining({
+      mapping: expect.objectContaining({ id: ["凭证编号"] }),
+    })));
   });
 
   it("auto re-reads the archived file and keeps the archived mapping over suggestions", async () => {
@@ -117,7 +174,7 @@ describe("kanzhang history resume", () => {
     });
   });
 
-  it("ignores restores without an archived mapping (sub-step jobs)", async () => {
+  it("re-reads source steps without an archived mapping and uses fresh suggestions", async () => {
     publishTaskRestore({
       jobId: "j2",
       toolId: "kanzhang",
@@ -127,10 +184,22 @@ describe("kanzhang history resume", () => {
       authorizedPathCount: 1,
     });
     render(<KanzhangParityPage tool={tool} />);
-    // 不应用、也不触发读取。
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(jobStart).not.toHaveBeenCalled();
-    const draft = JSON.parse(sessionStorage.getItem(DRAFT_CACHE) ?? "{}");
-    expect(draft.inputPath ?? "").toBe("");
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("kanzhang.inspect", {
+      inputPath: "C:/tmp/je.xlsx", sheet: undefined, headerRow: 1, headerDepth: 1,
+    }));
+    act(() => jobEventsCallback?.({
+      toolId: "kanzhang", jobId: "job-restore-1", phase: "completed",
+      result: {
+        headers: ["科目名称", "金额"], preview: [], dimensions: { rows: 1, columns: 2 },
+        sheets: [], selectedSheet: "", accounts: [],
+        suggestedMapping: { id: [], accountName: ["科目名称"], date: "", functionalAmount: "金额" },
+      },
+    }));
+    await waitFor(() => {
+      const draft = JSON.parse(sessionStorage.getItem(DRAFT_CACHE) ?? "{}");
+      expect(draft.inputPath).toBe("C:/tmp/je.xlsx");
+      expect(draft.mapping.accountName).toEqual(["科目名称"]);
+      expect(draft.inspect.headers).toEqual(["科目名称", "金额"]);
+    });
   });
 });

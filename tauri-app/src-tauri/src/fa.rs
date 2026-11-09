@@ -3,10 +3,11 @@
 //! This module deliberately owns the entire deterministic FA workflow.  The
 //! webview passes paths and mappings; files never transit through JSON.
 
-use calamine::{Data, Reader, open_workbook_auto};
+use calamine::{Data, Reader};
+use crate::spreadsheet_input::open_workbook_auto;
 use chrono::{Datelike, Local, Months, NaiveDate};
 use reqwest::blocking::Client;
-use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
+use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook};
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -14,14 +15,33 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use crate::AppError;
 use crate::excel_merger::PauseCheckpoint;
+
+#[path = "fa_disk_rows.rs"]
+mod disk_rows;
+#[path = "fa_export_rows.rs"]
+mod export_rows;
+#[path = "fa_export_projection.rs"]
+mod export_projection;
+use export_projection::{MergedCell, MergedProjection};
+#[cfg(test)]
+#[path = "fa_export_tests.rs"]
+mod export_tests;
+#[cfg(test)]
+#[path = "fa_header_controls_tests.rs"]
+mod header_controls_tests;
+#[path = "fa_disk.rs"]
+pub(crate) mod disk;
+#[path = "fa_resources.rs"]
+pub(crate) mod resources;
+pub(crate) use disk_rows::JoinedRows;
 
 pub(crate) type Progress<'a> = &'a dyn Fn(&str, usize, usize, &str);
 
@@ -31,43 +51,174 @@ pub(crate) struct Table {
     pub(crate) sheet: Option<String>,
     pub(crate) sheets: Vec<String>,
     pub(crate) header_row: usize,
+    pub(crate) header_depth: usize,
     pub(crate) headers: Vec<String>,
     pub(crate) rows: Vec<Vec<String>>,
+    /// 表内数据行的真实总数。整表读取时等于 `rows.len()`；前缀读取时是
+    /// Excel 声明的规模（可能略大于去空后的实际行数）。界面展示行数、以及
+    /// “是否只拿了前缀”的判定（`rows.len() < row_count`）都以它为准。
+    pub(crate) row_count: usize,
 }
 
-#[derive(Clone, Debug)]
-struct JoinedRow {
-    begin: Option<Vec<String>>,
-    end: Option<Vec<String>>,
-    source: &'static str,
-    match_value: String,
-    extra: BTreeMap<String, Cell>,
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct HeaderOptions {
+    pub(crate) row: Option<usize>,
+    pub(crate) depth: Option<usize>,
 }
 
-#[derive(Clone, Debug)]
-enum Cell {
+impl From<Option<usize>> for HeaderOptions {
+    fn from(row: Option<usize>) -> Self { Self { row, depth: None } }
+}
+impl From<usize> for HeaderOptions {
+    fn from(row: usize) -> Self { Some(row).into() }
+}
+impl HeaderOptions {
+    pub(crate) fn params(params: &Value, row_key: &str, depth_key: &str) -> Result<Self, AppError> {
+        let depth = match params.get(depth_key) {
+            None | Some(Value::Null) => None,
+            Some(value) => match value.as_u64() {
+                Some(0) => None,
+                Some(depth @ 1..=2) => Some(depth as usize),
+                _ => return Err(error("INVALID_PARAMS", "表头层数只能为自动识别、1层或2层。", None)),
+            },
+        };
+        Ok(Self { row: optional_header(params, row_key)?, depth })
+    }
+    pub(crate) fn resolved(table: &Table) -> Self {
+        Self { row: Some(table.header_row), depth: Some(table.header_depth) }
+    }
+}
+
+type ReviewTableKey = (PathBuf, u64, SystemTime, Option<String>, usize, usize);
+// 只缓存最近一次 inspect 的两张表，复核复用读取结果；worker 导出仍重新读源文件。
+static REVIEW_TABLES: OnceLock<Mutex<Vec<(ReviewTableKey, Arc<Table>)>>> = OnceLock::new();
+
+fn review_table_key(path: &Path, sheet: Option<&str>, header: impl Into<HeaderOptions>) -> Option<ReviewTableKey> {
+    let header = header.into();
+    let metadata = fs::metadata(path).ok()?;
+    Some((fs::canonicalize(path).ok()?, metadata.len(), metadata.modified().ok()?, sheet.map(str::to_owned), header.row.unwrap_or(0), header.depth.unwrap_or(0)))
+}
+
+fn review_table(params: &Value, side: &str) -> Result<Arc<Table>, AppError> {
+    let path = required_path(params, &format!("{side}Path"))?;
+    let sheet = params.get(format!("{side}Sheet")).and_then(Value::as_str).filter(|sheet| !sheet.is_empty());
+    let header = HeaderOptions::params(params, &format!("{side}HeaderRow"), &format!("{side}HeaderDepth"))?;
+    load_review_table(&path, sheet, header, false)
+}
+
+/// 交互场景的表读取：优先前缀结构表（选表、表头、样例秒级可得），走不通
+/// （非 xlsx、结构不认识）再退回整表读取。合并/导出 worker 不走这里，
+/// 它们本就要全量数据。
+fn load_interactive_table(
+    path: &Path,
+    sheet: Option<&str>,
+    header: impl Into<HeaderOptions>,
+    choose_best: bool,
+) -> Result<Table, AppError> {
+    let header = header.into();
+    // 预览先走前缀。大文件磁盘分流只决定正式任务的读法，不能提前建全表缓存。
+    if let Some(table) = crate::fa_sheet_pick::load_prefix_table(path, sheet, header, choose_best) {
+        return Ok(table);
+    }
+    if resources::uses_disk(&[(path, sheet)], resources::Phase::Read) {
+        return disk::load_review(path, sheet, header, choose_best);
+    }
+    load_table(path, sheet, header, choose_best)
+}
+
+#[test]
+fn fa_disk_preview_does_not_build_full_cache_and_key_evidence_stops_on_hit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("大表预览.xlsx");
+    crate::table_read_cache::workbook_with_bad_tail(&path, &["资产编号", "资产名称", "原值"]);
+    let mut plan = crate::disk_table::ReadPlan::default();
+    plan.add(&path, true);
+    let _guard = plan.enter();
+    let table = load_interactive_table(&path, Some("数据"), HeaderOptions { row: Some(1), depth: Some(1) }, false).unwrap();
+    assert!(table.rows.len() < table.row_count);
+    let disk_preview = disk::load_review(&path, Some("数据"), HeaderOptions { row: Some(1), depth: Some(1) }, false).unwrap();
+    assert_eq!(disk_preview.headers, table.headers);
+    assert!(disk_preview.rows.len() < 300);
+    assert!(crate::disk_table::DiskTable::cached_fa(&path, "数据", 1, 1).is_none());
+    assert!(disk::columns_containing(&table, &[0], &normalize_join_key("ID-300-0"), None).unwrap().contains(&0));
+    // 没有证据时扫描到异常尾部仍须报错，不能缓存成“确实没有这个编号”。
+    assert!(disk::columns_containing(&table, &[0], "missing-id", None).is_err());
+}
+
+pub(crate) fn load_review_table(
+    path: &Path,
+    sheet: Option<&str>,
+    header: impl Into<HeaderOptions>,
+    choose_best: bool,
+) -> Result<Arc<Table>, AppError> {
+    let header = header.into();
+    let sheet = sheet.filter(|sheet| !sheet.is_empty());
+    if let Some(key) = header.row.and_then(|_| review_table_key(path, sheet, header)) {
+        if let Some(table) = REVIEW_TABLES.get_or_init(|| Mutex::new(Vec::new()))
+            .lock().ok().and_then(|cache| cache.iter().find(|(cached, _)| *cached == key).map(|(_, table)| Arc::clone(table))) {
+            return Ok(table);
+        }
+    }
+    let before = review_table_key(path, None, 0);
+    let table = Arc::new(load_interactive_table(path, sheet, header, choose_best)?);
+    let after = review_table_key(path, None, 0);
+    if before.is_some() && before == after {
+        if let Some(key) = review_table_key(path, table.sheet.as_deref(), HeaderOptions { row: Some(table.header_row), ..header }) {
+            if let Ok(mut cache) = REVIEW_TABLES.get_or_init(|| Mutex::new(Vec::new())).lock() {
+                cache.retain(|(old, _)| old != &key);
+                cache.push((key, Arc::clone(&table)));
+                if cache.len() > 2 { cache.remove(0); }
+            }
+        }
+    }
+    Ok(table)
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct JoinedRow {
+    pub(crate) begin: Option<Vec<String>>,
+    pub(crate) end: Option<Vec<String>>,
+    pub(crate) source: &'static str,
+    pub(crate) match_value: String,
+    pub(crate) extra: BTreeMap<String, Cell>,
+}
+
+impl<'de> serde::Deserialize<'de> for JoinedRow {
+    fn deserialize<D:serde::Deserializer<'de>>(deserializer:D)->Result<Self,D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Raw {begin:Option<Vec<String>>,end:Option<Vec<String>>,source:String,match_value:String,extra:BTreeMap<String,Cell>}
+        let raw=Raw::deserialize(deserializer)?;
+        let source=match raw.source.as_str(){"两文件都有"=>"两文件都有","仅文件1"=>"仅文件1","仅文件2"=>"仅文件2",_=>return Err(serde::de::Error::custom("无效的匹配来源"))};
+        Ok(Self{begin:raw.begin,end:raw.end,source,match_value:raw.match_value,extra:raw.extra})
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Cell {
     Text(String),
     Number(f64),
 }
 
 /// `fa_subtools` 以不透明引用消费合并结果（折旧政策对比复用折旧期间逻辑），
-/// 字段保持模块私有。
+/// 不直接触字段；`fa_merge_snapshot` 需要逐字段落盘/重建匹配快照，字段对
+/// crate 内开放。
 #[derive(Clone, Debug)]
 pub(crate) struct MergeResult {
-    begin: Table,
-    end: Table,
-    rows: Vec<JoinedRow>,
-    begin_keys: Vec<String>,
-    end_keys: Vec<String>,
-    duplicate_values: usize,
-    duplicate_rows: usize,
-    unmatched_addition: Vec<Vec<String>>,
-    unmatched_disposal: Vec<Vec<String>>,
+    pub(crate) begin: Table,
+    pub(crate) end: Table,
+    pub(crate) rows: JoinedRows,
+    pub(crate) begin_keys: Vec<String>,
+    pub(crate) end_keys: Vec<String>,
+    pub(crate) duplicate_values: usize,
+    pub(crate) duplicate_rows: usize,
+    pub(crate) unmatched_addition: Vec<Vec<String>>,
+    pub(crate) unmatched_disposal: Vec<Vec<String>>,
 }
 
 pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
     match method {
         "fa.inspect" => inspect(params),
+        "fa.key_check" => fa_key_check(params),
         "fa.supplement_inspect" => supplement_inspect(params),
         "fa.review" => llm_review(params, false),
         "fa.supplement_review" => llm_review(params, true),
@@ -120,18 +271,30 @@ pub(crate) fn run_job(
 fn inspect(params: Value) -> Result<Value, AppError> {
     let begin_path = required_path(&params, "beginPath")?;
     let end_path = required_path(&params, "endPath")?;
-    let begin = load_table(
+    let fingerprints = [review_table_key(&begin_path, None, 0), review_table_key(&end_path, None, 0)];
+    let load_started = std::time::Instant::now();
+    let begin = Arc::new(load_interactive_table(
         &begin_path,
         params.get("beginSheet").and_then(Value::as_str),
-        optional_header(&params, "beginHeaderRow")?,
+        HeaderOptions::params(&params, "beginHeaderRow", "beginHeaderDepth")?,
         true,
-    )?;
-    let end = load_table(
+    )?);
+    let end = Arc::new(load_interactive_table(
         &end_path,
         params.get("endSheet").and_then(Value::as_str),
-        optional_header(&params, "endHeaderRow")?,
+        HeaderOptions::params(&params, "endHeaderRow", "endHeaderDepth")?,
         true,
-    )?;
+    )?);
+    eprintln!(
+        "FA inspect 读取 {:.1}s：期初 {}（{}/{} 行），期末 {}（{}/{} 行）",
+        load_started.elapsed().as_secs_f64(),
+        begin.sheet.clone().unwrap_or_default(),
+        begin.rows.len(),
+        begin.row_count,
+        end.sheet.clone().unwrap_or_default(),
+        end.rows.len(),
+        end.row_count,
+    );
     let mut bm = suggest_mapping(&begin);
     let mut em = suggest_mapping(&end);
     // 本年折旧、新增方式和新增日期都是期末（file2）属性。
@@ -140,15 +303,75 @@ fn inspect(params: Value) -> Result<Value, AppError> {
     for role in ["currentYearDep", "additionMethod", "additionDate"] {
         bm.insert(role.into(), Value::Null);
     }
-    extend_composite_key(&mut bm, &em);
-    extend_composite_key(&mut em, &bm);
+    extend_composite_key(&mut bm, &em, &begin);
+    extend_composite_key(&mut em, &bm, &end);
+    // 建议键逐位预碰撞校验：错配静默纠正到同值列，双侧无据可依时撤掉该配对。
+    let mut begin_keys = mapping_match_keys(&bm);
+    let mut end_keys = mapping_match_keys(&em);
+    // 组合键成员（名称/公司列）按本侧条件独立加入，两侧可能不等长——例如
+    // 期初多主体、期末单主体时只有期初会补公司列。逐位配对要求成员序列
+    // 一致，单侧悬空的尾部成员只会挂出恒为未命中的徽章，直接撤掉；首键
+    // （主编号）承载选列建议，永不裁剪。
+    align_key_members(&mut begin_keys, &mut end_keys);
+    let key_pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys)?;
+    // 未命中的样例由定向列扫描确认，不因建议纠正/撤键重读两侧全表。
+    let tables = [&begin, &end].into_iter().zip(fingerprints).filter_map(|(table, before)| {
+        // 读取过程中源文件被改动时，不把可能跨版本的读取结果加入缓存。
+        let before = before?;
+        let after = review_table_key(&table.path, None, 0)?;
+        if before != after { return None; }
+        review_table_key(&table.path, table.sheet.as_deref(), HeaderOptions::resolved(table))
+            .map(|key| (key, Arc::clone(table)))
+    }).collect();
+    if let Ok(mut cache) = REVIEW_TABLES.get_or_init(|| Mutex::new(Vec::new())).lock() {
+        *cache = tables;
+    }
+    bm.insert(
+        "matchKeys".into(),
+        Value::Array(begin_keys.into_iter().map(Value::String).collect()),
+    );
+    em.insert(
+        "matchKeys".into(),
+        Value::Array(end_keys.into_iter().map(Value::String).collect()),
+    );
     Ok(json!({
         "begin": table_inspection(&begin), "end": table_inspection(&end),
-        "suggestedMapping":{"begin":bm,"end":em}, "engine":"rust-fa"
+        "suggestedMapping":{"begin":bm,"end":em},
+        "keyPairing": key_pairing,
+        "engine":"rust-fa"
     }))
 }
 
-fn extend_composite_key(mapping: &mut Map<String, Value>, peer: &Map<String, Value>) {
+/// 手工键位的只读预检：按 `normalize_join_key` 归一、按 inspect 预碰撞的
+/// 成员判定逐位算 hit。不做任何纠正、不写缓存结论；键数不一致时按较短的
+/// 一侧配对，多出的键位单侧呈现且恒为未命中。
+fn fa_key_check(params: Value) -> Result<Value, AppError> {
+    let begin = review_table(&params, "begin")?;
+    let end = review_table(&params, "end")?;
+    let begin_keys = strings(params.get("beginKeys"));
+    let end_keys = strings(params.get("endKeys"));
+    let paired = begin_keys.len().min(end_keys.len());
+    let mut pairing = Vec::new();
+    for i in 0..paired {
+        let hit = match (
+            begin.headers.iter().position(|h| h == &begin_keys[i]),
+            end.headers.iter().position(|h| h == &end_keys[i]),
+        ) {
+            (Some(bi), Some(ei)) => key_columns_intersect(&begin, bi, &end, ei)?,
+            _ => false,
+        };
+        pairing.push(json!({"begin": begin_keys[i].clone(), "end": end_keys[i].clone(), "hit": hit}));
+    }
+    for column in &begin_keys[paired..] {
+        pairing.push(json!({"begin": column.clone(), "end": "", "hit": false}));
+    }
+    for column in &end_keys[paired..] {
+        pairing.push(json!({"begin": "", "end": column.clone(), "hit": false}));
+    }
+    Ok(json!({"keyPairing": pairing}))
+}
+
+fn extend_composite_key(mapping: &mut Map<String, Value>, peer: &Map<String, Value>, table: &Table) {
     let key = mapping
         .get("matchKey")
         .and_then(Value::as_str)
@@ -168,15 +391,293 @@ fn extend_composite_key(mapping: &mut Map<String, Value>, peer: &Map<String, Val
     {
         keys.push(Value::String(name.into()));
     }
+    for (index, header) in table.headers.iter().enumerate() {
+        // 公司列作为组合键成员只在多主体（值有变化）时有意义；单主体文件
+        // 的恒定公司列进键只会挂必绿的命中徽章，误导复核。
+        if is_company_id_header(header)
+            && !keys.contains(&Value::String(header.clone()))
+            && !column_is_constant(table, index)
+        {
+            keys.push(Value::String(header.clone()));
+        }
+    }
     mapping.insert("matchKeys".into(), Value::Array(keys));
+}
+
+/// 两侧建议键按较短一侧对齐：从较长一侧尾部撤掉多余成员（保留至少
+/// 首键）。组合键成员只有两侧成对出现才有逐位配对的意义。
+fn align_key_members(begin_keys: &mut Vec<String>, end_keys: &mut Vec<String>) {
+    while begin_keys.len() > end_keys.len() && begin_keys.len() > 1 {
+        begin_keys.pop();
+    }
+    while end_keys.len() > begin_keys.len() && end_keys.len() > 1 {
+        end_keys.pop();
+    }
+}
+
+fn is_company_id_header(header: &str) -> bool {
+    matches!(
+        normalize_header(header).as_str(),
+        "公司名称" | "公司名" | "企业名称" | "单位名称" | "主体名称" | "法人名称" | "公司"
+            | "公司编码" | "公司代码" | "公司id" | "companyname" | "companycode" | "companyid"
+            | "entityname" | "legalentity" | "company"
+    )
+}
+
+fn mapping_match_keys(mapping: &Map<String, Value>) -> Vec<String> {
+    mapping
+        .get("matchKeys")
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 列内第一个非空单元格的归一值（按 `normalize_join_key` 口径）。
+fn first_join_sample(table: &Table, index: usize) -> Option<String> {
+    table
+        .rows
+        .iter()
+        .map(|row| normalize_join_key(cell(row, index)))
+        .find(|value| !value.is_empty())
+}
+
+/// 样本是否落在该列的归一值集合里（流式扫描，命中即停）。
+fn column_contains(table: &Table, index: usize, sample: &str) -> Result<bool, AppError> {
+    if sample.is_empty() { return Ok(false); }
+    if table.rows.iter().any(|row| normalize_join_key(cell(row, index)) == sample) {
+        return Ok(true);
+    }
+    if table.rows.len() < table.row_count {
+        return disk::column_contains(table, index, sample);
+    }
+    Ok(false)
+}
+
+/// 键列对应的证据：两侧列的归一值域存在任一方向的交集即算命中（证明这
+/// 两列能连上）。先查已读行；需要补深时优先抽取行数较少的一侧，把整列
+/// 扫描的代价压到低的一侧——首扫结果会进值域缓存，后续调键复验免扫。
+fn key_columns_intersect(begin: &Table, b_index: usize, end: &Table, e_index: usize) -> Result<bool, AppError> {
+    let begin_sample = first_join_sample(begin, b_index);
+    let end_sample = first_join_sample(end, e_index);
+    if let Some(sample) = begin_sample.as_deref() {
+        if column_contains(end, e_index, sample)? {
+            return Ok(true);
+        }
+    }
+    if let Some(sample) = end_sample.as_deref() {
+        if column_contains(begin, b_index, sample)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// 序数列（值≈行号 1..N）识别：序数列完全唯一、完全覆盖，在键列打分里
+/// 形似完美 ID，但两表的序数列天然互含，成员校验对它形同虚设——既不能
+/// 建议为键，也不能当纠正候选。
+fn looks_like_serial_column(table: &Table, index: usize) -> bool {
+    let mut values: Vec<&str> = Vec::new();
+    for row in &table.rows {
+        let value = cell(row, index).trim();
+        if !value.is_empty() {
+            values.push(value);
+            if values.len() >= 30 {
+                break;
+            }
+        }
+    }
+    if values.len() < 8 {
+        return false;
+    }
+    let numbers: Vec<Option<f64>> = values.iter().map(|v| parse_serial_number(v)).collect();
+    let Some(first) = numbers[0] else {
+        return false;
+    };
+    if first.fract() != 0.0 {
+        return false;
+    }
+    // 与「首个值＋位置偏移」重合的占比高即视为行号列，容忍少量跳号与空行。
+    let mut hits = 0usize;
+    for (position, maybe) in numbers.iter().enumerate() {
+        if let Some(number) = maybe {
+            if (number - (first + position as f64)).abs() < 0.5 {
+                hits += 1;
+            }
+        }
+    }
+    hits * 10 >= numbers.len() * 8
+}
+
+fn parse_serial_number(value: &str) -> Option<f64> {
+    let cleaned: String = value
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != ',')
+        .collect();
+    cleaned.parse::<f64>().ok().filter(|number| number.is_finite())
+}
+
+/// 恒定列识别：非空值只有一种（如单主体文件的「公司」代码列）。恒定键
+/// 不筛行，只会挂着必绿的命中徽章误导复核。
+fn column_is_constant(table: &Table, index: usize) -> bool {
+    // 前缀表只见过开头一段：多主体清单常按主体分段排序，开头清一色
+    // 不代表整列恒定（实测 27 万行期末清单前 197 行全是同一主体，全列
+    // 实有 9 家）。恒定判定只在整表数据上下结论；前缀阶段让公司列照常
+    // 进组合键，由逐位值域校验用真实数据裁决。
+    if table.rows.len() < table.row_count {
+        return false;
+    }
+    let mut distinct: HashSet<&str> = HashSet::new();
+    let mut seen = 0usize;
+    for row in &table.rows {
+        let value = cell(row, index).trim();
+        if value.is_empty() {
+            continue;
+        }
+        distinct.insert(value);
+        seen += 1;
+        if seen >= 30 {
+            break;
+        }
+    }
+    seen >= 8 && distinct.len() == 1
+}
+
+/// 全表找归一值集合包含样本的列：候选多于一个时优先 `is_forbidden_id`
+/// 为假的列，再取最靠左。已被本侧其他键位占用的列不参与候选，避免纠正后
+/// 出现重复键列导致连接键永远对不上。序数列与恒定列一律不当候选——
+/// 序数列几乎包含一切整数，恒定列不筛行，纠正到它们等于没纠。
+fn find_column_containing(
+    table: &Table,
+    sample: &str,
+    excluded: &BTreeSet<usize>,
+) -> Result<Option<usize>, AppError> {
+    if sample.is_empty() {
+        return Ok(None);
+    }
+    let indexes = [false, true].into_iter().flat_map(|forbidden_pass| {
+        table.headers.iter().enumerate().filter_map(move |(index, header)| {
+            (!excluded.contains(&index)
+                && is_forbidden_id(header) == forbidden_pass
+                && !looks_like_serial_column(table, index)
+                && !column_is_constant(table, index)).then_some(index)
+        })
+    }).collect::<Vec<_>>();
+    if table.rows.len() < table.row_count {
+        return Ok(disk::columns_containing(table, &indexes, sample, None)?.first().copied());
+    }
+    for index in indexes {
+        if column_contains(table, index, sample)? { return Ok(Some(index)); }
+    }
+    Ok(None)
+}
+
+/// 除 `skip` 外当前仍生效的键列在本表的列下标（已撤掉的键位不再占用列）。
+fn occupied_key_indices(
+    table: &Table,
+    keys: &[String],
+    skip: usize,
+    dropped: &[bool],
+) -> BTreeSet<usize> {
+    keys.iter()
+        .enumerate()
+        .filter(|(i, _)| *i != skip && (*i >= dropped.len() || !dropped[*i]))
+        .filter_map(|(_, key)| table.headers.iter().position(|h| h == key))
+        .collect()
+}
+
+/// 建议键逐位预碰撞校验与静默纠正：取 begin 第 i 键列首个非空归一样本在
+/// end 第 i 键列查成员；未命中先在 end 全表找同值列纠正期末建议，再反向
+/// 纠正期初建议；两侧都找不到就同时撤掉该键位。只作用于 inspect 新算出
+/// 的建议键，不触碰用户映射。返回纠正后的逐位配对状态（被撤掉的不出现）。
+fn repair_suggested_key_pairing(
+    begin: &Table,
+    end: &Table,
+    begin_keys: &mut Vec<String>,
+    end_keys: &mut Vec<String>,
+) -> Result<Vec<Value>, AppError> {
+    let paired = begin_keys.len().min(end_keys.len());
+    let mut dropped = vec![false; paired];
+    let mut pairing = Vec::new();
+    for i in 0..paired {
+        let b_index = begin.headers.iter().position(|h| h == &begin_keys[i]);
+        let e_index = end.headers.iter().position(|h| h == &end_keys[i]);
+        let (b_index, e_index) = match (b_index, e_index) {
+            (Some(b), Some(e)) => (b, e),
+            // 建议键来自本表 suggest_mapping，正常必然存在；防御性维持原状。
+            _ => {
+                pairing.push(json!({"begin": begin_keys[i].clone(), "end": end_keys[i].clone(), "hit": true}));
+                continue;
+            }
+        };
+        let begin_sample = first_join_sample(begin, b_index);
+        let end_sample = first_join_sample(end, e_index);
+        if begin_sample.is_none() && end_sample.is_none() {
+            // 两侧键列都没有任何非空值：没有数据证据推翻表头层面的建议，维持原状。
+            pairing.push(json!({"begin": begin_keys[i].clone(), "end": end_keys[i].clone(), "hit": true}));
+            continue;
+        }
+        let mut hit = false;
+        if let Some(sample) = begin_sample.as_deref() {
+            if key_columns_intersect(begin, b_index, end, e_index)? {
+                hit = true;
+            } else if let Some(fixed) = find_column_containing(
+                end,
+                sample,
+                &occupied_key_indices(end, end_keys, i, &dropped),
+            )? {
+                end_keys[i] = end.headers[fixed].clone();
+                hit = true;
+            }
+        }
+        if !hit {
+            if let Some(sample) = end_sample.as_deref() {
+                if let Some(fixed) = find_column_containing(
+                    begin,
+                    sample,
+                    &occupied_key_indices(begin, begin_keys, i, &dropped),
+                )? {
+                    begin_keys[i] = begin.headers[fixed].clone();
+                    hit = true;
+                }
+            }
+        }
+        if hit {
+            pairing.push(json!({"begin": begin_keys[i].clone(), "end": end_keys[i].clone(), "hit": true}));
+        } else {
+            dropped[i] = true;
+        }
+    }
+    // 两侧同步移除被撤掉的键位；超出配对长度的多出键位保持原状。
+    let keep_alive = |keys: &[String]| {
+        keys.iter()
+            .enumerate()
+            .filter(|(i, _)| *i >= paired || !dropped[*i])
+            .map(|(_, key)| key.clone())
+            .collect::<Vec<_>>()
+    };
+    *begin_keys = keep_alive(begin_keys);
+    *end_keys = keep_alive(end_keys);
+    Ok(pairing)
 }
 
 fn supplement_inspect(params: Value) -> Result<Value, AppError> {
     let path = required_path(&params, "path")?;
-    let table = load_table(
+    if params.get("sheetsOnly").and_then(Value::as_bool) == Some(true) {
+        let sheets = crate::fa_sheet_pick::list_visible_sheets(&path)?;
+        if !sheets.is_empty() {
+            return Ok(json!({"path":path,"kind":"excel","sheets":sheets,
+                "headers":[],"preview":[],"suggestedMapping":{},"engine":"rust-fa"}));
+        }
+    }
+    let table = load_review_table(
         &path,
         params.get("sheet").and_then(Value::as_str),
-        optional_header(&params, "headerRow")?,
+        HeaderOptions::params(&params, "headerRow", "headerDepth")?,
         false,
     )?;
     let mut mapping = suggest_mapping(&table);
@@ -191,18 +692,22 @@ fn supplement_inspect(params: Value) -> Result<Value, AppError> {
         .and_then(Value::as_str)
         .filter(|path| !path.trim().is_empty())
         .map(|path| {
-            load_table(
-                Path::new(path),
-                params.get("referenceSheet").and_then(Value::as_str),
-                optional_header(&params, "referenceHeaderRow")?,
-                false,
-            )
+            let path = PathBuf::from(path);
+            let sheet = params.get("referenceSheet").and_then(Value::as_str);
+            let header = HeaderOptions::params(&params, "referenceHeaderRow", "referenceHeaderDepth")?;
+            // 此处只需列结构和样例，不为键验证构建全宽整表或磁盘行缓存。
+            let reference = match crate::fa_sheet_pick::load_prefix_table(&path, sheet, header, false) {
+                Some(table) => table,
+                None => load_interactive_table(&path, sheet, header, false)?,
+            };
+            Ok(reference)
         })
         .transpose()?;
     let exact_sample_match = reference_table.is_some() && !references.is_empty();
     let mut keys = reference_table
         .as_ref()
         .map(|reference| infer_supplement_keys_by_samples(&table, reference, &references))
+        .transpose()?
         .unwrap_or_default();
 
     // Compatibility fallback for API callers that do not provide the primary
@@ -269,8 +774,8 @@ fn supplement_inspect(params: Value) -> Result<Value, AppError> {
 /// Establish a one-to-one mapping from the primary ledger's configured keys to
 /// supplement columns using values, not header wording.
 ///
-/// For each candidate supplement column we take exactly three non-blank data
-/// samples.  A candidate is accepted only when all three values occur verbatim
+/// For each candidate supplement column we take one non-blank data sample.
+/// A candidate is accepted only when that value occurs verbatim
 /// (under the same harmless trim/case/Excel-`.0` normalization used by the
 /// merger) in one configured key column of the primary ledger.  Every primary
 /// key must be proved and every supplement column may be used once; otherwise
@@ -279,83 +784,111 @@ fn infer_supplement_keys_by_samples(
     supplement: &Table,
     reference: &Table,
     reference_keys: &[String],
-) -> Vec<String> {
-    if supplement.rows.len() < 3 {
-        return Vec::new();
+) -> Result<Vec<String>, AppError> {
+    if supplement.rows.is_empty() || reference_keys.is_empty() {
+        return Ok(Vec::new());
     }
-    // Use three representative data rows (head/middle/tail).  This is stable
-    // across repeated reviews while avoiding the bias of checking only the
-    // first few records, which are often one batch copied from the same source.
-    let sample_rows = [0usize, supplement.rows.len() / 2, supplement.rows.len() - 1];
     let Some(reference_indexes) = reference_keys
         .iter()
         .map(|key| reference.headers.iter().position(|header| header == key))
         .collect::<Option<Vec<_>>>()
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let reference_values = reference_indexes
+    let samples_by_column = (0..supplement.headers.len()).map(|column| {
+        supplement.rows.iter().map(|row| normalize_key(cell(row, column), true, false))
+            .find(|value| !value.is_empty()).unwrap_or_default()
+    }).collect::<Vec<_>>();
+    let wanted = samples_by_column.iter().filter(|value| !value.is_empty())
+        .cloned().collect::<HashSet<_>>();
+    let mut reference_values = reference_indexes
         .iter()
         .map(|index| {
             reference
                 .rows
                 .iter()
                 .map(|row| normalize_key(cell(row, *index), true, false))
-                .filter(|value| !value.is_empty())
+                .filter(|value| wanted.contains(value))
                 .collect::<HashSet<_>>()
         })
         .collect::<Vec<_>>();
-    let mut used = HashSet::new();
-    let mut result = Vec::with_capacity(reference_keys.len());
-    for (reference_position, reference_key) in reference_keys.iter().enumerate() {
-        let mut candidates = supplement
-            .headers
-            .iter()
-            .enumerate()
-            .filter(|(column, _)| !used.contains(column))
-            .filter_map(|(column, header)| {
-                let samples = supplement
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(row, _)| sample_rows.contains(row))
-                    .map(|(_, row)| normalize_key(cell(row, column), true, false))
-                    .collect::<Vec<_>>();
-                if samples.len() != 3
-                    || !samples
-                        .iter()
-                        .all(|value| reference_values[reference_position].contains(value))
-                {
-                    return None;
-                }
-                let exact_header =
-                    usize::from(normalize_header(header) == normalize_header(reference_key));
-                let semantic_header = usize::from(
-                    (looks_like_id(header) && looks_like_id(reference_key))
-                        || (looks_like_name(header) && looks_like_name(reference_key)),
-                );
-                let distinct_samples = samples.iter().collect::<HashSet<_>>().len();
-                Some((
-                    exact_header,
-                    semantic_header,
-                    distinct_samples,
-                    std::cmp::Reverse(column),
-                    column,
-                    header.clone(),
-                ))
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_unstable_by(|a, b| b.cmp(a));
-        let Some((_, _, _, _, column, header)) = candidates.into_iter().next() else {
-            return Vec::new();
-        };
-        used.insert(column);
-        result.push(header);
+    let choose_keys = |reference_values: &[HashSet<String>]| {
+        let mut used = HashSet::new();
+        let mut result = Vec::with_capacity(reference_keys.len());
+        for (reference_position, reference_key) in reference_keys.iter().enumerate() {
+            let mut candidates = supplement
+                .headers
+                .iter()
+                .enumerate()
+                .filter(|(column, _)| !used.contains(column))
+                .filter_map(|(column, header)| {
+                    let sample = &samples_by_column[column];
+                    if sample.is_empty() || !reference_values[reference_position].contains(sample)
+                    {
+                        return None;
+                    }
+                    let exact_header =
+                        usize::from(normalize_header(header) == normalize_header(reference_key));
+                    let semantic_header = usize::from(
+                        (looks_like_id(header) && looks_like_id(reference_key))
+                            || (looks_like_name(header) && looks_like_name(reference_key)),
+                    );
+                    Some((
+                        exact_header,
+                        semantic_header,
+                        std::cmp::Reverse(column),
+                        column,
+                        header.clone(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_unstable_by(|a, b| b.cmp(a));
+            let Some((_, _, _, column, header)) = candidates.into_iter().next() else {
+                return Vec::new();
+            };
+            used.insert(column);
+            result.push(header);
+        }
+        result
+    };
+    let keys = choose_keys(&reference_values);
+    if !keys.is_empty() || wanted.is_empty() || reference.rows.len() >= reference.row_count {
+        return Ok(keys);
     }
-    result
+    // 先用已加载的样例验证；未命中才单次扫描键列，找到对应关系即停止。
+    // 这里只保留候选样例的命中结果，不物化完整参照表。
+    crate::table_read_cache::read(&reference.path, "fa-supplement-key-evidence-v1",
+        &(reference.sheet.as_deref(), reference.header_row, reference.header_depth,
+            reference_keys, &supplement.headers, &samples_by_column), || {
+        let indexes = reference_indexes.iter().copied().collect::<HashSet<_>>();
+        let visit_sample = |row: Vec<String>, physical_row| {
+            if physical_row >= reference.header_row + reference.header_depth {
+                let mut changed = false;
+                for (position, index) in reference_indexes.iter().enumerate() {
+                    let value = normalize_key(cell(&row, *index), true, false);
+                    if wanted.contains(&value) { changed |= reference_values[position].insert(value); }
+                }
+                if changed && !choose_keys(&reference_values).is_empty() {
+                    return Err(error("FA_SUPPLEMENT_SAMPLE_FOUND", "已找到补充表匹配样例。", None));
+                }
+            }
+            Ok(())
+        };
+        let cancel = AtomicBool::new(false);
+        let sheet = reference.sheet.as_deref().unwrap_or("CSV");
+        let scan = match crate::disk_table::DiskTable::cached_fa(&reference.path, sheet, reference.header_row, reference.header_depth) {
+            Some(cached) => cached.visit_columns(&indexes, &cancel, visit_sample),
+            None => crate::disk_table::for_each_source_row_projected(&reference.path, sheet, &indexes, &cancel, visit_sample),
+        };
+        if let Err(error) = scan {
+            if error.code != "FA_SUPPLEMENT_SAMPLE_FOUND" { return Err(error); }
+        }
+        Ok(choose_keys(&reference_values))
+    })
 }
 
 fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
+    let review_started = std::time::Instant::now();
     let settings = params
         .get("__settings")
         .and_then(|value| value.get("llm"))
@@ -378,11 +911,17 @@ fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
         main_llm_payload(&params)?
     };
     let system = if supplement {
-        "你是固定资产审计补充清单映射复核助手。只能使用 payload.headers 中的原始列名。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"新增方式\"}，禁止返回字符串。新增清单角色仅 addition_method/addition_date，file_side=file1；处置清单角色仅 disposal_method/disposal_date/disposal_orig/disposal_dep，file_side=file2。action 只能 fill/replace/clear/keep。逐项结合样例复核已有映射：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。"
+        "你是固定资产审计补充清单映射复核助手。只能使用 payload.headers 中的原始列名。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"新增方式\"}，禁止返回字符串。新增清单角色仅 addition_method/addition_date，file_side=file1；处置清单角色仅 disposal_method/disposal_date/disposal_orig/disposal_dep，file_side=file2。action 只能 fill/replace/clear/keep。逐项结合样例复核已有映射：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。新增与处置各角色（新增方式/新增日期/处置方式/处置日期/处置原值/处置折旧）仅在 headers 中存在唯一可信候选列时才输出补齐建议；存在多个竞争候选时不输出建议、保持未映射，不得强行猜一个。"
     } else {
-        "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项结合 samples 核对：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。类别列应为少量重复的分类文本；若已映射类别列的 samples 多数是 Y110、A12-3 这类短字母数字代码而非类别文字，且 headers 中存在值为类别文字的列（例如 资产类型描述），必须返回 action=replace 指向该列，不得 keep。原值/折旧/残值率应为数值，日期列为日期，寿命为月数。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。"
+        "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项结合 samples 核对：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。类别列应为少量重复的分类文本；若已映射类别列的 samples 多数是 Y110、A12-3 这类短字母数字代码而非类别文字，且 headers 中存在值为类别文字的列（例如 资产类型描述），必须返回 action=replace 指向该列，不得 keep。原值/折旧应为数值，日期列为日期；寿命与残值字段按下述程序归一规则复核。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。可选角色（开始使用日期/使用寿命/残值率/本年折旧/新增方式/新增日期）仅在 headers 中存在唯一可信候选列时才输出补齐建议；存在多个竞争候选时不输出建议、保持未映射，不得强行猜一个。"
     };
-    let content = request_fa_llm(&settings, system, &payload.to_string())?;
+    // 全量检查，只输出调整项，避免几十条 keep 和重复建议拖慢生成。
+    let key_instruction = if supplement { "" } else { "公司名称、企业名称、单位名称等表头自动识别为现有资产ID角色，不是独立字段角色，不需要重复编号等前置条件。不得因为含公司或名称就排除这些 ID 列。资产ID可多列，保留其他已有ID列；需要补充公司名称 ID 列时在 matchReview 中返回两侧对应的 suggested_file1_columns/suggested_file2_columns。" };
+    let compact_system = format!("{system}\n{key_instruction}{FA_DATE_REVIEW_INSTRUCTION}{FA_NORMALIZATION_REVIEW_INSTRUCTION}逐项检查后只输出需要调整的项目；相容的 keep 项、没有可信候选的未映射项不逐条输出。同一调整仅放在 suggestions 或 fieldReviews 中一次。reason 最多一句话。匹配键无需调整时 matchReview 只返回 {{\"action\":\"keep\"}}。");
+    let started = std::time::Instant::now();
+    let text = payload.to_string();
+    let content = request_fa_llm(&settings, &compact_system, &text)?;
+    eprintln!("FA LLM 复核：输入 {} 字节，输出 {} 字节，请求 {:.1} 秒，总计 {:.1} 秒", text.len(), content.len(), started.elapsed().as_secs_f64(), review_started.elapsed().as_secs_f64());
     let parsed = parse_llm_json(&content).ok_or_else(|| {
         error(
             "LLM_RESPONSE_INVALID",
@@ -402,7 +941,8 @@ fn finalize_llm_review(parsed: Value, payload: Value, supplement: bool) -> Value
         .into_iter()
         .filter_map(|mut item| {
             sanitize_llm_review_item(&mut item, &payload);
-            llm_review_item_is_applicable(&mut item, supplement).then_some(item)
+            (llm_review_preserves_normalized_columns(&mut item, &payload)
+                && llm_review_item_is_applicable(&mut item, supplement, &payload)).then_some(item)
         })
         .collect::<Vec<_>>();
     let mut auto = Vec::new();
@@ -415,7 +955,8 @@ fn finalize_llm_review(parsed: Value, payload: Value, supplement: bool) -> Value
         .into_iter()
         .filter_map(|mut item| {
             sanitize_llm_review_item(&mut item, &payload);
-            llm_review_item_is_applicable(&mut item, supplement).then_some(item)
+            (llm_review_preserves_normalized_columns(&mut item, &payload)
+                && llm_review_item_is_applicable(&mut item, supplement, &payload)).then_some(item)
         })
         .collect::<Vec<_>>();
     for fallback in local_unmapped_suggestions(&payload) {
@@ -474,7 +1015,10 @@ fn finalize_llm_review(parsed: Value, payload: Value, supplement: bool) -> Value
         .get("action")
         .and_then(Value::as_str)
         .unwrap_or("keep");
-    let message = if auto.is_empty() && reviews.is_empty() && match_action == "keep" {
+    let rejected_dates = reviews.iter().any(|item| item.get("rejectedByDateValidation").and_then(Value::as_bool) == Some(true));
+    let message = if rejected_dates {
+        "LLM 复核完成：已忽略与日期取值不符的建议，当前映射未因此改动；请人工确认真实日期列。"
+    } else if auto.is_empty() && reviews.is_empty() && match_action == "keep" {
         if supplement {
             "补充清单 LLM 复核完成：现有脚本映射无需补充，匹配键已复核。"
         } else {
@@ -808,14 +1352,107 @@ fn local_category_code_suspects(
     Vec::new()
 }
 
+pub(crate) const FA_DATE_REVIEW_INSTRUCTION: &str = "日期角色 date/addition_date/disposal_date 的建议必须由样例中的真实年月日或合理 Excel 日期序列值支持。已购、NEW、新建、购入、外购、是否新增、取得方式、资产状态均不是日期；这些状态或方式列不得映射任何日期角色。同一文件只有一列可信的新增日期、入账日期或开始使用日期时，date 与 addition_date 可以共用该列，按新增日期口径处理；已有共用映射必须保留，不得因为该列已用于另一个日期角色或没有独立日期列而 clear。未映射角色可 fill 到同一列。只有存在两列或更多可信候选日期列时，才结合列名与样例区分新增、入账和开始使用日期；角色候选仍有歧义时不强行猜列。新增方式 addition_method 与新增日期 addition_date 是独立角色，不得为了补齐未映射字段强行找列；没有可信日期列时保持新增日期未映射。";
+
+/// 只在日期表头和真实样例均支持时允许共用，不能把金额的数值当日期序列。
+fn llm_single_shared_date_column(payload: &Value, side: &str) -> Option<String> {
+    let mut candidates = payload_headers(payload, side).into_iter().filter(|column| {
+        let header = normalize_header(column).to_ascii_lowercase();
+        (header.contains("日期") || header.contains("时间") || header.contains("date"))
+            && llm_date_column_is_compatible(payload, side, column)
+    });
+    let column = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    let header = normalize_header(&column).to_ascii_lowercase();
+    (matches!(header.as_str(), "日期" | "时间" | "date")
+        || ["新增", "增加", "入账", "开始", "使用", "启用", "投用", "购置", "取得", "资本化", "addition", "acquisition", "capitalization", "start", "posting", "entry", "book"]
+            .iter().any(|term| header.contains(term))).then_some(column)
+}
+
+fn llm_date_column_is_compatible(payload: &Value, side: &str, column: &str) -> bool {
+    let Some(values) = payload.get(side).and_then(|table| table.get("samples"))
+        .and_then(|samples| samples.get(column)).and_then(Value::as_array) else { return false; };
+    let values = values.iter().filter_map(Value::as_str).map(str::trim)
+        .filter(|value| !value.is_empty() && !matches!(value.to_ascii_lowercase().as_str(), "-" | "/" | "n/a" | "na" | "null" | "无" | "未填写" | "不适用"))
+        .collect::<Vec<_>>();
+    let valid = values.iter().filter(|value| {
+        // parse_fa_date 可将任意小数字解释为序列值；角色复核不能把年限、标志或年份当日期。
+        if let Ok(serial) = value.parse::<f64>() {
+            let compact_date = value.len() == 8 && NaiveDate::parse_from_str(value, "%Y%m%d").is_ok();
+            if !compact_date && !(10_000.0..=80_000.0).contains(&serial) { return false; }
+        }
+        parse_fa_date(value).is_some_and(|date| (1900..=2100).contains(&date.year()))
+    }).count();
+    !values.is_empty() && valid * 5 >= values.len() * 4
+}
+
+pub(crate) const FA_NORMALIZATION_REVIEW_INSTRUCTION: &str = "使用寿命可来自总使用年限或总使用月数，年转月由程序完成；累计折旧月份、已折旧月份、剩余折旧月份不是总使用寿命，禁止仅为取得月数而换列。残值率允许小数或百分数，也允许映射残值金额并由程序除以原值换算。已映射的正确寿命或残值字段无需因单位、百分数或金额形式而替换、清除或提示复核；仍可补齐未映射角色、纠正字段含义错误。";
+
+/// 对程序可归一的现有字段保留原映射；不能依赖模型对其自身理由的分类。
+/// 只保护具有明确语义的表头，误映射到累计/剩余月数等列仍可纠正。
+pub(crate) fn llm_review_preserves_normalized_columns(item: &mut Value, payload: &Value) -> bool {
+    let key = match item.get("role").and_then(Value::as_str) {
+        Some("life") => "life",
+        Some("residual") => "residualRate",
+        _ => return true,
+    };
+    for side in ["file1", "file2"] {
+        let Some(header) = payload.get(side).and_then(|v| v.get("mapping"))
+            .and_then(|v| v.get(key)).and_then(Value::as_str) else { continue; };
+        let h = normalize_header(header).to_lowercase();
+        let compatible = if key == "life" {
+            !["累计", "剩余", "已提", "已折旧", "remaining", "elapsed"].iter().any(|v| h.contains(v))
+                && ["寿命", "使用年", "使用月", "计划使用", "折旧年限", "预计年限", "预计使用期间数", "usefullife"].iter().any(|v| h.contains(v))
+        } else {
+            ["残值", "residual", "salvage"].iter().any(|v| h.contains(v))
+        };
+        if !compatible { continue; }
+        let explicit_side = item.get("file_side").and_then(Value::as_str) == Some(side);
+        let single_file_default = side == "file2" && payload.get("file1").is_none()
+            && item.get("file_side").is_none() && item.get("suggested_mapping").is_none();
+        let had_mapping = item.get("suggested_mapping").is_some();
+        if let Some(mapping) = item.get_mut("suggested_mapping").and_then(Value::as_object_mut) {
+            mapping.remove(side);
+        }
+        if explicit_side || single_file_default {
+            if let Some(object) = item.as_object_mut() {
+                object.remove("file_side");
+                object.remove("suggested_column");
+            }
+            if !item.get("suggested_mapping").and_then(Value::as_object).is_some_and(|m| !m.is_empty()) {
+                return false;
+            }
+        }
+        if had_mapping && item.get("suggested_mapping").and_then(Value::as_object).is_some_and(|m| m.is_empty()) {
+            return false;
+        }
+    }
+    true
+}
+
 pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
     let Some(object) = item.as_object_mut() else {
         return;
     };
     if object.get("action").and_then(Value::as_str) == Some("clear") {
-        // FA 的本地疑点多数同时携带可信替代列，不能据此自动删映射。
-        // clear 保留下发供人工采纳，但模型无权自行签发自动清除许可。
+        // 清除门槛由前端统一按 confidence >= 0.9 判断，不接受模型自行签发许可。
         object.insert("autoClearSafe".into(), Value::Bool(false));
+        let role = object.get("role").and_then(Value::as_str).unwrap_or("");
+        let side = object.get("file_side").and_then(Value::as_str).unwrap_or("");
+        if matches!(role, "date" | "addition_date") {
+            let key = if role == "date" { "startDate" } else { "additionDate" };
+            let current = payload.get(side).and_then(|table| table.get("mapping"))
+                .and_then(|mapping| mapping.get(key).or_else(|| mapping.get("date")))
+                .and_then(Value::as_str);
+            if llm_single_shared_date_column(payload, side).as_deref()
+                .is_some_and(|column| current == Some(column)) {
+                object.insert("action".into(), json!("keep"));
+                object.remove("suggested_column");
+                object.remove("suggested_mapping");
+            }
+        }
     }
     if let Some(raw) = object.get("suggested_mapping").cloned() {
         object.insert(
@@ -844,11 +1481,43 @@ pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
             }
         }
     }
+    if matches!(object.get("role").and_then(Value::as_str), Some("date" | "addition_date" | "disposal_date")) {
+        let mut targets = Vec::new();
+        if let (Some(side), Some(column)) = (object.get("file_side").and_then(Value::as_str), object.get("suggested_column").and_then(Value::as_str)) {
+            targets.push((side, column));
+        }
+        if let Some(mapping) = object.get("suggested_mapping").and_then(Value::as_object) {
+            targets.extend(mapping.iter().filter_map(|(side, column)| Some((side.as_str(), column.as_str()?))));
+        }
+        if targets.iter().any(|(side, column)| !llm_date_column_is_compatible(payload, side, column)) {
+            object.remove("suggested_column");
+            object.remove("suggested_mapping");
+            object.insert("confidence".into(), json!(0.0));
+            object.insert("action".into(), json!("review"));
+            object.insert("rejectedByDateValidation".into(), json!(true));
+            object.insert("reason".into(), json!("已忽略日期映射建议：该列样例不是可信日期，请保持未映射或人工选择真实日期列。"));
+        }
+    }
 }
 
-fn llm_review_item_is_applicable(item: &mut Value, supplement: bool) -> bool {
+fn llm_review_item_is_applicable(item: &mut Value, supplement: bool, payload: &Value) -> bool {
     let role = item.get("role").and_then(Value::as_str).unwrap_or("");
     if supplement {
+        // 单侧复核只载荷了一侧表头；另一侧没有列名可对照，指向它的建议
+        // 一律丢弃，防止模型对着缺失的文件编造列名。
+        let implied_side = match role {
+            "addition_method" | "addition_date" => "file1",
+            "disposal_method" | "disposal_date" | "disposal_orig" | "disposal_dep" => "file2",
+            _ => "",
+        };
+        let side = item
+            .get("file_side")
+            .and_then(Value::as_str)
+            .filter(|side| !side.is_empty())
+            .unwrap_or(implied_side);
+        if !side.is_empty() && payload.get(side).is_none() {
+            return false;
+        }
         return match role {
             "addition_method" | "addition_date" => item
                 .get("file_side")
@@ -952,18 +1621,8 @@ fn resolve_payload_header(payload: &Value, side: &str, candidate: &str) -> Optio
 }
 
 fn main_llm_payload(params: &Value) -> Result<Value, AppError> {
-    let begin = load_table(
-        &required_path(params, "beginPath")?,
-        params.get("beginSheet").and_then(Value::as_str),
-        optional_header(params, "beginHeaderRow")?,
-        false,
-    )?;
-    let end = load_table(
-        &required_path(params, "endPath")?,
-        params.get("endSheet").and_then(Value::as_str),
-        optional_header(params, "endHeaderRow")?,
-        false,
-    )?;
+    let begin = review_table(params, "begin")?;
+    let end = review_table(params, "end")?;
     let mut suspect_mappings = local_category_mismatch_suggestions(
         &begin,
         params.get("beginMapping"),
@@ -1008,6 +1667,9 @@ fn main_llm_side_payload(
     include_file2_only: bool,
 ) -> Value {
     let suggested = suggest_mapping(table);
+    let samples = review_sample_columns(table);
+    let date_payload = json!({"file2": {"headers": table.headers, "samples": samples}});
+    let shared_date = llm_single_shared_date_column(&date_payload, "file2");
     let roles = [
         ("category", "category", false),
         ("name", "name", false),
@@ -1035,13 +1697,18 @@ fn main_llm_side_payload(
             continue;
         }
         unmapped_roles.push(Value::String(role.to_owned()));
-        if let Some(column) = suggested.get(mapping_key).and_then(Value::as_str) {
+        let column = if matches!(role, "date" | "addition_date") {
+            shared_date.as_deref().or_else(|| suggested.get(mapping_key).and_then(Value::as_str))
+        } else {
+            suggested.get(mapping_key).and_then(Value::as_str)
+        };
+        if let Some(column) = column {
             unmapped_candidates.push(json!({"role": role, "column": column}));
         }
     }
     json!({
         "headers": table.headers,
-        "samples": sample_columns(table),
+        "samples": samples,
         "mapping": mapping,
         "keys": keys,
         "unmappedRoles": unmapped_roles,
@@ -1052,8 +1719,9 @@ fn supplement_llm_payload(params: &Value) -> Result<Value, AppError> {
     let mut payload = Map::new();
     for (name, label) in [("addition", "file1"), ("disposal", "file2")] {
         if let Some(config) = params.get(name).filter(|v| v.get("path").is_some()) {
-            let table = load_supplement(config)?;
-            payload.insert(label.into(),json!({"headers":table.headers,"samples":sample_columns(&table),"mapping":config,"keys":config.get("keys")}));
+            let path = required_path(config, "path")?;
+            let table = load_review_table(&path, config.get("sheet").and_then(Value::as_str), HeaderOptions::params(config, "headerRow", "headerDepth")?, false)?;
+            payload.insert(label.into(),json!({"headers":table.headers,"samples":review_sample_columns(&table),"mapping":config,"keys":config.get("keys")}));
         }
     }
     payload.insert(
@@ -1081,7 +1749,35 @@ pub(crate) fn sample_columns(table: &Table) -> Value {
     Value::Object(map)
 }
 
+pub(crate) fn review_sample_columns(table: &Table) -> Value {
+    let mut samples = sample_columns(table);
+    if let Some(columns) = samples.as_object_mut() {
+        for values in columns.values_mut() {
+            if let Some(values) = values.as_array_mut() {
+                let mut seen = HashSet::new();
+                values.retain(|value| seen.insert(value.clone()));
+                values.truncate(3);
+                for value in values {
+                    if let Some(text) = value.as_str() {
+                        *value = Value::String(text.chars().take(120).collect());
+                    }
+                }
+            }
+        }
+    }
+    samples
+}
+
 pub(crate) fn request_fa_llm(config: &Value, prompt: &str, text: &str) -> Result<String, AppError> {
+    let started = std::time::Instant::now();
+    let result = request_fa_llm_inner(config, prompt, text);
+    eprintln!("FA LLM 调用：提示词 {} 字节，文本 {} 字节，输出 {} 字节，耗时 {:.1} 秒，状态 {}",
+        prompt.len(), text.len(), result.as_ref().map(|content| content.len()).unwrap_or(0),
+        started.elapsed().as_secs_f64(), result.as_ref().map(|_| "成功").unwrap_or_else(|error| error.code.as_str()));
+    result
+}
+
+fn request_fa_llm_inner(config: &Value, prompt: &str, text: &str) -> Result<String, AppError> {
     let api_type = config
         .get("apiType")
         .or_else(|| config.get("api_type"))
@@ -1111,7 +1807,7 @@ pub(crate) fn request_fa_llm(config: &Value, prompt: &str, text: &str) -> Result
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
         .or_else(|| {
-            keyring::Entry::new("AuditToolbox", secret_name)
+            keyring::Entry::new(crate::release_channel::credential_service(), secret_name)
                 .ok()
                 .and_then(|e| e.get_password().ok())
         })
@@ -1292,18 +1988,16 @@ fn preview(
     pause: &PauseCheckpoint,
 ) -> Result<Value, AppError> {
     pause.wait()?;
+    let merge_started = std::time::Instant::now();
     let result = merge(&params, progress, &cancel)?;
+    let merge_secs = merge_started.elapsed().as_secs_f64();
+    // 匹配结果落快照：导出直接复用这一次的结果，不再重新读表配对
+    // （改了输入/映射要重新点匹配，快照随之刷新）。
+    result.rows.check()?;
+    crate::fa_merge_snapshot::save(&params, &result);
     pause.wait()?;
     check_cancel(&cancel)?;
     progress("preview", 4, 4, "匹配预览完成");
-    let counts = result.rows.iter().fold([0usize; 3], |mut acc, row| {
-        match row.source {
-            "两文件都有" => acc[0] += 1,
-            "仅文件1" => acc[1] += 1,
-            _ => acc[2] += 1,
-        }
-        acc
-    });
     // 明细前 N 行对核对没有帮助：审计员要看的是期初→期末的增减变动是否
     // 对得上，所以预览直接给变动汇总（与导出的固定资产变动汇总表同一份
     // 行定义，数值为数字，由前端按千分位渲染）。
@@ -1315,13 +2009,33 @@ fn preview(
                 "values": line.values.iter().map(|v| round_money(*v)).collect::<Vec<_>>()})
         })
         .collect::<Vec<_>>();
+    let stats = match_statistics(&result);
+    result.rows.check()?;
     Ok(json!({
-        "engine":"rust-fa", "message":format!("完全外连接完成，共 {} 行。", result.rows.len()),
-        "stats":{"rows":result.rows.len(),"both":counts[0],"beginOnly":counts[1],"endOnly":counts[2],
-            "duplicates":{"hasDuplicates":result.duplicate_values>0,"duplicateValueCount":result.duplicate_values,"duplicateRowCount":result.duplicate_rows},
-            "unmatchedAddition":result.unmatched_addition.len(),"unmatchedDisposal":result.unmatched_disposal.len()},
+        "engine":"rust-fa", "message":format!(
+            "完全外连接完成，共 {} 行（匹配 {:.1}s，结果已缓存，导出时直接复用）。",
+            result.rows.len(), merge_secs),
+        "stats": stats,
         "summary":{"columns":categories,"rows":summary_rows}
     }))
+}
+
+fn match_statistics(result: &MergeResult) -> Value {
+    let counts = result.rows.iter().fold([0usize; 3], |mut acc, row| {
+        match row.source {
+            "两文件都有" => acc[0] += 1,
+            "仅文件1" => acc[1] += 1,
+            _ => acc[2] += 1,
+        }
+        acc
+    });
+    statistics_from_counts(result, counts)
+}
+
+fn statistics_from_counts(result: &MergeResult, counts: [usize; 3]) -> Value {
+    json!({"rows":result.rows.len(),"both":counts[0],"beginOnly":counts[1],"endOnly":counts[2],
+        "duplicates":{"hasDuplicates":result.duplicate_values>0,"duplicateValueCount":result.duplicate_values,"duplicateRowCount":result.duplicate_rows},
+        "unmatchedAddition":unmatched_count(result,false),"unmatchedDisposal":unmatched_count(result,true)})
 }
 
 fn export(
@@ -1346,7 +2060,37 @@ fn export(
             Some(balance_sheet_date),
         ));
     }
-    let result = merge(&params, progress, &cancel)?;
+    // 导出直接复用「开始匹配」那一次的合并快照：改了主文件输入/映射应回第一步
+    // 重新匹配（快照随之刷新）；指纹不一致只提示不重算，保证导出套表与
+    // 第一步统计永远同源。没有可用快照（首次、换了文件对、快照损坏）才
+    // 现场合并兜底。
+    let merge_started = std::time::Instant::now();
+    let (result, params, merge_label) = match crate::fa_merge_snapshot::load(&params) {
+        Some(mut loaded) => {
+            let hint = if loaded.matches_current {
+                ""
+            } else {
+                "；输入或映射与上次匹配时不一致，建议重新匹配"
+            };
+            progress(
+                "match",
+                2,
+                5,
+                &format!("复用上一次匹配结果，跳过重新合并{hint}"),
+            );
+            // 第二步在匹配后才选择补充清单。复用主匹配行，但必须清除旧补充
+            // 结果并按当前配置应用，覆盖新增、改列、移除和源文件内容变化。
+            apply_supplements(&mut loaded.result, &loaded.effective_params, &cancel)?;
+            (loaded.result, loaded.effective_params, format!("复用上次匹配结果{hint}"))
+        }
+        None => {
+            let result = merge(&params, progress, &cancel)?;
+            result.rows.check()?;
+    crate::fa_merge_snapshot::save(&params, &result);
+            (result, params, "现场合并".to_owned())
+        }
+    };
+    let merge_secs = merge_started.elapsed().as_secs_f64();
     pause.wait()?;
     check_cancel(&cancel)?;
     let output = output_path(&params, &result.end.path)?;
@@ -1355,38 +2099,55 @@ fn export(
         .and_then(|v| v.to_str())
         .map(|v| v.eq_ignore_ascii_case("csv"))
         .unwrap_or(false);
+    let (export_columns, source_counts) = result_columns_and_counts(&result, true);
+    result.rows.check()?;
+    // 纠偏依赖原始两侧资料，在写表前完成；保存后不再隐藏一次原始大表扫描。
+    let check_started = std::time::Instant::now();
+    let warnings = correction_warnings_with_progress(&result, &params, progress, &cancel, pause)?;
+    let check_secs = check_started.elapsed().as_secs_f64();
+    let tax_started = std::time::Instant::now();
     let tax_analysis = if is_csv {
         None
     } else {
         progress("analyze", 3, 5, "正在分析税法最低折旧年限");
-        let period_rows = build_depreciation_period(&result, &params);
-        Some(crate::fa_subtools::build_policy_tax_analysis(
-            &period_rows,
-            &params,
-            &cancel,
-            pause,
-        )?)
+        Some(crate::fa_subtools::prepare_policy_export(&result, &params, &cancel, pause)?)
     };
+    let tax_secs = tax_started.elapsed().as_secs_f64();
     progress("export", 4, 5, "正在生成 FA List、变动清单、汇总与透视表");
+    let write_started = std::time::Instant::now();
+    let mut export_timings = Vec::new();
     if is_csv {
         pause.wait()?;
-        write_csv(&output, &result, strings(params.get("selectedColumns")))?;
+        write_csv_with_columns(&output, &result, strings(params.get("selectedColumns")), export_columns.clone())?;
     } else {
         pause.wait()?;
-        write_xlsx_with_tax_analysis(&output, &result, &params, &cancel, tax_analysis.as_ref())?;
+        export_timings = write_xlsx_with_progress(&output, &result, &params, &cancel, tax_analysis.as_ref(), Some(&export_columns), progress)?;
     }
+    let write_secs = write_started.elapsed().as_secs_f64();
     let mut export_message = "FA List 导出完成".to_owned();
-    if !result.unmatched_addition.is_empty() || !result.unmatched_disposal.is_empty() {
+    if unmatched_count(&result,false)>0 || unmatched_count(&result,true)>0 {
+        progress("export", 99, 100, "套表已保存，正在保存未匹配资产变动清单");
         let path = output
             .parent()
             .unwrap_or(Path::new("."))
             .join("[未匹配资产变动清单].xlsx");
         pause.wait()?;
-        write_unmatched(&path, &result, &cancel)?;
+        write_unmatched(&path, &result, &params, &cancel)?;
         export_message.push_str("；已生成未匹配资产变动清单");
     }
+    // 各阶段真实耗时进完成消息，用户看得见时间去向。
+    export_message.push_str(&format!(
+        "（{} {:.1}s｜口径检查 {:.1}s｜税法年限分析 {:.1}s｜生成套表 {:.1}s）",
+        merge_label, merge_secs, check_secs, tax_secs, write_secs
+    ));
+    if !export_timings.is_empty() {
+        export_message.push_str(&format!("；套表分段：{}", export_timings.iter()
+            .map(|(name, secs)| format!("{name} {secs:.1}s")).collect::<Vec<_>>().join("｜")));
+    }
     let completion_message = export_message.clone();
-    let warnings = correction_warnings(&result, &params);
+    let stats = statistics_from_counts(&result, source_counts);
+    let column_count = export_columns.len();
+    result.rows.check()?;
     if !warnings.is_empty() {
         export_message.push_str("===CORRECTION_WARNINGS===");
         export_message.push_str(&warnings.join("\n"));
@@ -1395,8 +2156,9 @@ fn export(
     progress("completed", 5, 5, &completion_message);
     Ok(
         json!({"engine":"rust-fa","message":"完全外连接完成。","exportMessage":export_message,
-        "taxAnalysisCompleted":tax_analysis.as_ref().is_some_and(|analysis| analysis.completed),
-        "rows":result.rows.len(),"columns":result_columns(&result,true).len(),"outputPaths":[output.to_string_lossy()]}),
+        "taxAnalysisCompleted":tax_analysis.as_ref().is_some_and(|analysis| analysis.tax.completed),
+        "stats":stats,"exportTimings":export_timings,
+        "rows":result.rows.len(),"columns":column_count,"outputPaths":[output.to_string_lossy()]}),
     )
 }
 
@@ -1426,19 +2188,24 @@ pub(crate) fn merge(
             None,
         ));
     }
+    if crate::disk_table::forced_disk_allowed(&[&begin_path, &end_path],
+        params.get("__forceDisk").and_then(Value::as_bool).unwrap_or(false))
+        || resources::pair_uses_disk(params, resources::Phase::Match) {
+        return disk::merge(params, progress, cancel, begin_keys, end_keys);
+    }
     progress("load", 0, 4, "正在读取期初固定资产清单");
-    let begin = load_table(
+    let begin = crate::fa_table_cache::load_table_cached(
         &begin_path,
         params.get("beginSheet").and_then(Value::as_str),
-        optional_header(params, "beginHeaderRow")?,
+        HeaderOptions::params(params, "beginHeaderRow", "beginHeaderDepth")?,
         false,
     )?;
     check_cancel(cancel)?;
     progress("load", 1, 4, "正在读取期末固定资产清单");
-    let end = load_table(
+    let end = crate::fa_table_cache::load_table_cached(
         &end_path,
         params.get("endSheet").and_then(Value::as_str),
-        optional_header(params, "endHeaderRow")?,
+        HeaderOptions::params(params, "endHeaderRow", "endHeaderDepth")?,
         false,
     )?;
     validate_keys(&begin, &begin_keys)?;
@@ -1464,17 +2231,21 @@ pub(crate) fn merge(
     // Match pandas' stable outer-join order: keep the first occurrence order
     // from file1, then append keys which only occur in file2.  Sorting keys
     // here made duplicate-card displays jump around between the old and new UI.
-    let mut keys = ordered_group_keys(&begin, &bi, remove_spaces, case_sensitive);
-    let mut seen = keys.iter().cloned().collect::<HashSet<_>>();
-    for key in ordered_group_keys(&end, &ei, remove_spaces, case_sensitive) {
+    // 连接键做预检同款归一；每个键同时携带展示形态，匹配列仍显示原值。
+    let mut keys = ordered_display_keys(&begin, &bi, remove_spaces, case_sensitive);
+    let mut seen = keys
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect::<HashSet<_>>();
+    for (key, display) in ordered_display_keys(&end, &ei, remove_spaces, case_sensitive) {
         if seen.insert(key.clone()) {
-            keys.push(key);
+            keys.push((key, display));
         }
     }
     let mut rows = Vec::new();
     let mut duplicate_values = 0;
     let mut duplicate_rows = 0;
-    for (key_index, key) in keys.into_iter().enumerate() {
+    for (key_index, (key, display)) in keys.into_iter().enumerate() {
         if key_index % 1024 == 0 {
             check_cancel(cancel)?;
         }
@@ -1512,7 +2283,7 @@ pub(crate) fn merge(
                 match_value: if key.starts_with("__BLANK__") {
                     String::new()
                 } else {
-                    key.replace("|||", " | ")
+                    display.replace("|||", " | ")
                 },
                 extra: BTreeMap::new(),
             });
@@ -1531,7 +2302,7 @@ pub(crate) fn merge(
     let mut result = MergeResult {
         begin,
         end,
-        rows,
+        rows: rows.into(),
         begin_keys,
         end_keys,
         duplicate_values,
@@ -1539,12 +2310,12 @@ pub(crate) fn merge(
         unmatched_addition: Vec::new(),
         unmatched_disposal: Vec::new(),
     };
-    add_change_columns(&mut result, params);
+    add_change_columns(&mut result, params,cancel)?;
     apply_supplements(&mut result, params, cancel)?;
     Ok(result)
 }
 
-fn add_change_columns(result: &mut MergeResult, params: &Value) {
+fn add_change_columns(result: &mut MergeResult, params: &Value,cancel:&AtomicBool) -> Result<(), AppError> {
     let begin_mapping = params.get("beginMapping").and_then(Value::as_object);
     let end_mapping = params.get("endMapping").and_then(Value::as_object);
     let mapped = |side: Option<&Map<String, Value>>, role: &str| {
@@ -1584,7 +2355,8 @@ fn add_change_columns(result: &mut MergeResult, params: &Value) {
     let ei_dep = end_dep
         .as_ref()
         .and_then(|v| result.end.headers.iter().position(|h| h == v));
-    for row in &mut result.rows {
+    result.rows.try_edit(|row| {
+        check_cancel(cancel)?;
         if bi_original.is_some() || ei_original.is_some() {
             let before = bi_original
                 .and_then(|i| row.begin.as_ref().map(|r| number(cell(r, i))))
@@ -1614,7 +2386,9 @@ fn add_change_columns(result: &mut MergeResult, params: &Value) {
                 Cell::Text(change_type(change, "累计折旧")),
             );
         }
-    }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn change_type(change: f64, label: &str) -> String {
@@ -1632,6 +2406,18 @@ fn apply_supplements(
     params: &Value,
     cancel: &AtomicBool,
 ) -> Result<(), AppError> {
+    if result.rows.path().is_some() { return disk::apply_supplements(result,params,cancel); }
+    result.unmatched_addition.clear();
+    result.unmatched_disposal.clear();
+    result.rows.edit(|row| {
+        for field in [
+            "新增方式_辅助_文件2", "新增时间_辅助_文件2",
+            "处置方式_辅助_文件1", "处置时间_辅助_文件1",
+            "处置原值_辅助_文件1", "处置折旧_辅助_文件1",
+        ] {
+            row.extra.remove(field);
+        }
+    })?;
     let valid = result
         .rows
         .iter()
@@ -1669,7 +2455,7 @@ fn apply_supplements(
                 push_unique(&mut e.1, cell(row, i));
             }
         }
-        for row in &mut result.rows {
+        result.rows.edit(|row| {
             if let Some((methods, dates)) = grouped.get(&canonical_display_key(&row.match_value)) {
                 if !methods.is_empty() {
                     row.extra
@@ -1680,7 +2466,7 @@ fn apply_supplements(
                         .insert("新增时间_辅助_文件2".into(), Cell::Text(dates.join("；")));
                 }
             }
-        }
+        })?;
     }
     if let Some(config) = params.get("disposalSupplement").filter(|v| {
         v.get("path")
@@ -1729,7 +2515,7 @@ fn apply_supplements(
                 }
             }
         }
-        for row in &mut result.rows {
+        result.rows.edit(|row| {
             if let Some((methods, dates, original, dep)) =
                 grouped.get(&canonical_display_key(&row.match_value))
             {
@@ -1750,23 +2536,26 @@ fn apply_supplements(
                         .insert("处置折旧_辅助_文件1".into(), Cell::Number(*dep));
                 }
             }
-        }
+        })?;
     }
     Ok(())
 }
 
 fn load_supplement(config: &Value) -> Result<Table, AppError> {
     let path = required_path(config, "path")?;
-    load_table(
+    // 补充清单在合并/导出 worker 里要全量行（未匹配行上报、逐行分组），不能走
+    // 交互前缀表（只有前 200 行）；整表读取接入稳定磁盘缓存，同文件二次读取
+    // 直接命中 Parquet，语义与 load_table 完全一致。
+    crate::fa_table_cache::load_table_cached(
         &path,
         config.get("sheet").and_then(Value::as_str),
-        optional_header(config, "headerRow")?,
+        HeaderOptions::params(config, "headerRow", "headerDepth")?,
         false,
     )
 }
 
 pub(crate) fn table_inspection(table: &Table) -> Value {
-    json!({"path":table.path.to_string_lossy(),"kind":if table.sheets.is_empty(){"text"}else{"excel"},"sheets":table.sheets,"selectedSheet":table.sheet,"displayName":match &table.sheet{Some(s)=>format!("{} & {}",table.path.file_name().unwrap_or_default().to_string_lossy(),s),None=>table.path.file_name().unwrap_or_default().to_string_lossy().into_owned()},"detectedHeaderRow":table.header_row,"headerMode":"auto","headers":table.headers,"preview":table.rows.iter().take(12).collect::<Vec<_>>(),"dimensions":{"rows":table.rows.len(),"columns":table.headers.len()}})
+    json!({"path":table.path.to_string_lossy(),"kind":if table.sheets.is_empty(){"text"}else{"excel"},"sheets":table.sheets,"selectedSheet":table.sheet,"displayName":match &table.sheet{Some(s)=>format!("{} & {}",table.path.file_name().unwrap_or_default().to_string_lossy(),s),None=>table.path.file_name().unwrap_or_default().to_string_lossy().into_owned()},"detectedHeaderRow":table.header_row,"headerDepth":table.header_depth,"headerMode":"auto","headers":table.headers,"preview":table.rows.iter().take(12).collect::<Vec<_>>(),"dimensions":{"rows":table.row_count.max(table.rows.len()),"columns":table.headers.len()}})
 }
 
 pub(crate) fn suggest_mapping(table: &Table) -> Map<String, Value> {
@@ -1810,6 +2599,7 @@ pub(crate) fn suggest_mapping(table: &Table) -> Map<String, Value> {
                 "固定资产名称",
                 "资产名称",
                 "资产描述",
+                "资产说明",
                 "设备名称",
                 "description",
                 "assetname",
@@ -1857,6 +2647,7 @@ pub(crate) fn suggest_mapping(table: &Table) -> Map<String, Value> {
                 "使用寿命(月)",
                 "预计使用期间数",
                 "使用年限",
+                "折旧年限",
                 "计划使用年",
                 "预计使用年限",
                 "usefullife",
@@ -1916,9 +2707,12 @@ pub(crate) fn suggest_mapping(table: &Table) -> Map<String, Value> {
         ),
         (
             "disposalMethod",
-            &["处置方式", "减少方式", "disposalmethod"],
+            &["处置方式", "减少方式", "报废方式", "报废类型", "disposalmethod"],
         ),
-        ("disposalDate", &["处置日期", "减少日期", "disposaldate"]),
+        (
+            "disposalDate",
+            &["处置日期", "减少日期", "报废日期", "报废时间", "disposaldate"],
+        ),
         (
             "disposalOriginal",
             &["处置原值", "减少原值", "原值减少", "处置成本"],
@@ -1982,6 +2776,11 @@ fn pick_match_header(table: &Table, terms: &[&str]) -> Option<String> {
         .iter()
         .enumerate()
         .filter(|(_, header)| !is_forbidden_id(header))
+        .filter(|&(index, _)| {
+            // 序数列与恒定列在值形态打分里一个形似完美 ID、一个挂必绿徽章，
+            // 都不具键资格：先于打分排除，让真正的卡片编号露头。
+            !looks_like_serial_column(table, index) && !column_is_constant(table, index)
+        })
         .filter_map(|(index, header)| {
             let raw_normalized = normalize_header(header);
             let normalized = raw_normalized
@@ -1999,7 +2798,8 @@ fn pick_match_header(table: &Table, terms: &[&str]) -> Option<String> {
                         .position(|term| !term.is_empty() && normalized.contains(term))
                         .map(|p| 700.0 - p as f64)
                 })
-                .or_else(|| fallback_id_score(&normalized))?;
+                .or_else(|| fallback_id_score(&normalized))
+                .or_else(|| is_company_id_header(header).then_some(100.0))?;
             let values = table
                 .rows
                 .iter()
@@ -2083,15 +2883,16 @@ fn pick_header(headers: &[String], terms: &[&str], id: bool) -> Option<String> {
     None
 }
 fn is_forbidden_id(v: &str) -> bool {
+    if is_company_id_header(v) { return false; }
     [
         "公司", "分类", "类别", "大类", "描述", "名称", "原值", "折旧", "净值", "金额", "日期",
-        "时间", "年限", "寿命",
+        "时间", "年限", "寿命", "序号", "行号",
     ]
     .iter()
     .any(|x| v.contains(x))
 }
 fn looks_like_id(v: &str) -> bool {
-    !is_forbidden_id(v)
+    is_company_id_header(v) || (!is_forbidden_id(v)
         && [
             "编号",
             "编码",
@@ -2102,7 +2903,7 @@ fn looks_like_id(v: &str) -> bool {
             "coding",
         ]
         .iter()
-        .any(|x| normalize_header(v).contains(&normalize_header(x)))
+        .any(|x| normalize_header(v).contains(&normalize_header(x))))
 }
 fn looks_like_name(v: &str) -> bool {
     [
@@ -2111,6 +2912,7 @@ fn looks_like_name(v: &str) -> bool {
         "名称",
         "资产描述",
         "描述",
+        "说明",
         "assetname",
         "description",
     ]
@@ -2118,7 +2920,7 @@ fn looks_like_name(v: &str) -> bool {
     .any(|x| normalize_header(v).contains(&normalize_header(x)))
 }
 
-fn sheet_name_affinity(path: &Path, sheet: &str) -> i32 {
+pub(crate) fn sheet_name_affinity(path: &Path, sheet: &str) -> i32 {
     let normalized = normalize_header(sheet);
     let mut score = if matches!(
         normalized.as_str(),
@@ -2160,9 +2962,11 @@ fn sheet_name_affinity(path: &Path, sheet: &str) -> i32 {
 pub(crate) fn load_table(
     path: &Path,
     requested_sheet: Option<&str>,
-    header: Option<usize>,
+    header: impl Into<HeaderOptions>,
     choose_best: bool,
 ) -> Result<Table, AppError> {
+    let options = header.into();
+    let header = options.row;
     if !path.is_file() {
         return Err(error(
             "FILE_NOT_FOUND",
@@ -2171,7 +2975,7 @@ pub(crate) fn load_table(
         ));
     }
     if crate::spreadsheet_input::is_text(path.as_ref()) {
-        return load_csv(path, header);
+        return load_csv(path, options);
     }
     let mut workbook = open_workbook_auto(path).map_err(|e| {
         error(
@@ -2202,68 +3006,63 @@ pub(crate) fn load_table(
     {
         vec![sheet.to_owned()]
     } else if choose_best {
-        sheets.clone()
+        // 自动选表先走记事结论与前缀轻量打分（见 fa_sheet_pick），避免把每张
+        // 可见表整表读一遍；候选最终仍进入下方同一套整表读取与判分循环。
+        crate::fa_sheet_pick::auto_sheet_candidates(path, &sheets, header)
     } else {
         vec![sheets[0].clone()]
     };
-    let mut best: Option<(i32, String, usize, Vec<Vec<String>>)> = None;
+    let mut best: Option<(crate::fa_sheet_pick::AutoSheetJudgement, String, Vec<Vec<String>>)> =
+        None;
     for (pos, sheet) in candidates.iter().enumerate() {
         let range = workbook
             .worksheet_range(sheet)
             .map_err(|e| error("FA_LOAD_FAILED", "无法读取工作表。", Some(e.to_string())))?;
-        let matrix = range
-            .rows()
-            .map(|r| r.iter().map(data_string).collect::<Vec<_>>())
-            .collect::<Vec<_>>();
-        let hi = header
-            .map(|v| v.saturating_sub(1))
-            .unwrap_or_else(|| detect_header(&matrix));
-        let headers = asset_headers(&matrix, hi);
-        let mapping = suggest_mapping(&Table {
-            path: path.into(),
-            sheet: Some(sheet.clone()),
-            sheets: vec![],
-            header_row: hi + 1,
-            headers: headers.clone(),
-            rows: vec![],
-        });
-        let mapped = mapping.values().filter(|v| v.is_string()).count() as i32;
-        let core = [
-            "matchKey",
-            "category",
-            "name",
-            "originalValue",
-            "depreciation",
-        ]
-        .iter()
-        .filter(|k| mapping.get(**k).is_some_and(Value::is_string))
-        .count() as i32;
-        let penalty = if ["合计", "汇总", "summary", "pivot"]
-            .iter()
-            .any(|t| sheet.to_lowercase().contains(t))
-        {
-            5
-        } else {
-            0
-        };
-        let score = mapped * 2
-            + core * 4
-            + if mapping.get("matchKey").is_some_and(Value::is_string) {
-                6
-            } else {
-                0
-            }
-            - penalty
-            + sheet_name_affinity(path, sheet)
-            - pos as i32;
-        let take = best.as_ref().is_none_or(|b| score > b.0);
+        // Calamine 的范围从首个非空单元格开始；标题行及列位仍是 Excel 物理坐标。
+        let (start_row, start_col) = range.start().unwrap_or((0, 0));
+        let mut matrix = vec![Vec::new(); start_row as usize];
+        matrix.extend(range.rows().map(|cells| {
+            let mut row = vec![String::new(); start_col as usize];
+            row.extend(cells.iter().map(data_string));
+            row
+        }));
+        let judgement = crate::fa_sheet_pick::auto_sheet_judge(path, sheet, pos, &matrix, header);
+        let take = best
+            .as_ref()
+            .is_none_or(|(current, _, _)| judgement.score > current.score);
         if take {
-            best = Some((score, sheet.clone(), hi, matrix));
+            best = Some((judgement, sheet.clone(), matrix));
         }
     }
-    let (_, sheet, hi, matrix) = best.unwrap();
-    let depth = asset_header_depth(&matrix, hi);
-    let headers = asset_headers(&matrix, hi);
+    let (judgement, sheet, matrix) = best.unwrap();
+    crate::header_detection::require_tabular(&matrix, header.is_none())?;
+    finalize_table(
+        path,
+        Some(sheet),
+        sheets,
+        judgement.header_row,
+        matrix,
+        0,
+        options.depth,
+    )
+}
+
+/// 整表与前缀两条读取路径共用的收尾：按标题行与多层表头切数据、去全空
+/// 行、按表头宽度对齐。`row_count` 传 0 表示 `rows` 已是全量（用行数本身）。
+pub(crate) fn finalize_table(
+    path: &Path,
+    sheet: Option<String>,
+    sheets: Vec<String>,
+    hi: usize,
+    matrix: Vec<Vec<String>>,
+    row_count: usize,
+    requested_depth: Option<usize>,
+) -> Result<Table, AppError> {
+    let depth = requested_depth.unwrap_or_else(|| asset_header_depth(&matrix, hi));
+    if hi >= matrix.len() || hi + depth > matrix.len() {
+        return Err(error("INVALID_PARAMS", "标题行或表头层数超出工作表范围，请重新设置。", None));
+    }
+    let headers = asset_headers_at_depth(&matrix, hi, depth);
     let width = headers.len();
     let rows = matrix
         .into_iter()
@@ -2274,46 +3073,31 @@ pub(crate) fn load_table(
             r.truncate(width);
             r
         })
-        .collect();
+        .collect::<Vec<_>>();
     Ok(Table {
         path: path.into(),
-        sheet: Some(sheet),
+        sheet,
         sheets,
         header_row: hi + 1,
+        header_depth: depth,
         headers,
+        row_count: row_count.max(rows.len()),
         rows,
     })
 }
 
-fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
+fn load_csv(path: &Path, options: impl Into<HeaderOptions>) -> Result<Table, AppError> {
+    let options = options.into();
+    let header = options.row;
     let matrix = crate::spreadsheet_input::read_rows(path)?;
+    crate::header_detection::require_tabular(&matrix, header.is_none())?;
     let hi = header
         .map(|v| v.saturating_sub(1))
         .unwrap_or_else(|| detect_header(&matrix));
-    let depth = asset_header_depth(&matrix, hi);
-    let headers = asset_headers(&matrix, hi);
-    let width = headers.len();
-    let rows = matrix
-        .into_iter()
-        .skip(hi + depth)
-        .filter(|r| r.iter().any(|v| !v.trim().is_empty()))
-        .map(|mut r| {
-            r.resize(width, String::new());
-            r.truncate(width);
-            r
-        })
-        .collect();
-    Ok(Table {
-        path: path.into(),
-        sheet: None,
-        sheets: vec![],
-        header_row: hi + 1,
-        headers,
-        rows,
-    })
+    finalize_table(path, None, vec![], hi, matrix, 0, options.depth)
 }
 
-fn detect_header(rows: &[Vec<String>]) -> usize {
+pub(crate) fn detect_header(rows: &[Vec<String>]) -> usize {
     crate::header_detection::layout(
         rows,
         20,
@@ -2334,16 +3118,22 @@ fn asset_header_hit(value: &str) -> bool {
     .iter()
     .any(|word| value.contains(word))
 }
-fn asset_header_depth(rows: &[Vec<String>], start: usize) -> usize {
+pub(crate) fn asset_header_depth(rows: &[Vec<String>], start: usize) -> usize {
     crate::header_detection::depth(rows, start, asset_header_hit)
 }
-fn asset_headers(rows: &[Vec<String>], start: usize) -> Vec<String> {
+pub(crate) fn asset_headers(rows: &[Vec<String>], start: usize) -> Vec<String> {
     let depth = asset_header_depth(rows, start);
+    asset_headers_at_depth(rows, start, depth)
+}
+fn asset_headers_at_depth(rows: &[Vec<String>], start: usize, depth: usize) -> Vec<String> {
+    // 流式行尾空单元格可被省略，正文却仍有该列；以实际读取宽度保留列位。
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
     if depth == 2 {
-        let width = rows[start].len().max(rows[start + 1].len());
         unique_headers(crate::fx::merge_headers(&rows[start..start + depth], width))
     } else {
-        unique_headers(rows.get(start).cloned().unwrap_or_default())
+        let mut header = rows.get(start).cloned().unwrap_or_default();
+        header.resize(width, String::new());
+        unique_headers(header)
     }
 }
 fn unique_headers(row: Vec<String>) -> Vec<String> {
@@ -2399,23 +3189,40 @@ fn grouped_rows(
     }
     groups
 }
-fn ordered_group_keys(
+/// 连接键的展示形态（旧版口径，未做连接归一）：供 `match_value` 展示，
+/// 与分组用的连接键并行携带，保证“文本001009”与“数字1009”能连接的
+/// 同时展示列仍是原值。
+fn legacy_row_key(
+    row: &[String],
+    indexes: &[usize],
+    remove_spaces: bool,
+    case_sensitive: bool,
+) -> String {
+    indexes
+        .iter()
+        .map(|i| legacy_normalize_key(cell(row, *i), remove_spaces, case_sensitive))
+        .collect::<Vec<_>>()
+        .join("|||")
+}
+/// 两侧连接键的稳定顺序，同时携带每个键的展示形态（取首次出现行）。
+fn ordered_display_keys(
     table: &Table,
     indexes: &[usize],
     remove_spaces: bool,
     case_sensitive: bool,
-) -> Vec<String> {
+) -> Vec<(String, String)> {
     let mut keys = Vec::new();
     let mut seen = HashSet::new();
     let mut blank = 0;
     for row in &table.rows {
         let mut key = row_key(row, indexes, remove_spaces, case_sensitive);
+        let display = legacy_row_key(row, indexes, remove_spaces, case_sensitive);
         if key.replace("|||", "").is_empty() {
             blank += 1;
             key = format!("__BLANK__{blank:012}");
         }
         if seen.insert(key.clone()) {
-            keys.push(key);
+            keys.push((key, display));
         }
     }
     keys
@@ -2427,7 +3234,32 @@ fn row_key(row: &[String], indexes: &[usize], remove_spaces: bool, case_sensitiv
         .collect::<Vec<_>>()
         .join("|||")
 }
-fn normalize_key(value: &str, remove_spaces: bool, case_sensitive: bool) -> String {
+/// 资产ID预碰撞校验与正式合并共用的唯一归一口径：去首尾空白（含全角空格）、
+/// 去前导单引号，能解析为数字的输出规范数字串（"001009"→"1009"、
+/// "1009.0"→"1009"、"-0"→"0"），ASCII 字母转小写；其余原样返回。
+/// 只用于连接比较，导出展示仍用原始单元格文本。
+pub(crate) fn normalize_join_key(value: &str) -> String {
+    let trimmed = value.trim().trim_start_matches('\'');
+    let trimmed = trimmed.trim();
+    if let Ok(n) = trimmed.parse::<f64>() {
+        if n.is_finite() {
+            if n == 0.0 {
+                return "0".into();
+            }
+            if n.fract() == 0.0 && n.abs() < 1e18 {
+                return format!("{}", n as i128);
+            }
+            return format!("{n}");
+        }
+    }
+    trimmed
+        .chars()
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+/// 展示口径的键段归一（旧版行为）：trim、全角空格转半角、日期 ISO 化、
+/// 可选去空格/大小写、整数尾巴“.0”剥离。`match_value` 等展示文本用它。
+fn legacy_normalize_key(value: &str, remove_spaces: bool, case_sensitive: bool) -> String {
     let mut v = value.trim().replace('\u{3000}', " ");
     if let Some(date) = normalized_date_component(&v) {
         return date;
@@ -2442,6 +3274,12 @@ fn normalize_key(value: &str, remove_spaces: bool, case_sensitive: bool) -> Stri
         v = stripped.into();
     }
     v
+}
+/// 参与连接比较的键值在展示口径之上再统一预检同款归一（数字文本去前导
+/// 零/去尾零、前导单引号、ASCII 小写），让“文本001009”与“数字1009”在
+/// 预检和正式合并里都配上；分组、连接与辅助表对账都用这个键。
+fn normalize_key(value: &str, remove_spaces: bool, case_sensitive: bool) -> String {
+    normalize_join_key(&legacy_normalize_key(value, remove_spaces, case_sensitive))
 }
 
 fn normalized_date_component(value: &str) -> Option<String> {
@@ -2543,6 +3381,10 @@ fn mapped_display_header(params: &Value, side: u8, role: &str, fallback: &str) -
 }
 
 fn result_columns(r: &MergeResult, formatted: bool) -> Vec<String> {
+    result_columns_and_counts(r, formatted).0
+}
+
+fn result_columns_and_counts(r: &MergeResult, formatted: bool) -> (Vec<String>, [usize; 3]) {
     let left = if formatted { "期初" } else { "文件1" };
     let right = if formatted { "期末" } else { "文件2" };
     let mut columns = r
@@ -2553,11 +3395,12 @@ fn result_columns(r: &MergeResult, formatted: bool) -> Vec<String> {
         .chain(r.end.headers.iter().map(|h| format!("{h}_{right}")))
         .collect::<Vec<_>>();
     columns.extend(["数据来源".into(), "匹配列".into()]);
-    let extras = r
-        .rows
-        .iter()
-        .flat_map(|row| row.extra.keys().cloned())
-        .collect::<BTreeSet<_>>();
+    let mut counts = [0usize; 3];
+    let mut extras = BTreeSet::new();
+    for row in &r.rows {
+        counts[match row.source { "两文件都有" => 0, "仅文件1" => 1, _ => 2 }] += 1;
+        extras.extend(row.extra.keys().cloned());
+    }
     columns.extend(extras.into_iter().map(|v| {
         if formatted {
             v.replace("_文件1", "_期初").replace("_文件2", "_期末")
@@ -2565,7 +3408,7 @@ fn result_columns(r: &MergeResult, formatted: bool) -> Vec<String> {
             v
         }
     }));
-    columns
+    (columns, counts)
 }
 fn row_json(result: &MergeResult, row: &JoinedRow, formatted: bool) -> Value {
     let left = if formatted { "期初" } else { "文件1" };
@@ -2603,26 +3446,30 @@ fn row_json(result: &MergeResult, row: &JoinedRow, formatted: bool) -> Value {
 }
 
 fn write_csv(path: &Path, result: &MergeResult, selected: Vec<String>) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(io_error)?;
-    }
     let all = result_columns(result, true);
-    let columns = if selected.is_empty() {
-        all
-    } else {
-        all.into_iter().filter(|v| selected.contains(v)).collect()
-    };
-    let mut file = fs::File::create(path).map_err(io_error)?;
-    file.write_all(&[0xEF, 0xBB, 0xBF]).map_err(io_error)?;
-    let mut writer = csv::WriterBuilder::new().from_writer(file);
-    writer.write_record(&columns).map_err(csv_error)?;
-    for row in &result.rows {
-        let value = row_json(result, row, true);
-        writer
-            .write_record(columns.iter().map(|c| json_cell(value.get(c))))
-            .map_err(csv_error)?;
-    }
-    writer.flush().map_err(io_error)
+    write_csv_with_columns(path, result, selected, all)
+}
+
+fn write_csv_with_columns(path: &Path, result: &MergeResult, selected: Vec<String>, all: Vec<String>) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent).map_err(io_error)?; }
+    let columns = if selected.is_empty() { all } else { all.into_iter().filter(|v| selected.contains(v)).collect() };
+    let partial = path.with_extension("csv.partial");
+    let write = (|| -> Result<(), AppError> {
+        let mut file = fs::File::create(&partial).map_err(io_error)?;
+        file.write_all(&[0xEF,0xBB,0xBF]).map_err(io_error)?;
+        let mut writer = csv::WriterBuilder::new().from_writer(file);
+        writer.write_record(&columns).map_err(csv_error)?;
+        for row in &result.rows {
+            let value = row_json(result,&row,true);
+            writer.write_record(columns.iter().map(|c|json_cell(value.get(c)))).map_err(csv_error)?;
+        }
+        result.rows.check()?;
+        writer.flush().map_err(io_error)?;
+        drop(writer);
+        replace_output(&partial,path)
+    })();
+    if write.is_err() { let _ = fs::remove_file(&partial); }
+    write
 }
 
 /// Parses a merged-data cell as a quantity, or returns None if it must stay
@@ -2750,14 +3597,37 @@ fn write_xlsx_with_tax_analysis(
     result: &MergeResult,
     params: &Value,
     cancel: &AtomicBool,
-    tax_analysis: Option<&crate::fa_subtools::PolicyTaxAnalysis>,
+    tax_analysis: Option<&crate::fa_subtools::PreparedPolicyExport>,
 ) -> Result<(), AppError> {
+    write_xlsx_with_progress(path, result, params, cancel, tax_analysis, None, &|_, _, _, _| {}).map(|_| ())
+}
+
+fn write_xlsx_with_progress(
+    path: &Path,
+    result: &MergeResult,
+    params: &Value,
+    cancel: &AtomicBool,
+    tax_analysis: Option<&crate::fa_subtools::PreparedPolicyExport>,
+    prepared_columns: Option<&[String]>,
+    progress: Progress<'_>,
+) -> Result<Vec<(&'static str, f64)>, AppError> {
+    let mut timings = Vec::new();
+    let mut stage_name = "合并明细";
+    let mut stage_started = std::time::Instant::now();
+    progress("export", 80, 100, "正在写入合并明细");
+    let mut advance = |percent, name: &'static str, message| {
+        timings.push((stage_name, stage_started.elapsed().as_secs_f64()));
+        stage_name = name;
+        stage_started = std::time::Instant::now();
+        progress("export", percent, 100, message);
+    };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io_error)?;
     }
     let partial = path.with_extension("xlsx.partial");
     let mut wb = Workbook::new();
-    let columns = result_columns(result, true);
+    let columns = prepared_columns.map(<[String]>::to_vec).unwrap_or_else(|| result_columns(result, true));
+    let projection = MergedProjection::new(result, &columns);
     let header = Format::new()
         .set_bold()
         .set_background_color(LEGACY_HEADER_FILL)
@@ -2765,7 +3635,7 @@ fn write_xlsx_with_tax_analysis(
         .set_align(FormatAlign::Left);
     write_guide_sheets(&mut wb, params)?;
     for name in ["合并数据"] {
-        let ws = wb.add_worksheet();
+        let ws = wb.add_worksheet_with_constant_memory();
         ws.set_name(name).map_err(xlsx_error)?;
         // Legacy tinted every file2 column grey so the two periods are
         // distinguishable while scrolling a 46-column sheet.
@@ -2795,14 +3665,12 @@ fn write_xlsx_with_tax_analysis(
             };
             ws.write_string_with_format(0, c as u16, display_header(h, params), fmt)
                 .map_err(xlsx_error)?;
-            ws.write_string(1, c as u16, merged_field_source(h))
-                .map_err(xlsx_error)?;
         }
-        let detail_rows = result
-            .rows
-            .iter()
-            .filter(|row| row_summary_noise_marker(row).is_none())
-            .collect::<Vec<_>>();
+        for (c,h) in columns.iter().enumerate() {
+            ws.write_string(1,c as u16,merged_field_source(h)).map_err(xlsx_error)?;
+        }
+        ws.set_row_height(1,22).map_err(xlsx_error)?;
+        let detail_rows = || result.rows.iter().filter(|row|row_summary_noise_marker(&row).is_none());
         let date_column = columns
             .iter()
             .map(|h| h.contains("日期") || h.contains("时间"))
@@ -2820,11 +3688,11 @@ fn write_xlsx_with_tax_analysis(
             .enumerate()
             .map(|(c, _)| !date_column[c] && !identifier_column[c])
             .collect::<Vec<_>>();
-        for row in detail_rows.iter().take(1000) {
-            let value = row_json(result, row, true);
-            for (c, h) in columns.iter().enumerate() {
+        for row in detail_rows().take(1000) {
+            let value = projection.project(&row);
+            for c in 0..columns.len() {
                 if numeric_column[c] {
-                    if let Some(Value::String(text)) = value.get(h) {
+                    if let MergedCell::Text(text) = value[c] {
                         if !text.trim().is_empty() && numeric_text(text).is_none() {
                             numeric_column[c] = false;
                         }
@@ -2833,18 +3701,23 @@ fn write_xlsx_with_tax_analysis(
             }
         }
         let mut widest = vec![0usize; columns.len()];
-        for (r, row) in detail_rows.iter().enumerate() {
+        let mut detail_count = 0usize;
+        for (r, row) in detail_rows().enumerate() {
+            detail_count = r + 1;
             check_cancel(cancel)?;
-            let value = row_json(result, row, true);
+            if r % 4096 == 0 {
+                progress("export", 80 + r * 7 / result.rows.len().max(1), 100, "正在写入合并明细");
+            }
+            let value = projection.project(&row);
             for (c, h) in columns.iter().enumerate() {
-                let cell = value.get(h);
+                let cell = value[c];
                 let excel_row = (r + 2) as u32;
                 // Measure what actually lands in the cell: a date column holds
                 // "2023-06-27" even though the source value is the serial 45104.
                 if r < 10 || numeric_column[c] {
                     let rendered = match cell {
-                        Some(Value::String(text)) if date_column[c] => display_date(text),
-                        other => json_cell(other),
+                        MergedCell::Text(text) if date_column[c] => std::borrow::Cow::Owned(display_date(text)),
+                        other => other.rendered(),
                     };
                     widest[c] = widest[c].max(legacy_display_len(&rendered, h));
                 }
@@ -2858,7 +3731,7 @@ fn write_xlsx_with_tax_analysis(
                     None
                 };
                 match cell {
-                    Some(Value::String(text)) if date_column[c] => {
+                    MergedCell::Text(text) if date_column[c] => {
                         let rendered = display_date(text);
                         match tint {
                             Some(fmt) => {
@@ -2868,7 +3741,7 @@ fn write_xlsx_with_tax_analysis(
                         }
                         .map_err(xlsx_error)?;
                     }
-                    Some(Value::String(text)) if numeric_column[c] => {
+                    MergedCell::Text(text) if numeric_column[c] => {
                         match (numeric_text(text), tint) {
                             (Some(number), Some(fmt)) => {
                                 ws.write_number_with_format(excel_row, c as u16, number, fmt)
@@ -2885,10 +3758,17 @@ fn write_xlsx_with_tax_analysis(
                     }
                     _ => match tint {
                         Some(fmt) => ws
-                            .write_string_with_format(excel_row, c as u16, json_cell(cell), fmt)
+                            .write_string_with_format(excel_row, c as u16, cell.rendered(), fmt)
                             .map(|_| ())
                             .map_err(xlsx_error)?,
-                        None => write_json_cell(ws, excel_row, c as u16, cell)?,
+                        None => {
+                            match cell {
+                                MergedCell::Text(text) => { ws.write_string(excel_row, c as u16, text).map_err(xlsx_error)?; }
+                                MergedCell::Number(number) => { ws.write_number_with_format(excel_row, c as u16, number, &money).map_err(xlsx_error)?; }
+                                MergedCell::Null => { ws.write_string(excel_row, c as u16, "null").map_err(xlsx_error)?; }
+                                MergedCell::Missing => {}
+                            }
+                        }
                     },
                 }
             }
@@ -2898,12 +3778,12 @@ fn write_xlsx_with_tax_analysis(
             ws.autofilter(
                 0,
                 0,
-                detail_rows.len() as u32 + 1,
+                detail_count as u32 + 1,
                 columns.len().saturating_sub(1) as u16,
             )
             .map_err(xlsx_error)?;
         }
-        let note_row = detail_rows.len() as u32 + 3;
+        let note_row = detail_count as u32 + 3;
         let info = sheet_explanation(name);
         let note = format!("{} 信息来源：{} 重点关注：{}", info.0, info.1, info.2);
         ws.write_string_with_format(note_row, 0, "本表说明", &header)
@@ -2916,41 +3796,50 @@ fn write_xlsx_with_tax_analysis(
             ws.set_column_width(c as u16, legacy_column_width(name, widest[c]))
                 .map_err(xlsx_error)?;
         }
-        ws.set_row_height(1, 22).map_err(xlsx_error)?;
+
         ws.set_row_height(note_row - 1, 8).map_err(xlsx_error)?;
         ws.set_row_height(note_row, 72).map_err(xlsx_error)?;
     }
     // Sheet creation order *is* the tab order in the workbook; see SHEET_ORDER.
+    advance(88, "数据透视", "正在生成数据透视表");
     write_pivot_sheet(&mut wb, result, params, &header, cancel)?;
     check_cancel(cancel)?;
+    advance(89, "变动汇总", "正在生成固定资产变动汇总表");
     write_summary_sheet(&mut wb, result, params, &header)?;
     check_cancel(cancel)?;
+    advance(90, "业务清单", "正在生成 FA List 及新增、处置清单");
     write_business_sheets(&mut wb, result, params, &header, cancel)?;
     check_cancel(cancel)?;
+    advance(94, "折旧期间", "正在生成折旧期间表");
     if let Some(analysis) = tax_analysis {
         crate::fa_subtools::write_depreciation_period_tax_sheet(
             &mut wb,
-            result,
             params,
             &header,
             cancel,
             "折旧期间",
-            &analysis.rows,
+            analysis,
         )?;
     } else {
         write_depreciation_period_sheet(&mut wb, result, params, &header, cancel, "折旧期间")?;
     }
     check_cancel(cancel)?;
+    advance(95, "分析与异常", "正在生成分析与异常清单");
     if fa_llm_enabled(params) {
         write_llm_analysis(&mut wb, result, params)?;
     }
     write_anomaly_sheet(&mut wb, result, params, &header, cancel)?;
+    result.rows.check()?;
+    advance(97, "压缩保存", "正在压缩并保存工作簿");
     wb.save(&partial).map_err(xlsx_error)?;
     if let Err(cancelled) = check_cancel(cancel) {
         let _ = fs::remove_file(&partial);
         return Err(cancelled);
     }
-    replace_output(&partial, path)
+    replace_output(&partial, path)?;
+    advance(99, "保存完成", "套表已保存，正在收尾");
+    drop(advance);
+    Ok(timings)
 }
 
 /// Returns the summary-noise rows for `write_noise_backup_sheet` to emit later.
@@ -2960,27 +3849,9 @@ fn write_summary_sheet(
     params: &Value,
     header: &Format,
 ) -> Result<Vec<Vec<String>>, AppError> {
-    let (headers, rows, noise) = build_extended_summary(result, params);
-    let mut begin_categories = BTreeSet::new();
-    let mut end_categories = BTreeSet::new();
-    for row in result
-        .rows
-        .iter()
-        .filter(|row| row_summary_noise_marker(row).is_none())
-    {
-        let begin = mapped_text(result, row, params, 1, "category");
-        let end = mapped_text(result, row, params, 2, "category");
-        if !begin.trim().is_empty()
-            && mapped_number(result, row, params, 1, "originalValue").abs() > 0.005
-        {
-            begin_categories.insert(begin);
-        }
-        if !end.trim().is_empty()
-            && mapped_number(result, row, params, 2, "originalValue").abs() > 0.005
-        {
-            end_categories.insert(end);
-        }
-    }
+    let mut category_sources = [BTreeSet::new(), BTreeSet::new()];
+    let (headers, rows, noise) = build_extended_summary_with_sources(result, params, Some(&mut category_sources));
+    let [begin_categories, end_categories] = category_sources;
     let ws = wb.add_worksheet();
     ws.set_name("固定资产变动汇总表").map_err(xlsx_error)?;
     for (c, h) in headers.iter().enumerate() {
@@ -3014,7 +3885,8 @@ fn write_summary_sheet(
                 ws.write_formula_with_format(
                     (r + 2) as u32,
                     2,
-                    format!("=SUM(D{excel_row}:{last_category_col}{excel_row})").as_str(),
+                    Formula::new(format!("=SUM(D{excel_row}:{last_category_col}{excel_row})"))
+                        .set_result(value),
                     &money_format,
                 )
                 .map_err(xlsx_error)?;
@@ -3137,7 +4009,7 @@ struct CategoryMovement {
     end_dep: f64,
 }
 
-fn is_summary_noise(value: &str) -> bool {
+pub(crate) fn is_summary_noise(value: &str) -> bool {
     let normalized = value.trim().to_lowercase().replace(' ', "");
     normalized.is_empty()
         || ["合计", "小计", "总计", "subtotal", "total"]
@@ -3202,11 +4074,38 @@ struct SummaryLine {
 
 /// `short_labels` 为真时，期初期末行直接叫「期初原值／期末原值」；导出底稿
 /// 沿用旧版写法，把来源工作簿名拼进项目名（`side_label`）。
+/// 派生结果不按预估体积硬拦截；实际内存紧张时由 worker 等待恢复。
+struct FaAggregateBudget<'a> { rows: &'a JoinedRows, checks: usize }
+impl<'a> FaAggregateBudget<'a> {
+    fn new(result: &'a MergeResult, _label: &'static str) -> Self {
+        Self { rows: &result.rows, checks: 0 }
+    }
+    fn reserve(&mut self, _bytes: u64) -> bool {
+        self.checks += 1;
+        if self.rows.path().is_some() && (self.checks == 1 || self.checks % 256 == 0) {
+            if let Err(error) = crate::resource_budget::check_available_if_managed() {
+                self.rows.record_resource_error(&error);
+                return false;
+            }
+        }
+        true
+    }
+}
 fn build_summary_lines(
     result: &MergeResult,
     params: &Value,
     short_labels: bool,
 ) -> (Vec<String>, Vec<SummaryLine>, Vec<Vec<String>>) {
+    build_summary_lines_with_sources(result, params, short_labels, None)
+}
+
+fn build_summary_lines_with_sources(
+    result: &MergeResult,
+    params: &Value,
+    short_labels: bool,
+    mut category_sources: Option<&mut [BTreeSet<String>; 2]>,
+) -> (Vec<String>, Vec<SummaryLine>, Vec<Vec<String>>) {
+    let mut budget = FaAggregateBudget::new(result,"资产变动汇总");
     let mut movements: BTreeMap<String, CategoryMovement> = BTreeMap::new();
     // Legacy preserves the category order in the merged schedule instead of
     // alphabetically sorting Chinese labels.
@@ -3215,19 +4114,20 @@ fn build_summary_lines(
     let mut disposal_method_order = Vec::<String>::new();
     let mut noise = Vec::new();
     for row in &result.rows {
-        let begin_category = mapped_text(result, row, params, 1, "category");
-        let end_category = mapped_text(result, row, params, 2, "category");
+        let begin_category = mapped_text(result, &row, params, 1, "category");
+        let end_category = mapped_text(result, &row, params, 2, "category");
         let category = nonempty(end_category.clone())
             .or_else(|| nonempty(begin_category.clone()))
             .unwrap_or_else(|| "未分类".into());
-        if is_summary_noise(&category) || row_summary_noise_marker(row).is_some() {
+        if is_summary_noise(&category) || row_summary_noise_marker(&row).is_some() {
+            if !budget.reserve((512 + category.len() + row.match_value.len()) as u64) { return (Vec::new(),Vec::new(),Vec::new()); }
             noise.push(vec![
                 row.source.into(),
                 category,
                 row.match_value.clone(),
                 format!(
                     "合计/小计/空分类行未纳入变动汇总{}",
-                    row_summary_noise_marker(row)
+                    row_summary_noise_marker(&row)
                         .map(|value| format!("（识别标识：{value}）"))
                         .unwrap_or_default()
                 ),
@@ -3246,16 +4146,25 @@ fn build_summary_lines(
             .unwrap_or_else(|| "未分类".into());
         for key in [&begin_key, &end_key] {
             if !categories.contains(key) {
+                if !budget.reserve((1024 + key.len() * 4) as u64) { return (Vec::new(),Vec::new(),Vec::new()); }
                 categories.push(key.clone());
             }
         }
         let reclassified = nonempty(begin_category.clone()).is_some()
             && nonempty(end_category.clone()).is_some()
             && begin_category != end_category;
-        let begin_original = mapped_number(result, row, params, 1, "originalValue");
-        let end_original = mapped_number(result, row, params, 2, "originalValue");
-        let begin_dep = mapped_number(result, row, params, 1, "depreciation");
-        let end_dep = mapped_number(result, row, params, 2, "depreciation");
+        let begin_original = mapped_number(result, &row, params, 1, "originalValue");
+        let end_original = mapped_number(result, &row, params, 2, "originalValue");
+        if let Some(sources) = category_sources.as_mut() {
+            if !begin_category.trim().is_empty() && begin_original.abs() > 0.005 {
+                sources[0].insert(begin_category.clone());
+            }
+            if !end_category.trim().is_empty() && end_original.abs() > 0.005 {
+                sources[1].insert(end_category.clone());
+            }
+        }
+        let begin_dep = mapped_number(result, &row, params, 1, "depreciation");
+        let end_dep = mapped_number(result, &row, params, 2, "depreciation");
         {
             let opening = movements.entry(begin_key.clone()).or_default();
             opening.begin_original += begin_original;
@@ -3280,12 +4189,13 @@ fn build_summary_lines(
         let original_change = end_original - begin_original;
         if original_change > 0.005 {
             let methods = method_parts(
-                extra_text(row, "新增方式_辅助_文件2")
-                    .or_else(|| nonempty(mapped_text(result, row, params, 2, "additionMethod"))),
+                extra_text(&row, "新增方式_辅助_文件2")
+                    .or_else(|| nonempty(mapped_text(result, &row, params, 2, "additionMethod"))),
                 "未标注新增方式",
             );
             let share = original_change / methods.len() as f64;
             for method in methods {
+                if !movement.additions.contains_key(&method) && !budget.reserve((256 + method.len() * 3) as u64) { return (Vec::new(),Vec::new(),Vec::new()); }
                 if !add_method_order.contains(&method) {
                     add_method_order.push(method.clone());
                 }
@@ -3293,18 +4203,19 @@ fn build_summary_lines(
             }
         } else if original_change < -0.005 {
             let methods = method_parts(
-                extra_text(row, "处置方式_辅助_文件1")
-                    .or_else(|| nonempty(mapped_text(result, row, params, 1, "disposalMethod"))),
+                extra_text(&row, "处置方式_辅助_文件1")
+                    .or_else(|| nonempty(mapped_text(result, &row, params, 1, "disposalMethod"))),
                 "未标注处置方式",
             );
             let share = -original_change / methods.len() as f64;
-            let allocated_dep = if begin_original.abs() > f64::EPSILON {
+            let allocated_dep = extra_number(&row, "处置折旧_辅助_文件1").unwrap_or_else(|| if begin_original.abs() > f64::EPSILON {
                 begin_dep.abs() * ((-original_change) / begin_original.abs()).min(1.0)
             } else {
                 begin_dep.abs()
-            };
+            });
             let dep_share = allocated_dep / methods.len() as f64;
             for method in methods {
+                if !movement.disposals.contains_key(&method) && !budget.reserve((384 + method.len() * 4) as u64) { return (Vec::new(),Vec::new(),Vec::new()); }
                 if !disposal_method_order.contains(&method) {
                     disposal_method_order.push(method.clone());
                 }
@@ -3323,14 +4234,8 @@ fn build_summary_lines(
     }
     let add_methods = add_method_order;
     let disposal_methods = disposal_method_order;
-    // Legacy only splits depreciation disposal rows that carry an explicit
-    // method.  An unlabelled disposal remains in the catch-all non-disposal
-    // line, even though its original-value reduction is still shown separately.
-    let dep_methods = disposal_methods
-        .iter()
-        .filter(|method| method.as_str() != "未标注处置方式")
-        .cloned()
-        .collect::<Vec<_>>();
+    // 原值减少已证明资产发生减少，处置方式未填不能把对应折旧藏进非处置变动。
+    let dep_methods = disposal_methods.clone();
     let has_non_disposal_dep = categories.iter().any(|c| {
         let m = &movements[c];
         let disposed = dep_methods
@@ -3339,6 +4244,8 @@ fn build_summary_lines(
             .sum::<f64>();
         (-m.dep_change_total - disposed).abs() > 0.005
     });
+    let cells = (categories.len() as u64).saturating_mul((add_methods.len() + disposal_methods.len() * 2 + 24) as u64);
+    if !budget.reserve(cells.saturating_mul(128)) { return (Vec::new(),Vec::new(),Vec::new()); }
     let mut rows = Vec::new();
     let mut add_row = |section: &str, item: String, values: Vec<f64>| {
         if values.iter().all(|v| v.abs() <= 0.005)
@@ -3508,7 +4415,15 @@ fn build_extended_summary(
     result: &MergeResult,
     params: &Value,
 ) -> (Vec<String>, Vec<Vec<String>>, Vec<Vec<String>>) {
-    let (categories, lines, noise) = build_summary_lines(result, params, false);
+    build_extended_summary_with_sources(result, params, None)
+}
+
+fn build_extended_summary_with_sources(
+    result: &MergeResult,
+    params: &Value,
+    category_sources: Option<&mut [BTreeSet<String>; 2]>,
+) -> (Vec<String>, Vec<Vec<String>>, Vec<Vec<String>>) {
+    let (categories, lines, noise) = build_summary_lines_with_sources(result, params, false, category_sources);
     let mut headers = vec![String::new(), String::new(), "合计".into()];
     headers.extend(categories.iter().cloned());
     let rows = lines
@@ -3539,7 +4454,7 @@ fn write_business_sheets(
 ) -> Result<(), AppError> {
     // Column order and names follow the legacy sheet: 本年折旧 sits before 净值,
     // and the flag column is 已提足折旧 (not 是否已提足折旧).
-    let fa_headers = [
+    let fa_headers = vec![
         "资产类别",
         "固定资产编号",
         "固定资产名称",
@@ -3553,26 +4468,20 @@ fn write_business_sheets(
         "已提足折旧",
         "提足折旧时间",
     ];
-    let mut fa_rows = Vec::new();
-    // Legacy builds FA List from the already merged schedule.  This preserves
-    // its grouped/key order while excluding cards that exist only at opening.
-    let display_rows = result
-        .rows
-        .iter()
-        .filter(|row| row.end.is_some() && row_summary_noise_marker(row).is_none())
-        .filter(|row| !primary_key_segment(&row.match_value).trim().is_empty())
-        .cloned()
-        .collect::<Vec<_>>();
     let end_life_scale = life_scale(result, params, 2);
-    for row in &display_rows {
+    let mut short_rows = export_rows::PreparedRows::default();
+    let fa_rows = result.rows.iter()
+        .filter(|row|row.end.is_some() && row_summary_noise_marker(&row).is_none())
+        .filter(|row|!primary_key_segment(&row.match_value).trim().is_empty())
+        .map(|row| {
         check_cancel(cancel)?;
-        let original = mapped_number(result, row, params, 2, "originalValue");
+        let original = mapped_number(result, &row, params, 2, "originalValue");
         // Many ERP exports carry accumulated depreciation as a negative number.
         // Legacy took the absolute value before computing net book value;
         // subtracting the raw figure turns 100 - (-30) into 130.
-        let depreciation = mapped_number(result, row, params, 2, "depreciation").abs();
-        let life = mapped_life(result, row, params, 2, end_life_scale);
-        let residual = mapped_residual_rate(result, row, params, 2, original);
+        let depreciation = mapped_number(result, &row, params, 2, "depreciation").abs();
+        let life = mapped_life(result, &row, params, 2, end_life_scale);
+        let residual = mapped_residual_rate(result, &row, params, 2, original);
         let fully = if original.abs() > f64::EPSILON
             && original - depreciation <= original * residual + 0.1
         {
@@ -3580,42 +4489,41 @@ fn write_business_sheets(
         } else {
             "否"
         };
-        fa_rows.push(vec![
-            mapped_text(result, row, params, 2, "category"),
+        let values = vec![
+            mapped_text(result, &row, params, 2, "category"),
             primary_key_segment(&row.match_value),
-            mapped_text(result, row, params, 2, "name"),
-            display_date(&mapped_text(result, row, params, 2, "startDate")),
+            mapped_text(result, &row, params, 2, "name"),
+            display_date(&mapped_text(result, &row, params, 2, "startDate")),
             display_number(life),
             display_number(residual),
             display_number(original),
             display_number(depreciation),
-            display_number(mapped_number(result, row, params, 2, "currentYearDep")),
+            display_number(mapped_number(result, &row, params, 2, "currentYearDep")),
             display_number(original - depreciation),
             fully.into(),
-            depreciation_end_date(&mapped_text(result, row, params, 2, "startDate"), life),
-        ]);
-    }
-    write_string_sheet(
+            depreciation_end_date(&mapped_text(result, &row, params, 2, "startDate"), life),
+        ];
+        // Reuse the exact rendered FA row instead of re-reading and computing
+        // every asset a second time just to select the short-life subset.
+        if parse_life_cell(&values[4]).is_some_and(|life| life > 0.0 && life <= 12.0) {
+            short_rows.push(values.clone())?;
+        }
+        Ok(values)
+    });
+    write_string_sheet_stream(
         wb,
         "FA List",
         &fa_headers,
-        &fa_rows,
+        || fa_rows,
         header,
         params.get("balanceSheetDate").and_then(Value::as_str),
         Some(cancel),
+        None,
     )?;
     // A blank life is "unknown", not "short": legacy required a parsed value
     // before comparing, so cards with no life stayed out of this sheet instead
     // of dragging the whole ledger into it.
-    let short_rows = fa_rows
-        .iter()
-        .filter(|row| {
-            parse_life_cell(row.get(4).map(String::as_str).unwrap_or(""))
-                .is_some_and(|life| life > 0.0 && life <= 12.0)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if short_rows.is_empty() {
+    if short_rows.count == 0 {
         // An empty grid reads as "not computed"; the legacy sheet said so
         // explicitly in a single 提示 column.
         write_string_sheet(
@@ -3630,14 +4538,16 @@ fn write_business_sheets(
             Some(cancel),
         )?;
     } else {
-        write_string_sheet(
+        let short_rows = short_rows.into_rows()?;
+        write_string_sheet_stream(
             wb,
             "≤12月卡片明细",
             &fa_headers,
-            &short_rows,
+            || short_rows,
             header,
             None,
             Some(cancel),
+            None,
         )?;
     }
 
@@ -3677,10 +4587,10 @@ fn write_business_sheets(
     // file2 cards carry 计划使用年 far more often than a month count, so the
     // addition sheet has to run the same year->month conversion FA List does;
     // without it the depreciation formulas divide by 5 instead of 60.
-    let addition_rows = result
+    let addition_rows = || result
         .rows
         .iter()
-        .filter(|row| row_summary_noise_marker(row).is_none())
+        .filter(|row| row_summary_noise_marker(&row).is_none())
         .filter(|row| !primary_key_segment(&row.match_value).trim().is_empty())
         // 变动汇总表 books an addition whenever 期末原值 > 期初原值, so the
         // detail sheet has to use the same net-increase test.  Restricting it
@@ -3694,29 +4604,29 @@ fn write_business_sheets(
         // auxiliary column, and using it here turned the sheet into a copy of
         // the full FA List instead of the period's additions.
         .filter(|row| {
-            mapped_number(result, row, params, 2, "originalValue")
-                - mapped_number(result, row, params, 1, "originalValue")
+            mapped_number(result, &row, params, 2, "originalValue")
+                - mapped_number(result, &row, params, 1, "originalValue")
                 > 0.005
         })
         .map(|row| {
             vec![
-                mapped_text(result, row, params, 2, "category"),
+                mapped_text(result, &row, params, 2, "category"),
                 primary_key_segment(&row.match_value),
-                mapped_text(result, row, params, 2, "name"),
-                display_date(&mapped_text(result, row, params, 2, "startDate")),
-                display_number(mapped_life(result, row, params, 2, end_life_scale)),
+                mapped_text(result, &row, params, 2, "name"),
+                display_date(&mapped_text(result, &row, params, 2, "startDate")),
+                display_number(mapped_life(result, &row, params, 2, end_life_scale)),
                 display_number(mapped_residual_rate(
                     result,
-                    row,
+                    &row,
                     params,
                     2,
-                    mapped_number(result, row, params, 2, "originalValue"),
+                    mapped_number(result, &row, params, 2, "originalValue"),
                 )),
                 // Mirrors 减少类型 on the disposal sheet: the question is whether
                 // the increase is a brand-new card or an uplift on an existing
                 // one, not whether the date falls inside the period.  Dating the
                 // label off 新增时间 (usually blank) stamped every row 本期新增.
-                if mapped_number(result, row, params, 1, "originalValue").abs() > 0.005 {
+                if mapped_number(result, &row, params, 1, "originalValue").abs() > 0.005 {
                     "原值修改".into()
                 } else {
                     "非原值修改".into()
@@ -3725,12 +4635,12 @@ fn write_business_sheets(
                 // an existing card only adds the delta.  For 仅文件2 rows 期初 is
                 // zero, so this stays the full amount.
                 display_number(
-                    (mapped_number(result, row, params, 2, "originalValue")
-                        - mapped_number(result, row, params, 1, "originalValue"))
+                    (mapped_number(result, &row, params, 2, "originalValue")
+                        - mapped_number(result, &row, params, 1, "originalValue"))
                     .max(0.0),
                 ),
-                extra_text(row, "新增方式_辅助_文件2")
-                    .or_else(|| nonempty(mapped_text(result, row, params, 2, "additionMethod")))
+                extra_text(&row, "新增方式_辅助_文件2")
+                    .or_else(|| nonempty(mapped_text(result, &row, params, 2, "additionMethod")))
                     .unwrap_or_else(|| {
                         if addition_method_mapped {
                             String::new()
@@ -3738,8 +4648,8 @@ fn write_business_sheets(
                             "[新增方式?]".into()
                         }
                     }),
-                extra_text(row, "新增时间_辅助_文件2")
-                    .or_else(|| nonempty(mapped_text(result, row, params, 2, "additionDate")))
+                extra_text(&row, "新增时间_辅助_文件2")
+                    .or_else(|| nonempty(mapped_text(result, &row, params, 2, "additionDate")))
                     .map(|value| display_date(&value))
                     .unwrap_or_else(|| {
                         if addition_date_mapped {
@@ -3750,15 +4660,16 @@ fn write_business_sheets(
                     }),
             ]
         })
-        .collect::<Vec<_>>();
-    write_string_sheet(
+        .map(Ok);
+    write_string_sheet_stream(
         wb,
         "新增清单_BKD",
         &addition_headers,
-        &addition_rows,
+        addition_rows,
         header,
         None,
         Some(cancel),
+        None,
     )?;
     check_cancel(cancel)?;
 
@@ -3797,38 +4708,38 @@ fn write_business_sheets(
         "处置折旧",
     ];
     let begin_life_scale = life_scale(result, params, 1);
-    let disposal_rows = result
+    let disposal_rows = || result
         .rows
         .iter()
-        .filter(|row| row_summary_noise_marker(row).is_none())
+        .filter(|row| row_summary_noise_marker(&row).is_none())
         .filter(|row| !primary_key_segment(&row.match_value).trim().is_empty())
         .filter(|row| {
-            mapped_number(result, row, params, 1, "originalValue")
-                - mapped_number(result, row, params, 2, "originalValue")
+            mapped_number(result, &row, params, 1, "originalValue")
+                - mapped_number(result, &row, params, 2, "originalValue")
                 > 0.005
         })
         .enumerate()
         .map(|(row_index, row)| {
-            let opening_original = mapped_number(result, row, params, 1, "originalValue");
-            let ending_original = mapped_number(result, row, params, 2, "originalValue");
+            let opening_original = mapped_number(result, &row, params, 1, "originalValue");
+            let ending_original = mapped_number(result, &row, params, 2, "originalValue");
             let decrease = (opening_original - ending_original).abs();
-            let opening_dep = mapped_number(result, row, params, 1, "depreciation");
+            let opening_dep = mapped_number(result, &row, params, 1, "depreciation");
             let allocated_dep =
                 if opening_original.abs() > f64::EPSILON && ending_original.abs() > f64::EPSILON {
                     opening_dep.abs() * (decrease / opening_original.abs()).min(1.0)
                 } else {
                     opening_dep.abs()
                 };
-            let disposal_dep = extra_number(row, "处置折旧_辅助_文件1");
+            let disposal_dep = extra_number(&row, "处置折旧_辅助_文件1");
             vec![
-                mapped_text(result, row, params, 1, "category"),
+                mapped_text(result, &row, params, 1, "category"),
                 primary_key_segment(&row.match_value),
-                mapped_text(result, row, params, 1, "name"),
-                display_date(&mapped_text(result, row, params, 1, "startDate")),
-                display_number(mapped_life(result, row, params, 1, begin_life_scale)),
+                mapped_text(result, &row, params, 1, "name"),
+                display_date(&mapped_text(result, &row, params, 1, "startDate")),
+                display_number(mapped_life(result, &row, params, 1, begin_life_scale)),
                 display_number(mapped_residual_rate(
                     result,
-                    row,
+                    &row,
                     params,
                     1,
                     opening_original,
@@ -3842,8 +4753,8 @@ fn write_business_sheets(
                 } else {
                     "非原值修改".into()
                 },
-                extra_text(row, "处置方式_辅助_文件1")
-                    .or_else(|| nonempty(mapped_text(result, row, params, 1, "disposalMethod")))
+                extra_text(&row, "处置方式_辅助_文件1")
+                    .or_else(|| nonempty(mapped_text(result, &row, params, 1, "disposalMethod")))
                     .unwrap_or_else(|| {
                         if disposal_method_mapped {
                             String::new()
@@ -3851,8 +4762,8 @@ fn write_business_sheets(
                             "[处置方式?]".into()
                         }
                     }),
-                extra_text(row, "处置时间_辅助_文件1")
-                    .or_else(|| nonempty(mapped_text(result, row, params, 1, "disposalDate")))
+                extra_text(&row, "处置时间_辅助_文件1")
+                    .or_else(|| nonempty(mapped_text(result, &row, params, 1, "disposalDate")))
                     .map(|value| display_date(&value))
                     .unwrap_or_else(|| {
                         if disposal_date_mapped {
@@ -3861,7 +4772,7 @@ fn write_business_sheets(
                             "[处置时间?]".into()
                         }
                     }),
-                extra_number(row, "处置原值_辅助_文件1")
+                extra_number(&row, "处置原值_辅助_文件1")
                     .map(display_number)
                     .unwrap_or_else(|| {
                         if disposal_original_mapped {
@@ -3878,15 +4789,16 @@ fn write_business_sheets(
                     .unwrap_or_else(|| format!("=H{}", row_index + 3)),
             ]
         })
-        .collect::<Vec<_>>();
-    write_string_sheet(
+        .map(Ok);
+    write_string_sheet_stream(
         wb,
         "处置清单_BKD",
         &disposal_headers,
-        &disposal_rows,
+        disposal_rows,
         header,
         params.get("balanceSheetDate").and_then(Value::as_str),
         Some(cancel),
+        None,
     )?;
     check_cancel(cancel)?;
     Ok(())
@@ -3921,7 +4833,7 @@ pub(crate) fn write_depreciation_period_sheet(
     sheet_name: &str,
 ) -> Result<(), AppError> {
     let headers = depreciation_period_headers(params);
-    let rows = build_depreciation_period(result, params);
+    let rows = build_depreciation_period(result, params)?;
     write_string_sheet_labelled(
         wb,
         sheet_name,
@@ -3961,7 +4873,12 @@ fn write_anomaly_sheet(
     header: &Format,
     cancel: &AtomicBool,
 ) -> Result<(), AppError> {
-    write_string_sheet(
+    let mut rows = result.rows.iter().enumerate()
+        .flat_map(|(i,row)|row_anomalies(result,params,i,&row)).map(Ok).peekable();
+    if rows.peek().is_none() {
+        return write_string_sheet(wb,"异常清单",&["异常类型","原始行号","资产类别","资产编码","资产名称","期末原值","处理方式","行内容"],&[no_anomaly_row()],header,None,Some(cancel));
+    }
+    write_string_sheet_stream(
         wb,
         "异常清单",
         &[
@@ -3974,10 +4891,11 @@ fn write_anomaly_sheet(
             "处理方式",
             "行内容",
         ],
-        &build_anomalies(result, params),
+        || rows,
         header,
         None,
         Some(cancel),
+        None,
     )
 }
 
@@ -4030,71 +4948,29 @@ pub(crate) fn parse_life_cell(value: &str) -> Option<f64> {
 /// value profile.  A per-row "value <= 50 means years" rule looks equivalent but
 /// is not: it turns a genuine 12-month tooling column into 144 months, and it
 /// reacts differently to two cards in the same column.
-pub(crate) fn life_scale_for_column(header: &str, values: &[f64]) -> f64 {
-    let name = header
-        .replace("_文件1", "")
-        .replace("_文件2", "")
-        .to_lowercase();
-    if name.contains('月') || name.contains("month") {
-        return 1.0;
+#[derive(Default)]
+pub(crate) struct LifeScaleStats { any:bool,max:f64,whole:bool,typical_years:bool,typical_months:bool,ambiguous:bool }
+impl LifeScaleStats {
+    pub(crate) fn push(&mut self,value:f64) {
+        if !(value>0.0) { return; }
+        if !self.any {self.whole=true;self.typical_years=true;}
+        self.any=true;self.max=self.max.max(value);
+        self.whole &= (value-value.round()).abs()<1e-6;
+        let rounded=value.round() as i64;
+        self.typical_years &= [3,4,5,6,8,10,15,20,25].contains(&rounded);
+        self.typical_months |= [36,48,60,120,240].contains(&rounded);
+        self.ambiguous |= [12,18,24].contains(&rounded);
     }
-    const YEAR_MARKERS: [&str; 13] = [
-        "使用年限",
-        "折旧年限",
-        "预计年限",
-        "计划使用年",
-        "预计使用年",
-        "使用寿命年",
-        "寿命年",
-        "年限",
-        "寿命(年)",
-        "寿命（年）",
-        "(年)",
-        "（年）",
-        "year",
-    ];
-    if YEAR_MARKERS.iter().any(|marker| name.contains(marker)) {
-        return 12.0;
+    pub(crate) fn scale(&self,header:&str)->f64 {
+        let name=header.replace("_文件1","").replace("_文件2","").to_lowercase();
+        if name.contains('月') || name.contains("month") {return 1.0;}
+        if ["使用年限","折旧年限","预计年限","计划使用年","预计使用年","使用寿命年","寿命年","年限","寿命(年)","寿命（年）","(年)","（年）","year"].iter().any(|word|name.contains(word)) {return 12.0;}
+        if !self.any || self.max>70.0 || self.typical_months || self.max>=30.0 || !self.whole {return 1.0;}
+        if self.typical_years && !self.ambiguous {12.0} else {1.0}
     }
-    let positive = values
-        .iter()
-        .copied()
-        .filter(|value| *value > 0.0)
-        .collect::<Vec<_>>();
-    if positive.is_empty() {
-        return 1.0;
-    }
-    let max = positive.iter().copied().fold(f64::MIN, f64::max);
-    // Anything that looks like a month count on its face (a 60/120/240 term, or
-    // simply a value no year term reaches) is left alone.
-    const TYPICAL_MONTHS: [i64; 5] = [36, 48, 60, 120, 240];
-    if max > 70.0
-        || positive
-            .iter()
-            .any(|value| TYPICAL_MONTHS.contains(&(value.round() as i64)))
-    {
-        return 1.0;
-    }
-    // Otherwise convert only on strong evidence: every value a whole number, all
-    // of them common year terms, and none of them a value that reads equally
-    // well as months (12/18/24).  Legacy stayed put on anything weaker and only
-    // raised a warning.
-    if max >= 30.0 || !positive.iter().all(|v| (v - v.round()).abs() < 1e-6) {
-        return 1.0;
-    }
-    const TYPICAL_YEARS: [i64; 9] = [3, 4, 5, 6, 8, 10, 15, 20, 25];
-    const AMBIGUOUS_MONTHS: [i64; 3] = [12, 18, 24];
-    let rounded = positive
-        .iter()
-        .map(|v| v.round() as i64)
-        .collect::<BTreeSet<_>>();
-    if rounded.iter().all(|v| TYPICAL_YEARS.contains(v))
-        && !rounded.iter().any(|v| AMBIGUOUS_MONTHS.contains(v))
-    {
-        12.0
-    } else {
-        1.0
-    }
+}
+pub(crate) fn life_scale_for_column(header:&str,values:&[f64])->f64 {
+    let mut stats=LifeScaleStats::default();for value in values {stats.push(*value);}stats.scale(header)
 }
 
 /// The year->month factor for one side's mapped life column, decided once from
@@ -4103,6 +4979,7 @@ fn life_scale(result: &MergeResult, params: &Value, side: u8) -> f64 {
     let Some(header) = mapped_header(params, side, "life") else {
         return 1.0;
     };
+    if let Some(scale) = disk::life_scale(&result.rows, &header, side) { return scale; }
     let table = if side == 1 {
         &result.begin
     } else {
@@ -4121,18 +4998,19 @@ fn life_scale(result: &MergeResult, params: &Value, side: u8) -> f64 {
 
 /// One card's useful life in months, 0 when the cell is blank or unparseable.
 fn mapped_life(result: &MergeResult, row: &JoinedRow, params: &Value, side: u8, scale: f64) -> f64 {
-    match parse_life_cell(&mapped_text(result, row, params, side, "life")) {
+    match parse_life_cell(mapped_text_ref(result, row, params, side, "life")) {
         Some(value) if value > 0.0 => value * scale,
         _ => 0.0,
     }
 }
 
 pub(crate) fn parse_fa_date(value: &str) -> Option<NaiveDate> {
-    let text = value
+    let raw = value
         .trim()
         .split([' ', 'T'])
         .next()
-        .unwrap_or("")
+        .unwrap_or("");
+    let text = raw
         .replace(['年', '月'], "-")
         .replace('日', "")
         .replace('.', "-");
@@ -4141,7 +5019,7 @@ pub(crate) fn parse_fa_date(value: &str) -> Option<NaiveDate> {
             return Some(date);
         }
     }
-    if let Ok(serial) = text.parse::<f64>() {
+    if let Ok(serial) = raw.parse::<f64>() {
         return NaiveDate::from_ymd_opt(1899, 12, 30)?
             .checked_add_signed(chrono::Duration::days(serial as i64));
     }
@@ -4225,7 +5103,7 @@ fn mapped_residual_rate(
     side: u8,
     original: f64,
 ) -> f64 {
-    let raw = mapped_number(result, row, params, side, "residualRate");
+    let raw = mapped_number(result, &row, params, side, "residualRate");
     let header = mapped_header(params, side, "residualRate")
         .unwrap_or_default()
         .to_lowercase();
@@ -4244,12 +5122,26 @@ fn mapped_residual_rate(
 /// becomes `0.05`, `3` years becomes `36` months, a monetary 残值 column is
 /// divided by原值).  Legacy popped a dialog for each of these asking the user to
 /// verify the exported sheets; report them so the change is at least visible.
+#[cfg(test)]
 fn correction_warnings(result: &MergeResult, params: &Value) -> Vec<String> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    correction_warnings_with_progress(result, params, &|_, _, _, _| {}, &cancel, &PauseCheckpoint::unpaused(cancel.clone())).unwrap()
+}
+
+fn correction_warnings_with_progress(
+    result: &MergeResult,
+    params: &Value,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+    pause: &PauseCheckpoint,
+) -> Result<Vec<String>, AppError> {
     let mut warnings = Vec::new();
     // 残值率/寿命纠偏对期初、期末两侧都会发生（折旧期间表两侧都要用），警告
     // 逐侧统计并带上期初/期末前缀——只写「残值率纠偏」用户无从知道该核对
     // 哪份清单。
     for side in [1u8, 2u8] {
+        pause.wait()?;
+        check_cancel(cancel)?;
         let period = if side == 1 { "期初" } else { "期末" };
         let table = if side == 1 {
             &result.begin
@@ -4268,35 +5160,38 @@ fn correction_warnings(result: &MergeResult, params: &Value) -> Vec<String> {
             || normalized_residual.contains("residualvalue")
             || normalized_residual.contains("salvagevalue");
         let life_header = mapped_header(params, side, "life").unwrap_or_default();
+        let field_index = |role: &str| mapped_header(params, side, role)
+            .and_then(|header| table.headers.iter().position(|value| value == &header));
+        let original_index = field_index("originalValue");
+        let residual_index = field_index("residualRate");
+        let life_index = field_index("life");
         // Warn on the same column-level decision the export actually applies, so
         // the message cannot claim a conversion that never happened (or stay silent
         // about one that did).
         let life_in_years = life_scale(result, params, side) > 1.0;
-        for values in &table.rows {
-            if values_are_summary_noise(values) {
+        let start = 50 + (side as usize - 1) * 5;
+        let total = table.row_count.max(table.rows.len());
+        progress("check", start, 100, &format!("正在检查{period}寿命和残值口径，准备读取原始清单…"));
+        let source: Box<dyn Iterator<Item=Result<std::borrow::Cow<'_, [String]>, AppError>> + '_> = match result.rows.path() {
+            Some(path) => Box::new(disk::SourceIter::source_with_cancel(path, side, cancel).map(|row| row.map(std::borrow::Cow::Owned))),
+            None => Box::new(table.rows.iter().map(|row| Ok(std::borrow::Cow::Borrowed(row.as_slice())))),
+        };
+        let mut seen = 0usize;
+        for values in source {
+            let values = values.map_err(|error| { result.rows.record_error(error.user_message.clone()); error })?;
+            if seen % 256 == 0 { pause.wait()?; check_cancel(cancel)?; }
+            seen += 1;
+            if seen == 1 || seen % 4096 == 0 {
+                progress("check", start + (seen.saturating_mul(4) / total.max(1)).min(4), 100,
+                    &format!("正在检查{period}寿命和残值口径：{seen} / {total} 行"));
+            }
+            if values_are_summary_noise(&values) {
                 continue;
             }
-            let row = JoinedRow {
-                begin: if side == 1 {
-                    Some(values.clone())
-                } else {
-                    None
-                },
-                end: if side == 2 {
-                    Some(values.clone())
-                } else {
-                    None
-                },
-                source: if side == 1 {
-                    "仅文件1"
-                } else {
-                    "仅文件2"
-                },
-                match_value: String::new(),
-                extra: BTreeMap::new(),
-            };
-            let original = mapped_number(result, &row, params, side, "originalValue");
-            let raw_residual = mapped_number(result, &row, params, side, "residualRate");
+            // 按原始源行口径统计，绑定列号后借用单元格；无需复制整行构造 JoinedRow。
+            let raw = |index: Option<usize>| index.and_then(|index|values.get(index)).map(String::as_str).unwrap_or("");
+            let original = number(raw(original_index));
+            let raw_residual = number(raw(residual_index));
             if residual_is_amount
                 && original.abs() > f64::EPSILON
                 && raw_residual.abs() > f64::EPSILON
@@ -4306,7 +5201,7 @@ fn correction_warnings(result: &MergeResult, params: &Value) -> Vec<String> {
                 residual_scaled += 1;
             }
             if life_in_years
-                && parse_life_cell(&mapped_text(result, &row, params, side, "life"))
+                && parse_life_cell(raw(life_index))
                     .is_some_and(|life| life > 0.0)
             {
                 life_converted += 1;
@@ -4332,8 +5227,9 @@ fn correction_warnings(result: &MergeResult, params: &Value) -> Vec<String> {
                 "【{period}·使用寿命纠偏】{life_converted} 张卡片的“{life_header}”按年换算为月（乘以 12），请确认导出的使用寿命是否正确。"
             ));
         }
+        progress("check", start + 4, 100, &format!("{period}寿命和残值口径检查完成：{seen} 行"));
     }
-    warnings
+    Ok(warnings)
 }
 
 #[derive(Default)]
@@ -4344,7 +5240,8 @@ struct DepGroup {
     end_residual_amount: f64,
 }
 
-pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) -> Vec<Vec<String>> {
+pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) -> Result<Vec<Vec<String>>, AppError> {
+    let mut budget = FaAggregateBudget::new(result,"折旧政策对比");
     let begin_life_scale = life_scale(result, params, 1);
     let end_life_scale = life_scale(result, params, 2);
     #[derive(Clone)]
@@ -4358,6 +5255,23 @@ pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) ->
         begin_residual: f64,
         end_residual: f64,
         begin_category_inferred: bool,
+    }
+    impl Input {
+        // Preserve the exact f64 bit patterns across bounded temporary replay.
+        fn stored(self) -> Vec<String> {
+            vec![self.begin_category, self.end_category, self.begin_life.to_string(), self.end_life.to_string(),
+                self.begin_original.to_bits().to_string(), self.end_original.to_bits().to_string(),
+                self.begin_residual.to_bits().to_string(), self.end_residual.to_bits().to_string()]
+        }
+        fn restored(row: Result<Vec<String>, AppError>) -> Result<Self, AppError> {
+            let row = row?;
+            let invalid = || error("FA_POLICY_REPLAY_INVALID", "折旧政策临时数据损坏，请重试。", None);
+            if row.len() != 8 { return Err(invalid()); }
+            let bits = |index: usize| row[index].parse::<u64>().map(f64::from_bits).map_err(|_|invalid());
+            Ok(Self {begin_category:row[0].clone(),end_category:row[1].clone(),
+                begin_life:row[2].parse().map_err(|_|invalid())?,end_life:row[3].parse().map_err(|_|invalid())?,
+                begin_original:bits(4)?,end_original:bits(5)?,begin_residual:bits(6)?,end_residual:bits(7)?,begin_category_inferred:false})
+        }
     }
     let normalize_category = |value: String| {
         let value = value.trim().to_owned();
@@ -4381,42 +5295,46 @@ pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) ->
             value
         }
     };
-    let mut inputs = result
+    let inputs = || result
         .rows
         .iter()
         .map(|row| {
-            let begin_original = mapped_number(result, row, params, 1, "originalValue");
-            let end_original = mapped_number(result, row, params, 2, "originalValue");
+            let begin_original = mapped_number(result, &row, params, 1, "originalValue");
+            let end_original = mapped_number(result, &row, params, 2, "originalValue");
             Input {
-                begin_category: normalize_category(mapped_text(result, row, params, 1, "category")),
-                end_category: normalize_category(mapped_text(result, row, params, 2, "category")),
-                begin_life: mapped_life(result, row, params, 1, begin_life_scale).round() as i64,
-                end_life: mapped_life(result, row, params, 2, end_life_scale).round() as i64,
+                begin_category: normalize_category(mapped_text(result, &row, params, 1, "category")),
+                end_category: normalize_category(mapped_text(result, &row, params, 2, "category")),
+                begin_life: mapped_life(result, &row, params, 1, begin_life_scale).round() as i64,
+                end_life: mapped_life(result, &row, params, 2, end_life_scale).round() as i64,
                 begin_original,
                 end_original,
-                begin_residual: mapped_residual_rate(result, row, params, 1, begin_original),
-                end_residual: mapped_residual_rate(result, row, params, 2, end_original),
+                begin_residual: mapped_residual_rate(result, &row, params, 1, begin_original),
+                end_residual: mapped_residual_rate(result, &row, params, 2, end_original),
                 begin_category_inferred: false,
             }
-        })
-        .collect::<Vec<_>>();
+        });
 
     // Match the legacy A/B/C/D fallback rules before grouping.  Closing-only
     // cards join an existing opening category/life group when that combination
     // already exists; genuinely new categories remain visible as 未分类 -> 类别.
-    let start_categories = inputs
-        .iter()
-        .filter(|i| !i.begin_category.is_empty() && i.begin_original.abs() > 0.005)
-        .map(|i| i.begin_category.clone())
-        .collect::<BTreeSet<_>>();
-    let start_category_lives = inputs
-        .iter()
-        .filter(|i| {
-            !i.begin_category.is_empty() && i.begin_life != 0 && i.begin_original.abs() > 0.005
-        })
-        .map(|i| (i.begin_category.clone(), i.begin_life))
-        .collect::<BTreeSet<_>>();
-    for input in &mut inputs {
+    let mut start_categories = BTreeSet::new();
+    let mut start_category_lives = BTreeSet::new();
+    let mut prepared_inputs = export_rows::PreparedRows::default();
+    for input in inputs() {
+        if !input.begin_category.is_empty() && input.begin_original.abs() > 0.005 {
+        if !start_categories.contains(&input.begin_category) {
+            if !budget.reserve((256 + input.begin_category.len() * 2) as u64) { result.rows.check()?; return Ok(Vec::new()); }
+            start_categories.insert(input.begin_category.clone());
+        }
+        if input.begin_life != 0 && !start_category_lives.contains(&(input.begin_category.clone(),input.begin_life)) {
+            if !budget.reserve((256 + input.begin_category.len() * 2) as u64) { result.rows.check()?; return Ok(Vec::new()); }
+            start_category_lives.insert((input.begin_category.clone(),input.begin_life));
+        }
+        }
+        prepared_inputs.push(input.stored())?;
+    }
+    result.rows.check()?;
+    let with_opening = |mut input: Input| {
         if input.begin_category.is_empty()
             && !input.end_category.is_empty()
             && start_categories.contains(&input.end_category)
@@ -4432,16 +5350,20 @@ pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) ->
         {
             input.begin_life = input.end_life;
         }
-    }
+        input
+    };
     let mut closing_by_opening = BTreeMap::<(String, i64), (String, i64)>::new();
-    for input in &inputs {
+    for input in prepared_inputs.replay()?.map(Input::restored) {
+        let input = with_opening(input?);
         if !input.begin_category.is_empty() && !input.end_category.is_empty() {
+            if !closing_by_opening.contains_key(&(input.begin_category.clone(), input.begin_life))
+                && !budget.reserve((512 + (input.begin_category.len() + input.end_category.len()) * 2) as u64) { result.rows.check()?; return Ok(Vec::new()); }
             closing_by_opening
                 .entry((input.begin_category.clone(), input.begin_life))
                 .or_insert_with(|| (input.end_category.clone(), input.end_life));
         }
     }
-    for input in &mut inputs {
+    let with_closing = |mut input: Input| {
         if input.end_category.is_empty() && !input.begin_category.is_empty() {
             if let Some((category, life)) =
                 closing_by_opening.get(&(input.begin_category.clone(), input.begin_life))
@@ -4456,16 +5378,19 @@ pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) ->
         if input.end_life == 0 && input.begin_life != 0 && input.end_original.abs() > 0.005 {
             input.end_life = input.begin_life;
         }
-    }
+        input
+    };
 
     let mut groups: BTreeMap<(String, String, i64, i64), DepGroup> = BTreeMap::new();
-    for input in inputs {
+    for input in prepared_inputs.replay()?.map(Input::restored) {
+        let input = with_closing(with_opening(input?));
         let key = (
             input.begin_category,
             input.end_category,
             input.begin_life,
             input.end_life,
         );
+        if !groups.contains_key(&key) && !budget.reserve((2048 + (key.0.len() + key.1.len()) * 8) as u64) { result.rows.check()?; return Ok(Vec::new()); }
         let group = groups.entry(key).or_default();
         group.begin_original += input.begin_original;
         group.end_original += input.end_original;
@@ -4538,7 +5463,7 @@ pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) ->
             }
         }
     }
-    prepared
+    Ok(prepared
         .drain(..)
         .map(
             |(begin_category, end_category, begin_life, end_life, begin_rate, end_rate, g)| {
@@ -4620,7 +5545,7 @@ pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) ->
                 ]
             },
         )
-        .collect()
+        .collect())
 }
 
 fn generic_field_value(
@@ -4632,9 +5557,9 @@ fn generic_field_value(
     match field {
         "category" | "资产类别" => {
             if row.end.is_some() {
-                mapped_text(result, row, params, 2, "category")
+                mapped_text(result, &row, params, 2, "category")
             } else {
-                mapped_text(result, row, params, 1, "category")
+                mapped_text(result, &row, params, 1, "category")
             }
         }
         // Crossing the two sides is what makes a reclassification visible:
@@ -4643,24 +5568,24 @@ fn generic_field_value(
         // axes — labelling the missing side 未分类 split every category into
         // two rows and doubled the sheet without adding information.
         "beginCategory" | "期初资产类别" => {
-            let begin = mapped_text(result, row, params, 1, "category");
-            nonempty(begin).unwrap_or_else(|| mapped_text(result, row, params, 2, "category"))
+            let begin = mapped_text(result, &row, params, 1, "category");
+            nonempty(begin).unwrap_or_else(|| mapped_text(result, &row, params, 2, "category"))
         }
         "endCategory" | "期末资产类别" => {
-            let end = mapped_text(result, row, params, 2, "category");
-            nonempty(end).unwrap_or_else(|| mapped_text(result, row, params, 1, "category"))
+            let end = mapped_text(result, &row, params, 2, "category");
+            nonempty(end).unwrap_or_else(|| mapped_text(result, &row, params, 1, "category"))
         }
         "name" | "资产名称" => {
             if row.end.is_some() {
-                mapped_text(result, row, params, 2, "name")
+                mapped_text(result, &row, params, 2, "name")
             } else {
-                mapped_text(result, row, params, 1, "name")
+                mapped_text(result, &row, params, 1, "name")
             }
         }
         "source" | "数据来源" => row.source.into(),
         "match" | "匹配列" => row.match_value.clone(),
         _ => {
-            let value = row_json(result, row, true);
+            let value = row_json(result, &row, true);
             json_cell(value.get(field))
         }
     }
@@ -4673,15 +5598,15 @@ fn generic_numeric_value(
     field: &str,
 ) -> f64 {
     match field {
-        "beginOriginal" | "期初原值" => mapped_number(result, row, params, 1, "originalValue"),
-        "endOriginal" | "期末原值" => mapped_number(result, row, params, 2, "originalValue"),
+        "beginOriginal" | "期初原值" => mapped_number(result, &row, params, 1, "originalValue"),
+        "endOriginal" | "期末原值" => mapped_number(result, &row, params, 2, "originalValue"),
         "beginDepreciation" | "期初累计折旧" => {
-            mapped_number(result, row, params, 1, "depreciation")
+            mapped_number(result, &row, params, 1, "depreciation")
         }
         "endDepreciation" | "期末累计折旧" => {
-            mapped_number(result, row, params, 2, "depreciation")
+            mapped_number(result, &row, params, 2, "depreciation")
         }
-        _ => number(&generic_field_value(result, row, params, field)),
+        _ => number(&generic_field_value(result, &row, params, field)),
     }
 }
 
@@ -4713,6 +5638,7 @@ fn pivot_value_header(field: &str, params: &Value) -> String {
 }
 
 fn build_pivot(result: &MergeResult, params: &Value) -> (Vec<String>, Vec<Vec<String>>) {
+    let mut budget = FaAggregateBudget::new(result,"数据透视表");
     let config = params.get("pivotConfig").unwrap_or(&Value::Null);
     let mut row_fields = string_array(config.get("rows"))
         .into_iter()
@@ -4758,12 +5684,12 @@ fn build_pivot(result: &MergeResult, params: &Value) -> (Vec<String>, Vec<Vec<St
     for row in result
         .rows
         .iter()
-        .filter(|row| row_summary_noise_marker(row).is_none())
+        .filter(|row| row_summary_noise_marker(&row).is_none())
     {
         let rk = row_fields
             .iter()
             .map(|f| {
-                let value = generic_field_value(result, row, params, f);
+                let value = generic_field_value(result, &row, params, f);
                 if value.trim().is_empty() {
                     "未分类".into()
                 } else {
@@ -4773,8 +5699,10 @@ fn build_pivot(result: &MergeResult, params: &Value) -> (Vec<String>, Vec<Vec<St
             .collect::<Vec<_>>();
         let ck = column_fields
             .iter()
-            .map(|f| generic_field_value(result, row, params, f))
+            .map(|f| generic_field_value(result, &row, params, f))
             .collect::<Vec<_>>();
+        if !row_keys.contains(&rk) && !budget.reserve((256 + rk.iter().map(|s:&String| s.len()+48).sum::<usize>() * 3) as u64) { return (Vec::new(),Vec::new()); }
+        if !column_keys.contains(&ck) && !budget.reserve((256 + ck.iter().map(|s:&String| s.len()+48).sum::<usize>() * 3) as u64) { return (Vec::new(),Vec::new()); }
         row_keys.insert(rk.clone());
         column_keys.insert(ck.clone());
         for (spec_index, spec) in value_specs.iter().enumerate() {
@@ -4782,9 +5710,11 @@ fn build_pivot(result: &MergeResult, params: &Value) -> (Vec<String>, Vec<Vec<St
                 .get("field")
                 .and_then(Value::as_str)
                 .unwrap_or("期末原值");
-            let value = generic_numeric_value(result, row, params, field);
+            let value = generic_numeric_value(result, &row, params, field);
+            let key = (rk.clone(), ck.clone(), spec_index);
+            if !groups.contains_key(&key) && !budget.reserve((256 + rk.iter().chain(&ck).map(|s| s.len()+48).sum::<usize>() * 2) as u64) { return (Vec::new(),Vec::new()); }
             let entry = groups
-                .entry((rk.clone(), ck.clone(), spec_index))
+                .entry(key)
                 .or_default();
             entry.count += 1;
             entry.sum += value;
@@ -4798,6 +5728,8 @@ fn build_pivot(result: &MergeResult, params: &Value) -> (Vec<String>, Vec<Vec<St
             }
         }
     }
+    let output_columns = (column_keys.len() as u64).max(1).saturating_mul(value_specs.len() as u64).saturating_add(row_fields.len() as u64);
+    if !budget.reserve((row_keys.len() as u64 + 4).saturating_mul(output_columns).saturating_mul(128)) { return (Vec::new(),Vec::new()); }
     let mut headers = row_fields
         .iter()
         .map(|f| pivot_value_header(f, params))
@@ -4932,28 +5864,27 @@ fn build_pivot(result: &MergeResult, params: &Value) -> (Vec<String>, Vec<Vec<St
     (headers, rows)
 }
 
-fn build_anomalies(result: &MergeResult, params: &Value) -> Vec<Vec<String>> {
+fn row_anomalies(result: &MergeResult, params: &Value, row_index:usize,row:&JoinedRow) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
-    for (row_index, row) in result.rows.iter().enumerate() {
         for side in [1, 2] {
             if (side == 1 && row.begin.is_none()) || (side == 2 && row.end.is_none()) {
                 continue;
             }
             let life =
-                parse_life_cell(&mapped_text(result, row, params, side, "life")).unwrap_or(0.0);
-            let residual = mapped_number(result, row, params, side, "residualRate");
-            let original = mapped_number(result, row, params, side, "originalValue");
-            let depreciation = mapped_number(result, row, params, side, "depreciation");
-            let category = mapped_text(result, row, params, side, "category");
-            let name = mapped_text(result, row, params, side, "name");
-            let raw = if side == 1 {
-                row.begin.as_ref()
-            } else {
-                row.end.as_ref()
-            }
-            .map(|values| values.join(" | "))
-            .unwrap_or_default();
+                parse_life_cell(&mapped_text(result, &row, params, side, "life")).unwrap_or(0.0);
+            let residual = mapped_number(result, &row, params, side, "residualRate");
+            let original = mapped_number(result, &row, params, side, "originalValue");
+            let depreciation = mapped_number(result, &row, params, side, "depreciation");
+            let category = mapped_text(result, &row, params, side, "category");
+            let name = mapped_text(result, &row, params, side, "name");
+            let mut raw = None;
             let mut push = |kind: &str, action: &str| {
+                // Normal cards need no full-width raw-line copy. Cache only
+                // when this side actually contributes an anomaly row.
+                let raw = raw.get_or_insert_with(|| {
+                    if side == 1 { row.begin.as_ref() } else { row.end.as_ref() }
+                        .map(|values| values.join(" | ")).unwrap_or_default()
+                });
                 rows.push(vec![
                     kind.into(),
                     (row_index + 2).to_string(),
@@ -4992,9 +5923,19 @@ fn build_anomalies(result: &MergeResult, params: &Value) -> Vec<Vec<String>> {
                 );
             }
         }
-    }
-    if rows.is_empty() {
-        rows.push(vec![
+    rows
+}
+
+#[cfg(test)]
+fn build_anomalies(result: &MergeResult, params: &Value) -> Vec<Vec<String>> {
+    let mut rows = result.rows.iter().enumerate()
+        .flat_map(|(i, row)| row_anomalies(result, params, i, &row)).collect::<Vec<_>>();
+    if rows.is_empty() { rows.push(no_anomaly_row()); }
+    rows
+}
+
+fn no_anomaly_row() -> Vec<String> {
+    vec![
             "未发现异常".into(),
             String::new(),
             String::new(),
@@ -5003,9 +5944,7 @@ fn build_anomalies(result: &MergeResult, params: &Value) -> Vec<Vec<String>> {
             String::new(),
             "未发现需要列入异常清单的记录。".into(),
             String::new(),
-        ]);
-    }
-    rows
+    ]
 }
 
 fn write_string_sheet(
@@ -5115,10 +6054,24 @@ pub(crate) fn write_string_sheet_labelled(
                 // shows the formula instead of the figure and, worse, leaves the
                 // reader unable to see that the total really is the column.
                 _ if value.starts_with('=') && value.len() > 1 => {
+                    let mut formula = Formula::new(value);
+                    // 这两列的确定性结果已知；保留公式也保存正确数值，预览或手动计算模式不会显示假零。
+                    if name == "处置清单_BKD" {
+                        let excel_row = r + 3;
+                        let opening_dep = row.get(7).map(|value| number(value)).unwrap_or(0.0);
+                        if c == 14 && value == &format!("=H{excel_row}") {
+                            formula = formula.set_result(opening_dep.to_string());
+                        } else if c == 8 && value == &format!("=O{excel_row}-H{excel_row}") {
+                            let disposal_dep = row.get(14).map(|value| {
+                                if value == &format!("=H{excel_row}") { opening_dep } else { number(value) }
+                            }).unwrap_or(0.0);
+                            formula = formula.set_result((disposal_dep - opening_dep).to_string());
+                        }
+                    }
                     ws.write_formula_with_format(
                         (r + 2) as u32,
                         c as u16,
-                        value.as_str(),
+                        formula,
                         &number_format,
                     )
                     .map_err(xlsx_error)?;
@@ -5182,6 +6135,187 @@ pub(crate) fn write_string_sheet_labelled(
     ws.set_row_height(note_row, 72).map_err(xlsx_error)?;
     Ok(())
 }
+
+pub(crate) fn write_string_sheet_stream<I, F>(
+    wb: &mut Workbook,
+    name: &str,
+    headers: &[&str],
+    read: F,
+    header: &Format,
+    balance_sheet_date: Option<&str>,
+    cancel: Option<&AtomicBool>,
+    end_label: Option<&str>,
+) -> Result<(), AppError>
+where I: Iterator<Item=Result<Vec<String>,AppError>>, F: FnOnce()->I {
+    let formulas = name=="FA List" || name=="折旧测算" || (name=="处置清单_BKD" && headers.contains(&"处置时间") && headers.contains(&"处置原值") && headers.contains(&"处置折旧"));
+    if let Some(cancel) = cancel { check_cancel(cancel)?; }
+    let mut source = read();
+    let mut sample = Vec::new();
+    for row in source.by_ref().take(10) { sample.push(row?); }
+    let mut row_count = 0usize;
+    let source = sample.clone().into_iter().map(Ok).chain(source);
+    // Formula policy and its notice require the exact final count before row 3
+    // is flushed. Replay compact computed rows instead of recomputing them from
+    // the full-width source. Non-formula sheets stream directly after sampling.
+    let rows: Box<dyn Iterator<Item=Result<Vec<String>, AppError>> + '_> = if formulas {
+        let mut prepared = export_rows::PreparedRows::default();
+        for row in source {
+            prepared.push(row?)?;
+            if prepared.count % 256 == 0 {
+                if let Some(cancel) = cancel { check_cancel(cancel)?; }
+            }
+        }
+        row_count = prepared.count;
+        prepared.into_rows()?
+    } else {
+        Box::new(source)
+    };
+    let formula_limit = if row_count <= DEPRECIATION_FORMULA_ROW_LIMIT {
+        row_count
+    } else {
+        row_count.min(DEPRECIATION_FORMULA_SAMPLE_ROWS)
+    };
+    let date=balance_sheet_date.unwrap_or("2099-12-31");
+    // Legacy rendered every amount as #,##0 and sized columns off that same
+    // rendering.  Keeping two decimals here while measuring widths as integers
+    // is what produced ### in the money columns.
+    let number_format = Format::new().set_num_format(MONEY_NUMBER_FORMAT);
+    let integer_format = Format::new().set_num_format(MONEY_NUMBER_FORMAT);
+    let percent_format = Format::new().set_num_format("0.00%");
+    let source_format = Format::new()
+        .set_italic()
+        .set_font_color("#374151")
+        .set_background_color("#F7F8FA")
+        .set_border(FormatBorder::Thin)
+        .set_align(FormatAlign::Left);
+    let note_format = Format::new()
+        .set_background_color("#F6F6F6")
+        .set_border(FormatBorder::Thin)
+        .set_text_wrap();
+    let ws = wb.add_worksheet_with_constant_memory();
+    ws.set_name(name).map_err(xlsx_error)?;
+    for (c,h) in headers.iter().enumerate() {
+        ws.write_string_with_format(0,c as u16,*h,header).map_err(xlsx_error)?;
+    }
+    if formulas { append_depreciation_formulas_chunk(ws,name,headers,row_count,date,header,&source_format,Some(0),0..0,false)?; }
+    for (c,h) in headers.iter().enumerate() {
+        ws.write_string_with_format(1,c as u16,field_source_for_header(name,h,c,end_label),&source_format).map_err(xlsx_error)?;
+    }
+    if formulas { append_depreciation_formulas_chunk(ws,name,headers,row_count,date,header,&source_format,Some(1),0..0,false)?; }
+    ws.set_row_height(1,22).map_err(xlsx_error)?;
+    let numeric_column = (0..headers.len())
+        .map(|c| column_reads_numeric(sample.iter().filter_map(|r| r.get(c)).map(String::as_str)))
+        .collect::<Vec<_>>();
+    let mut widest = vec![0usize; headers.len()];
+    for (r, row) in rows.enumerate() {
+        let row=row?;
+        if !formulas { row_count = r + 1; }
+        if r % 256 == 0 {
+            if let Some(cancel) = cancel {
+                check_cancel(cancel)?;
+            }
+        }
+        for (c, value) in row.iter().enumerate() {
+            let header = headers.get(c).copied().unwrap_or("");
+            if c < widest.len() && (r < 10 || numeric_column[c]) {
+                widest[c] = widest[c].max(legacy_display_len(value, header));
+            }
+            // A date column must stay textual even when the source handed us a
+            // bare Excel serial: writing it as a number stamps the money format
+            // on it and the sheet shows "45,104.00" instead of a date.
+            let is_date = header.contains("日期") || header.contains("时间");
+            match value.parse::<f64>() {
+                Ok(number) if !is_date && !is_identifier_header(header) => {
+                    let format = if header.contains("残值率")
+                        || header.contains("比例")
+                        || header.contains("百分比")
+                    {
+                        &percent_format
+                    } else if header.contains("月份")
+                        || header.contains("寿命")
+                        || header.contains("数量")
+                    {
+                        &integer_format
+                    } else {
+                        &number_format
+                    };
+                    ws.write_number_with_format((r + 2) as u32, c as u16, number, format)
+                        .map_err(xlsx_error)?;
+                }
+                // A total row hands us "=SUM(C3:C10)".  Writing that as text
+                // shows the formula instead of the figure and, worse, leaves the
+                // reader unable to see that the total really is the column.
+                _ if value.starts_with('=') && value.len() > 1 => {
+                    let mut formula = Formula::new(value);
+                    // 这两列的确定性结果已知；保留公式也保存正确数值，预览或手动计算模式不会显示假零。
+                    if name == "处置清单_BKD" {
+                        let excel_row = r + 3;
+                        let opening_dep = row.get(7).map(|value| number(value)).unwrap_or(0.0);
+                        if c == 14 && value == &format!("=H{excel_row}") {
+                            formula = formula.set_result(opening_dep.to_string());
+                        } else if c == 8 && value == &format!("=O{excel_row}-H{excel_row}") {
+                            let disposal_dep = row.get(14).map(|value| {
+                                if value == &format!("=H{excel_row}") { opening_dep } else { number(value) }
+                            }).unwrap_or(0.0);
+                            formula = formula.set_result((disposal_dep - opening_dep).to_string());
+                        }
+                    }
+                    ws.write_formula_with_format(
+                        (r + 2) as u32,
+                        c as u16,
+                        formula,
+                        &number_format,
+                    )
+                    .map_err(xlsx_error)?;
+                }
+                _ => {
+                    ws.write_string((r + 2) as u32, c as u16, value)
+                        .map_err(xlsx_error)?;
+                }
+            }
+        }
+        if formulas && r <= formula_limit {
+            append_depreciation_formulas_chunk(ws,name,headers,row_count,date,header,&source_format,None,r..r+1,r==formula_limit)?;
+        }
+    }
+    ws.set_freeze_panes(2, 0).map_err(xlsx_error)?;
+    if !headers.is_empty() {
+        ws.autofilter(
+            0,
+            0,
+            row_count as u32 + 1,
+            headers.len().saturating_sub(1) as u16,
+        )
+        .map_err(xlsx_error)?;
+    }
+    let note_row = row_count as u32 + 3;
+    ws.write_string_with_format(note_row, 0, "本表说明", header)
+        .map_err(xlsx_error)?;
+    let info = sheet_explanation(name);
+    let note = format!("{} 信息来源：{} 重点关注：{}", info.0, info.1, info.2);
+    if headers.len() >= 4 {
+        ws.merge_range(note_row, 1, note_row, 3, &note, &note_format)
+            .map_err(xlsx_error)?;
+    } else {
+        // Even a one-column exception sheet still needs the explanation body.
+        // Writing it in B preserves the standard "本表说明 | 正文" contract
+        // instead of leaving a dangling label with no source or review guidance.
+        ws.write_string_with_format(note_row, 1, &note, &note_format)
+            .map_err(xlsx_error)?;
+    }
+    // Legacy geometry: explicit widths from the content (autofit ran away on
+    // long asset names), a taller source row, a thin spacer above the note and
+    // a deep note row so the wrapped text is readable.
+    for c in 0..headers.len() {
+        ws.set_column_width(c as u16, legacy_column_width(name, widest[c]))
+            .map_err(xlsx_error)?;
+    }
+
+    ws.set_row_height(note_row - 1, 8).map_err(xlsx_error)?;
+    ws.set_row_height(note_row, 72).map_err(xlsx_error)?;
+    Ok(())
+}
+
 
 fn header_is_end_side(header: &str, end_label: Option<&str>) -> bool {
     header.contains("期末")
@@ -5304,6 +6438,22 @@ fn append_depreciation_formulas(
     header_format: &Format,
     source_format: &Format,
 ) -> Result<(), AppError> {
+    append_depreciation_formulas_chunk(ws,sheet_name,headers,row_count,balance_sheet_date,header_format,source_format,Some(0),0..0,false)?;
+    append_depreciation_formulas_chunk(ws,sheet_name,headers,row_count,balance_sheet_date,header_format,source_format,Some(1),0..row_count,true)
+}
+
+fn append_depreciation_formulas_chunk(
+    ws: &mut rust_xlsxwriter::Worksheet,
+    sheet_name: &str,
+    headers: &[&str],
+    row_count: usize,
+    balance_sheet_date: &str,
+    header_format: &Format,
+    source_format: &Format,
+    header_phase: Option<u8>,
+    row_range: std::ops::Range<usize>,
+    notice: bool,
+) -> Result<(), AppError> {
     let required = if matches!(sheet_name, "FA List" | "折旧测算") {
         [
             "入账开始日期",
@@ -5354,11 +6504,14 @@ fn append_depreciation_formulas(
     // month counts and keep their own rendering.
     const MONEY_OFFSETS: [usize; 6] = [0, 3, 4, 5, 6, 7];
     let money_format = Format::new().set_num_format(MONEY_NUMBER_FORMAT);
-    for (offset, name) in output.iter().enumerate() {
-        ws.write_string_with_format(0, (start + offset) as u16, *name, header_format)
-            .map_err(xlsx_error)?;
-        ws.write_string_with_format(1, (start + offset) as u16, "计算", source_format)
-            .map_err(xlsx_error)?;
+    if let Some(phase) = header_phase {
+        for (offset, name) in output.iter().enumerate() {
+            if phase == 0 {
+                ws.write_string_with_format(0,(start+offset) as u16,*name,header_format).map_err(xlsx_error)?;
+            } else {
+                ws.write_string_with_format(1,(start+offset) as u16,"计算",source_format).map_err(xlsx_error)?;
+            }
+        }
     }
     let d = xlsx_col(indexes[0]);
     let life = xlsx_col(indexes[1]);
@@ -5386,7 +6539,7 @@ fn append_depreciation_formulas(
     } else {
         row_count.min(DEPRECIATION_FORMULA_SAMPLE_ROWS)
     };
-    for r in 0..formula_rows {
+    for r in row_range.start..row_range.end.min(formula_rows) {
         let excel_row = r + 3;
         let cutoff = cutoff_col
             .as_ref()
@@ -5476,12 +6629,12 @@ fn append_depreciation_formulas(
                 )
                 .map_err(xlsx_error)?;
             } else {
-                ws.write_formula(r as u32 + 2, (start + offset) as u16, formula.as_str())
+                ws.write_formula_with_format(r as u32 + 2, (start + offset) as u16, formula.as_str(), &money_format)
                     .map_err(xlsx_error)?;
             }
         }
     }
-    if formula_rows < row_count {
+    if notice && formula_rows < row_count {
         // Parked one column past the block, not in 月折旧额: that column has to
         // stay purely numeric so the reviewer can compute over it.
         ws.write_string(
@@ -5496,6 +6649,10 @@ fn append_depreciation_formulas(
     Ok(())
 }
 fn mapped_header(params: &Value, side: u8, role: &str) -> Option<String> {
+    mapped_header_ref(params, side, role).map(str::to_owned)
+}
+
+fn mapped_header_ref<'a>(params: &'a Value, side: u8, role: &str) -> Option<&'a str> {
     let key = if side == 1 {
         "beginMapping"
     } else {
@@ -5506,7 +6663,6 @@ fn mapped_header(params: &Value, side: u8, role: &str) -> Option<String> {
         .and_then(Value::as_object)
         .and_then(|m| m.get(role))
         .and_then(Value::as_str)
-        .map(str::to_owned)
         .or_else(|| {
             let key = match (role, side) {
                 ("originalValue", 1) => "beginOriginalValue",
@@ -5515,7 +6671,7 @@ fn mapped_header(params: &Value, side: u8, role: &str) -> Option<String> {
                 ("depreciation", 2) => "endDepreciation",
                 _ => return None,
             };
-            params.get(key).and_then(Value::as_str).map(str::to_owned)
+            params.get(key).and_then(Value::as_str)
         })
 }
 fn mapped_text(
@@ -5525,18 +6681,28 @@ fn mapped_text(
     side: u8,
     role: &str,
 ) -> String {
-    let Some(header) = mapped_header(params, side, role) else {
-        return String::new();
+    mapped_text_ref(result, row, params, side, role).to_owned()
+}
+
+fn mapped_text_ref<'a>(
+    result: &MergeResult,
+    row: &'a JoinedRow,
+    params: &Value,
+    side: u8,
+    role: &str,
+) -> &'a str {
+    let Some(header) = mapped_header_ref(params, side, role) else {
+        return "";
     };
     let (table, data) = if side == 1 {
         (&result.begin, row.begin.as_ref())
     } else {
         (&result.end, row.end.as_ref())
     };
-    let Some(index) = table.headers.iter().position(|h| h == &header) else {
-        return String::new();
+    let Some(index) = table.headers.iter().position(|h| h == header) else {
+        return "";
     };
-    data.map(|r| cell(r, index).to_owned()).unwrap_or_default()
+    data.map(|r| cell(r, index)).unwrap_or_default()
 }
 fn mapped_number(
     result: &MergeResult,
@@ -5545,7 +6711,7 @@ fn mapped_number(
     side: u8,
     role: &str,
 ) -> f64 {
-    number(&mapped_text(result, row, params, side, role))
+    number(mapped_text_ref(result, row, params, side, role))
 }
 /// Round to fen for sheets that only ever hold money.  Summing 15k floats
 /// leaves noise like 3015186049.229984 and residual rows of 1.1e-05, which read
@@ -5844,6 +7010,9 @@ fn build_analysis_facts(result: &MergeResult, params: &Value) -> [(&'static str,
 
     let (mut begin_original, mut end_original) = (0.0, 0.0);
     let (mut begin_dep, mut end_dep) = (0.0, 0.0);
+    let (mut addition_count,mut disposal_count,mut off_period_count)=(0usize,0usize,0usize);
+    let (mut addition_total,mut disposal_total,mut off_period_total)=(0.0,0.0,0.0);
+    let push_ranked=|rows:&mut Vec<AnalysisItem>,item:AnalysisItem| {rows.push(item);rows.sort_by(|a,b|b.amount.partial_cmp(&a.amount).unwrap_or(std::cmp::Ordering::Equal));rows.truncate(8);};
     let mut additions: Vec<AnalysisItem> = Vec::new();
     let mut disposals: Vec<AnalysisItem> = Vec::new();
     let mut off_period: Vec<AnalysisItem> = Vec::new();
@@ -5852,22 +7021,22 @@ fn build_analysis_facts(result: &MergeResult, params: &Value) -> [(&'static str,
     for row in result
         .rows
         .iter()
-        .filter(|row| row_summary_noise_marker(row).is_none())
+        .filter(|row| row_summary_noise_marker(&row).is_none())
     {
-        let begin_value = mapped_number(result, row, params, 1, "originalValue");
-        let end_value = mapped_number(result, row, params, 2, "originalValue");
+        let begin_value = mapped_number(result, &row, params, 1, "originalValue");
+        let end_value = mapped_number(result, &row, params, 2, "originalValue");
         begin_original += begin_value;
         end_original += end_value;
-        begin_dep += mapped_number(result, row, params, 1, "depreciation").abs();
-        end_dep += mapped_number(result, row, params, 2, "depreciation").abs();
+        begin_dep += mapped_number(result, &row, params, 1, "depreciation").abs();
+        end_dep += mapped_number(result, &row, params, 2, "depreciation").abs();
 
         let side = if row.end.is_some() { 2 } else { 1 };
         let item = |amount: f64| AnalysisItem {
-            category: mapped_text(result, row, params, side, "category"),
+            category: mapped_text(result, &row, params, side, "category"),
             id: primary_key_segment(&row.match_value),
-            name: mapped_text(result, row, params, side, "name"),
+            name: mapped_text(result, &row, params, side, "name"),
             amount,
-            date: display_date(&mapped_text(result, row, params, side, "startDate")),
+            date: display_date(&mapped_text(result, &row, params, side, "startDate")),
         };
         let change = end_value - begin_value;
         // Legacy screens the complete closing FA List for expense-like names,
@@ -5877,18 +7046,18 @@ fn build_analysis_facts(result: &MergeResult, params: &Value) -> [(&'static str,
                 .iter()
                 .any(|term| item(0.0).name.contains(term))
         {
-            expense_like.push(item(end_value));
+            if expense_like.len()<8 {expense_like.push(item(end_value));}
         }
         if change > 0.005 {
             let entry = item(change);
             if let (Some(year), Some(started)) = (bs_year, parse_fa_date(&entry.date)) {
                 if started.year() != year {
-                    off_period.push(item(change));
+                    off_period_count+=1;off_period_total+=change;push_ranked(&mut off_period,item(change));
                 }
             }
-            additions.push(entry);
+            addition_count+=1;addition_total+=change;push_ranked(&mut additions,entry);
         } else if change < -0.005 {
-            disposals.push(item(-change));
+            disposal_count+=1;disposal_total-=change;push_ranked(&mut disposals,item(-change));
         }
     }
 
@@ -5912,10 +7081,10 @@ fn build_analysis_facts(result: &MergeResult, params: &Value) -> [(&'static str,
         money(begin_original),
         money(end_original),
         money(end_original - begin_original),
-        additions.len(),
-        money(additions.iter().map(|i| i.amount).sum::<f64>()),
-        disposals.len(),
-        money(disposals.iter().map(|i| i.amount).sum::<f64>()),
+        addition_count,
+        money(addition_total),
+        disposal_count,
+        money(disposal_total),
         money(begin_dep),
         money(end_dep),
         money(begin_original - begin_dep),
@@ -5942,8 +7111,8 @@ fn build_analysis_facts(result: &MergeResult, params: &Value) -> [(&'static str,
         }
         Some(year) => format!(
             "发现 {} 项新增资产的入账日期不属于 {year} 年度，合计 {} 元，示例：{}。请复核是否应计入本期。",
-            off_period.len(),
-            money(off_period.iter().map(|i| i.amount).sum::<f64>()),
+            off_period_count,
+            money(off_period_total),
             join_examples(&off_period, 8)
         ),
     };
@@ -6062,11 +7231,22 @@ fn write_sheet_map(wb: &mut Workbook) -> Result<(), AppError> {
     ws.autofit();
     Ok(())
 }
-fn write_unmatched(path: &Path, result: &MergeResult, cancel: &AtomicBool) -> Result<(), AppError> {
+fn unmatched_count(result:&MergeResult,disposal:bool)->usize {
+    if let Some(path)=result.rows.path() {
+        let count=(||->Result<usize,rusqlite::Error>{let conn=rusqlite::Connection::open(path)?;conn.query_row("SELECT COUNT(*) FROM unmatched WHERE side=?",[if disposal {2}else{1}],|row|row.get(0))})();
+        match count {Ok(count)=>count,Err(error)=>{result.rows.record_error(error.to_string());0}}
+    } else if disposal {result.unmatched_disposal.len()} else {result.unmatched_addition.len()}
+}
+fn unmatched_rows(result:&MergeResult,disposal:bool)->Box<dyn Iterator<Item=Result<Vec<String>,AppError>>+'_> {
+    match result.rows.path() {Some(path)=>Box::new(disk::SourceIter::unmatched(path,disposal)),None=>Box::new(if disposal {result.unmatched_disposal.iter()} else {result.unmatched_addition.iter()}.cloned().map(Ok))}
+}
+
+fn write_unmatched(path: &Path, result: &MergeResult, params: &Value, cancel: &AtomicBool) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io_error)?;
     }
     let mut wb = Workbook::new();
+    let number_format = Format::new().set_num_format(MONEY_NUMBER_FORMAT);
     let header = Format::new()
         .set_bold()
         .set_background_color(LEGACY_HEADER_FILL)
@@ -6093,31 +7273,48 @@ fn write_unmatched(path: &Path, result: &MergeResult, cancel: &AtomicBool) -> Re
         .write_string(2, 1, "补充清单中未能匹配期初卡片的处置记录，请复核组合键。")
         .map_err(xlsx_error)?;
     guide.autofit();
-    for (name, headers, rows) in [
+    // 未匹配行来自补充文件，列顺序和列数均可能与两期主清单不同。
+    let addition_headers = if unmatched_count(result,false)==0 {
+        Vec::new()
+    } else {
+        disk::load_input(&required_path(&params["additionSupplement"],"path")?,params["additionSupplement"].get("sheet").and_then(Value::as_str),HeaderOptions::params(&params["additionSupplement"],"headerRow","headerDepth")?,&|_,_,_,_|{},cancel)?.0.headers
+    };
+    let disposal_headers = if unmatched_count(result,true)==0 {
+        Vec::new()
+    } else {
+        disk::load_input(&required_path(&params["disposalSupplement"],"path")?,params["disposalSupplement"].get("sheet").and_then(Value::as_str),HeaderOptions::params(&params["disposalSupplement"],"headerRow","headerDepth")?,&|_,_,_,_|{},cancel)?.0.headers
+    };
+    for (name, headers, disposal) in [
         (
             "未匹配新增清单",
-            &result.end.headers,
-            &result.unmatched_addition,
+            &addition_headers,
+            false,
         ),
         (
             "未匹配处置清单",
-            &result.begin.headers,
-            &result.unmatched_disposal,
+            &disposal_headers,
+            true,
         ),
     ] {
-        let ws = wb.add_worksheet();
+        let ws = wb.add_worksheet_with_constant_memory();
         ws.set_name(name).map_err(xlsx_error)?;
         for (c, h) in headers.iter().enumerate() {
             ws.write_string_with_format(0, c as u16, h, &header)
                 .map_err(xlsx_error)?;
         }
-        for (r, row) in rows.iter().enumerate() {
+        for (r, row) in unmatched_rows(result,disposal).enumerate() {
+            let row=row?;
             if r % 256 == 0 {
                 check_cancel(cancel)?;
             }
             for (c, v) in row.iter().enumerate() {
-                ws.write_string((r + 1) as u32, c as u16, v)
-                    .map_err(xlsx_error)?;
+                let header = headers.get(c).map(String::as_str).unwrap_or("");
+                if let Some(number) = crate::xlsx_numbers::number_from_text(header, v) {
+                    ws.write_number_with_format((r + 1) as u32, c as u16, number, &number_format)
+                        .map_err(xlsx_error)?;
+                } else {
+                    ws.write_string((r + 1) as u32, c as u16, v).map_err(xlsx_error)?;
+                }
             }
         }
         ws.autofit();
@@ -6300,7 +7497,7 @@ pub(crate) fn check_cancel(cancel: &AtomicBool) -> Result<(), AppError> {
         Ok(())
     }
 }
-fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppError {
+pub(crate) fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppError {
     AppError::new(code, message, false, detail)
 }
 pub(crate) fn io_error(e: std::io::Error) -> AppError {
@@ -6335,6 +7532,47 @@ fn xlsx_error(e: rust_xlsxwriter::XlsxError) -> AppError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn 通用表头资产首条编号名称金额不充当下层且磁盘读取一致() {
+        let path = std::env::temp_dir().join(format!("fa-body-{}.xlsx", uuid::Uuid::new_v4()));
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let sheet = book.add_worksheet();
+        for (r, row) in [
+            ["编号", "名称", "原值", "折旧", ""],
+            ["资产编号", "设备名称", "100", "折旧说明", "说明"],
+            ["002", "设备乙", "200", "20", "其他"],
+        ].iter().enumerate() {
+            for (c, value) in row.iter().enumerate() {
+                sheet.write_string(3 + r as u32, 2 + c as u16, *value).unwrap();
+            }
+        }
+        book.save(&path).unwrap();
+        let auto = super::load_table(&path, None, None, false).unwrap();
+        assert_eq!(auto.header_row, 4);
+        assert_eq!(auto.headers[4], "原值");
+        assert_eq!(auto.rows.len(), 2);
+        assert_eq!(auto.rows[0][4], "100");
+        let manual = super::load_table(&path, auto.sheet.as_deref(), Some(4), false).unwrap();
+        assert_eq!(manual.headers, auto.headers);
+        assert_eq!(manual.rows, auto.rows);
+        let prefix = crate::fa_sheet_pick::load_prefix_table(&path, auto.sheet.as_deref(), Some(4), false).unwrap();
+        assert_eq!(prefix.headers, auto.headers);
+        assert_eq!(prefix.rows, auto.rows);
+        let (disk, _) = super::disk::load_input(&path, auto.sheet.as_deref(), Some(4), &|_,_,_,_|{}, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        assert_eq!(disk.headers, auto.headers);
+        assert_eq!(disk.rows, auto.rows);
+        book.worksheet_from_index(0).unwrap().write_string(250, 8, "窗口外尾列").unwrap();
+        book.save(&path).unwrap();
+        let full = super::load_table(&path, auto.sheet.as_deref(), Some(4), false).unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let (preview, disk) = super::disk::load_input(&path, auto.sheet.as_deref(), Some(4), &|_,_,_,_|{}, &cancel).unwrap();
+        assert_eq!(preview.headers, full.headers);
+        assert_eq!(preview.headers.len(), 9);
+        let mut last = Vec::new();
+        disk.visit(&cancel, |row, _| { last = row.to_vec(); Ok(()) }).unwrap();
+        assert_eq!(last[8], "窗口外尾列");
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn 通用表头固定资产双层与手动行号读取一致() {
         let path = std::env::temp_dir().join(format!("asset-header-{}.csv", uuid::Uuid::new_v4()));
@@ -6400,16 +7638,18 @@ mod tests {
             sheet: None,
             sheets: Vec::new(),
             header_row: 1,
+            header_depth: 1,
             headers: headers.iter().map(|value| (*value).to_owned()).collect(),
             rows: rows
                 .iter()
                 .map(|row| row.iter().map(|value| (*value).to_owned()).collect())
                 .collect(),
+            row_count: rows.len(),
         }
     }
 
     #[test]
-    fn supplement_keys_are_proved_by_three_exact_samples_in_reference_key_order() {
+    fn supplement_keys_use_one_sample_in_reference_key_order() {
         let reference = in_memory_table(
             &["资产编码", "资产名称", "类别"],
             &[
@@ -6422,7 +7662,7 @@ mod tests {
         // Deliberately misleading headers: the proof must come from values and
         // the returned columns must follow the primary ledger's composite-key
         // order rather than supplement column order.
-        let supplement = in_memory_table(
+        let mut supplement = in_memory_table(
             &["名称备注", "数据列", "资产编码", "金额"],
             &[
                 &["设备甲", "001.0", "X", "10"],
@@ -6435,9 +7675,12 @@ mod tests {
                 &supplement,
                 &reference,
                 &["资产编码".into(), "资产名称".into()]
-            ),
+            ).unwrap(),
             ["数据列", "名称备注"]
         );
+        supplement.rows.truncate(1);
+        assert_eq!(infer_supplement_keys_by_samples(&supplement, &reference,
+            &["资产编码".into(), "资产名称".into()]).unwrap(), ["数据列", "名称备注"]);
     }
 
     #[test]
@@ -6448,7 +7691,7 @@ mod tests {
         );
         let supplement = in_memory_table(
             &["代码", "错误名称"],
-            &[&["A1", "甲"], &["A2", "乙"], &["A3", "不存在"]],
+            &[&["A1", "不存在"], &["A2", "乙"], &["A3", "丙"]],
         );
         assert!(
             infer_supplement_keys_by_samples(
@@ -6456,8 +7699,87 @@ mod tests {
                 &reference,
                 &["编码".into(), "名称".into()]
             )
+            .unwrap()
             .is_empty()
         );
+    }
+
+    #[test]
+    fn supplement_file_selection_reads_only_directory_and_ignores_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("补充.xlsx");
+        let mut workbook = rust_xlsxwriter::Workbook::new();
+        workbook.add_worksheet().set_name("说明").unwrap();
+        workbook.add_worksheet().set_name("处置").unwrap();
+        workbook.add_worksheet().set_name("旧表").unwrap().set_hidden(true);
+        workbook.save(&path).unwrap();
+        // 空白说明表不具备可识别表头；不存在的参照表也不应被打开。
+        let result = supplement_inspect(json!({"path":path,"sheetsOnly":true,
+            "referencePath":dir.path().join("不存在.xlsx"),"referenceKeys":["编码"]})).unwrap();
+        assert_eq!(result["sheets"], json!(["说明","处置"]));
+        assert!(result["headers"].as_array().unwrap().is_empty());
+        assert!(result["selectedSheet"].is_null());
+    }
+
+    #[test]
+    fn supplement_key_proof_reads_beyond_prefix_and_excludes_two_header_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("参照.xlsx");
+        let mut workbook = rust_xlsxwriter::Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.set_name("卡片").unwrap();
+        sheet.write(0, 0, "上层标题").unwrap();
+        sheet.write(1, 0, "下层标题").unwrap();
+        sheet.write(1, 1, "名称").unwrap();
+        for row in 2..302u32 {
+            sheet.write(row, 0, format!("A{row}")).unwrap();
+            if row != 280 { sheet.write(row, 1, format!("设备{row}")).unwrap(); }
+        }
+        workbook.save(&path).unwrap();
+        let reference = Table { path, sheet: Some("卡片".into()), sheets: vec!["卡片".into()],
+            header_row: 1, header_depth: 2, headers: vec!["编码".into(),"名称".into()],
+            rows: vec![vec!["A2".into(),"设备2".into()]], row_count: 300 };
+        let supplement = in_memory_table(&["其他编码", "数据", "名称"], &[
+            &["错误1", " a250 ", "设备250"],
+            &["错误2", "A270.0", "设备270"],
+            &["错误3", "A300", "设备300"],
+        ]);
+        let keys = vec!["编码".into(),"名称".into()];
+        assert_eq!(infer_supplement_keys_by_samples(&supplement, &reference, &keys).unwrap(), ["数据","名称"]);
+        assert_eq!(infer_supplement_keys_by_samples(&supplement, &reference, &keys).unwrap(), ["数据","名称"]);
+        assert_eq!(infer_supplement_keys_by_samples(&supplement, &reference, &["名称".into(), "编码".into()]).unwrap(), ["名称", "数据"]);
+        let header_samples = in_memory_table(&["伪编码"], &[
+            &["上层标题"], &["下层标题"], &["A300"],
+        ]);
+        assert!(infer_supplement_keys_by_samples(&header_samples, &reference, &["编码".into()]).unwrap().is_empty());
+        fs::remove_file(&reference.path).unwrap();
+        assert!(infer_supplement_keys_by_samples(&supplement, &reference, &keys).is_err());
+        let already_loaded = in_memory_table(&["编码", "名称"], &[&["A2", "设备2"]]);
+        assert_eq!(infer_supplement_keys_by_samples(&already_loaded, &reference, &keys).unwrap(), ["编码","名称"]);
+    }
+
+    /// FA_SUPPLEMENT_BENCH_DIR 指向真实清单目录；输出目录读取、选表后读取的耗时。
+    #[test]
+    #[ignore = "需要 FA_SUPPLEMENT_BENCH_DIR 指向本地真实清单"]
+    fn live_fa_supplement_read_bench() {
+        let dir = PathBuf::from(std::env::var_os("FA_SUPPLEMENT_BENCH_DIR").expect("FA_SUPPLEMENT_BENCH_DIR"));
+        let path = dir.join("资产减少业务查询 25年5-10月.xlsx");
+        let reference = dir.join("科技FA存量清单-202412.xlsx");
+        let mut request = json!({"path":path,"sheetsOnly":true,"referencePath":reference,
+            "referenceSheet":"FA241231","referenceHeaderRow":1,"referenceHeaderDepth":1,
+            "referenceKeys":["FA编号","资产说明"]});
+        let started = std::time::Instant::now();
+        let directory = supplement_inspect(request.clone()).unwrap();
+        println!("[补充表基准] 工作表目录 {:.3}s", started.elapsed().as_secs_f64());
+        request["sheetsOnly"] = json!(false);
+        request["sheet"] = directory["sheets"][0].clone();
+        for label in ["首次选表", "重复读取"] {
+            let started = std::time::Instant::now();
+            let result = supplement_inspect(request.clone()).unwrap();
+            println!("[补充表基准] {label} {:.3}s；规模 {}；映射 {}", started.elapsed().as_secs_f64(),
+                result["dimensions"], result["suggestedMapping"]["matchKeys"]);
+            assert!(!result["headers"].as_array().unwrap().is_empty());
+        }
     }
 
     #[test]
@@ -6514,7 +7836,7 @@ mod tests {
     #[test]
     #[ignore = "requires the machine's configured LLM endpoint, credentials and network"]
     fn live_fa_review_completes_within_configured_timeout() {
-        let dirs = directories::ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
+        let dirs = directories::ProjectDirs::from("com", "AuditToolbox", crate::release_channel::application_name())
             .expect("data directory");
         let db = dirs.data_local_dir().join("audit-toolbox.db");
         let connection = rusqlite::Connection::open(&db).expect("open settings database");
@@ -6610,6 +7932,121 @@ mod tests {
         assert_eq!(value["enabled"], true);
     }
 
+    /// 跑法：cargo test --manifest-path src-tauri/Cargo.toml --lib live_fa_read_bench -- --ignored --nocapture
+    ///
+    /// 用 Downloads 里的两份真实大表实测读取成本：新交互路径（前缀表＋定向抽列）
+    /// 对照旧整表解析（读全部可见 Sheet 并逐格转字符串），另测 worker 侧胜出表
+    /// 的单表整读，回答"第一步是否秒开、剩余成本花在哪"。
+    #[test]
+    #[ignore = "需要本机 Downloads 里的两份真实 FA 清单"]
+    fn live_fa_read_bench() {
+        let dir = std::path::PathBuf::from(r"C:\Users\lenovo\Downloads");
+        let begin_path = dir.join("科技FA存量清单-202412.xlsx");
+        let end_path = dir.join("2025年12月FA资产清单 (2).xlsx");
+        assert!(begin_path.is_file(), "找不到 {}", begin_path.display());
+        assert!(end_path.is_file(), "找不到 {}", end_path.display());
+        let params = json!({
+            "beginPath": begin_path.to_string_lossy(),
+            "endPath": end_path.to_string_lossy(),
+        });
+        let sheet_of = |value: &Value, side: &str| {
+            value[side]["selectedSheet"]
+                .as_str()
+                .unwrap_or("?")
+                .to_owned()
+        };
+        let started = std::time::Instant::now();
+        let first = inspect(params.clone()).expect("inspect 第一次");
+        println!(
+            "[bench] inspect 冷读（选表＋建议＋键碰撞）{:.2}s → 期初 {} / 期末 {}",
+            started.elapsed().as_secs_f64(),
+            sheet_of(&first, "begin"),
+            sheet_of(&first, "end"),
+        );
+        let started = std::time::Instant::now();
+        let second = inspect(params.clone()).expect("inspect 第二次");
+        println!(
+            "[bench] inspect 记事命中重读 {:.2}s",
+            started.elapsed().as_secs_f64(),
+        );
+        // worker（匹配/导出）的整表读取已接入稳定磁盘缓存：第一次整读落缓存，
+        // 同文件再读一次直接命中 Parquet，量一下两段的耗时。
+        for (label, side, path) in [
+            ("期初", "begin", &begin_path),
+            ("期末", "end", &end_path),
+        ] {
+            let sheet = second[side]["selectedSheet"].as_str().unwrap_or("?").to_owned();
+            let header = second[side]["detectedHeaderRow"]
+                .as_u64()
+                .map(|v| v as usize);
+            let started = std::time::Instant::now();
+            let table = crate::fa_table_cache::load_table_cached(
+                path,
+                Some(sheet.as_str()),
+                header,
+                false,
+            )
+            .expect("整表读取");
+            println!(
+                "[bench] worker 整读 {}（{}，{} 行）{:.2}s",
+                label,
+                sheet,
+                table.rows.len(),
+                started.elapsed().as_secs_f64(),
+            );
+            let started = std::time::Instant::now();
+            let again = crate::fa_table_cache::load_table_cached(
+                path,
+                Some(sheet.as_str()),
+                header,
+                false,
+            )
+            .expect("缓存整读");
+            println!(
+                "[bench] worker 缓存命中 {}（{}，{} 行）{:.2}s",
+                label,
+                sheet,
+                again.rows.len(),
+                started.elapsed().as_secs_f64(),
+            );
+            assert_eq!(table.rows.len(), again.rows.len());
+            assert_eq!(table.headers, again.headers);
+        }
+        // 旧版行为复刻：每份工作簿全部可见 Sheet 整读并逐格转字符串。默认跳过
+        // （FA_BENCH_OLD=1 时才跑），便于二次运行对照缓存命中后的读取成本。
+        if std::env::var("FA_BENCH_OLD").as_deref() == Ok("1") {
+            for path in [&begin_path, &end_path] {
+            let mut book = calamine::open_workbook_auto(path).expect("打开工作簿");
+            let visible: Vec<String> = book
+                .sheets_metadata()
+                .iter()
+                .filter(|sheet| sheet.visible == calamine::SheetVisible::Visible)
+                .map(|sheet| sheet.name.clone())
+                .collect();
+            let started = std::time::Instant::now();
+            let mut cells = 0usize;
+            for name in &visible {
+                let Ok(range) = calamine::Reader::worksheet_range(&mut book, name) else {
+                    continue;
+                };
+                for row in range.rows() {
+                    for cell in row {
+                        let _ = data_string(cell);
+                        cells += 1;
+                    }
+                }
+            }
+            println!(
+                "[bench] 旧路径全部可见 Sheet 整读 {}：{:.2}s（{} 表 / {} 格）",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                started.elapsed().as_secs_f64(),
+                visible.len(),
+                cells,
+            );
+            }
+        }
+    }
+
     #[test]
     fn match_key_falls_back_to_legacy_tiers_beyond_the_term_list() {
         let table = |headers: &[&str]| Table {
@@ -6617,15 +8054,23 @@ mod tests {
             sheet: None,
             sheets: vec![],
             header_row: 1,
+            header_depth: 1,
             headers: headers.iter().map(|v| (*v).to_owned()).collect(),
             rows: vec![],
+            row_count: 0,
         };
         let terms: &[&str] = &["固定资产编号", "卡片编号", "coding"];
 
-        // 词表里没有"资产序号"，但它含资产语境 + 号，旧版给 700 分能选中。
+        // "资产卡号"不在词表里，但含资产语境 + 号，旧版兜底层能选中。
         assert_eq!(
-            pick_match_header(&table(&["资产类别", "资产序号", "原值"]), terms).as_deref(),
-            Some("资产序号")
+            pick_match_header(&table(&["资产类别", "资产卡号", "原值"]), terms).as_deref(),
+            Some("资产卡号")
+        );
+        // 序号类列名自 2026-09-29 起列入禁列：值≈行号的列天然互含，键校验
+        // 对它形同虚设（实测期末清单把序号纠正成 ID 的教训）。
+        assert_eq!(
+            pick_match_header(&table(&["资产类别", "资产序号", "原值"]), terms),
+            None
         );
         // 单独含"编号"也是候选。
         assert_eq!(
@@ -6641,7 +8086,7 @@ mod tests {
         assert!(pick_match_header(&table(&["资产分类编号"]), terms).is_none());
         // 词表命中仍然压过兜底。
         assert_eq!(
-            pick_match_header(&table(&["资产序号", "固定资产编号"]), terms).as_deref(),
+            pick_match_header(&table(&["资产卡号", "固定资产编号"]), terms).as_deref(),
             Some("固定资产编号")
         );
     }
@@ -6650,6 +8095,440 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let pause = PauseCheckpoint::unpaused(cancel.clone());
         preview(params, &|_, _, _, _| {}, cancel, &pause)
+    }
+
+    #[test]
+    fn review_cache_key_tracks_source_sheet_and_header_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("源.csv");
+        fs::write(&path, "编号\nA1\n").unwrap();
+        let key = review_table_key(&path, Some("明细"), 1).unwrap();
+        assert_ne!(Some(key.clone()), review_table_key(&path, Some("另一页"), 1));
+        assert_ne!(Some(key.clone()), review_table_key(&path, Some("明细"), 2));
+        fs::write(&path, "编号\nA1\nA2\n").unwrap();
+        assert_ne!(Some(key), review_table_key(&path, Some("明细"), 1));
+    }
+
+    #[test]
+    fn review_samples_are_compact_without_a_separate_company_role() {
+        let table = Table {
+            path: "test.csv".into(), sheet: None, sheets: vec![], header_row: 1, header_depth: 1,
+            headers: vec!["公司名称".into(), "卡片编号".into(), "资产名称".into()],
+            rows: (0..5).map(|index| vec!["测试公司".into(), format!("A{index}"), "长名称".repeat(100)]).collect(),
+            row_count: 5,
+        };
+        let mapping = suggest_mapping(&table);
+        assert!(!mapping.contains_key("companyName"));
+        assert_eq!(mapping["matchKey"], "卡片编号");
+        let payload = main_llm_side_payload(&table, Some(&json!({})), None, false);
+        assert_eq!(payload["samples"]["公司名称"], json!(["测试公司"]));
+        assert_eq!(payload["samples"]["卡片编号"].as_array().unwrap().len(), 3);
+        assert_eq!(payload["samples"]["资产名称"][0].as_str().unwrap().chars().count(), 120);
+        assert!(!payload["unmappedRoles"].as_array().unwrap().contains(&json!("company_name")));
+    }
+
+    #[test]
+    fn suggest_mapping_recognises_scrap_wording_for_disposal_roles() {
+        // 资产减少业务查询导出：处置方式/处置日期两列叫「报废类型」「报废日期」，
+        // 词表必须覆盖「报废」一族叫法，否则必填字段永远映射不上。
+        let table = in_memory_table(
+            &[
+                "资产编号", "资产名称", "报废成本", "转让销售收入", "清理费用", "净损益",
+                "启用日期", "报废日期", "报废类型",
+            ],
+            &[&[
+                "FA001", "机器", "900", "0", "0", "0", "2021-11-22", "2025-05-26", "04 正常报废",
+            ]],
+        );
+        let mapping = suggest_mapping(&table);
+        assert_eq!(mapping["disposalMethod"], "报废类型");
+        assert_eq!(mapping["disposalDate"], "报废日期");
+    }
+
+    #[test]
+    fn supplement_llm_suggestions_for_absent_side_are_dropped() {
+        // 单侧复核（只传处置清单）时载荷里没有 file1：模型对缺失一侧的
+        // 任何建议都必须丢弃，不得落到前端配置上。
+        let payload = json!({
+            "file2": {"headers": ["报废类型", "报废日期"], "samples": {}, "mapping": {}, "keys": []},
+            "beginKeys": [], "endKeys": []
+        });
+        let parsed = json!({
+            "suggestions": [
+                {"role": "disposal_method", "file_side": "file2", "suggested_column": "报废类型",
+                 "confidence": 0.9, "action": "fill", "reason": "唯一可信候选"},
+                {"role": "addition_method", "file_side": "file1", "suggested_column": "编造列",
+                 "confidence": 0.9, "action": "fill", "reason": "载荷里没有 file1"}
+            ],
+            "fieldReviews": []
+        });
+        let result = finalize_llm_review(parsed, payload, true);
+        let auto = result["autoApplied"].as_array().unwrap();
+        let reviews = result["fieldReviews"].as_array().unwrap();
+        assert_eq!(auto.len(), 1);
+        assert_eq!(auto[0]["role"], "disposal_method");
+        assert_eq!(auto[0]["suggested_column"], "报废类型");
+        assert!(reviews.is_empty(), "指向缺失侧的建议不应存活：{reviews:?}");
+    }
+
+    #[test]
+    fn company_headers_map_directly_to_existing_id_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let begin = dir.path().join("begin.csv");
+        let end = dir.path().join("end.csv");
+        fs::write(&begin, "卡片编号,公司名称,资产名称\nA1,甲公司,服务器\nA2,甲公司,终端\n").unwrap();
+        fs::write(&end, "资产编号,企业名称,资产名称\nA1,甲公司,服务器\nA2,甲公司,终端\n").unwrap();
+        let p = json!({"beginPath":begin,"endPath":end});
+        let inspected = inspect(p).unwrap();
+        assert_eq!(inspected["suggestedMapping"]["begin"]["matchKeys"], json!(["卡片编号", "资产名称", "公司名称"]));
+        assert_eq!(inspected["suggestedMapping"]["end"]["matchKeys"], json!(["资产编号", "资产名称", "企业名称"]));
+        // 不检查编号是否重复或公司数量；只按表头标识 ID 角色。
+        assert!(looks_like_id("公司名称"));
+        assert!(looks_like_id("企业名称"));
+        let table = Table { path: begin, sheet: None, sheets: vec![], header_row: 1, header_depth: 1,
+            headers: vec!["公司名称".into()], rows: vec![vec!["甲公司".into()]], row_count: 1 };
+        assert_eq!(suggest_mapping(&table)["matchKey"], "公司名称");
+    }
+
+    #[test]
+    fn serial_and_constant_columns_lose_key_candidacy() {
+        let serial: Vec<String> = (1..=10).map(|i| i.to_string()).collect();
+        let ids: Vec<String> = (0..10).map(|i| format!("FA{i:05}")).collect();
+        let names: Vec<String> = (0..10).map(|i| format!("服务器{i}")).collect();
+        let rows: Vec<Vec<&str>> = (0..10)
+            .map(|i| {
+                vec![
+                    serial[i].as_str(),
+                    "000000",
+                    ids[i].as_str(),
+                    names[i].as_str(),
+                ]
+            })
+            .collect();
+        let slices: Vec<&[&str]> = rows.iter().map(|row| row.as_slice()).collect();
+        let table = in_memory_table(&["序号", "公司", "FA编号", "资产名称"], &slices);
+        // 建议主键落在真正的卡片编号上：序号（值形态满分但天然互含）与
+        // 恒定公司列（必绿徽章）都不再参与键竞争。
+        assert_eq!(suggest_mapping(&table)["matchKey"], "FA编号");
+        let mut mapping = suggest_mapping(&table);
+        let peer = Map::new();
+        extend_composite_key(&mut mapping, &peer, &table);
+        let keys = mapping_match_keys(&mapping);
+        assert!(!keys.contains(&"公司".to_string()), "恒定公司列不应进组合键：{keys:?}");
+        assert!(!keys.contains(&"序号".to_string()), "序号列不应进组合键：{keys:?}");
+        assert!(is_forbidden_id("序号"));
+        assert!(is_forbidden_id("行号"));
+    }
+
+    #[test]
+    fn key_repair_never_corrects_onto_serial_or_constant_columns() {
+        // 期末表里序号列与资产编号列都包含期初样本"5"：纠正必须落在资产
+        // 编号上，序数列（几乎包含一切整数）与恒定列（不筛行）没有候选资格。
+        let serial: Vec<String> = (1..=10).map(|i| i.to_string()).collect();
+        let ids: Vec<String> = (0..10)
+            .map(|i| if i == 4 { "5".to_owned() } else { format!("FA{i:05}") })
+            .collect();
+        let rows: Vec<Vec<&str>> = (0..10)
+            .map(|i| vec![serial[i].as_str(), "000000", ids[i].as_str()])
+            .collect();
+        let slices: Vec<&[&str]> = rows.iter().map(|row| row.as_slice()).collect();
+        let end = in_memory_table(&["序号", "公司", "资产编号"], &slices);
+        let sample = normalize_join_key("5");
+        let found = find_column_containing(&end, &sample, &BTreeSet::new()).unwrap();
+        assert_eq!(
+            found.map(|index| end.headers[index].as_str()),
+            Some("资产编号")
+        );
+    }
+
+    #[test]
+    fn key_alignment_trims_dangling_composite_members() {
+        // 期初多主体、期末单主体时只有期初会补公司键；多出的尾部成员
+        // 悬在单侧只会挂恒为未命中的徽章，必须撤掉，首键永不裁剪。
+        let mut begin = vec!["FA编号".to_owned(), "公司".to_owned()];
+        let mut end = vec!["资产编码".to_owned()];
+        align_key_members(&mut begin, &mut end);
+        assert_eq!(begin, vec!["FA编号".to_owned()]);
+        assert_eq!(end, vec!["资产编码".to_owned()]);
+
+        let mut longer = vec!["FA编号".to_owned(), "资产说明".to_owned(), "公司".to_owned()];
+        let mut shorter = vec!["资产编码".to_owned()];
+        align_key_members(&mut longer, &mut shorter);
+        assert_eq!(longer, vec!["FA编号".to_owned()]);
+
+        // 另一侧完全没有键时也保留首键：它承载"哪列是编号"的选列建议。
+        let mut only = vec!["FA编号".to_owned(), "公司".to_owned()];
+        let mut none = Vec::new();
+        align_key_members(&mut only, &mut none);
+        assert_eq!(only.len(), 1);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn prefix_constant_company_column_still_joins_composite_key() {
+        // 期末前缀段清一色同一主体、全列多家主体：前缀阶段不得把公司列
+        // 判成恒定（实测 IT 账套 27 万行、前 197 行全是 000000，全列 9 家）。
+        let rows: Vec<Vec<&str>> = (0..10).map(|_| vec!["FA1", "000000"]).collect();
+        let slices: Vec<&[&str]> = rows.iter().map(|row| row.as_slice()).collect();
+        let mut prefix = in_memory_table(&["资产编码", "公司编码"], &slices);
+        prefix.row_count = 273_924; // rows.len() < row_count 即前缀表
+        assert!(!column_is_constant(&prefix, 1));
+        // 整表数据确为单一主体时照旧判恒定。
+        let full = in_memory_table(&["资产编码", "公司编码"], &slices);
+        assert!(column_is_constant(&full, 1));
+        // 编码形态的公司列头也是公司键成员候选。
+        assert!(is_company_id_header("公司编码"));
+        assert!(is_company_id_header("公司名称"));
+    }
+
+    /// 跑法（真机验收，需本地样例）：
+    /// FA_LIVE_INSPECT="期初.xlsx,期末.xlsx" cargo test --manifest-path
+    /// src-tauri/Cargo.toml --lib live_inspect_avoids -- --ignored --nocapture
+    #[test]
+    #[ignore = "requires FA_LIVE_INSPECT pointing at two real card workbooks"]
+    fn live_inspect_avoids_degenerate_keys() {
+        let pair = std::env::var("FA_LIVE_INSPECT").expect("FA_LIVE_INSPECT=期初,期末");
+        let (begin, end) = pair
+            .split_once(',')
+            .expect("FA_LIVE_INSPECT should be \"begin,end\"");
+        let started = std::time::Instant::now();
+        let inspected = inspect(json!({"beginPath":begin,"endPath":end})).unwrap();
+        println!("inspect 耗时 {:.1}s", started.elapsed().as_secs_f64());
+        println!(
+            "完整建议映射：{}",
+            serde_json::to_string_pretty(&inspected["suggestedMapping"]).unwrap()
+        );
+        println!(
+            "键配对（含纠正/撤键结论）：{}",
+            serde_json::to_string(&inspected["keyPairing"]).unwrap()
+        );
+        for side in ["begin", "end"] {
+            let keys = inspected["suggestedMapping"][side]["matchKeys"].clone();
+            for key in keys.as_array().into_iter().flatten() {
+                let header = key.as_str().unwrap_or_default();
+                assert!(
+                    !header.contains("序号") && !header.contains("行号"),
+                    "{side} 的建议键落在序号类列上：{header}"
+                );
+            }
+        }
+        // 用建议键模拟界面徽章：第一次命中检查（可能触发补深）与第二次（应走缓存）分开计时。
+        let begin_keys = inspected["suggestedMapping"]["begin"]["matchKeys"].clone();
+        let end_keys = inspected["suggestedMapping"]["end"]["matchKeys"].clone();
+        let begin_sheet = inspected["begin"]["selectedSheet"].clone();
+        let end_sheet = inspected["end"]["selectedSheet"].clone();
+        for round in 1..=2 {
+            let started = std::time::Instant::now();
+            let checked = fa_key_check(json!({
+                "beginPath": begin,
+                "beginSheet": begin_sheet,
+                "endPath": end,
+                "endSheet": end_sheet,
+                "beginKeys": begin_keys,
+                "endKeys": end_keys,
+            }))
+            .unwrap();
+            println!(
+                "第{round}次 key_check {:.1}s：{}",
+                started.elapsed().as_secs_f64(),
+                serde_json::to_string(&checked["keyPairing"]).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn summary_keeps_unlabelled_disposal_depreciation_and_cached_totals() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = params(dir.path());
+        for supplied_dep in [None, Some(22.0), Some(0.0)] {
+            let mut result = merge(&p, &|_,_,_,_| {}, &AtomicBool::new(false)).unwrap();
+            if let Some(dep) = supplied_dep {
+                let row = result.rows.iter_mut().find(|row| row.match_value == "A2").unwrap();
+                row.extra.insert("处置折旧_辅助_文件1".into(), Cell::Number(dep));
+            }
+            let expected_disposal = supplied_dep.unwrap_or(30.0);
+            let (_, rows, _) = build_extended_summary(&result, &p);
+            let disposed = rows.iter().find(|row| row[0] == "累计折旧" && row[1] == "——其中-未标注处置方式");
+            assert_eq!(disposed.map(|row| number(&row[2])).unwrap_or(0.0), expected_disposal);
+            let non_disposal = rows.iter().find(|row| row[1] == "——其中-非处置变动（含计提折旧）").unwrap();
+            assert_eq!(number(&non_disposal[2]) + expected_disposal, 2.0);
+            let path = dir.path().join("summary.xlsx");
+            write_xlsx(&path, &result, &p, &AtomicBool::new(false)).unwrap();
+            let mut workbook = open_workbook_auto(&path).unwrap();
+            let summary = workbook.worksheet_range("固定资产变动汇总表").unwrap();
+            let opening = summary.rows().find(|row| data_string(&row[1]).ends_with("begin.csv累计折旧")).unwrap();
+            assert_eq!(data_string(&opening[2]), "50", "合计活公式也保存正确的年初折旧结果");
+            let disposal = workbook.worksheet_range("处置清单_BKD").unwrap();
+            let row = disposal.rows().nth(2).unwrap();
+            assert_eq!(number(&data_string(&row[14])), expected_disposal);
+            assert_eq!(number(&data_string(&row[8])), expected_disposal - 30.0);
+            let formulas = workbook.worksheet_formula("处置清单_BKD").unwrap();
+            assert_eq!(formulas.get_value((2, 8)).unwrap(), "O3-H3");
+        }
+    }
+
+    #[test]
+    fn single_date_review_preserves_shared_mapping_and_fills_both_roles() {
+        for header in ["入账日期", "新增日期", "开始使用日期", "日期"] {
+            let table = in_memory_table(&[header, "原值"], &[&["2025-01-02", "45000"]]);
+            let side_payload = main_llm_side_payload(&table, Some(&json!({})), None, true);
+            let payload = json!({"file2": side_payload});
+            let reviewed = finalize_llm_review(json!({}), payload, false);
+            for role in ["date", "addition_date"] {
+                assert!(reviewed["autoApplied"].as_array().unwrap().iter().any(|item|
+                    item["role"] == role && item["suggested_column"] == header));
+            }
+            for (side, role, key) in [("file1", "date", "startDate"), ("file2", "date", "startDate"),
+                ("file2", "addition_date", "additionDate"), ("file1", "addition_date", "date")] {
+                let payload = json!({side: {"headers":[header, "原值"],
+                    "samples":{header:["2025-01-02"], "原值":["45000"]}, "mapping":{key:header}}});
+                let mut item = json!({"role":role, "file_side":side, "action":"clear", "confidence":1.0});
+                sanitize_llm_review_item(&mut item, &payload);
+                assert_eq!(item["action"], "keep", "{side}/{role}/{header}");
+            }
+        }
+    }
+
+    #[test]
+    fn single_date_review_does_not_protect_ambiguous_or_invalid_dates() {
+        for (headers, samples, current) in [
+            (json!(["入账日期", "新增日期"]), json!({"入账日期":["2025-01-02"], "新增日期":["2025-01-03"]}), "入账日期"),
+            (json!(["入账日期"]), json!({"入账日期":["NEW 新建"]}), "入账日期"),
+            (json!(["报废日期"]), json!({"报废日期":["2025-01-02"]}), "报废日期"),
+            (json!(["入账日期", "已购"]), json!({"入账日期":["2025-01-02"], "已购":["NEW 新建"]}), "已购"),
+        ] {
+            let payload = json!({"file2":{"headers":headers, "samples":samples, "mapping":{"additionDate":current}}});
+            let mut item = json!({"role":"addition_date", "file_side":"file2", "action":"clear", "confidence":0.9});
+            sanitize_llm_review_item(&mut item, &payload);
+            assert_eq!(item["action"], "clear");
+        }
+        let table = in_memory_table(&["入账日期", "新增日期"], &[&["2025-01-02", "2025-01-03"]]);
+        let payload = json!({"file2":main_llm_side_payload(&table, Some(&json!({})), None, true)});
+        assert!(llm_single_shared_date_column(&payload, "file2").is_none());
+        let reviewed = finalize_llm_review(json!({"fieldReviews":[{"role":"addition_date", "file_side":"file2",
+            "action":"replace", "suggested_mapping":{"file2":"新增日期"}, "confidence":0.9}]}), payload, false);
+        assert_eq!(reviewed["fieldReviews"][0]["suggested_mapping"]["file2"], "新增日期");
+    }
+
+    #[test]
+    fn date_review_rejects_purchase_status_even_at_full_confidence() {
+        for (role, side) in [("addition_date", "file2"), ("addition_date", "file1"), ("date", "file2"), ("disposal_date", "file2")] {
+            let payload = json!({side: {"headers":["已购"], "samples":{"已购":["NEW 新建", "NEW 新建", "购入"]}}});
+            for mut item in [
+                json!({"role":role,"file_side":side,"suggested_column":"已购","action":"fill","confidence":1.0}),
+                json!({"role":role,"suggested_mapping":{side:"已购"},"action":"replace","confidence":1.0}),
+            ] {
+                sanitize_llm_review_item(&mut item, &payload);
+                assert_eq!(item["confidence"], 0.0);
+                assert!(item.get("suggested_column").is_none());
+                assert!(item.get("suggested_mapping").is_none());
+            }
+            let reviewed = finalize_llm_review(
+                json!({"suggestions":[{"role":role,"file_side":side,"suggested_column":"已购","action":"fill","confidence":1.0}]}),
+                payload,
+                side == "file1" || role == "disposal_date",
+            );
+            assert_eq!(reviewed["autoApplied"], json!([]));
+            assert!(reviewed["message"].as_str().unwrap().contains("已忽略"));
+        }
+    }
+
+    #[test]
+    fn date_review_accepts_dates_and_excel_serials_but_not_flags_or_years() {
+        let payload = json!({"file2":{"headers":["新增日期"], "samples":{"新增日期":["2025-01-02", "45659.0", "20250103"]}}});
+        let mut item = json!({"role":"addition_date","file_side":"file2","suggested_column":"新增日期","action":"fill","confidence":0.95});
+        sanitize_llm_review_item(&mut item, &payload);
+        assert_eq!(item["suggested_column"], "新增日期");
+        assert_eq!(item["confidence"], 0.95);
+        for values in [json!(["0", "1"]), json!(["2024", "2025"]), json!([])] {
+            let payload = json!({"file2":{"samples":{"新增日期":values}}});
+            assert!(!llm_date_column_is_compatible(&payload, "file2", "新增日期"));
+        }
+    }
+
+    #[test]
+    fn review_table_reloads_after_source_or_header_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("资产.csv");
+        fs::write(&path, "编号,名称\nA1,甲\n").unwrap();
+        let old = load_review_table(&path, None, Some(1), false).unwrap();
+        assert_eq!(old.rows.len(), 1);
+        fs::write(&path, "编号,名称\nA1,甲\nA2,乙\n").unwrap();
+        let new = load_review_table(&path, None, Some(1), false).unwrap();
+        assert_eq!(new.rows.len(), 2);
+        assert_eq!(old.rows.len(), 1);
+        let changed_header = load_review_table(&path, None, Some(2), false).unwrap();
+        assert_eq!(changed_header.headers[0], "A1");
+    }
+
+    #[test]
+    fn export_reuses_last_match_until_user_rematches() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = params(dir.path());
+        let old = test_preview(p.clone()).unwrap();
+        assert_eq!(old["stats"]["both"], 1);
+        // 匹配后改键位/映射但不重新匹配：导出复用上一次匹配结果（与第一
+        // 步展示的统计同源），改动的键与映射不生效。
+        p["beginKeys"] = json!(["资产名称"]);
+        p["endKeys"] = json!(["资产名称"]);
+        p["endMapping"]["originalValue"] = json!("累计折旧");
+        let output = test_export(p.clone()).unwrap();
+        assert!(output["outputPaths"].as_array().is_some_and(|paths| !paths.is_empty()));
+        let mut workbook = open_workbook_auto(dir.path().join("FA_List.xlsx")).unwrap();
+        let range = workbook.worksheet_range("FA List").unwrap();
+        let row = range.rows().find(|row| row.get(2).is_some_and(|value| data_string(value) == "甲")).unwrap();
+        assert_eq!(data_string(&row[1]), "A1", "沿用上一次匹配的键（卡片编号）");
+        assert_eq!(data_string(&row[6]), "100", "沿用上一次匹配的原值映射");
+        // 回第一步重新匹配：快照刷新，导出按新键位/映射生成。
+        test_preview(p.clone()).unwrap();
+        test_export(p).unwrap();
+        let mut workbook = open_workbook_auto(dir.path().join("FA_List.xlsx")).unwrap();
+        let range = workbook.worksheet_range("FA List").unwrap();
+        let row = range.rows().find(|row| row.get(2).is_some_and(|value| data_string(value) == "甲")).unwrap();
+        assert_eq!(data_string(&row[1]), "甲", "重新匹配后使用新的匹配键");
+        assert_eq!(data_string(&row[6]), "40", "重新匹配后使用人工修改后的原值映射");
+    }
+
+    #[test]
+    fn export_applies_current_supplements_after_matching_and_clears_old_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = params(dir.path());
+        test_preview(p.clone()).unwrap();
+        let disposal = dir.path().join("处置.csv");
+        let addition = dir.path().join("新增.csv");
+        fs::write(&disposal, "编号,摘要,业务类型,日期,原值,折旧\nA2,报废,出售,2025-05-01,50,0\nX9,报废,出售,2025-05-01,1,1\n").unwrap();
+        fs::write(&addition, "编号,方式\nA3,购置\n").unwrap();
+        p["disposalSupplement"] = json!({"path":disposal,"keys":["编号"],"method":"摘要","date":"日期","originalValue":"原值","depreciation":"折旧"});
+        p["additionSupplement"] = json!({"path":addition,"keys":["编号"],"method":"方式"});
+        test_export(p.clone()).unwrap();
+        let mut wb = open_workbook_auto(dir.path().join("FA_List.xlsx")).unwrap();
+        let range = wb.worksheet_range("处置清单_BKD").unwrap();
+        assert_eq!(data_string(range.get((0, 11)).unwrap()), "处置方式");
+        assert_eq!(data_string(range.get((2, 11)).unwrap()), "报废");
+        assert_eq!(data_string(range.get((2, 12)).unwrap()), "2025-05-01");
+        assert_eq!(number(&data_string(range.get((2, 14)).unwrap())), 0.0);
+        let range = wb.worksheet_range("新增清单_BKD").unwrap();
+        assert_eq!(data_string(range.get((2, 8)).unwrap()), "购置");
+        let mut unmatched = open_workbook_auto(dir.path().join("[未匹配资产变动清单].xlsx")).unwrap();
+        let range = unmatched.worksheet_range("未匹配处置清单").unwrap();
+        assert_eq!(data_string(range.get((0, 0)).unwrap()), "编号");
+        assert_eq!(data_string(range.get((0, 1)).unwrap()), "摘要");
+        assert_eq!(data_string(range.get((1, 0)).unwrap()), "X9");
+        // 模拟旧快照已含补充数据；更换选列须采用当前映射。
+        test_preview(p.clone()).unwrap();
+        p["disposalSupplement"]["method"] = json!("业务类型");
+        test_export(p.clone()).unwrap();
+        let mut wb = open_workbook_auto(dir.path().join("FA_List.xlsx")).unwrap();
+        assert_eq!(data_string(wb.worksheet_range("处置清单_BKD").unwrap().get((2, 11)).unwrap()), "出售");
+        p.as_object_mut().unwrap().remove("disposalSupplement");
+        p.as_object_mut().unwrap().remove("additionSupplement");
+        let mut loaded = crate::fa_merge_snapshot::load(&p).unwrap();
+        apply_supplements(&mut loaded.result, &loaded.effective_params, &AtomicBool::new(false)).unwrap();
+        assert!(loaded.result.unmatched_disposal.is_empty());
+        assert!(loaded.result.rows.iter().all(|row| !row.extra.contains_key("处置方式_辅助_文件1") && !row.extra.contains_key("新增方式_辅助_文件2")));
+        test_export(p).unwrap();
+        let mut wb = open_workbook_auto(dir.path().join("FA_List.xlsx")).unwrap();
+        assert_eq!(data_string(wb.worksheet_range("处置清单_BKD").unwrap().get((2, 11)).unwrap()), "[处置方式?]");
     }
 
     fn test_export(params: Value) -> Result<Value, AppError> {
@@ -6757,6 +8636,181 @@ mod tests {
         assert!(result["message"].as_str().unwrap().contains("未启用"));
     }
     #[test]
+    fn suggest_mapping把折旧年限年列认给寿命角色() {
+        let table = in_memory_table(
+            &["卡片编号", "折旧年限(年)", "原值"],
+            &[&["A1", "5", "100"], &["A2", "10", "200"]],
+        );
+        let mapping = suggest_mapping(&table);
+        assert_eq!(mapping["life"], json!("折旧年限(年)"));
+        // 含“(年)”的列头沿用既有年换月规则，无需额外处理。
+        assert_eq!(life_scale_for_column("折旧年限(年)", &[5.0, 10.0]), 12.0);
+    }
+    #[test]
+    fn 归一化连接键统一数字引号与大小写口径() {
+        assert_eq!(normalize_join_key("001009"), "1009");
+        assert_eq!(normalize_join_key(" 1009 "), "1009");
+        assert_eq!(normalize_join_key("1009.0"), "1009");
+        assert_eq!(normalize_join_key("-0"), "0");
+        assert_eq!(normalize_join_key("'001009"), "1009");
+        // 含空格的中文文本只做首尾修剪，内部空格保留。
+        assert_eq!(normalize_join_key(" 设备 甲 "), "设备 甲");
+        assert_eq!(normalize_join_key("A-1"), "a-1");
+        // 正式合并的键构造路径与预检共用同一口径。
+        assert_eq!(normalize_key("001009", false, true), "1009");
+        assert_eq!(normalize_key("'001009", false, true), "1009");
+        assert_eq!(normalize_key("1009.0", false, true), "1009");
+        assert_eq!(normalize_key("2025-06-12", false, true), "2025-06-12");
+    }
+    #[test]
+    fn 建议键正向纠正把期末键列换成含样本的列() {
+        let begin = in_memory_table(
+            &["资产编号", "资产名称"],
+            &[&["1009", "甲设备"], &["1010", "乙设备"]],
+        );
+        // 期末“资产编码”列实际放的是类别文本，真实ID在“卡片号”列。
+        let end = in_memory_table(
+            &["卡片号", "资产编码", "资产名称"],
+            &[&["1009", "电子设备", "甲设备"], &["1010", "电子设备", "乙设备"]],
+        );
+        let mut begin_keys = vec!["资产编号".into()];
+        let mut end_keys = vec!["资产编码".into()];
+        let pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys).unwrap();
+        assert_eq!(end_keys, vec!["卡片号".to_string()]);
+        assert_eq!(begin_keys, vec!["资产编号".to_string()]);
+        assert_eq!(
+            pairing,
+            vec![json!({"begin": "资产编号", "end": "卡片号", "hit": true})]
+        );
+    }
+    #[test]
+    fn 建议键纠正跳过禁列并取最靠左的非禁列() {
+        let begin = in_memory_table(&["资产编号"], &[&["1009"]]);
+        // “类别备注”含“类别”是禁列且同样含样本；两个非禁候选里取更靠左的“标识前”。
+        let end = in_memory_table(
+            &["备注", "类别备注", "标识前", "标识后"],
+            &[&["甲乙", "1009", "1009", "1009"]],
+        );
+        let mut begin_keys = vec!["资产编号".into()];
+        let mut end_keys = vec!["备注".into()];
+        repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys).unwrap();
+        assert_eq!(end_keys, vec!["标识前".to_string()]);
+    }
+    #[test]
+    fn 建议键反向纠正改期初键列() {
+        let begin = in_memory_table(
+            &["资产编号", "旧资产编号"],
+            &[&["甲类别", "1009"]],
+        );
+        let end = in_memory_table(&["资产编码"], &[&["1009"]]);
+        let mut begin_keys = vec!["资产编号".into()];
+        let mut end_keys = vec!["资产编码".into()];
+        let pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys).unwrap();
+        assert_eq!(begin_keys, vec!["旧资产编号".to_string()]);
+        assert_eq!(end_keys, vec!["资产编码".to_string()]);
+        assert_eq!(
+            pairing,
+            vec![json!({"begin": "旧资产编号", "end": "资产编码", "hit": true})]
+        );
+    }
+    #[test]
+    fn 双侧都找不到时配对被同步撤掉() {
+        let begin = in_memory_table(&["资产编号", "资产名称"], &[&["AAA", "甲"]]);
+        let end = in_memory_table(&["资产编码", "资产名称"], &[&["ZZZ", "甲"]]);
+        let mut begin_keys = vec!["资产编号".into(), "资产名称".into()];
+        let mut end_keys = vec!["资产编码".into(), "资产名称".into()];
+        let pairing = repair_suggested_key_pairing(&begin, &end, &mut begin_keys, &mut end_keys).unwrap();
+        // 第0位两侧互相找不到：撤；第1位样本一致：留。
+        assert_eq!(begin_keys, vec!["资产名称".to_string()]);
+        assert_eq!(end_keys, vec!["资产名称".to_string()]);
+        assert_eq!(
+            pairing,
+            vec![json!({"begin": "资产名称", "end": "资产名称", "hit": true})]
+        );
+    }
+    #[test]
+    fn inspect返回纠正后的逐位配对状态() {
+        let dir = tempfile::tempdir().unwrap();
+        let begin = dir.path().join("begin.csv");
+        let end = dir.path().join("end.csv");
+        fs::write(&begin, "资产编号,资产名称\n1009,甲\n1010,乙\n").unwrap();
+        fs::write(&end, "旧编号,资产编码,资产名称\n1009,1,甲\n1010,2,乙\n").unwrap();
+        let inspected = inspect(json!({"beginPath": begin, "endPath": end})).unwrap();
+        // 词表先选中“资产编码”，预碰撞发现样本在“旧编号”列后静默纠正。
+        assert_eq!(
+            inspected["suggestedMapping"]["end"]["matchKeys"],
+            json!(["旧编号", "资产名称"])
+        );
+        assert_eq!(
+            inspected["keyPairing"],
+            json!([
+                {"begin": "资产编号", "end": "旧编号", "hit": true},
+                {"begin": "资产名称", "end": "资产名称", "hit": true}
+            ])
+        );
+    }
+    #[test]
+    fn 键预检对手工错配只报告不纠正() {
+        let dir = tempfile::tempdir().unwrap();
+        let begin = dir.path().join("begin.csv");
+        let end = dir.path().join("end.csv");
+        fs::write(&begin, "资产编号,资产名称\n1009,甲\n").unwrap();
+        fs::write(&end, "资产编码,资产名称\n1009,甲\n").unwrap();
+        let matched = fa_key_check(json!({
+            "beginPath": begin, "endPath": end,
+            "beginKeys": ["资产编号"], "endKeys": ["资产编码"]
+        }))
+        .unwrap();
+        assert_eq!(
+            matched["keyPairing"],
+            json!([{"begin": "资产编号", "end": "资产编码", "hit": true}])
+        );
+        let mismatched = fa_key_check(json!({
+            "beginPath": begin, "endPath": end,
+            "beginKeys": ["资产名称"], "endKeys": ["资产编码"]
+        }))
+        .unwrap();
+        assert_eq!(
+            mismatched["keyPairing"],
+            json!([{"begin": "资产名称", "end": "资产编码", "hit": false}])
+        );
+        // 数量不一致按较短一侧配对，多出的键位单侧呈现且恒为未命中。
+        let ragged = fa_key_check(json!({
+            "beginPath": begin, "endPath": end,
+            "beginKeys": ["资产编号", "资产名称"], "endKeys": ["资产编码"]
+        }))
+        .unwrap();
+        assert_eq!(
+            ragged["keyPairing"],
+            json!([
+                {"begin": "资产编号", "end": "资产编码", "hit": true},
+                {"begin": "资产名称", "end": "", "hit": false}
+            ])
+        );
+    }
+    #[test]
+    fn 归一化连接让文本前导零编号与数字编号配上() {
+        let dir = tempfile::tempdir().unwrap();
+        let begin = dir.path().join("begin.csv");
+        let end = dir.path().join("end.csv");
+        fs::write(&begin, "卡片编号,原值\n001009,100\n").unwrap();
+        fs::write(&end, "卡片编号,原值\n1009,120\n").unwrap();
+        let p = json!({
+            "beginPath": begin, "endPath": end,
+            "beginKeys": ["卡片编号"], "endKeys": ["卡片编号"],
+            "balanceSheetDate": "2025-12-31",
+            "outputPath": dir.path().join("FA_List.xlsx"),
+            "beginMapping": {"originalValue": "原值"},
+            "endMapping": {"originalValue": "原值"},
+        });
+        let result = merge(&p, &|_, _, _, _| {}, &AtomicBool::new(false)).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].source, "两文件都有");
+        // 连接比较已归一，导出展示列仍是原始文本。
+        assert_eq!(result.rows[0].begin.as_ref().unwrap()[0], "001009");
+        assert_eq!(result.rows[0].end.as_ref().unwrap()[0], "1009");
+    }
+    #[test]
     fn rerun_review_recovers_a_manually_unmapped_start_date() {
         let dir = std::env::temp_dir().join(format!("fa-llm-unmapped-date-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -6823,6 +8877,49 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn llm_keeps_normalizable_life_and_residual_columns() {
+        for (role, key, header, replacement) in [
+            ("life", "life", "计划使用年", "累计折旧月份"),
+            ("life", "life", "使用寿命(月)", "剩余折旧月份"),
+            ("residual", "residualRate", "残值", "残值率"),
+            ("residual", "residualRate", "残值率", "残值"),
+        ] {
+            let payload = json!({
+                "file1":{"headers":[header,replacement],"mapping":{key:header}},
+                "file2":{"headers":[header,replacement],"mapping":{key:header}}
+            });
+            for field in ["suggestions", "fieldReviews"] {
+                for side in ["file1", "file2"] {
+                    for item in [
+                        json!({"role":role,"file_side":side,"suggested_column":replacement,"action":"replace","confidence":0.99}),
+                        json!({"role":role,"suggested_mapping":{side:replacement},"action":"replace","confidence":0.99}),
+                        json!({"role":role,"file_side":side,"action":"clear","confidence":0.99}),
+                    ] {
+                        let reviewed = finalize_llm_review(json!({field:[item]}), payload.clone(), false);
+                        assert_eq!(reviewed["autoApplied"], json!([]));
+                        assert_eq!(reviewed["fieldReviews"], json!([]), "{role} {side} {field}");
+                        assert_eq!(reviewed["passed"], true);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn llm_can_fill_missing_units_and_correct_semantically_wrong_life() {
+        let payload = json!({
+            "file1":{"headers":["计划使用年"],"mapping":{"life":"计划使用年"}},
+            "file2":{"headers":["计划使用年","累计折旧月份","残值"],"mapping":{"life":"累计折旧月份"}}
+        });
+        let reviewed = finalize_llm_review(json!({"suggestions":[
+            {"role":"life","suggested_mapping":{"file1":"计划使用年","file2":"计划使用年"},"action":"replace","confidence":0.99},
+            {"role":"residual","file_side":"file2","suggested_column":"残值","action":"fill","confidence":0.99}
+        ]}), payload, false);
+        assert_eq!(reviewed["autoApplied"][0]["suggested_column"], "残值");
+        assert_eq!(reviewed["fieldReviews"][0]["suggested_mapping"], json!({"file2":"计划使用年"}));
+    }
+
     #[test]
     fn llm_contract_auto_applies_high_confidence_and_preserves_match_review() {
         let value = finalize_llm_review(
@@ -7248,7 +9345,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let (result, p) = parity_fixture(&dir);
-        let rows = build_depreciation_period(&result, &p);
+        let rows = build_depreciation_period(&result, &p).unwrap();
         assert!(
             rows.iter()
                 .any(|r| r[0] == "机器" && r[8] == "不一致" && number(&r[9]).abs() > 0.0)
@@ -7787,7 +9884,7 @@ mod tests {
             result
                 .rows
                 .iter()
-                .map(|r| r.match_value.as_str())
+                .map(|r| r.match_value.clone())
                 .collect::<Vec<_>>(),
             vec!["A1", "B1", "C1"]
         );
@@ -7972,8 +10069,20 @@ mod tests {
                 {"field":"期末原值","agg":"count"}
             ]
         });
-        let out = test_export(p).unwrap();
+        let events = std::cell::RefCell::new(Vec::new());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let out = export(p, &|stage, current, total, message| {
+            if stage == "export" { events.borrow_mut().push((current * 100 / total.max(1), message.to_owned())); }
+        }, cancel, &pause).unwrap();
         assert_eq!(out["engine"], "rust-fa");
+        let events = events.into_inner();
+        assert!(events.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        assert!(events.iter().any(|(_, message)| message.contains("压缩并保存")));
+        assert_eq!(events.last().unwrap().0, 99);
+        let timings = out["exportTimings"].as_array().unwrap();
+        assert!(timings.iter().any(|entry| entry[0] == "压缩保存"));
+        assert!(timings.iter().all(|entry| entry[1].as_f64().unwrap() >= 0.0));
         let mut wb = open_workbook_auto(dir.join("FA_List.xlsx")).unwrap();
         // Tab order must match the legacy workbook exactly (00_使用说明 was
         // dropped; 汇总备查 is Rust-only and trails the legacy set).

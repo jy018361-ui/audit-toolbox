@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>已识别卡片 · 圆形背景效果图</title>
+<style>
+  /*
+   * 需求修正（v2）：不是加小圆点徽标，而是把标题的绿色背景本身做成「圆形填充」。
+   * 颜色仍取自真实主题：success-bg #dcf3e7 及其变浅/加深档，文字保持深色。
+   * 每版照旧给 JE / TB 两张卡并排，按真实界面 1:1 复刻。
+   */
+  :root {
+    --ink: #182626;
+    --brand: #1e6267;
+    --success-bg: #dcf3e7;
+    --success-fg: #176642;
+    --danger-fg: #983d2f;
+    --border: #cbd7d2;
+    --border-soft: #e4e9e7;
+    --surface-page: #edf1ee;
+    --pill-border: #99b7aa;
+    --pill-bg: #e8f7ef;
+    --card-border: #afccc5;
+    --bar-bg: #ebf8f1;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    background: var(--surface-page);
+    color: var(--ink);
+    padding: 44px 48px 64px;
+  }
+  .page { max-width: 1400px; margin: 0 auto; }
+  h1 { font-size: 24px; font-weight: 700; color: #173a3e; }
+  .lede { margin-top: 8px; font-size: 13px; color: #5d706d; line-height: 1.7; }
+
+  .variant { margin-top: 40px; }
+  .variant-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  .variant-tag {
+    flex: none;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: var(--brand);
+    color: #eef6f2;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+  }
+  .variant-tag.ghost { background: #83908e; }
+  .variant-tag.reco { background: #176642; }
+  .variant-head b { font-size: 16px; color: #173a3e; }
+  .variant-desc { font-size: 13px; color: #5d706d; margin-bottom: 16px; line-height: 1.7; }
+
+  /* ===== 来源卡 1:1 复刻 ===== */
+  .fx-source-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    align-items: stretch;
+  }
+  .fx-card {
+    position: relative;
+    background: #fff;
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    box-shadow: 0 10px 28px rgba(30, 98, 103, 0.07);
+    padding: 24px;
+    overflow: hidden;
+  }
+  .fx-card-header { position: relative; z-index: 1; display: flex; align-items: center; }
+  .fx-card-title { font-size: 16px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+  .fx-card-content { position: relative; z-index: 1; margin-top: 22px; }
+
+  /* 现状：绿色横条 */
+  .fx-card.bar .fx-card-header {
+    margin: 0 -24px;
+    padding: 9px 24px;
+    background: var(--bar-bg);
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .fx-detected-file {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 13px 16px;
+    border: 1px solid var(--pill-border);
+    border-radius: 11px;
+    background: var(--pill-bg);
+  }
+  .fx-detected-file .name {
+    flex: 1;
+    min-width: 0;
+    color: var(--success-fg);
+    font-weight: 650;
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .fx-detected-file .acts { display: flex; gap: 22px; flex: none; }
+  .fx-detected-file button {
+    border: 0;
+    background: none;
+    padding: 0;
+    font: inherit;
+    font-size: 14px;
+    color: var(--danger-fg);
+    cursor: pointer;
+  }
+  .fx-meta { margin-top: 16px; font-size: 14px; color: var(--ink); }
+  .fx-meta + .fx-meta { margin-top: 12px; }
+
+  /* ===== 方案一 · 椭圆蛋壳：标题坐在一个竖向滚圆的椭圆上 ===== */
+  .oval-bg {
+    display: inline-flex;
+    align-items: center;
+    padding: 16px 40px;
+    border-radius: 50%;
+    background: var(--success-bg);
+    /* 左侧外扩半份内边距，让标题文字与下方内容左对齐 */
+    margin-left: -18px;
+  }
+
+  /* ===== 方案二 · 胶囊：两头全圆，最省空间 ===== */
+  .capsule-bg {
+    display: inline-flex;
+    align-items: center;
+    padding: 11px 26px;
+    border-radius: 999px;
+    background: var(--success-bg);
+  }
+
+  /* ===== 方案三 · 大圆探出：背景就是一个真·正圆，探出卡片左上角被裁掉 ===== */
+  .hill::before {
+    content: "";
+    position: absolute;
+    z-index: 0;
+    width: 340px;
+    height: 340px;
+    border-radius: 50%;
+    background: var(--success-bg);
+    top: -178px;
+    left: -52px;
+    pointer-events: none;
+  }
+
+  /* ===== 方案四 · 双圆叠色：两个错位圆形叠出层次 ===== */
+  .twin { position: relative; display: inline-block; padding: 15px 44px 15px 30px; }
+  .twin::before {
+    content: "";
+    position: absolute;
+    z-index: 0;
+    inset: 0;
+    border-radius: 50%;
+    background: var(--success-bg);
+  }
+  .twin::after {
+    content: "";
+    position: absolute;
+    z-index: 0;
+    width: 52%;
+    height: 132%;
+    right: -4%;
+    top: -16%;
+    border-radius: 50%;
+    background: #bfe7d3;
+  }
+  .twin > b { position: relative; z-index: 1; font-size: 16px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+
+  .footnote {
+    margin-top: 44px;
+    padding: 16px 20px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: #fff;
+    font-size: 13px;
+    color: #5d706d;
+    line-height: 1.9;
+  }
+  .footnote b { color: #173a3e; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>「已识别」卡片 · 圆形背景效果图</h1>
+  <p class="lede">
+    按你的要求修正：绿色不再是横条，而是收成一块「圆形填充」，标题文字直接坐在圆形上。
+    以下 4 版都是圆形背景，差别在圆的形状与探出的方式；卡片其余部分与真实界面完全一致。
+  </p>
+
+  <!-- 现状 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag ghost">现状</span>
+      <b>绿色横条（对照用）</b>
+    </div>
+    <div class="fx-source-grid">
+      <div class="fx-card bar">
+        <div class="fx-card-header"><span class="fx-card-title">已识别：JE 序时账</span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card bar">
+        <div class="fx-card-header"><span class="fx-card-title">已识别：TB 科目余额表</span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 方案一 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag reco">方案一 · 推荐</span>
+      <b>椭圆蛋壳 · 标题坐在椭圆上</b>
+    </div>
+    <p class="variant-desc">文字外围一圈等宽的绿，上下鼓、左右收，圆形感最强、文字最稳；
+      上下留白也足够，不会碰到卡片边缘。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="oval-bg"><span class="fx-card-title">已识别：JE 序时账</span></span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="oval-bg"><span class="fx-card-title">已识别：TB 科目余额表</span></span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 方案二 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag">方案二</span>
+      <b>胶囊 · 两头全圆</b>
+    </div>
+    <p class="variant-desc">比椭圆更瘦一档，只把两条直边变成半圆。占地方最小，
+      与下方「当前模式所需资料」的胶囊标签形状呼应，整体感也顺。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="capsule-bg"><span class="fx-card-title">已识别：JE 序时账</span></span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="capsule-bg"><span class="fx-card-title">已识别：TB 科目余额表</span></span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 方案三 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag">方案三</span>
+      <b>大圆探出 · 真正的「背景是一个圆」</b>
+    </div>
+    <p class="variant-desc">背景本身就是一个大正圆：从卡片左上角探进来，超出部分被卡片圆角裁掉，
+      只露出月牙形的一片绿。最有设计感，但圆的可见部分受卡片宽度影响，窄窗口时露出的弧度会变小。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card hill">
+        <div class="fx-card-header"><span class="fx-card-title">已识别：JE 序时账</span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card hill">
+        <div class="fx-card-header"><span class="fx-card-title">已识别：TB 科目余额表</span></div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 方案四 -->
+  <section class="variant">
+    <div class="variant-head">
+      <span class="variant-tag">方案四</span>
+      <b>双圆叠色 · 深浅两个圆错位叠加</b>
+    </div>
+    <p class="variant-desc">一深一浅两个圆错开叠放，标题压在圆上。比单色椭圆更有层次和「圆形」的暗示，
+      属于四个方案里最有装饰感的一版。</p>
+    <div class="fx-source-grid">
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="twin"><b>已识别：JE 序时账</b></span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04JE.XLSX</span><span class="acts"><button>移除</button><button>更正为 TB</button></span></div>
+          <p class="fx-meta">164,420 行 × 61 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+      <div class="fx-card">
+        <div class="fx-card-header">
+          <span class="twin"><b>已识别：TB 科目余额表</b></span>
+        </div>
+        <div class="fx-card-content">
+          <div class="fx-detected-file"><span class="name">04TB.XLSX</span><span class="acts"><button>移除</button><button>更正为 JE</button></span></div>
+          <p class="fx-meta">580 行 × 11 列</p>
+          <p class="fx-meta">Sheet：Sheet1</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="footnote">
+    <b>说明</b><br>
+    ① 圆形的绿色用的是主题里的标准浅绿（比现在横条的绿稍微实一点，圆形轮廓更清楚）；想要更淡可以再调。<br>
+    ② 同样是一次改动、三个页面（借款利息 / 存款利息 / 汇兑损益）同时生效。<br>
+    ③ 确定方案后我把颜色深浅、圆的大小再按你的感觉微调到位。
+  </div>
+</div>
+</body>
+</html>

@@ -1,7 +1,8 @@
-import { invoke } from "@tauri-apps/api/core";
+import { diagnosticInvoke as invoke } from "./diagnostics";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ReleaseNotesSchema } from "./updateNotes";
+import { JobStartDelivery } from "./jobStartDelivery";
 import { version as appVersion } from "../package.json";
 import { demoDataEnabled, demoJobLookup, demoLookup, demoPath,
   cancelDemoJob, demoReplayJobs, injectDemoJobEvent, registerDemoReplayJob,
@@ -9,12 +10,19 @@ import { demoDataEnabled, demoJobLookup, demoLookup, demoPath,
 import "./preview/layoutAudit";
 import {
   BootstrapSchema,
+  SecretValueSchema,
   HistoryRowSchema,
   JobEventSchema,
   MeetingEventSchema,
   MeetingRecordStartSchema,
   MeetingRecordStopSchema,
   MeetingStatusSchema,
+  MeetingResultSchema,
+  MeetingHistoryRowSchema,
+  MeetingVocabularyEntrySchema,
+  MeetingSpeakerNamesSchema,
+  MeetingMailDraftSchema,
+  type MeetingVocabularyEntry,
   TaskRestoreSchema,
   ToolManifestSchema,
   type HistoryRow,
@@ -80,6 +88,30 @@ export type SyncBusyEntry = { id: number; method: string; detail?: string };
 
 const syncBusyListeners = new Set<(entries: SyncBusyEntry[]) => void>();
 let syncBusySeq = 0;
+// 停止等待只结束前端 Promise；同一来源再次上传时复用仍在运行的只读识别，
+// 避免旧 Rust 调用和新调用同时解析大账表、互相抢 CPU。
+const sharedLedgerReads = new Map<string, Promise<unknown>>();
+const SHARED_LEDGER_METHODS = new Set([
+  "deposit.classify_source", "deposit.inspect_tb", "deposit.inspect_je",
+  "fx.classify_source", "fx.inspect_tb", "fx.inspect_je",
+  "loan.inspect", "loan.tb_accounts",
+]);
+
+function invokeEngine(method: string, params: Record<string, unknown>): Promise<unknown> {
+  if (!SHARED_LEDGER_METHODS.has(method)) {
+    return invoke<unknown>("engine_call", { method, params });
+  }
+  const key = JSON.stringify([method, params]);
+  const active = sharedLedgerReads.get(key);
+  if (active) return active;
+  const pending = invoke<unknown>("engine_call", { method, params });
+  sharedLedgerReads.set(key, pending);
+  void pending.then(
+    () => { if (sharedLedgerReads.get(key) === pending) sharedLedgerReads.delete(key); },
+    () => { if (sharedLedgerReads.get(key) === pending) sharedLedgerReads.delete(key); },
+  );
+  return pending;
+}
 // abort 只掐断前端的「等待」：Rust 侧一口气跑完的处理无法安全击杀，会自行
 // 收尾，但结果按终止要求丢弃（engineCall 的 promise 在 abort 时即拒绝）。
 const syncBusyActive = new Map<
@@ -121,7 +153,7 @@ export function syncBusyAbortAll(): number {
   for (const id of pending) {
     const item = syncBusyActive.get(id);
     syncBusyActive.delete(id);
-    item?.abort(new Error(SYNC_BUSY_ABORTED_MESSAGE));
+    item?.abort(Object.assign(new Error(SYNC_BUSY_ABORTED_MESSAGE), { code: "SYNC_BUSY_ABORTED" }));
   }
   if (pending.length > 0) notifySyncBusy();
   return pending.length;
@@ -165,7 +197,7 @@ export async function engineCall(
       },
     });
     notifySyncBusy();
-    invoke<unknown>("engine_call", { method, params }).then(
+    invokeEngine(method, params).then(
       (value) => settle("fulfill", value),
       (error) => settle("reject", undefined, error),
     );
@@ -198,6 +230,7 @@ const DEMO_JOB_TOOL_ID_RULES: Array<[prefix: string, toolId: string]> = [
   ["kanzhang.mark_", "je_sign_mark"],
   ["kanzhang.", "kanzhang"],
   ["audipick.", "audipick"],
+  ["ocr.", "ocr"],
   ["tbje_check.", "tbje_check"],
   ["fa.dep_", "fa_dep_calc"],
   ["fa.policy_", "fa_policy_compare"],
@@ -209,11 +242,14 @@ const DEMO_JOB_TOOL_ID_RULES: Array<[prefix: string, toolId: string]> = [
   ["pdf2excel.", "pdf_to_excel"],
   ["fuzzy.", "fuzzy_match"],
   ["meeting.", "meeting_minutes"],
+  ["meeting.", "meeting_minutes"],
 ];
 
 const demoJobToolId = (method: string): string =>
   DEMO_JOB_TOOL_ID_RULES.find(([prefix]) => method.startsWith(prefix))?.[1] ??
   "Excel_Merger";
+
+const jobStartDelivery = new JobStartDelivery();
 
 export async function jobStart(
   method: string,
@@ -231,7 +267,15 @@ export async function jobStart(
     registerDemoReplayJob(jobId, method, toolId, events);
     return Promise.resolve(jobId);
   }
-  return invoke<string>("job_start", { method, params });
+  const finishStart = jobStartDelivery.begin();
+  let jobId: string | undefined;
+  try {
+    jobId = await invoke<string>("job_start", { method, params });
+    return jobId;
+  } finally {
+    // 成功和拒绝都释放通知，避免一次启动失败拖住其他工具的事件。
+    finishStart(jobId);
+  }
 }
 
 export const jobCancel = (jobId: string) => {
@@ -339,14 +383,20 @@ export const secretSet = (name: string, value: string) =>
   inTauri()
     ? invoke<void>("secret_set", { name, value })
     : Promise.reject(previewUnavailable("保存密钥"));
+export const secretGet = (name: string) =>
+  inTauri()
+    ? invoke("secret_get", { name }).then((value) => SecretValueSchema.parse(value))
+    : Promise.reject(previewUnavailable("查看已保存密钥"));
 export const audipickLlmTest = (profile: Record<string, unknown>, apiKey?: string) =>
   inTauri()
     ? invoke<{ message: string; elapsedMs: number }>("audipick_llm_test", { profile, apiKey: apiKey?.trim() || null })
     : Promise.reject(previewUnavailable("测试 AudiPick AI 连接"));
-export const audipickOcrTest = (engine: string, imageBase64: string, apiKey?: string, secretKey?: string) =>
+export const audipickOcrTest = (engine: string, imageBase64: string, apiKey?: string, secretKey?: string, ocrConfig?: { bailian_base_url: string; bailian_model: string }, useGlobalLlm?: boolean) =>
   inTauri()
     ? invoke<{ message: string; elapsedMs: number }>("audipick_ocr_test", {
         engine, imageBase64, apiKey: apiKey?.trim() || null, secretKey: secretKey?.trim() || null,
+        ocrConfig: ocrConfig ?? null,
+        ...(useGlobalLlm === undefined ? {} : { useGlobalLlm }),
       })
     : Promise.reject(previewUnavailable("测试 OCR 连接"));
 export const secretDelete = (name: string) =>
@@ -363,6 +413,69 @@ export const legacyImport = (path: string) =>
     : Promise.reject(previewUnavailable("导入迁移备份"));
 
 // ===== 会议纪要助手 =====
+
+export const meetingVocabularyList = async () => {
+  if (!inTauri()) return [];
+  return MeetingVocabularyEntrySchema.array().parse(await invoke("meeting_vocabulary_list"));
+};
+
+export const meetingVocabularySave = async (entry: MeetingVocabularyEntry) => {
+  if (!inTauri()) throw previewUnavailable("保存会议词库");
+  const validated = MeetingVocabularyEntrySchema.parse(entry);
+  return MeetingVocabularyEntrySchema.array().parse(await invoke("meeting_vocabulary_save", { entry: validated }));
+};
+
+export const meetingVocabularyDelete = async (id: string) => {
+  if (!inTauri()) throw previewUnavailable("删除会议词条");
+  return MeetingVocabularyEntrySchema.array().parse(await invoke("meeting_vocabulary_delete", { id }));
+};
+
+export const meetingHistoryList = async () => {
+  if (!inTauri()) return MeetingHistoryRowSchema.array().parse(demoLookup("meeting.history_list")?.({}) ?? []);
+  return MeetingHistoryRowSchema.array().parse(await invoke("meeting_history_list"));
+};
+
+export const meetingHistoryGet = async (id: string) => {
+  if (!inTauri()) {
+    const demo = demoLookup("meeting.history_get");
+    if (demo) return MeetingResultSchema.parse(demo({id}));
+    throw previewUnavailable("读取会议历史");
+  }
+  return MeetingResultSchema.parse(await invoke("meeting_history_get", { id }));
+};
+
+export const meetingReadTranscript = async (path: string) => {
+  if (!inTauri()) {
+    const demo = demoLookup("meeting.read_transcript");
+    if (demo) return String(demo({path}));
+    throw previewUnavailable("读取转写稿");
+  }
+  const value = await invoke("meeting_read_transcript", { path });
+  if (typeof value !== "string") throw new Error("转写稿返回格式异常。");
+  return value;
+};
+
+export const meetingReadMinutes = async (path: string) => {
+  if (!inTauri()) throw previewUnavailable("读取会议纪要");
+  return MeetingResultSchema.parse(await invoke("meeting_read_minutes", { path }));
+};
+
+export const meetingSaveMinutes = async (path: string, minutesMarkdown: string, expectedMarkdown: string, speakerNames: Record<string, string> = {}) => {
+  if (!inTauri()) throw previewUnavailable("保存会议纪要");
+  if (typeof minutesMarkdown !== "string" || new TextEncoder().encode(minutesMarkdown).length > 2 * 1024 * 1024) {
+    throw new Error("会议纪要超过 2 MB，请缩短正文后保存。");
+  }
+  const names = MeetingSpeakerNamesSchema.parse(speakerNames);
+  return MeetingResultSchema.parse(await invoke("meeting_save_minutes", { path, minutesMarkdown, expectedMarkdown, speakerNames: names }));
+};
+
+export const meetingCreateMailDraft = async (subject: string, htmlBody: string) => {
+  if (!inTauri()) throw previewUnavailable("生成 Outlook 邮件草稿");
+  if (!subject.trim() || subject.length > 255 || /[\r\n]/.test(subject) || new TextEncoder().encode(htmlBody).length > 4 * 1024 * 1024) {
+    throw new Error("邮件标题或正文格式不正确，正文最多 4 MB。");
+  }
+  return MeetingMailDraftSchema.parse(await invoke("meeting_create_mail_draft", { subject, htmlBody }));
+};
 
 export const meetingStatus = () =>
   inTauri()
@@ -413,22 +526,25 @@ export const meetingRecordStop = () =>
       )
     : Promise.reject(previewUnavailable("停止会议录音"));
 
-/** 语音转写连接测试：传 plan 走套餐通道（realtime 连接测试），
- *  否则按通用通道验证 paraformer 上传凭证密钥。 */
+/** 按当前通道、地址与模型测试连接；不提交录音文件。 */
 export const meetingAsrTest = (
   apiKey?: string,
-  plan?: { baseUrl: string; model: string; apiKey?: string },
+  config?: { channel: "paraformer" | "token_plan"; baseUrl: string; model: string },
 ) =>
   inTauri()
     ? invoke<{ ok: boolean; message: string; elapsedMs: number }>(
         "meeting_asr_test",
-        plan
+        config?.channel === "token_plan"
           ? {
-              planBaseUrl: plan.baseUrl,
-              planModel: plan.model,
-              planApiKey: plan.apiKey?.trim() || null,
+              planBaseUrl: config.baseUrl,
+              planModel: config.model,
+              planApiKey: apiKey?.trim() || null,
             }
-          : { apiKey: apiKey?.trim() || null },
+          : {
+              apiKey: apiKey?.trim() || null,
+              baseUrl: config?.baseUrl ?? null,
+              model: config?.model ?? null,
+            },
       )
     : Promise.reject(previewUnavailable("测试百炼语音转写连接"));
 
@@ -446,6 +562,12 @@ export const meetingAskChoice = (accepted: boolean) =>
   inTauri()
     ? emit("meeting-ask-choice", { accepted })
     : Promise.resolve();
+
+/** 同一询问窗口隐藏后复用，下次显示前清除上一场的错误和忙碌状态。 */
+export async function listenMeetingAskReset(callback: () => void): Promise<UnlistenFn> {
+  if (!inTauri()) return () => undefined;
+  return listen("meeting-ask-reset", callback);
+}
 
 /** 主窗口监听询问小窗的决定（「本次不记录」要压制当前这场会）。 */
 export async function listenMeetingAskChoice(
@@ -504,7 +626,12 @@ export async function listenJobEvents(
     if (demoDataEnabled()) return subscribeDemoJobs(callback);
     return () => undefined;
   }
-  return listen("job-event", (e) => callback(JobEventSchema.parse(e.payload)));
+  let active = true;
+  const off = await listen("job-event", (e) => {
+    const event = JobEventSchema.parse(e.payload);
+    jobStartDelivery.deliver(event.jobId, () => { if (active) callback(event); });
+  });
+  return () => { active = false; off(); };
 }
 
 export async function listenFileDrops(
@@ -514,6 +641,24 @@ export async function listenFileDrops(
   return listen<{ paths?: string[] }>("tauri://drag-drop", (event) =>
     callback(event.payload.paths ?? []),
   );
+}
+
+export type NativeFileDragEvent = {
+  type: "enter" | "over" | "leave" | "drop";
+  paths?: string[];
+};
+
+/** Windows WebView 接管文件拖放，HTML dragenter/drop 不能代替原生事件。 */
+export async function listenNativeFileDragEvents(
+  callback: (event: NativeFileDragEvent) => void,
+): Promise<UnlistenFn> {
+  if (!inTauri()) return () => undefined;
+  return getCurrentWebview().onDragDropEvent(({ payload }) => {
+    callback({
+      type: payload.type,
+      ...(payload.type === "drop" ? { paths: payload.paths } : {}),
+    });
+  });
 }
 
 export type PositionedFileDrop = {
@@ -535,5 +680,92 @@ export async function listenPositionedFileDrops(
       x: event.payload.position.x / scale,
       y: event.payload.position.y / scale,
     });
+  });
+}
+
+// ===== 数据流 DataFlow（可视化数据处理工作流，第一期 8 节点＋二期 12 节点） =====
+// import 声明置于文件末尾同样生效（ES 模块静态导入会被提升），
+// 以满足「api.ts 只在末尾追加、改动最小化」的约定。
+import { dataflowDemoResult } from "./dataflow/demoData";
+import { dataflowRunRequest } from "./dataflow/model";
+import { DataflowSheetNamesSchema } from "./types";
+
+/** 只读取可见 Sheet 清单；批量模式与运行时采用相同的文件匹配规则。 */
+export async function dataflowSheetNames(path: string, sourceType = "file", filePattern = ""): Promise<string[]> {
+  return DataflowSheetNamesSchema.parse(
+    await engineCall("dataflow_sheet_names", { path, sourceType, filePattern }, "读取 Sheet 名称候选"),
+  );
+}
+
+export type DataflowRunMode = "preview" | "full";
+
+/**
+ * 数据流预览运行：每个输入节点取样本快速试跑，不写输出文件。
+ * 请求：engine_call("dataflow_preview", 工作流JSON本体 + runMode + paramOverrides)。
+ * 浏览器预览模式返回内置中文审计示例数据，供 npm run dev 完整体验界面。
+ */
+export async function dataflowPreview(
+  workflow: unknown,
+  paramOverrides: Record<string, string> = {},
+): Promise<unknown> {
+  if (!inTauri()) return dataflowDemoResult("preview", workflow, paramOverrides);
+  return engineCall(
+    "dataflow_preview",
+    dataflowRunRequest(workflow, "preview", paramOverrides),
+    "数据流预览运行（样本数据）",
+  );
+}
+
+/**
+ * 数据流全量运行：完整数据处理，输出节点落盘。
+ * 请求：engine_call("dataflow_run", 工作流JSON本体 + runMode + paramOverrides)。
+ * 可选 uptoNodeId＝「运行到选中节点」：全量数据只执行到该节点（含全部上游）为止，
+ * 其后节点不执行；与 paramOverrides 平级传入。
+ */
+export async function dataflowRun(
+  workflow: unknown,
+  paramOverrides: Record<string, string> = {},
+  uptoNodeId?: string,
+  rowLimit?: number,
+): Promise<unknown> {
+  if (!inTauri()) return dataflowDemoResult("full", workflow, paramOverrides, uptoNodeId);
+  return engineCall(
+    "dataflow_run",
+    dataflowRunRequest(workflow, "full", paramOverrides, uptoNodeId, rowLimit),
+    uptoNodeId ? "数据流运行到选中节点" : "数据流全量运行",
+  );
+}
+
+/** 数据库文件输入的内置示例表名（浏览器预览模式 dataflowDbTables 返回）。 */
+export const DATAFLOW_DB_DEMO_TABLES = ["序时账_2026", "科目余额表", "辅助余额表"];
+
+/**
+ * 列出 .db 数据库文件内的数据表名（数据库文件输入节点的表下拉数据源）。
+ * 请求：engine_call("dataflow_db_tables", { path })，引擎返回 [{name}]，
+ * 这里展开为表名字符串数组；非 SQLite／加密／损坏文件由引擎返回中文诊断。
+ * 浏览器预览模式返回内置示例表名列表。
+ */
+export async function dataflowDbTables(path: string): Promise<string[]> {
+  if (!inTauri()) return [...DATAFLOW_DB_DEMO_TABLES];
+  const result = await engineCall("dataflow_db_tables", { path }, "读取数据库表清单");
+  if (Array.isArray(result)) {
+    return result
+      .map((table): string | undefined =>
+        typeof table === "string" ? table : table?.name,
+      )
+      .filter((name): name is string => typeof name === "string" && name.length > 0);
+  }
+  return [];
+}
+
+/** 通知点击仅带任务编号，结果仍通过会议历史与现有文件授权读取。 */
+export async function meetingNotify(jobId: string, title: string, body: string) {
+  if (!inTauri()) return;
+  await invoke("meeting_notify", { jobId, title, body: body.slice(0, 1000) });
+}
+export async function listenMeetingNotificationOpen(handler: (jobId: string) => void) {
+  if (!inTauri()) return () => undefined;
+  return listen<{ jobId: string }>("meeting-notification-open", event => {
+    if (typeof event.payload?.jobId === "string") handler(event.payload.jobId);
   });
 }

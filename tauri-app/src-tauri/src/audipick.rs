@@ -16,6 +16,27 @@ use std::{
 
 use crate::AppError;
 
+fn write_export_value(
+    sheet: &mut rust_xlsxwriter::Worksheet,
+    row: u32,
+    column: u16,
+    header: &str,
+    value: &Value,
+) -> Result<(), AppError> {
+    let text = match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    if let Some(number) = crate::xlsx_numbers::number_from_text(header, &text) {
+        sheet.write_number_with_format(row, column, number, crate::xlsx_numbers::number_format())
+            .map_err(xlsx_error)?;
+    } else {
+        sheet.write_string(row, column, &text).map_err(xlsx_error)?;
+    }
+    Ok(())
+}
+
 pub fn call(method: &str, params: Value, settings: Value) -> Result<Value, AppError> {
     match method {
         "audipick.config_status" => config_status(&settings),
@@ -38,12 +59,27 @@ pub fn test_ocr_connection(
     image: &str,
     api_key: Option<&str>,
     secret_key: Option<&str>,
+    ocr_config: Option<&Value>,
+    use_global_llm: bool,
 ) -> Result<Value, AppError> {
     if image.is_empty() || image.len() > 200_000 {
         return Err(error("OCR_TEST_IMAGE_INVALID", "OCR 测试图片无效。", None));
     }
     let start = std::time::Instant::now();
-    settings["ocr"] = json!({"engine": engine});
+    if use_global_llm {
+        settings["audipickLlm"] = json!({"mode": "inherit"});
+    }
+    // Only accept non-secret OCR fields from the unsaved form.
+    if let Some(draft) = ocr_config {
+        for name in ["bailian_base_url", "bailian_model"] {
+            if let Some(value) = draft.get(name).and_then(Value::as_str) {
+                if !settings["ocr"].is_object() { settings["ocr"] = json!({}); }
+                settings["ocr"][name] = json!(value);
+            }
+        }
+    }
+    if !settings["ocr"].is_object() { settings["ocr"] = json!({}); }
+    settings["ocr"]["engine"] = json!(engine);
     let value = if engine == "baidu" {
         let ak = api_key
             .filter(|v| !v.trim().is_empty())
@@ -56,6 +92,8 @@ pub fn test_ocr_connection(
             .or_else(|| secret("baidu_ocr_secret"))
             .ok_or_else(|| error("OCR_KEY_MISSING", "请填写百度 Secret Key。", None))?;
         baidu_ocr_with_keys(image, &ak, &sk)
+    } else if engine == "bailian" {
+        bailian_ocr(image, &settings, api_key)
     } else {
         ocr(&json!({"imageBase64": image}), &settings)
     }
@@ -360,14 +398,7 @@ fn export_workpaper(params: &Value) -> Result<Value, AppError> {
     for (row_index, row) in rows.iter().enumerate() {
         for (column, key) in columns.iter().enumerate() {
             let value = row.get(key).cloned().unwrap_or(Value::Null);
-            let text = match value {
-                Value::Null => String::new(),
-                Value::String(value) => value,
-                other => other.to_string(),
-            };
-            sheet
-                .write_string((row_index + 1) as u32, column as u16, &text)
-                .map_err(xlsx_error)?;
+            write_export_value(sheet, (row_index + 1) as u32, column as u16, key, &value)?;
         }
     }
     sheet.set_freeze_panes(1, 0).map_err(xlsx_error)?;
@@ -490,14 +521,7 @@ fn export_workpaper_bundle(params: &Value) -> Result<Value, AppError> {
         for (row_index, row) in rows.iter().enumerate() {
             for (column, key) in columns.iter().enumerate() {
                 let value = row.get(key).cloned().unwrap_or(Value::Null);
-                let text = match value {
-                    Value::Null => String::new(),
-                    Value::String(value) => value,
-                    other => other.to_string(),
-                };
-                sheet
-                    .write_string((row_index + 1) as u32, column as u16, &text)
-                    .map_err(xlsx_error)?;
+                write_export_value(sheet, (row_index + 1) as u32, column as u16, key, &value)?;
             }
         }
         sheet.set_freeze_panes(1, 0).map_err(xlsx_error)?;
@@ -602,6 +626,8 @@ fn config_status(settings: &Value) -> Result<Value, AppError> {
         "ai" => llm_ready && api_type != "dify_chat",
         "baidu" => secret("baidu_ocr_key").is_some() && secret("baidu_ocr_secret").is_some(),
         "local" => local_ocr_ready(),
+        "bailian" => crate::bailian_ocr::OcrConfig::from_settings(settings).is_ok()
+            && secret("bailian_ocr_key").is_some(),
         _ => false,
     };
     Ok(json!({
@@ -609,10 +635,70 @@ fn config_status(settings: &Value) -> Result<Value, AppError> {
                 "apiType": api_type, "model": llm.get("model").cloned().unwrap_or(Value::Null)},
         "ocr": {"ready": ocr_ready, "engine": ocr_engine},
         "credentials": {"baiduApiKey": secret("baidu_ocr_key").is_some(),
+            "bailianOcrKey": secret("bailian_ocr_key").is_some(),
             "baiduSecretKey": secret("baidu_ocr_secret").is_some(), "llmApiKey": llm_secret.is_some(),
             "audipickOpenaiKey": secret("audipick_llm_api_key").is_some(),
             "audipickDifyKey": secret("audipick_dify_api_key").is_some()}
     }))
+}
+
+/// Independent OCR always uses toolbox credentials, never AudiPick's profile.
+pub(crate) fn toolbox_ocr_status(settings: &Value) -> Result<Value, AppError> {
+    let mut global = settings.clone();
+    global["audipickLlm"] = json!({"mode":"inherit"});
+    let mut status = config_status(&global)?;
+    status["llm"]["visionReady"] = json!(status["llm"]["ready"] == true && status["llm"]["apiType"] != "dify_chat");
+    Ok(status)
+}
+
+pub(crate) fn toolbox_ocr_page(params: &Value, settings: &Value) -> Result<Value, AppError> {
+    let mut global = settings.clone();
+    global["audipickLlm"] = json!({"mode":"inherit"});
+    // Truncated text must not be saved as a completed page.
+    global["llm"]["__rejectTruncated"] = json!(true);
+    let engine = settings.pointer("/ocr/engine").and_then(Value::as_str).unwrap_or("ai");
+    let image = params["imageBase64"].as_str().filter(|s| !s.is_empty())
+        .ok_or_else(|| error("OCR_IMAGE_REQUIRED", "没有收到需要识别的页面图片。", None))?;
+    if engine == "ai" {
+        let content = toolbox_llm_request(crate::bailian_ocr::STRUCTURED_PROMPT, "", Some(image), &global)?;
+        return Ok(structured_ocr_result(&content, "ai"));
+    }
+    if engine == "bailian" {
+        let config = crate::bailian_ocr::OcrConfig::from_settings(&global)?;
+        let key = secret("bailian_ocr_key").ok_or_else(||error("OCR_KEY_MISSING", "请填写百炼 OCR API Key。", None))?;
+        let response = config.recognize_structured(image, &key)?;
+        let mut result = structured_ocr_result(response["text"].as_str().unwrap_or(""), "bailian");
+        result["httpTiming"] = response["httpTiming"].clone();
+        return Ok(result);
+    }
+    ocr(params, &global)
+}
+
+fn structured_ocr_result(raw: &str, engine: &str) -> Value {
+    let mut result = crate::bailian_ocr::readable_ocr_content(raw);
+    result["engine"] = json!(engine);
+    // Kept for internal diagnostics only; callers persist it separately from
+    // page text and the normal user/export payload.
+    result["diagnosticResponse"] = json!(raw);
+    result
+}
+
+pub(crate) fn toolbox_llm_request(prompt: &str, text: &str, image: Option<&str>, settings: &Value) -> Result<String, AppError> {
+    let mut global = settings.clone();
+    global["audipickLlm"] = json!({"mode":"inherit"});
+    global["llm"]["__rejectTruncated"] = json!(true);
+    let llm = audipick_llm_config(&global);
+    if !llm["enabled"].as_bool().unwrap_or(false) {
+        return Err(error("LLM_DISABLED", "统一 LLM 尚未启用，请在设置中配置。", None));
+    }
+    if image.is_some() && llm["api_type"] == "dify_chat" {
+        return Err(error("OCR_MODEL_UNSUPPORTED", "当前统一 LLM 接口不支持页面图片。", None));
+    }
+    let content = request_llm(&llm, prompt, text, image)?;
+    if content.trim().is_empty() {
+        return Err(error("OCR_MODEL_EMPTY", "模型未返回正文，请缩短摘录范围或检查模型设置。", None));
+    }
+    Ok(content)
 }
 
 fn llm_text(params: &Value, settings: &Value) -> Result<Value, AppError> {
@@ -710,14 +796,17 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
 /// 两张表共用的复核纪律。**只放对 TB 与 JE 都成立的规则**——
 /// 各自的角色清单与形态规则分别放在 [`REVIEW_JE`] 与 [`REVIEW_TB`] 里，
 /// 免得复核一张表时眼前摆着另一张表的规矩。
-const REVIEW_COMMON: &str = "只能使用输入 availableRoles 中列出的角色——它是本工具当前形态启用的角色清单，包含当前形态的必填、选填角色以及不属于任何互斥形态的公共角色；没列出的角色属于其他形态，即使表里有对应的列也不要提。输入的 currentForm 是脚本按整组匹配判出的账表形态。complete=true 只表示构成该形态的槽位已有非空映射，不证明映射正确；必须先结合 headers 与 sampleRows 逐项验证。当前列与角色语义及取值形态相容时维持现状；明显不相容且有可信替代列时必须 replace；明显不相容但没有可信替代列时必须 clear；证据不足时 uncertain。净额列里是正数还是自带正负号不影响形态判定，借贷符号口径由数据配平判定，不由列名判定。**只有当前映射和候选映射都通过语义及样例验证、仅属偏好差异时，才维持现状，不要为了让它更好看而改**。complete 不代表整张表的映射已经完备——availableRoles 里本工具需要、currentMapping 还缺着的角色（比如原币币种、会计期间），仍必须照样补齐。complete 为 false 时，优先补齐 currentForm.missingSlots 里点名缺失的槽位。除此之外，必须主动补齐 currentMapping 中缺失、但可由 headers 与 sampleRows 判断出来的角色，不得仅复核已有映射。只能使用输入 headers 中真实存在的列，不得虚构列名。双语表头（如「科目描述 Description」「过账日期 Posting Date」）按其中的中文段判断角色。一列只承载一个语义，不能把同一列同时映射到两个角色——唯一的例外是下述「编码与名称写在同一格」的科目列。判断依据必须落在 sampleRows 的实际取值上：每提出一个 replace，先从 sampleRows 里随意取三五行看该列的真实内容，若这几行取值与该角色应有的形态不符（科目编码列应是稳定的数字或字母数字编码，科目名称列应是可读文本，币种列应是三位 ISO 代码，金额列应是数值），就不要提出该 replace。accountCode 与 accountName 是两个彼此独立的角色，不能互换：编码给 accountCode，名称/文本给 accountName。**编码与名称写在同一格**是例外情形（`1001010000:库存现金-人民币`、`1001/库存现金`、`1001_现金`，也有编码后面接反斜杠再接多级名称的写法——分隔符是斜杠、冒号、下划线、反斜杠、竖线之一，前半段是一串数字或字母数字编码）：这一列应**同时映射为 accountCode 与 accountName 两个角色**（脚本自动映射正是这么做的），既不要因为这列里有名称就改判成纯 accountName，也不要把其中任何一个角色挪走或删掉。务必与**层级名称拼接**区分开——`交易性金融资产_结构性存款`、`管理费用_研发费用_水电气费`，以及用反斜杠拼起来的「银行存款、在财务公司存款、活期」这种，前半段是上级科目名不是编码，这些整列属于 accountName。科目余额表与序时账是同一套账，同名角色必须同口径——两边的 accountCode 必须是同一种科目编码，accountName 同理。`抵销科目`、`统驭科目`、`对方科目`、`往来科目`、`预算科目` 记的是对手方或参考科目，取值同样是一串科目编码，跟本方科目长得一模一样，但它们绝不是 accountCode，也不是 accountName。entity 是记账主体（公司代码、核算主体、账套公司），绝不是交易对手方、往来单位（往來單位、Counterparty）、客户（客戶）、供应商（供應商）这类对手方字段，也不是制单人、录入人、审核人、过账人这类操作员；没有明确的主体列时让 entity 空缺，不得拿对手方字段凑数。集团货币／报告货币（Group Currency、集团货币金额）是第三套口径，既不是本位币也不是原币，对应的金额列与币种列一律不映射到任何角色。changes 数组只放真实调整：replace 条目的 suggestedColumn 必须是 headers 中真实存在且不同于当前映射的列；clear 条目必须写 action=clear 并省略 suggestedColumn，只用于删除已经确定错误且无可信替代列的现有映射。确认正确、确认某个本来就空缺的角色应继续空缺、或没有实际变更时不要输出 changes。置信度低于 0.6 的建议不要输出。reason 必须与 action 和 suggestedColumn 指向同一结论。同一列在 changes 里最多出现一次。『整列同值』的意思是全列每一行取值完全相同；只要出现两种以上取值，该列就在逐行区分交易或账户，绝不是本位币列。优先建议原始数据列：由其他列推算出的公式辅助列（如按方向列把金额改写成的「借正贷负」列、用日期与凭证号拼出的唯一码列）不要抢原始列的角色。不要计算金额、汇率或业务分类，只管映射。";
+const REVIEW_COMMON: &str = "第一阶段只能使用输入 availableRoles 中列出的角色——它是本工具当前形态启用的角色清单，包含当前形态的必填、选填角色以及不属于任何互斥形态的公共角色；其他形态字段只能在满足后述 formFallback 条件后，放入独立的类型纠正计划。输入的 currentForm 是脚本按整组匹配判出的账表形态。complete=true 只表示构成该形态的槽位已有非空映射，不证明映射正确；必须先结合 headers 与 sampleRows 逐项验证。当前列与角色语义及取值形态相容时维持现状；明显不相容且有可信替代列时必须 replace；明显不相容但没有可信替代列时必须 clear；证据不足时 uncertain。净额列里是正数还是自带正负号不影响形态判定，借贷符号口径由数据配平判定，不由列名判定。**只有当前映射和候选映射都通过语义及样例验证、仅属偏好差异时，才维持现状，不要为了让它更好看而改**。complete 不代表整张表的映射已经完备——availableRoles 里本工具需要、currentMapping 还缺着的角色（比如原币币种、会计期间），仍必须照样补齐。complete 为 false 时，优先补齐 currentForm.missingSlots 里点名缺失的槽位。除此之外，必须主动补齐 currentMapping 中缺失、但可由 headers 与 sampleRows 判断出来的角色，不得仅复核已有映射。只能使用输入 headers 中真实存在的列，不得虚构列名。双语表头（如「科目描述 Description」「过账日期 Posting Date」）按其中的中文段判断角色。一列只承载一个语义，不能把同一列同时映射到两个角色——唯一的例外是下述「编码与名称写在同一格」的科目列。判断依据必须落在 sampleRows 的实际取值上：每提出一个 replace，先从 sampleRows 里随意取三五行看该列的真实内容，若这几行取值与该角色应有的形态不符（科目编码列应是稳定的数字或字母数字编码，科目名称列应是可读文本，币种列应是三位 ISO 代码，金额列应是数值），就不要提出该 replace。accountCode 与 accountName 是两个彼此独立的角色，不能互换：编码给 accountCode，名称/文本给 accountName。**编码与名称写在同一格**是例外情形（`1001010000:库存现金-人民币`、`1001/库存现金`、`1001_现金`，也有编码后面接反斜杠再接多级名称的写法——分隔符是斜杠、冒号、下划线、反斜杠、竖线之一，前半段是一串数字或字母数字编码）：这一列应**同时映射为 accountCode 与 accountName 两个角色**（脚本自动映射正是这么做的），既不要因为这列里有名称就改判成纯 accountName，也不要把其中任何一个角色挪走或删掉。务必与**层级名称拼接**区分开——`交易性金融资产_结构性存款`、`管理费用_研发费用_水电气费`，以及用反斜杠拼起来的「银行存款、在财务公司存款、活期」这种，前半段是上级科目名不是编码，这些整列属于 accountName。科目余额表与序时账是同一套账，同名角色必须同口径——两边的 accountCode 必须是同一种科目编码，accountName 同理。`抵销科目`、`统驭科目`、`对方科目`、`往来科目`、`预算科目` 记的是对手方或参考科目，取值同样是一串科目编码，跟本方科目长得一模一样，但它们绝不是 accountCode，也不是 accountName。entity 是记账主体（公司代码、核算主体、账套公司），绝不是交易对手方、往来单位（往來單位、Counterparty）、客户（客戶）、供应商（供應商）这类对手方字段，也不是制单人、录入人、审核人、过账人这类操作员；没有明确的主体列时让 entity 空缺，不得拿对手方字段凑数。集团货币／报告货币（Group Currency、集团货币金额）是第三套口径，既不是本位币也不是原币，对应的金额列与币种列一律不映射到任何角色。changes 数组只放真实调整：replace 条目的 suggestedColumn 必须是 headers 中真实存在且不同于当前映射的列；clear 条目必须写 action=clear 并省略 suggestedColumn，只用于删除已经确定错误且无可信替代列的现有映射。确认正确、确认某个本来就空缺的角色应继续空缺、或没有实际变更时不要输出 changes。置信度低于 0.6 的建议不要输出。reason 必须与 action 和 suggestedColumn 指向同一结论。同一列在 changes 里最多出现一次。『整列同值』的意思是全列每一行取值完全相同；只要出现两种以上取值，该列就在逐行区分交易或账户，绝不是本位币列。优先建议原始数据列：由其他列推算出的公式辅助列（如按方向列把金额改写成的「借正贷负」列、用日期与凭证号拼出的唯一码列）不要抢原始列的角色。不要计算金额、汇率或业务分类，只管映射。";
 
 fn review_common_instruction() -> String {
-    REVIEW_COMMON.replace(
+    let common = REVIEW_COMMON.replace(
         "同一列在 changes 里最多出现一次。",
         "同一列在 changes 里通常最多出现一次；唯一例外是经 sampleRows 确认的科目编码＋科目名称混写列，可分别为 accountCode 与 accountName 各出现一次，除此之外绝不放宽。",
-    )
+    );
+    format!("{common}{REVIEW_FORM_FALLBACK}")
 }
+
+const REVIEW_FORM_FALLBACK: &str = "类型纠正必须按两个阶段顺序判断。第一阶段仅在 availableRoles 范围内，优先寻找 currentForm.missingSlots 的候选并放入正常 changes；能补齐当前类型时严禁换型。第二阶段仅在输入存在 formFallback、且第一阶段仍有必填字段找不到可信候选时启用：逐项核对全部表头和样例后，在 formCorrection 中报告 {targetForm:string,missingRoleSearches:[{role:string,status:\"found\"|\"no_candidate\",reason:string}],changes:[与正常changes相同结构]}。missingRoleSearches 必须覆盖 formFallback.missingRoles 的每个角色，已找到候选的标为 found 并放入正常 changes；仍缺失的标为 no_candidate，并说明当前类型为什么没有相容列；不确定、样例全空、仅偏好其他类型均不能作为找不到的证据。只能选择 formFallback.alternatives 中的类型，并使用该类型的 availableRoles；必须提供能完整成立的整组映射，置信度均须高于0.75，禁止只补半套、将借贷单侧充当净额或把本期当本年累计。不属于目标类型的旧金额映射必须显式清除，只有已经确定错误的旧映射才能清除。无充分证据时省略 formCorrection，保留当前类型和缺项。联合复核分别返回 tbFormCorrection、jeFormCorrection；单表（含看账）返回 formCorrection。正常 changes 仍严格局限第一阶段的 availableRoles，禁止把第二阶段字段混入正常 changes。";
 
 /// 科目标题在不同 ERP 导出中含义会互换。这类纠偏必须由 LLM 读取样例值提出，
 /// Coding 只负责在响应返回后拦截与数据形态明显冲突的建议，不能代替模型补答案。
@@ -735,11 +824,15 @@ fn review_je_instruction() -> String {
     )
 }
 
+fn review_tb_instruction() -> String {
+    REVIEW_TB.replace("{TB_DIRECTION_RULES}", crate::ledger_mapping::TB_DIRECTION_REVIEW_RULES)
+}
+
 /// 序时账专属：16 个角色，一行是一条分录。
 const REVIEW_JE: &str = "角色仅可为 entity、date、id、voucherType、accountCode、accountName、summary、currency、functionalCurrency、direction、functionalAmount、functionalDebit、functionalCredit、foreignAmount、foreignDebit、foreignCredit。id 与 accountName 可以映射多列：Oracle 的凭证键要 Batch＋JE Name 两列组合才唯一，少一列就串号；科目名称可能拆成一级、二级两列。其余角色各占一列。多列仅限上述两种真正的拆分：名称只组合科目名称自己的层级列（一级／二级／三级），凭证号只组合构成凭证键的列（如 Batch＋JE Name、凭证字＋凭证号）；冲销凭证号、被冲销凭证号记录的是「这张凭证冲掉了谁」，不是凭证键，预算科目、对方／往来科目也不是本方科目名称——这些列绝不并入多列。voucherType 只认独立成列的凭证类型（SAP 的 BLART、Document Type、凭证类别这类单独一列）；「凭证字＋号合成一列」（如 记-0001、记0001、记2025-0001）整列就是凭证识别字段 id，绝不要建议把这类合成列同时或改为映射 voucherType，也不要建议从中拆出类型。借贷方向只有 direction 一个角色，原币与本位币共用同一列——一条分录的借贷方向对两个口径必然相同，不存在原币记借方而本位币记贷方的情况。金额有三种记法，同一口径内只能成立一种：单列净额（借正贷负）、借方与贷方两列、净额加方向列。两个口径各自独立判定：原币可以是借贷分列而本位币是净额。借方与贷方两列已经成立时，不要再建议把借方或贷方列改映射为净额角色；净额列（无论正负号是否随方向列拆出）已经成立时，也不要建议把同一净额列同时映射为借方与贷方两个角色——三种记法互斥，多选反而破坏方案。币种**一律分两列判定，与科目余额表同口径**：currency 是原币币种，登记这笔分录按什么币记账（凭证货币、Document Currency Key、Enter Currency），逐行可变；functionalCurrency 是本位币币种，登记主体的记账本位币（公司代码货币、Company Code Currency Key、Ledger Currency），整列同值、不区分行。两者都是**币种代码列**（存 CNY／USD 这类三位代码），不是金额列，别跟本位币金额、原币金额混。两者都存在时不要互换。只有一列时先看列名：凭证货币命名的列（货币、凭证货币、交易币种、Document Currency、Enter Currency）就是 currency——整列只剩一种代码只是「整本账都是本币业务」的正常形态，不是本位币列的证据；本位币命名的列（本位币、本币、公司代码货币、总账货币、Ledger Currency、Company Code Currency）才是 functionalCurrency，整列同一个代码的「本币」「本币币种」列绝不能指给 currency。列名两头都不沾的，再按取值分布判：整列同一个代码且几乎不空的是 functionalCurrency，出现两种以上代码或大量空白的是 currency。常用表头示例：会计科目、总账科目、总帐科目（「帐」是「账」的异体字，两种写法都有）属于 accountCode，科目文本／科目全名／科目名称一级／科目名称二级属于 accountName，借贷标志（取值 S／H）属于 direction，唯一码（日期与凭证号已经拼好的一列）属于 id，凭证货币属于 currency，凭证金额、凭证货币金额属于 foreignAmount，本位币金额属于 functionalAmount，借贷属于 direction。列名只是线索、取值才是判据：「会计科目」「总账科目」命名的列在某些导出里放的是名称文本（如 库存现金-人民币），这时它是 accountName；取值是纯编码时才是 accountCode。过账代码（Posting Key，取值 40、50、01 这类数字过账码）不是借贷方向——统驭过账码没有借贷含义，绝不能映射为 direction。金额方案仅可为 signed、direction、debit_credit。";
 
 /// 科目余额表专属：一行是一个科目在某时点的余额。角色清单以传入的 hardcodedCandidates 为准。
-const REVIEW_TB: &str = "角色共分七组：身份（entity、accountCode、accountName）；币种（currency 原币币种、functionalCurrency 本位币）；方向（openingDirection 期初方向、closingDirection 期末方向）；期初余额六件套（本位币净额/借方/贷方、原币净额/借方/贷方）；期末余额六件套（同上）；本年累计发生额（本位币借方/贷方、原币借方/贷方）；本期发生额（本位币净额/借方/贷方，次选口径）。accountName 可以映射多列（如科目名称一级＋二级），其余角色各占一列。多列仅限科目名称的层级列；预算科目、对方／往来、辅助核算等语义不同的列不得并入。余额有三种记法，期初与期末各自独立判定：单列净额（借正贷负）、借方与贷方两列、净额加方向列。没有方向列时净额必须自带正负号，不要为了凑形态硬给一个方向列。方向列的归属看位置：方向列紧邻在某个余额列的右侧（期初余额…方向 / 期末余额…方向）时属于那个余额，紧跟期初余额右侧的映射 openingDirection、紧跟期末余额右侧的映射 closingDirection；表里只有一列「方向」且不在任何余额列右侧时（常见于表头前部、科目信息旁边），它是余额方向，一律映射 closingDirection——即使它紧邻或位于期初余额列的左侧也不要映射为 openingDirection。发生额口径：`借方累计`／`贷方累计` 与 `本年累计借方`／`本年累计贷方` 是同一回事，只是词序不同，都属于本年累计；期末余额列可能写作 `累计余额`（配一个 `累计余额方向`）。列名没写明「本期」还是「本年」时一律按本年累计（审计取的是全年数）；若同一张表出现两列都叫「借方发生额」，金额合计大的是本年累计、小的是本期发生。币种列判定只看取值分布，与列名无关，按两条二选一，没有第三种情况：（1）整列几乎全填满（空白不到一成）且从头到尾只出现一种币种代码 → functionalCurrency，它登记的是主体本位币；（2）其余一切情形 → currency（原币币种列）。这包括出现两种以上币种代码，也包括「只标外币」写法——大部分行空白、只有外币科目行才填币种，空白行的含义是本位币，这恰恰是 currency 列的正常形态，绝不能因为空白多就把它判成本位币列。反例：某列八成行空白、只在美元户/欧元户行填 USD/EUR——它是 currency；整列二百多行全部填同一个币种代码、无一空白——才是 functionalCurrency。币种角色空缺是正常状态：判为原币币种列的只映射 currency，functionalCurrency 空着（很多表根本不单列本位币）；判为本位币列的只映射 functionalCurrency，currency 空着。绝不要因为某个角色还空着，就把已判给另一币种角色的列再塞给它。币种线索文本（currencyText）不在复核范围：识别阶段已按取值自动挑选（文本列里逐行写着账户币种时由脚本登记，如「美元户」「ICBC USD」），currentMapping 里即使有它也维持现状，不要对它输出任何 change，也不要建议把任何文本列新指给它。可以用勾稽等式验证映射是否成立：期末余额 = 期初余额 + 本年累计借方 − 本年累计贷方。若按当前映射大面积对不上，多半是把某一列映射错了口径，应指出来。";
+const REVIEW_TB: &str = "角色共分七组：身份（entity、accountCode、accountName）；币种（currency 原币币种、functionalCurrency 本位币）；方向（openingDirection 期初方向、closingDirection 期末方向）；期初余额六件套（本位币净额/借方/贷方、原币净额/借方/贷方）；期末余额六件套（同上）；本年累计发生额（本位币借方/贷方、原币借方/贷方）；本期发生额（本位币净额/借方/贷方，次选口径）。accountName 可以映射多列（如科目名称一级＋二级），其余角色各占一列。多列仅限科目名称的层级列；预算科目、对方／往来、辅助核算等语义不同的列不得并入。余额有三种记法，期初与期末各自独立判定：单列净额（借正贷负）、借方与贷方两列、净额加方向列。没有方向列时净额必须自带正负号，不要为了凑形态硬给一个方向列。{TB_DIRECTION_RULES}发生额口径：`借方累计`／`贷方累计` 与 `本年累计借方`／`本年累计贷方` 是同一回事，只是词序不同，都属于本年累计；期末余额列可能写作 `累计余额`（配一个 `累计余额方向`）。列名没写明「本期」还是「本年」时一律按本年累计（审计取的是全年数）；若同一张表出现两列都叫「借方发生额」，金额合计大的是本年累计、小的是本期发生。币种列判定只看取值分布，与列名无关，按两条二选一，没有第三种情况：（1）整列几乎全填满（空白不到一成）且从头到尾只出现一种币种代码 → functionalCurrency，它登记的是主体本位币；（2）其余一切情形 → currency（原币币种列）。这包括出现两种以上币种代码，也包括「只标外币」写法——大部分行空白、只有外币科目行才填币种，空白行的含义是本位币，这恰恰是 currency 列的正常形态，绝不能因为空白多就把它判成本位币列。反例：某列八成行空白、只在美元户/欧元户行填 USD/EUR——它是 currency；整列二百多行全部填同一个币种代码、无一空白——才是 functionalCurrency。币种角色空缺是正常状态：判为原币币种列的只映射 currency，functionalCurrency 空着（很多表根本不单列本位币）；判为本位币列的只映射 functionalCurrency，currency 空着。绝不要因为某个角色还空着，就把已判给另一币种角色的列再塞给它。币种线索文本（currencyText）不在复核范围：识别阶段已按取值自动挑选（文本列里逐行写着账户币种时由脚本登记，如「美元户」「ICBC USD」），currentMapping 里即使有它也维持现状，不要对它输出任何 change，也不要建议把任何文本列新指给它。可以用勾稽等式验证映射是否成立：期末余额 = 期初余额 + 本年累计借方 − 本年累计贷方。若按当前映射大面积对不上，多半是把某一列映射错了口径，应指出来。";
 
 /// 汇兑损益专属的月度兜底：未实现测算按月归集，序时账只有月份列时
 /// date 不必非要完整日期。其他工具（存款利息按日计息、借款利息按天
@@ -1149,6 +1242,10 @@ fn inject_current_form(payload: &mut Value, kind: &str) {
 /// 当前形态的必填、任一、选填槽全部保留；没有归属到任何互斥形态的公共角色
 /// （例如主体、科目、会计期间）也保留。只有明确属于其他形态的角色才排除。
 fn restrict_review_roles_to_current_form(payload: &mut Value, kind: &str) {
+    // 输入中的历史/外部元数据不能自行开启换型。
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("formFallback");
+    }
     let Some(form_id) = payload
         .get("currentForm")
         .and_then(|form| form.get("id"))
@@ -1179,6 +1276,7 @@ fn restrict_review_roles_to_current_form(payload: &mut Value, kind: &str) {
     else {
         return;
     };
+    let original_available = available.clone();
     available.retain(|value| {
         let Some(raw_role) = value.as_str() else {
             return false;
@@ -1186,6 +1284,54 @@ fn restrict_review_roles_to_current_form(payload: &mut Value, kind: &str) {
         let role = crate::ledger_mapping::migrate_role_name(kind, raw_role);
         !all_form_roles.contains(role) || current_roles.contains(role)
     });
+    // 不完整类型仍先按原边界复核；其他类型只放在独立的条件出口中。
+    if payload["currentForm"]["complete"] == false {
+        let mapping = payload.get("currentMapping").and_then(Value::as_object);
+        let missing = current_form
+            .required
+            .iter()
+            .flat_map(|slot| slot.iter())
+            .copied()
+            .filter(|role| {
+                !mapping
+                    .and_then(|m| m.get(*role))
+                    .is_some_and(value_is_filled)
+            })
+            .collect::<Vec<_>>();
+        let allowed = original_available
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|role| crate::ledger_mapping::migrate_role_name(kind, role))
+            .collect::<std::collections::HashSet<_>>();
+        let alternatives = forms
+            .iter()
+            .filter(|form| form.id != current_form.id)
+            .filter(|form| {
+                form.required
+                    .iter()
+                    .flat_map(|slot| slot.iter())
+                    .all(|role| allowed.contains(*role))
+            })
+            .map(|form| {
+                let form_roles = roles_of(form);
+                let available = original_available
+                    .iter()
+                    .filter(|value| {
+                        let role = crate::ledger_mapping::migrate_role_name(
+                            kind,
+                            value.as_str().unwrap_or(""),
+                        );
+                        !all_form_roles.contains(role) || form_roles.contains(role)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                json!({"id":form.id,"label":form.label,"availableRoles":available})
+            })
+            .collect::<Vec<_>>();
+        if !missing.is_empty() && !alternatives.is_empty() {
+            payload["formFallback"] = json!({"missingRoles":missing,"alternatives":alternatives});
+        }
+    }
 }
 
 /// 所有 TB/JE 工具共用的唯一映射复核入口。
@@ -1278,6 +1424,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
     let je_date_instruction = review_date_instruction(date_policy);
     let je_instruction = review_je_instruction();
     let review_common = review_common_instruction();
+    let tb_review_instruction = review_tb_instruction();
     let prompt = format!(
         "你是审计工具箱公共 TB＋JE 联合字段映射复核器。TB 与 JE 属于同一账套，必须在一次判断中同时复核。\
          只输出严格 JSON：{{\"task\":\"ledger_pair_mapping\",\"tbChanges\":[{{\"role\":string,\"action\":\"replace\"|\"clear\",\"currentColumn\":string,\"suggestedColumn\":string|null,\"confidence\":number,\"reason\":string}}],\
@@ -1285,7 +1432,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
          \"tbRoleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"replace\"|\"clear\"|\"uncertain\",\"reason\":string}}],\
          \"jeRoleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"replace\"|\"clear\"|\"uncertain\",\"reason\":string}}],\
          \"pairFindings\":[{{\"type\":string,\"confidence\":number,\"reason\":string}}],\"summary\":string}}。\
-         TB 建议只能使用 tb.availableRoles 与 tb.headers，JE 建议只能使用 je.availableRoles 与 je.headers。\
+         第一阶段的 TB 建议只能使用 tb.availableRoles 与 tb.headers，JE 建议只能使用 je.availableRoles 与 je.headers。仅满足下述 formFallback 条件时，可额外返回 tbFormCorrection／jeFormCorrection。\
          两侧 engineFacts 是 Coding 根据样例验证的处理事实；protected=true 的事实不得修改。\
          同一源列可合法承担 engineFacts.mappedRoles 中列出的多个角色，Coding 会在后续完成拆分、组合或标准化。\
          requiredMissingRoles 是当前仍缺失的公共必填角色清单；requiredMissingAny 中每组至少补一个相容角色。只要 headers 与 sampleRows 中存在相容列，就必须输出 change，不得只复核已有映射。摘要是选填，不因缺失而阻拦。\
@@ -1294,7 +1441,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
          mappedRolesToReview 是必须逐项复核的全部已有映射；不能用 changes 为空代替语义复核。status=keep 仅限样例值与角色含义相容；明显错配且有可信替代列用 replace 并同时输出 action=replace；明显错配但无可信替代列用 clear 并同时输出 action=clear；证据不足用 uncertain。suspectMappings 是 Coding 已发现的确定性疑点，必须优先处理。\
          联合比较 accountCode/accountName 的标题语义、样例形态与两侧口径；证据接近时维持当前映射，不要为了换成看起来更好的列而改。\
          changes 只放真实调整，确认现状正确不要造条目。{review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}\
-         对 TB：{REVIEW_TB}\
+         对 TB：{tb_review_instruction}\
          对 JE：{je_instruction}{je_date_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     );
     let payload = json!({
@@ -1303,6 +1450,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
         "tb": tb,
         "je": je,
     });
+    let prompt = format!("{prompt}{REVIEW_CONCISE_OUTPUT}");
     let content = request_llm(llm, &prompt, &payload.to_string(), None)?;
     let mut parsed = parse_json_content(&content);
     if !parsed.is_object() {
@@ -1351,7 +1499,8 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
             .find_map(|alias| parsed.get(alias))
             .cloned()
             .unwrap_or_else(|| json!([]));
-        let mut wrapper = json!({"changes": changes});
+        let correction_key = if kind == "tb" { "tbFormCorrection" } else { "jeFormCorrection" };
+        let mut wrapper = json!({"changes": changes,"formCorrection":parsed.get(correction_key)});
         sanitize_mapping_changes(&mut wrapper, side, kind, date_policy);
         output[key] = wrapper["changes"].clone();
     }
@@ -1431,7 +1580,7 @@ fn ledger_mapping_llm_call(
         "ledger_je_mapping"
     };
     let (table_name, specific) = if is_tb {
-        ("科目余额表", REVIEW_TB.to_owned())
+        ("科目余额表", review_tb_instruction())
     } else {
         ("序时账", review_je_instruction())
     };
@@ -1483,6 +1632,7 @@ fn ledger_mapping_llm_call(
     inject_required_missing_roles(&mut payload, if is_tb { "tb" } else { "je" });
     inject_mapping_review_scope(&mut payload, if is_tb { "tb" } else { "je" });
     let payload = &payload;
+    let prompt = format!("{prompt}{REVIEW_CONCISE_OUTPUT}");
     let content = request_llm(llm, &prompt, &payload.to_string(), None)?;
     let mut value = parse_json_content(&content);
     if !value.is_object() {
@@ -1529,6 +1679,266 @@ fn sanitize_mapping_changes(
     // 的候选。多候选或证据不足仍保持空缺，交给用户确认，绝不猜列。
     if kind == "je" && date_policy == ReviewDatePolicy::TbjeComposite {
         supplement_tbje_required_je_changes(value, payload);
+    }
+    sanitize_form_correction(value, payload, kind, date_policy);
+}
+
+/// 只预演已过滤的建议，不自动替模型猜列。多列角色沿用追加语义。
+fn review_projected_mapping(
+    payload: &Value,
+    kind: &str,
+    changes: &[Value],
+) -> serde_json::Map<String, Value> {
+    let mut mapping = payload
+        .get("currentMapping")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for change in changes {
+        let Some(role) = change.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+        if change.get("action").and_then(Value::as_str) == Some("clear") {
+            mapping.remove(role);
+        } else if let Some(column) = change.get("suggestedColumn").and_then(Value::as_str) {
+            if crate::ledger_mapping::role_of(kind, role).is_some_and(|role| role.multi) {
+                let mut columns = match mapping.get(role) {
+                    Some(Value::Array(all)) => all.clone(),
+                    Some(Value::String(one)) if !one.is_empty() => vec![json!(one)],
+                    _ => Vec::new(),
+                };
+                if !columns.iter().any(|value| value.as_str() == Some(column)) {
+                    columns.push(json!(column));
+                }
+                mapping.insert(role.into(), json!(columns));
+            } else {
+                mapping.insert(role.into(), json!(column));
+            }
+        }
+    }
+    mapping
+}
+
+/// 当前类型优先。只有逐项查无候选、原类型仍不完整、替代类型整组可安全应用，
+/// 才把独立的纠型计划并入正常建议。缺证据、低置信、过滤后半套均整组拒绝。
+fn sanitize_form_correction(
+    value: &mut Value,
+    payload: &Value,
+    kind: &str,
+    date_policy: ReviewDatePolicy,
+) {
+    let Some(fallback) = payload.get("formFallback") else {
+        return;
+    };
+    let Some(correction) = value.get("formCorrection") else {
+        return;
+    };
+    if payload["currentForm"]["complete"] != false {
+        return;
+    }
+    let Some(missing) = fallback
+        .get("missingRoles")
+        .and_then(Value::as_array)
+        .filter(|all| !all.is_empty())
+    else {
+        return;
+    };
+    let Some(searches) = correction
+        .get("missingRoleSearches")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let Some(target) = correction
+        .get("targetForm")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(alternative) = fallback
+        .get("alternatives")
+        .and_then(Value::as_array)
+        .and_then(|all| all.iter().find(|form| form["id"] == target))
+    else {
+        return;
+    };
+    let key = if value.get("changes").is_some() {
+        "changes"
+    } else {
+        "fills"
+    };
+    let mut primary = value
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if key == "fills" {
+        primary.extend(
+            value
+                .get("reviews")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
+    }
+    let base_mapping = review_projected_mapping(payload, kind, &primary);
+    let unresolved = missing
+        .iter()
+        .filter(|role| {
+            !role
+                .as_str()
+                .and_then(|role| base_mapping.get(role))
+                .is_some_and(value_is_filled)
+        })
+        .collect::<Vec<_>>();
+    if unresolved.is_empty()
+        || !missing.iter().all(|role| {
+            let matches = searches
+                .iter()
+                .filter(|search| search.get("role") == Some(role))
+                .collect::<Vec<_>>();
+            let status = if unresolved.contains(&role) {
+                "no_candidate"
+            } else {
+                "found"
+            };
+            matches.len() == 1
+                && matches[0]["status"] == status
+                && matches[0]
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| !reason.trim().is_empty())
+        })
+    {
+        return;
+    }
+    let Some(proposed) = correction
+        .get("changes")
+        .and_then(Value::as_array)
+        .filter(|all| !all.is_empty())
+    else {
+        return;
+    };
+    let mut corrected_payload = payload.clone();
+    corrected_payload["currentMapping"] = json!(base_mapping);
+    // 目标类型角色供 replace；原类型角色仅供显式清除旧错配。
+    let mut allowed = alternative["availableRoles"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for role in payload["availableRoles"].as_array().into_iter().flatten() {
+        if !allowed.contains(role) {
+            allowed.push(role.clone());
+        }
+    }
+    corrected_payload["availableRoles"] = json!(allowed);
+    let mut wrapper = json!({"changes":proposed});
+    sanitize_change_list(
+        &mut wrapper,
+        &corrected_payload,
+        kind,
+        "changes",
+        date_policy,
+    );
+    let accepted = wrapper["changes"].as_array().unwrap();
+    let target_roles = alternative["availableRoles"].as_array().unwrap();
+    let mut seen = std::collections::HashSet::new();
+    if accepted.len() != proposed.len()
+        || accepted.iter().any(|change| {
+            let role = change["role"].as_str().unwrap_or("");
+            !seen.insert(role)
+                || change["confidence"]
+                    .as_f64()
+                    .is_none_or(|confidence| confidence <= 0.75)
+                || if change["action"] == "clear" {
+                    change["autoClearSafe"] != true
+                } else {
+                    !target_roles
+                        .iter()
+                        .any(|allowed| allowed.as_str() == Some(role))
+                }
+        })
+    {
+        return;
+    }
+    let mapping = review_projected_mapping(&corrected_payload, kind, accepted);
+    let mapped = mapping
+        .iter()
+        .filter(|(_, value)| value_is_filled(value))
+        .map(|(role, _)| role.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if !crate::ledger_mapping::match_forms(kind, &mapped)
+        .iter()
+        .any(|form| form.form == target && form.complete)
+    {
+        return;
+    }
+    let all_form_roles = crate::ledger_mapping::forms(kind)
+        .iter()
+        .flat_map(|form| {
+            form.required
+                .iter()
+                .chain(form.optional.iter())
+                .flat_map(|slot| slot.iter())
+                .copied()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if mapped.iter().any(|role| {
+        all_form_roles.contains(role)
+            && !target_roles
+                .iter()
+                .any(|allowed| allowed.as_str() == Some(*role))
+    }) {
+        return;
+    }
+    // 替代形态的金额字段必须有真实、可解析的样例值，不能靠空列凑完整。
+    let headers = payload.get("headers").and_then(Value::as_array);
+    let rows = sample_rows_of(payload).unwrap_or_default();
+    for role in mapped
+        .iter()
+        .filter(|role| role.contains("Amount") || role.contains("Debit") || role.contains("Credit"))
+    {
+        let Some(column) = mapping.get(*role).and_then(Value::as_str) else {
+            return;
+        };
+        let Some(index) = headers.and_then(|all| {
+            all.iter()
+                .position(|header| header.as_str() == Some(column))
+        }) else {
+            return;
+        };
+        let mut has_number = false;
+        for raw in rows
+            .iter()
+            .filter_map(|row| row.get(index))
+            .filter(|raw| !raw.trim().is_empty())
+        {
+            match crate::ledger_mapping::parse_amount(raw) {
+                Ok(Some(_)) => has_number = true,
+                Ok(None) => (),
+                Err(_) => return,
+            }
+        }
+        if !has_number {
+            return;
+        }
+    }
+    let target_is_je1 = target == "JE1";
+    let Some(output) = value.as_object_mut() else {
+        return;
+    };
+    let Some(changes) = output
+        .entry(key)
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+    else {
+        return;
+    };
+    changes.extend(accepted.iter().cloned());
+    if key == "fills" && kind == "je" {
+        value["scheme"] = json!(if target_is_je1 { "B" } else { "A" });
     }
 }
 
@@ -2364,6 +2774,8 @@ pub(crate) fn fx_account_translation_llm_call(
     Ok(output)
 }
 
+const REVIEW_CONCISE_OUTPUT: &str = "\n输出精简规则：mappedRolesToReview 中的每个角色仍须逐项返回 roleReviews，保留原始 currentColumns 和 status。keep 的 reason 只写样例相容的简短依据，最多 20 个字；replace、clear、uncertain 及 change 的理由只写一句关键依据，不重复表头清单、样例行或整段业务规则。除 formCorrection 要求的查无候选证据外，不要为尚未映射且没有可信候选的角色额外生成确认记录，也不要重复输出同一调整。";
+
 /// 看账与正负数凭证标记的复核提示词。
 ///
 /// **规则文本不自带**——纪律取自 [`REVIEW_COMMON`] ＋ [`REVIEW_JE`]，与汇兑损益同一份。
@@ -2382,7 +2794,7 @@ fn kanzhang_mapping_prompt() -> String {
          roleReviews:[{{role:string,currentColumns:[string],status:\"keep\"|\"replace\"|\"clear\"|\"uncertain\",reason:string}}]}}。action=clear 时省略 suggestedColumn。\
          方案A＝净额列（可加方向列）；方案B＝借方与贷方两列，二者互斥。\
          mappedRolesToReview 中每个已有角色都必须返回一条 roleReviews；不能用 fills/reviews 为空代替语义复核。unmappedRoles 逐项检查，有相容列就输出 fills；requiredMissingRoles、requiredMissingAny 与 suspectMappings 优先。requiredMissingAny 中每组至少补一个相容角色；摘要是选填，不因缺失而阻拦。\
-         {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{je_instruction}{composite_date}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
+         {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{je_instruction}{composite_date}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}{REVIEW_CONCISE_OUTPUT}"
     )
 }
 
@@ -2411,10 +2823,13 @@ fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
     if engine == "local" {
         return local_ocr(image);
     }
+    if engine == "bailian" {
+        return bailian_ocr(params["imageBase64"].as_str().unwrap_or(""), settings, None);
+    }
     if engine != "ai" {
         return Err(error(
             "OCR_ENGINE_UNAVAILABLE",
-            "当前仅支持统一 AI 视觉或百度 OCR。",
+            "不支持当前 OCR 引擎，请选择 AI 视觉、百度 OCR、百炼 OCR 或本机 OCR。",
             None,
         ));
     }
@@ -2427,6 +2842,7 @@ fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
         ));
     }
     let tax_table = params.get("taxTable").and_then(Value::as_bool).unwrap_or(false);
+    let image = params["imageBase64"].as_str().unwrap_or(image);
     let content = if tax_table {
         request_llm_reply_with_key(&llm, ocr_prompt(true), "", Some(image), None, tax_ocr_output_limit())
             .map(|reply| reply.content)
@@ -2454,6 +2870,14 @@ fn tax_ocr_output_limit() -> Option<u64> {
     // A finite limit also enables the shared reply parser's truncation gate.
     // Partial rows must never enter the tax page cache as complete OCR.
     Some(8_000)
+}
+
+fn bailian_ocr(image: &str, settings: &Value, api_key: Option<&str>) -> Result<Value, AppError> {
+    let config = crate::bailian_ocr::OcrConfig::from_settings(settings)?;
+    let key = api_key.filter(|v| !v.trim().is_empty()).map(str::to_owned)
+        .or_else(|| secret("bailian_ocr_key"))
+        .ok_or_else(|| error("OCR_KEY_MISSING", "请填写百炼 OCR API Key。", None))?;
+    config.recognize_structured(image, &key)
 }
 
 fn local_ocr_ready() -> bool {
@@ -2513,10 +2937,15 @@ fn local_ocr(image: &str) -> Result<Value, AppError> {
             Some(message.into()),
         ));
     }
-    Ok(json!({
+    let mut result = json!({
         "text": value.get("text").and_then(Value::as_str).unwrap_or(""),
         "engine": "local",
-    }))
+    });
+    if value["tables"].is_array() {
+        result["tables"] = value["tables"].clone();
+        result["warnings"] = value.get("warnings").cloned().unwrap_or(json!([]));
+    }
+    Ok(result)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2531,7 +2960,12 @@ pub(crate) fn request_llm(
     text: &str,
     image: Option<&str>,
 ) -> Result<String, AppError> {
-    request_llm_with_key(config, prompt, text, image, None).map_err(|mut failure| {
+    let started = std::time::Instant::now();
+    let result = request_llm_with_key(config, prompt, text, image, None);
+    eprintln!("LLM 调用：提示词 {} 字节，文本 {} 字节，含图片 {}，输出 {} 字节，耗时 {:.1} 秒，状态 {}",
+        prompt.len(), text.len(), image.is_some(), result.as_ref().map(|content| content.len()).unwrap_or(0),
+        started.elapsed().as_secs_f64(), result.as_ref().map(|_| "成功").unwrap_or_else(|error| error.code.as_str()));
+    result.map_err(|mut failure| {
         if config["__source"] == "dedicated" {
             failure.user_message = format!(
                 "AudiPick 专用模型：{} 未切换到工具箱模型。",
@@ -2636,7 +3070,7 @@ fn request_llm_reply_with_key(
     let timeout = config
         .get("timeout")
         .and_then(Value::as_u64)
-        .unwrap_or(60)
+        .unwrap_or(120)
         .clamp(10, 300);
     let client = Client::builder()
         .timeout(Duration::from_secs(timeout))
@@ -2659,8 +3093,8 @@ fn request_llm_reply_with_key(
             format!("{base}/chat-messages")
         };
         let query = format!("{prompt}\n\n{text}");
-        let response = client.post(url).bearer_auth(key).json(&json!({"inputs":{},"query":query,"response_mode":"blocking","user":"audit-toolbox"})).send().map_err(network_error)?;
-        let value = read_llm_response(response, "Dify 提取请求失败。")?;
+        let response = client.post(url).bearer_auth(key).json(&json!({"inputs":{},"query":query,"response_mode":"blocking","user":"audit-toolbox"})).send().map_err(|failure| llm_request_error(failure, timeout))?;
+        let value = read_llm_response(response, "Dify 提取请求失败。", timeout)?;
         return parse_dify_reply(&value, max_tokens.is_some());
     }
     let key = api_key
@@ -2673,7 +3107,8 @@ fn request_llm_reply_with_key(
         format!("{base}/chat/completions")
     };
     let user_content = if let Some(data) = image {
-        json!([{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":format!("data:image/jpeg;base64,{data}")}}])
+        let image_url = if data.starts_with("data:image/") { data.to_owned() } else { format!("data:image/jpeg;base64,{data}") };
+        json!([{"type":"text","text":format!("{prompt}\n\n{text}")},{"type":"image_url","image_url":{"url":image_url}}])
     } else {
         Value::String(text.to_string())
     };
@@ -2684,8 +3119,20 @@ fn request_llm_reply_with_key(
         request = request.bearer_auth(key);
     }
     let body = openai_chat_body(config, base, prompt, user_content, max_tokens);
-    let response = request.json(&body).send().map_err(network_error)?;
-    let value = read_llm_response(response, "LLM 提取请求失败。")?;
+    let response = request
+        .json(&body)
+        .send()
+        .map_err(|failure| llm_request_error(failure, timeout))?;
+    let value = read_llm_response(response, "LLM 提取请求失败。", timeout)?;
+    if config["__rejectTruncated"] == true
+        && value.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length")
+    {
+        return Err(error(
+            "OCR_MODEL_TRUNCATED",
+            "模型输出被截断，请拆分页面或缩短摘录范围后重试。",
+            None,
+        ));
+    }
     parse_openai_reply(&value, max_tokens.is_some())
 }
 
@@ -2706,6 +3153,7 @@ fn openai_chat_body(
         "messages": [{"role":"system","content":system_prompt},{"role":"user","content":user_content}],
         "thinking": {"type": if thinking_enabled(config) { "enabled" } else { "disabled" }},
     });
+    apply_provider_thinking(&mut body, base, config);
     if json_prompt.is_some() {
         body["response_format"] = json!({"type": "json_object"});
     }
@@ -2872,7 +3320,7 @@ fn baidu_ocr_with_keys(image: &str, ak: &str, sk: &str) -> Result<Value, AppErro
 }
 
 fn secret(name: &str) -> Option<String> {
-    keyring::Entry::new("AuditToolbox", name)
+    keyring::Entry::new(crate::release_channel::credential_service(), name)
         .ok()?
         .get_password()
         .ok()
@@ -2906,6 +3354,36 @@ fn thinking_enabled(config: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The official Bailian Qwen API controls hybrid thinking with a top-level
+/// boolean, not the MiniMax/DeepSeek-shaped `thinking.type` object. Preserve
+/// the saved user preference without changing provider, model or settings.
+/// https://help.aliyun.com/en/model-studio/deep-thinking
+/// Unknown gateways/models retain their existing wire protocol.
+fn apply_provider_thinking(body: &mut Value, base: &str, config: &Value) {
+    let Ok(url) = reqwest::Url::parse(base) else { return; };
+    let host = url.host_str().unwrap_or("");
+    if url.scheme() != "https" || url.port().is_some()
+        || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some()
+        || !matches!(url.path().trim_end_matches('/'), "/compatible-mode/v1" | "/compatible-mode/v1/chat/completions")
+        || !(matches!(host, "dashscope.aliyuncs.com" | "dashscope-intl.aliyuncs.com" | "dashscope-us.aliyuncs.com")
+            || host.ends_with(".maas.aliyuncs.com"))
+    { return; }
+    let model = config["model"].as_str().unwrap_or("");
+    // Explicit known capabilities avoid sending false to thinking-only models.
+    let hybrid = matches!(model,
+        "qwen3.8-flash" | "qwen3.8-max" | "qwen3.8-max-0902" | "qwen3.8-27b"
+        | "qwen3.7-max" | "qwen3.7-max-2026-05-20" | "qwen3.7-max-2026-06-08"
+        | "qwen3.7-plus" | "qwen3.7-plus-2026-05-26" | "qwen3.7-flash" | "qwen3.7-flash-2026-07-15"
+        | "qwen3.6-plus" | "qwen3.6-plus-2026-04-02" | "qwen3.6-flash" | "qwen3.6-flash-2026-04-16"
+        | "qwen3.5-plus" | "qwen3.5-plus-2026-02-15" | "qwen3.5-flash" | "qwen3.5-flash-2026-02-23"
+        | "qwen3.5-397b-a17b" | "qwen3.5-122b-a10b" | "qwen3.5-27b" | "qwen3.5-35b-a3b");
+    let thinking_only = matches!(model, "qwen3.8-2.4t-a95b" | "qwen3.7-max-preview" | "qwen3.7-max-2026-05-17");
+    if hybrid || thinking_only {
+        if let Some(object) = body.as_object_mut() { object.remove("thinking"); }
+        if hybrid { body["enable_thinking"] = json!(thinking_enabled(config)); }
+    }
+}
+
 fn wants_json_response(base: &str) -> bool {
     base.to_ascii_lowercase().contains("api.deepseek.com")
 }
@@ -2933,9 +3411,10 @@ fn body_snippet(body: &str) -> String {
 fn read_llm_response(
     response: reqwest::blocking::Response,
     label: &str,
+    timeout: u64,
 ) -> Result<Value, AppError> {
     let status = response.status();
-    let body = response.text().map_err(network_error)?;
+    let body = response.text().map_err(|failure| llm_request_error(failure, timeout))?;
     if !status.is_success() {
         let detail = serde_json::from_str::<Value>(&body)
             .as_ref()
@@ -2954,6 +3433,14 @@ fn read_llm_response(
             Some(format!("{e}；响应开头：{}", body_snippet(&body))),
         )
     })
+}
+
+fn llm_request_error(failure: reqwest::Error, timeout: u64) -> AppError {
+    if failure.is_timeout() {
+        error("LLM_REQUEST_TIMEOUT", &format!("模型请求已达到配置的 {timeout} 秒时限，本段尚未获得完整响应。原文已保留，请减少单次摘录范围后重试。"), None)
+    } else {
+        network_error(failure)
+    }
 }
 
 fn network_error(error: impl std::fmt::Display) -> AppError {
@@ -3001,6 +3488,82 @@ mod tests {
         let full = json!({"choices":[{"finish_reason":"stop","message":{"content":"| 行次 | 金额 |\n| 1 | 100 |"}}]});
         assert!(parse_openai_reply(&full, tax_ocr_output_limit().is_some()).is_ok());
     }
+    #[test]
+    fn thousands_workpaper_keeps_long_ids_dates_rates_and_empty_values_text() {
+        use calamine::Reader;
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        for (column, (header, value)) in [
+            ("合同金额", json!(1234567.89)), ("未税金额", json!("1,234.56")),
+            ("合同编号", json!("001234")), ("银行账号", json!("123456789012345678")),
+            ("日期", json!("2026-11-05")), ("税率", json!("13%")), ("金额", Value::Null),
+        ].iter().enumerate() {
+            write_export_value(sheet, 0, column as u16, header, value).unwrap();
+        }
+        let bytes = book.save_to_buffer().unwrap();
+        for cell in ["A1", "B1"] {
+            crate::xlsx_numbers::assert_cell_format(&bytes, 1, cell, crate::xlsx_numbers::NUMBER_FORMAT);
+        }
+        let mut read = calamine::Xlsx::new(std::io::Cursor::new(bytes)).unwrap();
+        let range = read.worksheet_range("Sheet1").unwrap();
+        assert_eq!(range[(0, 0)], calamine::Data::Float(1234567.89));
+        assert_eq!(range[(0, 2)], calamine::Data::String("001234".into()));
+        assert_eq!(range[(0, 3)], calamine::Data::String("123456789012345678".into()));
+        assert_eq!(range[(0, 5)], calamine::Data::String("13%".into()));
+        assert!(range.get_value((0, 6)).map(ToString::to_string).unwrap_or_default().is_empty());
+    }
+    #[test]
+    fn independent_ocr_uses_global_profile_and_keeps_failed_structure() {
+        let settings = json!({"llm":{"enabled":false},"audipickLlm":{"mode":"dedicated","enabled":true,"model":"must-not-use"}});
+        let failure = toolbox_ocr_page(&json!({"imageBase64":"synthetic"}), &settings).unwrap_err();
+        assert_eq!(failure.code, "LLM_DISABLED");
+        let settings = json!({"llm":{"enabled":true,"base_url":"invalid-global-url"},"audipickLlm":{"mode":"dedicated","enabled":false}});
+        assert_eq!(toolbox_llm_request("p", "t", None, &settings).unwrap_err().code, "LLM_URL_INVALID");
+        let valid = structured_ocr_result(r#"{"text":"原文 00123","tables":[],"warnings":[]}"#, "ai");
+        assert_eq!(valid["text"], "原文 00123");
+        assert!(valid["structureError"].is_null());
+        let invalid = structured_ocr_result("原始模型输出", "bailian");
+        assert_eq!(invalid["text"], "原始模型输出");
+        assert!(invalid["structureError"].is_null());
+        assert_eq!(invalid["diagnosticResponse"], "原始模型输出");
+    }
+
+    #[test]
+    fn strict_ocr_rejects_truncation_and_preserves_png_and_reference_text() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let size = stream.read(&mut buffer).unwrap();
+                assert!(size > 0);
+                bytes.extend_from_slice(&buffer[..size]);
+                if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&bytes[..end]);
+                    let length: usize = header.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
+                    }).unwrap();
+                    if bytes.len() >= end + 4 + length { break; }
+                }
+            }
+            let body = json!({"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}).to_string();
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            String::from_utf8(bytes).unwrap()
+        });
+        let config = json!({"base_url":format!("http://{address}/v1"),"model":"synthetic","__rejectTruncated":true});
+        let failure = request_llm_with_key(&config,"逐字识别","参考文字",Some("data:image/png;base64,synthetic"),Some("synthetic-key")).unwrap_err();
+        assert_eq!(failure.code,"OCR_MODEL_TRUNCATED");
+        let request = server.join().unwrap();
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["messages"][1]["content"][1]["image_url"]["url"],"data:image/png;base64,synthetic");
+        assert!(body["messages"][1]["content"][0]["text"].as_str().unwrap().contains("参考文字"));
+    }
+
     #[test]
     fn audipick_profile_priority_and_credentials_are_isolated() {
         let settings = json!({"llm":{"enabled":false,"model":"global","api_type":"openai"},
@@ -3067,9 +3630,21 @@ mod tests {
     #[test]
     fn ocr_test_rejects_invalid_images_without_network() {
         for image in [String::new(), "a".repeat(200_001)] {
-            let failure = test_ocr_connection(json!({}), "baidu", &image, None, None).unwrap_err();
+            let failure = test_ocr_connection(json!({}), "baidu", &image, None, None, None, false).unwrap_err();
             assert_eq!(failure.code, "OCR_TEST_IMAGE_INVALID");
         }
+    }
+
+    #[test]
+    fn toolbox_ocr_test_never_uses_audipick_dedicated_model() {
+        let settings = json!({
+            "llm": {"enabled": false},
+            "audipickLlm": {"mode": "dedicated", "enabled": true, "api_type": "dify_chat"}
+        });
+        let failure = test_ocr_connection(settings.clone(), "ai", "test-image", None, None, None, true).unwrap_err();
+        assert_eq!(failure.code, "LLM_DISABLED");
+        let failure = test_ocr_connection(settings, "ai", "test-image", None, None, None, false).unwrap_err();
+        assert_eq!(failure.code, "OCR_MODEL_UNSUPPORTED");
     }
 
     #[test]
@@ -3181,6 +3756,21 @@ mod tests {
                 .expect("reviews 还在")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn voucher_reference_suggestions_are_blocked_before_llm_application() {
+        let payload = json!({
+            "headers": ["凭证编号", "参照伝票番号-参照凭证号", "GL Reference"],
+            "currentMapping": {"id": ["凭证编号"]},
+        });
+        let mut value = json!({
+            "fills": [{"role":"id", "suggestedColumn":"参照伝票番号-参照凭证号", "confidence":0.99}],
+            "reviews": [{"role":"id", "suggestedColumn":"参照伝票番号-参照凭证号", "confidence":0.99}],
+        });
+        sanitize_mapping_changes(&mut value, &payload, "je", ReviewDatePolicy::Strict);
+        assert!(value["fills"].as_array().unwrap().is_empty());
+        assert!(value["reviews"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -3725,6 +4315,119 @@ mod tests {
         );
     }
     #[test]
+    #[ignore = "手动真实服务验收，仅在用户明确授权同一份资料实测时运行"]
+    fn live_dev_text_request_from_stdin() {
+        // Credentials remain in this process; the caller passes only the
+        // already authorized prompt/text and non-secret Dev model settings.
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        let request: Value = serde_json::from_str(&input).expect("需要单行 JSON 实测请求");
+        let mut config = request["llm"].clone();
+        config["__rejectTruncated"] = json!(true);
+        let started = std::time::Instant::now();
+        let key = keyring::Entry::new("AuditToolboxDev", "llm_api_key")
+            .and_then(|entry| entry.get_password());
+        let result = match key.as_ref() {
+            Ok(key) => request_llm_with_key(&config, request["prompt"].as_str().unwrap_or(""),
+                request["text"].as_str().unwrap_or(""), None, Some(key)),
+            Err(_) => Err(error("LLM_KEY_MISSING", "未找到 Dev 统一 LLM 密钥。", None)),
+        };
+        let elapsed = started.elapsed().as_secs_f64();
+        let value = match result {
+            Ok(raw) => json!({"ok":true,"elapsedSeconds":elapsed,"model":config["model"],
+                "result":{"parsed":serde_json::from_str::<Value>(&raw).ok(),"raw":raw}}),
+            Err(mut failure) => {
+                // A gateway error can echo authorization data. Never propagate
+                // those details through even this local acceptance protocol.
+                failure.detail = None;
+                if let Ok(key) = key { failure.user_message = failure.user_message.replace(&key, "[已隐去]"); }
+                json!({"ok":false,"elapsedSeconds":elapsed,"model":config["model"],"error":failure})
+            }
+        };
+        println!("{}", value);
+    }
+    #[test]
+    fn llm_timeout_is_named_for_slow_headers_and_slow_body_without_waiting_real_limits() {
+        use std::io::{Read, Write};
+        for delay_body in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut bytes = [0; 1024];
+                let _ = stream.read(&mut bytes);
+                if delay_body {
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n");
+                    let _ = stream.flush();
+                }
+                thread::sleep(Duration::from_millis(650));
+            });
+            let client = Client::builder().no_proxy().timeout(Duration::from_millis(250)).build().unwrap();
+            let request = client.get(format!("http://{address}/v1")).send();
+            let failure = if delay_body {
+                read_llm_response(request.unwrap(), "合成失败", 120).unwrap_err()
+            } else { llm_request_error(request.unwrap_err(), 120) };
+            assert_eq!(failure.code, "LLM_REQUEST_TIMEOUT");
+            assert!(failure.user_message.contains("120 秒时限"));
+            assert!(failure.user_message.contains("原文已保留"));
+            assert!(!failure.user_message.contains("代理"));
+            assert!(failure.detail.is_none());
+            server.join().unwrap();
+        }
+        let invalid = Client::new().get("not a URL").send().unwrap_err();
+        assert_eq!(llm_request_error(invalid, 120).code, "NETWORK_ERROR");
+    }
+    #[test]
+    fn official_qwen_hybrid_thinking_follows_the_saved_switch_with_the_correct_parameter() {
+        for base in ["https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "https://dashscope-us.aliyuncs.com:443/compatible-mode/v1"] {
+            for enabled in [false, true] {
+                let config = json!({"model":"qwen3.8-flash","thinking_enabled":enabled});
+                let mut body = json!({"model":"qwen3.8-flash","messages":[{"role":"user","content":"合成资料"}],"thinking":{"type":"disabled"}});
+                apply_provider_thinking(&mut body, base, &config);
+                assert_eq!(body["enable_thinking"], enabled);
+                assert!(body.get("thinking").is_none());
+                assert_eq!(body["messages"][0]["content"], "合成资料");
+                assert_eq!(config["thinking_enabled"], enabled);
+            }
+        }
+        let mut absent = json!({"thinking":{"type":"disabled"}});
+        apply_provider_thinking(&mut absent, "https://dashscope.aliyuncs.com/compatible-mode/v1", &json!({"model":"qwen3.8-flash"}));
+        assert_eq!(absent["enable_thinking"], false);
+        let mut camel_case = json!({"thinking":{"type":"enabled"}});
+        apply_provider_thinking(&mut camel_case, "https://dashscope.aliyuncs.com/compatible-mode/v1", &json!({"model":"qwen3.8-flash","thinkingEnabled":true}));
+        assert_eq!(camel_case["enable_thinking"], true);
+    }
+    #[test]
+    fn thinking_only_qwen_never_receives_an_unsupported_false_switch() {
+        for model in ["qwen3.8-2.4t-a95b", "qwen3.7-max-preview", "qwen3.7-max-2026-05-17"] {
+            let mut body = json!({"thinking":{"type":"disabled"}});
+            apply_provider_thinking(&mut body, "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", &json!({"model":model,"thinking_enabled":false}));
+            assert!(body.get("enable_thinking").is_none());
+            assert!(body.get("thinking").is_none());
+        }
+    }
+    #[test]
+    fn other_providers_models_and_proxy_routes_keep_the_existing_protocol() {
+        for (base, model) in [
+            ("https://api.deepseek.com/v1", "deepseek-chat"),
+            ("https://gateway.example/v1", "qwen3.8-flash"),
+            ("http://127.0.0.1:8765/compatible-mode/v1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com.evil.example/compatible-mode/v1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com:8443/compatible-mode/v1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com/proxy/v1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com/compatible-mode/v1?query=1", "qwen3.8-flash"),
+            ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.8-unknown"),
+            ("https://dashscope.aliyuncs.com/compatible-mode/v1", "glm-5.3"),
+        ] {
+            let mut body = json!({"thinking":{"type":"disabled"},"model":model});
+            let original = body.clone();
+            apply_provider_thinking(&mut body, base, &json!({"model":model,"thinking_enabled":false}));
+            assert_eq!(body, original, "不应改写 {base} / {model}");
+        }
+    }
+    #[test]
     fn batch_keeps_per_document_failures() {
         let cancel = Arc::new(AtomicBool::new(false));
         let result = run_batch(
@@ -3768,6 +4471,15 @@ mod mapping_prompt_tests {
     ///
     /// 拆开之前是一整段同时讲 TB 与 JE，复核任一张表都要读另一张表的规矩——
     /// 序时账的凭证类型、余额表的期初期末混在一起，既是干扰也容易串用角色。
+    #[test]
+    fn direction_pair_review_prompt_uses_public_policy() {
+        let instruction = review_tb_instruction();
+        assert!(instruction.contains(crate::ledger_mapping::TB_DIRECTION_REVIEW_RULES));
+        assert!(!instruction.contains("{TB_DIRECTION_RULES}"));
+        assert!(!instruction.contains("一律映射 closingDirection"));
+        assert!(!instruction.contains("不要映射为 openingDirection"));
+    }
+
     #[test]
     fn 两段提示词互不掺杂() {
         assert!(
@@ -4397,6 +5109,8 @@ mod mapping_prompt_tests {
         assert_eq!(payload["currentForm"]["id"], "TB3");
         restrict_review_roles_to_current_form(&mut payload, "tb");
 
+        assert!(payload.get("formFallback").is_none(), "完整类型不开放纠型出口");
+
         assert_eq!(
             payload["availableRoles"],
             json!([
@@ -4409,6 +5123,167 @@ mod mapping_prompt_tests {
             ]),
             "公共角色和当前形态选填槽应保留，其他形态专属槽应排除"
         );
+    }
+
+    fn form_fallback_case() -> (Value, Value) {
+        let mut payload = json!({
+            "headers":["科目编码","期初余额-本位币(借)","期初余额-本位币(贷)","期末余额-本位币(借)","期末余额-本位币(贷)","本年借方","本年贷方"],
+            "sampleRows":[["1001","1","0","2","0","3","2"]],
+            "currentMapping":{"accountCode":"科目编码","ytdFunctionalDebit":"本年借方","ytdFunctionalCredit":"本年贷方"},
+            "availableRoles":crate::ledger_mapping::roles("tb").iter().map(|role| role.name).collect::<Vec<_>>()
+        });
+        inject_current_form(&mut payload, "tb");
+        restrict_review_roles_to_current_form(&mut payload, "tb");
+        inject_mapping_review_scope(&mut payload, "tb");
+        assert_eq!(payload["currentForm"]["id"], "TB1");
+        let changes = [
+            ("openingFunctionalDebit","期初余额-本位币(借)"),
+            ("openingFunctionalCredit","期初余额-本位币(贷)"),
+            ("closingFunctionalDebit","期末余额-本位币(借)"),
+            ("closingFunctionalCredit","期末余额-本位币(贷)"),
+        ].iter().map(|(role,column)|json!({"role":role,"suggestedColumn":column,"confidence":0.96,"reason":"借贷分列余额"})).collect::<Vec<_>>();
+        let response = json!({"changes":[],"formCorrection":{
+            "targetForm":"TB3",
+            "missingRoleSearches":[
+                {"role":"openingFunctionalAmount","status":"no_candidate","reason":"只有期初借贷分列，没有净额列"},
+                {"role":"closingFunctionalAmount","status":"no_candidate","reason":"只有期末借贷分列，没有净额列"}
+            ],"changes":changes
+        }});
+        (payload, response)
+    }
+
+    #[test]
+    fn form_fallback_requires_exhausted_current_type_and_complete_safe_plan() {
+        let (payload, mut response) = form_fallback_case();
+        assert!(
+            !payload["availableRoles"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("openingFunctionalDebit")),
+            "第一阶段边界保留"
+        );
+        sanitize_mapping_changes(&mut response, &payload, "tb", ReviewDatePolicy::Strict);
+        assert_eq!(response["changes"].as_array().unwrap().len(), 4);
+        for invalid in [
+            "missing_evidence",
+            "uncertain",
+            "blank_reason",
+            "half_plan",
+            "wrong_currency",
+            "low_confidence",
+            "unsupported_type",
+            "blank_samples",
+        ] {
+            let (mut payload, mut response) = form_fallback_case();
+            match invalid {
+                "missing_evidence" => {
+                    response["formCorrection"]["missingRoleSearches"]
+                        .as_array_mut()
+                        .unwrap()
+                        .pop();
+                }
+                "uncertain" => {
+                    response["formCorrection"]["missingRoleSearches"][0]["status"] = json!("uncertain")
+                }
+                "blank_reason" => {
+                    response["formCorrection"]["missingRoleSearches"][0]["reason"] = json!("")
+                }
+                "half_plan" => {
+                    response["formCorrection"]["changes"]
+                        .as_array_mut()
+                        .unwrap()
+                        .pop();
+                }
+                "wrong_currency" => {
+                    response["formCorrection"]["changes"][0]["suggestedColumn"] =
+                        json!("期初余额-原币(借)")
+                }
+                "low_confidence" => response["formCorrection"]["changes"][0]["confidence"] = json!(0.7),
+                "unsupported_type" => response["formCorrection"]["targetForm"] = json!("TB_UNKNOWN"),
+                "blank_samples" => payload["sampleRows"] = json!([]),
+                _ => unreachable!(),
+            }
+            sanitize_mapping_changes(&mut response, &payload, "tb", ReviewDatePolicy::Strict);
+            assert!(
+                response["changes"].as_array().unwrap().is_empty(),
+                "{invalid}: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn form_fallback_keeps_current_type_when_missing_fields_can_be_filled() {
+        let (mut payload, mut response) = form_fallback_case();
+        payload["headers"]
+            .as_array_mut()
+            .unwrap()
+            .extend([json!("期初净额"), json!("期末净额")]);
+        payload["sampleRows"][0]
+            .as_array_mut()
+            .unwrap()
+            .extend([json!("1"), json!("2")]);
+        response["changes"] = json!([
+            {"role":"openingFunctionalAmount","suggestedColumn":"期初净额","confidence":0.96,"reason":"找到期初净额"},
+            {"role":"closingFunctionalAmount","suggestedColumn":"期末净额","confidence":0.96,"reason":"找到期末净额"}
+        ]);
+        sanitize_mapping_changes(&mut response, &payload, "tb", ReviewDatePolicy::Strict);
+        let changes = response["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(
+            changes
+                .iter()
+                .all(|change| change["role"].as_str().unwrap().ends_with("Amount"))
+        );
+    }
+
+    #[test]
+    fn form_fallback_rejects_unconditional_other_type_changes_and_tool_scope_escape() {
+        let (mut payload, mut response) = form_fallback_case();
+        response["changes"] = response["formCorrection"]["changes"].clone();
+        response.as_object_mut().unwrap().remove("formCorrection");
+        sanitize_mapping_changes(&mut response, &payload, "tb", ReviewDatePolicy::Strict);
+        assert!(response["changes"].as_array().unwrap().is_empty());
+        // 工具未启用的原币角色不得借纠型出口重新放进来。
+        payload["availableRoles"] = json!([
+            "accountCode",
+            "ytdFunctionalDebit",
+            "ytdFunctionalCredit",
+            "openingFunctionalAmount",
+            "closingFunctionalAmount"
+        ]);
+        payload["formFallback"] = json!({"alternatives":[{"id":"伪造"}]});
+        restrict_review_roles_to_current_form(&mut payload, "tb");
+        assert!(payload.get("formFallback").is_none());
+    }
+
+    #[test]
+    fn form_fallback_je_reuses_safe_clear_and_kanzhang_scheme() {
+        let mut payload = json!({
+            "headers":["科目编码","金额"],"sampleRows":[["1001","2"],["2001","-2"]],
+            "currentMapping":{"accountCode":"科目编码","functionalDebit":"不存在的旧列"},
+            "availableRoles":["accountCode","functionalDebit","functionalCredit","functionalAmount","direction"]
+        });
+        inject_current_form(&mut payload, "je");
+        restrict_review_roles_to_current_form(&mut payload, "je");
+        inject_mapping_review_scope(&mut payload, "je");
+        assert_eq!(payload["currentForm"]["id"], "JE1");
+        let correction = json!({
+            "targetForm":"JE3",
+            "missingRoleSearches":[{"role":"functionalCredit","status":"no_candidate","reason":"只有带正负号净额，没有贷方单列"}],
+            "changes":[
+                {"role":"functionalDebit","action":"clear","confidence":0.96,"reason":"旧列已不存在"},
+                {"role":"functionalAmount","suggestedColumn":"金额","confidence":0.96,"reason":"原始带符号净额"}
+            ]
+        });
+        let mut response = json!({"fills":[],"reviews":[],"scheme":"B","formCorrection":correction});
+        sanitize_mapping_changes(&mut response, &payload, "je", ReviewDatePolicy::Strict);
+        assert_eq!(response["scheme"], "A");
+        assert_eq!(response["fills"].as_array().unwrap().len(), 2);
+        assert_eq!(response["fills"][0]["autoClearSafe"], true);
+        // 即使模型漏掉普通数组，条件纠型也不得导致后端 panic。
+        let mut missing_array = json!({"formCorrection":correction});
+        sanitize_mapping_changes(&mut missing_array, &payload, "je", ReviewDatePolicy::Strict);
+        assert_eq!(missing_array["fills"].as_array().unwrap().len(), 2);
     }
 
     #[test]

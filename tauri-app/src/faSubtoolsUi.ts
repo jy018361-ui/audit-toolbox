@@ -4,7 +4,7 @@ import {
   faMissingOptionalRoles,
   faParentDirectory,
   normalizeFaSuggestedMapping,
-  shouldAutoApplyFa,
+  shouldAutoApplyFaField,
   type FaLlmSuggestionLike,
   type FaMappingLike,
   type FaSide,
@@ -226,8 +226,7 @@ export function planDepLlmChanges(input: DepLlmPlanInput): DepLlmPlan {
     const before = mapping[key];
     if (depValueText(before as string | string[]) === depValueText(column)) return;
     if (
-      shouldAutoApplyFa(item.confidence) &&
-      (item.action !== "clear" || item.autoClearSafe === true)
+      shouldAutoApplyFaField(item)
     ) {
       record(key, column, item);
       return;

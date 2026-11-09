@@ -1,0 +1,1602 @@
+[
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "fa-cards-initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "fa-cards-initial",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "fa-cards-initial",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "fa-cards-files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "fa-cards-files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "fa-cards-files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "step-1-开始匹配",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "step-1-开始匹配",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_list",
+    "state": "step-1-开始匹配",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_dep_calc",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_dep_calc",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_dep_calc",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_dep_calc",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_dep_calc",
+    "state": "step-1-下一步：生成底稿",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_policy_compare",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_policy_compare",
+    "state": "initial",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_policy_compare",
+    "state": "initial",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_policy_compare",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_policy_compare",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_policy_compare",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_policy_compare",
+    "state": "step-1-读取表格 + LLM 复核",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_policy_compare",
+    "state": "step-1-读取表格 + LLM 复核",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_policy_compare",
+    "state": "step-1-读取表格 + LLM 复核",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/fa_policy_compare",
+    "state": "step-2-下一步",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-1-读取并自动映射",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-1-读取并自动映射",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-1-读取并自动映射",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-2-下一步：科目筛选",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-2-下一步：科目筛选",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-2-下一步：科目筛选",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-3-套用审计关注科目预设（8类）",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-3-套用审计关注科目预设（8类）",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-3-套用审计关注科目预设（8类）",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-4-按一级科目生成全科目批次（不含货币资金）",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-4-按一级科目生成全科目批次（不含货币资金）",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-4-按一级科目生成全科目批次（不含货币资金）",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-5-筛选预览",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-5-筛选预览",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-5-筛选预览",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-6-下一步：透视与导出",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-6-下一步：透视与导出",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/kanzhang",
+    "state": "step-6-下一步：透视与导出",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/je_sign_mark",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/je_sign_mark",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/je_sign_mark",
+    "state": "step-1-读取并自动映射",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/je_sign_mark",
+    "state": "step-1-读取并自动映射",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/je_sign_mark",
+    "state": "step-1-读取并自动映射",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "step-1-加载文件",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "step-1-加载文件",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "step-1-加载文件",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "step-2-下一步：条件筛选",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "step-2-下一步：条件筛选",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "step-2-下一步：条件筛选",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "step-3-下一步：导出",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "step-3-下一步：导出",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/ts_manager",
+    "state": "step-3-下一步：导出",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/confirmation_progress",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/confirmation_progress",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/confirmation_progress",
+    "state": "step-1-检查数据",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/confirmation_progress",
+    "state": "step-2-下一步：报告范围",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/confirmation_progress",
+    "state": "step-3-下一步：生成报告",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/file_list_directory",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/file_list_directory",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/file_list_directory",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/file_list_directory",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/file_list_directory",
+    "state": "step-1-重新扫描",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/file_list_directory",
+    "state": "step-1-重新扫描",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/file_list_directory",
+    "state": "step-1-重新扫描",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/file_list_directory",
+    "state": "step-2-下一步：输出文件",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/file_list_directory",
+    "state": "step-2-下一步：输出文件",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/file_list_directory",
+    "state": "step-2-下一步：输出文件",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/pdf_to_excel",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/pdf_to_excel",
+    "state": "initial",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/pdf_to_excel",
+    "state": "initial",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/pdf_to_excel",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/pdf_to_excel",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/pdf_to_excel",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/pdf_to_excel",
+    "state": "step-1-继续添加 PDF 或文件夹",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/pdf_to_excel",
+    "state": "step-1-继续添加 PDF 或文件夹",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/pdf_to_excel",
+    "state": "step-1-继续添加 PDF 或文件夹",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/pdf_to_excel",
+    "state": "step-2-开始转换",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/pdf_to_excel",
+    "state": "step-2-开始转换",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1600-wide",
+    "route": "/tools/pdf_to_excel",
+    "state": "step-2-开始转换",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "fa-cards-initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "fa-cards-initial",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "fa-cards-initial",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "fa-cards-files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "fa-cards-files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "fa-cards-files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "step-1-开始匹配",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "step-1-开始匹配",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_list",
+    "state": "step-1-开始匹配",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_dep_calc",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_dep_calc",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_dep_calc",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_dep_calc",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_dep_calc",
+    "state": "step-1-下一步：生成底稿",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_policy_compare",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_policy_compare",
+    "state": "initial",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_policy_compare",
+    "state": "initial",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_policy_compare",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_policy_compare",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_policy_compare",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_policy_compare",
+    "state": "step-1-读取表格 + LLM 复核",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_policy_compare",
+    "state": "step-1-读取表格 + LLM 复核",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_policy_compare",
+    "state": "step-1-读取表格 + LLM 复核",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_policy_compare",
+    "state": "step-2-下一步",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_policy_compare",
+    "state": "step-2-下一步",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/fa_policy_compare",
+    "state": "step-2-下一步",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-1-读取并自动映射",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-1-读取并自动映射",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-1-读取并自动映射",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-2-下一步：科目筛选",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-2-下一步：科目筛选",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-2-下一步：科目筛选",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-3-套用审计关注科目预设（8类）",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-3-套用审计关注科目预设（8类）",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-3-套用审计关注科目预设（8类）",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-4-按一级科目生成全科目批次（不含货币资金）",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-4-按一级科目生成全科目批次（不含货币资金）",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-4-按一级科目生成全科目批次（不含货币资金）",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-5-筛选预览",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-5-筛选预览",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-5-筛选预览",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-6-下一步：透视与导出",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-6-下一步：透视与导出",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/kanzhang",
+    "state": "step-6-下一步：透视与导出",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/je_sign_mark",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/je_sign_mark",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/je_sign_mark",
+    "state": "step-1-读取并自动映射",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/je_sign_mark",
+    "state": "step-1-读取并自动映射",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/je_sign_mark",
+    "state": "step-1-读取并自动映射",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "initial",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "initial",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "step-1-加载文件",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "step-1-加载文件",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "step-1-加载文件",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "step-2-下一步：条件筛选",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "step-2-下一步：条件筛选",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "step-2-下一步：条件筛选",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "step-3-下一步：导出",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "step-3-下一步：导出",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/ts_manager",
+    "state": "step-3-下一步：导出",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "initial",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "initial",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "step-1-检查数据",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "step-1-检查数据",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "step-1-检查数据",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "step-2-下一步：报告范围",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "step-2-下一步：报告范围",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "step-2-下一步：报告范围",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/confirmation_progress",
+    "state": "step-3-下一步：生成报告",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/file_list_directory",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/file_list_directory",
+    "state": "initial",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/file_list_directory",
+    "state": "initial",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/file_list_directory",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/file_list_directory",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/file_list_directory",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/file_list_directory",
+    "state": "step-1-重新扫描",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/file_list_directory",
+    "state": "step-1-重新扫描",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/file_list_directory",
+    "state": "step-1-重新扫描",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/file_list_directory",
+    "state": "step-2-下一步：输出文件",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/file_list_directory",
+    "state": "step-2-下一步：输出文件",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/file_list_directory",
+    "state": "step-2-下一步：输出文件",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/pdf_to_excel",
+    "state": "initial",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/pdf_to_excel",
+    "state": "initial",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/pdf_to_excel",
+    "state": "initial",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/pdf_to_excel",
+    "state": "files-selected",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/pdf_to_excel",
+    "state": "files-selected",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/pdf_to_excel",
+    "state": "files-selected",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/pdf_to_excel",
+    "state": "step-1-继续添加 PDF 或文件夹",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/pdf_to_excel",
+    "state": "step-1-继续添加 PDF 或文件夹",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/pdf_to_excel",
+    "state": "step-1-继续添加 PDF 或文件夹",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/pdf_to_excel",
+    "state": "step-2-开始转换",
+    "scroll": "top",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/pdf_to_excel",
+    "state": "step-2-开始转换",
+    "scroll": "middle",
+    "observedTaskStates": [],
+    "issues": []
+  },
+  {
+    "viewport": "1000-minimum",
+    "route": "/tools/pdf_to_excel",
+    "state": "step-2-开始转换",
+    "scroll": "bottom",
+    "observedTaskStates": [],
+    "issues": []
+  }
+]

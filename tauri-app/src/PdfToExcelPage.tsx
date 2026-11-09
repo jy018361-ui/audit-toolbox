@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
@@ -30,6 +31,7 @@ import {
   fileStatusPill,
   filterPdfPaths,
   isPdfConvertResult,
+  isSuccessfulFileResult,
   pdfFileName,
   summarizeFileResults,
   summarizeFileResultsText,
@@ -195,9 +197,32 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
         current={currentStep}
       />
       {summary && (
-        <div className="pdf-result-callout" role="status">
-          <strong>转换完成：成功 {summary.successCount} 份，失败 {summary.failCount} 份</strong>
-          <span>逐份结果与失败原因见下方「进度与结果」。</span>
+        /* 结果横幅分色：完成用 success 绿打底，失败份数以红色数字跳出；
+           「打开输出」在成功态并入横幅右侧，不再沉在结果卡底部（UI 审核）。 */
+        <div className="pdf-result-callout pdf-result-toned" role="status">
+          <strong>
+            转换完成：成功 {formatCount(summary.successCount)} 份
+            {summary.failCount > 0 && (
+              <>
+                ，失败{" "}
+                <b className="pdf-result-fail-count">
+                  {formatCount(summary.failCount)}
+                </b>{" "}
+                份
+              </>
+            )}
+          </strong>
+          {openTarget && (
+            <Button
+              type="button"
+              variant="default"
+              size="sm"
+              title={openTarget}
+              onClick={() => void openOutput(openTarget)}
+            >
+              打开输出
+            </Button>
+          )}
         </div>
       )}
       {job?.phase === "cancelled" && (
@@ -226,10 +251,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
               onClick={() => void chooseFiles()}
             >
               <strong>{pdfPaths.length ? "继续添加 PDF 或文件夹" : "拖放回函 PDF 或文件夹到窗口"}</strong>
-              {!pdfPaths.length && <span>
-                可一次拖入多份；拖入文件夹会自动找出其中的全部
-                PDF，也可点击选择文件
-              </span>}
+              {!pdfPaths.length && <span>支持批量 PDF 与文件夹</span>}
             </button>
             <div className="merger-toolbar">
               <Button
@@ -299,7 +321,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                 <EmptyState
                   compact
                   title="尚未添加 PDF 文件"
-                  description="选择回函 PDF 或文件夹后，可在此确认待处理列表。"
+                  description="尚无待处理 PDF。"
                 />
               )}
             </div>
@@ -317,6 +339,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                 <FileDropInput
                   value={outputDir}
                   placeholder="拖放或点击选择输出文件夹"
+                  hideFilledLabel
                   onBrowse={() => void chooseOutputDir()}
                   onClear={outputDir ? () => setOutputDir("") : undefined}
                   onDragStateChange={() => {}}
@@ -325,15 +348,14 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
               </div>
             </Field>
             <p className="hint">
-              留空则输出到每份 PDF
-              所在文件夹，文件名自动生成；另会生成一份“处理清单”汇总全部结果。
+              未选输出文件夹时，文件存于各 PDF 原目录；另生成处理清单。
             </p>
-            <div className="actions">
+            <div className="actions" data-button-size="default">
               {busy && job ? (
                 <Button
                   type="button"
                   variant="secondary"
-                  size="sm"
+                  size="default"
                   onClick={() => void cancelJobWithFeedback(job.jobId)}
                 >
                   取消任务
@@ -349,9 +371,6 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                 </Button>
               )}
             </div>
-            {!pdfPaths.length && (
-              <p className="hint">请先添加回函 PDF，再开始转换。</p>
-            )}
           </CardContent>
         </Card>
 
@@ -371,27 +390,15 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
               <>
                 <p className="hint">{summarizeFileResultsText(summary)}</p>
                 <PdfConvertResultTable files={result.files} />
-                {openTarget && (
-                  <div className="actions">
-                    <Button
-                      type="button"
-                      variant="default"
-                      title={openTarget}
-                      onClick={() => void openOutput(openTarget)}
-                    >
-                      打开输出
-                    </Button>
-                  </div>
-                )}
               </>
             ) : (
               !job && (
+                /* 空态压成单行紧凑块：这里只是等待位，不再撑一整块虚线占位。 */
                 <EmptyState
+                  compact
                   title="等待转换结果"
                   description={
-                    pdfPaths.length
-                      ? "开始转换后，这里会显示总体进度和每份回函的处理结果。"
-                      : "先添加回函 PDF，再开始转换。"
+                    pdfPaths.length ? undefined : "先添加回函 PDF，再开始转换。"
                   }
                 />
               )
@@ -430,18 +437,25 @@ function PdfConvertResultTable({
           </thead>
           <tbody>
             {files.map((row, index) => (
-              <tr key={`${row.outputPath || row.name}#${index}`}>
+              <tr
+                key={`${row.outputPath || row.name}#${index}`}
+                className={!isSuccessfulFileResult(row) ? "pdf-row-failed" : undefined}
+              >
                 <td title={row.name}>{row.name}</td>
                 <td>
                   <span className={fileStatusPill(row)}>
                     {fileStatusLabel(row)}
                   </span>
                 </td>
-                <td>{row.pages}</td>
-                <td>{row.textRows}</td>
-                <td>{row.tables}</td>
-                <td>{row.tableDataRows}</td>
-                <td title={row.error}>{row.error}</td>
+                <td>{formatCount(row.pages)}</td>
+                <td>{formatCount(row.textRows)}</td>
+                <td>{formatCount(row.tables)}</td>
+                <td>{formatCount(row.tableDataRows)}</td>
+                {/* 失败原因是关键诊断：整行浅红底、允许两行显示，
+                    不再被单行省略号截断（UI 审核）。 */}
+                <td className="pdf-error-cell" title={row.error}>
+                  <span className="pdf-error-text">{row.error}</span>
+                </td>
               </tr>
             ))}
           </tbody>

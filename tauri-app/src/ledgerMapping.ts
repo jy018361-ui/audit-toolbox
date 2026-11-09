@@ -4,6 +4,7 @@ import {
   shouldAutoAcceptLlmReview,
 } from "@/llmReviewConfidence";
 import { fileName } from "./tbjePairing";
+import { manualAuxiliaryColumns, recordManualLedgerMapping } from "./manualLedgerMapping";
 
 // 凭证映射的共享逻辑：看账工具与正负数凭证标记共用同一套字段角色、
 // 金额方案取舍和 LLM 复核判定，避免两个工具的口径各自漂移。
@@ -69,8 +70,16 @@ export function ledgerHasMappedRole(
 }
 
 /** 第二步统一在科目列展示有效辅助值；身份键仍分别保留科目和辅助字段。 */
-export function ledgerReviewAccountLabel(account: string, auxiliary?: string | null): string {
-  const name = account.trim();
+export function ledgerReviewAccountLabel(account: string, auxiliary?: string | null, parentAccountName?: string | null): string {
+  let name = account.trim();
+  const parent = parentAccountName?.trim();
+  if (parent) {
+    const match = name.match(/^(\S+?)[\s/:：\\|]+(.+)$/);
+    const hasCode = Boolean(match && looksLikeAccountCode(match[1]));
+    const leaf = hasCode ? match![2].trim() : name;
+    // 显示层补名；源科目串及身份键始终保留原值。
+    if (!leaf.includes(parent)) name = `${hasCode ? `${match![1]} ` : ""}${parent}-${leaf}`;
+  }
   const detail = auxiliary?.trim();
   return detail ? `${name} · ${detail}` : name;
 }
@@ -184,6 +193,7 @@ export async function classifyLedgerWorkbookSheets<
   call: LedgerEngineCall,
   method: string,
   path: string,
+  onEmptySheet?: (sheet: string) => void,
 ): Promise<T[]> {
   const classify = (sheet: string) =>
     call(
@@ -199,7 +209,15 @@ export async function classifyLedgerWorkbookSheets<
   ];
   const results: T[] = [];
   for (const sheet of names) {
-    results.push(sheet === first.sheet ? first : await classify(sheet));
+    try {
+      results.push(sheet === first.sheet ? first : await classify(sheet));
+    } catch (error) {
+      // 默认读取已找到有效正表；其他空白页不能让整份工作簿的有效结果作废。
+      // 只跳过引擎明确报告的空表／参数说明页，读取失败、取消等错误仍交给调用方处理。
+      if (!(typeof error === "object" && error !== null && "code" in error && ["SOURCE_EMPTY", "SOURCE_NOT_TABULAR"].includes(String(error.code))))
+        throw error;
+      onEmptySheet?.(sheet);
+    }
   }
   return results;
 }
@@ -309,6 +327,7 @@ export async function scanLedgerUploadSources<
           call,
           options.classificationMethod ?? "deposit.classify_source",
           path,
+          () => { local.hiddenSheets += 1; },
         );
         for (const scripted of sheets) {
           if (!ledgerClassificationIsVisible(scripted)) {
@@ -669,6 +688,11 @@ export const isCombinedAccountValues = (values: string[]): boolean => {
     const value = raw.trim();
     if (!value) continue;
     total += 1;
+    // 仅用于允许明确的编码＋名称双角色；实际解析仍要求两角色共用该列。
+    if (/^\d{4,}-\s*[\u4e00-\u9fff]/u.test(value)) {
+      split += 1;
+      continue;
+    }
     // 与 Rust split_code_and_name_ref 同口径：完整日期不是科目；分隔符后
     // 若仍是编码也不是名称（例如 1001/02）。
     if (/^(?:19|20)\d{2}\/\d{1,2}\/\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/.test(value))
@@ -880,7 +904,7 @@ export function planLedgerChanges(
     }
     const occupied = Object.entries(next).filter(
       ([role, value]) =>
-        role !== change.role &&
+        !role.startsWith("__") && role !== change.role &&
         (Array.isArray(value) ? value.includes(column) : value === column) &&
         !canShareCombinedAccountColumn(
           headers,
@@ -929,7 +953,7 @@ export function planLedgerChanges(
     applied.push(planned);
   }
   return {
-    mapping: next,
+    mapping: recordManualLedgerMapping(current, next, "", ""),
     applied,
     pending,
   };
@@ -956,7 +980,7 @@ export function applyLedgerPendingChange(
   if (!column || !headers.includes(column)) return next;
   for (const [role, value] of Object.entries(next)) {
     if (
-      role === change.role ||
+      role.startsWith("__") || role === change.role ||
       !(Array.isArray(value) ? value.includes(column) : value === column) ||
       canShareCombinedAccountColumn(headers, sampleRows, column, change.role, role)
     ) {
@@ -980,7 +1004,7 @@ export function applyLedgerPendingChange(
   } else {
     next[change.role] = column;
   }
-  return next;
+  return recordManualLedgerMapping(current, next, column, change.role);
 }
 
 export const ledgerErrorText = (error: unknown) => {
@@ -1559,9 +1583,6 @@ export type AuxiliaryLinkResult = {
   tbAuxMapped: boolean;
   status: AuxiliaryLinkStatus;
   column: string | null;
-  anchorHits: number;
-  anchorTotal: number;
-  coverage: number;
   competingColumns: string[];
   warnings: string[];
   planKey?: string | null;
@@ -1588,11 +1609,9 @@ export type AuxiliaryLinkResult = {
 };
 
 /**
- * TB 辅助字段必须由 JE 锚点反查验证后才能保留。
+ * 自动辅助字段须经 JE 联动验证；人工逐列确认的映射保留为 TB 结构证据。
  *
- * 映射是整列口径，不能在映射面板里声称“已映射”，计算时却只对部分
- * 主体＋科目组生效。因此除完整 verified 外，统一撤销 TB 的辅助映射；
- * 计算侧随后自然退回主体＋科目，不再携带一项未经跨表证明的字段。
+ * 保留人工映射不代表 JE 辅助匹配成功，跨表匹配仍由公共完整验证决定。
  */
 export function dropUnlinkedTbAuxiliary<T extends Record<string, unknown>>(
   mapping: T,
@@ -1601,15 +1620,19 @@ export function dropUnlinkedTbAuxiliary<T extends Record<string, unknown>>(
 ): T {
   if (!result?.tbAuxMapped || result.status === "verified" || !(role in mapping))
     return mapping;
+  const manual = manualAuxiliaryColumns(mapping, role);
+  const selected = Array.isArray(mapping[role]) ? mapping[role] : [mapping[role]];
+  if (manual.length && manual.length === selected.length) return mapping;
   const next = { ...mapping };
-  delete next[role];
+  if (manual.length) (next as Record<string, unknown>)[role] = manual;
+  else delete next[role];
   return next;
 }
 
 /**
  * 映射阶段的辅助核算联动验证：TB 锚点反查认定 JE 辅助列。
  * 计算侧（TBJE 完整性／存款）复核同一份公共判定逻辑，两阶段不会各说各话。
- * 调用方对非 verified 结论撤销 TB 辅助映射；验证调用失败本身不抛错。
+ * 调用方对非 verified 结论撤销自动辅助候选，人工确认列仍保留；验证调用失败本身不抛错。
  */
 export async function verifyAuxiliaryLink(
   params: Record<string, unknown>,
@@ -1647,6 +1670,7 @@ export type CurrencyLinkResult = {
  */
 export async function verifyCurrencyLink(
   params: Record<string, unknown>,
+  options: { throwOnError?: boolean } = {},
 ): Promise<CurrencyLinkResult | null> {
   try {
     const { engineCall } = await import("./api");
@@ -1654,8 +1678,11 @@ export async function verifyCurrencyLink(
       "ledger.currency_link",
       params,
     )) as CurrencyLinkResult;
-    return result && typeof result.required === "boolean" ? result : null;
-  } catch {
+    if (result && typeof result.required === "boolean") return result;
+    if (options.throwOnError) throw new Error("币种衔接验证未返回有效结果，请重新识别账表后重试。");
+    return null;
+  } catch (error) {
+    if (options.throwOnError) throw error;
     return null;
   }
 }

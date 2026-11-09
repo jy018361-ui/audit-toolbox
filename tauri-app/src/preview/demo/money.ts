@@ -45,6 +45,47 @@ const loanPreparedRates = () => loanPreviewAccounts()
     fixedRate: 0.03,
   }));
 
+/** 台账模式「台账信息确认」步骤的演示行：形状对齐 Rust loan.prepare_rates。 */
+const loanConfirmationRows = (params: Dict) => {
+  const end = typeof params.reportEnd === "string" ? params.reportEnd : "2025-12-31";
+  const start = typeof params.reportStart === "string" ? params.reportStart : `${end.slice(0, 4)}-01-01`;
+  const event = (date: string, amount: number, basis: string) => ({
+    date: date > end ? end : date < start ? start : date, amount,
+    basis: date > end ? "按测算截止日默认" : date < start ? "按报告期开始日默认" : basis,
+  });
+  return [
+  {
+    rowKey: "ledger-1", loanId: "HG-2023-011", entity: "默认主体",
+    opening: 10970000, added: 0, reduced: 0, closing: 10970000,
+    originalClosing: 10970000, rateType: "fixed", spreadBps: 0,
+    fixedRate: 0.0435, benchmarkRate: null,
+    contractStart: "2023-03-15", contractEnd: "2026-03-14",
+    additions: [], repayments: [],
+  },
+  {
+    rowKey: "ledger-2", loanId: "HG-2023-018", entity: "默认主体",
+    opening: 5000000, added: 3000000, reduced: 2000000, closing: 6000000,
+    originalClosing: 6000000, rateType: "floating", spreadBps: 120,
+    fixedRate: null, benchmarkRate: 0.031,
+    contractStart: "2025-02-10", contractEnd: "2027-02-09",
+    additions: [event("2025-02-10", 3000000, "按合同开始日默认")],
+    repayments: [event("2027-02-09", 2000000, "按到期日默认")],
+  },
+  {
+    rowKey: "ledger-3", loanId: "HG-2024-034", entity: "华远上海分公司",
+    opening: 8795000, added: 0, reduced: 0, closing: 8795000,
+    originalClosing: 8795000, rateType: "fixed", spreadBps: 0,
+    fixedRate: 0.041, benchmarkRate: null,
+    contractStart: "2024-01-23", contractEnd: "2027-01-22",
+    additions: [], repayments: [],
+  },
+  ].map((row, i) => ({...row,
+    amountSources: {opening: i === 1 ? "PBC" : "推算", added: i === 1 ? "PBC" : "推算",
+      reduced: i === 1 ? "PBC" : "推算", closing: "PBC"},
+    originalAmounts: {opening: row.opening, added: row.added, reduced: row.reduced, closing: row.closing},
+  }));
+};
+
 const COMPANY = "北京华远国际贸易有限公司";
 const REPORT_END = "2025-12-31";
 const DATA_YEARS = [2025];
@@ -1150,7 +1191,8 @@ export const handlers: Record<string, (params: Record<string, unknown>) => unkno
   "loan.inspect": (params) =>
     loanInspection(typeof params.kind === "string" ? params.kind : "ledger"),
   "loan.tb_accounts": () => ({ accounts: loanPreviewAccounts() }),
-  "loan.prepare_rates": () => ({ rows: loanPreparedRates() }),
+  "loan.prepare_rates": (params) =>
+    ({ rows: params.mode === "ledger" ? loanConfirmationRows(params) : loanPreparedRates() }),
 
   // —— 公共账表引擎（三个工具共用） ——
   "ledger.forms": (params) =>
@@ -1162,9 +1204,6 @@ export const handlers: Record<string, (params: Record<string, unknown>) => unkno
     status: "verified",
     column: typeof (params.jeMapping as Dict | undefined)?.auxiliary === "string"
       ? (params.jeMapping as Dict).auxiliary : null,
-    anchorHits: 12,
-    anchorTotal: 12,
-    coverage: 1,
     competingColumns: [],
     warnings: [],
     planKey: "demo-auxiliary-link",

@@ -3,6 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JeSignMarkPage } from "./JeSignMarkPage";
+import { publishTaskRestore } from "./restore";
 import type { ToolManifest } from "./types";
 
 vi.mock("./api", () => ({
@@ -50,6 +51,22 @@ function seedLoadedDraft() {
 }
 
 describe("JeSignMarkPage", () => {
+  it("restores a reading step without mapping and re-identifies the saved source", async () => {
+    const { jobStart } = await import("./api");
+    vi.mocked(jobStart).mockResolvedValueOnce("restored-read");
+    publishTaskRestore({
+      jobId: "old-read", toolId: tool.id, method: "kanzhang.mark_inspect",
+      params: { inputPath: "C:/tmp/saved.xlsx", sheet: "凭证", headerRow: 2 },
+      missingPaths: [], authorizedPathCount: 1,
+    });
+    render(<JeSignMarkPage tool={tool} />);
+    await waitFor(() => expect(jobStart).toHaveBeenCalledWith("kanzhang.mark_inspect", {
+      inputPath: "C:/tmp/saved.xlsx", sheet: "凭证", headerRow: 2, headerDepth: 1,
+    }));
+    const draft = JSON.parse(sessionStorage.getItem("audit-toolbox.je-sign-mark.draft.v2") ?? "{}");
+    expect(draft.inputPath).toBe("C:/tmp/saved.xlsx");
+    expect(draft.sheet).toBe("凭证");
+  });
   it("取消后页首提供独立警示徽标和重试方向", async () => {
     const { listenJobEvents } = await import("./api");
     const { container } = render(<JeSignMarkPage tool={tool} />);
@@ -62,6 +79,7 @@ describe("JeSignMarkPage", () => {
     // vitest 未开全局 cleanup，不手动卸载的话上一条用例的 DOM 会留到下一条。
     cleanup();
     sessionStorage.clear();
+    vi.clearAllMocks();
   });
 
   it("shows only the loading card before a file is read", () => {
@@ -94,6 +112,12 @@ describe("JeSignMarkPage", () => {
     // 看账的三步走在这里不该出现，尤其是被剪掉的「科目筛选」独立步骤。
     expect(screen.queryByText("科目筛选")).not.toBeInTheDocument();
     expect(screen.queryByText("透视与导出")).not.toBeInTheDocument();
+
+    // 文件预览必须走公共 DataTable（列按内容取宽 + data-more 滚动渐隐 +
+    // 金额右对齐都在那套容器里）；退回自制表格会把右缘裁列问题带回来。
+    expect(
+      document.querySelector(".mapping-panel .data-table-frame .data-table-scroll table.data-table-table"),
+    ).not.toBeNull();
   });
 
   it("keeps batch naming out of the default view and opens inline rename on demand", () => {
@@ -117,9 +141,8 @@ describe("JeSignMarkPage", () => {
     expect(screen.getByText(/不参与正负数配对/)).toBeInTheDocument();
   });
 
-  // 金额符号口径卡片：自动检测的结论与依据要亮出来，筛过的账要黄牌提醒，
-  // 手动选择要在导出参数里生效。
-  it("shows the sign convention card with basis and passes the manual choice to export", async () => {
+  // 正常检测静默；单边文件保留用户选择，并确保选择传入导出。
+  it("asks for a choice only for one-sided files and passes the manual choice to export", async () => {
     seedLoadedDraft();
     // 导出按钮需要有效批次：给种子草稿补一个已选科目的批次。
     const raw = JSON.parse(
@@ -143,12 +166,10 @@ describe("JeSignMarkPage", () => {
     });
     render(<JeSignMarkPage tool={tool} />);
     await waitFor(() =>
-      expect(screen.getByText(/36 张借贷齐全的凭证/)).toBeInTheDocument(),
+      expect(screen.getByText("文件仅含单边分录，请确认金额记录方式。")).toBeInTheDocument(),
     );
-    // 筛过的账：黄牌提醒必须出现，并且要点明成因是"按科目筛选后导出"，
-    // 不能让人误以为是字段映射出了问题。
-    expect(screen.getByText(/按科目筛选后导出/)).toBeInTheDocument();
-    expect(screen.getByText(/这不是映射问题/)).toBeInTheDocument();
+    expect(screen.queryByText(/36 张借贷齐全的凭证/)).not.toBeInTheDocument();
+    expect(screen.queryByText("查看判定依据")).not.toBeInTheDocument();
     // 全部凭证均为单边时才显示两个人工口径；选择后要进入导出参数。
     fireEvent.click(screen.getByRole("button", { name: "已带符号" }));
     fireEvent.click(screen.getByRole("button", { name: "标记并导出" }));
@@ -158,7 +179,7 @@ describe("JeSignMarkPage", () => {
     expect(params.markLossTransfer).toBe(true);
   });
 
-  it("hides manual sign choices when the file contains balanced vouchers", async () => {
+  it("hides routine sign information and places review in the mapping panel", async () => {
     seedLoadedDraft();
     const { engineCall } = await import("./api");
     vi.mocked(engineCall).mockResolvedValue({
@@ -174,10 +195,36 @@ describe("JeSignMarkPage", () => {
         keySuspect: false,
       },
     });
-    render(<JeSignMarkPage tool={tool} />);
-    await waitFor(() => expect(screen.getByText(/12 张凭证均可/)).toBeInTheDocument());
+    await act(async () => { render(<JeSignMarkPage tool={tool} />); });
+    expect(screen.queryByText(/12 张凭证均可/)).not.toBeInTheDocument();
+    expect(screen.queryByText("金额符号口径")).not.toBeInTheDocument();
+    expect(screen.queryByText(/金额方案.*已生效/)).not.toBeInTheDocument();
+    expect(screen.queryByText("查看判定依据")).not.toBeInTheDocument();
+    const review = screen.getByRole("button", { name: "复核映射" });
+    expect(review.closest(".mapping-panel")).toHaveTextContent("文件预览");
+    expect(document.querySelector(".jm-sign")).toBeNull();
     expect(screen.queryByRole("button", { name: "借贷符号一样" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "已带符号" })).not.toBeInTheDocument();
+  });
+
+  it("LLM 已复核但没有调整时仍在映射区显示结论", async () => {
+    seedLoadedDraft();
+    const { engineCall } = await import("./api");
+    vi.mocked(engineCall).mockImplementation(async (method) => {
+      if (method === "kanzhang.llm_mapping") return { reviews: [] };
+      if (method === "kanzhang.mark_sign_report") return {
+        signConvention: {
+          scheme: "single", detected: "signed", basis: "单一金额列。",
+          totalVouchers: 1, balancedVouchers: 0, unbalancedVouchers: 0,
+          oneSidedVouchers: 1, filtered: false, keySuspect: false,
+        },
+      };
+      return { values: [], total: 0 };
+    });
+    render(<JeSignMarkPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", { name: "复核映射" }));
+    expect(await screen.findByText("无调整")).toBeVisible();
+    expect(screen.getByText(/现有字段映射与 LLM 判断一致，未做改动/)).toBeVisible();
   });
 
   it("omits the selector when a single amount column leaves no ambiguity", async () => {
@@ -196,10 +243,9 @@ describe("JeSignMarkPage", () => {
         keySuspect: false,
       },
     });
-    render(<JeSignMarkPage tool={tool} />);
-    await waitFor(() =>
-      expect(screen.getByText(/单一金额列必然已带符号/)).toBeInTheDocument(),
-    );
+    await act(async () => { render(<JeSignMarkPage tool={tool} />); });
+    expect(screen.queryByText(/单一金额列必然已带符号/)).not.toBeInTheDocument();
+    expect(document.querySelector(".jm-sign")).toBeNull();
     expect(
       screen.queryByRole("button", { name: "借贷符号一样" }),
     ).not.toBeInTheDocument();
@@ -251,4 +297,7 @@ describe("JeSignMarkPage", () => {
     expect(screen.getByText("文件无法读取")).toBeInTheDocument();
     expect(screen.queryByText("标记结果")).not.toBeInTheDocument();
   });
+
+  // jsdom 环境下 import.meta.url 不是 file 协议，读不了文件；正负数的
+  // 样式断言放在 node 环境的 KanzhangParityPage.test.ts（两页共用样式族）。
 });

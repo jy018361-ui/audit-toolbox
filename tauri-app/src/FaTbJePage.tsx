@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatMoney } from "@/lib/numberFormat";
 import type { ReactNode } from "react";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
@@ -15,6 +16,7 @@ import {
   TB_LABELS,
 } from "./DepositInterestPage";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { SourceTableControls } from "@/components/SourceTableControls";
 import { useTableColumnResize } from "@/components/useTableColumnResize";
 import {
   completeLedgerPairReviewKey,
@@ -62,6 +64,7 @@ import {
   resolveForm,
   roleRequirement,
   useLedgerForms,
+  type LedgerForm,
 } from "@/ledgerForms";
 import "./fx-audit.css";
 import "./fa-tbje.css";
@@ -74,6 +77,7 @@ type AccountRole = "cost" | "depreciation" | "excluded";
 type Assignment = {
   entity?: string;
   account: string;
+  parentAccountName?: string;
   auxiliary?: string;
   currency?: string;
   role: AccountRole;
@@ -117,13 +121,15 @@ let faTbJeDraftCache: FaTbJeDraft | undefined;
 
 const MULTI = new Set(["id", "accountName", "account", "auxiliary", "date"]);
 const PAGE_SIZE = 50;
+// 汇总变动表/对方科目透视表的每批渲染行数，与存款利息 250 条/批口径一致。
+const FA_TABLE_PAGE_SIZE = 250;
 
 const hasMapped = (mapping: Mapping, role: string) => {
   const value = mapping[role];
   return Array.isArray(value) ? value.some(Boolean) : Boolean(value?.trim());
 };
 
-export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
+export function faTbJeMissingMappings(kind: Kind, mapping: Mapping, forms: LedgerForm[] = []): string[] {
   const missing: string[] = [];
   const amountPairHint = (prefix: string, label: string) => {
     const absent = [
@@ -134,6 +140,20 @@ export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
   };
   if (!hasMapped(mapping, "accountCode") && !hasMapped(mapping, "accountName"))
     missing.push("科目编码或科目名称");
+  if (forms.length) {
+    if (kind === "je") {
+      if (!hasMapped(mapping, "id")) missing.push("凭证标识");
+      if (!hasMapped(mapping, "date")) missing.push("记账日期");
+    }
+    const match = resolveForm(kind, forms, mapping);
+    const labels = kind === "tb" ? TB_LABELS : JE_LABELS;
+    if (match) {
+      missing.push(...match.missing.map((role) => labels[role] ?? role));
+      missing.push(...match.missingAny.map((slot) => `${slot.map((role) => labels[role] ?? role).join("／")}（任一）`));
+      missing.push(...match.partialOptional.map((role) => labels[role] ?? role));
+    }
+    return [...new Set(missing)];
+  }
   if (kind === "tb") {
     const opening =
       hasMapped(mapping, "openingFunctionalAmount") ||
@@ -145,6 +165,8 @@ export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
         hasMapped(mapping, "closingFunctionalCredit"));
     if (!opening) missing.push(`期初余额（${amountPairHint("openingFunctional", "期初本位币")}）`);
     if (!closing) missing.push(`期末余额（${amountPairHint("closingFunctional", "期末本位币")}）`);
+    if (!hasMapped(mapping, "ytdFunctionalDebit") || !hasMapped(mapping, "ytdFunctionalCredit"))
+      missing.push("本年累计借方和贷方发生额");
   } else {
     if (!hasMapped(mapping, "id")) missing.push("凭证标识");
     if (!hasMapped(mapping, "date")) missing.push("记账日期");
@@ -154,7 +176,7 @@ export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
         hasMapped(mapping, "functionalCredit"));
     if (!amount) missing.push(`本位币金额（${amountPairHint("functional", "本位币")}）`);
   }
-  return missing;
+  return [...new Set(missing)];
 }
 
 /**
@@ -195,7 +217,7 @@ export function splitFaAccount(account: string): {
  * 1602 整支是累计折旧；1601 整支进表，原值还是折旧再由科目名称定（见 `suggestFaAccounts`）。
  *
  * **非 1601/1602 的数字编码**不再一律排除：自身或按编码前缀回查到的上级科目名
- * **明确**写着「固定资产／累计折旧」时进表（旧制度 1501/1502、自定义编码的账套）。
+ * **首段明确**写着「固定资产／累计折旧」时进表（旧制度 1501/1502、自定义编码的账套）。
  * 宽词（房屋／设备）不参与这一层——名称里带「房屋」的费用或存款科目
  * （`6601090401 折旧费-固定资产-…`、`1002016871 银行存款-汉口银行(房屋积金)`）
  * 只看宽词必然被当成原值捞进来。字母开头的自定义编码（`FA01`）不适用本规则，
@@ -208,19 +230,38 @@ function roleFromCode(code: string): AccountRole | undefined {
 }
 
 const SAYS_DEPRECIATION =
-  /累计折旧|累計折舊|accumulated\s+depreciation|accum\.?\s*dep/i;
+  /累计折旧|累計折舊|(?:^|[\s\/|])(?:固定资产折旧|固定資產折舊)(?=$|[\s:_\-–—－：\/|])|accumulated\s+depreciation|accum\.?\s*dep/i;
+/** 名称及真实上级共同提供费用语境；不能把“固定资产折旧”中的资产词当原值。 */
+function saysDepreciationExpense(...names: string[]): boolean {
+  const context = names.join(" ");
+  return /费用|費用/.test(context) && /折旧|折舊/.test(context);
+}
 /** 名称一出现就整枝出局（优先于折旧词）：使用权资产与 SAP 技术性清账科目不是固定资产本体。 */
 const SAYS_NOT_IN_SCOPE = /使用权|使用權|清账|清賬|right[-\s]?of[-\s]?use/i;
-/** 名称一出现就不是原值：减值准备、清理清算过渡户、折旧费／摊销／租赁费等费用科目。 */
+/** 名称一出现就不是原值：减值准备、清理清算过渡户、折旧费／摊销／租赁费等费用科目。
+ *  预付／应付往来科目名称常带资产词（1123.02 预付固定资产款-供应商），本体是往来
+ *  不是固定资产，整词出局，不得被「名称明确写出固定资产」的补救规则捞回。
+ *  兜底排除：营业外收支、待处理财产损溢整科出局；「报废」与处置/损失同款，
+ *  和「固定资产」前后相邻即判非原值（营业外收入-固定资产报废利得）。 */
 const SAYS_NOT_COST =
-  /减值准备|減值準備|impairment|清理|清算|折旧费|折舊費|摊销|攤銷|租赁费|租賃費|固定资产.*(?:处置|损失)|固定資產.*(?:處置|損失)|(?:处置|损失).*固定资产|(?:處置|損失).*固定資產/i;
-/** 非标准数字编码进表的唯一窄门：名称**明确**写出「固定资产」。
- *  1601/1602 不适用时靠自身或上级科目名匹配（用户定的口径），宽词一律不算。 */
+  /减值准备|減值準備|impairment|清理|清算|折旧费|折舊費|摊销|攤銷|租赁费|租賃費|营业外|營業外|待处理|待處理|预付|預付|应付|應付|prepaid|payable|固定资产.*(?:处置|损失|报废)|固定資產.*(?:處置|損失|報廢)|(?:处置|损失|报废).*固定资产|(?:處置|損失|報廢).*固定資產/i;
 const SAYS_FA_EXPLICIT = /固定资产|固定資產/i;
+/** 「名称明确写出固定资产」只认首段：科目本体（或上下文附带的上级科目名，
+ *  空格分隔）的首个路径分段。尾段的「固定资产」多为辅助核算标注（进项税
+ *  「：固定资产」，这笔税产生自购固定资产）或损益修饰（营业外收入-固定资产
+ *  报废利得），全名包含会把税费/损益科目误判成原值，资产类别还会被填成
+ *  科目全名。与看账工具「关键词只认首段」同一口径。 */
+function saysFaExplicitAtHead(name: string): boolean {
+  return name.split(/\s+/).some((token) => {
+    const head = token.replace(/^[\s:：\-–—－/\\|]+/, "").split(/[\s:：\-–—－/\\|]/)[0] ?? "";
+    return SAYS_FA_EXPLICIT.test(head);
+  });
+}
 const SAYS_FIXED_ASSET =
   /固定资产|固定資產|房屋|建筑物|建築物|机器|機器|机械|機械|设备|設備|运输工具|運輸工具|电子设备|办公设备|fixture|equipment|building|vehicle/i;
 
 function roleFromName(name: string): AccountRole {
+  if (saysDepreciationExpense(name)) return "excluded";
   if (SAYS_NOT_IN_SCOPE.test(name)) return "excluded";
   if (SAYS_DEPRECIATION.test(name)) return "depreciation";
   if (SAYS_NOT_COST.test(name)) return "excluded";
@@ -251,10 +292,12 @@ function faCategory(name: string): string {
         // 类别列先剥掉它，08 号样例的类别才不会显示成「160101\房屋建筑物」。
         .replace(/^[0-9][0-9A-Za-z._]*[\s:：\-—/\\|]+/, "")
         .replace(
-          /累计折旧|累計折舊|固定资产|固定資產|accumulated\s+depreciation|property[,\s]*plant\s*(and|&)\s*equipment|ppe/gi,
+          /累计折旧|累計折舊|固定资产折旧|固定資產折舊|固定资产|固定資產|accumulated\s+depreciation|property[,\s]*plant\s*(and|&)\s*equipment|ppe/gi,
           "",
         )
-        .replace(/^[-—:：\s\\/|]+|[-—:：\s\\/|]+$/g, ""),
+        // 英文账套的角色前缀与资产类别分开；只消费名称开头的完整角色词。
+        .replace(/^\s*(?:fixed[\s_]+assets?|depreciation)(?=$|[\s_\-–—－:：\\/|])[,\s_\-–—－:：\\/|]*/i, "")
+        .replace(/^[-–—－:：\s\\/|]+|[-–—－:：\s\\/|]+$/g, ""),
     ) || "固定资产"
   );
 }
@@ -268,6 +311,19 @@ function nearestParent(chart: Map<string, string>, code: string): string {
   return "";
 }
 
+/** 编码列与混写名称列并用时，名称可能又以同一编码开头。
+ *  只为自动分类剥离这段重复前缀；原始科目串及复核身份仍保持原值。 */
+function faClassificationName(code: string, name: string): string {
+  let value = name.trim();
+  while (code && value.startsWith(code)) {
+    const rest = value.slice(code.length);
+    const boundary = /^[\s:：_\-—/\\|]+/.exec(rest);
+    if (!boundary) break;
+    value = rest.slice(boundary[0].length).trim();
+  }
+  return value;
+}
+
 /**
  * 整张科目表一起分类。逐个科目单看名称是分不清的——`机械设备` 既可能挂在
  * 1601 原值下，也可能挂在 1602 累计折旧下，`直接投入-仪器设备维护费` 更是
@@ -278,24 +334,21 @@ function nearestParent(chart: Map<string, string>, code: string): string {
  * 1. **在不在本表口径内**，由「上级科目 → 一级编码 → 名称关键词」决定，上级科目的
  *    结论一路继承给下级。`1604 在建工程`、`1605 使用权资产`、`5301 研发支出`、
  *    `6601 运营费用` 整枝排除。**非 1601/1602 的数字编码**不据此出局：自身或
- *    上级科目名明确写出「固定资产／累计折旧」的照常进表（旧制度 1501/1502、
+ *    上级科目名首段明确写出「固定资产／累计折旧」的照常进表（旧制度 1501/1502、
  *    自定义编码账套）；上级行不存在时以自身名称为准，宽词不算。
  * 2. **在口径内的再分原值还是折旧**，科目名称写了「累计折旧」就是折旧——
  *    SAP 型科目表把累计折旧挂在 1601 底下，只认编码会整片判成原值；
  *    国标科目表（1602 整支折旧）则靠编码，因为明细科目只写「机械设备」不写折旧。
  *    名称写了「减值准备」「清理」「折旧费」的一律排除，不能混进原值。
  *
- * **结论按科目编码归一**：同一个科目在 TB 与 JE 里可能拼出两种科目串
- * （列序不同、名称取的列也不同），角色按信息最全的那个名称判，资产类别取
- * 首次出现的那个（科目串按 TB 在前、JE 在后传入，即以余额表的科目名为准）。
- * 不归一的话，同一科目的两条分类会带着不同的资产类别送进引擎，
- * 轻则原值与累计折旧配不上对，重则直接触发科目分类冲突。
+ * 同编码名称用于补充自动建议上下文；同码多名称仍保留各自类别和原始身份。
+ * 自动建议只供 TB 人工确认，不创建 JE 人工分类或改写已确认的类别。
  */
 export function suggestFaAccounts(accounts: string[]): Assignment[] {
-  const parts = accounts.map((account) => ({
-    account,
-    ...splitFaAccount(account),
-  }));
+  const parts = accounts.map((account) => {
+    const { code, name } = splitFaAccount(account);
+    return { account, code, name: faClassificationName(code, name) };
+  });
   const chart = new Map<string, string>();
   const firstName = new Map<string, string>();
   for (const { code, name } of parts) {
@@ -304,17 +357,18 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
     if ((chart.get(code) ?? "").length < name.length) chart.set(code, name);
   }
   const resolved = new Map<string, AccountRole>();
-  /** 一级根节点的口径判定：1601/1602 走编码；其余数字编码只有名称**明确**
+  /** 一级根节点的口径判定：1601/1602 走编码；其余数字编码只有名称首段**明确**
    *  写出「固定资产／累计折旧」才进表（旧制度 1501/1502、自定义编码账套）；
    *  宽词（房屋／设备）不参与，挡住「银行存款-汉口银行(房屋积金)」式误配。 */
   const rootRole = (code: string, name: string): AccountRole => {
     const byCode = roleFromCode(code);
     if (byCode) return byCode;
     if (/^\d/.test(code)) {
+      if (saysDepreciationExpense(name)) return "excluded";
       if (SAYS_NOT_IN_SCOPE.test(name)) return "excluded";
       if (SAYS_DEPRECIATION.test(name)) return "depreciation";
       if (SAYS_NOT_COST.test(name)) return "excluded";
-      return SAYS_FA_EXPLICIT.test(name) ? "cost" : "excluded";
+      return saysFaExplicitAtHead(name) ? "cost" : "excluded";
     }
     return roleFromName(name);
   };
@@ -323,20 +377,26 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
     const cached = resolved.get(cacheKey);
     if (cached) return cached;
     const parent = depth < 32 ? nearestParent(chart, code) : "";
+    const context = [name];
+    for (let ancestor = parent, count = 0; ancestor && count < 32; count += 1) {
+      context.push(chart.get(ancestor) ?? "");
+      ancestor = nearestParent(chart, ancestor);
+    }
     const base = parent
       ? roleOf(parent, chart.get(parent) ?? "", depth + 1)
       : rootRole(code, name || code);
     let role = base;
     // 名称修正对整枝生效（含继承为「排除」的枝）：累计折旧提为折旧，
-    // 清理／折旧费／使用权压回排除；被排除的数字编码若自身名称明确写出
+    // 清理／折旧费／使用权压回排除；被排除的数字编码若自身名称首段明确写出
     // 「固定资产」则提为原值——上级名不含语义、子级写明的账套也能进表。
-    if (SAYS_NOT_IN_SCOPE.test(name)) role = "excluded";
+    if (saysDepreciationExpense(...context)) role = "excluded";
+    else if (SAYS_NOT_IN_SCOPE.test(name)) role = "excluded";
     else if (SAYS_DEPRECIATION.test(name)) role = "depreciation";
     else if (SAYS_NOT_COST.test(name)) role = "excluded";
     else if (
       base === "excluded" &&
       /^\d/.test(code) &&
-      SAYS_FA_EXPLICIT.test(name)
+      saysFaExplicitAtHead(name)
     ) {
       role = "cost";
     }
@@ -391,7 +451,18 @@ export function faAssignmentsForEntities(
 }
 
 /** 账里真实存在的「主体×科目」组合（inspect_* 的 entityAccounts 项）。 */
-export type EntityAccountPair = { entity: string; account: string; auxiliary?: string; currency?: string };
+export type EntityAccountPair = { entity: string; account: string; auxiliary?: string; currency?: string; classificationContext?: string; parentAccountName?: string; parentAccountNames?: string[] };
+
+/** 只使用公共 TB 选层目录；显式空目录不能回退带回已剔除的汇总行。 */
+export function faInspectionAccounts(inspection: Inspection | undefined): EntityAccountPair[] {
+  if (!inspection) return [];
+  if (inspection.reviewAccounts) {
+    return inspection.reviewAccounts;
+  }
+  if (inspection.entityAccounts) return inspection.entityAccounts;
+  const entities = inspection.entities.length ? inspection.entities : [DEFAULT_ENTITY];
+  return entities.flatMap((entity) => inspection.accounts.map((account) => ({ entity, account })));
+}
 
 const faAssignmentIdentity = (row: Pick<Assignment, "entity" | "account" | "auxiliary" | "currency">) => {
   const { code, name } = splitFaAccount(row.account);
@@ -403,6 +474,11 @@ const faAssignmentIdentity = (row: Pick<Assignment, "entity" | "account" | "auxi
     row.currency ?? "",
   ]);
 };
+
+/** 确认表与表体共用的行键：与旧 JSON.stringify 键同值域的唯一串，
+    大账套逐行建键时不再反复序列化。 */
+const faViewKey = (entity: string | undefined, key: string) =>
+  `${entity ?? DEFAULT_ENTITY}\u0000${key}`;
 
 /** TB 在前、JE 在后合并两侧真实组合，按「主体＋科目串」去重（TB 写法优先保留）。 */
 export function unionEntityAccounts(
@@ -418,23 +494,26 @@ export function unionEntityAccounts(
     const key = faAssignmentIdentity({ entity, account, auxiliary: pair.auxiliary, currency: pair.currency });
     if (seen.has(key)) continue;
     seen.add(key);
-    pairs.push({ entity, account, ...(pair.auxiliary ? { auxiliary: pair.auxiliary } : {}), ...(pair.currency ? { currency: pair.currency } : {}) });
+    pairs.push({ entity, account, ...(pair.auxiliary ? { auxiliary: pair.auxiliary } : {}), ...(pair.currency ? { currency: pair.currency } : {}), ...(pair.classificationContext ? { classificationContext: pair.classificationContext } : {}), ...(pair.parentAccountName ? { parentAccountName: pair.parentAccountName } : {}), ...(pair.parentAccountNames ? { parentAccountNames: pair.parentAccountNames } : {}) });
   }
   return pairs;
 }
 
-/** 固定资产科目复核只以 TB 为范围；JE 只用于匹配变动与保留整张凭证。 */
+/** 第二步只复核 TB；JE 分录由业务引擎承接已确认的角色与类别。 */
 export function faReviewEntityAccounts(
   tb: EntityAccountPair[] | undefined,
   entityKeyEnabled = true,
 ): EntityAccountPair[] {
-  return unionEntityAccounts(
-    tb?.map((pair) => ({
-      ...pair,
-      entity: entityKeyEnabled ? pair.entity : DEFAULT_ENTITY,
-    })),
-    undefined,
-  );
+  return unionEntityAccounts(tb?.map((pair) => ({
+    ...pair,
+    entity: entityKeyEnabled ? pair.entity : DEFAULT_ENTITY,
+  })), undefined);
+}
+
+/** 过滤旧两侧草稿中的 JE 项；按完整 TB 身份保留人工分类及明确排除。 */
+export function faConfirmedTbAssignments(pairs: EntityAccountPair[], assignments: Assignment[]): Assignment[] {
+  const identities = new Set(pairs.map(faAssignmentIdentity));
+  return assignments.filter((row) => identities.has(faAssignmentIdentity(row)));
 }
 
 /**
@@ -449,44 +528,55 @@ export function faAssignmentsForEntityAccounts(
   pairs: EntityAccountPair[],
   current: Assignment[],
 ): Assignment[] {
+  const contextualSuggestions = new Map(pairs.filter((pair) => pair.classificationContext ||
+    saysDepreciationExpense(pair.account, pair.parentAccountName ?? "", ...(pair.parentAccountNames ?? []))).map((pair) => {
+    const text = [pair.account, pair.classificationContext].filter(Boolean).join(" ");
+    const category = faCategory(pair.classificationContext || splitFaAccount(pair.account).name);
+    return [faAssignmentIdentity(pair), {
+      ...suggestFaAccount(text), account: pair.account,
+      ...(saysDepreciationExpense(pair.account, pair.classificationContext ?? "", pair.parentAccountName ?? "", ...(pair.parentAccountNames ?? []))
+        ? { role: "excluded" as const } : {}),
+      category: category === "固定资产" ? suggestFaAccount(pair.account).category : category,
+    }] as const;
+  }));
   const suggested = new Map(
     suggestFaAccounts([...new Set(pairs.map((pair) => pair.account))]).map(
       (item) => [item.account, item],
     ),
   );
-  const orderOf = (account: string) =>
-    ROLE_ORDER[suggested.get(account)?.role ?? "excluded"];
+  const orderOf = (pair: EntityAccountPair) =>
+    ROLE_ORDER[contextualSuggestions.get(faAssignmentIdentity(pair))?.role ?? suggested.get(pair.account)?.role ?? "excluded"];
   return pairs
-    .map(({ entity, account, auxiliary, currency }, index) => ({ entity, account, auxiliary, currency, index }))
+      .map(({ entity, account, auxiliary, currency, parentAccountName }, index) => ({ entity, account, auxiliary, currency, parentAccountName, index }))
     .sort(
-      (a, b) => orderOf(a.account) - orderOf(b.account) || a.index - b.index,
+      (a, b) => orderOf(a) - orderOf(b) || a.index - b.index,
     )
-    .map(({ entity, account, auxiliary, currency }) => {
+      .map(({ entity, account, auxiliary, currency, parentAccountName }) => {
       const previous = current.find(
         (item) => faAssignmentIdentity(item) === faAssignmentIdentity({ entity, account, auxiliary, currency }),
       );
       return previous
-        ? normalizeAssignmentCategory(previous)
+          ? { ...normalizeAssignmentCategory(previous), ...(parentAccountName ? { parentAccountName } : {}) }
         : {
-            ...(suggested.get(account) ?? suggestFaAccount(account)),
+            ...(contextualSuggestions.get(faAssignmentIdentity({ entity, account, auxiliary, currency })) ?? suggested.get(account) ?? suggestFaAccount(account)),
             entity,
             auxiliary,
-            currency,
+              currency,
+              ...(parentAccountName ? { parentAccountName } : {}),
           };
     });
 }
 
-/** 科目复核表的一行（显示层）：同一「主体＋科目编码」的 TB/JE 两种写法合并。 */
+/** 科目复核显示行；同码多名称、辅助和币种仍按完整 TB 源身份区分。 */
 export type AssignmentView = {
   entity: string;
   auxiliary?: string;
   currency?: string;
-  /** 分组键：科目编码；认不出编码时用科目串本身。 */
+  /** 分组键：完整 TB 源身份，包含主体、编码、名称、辅助和币种。 */
   key: string;
   /** 展示用科目串：优先带名称的写法，否则纯编码写法。 */
   label: string;
-  /** 组内原始科目串的来源侧（TB／JE），空数组表示无从判断（回退口径）。 */
-  sources: Kind[];
+  parentAccountName?: string;
   /** 组内全部原始科目串——payload 逐条使用，缺一不可。 */
   accounts: string[];
   /** 组首行在 assignments 里的下标；改角色/类别经 updateAssignment 同步整组。 */
@@ -496,14 +586,11 @@ export type AssignmentView = {
 };
 
 /**
- * payload 级分配行 → 显示行：按（主体, splitFaAccount(account).code）分组
- * （code 为空时按科目串本身分组），每组只渲染一行。
- * 发给引擎的 accountAssignments 仍逐条使用 entityAccounts 里的原始科目串
- * （两种写法各自成行），这里只是显示层的合并——引擎按这些串逐侧匹配。
+ * payload 级分配行 → 显示行：按主体、编码、名称、辅助和币种分组。
+ * 发给引擎的 accountAssignments 保留 TB 原始身份，不混入 JE 人工分类。
  */
 export function groupAssignmentViews(
   assignments: Assignment[],
-  sourcesOf: (entity: string, account: string) => Kind[] = () => [],
 ): AssignmentView[] {
   const groups = new Map<
     string,
@@ -517,12 +604,6 @@ export function groupAssignmentViews(
     groups.set(key, group);
   });
   return [...groups.values()].map((group) => {
-    const sourceSet = new Set<Kind>();
-    for (const { row } of group.rows) {
-      for (const kind of sourcesOf(row.entity ?? DEFAULT_ENTITY, row.account)) {
-        sourceSet.add(kind);
-      }
-    }
     const accounts = group.rows.map(({ row }) => row.account);
     const first = group.rows[0];
     return {
@@ -532,10 +613,10 @@ export function groupAssignmentViews(
       currency: first.row.currency,
       label:
         accounts.find((account) => splitFaAccount(account).name) ?? accounts[0],
-      sources: (["tb", "je"] as const).filter((kind) => sourceSet.has(kind)),
+      ...(first.row.parentAccountName ? { parentAccountName: first.row.parentAccountName } : {}),
       accounts,
       index: first.index,
-      // 组内各行已按「主体＋科目编码」同步（updateAssignment / 自动归一），
+      // 组内各行已按完整 TB 源身份同步（updateAssignment），
       // 取首行的角色与类别即可代表整组。
       role: first.row.role,
       category: first.row.category,
@@ -543,15 +624,13 @@ export function groupAssignmentViews(
   });
 }
 
-function defaultOutput(input: string) {
+/** 默认输出名带时分秒（与看账导出的 `YYYYMMDD_HHMMSS` 同口径）：
+ *  底稿常在同一天反复生成，只到年月日会让第二次生成指向同一文件，容易覆盖上一版。 */
+export function defaultOutput(input: string, now = new Date()) {
   const slash = Math.max(input.lastIndexOf("\\"), input.lastIndexOf("/"));
   const dir = slash >= 0 ? input.slice(0, slash + 1) : "";
-  const now = new Date();
-  const stamp = [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-  ].join("");
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
   return `${dir}FA_TBJE_${stamp}.xlsx`;
 }
 
@@ -595,6 +674,8 @@ export function FaTbJePage() {
   const [mappings, setMappings] = useState<Record<Kind, Mapping>>(
     () => faTbJeDraftCache?.mappings ?? { tb: {}, je: {} },
   );
+  const tbForms = useLedgerForms("tb");
+  const jeForms = useLedgerForms("je");
   const [assignments, setAssignments] = useState<Assignment[]>(
     () => faTbJeDraftCache?.assignments ?? [],
   );
@@ -636,7 +717,7 @@ export function FaTbJePage() {
       inspects.je?.headerRow,
       inspects.je?.headerDepth,
     ]),
-  });
+  }, mappings);
   const ledgerReviewOwner = useRef({});
   const reviewing = Boolean(reviews.reviewing.tb || reviews.reviewing.je);
   const { job, setJob, activeJobId } = useJobEvents({
@@ -722,8 +803,7 @@ export function FaTbJePage() {
           ? (p.jeMapping as Mapping)
           : {},
     });
-    if (Array.isArray(p.accountAssignments))
-      setAssignments(p.accountAssignments as Assignment[]);
+    setAssignments(Array.isArray(p.accountAssignments) ? p.accountAssignments : []);
     if (typeof p.outputPath === "string") setOutputPath(p.outputPath);
     // 字段映射已并入第 1 步，直接落回「上传与映射」。
     setStep(1);
@@ -786,10 +866,6 @@ export function FaTbJePage() {
     })();
   });
 
-  const accounts = useMemo(
-    () => [...new Set(inspects.tb?.accounts ?? [])],
-    [inspects.tb],
-  );
   // 主体是公共映射字段；源表没有主体列时由引擎统一使用默认主体。
   const entitiesReady = Boolean(inspects.tb && inspects.je);
   const entityKeyEnabled = ledgerEntityKeyEnabled(mappings.tb, mappings.je);
@@ -798,21 +874,10 @@ export function FaTbJePage() {
     const detected = [...new Set(inspects.tb?.entities ?? [])].filter(Boolean);
     return detected.length ? detected : [DEFAULT_ENTITY];
   }, [inspects.tb, entityKeyEnabled]);
-  // 科目复核只以 TB 中真实存在的「主体×科目」为范围。JE 是变动明细来源，
-  // 其中的对方科目不能进入固定资产科目分类。旧后端／浏览器预览没有
-  // entityAccounts 时，回退为 TB 主体 × TB 科目。
+  // 人工分类仅绑定公共 TB 选层后的源身份，JE 由引擎自动承接分类。
   const entityAccountPairs = useMemo(
-    () => {
-      const raw = inspects.tb?.reviewAccounts ?? inspects.tb?.entityAccounts;
-      const verified = auxiliaryLink?.status === "verified";
-      const effective = raw?.map((pair) => ({
-        ...pair,
-        auxiliary: verified && "auxiliary" in pair && typeof pair.auxiliary === "string"
-          ? pair.auxiliary : undefined,
-      }));
-      return faReviewEntityAccounts(effective, entityKeyEnabled);
-    },
-    [inspects.tb?.reviewAccounts, inspects.tb?.entityAccounts, entityKeyEnabled, auxiliaryLink?.status],
+    () => faReviewEntityAccounts(faInspectionAccounts(inspects.tb), entityKeyEnabled),
+    [inspects.tb, entityKeyEnabled],
   );
   const entityScope = useEntityScopeConfirmation({
     tbEntities: entityKeyEnabled ? (inspects.tb?.entities ?? []) : [],
@@ -823,8 +888,8 @@ export function FaTbJePage() {
     },
   });
   const missingMappings = {
-    tb: faTbJeMissingMappings("tb", mappings.tb),
-    je: faTbJeMissingMappings("je", mappings.je),
+    tb: faTbJeMissingMappings("tb", mappings.tb, tbForms),
+    je: faTbJeMissingMappings("je", mappings.je, jeForms),
   };
   const mappingsReady =
     Boolean(inspects.tb && inspects.je) &&
@@ -841,14 +906,43 @@ export function FaTbJePage() {
   useEffect(() => {
     setAuxiliaryLink(null);
   }, [auxiliaryLinkKey]);
-  // 确认行按主体、编码、名称、有效辅助值和币种区分；只有完整身份相同才合并。
+  // 旧草稿/历史任务可能含 JE 分类。目录回填前不显示或提交旧项，
+  // 回填后仅保留当前 TB 完整身份，不按编码放宽过滤。
+  const tbAssignments = useMemo(
+    () => faConfirmedTbAssignments(entityAccountPairs, assignments),
+    [assignments, entityAccountPairs],
+  );
+  // 完整源身份只用于绑定人工分类，不作为跨表业务匹配条件。
   const assignmentViews = useMemo(
-    () => groupAssignmentViews(assignments),
-    [assignments],
+    () => groupAssignmentViews(tbAssignments),
+    [tbAssignments],
   );
   const showReviewEntity = entityKeyEnabled &&
     new Set(assignmentViews.map((view) => view.entity)).size > 1;
   const showReviewCurrency = ledgerHasMappedRole(mappings.tb, "currency");
+  // 确认弹层的上下文键与行清单：全量科目的拼串建键只随真正影响内容的输入
+  // 重算，切步骤等整页重渲染不再重复跑一遍。
+  const confirmationContext = useMemo(
+    () =>
+      JSON.stringify([
+        "review-layout-v2",
+        paths,
+        mappings,
+        assignmentViews.map((view) => [view.entity, view.key]),
+      ]),
+    [paths, mappings, assignmentViews],
+  );
+  const confirmationRows = useMemo(
+    () =>
+      assignmentViews.map((view) => ({
+        key: faViewKey(view.entity, view.key),
+        values: [...(showReviewEntity ? [view.entity] : []), ledgerReviewAccountLabel(view.label, view.auxiliary, view.parentAccountName),
+          ...(showReviewCurrency ? [view.currency ?? ""] : []),
+          view.role === "cost" ? "固定资产原值" : view.role === "depreciation" ? "累计折旧" : "排除",
+          view.category],
+      })),
+    [assignmentViews, showReviewEntity, showReviewCurrency],
+  );
   const includedViews = assignmentViews.filter(
     (view) => view.role !== "excluded",
   );
@@ -863,7 +957,7 @@ export function FaTbJePage() {
   const filteredAssignmentViews = useMemo(() => {
     const matches = keywordFilterPredicate(accountQuery);
     return assignmentViews.filter((view) =>
-      matches([view.label, ...view.accounts].join(" ")),
+      matches([view.label, view.parentAccountName ?? "", ...view.accounts].join(" ")),
     );
   }, [assignmentViews, accountQuery]);
   const pageCount = Math.max(
@@ -877,22 +971,26 @@ export function FaTbJePage() {
       visibleAssignmentPage * PAGE_SIZE,
       (visibleAssignmentPage + 1) * PAGE_SIZE,
     );
-  const roleCounts = assignmentViews.reduce(
-    (counts, view) => ({ ...counts, [view.role]: counts[view.role] + 1 }),
-    { cost: 0, depreciation: 0, excluded: 0 } as Record<AccountRole, number>,
+  const roleCounts = useMemo(
+    () =>
+      assignmentViews.reduce(
+        (counts, view) => ({ ...counts, [view.role]: counts[view.role] + 1 }),
+        { cost: 0, depreciation: 0, excluded: 0 } as Record<AccountRole, number>,
+      ),
+    [assignmentViews],
   );
   useEffect(() => {
     if (restoredDraftOnMount.current) {
       restoredDraftOnMount.current = false;
-      return;
+      // 正常子页切换保留确认状态；旧两侧草稿必须剔除 JE 后重新确认。
+      if (tbAssignments.length === assignments.length) return;
     }
+    if (!inspects.tb) return;
     setAssignments((current) =>
-      entityAccountPairs.length
-        ? faAssignmentsForEntityAccounts(entityAccountPairs, current)
-        : faAssignmentsForEntities(accounts, entities, current),
+      faAssignmentsForEntityAccounts(entityAccountPairs, current),
     );
     setAccountsReviewed(false);
-  }, [entityAccountPairs, accounts, entities]);
+  }, [entityAccountPairs]);
   useEffect(() => {
     faTbJeDraftCache = {
       step,
@@ -1071,7 +1169,7 @@ export function FaTbJePage() {
       setSourceStatus(
         recognized.length
           ? scan.hiddenSheets
-            ? `${scan.hiddenSheets} 张低置信度 Sheet 已忽略，请核对已选工作表。`
+            ? `${scan.hiddenSheets} 张空白或低置信度 Sheet 已忽略，请核对已选工作表。`
             : ""
           : "没有文件识别成功，请检查文件内容后重试。",
       );
@@ -1255,15 +1353,14 @@ export function FaTbJePage() {
                 account: item.account,
                 tbColumn: item.tbColumn,
                 jeColumn: item.column,
-                anchorHits: item.anchorHits,
-                anchorTotal: item.anchorTotal,
               })),
             }
           : undefined,
-      accountAssignments: assignments.map((assignment) => ({
+      accountAssignments: tbAssignments.map((assignment) => ({
         ...assignment,
         category: normalizeFaCategory(assignment.category),
       })),
+      assignmentBasis: "assetRoleCategory",
       tbFixedEntity: DEFAULT_ENTITY,
       jeFixedEntity: DEFAULT_ENTITY,
       entityScope: entityScope.selection,
@@ -1296,18 +1393,18 @@ export function FaTbJePage() {
       if (tbMapping !== mappings.tb) {
         setMappings((current) => ({ ...current, tb: tbMapping }));
       }
-      // 科目分类只以 TB 中真实存在的主体×科目为范围；JE 不在这里重读。
-      const refreshedTb = (await engineCall("deposit.inspect_tb", {
+      // 只刷新 TB 公共选层目录；JE 无需另建人工分类清单。
+      const refreshedTb = await engineCall("deposit.inspect_tb", {
         source: source("tb"),
         mapping: tbMapping,
-      }, `TB ${fileName(paths.tb)}`)) as Inspection;
+      }, `TB ${fileName(paths.tb)}`) as Inspection;
       setInspects((current) => ({
         ...current,
         tb: refreshedTb,
       }));
       setAccountsReviewed(false);
       setAssignmentPage(0);
-      setSourceStatus("映射口径已确认；已按 TB 刷新主体与科目清单，请复核分类。");
+      setSourceStatus("映射口径已确认；请确认 TB 科目的原值／折旧角色与资产类别。");
       setStep(2);
     } catch (e) {
       setError(errorText(e));
@@ -1381,11 +1478,7 @@ export function FaTbJePage() {
     }
   }
 
-  // 同一个科目在 TB 与 JE 里可能拼成两种科目串（列序不同，编码一头一尾），
-  // 两行分别参与两侧匹配、缺一不可。用户只改其中一行的话，引擎会按
-  // FA_TBJE_ACCOUNT_ASSIGNMENT_CONFLICT 拒绝导出——所以改动按「主体＋科目编码」同步。
-  // 复核表把这两种写法合并成一行显示（见 groupAssignmentViews），本函数的
-  // 同步范围恰好就是该行背后的整组原始串，改一处即整组生效。
+  // 仅同步同一完整 TB 身份；同码多名称、辅助和币种保持独立。
   function updateAssignment(index: number, patch: Partial<Assignment>) {
     invalidateResult();
     setAccountsReviewed(false);
@@ -1394,11 +1487,10 @@ export function FaTbJePage() {
         ? { ...patch, category: normalizeFaCategory(patch.category) }
         : patch;
     setAssignments((rows) => {
-      const target = rows[index];
+      const target = tbAssignments[index];
       if (!target) return rows;
       const identity = faAssignmentIdentity(target);
-      return rows.map((row, rowIndex) =>
-        rowIndex === index ||
+      return rows.map((row) =>
         faAssignmentIdentity(row) === identity
           ? { ...row, ...normalizedPatch }
           : row,
@@ -1505,7 +1597,6 @@ export function FaTbJePage() {
                       onKindChange={() =>
                         void changeSourceKind(kind, kind === "tb" ? "je" : "tb")
                       }
-                      onHeaderChange={(over) => void reinspect(kind, over)}
                     />
                   ) : (
                     <Card variant="subtle" className="fx-source-empty">
@@ -1567,7 +1658,7 @@ export function FaTbJePage() {
                           setMappings((value) => ({ ...value, tb: next }));
                         },
                         missingAfter: (mapping) =>
-                          faTbJeMissingMappings("tb", mapping),
+                          faTbJeMissingMappings("tb", mapping, tbForms),
                       }
                     : undefined,
                   je: inspects.je
@@ -1583,7 +1674,7 @@ export function FaTbJePage() {
                           setMappings((value) => ({ ...value, je: next }));
                         },
                         missingAfter: (mapping) =>
-                          faTbJeMissingMappings("je", mapping),
+                          faTbJeMissingMappings("je", mapping, jeForms),
                       }
                     : undefined,
                 })
@@ -1598,6 +1689,7 @@ export function FaTbJePage() {
                 <FaTbJeMappingPanel
                   key={kind}
                   kind={kind}
+                  sourceName={fileName(paths[kind])}
                   headers={inspects[kind]!.headers}
                   rows={inspects[kind]!.preview}
                   engineRoles={inspects[kind]!.roles}
@@ -1605,6 +1697,19 @@ export function FaTbJePage() {
                   missing={missingMappings[kind]}
                   busy={reviews.reviewing[kind] || busy}
                   note={`${inspects[kind]!.rowCount.toLocaleString("zh-CN")} 行 × ${inspects[kind]!.headers.length} 列`}
+                  toolbar={
+                    <SourceTableControls
+                      namePrefix={kind}
+                      sheet={inspects[kind]!.sheet}
+                      sheets={inspects[kind]!.sheets}
+                      headerRow={inspects[kind]!.headerRow}
+                      headerDepth={inspects[kind]!.headerDepth}
+                      disabled={busy || reviews.reviewing[kind]}
+                      onSheetChange={(sheet) => void reinspect(kind, { sheet, headerRow: 0, headerDepth: 0 })}
+                      onHeaderRowChange={(row) => void reinspect(kind, { headerRow: Number(row) })}
+                      onHeaderDepthChange={(headerDepth) => void reinspect(kind, { headerDepth })}
+                    />
+                  }
                   onChange={(next) => {
                     invalidateResult();
                     setAccountsReviewed(false);
@@ -1657,6 +1762,7 @@ export function FaTbJePage() {
             </div>
           </CardHeader>
           <CardContent className="form-stack">
+            <p>确认科目角色与资产类别。</p>
             <div className="fa-tbje-account-toolbar">
               <Button
                 type="button"
@@ -1707,12 +1813,12 @@ export function FaTbJePage() {
                 </thead>
                 <tbody>
                   {pagedViews.map(({ view, index }) => (
-                    <tr key={JSON.stringify([view.entity, view.key])}>
+                    <tr key={faViewKey(view.entity, view.key)}>
                       {showReviewEntity && <td><Badge variant="outline">{view.entity}</Badge></td>}
-                      <td title={[...view.accounts, view.auxiliary].filter(Boolean).join("；")}>
+                      <td title={ledgerReviewAccountLabel(view.label, view.auxiliary, view.parentAccountName)}>
                         <div className="fa-tbje-account-cell">
                           <span className="fa-tbje-account-name">
-                            {ledgerReviewAccountLabel(view.label, view.auxiliary)}
+                            {ledgerReviewAccountLabel(view.label, view.auxiliary, view.parentAccountName)}
                           </span>
                         </div>
                       </td>
@@ -1799,7 +1905,7 @@ export function FaTbJePage() {
               <AccountConfirmationActions
                 tool="fa_tbje"
                 title="固定资产TBJE"
-                context={JSON.stringify(["review-layout-v2", paths, mappings, assignmentViews.map((view) => [view.entity, view.key])])}
+                context={confirmationContext}
                 columns={[
                   ...(showReviewEntity ? [{ key: "entity", title: "主体" }] : []),
                   { key: "account", title: "科目" },
@@ -1807,17 +1913,11 @@ export function FaTbJePage() {
                   { key: "role", title: "角色", editable: true, options: ["排除", "固定资产原值", "累计折旧"] },
                   { key: "category", title: "资产类别", editable: true },
                 ]}
-                rows={assignmentViews.map((view) => ({
-                  key: JSON.stringify([view.entity, view.key]),
-                  values: [...(showReviewEntity ? [view.entity] : []), ledgerReviewAccountLabel(view.label, view.auxiliary),
-                    ...(showReviewCurrency ? [view.currency ?? ""] : []),
-                    view.role === "cost" ? "固定资产原值" : view.role === "depreciation" ? "累计折旧" : "排除",
-                    view.category],
-                }))}
+                rows={confirmationRows}
                 disabled={busy}
                 onImport={(changed) => {
                   invalidateResult();
-                  const byKey = new Map(assignmentViews.map((view) => [JSON.stringify([view.entity, view.key]), view]));
+                  const byKey = new Map(assignmentViews.map((view) => [faViewKey(view.entity, view.key), view]));
                   const updates = new Map(changed.map((row) => {
                     const view = byKey.get(row.key)!;
                     const roleIndex = Number(showReviewEntity) + 1 + Number(showReviewCurrency);
@@ -1827,7 +1927,7 @@ export function FaTbJePage() {
                     return [row.key, { role, category: normalizeFaCategory(row.values[roleIndex + 1]) }] as const;
                   }));
                   setAssignments((current) => current.map((row) => {
-                    const key = JSON.stringify([row.entity ?? DEFAULT_ENTITY, faAssignmentIdentity(row)]);
+                    const key = faViewKey(row.entity, faAssignmentIdentity(row));
                     return updates.has(key) ? { ...row, ...updates.get(key)! } : row;
                   }));
                   setAccountsReviewed(false);
@@ -1863,7 +1963,7 @@ export function FaTbJePage() {
             <CardHeader className="fa-tbje-card-head">
               <CardTitle>生成预览并导出五表</CardTitle>
               <Badge variant={resultStale ? "warning" : "success"}>
-                {resultStale ? "结果待重算" : "全部就绪"}
+                {resultStale ? "结果待重算" : !assignmentsReady ? "分类待复核" : "全部就绪"}
               </Badge>
             </CardHeader>
             <CardContent className="form-stack">
@@ -1917,11 +2017,7 @@ export function FaTbJePage() {
                 />
               </label>
               <div className="fa-tbje-step-actions">
-                <span>
-                  {outputPath
-                    ? "输出路径已确认。"
-                    : "预览无需输出路径；导出前请选择保存位置。"}
-                </span>
+                {!outputPath && <span>导出前请选择保存位置。</span>}
                 <Button
                   variant="secondary"
                   disabled={busy || reviewing}
@@ -2008,17 +2104,25 @@ export function FaSummaryTable({
   });
   const [query, setQuery] = useState("");
   const [differencesOnly, setDifferencesOnly] = useState(false);
-  const matches = keywordFilterPredicate(query);
-  const visibleRows = rows.filter((row) => {
-    const values = Array.isArray(row.values) ? row.values : [];
-    if (
-      differencesOnly &&
-      (row.section !== "勾稽差异" ||
-        !values.some((value) => Math.abs(Number(value) || 0) >= 0.005))
-    )
-      return false;
-    return matches(`${row.section ?? ""} ${row.item ?? ""}`);
-  });
+  const visibleRows = useMemo(() => {
+    const matches = keywordFilterPredicate(query);
+    return rows.filter((row) => {
+      const values = Array.isArray(row.values) ? row.values : [];
+      if (
+        differencesOnly &&
+        (row.section !== "勾稽差异" ||
+          !values.some((value) => Math.abs(Number(value) || 0) >= 0.005))
+      )
+        return false;
+      return matches(`${row.section ?? ""} ${row.item ?? ""}`);
+    });
+  }, [rows, query, differencesOnly]);
+  // 变动项目分批显示：数据全量保留，界面先画首批，避免多主体大账套一次铺开。
+  const [rowLimit, setRowLimit] = useState(FA_TABLE_PAGE_SIZE);
+  useEffect(() => {
+    setRowLimit(FA_TABLE_PAGE_SIZE);
+  }, [query, differencesOnly, rows]);
+  const renderedRows = visibleRows.slice(0, rowLimit);
   let lastSection: string | null = null;
   return (
     <div className="fa-tbje-summary-shell">
@@ -2059,7 +2163,7 @@ export function FaSummaryTable({
           </tr>
         </thead>
         <tbody>
-          {visibleRows.map((row, index) => {
+          {renderedRows.map((row, index) => {
             const section =
               row.section && row.section !== lastSection ? row.section : "";
             lastSection = row.section ?? lastSection;
@@ -2109,6 +2213,17 @@ export function FaSummaryTable({
         </tbody>
       </table>
       </div>
+      {renderedRows.length < visibleRows.length && (
+        <div className="fa-tbje-table-more">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => setRowLimit((current) => current + FA_TABLE_PAGE_SIZE)}
+          >
+            继续显示（已显示 {renderedRows.length} / {visibleRows.length}）
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -2174,13 +2289,23 @@ export function FaPivotTable({
   const resize = useTableColumnResize<HTMLDivElement>({
     storageKey: resizeKey ?? "",
   });
-  const totals = rows.reduce<{ debit: number; credit: number }>(
-    (acc, row) => ({
-      debit: acc.debit + (Number(row.debit) || 0),
-      credit: acc.credit + (Number(row.credit) || 0),
-    }),
-    { debit: 0, credit: 0 },
+  const totals = useMemo(
+    () =>
+      rows.reduce<{ debit: number; credit: number }>(
+        (acc, row) => ({
+          debit: acc.debit + (Number(row.debit) || 0),
+          credit: acc.credit + (Number(row.credit) || 0),
+        }),
+        { debit: 0, credit: 0 },
+      ),
+    [rows],
   );
+  // 对方科目分批显示：与汇总表同款，避免凭证科目多时一次铺开。
+  const [rowLimit, setRowLimit] = useState(FA_TABLE_PAGE_SIZE);
+  useEffect(() => {
+    setRowLimit(FA_TABLE_PAGE_SIZE);
+  }, [rows]);
+  const renderedRows = rows.slice(0, rowLimit);
   return (
     <div className="fa-tbje-pivot-block">
       <h4>{title}</h4>
@@ -2201,7 +2326,7 @@ export function FaPivotTable({
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, index) => (
+            {renderedRows.map((row, index) => (
               <tr key={index}>
                 <td title={String(row.entity ?? "")}>
                   {String(row.entity ?? "")}
@@ -2233,18 +2358,24 @@ export function FaPivotTable({
           </tbody>
         </table>
       </div>
+      {renderedRows.length < rows.length && (
+        <div className="fa-tbje-table-more">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => setRowLimit((current) => current + FA_TABLE_PAGE_SIZE)}
+          >
+            继续显示（已显示 {renderedRows.length} / {rows.length}）
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
 
 /** 与导出格式 `#,##0.00;[Red]-#,##0.00;-` 对齐：零值显示短横线。 */
 function formatPivotAmount(value: unknown): string {
-  const num = Number(value);
-  if (!Number.isFinite(num) || Math.abs(num) < 0.005) return "-";
-  return num.toLocaleString("zh-CN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  return formatMoney(value, { zeroText: "-", invalidText: "-" });
 }
 
 /** 任务结果卡片：完成状态、关键指标、输出文件与告警集中在一处，
@@ -2333,12 +2464,7 @@ function FaTbJeResultCard({ value }: { value: unknown }) {
 }
 
 function formatPreviewAmount(value: unknown): string {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return "—";
-  return num.toLocaleString("zh-CN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  return formatMoney(value ?? 0);
 }
 
 function FaLedgerSourceCard(props: {
@@ -2349,9 +2475,6 @@ function FaLedgerSourceCard(props: {
   onReplace: () => void;
   onClear: () => void;
   onKindChange: () => void;
-  onHeaderChange: (
-    over: Partial<Pick<Inspection, "sheet" | "headerRow" | "headerDepth">>,
-  ) => void;
 }) {
   const { kind, inspection } = props;
   return (
@@ -2389,60 +2512,6 @@ function FaLedgerSourceCard(props: {
         </div>
         <div className="fx-source-meta">
           <span>{inspection.rowCount.toLocaleString("zh-CN")} 行</span>
-          <label>
-            Sheet
-            <select
-              name={`${kind}-sheet`}
-              autoComplete="off"
-              disabled={props.disabled}
-              value={inspection.sheet}
-              onChange={(event) =>
-                props.onHeaderChange({
-                  sheet: event.target.value,
-                  headerRow: 0,
-                  headerDepth: 0,
-                })
-              }
-            >
-              {(inspection.sheets.length
-                ? inspection.sheets
-                : [inspection.sheet]
-              ).map((sheet) => (
-                <option key={sheet}>{sheet}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            标题行
-            <Input
-              name={`${kind}-header-row`}
-              autoComplete="off"
-              disabled={props.disabled}
-              type="number"
-              min={1}
-              value={inspection.headerRow}
-              onChange={(event) =>
-                props.onHeaderChange({ headerRow: Number(event.target.value) })
-              }
-            />
-          </label>
-          <label>
-            表头层数
-            <select
-              name={`${kind}-header-depth`}
-              autoComplete="off"
-              disabled={props.disabled}
-              value={inspection.headerDepth}
-              onChange={(event) =>
-                props.onHeaderChange({
-                  headerDepth: Number(event.target.value),
-                })
-              }
-            >
-              <option value={1}>1层</option>
-              <option value={2}>2层</option>
-            </select>
-          </label>
         </div>
       </CardContent>
     </Card>
@@ -2455,6 +2524,7 @@ function FaLedgerSourceCard(props: {
  */
 function FaTbJeMappingPanel(props: {
   kind: Kind;
+  sourceName: string;
   headers: string[];
   rows: string[][];
   /** 引擎随识别结果下发的角色标签（deposit.inspect_* 响应）；未下发时回落本地标签表。 */
@@ -2463,6 +2533,7 @@ function FaTbJeMappingPanel(props: {
   missing: string[];
   busy: boolean;
   note: string;
+  toolbar?: ReactNode;
   onChange: (next: MappingDict) => void;
 }) {
   const labels = resolveRoleLabels(
@@ -2477,6 +2548,7 @@ function FaTbJeMappingPanel(props: {
   return (
     <MappingPanel
       title={`${props.kind.toUpperCase()} 字段映射`}
+      sourceName={props.sourceName}
       resizeKey={`fa.mapping-${props.kind}`}
       headers={props.headers}
       rows={props.rows}
@@ -2485,10 +2557,12 @@ function FaTbJeMappingPanel(props: {
       groups={formGroups(props.kind, roles, forms, props.mapping)}
       requirementOf={(role) => roleRequirement(match, role)}
       formNote={describeForm(match, (role) => labels[role] ?? role)}
+      formComplete={match?.complete}
       multi={MULTI}
       missing={props.missing}
       busy={props.busy}
       note={props.note}
+      toolbar={props.toolbar}
       onChange={props.onChange}
     />
   );

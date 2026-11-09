@@ -1,14 +1,22 @@
-//! Teams 会议状态检测：监听新版 Teams 客户端的 SlimCore 通话日志。
+//! Teams 会议状态检测：并发监听新版 Teams 客户端的全部 SlimCore 通话日志。
 //!
 //! 新版 Teams 在通话期间会开启“窗口内容保护”（共享屏幕软件因此录不到 Teams
 //! 窗口），动作会落进 `%LOCALAPPDATA%\Packages\MSTeams_8wekyb3d8bbwe\
 //! LocalCache\Microsoft\MSTeams\Logs\MSTeamsNM_SlimCore_*.log`：
 //! `SetWindowContentProtection success` = 通话开始，`UnregisterCall success`
 //! = 通话结束。检测到状态翻转时向前端发 `meeting-event` 事件。
+//!
+//! 新版 Teams 会同时开多个 ms-teams.exe 进程，各自写一份 SlimCore 日志，
+//! 通话标记只落在其中一份（真机 2026-10-09 复盘：同一分钟创建 .41/.42 两份，
+//! .41 带完整通话标记，.42 全程只有一个遥测进程的错误行）。旧逻辑只盯
+//! “最新修改”的一份日志，选到没标记的那份时整场会议都检测不到，两份日志
+//! 交替被写时还会来回切换、把状态机反复翻转。因此这里对目录下所有
+//! SlimCore 日志各自记读取偏移、增量喂进同一个状态机。
 
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -17,21 +25,72 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::AppError;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(3);
-/// 首次扫描整份日志的上限：SlimCore 单文件通常在几百 KB 量级。
+/// 检测轮询间隔：真机反馈「点结束会议时才弹询问窗」，短测试会里 3 秒轮询
+/// 加上小窗创建就要 4-6 秒，弹出来会已挂断。降到 1 秒把端到端延迟压住，
+/// 日志文件很小，这个频率的增量读没有负担。
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// 首次扫描单份日志的读取上限：SlimCore 单文件通常在几百 KB 量级。
 const INITIAL_SCAN_CAP: u64 = 32 * 1024 * 1024;
 const MAX_READ_PER_POLL: u64 = 4 * 1024 * 1024;
+/// 启动时只回放「最近仍在写入」的日志：正在进行的通话其日志必然刚写过，
+/// 会照常回放；早已结束的历史通话（文件很久没动）直接跳到文件尾，
+/// 避免启动瞬间回放出一场旧会、闪一下询问窗又关掉。
+const REPLAY_WINDOW: Duration = Duration::from_secs(2 * 60 * 60);
 const START_MARKER: &str = "WindowContentProtectionProvider: SetWindowContentProtection success";
 const END_MARKER: &str = "WindowContentProtectionProvider: UnregisterCall success";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 音频会话是兜底信号：需 Teams 采集与播放会话同时活跃 3 秒才询问；开始后双向音频都
+/// 停止 10 秒才收尾，避免短暂静音或设备切换导致提前结束。提示音不触发。
+#[derive(Default)]
+struct AudioCallState {
+    active: bool,
+    pending_since: Option<Instant>,
+}
+
+impl AudioCallState {
+    // 日志与音频必须共用当前会态：日志先报开始时，即使麦克风从未开启，
+    // 音频也要接管结束检测；反方向的结束同样要清掉旧防抖。
+    fn sync(&mut self, in_call: bool) {
+        if self.active != in_call {
+            self.active = in_call;
+            self.pending_since = None;
+        }
+    }
+
+    fn observe(&mut self, capture: bool, render: bool, now: Instant) -> Option<CallEvent> {
+        let pending = if self.active {
+            !capture && !render
+        } else {
+            capture && render
+        };
+        if !pending {
+            self.pending_since = None;
+            return None;
+        }
+        let since = self.pending_since.get_or_insert(now);
+        let delay = Duration::from_secs(if self.active { 10 } else { 3 });
+        if now.duration_since(*since) < delay {
+            return None;
+        }
+        self.pending_since = None;
+        self.active = !self.active;
+        Some(if self.active {
+            CallEvent::Started
+        } else {
+            CallEvent::Ended
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum CallState {
+    #[default]
     Idle,
     InCall,
 }
@@ -58,15 +117,6 @@ pub(crate) fn advance(state: &mut CallState, line: &str) -> Option<CallEvent> {
     None
 }
 
-/// 首次看到一份日志时从头推断当前状态（不回放历史事件）。
-fn infer_initial_state(contents: &str) -> CallState {
-    let mut state = CallState::Idle;
-    for line in contents.lines() {
-        advance(&mut state, line);
-    }
-    state
-}
-
 fn log_dir_under(local_app_data: &Path) -> PathBuf {
     local_app_data.join(r"Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\Logs")
 }
@@ -78,23 +128,149 @@ pub(crate) fn teams_log_dir() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
-fn newest_slimcore_log(dir: &Path) -> Option<PathBuf> {
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(dir).ok()?.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !(name.starts_with("MSTeamsNM_SlimCore_") && name.ends_with(".log")) {
-            continue;
+fn is_slimcore_log(name: &str) -> bool {
+    name.starts_with("MSTeamsNM_SlimCore_") && name.ends_with(".log")
+}
+
+/// 单份日志的读取进度：已读偏移 + 末尾尚未换行的半行。
+#[derive(Default)]
+struct TailState {
+    offset: u64,
+    partial: String,
+}
+
+/// 一轮扫描的结果，交给 watch_loop 决定发不发事件。
+#[derive(Debug, PartialEq, Eq)]
+enum ScanOutcome {
+    /// 首轮扫描：历史标记只推断现状、不回放成事件；`in_call` 为推断结果。
+    FirstScan { in_call: bool },
+    /// 后续增量：新出现的完整标记行翻转出的真实事件。
+    Events(Vec<CallEvent>),
+}
+
+/// 目录下全部 SlimCore 日志的增量读取器。所有文件的行喂进同一台状态机：
+/// 同一场通话的标记只会出现在其中一份日志里，选错主日志就会整场漏检。
+#[derive(Default)]
+struct TailSet {
+    files: HashMap<PathBuf, TailState>,
+    call_state: CallState,
+    first_scan_done: bool,
+}
+
+impl TailSet {
+    fn sync(&mut self, in_call: bool) {
+        self.call_state = if in_call {
+            CallState::InCall
+        } else {
+            CallState::Idle
+        };
+    }
+
+    /// 各文件只提取完整标记行，整轮按时间合并后再推进状态机。
+    fn drain_file(&mut self, path: &Path, meta_len: u64, cap: u64, markers: &mut Vec<String>) {
+        let state = self.files.get_mut(path).expect("tail state exists");
+        if meta_len < state.offset {
+            // 文件被截断（日志清理后重建）：旧偏移作废，从零重读新内容，
+            // 新写入的结束标记才不会被跳过。
+            state.offset = 0;
+            state.partial.clear();
         }
-        let modified = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        if best.as_ref().is_none_or(|(time, _)| modified >= *time) {
-            best = Some((modified, entry.path()));
+        if meta_len <= state.offset {
+            return;
+        }
+        let mut bytes = Vec::new();
+        let read = fs::File::open(path)
+            .and_then(|mut handle| {
+                handle.seek(SeekFrom::Start(state.offset))?;
+                let mut limited = handle.take(cap);
+                limited.read_to_end(&mut bytes)
+            })
+            .unwrap_or(0);
+        if read == 0 {
+            return;
+        }
+        state.offset += read as u64;
+        state.partial.push_str(&String::from_utf8_lossy(&bytes));
+        let mut lines: Vec<&str> = state.partial.split('\n').collect();
+        let trailing = lines.pop();
+        for line in lines {
+            if line.contains(START_MARKER) || line.contains(END_MARKER) {
+                markers.push(line.to_owned());
+            }
+        }
+        match trailing {
+            Some(tail) => state.partial = tail.to_string(),
+            None => state.partial.clear(),
         }
     }
-    best.map(|(_, path)| path)
+
+    fn scan(&mut self, dir: &Path) -> ScanOutcome {
+        let mut entries: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
+        for entry in fs::read_dir(dir).ok().into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            if !is_slimcore_log(&name.to_string_lossy()) {
+                continue;
+            }
+            let (len, modified) = match entry.metadata() {
+                Ok(meta) => (
+                    meta.len(),
+                    meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                ),
+                Err(_) => continue,
+            };
+            entries.push((entry.path(), len, modified));
+        }
+        // 已被清理的日志不再跟踪，防止偏移表无限增长。
+        self.files
+            .retain(|path, _| entries.iter().any(|(p, _, _)| p == path));
+        if !self.first_scan_done {
+            let fresh = SystemTime::now()
+                .checked_sub(REPLAY_WINDOW)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            for (path, len, modified) in &entries {
+                let tail = TailState {
+                    offset: if *modified >= fresh { 0 } else { *len },
+                    partial: String::new(),
+                };
+                self.files.insert(path.clone(), tail);
+            }
+            let cap = INITIAL_SCAN_CAP;
+            let mut markers = Vec::new();
+            for (path, len, _) in &entries {
+                self.drain_file(path, *len, cap, &mut markers);
+            }
+            self.apply_markers(markers);
+            self.first_scan_done = true;
+            return ScanOutcome::FirstScan {
+                in_call: self.call_state == CallState::InCall,
+            };
+        }
+        for (path, _, _) in &entries {
+            self.files.entry(path.clone()).or_default();
+        }
+        let cap = MAX_READ_PER_POLL;
+        let mut markers = Vec::new();
+        for (path, len, _) in &entries {
+            self.drain_file(path, *len, cap, &mut markers);
+        }
+        ScanOutcome::Events(self.apply_markers(markers))
+    }
+
+    fn apply_markers(&mut self, mut markers: Vec<String>) -> Vec<CallEvent> {
+        // 文件遍历顺序与会议时间无关。两份日志各含不同会议时，必须先处理
+        // 较早事件，否则已结束的旧会可能覆盖新会状态。
+        markers.sort_by_cached_key(|line| {
+            line.split_whitespace()
+                .next()
+                .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
+                .map(|stamp| stamp.timestamp_micros())
+                .unwrap_or_default()
+        });
+        markers
+            .iter()
+            .filter_map(|line| advance(&mut self.call_state, line))
+            .collect()
+    }
 }
 
 /// 会议功能的运行时状态：检测开关、当前是否在会、录音会话由 `meeting_record` 侧管理。
@@ -103,9 +279,12 @@ pub(crate) struct MeetingState {
     resident: Arc<AtomicBool>,
     in_call: Arc<AtomicBool>,
     log_found: Arc<AtomicBool>,
+    audio_available: AtomicBool,
     watcher_stop: Arc<AtomicBool>,
     watcher_join: Mutex<Option<thread::JoinHandle<()>>>,
     recording: Mutex<Option<Arc<crate::meeting_record::ActiveRecording>>>,
+    latest_job: Mutex<Option<Value>>,
+    processing_error: Mutex<Option<String>>,
 }
 
 impl MeetingState {
@@ -115,9 +294,12 @@ impl MeetingState {
             resident: Arc::new(AtomicBool::new(resident)),
             in_call: Arc::new(AtomicBool::new(false)),
             log_found: Arc::new(AtomicBool::new(false)),
+            audio_available: AtomicBool::new(false),
             watcher_stop: Arc::new(AtomicBool::new(false)),
             watcher_join: Mutex::new(None),
             recording: Mutex::new(None),
+            latest_job: Mutex::new(None),
+            processing_error: Mutex::new(None),
         }
     }
 
@@ -154,18 +336,28 @@ impl MeetingState {
         }
         let active = self.recording.lock().take();
         if let Some(active) = active {
-            let _ = crate::meeting_record::finalize(active);
+            let _ = crate::meeting_record::finalize(active, crate::meeting_record::StopReason::AppExit);
         }
     }
 
     pub(crate) fn status(&self) -> Value {
+        let recording = self.recording.lock();
         json!({
             "watchEnabled": self.watch_enabled.load(Ordering::Relaxed),
             "resident": self.resident.load(Ordering::Relaxed),
             "inCall": self.in_call.load(Ordering::Relaxed),
             "logFound": self.log_found.load(Ordering::Relaxed),
-            "recording": self.recording.lock().is_some(),
+            "audioDetectionAvailable": self.audio_available.load(Ordering::Relaxed),
+            "recording": recording.is_some(),
+            "recordingSummary": recording.as_ref().map(|active| crate::meeting_record::recording_summary(active)),
+            "latestJob": self.latest_job.lock().clone(),
+            "processingError": self.processing_error.lock().clone(),
         })
+    }
+
+    pub(crate) fn update_job(&self, event: &Value) {
+        *self.latest_job.lock() = Some(event.clone());
+        *self.processing_error.lock() = None;
     }
 
     pub(crate) fn begin_recording(&self, data_dir: &Path) -> Result<Value, AppError> {
@@ -180,6 +372,7 @@ impl MeetingState {
         let active = Arc::new(crate::meeting_record::start(data_dir)?);
         let summary = crate::meeting_record::recording_summary(&active);
         *guard = Some(active);
+        *self.processing_error.lock() = None;
         Ok(summary)
     }
 
@@ -187,7 +380,7 @@ impl MeetingState {
         let active = self.recording.lock().take().ok_or_else(|| {
             record_error("MEETING_RECORD_NONE", "当前没有进行中的会议录音。", None)
         })?;
-        crate::meeting_record::finalize(active)
+        crate::meeting_record::finalize(active, crate::meeting_record::StopReason::Manual)
     }
 }
 
@@ -196,17 +389,54 @@ fn record_error(code: &str, message: &str, detail: Option<String>) -> AppError {
 }
 
 fn watch_loop(app: &tauri::AppHandle, state: &Arc<MeetingState>) {
-    let mut call_state = CallState::Idle;
-    // (当前文件, 已读偏移)。Teams 重启或日志滚动会换文件，此时整份新文件
-    // 重新推断状态——文件很小，代价可忽略。
-    let mut current: Option<(PathBuf, u64)> = None;
-    let mut partial = String::new();
+    let mut tails = TailSet::default();
+    let mut audio_call = AudioCallState::default();
+    let enumerator = wasapi::initialize_mta()
+        .is_ok()
+        .then(|| wasapi::DeviceEnumerator::new().ok())
+        .flatten();
     loop {
         if state.watcher_stop.load(Ordering::Relaxed) {
             break;
         }
         if state.watch_enabled.load(Ordering::Relaxed) {
-            poll_once(app, state, &mut call_state, &mut current, &mut partial);
+            poll_once(app, state, &mut tails, &mut audio_call);
+            audio_call.sync(state.in_call.load(Ordering::Relaxed));
+            let audio = enumerator
+                .as_ref()
+                .and_then(|enumerator| crate::meeting_audio::snapshot(enumerator).ok());
+            state
+                .audio_available
+                .store(audio.is_some(), Ordering::Relaxed);
+            if let Some(audio) = audio {
+                if let Some(event) = audio_call.observe(
+                    !audio.capture_devices.is_empty(),
+                    audio.rendering,
+                    Instant::now(),
+                ) {
+                    let started = event == CallEvent::Started;
+                    // 同一场会议两种信号只发一次事件。
+                    if state.in_call.swap(started, Ordering::Relaxed) != started {
+                        emit_event(
+                            app,
+                            if started {
+                                "call_started"
+                            } else {
+                                "call_ended"
+                            },
+                        );
+                        if !started {
+                            tails.call_state = CallState::Idle;
+                            auto_finalize_recording(app, state);
+                        }
+                    }
+                }
+            } else {
+                // 枚举失败是未知状态，不能累计成十秒“音频已停止”。
+                audio_call.pending_since = None;
+            }
+        } else {
+            audio_call.pending_since = None;
         }
         thread::sleep(POLL_INTERVAL);
     }
@@ -214,115 +444,106 @@ fn watch_loop(app: &tauri::AppHandle, state: &Arc<MeetingState>) {
 
 /// 通话结束时的统一收尾：无论录音从哪个入口开始（询问小窗、工具页手动），
 /// 都在检测线程里停录混音，成品信息用 `recording_auto_finished` 事件交给
-/// 前端去跑转写纪要任务。此前只有全局弹窗发起的录音会被前端代停，
-/// 工具页手动开始的录音会议一结束就悬着，用户还得回去手点停止。
+/// 前端展示。转写纪要由后台直接启动，不依赖前端是否及时订阅、是否在托盘。
 fn auto_finalize_recording(app: &tauri::AppHandle, state: &Arc<MeetingState>) {
     let active = state.recording.lock().take();
     let Some(active) = active else {
         return;
     };
     let at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    match crate::meeting_record::finalize(active) {
+    match crate::meeting_record::finalize(active, crate::meeting_record::StopReason::Automatic) {
         Ok(summary) => {
             let _ = app.emit(
                 "meeting-event",
                 json!({"type": "recording_auto_finished", "at": at, "summary": summary}),
             );
+            let app = app.clone();
+            let state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                // 与手动任务共用设置注入、worker、任务历史和输出路径授权。
+                let params = auto_minutes_params(&summary);
+                if let Err(error) = crate::job_start(
+                    app.state::<crate::ExcelMergerService>(),
+                    app.state::<crate::storage::Storage>(),
+                    app.state::<crate::AllowedPaths>(),
+                    "meeting.generate".into(),
+                    params,
+                )
+                .await
+                {
+                    report_processing_error(
+                        &app,
+                        &state,
+                        &format!("纪要任务启动失败：{}", error.user_message),
+                    );
+                }
+            });
         }
         Err(error) => {
-            let _ = app.emit(
-                "meeting-event",
-                json!({
-                    "type": "recording_failed",
-                    "at": at,
-                    "message": error.user_message,
-                    "detail": error.detail,
-                }),
+            report_processing_error(
+                app,
+                state,
+                &format!("录音收尾出现问题：{}", error.user_message),
             );
         }
     }
 }
 
+fn auto_minutes_params(summary: &Value) -> Value {
+    json!({"audioPath": summary["audioPath"]})
+}
+
+fn report_processing_error(app: &tauri::AppHandle, state: &MeetingState, message: &str) {
+    *state.processing_error.lock() = Some(message.into());
+    let _ = app.emit(
+        "meeting-event",
+        json!({
+            "type": "recording_failed",
+            "at": chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "message": message,
+        }),
+    );
+}
+
 fn poll_once(
     app: &tauri::AppHandle,
     state: &Arc<MeetingState>,
-    call_state: &mut CallState,
-    current: &mut Option<(PathBuf, u64)>,
-    partial: &mut String,
+    tails: &mut TailSet,
+    audio_call: &mut AudioCallState,
 ) {
-    let in_call = &state.in_call;
-    let log_found = &state.log_found;
+    // 音频先报开始时，日志侧必须仍能识别随后的结束标记。
+    tails.sync(state.in_call.load(Ordering::Relaxed));
     let Some(dir) = teams_log_dir() else {
-        log_found.store(false, Ordering::Relaxed);
+        state.log_found.store(false, Ordering::Relaxed);
         return;
     };
-    log_found.store(true, Ordering::Relaxed);
-    let Some(file) = newest_slimcore_log(&dir) else {
-        return;
-    };
-    let rolled = current.as_ref().is_none_or(|(path, _)| *path != file);
-    let mut offset = if rolled {
-        0
-    } else {
-        current.as_ref().map(|(_, off)| *off).unwrap_or(0)
-    };
-    let length = fs::metadata(&file).map(|meta| meta.len()).unwrap_or(0);
-    if length < offset {
-        // 文件被截断（日志清理），从头再来。
-        partial.clear();
-        offset = 0;
-    }
-    let cap = if rolled {
-        INITIAL_SCAN_CAP
-    } else {
-        MAX_READ_PER_POLL
-    };
-    if length <= offset && !rolled {
-        if let Some(entry) = current.as_mut() {
-            entry.1 = offset;
-        }
-        return;
-    }
-    let mut bytes = Vec::new();
-    let read = fs::File::open(&file)
-        .and_then(|mut handle| {
-            handle.seek(SeekFrom::Start(offset))?;
-            let mut limited = handle.take(cap);
-            limited.read_to_end(&mut bytes)
-        })
-        .unwrap_or(0);
-    let consumed = offset + read as u64;
-    *current = Some((file, consumed));
-    partial.push_str(&String::from_utf8_lossy(&bytes));
-    let scanned_all = consumed >= length;
-    let mut lines: Vec<&str> = partial.split('\n').collect();
-    let trailing = if scanned_all || bytes.last() == Some(&b'\n') {
-        lines.pop().filter(|tail| !tail.is_empty())
-    } else {
-        // 末尾是半行，留在 partial 下一轮再判。
-        lines.pop()
-    };
-    if rolled {
-        // 首见/滚动：整份内容只用来推断现状；状态翻转照样出事件——
-        // 尤其是会中换文件（Teams 重启/日志滚动）推断回空闲时，
-        // 不能把通话结束吞掉，录音还得照常收尾。
-        let was_in_call = in_call.load(Ordering::Relaxed);
-        *call_state = infer_initial_state(partial);
-        let now_in_call = *call_state == CallState::InCall;
-        match (was_in_call, now_in_call) {
-            (false, true) => emit_event(app, "call_started"),
-            (true, false) => {
-                emit_event(app, "call_ended");
-                auto_finalize_recording(app, state);
+    state.log_found.store(
+        fs::read_dir(&dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| is_slimcore_log(&entry.file_name().to_string_lossy())),
+        Ordering::Relaxed,
+    );
+    match tails.scan(&dir) {
+        ScanOutcome::FirstScan { in_call } => {
+            // 启动时正在开会：历史标记推断出「在会」，照常询问，不算回放。
+            if in_call {
+                if !state.in_call.swap(true, Ordering::Relaxed) {
+                    emit_event(app, "call_started");
+                }
             }
-            _ => {}
         }
-        in_call.store(now_in_call, Ordering::Relaxed);
-    } else {
-        for line in lines {
-            if let Some(event) = advance(call_state, line) {
+        ScanOutcome::Events(events) => {
+            for event in events {
                 let started = event == CallEvent::Started;
-                in_call.store(started, Ordering::Relaxed);
+                if state.in_call.swap(started, Ordering::Relaxed) == started {
+                    continue;
+                }
+                // 同一轮可能读到上一场结束和下一场开始；逐个同步，
+                // 即使轮询前后都为在会，也不能沿用上一场的结束防抖。
+                audio_call.sync(started);
                 emit_event(
                     app,
                     if started {
@@ -337,13 +558,15 @@ fn poll_once(
             }
         }
     }
-    match trailing {
-        Some(tail) => *partial = tail.to_string(),
-        None => partial.clear(),
-    }
 }
 
 fn emit_event(app: &tauri::AppHandle, kind: &str) {
+    // 原生侧先隐藏：即使前端监听未就绪或小窗 IPC 已失效，也不留退会询问窗。
+    if kind == "call_ended" {
+        if let Some(window) = app.get_webview_window("meeting-ask") {
+            let _ = window.hide();
+        }
+    }
     let at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let _ = app.emit("meeting-event", json!({"type": kind, "at": at}));
 }
@@ -356,6 +579,195 @@ mod tests {
     const END_LINE: &str = "2026-09-04T09:45:17.546156+08:00 0x0001e1cc <INFO> SlimCoreModule::WindowContentProtectionProvider: UnregisterCall success result";
     const NOISE_LINE: &str = "2026-09-04T09:26:04.170217+08:00 0x0001e1cc <INFO> SlimCoreModule::HostServiceFactory: GetService host_services::IWindowContentProtectionProvider_1";
     const PRE_START_LINE: &str = "2026-09-04T09:26:04.170217+08:00 0x0001e1cc <INFO> SlimCoreModule::WindowContentProtectionProvider: SetWindowContentProtection 103";
+
+    #[test]
+    fn log_started_call_ends_without_ever_opening_microphone() {
+        let mut tails = TailSet::default();
+        assert_eq!(
+            tails.apply_markers(vec![START_LINE.into()]),
+            vec![CallEvent::Started]
+        );
+        let mut audio = AudioCallState::default();
+        audio.sync(tails.call_state == CallState::InCall);
+        let now = Instant::now();
+        assert_eq!(audio.observe(false, true, now), None);
+        assert_eq!(
+            audio.observe(false, false, now + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            audio.observe(false, false, now + Duration::from_secs(11)),
+            Some(CallEvent::Ended)
+        );
+        assert_eq!(
+            audio.observe(false, false, now + Duration::from_secs(12)),
+            None
+        );
+    }
+
+    #[test]
+    fn log_end_clears_audio_debounce_for_next_call() {
+        let mut audio = AudioCallState::default();
+        let now = Instant::now();
+        audio.sync(true);
+        assert_eq!(audio.observe(false, false, now), None);
+        audio.sync(false); // 日志先检测到上一场结束
+        audio.sync(true); // 下一场由日志开始
+        assert_eq!(
+            audio.observe(false, false, now + Duration::from_secs(20)),
+            None
+        );
+        assert_eq!(
+            audio.observe(false, false, now + Duration::from_secs(30)),
+            Some(CallEvent::Ended)
+        );
+    }
+
+    #[test]
+    fn audio_started_call_can_end_via_log_without_log_start() {
+        let mut audio = AudioCallState::default();
+        let now = Instant::now();
+        assert_eq!(audio.observe(true, true, now), None);
+        assert_eq!(
+            audio.observe(true, true, now + Duration::from_secs(3)),
+            Some(CallEvent::Started)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("MSTeamsNM_SlimCore_audio.41.log");
+        let mut tails = TailSet::default();
+        tails.scan(dir.path());
+        tails.sync(audio.active);
+        append(&path, END_LINE);
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::Events(vec![CallEvent::Ended])
+        );
+    }
+
+    #[test]
+    fn auto_minutes_uses_finished_audio_without_overriding_content_title() {
+        assert_eq!(
+            auto_minutes_params(&json!({
+                "audioPath": "C:/data/record-1/audio-mix.wav",
+                "startedAt": "2026-10-19T10:23:00+08:00",
+            })),
+            json!({"audioPath": "C:/data/record-1/audio-mix.wav"})
+        );
+    }
+
+    #[test]
+    fn snapshot_keeps_result_and_start_failure_without_frontend_listener() {
+        let state = MeetingState::new(true, true);
+        *state.processing_error.lock() = Some("纪要任务启动失败".into());
+        assert_eq!(state.status()["processingError"], "纪要任务启动失败");
+        let result = json!({"jobId": "meeting-1", "toolId": "meeting_minutes", "phase": "completed", "result": {"minutesPath": "C:/data/纪要.md", "transcriptPath": "C:/data/转写.txt"}});
+        state.update_job(&result);
+        assert_eq!(state.status()["latestJob"], result);
+        assert!(state.status()["processingError"].is_null());
+    }
+
+    #[test]
+    fn audio_fallback_detects_silent_streams_and_waits_for_both_directions_to_stop() {
+        let mut state = AudioCallState::default();
+        let now = Instant::now();
+        assert_eq!(state.observe(false, true, now), None); // Teams 提示音不能触发
+        assert_eq!(state.observe(true, true, now), None);
+        assert_eq!(
+            state.observe(true, true, now + Duration::from_secs(3)),
+            Some(CallEvent::Started)
+        );
+        // 麦克风静音后，播放流仍在，不能提前结束。
+        assert_eq!(
+            state.observe(false, true, now + Duration::from_secs(20)),
+            None
+        );
+        assert_eq!(
+            state.observe(false, false, now + Duration::from_secs(21)),
+            None
+        );
+        assert_eq!(
+            state.observe(false, false, now + Duration::from_secs(30)),
+            None
+        );
+        assert_eq!(
+            state.observe(false, false, now + Duration::from_secs(31)),
+            Some(CallEvent::Ended)
+        );
+    }
+
+    #[test]
+    fn background_teams_with_only_dictation_or_notifications_does_not_start_call() {
+        for (capture, render) in [(true, false), (false, true), (false, false)] {
+            let mut state = AudioCallState::default();
+            let now = Instant::now();
+            for seconds in 0..=30 {
+                assert_eq!(
+                    state.observe(capture, render, now + Duration::from_secs(seconds)),
+                    None
+                );
+            }
+            assert!(!state.active);
+        }
+    }
+
+    #[test]
+    fn audio_start_requires_continuous_duplex_and_resets_when_either_side_stops() {
+        let mut state = AudioCallState::default();
+        let now = Instant::now();
+        assert_eq!(state.observe(true, true, now), None);
+        assert_eq!(
+            state.observe(true, false, now + Duration::from_secs(2)),
+            None
+        );
+        assert_eq!(
+            state.observe(true, true, now + Duration::from_secs(3)),
+            None
+        );
+        assert_eq!(
+            state.observe(true, true, now + Duration::from_secs(5)),
+            None
+        );
+        assert_eq!(
+            state.observe(true, true, now + Duration::from_secs(6)),
+            Some(CallEvent::Started)
+        );
+        // 确认开始后只剩任一路会话也维持会态，不要求双方一直说话。
+        assert_eq!(
+            state.observe(false, true, now + Duration::from_secs(20)),
+            None
+        );
+        assert_eq!(
+            state.observe(true, false, now + Duration::from_secs(40)),
+            None
+        );
+        assert!(state.active);
+    }
+
+    #[test]
+    fn audio_fallback_resets_debounce_after_short_device_switch() {
+        let mut state = AudioCallState {
+            active: true,
+            pending_since: None,
+        };
+        let now = Instant::now();
+        assert_eq!(state.observe(false, false, now), None);
+        assert_eq!(
+            state.observe(true, false, now + Duration::from_secs(9)),
+            None
+        );
+        assert_eq!(
+            state.observe(false, false, now + Duration::from_secs(11)),
+            None
+        );
+        assert_eq!(
+            state.observe(false, false, now + Duration::from_secs(20)),
+            None
+        );
+        assert_eq!(
+            state.observe(false, false, now + Duration::from_secs(21)),
+            Some(CallEvent::Ended)
+        );
+    }
 
     #[test]
     fn start_marker_flips_idle_to_in_call_once() {
@@ -382,17 +794,130 @@ mod tests {
         assert_eq!(advance(&mut state, END_LINE), None);
     }
 
+    fn append(path: &Path, line: &str) {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "{line}").unwrap();
+    }
+
+    /// 真机 2026-10-09 复盘场景：同一分钟两份 SlimCore 日志，通话标记只在
+    /// 其中一份。首轮扫描必须合并两份推断出「在会」。
     #[test]
-    fn infer_state_detects_ongoing_meeting() {
-        assert_eq!(
-            infer_initial_state(&format!("{NOISE_LINE}\n{START_LINE}\n")),
-            CallState::InCall
+    fn first_scan_merges_concurrent_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        append(
+            &dir.path()
+                .join("MSTeamsNM_SlimCore_2026-10-09_17-02-22.41.log"),
+            &format!("{NOISE_LINE}\n{START_LINE}\n"),
         );
-        assert_eq!(
-            infer_initial_state(&format!("{START_LINE}\n{NOISE_LINE}\n{END_LINE}\n")),
-            CallState::Idle
+        append(
+            &dir.path()
+                .join("MSTeamsNM_SlimCore_2026-10-09_17-02-26.42.log"),
+            &format!("{NOISE_LINE}\n"),
         );
-        assert_eq!(infer_initial_state(NOISE_LINE), CallState::Idle);
+        let mut tails = TailSet::default();
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::FirstScan { in_call: true }
+        );
+    }
+
+    #[test]
+    fn log_markers_across_files_follow_timestamp_order() {
+        let mut tails = TailSet::default();
+        // 后一场会议开始于旧会结束之后，文件顺序相反也应保持在会。
+        let later_start = START_LINE.replace("09:26:04", "10:26:04");
+        assert_eq!(
+            tails.apply_markers(vec![later_start, END_LINE.into(), START_LINE.into()]),
+            vec![CallEvent::Started, CallEvent::Ended, CallEvent::Started]
+        );
+        assert_eq!(tails.call_state, CallState::InCall);
+    }
+
+    /// 状态机是全局一台：没标记那份日志再怎么写噪声，都不能翻转通话状态
+    /// （旧逻辑盯单份日志，两份交替更新时会来回误报开始/结束）。
+    #[test]
+    fn noise_in_markerless_log_does_not_flip_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let with_marker = dir.path().join("MSTeamsNM_SlimCore_a.41.log");
+        let noise_only = dir.path().join("MSTeamsNM_SlimCore_b.42.log");
+        append(&with_marker, &format!("{START_LINE}\n"));
+        append(&noise_only, &format!("{NOISE_LINE}\n"));
+        let mut tails = TailSet::default();
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::FirstScan { in_call: true }
+        );
+        // 无标记日志持续追加内容：不得产生任何事件。
+        append(&noise_only, &format!("{NOISE_LINE}\n{NOISE_LINE}\n"));
+        assert_eq!(tails.scan(dir.path()), ScanOutcome::Events(vec![]));
+        // 通话结束标记写在带标记那份：正常出结束事件。
+        append(&with_marker, &format!("{END_LINE}\n"));
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::Events(vec![CallEvent::Ended])
+        );
+    }
+
+    /// 启动时早已结束的通话（日志很久没写）不回放、不误报在会。
+    #[test]
+    fn first_scan_skips_stale_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("MSTeamsNM_SlimCore_old.39.log");
+        append(&path, &format!("{START_LINE}\n{NOISE_LINE}\n"));
+        let stale = SystemTime::now() - Duration::from_secs(3 * 60 * 60);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(stale))
+            .unwrap();
+        let mut tails = TailSet::default();
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::FirstScan { in_call: false }
+        );
+    }
+
+    /// 运行中新出现的日志（Teams 重启）从零读起，标记行照常出事件。
+    #[test]
+    fn new_log_mid_run_emits_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("MSTeamsNM_SlimCore_a.40.log");
+        append(&old, &format!("{START_LINE}\n"));
+        let mut tails = TailSet::default();
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::FirstScan { in_call: true }
+        );
+        let fresh = dir.path().join("MSTeamsNM_SlimCore_b.41.log");
+        append(&fresh, &format!("{END_LINE}\n"));
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::Events(vec![CallEvent::Ended])
+        );
+    }
+
+    /// 日志被清理截断后重写：从零重读，新内容里的结束标记照常出事件。
+    #[test]
+    fn truncated_log_rereads_new_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("MSTeamsNM_SlimCore_a.40.log");
+        append(&path, &format!("{START_LINE}\n{NOISE_LINE}\n"));
+        let mut tails = TailSet::default();
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::FirstScan { in_call: true }
+        );
+        fs::write(&path, format!("{END_LINE}\n")).unwrap();
+        assert_eq!(
+            tails.scan(dir.path()),
+            ScanOutcome::Events(vec![CallEvent::Ended])
+        );
     }
 
     #[test]

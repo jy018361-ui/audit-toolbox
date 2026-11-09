@@ -14,6 +14,15 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::AppError;
 
+#[path = "meeting_history.rs"]
+mod meeting_history;
+
+#[path = "meeting_documents.rs"]
+pub(crate) mod meeting_documents;
+
+#[path = "meeting_vocabulary.rs"]
+pub(crate) mod meeting_vocabulary;
+
 pub struct Storage {
     conn: Mutex<Connection>,
     data_dir: PathBuf,
@@ -41,6 +50,9 @@ impl Storage {
         };
         storage.migrate_task_history_summaries()?;
         storage.migrate_task_history_params()?;
+        storage.initialize_meeting_history()?;
+        storage.initialize_meeting_documents()?;
+        storage.initialize_meeting_vocabulary()?;
         storage.import_legacy_defaults()?;
         storage.sanitize_roll_forward_settings()?;
         Ok(storage)
@@ -134,6 +146,7 @@ impl Storage {
                 output_paths.to_string()
             ],
         ).map_err(db_error)?;
+        self.record_meeting_history(event)?;
         Ok(())
     }
 
@@ -184,6 +197,13 @@ impl Storage {
                 snapshot.to_string()
             ],
         ).map_err(db_error)?;
+        if tool_id == "meeting_minutes" {
+            let (phase, message): (String, Option<String>) = self.conn.lock().query_row(
+                "SELECT status,message FROM task_history WHERE job_id=?1", [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(db_error)?;
+            self.record_meeting_history(&json!({"jobId":job_id,"toolId":tool_id,"phase":phase,"message":message}))?;
+        }
         Ok(())
     }
 
@@ -981,6 +1001,9 @@ impl Storage {
         Ok(json!({"deleted":deleted>0,"documentId":id}))
     }
     pub fn legacy_paths_exist() -> bool {
+        if crate::release_channel::is_dev() {
+            return false;
+        }
         let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
         appdata.is_some_and(|p| {
             p.join("AuditToolbox/llm_settings.json").exists()
@@ -1150,6 +1173,10 @@ impl Storage {
         Ok(report)
     }
     fn import_legacy_defaults(&self) -> Result<(), AppError> {
+        // Dev starts with an empty store and never imports production credentials.
+        if crate::release_channel::is_dev() {
+            return Ok(());
+        }
         let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) else {
             return Ok(());
         };
@@ -1199,7 +1226,7 @@ impl Storage {
                         } else {
                             "llm_api_key"
                         };
-                    let _ = keyring::Entry::new("AuditToolbox", secret_name)
+                    let _ = keyring::Entry::new(crate::release_channel::credential_service(), secret_name)
                         .and_then(|entry| entry.set_password(secret));
                 }
                 if let Value::Object(ref mut map) = value {

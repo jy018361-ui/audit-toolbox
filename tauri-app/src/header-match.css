@@ -10,7 +10,8 @@
   --hmg-ghost-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
   position: fixed;
   inset: 0;
-  z-index: 60;
+  /* 与全局模态遮罩同层，盖住无边框窗口按钮及其背景衬条。 */
+  z-index: var(--layer-dialog-overlay);
   background: var(--hmg-scrim);
   display: flex;
   align-items: stretch;
@@ -77,8 +78,23 @@
   font-size: var(--fs-sm);
 }
 
-.hmg-template select {
-  max-width: 260px;
+.hmg-template-label {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hmg-baseline-hint {
+  align-self: center;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.hmg-toast.hmg-error {
+  background: var(--surface);
+  color: var(--danger-fg);
+  border: 1px solid var(--danger-fg);
 }
 
 .hmg-actions {
@@ -96,6 +112,8 @@
 }
 
 .hmg-grid {
+  table-layout: fixed;
+  width: 100%;
   border-collapse: separate;
   border-spacing: 3px;
   font-size: var(--fs-sm);
@@ -186,20 +204,28 @@
 }
 
 .hmg-file-cell {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
   padding: 6px 8px;
+}
+
+.hmg-file-content {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-width: 180px;
+  min-width: 0;
 }
 
-.hmg-file-cell > span[title] {
+.hmg-file-content > span[title] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .hmg-expand {
+  flex: none;
   border: none;
   background: none;
   cursor: pointer;
@@ -311,24 +337,28 @@
   border-radius: 6px;
 }
 
-.hmg-preview-row td {
+.hmg-preview-row > td {
   background: var(--surface-sunken);
-  padding: 8px 12px;
+  padding: 8px 9px;
 }
 
-.hmg-preview-cols {
+.hmg-preview-file {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+
+.hmg-preview-file .hmg-detect-edit {
   display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding-bottom: 4px;
+  flex-wrap: wrap;
+  margin-top: 0;
 }
 
 .hmg-preview-col {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 110px;
-  max-width: 180px;
+  min-width: 0;
   font-size: var(--fs-xs);
   color: var(--text-muted);
 }
@@ -341,6 +371,7 @@
 }
 
 .hmg-preview-col span {
+  min-height: 1.5em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -357,7 +388,13 @@
 
 .hmg-detect-input {
   width: 42px;
+  min-height: 28px;
+  padding: 2px 4px;
   text-align: center;
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--control-bg);
+  color: var(--foreground);
 }
 
 .hmg-bottombar {
@@ -501,4 +538,13 @@
   background: var(--surface-muted);
   color: var(--text-muted);
   font-size: var(--fs-sm);
+}
+
+/* 非数据页的状态单独成行，避免挤占文件名和工作表名。 */
+.hmg-source-note {
+  margin-top: 4px;
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  color: var(--text-muted);
+  white-space: normal;
 }

@@ -18,6 +18,63 @@ pub(super) struct DiskSuiteResult {
 mod tests {
     use super::*;
 
+    #[test]
+    fn thousands_disk_suite_keeps_keys_text_and_amounts_numeric() {
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet_with_constant_memory();
+        write_row(sheet, 0, &["001234".into(), "1234567.89".into(), "-987654.32".into()], 1).unwrap();
+        let bytes = book.save_to_buffer().unwrap();
+        for cell in ["B1", "C1"] { crate::xlsx_numbers::assert_cell_format(&bytes, 1, cell, "#,##0"); }
+        let mut read = calamine::Xlsx::new(std::io::Cursor::new(bytes)).unwrap();
+        let range = read.worksheet_range("Sheet1").unwrap();
+        assert_eq!(range[(0, 0)], Data::String("001234".into()));
+        assert_eq!(range[(0, 1)], Data::Float(1234567.89));
+    }
+
+    #[test]
+    fn datetime_pivot_months_in_disk_suite_match_memory_export() {
+        let root = std::env::temp_dir().join(format!("datetime-pivot-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("ledger.csv");
+        fs::write(&input, "日期,凭证号,科目名称,金额\n2026-05-01 00:00:00,1,收入,-100\n2026-05-01 00:00:00,1,银行,100\n2026-06-30 23:59:59,2,收入,-200\n2026-06-30 23:59:59,2,银行,200\n").unwrap();
+        let mapping = LedgerMapping {
+            date: vec!["日期".into()], id: vec!["凭证号".into()],
+            account_name: vec!["科目名称".into()], amount: Some("金额".into()),
+            ..Default::default()
+        };
+        let job: KanzhangParams = serde_json::from_value(json!({
+            "inputPath":input,"includePivot":true,"markLossTransfer":false,
+            "pivotRows":["科目名称"],"pivotColumns":["日期"],
+        })).unwrap();
+        let cancel = AtomicBool::new(false);
+        let source = SourceParams { input_path: input.to_string_lossy().into_owned(), sheet: None, header_row: 1, header_depth: 1 };
+        let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel).unwrap();
+        let ledger = super::super::disk_ledger::prepare(&cache, &mapping, Some(SignConvention::Signed), 1, &|_, _, _, _| {}, &cancel).unwrap();
+        let targets = vec!["收入".into()];
+        ledger.select(&targets, &cancel).unwrap();
+        let disk_path = root.join("disk.xlsx");
+        write_suite(&ledger, &mapping, &targets, &job, &disk_path, 256 * 1024 * 1024, &|_, _, _, _| {}, &cancel).unwrap();
+        export_kanzhang(json!({
+            "inputPath":input,"mapping":mapping,"outputPath":root.join("memory.csv"),
+            "includePivot":true,"markLossTransfer":false,"targetAccounts":targets,
+            "pivotRows":["科目名称"],"pivotColumns":["日期"],
+        }), &|_, _, _, _| {}, &cancel).unwrap();
+        let mut disk = open_workbook_auto(&disk_path).unwrap();
+        let mut memory = open_workbook_auto(root.join("memory_套表.xlsx")).unwrap();
+        let actual = disk.worksheet_range("透视分析").unwrap();
+        let expected = memory.worksheet_range("透视分析").unwrap();
+        let as_strings = |sheet: &calamine::Range<Data>| sheet.rows().map(|row| row.iter().map(ToString::to_string).collect::<Vec<_>>()).collect::<Vec<_>>();
+        let actual = as_strings(&actual);
+        assert_eq!(actual, as_strings(&expected));
+        assert_eq!(actual[0], ["科目名称", "合计", "2026-05-#_净额(Net)", "2026-06-#_净额(Net)"]);
+        let income = actual.iter().find(|row| row[0] == "收入").unwrap();
+        assert_eq!(&income[1..], ["-300", "-100", "-200"]);
+        assert!(actual.iter().flatten().all(|value| !value.contains("Unknown")));
+        drop(ledger);
+        drop(cache);
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn info(id: &str, accounts: &[(&str, f64)], targets: &[&str]) -> VoucherInfo {
         let account_nets = accounts
             .iter()
@@ -118,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn classification_budget_fails_cleanly() {
+    fn classification_continues_above_estimated_budget() {
         let item = info(
             "001",
             &[("很长的目标科目", 1.0), ("很长的对方科目", -1.0)],
@@ -138,8 +195,9 @@ mod tests {
             ],
         )
         .unwrap();
-        let failure = classify(&db, false, 64, &AtomicBool::new(false)).unwrap_err();
-        assert_eq!(failure.code, "KANZHANG_SUITE_MEMORY_LIMIT");
+        classify(&db, false, 64, &AtomicBool::new(false)).unwrap();
+        let members: usize = db.query_row("SELECT COUNT(*) FROM suite_members", [], |r| r.get(0)).unwrap();
+        assert_eq!(members, 1);
     }
 
     #[test]
@@ -285,15 +343,8 @@ fn json_error(e: serde_json::Error) -> AppError {
 fn encode<T: Serialize + ?Sized>(value: &T) -> Result<String, AppError> {
     serde_json::to_string(value).map_err(json_error)
 }
-fn guard(bytes: usize, budget: u64) -> Result<(), AppError> {
-    if bytes as u64 > budget {
-        return Err(error(
-            "KANZHANG_SUITE_MEMORY_LIMIT",
-            "此批次的凭证科目组合或透视列超过当前可用内存预算。请缩小目标科目批次或减少透视列后重试；明细筛选不受此分析限制。",
-            None,
-        ));
-    }
-    Ok(())
+fn guard(_bytes: usize, _budget: u64) -> Result<(), AppError> {
+    crate::resource_budget::check_available_if_managed()
 }
 fn shape_bytes(full: &BTreeSet<String>, signs: &BTreeMap<String, i8>) -> usize {
     full.iter().map(|v| v.len() + 96).sum::<usize>()
@@ -1272,8 +1323,10 @@ fn write_row(
     for (column, value) in values.iter().enumerate() {
         if column >= number_start {
             if let Ok(number) = value.parse::<f64>() {
+                sheet.set_column_width(column as u16, 24).map_err(xlsx_error)?;
                 sheet
-                    .write_number(row, column as u16, number)
+                    .write_number_with_format(row, column as u16, number,
+                        crate::xlsx_numbers::integer_format())
                     .map_err(xlsx_error)?;
                 continue;
             }

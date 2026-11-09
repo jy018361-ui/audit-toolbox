@@ -1,5 +1,10 @@
 # Audit Roll Forward Rust 迁移核对
 
+## 2026-10-26：Excel 2003 XML 输入兼容
+
+接入公共 SpreadsheetML 内容识别、数据读取及模板准备；包括 NetSuite 使用 `.XLS` 后缀的 XML 导出。保留现有字段映射与业务规则；数据读取不依赖 Excel，版式模板转换沿用本机 Excel。格式、缓存、预览／完整读取边界及验证命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。
+
+
 ## 2026-09-04 · XLS 输入统一
 
 已接入共享 XLS 内容识别/文本读取或模板准备路径。保留本工具的字段映射和业务规则；格式、模板依赖、已覆盖与未覆盖范围及回归命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。不将文件格式兼容表述为旧版全部业务行为等价。

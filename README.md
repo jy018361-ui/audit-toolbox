@@ -3,7 +3,7 @@
 一个面向审计、财务和数据处理场景的 Windows 桌面工具箱。2.x 基于 **Tauri 2 + React 19/TypeScript 前端 + 全 Rust 原生业务核心**，十八个工具全部由 Rust 执行生产逻辑，发布为单个 EXE。
 
 > **给各工具负责人和贡献者**：本 README 是本项目的**唯一贡献规范入口**——代码在哪里、加东西要遵守什么、怎么验证、怎么打包发布，都在这里。只使用工具的人下载发布版 EXE 即可，无需关心工程。
-> 各工具的迁移验收矩阵见 `tauri-app/*_PARITY.md`，架构细节见 `tauri-app/CLAUDE.md`，账表映射内核方案见 `tauri-app/LEDGER_MAPPING_UNIFICATION.md`。
+> 各工具的迁移验收矩阵见 `tauri-app/*_PARITY.md`，架构细节见 `tauri-app/AGENTS.md`，账表映射内核方案见 `tauri-app/LEDGER_MAPPING_UNIFICATION.md`。
 
 ## 功能一览
 
@@ -220,6 +220,8 @@ Windows 上全量 Rust 测试会同时链接 Polars、Excel 与 Tauri 依赖，�
 > 写 `*_PARITY.md` 有两条从教训里来的约定：**不要在文档里写死测试数量**（写运行命令，每加一个测试就过期一次）；**不要把"已实现"写成"已保留全部行为"**（拿不准就逐项列"保留了什么／没保留什么"）。
 
 ## 打包发布
+
+正式版与开发版使用独立的发布和自动更新通道，操作步骤见 [RELEASE_CHANNELS.md](RELEASE_CHANNELS.md)。Dev 安装包、数据库、凭据和更新入口独立，现有正式版更新地址保持不变。
 
 ### 设置页与更新说明
 

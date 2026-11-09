@@ -121,7 +121,7 @@ describe("FA 子工具默认输出路径", () => {
 });
 
 describe("折旧测算单文件 LLM 复核规划器", () => {
-  it("clear 能删除没有可信替代列的错误映射", () => {
+  it.each([0.89, 0.9, 0.94, 1])("clear 置信度 %s 按 90% 门槛处理", (confidence) => {
     const plan = planDepLlmChanges({
       mapping: { life: "资产名称" },
       fieldReviews: [
@@ -129,11 +129,17 @@ describe("折旧测算单文件 LLM 复核规划器", () => {
           role: "life",
           file_side: "file2",
           action: "clear",
-          confidence: 0.94,
+          confidence,
           reason: "当前列不是月数且没有可信寿命列",
         },
       ],
     });
+    if (confidence >= 0.9) {
+      expect(plan.mapping.life).toBeUndefined();
+      expect(plan.pending).toEqual([]);
+      expect(plan.changes[0].restore).toMatchObject({ value: "资产名称" });
+      return;
+    }
     expect(plan.mapping.life).toBe("资产名称");
     expect(plan.pending[0]).toMatchObject({
       current: "资产名称",

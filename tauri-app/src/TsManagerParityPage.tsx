@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { formatCount } from "@/lib/numberFormat";
 import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
@@ -20,6 +21,8 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { FileInput } from "@/components/FileInput";
 import { displayFileName } from "@/fileDisplay";
 import { DataTable } from "@/components/DataTable";
+import { SourceTableControls } from "@/components/SourceTableControls";
+import { PreviewSourceHeader } from "@/components/PreviewSourceHeader";
 import {
   BLANK_TOKEN,
   ColumnFilterMenu,
@@ -29,13 +32,13 @@ import {
 } from "@/components/ColumnFilterMenu";
 import { StatGrid } from "@/components/StatGrid";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
 import "./ts-manager.css";
 
 type TsInspect = {
+  headerDepth?: number;
   headers?: string[];
   sheets?: string[];
   selectedSheet?: string;
@@ -50,6 +53,7 @@ type TsDraft = {
   inputPath: string;
   sheet: string;
   headerRow: string;
+  headerDepth?: number;
   inspect?: TsInspect;
   /** 每列勾选的筛选值：同列多值取「或」，跨列取「与」——与旧版口径一致。 */
   selections: Record<string, string[]>;
@@ -147,17 +151,23 @@ function nextSelections(
   selections: Record<string, string[]>,
   field: string,
   checked: string[],
-  known: { total: number; truncated: boolean; keyword?: string },
+  known: {
+    total: number;
+    truncated: boolean;
+    keyword?: string;
+    /** 不带关键词那次读取的整列去重值总数；搜索后 total 会被命中数覆盖。 */
+    fullTotal?: number;
+  },
 ) {
   const next = { ...selections };
-  // 只有“未搜索时，完整取值列表全勾”才等于整列不筛选。
-  // 搜索后的 total 只是命中关键词的取值数，把它当整列总数会导致用户
-  // 勾完搜索结果点应用后，条件被误删。
+  // 「整列取值全勾」才等于不筛选。判定认全量口径 fullTotal（未截断列才可信）：
+  // 搜索后的 total 只是命中关键词的取值数，拿它判断会把用户真想筛的整列全勾
+  // 误判成不筛选；反过来，搜索后全勾若覆盖的正是全量取值，条件实际什么都没
+  // 筛掉，界面却显示“已设筛选”，误导——也要按不筛选处理。
+  const fullTotal =
+    known.fullTotal ?? (!(known.keyword ?? "").trim() ? known.total : 0);
   const selectsEverything =
-    !(known.keyword ?? "").trim() &&
-    !known.truncated &&
-    known.total > 0 &&
-    checked.length >= known.total;
+    !known.truncated && fullTotal > 0 && checked.length >= fullTotal;
   if (!checked.length || selectsEverything) delete next[field];
   else next[field] = checked;
   return next;
@@ -176,7 +186,7 @@ function switchSheetInspect(inspect: TsInspect | undefined, sheet: string) {
 }
 
 function filterLookupParams(
-  state: Pick<TsDraft, "inputPath" | "sheet" | "headerRow">,
+  state: Pick<TsDraft, "inputPath" | "sheet" | "headerRow" | "headerDepth">,
   field: string,
   keyword: string,
 ) {
@@ -184,20 +194,33 @@ function filterLookupParams(
     inputPath: state.inputPath,
     sheet: state.sheet || undefined,
     headerRow: Math.max(1, Number(state.headerRow) || 1),
+    headerDepth: state.headerDepth ?? 1,
     field,
     keyword: keyword.trim(),
     limit: VALUE_LIMIT,
   };
 }
 
-function canStartTsExport(headers: string[], outputPath: string) {
-  return headers.length > 0 && Boolean(outputPath.trim());
+function canStartTsExport(headers: string[]) {
+  return headers.length > 0;
+}
+
+/** 导出建议文件名带生成时刻的时间戳（工时报告_20261107_093012.xlsx）：
+ * 同一批数据多次导出不再互相覆盖，明细 CSV 跟随主文件名自动带同一时间戳。 */
+function defaultExportFileName(now = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const stamp = [
+    `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`,
+    `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`,
+  ].join("_");
+  return `工时报告_${stamp}.xlsx`;
 }
 
 export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   const [state, setState] = useState<TsDraft>(() => draft);
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [busy, setBusy] = useState(false);
+  const [exportPending, setExportPending] = useState(false);
   const [job, setJob] = useState<JobEvent>();
   const [error, setError] = useState("");
   const [dragHover, setDragHover] = useState(false);
@@ -328,6 +351,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
       inputPath?: string;
       sheet?: string;
       headerRow?: number;
+      headerDepth?: number;
       outputPath?: string;
       filters?: Array<{ field?: unknown; values?: unknown }>;
     };
@@ -354,6 +378,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
           ? String(p.headerRow)
           : "1",
       outputPath: typeof p.outputPath === "string" ? p.outputPath : "",
+      headerDepth: p.headerDepth ?? 1,
     });
     if (Object.keys(selections).length)
       setState((current) => ({ ...current, selections }));
@@ -378,7 +403,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     );
     if (typeof selected !== "string") return;
     rememberLastFolder(selected);
-    resetForNewSource({ inputPath: selected, sheet: "" });
+    resetForNewSource({ inputPath: selected, sheet: "", headerDepth: 1 });
     // 旧版选完文件就直接开始读取（_confirm_selected_file），不需要再点一次「加载文件」。
     await inspect(selected);
   }
@@ -399,6 +424,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
         inputPath,
         sheet: sheet || undefined,
         headerRow: Math.max(1, Number(state.headerRow) || 1),
+        headerDepth: overridePath ? 1 : state.headerDepth ?? 1,
       });
       loadJobIdRef.current = jobId;
     } catch (caught) {
@@ -419,11 +445,14 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
       ...current,
       inspect: value,
       sheet: value.selectedSheet ?? current.sheet,
+      headerDepth: value.headerDepth ?? current.headerDepth ?? 1,
       selections:
         restored ??
         (defaultField && defaultValue ? { [defaultField]: [defaultValue] } : {}),
       filtered: undefined,
     }));
+    // 加载成功即进入「条件筛选」：选完文件还要手动点「下一步」是多余的。
+    if ((value.headers ?? []).length) setStep(2);
   }
 
   const loadValues = useCallback(
@@ -444,6 +473,10 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
             total: value.total ?? values.length,
             truncated: Boolean(value.truncated),
             keyword,
+            // 全量口径只在“不带关键词”的读取里可靠；搜索后沿用上次的记录。
+            fullTotal: keyword.trim()
+              ? current[field]?.fullTotal
+              : value.total ?? values.length,
           },
         }));
       } catch (caught) {
@@ -452,7 +485,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
         setValuesLoading(false);
       }
     },
-    [state.inputPath, state.sheet, state.headerRow],
+    [state.inputPath, state.sheet, state.headerRow, state.headerDepth],
   );
 
   function openFilterMenu(field: string, anchor: HTMLElement) {
@@ -475,6 +508,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
         inputPath: state.inputPath,
         sheet: state.sheet || undefined,
         headerRow: Math.max(1, Number(state.headerRow) || 1),
+        headerDepth: state.headerDepth ?? 1,
         filters: applied,
       });
     } catch (caught) {
@@ -489,6 +523,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
       total: known?.total ?? 0,
       truncated: known?.truncated ?? false,
       keyword: known?.keyword,
+      fullTotal: known?.fullTotal,
     });
     setMenu(undefined);
     patch({ selections: next });
@@ -508,32 +543,38 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   }
 
   async function chooseOutput() {
-    const selected = await pickPath("save", "保存 Timesheet 默认双 Sheet", [
-      "xlsx",
-    ]);
-    if (typeof selected === "string") patch({ outputPath: selected });
+    const selected = await pickPath(
+      "save",
+      "另存为工时报告（by经理 + by项目）",
+      ["xlsx"],
+      defaultExportFileName(),
+    );
+    if (typeof selected !== "string" || !selected.trim()) return;
+    patch({ outputPath: selected });
+    return selected;
   }
 
   async function startExport() {
+    if (busy || exportPending) return;
     if (!state.inputPath || !state.inspect || !headers.length) {
       setError("请先加载 Timesheet 文件。");
       return;
     }
-    if (!state.outputPath.trim()) {
-      setError("请选择 TS 导出文件的保存路径。");
-      return;
-    }
-    setBusy(true);
+    setExportPending(true);
     setError("");
-    patch({ result: undefined });
     try {
+      const outputPath = state.outputPath.trim() || (await chooseOutput());
+      if (!outputPath) return;
+      setBusy(true);
+      patch({ result: undefined });
       const jobId = await jobStart("ts.export", {
         inputPath: state.inputPath,
         sheet: state.sheet || undefined,
         headerRow: Math.max(1, Number(state.headerRow) || 1),
+        headerDepth: state.headerDepth ?? 1,
         pivotMode: "dual_default",
         filters,
-        outputPath: state.outputPath,
+        outputPath,
       });
       setJob({
         jobId,
@@ -548,6 +589,8 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     } catch (caught) {
       setBusy(false);
       setError(messageOf(caught));
+    } finally {
+      setExportPending(false);
     }
   }
 
@@ -617,7 +660,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   return (
     <div className="ts-manager-page">
       <PageHeader
-        eyebrow="Timesheet 透视"
+        eyebrow="工时透视"
         title={tool.name}
         detail="加载工时表，在预览表头按列勾选筛选值，导出 by经理 与 by项目 默认双 Sheet。"
       />
@@ -659,7 +702,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   ? "加载失败"
                   : headers.length
                     ? "文件已加载"
-                    : "待加载文件"}
+                    : "等待文件"}
             </Badge>}
           </CardHeader>
           <CardContent>
@@ -678,6 +721,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   <FileDropInput
                     value={state.inputPath}
                     placeholder="拖放或点击选择 Timesheet 文件"
+                    hideFilledLabel
                     onBrowse={() => void chooseInput()}
                     onClear={state.inputPath && !busy ? clearAll : undefined}
                     onDragStateChange={() => {}}
@@ -685,56 +729,11 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     disabled={busy}
                   />
                 </Field>
-                <div className="form-grid">
-                  <Field label="Sheet">
-                    {state.inspect?.sheets?.length ? (
-                      <select
-                        value={state.sheet}
-                        onChange={(event) => {
-                          const sheet = event.target.value;
-                          setMenu(undefined);
-                          setValueCache({});
-                          patch({
-                            sheet,
-                            inspect: switchSheetInspect(state.inspect, sheet),
-                            selections: {},
-                            filtered: undefined,
-                            result: undefined,
-                          });
-                          setStep(1);
-                        }}
-                      >
-                        {state.inspect.sheets.map((name) => (
-                          <option key={name}>{name}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <Input
-                        value={state.sheet}
-                        onChange={(event) => {
-                          patch({ sheet: event.target.value });
-                          setStep(1);
-                        }}
-                      />
-                    )}
-                  </Field>
-                  <Field label="标题行（默认 1）">
-                    <Input
-                      type="number"
-                      min={1}
-                      max={50}
-                      value={state.headerRow}
-                      onChange={(event) => {
-                        resetForNewSource({ headerRow: event.target.value });
-                      }}
-                    />
-                  </Field>
-                </div>
-                <div className="actions">
+                <div className="actions" data-button-size="default">
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     disabled={busy || !state.inputPath}
                     onClick={() => void inspect()}
                   >
@@ -743,7 +742,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   <Button
                     type="button"
                     variant="default"
-                    disabled={!state.inspect}
+                    disabled={!headers.length}
                     onClick={() => setStep(2)}
                   >
                     下一步：条件筛选
@@ -753,17 +752,12 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
             )}
             {step === 2 && (
               <>
-                <p className="hint">
-                  筛选在下方「文件预览」里做：点表头第一行的 ▼
-                  打开取值清单，勾选后点「应用」。
-                  同一列勾多个取值是「或」，不同列之间是「且」——和 Excel
-                  的自动筛选一致。
-                </p>
+                <p className="hint">筛选规则：同列取「或」，跨列取「且」。</p>
                 {filters.length === 0 ? (
                   <EmptyState
                     compact
                     title="尚未添加筛选条件"
-                    description={`导出将包含全部 ${totalRows} 行。可在下方预览表头按列筛选，或直接进入导出。`}
+                    description={`未设置筛选，将导出全部 ${totalRows} 行。`}
                   />
                 ) : (
                   <>
@@ -793,11 +787,11 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     </p>
                   </>
                 )}
-                <div className="actions">
+                <div className="actions" data-button-size="default">
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     disabled={!filters.length}
                     onClick={clearAllFilters}
                   >
@@ -806,7 +800,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     onClick={() => setStep(1)}
                   >
                     上一步
@@ -827,23 +821,29 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                 <Field label="输出文件">
                   <FileInput
                     value={state.outputPath}
-                    placeholder="请选择导出文件的保存路径"
-                    onBrowse={() => void chooseOutput()}
+                    placeholder="点击导出时选择保存位置"
+                    disabled={busy || exportPending}
+                    onBrowse={() => {
+                      void chooseOutput().catch((caught) => setError(messageOf(caught)));
+                    }}
                     onClear={
                       state.outputPath
                         ? () => patch({ outputPath: "" })
                         : undefined
                     }
+                    /* 动词统一（设计评审）：选文件的按钮全站叫「选择」。 */
+                    browseLabel="选择"
                   />
                 </Field>
                 <p className="hint">
                   将按 {filters.length} 个筛选条件导出，命中 {shownRows} 行。
+                  {!state.outputPath.trim() && "点击导出后选择保存位置。"}
                 </p>
-                <div className="actions">
+                <div className="actions" data-button-size="default">
                   <Button
                     type="button"
                     variant="secondary"
-                    size="sm"
+                    size="default"
                     onClick={() => setStep(2)}
                   >
                     上一步
@@ -852,7 +852,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     <Button
                       type="button"
                       variant="secondary"
-                      size="sm"
+                      size="default"
                       onClick={() => void cancelJobWithFeedback(job.jobId)}
                     >
                       取消
@@ -861,21 +861,44 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     <Button
                       type="button"
                       variant="default"
-                      disabled={!canStartTsExport(headers, state.outputPath)}
+                      disabled={busy || exportPending || !canStartTsExport(headers)}
                       onClick={() => void startExport()}
                     >
                       导出默认双 Sheet
                     </Button>
                   )}
                 </div>
+                {!canStartTsExport(headers) && !busy && (
+                  <p className="hint" role="status">
+                    请先加载 Timesheet 文件。
+                  </p>
+                )}
               </>
             )}
           </CardContent>
         </Card>
 
         <Card>
-          <CardHeader>
-            <CardTitle>数据预览</CardTitle>
+          <CardHeader className="source-preview-card-head">
+            <PreviewSourceHeader toolbar={state.inputPath && <>
+              <SourceTableControls
+                sheet={state.sheet} sheets={state.inspect?.sheets ?? []} headerRow={state.headerRow}
+                headerDepth={state.headerDepth ?? 1}
+                onHeaderDepthChange={(headerDepth) => resetForNewSource({ headerDepth, inspect: switchSheetInspect(state.inspect, state.sheet) })}
+                editableSheet headerRowMax={50} disabled={busy}
+                onSheetChange={(sheet) => {
+                  setMenu(undefined);
+                  setValueCache({});
+                  patch({ sheet, inspect: switchSheetInspect(state.inspect, sheet), selections: {}, filtered: undefined, result: undefined });
+                  setStep(1);
+                }}
+                onHeaderRowChange={(headerRow) => resetForNewSource({ headerRow, inspect: switchSheetInspect(state.inspect, state.sheet) })}
+              />
+              {!headers.length && <Button variant="secondary" size="sm" disabled={busy} onClick={() => void inspect()}>重新加载</Button>}
+            </>}>
+              <h2>数据预览</h2>
+              {state.inputPath && <strong className="preview-source-name" title={state.inputPath}>{displayFileName(state.inputPath)}</strong>}
+            </PreviewSourceHeader>
           </CardHeader>
           <CardContent>
             {state.inspect && (
@@ -885,7 +908,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   {
                     label: "数据行",
                     value: filters.length
-                      ? `${shownRows} / ${totalRows}`
+                      ? `${formatCount(shownRows)} / ${formatCount(totalRows)}`
                       : totalRows,
                   },
                   {
@@ -893,26 +916,17 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     value: state.inspect.dimensions?.columns ?? headers.length,
                   },
                   { label: "Sheet", value: state.sheet || "CSV" },
-                  { label: "有效筛选", value: filters.length },
+                  { label: "已设筛选列", value: filters.length },
                 ]}
               />
             )}
-            {/* Legacy forced a sheet picker before loading; silently taking the
-                first sheet reads a cover page as if it were the data. */}
-            {(state.inspect?.sheets?.length ?? 0) > 1 && (
-              /* P3-6a：这是常规信息提示（当前 Sheet 未必有错），用中性蓝的
-                 info-box，不再借用错误级的红底红框。 */
-              <div className="info-box">
-                该工作簿共有 {state.inspect?.sheets?.length}{" "}
-                个工作表，当前使用「
-                {state.sheet || state.inspect?.selectedSheet}」。
-                如果数据不在这一张，请在上方切换 Sheet 后重新加载。
-              </div>
-            )}
+            {/* Sheet 名已在上方统计瓦片里说一遍（设计评审·去重）：多工作簿
+                的切换入口就在预览区工具栏的 Sheet 下拉，不再重复横幅提醒。 */}
             {preview.length > 0 && (
               <DataTable
                 columns={headers}
                 rows={preview}
+                resizeKey="ts-manager.preview"
                 caption={
                   <div className="fa-table-caption">
                     <strong>
@@ -998,6 +1012,7 @@ export const tsManagerParity = {
   parentDirectory,
   pickerStartDirectory,
   canStartTsExport,
+  defaultExportFileName,
   BLANK_TOKEN,
   LEGACY_DEFAULT_FOLDER,
 };

@@ -9,12 +9,14 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { within } from "@testing-library/react";
 import {
   DepositInterestPage,
   depositCatalogMappingKey,
 } from "./DepositInterestPage";
 import { publishTaskRestore } from "./restore";
 import type { JobEvent, ToolManifest } from "./types";
+import * as ledgerMapping from "./ledgerMapping";
 
 const mock = vi.hoisted(() => ({
   engineCall: vi.fn(),
@@ -151,7 +153,8 @@ beforeEach(() => {
     },
   );
 });
-afterEach(cleanup);
+let auxiliarySpy: { mockRestore(): void } | undefined;
+afterEach(() => { cleanup(); auxiliarySpy?.mockRestore(); auxiliarySpy = undefined; });
 
 it("历史任务恢复后重新识别完整预览，返回输入文件不白屏", async () => {
   publishTaskRestore({
@@ -245,6 +248,108 @@ const STEP1 = /^1\s*上传与识别/;
 const goToStep = (label: RegExp) =>
   fireEvent.click(screen.getByRole("button", { name: label }));
 
+describe("快速任务完成早于启动返回", () => {
+  async function enterCalculation() {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", {
+      name: "拖放或选择 TB、序时账文件（可同时选择）",
+    }));
+    await waitFor(() => expect(screen.getByRole("button", { name: STEP2 })).toBeEnabled());
+    goToStep(STEP2);
+    goToStep(STEP3);
+  }
+
+  it("预览完成后立即导出，提前到达的完成事件仍展示文件并停止转圈", async () => {
+    mock.jobStart.mockResolvedValueOnce("preview-job");
+    await enterCalculation();
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+    act(() => mock.event?.({ ...complete, jobId: "preview-job", message: "旧预览完成" }));
+    expect(screen.getByRole("button", { name: "生成 Excel 底稿" })).toBeEnabled();
+
+    let resolveStart!: (id: string) => void;
+    mock.jobStart.mockImplementationOnce(() => new Promise<string>((resolve) => {
+      resolveStart = resolve;
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "生成 Excel 底稿" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledTimes(2));
+    // 新任务不能继续显示上一轮的完成状态。
+    expect(screen.queryByText("旧预览完成")).not.toBeInTheDocument();
+    act(() => {
+      mock.event?.({ ...complete, jobId: "other-job", message: "其他任务完成" });
+      mock.event?.({
+        ...complete, jobId: "export-job", message: "导出完成",
+        result: { rows: [], outputPaths: ["C:/output/存款底稿.xlsx"] },
+      });
+      mock.event?.({ ...complete, jobId: "export-job", phase: "running", message: "迟到进度" });
+      mock.event?.({ ...complete, jobId: "export-job", toolId: "loan_interest", message: "其他工具完成" });
+    });
+    expect(screen.getByRole("button", { name: "生成 Excel 底稿" })).toBeDisabled();
+    await act(async () => resolveStart("export-job"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "生成 Excel 底稿" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "测算预览" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "打开 Excel 底稿" })).toBeVisible();
+    expect(screen.getByText("导出完成")).toBeVisible();
+    expect(screen.queryByText("其他任务完成")).not.toBeInTheDocument();
+    expect(screen.queryByText("迟到进度")).not.toBeInTheDocument();
+    expect(document.querySelector(".fx-actions .busy-spinner")).toBeNull();
+  });
+
+  it.each(["failed", "cancelled"])("启动返回前收到 %s 也恢复按钮", async (phase) => {
+    await enterCalculation();
+    mock.jobStart.mockImplementationOnce(async () => {
+      mock.event?.({
+        ...complete, jobId: "fast-terminal", phase,
+        message: phase === "failed" ? "底稿生成失败" : "任务已取消",
+        result: undefined,
+      });
+      return "fast-terminal";
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成 Excel 底稿" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole("button", { name: "生成 Excel 底稿" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "测算预览" })).toBeEnabled();
+    expect(document.querySelector(".fx-actions .busy-spinner")).toBeNull();
+  });
+});
+
+it("同码银行先选择JE汇总，再填写统一利率，参数与选择一致", async () => {
+  const original = mock.engineCall.getMockImplementation()!;
+  const groups = [{entity:"默认主体",accountCode:"1002",names:["银行甲","银行乙"],canUseJe:true}];
+  const summaryAccount = "1002 存款科目汇总（明细无法衔接）";
+  mock.pickPath.mockResolvedValue(["fixture-tb.xlsx","fixture-je.xlsx"]);
+  mock.engineCall.mockImplementation(async(method:string, p:Record<string,unknown>) => {
+    if (method === "deposit.classify_source") {
+      const isJe = (p.source as {inputPath:string}).inputPath.endsWith("je.xlsx");
+      return {...inspection, kind:isJe ? "je":"tb", confidence:1, scores:isJe?{tb:1,je:10}:{tb:10,je:1},sheet:isJe?"JE":"TB"};
+    }
+    if (method === "deposit.inspect_je") return {...inspection, sheet:"JE",sheets:["JE"],headers:["科目编码","科目名称","日期","借方","贷方","凭证号"],suggestedMapping:{accountCode:"科目编码",accountName:"科目名称",date:"日期",functionalDebit:"借方",functionalCredit:"贷方",id:"凭证号"}};
+    if (method === "deposit.account_currencies") return {
+      matchingFallbackCandidates:groups,
+      rows:[{key:"汇总-key",entity:"默认主体",account:p.matchingFallbackMode === "accountJe" ? summaryAccount : bank,auxiliary:"",currency:"本位币合并",role:"deposit",openingBalance:300,closingBalance:400}],
+    };
+    if (method === "deposit.matching_fallback") return {matchingFallbackGroups:groups};
+    return original(method,p);
+  });
+  render(<DepositInterestPage tool={tool}/>);
+  fireEvent.click(screen.getByRole("button",{name:"拖放或选择 TB、序时账文件（可同时选择）"}));
+  await screen.findByText("已识别：JE 序时账");
+  await waitFor(()=>expect(screen.getByRole("button",{name:"下一步：科目与利率确认"})).toBeEnabled());
+  fireEvent.click(screen.getByRole("button",{name:"下一步：科目与利率确认"}));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByRole("button",{name:"按所选口径继续"})).toBeDisabled();
+  fireEvent.click(within(dialog).getByRole("radio",{name:/合并同码存款/}));
+  fireEvent.click(within(dialog).getByRole("button",{name:"按所选口径继续"}));
+  const rate = await screen.findByRole("spinbutton",{name:`默认主体 / ${summaryAccount}的统一年利率`});
+  goToStep(STEP3);
+  expect(screen.getByText("请先为存款科目汇总填写统一年利率。")).toBeVisible();
+  expect(mock.jobStart).not.toHaveBeenCalled();
+  fireEvent.change(rate,{target:{value:"3"}});
+  goToStep(STEP3);
+  fireEvent.click(screen.getByRole("button",{name:"测算预览"}));
+  await waitFor(()=>expect(mock.jobStart).toHaveBeenCalledWith("deposit.preview",expect.objectContaining({matchingFallbackMode:"accountJe",matchingFallbackGroups:groups,requireMatchingFallbackChoice:true,rateOverrides:{"汇总-key":{annualRate:0.03}}})));
+});
+
 it("只有科目身份映射变化才需要重建科目目录", () => {
   expect(
     depositCatalogMappingKey({
@@ -262,7 +367,147 @@ it("只有科目身份映射变化才需要重建科目目录", () => {
   );
 });
 
+async function openClassificationWorkspace(nativeRows = false, ambiguous = false) {
+  auxiliarySpy = vi.spyOn(ledgerMapping, "verifyAuxiliaryLink").mockImplementation(async request => {
+    try { return await mock.engineCall("ledger.auxiliary_link", request); }
+    catch { return null; }
+  });
+  const original = mock.engineCall.getMockImplementation()!;
+  const extra = Array.from({ length: 10 }, (_, i) => `199${i} 待分类账户${i}`);
+  const accounts = [bank, ...extra];
+  const roles = Object.fromEntries(accounts.map(account => [account, account === bank && !nativeRows ? "deposit" : "excluded"]));
+  const tb = {
+    ...inspection, accounts, accountsLeaf: accounts, suggestedAccountRoles: roles,
+    headers: [...inspection.headers, "辅助核算"],
+    preview: inspection.preview.map(row => [...row, ""]),
+    suggestedMapping: { ...mapping, auxiliary: "辅助核算" },
+    ...(nativeRows ? { reviewAccounts: accounts.map(account => ({
+      entity: "默认主体", account, auxiliary: "", currency: "",
+      suggestedDepositRole: account === bank ? "deposit" : "excluded",
+    })) } : {}),
+  };
+  const je = { ...inspection, sheet: "JE", sheets: ["JE"], headers: ["科目编码", "科目名称", "日期", "借方", "贷方", "凭证号"], suggestedMapping: {
+    accountCode: "科目编码", accountName: "科目名称", date: "日期",
+    functionalDebit: "借方", functionalCredit: "贷方", id: "凭证号",
+  } };
+  const groups = ambiguous ? [{ entity: "默认主体", accountCode: "1002", names: ["银行甲", "银行乙"], canUseJe: true }] : [];
+  mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
+  mock.engineCall.mockImplementation(async (method: string, p: Record<string, unknown>) => {
+    if (method === "ledger.forms") return [];
+    if (method === "ledger.review_pair_mapping") return { tbChanges: [], jeChanges: [] };
+    if (method === "deposit.classify_source") return {
+      ...inspection, kind: (p.source as { inputPath: string }).inputPath.startsWith("je") ? "je" : "tb",
+      scores: { tb: 10, je: 1 },
+    };
+    if (method === "deposit.inspect_tb") return tb;
+    if (method === "deposit.inspect_je") return je;
+    if (method === "ledger.currency_link") return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
+    if (method === "ledger.auxiliary_link") return { tbAuxMapped: true, status: "verified", planKey: "initial-plan", groups: [], warnings: [] };
+    if (method === "deposit.account_currencies") return { rows: p.matchingFallbackMode === "accountJe"
+      ? [{ key: "summary-row", entity: "默认主体", account: "1002 存款科目汇总", auxiliary: "", currency: "", role: "deposit" }]
+      : accounts.map(account => ({ key: `${account}-row`, entity: "默认主体", account, auxiliary: "", currency: "", role: account === bank ? "deposit" : "excluded" })),
+    };
+    if (method === "deposit.matching_fallback") return { matchingFallbackGroups: groups };
+    return original(method, p);
+  });
+  render(<DepositInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }));
+  await screen.findByText("已识别：JE 序时账");
+  fireEvent.click(screen.getByRole("button", { name: "下一步：科目与利率确认" }));
+  await screen.findByRole("combobox", { name: `${extra[0]}的分类` });
+  await waitFor(() => expect(mock.engineCall).toHaveBeenCalledWith("deposit.account_currencies", expect.objectContaining({ auxiliaryPlan: expect.objectContaining({ planKey: "initial-plan" }) })));
+  await act(async () => {});
+  return { extra, groups };
+}
+
 describe("存款科目手工分类请求", () => {
+  it.each([false, true])("连续分类不读取账表，第三步统一使用最新分类与原利率（明细行：%s）", async nativeRows => {
+    const { extra } = await openClassificationWorkspace(nativeRows);
+    const rate = screen.getByRole("spinbutton", { name: `${bank}的年利率` });
+    fireEvent.change(rate, { target: { value: "1.25" } });
+    fireEvent.blur(rate);
+    const before = mock.engineCall.mock.calls.length;
+    for (const [i, account] of extra.entries()) {
+      await act(async () => fireEvent.change(screen.getByRole("combobox", { name: `${account}的分类` }), { target: { value: i === 9 ? "interest_income" : "deposit" } }));
+      expect(mock.engineCall.mock.calls).toHaveLength(before);
+    }
+    expect(screen.getByText("计息科目 10")).toBeVisible();
+    expect(screen.getByText("科目分类已记录，将在下一步测算时生效。")).toBeVisible();
+    expect(mock.jobStart).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "下一步：测算与底稿" }));
+    expect(mock.engineCall.mock.calls).toHaveLength(before);
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+    expect(mock.engineCall.mock.calls.filter(([method]) => method === "deposit.matching_fallback")).toHaveLength(1);
+    const request = mock.jobStart.mock.calls[0][1];
+    expect(request).not.toHaveProperty("auxiliaryPlan");
+    expect(request.rateOverrides).toEqual({ [`${bank}-row`]: { annualRate: 0.0125 } });
+    for (const [i, account] of extra.entries()) {
+      const key = nativeRows ? JSON.stringify(["", account, "", ""]) : account;
+      expect(request.accountReviewRoles[key]).toBe(i === 9 ? "interest_income" : "deposit");
+    }
+  });
+
+  it("测算阶段衔接检查失败可重试，旧分类不会启动任务", async () => {
+    const { extra } = await openClassificationWorkspace();
+    fireEvent.change(screen.getByRole("combobox", { name: `${extra[0]}的分类` }), { target: { value: "deposit" } });
+    fireEvent.click(screen.getByRole("button", { name: "下一步：测算与底稿" }));
+    mock.engineCall.mockRejectedValueOnce(new Error("检查失败，请重试"));
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await screen.findByText("检查失败，请重试");
+    expect(mock.jobStart).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+  });
+
+  it("确认表回传分类和利率仅记录，测算时才检查并使用回传值", async () => {
+    const { extra } = await openClassificationWorkspace(true);
+    const original = mock.engineCall.getMockImplementation()!;
+    const key = JSON.stringify(["", extra[0], "", ""]);
+    mock.engineCall.mockImplementation(async (method: string, request: Record<string, unknown>) => {
+      if (method === "account_confirmation.import") return { rows: [{
+        key, values: [extra[0], "银行存款（计息）", "活期存款", "", "1.5"],
+      }] };
+      return original(method, request);
+    });
+    mock.pickPath.mockResolvedValueOnce("确认表.xlsx");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const before = mock.engineCall.mock.calls.length;
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "回传科目确认表" }));
+      await screen.findByText("已回传 1 行，页面已更新；请继续检查并测算。");
+    } finally { confirm.mockRestore(); }
+    expect(mock.engineCall.mock.calls.slice(before).map(([method]) => method)).toEqual(["account_confirmation.import"]);
+    expect(mock.jobStart).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "下一步：测算与底稿" }));
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith("deposit.preview", expect.objectContaining({
+      accountReviewRoles: expect.objectContaining({ [key]: "deposit" }),
+      accountRateOverrides: { [extra[0]]: 0.015 },
+    })));
+  });
+
+  it.each(["accountJe", "tbAverage"])("新增分类的衔接口径及%s利率在第三步处理", async choice => {
+    const { extra, groups } = await openClassificationWorkspace(false, true);
+    fireEvent.change(screen.getByRole("combobox", { name: `${extra[0]}的分类` }), { target: { value: "deposit" } });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "下一步：测算与底稿" }));
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(mock.jobStart).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("radio", { name: choice === "accountJe" ? /合并同码存款/ : /保留 TB 明细/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "按所选口径继续" }));
+    expect(screen.getByRole("button", { name: "测算预览" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    if (choice === "accountJe") {
+      const rate = await screen.findByRole("spinbutton", { name: "默认主体 / 1002 存款科目汇总的统一年利率" });
+      expect(mock.jobStart).not.toHaveBeenCalled();
+      fireEvent.change(rate, { target: { value: "3" } });
+      fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    }
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith("deposit.preview", expect.objectContaining({ matchingFallbackMode: choice, matchingFallbackGroups: groups })));
+  });
+
   it("利率档位加载失败不再静默，会显示可恢复警告", async () => {
     mock.engineCall.mockRejectedValueOnce(new Error("网络不可用"));
     render(<DepositInterestPage tool={tool} />);
@@ -304,7 +549,7 @@ describe("存款科目手工分类请求", () => {
         },
       }),
     );
-    expect(await screen.findByText("manual-tb.xlsx")).toBeVisible();
+    expect(await screen.findByRole("button", { name: "manual-tb.xlsx" })).toBeVisible();
   });
   it("人工补正科目映射后按确认映射刷新完整科目目录", async () => {
     const added = "100201 新补出的银行账户";
@@ -442,7 +687,7 @@ describe("存款科目手工分类请求", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByText("计息科目 1")).toBeVisible();
     expect(
-      screen.getByText(/页面上限为 20%/),
+      screen.getByText(/默认利率为暂估值/),
     ).toBeVisible();
     fireEvent.change(screen.getByRole("combobox", { name: `${bank}的分类` }), {
       target: { value: "cash_on_hand" },
@@ -583,7 +828,7 @@ describe("第二步余额列示", () => {
     goToStep(STEP2);
     // 轻量逐户清单会替换刚进入页面时的科目级兜底行；等待清单余额出现，
     // 避免抓到随后被卸载的旧 select 节点。
-    expect(await screen.findByRole("cell", { name: "1,000" })).toBeVisible();
+    expect(await screen.findByRole("cell", { name: "1,000.00" })).toBeVisible();
     expect(
       screen.getByRole("columnheader", { name: /^期初余额/ }),
     ).toBeVisible();
@@ -592,8 +837,8 @@ describe("第二步余额列示", () => {
     ).toBeVisible();
     // 有逐户行时按户拆示：2000 户期初 1,000、期末 2,000；2002 户没有
     // 年初列，期初显示「—」，期末 3,000。
-    expect(screen.getByRole("cell", { name: "2,000" })).toBeVisible();
-    expect(screen.getByRole("cell", { name: "3,000" })).toBeVisible();
+    expect(screen.getByRole("cell", { name: "2,000.00" })).toBeVisible();
+    expect(screen.getByRole("cell", { name: "3,000.00" })).toBeVisible();
     expect(
       screen.getAllByRole("cell", { name: "—" }).length,
     ).toBeGreaterThan(0);
@@ -603,6 +848,40 @@ describe("第二步余额列示", () => {
 /** 手填利率的回归：受控输入若每敲一个字符就"数字→文本"来回转，
  *  敲到「0.0」时会被改写回「0」，小数点连着后面的位数一起被吞，
  *  用户永远填不进 0.05%。编辑期间必须原样保留用户敲的文本。 */
+describe("分类前利息发生额", () => {
+  it.each([
+    [923800.5, "923,800.5"],
+    [0, "0"],
+    [null, "—"],
+  ] as const)("不参与测算时仍展示源发生额 %s，不用余额0替代", async (occurrence, displayed) => {
+    const interest = "66030002 财务费用-利息";
+    const basis = "已结转·红字冲减费用，按收入计入";
+    const original = mock.engineCall.getMockImplementation()!;
+    mock.engineCall.mockImplementation(async (method: string, params?: unknown) => {
+      if (method === "deposit.inspect_tb") return {
+        ...inspection,
+        accounts: [bank, interest], accountsLeaf: [bank, interest],
+        suggestedAccountRoles: { [bank]: "deposit", [interest]: "excluded" },
+        accountMetrics: { [interest]: { opening: 0, closing: 0, occurrence, occurrenceBasis: basis } },
+      };
+      return original(method, params);
+    });
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled());
+    goToStep(STEP2);
+    const classification = await screen.findByRole("combobox", { name: `${interest}的分类` });
+    const sourceCell = () => within(classification.closest("tr")!).getByTitle(basis);
+    expect(sourceCell()).toHaveTextContent(displayed);
+    expect(classification).toHaveValue("");
+    fireEvent.change(classification, { target: { value: "interest_income" } });
+    expect(sourceCell()).toHaveTextContent(displayed);
+    fireEvent.change(classification, { target: { value: "excluded" } });
+    expect(sourceCell()).toHaveTextContent(displayed);
+    expect(mock.jobStart).not.toHaveBeenCalled();
+  });
+});
+
 describe("利率手工填写", () => {
   it("逐字符敲 0.05 不会被输入框吞掉小数位，并按 0.0005 提交", async () => {
     render(<DepositInterestPage tool={tool} />);
@@ -633,6 +912,34 @@ describe("利率手工填写", () => {
 });
 
 describe("JE 币种资料提示", () => {
+  it.each([false, true])("账面收入基准是否已确认 %s，缺失与真实零值分别展示", async (hasIncome) => {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled());
+    goToStep(STEP2);
+    goToStep(STEP3);
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+    act(() => mock.event?.({ ...complete, result: { rows: [{
+      key: "zero-baseline-bank", entity: "默认主体", account: bank, auxiliary: "", currency: "CNY",
+      role: "deposit", tier: "demand", tierLabel: "活期存款", category: "demand", termLabel: "",
+      annualRate: 0.005, rateResolved: true, rateProvisional: false,
+      openingBalance: 24600, tbClosingBalance: 24600, derivedClosingBalance: 24600,
+      reconciliationDiff: 0, averageBalance: 24600, calculatedInterest: 123,
+      months: [], status: "已勾稽", note: "",
+    }], summary: {
+      hasInterestIncomeAccount: hasIncome, bookedInterestIncome: hasIncome ? 0 : null,
+      calculatedInterest: 123, difference: hasIncome ? 123 : null, differenceRatio: null,
+      reconciliationPassed: false,
+    } } }));
+    if (hasIncome) {
+      expect(await screen.findByText("账面收入为零，差异率不适用")).toBeVisible();
+    } else {
+      expect(await screen.findByText("无法比较")).toBeVisible();
+      expect(screen.getByText("TB 中未识别到利息收入科目")).toBeVisible();
+    }
+    expect(screen.queryByText("差异率 0.00%")).not.toBeInTheDocument();
+  });
   it("在结果顶部说明 JE 发生额无法按币种分配", async () => {
     render(<DepositInterestPage tool={tool} />);
     fireEvent.click(
@@ -780,7 +1087,7 @@ describe("导航步骤切换不重复验证", () => {
         if (method === "deposit.inspect_tb" || method === "deposit.inspect_je")
           return inspection;
         if (method === "ledger.auxiliary_link")
-          return { tbAuxMapped: true, status: "ok", column: null, anchorHits: 0, anchorTotal: 0, coverage: 1, competingColumns: [], warnings: [], groups: [] };
+          return { tbAuxMapped: true, status: "ok", column: null, competingColumns: [], warnings: [], groups: [] };
         if (method === "ledger.currency_link")
           return { status: "ok", required: false, verified: true, affectedGroupCount: 0, missingCurrencies: [] };
         throw new Error(`unexpected ${method}: ${JSON.stringify(params ?? "")}`);
@@ -806,6 +1113,28 @@ describe("导航步骤切换不重复验证", () => {
   const currencyLinkCalls = () =>
     mock.engineCall.mock.calls.filter(([m]) => m === "ledger.currency_link")
       .length;
+
+  it("停止币种验证不会报映射错误或放行，重试成功才进入第二步", async () => {
+    withBothSources();
+    render(<DepositInterestPage tool={tool} />);
+    await waitFor(() => expect(mock.engineCall).toHaveBeenCalledWith("deposit.inspect_tb", expect.anything()));
+    const original = mock.engineCall.getMockImplementation()!;
+    let stop = true;
+    mock.engineCall.mockImplementation(async (method, params) => {
+      if (method === "ledger.currency_link" && stop) throw Object.assign(new Error("已停止等待：界面已恢复。"), { code: "SYNC_BUSY_ABORTED" });
+      return original(method, params);
+    });
+    goToStep(STEP2);
+    expect(await screen.findByText("已停止币种衔接验证，当前映射已保留。")).toBeVisible();
+    expect(screen.queryByText(/验证失败|暂时无法验证/)).not.toBeInTheDocument();
+    expect(screen.queryByText("逐个核对科目分类（末级明细）")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: STEP2 })).toBeEnabled();
+    stop = false;
+    goToStep(STEP2);
+    expect(await screen.findByText("逐个核对科目分类（末级明细）")).toBeVisible();
+    expect(currencyLinkCalls()).toBe(2);
+    expect(screen.queryByText(/已停止币种衔接验证/)).not.toBeInTheDocument();
+  });
 
   it("第一步不后台生成账户清单，进入第二步才做轻量准备且不启动测算", async () => {
     withBothSources();
@@ -1032,7 +1361,7 @@ describe("存款步骤门禁与来源状态", () => {
     goToStep(STEP1);
     mock.pickPath.mockResolvedValueOnce("replacement-tb.xlsx");
     fireEvent.click(screen.getByRole("button", { name: "fixture-tb.xlsx" }));
-    expect(await screen.findByText("replacement-tb.xlsx")).toBeVisible();
+    expect(await screen.findByRole("button", { name: "replacement-tb.xlsx" })).toBeVisible();
     goToStep(STEP2);
     goToStep(STEP3);
     expect(screen.getByLabelText("资产负债表日")).toHaveValue("2024-09-30");
@@ -1085,4 +1414,28 @@ describe("利率档位单向联动", () => {
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
+});
+
+/** 回归（视觉审核 S5）：进入第二步时「逐账户币种清单加载失败」的黄条
+ *  不能滞留到测算成功之后——完成事件一到就应清除，避免一边报失败一边展示成功。 */
+it("币种清单加载失败后测算成功即清除滞留提示", async () => {
+  render(<DepositInterestPage tool={tool} />);
+  fireEvent.click(
+    screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: STEP2 })).toBeEnabled(),
+  );
+  goToStep(STEP2);
+  // 默认引擎桩未实现 deposit.account_currencies：走真实失败同款的 catch 路径。
+  expect(await screen.findByText("逐账户币种清单加载失败")).toBeVisible();
+  goToStep(STEP3);
+  fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+  await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+  act(() => mock.event?.({ ...complete, result: { rows: [] } }));
+  await waitFor(() =>
+    expect(screen.queryByText("逐账户币种清单加载失败")).not.toBeInTheDocument(),
+  );
+  // 黄条容器整体退场，而不是只剩空壳。
+  expect(document.querySelector(".deposit-validation-warnings")).toBeNull();
 });

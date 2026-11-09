@@ -1,14 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { X } from "lucide-react";
 import {
   getCurrentWebviewWindow,
   WebviewWindow,
 } from "@tauri-apps/api/webviewWindow";
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -19,13 +16,22 @@ import {
 } from "@/components/ui/dialog";
 import {
   jobStart,
+  meetingNotify,
+  listenMeetingNotificationOpen,
+  meetingHistoryList,
   listenMeetingAskChoice,
   listenMeetingEvents,
+  listenJobEvents,
   meetingRecordStart,
   meetingRecordStop,
+  meetingStatus,
+  openOutput,
 } from "../api";
-import { errorText } from "@/lib/errors";
-import type { MeetingRecordStart, MeetingRecordStop } from "../types";
+import { terminalJobError } from "./JobProgress";
+import { meetingErrorText as errorText } from "@/lib/errors";
+import type { JobEvent, MeetingEvent, MeetingRecordStart, MeetingRecordStop } from "../types";
+import type { MeetingResult } from "../MeetingMinutesPage";
+import { meetingOutputPath } from "../meetingMinutesResult";
 import "../meeting-minutes.css";
 
 /** Teams 会议检测的全局交互：询问小窗、录音指示、结束后自动出纪要。
@@ -35,15 +41,13 @@ import "../meeting-minutes.css";
  * 录音的开始/结束由 Rust 检测层统一广播（recording_started / stopped /
  * auto_finished），这里只消费事件，不再自己记账。 */
 
-async function notifyDesktop(title: string, body: string) {
+async function notifyDesktop(jobId: string, title: string, body: string) {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
   try {
-    let granted = await isPermissionGranted();
-    if (!granted) granted = (await requestPermission()) === "granted";
-    if (granted) sendNotification({ title, body });
-  } catch {
-    // 通知失败不影响主流程：询问小窗仍会照常出现。
-  }
+    const focused = await getCurrentWebviewWindow().isFocused();
+    if (document.visibilityState === "visible" && focused) return;
+    await meetingNotify(jobId, title, body);
+  } catch { /* 系统通知不可用时，结果仍可从工具箱查看。 */ }
 }
 
 function focusMainWindow() {
@@ -58,38 +62,63 @@ function focusMainWindow() {
 }
 
 /** 询问改用置顶小窗：不再把整个工具箱主窗口拉到用户面前。
+ *  无边框 + 透明底，视觉只剩一张居中卡片；拖拽靠卡片标题区。
  *  小窗创建失败（权限/平台限制）时降级回应用内弹窗。 */
-async function openAskWindow() {
-  const existing = await WebviewWindow.getByLabel("meeting-ask");
-  if (existing) {
-    await existing.show();
-    await existing.setFocus();
-    return;
-  }
-  const ask = new WebviewWindow("meeting-ask", {
-    url: "/#/meeting-ask",
-    title: "会议记录询问",
-    width: 480,
-    height: 300,
-    resizable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    center: true,
-    focus: true,
-  });
-  await new Promise<void>((resolve, reject) => {
-    void ask.once("tauri://created", () => resolve());
-    void ask.once("tauri://error", (event) => reject(event.payload));
+let askWindowOperations = Promise.resolve();
+
+function queueAskWindow(operation: () => Promise<void>) {
+  const next = askWindowOperations.then(operation, operation);
+  askWindowOperations = next.catch(() => undefined);
+  return next;
+}
+
+function openAskWindow(stillWanted: () => boolean) {
+  return queueAskWindow(async () => {
+    if (!stillWanted()) return;
+    const existing = await WebviewWindow.getByLabel("meeting-ask");
+    if (existing) {
+      if (!stillWanted()) return;
+      await existing.emit("meeting-ask-reset");
+      if (!stillWanted()) return;
+      await existing.show();
+      await existing.setFocus();
+      return;
+    }
+    const ask = new WebviewWindow("meeting-ask", {
+      url: "/#/meeting-ask",
+      title: "会议记录询问",
+      width: 440,
+      height: 340,
+      visible: false,
+      resizable: false,
+      decorations: false,
+      transparent: true,
+      shadow: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      center: true,
+      focus: true,
+    });
+    await new Promise<void>((resolve, reject) => {
+      void ask.once("tauri://created", () => resolve());
+      void ask.once("tauri://error", (event) => reject(event.payload));
+    });
+    if (stillWanted()) {
+      await ask.show();
+      await ask.setFocus();
+    }
   });
 }
 
-async function closeAskWindow() {
-  try {
-    const existing = await WebviewWindow.getByLabel("meeting-ask");
-    await existing?.close();
-  } catch {
-    // 小窗可能已自行关闭。
-  }
+function closeAskWindow() {
+  return queueAskWindow(async () => {
+    try {
+      const existing = await WebviewWindow.getByLabel("meeting-ask");
+      await existing?.hide();
+    } catch {
+      // 退出期间窗口可能已释放。
+    }
+  });
 }
 
 function elapsedText(startedAt: string) {
@@ -100,31 +129,82 @@ function elapsedText(startedAt: string) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-/** 会议结束后自动出纪要的标题与全局弹窗流程保持一致。 */
-function autoMinutesTitle(startedAt: string) {
-  const started = Date.parse(startedAt);
-  const stamp = Number.isFinite(started)
-    ? new Date(started).toLocaleString("zh-CN", {
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    : "";
-  return `Teams 会议 ${stamp}`.trim();
-}
-
 export function MeetingWatch() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const inMeetingPage = location.pathname === "/tools/meeting_minutes";
+  const terminalEvents = useRef(new Map<string, JobEvent>());
+  const notified = useRef(new Set<string>());
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenMeetingNotificationOpen(async jobId => {
+      if (disposed) return;
+      const event = terminalEvents.current.get(jobId);
+      if (event?.phase === "completed") {
+        navigate("/tools/meeting_minutes?version=content", { state: { meetingJob: event } });
+        return;
+      }
+      try {
+        const rows = await meetingHistoryList();
+        if (disposed) return;
+        const row = rows.find(row => row.jobId === jobId);
+        navigate(row ? `/tools/meeting_minutes?meeting=${encodeURIComponent(row.id)}&version=content` : "/tools/meeting_minutes");
+      } catch { if (!disposed) navigate("/tools/meeting_minutes"); }
+    }).then(fn => { if (disposed) fn(); else unlisten = fn; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, [navigate]);
   // 应用内弹窗只作为小窗创建失败的降级形态。
   const [askOpen, setAskOpen] = useState(false);
   const [askError, setAskError] = useState("");
   const [starting, setStarting] = useState(false);
   const [recording, setRecording] = useState<MeetingRecordStart>();
   const [stopping, setStopping] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
   const [tick, setTick] = useState(0);
+  const [latestJob, setLatestJob] = useState<JobEvent>();
+  const [processingError, setProcessingError] = useState("");
   // 「本次不记录」：通话结束前不再询问，结束后自动恢复。
   const suppressed = useRef(false);
   const recordingRef = useRef<MeetingRecordStart | undefined>(undefined);
+  const askGeneration = useRef(0);
+  const jobVersion = useRef(0);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenJobEvents((event) => {
+      if (disposed || event.toolId !== "meeting_minutes") return;
+      setFinalizing(false);
+      jobVersion.current += 1;
+      setLatestJob(event);
+      setProcessingError("");
+      if (["completed", "failed", "cancelled"].includes(event.phase)) {
+        terminalEvents.current.set(event.jobId, event);
+        if (terminalEvents.current.size > 30) terminalEvents.current.delete(terminalEvents.current.keys().next().value!);
+      }
+      if (notified.current.has(event.jobId)) return;
+      if (["completed", "failed", "cancelled"].includes(event.phase)) {
+        notified.current.add(event.jobId);
+        if (notified.current.size > 256) notified.current.delete(notified.current.values().next().value!);
+      }
+      if (event.phase === "completed") {
+        const result = event.result as MeetingResult | undefined;
+        void notifyDesktop(
+          event.jobId,
+          result?.minutesPath ? "会议纪要已生成" : "会议纪要需要处理",
+          result?.minutesError || (result?.minutesPath ? (result.minutesVersions ? "按内容、按时间两个版本及转写稿已保存，可在工具箱中查看。" : "会议纪要和转写稿已保存，可在工具箱中打开。") : "任务结束但未返回会议纪要，请查看任务结果。"),
+        );
+      } else if (event.phase === "failed") {
+        void notifyDesktop(event.jobId, "会议纪要未生成", terminalJobError(event));
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
 
   useEffect(() => {
     recordingRef.current = recording;
@@ -139,59 +219,89 @@ export function MeetingWatch() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
-    void listenMeetingEvents((event) => {
+    let receivedEvent = false;
+    const handleEvent = (event: MeetingEvent) => {
+      if (disposed) return;
+      receivedEvent = true;
       if (event.type === "call_started") {
         if (recordingRef.current || suppressed.current) return;
+        const generation = ++askGeneration.current;
         setAskError("");
-        void notifyDesktop(
-          "检测到 Teams 会议",
-          "工具箱已就绪，请在弹出的询问窗口确认是否开始记录会议纪要。",
-        );
-        openAskWindow().catch(() => {
+
+        openAskWindow(() => !disposed && generation === askGeneration.current && !suppressed.current).catch(() => {
+          if (disposed || generation !== askGeneration.current) return;
           // 降级：应用内弹窗 + 拉起主窗口，功能不能因为小窗失败而丢失。
           setAskOpen(true);
           focusMainWindow();
         });
       } else if (event.type === "call_ended") {
+        askGeneration.current += 1;
         suppressed.current = false;
+        setAskOpen(false);
         // 询问还没答，会议就结束了：小窗一并收掉。
         void closeAskWindow();
+        if (recordingRef.current) {
+          recordingRef.current = undefined;
+          setRecording(undefined);
+          setFinalizing(true);
+        }
         // 录音收尾由 Rust 检测层完成（recording_auto_finished），
         // 无论录音从询问小窗还是工具页开始都会被照顾到。
       } else if (event.type === "recording_started") {
+        setFinalizing(false);
         const parsed = pickStartSummary(event.summary);
-        if (parsed) setRecording(parsed);
+        if (parsed) {
+          recordingRef.current = parsed;
+          setRecording(parsed);
+          setProcessingError("");
+
+        }
       } else if (event.type === "recording_stopped") {
+        setFinalizing(false);
+        recordingRef.current = undefined;
         setRecording(undefined);
       } else if (event.type === "recording_auto_finished") {
+        setFinalizing(false);
+        recordingRef.current = undefined;
         setRecording(undefined);
         const stopped = pickStopSummary(event.summary);
         if (!stopped) return;
-        void notifyDesktop(
-          "会议结束，录音已保存",
-          `时长约 ${Math.round(stopped.durationSec / 60)} 分钟，正在转写并生成纪要。`,
-        );
-        // 空录体检有疑点时单独再提醒一次：转写多半要空手而归，先讲清原因。
-        for (const warning of stopped.warnings) {
-          void notifyDesktop("录音质量提醒", warning);
-        }
-        void jobStart("meeting.generate", {
-          audioPath: stopped.audioPath,
-          title: autoMinutesTitle(stopped.startedAt),
-        }).catch((error) => {
-          void notifyDesktop("会议纪要", `纪要任务启动失败：${errorText(error)}`);
-        });
+        // 后台已负责启动任务；这里再启动会重复上传、重复计费。
       } else if (event.type === "recording_failed") {
+        setFinalizing(false);
+        recordingRef.current = undefined;
         setRecording(undefined);
-        void notifyDesktop(
-          "会议纪要",
-          `录音收尾出现问题：${event.message ?? "未知错误"}`,
-        );
+        setProcessingError(event.message ?? "录音收尾出现问题");
+        const failureKey = `${event.at}:${event.message}`;
+        if (!notified.current.has(failureKey)) {
+          notified.current.add(failureKey);
+          void notifyDesktop("", "会议纪要需要处理", event.message ?? "录音收尾出现问题");
+        }
       }
-    })
+    };
+    void listenMeetingEvents(handleEvent)
       .then((fn) => {
         if (disposed) fn();
-        else unlisten = fn;
+        else {
+          unlisten = fn;
+          // Rust 检测线程早于 React 挂载。先订阅再读快照，补回启动时
+          // 已在会中的状态；期间收到新事件则以事件为准，避免过期快照。
+          const version = jobVersion.current;
+          void meetingStatus().then((status) => {
+            if (disposed) return;
+            if (!receivedEvent && status.recordingSummary) {
+              recordingRef.current = status.recordingSummary;
+              setRecording(status.recordingSummary);
+            }
+            if (!receivedEvent && version === jobVersion.current) {
+              setLatestJob(status.latestJob ?? undefined);
+              setProcessingError(status.processingError ?? "");
+            }
+            if (!disposed && !receivedEvent && status.watchEnabled && status.inCall && !status.recording) {
+              handleEvent({ type: "call_started", at: new Date().toISOString() });
+            }
+          }).catch(() => undefined);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -206,6 +316,8 @@ export function MeetingWatch() {
     let disposed = false;
     void listenMeetingAskChoice((accepted) => {
       if (!accepted) suppressed.current = true;
+      setAskOpen(false);
+      void closeAskWindow();
     })
       .then((fn) => {
         if (disposed) fn();
@@ -226,10 +338,7 @@ export function MeetingWatch() {
       const started = await meetingRecordStart();
       setRecording(started);
       setAskOpen(false);
-      void notifyDesktop(
-        "已开始录制会议",
-        "录音将上传阿里云百炼转写，请确认已告知参会人；会议结束后自动生成纪要。",
-      );
+
     } catch (error) {
       setAskError(errorText(error));
     } finally {
@@ -240,6 +349,7 @@ export function MeetingWatch() {
   function declineThisCall() {
     suppressed.current = true;
     setAskOpen(false);
+    void closeAskWindow();
   }
 
   async function stopAndGenerate() {
@@ -252,15 +362,29 @@ export function MeetingWatch() {
         audioPath: stopped.audioPath,
       });
     } catch (error) {
-      setAskError(errorText(error));
+      setProcessingError(errorText(error));
     } finally {
       setStopping(false);
     }
   }
 
+  const finished = latestJob && ["completed", "failed", "cancelled"].includes(latestJob.phase);
+  const result = latestJob?.phase === "completed" ? latestJob.result as MeetingResult | undefined : undefined;
+  const resultError = processingError || terminalJobError(latestJob) || result?.minutesError;
+  const outputPath = meetingOutputPath(result);
+  function viewMinutes() {
+    focusMainWindow();
+    setLatestJob(undefined);
+    setProcessingError("");
+  }
+  async function openResult(path: string) {
+    try { await openOutput(path); }
+    catch (error) { setProcessingError(errorText(error)); }
+  }
+
   return (
     <>
-      <Dialog open={askOpen} onOpenChange={setAskOpen}>
+      <Dialog open={askOpen} onOpenChange={(open) => { if (open) setAskOpen(true); else declineThisCall(); }}>
         <DialogContent className="meeting-ask-dialog">
           <DialogHeader>
             <DialogTitle>检测到 Teams 会议</DialogTitle>
@@ -295,6 +419,7 @@ export function MeetingWatch() {
           <span className="meeting-recording-text">
             正在录制会议 {elapsedText(recording.startedAt) || "…"}
           </span>
+          {processingError && <span role="alert">{processingError}</span>}
           <Button
             size="sm"
             variant="secondary"
@@ -303,6 +428,28 @@ export function MeetingWatch() {
           >
             {stopping ? "正在收尾…" : "停止并生成纪要"}
           </Button>
+        </div>
+      )}
+      {finalizing && (
+        <div className="meeting-recording-capsule" role="status" aria-live="polite">
+          <strong>会议已结束，正在保存录音…</strong>
+        </div>
+      )}
+      {!inMeetingPage && !recording && !finalizing && (processingError || (finished && latestJob.phase !== "cancelled")) && (
+        <div className="meeting-processing-card" role={resultError ? "alert" : "status"}>
+          <div className="meeting-processing-header">
+            <strong>{result?.minutesPath ? "会议纪要已生成" : "会议纪要未生成"}</strong>
+            <Button size="icon-sm" variant="ghost" aria-label="关闭提示" title="关闭提示" onClick={() => { setLatestJob(undefined); setProcessingError(""); }}>
+              <X aria-hidden="true" />
+            </Button>
+          </div>
+          {resultError && <p>{resultError}</p>}
+          <div className="meeting-result-actions">
+            {result?.minutesVersions ? result.minutesVersions.filter((version) => version.minutesPath || version.minutesMarkdown).map((version) => (
+              <Link key={version.kind} className={buttonVariants({ size: "sm" })} to={`/tools/meeting_minutes?version=${version.kind}`} state={{ meetingJob: latestJob }} onClick={viewMinutes}>查看{version.label}版</Link>
+            )) : (result?.minutesPath || result?.minutesMarkdown) && <Link className={buttonVariants({ size: "sm" })} to="/tools/meeting_minutes?version=content" state={{ meetingJob: latestJob }} onClick={viewMinutes}>查看会议纪要</Link>}
+            {outputPath && <Button size="sm" variant="secondary" onClick={() => void openResult(outputPath)}>打开输出文件夹</Button>}
+          </div>
         </div>
       )}
     </>

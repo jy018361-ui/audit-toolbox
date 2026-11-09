@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_LOAN_RATE,
   loanEffectiveRate,
-  loanDisplayNumber,
   loanEquation,
   loanMissing,
   loanAccountReviewRows,
@@ -10,21 +9,25 @@ import {
 } from "./LoanInterestPage";
 
 describe("借款利息测算", () => {
+  it("取消 JE 金额映射后提示缺失，净额或完整借贷二选一", () => {
+    const identity = {accountCode: "科目", date: ["日期"], id: ["凭证号"]};
+    expect(loanMissing("je", identity)).toContain("本位币金额（净额，或借方和贷方）");
+    expect(loanMissing("je", {...identity, functionalDebit: "借方"})).toContain("本位币金额（净额，或借方和贷方）");
+    expect(loanMissing("je", {...identity, functionalAmount: "净额"})).toEqual([]);
+    expect(loanMissing("je", {...identity, functionalDebit: "借方", functionalCredit: "贷方"})).toEqual([]);
+    expect(loanMissing("je", {...identity, functionalAmount: [" "]})).toContain("本位币金额（净额，或借方和贷方）");
+  });
   it("未提供合同利率时预填当前一年期LPR 3.00%", () =>
     expect(DEFAULT_LOAN_RATE).toBe(0.03));
-  it("正零和负零都只显示0", () => {
-    expect(loanDisplayNumber(0, { minimumFractionDigits: 2 })).toBe("0");
-    expect(loanDisplayNumber(-0, { minimumFractionDigits: 2 })).toBe("0");
-  });
   it("辅助整组经 JE 验证后才在第二步展开", () => {
     const account = { key: "200101", code: "200101", name: "银行借款", account: "200101 银行借款", opening: 100, closing: 90 };
     expect(loanAccountReviewRows([account], {
-      tbAuxMapped: true, status: "verified", column: "辅助", anchorHits: 1, anchorTotal: 1,
-      coverage: 1, competingColumns: [], warnings: [],
+      tbAuxMapped: true, status: "verified", column: "辅助",
+      competingColumns: [], warnings: [],
       groups: [{ entity: "甲", account: "200101", reviewVerified: true,
         details: [{ key: "a银行", display: "A银行" }], tbAuxMapped: true,
-        status: "verified", column: "辅助", anchorHits: 1, anchorTotal: 1,
-        coverage: 1, competingColumns: [], warnings: [] }],
+        status: "verified", column: "辅助",
+        competingColumns: [], warnings: [] }],
     })).toMatchObject([{ entity: "甲", auxiliary: "A银行" }]);
     expect(loanAccountReviewRows([account], null)).toMatchObject([{ reviewKey: "200101" }]);
   });
@@ -63,12 +66,12 @@ describe("借款利息测算", () => {
       { ...base, identity: "股东", name: "股东借款", account: "2001 股东借款", reviewAuxiliaries: [{ entity: "甲", auxiliary: "股东甲" }] },
     ];
     const link = {
-      tbAuxMapped: true, status: "verified", column: "辅助", anchorHits: 2, anchorTotal: 2,
-      coverage: 1, competingColumns: [], warnings: [], groups: [{
+      tbAuxMapped: true, status: "verified", column: "辅助",
+      competingColumns: [], warnings: [], groups: [{
         entity: "甲", account: "2001", reviewVerified: true,
         details: [{ key: "A银行", display: "A银行" }, { key: "股东甲", display: "股东甲" }],
-        tbAuxMapped: true, status: "verified", column: "辅助", anchorHits: 2,
-        anchorTotal: 2, coverage: 1, competingColumns: [], warnings: [],
+        tbAuxMapped: true, status: "verified", column: "辅助",
+        competingColumns: [], warnings: [],
       }],
     } as Parameters<typeof loanAccountReviewRows>[1];
     const rows = loanAccountReviewRows(accounts, link);

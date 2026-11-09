@@ -87,11 +87,7 @@ export function LlmReview({
           ? presentation.label.replace(/^已复核 · /, "")
           : passed === false
             ? "需人工复核"
-            : "无需调整";
-
-  // 没有改动、待确认项或风险时，映射区已有复核状态；不再重复占一整张卡。
-  if (!busy && !failed && passed !== false && enabled && !changes.length && !pending.length)
-    return null;
+            : "无调整";
 
   return (
     <div className={`fa-llm-review ${passed === false ? "warning" : ""}`}>

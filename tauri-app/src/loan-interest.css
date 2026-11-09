@@ -95,10 +95,15 @@
 }
 .loan-account-confirm th,
 .loan-account-confirm td {
-  padding: 11px 14px;
+  padding: 8px 14px;
   border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: middle;
+}
+/* 行高统一 48px 左右（曾 68px：大内边距＋36px 控件叠出来），
+   科目列才不用滚两屏就看不见利率列。 */
+.loan-account-confirm td {
+  height: 48px;
 }
 .loan-account-confirm th {
   position: sticky;
@@ -122,8 +127,8 @@
 }
 .loan-account-confirm select {
   min-width: 112px;
-  min-height: 36px;
-  padding: 6px 28px 6px 9px;
+  min-height: 30px;
+  padding: 4px 26px 4px 8px;
   border: 1px solid var(--control-border);
   border-radius: var(--radius-md);
   background: var(--control-bg);
@@ -139,17 +144,33 @@
 .loan-account-confirm.loan-confirm-table td {
   white-space: nowrap;
 }
-.loan-account-confirm.loan-confirm-table input {
-  min-height: 32px;
+/* 选择器不限定 loan-confirm-table：上方「借款汇总利率确认」小表没有挂该类，
+   之前的输入框无框无底，看上去像不可编辑的静态文字。 */
+.loan-account-confirm input {
+  min-height: 30px;
   padding: 4px 8px;
   border: 1px solid var(--control-border);
   border-radius: 8px;
   background: var(--control-bg);
   color: var(--foreground);
 }
-.loan-account-confirm.loan-confirm-table input[type="number"] {
+/* 科目列超长名省略：auto 布局的 td 不认 max-width，包一层定宽块级元素
+   才能截断；全名靠 td 的 title 悬浮查看。 */
+.loan-account-ellipsis {
+  display: block;
+  overflow: hidden;
+  max-width: 300px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.loan-account-confirm input[type="number"] {
   width: 112px;
   min-width: 96px;
+}
+.loan-account-confirm input:disabled {
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  cursor: not-allowed;
 }
 /* 利率与 BP 都是审计人员据实录入；隐藏浏览器的步进箭头，避免误点改数。 */
 .loan-manual-number {
@@ -241,6 +262,11 @@
   color: var(--muted-foreground);
   font-size: 12px;
 }
+/* 拖放区第二行的准备说明：帮助块已并入这里（13px 灰字）。 */
+.loan-upload .file-input-description {
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
 .loan-run-grid {
   display: grid;
   grid-template-columns: minmax(180px, 240px) minmax(320px, 1fr);
@@ -296,17 +322,29 @@
   table-layout: auto;
 }
 .loan-rate-table table {
-  width: max-content;
   min-width: 100%;
-  table-layout: auto;
+  table-layout: fixed;
 }
 .loan-rate-confirmation th,
 .loan-rate-confirmation td,
 .loan-rate-table th,
 .loan-rate-table td {
-  padding: 9px 10px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
+}
+/* 结果表行高统一 44~48px。 */
+.loan-rate-confirmation td,
+.loan-rate-table td {
+  height: 44px;
+}
+/* 表内控件收到 30px：行高压进 48px 内，且控件行与文字行不再差一截。 */
+.loan-rate-confirmation input,
+.loan-rate-confirmation select,
+.loan-rate-table input,
+.loan-rate-table select {
+  min-height: 30px;
+  padding: 4px 8px;
 }
 .loan-rate-confirmation th,
 .loan-rate-table th {
@@ -354,6 +392,8 @@
 .loan-rate-table th,
 .loan-rate-table td {
   text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .loan-rate-table th:first-child,
 .loan-rate-table td:first-child,
@@ -369,17 +409,13 @@
   position: sticky;
   left: 0;
   z-index: 2;
-  width: 110px;
-  min-width: 110px;
   background: var(--card);
 }
 .loan-rate-table th:nth-child(2),
 .loan-rate-table td:nth-child(2) {
   position: sticky;
-  left: 110px;
+  left: 96px;
   z-index: 2;
-  width: 180px;
-  min-width: 180px;
   background: var(--card);
 }
 .loan-rate-table td:nth-child(2) {
@@ -434,11 +470,20 @@
   color: var(--muted-foreground);
   font-size: var(--fs-sm);
 }
+/* 「暂估」小字为浮层（不占单元格高度），此处预留其显示空间，
+   保证执行利率与相邻列的输入框始终按行对齐，小字出现/消失不引起跳动。 */
+.loan-account-confirm td.loan-rate-cell {
+  padding-bottom: 28px;
+}
 .loan-rate-input-stack {
+  position: relative;
   display: grid;
-  gap: 3px;
 }
 .loan-provisional-rate {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 0;
+  white-space: nowrap;
   color: var(--warning-fg);
   font-size: 11px;
   font-weight: 700;
@@ -485,6 +530,12 @@
   color: var(--muted-foreground);
   font-size: var(--fs-sm);
   line-height: 36px;
+}
+/* 结果表分批显示的「继续显示」入口，与存款利息科目复核同款形态。 */
+.loan-result-more {
+  display: flex;
+  justify-content: center;
+  padding-top: 12px;
 }
 .loan-bridge-equation {
   display: grid;
@@ -670,13 +721,34 @@
   text-overflow: ellipsis;
 }
 
-.loan-information-row { margin-top: 18px; padding: 18px; border: 1px solid var(--border); border-radius: 10px; }
-.loan-information-row h3, .loan-information-events h4 { margin: 0 0 10px; font-weight: 600; }
-.loan-information-row p, .loan-information-card p { margin: 10px 0; color: var(--muted-foreground); }
-.loan-information-amounts { display: grid; grid-template-columns: repeat(4,minmax(140px,1fr)); gap: 14px; margin: 14px 0; }
-.loan-information-row summary { cursor: pointer; padding: 10px 0; }
-.loan-information-event-tables { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 20px; }
-.loan-information-event { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin: 10px 0; }
-.loan-information-event label { flex: 1; min-width: 130px; }
-.loan-information-valid { color: #246b58; margin-top: 12px; }
-@media(max-width:1000px) { .loan-information-amounts { grid-template-columns: repeat(2,minmax(140px,1fr)); } .loan-information-event-tables { grid-template-columns: 1fr; } }
+/* === 台账信息确认（2026-09-28）：一行一笔的紧凑表格 ===
+   旧版每笔借款一张大卡片，四类金额、四项利率、明细各占几行，一条借款
+   的信息散在屏幕各处。改为左右拖动的单行表格：一行一笔，行首「＋」展开
+   新增与还款明细（金额与主行同列，日期位于金额下方）。 */
+.loan-information-card p { margin: 10px 0; color: var(--muted-foreground); }
+.loan-ledger-scroll { overflow: auto; max-height: 68vh; border: 1px solid var(--border); border-radius: 10px; }
+.loan-ledger-table { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; table-layout: fixed; font-size: 13px; }
+.loan-ledger-table > :is(thead,tbody) > tr > :is(th,td) { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; text-align: left; }
+.loan-ledger-table > tbody > tr > td { height: 44px; }
+.loan-ledger-table input, .loan-ledger-table select { min-height: 30px; }
+.loan-ledger-table > thead > tr > th { position: sticky; top: 0; z-index: 3; background: var(--card); font-weight: 600; }
+.loan-ledger-table > :is(thead,tbody) > tr > :is(th,td):first-child { position: sticky; left: 0; z-index: 2; background: var(--card); }
+.loan-ledger-table > :is(thead,tbody) > tr > :is(th,td):nth-child(2) { position: sticky; left: 52px; z-index: 2; background: var(--card); box-shadow: 1px 0 0 var(--border); }
+.loan-ledger-table > thead > tr > th:nth-child(-n+2) { z-index: 4; }
+.loan-ledger-table input, .loan-ledger-table .loan-rate-pick { width: 100%; min-width: 0; }
+.loan-ledger-table input[type="number"] { text-align: right; font-variant-numeric: tabular-nums; }
+.loan-ledger-table .loan-ledger-number { text-align: right; font-variant-numeric: tabular-nums; }
+.loan-ledger-table input[aria-invalid="true"] { border-color: var(--danger-fg); }
+.loan-ledger-toggle { text-align: center; }
+.loan-ledger-expand { width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 7px; background: var(--card); cursor: pointer; }
+.loan-ledger-id { font-weight: 600; }
+.loan-ledger-row.has-errors .loan-ledger-id, .loan-ledger-status.bad, .loan-ledger-error { color: var(--danger-fg); }
+.loan-ledger-status { display: block; border: 0; background: none; padding: 4px 0; font-size: 12px; text-align: left; white-space: normal; cursor: pointer; }
+.loan-ledger-status.ok { color: var(--success-fg); }
+.loan-ledger-reasons { display: block; font-weight: normal; line-height: 1.5; margin-top: 3px; }
+.loan-ledger-error { display: block; white-space: normal; font-size: 12px; margin-top: 5px; }
+.loan-ledger-basis { display: block; font-size: 11px; color: var(--muted-foreground); margin-top: 4px; }
+.loan-ledger-event-cell { display: grid; gap: 8px; }
+.loan-ledger-event-cell label { display: grid; gap: 4px; color: var(--muted-foreground); }
+.loan-ledger-details-row > td, .loan-ledger-detail-total > td { background: color-mix(in srgb, var(--border) 12%, var(--card)); }
+.loan-ledger-detail-total { font-variant-numeric: tabular-nums; font-weight: 600; }

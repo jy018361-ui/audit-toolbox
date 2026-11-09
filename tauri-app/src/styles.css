@@ -238,7 +238,7 @@ body {
   min-width: 0;
   min-height: 100vh;
 }
-button,
+button:not([data-slot="button"]),
 input,
 select {
   font: inherit;
@@ -246,6 +246,11 @@ select {
      等宽代码类自带显式字号，按特异性正常覆盖。 */
   font-size: var(--fs-md);
   line-height: var(--lh-body);
+}
+/* 固定列宽及手动调窄后，控件边框也必须留在单元格内容区内。
+   只限制最大宽度，保留各工具的默认宽度与自动布局最小列宽。 */
+table :is(input, select, textarea) {
+  max-width: 100%;
 }
 /* 原生单选/勾选框在 Windows 上取系统主题色（本机显示为红色），与品牌主题脱节 */
 input[type="radio"],
@@ -285,11 +290,10 @@ summary:focus-visible {
   --scrollbar-thumb: color-mix(in srgb, var(--on-dark-muted) 54%, transparent);
   --scrollbar-thumb-hover: color-mix(in srgb, var(--on-dark) 74%, transparent);
   color: var(--on-brand-deep, var(--ink-inverse));
-  /* 只允许纵向滚动：内容过宽时横向滚动条会出现在深色侧栏底部，
-     可截断的文字项（.tool-nav-label）自带省略号，横向溢出直接裁掉 */
-  overflow-y: auto;
-  overflow-x: hidden;
+  /* 设置及以上固定，只有下方工具列表占用剩余高度并独立滚动。 */
+  overflow: hidden;
 }
+.sidebar > * { flex-shrink: 0; }
 .brand span,
 .nav-caption {
   font-size: var(--fs-xs);
@@ -316,27 +320,39 @@ summary:focus-visible {
 /* ---- 无边框窗口（decorations: false）----
  * 右上角只保留最小化/最大化/关闭；拖动窗口靠品牌区、页头（deep 拖拽区）
  * 和主区顶部的 44px 条带（.main 自身 padding 上的裸 drag-region）。
- * 按钮固定压在主区顶部条带上，所以 .frameless .main 要加出一截顶部内边距。
+ * 控件在条带内组成轻量按钮组，实色底避免滚动正文穿透，不再铺渐变衬条。
  * 层级取 800：高于侧边栏(20)，低于 ts-filter-menu(1000)，
  * 下拉菜单能盖住按钮，但按钮不会反过来挡菜单。 */
 .window-controls {
   position: fixed;
-  top: 0;
-  right: 0;
+  top: var(--sp-1);
+  right: var(--sp-2);
   z-index: var(--layer-window-controls);
   display: flex;
+  gap: var(--sp-1);
+  padding: var(--sp-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  user-select: none;
 }
 .window-controls button {
-  width: 44px;
-  height: 34px;
+  width: calc(var(--sp-6) + var(--sp-1));
+  height: calc(var(--sp-6) - var(--sp-1));
   display: inline-grid;
   place-items: center;
   padding: 0;
   border: none;
+  border-radius: calc(var(--r-sm) - var(--sp-1));
   background: transparent;
-  color: var(--text-muted);
+  color: var(--label);
+  transition: background-color 120ms ease, color 120ms ease;
   /* 窗口控制按钮按 Windows 习惯保持箭头光标，不用手型 */
   cursor: default;
+}
+.window-controls button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
 }
 .window-controls button:hover {
   background: var(--surface-muted);
@@ -353,17 +369,8 @@ summary:focus-visible {
   background: var(--window-close-active);
   color: var(--window-close-fg);
 }
-/* === UI 审计修复（2026-09-25）：真机无边框窗口滚动后，右上角内容会钻进透明的
-   窗口按钮底下（步骤条/页头与按钮互相叠压）。给按钮组加一条自上而下的衬条
-   （页面底色渐变到透明），滚动时按钮区始终与内容可辨；衬条本身不拦点击，
-   pointer-events 下放给按钮自身，拖拽手柄不受影响。仅真机 frameless 生效。 */
-.frameless .window-controls {
-  background: linear-gradient(to bottom, var(--surface-page) 55%, transparent);
-  padding: 0 0 var(--sp-2) var(--sp-3);
-  pointer-events: none;
-}
-.frameless .window-controls button {
-  pointer-events: auto;
+@media (prefers-reduced-motion: reduce) {
+  .window-controls button { transition: none; }
 }
 /* 品牌区与页头现在是拖拽手柄（双击=最大化），拖动时选中文字只会闪一下，关掉 */
 .brand,
@@ -457,6 +464,13 @@ summary:focus-visible {
 }
 .tool-nav {
   margin-top: var(--sp-5);
+  flex: 1 1 0;
+  min-height: 0;
+  align-content: start;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
 }
 /* 一级分组标题要"退后"：压暗颜色、缩小字号，让人一眼看出它是分区标签
    而不是可点击的工具行。上方共享的 accent 绿只留给品牌区/页头用。 */
@@ -488,7 +502,7 @@ summary:focus-visible {
 .persistent-tool-page {
   min-width: 0;
 }
-/* 无边框窗口：顶部为右上角的窗口按钮留出高度（34px 按钮 + 一点余量），
+/* 无边框窗口：顶部为右上角的窗口按钮组留出高度，
    避免页面右上角的操作按钮被压住。浏览器预览没有这个标记，保持原样。 */
 .frameless .main {
   padding-top: 44px;
@@ -732,6 +746,11 @@ summary:focus-visible {
   /* 与普通字段输入框等高，避免同一页面上文件选择框矮一截 */
   height: 40px;
   box-sizing: border-box;
+  /* 本组合并不总在 .field 内（设置页旧数据迁移、AudiPick 的 PDF 搜索），
+     边框底色在此自给自足；在 .field 内时取值相同，外观不变。 */
+  border: 1px solid var(--control-border);
+  background: var(--surface-sunken);
+  color: var(--ink-strong);
 }
 /* 焦点圈画在元素内部，避免外扩的 outline 穿过紧邻的浏览按钮，造成"颜色条穿按钮"的割裂感 */
 .input-with-button input:focus-visible {
@@ -769,8 +788,9 @@ summary:focus-visible {
   gap: var(--sp-2);
   margin-top: var(--sp-5);
 }
-.actions button,
-.task-row button {
+/* 旧按钮保留原样；组件按钮的高度、边框与内边距由 Button 自己管理。 */
+.actions button:not([data-slot="button"]),
+.task-row button:not([data-slot="button"]) {
   border: 0;
   border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-4);
@@ -1205,7 +1225,8 @@ summary:focus-visible {
 .fa-preview-stack {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: repeat(2, minmax(0, 1fr));
+  grid-template-rows: auto auto;
+  align-items: start;
   gap: var(--sp-4);
   flex: 1 1 auto;
   min-height: 0;
@@ -1428,7 +1449,7 @@ summary:focus-visible {
 .actions.compact {
   margin-top: var(--sp-1);
 }
-.actions.compact button {
+.actions.compact button:not([data-slot="button"]) {
   padding: var(--sp-1) var(--sp-2);
   font-size: var(--fs-xs);
 }
@@ -1534,7 +1555,7 @@ summary:focus-visible {
   gap: var(--sp-2);
   margin: var(--sp-2) 0;
 }
-.pdf-toolbar button {
+.pdf-toolbar button:not([data-slot="button"]) {
   border: 0;
   border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-2);
@@ -1543,8 +1564,14 @@ summary:focus-visible {
 .pdf-text {
   width: 100%;
   min-height: 260px;
+  padding: var(--sp-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--control-bg);
+  color: var(--foreground);
   font-family: Consolas, monospace;
   font-size: var(--fs-xs);
+  resize: vertical;
 }
 .chip-list {
   display: flex;
@@ -1761,6 +1788,18 @@ summary:focus-visible {
   border-color: var(--border-strong);
   background: var(--surface-muted);
 }
+.step-indicator-badge {
+  flex: 0 0 auto;
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--warning-dot);
+  border-radius: var(--r-pill);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+}
 .step-indicator-item .step-indicator-index {
   display: inline-grid;
   place-items: center;
@@ -1830,8 +1869,39 @@ summary:focus-visible {
   border-radius: var(--r-md);
   background: var(--surface);
 }
+.data-table-frame {
+  position: relative;
+}
+/* 右缘/底缘还有未滚到的内容时渐隐提示（数据属性由 DataTable 组件维护）：
+   WebView2 的覆盖式滚动条会自动隐藏，被裁一半的行列看起来像渲染坏了。
+   z-index 必须高于粘性表头（th 为 sticky z-index:1），否则表头行的截断
+   没有渐隐遮盖，看起来就是「坏了」而不是「还能横向滚动」。 */
+.data-table-frame[data-more-right="true"]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 44px;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--surface));
+}
+.data-table-frame[data-more-bottom="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 20px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--surface));
+}
 .data-table-table {
-  width: 100%;
+  /* 列按内容取宽：width:100% 会把宽表压扁、表头下拉被切成半个字。
+     内容不足时仍撑满容器；超出时由 .data-table-scroll 横向滚动。 */
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: var(--fs-sm);
 }
@@ -1846,6 +1916,13 @@ summary:focus-visible {
   padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border);
 }
+.data-table-table th > span {
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .data-table-table td {
   padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border-soft);
@@ -1853,6 +1930,12 @@ summary:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 金额/数量单元格右对齐（判定见 lib/numberFormat 的 isNumericCellText）：
+   位数竖向可比是审计预览表的基本可读性。 */
+.data-table-table td.data-table-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .data-table-table tr:last-child td {
   border-bottom: 0;
@@ -1873,6 +1956,7 @@ summary:focus-visible {
 }
 .mapping-panel > .loan-map-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
   gap: var(--sp-4);
@@ -1885,7 +1969,7 @@ summary:focus-visible {
   margin: 0;
   color: var(--ink-strong);
   font-size: var(--fs-lg);
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   text-wrap: balance;
 }
 .mapping-panel > .loan-map-head p {
@@ -1898,6 +1982,94 @@ summary:focus-visible {
   align-items: flex-end;
   flex-wrap: wrap;
   gap: var(--sp-2);
+  min-width: 0;
+  max-width: 100%;
+}
+.mapping-source-controls {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  min-width: 0;
+  width: max-content;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.mapping-source-controls > label {
+  min-width: 0;
+  max-width: 100%;
+}
+.mapping-source-controls > label:first-child {
+  flex: 0 1 200px;
+  width: 200px;
+  max-width: 260px;
+}
+.mapping-source-controls input,
+.mapping-source-controls select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+.mapping-source-controls input[type="number"] {
+  width: 100px;
+}
+.source-preview {
+  min-width: 0;
+}
+.preview-source-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-3) var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+.preview-source-identity {
+  flex: 1 1 120px;
+  min-width: 0;
+}
+.preview-source-identity h2 {
+  margin: 0;
+  font-size: var(--fs-md);
+  letter-spacing: 0;
+}
+.preview-source-identity p {
+  margin: var(--sp-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.preview-source-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: var(--sp-1);
+}
+.preview-source-identity .fa-table-caption {
+  display: block;
+  margin: 0;
+}
+.preview-source-identity .fa-table-caption > strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-preview-card-head {
+  padding: 0;
+}
+.source-preview-toolbar {
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+.source-preview-empty {
+  padding: var(--sp-4) var(--sp-5);
+  color: var(--text-muted);
 }
 .mapping-panel-toolbar label {
   display: grid;
@@ -2369,6 +2541,12 @@ summary:focus-visible {
 }
 .ts-filter-menu-search input {
   min-width: 0;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--control-bg);
+  color: var(--foreground);
 }
 .ts-filter-all,
 .ts-filter-value {
@@ -2381,8 +2559,32 @@ summary:focus-visible {
 }
 .ts-filter-all {
   padding: var(--sp-1) var(--sp-2);
-  border-bottom: 1px solid var(--border-soft);
   font-weight: 600;
+}
+/* 「（全选）」与「仅勾选当前结果」同行：搜索后一键只留当前结果。 */
+.ts-filter-all-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+.ts-filter-keep-visible {
+  margin-right: var(--sp-2);
+  padding: 2px 6px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--control-bg);
+  color: var(--foreground);
+  font-size: var(--fs-xs, 12px);
+  cursor: pointer;
+}
+.ts-filter-keep-visible:hover:not(:disabled) {
+  background: var(--surface-sunken);
+}
+.ts-filter-keep-visible:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .ts-filter-values {
   flex: 1 1 auto;
@@ -2471,7 +2673,12 @@ summary:focus-visible {
   background: color-mix(in srgb, var(--brand) 12%, transparent);
 }
 .data-table-table th .dt-header-control select {
-  width: 100%;
+  /* 映射目标是用户必须看清的信息：宽度跟内容（否则不参与列宽计算，
+     长选项被切成半个字），列更宽时撑满，上限防长选项把列撑爆。 */
+  width: auto;
+  min-width: 100%;
+  max-width: 260px;
+  text-overflow: ellipsis;
   height: 28px;
   font-size: var(--fs-xs);
   border: 1px solid var(--control-border);
@@ -2549,6 +2756,12 @@ summary:focus-visible {
 .data-table-table th .dt-header-control select option.dt-option-unavailable {
   color: var(--text-muted);
   background: var(--surface-muted);
+}
+.data-table-table th .dt-header-control select optgroup.dt-group-not-applicable,
+.data-table-table th .dt-header-control select option.dt-option-not-applicable {
+  color: var(--text-muted);
+  background: var(--surface-muted);
+  font-weight: 400;
 }
 
 /* 未映射字段提示 */
@@ -3417,6 +3630,11 @@ summary:focus-visible {
 .ap-result-editor textarea {
   width: 100%;
   min-height: 220px;
+  padding: var(--sp-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--control-bg);
+  color: var(--foreground);
   resize: vertical;
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
@@ -3720,24 +3938,22 @@ body:has(.sync-busy-pill) .job-command-notice {
   border-color: var(--brand-accent);
 }
 .job-dialog-pill:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 3px;
+  /* 深色药丸上的品牌色焦点圈会叠成「双环毛边」，改用文字色描边（药丸
+     文字为白色，样式表不允许颜色字面量）。 */
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
 }
+/* 进行中指示与同步等待小条（.sync-busy-spinner）同一语言：旋转圈，
+   不再用纯透明度脉冲圆点（两套指示曾让人以为是两种状态）。 */
 .job-dialog-pill-dot {
-  width: 8px;
-  height: 8px;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
   border-radius: var(--r-pill);
-  background: var(--brand-accent);
-  animation: job-dialog-pulse 1.4s ease-in-out infinite;
-}
-@keyframes job-dialog-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
+  border: 2px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-top-color: currentColor;
+  background: transparent;
+  animation: sync-busy-spin 0.8s linear infinite;
 }
 /* 开发版徽标：开发窗口与安装版界面完全一致，不打标会分不清哪个窗口带着最新代码 */
 .dev-build-badge {
@@ -3871,7 +4087,7 @@ body:has(.sync-busy-pill) .job-command-notice {
   border-color: var(--brand-accent);
 }
 .sync-busy-pill:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid currentColor;
   outline-offset: 3px;
 }
 .sync-busy-pill .sync-busy-spinner {
@@ -3901,14 +4117,69 @@ body:has(.sync-busy-pill) .job-command-notice {
   min-height: 0;
   overflow: hidden;
 }
+/* 滚动与限高移入 ScrollFadeBox 的滚动层；这里只管文字观感。 */
 .confirm-dialog-message {
+  overflow-wrap: anywhere;
+}
+/* 共享滚动渐隐（ConfirmDialog / JobDialog 等浮层用，与 DataTable 的
+   data-more-* 同一交互语言）：底缘还有未滚到的内容时渐隐提示。 */
+.scroll-fade {
+  position: relative;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
+  /* 弹窗是 flex 纵列，滚动层必须允许收缩，否则长路径的 min-content
+     会把整个弹窗横向撑爆（曾把 510px 弹窗顶到 3382px）。 */
+  min-width: 0;
+}
+.scroll-fade-scroll {
+  min-height: 0;
+  min-width: 0;
   flex: 1 1 auto;
-  max-height: min(52dvh, 420px);
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding-right: var(--sp-1);
   scrollbar-gutter: stable;
+}
+.scroll-fade--more::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 26px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--card));
+}
+/* 渐隐必须放在不滚动的外框上，否则横向/纵向滚动会把白色提示带进表中。 */
+.scroll-fade-x {
+  position: relative;
+  min-width: 0;
+}
+.scroll-fade-x-scroll {
+  min-width: 0;
+  overflow: auto;
+}
+.scroll-fade-x[data-more-right="true"]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 44px;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--card));
+}
+.scroll-fade-x[data-more-bottom="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 22px;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--card));
 }
 
 @media (max-width: 520px), (max-height: 520px) {
@@ -4242,4 +4513,12 @@ input[type="checkbox"].switch-input:disabled {
 .primary:disabled {
   opacity: calc(var(--disabled-opacity) - 0.15);
   box-shadow: none;
+}
+
+/* 不完整的形态不能使用成功色；所有账表工具共用。 */
+.mapping-panel .mapping-form-note.mapping-form-note-incomplete {
+  color: var(--warning-fg);
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+  white-space: normal;
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   accountColumns,
   activeAmountScheme,
@@ -39,6 +40,7 @@ import {
   type KanzhangDraft,
   type Mapping,
   undoMappingChange,
+  updateKanzhangMapping,
   validKanzhangBatches,
 } from "./KanzhangParityPage";
 
@@ -65,6 +67,49 @@ const draft = (): KanzhangDraft => ({
   pivotColumns: [],
   pivotValues: [],
   step: 2,
+});
+
+describe("映射修正与默认透视联动", () => {
+  const original = (): KanzhangDraft => ({
+    ...draft(),
+    mapping: { id: ["凭证号"], accountCode: "录入时间", accountName: ["科目名称"], date: "旧日期" },
+    pivotRows: ["录入时间", "科目名称"],
+    pivotColumns: ["旧日期"],
+    pivotValues: ["金额"],
+  });
+
+  it("纠正错误科目编码与日期后，替换透视默认选择", () => {
+    const current = original();
+    const result = updateKanzhangMapping(current, { ...current.mapping, accountCode: "总账科目", date: ["年", "月", "日"] });
+    expect(result.pivotRows).toEqual(["总账科目", "科目名称"]);
+    expect(result.pivotColumns).toEqual(["年", "月", "日"]);
+    expect(result.pivotValues).toEqual(["金额"]);
+    expect(current.pivotRows).toEqual(["录入时间", "科目名称"]);
+  });
+
+  it("保留手工指定的行字段，同时更新仍为默认值的列字段", () => {
+    const current = { ...original(), pivotRows: ["部门", "录入时间"] };
+    const result = updateKanzhangMapping(current, { ...current.mapping, accountCode: "总账科目", date: "过账日期" });
+    expect(result.pivotRows).toEqual(["部门", "录入时间"]);
+    expect(result.pivotColumns).toEqual(["过账日期"]);
+  });
+
+  it("保留手工清空的行字段及自定义列字段", () => {
+    const current = { ...original(), pivotRows: [], pivotColumns: ["公司"] };
+    const result = updateKanzhangMapping(current, { ...current.mapping, accountCode: "总账科目", date: "过账日期" });
+    expect(result.pivotRows).toEqual([]);
+    expect(result.pivotColumns).toEqual(["公司"]);
+  });
+
+  it("清除和撤销映射时，默认透视跟随最新映射", () => {
+    const current = original();
+    const cleared = updateKanzhangMapping(current, { ...current.mapping, accountCode: undefined, date: undefined });
+    expect(cleared.pivotRows).toEqual(["科目名称"]);
+    expect(cleared.pivotColumns).toEqual([]);
+    const undone = updateKanzhangMapping(cleared, current.mapping);
+    expect(undone.pivotRows).toEqual(current.pivotRows);
+    expect(undone.pivotColumns).toEqual(current.pivotColumns);
+  });
 });
 
 describe("目标批次清空", () => {
@@ -874,7 +919,7 @@ describe("看账其他交互口径", () => {
     ).toEqual([]);
   });
 
-  it("全科目口径按一级科目分批并排除货币资金", () => {
+  it("全科目口径默认按编码前四位分批并排除货币资金", () => {
     const values = [
       "100201-货币资金-银行存款",
       "160101-固定资产-机器",
@@ -904,14 +949,86 @@ describe("看账其他交互口径", () => {
         group.accounts.length,
       ]),
     ).toEqual([
-      ["全科目｜固定资产", 2],
-      ["全科目｜管理费用", 1],
-      ["全科目｜应付账款", 1],
+      ["全科目｜1601 固定资产", 2],
+      ["全科目｜2202 应付账款", 1],
+      ["全科目｜6602 管理费用", 1],
     ]);
     expect(applied.summary.skippedCash).toEqual([values[0]]);
     expect(
       applied.batches.some((batch) => batch.accounts.includes(values[0])),
     ).toBe(false);
+  });
+
+  it("编码前缀相同的不同名称归为一批，同名但编码不同的科目分开", () => {
+    const result = applyAllPrimaryAccountBatches(
+      [], ["机器", "车辆", "其他设备"], ["160101", "160102", "160201"],
+      ["机器设备", "运输工具", "机器设备"], [],
+    );
+    expect(result.batches.map(batch => batch.accounts)).toEqual([["机器", "车辆"], ["其他设备"]]);
+    expect(result.summary.codeLength).toBe(4);
+  });
+
+  it("切换位数重新分组，并迁移旧名称分组，保留手工批次", () => {
+    const old = [
+      { name: "旧批次", presetId: "all_primary:固定资产", accounts: ["旧科目"] },
+      { name: "人工", accounts: ["自选"] },
+    ];
+    const result = applyAllPrimaryAccountBatches(
+      old, ["机器", "车辆", "配件"], ["16010101", "16010201", "16010102"],
+      ["固定资产", "固定资产", "固定资产"], [], 6,
+    );
+    expect(result.batches).toEqual([
+      old[1],
+      { name: "全科目｜160101 固定资产", presetId: "all_primary:code:160101", accounts: ["机器", "配件"] },
+      { name: "全科目｜160102 固定资产", presetId: "all_primary:code:160102", accounts: ["车辆"] },
+    ]);
+    expect(result.summary.removed).toBe(1);
+  });
+
+  it("有编码不足位数时跳过，无编码按名称分组，保留字母及前导零编码", () => {
+    const result = applyAllPrimaryAccountBatches(
+      [], ["160101-设备", "短编码", "正常1", "正常2", "字母编码", "例外"],
+      ["", "16", " 001201 ", "001202", "AB1201", "001299"], [], ["例外"], 4,
+    );
+    expect(result.batches.map(batch => [batch.presetId, batch.accounts])).toEqual([
+      ["all_primary:code:0012", ["正常1", "正常2"]], ["all_primary:code:AB12", ["字母编码"]],
+      ["all_primary:name:160101", ["160101-设备"]],
+    ]);
+    expect(result.summary.skippedCodes).toEqual(["短编码"]);
+    expect(result.summary.nameGroupCount).toBe(1);
+    expect(result.summary.skippedExcludes).toEqual(["例外"]);
+  });
+
+  it.each(["-", "/", "\\", "—", "–", "／", "|", ">", ":", "：", "\n", "\r\n\r\n"])("无编码时按分隔符 %j 取首个非空科目分类", separator => {
+    const values = [` ${separator} 固定资产 ${separator}机器`, "固定资产/车辆", "管理费用-差旅"];
+    const result = applyAllPrimaryAccountBatches([], values, [], [], []);
+    expect(result.batches.map(batch => batch.accounts)).toEqual([values.slice(0, 2), values.slice(2)]);
+    expect(result.summary.nameGroupCount).toBe(2);
+    expect(result.summary.skippedCodes).toEqual([]);
+  });
+
+  it("有编码和无编码的同名科目分别分组，取映射的首列名称优先", () => {
+    const result = applyAllPrimaryAccountBatches(
+      [], ["160101-固定资产-机器", "其他显示值", "固定资产\\车辆", " / - \n"],
+      ["160101", "", "", ""], ["固定资产", "固定资产/设备", "", ""], [],
+    );
+    expect(result.batches.map(batch => [batch.presetId, batch.accounts])).toEqual([
+      ["all_primary:code:1601", ["160101-固定资产-机器"]],
+      ["all_primary:name:固定资产", ["其他显示值", "固定资产\\车辆"]],
+    ]);
+    expect(result.summary.skippedNames).toEqual([" / - \n"]);
+  });
+
+  it("无编码名称分组仍排除货币资金与例外，重复生成刷新自动批次", () => {
+    const first = applyAllPrimaryAccountBatches([], ["固定资产-机器"], [], [], []);
+    const next = applyAllPrimaryAccountBatches(first.batches,
+      ["固定资产/车辆", "银行存款-工行", "管理费用-例外"], [], [], ["管理费用-例外"]);
+    expect(next.batches).toEqual([{ name: "全科目｜名称 固定资产", accounts: ["固定资产/车辆"], presetId: "all_primary:name:固定资产" }]);
+    expect(next.summary).toMatchObject({ updated: 1, created: 0, skippedCash: ["银行存款-工行"], skippedExcludes: ["管理费用-例外"] });
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity])("无效位数 %s 被拒绝", length => {
+    expect(() => applyAllPrimaryAccountBatches([], [], [], [], [], length)).toThrow("正整数");
   });
 
   it("重复生成全科目口径会刷新并移除过期的自动批次", () => {
@@ -935,11 +1052,11 @@ describe("看账其他交互口径", () => {
       removed: 1,
     });
     expect(
-      second.batches.find((batch) => batch.presetId === "all_primary:固定资产")
+      second.batches.find((batch) => batch.presetId === "all_primary:code:1601")
         ?.accounts,
     ).toEqual(["160102-固定资产"]);
     expect(
-      second.batches.some((batch) => batch.presetId === "all_primary:应付账款"),
+      second.batches.some((batch) => batch.presetId === "all_primary:code:2202"),
     ).toBe(false);
     expect(second.batches.some((batch) => batch.name === "人工")).toBe(true);
   });
@@ -1067,5 +1184,50 @@ describe("看账其他交互口径", () => {
     );
     // 没选文件时不猜路径
     expect(defaultKanzhangOutputPath("", "", now)).toBe("");
+  });
+});
+
+describe("看账视觉审核修复（界面防溢出）", () => {
+  const css = readFileSync(
+    new URL("./kanzhang-parity.css", import.meta.url),
+    "utf8",
+  );
+  const tsx = readFileSync(
+    new URL("./KanzhangParityPage.tsx", import.meta.url),
+    "utf8",
+  );
+
+  it("批次标签行允许换行，不再被卡片右缘裁切", () => {
+    // 套用预设后批次多达八九个，横向滚动在 WebView2 下滚动条自动隐藏，
+    // 最右一枚看起来像被裁坏；必须换行而不是滚动。
+    expect(css).toMatch(/\.kz-tabs\s*\{[^}]*flex-wrap:\s*wrap/);
+    expect(css).not.toMatch(/\.kz-tabs\s*\{[^}]*overflow:\s*auto/);
+  });
+
+  it("透视三个多选列表按整行取高，末项不再被容器底边拦腰切半", () => {
+    // CSS 像素高度除不尽原生选项行高就会截断末项：height 交给 size 属性
+    // （取字段总数，列表全部可见），CSS 侧 height:auto 兜底防继承压出半行。
+    expect(css).not.toMatch(/select\[multiple\][^{]*\{[^}]*min-height/);
+    expect(css).toMatch(/\.kz-card select\[multiple\]\s*\{[^}]*height:\s*auto/);
+    expect((tsx.match(/multiple size=\{12\}/g) ?? []).length).toBe(3);
+  });
+
+  it("文件预览卡头部在本页垂直居中，覆盖公共的贴底对齐", () => {
+    expect(css).toMatch(
+      /\.kz-page \.mapping-panel > \.loan-map-head\s*\{[^}]*align-items:\s*center/,
+    );
+  });
+
+  // 正负数标记页（JeSignMarkPage）与看账共用样式族；其页面样式断言放这里，
+  // 因为它自己的测试文件跑在 jsdom 下读不了文件。
+  it("正负数的批次与目标科目卡与同栈其余卡片同宽", () => {
+    const jeCss = readFileSync(
+      new URL("./je-sign-mark.css", import.meta.url),
+      "utf8",
+    );
+    const rule = jeCss.match(/\.jm-batches\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(rule).toContain("width: 100%");
+    // 旧的 62rem 上限让批次卡比上下卡片窄约 300px。
+    expect(rule).not.toMatch(/max-width|align-self/);
   });
 });

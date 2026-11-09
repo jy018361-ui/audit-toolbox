@@ -1,5 +1,90 @@
 # Excel 批量合并迁移差异记录
 
+## 2026-11-05：Excel 数值统一千分位
+
+- 普通横向／纵向合并的整数使用 `#,##0`，浮点数使用保留可选小数的千分位格式；数值列加宽至 24，避免普通金额添加逗号后显示为井号。保留数值、文本、布尔值及原有日期类型，不改 CSV。
+- 多 Sheet 复制后仅重写输出包的 `xl/styles.xml`：General、整数和普通小数格式增加千分位，已有小数位保留；日期、百分比及其他专用格式保持。其他包部件原压缩复制，公式、对象、超链接和来源文件不改。此项明确调整原样复制的普通数字显示格式。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib thousands`、`--lib excel_merger::`。覆盖实际 XLSX 数值及类型、样式解析、缺少自定义格式表、复制后除样式外所有部件逐字节一致；真实 COM 链路另运行 `--lib excel_com_preserves_formula_and_sheet_order -- --ignored`。
+
+## 2026-11-05 · 公共 worker 诊断记录
+
+- 主进程记录 worker 启动/退出（含 pid、jobId、退出码）及任务阶段、进度和终态结果结构；worker 记录请求身份、AppError 位置和 panic 代码栈。成功完成的任务同样记录，普通同阶段进度限频，日志失败不影响业务。无文件内容或任务结果原文写入日志。
+- 取消、暂停、调度、事件交付、输出和既有任务历史行为保留；不提供自动回放或原始数据复原。导出包与隐私/轮换说明见 `DIAGNOSTICS.md`。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib diagnostics::`、`cargo test --manifest-path src-tauri/Cargo.toml --lib excel_merger::`。
+
+## 2026-10-26：Excel 2003 XML 输入兼容
+
+接入公共 SpreadsheetML 内容识别、数据读取及模板准备；包括 NetSuite 使用 `.XLS` 后缀的 XML 导出。保留现有字段映射与业务规则；数据读取不依赖 Excel，版式模板转换沿用本机 Excel。格式、缓存、预览／完整读取边界及验证命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。
+
+
+## 2026-10-25：目录与预览有界读取
+
+- 文件检查只读取工作簿目录；匹配预览通过公共物理行前缀读取，不再先 `worksheet_range` 整表物化。同一文件／Sheet／窗口的模板与来源复用稳定缓存。
+- 公共结构判定已不使用合并区域，因此删除预览的合并区域整表扫描；保留物理空行／空列、显式 Sheet 校验、人工表头、原顺序／映射导出与正式快照校验。日期预览及正式表头快照统一使用公共日期文本（午夜日期包含 `00:00:00`），避免日期型表头确认后被误判已变更；正式 Excel 单元格类型与日期格式写出路径不改。
+- 回归：`--lib excel_merger::`、`--lib excel_preview_does_not_parse_tail`、公共读取测试；异常尾部样例预览成功而完整读取仍失败。缓存约定见 `TABLE_READ_POLICY.md`。
+
+## 2026-10-21：说明页排除与无常规表头原样导出
+
+识别调用公共结构候选与联合层数路径，第22行说明不得取代 FA 汇总第1～2行。明确参数页使用零层表头，从首行保留全部参数；空表明确标注、不生成数据行。零层页不参与自动列匹配，手动指定表头后可作为正常数据表处理；无明确基准时优先首个数据页，显式指定参数／空页则报告原因。实际含数据的未识别页及原样页新增尾列须停止复核，不能静默跳过／截列。列建议算法本轮未修改。
+
+回归：`--lib header_structure -- --include-ignored`（原件目录环境见 `HEADER_DETECTION.md`）；`--lib excel_`；`npx vitest run src/components/HeaderMatchGrid.test.tsx src/ExcelMergerPage.test.ts src/ToolPageJobEvents.test.tsx`；`npm run build`。原件验收覆盖三个工作簿全部13张 Sheet，普通／有界预览一致及 CSV／XLSX 全部正文逐行比较；原始文件不修改。
+
+## 2026-10-21 · 基准精确到文件与 Sheet，入口改为逐行右键
+
+- `excel_merger.match_preview` 接受可选 `templateSheet`，返回 `template.sheet`。显式 Sheet 必须存在，读取失败报错，不能回退首表；未指定时仍按合并范围取输入基准的首个目标 Sheet，外部基准默认取首表。分隔文本沿用 `CSV` 标识。
+- 界面以每行「文件路径 + Sheet 名」作为基准身份；右键文件名或 Sheet 名设为基准，同一文件其他 Sheet 不再被误认为当前基准。右上角文件下拉改为只读的当前基准信息，外部文件通过「选择外部基准」重新选入（替代原下拉中的外部模板回选）。浏览器演示同步支持精确 Sheet。
+- 切换成功后重新生成匹配网格及导出表头；切换失败保留原网格。表头行修正只同步精确的基准来源，不再以相同表头内容猜测 Sheet。人工配对在切换成功后随新预览重置；导出继续使用已确认的逐 Sheet 快照、列映射及两种导出路径。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib excel_`，覆盖同文件第二张 Sheet 的表头和正文、实际合并后金额/日期/凭证列序、无效 Sheet 拒绝、默认/按名称范围、外部基准与 CSV 标识。前端命令见 `UI_CHANGELOG.md` 同日记录，含真实页面传参、失败重试、重新打开时保留 Sheet 及导出计划。
+
+## 2026-10-21 · 原列顺序导出、公共表头识别与文本快照修复
+
+- 匹配页提供「按原列顺序导出」与「调整后导出」，移除「全部按建议执行」「下一处待确认」。原列路径按物理列位拼接，保留已确认的表头行和层数，忽略映射、丢弃、模板移除及对照表学习；更宽来源的尾列保留。调整路径继续使用网格及黄色建议确认。
+- 自动行号／层数直接调用 TBJE 使用的 `fx::infer_public_header_layout`，扫描前 30 行，取消合并工具独立的宽松双层判断；表头仍保留同名列独立槽位，避免修改既有列匹配语义。
+- 预览与匹配导出同步恢复 Calamine 裁剪的物理空行／空列。单层空标题按原列位显示「列N」，不借用左侧列名；预览、人工修正、正式快照统一清理换行。修改模板行号只同步模板所在 Sheet，其他文件保持各自行号／层数，并刷新正文预览。
+- 文本型 XLS／CSV 的快照复核此前错误收集文件起始行，现先跳过计划 `headerRow`，再收集确认的表头层；未改原件不再因此误报 `HEADER_PLAN_STALE`，真实表头变化仍中止并清除输出。提示改为说明实际读取差异，不推断用户修改文件。
+- 回归：`npx vitest run src/components/HeaderMatchGrid.test.tsx src/ExcelMergerPage.test.ts src/ToolPageJobEvents.test.tsx`；`npm run build`；`cargo test --manifest-path src-tauri/Cargo.toml --lib excel_`；`--lib header_data`。
+- 特殊样本：`--lib header_regression -- --include-ignored`，真实件用 `MERGER_HEADER_NATIVE_CASES`（path／label／0基headerRow／headerRowsCount）与 `MERGER_HEADER_NATIVE_OUTPUT` 指定。覆盖 TBJEPBC 03／06两期间／10 及十月 HK／AUS 六份原件，双格式实际导出对比全部正文行；另有五类合成物理空行空列／空标题／横纵合并，以及 GBK 文本型 XLS 的误报和真实改动反例。
+- 用户补充截图的原件不在本机，文本快照错误已用同结构样本复现；截图中正文被解析成两列表头的具体分隔符／源格式原因尚不能确认。
+
+## 2026-10-19 · 公共 worker 的估算预算与启动保护分离
+
+- 公共表格任务的估算内存预算只用于普通／磁盘选路、批次、SQLite 缓存和并行度，不再因扣除预留内存后不足 256 MiB 拒绝磁盘任务。小预算下仍有可推进的批次，真实系统状态无法读取时仍明确失败。
+- 启动等待按既有运行期物理内存／提交余量暂停线判断；不改暂停线、恢复稳定窗口、危险终止窗口与取消行为。Job Object 仍仅管理进程生命周期，不安装估算内存硬配额。
+- FA 选路统一调用分阶段策略，并传递所选 Sheet；导出可能退回匹配时，调度监测覆盖该分支。其他业务工具的工作集倍率不变，共用低预算批次策略。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib resource_budget::`、`--lib disk_table::`、`--lib excel_merger::`，以及 `FA_LIST_PARITY.md` 同日记录中的 FA 端到端回归。记录位于 `artifacts/fa-memory-policy-20261019/`，取代下文旧的最低预算启动要求。
+
+## 2026-10-19：共享 worker 不再安装预估内存硬配额
+
+- 大文件后台进程 Job Object 仅保留退出清理，不再设置进程／任务内存配额；仍按实际系统资源暂停、恢复、取消，持续危险才终止。异常退出不再猜测达到预算上限并要求缩小文件。
+- 联合工作集仍决定磁盘模式，预算仍调节批次及并行度，不改变合并内容。共享读取入口不再二次分流后返回“超过预算，未接入磁盘”错误。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib resource_budget::`、`--lib ordinary_mode`、`--lib memory_protection`；真实 worker 验证见 `artifacts/data-volume-limits-20261019/`。
+
+## 2026-10-19 · 共享 worker 内存保护只跟随大文件磁盘分流
+
+- 共享后台调度不再仅凭文本输入合计超过 1 GiB 单独启用内存门禁，统一使用原有联合工作集磁盘分流判定。普通模式不等待大文件 worker 的最低预算；磁盘任务仍安装原有内存上限并支持内存暂停、恢复及取消。
+- 自动磁盘分流阈值及各工具业务计算不变，未扩大受保护方法范围。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib ordinary_mode_workers`、`--lib memory_protection`、`--lib disk_table::`。测试模拟低内存，对照普通 CSV 与压缩体积小、解压工作集大的输入。
+
+## 2026-10-18 · 超大文本台账兼容：零星编码瑕疵容错 + 表头识别只读文件头
+
+**起因：印尼 2.9GB/4GB 两份 GBK 台账，其中一份在约 418MB 处有源系统导出时写坏的
+孤立字节（GBK 编不出的字符被写成问号并留下残缺前导字节），旧逻辑读到即整档报错。**
+
+- **零星编码瑕疵改为容错**：解码遇非法序列不再中止整档，替换为 U+FFFD（�）继续，
+  合并结果 `warnings` 里逐文件留痕（文件名 + 替换处数 + 建议索取 UTF-8 版本复核），
+  纵向 CSV/XLSX、横向、检查各路径一致。此前 2026-09-04 定下的「不用有损解码」
+  口径调整为「可以有损但必须留痕」——审计上不可接受的是静默篡改，不是 � 本身。
+- **大面积替换仍然中止**（新错误码 `TEXT_ENCODING_INVALID`）：替换字符数超过实际
+  扫描字节数 1/8 视为编码判断错误（典型如无 BOM 的 UTF-16 被当 GBK），报错并清理
+  临时输出，绝不发布整档乱码；与旧的「晚发解码失败必须中止」安全属性等价。
+- **表头识别只读文件头**：`read_sheet_preview_rows` 的文本分支改用 `read_rows_head`
+  （凑满预览行数即停），几 GB 台账「智能匹配并预览」不再全文扫描（此前 4GB 约 35 秒）。
+  纵向合并写出本身已是流式，未改动。
+- 替换计数只统计解码器真正替换的字符（GBK 源文件不可能原生含 U+FFFD，无虚报）；
+  读多少算多少，行数受限的预览读取不会把未扫描尾部的瑕疵计入防误判阈值。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib spreadsheet_input excel_merger`
+  （新增零星替换留痕、密集乱码中止、预览早停不扫尾部三组用例；原「悬空字节必须报错」
+  用例改为「零星容错 + 密集中止」双断言）。
+
 ## 2026-09-26：复用公共重复标题排除
 
 - 智能表头匹配候选行排除整行重复的报表标题；双层上层必须有不同标签。只有单列来源保留评分兜底。原有合并区域、置信度、人工匹配和导出快照校验继续使用原规则。
@@ -98,7 +183,7 @@
 | 超 104 万行 | 全 xlsx 通道拆表；混合清单通道**不拆也不报错，静默丢弃超出行** | 恒定拆表 |
 | 超 16,384 列 | 静默丢弃多余列 | 明确报错，不产出文件 |
 | 文本文件 | 只试 UTF-8 / GBK，一律按逗号分列 | 识别 UTF-16、BOM，嗅探逗号/制表符/分号。制表符 txt 由"挤在一列"变为正确分列 |
-| 编码坏掉的文本文件 | 跳过并在完成提示中告警 | 严格解码；纵向中止并清理临时输出，横向跳过并告警 |
+| 编码坏掉的文本文件 | 跳过并在完成提示中告警 | 零星坏字符替换为 � 并在完成提示中告警留痕；大面积坏（编码判断错误）中止并清理临时输出（2026-10-18 前为严格解码、任何坏字符即中止） |
 
 ## 仍未清零
 

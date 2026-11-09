@@ -1,5 +1,10 @@
 # FY27 WP 服务单 Rust 迁移说明
 
+## 2026-10-26：Excel 2003 XML 输入兼容
+
+接入公共 SpreadsheetML 内容识别、数据读取及模板准备；包括 NetSuite 使用 `.XLS` 后缀的 XML 导出。保留现有字段映射与业务规则；数据读取不依赖 Excel，版式模板转换沿用本机 Excel。格式、缓存、预览／完整读取边界及验证命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。
+
+
 团队使用方式、三类输入文件的命名规则和必要字段见 [WP 服务单生成工具使用说明](WP_SERVICE_GENERATOR_USAGE.md)。
 
 ## 2026-09-08 · AI/CI 工时与灵活 Section

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useJobOwnedByDialog } from "@/components/JobDialog";
-import { errorText, isJobGone } from "@/lib/errors";
+import { jobPause } from "@/api";
+import { errorText, isJobGone, meetingErrorText } from "@/lib/errors";
 import type { JobEvent } from "@/types";
 import { jobPresentation } from "@/jobState";
 import "./task-state.css";
@@ -19,7 +20,9 @@ export type JobProgressProps = {
 export function terminalJobError(job?: JobEvent): string {
   if (!job || (job.phase !== "failed" && job.phase !== "cancelled")) return "";
   const result = job.result as { error?: unknown } | undefined;
-  return result?.error ? errorText(result.error) : job.message;
+  return result?.error
+    ? (job.toolId === "meeting_minutes" ? meetingErrorText : errorText)(result.error)
+    : job.message;
 }
 
 /**
@@ -50,6 +53,8 @@ export function JobProgress({
 }: JobProgressProps) {
   const [cancelPending, setCancelPending] = useState(false);
   const [cancelError, setCancelError] = useState("");
+  const [resumePending, setResumePending] = useState(false);
+  const [resumeError, setResumeError] = useState("");
   async function cancel() {
     if (!onCancel || cancelPending) return;
     setCancelPending(true);
@@ -67,6 +72,25 @@ export function JobProgress({
       setCancelPending(false);
     }
   }
+  // 内存暂停：任务弹窗被最小化时，页面内联状态也要给出「继续」出口，
+  // 不能只让文案承诺「可继续」却无处可点。
+  async function resume() {
+    if (resumePending) return;
+    setResumePending(true);
+    setResumeError("");
+    try {
+      const accepted = await jobPause(job.jobId, false);
+      if (!accepted) throw new Error("任务可能已结束，继续指令未被接受。请检查任务状态后重试。");
+    } catch (error) {
+      setResumeError(
+        isJobGone(error)
+          ? "任务可能已结束，继续指令未被接受。请检查任务状态后重试。"
+          : `继续失败：${errorText(error)}`,
+      );
+    } finally {
+      setResumePending(false);
+    }
+  }
   // 全局弹窗或最小化任务条接管时让位，同一进度只呈现一次。
   const owned = useJobOwnedByDialog(job.jobId);
   const total = Number.isFinite(job.total) ? Math.max(job.total, 0) : 0;
@@ -74,7 +98,8 @@ export function JobProgress({
   const presentation = jobPresentation(job);
   // P2-2：消息与状态徽标输出同一状态词时（“排队中 排队中”“处理中 处理中”）只渲染
   // 一次——消息区优先展示业务阶段文案，状态词只在消息缺失或不同时出现。
-  const message = job.message && job.message !== presentation.label ? job.message : "";
+  const progressMessage = presentation.message ?? job.message;
+  const message = progressMessage && progressMessage !== presentation.label ? progressMessage : "";
   const value = Math.max(
     0,
     Math.min(job.current, presentation.terminal ? max : max * 0.99),
@@ -111,9 +136,21 @@ export function JobProgress({
         {presentation.percent !== null && (
           <span className="job-pct">{presentation.percent}%</span>
         )}
+        {job.phase === "memory_paused" && (
+          <Button
+            variant="secondary"
+            size="xs"
+            type="button"
+            className="job-cancel"
+            onClick={() => void resume()}
+            disabled={resumePending}
+          >
+            {resumePending ? "正在继续…" : "尝试继续"}
+          </Button>
+        )}
         {onCancel && !presentation.terminal && (
           <Button
-            variant="ghost"
+            variant="secondary"
             size="xs"
             type="button"
             className="job-cancel"
@@ -128,6 +165,7 @@ export function JobProgress({
         <p className="job-progress-error">{detail}</p>
       )}
       {cancelError && <p className="job-progress-error" role="alert">{cancelError}</p>}
+      {resumeError && <p className="job-progress-error" role="alert">{resumeError}</p>}
       {!presentation.terminal && (
         <progress
           aria-label={`${presentation.label}进度`}

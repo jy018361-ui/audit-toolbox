@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | **生产栈** | [`tauri-app/`](tauri-app/) | Tauri 2 + React 19/TS + 全 Rust 业务核心，九个工具的唯一生产实现 |
 | **旧栈 / 金标** | `suite_main.py`、`launcher/`、`tools/`、`modules/`、`audit_engine/` | tkinter Hub + Python 内核，**不再参与生产运行和发布打包**，仅作迁移对照基线与回归测试 |
 
-**默认在 `tauri-app/` 里干活**——该目录有自己的 [CLAUDE.md](tauri-app/CLAUDE.md)，描述 Tauri/Rust 架构、
+**默认在 `tauri-app/` 里干活**——该目录有自己的 [AGENTS.md](tauri-app/AGENTS.md)，描述 Tauri/Rust 架构、
 命令白名单、worker 进程模型和发布门禁。本文件只在你需要读/改旧 Python 栈（做迁移对照、跑金标测试）时才有用。
 
 `tools.json` 注册了九个工具，与 `tauri-app/public/tool-catalog.json` 的九个 id 一一对应：
@@ -23,7 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 环境要求
 
 - Python 3.10+，Windows 10/11；仓库含 `.venv/`，开发前可先 `.venv\Scripts\activate`
-- 生产栈另需 Node.js 22、Rust stable-msvc、Visual Studio C++ Build Tools（见 `tauri-app/CLAUDE.md`）
+- 生产栈另需 Node.js 22、Rust stable-msvc、Visual Studio C++ Build Tools（见 `tauri-app/AGENTS.md`）
 
 ## 常用命令
 

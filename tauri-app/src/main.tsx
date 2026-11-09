@@ -2,7 +2,6 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { createHashRouter, RouterProvider } from "react-router-dom";
 import App from "./App";
-import AudiPickWindow from "./AudiPickWindow";
 import MeetingAskWindow from "./MeetingAskWindow";
 import "./styles.css";
 import "./settings.css";
@@ -11,6 +10,9 @@ import "./fa-dep-calc.css";
 import "./table-resize.css";
 import { restoreSavedTheme } from "./theme";
 import { ApplicationErrorBoundary } from "./components/ApplicationErrorBoundary";
+import { installFrontendDiagnostics } from "./diagnostics";
+
+installFrontendDiagnostics();
 
 // Before the first paint, so the window never flashes the default theme.
 restoreSavedTheme();
@@ -21,11 +23,16 @@ if ("__TAURI_INTERNALS__" in window) {
   document.documentElement.classList.add("frameless");
 }
 
-const root = ReactDOM.createRoot(document.getElementById("root")!);
-const appRouter = createHashRouter([{ path: "*", element: <App /> }]);
 // 会议询问小窗（label=meeting-ask）不进 App 壳：没有侧栏/路由/巡游，
 // 只渲染一张居中询问卡片。按启动时的 hash 分流，小窗内不会发生导航。
 const isMeetingAskWindow = window.location.hash.startsWith("#/meeting-ask");
+// 首帧前让整个文档画布透明；只清 body 会透出 :root 的主题底色。
+if (isMeetingAskWindow) {
+  document.documentElement.classList.add("meeting-ask-root");
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root")!);
+const appRouter = createHashRouter([{ path: "*", element: <App /> }]);
 const askRouter = createHashRouter([{ path: "*", element: <MeetingAskWindow /> }]);
 
 async function renderApp() {

@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { loadTourState } from "./tourState";
 import { useCurrentToolId } from "./ToolTourContext";
 import { TOOL_TOUR_SCRIPTS } from "./toolTourContent";
+import { TOUR_COPY, formatTourText } from "./tourCopy";
 import "./beginner-tour.css";
 
 type HintStep = { key: string; label: string; disabled?: boolean };
@@ -20,7 +21,7 @@ function isVisibleIndicator(el: HTMLElement): boolean {
  * 工具内的分步提示（新手模式）：步骤条切换到某一步时，弹出一张小卡片，
  * 说明当前是第几步、这一步叫什么、做完怎么继续。弹出期间全屏压暗并
  * 挖孔锁定步骤条，观感与完整引导一致。挂在 StepIndicator 内部——
- * 18 个工具共用步骤条，一处接入全部生效。几秒后自动消失，也可手动
+ * 各工具共用步骤条，一处接入全部生效。几秒后自动消失，也可手动
  * 关闭；总开关关闭时不弹。
  */
 export function StepTourHint({
@@ -33,17 +34,33 @@ export function StepTourHint({
   /** 测试可注入：提示自动消失的毫秒数。 */
   autoDismissMs?: number;
 }) {
-  const [hint, setHint] = useState<{ index: number; nonce: number } | null>(
+  const [hint, setHint] = useState<{ index: number; key: string; toolId?: string; nonce: number } | null>(
     null,
   );
   const [anchorRect, setAnchorRect] = useState<Rect | null>(null);
-  const [pauseDismiss, setPauseDismiss] = useState(false);
-  const previousCurrent = useRef(current);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
   const toolId = useCurrentToolId();
+  const currentKey = steps[current]?.key;
+  const currentDisabled = Boolean(steps[current]?.disabled);
+  const previousStep = useRef({ current, key: currentKey, toolId });
 
   useEffect(() => {
-    if (current === previousCurrent.current) return;
-    previousCurrent.current = current;
+    const previous = previousStep.current;
+    previousStep.current = { current, key: currentKey, toolId };
+    if (!currentKey || currentDisabled) {
+      setHint(null);
+      setHovered(false);
+      setFocused(false);
+      return;
+    }
+    if (current === previous.current && currentKey === previous.key && toolId === previous.toolId) return;
+    // 切到无需提示的环节也必须清除上一张卡片及其遮罩。
+    setHint(null);
+    setHovered(false);
+    setFocused(false);
+    // 工具或流程替换属于重新挂载语义，保持首次进入不弹步骤提示的规则。
+    if (toolId !== previous.toolId || current === previous.current) return;
     // 总开关关闭、或完整引导正在播放时不叠加提示。
     if (loadTourState().newbieMode === false) return;
     if (document.querySelector(".tour-layer")) return;
@@ -54,14 +71,14 @@ export function StepTourHint({
     const script = toolId ? TOOL_TOUR_SCRIPTS[toolId] : undefined;
     const specific = script?.stepHints?.[step.key];
     if (script?.suppressGenericHints && !specific) return;
-    setHint({ index: current, nonce: Date.now() });
-  }, [current, steps]);
+    setHint({ index: current, key: step.key, toolId, nonce: Date.now() });
+  }, [current, currentKey, currentDisabled, steps, toolId]);
 
   useEffect(() => {
-    if (!hint || pauseDismiss) return;
+    if (!hint || hovered || focused) return;
     const timer = window.setTimeout(() => setHint(null), autoDismissMs);
     return () => window.clearTimeout(timer);
-  }, [hint, autoDismissMs, pauseDismiss]);
+  }, [hint, autoDismissMs, hovered, focused]);
 
   // 提示展示期间挖孔锁定步骤条：取第一个【可见】的步骤条（有后台任务
   // 的工具页会被 keep-alive 保活，同名挂点必须跳过），窗口缩放或滚动时
@@ -98,7 +115,7 @@ export function StepTourHint({
 
   if (!hint) return null;
   const step = steps[hint.index];
-  if (!step) return null;
+  if (!step || step.disabled || hint.index !== current || hint.key !== step.key || hint.toolId !== toolId) return null;
   const isLast = hint.index === steps.length - 1;
   // 优先用针对性文案（toolTourContent.ts 按 工具id + 步骤key 逐条编写），
   // 没有对应的条目才落到通用文案。
@@ -133,27 +150,32 @@ export function StepTourHint({
         role="status"
         aria-live="polite"
         aria-atomic="true"
-        onMouseEnter={() => setPauseDismiss(true)}
-        onMouseLeave={() => setPauseDismiss(false)}
-        onFocusCapture={() => setPauseDismiss(true)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onFocusCapture={() => setFocused(true)}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setFocused(false);
+          }
+        }}
       >
         <p className="step-hint-count">
-          第 {hint.index + 1} 步 · 共 {steps.length} 步
+          {formatTourText(TOUR_COPY.stepCount, { current: hint.index + 1, total: steps.length })}
         </p>
         <strong className="step-hint-title">{step.label}</strong>
         <p className="step-hint-body">
           {specific ??
             (isLast
-              ? "最后一步：完成它就能看到结果。想改前面的内容，点步骤条随时回去。"
-              : "完成这一步的操作后，点「下一步」或步骤条继续；想改前面的内容，随时点回去。")}
+              ? TOUR_COPY.fallbackLastHint
+              : TOUR_COPY.fallbackHint)}
         </p>
         <button
           type="button"
           className="step-hint-close"
-          aria-label="关闭本步提示"
+          aria-label={TOUR_COPY.closeStepHint}
           onClick={() => setHint(null)}
         >
-          ×
+          {TOUR_COPY.closeSymbol}
         </button>
       </div>
     </Fragment>

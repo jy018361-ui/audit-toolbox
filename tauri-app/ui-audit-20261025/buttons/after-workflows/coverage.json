@@ -1,0 +1,144 @@
+{
+  "coverageKind": "real-pages-positive-path-only",
+  "excludedToolIds": [
+    "audipick"
+  ],
+  "taskEventMatrixComplete": false,
+  "observedByTool": {
+    "fa_list": {
+      "observed": [],
+      "unverified": [
+        "loading",
+        "queued",
+        "running",
+        "paused",
+        "cancelled",
+        "failed",
+        "completed",
+        "partial",
+        "restored",
+        "history_resume"
+      ]
+    },
+    "fa_dep_calc": {
+      "observed": [],
+      "unverified": [
+        "loading",
+        "queued",
+        "running",
+        "paused",
+        "cancelled",
+        "failed",
+        "completed",
+        "partial",
+        "restored",
+        "history_resume"
+      ]
+    },
+    "fa_policy_compare": {
+      "observed": [],
+      "unverified": [
+        "loading",
+        "queued",
+        "running",
+        "paused",
+        "cancelled",
+        "failed",
+        "completed",
+        "partial",
+        "restored",
+        "history_resume"
+      ]
+    },
+    "kanzhang": {
+      "observed": [],
+      "unverified": [
+        "loading",
+        "queued",
+        "running",
+        "paused",
+        "cancelled",
+        "failed",
+        "completed",
+        "partial",
+        "restored",
+        "history_resume"
+      ]
+    },
+    "je_sign_mark": {
+      "observed": [],
+      "unverified": [
+        "loading",
+        "queued",
+        "running",
+        "paused",
+        "cancelled",
+        "failed",
+        "completed",
+        "partial",
+        "restored",
+        "history_resume"
+      ]
+    },
+    "ts_manager": {
+      "observed": [],
+      "unverified": [
+        "loading",
+        "queued",
+        "running",
+        "paused",
+        "cancelled",
+        "failed",
+        "completed",
+        "partial",
+        "restored",
+        "history_resume"
+      ]
+    },
+    "confirmation_progress": {
+      "observed": [],
+      "unverified": [
+        "loading",
+        "queued",
+        "running",
+        "paused",
+        "cancelled",
+        "failed",
+        "completed",
+        "partial",
+        "restored",
+        "history_resume"
+      ]
+    },
+    "file_list_directory": {
+      "observed": [],
+      "unverified": [
+        "loading",
+        "queued",
+        "running",
+        "paused",
+        "cancelled",
+        "failed",
+        "completed",
+        "partial",
+        "restored",
+        "history_resume"
+      ]
+    },
+    "pdf_to_excel": {
+      "observed": [],
+      "unverified": [
+        "loading",
+        "queued",
+        "running",
+        "paused",
+        "cancelled",
+        "failed",
+        "completed",
+        "partial",
+        "restored",
+        "history_resume"
+      ]
+    }
+  }
+}

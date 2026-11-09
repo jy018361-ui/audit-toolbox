@@ -149,6 +149,7 @@ describe("税表工作流交互",()=>{
     const value=index("甲公司");value.forms=[];value.taxType="unknown";
     mocks.extract.mockResolvedValue({parsed:{companyName:"甲公司",period:"2025年度",tables:[{...form,formKey:form.key,pages:[6],rows:[["行次","金额"],["1","0"]],merges:[]}]}});
     render(<AudiPickTaxWorkflow documents={[{id:"a",name:"甲公司.pdf"}]} initialIndexes={{a:value}} loadPdf={async()=>pdf()} onSave={async()=>{}} onClose={vi.fn()}/>);
+    fireEvent.click(screen.getByRole("button",{name:"全部表单库"}));
     fireEvent.click(screen.getByRole("checkbox",{name:/纳税调整项目明细表/}));
     fireEvent.click(screen.getByRole("button",{name:"2. 提取所选表单"}));
     await waitFor(()=>expect(screen.getByRole("alert")).toHaveTextContent("税种待确认"));

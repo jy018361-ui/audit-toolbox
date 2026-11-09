@@ -2,12 +2,13 @@ import { assessPdfTextLayer, pdfTextFromItems } from "./audipickPdfPreparation";
 import { buildTaxPageIndex, buildTaxExtractionPrompt, parseTaxPageSelection, validateTaxGridResponse, type TaxDocumentIndex, type TaxForm, type TaxGridTable } from "./audipickTax";
 import { hasLegacyTaxPageLayout } from "./audipickTaxLayout";
 import { combineTaxPageGrids, parseTaxHtmlTables, type TaxPageGrid } from "./audipickTaxTable";
+import { isTaxReviewCurrent, validateTaxReviewGroupsStructure, type TaxReviewGroup } from "./audipickTaxReview";
 
 /** Bump when the native/visual tax page reader gains structural corrections. */
 export const TAX_PAGE_READER_VERSION="tax-structured-page-v3";
 
 export type TaxExportTable = TaxGridTable & {
-  documentId: string; companyName: string; period: string; sourceFile: string; extractionKey: string;
+  documentId: string; companyName: string; period: string; sourceFile: string; extractionKey: string; instanceId?: string;
 };
 export type TaxExtractionDiagnostic = {
   attempts: {raw:string;error?:string}[];
@@ -22,6 +23,7 @@ export type AudiPickTaxWorkflowState = {
   tables: TaxExportTable[];
   selectedFormKeys?: string[];
   pageOverrides?: Record<string, Record<string, string>>;
+  reviews?: Record<string, TaxReviewGroup[]>;
   diagnostics?: Record<string, Record<string, TaxExtractionDiagnostic>>;
 };
 
@@ -66,15 +68,37 @@ export async function inspectTaxDocument(options: {
   return index;
 }
 
-export function resolveTaxForms(index: TaxDocumentIndex, keys: string[], overrides: Record<string,string> = {}, catalogue: TaxForm[] = []): TaxForm[] {
+export function taxFormIdentity(form: TaxForm): string {
+  return form.instanceId ?? form.key;
+}
+
+export function taxExtractionKey(index: TaxDocumentIndex, form: TaxForm): string {
+  return JSON.stringify({companyName:form.companyName??index.companyName,period:form.period??index.period,form});
+}
+
+export function resolveTaxForms(index: TaxDocumentIndex, keys: string[], overrides: Record<string,string> = {}, catalogue: TaxForm[] = [], reviews: TaxReviewGroup[] = []): TaxForm[] {
+  if (reviews.length) validateTaxReviewGroupsStructure(index, reviews);
+  const occupiedPages = new Set(reviews.flatMap(group=>group.pages));
   return keys.flatMap(key=>{
     const own=index.forms.find(f=>f.key===key);
     const base=own ?? catalogue.find(f=>f.key===key);
+    const reviewed=reviews.filter(group=>group.formKey===key);
+    if (reviewed.length) {
+      if (!base) throw new Error(`复核表单 ${key} 不在目录中，请重新选择表单。`);
+      return reviewed.filter(group=>group.status==="confirmed"&&isTaxReviewCurrent(index,group)).map(group=>({
+        ...base, pages:[...group.pages], instanceId:group.id, companyName:group.companyName, period:group.period,
+      }));
+    }
     const override=overrides[key];
     if (!base || (!own && !override?.trim())) return [];
-    if (override===undefined && own?.pages.some(page=>index.pages.some(p=>p.page===page&&p.formKey===key&&p.confidence==="low"))) throw new Error(`${base.formName}：存在重复或不确定匹配，请预览后手动确认页码。`);
-    const pages=override===undefined ? own?.pages ?? [] : parseTaxPageSelection(override,index.pages.length);
-    if (!pages.length) throw new Error(`${base.formName}：请填写完整页码（含续页）。`);
+    let pages=override===undefined ? own?.pages ?? [] : parseTaxPageSelection(override,index.pages.length);
+    if (override!==undefined && pages.some(page=>occupiedPages.has(page))) throw new Error(`${base.formName}：指定页码与其他人工复核组冲突，请调整页码归属。`);
+    if (override===undefined) pages=pages.filter(page=>!occupiedPages.has(page));
+    if (override===undefined && pages.some(page=>index.pages.some(p=>p.page===page&&p.formKey===key&&p.confidence==="low"))) throw new Error(`${base.formName}：存在重复或不确定匹配，请预览后手动确认页码。`);
+    if (!pages.length) {
+      if (override===undefined) return [];
+      throw new Error(`${base.formName}：请填写完整页码（含续页）。`);
+    }
     return [{...base,pages}];
   });
 }
@@ -88,16 +112,20 @@ export async function extractTaxForm(options: {
   checkpoint?: () => Promise<void>;
 }): Promise<TaxExportTable> {
   const { documentId,index,form }=options;
-  if (!index.companyName.trim()) throw new Error("请先确认公司名称。");
-  const extractionKey=JSON.stringify({companyName:index.companyName,period:index.period,form});
+  const identity=taxFormIdentity(form);
+  const companyName=form.companyName??index.companyName;
+  const period=form.period??index.period;
+  if (!companyName.trim()) throw new Error("请先确认公司名称。");
+  if (form.instanceId && !period.trim()) throw new Error("请先确认复核组所属期。");
+  const extractionKey=taxExtractionKey(index,form);
   const legacyLayout=form.pages.some(page=>hasLegacyTaxPageLayout(options.getState().pageTexts[documentId]?.[page]??""));
   const htmlCache=form.pages.some(page=>/<\/?table\b/i.test(options.getState().pageTexts[documentId]?.[page]??""));
-  const oldHtmlResult=htmlCache&&!["html","mixed"].includes(options.getState().diagnostics?.[documentId]?.[form.key]?.source??"");
-  const existing=options.getState().tables.find(t=>t.documentId===documentId&&t.formKey===form.key&&t.extractionKey===extractionKey);
+  const oldHtmlResult=htmlCache&&!["html","mixed"].includes(options.getState().diagnostics?.[documentId]?.[identity]?.source??"");
+  const existing=options.getState().tables.find(t=>t.documentId===documentId&&(t.instanceId??t.formKey)===identity&&t.extractionKey===extractionKey);
   if (existing&&!legacyLayout&&!oldHtmlResult) return existing;
   if (legacyLayout||oldHtmlResult) {
     const state=options.getState();
-    await options.save({...state,tables:state.tables.filter(table=>table.documentId!==documentId||table.formKey!==form.key)});
+    await options.save({...state,tables:state.tables.filter(table=>table.documentId!==documentId||(table.instanceId??table.formKey)!==identity)});
   }
   const pages:{page:number;text:string}[]=[];
   for (const page of form.pages) {
@@ -108,35 +136,35 @@ export async function extractTaxForm(options: {
       text=await options.readFullPage(page);
       if (!text.trim()) throw new Error(`PDF 第 ${page} 页 OCR 没有返回文字，请检查页面。`);
       const state=options.getState();
-      const previous=state.diagnostics?.[documentId]?.[form.key];
+      const previous=state.diagnostics?.[documentId]?.[identity];
       // Persist the reader generation together with the text, before the next
       // checkpoint. A retry can reuse an expensive fresh OCR even if grid
       // validation or a later page failed, while old failed caches migrate.
       await options.save({...state,
         pageTexts:{...state.pageTexts,[documentId]:{...state.pageTexts[documentId],[page]:text}},
         pageTextVersions:{...state.pageTextVersions,[documentId]:{...state.pageTextVersions?.[documentId],[page]:TAX_PAGE_READER_VERSION}},
-        ...(previousText!==undefined?{diagnostics:{...state.diagnostics,[documentId]:{...state.diagnostics?.[documentId],[form.key]:{...previous,source:previous?.source??"reader",pages:[...form.pages],attempts:previous?.attempts??[],refreshedPageTexts:{...previous?.refreshedPageTexts,[page]:text}}}}}: {})});
+        ...(previousText!==undefined?{diagnostics:{...state.diagnostics,[documentId]:{...state.diagnostics?.[documentId],[identity]:{...previous,source:previous?.source??"reader",pages:[...form.pages],attempts:previous?.attempts??[],refreshedPageTexts:{...previous?.refreshedPageTexts,[page]:text}}}}}: {})});
     }
     pages.push({page,text});
   }
   await options.checkpoint?.();
   async function diagnostic(source:string,raw:string):Promise<number> {
     const state=options.getState();
-    const previous=state.diagnostics?.[documentId]?.[form.key];
+    const previous=state.diagnostics?.[documentId]?.[identity];
     const attempts=[...(previous?.attempts??[]),{raw}];
-    await options.save({...state,diagnostics:{...state.diagnostics,[documentId]:{...state.diagnostics?.[documentId],[form.key]:{...previous,source,pages:[...form.pages],attempts}}}});
+    await options.save({...state,diagnostics:{...state.diagnostics,[documentId]:{...state.diagnostics?.[documentId],[identity]:{...previous,source,pages:[...form.pages],attempts}}}});
     return attempts.length-1;
   }
   async function diagnosticError(attempt:number,error:unknown) {
     const state=options.getState();
-    const previous=state.diagnostics?.[documentId]?.[form.key];
+    const previous=state.diagnostics?.[documentId]?.[identity];
     if(!previous) throw new Error("提取诊断尚未保存，已停止处理。");
     const message=error instanceof Error?error.message:String(error);
-    await options.save({...state,diagnostics:{...state.diagnostics,[documentId]:{...state.diagnostics?.[documentId],[form.key]:{...previous,attempts:previous.attempts.map((item,i)=>i===attempt?{...item,error:message}:item)}}}});
+    await options.save({...state,diagnostics:{...state.diagnostics,[documentId]:{...state.diagnostics?.[documentId],[identity]:{...previous,attempts:previous.attempts.map((item,i)=>i===attempt?{...item,error:message}:item)}}}});
     return message;
   }
   function validate(raw:string,selectedPages=form.pages) {
-    const grid=validateTaxGridResponse(raw,{companyName:index.companyName,formKeys:[form.key]});
+    const grid=validateTaxGridResponse(raw,{companyName,formKeys:[form.key]});
     if (grid.tables.length!==1) throw new Error("模型未返回所选的单张完整表格，请重试。");
     const table=grid.tables[0];
     if (table.pages.length!==selectedPages.length || [...new Set(table.pages)].length!==selectedPages.length || table.pages.some(p=>!selectedPages.includes(p))) throw new Error(`返回页码 ${table.pages.join(",")} 与所选完整表单页码 ${selectedPages.join(",")} 不一致，请复核页码后重试。`);
@@ -144,7 +172,7 @@ export async function extractTaxForm(options: {
   }
   async function modelGrid(selectedPages:{page:number;text:string}[],source:string) {
     const pageNumbers=selectedPages.map(page=>page.page);
-    const prompt=buildTaxExtractionPrompt({companyName:index.companyName,period:index.period,forms:[{...form,pages:pageNumbers}],pages:selectedPages});
+    const prompt=buildTaxExtractionPrompt({companyName,period,forms:[{...form,pages:pageNumbers}],pages:selectedPages});
     let request=prompt;
     // Legacy text gets one targeted correction; HTML is never passed here.
     for(let attempt=0;attempt<2;attempt++) {
@@ -191,7 +219,7 @@ export async function extractTaxForm(options: {
     }
     try {
       const table=combineTaxPageGrids(form.pages.map(page=>pageGrids.find(grid=>grid.page===page)!));
-      grid=validate(JSON.stringify({companyName:index.companyName,period:index.period,tables:[{...table,formKey:form.key,formCode:form.formCode,formName:form.formName,pages:form.pages,...(warnings.length?{warnings}: {})}]}));
+      grid=validate(JSON.stringify({companyName,period,tables:[{...table,formKey:form.key,formCode:form.formCode,formName:form.formName,pages:form.pages,...(warnings.length?{warnings}: {})}]}));
     } catch(error) {
       const message=await diagnosticError(attempt??await diagnostic(source,pageSource),error);
       throw new Error(`${message} 逐页原始响应与错误详情已保存，请复核页面结构。`);
@@ -199,9 +227,9 @@ export async function extractTaxForm(options: {
   }
   // The bounded loop either obtains a complete grid or throws its error.
   if(!grid) throw new Error("未获得有效税表网格。");
-  const result:TaxExportTable={...grid.tables[0],documentId,companyName:index.companyName,period:index.period||grid.period,sourceFile:index.fileName,extractionKey};
+  const result:TaxExportTable={...grid.tables[0],documentId,companyName,period:period||grid.period,sourceFile:index.fileName,extractionKey,...(form.instanceId?{instanceId:form.instanceId}:{})};
   const state=options.getState();
-  await options.save({...state,tables:[...state.tables.filter(t=>!(t.documentId===documentId&&t.formKey===form.key)),result]});
+  await options.save({...state,tables:[...state.tables.filter(t=>!(t.documentId===documentId&&(t.instanceId??t.formKey)===identity)),result]});
   return result;
 }
 

@@ -11,7 +11,7 @@ export type TaxPage = TaxPageInput & {
   confidence: "high" | "low";
   reason?: string;
 };
-export type TaxForm = { key: string; formCode: string; formName: string; taxType: TaxType; pages: number[] };
+export type TaxForm = { key: string; formCode: string; formName: string; taxType: TaxType; pages: number[]; instanceId?: string; companyName?: string; period?: string };
 export type TaxDocumentIndex = { fileName: string; companyName: string; period: string; taxType: TaxType; pages: TaxPage[]; forms: TaxForm[] };
 export type TaxGridMerge = { firstRow: number; lastRow: number; firstCol: number; lastCol: number };
 export type TaxGridSection = { page:number; tableIndex:number; rows:(string|number|null)[][]; merges:TaxGridMerge[]; notes?:string[] };

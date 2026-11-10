@@ -66,37 +66,37 @@ pub fn test_ocr_connection(
         return Err(error("OCR_TEST_IMAGE_INVALID", "OCR 测试图片无效。", None));
     }
     let start = std::time::Instant::now();
+    // AudiPick's read-only inheritance always tests the current saved toolbox
+    // settings. The toolbox settings page itself may test unsaved fields.
+    let use_saved_ocr = ocr_config.and_then(|value|value["source"].as_str()) == Some("inherit");
     if use_global_llm {
         settings["audipickLlm"] = json!({"mode": "inherit"});
+        settings["audipickOcr"] = json!({"mode": "inherit"});
     }
-    // Only accept non-secret OCR fields from the unsaved form.
-    if let Some(draft) = ocr_config {
+    let source = if use_global_llm { "inherit" } else { ocr_config.and_then(|v|v["source"].as_str()).unwrap_or("legacy") };
+    if !settings["audipickOcr"].is_object() { settings["audipickOcr"] = json!({}); }
+    settings["audipickOcr"]["mode"] = json!(source);
+    let ocr_key = if source == "dedicated" { "audipickOcr" } else { "ocr" };
+    if !settings[ocr_key].is_object() { settings[ocr_key] = json!({}); }
+    // Only accept non-secret OCR fields and draft model fields from this test
+    // request. Credentials are passed separately and never written to settings.
+    if let Some(draft) = ocr_config.filter(|_|!use_saved_ocr) {
         for name in ["bailian_base_url", "bailian_model"] {
             if let Some(value) = draft.get(name).and_then(Value::as_str) {
-                if !settings["ocr"].is_object() { settings["ocr"] = json!({}); }
-                settings["ocr"][name] = json!(value);
+                settings[ocr_key][name] = json!(value);
             }
         }
+        if source == "dedicated" {
+            if let Some(profile) = draft.get("profile").filter(|value|value.is_object()) { settings["audipickOcrLlm"] = profile.clone(); }
+        }
     }
-    if !settings["ocr"].is_object() { settings["ocr"] = json!({}); }
-    settings["ocr"]["engine"] = json!(engine);
-    let value = if engine == "baidu" {
-        let ak = api_key
-            .filter(|v| !v.trim().is_empty())
-            .map(str::to_owned)
-            .or_else(|| secret("baidu_ocr_key"))
-            .ok_or_else(|| error("OCR_KEY_MISSING", "请填写百度 API Key。", None))?;
-        let sk = secret_key
-            .filter(|v| !v.trim().is_empty())
-            .map(str::to_owned)
-            .or_else(|| secret("baidu_ocr_secret"))
-            .ok_or_else(|| error("OCR_KEY_MISSING", "请填写百度 Secret Key。", None))?;
-        baidu_ocr_with_keys(image, &ak, &sk)
-    } else if engine == "bailian" {
-        bailian_ocr(image, &settings, api_key)
-    } else {
+    if !use_saved_ocr { settings[ocr_key]["engine"] = json!(engine); }
+    let result = if use_saved_ocr {
         ocr(&json!({"imageBase64": image}), &settings)
-    }
+    } else {
+        ocr_with_test_keys(&json!({"imageBase64": image}), &settings, api_key, secret_key)
+    };
+    let value = result
     .map_err(|mut failure| {
         // Test credentials and access tokens must never appear in diagnostics.
         failure.detail = None;
@@ -606,7 +606,10 @@ fn require_audipick_llm(settings: &Value) -> Result<Value, AppError> {
 
 fn config_status(settings: &Value) -> Result<Value, AppError> {
     let llm = audipick_llm_config(settings);
-    let ocr = settings.get("ocr").cloned().unwrap_or(json!({}));
+    let ocr_source = effective_audipick_ocr_source(settings);
+    let ocr = audipick_ocr_config(settings, ocr_source);
+    let mut ocr_runtime = settings.clone();
+    ocr_runtime["ocr"] = ocr.clone();
     let api_type = llm
         .get("api_type")
         .and_then(Value::as_str)
@@ -622,23 +625,46 @@ fn config_status(settings: &Value) -> Result<Value, AppError> {
                 .as_str()
                 .is_some_and(|model| !model.trim().is_empty()));
     let ocr_engine = ocr.get("engine").and_then(Value::as_str).unwrap_or("ai");
+    let ocr_llm = audipick_ocr_llm_config(settings, ocr_source);
+    let ocr_llm_type = ocr_llm.get("api_type").and_then(Value::as_str).unwrap_or("openai");
+    let ocr_llm_source = ocr_llm.get("__source").and_then(Value::as_str).unwrap_or("toolbox");
+    let ocr_llm_secret = ocr_llm.get("__credentialName").and_then(Value::as_str).and_then(secret);
+    let ocr_llm_ready = ocr_llm["enabled"].as_bool().unwrap_or(false)
+        && ocr_llm_secret.is_some()
+        && ocr_llm["base_url"].as_str().is_some_and(|url|url.starts_with("http://")||url.starts_with("https://"))
+        && (ocr_llm_type == "dify_chat" || ocr_llm["model"].as_str().is_some_and(|model|!model.trim().is_empty()));
+    let (baidu_key, baidu_secret, bailian_key) = if ocr_source == "dedicated" {
+        ("audipick_ocr_baidu_key", "audipick_ocr_baidu_secret", "audipick_ocr_bailian_key")
+    } else { ("baidu_ocr_key", "baidu_ocr_secret", "bailian_ocr_key") };
     let ocr_ready = match ocr_engine {
-        "ai" => llm_ready && api_type != "dify_chat",
-        "baidu" => secret("baidu_ocr_key").is_some() && secret("baidu_ocr_secret").is_some(),
+        "ai" => ocr_llm_ready && ocr_llm_type != "dify_chat",
+        "baidu" => secret(baidu_key).is_some() && secret(baidu_secret).is_some(),
         "local" => local_ocr_ready(),
-        "bailian" => crate::bailian_ocr::OcrConfig::from_settings(settings).is_ok()
-            && secret("bailian_ocr_key").is_some(),
+        "bailian" => crate::bailian_ocr::OcrConfig::from_settings(&ocr_runtime).is_ok()
+            && secret(bailian_key).is_some(),
         _ => false,
+    };
+    let effective_ocr_model = match ocr_engine {
+        "ai" => ocr_llm.get("model").cloned().unwrap_or(Value::Null),
+        "bailian" => json!(ocr.get("bailian_model").and_then(Value::as_str).map(str::trim)
+            .filter(|model|!model.is_empty()).unwrap_or(crate::bailian_ocr::DEFAULT_MODEL)),
+        _ => Value::Null,
     };
     Ok(json!({
         "llm": {"ready": llm_ready, "source": llm["__source"],
                 "apiType": api_type, "model": llm.get("model").cloned().unwrap_or(Value::Null)},
-        "ocr": {"ready": ocr_ready, "engine": ocr_engine},
+        "ocr": {"ready": ocr_ready, "engine": ocr_engine, "source": ocr_source,
+            "llmSource": ocr_llm_source, "effectiveModel": effective_ocr_model},
         "credentials": {"baiduApiKey": secret("baidu_ocr_key").is_some(),
             "bailianOcrKey": secret("bailian_ocr_key").is_some(),
             "baiduSecretKey": secret("baidu_ocr_secret").is_some(), "llmApiKey": llm_secret.is_some(),
             "audipickOpenaiKey": secret("audipick_llm_api_key").is_some(),
-            "audipickDifyKey": secret("audipick_dify_api_key").is_some()}
+            "audipickDifyKey": secret("audipick_dify_api_key").is_some(),
+            "audipickOcrOpenaiKey": secret("audipick_ocr_llm_api_key").is_some(),
+            "audipickOcrDifyKey": secret("audipick_ocr_dify_api_key").is_some(),
+            "audipickOcrBaiduApiKey": secret("audipick_ocr_baidu_key").is_some(),
+            "audipickOcrBaiduSecretKey": secret("audipick_ocr_baidu_secret").is_some(),
+            "audipickOcrBailianKey": secret("audipick_ocr_bailian_key").is_some()}
     }))
 }
 
@@ -646,6 +672,7 @@ fn config_status(settings: &Value) -> Result<Value, AppError> {
 pub(crate) fn toolbox_ocr_status(settings: &Value) -> Result<Value, AppError> {
     let mut global = settings.clone();
     global["audipickLlm"] = json!({"mode":"inherit"});
+    global["audipickOcr"] = json!({"mode":"inherit"});
     let mut status = config_status(&global)?;
     status["llm"]["visionReady"] = json!(status["llm"]["ready"] == true && status["llm"]["apiType"] != "dify_chat");
     Ok(status)
@@ -654,6 +681,7 @@ pub(crate) fn toolbox_ocr_status(settings: &Value) -> Result<Value, AppError> {
 pub(crate) fn toolbox_ocr_page(params: &Value, settings: &Value) -> Result<Value, AppError> {
     let mut global = settings.clone();
     global["audipickLlm"] = json!({"mode":"inherit"});
+    global["audipickOcr"] = json!({"mode":"inherit"});
     // Truncated text must not be saved as a completed page.
     global["llm"]["__rejectTruncated"] = json!(true);
     let engine = settings.pointer("/ocr/engine").and_then(Value::as_str).unwrap_or("ai");
@@ -686,6 +714,7 @@ fn structured_ocr_result(raw: &str, engine: &str) -> Value {
 pub(crate) fn toolbox_llm_request(prompt: &str, text: &str, image: Option<&str>, settings: &Value) -> Result<String, AppError> {
     let mut global = settings.clone();
     global["audipickLlm"] = json!({"mode":"inherit"});
+    global["audipickOcr"] = json!({"mode":"inherit"});
     global["llm"]["__rejectTruncated"] = json!(true);
     let llm = audipick_llm_config(&global);
     if !llm["enabled"].as_bool().unwrap_or(false) {
@@ -2799,6 +2828,78 @@ fn kanzhang_mapping_prompt() -> String {
 }
 
 fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
+    ocr_with_keys(params, settings, None, None)
+}
+
+fn effective_audipick_ocr_source(settings: &Value) -> &'static str {
+    match settings.pointer("/audipickOcr/mode").and_then(Value::as_str) {
+        Some("inherit") => "inherit",
+        Some("dedicated") => "dedicated",
+        Some("legacy") => "legacy",
+        // Settings written before OCR and extraction sources were split must
+        // keep their historical coupling to the selected AudiPick LLM.
+        _ if settings.pointer("/audipickLlm/mode").and_then(Value::as_str) == Some("dedicated") => "legacy",
+        _ => "inherit",
+    }
+}
+
+fn audipick_ocr_config(settings: &Value, source: &str) -> Value {
+    if source == "dedicated" {
+        settings.get("audipickOcr").cloned().filter(Value::is_object).unwrap_or(json!({"engine":"ai"}))
+    } else {
+        settings.get("ocr").cloned().filter(Value::is_object).unwrap_or(json!({"engine":"ai"}))
+    }
+}
+
+fn audipick_ocr_llm_config(settings: &Value, source: &str) -> Value {
+    if source != "dedicated" {
+        let mut selected = settings.clone();
+        if source == "inherit" { selected["audipickLlm"] = json!({"mode":"inherit"}); }
+        return audipick_llm_config(&selected);
+    }
+    let mut llm = settings.get("audipickOcrLlm").filter(|value|value.is_object()).cloned().unwrap_or(json!({}));
+    let dify = llm["api_type"] == "dify_chat";
+    llm["__credentialName"] = json!(if dify {"audipick_ocr_dify_api_key"} else {"audipick_ocr_llm_api_key"});
+    llm["__source"] = json!("dedicated_ocr");
+    llm
+}
+
+fn require_audipick_ocr_llm(settings: &Value, source: &str) -> Result<Value, AppError> {
+    let llm = audipick_ocr_llm_config(settings, source);
+    if !llm["enabled"].as_bool().unwrap_or(false) {
+        return Err(error("LLM_DISABLED", if source == "dedicated" {
+            "AudiPick 专用 OCR 视觉模型尚未启用，请在 OCR 配置中启用。"
+        } else if source == "legacy" && llm["__source"] == "dedicated" {
+            "沿用旧版 AudiPick 专用 AI 配置，但该模型尚未启用。"
+        } else {
+            "当前工具箱视觉 LLM 尚未启用，请配置 OCR 来源或工具箱模型。"
+        }, None));
+    }
+    Ok(llm)
+}
+
+fn ocr_with_keys(params: &Value, settings: &Value, draft_api_key: Option<&str>, draft_secret_key: Option<&str>) -> Result<Value, AppError> {
+    ocr_with_keys_inner(params, settings, draft_api_key, draft_secret_key, false)
+}
+
+fn ocr_with_test_keys(params: &Value, settings: &Value, draft_api_key: Option<&str>, draft_secret_key: Option<&str>) -> Result<Value, AppError> {
+    ocr_with_keys_inner(params, settings, draft_api_key, draft_secret_key, true)
+}
+
+fn select_ocr_draft_keys<'a>(
+    source: &str,
+    draft_api_key: Option<&'a str>,
+    draft_secret_key: Option<&'a str>,
+    allow_inherited_test_draft: bool,
+) -> (Option<&'a str>, Option<&'a str>) {
+    if source == "dedicated" || allow_inherited_test_draft {
+        (draft_api_key, draft_secret_key)
+    } else {
+        (None, None)
+    }
+}
+
+fn ocr_with_keys_inner(params: &Value, settings: &Value, draft_api_key: Option<&str>, draft_secret_key: Option<&str>, allow_inherited_test_draft: bool) -> Result<Value, AppError> {
     let image = params
         .get("imageBase64")
         .and_then(Value::as_str)
@@ -2812,19 +2913,30 @@ fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
             None,
         ));
     }
-    let engine = settings
-        .get("ocr")
-        .and_then(|v| v.get("engine"))
+    let source = effective_audipick_ocr_source(settings);
+    let (draft_api_key, draft_secret_key) = select_ocr_draft_keys(source, draft_api_key, draft_secret_key, allow_inherited_test_draft);
+    let config = audipick_ocr_config(settings, source);
+    let engine = config
+        .get("engine")
         .and_then(Value::as_str)
         .unwrap_or("ai");
     if engine == "baidu" {
-        return baidu_ocr(image);
+        let (ak_name, sk_name) = if source == "dedicated" { ("audipick_ocr_baidu_key", "audipick_ocr_baidu_secret") } else { ("baidu_ocr_key", "baidu_ocr_secret") };
+        let ak = draft_api_key.filter(|value|!value.trim().is_empty()).map(str::to_owned).or_else(||secret(ak_name)).ok_or_else(||error("OCR_KEY_MISSING", if source == "dedicated" {"请填写 AudiPick 专用 OCR API Key。"} else {"未找到百度 OCR API Key。"}, None))?;
+        let sk = draft_secret_key.filter(|value|!value.trim().is_empty()).map(str::to_owned).or_else(||secret(sk_name)).ok_or_else(||error("OCR_KEY_MISSING", if source == "dedicated" {"请填写 AudiPick 专用 OCR Secret Key。"} else {"未找到百度 OCR Secret Key。"}, None))?;
+        if params.get("taxTable").and_then(Value::as_bool)==Some(true) {
+            return crate::baidu_table_ocr::recognize(image, &ak, &sk);
+        }
+        return baidu_ocr_with_keys(image, &ak, &sk);
     }
     if engine == "local" {
         return local_ocr(image);
     }
     if engine == "bailian" {
-        return bailian_ocr(params["imageBase64"].as_str().unwrap_or(""), settings, None);
+        let mut effective = settings.clone();
+        effective["ocr"] = config;
+        let key_name = if source == "dedicated" { "audipick_ocr_bailian_key" } else { "bailian_ocr_key" };
+        return bailian_ocr(params["imageBase64"].as_str().unwrap_or(""), &effective, draft_api_key, key_name);
     }
     if engine != "ai" {
         return Err(error(
@@ -2833,27 +2945,27 @@ fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
             None,
         ));
     }
-    let llm = require_audipick_llm(settings)?;
+    let llm = require_audipick_ocr_llm(settings, source)?;
     if llm["api_type"] == "dify_chat" {
         return Err(error(
             "OCR_MODEL_UNSUPPORTED",
-            "当前 Dify Chat 接口不支持页面图片。请选择支持图片的 OpenAI 兼容模型，或使用百度/本机 OCR。",
+                if source == "dedicated" { "AudiPick 专用 OCR Dify Chat 不支持页面图片，请填写支持视觉的 OpenAI 兼容模型。" } else { "当前 Dify Chat 接口不支持页面图片。请选择支持图片的 OpenAI 兼容模型，或使用百度/本机 OCR。" },
             None,
         ));
     }
     let tax_table = params.get("taxTable").and_then(Value::as_bool).unwrap_or(false);
     let image = params["imageBase64"].as_str().unwrap_or(image);
     let content = if tax_table {
-        request_llm_reply_with_key(&llm, ocr_prompt(true), "", Some(image), None, tax_ocr_output_limit())
+        request_llm_reply_with_key(&llm, ocr_prompt(true), "", Some(image), draft_api_key, tax_ocr_output_limit())
             .map(|reply| reply.content)
             .map_err(|mut failure| {
-                if llm["__source"] == "dedicated" {
-                    failure.user_message = format!("AudiPick 专用模型：{} 未切换到工具箱模型。", failure.user_message);
+                if source == "dedicated" {
+                    failure.user_message = format!("AudiPick 专用 OCR 模型：{} 未切换到其他来源。", failure.user_message);
                 }
                 failure
             })?
     } else {
-        request_llm(&llm, ocr_prompt(false), "", Some(image))?
+        request_llm_with_key(&llm, ocr_prompt(false), "", Some(image), draft_api_key)?
     };
     Ok(json!({"text": content, "engine": "ai"}))
 }
@@ -2872,10 +2984,10 @@ fn tax_ocr_output_limit() -> Option<u64> {
     Some(8_000)
 }
 
-fn bailian_ocr(image: &str, settings: &Value, api_key: Option<&str>) -> Result<Value, AppError> {
+fn bailian_ocr(image: &str, settings: &Value, api_key: Option<&str>, key_name: &str) -> Result<Value, AppError> {
     let config = crate::bailian_ocr::OcrConfig::from_settings(settings)?;
     let key = api_key.filter(|v| !v.trim().is_empty()).map(str::to_owned)
-        .or_else(|| secret("bailian_ocr_key"))
+        .or_else(|| secret(key_name))
         .ok_or_else(|| error("OCR_KEY_MISSING", "请填写百炼 OCR API Key。", None))?;
     config.recognize_structured(image, &key)
 }
@@ -3615,6 +3727,98 @@ mod tests {
                 .code,
             "OCR_MODEL_UNSUPPORTED"
         );
+    }
+
+    #[test]
+    fn inherited_audipick_ocr_uses_global_vision_model_even_when_extraction_is_dedicated() {
+        let settings = json!({
+            "llm":{"enabled":false,"api_type":"openai"},
+            "audipickLlm":{"mode":"dedicated","enabled":true,"api_type":"dify_chat"},
+            "ocr":{"engine":"ai"},
+            "audipickOcr":{"mode":"inherit"}
+        });
+        let failure = ocr(&json!({"imageBase64":"synthetic"}), &settings).unwrap_err();
+        assert_eq!(failure.code, "LLM_DISABLED");
+    }
+
+    #[test]
+    fn ocr_status_reports_the_selected_bailian_model_instead_of_the_extraction_model() {
+        let status = config_status(&json!({
+            "llm":{"enabled":false,"model":"contract-model"},
+            "audipickOcr":{"mode":"inherit"},
+            "ocr":{"engine":"bailian","bailian_model":"specific-ocr"}
+        })).unwrap();
+        assert_eq!(status["ocr"]["effectiveModel"],"specific-ocr");
+    }
+
+    #[test]
+    fn explicit_inherited_ocr_test_reads_current_toolbox_engine_without_draft_overrides() {
+        let failure = test_ocr_connection(
+            json!({"llm":{"enabled":false},"ocr":{"engine":"ai"}}),
+            "bailian", "synthetic", Some("private-draft"), None,
+            Some(&json!({"source":"inherit","bailian_base_url":"invalid-private-url"})), true,
+        ).unwrap_err();
+        assert_eq!(failure.code,"LLM_DISABLED");
+    }
+
+    #[test]
+    fn global_ocr_connection_test_accepts_only_its_transient_draft_credentials() {
+        assert_eq!(
+            select_ocr_draft_keys("inherit", Some("global-draft"), Some("secret-draft"), true),
+            (Some("global-draft"), Some("secret-draft"))
+        );
+        assert_eq!(
+            select_ocr_draft_keys("inherit", Some("private-draft"), Some("private-secret"), false),
+            (None, None)
+        );
+        assert_eq!(
+            select_ocr_draft_keys("legacy", Some("legacy-draft"), None, true),
+            (Some("legacy-draft"), None)
+        );
+        assert_eq!(
+            select_ocr_draft_keys("legacy", Some("legacy-draft"), None, false),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn old_unmarked_dedicated_profile_keeps_legacy_ai_ocr_source() {
+        let settings = json!({
+            "llm":{"enabled":false,"api_type":"openai"},
+            "audipickLlm":{"mode":"dedicated","enabled":true,"api_type":"dify_chat"},
+            "ocr":{"engine":"ai"}
+        });
+        let failure = ocr(&json!({"imageBase64":"synthetic"}), &settings).unwrap_err();
+        // The explicit unsupported-Dify error proves the old dedicated
+        // extraction profile remains selected; inherited global is disabled.
+        assert_eq!(failure.code, "OCR_MODEL_UNSUPPORTED");
+    }
+
+    #[test]
+    fn dedicated_audipick_ocr_uses_its_own_vision_profile_not_extraction_profile() {
+        let settings = json!({
+            "llm":{"enabled":false,"api_type":"openai"},
+            "audipickLlm":{"mode":"dedicated","enabled":true,"api_type":"dify_chat"},
+            "ocr":{"engine":"ai"},
+            "audipickOcr":{"mode":"dedicated","engine":"ai"},
+            "audipickOcrLlm":{"mode":"dedicated","enabled":false,"api_type":"openai"}
+        });
+        let failure = ocr(&json!({"imageBase64":"synthetic"}), &settings).unwrap_err();
+        assert_eq!(failure.code, "LLM_DISABLED");
+        assert!(failure.user_message.contains("OCR"));
+    }
+
+    #[test]
+    fn global_ocr_ignores_dedicated_audipick_ocr_settings() {
+        let settings = json!({
+            "llm":{"enabled":false,"api_type":"openai"},
+            "audipickLlm":{"mode":"dedicated","enabled":true,"api_type":"dify_chat"},
+            "ocr":{"engine":"ai"},
+            "audipickOcr":{"mode":"dedicated","engine":"ai"},
+            "audipickOcrLlm":{"mode":"dedicated","enabled":true,"api_type":"dify_chat"}
+        });
+        let failure = toolbox_ocr_page(&json!({"imageBase64":"synthetic"}), &settings).unwrap_err();
+        assert_eq!(failure.code, "LLM_DISABLED");
     }
 
     #[test]

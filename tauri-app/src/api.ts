@@ -391,7 +391,7 @@ export const audipickLlmTest = (profile: Record<string, unknown>, apiKey?: strin
   inTauri()
     ? invoke<{ message: string; elapsedMs: number }>("audipick_llm_test", { profile, apiKey: apiKey?.trim() || null })
     : Promise.reject(previewUnavailable("测试 AudiPick AI 连接"));
-export const audipickOcrTest = (engine: string, imageBase64: string, apiKey?: string, secretKey?: string, ocrConfig?: { bailian_base_url: string; bailian_model: string }, useGlobalLlm?: boolean) =>
+export const audipickOcrTest = (engine: string, imageBase64: string, apiKey?: string, secretKey?: string, ocrConfig?: { source?: "inherit" | "dedicated" | "legacy"; bailian_base_url?: string; bailian_model?: string; profile?: Record<string, unknown> }, useGlobalLlm?: boolean) =>
   inTauri()
     ? invoke<{ message: string; elapsedMs: number }>("audipick_ocr_test", {
         engine, imageBase64, apiKey: apiKey?.trim() || null, secretKey: secretKey?.trim() || null,

@@ -1,5 +1,5 @@
 import { assessPdfTextLayer, pdfTextFromItems } from "./audipickPdfPreparation";
-import { buildTaxPageIndex, buildTaxExtractionPrompt, parseTaxPageSelection, validateTaxGridResponse, type TaxDocumentIndex, type TaxForm, type TaxGridTable } from "./audipickTax";
+import { buildTaxPageIndex, buildTaxExtractionPrompt, parseTaxPageSelection, validateTaxGridResponse, type TaxDocumentIndex, type TaxForm, type TaxGridTable, type TaxPageInput } from "./audipickTax";
 import { hasLegacyTaxPageLayout } from "./audipickTaxLayout";
 import { combineTaxPageGrids, parseTaxHtmlTables, type TaxPageGrid } from "./audipickTaxTable";
 import { isTaxReviewCurrent, validateTaxReviewGroupsStructure, type TaxReviewGroup } from "./audipickTaxReview";
@@ -36,36 +36,56 @@ export function taxOcrHasTableStructure(text:string):boolean {
 /** Preflight never reads a full scanned page: the caller crops only the heading. */
 export async function inspectTaxDocument(options: {
   pdf: any; fileName: string; cached?: TaxDocumentIndex;
-  recognizeHeader: (page: any, number: number) => Promise<string>;
+  recognizeHeader: (page: any, number: number, rotation?:TaxPageInput["rotation"]) => Promise<string>;
   onPage: (index: TaxDocumentIndex) => Promise<void>;
   checkpoint?: () => Promise<void>;
 }): Promise<TaxDocumentIndex> {
-  const pages: {page:number;text:string;source:"text"|"header_ocr"}[] = [];
+  const pages: TaxPageInput[] = [];
+  function restoreMetadata(index:TaxDocumentIndex) {
+    if(options.cached?.companyName) index.companyName=options.cached.companyName;
+    if(options.cached?.period) index.period=options.cached.period;
+    const override=options.cached?.taxTypeOverride;
+    if(override) {index.taxType=override;index.taxTypeOverride=override;}
+    else if(index.taxType==="unknown"&&options.cached?.taxType&&options.cached.taxType!=="unknown") index.taxType=options.cached.taxType;
+    return index;
+  }
   for (let number=1; number<=options.pdf.numPages; number++) {
     await options.checkpoint?.();
     const cached=options.cached?.pages.find(p=>p.page===number);
     const reusable=cached&&(cached.source==="text" ? assessPdfTextLayer(cached.text).usable : Boolean(cached.text.trim())&&cached.kind!=="unknown");
-    if (reusable) { pages.push({page:number,text:cached.text,source:cached.source}); continue; }
+    if (reusable) { pages.push({page:number,text:cached.text,source:cached.source,rotation:cached.rotation}); continue; }
     const page=await options.pdf.getPage(number);
     try {
       const content=await page.getTextContent();
       let text=pdfTextFromItems(content.items);
       const source=assessPdfTextLayer(text).usable ? "text" : "header_ocr";
-      if (source==="header_ocr") text=await options.recognizeHeader(page,number);
-      pages.push({page:number,text,source});
-      const index=buildTaxPageIndex(pages,options.fileName);
+      let rotation=cached?.rotation;
+      if (source==="header_ocr") {
+        text=await options.recognizeHeader(page,number,rotation);
+        // A sideways heading lies outside the original top band. Retry only
+        // unclassified pages, stopping as soon as the heading is recognized.
+        if(buildTaxPageIndex([{page:number,text,source}],options.fileName).pages[0].kind==="unknown") {
+          for(const direction of [90,270,180] as const) {
+            const candidate=(((cached?.rotation??0)+direction)%360) as NonNullable<TaxPageInput["rotation"]>;
+            await options.checkpoint?.();
+            const rotated=await options.recognizeHeader(page,number,candidate);
+            if(buildTaxPageIndex([{page:number,text:rotated,source}],options.fileName).pages[0].kind!=="unknown") {
+              text=rotated;rotation=candidate;break;
+            }
+          }
+        }
+      }
+      pages.push({page:number,text,source,rotation});
+      // A failed later page must not erase saved directions or unprocessed
+      // directory entries from the persisted checkpoint.
+      const remaining=(options.cached?.pages??[]).filter(item=>item.page>number&&item.page<=options.pdf.numPages)
+        .map(({page,text,source,rotation})=>({page,text,source,rotation}));
+      const index=restoreMetadata(buildTaxPageIndex([...pages,...remaining],options.fileName));
       // User-corrected metadata survives preflight retries.
-      if (options.cached?.companyName) index.companyName=options.cached.companyName;
-      if (options.cached?.period) index.period=options.cached.period;
-      if (options.cached?.taxType&&options.cached.taxType!=="unknown") index.taxType=options.cached.taxType;
       await options.onPage(index);
     } finally { page.cleanup?.(); }
   }
-  const index=buildTaxPageIndex(pages,options.fileName);
-  if (options.cached?.companyName) index.companyName=options.cached.companyName;
-  if (options.cached?.period) index.period=options.cached.period;
-  if (options.cached?.taxType&&options.cached.taxType!=="unknown") index.taxType=options.cached.taxType;
-  return index;
+  return restoreMetadata(buildTaxPageIndex(pages,options.fileName));
 }
 
 export function taxFormIdentity(form: TaxForm): string {
@@ -73,7 +93,8 @@ export function taxFormIdentity(form: TaxForm): string {
 }
 
 export function taxExtractionKey(index: TaxDocumentIndex, form: TaxForm): string {
-  return JSON.stringify({companyName:form.companyName??index.companyName,period:form.period??index.period,form});
+  const rotations=form.pages.map(number=>[number,index.pages.find(page=>page.page===number)?.rotation??0]);
+  return JSON.stringify({companyName:form.companyName??index.companyName,period:form.period??index.period,form,...(rotations.some(([,rotation])=>rotation!==0)?{rotations}:{})});
 }
 
 export function resolveTaxForms(index: TaxDocumentIndex, keys: string[], overrides: Record<string,string> = {}, catalogue: TaxForm[] = [], reviews: TaxReviewGroup[] = []): TaxForm[] {

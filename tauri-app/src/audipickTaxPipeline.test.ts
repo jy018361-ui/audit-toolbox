@@ -1,12 +1,36 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { inspectTaxDocument, extractTaxForm, resolveTaxForms, taxExtractionKey, taxFormIdentity, taxOcrHasTableStructure, TAX_PAGE_READER_VERSION, type AudiPickTaxWorkflowState } from "./audipickTaxPipeline";
-import type { TaxDocumentIndex } from "./audipickTax";
+import { buildTaxPageIndex, type TaxDocumentIndex } from "./audipickTax";
 import { stampTaxReviewGroup } from "./audipickTaxReview";
 
 const index = (): TaxDocumentIndex => ({ fileName: "甲公司.pdf", companyName: "甲公司", period: "2025年度", taxType: "corporate_income", pages: Array.from({length: 10}, (_, i) => ({page: i+1,text:"",source:"text",kind:"unknown",taxType:"unknown",confidence:"low"})), forms: [{key:"A105000",formCode:"A105000",formName:"纳税调整项目明细表",taxType:"corporate_income",pages:[7,8]}, {key:"A106000",formCode:"A106000",formName:"企业所得税弥补亏损明细表",taxType:"corporate_income",pages:[9]}] });
 const state = (): AudiPickTaxWorkflowState => ({indexes:{doc:index()},tables:[],pageTexts:{}});
 describe("纳税表按表单选择工作流", () => {
+  it("预检中断时保留尚未处理页的已有目录和人工方向", async () => {
+    const cached=buildTaxPageIndex([{page:1,text:"",source:"header_ocr"},{page:2,text:"",source:"header_ocr",rotation:270}],"旋转扫描.pdf");
+    const onPage=vi.fn(async(_value:TaxDocumentIndex)=>{});
+    const recognize=vi.fn().mockResolvedValueOnce("增值税纳税申报表（一般纳税人适用）").mockRejectedValueOnce(new Error("识别中断"));
+    const pdf={numPages:2,getPage:async()=>({getTextContent:async()=>({items:[]}),cleanup:vi.fn()})};
+    await expect(inspectTaxDocument({pdf,fileName:cached.fileName,cached,recognizeHeader:recognize,onPage})).rejects.toThrow("识别中断");
+    expect(onPage.mock.calls.at(-1)![0].pages).toEqual(expect.arrayContaining([expect.objectContaining({page:2,rotation:270})]));
+  });
+  it("重预检保留人工方向和元数据，但旧单税种缓存不掩盖新的混税识别", async () => {
+    const cached=buildTaxPageIndex([{page:1,text:"增值税纳税申报表（一般纳税人适用）",source:"header_ocr",rotation:90},{page:2,text:"A105000 纳税调整项目明细表",source:"header_ocr"}],"混税.pdf");
+    cached.companyName="人工完整公司名称";cached.period="人工所属期";cached.taxType="vat";
+    const pdf={numPages:2,getPage:vi.fn()};
+    const result=await inspectTaxDocument({pdf,fileName:cached.fileName,cached,recognizeHeader:vi.fn(),onPage:vi.fn()});
+    expect(result).toMatchObject({taxType:"mixed",companyName:"人工完整公司名称",period:"人工所属期"});
+    expect(result.pages[0].rotation).toBe(90);expect(pdf.getPage).not.toHaveBeenCalled();
+    const overridden=await inspectTaxDocument({pdf,fileName:cached.fileName,cached:{...cached,taxTypeOverride:"vat"},recognizeHeader:vi.fn(),onPage:vi.fn()});
+    expect(overridden).toMatchObject({taxType:"vat",taxTypeOverride:"vat"});
+  });
+  it("旋转只改变所选受影响页的提取缓存身份", () => {
+    const value=index(),form=value.forms[0];
+    const changed={...value,pages:value.pages.map(page=>page.page===7?{...page,rotation:90 as const}:page)};
+    expect(taxExtractionKey(changed,form)).not.toBe(taxExtractionKey(value,form));
+    expect(taxExtractionKey(changed,value.forms[1])).toBe(taxExtractionKey(value,value.forms[1]));
+  });
   it("预检只在缺少文字层时调用标题识别，不提前完整 OCR", async () => {
     const header = vi.fn(async (_page:unknown, _number:number) => "A105000 纳税调整项目明细表");
     const pdf = {numPages:2,getPage:vi.fn(async (page:number)=>({getTextContent:async()=>({items:page===1 ? [{str:"纳税人名称：甲公司 企业所得税年度纳税申报表 A100000 "+"内容".repeat(60)}] : []}),cleanup:vi.fn()}))};

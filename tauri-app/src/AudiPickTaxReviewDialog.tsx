@@ -13,6 +13,7 @@ type Props = {
   preview: (page: number) => ReactNode;
   onSave: (group: TaxReviewGroup, next: boolean) => Promise<void>;
   onRecognize: (page: number) => Promise<void>;
+  onRotate: (page: number, delta: number) => Promise<void>;
   onClose: () => void;
 };
 
@@ -47,7 +48,7 @@ export function AudiPickTaxReviewDialog(props: Props) {
   }}>
     <header><strong>税表人工复核 · {props.index.fileName}</strong><button disabled={props.busy} onClick={props.onClose}>取消</button></header>
     <div className="tax-review-columns">
-      <section className="tax-review-original" aria-label="原页核对"><div className="tax-actions"><button disabled={props.busy || page <= 1} onClick={() => setPage(page - 1)}>上一页</button><span>PDF 第 {page} 页 / 共 {props.index.pages.length} 页</span><button disabled={props.busy || page >= props.index.pages.length} onClick={() => setPage(page + 1)}>下一页</button><button disabled={props.busy} onClick={() => void props.onRecognize(page)}>重新识别此页</button></div>{props.preview(page)}</section>
+      <section className="tax-review-original" aria-label="原页核对"><div className="tax-actions"><button disabled={props.busy || page <= 1} onClick={() => setPage(page - 1)}>上一页</button><span>PDF 第 {page} 页 / 共 {props.index.pages.length} 页</span><button disabled={props.busy || page >= props.index.pages.length} onClick={() => setPage(page + 1)}>下一页</button><button disabled={props.busy} onClick={() => void props.onRotate(page,-90)}>向左旋转</button><span>方向：{props.index.pages.find(item=>item.page===page)?.rotation??0}°</span><button disabled={props.busy} onClick={() => void props.onRotate(page,90)}>向右旋转</button><button disabled={props.busy} onClick={() => void props.onRecognize(page)}>重新识别此页</button></div>{props.preview(page)}</section>
       <section className="tax-review-fields" aria-label="复核设置">
         <p>把本表首页和续页选在同一组；不同所属期的同名表，请分别确认。保存后可再次修改。</p>
         <label><input type="checkbox" checked={draft.status === "excluded"} disabled={props.busy} onChange={event => setDraft({ ...draft, status: event.target.checked ? "excluded" : "confirmed" })}/>无需提取</label>

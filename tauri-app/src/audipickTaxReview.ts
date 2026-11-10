@@ -22,8 +22,8 @@ export function isTaxReviewCurrent(index: TaxDocumentIndex, group: TaxReviewGrou
 export function taxReviewFingerprint(index: TaxDocumentIndex): string {
   const directory = JSON.stringify({
     taxType: index.taxType,
-    pages: index.pages.map(({ page, text, source, kind, formKey, formCode, formName, taxType, confidence, reason }) =>
-      [page, text, source, kind, formKey, formCode, formName, taxType, confidence, reason]),
+    pages: index.pages.map(({ page, text, source, kind, formKey, formCode, formName, taxType, confidence, reason, rotation }) =>
+      [page, text, source, kind, formKey, formCode, formName, taxType, confidence, reason,...(rotation?[rotation]:[])]),
     forms: index.forms.map(({ key, formCode, formName, taxType, pages }) => [key, formCode, formName, taxType, pages]),
   });
   // Two independent 32-bit rolling hashes keep repeated synchronous checks cheap.

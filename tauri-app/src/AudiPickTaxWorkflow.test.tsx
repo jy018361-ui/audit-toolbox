@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AudiPickTaxWorkflow } from "./AudiPickTaxWorkflow";
 import type { TaxDocumentIndex } from "./audipickTax";
 import { TAX_PAGE_READER_VERSION } from "./audipickTaxPipeline";
+import { getAudiPickOperations, dismissFinishedAudiPickOperations } from "./audipickOperation";
 
 const mocks=vi.hoisted(()=>({engineCall:vi.fn(),pickPath:vi.fn(),recognize:vi.fn(),extract:vi.fn()}));
 vi.mock("./api",()=>({engineCall:mocks.engineCall,pickPath:mocks.pickPath,jobCancel:vi.fn(async()=>{}),jobPause:vi.fn(async()=>{})}));
@@ -24,8 +25,31 @@ beforeEach(()=>{
   mocks.pickPath.mockResolvedValue("D:/纳税表.xlsx");
   mocks.engineCall.mockResolvedValue({});
 });
-afterEach(()=>{cleanup();vi.restoreAllMocks();});
+afterEach(()=>{cleanup();dismissFinishedAudiPickOperations();vi.restoreAllMocks();});
 describe("税表工作流交互",()=>{
+  it("百度表格V2契约HTML在无文字层扫描件中保留原值、合并、空格和表外说明并直接导出",async()=>{
+    // Contract shared with baidu_table_ocr.rs:
+    // baidu_table_preserves_merged_cells_empty_cells_and_numeric_strings.
+    const html='<p>测试税表 &amp; 金额单位：元</p><table><tr><td rowspan="2">项目</td><td>本期金额</td></tr><tr><td>销售额</td></tr><tr><td>000123</td><td>-12.50</td></tr><tr><td></td><td>*</td></tr><tr><td>13%</td><td>0.00</td></tr></table><p>原页说明<br>续行</p>';
+    const rows=[["项目","本期金额"],[null,"销售额"],["000123","-12.50"],[null,"*"],["13%","0.00"]];
+    const merges=[{firstRow:0,lastRow:1,firstCol:0,lastCol:0}];
+    const notes=["测试税表 & 金额单位：元","原页说明\n续行"];
+    mocks.recognize.mockResolvedValue(html);
+    const save=vi.fn(async()=>{}),instance=pdf();
+    const view=render(<AudiPickTaxWorkflow documents={[{id:"a",name:"甲公司.pdf"}]} initialIndexes={{a:index("甲公司")}} initialSelectedFormKeys={[form.key]} loadPdf={async()=>instance} onSave={save} onClose={vi.fn()}/>);
+    fireEvent.click(screen.getByRole("button",{name:"2. 提取所选表单"}));
+    await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("已完成 1 张表"));
+    expect(instance.getPage).toHaveBeenCalledWith(7);
+    expect(mocks.recognize).toHaveBeenCalledTimes(1);
+    expect(mocks.recognize).toHaveBeenCalledWith(expect.objectContaining({documentId:"a",page:7,taxTable:true}),expect.anything());
+    expect(mocks.extract).not.toHaveBeenCalled();
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({pageTexts:{a:{7:html}},tables:[expect.objectContaining({rows,merges,notes})]}));
+    const previewRows=view.container.querySelectorAll(".tax-grid-scroll tr");
+    expect(Array.from(previewRows[3].querySelectorAll("td")).map(cell=>cell.textContent)).toEqual(["","*"]);
+    expect(previewRows[0].querySelector("td")).toHaveAttribute("rowspan","2");
+    fireEvent.click(screen.getByRole("button",{name:"3. 导出 Excel"}));
+    await waitFor(()=>expect(mocks.engineCall).toHaveBeenCalledWith("audipick.tax_export",expect.objectContaining({tables:[expect.objectContaining({companyName:"甲公司",pages:[7],sourceFile:"甲公司.pdf",rows,merges,notes})]})));
+  });
   it("HTML视觉OCR在PDF定位可用时不追加内部坐标，也不污染原页说明",async()=>{
     const html='<p>金额单位：元</p><table><tr><td>项目</td><td>123.45</td></tr></table><p>原页注释</p>';
     mocks.recognize.mockResolvedValue(html);
@@ -97,11 +121,34 @@ describe("税表工作流交互",()=>{
     expect(mocks.recognize.mock.calls.map(call=>[call[0].documentId,call[0].page,call[0].taxTable])).toEqual([["a",7,true],["b",8,true]]);
     expect(mocks.extract).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("alert")).toHaveTextContent("甲文件服务暂不可用");
+    expect(getAudiPickOperations().at(-1)).toMatchObject({status:"failed",message:expect.stringContaining("甲公司.pdf · 纳税调整项目明细表：甲文件服务暂不可用")});
     fireEvent.click(screen.getByRole("button",{name:"3. 导出 Excel"}));
     await waitFor(()=>expect(mocks.engineCall).toHaveBeenCalledWith("audipick.tax_export",expect.objectContaining({tables:[expect.objectContaining({companyName:"乙公司",pages:[8],sourceFile:"乙公司.pdf"})]})));
-    const pageInput=screen.getByRole("textbox",{name:"乙公司.pdf 纳税调整项目明细表 页码"});
-    fireEvent.change(pageInput,{target:{value:"6"}});
-    expect(screen.getByRole("button",{name:"3. 导出 Excel"})).toBeDisabled();
+    fireEvent.click(screen.getByRole("button",{name:"乙公司.pdf 第 8 页 预览并确认"}));
+    const dialog=within(screen.getByRole("dialog",{name:"税表人工复核"}));
+    fireEvent.change(dialog.getByLabelText("表单类型"),{target:{value:form.key}});
+    fireEvent.change(dialog.getByLabelText("PDF 页码（含续页）"),{target:{value:"6"}});
+    fireEvent.click(dialog.getByRole("button",{name:"确认并保存"}));
+    await waitFor(()=>expect(screen.getByRole("button",{name:"3. 导出 Excel"})).toBeDisabled());
+  });
+  it.each([
+    ["缺少目录", "请先完成目录预检。"],
+    ["税种未知", "税种待确认"],
+    ["没有确认页码", "纳税调整项目明细表：未找到可提取的已确认页码"],
+  ])("后台失败详情包含文件和前置校验原因：%s",async(scenario,reason)=>{
+    const value=index("甲公司");
+    if(scenario==="税种未知") value.taxType="unknown";
+    if(scenario==="没有确认页码") value.forms=[];
+    render(<AudiPickTaxWorkflow documents={[{id:"a",name:"甲公司.pdf"}]} initialIndexes={scenario==="缺少目录"?{}:{a:value}} initialSelectedFormKeys={[form.key]} loadPdf={async()=>pdf()} onSave={async()=>{}} onClose={vi.fn()}/>);
+    fireEvent.click(screen.getByRole("button",{name:"2. 提取所选表单"}));
+    await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("已完成 0 张表，1 项失败"));
+    const operation=getAudiPickOperations().at(-1)!;
+    expect(operation.status).toBe("failed");
+    expect(operation.message).toContain("甲公司.pdf");
+    expect(operation.message).toContain(reason);
+    expect(screen.getByRole("alert")).toHaveTextContent(reason);
+    expect(mocks.recognize).not.toHaveBeenCalled();
+    expect(mocks.extract).not.toHaveBeenCalled();
   });
   it("公司名、页码按文件保存，两个表单页码相互独立",async()=>{
     const save=vi.fn(async()=>{});
@@ -109,9 +156,18 @@ describe("税表工作流交互",()=>{
     fireEvent.click(screen.getByRole("checkbox",{name:/纳税调整项目明细表/}));
     fireEvent.click(screen.getByRole("checkbox",{name:/^企业所得税弥补亏损明细表/}));
     fireEvent.change(screen.getByRole("textbox",{name:"甲公司.pdf 公司名称"}),{target:{value:"甲公司全称"}});
-    fireEvent.change(screen.getByRole("textbox",{name:"甲公司.pdf 纳税调整项目明细表 页码"}),{target:{value:"6-7"}});
-    expect(screen.getByRole("textbox",{name:"甲公司.pdf 企业所得税弥补亏损明细表 页码"})).toHaveValue("9");
-    await waitFor(()=>expect(save).toHaveBeenLastCalledWith(expect.objectContaining({indexes:{a:expect.objectContaining({companyName:"甲公司全称"})},pageOverrides:{a:{A105000:"6-7"}}})));
+    fireEvent.click(screen.getByRole("button",{name:"甲公司.pdf 第 7 页 预览并确认"}));
+    let dialog=within(screen.getByRole("dialog",{name:"税表人工复核"}));
+    fireEvent.change(dialog.getByLabelText("表单类型"),{target:{value:form.key}});
+    fireEvent.change(dialog.getByLabelText("PDF 页码（含续页）"),{target:{value:"6-7"}});
+    fireEvent.click(dialog.getByRole("button",{name:"确认并保存"}));
+    await waitFor(()=>expect(screen.queryByRole("dialog",{name:"税表人工复核"})).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button",{name:"甲公司.pdf 第 9 页 预览并确认"}));
+    dialog=within(screen.getByRole("dialog",{name:"税表人工复核"}));
+    expect(dialog.getByLabelText("PDF 页码（含续页）")).toHaveValue("9");
+    fireEvent.change(dialog.getByLabelText("表单类型"),{target:{value:other.key}});
+    fireEvent.click(dialog.getByRole("button",{name:"确认并保存"}));
+    await waitFor(()=>expect(save).toHaveBeenLastCalledWith(expect.objectContaining({indexes:{a:expect.objectContaining({companyName:"甲公司全称"})},reviews:{a:[expect.objectContaining({formKey:form.key,pages:[6,7],companyName:"甲公司全称"}),expect.objectContaining({formKey:other.key,pages:[9]})]}})));
   });
   it("扫描OCR未提供行列边界时拒绝交给模型猜测网格",async()=>{
     mocks.recognize.mockResolvedValue("行次项目金额一二三四五六七");
@@ -124,7 +180,7 @@ describe("税表工作流交互",()=>{
   it("原页预览无需父级回调，关闭后销毁PDF实例",async()=>{
     const instance=pdf(),loadPdf=vi.fn(async()=>instance);
     render(<AudiPickTaxWorkflow documents={[{id:"a",name:"甲公司.pdf"}]} initialIndexes={{a:index("甲公司")}} initialSelectedFormKeys={[form.key]} loadPdf={loadPdf} onSave={async()=>{}} onClose={vi.fn()}/>);
-    fireEvent.click(screen.getByRole("button",{name:"预览原页"}));
+    fireEvent.click(screen.getByRole("button",{name:"7"}));
     await waitFor(()=>expect(instance.getPage).toHaveBeenCalledWith(7));
     expect(screen.getByRole("dialog",{name:"税表 PDF 原页预览"})).toBeVisible();
     fireEvent.click(screen.getByRole("button",{name:"关闭原页预览"}));
@@ -155,7 +211,11 @@ describe("税表工作流交互",()=>{
     await waitFor(()=>expect(screen.getByRole("alert")).toHaveTextContent("税种待确认"));
     expect(mocks.recognize).not.toHaveBeenCalled();
     fireEvent.change(screen.getByRole("combobox",{name:"甲公司.pdf 税种"}),{target:{value:"corporate_income"}});
-    fireEvent.change(screen.getByRole("textbox",{name:"甲公司.pdf 纳税调整项目明细表 页码"}),{target:{value:"6"}});
+    fireEvent.click(screen.getByRole("button",{name:"甲公司.pdf 第 6 页 预览并确认"}));
+    const dialog=within(screen.getByRole("dialog",{name:"税表人工复核"}));
+    fireEvent.change(dialog.getByLabelText("表单类型"),{target:{value:form.key}});
+    fireEvent.click(dialog.getByRole("button",{name:"确认并保存"}));
+    await waitFor(()=>expect(screen.queryByRole("dialog",{name:"税表人工复核"})).not.toBeInTheDocument());
     fireEvent.click(screen.getByRole("button",{name:"2. 提取所选表单"}));
     await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("已完成 1 张表"));
     expect(mocks.recognize.mock.calls[0][0].page).toBe(6);

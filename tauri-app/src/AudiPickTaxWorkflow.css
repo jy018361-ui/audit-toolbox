@@ -13,3 +13,15 @@
 
 
 .tax-diagnostics pre { max-height: 320px; max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.audipick-tax-workflow .tax-review-dialog{width:1450px;overflow:hidden}
+.audipick-tax-workflow .tax-review-columns{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(320px,1fr);gap:20px;min-height:0;overflow:auto}
+.audipick-tax-workflow .tax-review-original,.audipick-tax-workflow .tax-review-fields{min-width:0;overflow:auto}
+.audipick-tax-workflow .tax-review-fields>label{display:grid;grid-template-columns:100px minmax(0,1fr);margin:12px 0}
+.audipick-tax-workflow .tax-review-fields input:not([type=checkbox]),.audipick-tax-workflow .tax-review-fields select{width:100%;min-width:0;box-sizing:border-box}
+.audipick-tax-workflow .tax-review-pages{max-height:260px;overflow:auto;border:1px solid var(--border);padding:8px;margin:12px 0}
+.audipick-tax-workflow .tax-review-pages>div{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 0}
+.audipick-tax-workflow .tax-review-pages button{flex-shrink:0}
+.audipick-tax-workflow .tax-review-context{display:block;margin-top:4px}
+.audipick-tax-workflow .tax-review-original>.tax-actions{position:sticky;top:0;z-index:1;background:var(--surface);padding:8px 0}
+.audipick-tax-workflow button[aria-pressed=true]{background:var(--surface-muted);font-weight:600}
+@media(max-width:1000px){.audipick-tax-workflow .tax-review-columns{grid-template-columns:1fr}.audipick-tax-workflow .tax-review-original{max-height:40vh}.audipick-tax-workflow .tax-source-backdrop{padding:10px}}

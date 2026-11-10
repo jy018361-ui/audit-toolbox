@@ -7,7 +7,7 @@ describe("tax page index", () => {
   it("offers known forms with empty pages for a fully unrecognized scanned batch", () => {
     const catalogue = taxFormCatalogue();
     expect(catalogue.find((form) => form.key === "A105000")).toMatchObject({ taxType: "corporate_income", pages: [] });
-    expect(catalogue.filter((form) => form.taxType === "vat")).toHaveLength(8);
+    expect(catalogue.filter((form) => form.taxType === "vat").map((form) => form.key)).toEqual(expect.arrayContaining(["vat_main", "vat_main_small", "vat_appendix_1", "vat_appendix_5", "vat_relief", "vat_prepaid", "vat_small_appendix_2", "vat_main_pilot_2026"]));
     expect(catalogue.every((form) => form.pages.length === 0)).toBe(true);
     expect(new Set(catalogue.map((form) => form.key)).size).toBe(catalogue.length);
   });

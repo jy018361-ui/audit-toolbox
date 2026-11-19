@@ -120,7 +120,9 @@ pub(crate) fn open_workbook_auto(path: impl AsRef<Path>)
             .map_err(|e| std::io::Error::other(format!("{}：{}", e.user_message, e.detail.unwrap_or_default())))?;
         calamine::open_workbook_auto(converted)
     } else {
-        calamine::open_workbook_auto(path)
+        let compatible = crate::xlsx_compat::compatible_path(path)
+            .map_err(|e| std::io::Error::other(format!("{}：{}", e.user_message, e.detail.unwrap_or_default())))?;
+        calamine::open_workbook_auto(compatible)
     }
 }
 
@@ -214,7 +216,7 @@ pub(crate) fn prepare_xlsx(path: &Path) -> Result<PreparedWorkbook, AppError> {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("xls"))
     {
         return Ok(PreparedWorkbook {
-            path: path.to_path_buf(),
+            path: crate::xlsx_compat::compatible_path(path)?,
             temporary_dir: None,
         });
     }

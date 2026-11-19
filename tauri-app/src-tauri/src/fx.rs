@@ -1765,6 +1765,7 @@ fn xlsx_sheet_prefix(path: &Path, entry: &str, row_limit: usize) -> Result<Strin
             break;
         }
     }
+    let bytes = crate::xlsx_compat::normalize_header_prefix(bytes)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 

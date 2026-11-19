@@ -180,7 +180,8 @@ fn stream_xlsx(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Option<Preview>, AppError> {
-    let file = File::open(path).map_err(io_error)?;
+    let compatible = crate::xlsx_compat::compatible_path(path)?;
+    let file = File::open(&compatible).map_err(io_error)?;
     let size = file.metadata().map_err(io_error)?.len().max(1);
     let workbook_error = |err: XlsxError| {
         check_cancel(cancel).err().unwrap_or_else(|| {

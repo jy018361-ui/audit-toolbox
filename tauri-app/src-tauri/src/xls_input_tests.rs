@@ -300,3 +300,150 @@ fn xls_inputs_binary_template_conversion_preserves_formulas_and_styles() {
     drop(prepared);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn zero_header_all_data_tools_keep_first_row_and_values() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("SAP.XLSX");
+    let mut book = rust_xlsxwriter::Workbook::new();
+    let sheet = book.add_worksheet();
+    sheet.write_string(0, 0, "编号").unwrap();
+    sheet.write_string(0, 1, "金额").unwrap();
+    sheet.write_string(1, 0, "001").unwrap();
+    sheet.write_number(1, 1, 123.5).unwrap();
+    book.save(&path).unwrap();
+    let good = fs::read(&path).unwrap();
+    let mut source = zip::ZipArchive::new(std::io::Cursor::new(&good)).unwrap();
+    let mut output = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+    for i in 0..source.len() {
+        let mut entry = source.by_index(i).unwrap();
+        if entry.name() == "xl/worksheets/sheet1.xml" {
+            use std::io::{Read, Write};
+            let mut xml = String::new();
+            entry.read_to_string(&mut xml).unwrap();
+            assert!(xml.contains("<row r=\"1\""));
+            output
+                .start_file(entry.name(), zip::write::SimpleFileOptions::default())
+                .unwrap();
+            output
+                .write_all(xml.replacen("<row r=\"1\"", "<row r=\"0\"", 1).as_bytes())
+                .unwrap();
+        } else {
+            output.raw_copy_file(entry).unwrap();
+        }
+    }
+    output.finish().unwrap();
+    let original = fs::read(&path).unwrap();
+    // Exercise the cold TS cell stream before another tool can warm its cache.
+    let cold = tabular::call("ts.inspect", json!({"inputPath":path,"headerRow":1})).unwrap();
+    assert_eq!(cold["cacheHit"], false);
+    assert_eq!(cold["headers"], json!(["编号", "金额"]));
+    assert_eq!(cold["preview"][0], json!(["001", "123.5"]));
+    check_tools(&path);
+    let prepared = crate::spreadsheet_input::prepare_xlsx(&path).unwrap();
+    assert_ne!(prepared.path(), path);
+    assert_eq!(
+        crate::xlsx_compat::compatible_path(&path).unwrap(),
+        prepared.path()
+    );
+    // Cached adapter changes only the row marker. All other parts stay intact.
+    let mut fixed = zip::ZipArchive::new(fs::File::open(prepared.path()).unwrap()).unwrap();
+    for i in 0..source.len() {
+        use std::io::Read;
+        let mut before = source.by_index(i).unwrap();
+        let mut after = fixed.by_name(before.name()).unwrap();
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        before.read_to_end(&mut a).unwrap();
+        after.read_to_end(&mut b).unwrap();
+        assert_eq!(a, b, "{}", before.name());
+    }
+    assert_eq!(original, fs::read(&path).unwrap(), "原件不能被修改");
+    let styled = umya_spreadsheet::reader::xlsx::read(prepared.path()).unwrap();
+    assert_eq!(styled.get_sheet(&0).unwrap().get_value("A1"), "编号");
+    let inspected = crate::excel_merger::call(
+        "excel_merger.match_preview",
+        json!({"inputPaths":[path],"sheetAction":"default"}),
+    )
+    .unwrap();
+    assert!(inspected.to_string().contains("编号"));
+}
+
+#[test]
+#[ignore = "需要 ZERO_HEADER_SOURCE_DIR 指定本机序时账目录"]
+fn zero_header_original_workbooks_probe() {
+    use calamine::Reader;
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    fn digest(path: &Path) -> Vec<u8> {
+        let mut hash = Sha256::new();
+        let mut file = fs::File::open(path).unwrap();
+        let mut buffer = [0u8; 65536];
+        loop {
+            let n = file.read(&mut buffer).unwrap();
+            if n == 0 {
+                break;
+            }
+            hash.update(&buffer[..n]);
+        }
+        hash.finalize().to_vec()
+    }
+    let directory = std::path::PathBuf::from(std::env::var_os("ZERO_HEADER_SOURCE_DIR").unwrap());
+    for (name, expected) in [
+        ("6月智序时账.XLSX", 294734usize),
+        ("7月智序时账.XLSX", 399806usize),
+    ] {
+        let path = directory.join(name);
+        let before = digest(&path);
+        let mut total = 0;
+        let mut header = Vec::new();
+        crate::disk_table::for_each_source_row(
+            &path,
+            Some("Sheet1"),
+            &AtomicBool::new(false),
+            |row, i| {
+                assert_eq!(i, total + 1);
+                if i == 1 {
+                    header = row.clone();
+                }
+                total += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(total, expected);
+        let expected_header = if name.starts_with('6') {
+            "公司代码"
+        } else {
+            "总账科目"
+        };
+        assert_eq!(header[0], expected_header);
+        let compatible = crate::xlsx_compat::compatible_path(&path).unwrap();
+        let mut book = calamine::Xlsx::new(std::io::BufReader::new(
+            fs::File::open(&compatible).unwrap(),
+        ))
+        .unwrap();
+        let mut reader = book.worksheet_cells_reader("Sheet1").unwrap();
+        let mut ordinary = Vec::new();
+        while let Some(cell) = reader.next_cell().unwrap() {
+            let (r, c) = cell.get_position();
+            if r > 0 {
+                break;
+            }
+            ordinary.resize(c as usize + 1, String::new());
+            ordinary[c as usize] = crate::fx::data_text(&cell.get_value().clone().into());
+        }
+        assert_eq!(ordinary, header);
+        let preview = crate::excel_merger::call(
+            "excel_merger.match_preview",
+            json!({"inputPaths":[path],"sheetAction":"default"}),
+        )
+        .unwrap();
+        assert!(preview.to_string().contains(expected_header));
+        assert_eq!(before, digest(&path));
+        println!(
+            "原件验收：{name}，{total} 行，表头 {} 列，普通/流式表头一致，合并预览成功，原件未改动",
+            header.len()
+        );
+    }
+}

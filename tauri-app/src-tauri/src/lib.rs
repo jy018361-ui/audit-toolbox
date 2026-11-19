@@ -49,6 +49,7 @@ mod release_channel;
 mod resource_budget;
 mod roll_forward;
 mod spreadsheet_input;
+mod xlsx_compat;
 mod spreadsheet_xml;
 mod storage;
 mod tabular;

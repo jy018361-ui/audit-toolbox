@@ -138,6 +138,8 @@ fn excel_text(text: &str, preserve: bool) -> String {
     output
 }
 fn physical_row(start: &BytesStart<'_>, next: usize) -> Result<usize, AppError> {
+    // Only the first header may use SAP's zero marker; cells are checked below.
+    if next == 1 && attr(start, b"r")?.as_deref() == Some("0") { return Ok(1); }
     let row = attr(start, b"r")?
         .map(|value| value.parse::<usize>().map_err(io))
         .transpose()?
@@ -150,6 +152,13 @@ fn physical_row(start: &BytesStart<'_>, next: usize) -> Result<usize, AppError> 
         ));
     }
     Ok(row)
+}
+
+fn validate_zero_header_cell(start: &BytesStart<'_>) -> Result<(), AppError> {
+    if !attr(start, b"r")?.is_some_and(|r| crate::xlsx_compat::is_first_row_cell(&r)) {
+        return Err(failure("XLSX_ROW_INVALID", "第 0 行的单元格地址未一致指向第 1 行，请检查文件。", 0));
+    }
+    Ok(())
 }
 
 fn attr(start: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, AppError> {
@@ -519,6 +528,8 @@ pub(super) fn visit_projected(
     let mut phonetic = false;
     let mut in_cell = false;
     let mut retain_cell = true;
+    let mut zero_header = false;
+    let mut header_cells = 0;
     loop {
         token_bytes.set(0);
         match reader
@@ -527,6 +538,8 @@ pub(super) fn visit_projected(
         {
             Event::Start(e) => match e.local_name().as_ref() {
                 b"row" => {
+                    zero_header = next_row == 1 && attr(&e, b"r")?.as_deref() == Some("0");
+                    header_cells = 0;
                     physical = physical_row(&e, next_row)?;
                     while next_row < physical {
                         if next_row % 256 == 0 {
@@ -540,6 +553,10 @@ pub(super) fn visit_projected(
                     next_col = 0;
                 }
                 b"c" => {
+                    if zero_header {
+                        validate_zero_header_cell(&e)?;
+                        header_cells += 1;
+                    }
                     in_cell = true;
                     raw.clear();
                     col = attr(&e, b"r")?
@@ -648,6 +665,9 @@ pub(super) fn visit_projected(
                     in_cell = false;
                 }
                 b"row" => {
+                    if zero_header && header_cells == 0 {
+                        return Err(failure("XLSX_ROW_INVALID", "第 0 行没有明确的单元格地址，请检查文件。", physical));
+                    }
                     if physical % 256 == 0 { check(cancel)?; }
                     emit(std::mem::take(&mut row), physical)?;
                     next_row = physical + 1;
@@ -655,6 +675,9 @@ pub(super) fn visit_projected(
                 _ => {}
             },
             Event::Empty(e) if e.local_name().as_ref() == b"row" => {
+                if attr(&e, b"r")?.as_deref() == Some("0") {
+                    return Err(failure("XLSX_ROW_INVALID", "第 0 行没有明确的单元格地址，请检查文件。", 0));
+                }
                 let physical = physical_row(&e, next_row)?;
                 while next_row <= physical {
                     if next_row % 256 == 0 {
@@ -665,6 +688,10 @@ pub(super) fn visit_projected(
                 }
             }
             Event::Empty(e) if e.local_name().as_ref() == b"c" => {
+                if zero_header {
+                    validate_zero_header_cell(&e)?;
+                    header_cells += 1;
+                }
                 let c = attr(&e, b"r")?
                     .as_deref()
                     .and_then(column)

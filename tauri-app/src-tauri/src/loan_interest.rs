@@ -1235,7 +1235,7 @@ fn import_rates(params: &Value) -> Result<Value, AppError> {
         .ok_or_else(|| error("INVALID_PARAMS", "请先选择已填写的利率确认表。", None))?;
     let read_path = if crate::spreadsheet_input::is_xml_workbook(&path) {
         crate::spreadsheet_xml::data_copy(&path)?
-    } else { path.clone() };
+    } else { crate::xlsx_compat::compatible_path(&path)? };
     let book = umya_spreadsheet::reader::xlsx::read(&read_path).map_err(|e| {
         error(
             "WORKBOOK_READ_FAILED",

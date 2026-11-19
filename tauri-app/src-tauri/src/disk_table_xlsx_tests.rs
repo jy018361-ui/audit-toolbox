@@ -201,3 +201,32 @@ fn disk_xlsx_rejects_out_of_order_and_out_of_range_rows() {
         assert_eq!(err.code, "XLSX_ROW_INVALID");
     }
 }
+
+
+#[test]
+fn zero_header_native_and_projected_reads_preserve_header_and_sparse_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("SAP表头.xlsx");
+    fixture(&path, r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="0" spans=""><c r="A1" t="inlineStr"><is><t>编号</t></is></c><c r="B1" t="inlineStr"><is><t>金额</t></is></c><c r="C1"/></row><row r="2"><c r="A2" t="inlineStr"><is><t>001</t></is></c><c r="B2"><v>123.5</v></c></row><row r="4"><c r="B4"><v>-123.5</v></c></row></sheetData></worksheet>"#, None);
+    let cancel = AtomicBool::new(false);
+    let mut rows = Vec::new();
+    visit(&path,"Sheet1",&cancel,false,|row,i| { rows.push((i,row)); Ok(()) }).unwrap();
+    assert_eq!(rows[0], (1, vec!["编号".into(), "金额".into(), "".into()]));
+    assert_eq!(rows[1], (2, vec!["001".into(), "123.5".into()]));
+    assert_eq!(rows[2], (3, Vec::new()));
+    assert_eq!(rows[3], (4, vec!["".into(), "-123.5".into()]));
+    let mut projected = Vec::new();
+    visit_projected(&path,"Sheet1",&cancel,false,Some(&HashSet::from([1])),|row,i| { projected.push((i,row)); Ok(()) }).unwrap();
+    assert_eq!(projected[0], (1, vec!["".into(), "金额".into(), "".into()]));
+    for body in [
+        r#"<row r="0"><c r="A2"><v>1</v></c></row>"#,
+        r#"<row r="0"><c><v>1</v></c></row>"#,
+        r#"<row r="0"><c r="A1"/><c r="B2"/></row>"#,
+        r#"<row r="0"></row>"#,
+        r#"<row r="1"/><row r="0"><c r="A1"/></row>"#,
+    ] {
+        fixture(&path,&format!(r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{body}</sheetData></worksheet>"#),None);
+        let err=visit(&path,"Sheet1",&cancel,false,|_,_|Ok(())).unwrap_err();
+        assert_eq!(err.code,"XLSX_ROW_INVALID");
+    }
+}

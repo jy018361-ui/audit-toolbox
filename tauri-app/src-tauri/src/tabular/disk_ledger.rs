@@ -1347,13 +1347,19 @@ impl DiskLedger {
     ) -> Result<(), AppError> {
         self.visit_query(&format!("SELECT r.data,p.fills,p.{} FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",self.selected_net_column()),cancel,&mut visit)
     }
-    fn visit_selected_marked_where(
+    fn visit_selected_detail_where(
         &self,
         selected_where: &str,
+        mark_loss_transfer: bool,
         cancel: &AtomicBool,
-        mut visit: impl FnMut(Vec<String>, f64, bool) -> Result<(), AppError>,
+        mut visit: impl FnMut(Vec<String>, bool, bool) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        let mut statement=self.db.prepare(&format!("SELECT r.data,p.fills,p.{},EXISTS(SELECT 1 FROM detail_loss l WHERE l.voucher=p.voucher) FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE {selected_where} ORDER BY p.seq",self.selected_net_column())).map_err(sql_error)?;
+        let loss_expression = if mark_loss_transfer {
+            "EXISTS(SELECT 1 FROM detail_loss l WHERE l.voucher=p.voucher)"
+        } else {
+            "0"
+        };
+        let mut statement=self.db.prepare(&format!("SELECT r.data,p.fills,(NOT EXISTS(SELECT 1 FROM targets) OR p.account_norm IN (SELECT account FROM targets)),{loss_expression} FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE {selected_where} ORDER BY p.seq")).map_err(sql_error)?;
         let mut cursor = statement.query([]).map_err(sql_error)?;
         let mut index = 0usize;
         while let Some(record) = cursor.next().map_err(sql_error)? {
@@ -1461,13 +1467,11 @@ impl DiskLedger {
         if mark_loss_transfer {
             self.db.execute_batch("DROP TABLE IF EXISTS temp.detail_loss;CREATE TEMP TABLE detail_loss(voucher TEXT PRIMARY KEY) WITHOUT ROWID;INSERT INTO detail_loss SELECT DISTINCT voucher FROM processed WHERE account LIKE '%本年利润%' OR account LIKE '%未分配利润%';").map_err(sql_error)?;
         }
-        let output_headers = if mark_loss_transfer {
-            std::iter::once("【损益结转】".to_owned())
-                .chain(headers.iter().cloned())
-                .collect::<Vec<_>>()
-        } else {
-            headers.to_vec()
-        };
+        let mut output_headers = vec!["目标科目".to_owned()];
+        if mark_loss_transfer {
+            output_headers.push("【损益结转】".to_owned());
+        }
+        output_headers.extend(headers.iter().cloned());
         // The large CSV cache preserves each source record's physical width.
         // Merged CSV files can therefore contain records that omit different
         // numbers of trailing empty fields even though the normalized header
@@ -1481,7 +1485,7 @@ impl DiskLedger {
             .map_err(csv_error)?;
         let mut written = 0usize;
         let mut last_progress = Instant::now();
-        let mut write_row = |mut row: Vec<String>, loss: bool| -> Result<(), AppError> {
+        let mut write_row = |mut row: Vec<String>, target: bool, loss: bool| -> Result<(), AppError> {
             if written > 0 && written % per_part == 0 {
                 writer.as_mut().unwrap().flush().map_err(io_error)?;
                 drop(writer.take());
@@ -1511,6 +1515,7 @@ impl DiskLedger {
                     },
                 );
             }
+            row.insert(0, if target { "Y".into() } else { String::new() });
             writer
                 .as_mut()
                 .unwrap()
@@ -1528,15 +1533,12 @@ impl DiskLedger {
             }
             Ok(())
         };
-        let result = if mark_loss_transfer {
-            self.visit_selected_marked_where(selected_where, cancel, |row, _, loss| {
-                write_row(row, loss)
-            })
-        } else if include_counterpart {
-            self.visit_selected(cancel, |row, _| write_row(row, false))
-        } else {
-            self.visit_query(&format!("SELECT r.data,p.fills,p.{} FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE {selected_where} ORDER BY p.seq", self.selected_net_column()), cancel, &mut |row, _| write_row(row, false))
-        };
+        let result = self.visit_selected_detail_where(
+            selected_where,
+            mark_loss_transfer,
+            cancel,
+            &mut write_row,
+        );
         if let Err(err) = result {
             let _ = fs::remove_file(&partial);
             for (part, _) in &pending {
@@ -2039,6 +2041,51 @@ mod tests {
     }
 
     #[test]
+    fn target_marker_matches_ordinary_export_for_each_batch_and_mode() {
+        let (ledger, root) = fixture();
+        let cancel = AtomicBool::new(false);
+        ledger.select(&[], &cancel).unwrap();
+        let mut rows = Vec::new();
+        ledger.visit_selected(&cancel, |row, _| { rows.push(row); Ok(()) }).unwrap();
+        let table = Table {
+            path: ledger.table.path.clone(), sheet: "CSV".into(),
+            headers: ledger.table.headers.clone(), rows, sheets: vec![],
+            encoding: None, delimiter: Some(','),
+        };
+        for target in ["收入", "现金", "费用"] {
+            let targets = vec![target.to_owned()];
+            ledger.select(&targets, &cancel).unwrap();
+            for mark_loss in [false, true] {
+                for include_counterpart in [false, true] {
+                    let job: KanzhangParams = serde_json::from_value(json!({
+                        "inputPath":"source.csv", "includeSuite":false,
+                        "includeCounterpart":include_counterpart, "markLossTransfer":mark_loss
+                    })).unwrap();
+                    let selected = filter_ledger_rows_by_mode(&table, &ledger.mapping,
+                        &targets, &[], include_counterpart).unwrap();
+                    let expected = analyze_ledger(&table, &ledger.mapping, &selected,
+                        &targets, &job, &cancel).unwrap();
+                    let exported = ledger.write_selected_csv(&root.join("结果.csv"),
+                        &table.headers, 1, include_counterpart, mark_loss,
+                        &|_, _, _, _| {}, &cancel).unwrap();
+                    let mut actual = Vec::new();
+                    for path in exported.paths {
+                        let bytes = fs::read(path).unwrap();
+                        let mut reader = csv::Reader::from_reader(&bytes[3..]);
+                        assert_eq!(reader.headers().unwrap().iter().collect::<Vec<_>>(),
+                            expected.headers.iter().map(String::as_str).collect::<Vec<_>>());
+                        actual.extend(reader.records().map(|row| row.unwrap().iter()
+                            .map(str::to_owned).collect::<Vec<_>>()));
+                    }
+                    assert_eq!(actual, expected.rows);
+                }
+            }
+        }
+        drop(ledger);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn selected_csv_is_split_atomically_with_a_header_in_every_part() {
         let (ledger, root) = fixture();
         let cancel = AtomicBool::new(false);
@@ -2060,7 +2107,7 @@ mod tests {
             let bytes = fs::read(path).unwrap();
             assert!(bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
             let text = String::from_utf8_lossy(&bytes[3..]);
-            assert!(text.starts_with("【损益结转】,凭证号,科目,借方,贷方"));
+            assert!(text.starts_with("目标科目,【损益结转】,凭证号,科目,借方,贷方"));
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -2093,9 +2140,9 @@ mod tests {
         let bytes = fs::read(&output.paths[0]).unwrap();
         let mut reader = csv::Reader::from_reader(&bytes[3..]);
         let records = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(reader.headers().unwrap().len(), 5);
-        assert_eq!(records[0].len(), 5);
-        assert_eq!(records[0].get(4), Some(""));
+        assert_eq!(reader.headers().unwrap().len(), 6);
+        assert_eq!(records[0].len(), 6);
+        assert_eq!(records[0].get(5), Some(""));
         fs::remove_dir_all(root).unwrap();
     }
 

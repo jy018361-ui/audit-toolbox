@@ -2135,7 +2135,8 @@ fn analyze_ledger(
     // 旧版把辅助列放在最前面，原始列在后；迁移版原来追加在末尾，
     // 用户打开导出文件第一眼看到的东西完全不同。
     // 绝对值/符号/智能匹配状态三列已随正负数智能标记一并移出本工具。
-    let mut headers = Vec::with_capacity(table.headers.len() + 1);
+    let mut headers = Vec::with_capacity(table.headers.len() + 2);
+    headers.push("目标科目".into());
     if job.mark_loss_transfer {
         headers.push("【损益结转】".into());
     }
@@ -2147,6 +2148,11 @@ fn analyze_ledger(
         }
         let key = voucher_key(row, &id_indexes);
         let mut output = Vec::with_capacity(headers.len());
+        output.push(if target_set.is_empty() || row_matches_accounts(row, &account_indexes, &target_set) {
+            "Y".into()
+        } else {
+            String::new()
+        });
         if job.mark_loss_transfer {
             output.push(if loss_ids.contains(&key) {
                 "损益结转".into()
@@ -5168,7 +5174,9 @@ fn write_kanzhang_detail_workbook(
     // 旧版给明细页做三件事：辅助列整列灰底、金额列 `#,##0`、命中目标科目的
     // 科目列与金额列加粗。加粗走 `_targets` + COUNTIF，所以明细簿里也要有那张隐藏页。
     let detail_style = DetailSheetStyle {
-        gray_columns: header_positions_by(&analysis.headers, |value| value.starts_with('【')),
+        gray_columns: header_positions_by(&analysis.headers, |value| {
+            value == "目标科目" || value.starts_with('【')
+        }),
         target_range: range.as_deref(),
         account_columns: header_positions(&analysis.headers, &analysis.account_headers),
         bold_columns: {
@@ -10508,12 +10516,20 @@ mod tests {
         assert!(output.exists());
         assert!(root.join("result_成本_02.xlsx").exists());
         // 与旧版两阶段导出一致：明细一个文件、套表另一个文件，套表里不再夹带明细。
-        let workbook = open_workbook_auto(&output).unwrap();
+        let mut workbook = open_workbook_auto(&output).unwrap();
         // 明细簿也带 `_targets`：命中目标科目的加粗是条件格式，公式要在同一个工作簿里取值。
         assert_eq!(
             workbook.sheet_names(),
             &["凭证明细", "剔除明细", "_targets"]
         );
+        let detail = workbook.worksheet_range("凭证明细").unwrap();
+        let values = detail.rows().map(|row| row.iter().map(ToString::to_string)
+            .collect::<Vec<_>>()).collect::<Vec<_>>();
+        assert_eq!(values[0][0], "目标科目");
+        assert_eq!(values[1][0], "Y");
+        assert!(values[2][0].is_empty());
+        let excluded = workbook.worksheet_range("剔除明细").unwrap();
+        assert_eq!(excluded.rows().next().unwrap()[0].to_string(), "凭证号");
         let suite = open_workbook_auto(root.join("result_套表.xlsx")).unwrap();
         // 页签顺序照旧版：凭证 → 两张凭证类型 → 透视分析；新增的「科目汇总」排在其后。
         assert_eq!(
@@ -10533,7 +10549,57 @@ mod tests {
     }
 
     #[test]
-    fn kanzhang_detail_keeps_only_the_loss_transfer_aux_column() {
+    fn kanzhang_target_marker_uses_current_batch_and_exact_account() {
+        let headers = ["凭证号", "科目编码", "科目名称", "借方", "贷方"]
+            .map(str::to_owned).to_vec();
+        let rows = [
+            ["1", "6601", "费用", "100", "0"],
+            ["1", "6602", "费用", "200", "0"],
+            ["1", "6603", "折旧", "0", "300"],
+            ["2", "6601", "费用", "0", "100"],
+            ["2", "3103", "本年利润", "100", "0"],
+        ].map(|row| row.map(str::to_owned).to_vec()).to_vec();
+        let table = Table {
+            path: PathBuf::from("source.csv"), sheet: "CSV".into(), headers, rows,
+            sheets: vec![], encoding: None, delimiter: Some(','),
+        };
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()], account_code: Some("科目编码".into()),
+            account_name: vec!["科目名称".into()], debit: Some("借方".into()),
+            credit: Some("贷方".into()), ..Default::default()
+        };
+        let cancel = AtomicBool::new(false);
+        for target in ["6601-费用", "6602-费用"] {
+            let targets = vec![target.to_owned()];
+            for mark_loss in [false, true] {
+                for include_counterpart in [false, true] {
+                    let job: KanzhangParams = serde_json::from_value(json!({
+                        "inputPath":"source.csv", "includeSuite":false,
+                        "includeCounterpart":include_counterpart,
+                        "markLossTransfer":mark_loss,"excludeAccounts":["6603-折旧"]
+                    })).unwrap();
+                    let selected = filter_ledger_rows_by_mode(&table, &mapping, &targets,
+                        &job.exclude_accounts, include_counterpart).unwrap();
+                    let analysis = analyze_ledger(&table, &mapping, &selected, &targets, &job, &cancel).unwrap();
+                    assert_eq!(analysis.headers[0], "目标科目");
+                    let offset = 1 + usize::from(mark_loss);
+                    for (source, output) in selected.iter().zip(&analysis.rows) {
+                        assert_eq!(&output[offset..], source.as_slice());
+                        assert_eq!(output[0], if source[1] == &target[..4] { "Y" } else { "" });
+                    }
+                    assert_eq!(analysis.excluded_headers, table.headers);
+                    assert_eq!(analysis.excluded_rows, vec![table.rows[2].clone()]);
+                    // 导出后再次交给正负数工具时，辅助列不能被误识别为科目。
+                    let inferred = suggest_mapping(&analysis.headers, &analysis.rows);
+                    assert_eq!(inferred.account_code, mapping.account_code);
+                    assert_eq!(inferred.account_name, mapping.account_name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kanzhang_detail_marks_target_rows_alongside_loss_transfer() {
         let root = temp_dir("kanzhang-aux-columns");
         let input = root.join("ledger.csv");
         let output = root.join("out.csv");
@@ -10557,9 +10623,9 @@ mod tests {
         let mut lines = text.lines();
         let header = lines.next().unwrap().trim_start_matches('\u{feff}');
         // 辅助列仍在最前，但绝对值/符号/智能匹配状态三列已剪到「正负数智能标记」，
-        // 看账只剩损益结转一列。
+        // 目标科目列在最前，其后为可选的损益结转列。
         assert!(
-            header.starts_with("【损益结转】,公司,记账日期,凭证号,科目名称"),
+            header.starts_with("目标科目,【损益结转】,公司,记账日期,凭证号,科目名称"),
             "{header}"
         );
         for column in ["【辅助_绝对值】", "【辅助_符号】", "【智能匹配状态】"]
@@ -10570,8 +10636,8 @@ mod tests {
             .map(|line| line.split(',').map(str::to_owned).collect::<Vec<_>>())
             .collect::<Vec<_>>();
         // 命中目标科目的整张凭证照常输出，对方科目行也在。
-        assert!(rows.iter().any(|r| r[4] == "收入"));
-        assert!(rows.iter().any(|r| r[4] == "银行"));
+        assert!(rows.iter().any(|r| r[5] == "收入" && r[0] == "Y"));
+        assert!(rows.iter().any(|r| r[5] == "银行" && r[0].is_empty()));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -10820,8 +10886,7 @@ mod tests {
         )
         .unwrap();
         let xml = read_sheet_xml(&output, "xl/worksheets/sheet1.xml");
-        // 列宽自适应：长科目名那一列应明显宽于默认。辅助列只剩【损益结转】后
-        // 它落在第 5 列（1 基）。
+        // 两列辅助标记之后，科目名称落在第 6 列（1 基）。
         let widths = xml
             .split("<col ")
             .skip(1)
@@ -10843,7 +10908,7 @@ mod tests {
                 Some((min, width))
             })
             .collect::<Vec<_>>();
-        let account_width = widths.iter().find(|(min, _)| *min == 5).map(|(_, w)| *w);
+        let account_width = widths.iter().find(|(min, _)| *min == 6).map(|(_, w)| *w);
         assert!(
             account_width.is_some_and(|width| width > 40.0),
             "科目名称列应按内容加宽，实际 {widths:?}"

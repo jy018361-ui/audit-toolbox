@@ -10,7 +10,7 @@ mod ocr_content;
 pub(crate) use ocr_content::{has_image_markup, has_latex_layout, has_markdown_heading, has_markdown_table, looks_like_ocr_payload, readable_ocr_content, readable_ocr_text};
 
 const DEFAULT_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
-const DEFAULT_MODEL: &str = "qwen3.5-ocr";
+pub(crate) const DEFAULT_MODEL: &str = "qwen3.5-ocr";
 pub(crate) const STRUCTURED_PROMPT: &str = "请逐字识别整张扫描件的全部文字，保留阅读顺序、段落及全部表格内容。同时逐格恢复所有表格的原始行列。不要总结、补写、改写数字、日期、账号或金额，所有单元格均为字符串。合并单元格仅在左上格写文字，其余空串。text 必须含正文和全部表格文字，不能因 tables 已有而省略。仅输出完整 JSON：{\"text\":\"完整原文\",\"tables\":[{\"title\":\"原表名\",\"rows\":[[\"单元格\"]]}],\"warnings\":[\"无法确认的内容及位置\"]}。无表格返回空 tables。";
 // Compatibility gateways keep the provider's basic text task. On the official
 // Qwen3.5 service, use its native document parser rather than prompting the

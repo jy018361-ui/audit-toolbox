@@ -5,6 +5,7 @@ mod account_confirmation;
 mod account_classification_tests;
 mod audipick;
 mod audipick_tax;
+mod baidu_table_ocr;
 mod bailian_asr;
 mod bailian_ocr;
 mod bailian_plan_asr;
@@ -1282,6 +1283,11 @@ fn secret_name_allowed(name: &str) -> bool {
             | "bailian_plan_asr_key"
             | "audipick_llm_api_key"
             | "audipick_dify_api_key"
+            | "audipick_ocr_llm_api_key"
+            | "audipick_ocr_dify_api_key"
+            | "audipick_ocr_baidu_key"
+            | "audipick_ocr_baidu_secret"
+            | "audipick_ocr_bailian_key"
     )
 }
 
@@ -1341,6 +1347,11 @@ fn secret_delete(name: String) -> Result<(), AppError> {
             | "bailian_ocr_key"
             | "bailian_asr_key"
             | "bailian_plan_asr_key"
+            | "audipick_ocr_llm_api_key"
+            | "audipick_ocr_dify_api_key"
+            | "audipick_ocr_baidu_key"
+            | "audipick_ocr_baidu_secret"
+            | "audipick_ocr_bailian_key"
     ) {
         return Err(AppError::new(
             "SECRET_NAME_DENIED",
@@ -2605,6 +2616,8 @@ mod tests {
         assert!(secret_name_allowed("bailian_ocr_key"));
         assert!(secret_name_allowed("bailian_plan_asr_key"));
         assert!(secret_name_allowed("audipick_llm_api_key"));
+        assert!(secret_name_allowed("audipick_ocr_llm_api_key"));
+        assert!(secret_name_allowed("audipick_ocr_baidu_secret"));
         assert!(!secret_name_allowed("other_app_key"));
     }
 

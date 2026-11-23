@@ -22,7 +22,7 @@ vi.mock("./AudiPickLegacyProject", () => ({ AudiPickLegacyProject: ({ actions }:
   <button onClick={() => actions.onOpenDocument("tax")}>打开税表</button>
   <button onClick={() => actions.onDeleteDocument("tax")}>删除测试税表</button>
 </> }));
-vi.mock("./AudiPickTaxWorkflow", () => ({ AudiPickTaxWorkflow: ({ documents, onClose }: any) => <section data-testid="tax-workflow">
+vi.mock("./AudiPickTaxWorkflow", () => ({ AudiPickTaxWorkflow: ({ documents, initialReviews, onClose }: any) => <section data-testid="tax-workflow" data-reviews={JSON.stringify(initialReviews??{})}>
   {documents.map((doc: any) => doc.name).join("、")}<button onClick={onClose}>关闭税表流程</button>
 </section> }));
 
@@ -77,7 +77,7 @@ it.each(["税表单份提取", "税表批量提取", "打开税表"])("routes %s
 
 it("deletes the tax index, page cache and tables with their document", async () => {
   stored.taxWorkflow = { indexes: { tax: { taxType: "corporate_income" } }, pageTexts: { tax: { 1: "税表" } }, pageTextVersions: { tax: { 1: "tax-structured-page-v3" } },
-    pageOverrides: { tax: { A105000: "1" } }, selectedFormKeys: ["A105000"], tables: [{ documentId: "tax", formKey: "A105000" }] };
+    pageOverrides: { tax: { A105000: "1" } }, reviews: {tax:[{id:"review-tax"}],other:[{id:"review-other"}]}, selectedFormKeys: ["A105000"], tables: [{ documentId: "tax", formKey: "A105000" }] };
   await openProject();
   fireEvent.click(screen.getByText("删除测试税表"));
   await waitFor(() => expect(api.engineCall.mock.calls.some(([method]) => method === "audipick.document_delete")).toBe(true));
@@ -86,4 +86,17 @@ it("deletes the tax index, page cache and tables with their document", async () 
   expect(stored.taxWorkflow.pageTexts).toEqual({});
   expect(stored.taxWorkflow.pageTextVersions).toEqual({});
   expect(stored.taxWorkflow.pageOverrides).toEqual({});
+  expect(stored.taxWorkflow.reviews).toEqual({other:[{id:"review-other"}]});
+});
+
+it("restores saved tax reviews when reopening the workflow and retains them while rebuilding an index", async () => {
+  const reviews={tax:[{id:"saved-review",formKey:"A105000",pages:[1],companyName:"甲公司",period:"2025年度",status:"confirmed"}]};
+  stored.taxWorkflow={indexes:{tax:{taxType:"corporate_income"}},tables:[],pageTexts:{},reviews};
+  await openProject();
+  fireEvent.click(screen.getByText("打开税表"));
+  expect(await screen.findByTestId("tax-workflow")).toHaveAttribute("data-reviews",JSON.stringify(reviews));
+  fireEvent.click(screen.getByText("关闭税表流程"));
+  fireEvent.click(screen.getByText("导入测试PDF"));
+  await screen.findByTestId("tax-workflow");
+  expect(stored.taxWorkflow.reviews).toEqual(reviews);
 });

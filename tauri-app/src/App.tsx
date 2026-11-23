@@ -671,7 +671,7 @@ export default function App() {
         data-layout-mode={audiPickFocusMode ? "audipick-focus" : "toolbox"}
       >
         <a className="skip-navigation" href="#main-content" onClick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus(); }}>跳过导航，进入工作区</a>
-        <WindowControls />
+        <WindowControls onReturnToToolbox={audiPickFocusMode ? () => navigate("/") : undefined} />
         {!audiPickFocusMode && <aside
           id="app-sidebar"
           className={`sidebar${toolDrawerOpen ? " drawer-open" : ""}`}

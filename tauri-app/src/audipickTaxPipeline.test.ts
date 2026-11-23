@@ -1,11 +1,36 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { inspectTaxDocument, extractTaxForm, resolveTaxForms, taxOcrHasTableStructure, TAX_PAGE_READER_VERSION, type AudiPickTaxWorkflowState } from "./audipickTaxPipeline";
-import type { TaxDocumentIndex } from "./audipickTax";
+import { inspectTaxDocument, extractTaxForm, resolveTaxForms, taxExtractionKey, taxFormIdentity, taxOcrHasTableStructure, TAX_PAGE_READER_VERSION, type AudiPickTaxWorkflowState } from "./audipickTaxPipeline";
+import { buildTaxPageIndex, type TaxDocumentIndex } from "./audipickTax";
+import { stampTaxReviewGroup } from "./audipickTaxReview";
 
 const index = (): TaxDocumentIndex => ({ fileName: "甲公司.pdf", companyName: "甲公司", period: "2025年度", taxType: "corporate_income", pages: Array.from({length: 10}, (_, i) => ({page: i+1,text:"",source:"text",kind:"unknown",taxType:"unknown",confidence:"low"})), forms: [{key:"A105000",formCode:"A105000",formName:"纳税调整项目明细表",taxType:"corporate_income",pages:[7,8]}, {key:"A106000",formCode:"A106000",formName:"企业所得税弥补亏损明细表",taxType:"corporate_income",pages:[9]}] });
 const state = (): AudiPickTaxWorkflowState => ({indexes:{doc:index()},tables:[],pageTexts:{}});
 describe("纳税表按表单选择工作流", () => {
+  it("预检中断时保留尚未处理页的已有目录和人工方向", async () => {
+    const cached=buildTaxPageIndex([{page:1,text:"",source:"header_ocr"},{page:2,text:"",source:"header_ocr",rotation:270}],"旋转扫描.pdf");
+    const onPage=vi.fn(async(_value:TaxDocumentIndex)=>{});
+    const recognize=vi.fn().mockResolvedValueOnce("增值税纳税申报表（一般纳税人适用）").mockRejectedValueOnce(new Error("识别中断"));
+    const pdf={numPages:2,getPage:async()=>({getTextContent:async()=>({items:[]}),cleanup:vi.fn()})};
+    await expect(inspectTaxDocument({pdf,fileName:cached.fileName,cached,recognizeHeader:recognize,onPage})).rejects.toThrow("识别中断");
+    expect(onPage.mock.calls.at(-1)![0].pages).toEqual(expect.arrayContaining([expect.objectContaining({page:2,rotation:270})]));
+  });
+  it("重预检保留人工方向和元数据，但旧单税种缓存不掩盖新的混税识别", async () => {
+    const cached=buildTaxPageIndex([{page:1,text:"增值税纳税申报表（一般纳税人适用）",source:"header_ocr",rotation:90},{page:2,text:"A105000 纳税调整项目明细表",source:"header_ocr"}],"混税.pdf");
+    cached.companyName="人工完整公司名称";cached.period="人工所属期";cached.taxType="vat";
+    const pdf={numPages:2,getPage:vi.fn()};
+    const result=await inspectTaxDocument({pdf,fileName:cached.fileName,cached,recognizeHeader:vi.fn(),onPage:vi.fn()});
+    expect(result).toMatchObject({taxType:"mixed",companyName:"人工完整公司名称",period:"人工所属期"});
+    expect(result.pages[0].rotation).toBe(90);expect(pdf.getPage).not.toHaveBeenCalled();
+    const overridden=await inspectTaxDocument({pdf,fileName:cached.fileName,cached:{...cached,taxTypeOverride:"vat"},recognizeHeader:vi.fn(),onPage:vi.fn()});
+    expect(overridden).toMatchObject({taxType:"vat",taxTypeOverride:"vat"});
+  });
+  it("旋转只改变所选受影响页的提取缓存身份", () => {
+    const value=index(),form=value.forms[0];
+    const changed={...value,pages:value.pages.map(page=>page.page===7?{...page,rotation:90 as const}:page)};
+    expect(taxExtractionKey(changed,form)).not.toBe(taxExtractionKey(value,form));
+    expect(taxExtractionKey(changed,value.forms[1])).toBe(taxExtractionKey(value,value.forms[1]));
+  });
   it("预检只在缺少文字层时调用标题识别，不提前完整 OCR", async () => {
     const header = vi.fn(async (_page:unknown, _number:number) => "A105000 纳税调整项目明细表");
     const pdf = {numPages:2,getPage:vi.fn(async (page:number)=>({getTextContent:async()=>({items:page===1 ? [{str:"纳税人名称：甲公司 企业所得税年度纳税申报表 A100000 "+"内容".repeat(60)}] : []}),cleanup:vi.fn()}))};
@@ -35,6 +60,58 @@ describe("纳税表按表单选择工作流", () => {
     const value=index();value.pages[6]={...value.pages[6],formKey:"A105000",kind:"form",confidence:"low",reason:"重复命中"};
     expect(()=>resolveTaxForms(value,["A105000"])).toThrow(/手动确认/);
     expect(resolveTaxForms(value,["A105000"],{A105000:"7-8"})[0].pages).toEqual([7,8]);
+  });
+  it("人工确认组隔离同表不同期间，排除组和未分配重复页不会混入提取", () => {
+    const value=index();
+    value.pages[6]={...value.pages[6],formKey:"A105000",kind:"form",confidence:"low",reason:"重复命中"};
+    value.pages[7]={...value.pages[7],formKey:"A105000",kind:"form",confidence:"low",reason:"重复命中"};
+    const groups=[
+      stampTaxReviewGroup(value,{id:"a105000-2024",formKey:"A105000",companyName:"甲公司",period:"2024年度",pages:[7],status:"confirmed"}),
+      stampTaxReviewGroup(value,{id:"a105000-2025",formKey:"A105000",companyName:"甲公司",period:"2025年度",pages:[8],status:"confirmed"}),
+      stampTaxReviewGroup(value,{id:"a105000-excluded",formKey:"A105000",companyName:"甲公司",period:"不适用",pages:[6],status:"excluded"}),
+    ];
+    const forms=resolveTaxForms(value,["A105000"],{},[],groups);
+    expect(forms.map(form=>[form.instanceId,form.companyName,form.period,form.pages])).toEqual([
+      ["a105000-2024","甲公司","2024年度",[7]],["a105000-2025","甲公司","2025年度",[8]],
+    ]);
+    expect(forms.every(form=>taxFormIdentity(form)===form.instanceId)).toBe(true);
+    expect(taxExtractionKey(value,forms[0])).not.toBe(taxExtractionKey(value,forms[1]));
+  });
+  it("页面目录改变后过期复核组不授权页码，也不阻断其他已重新确认组", () => {
+    const value=index();
+    const stale=stampTaxReviewGroup(value,{id:"stale",formKey:"A105000",companyName:"甲公司",period:"2024年度",pages:[7],status:"confirmed"});
+    const changed={...value,pages:value.pages.slice(0,6).map(page=>page.page===1?{...page,formKey:"A000000"}:page)};
+    const current=stampTaxReviewGroup(changed,{id:"current",formKey:"A105000",companyName:"甲公司",period:"2025年度",pages:[6],status:"confirmed"});
+    const forms=resolveTaxForms(changed,["A105000"],{},[],[stale,current]);
+    expect(forms.map(form=>[form.instanceId,form.pages])).toEqual([["current",[6]]]);
+    expect(resolveTaxForms(changed,["A105000"],{},[],[stale])).toEqual([]);
+    const oldOtherKey=stampTaxReviewGroup(value,{id:"old-other-key",formKey:"A106000",companyName:"甲公司",period:"2024年度",pages:[7],status:"confirmed"});
+    expect(resolveTaxForms(changed,["A105000"],{},[],[oldOtherKey])[0].pages).toEqual([8]);
+  });
+  it("任何人工组都占用页码：自动定位过滤他组与排除页，手动覆盖冲突时报错", () => {
+    const value=index();
+    value.pages[6].confidence="high";
+    value.pages[7].confidence="high";
+    const reassigned=stampTaxReviewGroup(value,{id:"reassigned",formKey:"A106000",companyName:"甲公司",period:"2024年度",pages:[7],status:"confirmed"});
+    const excluded=stampTaxReviewGroup(value,{id:"excluded",formKey:"",companyName:"",period:"",pages:[8],status:"excluded"});
+    expect(resolveTaxForms(value,["A105000"],{},[],[reassigned])[0].pages).toEqual([8]);
+    expect(resolveTaxForms(value,["A105000"],{},[],[reassigned,excluded])).toEqual([]);
+    expect(()=>resolveTaxForms(value,["A105000"],{A105000:"7"},[],[reassigned])).toThrow(/页码与其他人工复核组冲突/);
+  });
+  it("同一文件同表的两个复核组各自缓存结果和诊断，不互相覆盖", async () => {
+    let latest=state();
+    const formA={...latest.indexes.doc.forms[0],pages:[7],instanceId:"a105000-2024",companyName:"甲公司",period:"2024年度"};
+    const formB={...latest.indexes.doc.forms[0],pages:[8],instanceId:"a105000-2025",companyName:"甲公司",period:"2025年度"};
+    latest.pageTexts={doc:{7:'<table><tr><td>2024</td><td>金额</td></tr></table>',8:'<table><tr><td>2025</td><td>金额</td></tr></table>'}};
+    latest.pageTextVersions={doc:{7:TAX_PAGE_READER_VERSION,8:TAX_PAGE_READER_VERSION}};
+    const save=async(next:AudiPickTaxWorkflowState)=>{latest=next;};
+    const options={documentId:"doc",index:latest.indexes.doc,getState:()=>latest,save,readFullPage:async()=>"",extract:vi.fn()};
+    const first=await extractTaxForm({...options,form:formA});
+    const second=await extractTaxForm({...options,form:formB});
+    expect(first).toMatchObject({instanceId:"a105000-2024",period:"2024年度",rows:[["2024","金额"]]});
+    expect(second).toMatchObject({instanceId:"a105000-2025",period:"2025年度",rows:[["2025","金额"]]});
+    expect(latest.tables.map(table=>table.instanceId)).toEqual(["a105000-2024","a105000-2025"]);
+    expect(Object.keys(latest.diagnostics?.doc??{})).toEqual(["a105000-2024","a105000-2025"]);
   });
   it("只对所选表页做完整 OCR，逐页保存并将结果与公司名绑定", async () => {
     let latest=state(); const save=vi.fn(async (next:AudiPickTaxWorkflowState)=>{latest=next;});

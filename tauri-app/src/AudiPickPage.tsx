@@ -1116,7 +1116,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     const state = projectsRef.current.find((item) => item.project.id === projectId)?.taxWorkflow;
     await saveTaxWorkflowState({
       indexes: { ...state?.indexes, [id]: index }, tables: state?.tables ?? [],
-      pageTexts: state?.pageTexts ?? {}, pageTextVersions: state?.pageTextVersions ?? {}, selectedFormKeys: state?.selectedFormKeys ?? [], pageOverrides: state?.pageOverrides ?? {}, diagnostics: state?.diagnostics ?? {},
+      pageTexts: state?.pageTexts ?? {}, pageTextVersions: state?.pageTextVersions ?? {}, selectedFormKeys: state?.selectedFormKeys ?? [], pageOverrides: state?.pageOverrides ?? {}, reviews: state?.reviews ?? {}, diagnostics: state?.diagnostics ?? {},
     }, projectId);
     const taxRule = index.taxType === "vat" ? "tax_vat" : index.taxType === "corporate_income" ? "tax_corporate_income" : "tax_declaration";
     const meta = contractMetaFor(projectId, id);
@@ -1213,6 +1213,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             pageTexts: Object.fromEntries(Object.entries(tax.pageTexts).filter(([id]) => id !== documentId)),
             pageTextVersions: Object.fromEntries(Object.entries(tax.pageTextVersions ?? {}).filter(([id]) => id !== documentId)),
             pageOverrides: Object.fromEntries(Object.entries(tax.pageOverrides ?? {}).filter(([id]) => id !== documentId)),
+            reviews: Object.fromEntries(Object.entries(tax.reviews ?? {}).filter(([id]) => id !== documentId)),
             diagnostics: Object.fromEntries(Object.entries(tax.diagnostics ?? {}).filter(([id]) => id !== documentId)),
             tables: tax.tables.filter((table) => table.documentId !== documentId),
           } } : {}),
@@ -3732,6 +3733,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           initialPageTextVersions={selected.taxWorkflow?.pageTextVersions}
           initialSelectedFormKeys={selected.taxWorkflow?.selectedFormKeys}
           initialPageOverrides={selected.taxWorkflow?.pageOverrides}
+          initialReviews={selected.taxWorkflow?.reviews}
           initialDiagnostics={selected.taxWorkflow?.diagnostics}
           onSave={(state) => saveTaxWorkflowState(state, selected.project.id)}
           onClose={() => setTaxWorkflowOpen(false)}

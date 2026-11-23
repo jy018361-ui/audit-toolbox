@@ -1,9 +1,12 @@
+import { matchTaxCatalogueForm, taxFormDefinitions } from "./audipickTaxCatalogue";
+export { canProcessTaxType, taxTypeName, taxTypeOptions } from "./audipickTaxCatalogue";
+
 /** Tax declarations keep their page identity separate from paid table OCR. */
-export type TaxType = "vat" | "corporate_income" | "unknown";
-export type TaxPageInput = { page: number; text: string; source?: "text" | "header_ocr" };
+export type TaxType = "vat" | "corporate_income" | "land_appreciation" | "stamp" | "property_behavior" | "surcharge" | "mixed" | "unknown";
+export type TaxPageInput = { page: number; text: string; source?: "text" | "header_ocr"; rotation?: 0 | 90 | 180 | 270 };
 export type TaxPage = TaxPageInput & {
   source: "text" | "header_ocr";
-  kind: "form" | "continuation" | "directory" | "cover" | "unknown";
+  kind: "form" | "continuation" | "directory" | "cover" | "receipt" | "unknown";
   formKey?: string;
   formCode?: string;
   formName?: string;
@@ -11,8 +14,8 @@ export type TaxPage = TaxPageInput & {
   confidence: "high" | "low";
   reason?: string;
 };
-export type TaxForm = { key: string; formCode: string; formName: string; taxType: TaxType; pages: number[] };
-export type TaxDocumentIndex = { fileName: string; companyName: string; period: string; taxType: TaxType; pages: TaxPage[]; forms: TaxForm[] };
+export type TaxForm = { key: string; formCode: string; formName: string; taxType: TaxType; pages: number[]; instanceId?: string; companyName?: string; period?: string };
+export type TaxDocumentIndex = { fileName: string; companyName: string; period: string; taxType: TaxType; taxTypeOverride?: TaxType; pages: TaxPage[]; forms: TaxForm[] };
 export type TaxGridMerge = { firstRow: number; lastRow: number; firstCol: number; lastCol: number };
 export type TaxGridSection = { page:number; tableIndex:number; rows:(string|number|null)[][]; merges:TaxGridMerge[]; notes?:string[] };
 export type TaxGridTable = { formKey: string; formCode: string; formName: string; pages: number[]; rows: (string | number | null)[][]; merges: TaxGridMerge[]; warnings?: string[]; notes?: string[]; sections?:TaxGridSection[] };
@@ -39,21 +42,22 @@ const corporateForms: Record<string, string> = {
 const overseasInvestmentReport: Omit<TaxForm,"pages"> = {
   key:"corporate_overseas_investment",formCode:"CIT_OVERSEAS_INVESTMENT_REPORT",formName:"居民企业境外投资信息报告表",taxType:"corporate_income",
 };
-
 /** Available even when every uploaded page is scanned or its title is unclear. */
 export function taxFormCatalogue(): TaxForm[] {
   const corporate: TaxForm[] = Object.entries(corporateForms).map(([formCode, formName]) => ({ key: formCode, formCode, formName, taxType: "corporate_income", pages: [] }));
-  const vat: TaxForm[] = [
-    { key: "vat_main", formCode: "VAT_MAIN", formName: "增值税及附加税费申报表（一般纳税人适用）", taxType: "vat", pages: [] },
-    { key: "vat_main_small", formCode: "VAT_MAIN_SMALL", formName: "增值税及附加税费申报表（小规模纳税人适用）", taxType: "vat", pages: [] },
-    ...["一", "二", "三", "四", "五"].map((number, i): TaxForm => ({ key: `vat_appendix_${i + 1}`, formCode: `VAT_APPENDIX_${i + 1}`, formName: `增值税及附加税费申报表附列资料（${number}）`, taxType: "vat", pages: [] })),
-    { key: "vat_relief", formCode: "VAT_RELIEF", formName: "增值税减免税申报明细表", taxType: "vat", pages: [] },
-  ];
-  return [...corporate, {...overseasInvestmentReport,pages:[]}, ...vat];
+  return [...corporate, {...overseasInvestmentReport,pages:[]}, ...taxFormDefinitions().map(({ titleAliases: _aliases, ...form }) => ({ ...form, pages: [] }))];
 }
 const compact = (text: string) => text.normalize("NFKC").replace(/\s+/g, "");
-const typeFromText = (text: string): TaxType => /增值税(?:及附加税费)?(?:纳税)?申报表|增值税减免税申报明细表/.test(text) ? "vat"
-  : /企业所得税(?:年度|月(?:季)?度|月\(季\)度)?纳税申报表|企业所得税弥补亏损明细表|居民企业境外投资信息报告表|\b[AB]\d{6}\b/i.test(text) ? "corporate_income" : "unknown";
+const typeFromText = (text: string): TaxType => {
+  const normalized = compact(text).replace(/土地增值税/g, "");
+  if (/土地增值税/.test(text)) return "land_appreciation";
+  if (/印花税/.test(text)) return "stamp";
+  if (/财产和行为税/.test(text)) return "property_behavior";
+  if (/城市维护建设税|教育费附加|地方教育附加/.test(text) && !/增值税及附加税费申报表/.test(text)) return "surcharge";
+  if (/企业所得税(?:年度|月(?:季)?度|月\(季\)度)?纳税申报表|企业所得税弥补亏损明细表|居民企业境外投资信息报告表|\b[AB]\d{6}\b/i.test(text)) return "corporate_income";
+  if (/增值税(?:及附加税费)?(?:纳税)?申报表|增值税减免税申报明细表|增值税及附加税费预缴表/.test(normalized)) return "vat";
+  return "unknown";
+};
 
 function metadata(pages: TaxPageInput[]) {
   let companyName = "", period = "";
@@ -79,12 +83,13 @@ function metadata(pages: TaxPageInput[]) {
   return { companyName, period };
 }
 
-function identifyForm(text: string): Omit<TaxForm, "pages"> | undefined {
+function identifyForm(text: string, vatPilotContext = false): Omit<TaxForm, "pages"> | undefined {
   const normalized = compact(text);
   const head = normalized.slice(0, 1800);
   // A directory lists form names, so callers must exclude it before matching.
   // Codes in data rows such as “填写A105000” refer to another form.
   const titleArea = head.split(/行次|栏次/)[0];
+  const titleText = text.slice(0, 1800).split(/行次|栏次/)[0];
   if (titleArea.includes(overseasInvestmentReport.formName)) return {...overseasInvestmentReport};
   if (/企业所得税年度纳税申报主表/.test(titleArea) || (/企业所得税年度纳税申报表\(A类/.test(titleArea) && /行次/.test(head))) return { key: "A100000", formCode: "A100000", formName: corporateForms.A100000, taxType: "corporate_income" };
   const codes = [...titleArea.matchAll(/\b([AB]\d{6})\b/gi)].map((match) => match[1].toUpperCase());
@@ -98,17 +103,13 @@ function identifyForm(text: string): Omit<TaxForm, "pages"> | undefined {
   for (const [code, name] of Object.entries(corporateForms).sort((a, b) => b[1].length - a[1].length)) {
     if (titleArea.includes(compact(name))) return { key: code, formCode: code, formName: name, taxType: "corporate_income" };
   }
-  if (/增值税/.test(head)) {
-    const appendix = head.match(/(?:附列资料|附表)\(?([一二三四五六七八九十\d]+)\)?/);
-    if (appendix) {
-      const number = ({ 一: "1", 二: "2", 三: "3", 四: "4", 五: "5" } as Record<string, string>)[appendix[1]] ?? appendix[1];
-      return { key: `vat_appendix_${number}`, formCode: `VAT_APPENDIX_${number}`, formName: `增值税及附加税费申报表附列资料（${appendix[1]}）`, taxType: "vat" };
-    }
-    if (/减免税申报明细表/.test(head)) return { key: "vat_relief", formCode: "VAT_RELIEF", formName: "增值税减免税申报明细表", taxType: "vat" };
-    if (/增值税(?:及附加税费)?(?:纳税)?申报表/.test(head)) {
-      const small = /小规模纳税人/.test(head);
-      return { key: small ? "vat_main_small" : "vat_main", formCode: small ? "VAT_MAIN_SMALL" : "VAT_MAIN", formName: small ? "增值税及附加税费申报表（小规模纳税人适用）" : "增值税及附加税费申报表（一般纳税人适用）", taxType: "vat" };
-    }
+  const catalogForm = matchTaxCatalogueForm(titleText, { vatPilotContext });
+  if (catalogForm) return catalogForm;
+  if (/增值税及附加税费申报表/.test(titleArea) && !/填报表单|申报目录|受理回执|申报回执/.test(titleArea)) {
+    const small = /小规模纳税人/.test(titleArea);
+    const pilot = /试行/.test(titleArea);
+    if (pilot) return { key: "vat_main_pilot_2026", formCode: "VAT_PILOT_2026_MAIN", formName: "增值税及附加税费申报表（试行）", taxType: "vat" };
+    return { key: small ? "vat_main_small" : "vat_main", formCode: small ? "VAT_MAIN_SMALL" : "VAT_MAIN", formName: small ? "增值税及附加税费申报表（小规模纳税人适用）" : "增值税及附加税费申报表（一般纳税人适用）", taxType: "vat" };
   }
   return undefined;
 }
@@ -148,16 +149,22 @@ export function buildTaxPageIndex(inputs: TaxPageInput[], fileName: string): Tax
   if (sorted.some((page, i) => !Number.isInteger(page.page) || page.page < 1 || (i > 0 && sorted[i - 1].page === page.page))) throw new Error("PDF 页码必须为不重复的正整数。");
   const { companyName, period } = metadata(sorted);
   const forms: TaxForm[] = [], pages: TaxPage[] = [];
+  const vatPilotContext = sorted.some((input) => /增值税及附加税费申报表\(试行\)|增值税及附加税费申报试点|增值税及附加税费申报表业务信息表/.test(compact(input.text)));
   for (const input of sorted) {
     const text = compact(input.text);
     const taxType = typeFromText(text);
     const page: TaxPage = { ...input, source: input.source ?? "text", kind: "unknown", taxType, confidence: "low" };
-    if (/(?:填报表单|申报表目录|申报表清单|表单目录|填报目录)/.test(text) || (/(?:目录|表单编号.*表单名称)/.test(text) && new Set(text.match(/[AB]\d{6}/gi)).size >= 3)) {
+    const resultWithStatus = text.includes("申报结果") && /(?:受理状态|申报状态|提交成功|申报成功|受理成功|已受理|已提交|申报完成|受理结果)/.test(text);
+    if (/(?:申报回执|受理回执|申报结果回执|申报成功回执|完税凭证|缴款书|缴款凭证|付款凭证)/.test(text) || resultWithStatus) {
+      page.kind = "receipt"; page.reason = "申报或缴款回执，不含待提取的申报表格";
+    } else if (/(?:填报表单|申报表目录|申报表清单|表单目录|填报目录)/.test(text) || (/(?:目录|表单编号.*表单名称)/.test(text) && new Set(text.match(/[AB]\d{6}/gi)).size >= 3)) {
       page.kind = "directory"; page.reason = "申报目录不含待提取表格";
+    } else if (/增值税及附加税费申报表\(试行\).*封面/.test(text)) {
+      page.kind = "cover"; page.confidence = "high"; page.taxType = "vat"; page.reason = "增值税申报试点封面";
     } else if (/企业所得税年度纳税申报表/.test(text) && /谨声明|纳税人\(签章\)/.test(text) && !/行次|栏次/.test(text)) {
       page.kind = "cover"; page.confidence = "high"; page.reason = "申报签章封面";
     } else {
-      const form = identifyForm(input.text);
+      const form = identifyForm(input.text, vatPilotContext);
       if (form) {
         Object.assign(page, { kind: "form", confidence: "high", formKey: form.key, formCode: form.formCode, formName: form.formName, taxType: form.taxType });
         const existing = forms.find((item) => item.key === form.key);
@@ -193,7 +200,7 @@ export function buildTaxPageIndex(inputs: TaxPageInput[], fileName: string): Tax
     pages.push(page);
   }
   const known = [...new Set(forms.map((form) => form.taxType).filter((type) => type !== "unknown"))];
-  const taxType = known.length === 1 ? known[0] : known.length > 1 ? "unknown" : typeFromText(`${fileName} ${sorted.map((page) => page.text).join(" ")}`);
+  const taxType = known.length === 1 ? known[0] : known.length > 1 ? "mixed" : typeFromText(`${fileName} ${pages.filter((page) => page.kind !== "receipt").map((page) => page.text).join(" ")}`);
   return { fileName, companyName, period, taxType, pages, forms };
 }
 

@@ -96,7 +96,7 @@ function IconClose() {
   );
 }
 
-export function WindowControls() {
+export function WindowControls({ onReturnToToolbox }: { onReturnToToolbox?: () => void } = {}) {
   const [maximized, setMaximized] = useState(false);
   useEffect(() => {
     if (!inTauriEnv) return;
@@ -142,9 +142,9 @@ export function WindowControls() {
       <button
         type="button"
         className="window-controls-close"
-        title="关闭"
-        aria-label="关闭"
-        onClick={() => void appWindow.close()}
+        title={onReturnToToolbox ? "返回工具箱" : "关闭"}
+        aria-label={onReturnToToolbox ? "返回工具箱" : "关闭"}
+        onClick={() => onReturnToToolbox ? onReturnToToolbox() : void appWindow.close()}
       >
         <IconClose />
       </button>

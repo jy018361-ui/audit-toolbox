@@ -74,7 +74,7 @@ impl Storage {
         for row in rows {
             let (k, v) = row.map_err(db_error)?;
             let mut value = serde_json::from_str(&v).unwrap_or(Value::Null);
-            if k == "audipickLlm" {
+            if k == "audipickLlm" || k == "audipickOcrLlm" {
                 strip_secrets(&mut value);
             }
             map.insert(k, value);
@@ -94,7 +94,7 @@ impl Storage {
         let tx = conn.transaction().map_err(db_error)?;
         for (k, mut v) in map {
             // AudiPick profiles use the existing credential store, never SQLite secrets.
-            if k == "audipickLlm" {
+            if k == "audipickLlm" || k == "audipickOcrLlm" {
                 strip_secrets(&mut v);
             }
             tx.execute("INSERT INTO settings(key,value_json,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",params![k,v.to_string(),Utc::now().to_rfc3339()]).map_err(db_error)?;
@@ -1411,6 +1411,32 @@ mod tests {
             reopened.settings_get().unwrap()["audipickLlm"]["mode"],
             "dedicated"
         );
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn audipick_ocr_profile_roundtrip_keeps_source_and_never_stores_its_key() {
+        let root = test_root();
+        let storage = Storage::new(&root).unwrap();
+        storage.settings_set(json!({"ocr":{"engine":"baidu","shared":"keep"},
+            "audipickLlm":{"mode":"dedicated","model":"extract"}})).unwrap();
+        storage.settings_set(json!({
+            "audipickOcr":{"mode":"dedicated","engine":"ai"},
+            "audipickOcrLlm":{"mode":"dedicated","enabled":true,"model":"vision","api_key":"synthetic-secret","nested":{"token":"synthetic-secret"}}
+        })).unwrap();
+        let value = storage.settings_get().unwrap();
+        assert_eq!(value["ocr"]["engine"], "baidu");
+        assert_eq!(value["audipickLlm"]["model"], "extract");
+        assert_eq!(value["audipickOcr"]["mode"], "dedicated");
+        assert_eq!(value["audipickOcrLlm"]["model"], "vision");
+        let stored: String = storage.conn.lock().query_row(
+            "SELECT value_json FROM settings WHERE key='audipickOcrLlm'", [], |row| row.get(0),
+        ).unwrap();
+        assert!(!stored.contains("synthetic-secret"));
+        drop(storage);
+        let reopened = Storage::new(&root).unwrap();
+        assert_eq!(reopened.settings_get().unwrap()["audipickOcr"]["mode"], "dedicated");
         drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }

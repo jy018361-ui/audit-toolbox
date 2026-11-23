@@ -2,7 +2,7 @@
 (function (global) {
   var ORDER = [
     'loan_covenant', 'loan_general', 'revenue', 'revenue_workpaper', 'procurement', 'invoicing_agreement',
-    'statement', 'invoice', 'warehouse_io', 'account_opening', 'tax_declaration',
+    'statement', 'invoice', 'warehouse_io', 'account_opening', 'tax_vat', 'tax_corporate_income',
     'credit_report', 'tax_audit_report'
   ];
 
@@ -146,6 +146,18 @@
       useCase: '用于从征信报告中摘录信贷记录、担保、公共记录、查询记录等对审计有实质影响的信息。',
       example: { category: '信贷记录', quote: '授信额度5,000万，已用3,200万，五级分类正常', hint: '关注逾期、展期及关联担保披露' }
     },
+    tax_vat: {
+      id: 'tax_vat', name: '纳税申报表·增值税', shortName: '增值税申报表',
+      category: 'voucher', docKind: 'table', version: '2.0', readonly: true,
+      description: '先识别主表及附表所在 PDF 页码，再选择表单提取，按原表行列导出 Excel。',
+      useCase: '批量提取增值税主表、附列资料及减免税明细，保留公司名称和来源页码。'
+    },
+    tax_corporate_income: {
+      id: 'tax_corporate_income', name: '纳税申报表·企业所得税', shortName: '企业所得税申报表',
+      category: 'voucher', docKind: 'table', version: '2.0', readonly: true,
+      description: '逐文件定位纳税调整、弥补亏损等表单及续页，选择后按原表行列导出 Excel。',
+      useCase: '批量提取企业所得税申报表，自动适配不同文件中的页码，保留公司名称。'
+    },
     tax_declaration: {
       id: 'tax_declaration',
       name: '纳税申报表',
@@ -178,6 +190,8 @@
     ORDER.forEach(function (id) {
       presets[id] = Object.assign({}, META[id], { prompt: prompts[id] || '' });
     });
+    // 历史项目仍可查看原模板；新建项目只选择拆分后的两个税种。
+    presets.tax_declaration = Object.assign({}, META.tax_declaration, { prompt: prompts.tax_declaration || '' });
     return presets;
   }
 

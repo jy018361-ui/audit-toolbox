@@ -33,3 +33,7 @@ remark: 备注（无则填""）
 1. 按表内顺序排列
 2. 无有效数据返回{"items":[]}
 3. 只输出JSON，不要解释、不要markdown代码块`;
+
+// 网格提取走税表专用选页流程；保留字段定义供模板库和历史记录展示。
+window.RULE_PROMPTS.tax_vat = window.RULE_PROMPTS.tax_declaration;
+window.RULE_PROMPTS.tax_corporate_income = window.RULE_PROMPTS.tax_declaration;

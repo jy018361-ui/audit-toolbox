@@ -486,6 +486,24 @@
   background: var(--surface-muted);
 }
 
+.hmg-empty-match:not([aria-disabled="true"]) { cursor: context-menu; }
+.hmg-empty-match:focus-visible,
+.hmg-empty-menu button:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+.hmg-empty-menu {
+  min-width: min(240px, calc(100vw - 16px));
+  max-width: min(360px, calc(100vw - 16px));
+  max-height: min(320px, calc(100vh - 16px));
+  overflow-wrap: anywhere;
+}
+.hmg-menu-source {
+  padding: 6px 8px;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
 /* 网格常挂载、用 hidden 收起（合并失败后一键返回，人工调整不丢）。 */
 .hmg-overlay[hidden] {
   display: none;

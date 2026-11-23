@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ConfirmDialog";
 
@@ -106,6 +106,14 @@ function unmatchedColumnsOf(cells: CellState[]): number[] {
     .map(({ index }) => index);
 }
 
+/** 与右侧未匹配区保持相同顺序，不包含已丢弃列。 */
+function orderedUnmatchedColumns(state: RowState): number[] {
+  const available = unmatchedColumnsOf(state.cells);
+  const listed = state.unmatchedOrder.filter((col) => available.includes(col));
+  const listedSet = new Set(listed);
+  return [...listed, ...available.filter((col) => !listedSet.has(col))];
+}
+
 function toRowState(
   row: HeaderMatchPreview["rows"][number],
 ): RowState {
@@ -175,6 +183,8 @@ export function HeaderMatchGrid(props: {
   const [menu, setMenu] = useState<MenuState>(null);
   const [headerMenu, setHeaderMenu] = useState<{ col: number; x: number; y: number } | null>(null);
   const [fileMenu, setFileMenu] = useState<{ row: number; x: number; y: number } | null>(null);
+  const [emptyMenu, setEmptyMenu] = useState<MenuState>(null);
+  const emptyMenuRef = useRef<HTMLDivElement | null>(null);
   const [toast, setToast] = useState("");
   const [rematchBusy, setRematchBusy] = useState(false);
   const gridRef = useRef<HTMLDivElement | null>(null);
@@ -200,7 +210,17 @@ export function HeaderMatchGrid(props: {
     setRows(preview.rows.map(toRowState));
     setExcluded(new Set());
     setExpanded(new Set());
+    closeMenus();
   }, [preview]);
+
+  useLayoutEffect(() => {
+    const element = emptyMenuRef.current;
+    if (!emptyMenu || !element) return;
+    const rect = element.getBoundingClientRect();
+    element.style.left = `${Math.max(8, Math.min(emptyMenu.x, window.innerWidth - rect.width - 8))}px`;
+    element.style.top = `${Math.max(8, Math.min(emptyMenu.y, window.innerHeight - rect.height - 8))}px`;
+    (element.querySelector<HTMLButtonElement>("button") ?? element).focus();
+  }, [emptyMenu]);
 
   useEffect(() => {
     if (!toast) return;
@@ -254,6 +274,14 @@ export function HeaderMatchGrid(props: {
     setMenu(null);
     setHeaderMenu(null);
     setFileMenu(null);
+    setEmptyMenu(null);
+  }
+
+  function openEmptyMenu(row: number, col: number, x: number, y: number) {
+    closeMenus();
+    if (busy || rematchBusy || excluded.has(col)
+      || rows[row].detection.kind === "empty" || rows[row].detection.headerRowsCount === 0) return;
+    setEmptyMenu({ row, col, x, y });
   }
 
   /** 把 (row, col) 的格子安置到 target 列；目标列已被占用时直接交换。 */
@@ -820,6 +848,7 @@ export function HeaderMatchGrid(props: {
             <p className="hmg-hint">
               左键拖拽格子到目标列；未匹配列可在本行内排序，顺序即输出顺序。
               右键格子、列头或文件名打开菜单；拖入丢弃区可移除列，模板列头拖到未匹配区可移出。
+              右键空白匹配格可直接选择本工作表未匹配字段；也可定位空白格后按 Enter 打开。
               键盘 Tab 定位格子，Enter 确认建议。
               「按原列顺序导出」按列位置拼接，保留表头行设置，忽略匹配和丢弃设置；「调整后导出」按当前网格输出。
             </p>
@@ -933,24 +962,7 @@ export function HeaderMatchGrid(props: {
                 state.cells.forEach((cell, col) => {
                   if (cell.target != null && !cell.discard) slots.set(cell.target, col);
                 });
-                const listed = state.unmatchedOrder.filter(
-                  (col) =>
-                    col < state.cells.length &&
-                    state.cells[col].target == null &&
-                    !state.cells[col].discard,
-                );
-                const listedSet = new Set(listed);
-                const orderedUnmatched = [
-                  ...listed,
-                  ...state.cells
-                    .map((_, col) => col)
-                    .filter(
-                      (col) =>
-                        !listedSet.has(col) &&
-                        state.cells[col].target == null &&
-                        !state.cells[col].discard,
-                    ),
-                ];
+                const orderedUnmatched = orderedUnmatchedColumns(state);
                 const discarded = state.cells
                   .map((cell, col) => ({ cell, col }))
                   .filter(({ cell }) => cell.discard)
@@ -1014,7 +1026,26 @@ export function HeaderMatchGrid(props: {
                                 "hmg-slot hmg-slot-empty" + dropClass(`col:${col}`)
                               }
                             >
-                              <div className="hmg-empty-mark" />
+                              <div
+                                className="hmg-empty-mark hmg-empty-match"
+                                data-empty-match={`${row}-${col}`}
+                                role="button"
+                                tabIndex={0}
+                                aria-label={`${state.name} / ${state.sheet}，匹配「${template.headers[col]}」，右键选择未匹配字段`}
+                                aria-disabled={busy || rematchBusy || excluded.has(col) || state.detection.kind === "empty" || state.detection.headerRowsCount === 0}
+                                title="右键选择本工作表未匹配字段"
+                                onContextMenu={(event) => {
+                                  event.preventDefault();
+                                  openEmptyMenu(row, col, event.clientX, event.clientY);
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter" || event.key === " " || event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                                    event.preventDefault();
+                                    const rect = event.currentTarget.getBoundingClientRect();
+                                    openEmptyMenu(row, col, rect.left, rect.bottom);
+                                  }
+                                }}
+                              />
                             </td>
                           );
                         }
@@ -1166,6 +1197,56 @@ export function HeaderMatchGrid(props: {
         {ghost && (
           <div className="hmg-ghost" style={{ left: ghost.x + 10, top: ghost.y + 10 }}>
             {ghost.label}
+          </div>
+        )}
+
+        {emptyMenu && rows[emptyMenu.row] && (
+          <div
+            ref={emptyMenuRef}
+            className="hmg-menu hmg-empty-menu"
+            style={{ left: emptyMenu.x, top: emptyMenu.y }}
+            role="menu"
+            aria-label={`为「${template.headers[emptyMenu.col]}」选择未匹配字段`}
+            tabIndex={-1}
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                document.querySelector<HTMLElement>(`[data-empty-match="${emptyMenu.row}-${emptyMenu.col}"]`)?.focus();
+                closeMenus();
+              } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+                event.preventDefault();
+                const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+                const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+                const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+                  : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+                buttons[next]?.focus();
+              } else if (event.key === "Tab") {
+                closeMenus();
+              }
+            }}
+          >
+            <div className="hmg-menu-title">匹配到「{template.headers[emptyMenu.col]}」</div>
+            <div className="hmg-menu-source">{rows[emptyMenu.row].name} / {rows[emptyMenu.row].sheet} · 未匹配字段</div>
+            {orderedUnmatchedColumns(rows[emptyMenu.row]).map((source) => (
+              <button
+                key={source}
+                type="button"
+                role="menuitem"
+                disabled={busy || rematchBusy}
+                onClick={() => {
+                  assign(emptyMenu.row, source, emptyMenu.col);
+                  closeMenus();
+                }}
+              >
+                {rows[emptyMenu.row].headers[source] || "（空白表头）"}
+                <span className="hmg-col-tag">{columnLetter(source)}列</span>
+              </button>
+            ))}
+            {orderedUnmatchedColumns(rows[emptyMenu.row]).length === 0 && (
+              <div className="hmg-menu-source">本工作表没有未匹配字段</div>
+            )}
           </div>
         )}
 

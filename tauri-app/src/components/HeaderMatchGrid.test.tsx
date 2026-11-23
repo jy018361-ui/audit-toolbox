@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/components/ConfirmDialog", () => ({
@@ -292,6 +292,74 @@ describe("表头匹配网格", () => {
     expect(bColumns[0].target).toBeNull();
     expect(bColumns[0].discard).toBe(false);
     expect(bColumns[2].discard).toBe(true);
+  });
+
+  it("右键空白格只列出本工作表未匹配字段，选中同步预览和导出人工映射", async () => {
+    const preview = makePreview();
+    preview.rows[0].headers.push("其他工作表字段");
+    preview.rows[0].matches.push({ target: null, confidence: 0, reason: "" });
+    const { onConfirm } = setup(preview);
+    fireEvent.click(screen.getByRole("button", { name: "全部展开" }));
+    const empty = document.querySelector('[data-empty-match="1-2"]') as HTMLElement;
+    fireEvent.contextMenu(empty, { clientX: 10000, clientY: 10000 });
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map(item => item.textContent)).toEqual(["备注C列"]);
+    expect(Number.parseFloat(menu.style.left)).toBeLessThan(window.innerWidth);
+    expect(Number.parseFloat(menu.style.top)).toBeLessThan(window.innerHeight);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "备注 C列" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(statOf("unmatched")).toBe("1 未匹配");
+    const mapped = document.querySelector('[data-cell="1-2"]') as HTMLElement;
+    expect(mapped.closest("td")?.getAttribute("data-drop")).toBe("col:2");
+    const previewCell = mapped.closest("tr")?.nextElementSibling?.children[3];
+    expect(previewCell?.textContent).toContain("回单");
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(onConfirm).toHaveBeenCalled());
+    const plan = onConfirm.mock.calls[0][0] as HeaderMatchingPlanJson;
+    expect(plan.assignments[1].columns[2]).toMatchObject({ target: 2, manual: true, discard: false });
+    expect(plan.rememberAliases).toContainEqual(["备注", "金额"]);
+  });
+
+  it("空白格菜单按右侧顺序区分重名列，并排除丢弃字段", async () => {
+    const preview = makePreview();
+    preview.rows[1].headers.push("备注", "丢弃字段");
+    preview.rows[1].matches.push(...[0, 1].map(() => ({ target: null, confidence: 0, reason: "" })));
+    const { onConfirm } = setup(preview);
+    fireEvent.contextMenu(document.querySelector('[data-cell="1-4"]') as HTMLElement);
+    fireEvent.click(screen.getByText("丢弃此列（不合并）"));
+    pointerDrag(document.querySelector('[data-cell="1-3"]') as HTMLElement, unmatchedSlot(1, 0));
+    fireEvent.contextMenu(document.querySelector('[data-empty-match="1-2"]') as HTMLElement);
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map(item => item.textContent)).toEqual(["备注D列", "备注C列"]);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "备注 D列" }));
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(onConfirm).toHaveBeenCalled());
+    const plan = onConfirm.mock.calls[0][0] as HeaderMatchingPlanJson;
+    expect(plan.assignments[1].columns[3].target).toBe(2);
+    expect(plan.assignments[1].columns[2].target).toBeNull();
+    expect(plan.assignments[1].columns[4].discard).toBe(true);
+  });
+
+  it("空白格支持键盘打开和退出，无候选时提示且忙碌时不开放匹配", () => {
+    setup();
+    const empty = document.querySelector('[data-empty-match="1-2"]') as HTMLElement;
+    fireEvent.keyDown(empty, { key: "Enter" });
+    const candidate = screen.getByRole("menuitem", { name: "备注 C列" });
+    expect(document.activeElement).toBe(candidate);
+    fireEvent.keyDown(candidate, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(empty);
+    fireEvent.contextMenu(document.querySelector('[data-cell="1-2"]') as HTMLElement);
+    fireEvent.click(screen.getByText("丢弃此列（不合并）"));
+    fireEvent.contextMenu(empty);
+    expect(screen.getByText("本工作表没有未匹配字段")).toBeTruthy();
+    expect(screen.queryByRole("menuitem")).toBeNull();
+    fireEvent.click(document.querySelector(".hmg-overlay") as HTMLElement);
+    expect(screen.queryByRole("menu")).toBeNull();
+    cleanup();
+    setup(makePreview(), { busy: true });
+    fireEvent.contextMenu(document.querySelector('[data-empty-match="1-2"]') as HTMLElement);
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 
   it("按原列顺序导出忽略匹配丢弃与模板移除，保留表头定位及宽表尾列", () => {

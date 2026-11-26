@@ -401,7 +401,7 @@ fn initialize(db: &Connection) -> Result<(), AppError> {
         CREATE TEMP TABLE suite_nets(id TEXT,account TEXT,net REAL,PRIMARY KEY(id,account));
         CREATE TEMP TABLE suite_month(id TEXT,month TEXT,account TEXT,net REAL,PRIMARY KEY(id,month,account));
         CREATE TEMP TABLE suite_summaries(id TEXT,value TEXT,seq INTEGER,PRIMARY KEY(id,value));
-        CREATE TEMP TABLE suite_subject(account TEXT PRIMARY KEY,net REAL,count INTEGER,debit REAL,credit REAL);
+        CREATE TEMP TABLE suite_subject(account TEXT PRIMARY KEY,debit REAL,credit REAL);
         CREATE TEMP TABLE suite_pivot(id TEXT,account TEXT,direction TEXT,net REAL,PRIMARY KEY(id,account,direction));
         CREATE TEMP TABLE suite_custom(rowkey TEXT,col TEXT,net REAL,PRIMARY KEY(rowkey,col));
         CREATE TEMP TABLE suite_shapes(seq INTEGER PRIMARY KEY,id TEXT,full TEXT,signs TEXT);
@@ -518,7 +518,7 @@ impl PivotConfig {
 fn aggregate(
     ledger: &DiskLedger,
     mapping: &LedgerMapping,
-    targets: &[String],
+    targets: &HashSet<String>,
     job: &KanzhangParams,
     budget: u64,
     progress: Progress<'_>,
@@ -656,7 +656,10 @@ fn aggregate(
     aggregate_progress(3, "正在批量汇总科目和方向…");
     db.execute_batch(
         "INSERT INTO suite_subject
-           SELECT account,SUM(net),COUNT(*),CASE WHEN COUNT(debit)=COUNT(*) THEN SUM(debit) END,CASE WHEN COUNT(credit)=COUNT(*) THEN SUM(credit) END FROM suite_stage GROUP BY account;
+           SELECT account,
+                  CASE WHEN COUNT(debit)=COUNT(*) THEN SUM(debit) END,
+                  CASE WHEN COUNT(credit)=COUNT(*) THEN SUM(credit) END
+           FROM suite_stage GROUP BY account;
          INSERT INTO suite_pivot
            SELECT id,account,direction,SUM(net) FROM suite_stage
            GROUP BY id,account,direction;",
@@ -686,11 +689,6 @@ fn aggregate(
     )
     .map_err(db_error)?;
     aggregate_progress(6, "凭证和科目批量汇总完成。");
-    let targets = targets
-        .iter()
-        .map(|s| normalize_account_text(s))
-        .filter(|s| !s.is_empty())
-        .collect::<HashSet<_>>();
     let mut vouchers = db
         .prepare("SELECT id,seq FROM suite_vouchers WHERE loss=0 ORDER BY seq")
         .map_err(db_error)?;
@@ -1668,6 +1666,15 @@ fn write_custom_output_csv(
     Ok(())
 }
 
+fn read_subject_summary_row(
+    row: &rusqlite::Row<'_>,
+    targets: &HashSet<String>,
+) -> rusqlite::Result<Vec<String>> {
+    let debit = row.get::<_, Option<f64>>(1)?;
+    let credit = row.get::<_, Option<f64>>(2)?;
+    Ok(ledger_summary_row(row.get(0)?, debit.zip(credit), targets))
+}
+
 /// Write every suite sheet directly from SQLite using rust_xlsxwriter's
 /// constant-memory worksheets. This deliberately doesn't construct a
 /// `LedgerAnalysis.rows` or a full `PivotResult.rows` in Rust.
@@ -1682,7 +1689,12 @@ pub(super) fn write_suite(
     cancel: &AtomicBool,
 ) -> Result<DiskSuiteResult, AppError> {
     initialize(&ledger.db)?;
-    let config = aggregate(ledger, mapping, targets, job, budget, progress, cancel)?;
+    let target_set = targets
+        .iter()
+        .map(|s| normalize_account_text(s))
+        .filter(|s| !s.is_empty())
+        .collect::<HashSet<_>>();
+    let config = aggregate(ledger, mapping, &target_set, job, budget, progress, cancel)?;
     let mut overflow_paths = Vec::new();
     let mut warnings = Vec::new();
     let mut overflow_type_sheets = HashSet::<String>::new();
@@ -1758,33 +1770,15 @@ pub(super) fn write_suite(
     let summary = {
         let mut stmt = ledger
             .db
-            .prepare("SELECT account,net,count,debit,credit FROM suite_subject ORDER BY account LIMIT 40")
+            .prepare("SELECT account,debit,credit FROM suite_subject ORDER BY account LIMIT 40")
             .map_err(db_error)?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok(vec![
-                    r.get(0)?,
-                    r.get::<_, Option<f64>>(3)?
-                        .map(format_number)
-                        .unwrap_or_default(),
-                    r.get::<_, Option<f64>>(4)?
-                        .map(format_number)
-                        .unwrap_or_default(),
-                    format_number(r.get(1)?),
-                    r.get::<_, i64>(2)?.to_string(),
-                ])
-            })
+            .query_map([], |row| read_subject_summary_row(row, &target_set))
             .map_err(db_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db_error)?;
         PivotResult {
-            headers: vec![
-                "科目名称".into(),
-                "借方金额".into(),
-                "贷方金额".into(),
-                "净额".into(),
-                "行数".into(),
-            ],
+            headers: LEDGER_SUMMARY_HEADERS.map(str::to_owned).to_vec(),
             rows,
             row_field_count: 1,
         }
@@ -1993,6 +1987,7 @@ pub(super) fn write_suite(
             ];
             h.extend(months.clone());
             headers(ws, &h)?;
+            write_voucher_type_key_note(ws)?;
             output_rows(&ledger.db, name, ws, cancel)?;
             progress("write", type_index + 2, 7, &format!("{name}工作表已生成。"));
         }
@@ -2103,7 +2098,7 @@ pub(super) fn write_suite(
         headers(ws, &summary.headers)?;
         let mut stmt = ledger
             .db
-            .prepare("SELECT account,net,count,debit,credit FROM suite_subject ORDER BY account")
+            .prepare("SELECT account,debit,credit FROM suite_subject ORDER BY account")
             .map_err(db_error)?;
         let mut rows = stmt.query([]).map_err(db_error)?;
         let mut index = 1u32;
@@ -2111,24 +2106,8 @@ pub(super) fn write_suite(
             if index % 2000 == 0 {
                 check_cancel(cancel)?;
             }
-            write_row(
-                ws,
-                index,
-                &[
-                    row.get(0).map_err(db_error)?,
-                    row.get::<_, Option<f64>>(3)
-                        .map_err(db_error)?
-                        .map(format_number)
-                        .unwrap_or_default(),
-                    row.get::<_, Option<f64>>(4)
-                        .map_err(db_error)?
-                        .map(format_number)
-                        .unwrap_or_default(),
-                    format_number(row.get(1).map_err(db_error)?),
-                    row.get::<_, i64>(2).map_err(db_error)?.to_string(),
-                ],
-                1,
-            )?;
+            let values = read_subject_summary_row(row, &target_set).map_err(db_error)?;
+            write_row(ws, index, &values, 1)?;
             index += 1;
         }
     }

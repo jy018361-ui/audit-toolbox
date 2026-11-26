@@ -3584,6 +3584,10 @@ fn strings(paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 fn supported(path: &Path) -> bool {
+    // Office owner files keep the workbook extension but contain lock metadata.
+    if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("~$")) {
+        return false;
+    }
     path.extension()
         .and_then(|v| v.to_str())
         .is_some_and(|v| SUPPORTED.contains(&v.to_ascii_lowercase().as_str()))
@@ -3686,6 +3690,48 @@ mod tests {
     fn test_merge(params: Value, cancel: Arc<AtomicBool>) -> Result<Value, AppError> {
         let pause = PauseCheckpoint::unpaused(cancel.clone());
         merge(params, &|_, _, _, _| {}, cancel, &pause)
+    }
+
+    #[test]
+    fn owner_files_are_excluded_from_expansion_inspection_and_merge() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("子目录");
+        fs::create_dir(&nested).unwrap();
+        let normal = root.path().join("正常.xlsx");
+        let tilde = nested.join("~预算.xlsx");
+        let dollar = nested.join("预算$明细.xlsx");
+        for path in [&normal, &tilde, &dollar] {
+            sample_book(path, "明细", &[&["编号", "金额"], &["001", "100"]]);
+        }
+        let locks = [root.path().join("~$正常.xlsx"), nested.join("~$预算.XLSX"),
+            nested.join("~$旧表.xls"), nested.join("~$宏表.xlsm")];
+        for path in &locks { fs::write(path, b"owner lock metadata").unwrap(); }
+        let explicit = vec![locks[0].clone(), normal.clone(), tilde.clone(), dollar.clone(), locks[1].clone()];
+        let expanded = call("excel_merger.expand_paths", json!({"paths":explicit})).unwrap();
+        assert_eq!(expanded["inputPaths"], json!([normal, tilde, dollar]));
+        for method in ["excel_merger.scan_folder", "excel_merger.expand_paths"] {
+            let params = if method.ends_with("scan_folder") { json!({"folder":root.path()}) }
+                else { json!({"paths":[root.path(),normal,locks[0]]}) };
+            let value = call(method, params).unwrap();
+            assert_eq!(value["fileCount"], 3);
+            assert!(value["inputPaths"].as_array().unwrap().iter().all(|p|
+                !Path::new(p.as_str().unwrap()).file_name().unwrap().to_string_lossy().starts_with("~$")));
+        }
+        let inspected = call("excel_merger.inspect", json!({"inputPaths":explicit})).unwrap();
+        assert_eq!(inspected["files"].as_array().unwrap().len(), 3);
+        assert!(inspected["files"].as_array().unwrap().iter().all(|f| f["error"].is_null()));
+        // A direct worker/old saved request must not try to parse a lock file.
+        let output = root.path().join("合并.csv");
+        let mut params = base_params(&explicit, &output);
+        params["outputFormat"] = json!("csv");
+        test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+        let rows = crate::spreadsheet_input::read_rows(&output).unwrap();
+        assert!(rows.iter().any(|row| row.iter().any(|v| v == "001")));
+        assert!(!rows.iter().flatten().any(|v| v.contains("~$")));
+        let empty = call("excel_merger.expand_paths", json!({"paths":locks})).unwrap();
+        assert_eq!(empty["fileCount"], 0);
+        assert_eq!(call("excel_merger.inspect", json!({"inputPaths":locks})).unwrap_err().code, "INVALID_ARGUMENT");
+        for path in locks { assert_eq!(fs::read(path).unwrap(), b"owner lock metadata"); }
     }
 
     #[test]

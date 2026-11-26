@@ -37,6 +37,10 @@ type MergerFile = {
   error?: string | null;
 };
 
+export function filterExcelMergerPaths(paths: string[]): string[] {
+  return paths.filter((path) => !(path.split(/[\\/]/).pop() ?? "").startsWith("~$"));
+}
+
 export function excelMergerStep(
   pathCount: number,
   inspectedCount: number,
@@ -85,7 +89,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   const addPaths = (incoming: string[]) =>
     setPaths((current) => [
       ...current,
-      ...incoming.filter(
+      ...filterExcelMergerPaths(incoming).filter(
         (path) =>
           !current.some(
             (old) => old.toLocaleLowerCase() === path.toLocaleLowerCase(),
@@ -184,21 +188,22 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
       addHyperlinks?: boolean;
     };
     if (!Array.isArray(p.inputPaths) || !p.inputPaths.length) return;
+    const restoredPaths = filterExcelMergerPaths(p.inputPaths);
     const restoredSheets = Array.isArray(p.targetSheets)
       ? p.targetSheets
       : null;
     restoredSheetsRef.current = restoredSheets
-      ? { paths: p.inputPaths, targetSheets: restoredSheets }
+      ? { paths: restoredPaths, targetSheets: restoredSheets }
       : null;
     const samePaths =
-      p.inputPaths.length === paths.length &&
-      p.inputPaths.every((value, index) => value === paths[index]);
+      restoredPaths.length === paths.length &&
+      restoredPaths.every((value, index) => value === paths[index]);
     if (samePaths) {
       setTargetSheets(restoredSheets ?? []);
       pendingTargetSheets.current = null;
     } else {
       pendingTargetSheets.current = restoredSheets;
-      setPaths(p.inputPaths);
+      setPaths(restoredPaths);
     }
     if (typeof p.outputDirectory === "string" && p.outputDirectory) {
       setOutputDirectory(p.outputDirectory);

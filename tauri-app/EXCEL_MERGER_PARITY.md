@@ -1,5 +1,12 @@
 # Excel 批量合并迁移差异记录
 
+## 2026-11-26：忽略 Office 临时锁文件
+
+- 拖拽文件／目录、扫描目录及直接检查／合并请求统一排除文件名以 `~$` 开头的临时锁文件，避免将占用元数据按 XLSX 解析而报压缩结构无效；不删除或改写源锁文件。
+- 页面添加文件与历史恢复同步过滤，避免检查前进入列表。仅检查文件名的精确前缀，正常 `~预算.xlsx`、`预算$明细.xlsx` 和位于 `~$归档` 目录的正常工作簿保留；有效输入顺序与去重规则保持。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib excel_merger:: -- --test-threads=1`；`npx vitest run src/ExcelMergerPage.test.ts src/ToolPageJobEvents.test.tsx`；`npm run build`。覆盖目录递归、显式传入、旧请求直达合并、全锁文件空结果及源文件不变。前端定向测试、前端构建与 Rust 合并工具回归通过；独立 EXE worker 用正常 CSV 与伪装 XLSX/XLS/XLSM 锁文件混合请求实际合并通过，核对正常行、前导零编号、金额及全部输入文件 SHA-256 不变。未打包或替换安装版。
+
+
 ## 2026-11-19：首行零编号 XLSX 输入兼容
 
 接入公共首行零编号兼容：单元格地址明确且一致指向第 1 行时保留表头，原件不改；业务映射和计算规则保持。普通／流式／轻量预览及模板入口的范围、歧义边界和回归命令见 [输入兼容范围](XLS_INPUT_COMPATIBILITY.md#2026-11-19xlsx-首行零编号兼容)。

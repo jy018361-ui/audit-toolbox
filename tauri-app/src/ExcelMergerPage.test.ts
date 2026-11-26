@@ -1,6 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import { excelMergerClearPrompt, excelMergerStep } from "./ExcelMergerPage";
+import { excelMergerClearPrompt, excelMergerStep, filterExcelMergerPaths } from "./ExcelMergerPage";
+
+describe("Excel 临时锁文件过滤", () => {
+  it("添加文件和历史恢复时排除锁文件，兼容两种路径分隔符及大写扩展名", () => {
+    const inputs = ["C:\\账表\\~$明细.XLSX", "C:/账表/~$明细.xls", "~$宏表.xlsm", "~$~预算.xlsx"];
+    expect(filterExcelMergerPaths(inputs)).toEqual([]);
+  });
+
+  it("只匹配文件名的锁前缀，保留正常波浪号、美元符号及同名前缀目录", () => {
+    const inputs = ["C:/~$归档/正式.xlsx", "C:\\账表\\~预算.xlsx", "预算$明细.xlsx", "C:/账表/正常.xlsx"];
+    expect(filterExcelMergerPaths(inputs)).toEqual(inputs);
+  });
+});
 
 describe("Excel 合并步骤状态", () => {
   it("添加文件前停留在文件源", () => {

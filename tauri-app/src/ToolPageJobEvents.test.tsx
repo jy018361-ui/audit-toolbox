@@ -44,6 +44,33 @@ beforeEach(async () => {
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.clearAllMocks(); });
 
 describe("真实工具页任务事件状态", () => {
+  it("Excel 添加、拖入和扫描后不展示锁文件，检查仅提交正常工作簿", async () => {
+    const api = await import("./api");
+    const picked = "C:/客户/正常.xlsx";
+    const dropped = "C:/客户/~预算.xlsx";
+    const scanned = "C:/~$归档/明细.XLSX";
+    vi.mocked(api.pickPath).mockResolvedValueOnce([picked, "C:/客户/~$正常.xlsx"]);
+    vi.mocked(api.engineCall).mockImplementation(async (method) => {
+      if (method === "excel_merger.expand_paths") return { inputPaths: [dropped, "C:/客户/~$预算.XLSX"] };
+      if (method === "excel_merger.scan_folder") return { inputPaths: [scanned, "C:/~$归档/~$明细.XLSX"] };
+      return { files: [], availableSheets: [] };
+    });
+    render(<ExcelMergerPage tool={tool("excel_merger", "Excel 批量合并")} />);
+    fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+    await screen.findByText("1 个文件");
+    const drop = vi.mocked(api.listenFileDrops).mock.calls.at(-1)![0];
+    await act(async () => { drop([dropped, "C:/客户/~$预算.XLSX"]); });
+    await screen.findByText("2 个文件");
+    vi.mocked(api.pickPath).mockResolvedValueOnce("C:/~$归档");
+    fireEvent.click(screen.getByRole("button", { name: "扫描文件夹" }));
+    await screen.findByText("3 个文件");
+    expect(screen.queryByText("~$正常.xlsx")).not.toBeInTheDocument();
+    expect(screen.queryByText("~$预算.XLSX")).not.toBeInTheDocument();
+    expect(screen.queryByText("~$明细.XLSX")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "检查文件与 Sheet" }));
+    await waitFor(() => expect(api.engineCall).toHaveBeenCalledWith("excel_merger.inspect", { inputPaths: [picked, dropped, scanned] }));
+  });
+
   it("Excel 右键切换同文件 Sheet：传递精确基准、失败保留原网格、重试后按新列序导出", async () => {
     const api = await import("./api");
     const path = "C:/客户/合并源.xlsx";

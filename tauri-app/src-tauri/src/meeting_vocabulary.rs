@@ -19,6 +19,8 @@ pub(crate) struct VocabularyEntry {
     pub category: String,
     #[serde(default)]
     pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub misspellings: Vec<String>,
     #[serde(default)]
     pub definition: String,
     pub enabled: bool,
@@ -50,9 +52,9 @@ fn normalize(mut entry: VocabularyEntry) -> Result<VocabularyEntry, AppError> {
     entry.term = clean(&entry.term, 40, true, false)?;
     entry.definition = clean(&entry.definition, 200, false, true)?;
     if !matches!(entry.category.as_str(), "company" | "industry" | "other")
-        || entry.aliases.len() > 5
+        || entry.aliases.len() > 5 || entry.misspellings.len() > 5
     {
-        return Err(invalid("请选择有效分类，每条最多填写 5 个简称。"));
+        return Err(invalid("请选择有效分类，每条最多填写 5 个简称和 5 个常见误写。"));
     }
     let mut seen = HashSet::from([entry.term.to_lowercase()]);
     let mut aliases = Vec::new();
@@ -63,6 +65,14 @@ fn normalize(mut entry: VocabularyEntry) -> Result<VocabularyEntry, AppError> {
         }
     }
     entry.aliases = aliases;
+    let mut misspellings = Vec::new();
+    for word in entry.misspellings {
+        let word = clean(&word, 40, true, false)?;
+        if seen.insert(word.to_lowercase()) {
+            misspellings.push(word);
+        }
+    }
+    entry.misspellings = misspellings;
     Ok(entry)
 }
 
@@ -73,7 +83,7 @@ fn validate_collection(entries: &[VocabularyEntry]) -> Result<(), AppError> {
     let mut names = HashSet::new();
     let mut size = 0;
     for entry in entries {
-        for name in std::iter::once(&entry.term).chain(entry.aliases.iter()) {
+        for name in std::iter::once(&entry.term).chain(&entry.aliases).chain(&entry.misspellings) {
             if !names.insert(name.to_lowercase()) {
                 return Err(invalid("名称或简称与已有词条重复，请合并到同一词条。"));
             }
@@ -263,6 +273,27 @@ impl Storage {
         tx.commit().map_err(db_error)?;
         Ok(entries)
     }
+
+    pub(crate) fn meeting_vocabulary_remember(&self, id: &str, word: &str) -> Result<Vec<VocabularyEntry>, AppError> {
+        let word = clean(word, 40, true, false)?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(db_error)?;
+        let mut entries = list(&tx)?;
+        let index = entries.iter().position(|entry| entry.id == id && entry.enabled)
+            .ok_or_else(|| invalid("该词条已停用或删除，请重新加载词库。"))?;
+        let entry = &mut entries[index];
+        let existing = entry.misspellings.iter().any(|value| value.eq_ignore_ascii_case(&word));
+        if !existing {
+            entry.aliases.retain(|value| !value.eq_ignore_ascii_case(&word));
+            entry.misspellings.push(word);
+            *entry = normalize(entry.clone())?;
+            validate_collection(&entries)?;
+            tx.execute("UPDATE meeting_vocabulary SET entry_json=?2 WHERE id=?1",
+                params![id, json!(entries[index]).to_string()]).map_err(db_error)?;
+        }
+        tx.commit().map_err(db_error)?;
+        Ok(entries)
+    }
 }
 
 fn snapshot(params: &Value) -> Result<Vec<VocabularyEntry>, AppError> {
@@ -325,6 +356,7 @@ mod tests {
             term: term.into(),
             category: "company".into(),
             aliases: vec!["ABC".into()],
+            misspellings: Vec::new(),
             definition: "集团业务系统".into(),
             enabled: true,
         }

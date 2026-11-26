@@ -210,6 +210,7 @@ fn generate(
             Some(e.to_string()),
         )
     })?;
+    metadata::write_segments(&transcript_path, &transcription);
     let mut context = metadata::recording(&audio_path);
     metadata::merge(&mut context, &metadata::transcription(&transcription));
     let mut enriched = params.clone();
@@ -261,7 +262,7 @@ fn summarize(
         drafts,
         0,
         0,
-        None,
+        string_param(&params["__meetingMetadata"], "audioPath").as_deref().map(Path::new),
     )?;
     metadata::merge(&mut result, &params["__meetingMetadata"]);
     Ok(result)
@@ -272,26 +273,26 @@ fn default_title() -> String {
 }
 
 fn output_stamp() -> String {
-    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+    format!("{}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"), uuid::Uuid::new_v4().simple())
 }
 
 /// 输出目录：录音所在会议目录优先（回填同一场会），否则新建 minutes 目录。
 fn output_dir_for(source: &Path, stamp: &str) -> PathBuf {
-    if let Some(parent) = source.parent() {
-        if parent
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("record-"))
-        {
-            return parent.to_path_buf();
-        }
-    }
     let data_dir = crate::project_dirs()
         .map(|dirs| dirs.data_local_dir().to_path_buf())
         .unwrap_or_else(|_| std::env::temp_dir());
-    let dir = data_dir
-        .join("meeting_records")
-        .join(format!("minutes-{stamp}"));
+    let root = data_dir.join("meeting_records");
+    if let Some(parent) = source.parent() {
+        let same_root = parent.canonicalize().ok().is_some_and(|resolved| {
+            root.canonicalize().ok().as_deref() == resolved.parent()
+        });
+        let is_meeting_folder = parent.file_name().and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("record-") || name.starts_with("minutes-"));
+        if same_root && is_meeting_folder {
+            return parent.to_path_buf();
+        }
+    }
+    let dir = root.join(format!("minutes-{stamp}"));
     let _ = fs::create_dir_all(&dir);
     dir
 }

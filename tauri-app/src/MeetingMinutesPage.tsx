@@ -17,13 +17,17 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { NoticeStack } from "@/components/NoticeStack";
 import { JobProgress, terminalJobError } from "@/components/JobProgress";
 import { PageHeader } from "@/components/PageHeader";
-import { MeetingMinutesInlineEditor } from "@/components/MeetingMinutesInlineEditor";
+import { MeetingMinutesInlineEditor, type MeetingProofEditor } from "@/components/MeetingMinutesInlineEditor";
+import { MeetingTranscript } from "@/components/MeetingTranscript";
+import { MeetingRevisionHistory } from "@/components/MeetingRevisionHistory";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { withoutTimelineMarkers } from "./meetingTimeline";
 import type { MinutesDocument } from "./meetingMinutesAutoSave";
 import { MeetingSpeakerNames } from "@/components/MeetingSpeakerNames";
 import { SwitchInput } from "@/components/SwitchInput";
 import { useJobEvents } from "@/hooks/useJobEvents";
 import { useMeetingMinutesEditor } from "@/hooks/useMeetingMinutesEditor";
+import { useMeetingProofreading } from "@/hooks/useMeetingProofreading";
 import { useNativeFileDropZone } from "@/hooks/useNativeFileDropZone";
 import { meetingErrorText as errorText } from "@/lib/errors";
 import {
@@ -38,6 +42,7 @@ import {
   meetingHistoryList,
   meetingHistoryGet,
   meetingReadTranscript,
+  meetingRevisionRestore,
   openOutput,
   pickPath,
   runningInDesktopApp,
@@ -48,6 +53,7 @@ import { replaceSpeakerNames, speakerIds, type SpeakerNames } from "./meetingSpe
 import { meetingSpeakerShares } from "./meetingSpeakerShares";
 import { meetingDateTime, withMeetingInfo } from "./meetingMinutesInfo";
 import { copyFormattedMinutes, formatMeetingMinutes } from "./meetingMinutesFormat";
+import { confirmationKey, type ProofTask } from "./meetingProofreading";
 import {
   MeetingResultSchema,
   type MeetingResult,
@@ -79,6 +85,11 @@ const DETAIL_OPTIONS = [
   { label: "标准", value: "standard" },
   { label: "详细（充分展开）", value: "detailed" },
 ];
+
+function hasMinutes(result: MeetingResult | undefined) {
+  return !!(result?.minutesPath || result?.minutesMarkdown ||
+    result?.minutesVersions?.some(version => version.minutesPath || version.minutesMarkdown));
+}
 
 /** 文件名显示：完整路径只露出文件名，避免撑破布局。 */
 export function displayAudioFileName(path: string) {
@@ -119,6 +130,17 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   const [recordBusy, setRecordBusy] = useState(false);
   const [generationStarting, setGenerationStarting] = useState(false);
   const generationStartingRef = useRef(false);
+  const regeneration = useRef<{
+    result: MeetingResult; jobId?: string; historyId?: string;
+    kind?: "content" | "timeline" | "transcript";
+  }>(undefined);
+  const [restoringVersion, setRestoringVersion] = useState(false);
+  const restoringVersionRef = useRef(false);
+  const proofEditor = useRef<MeetingProofEditor>(null);
+  const [proofOpen, setProofOpen] = useState(false);
+  const [proofNotice, setProofNotice] = useState<{ key: string; text: string; error?: boolean }>();
+  const [proofUndo, setProofUndo] = useState<{ key: string; before: string; after: string }>();
+  const proofLocation = useRef<{ key: string; index: number }>(undefined);
   const [importPath, setImportPath] = useState("");
   const importDropRef = useRef<HTMLDivElement>(null);
   const importSelectionRef = useRef(0);
@@ -157,13 +179,30 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   const manualResetRef = useRef(false);
 
   const onJobEvent = useCallback(
-    (event: { phase: string; result?: unknown }) => {
+    (event: JobEvent) => {
       jobVersion.current += 1;
+      const attempt = regeneration.current;
+      const terminal = ["completed", "failed", "cancelled"].includes(event.phase);
+      if (attempt?.jobId && attempt.jobId !== event.jobId) return;
+      if (attempt) attempt.jobId = event.jobId;
+      if (terminal) regeneration.current = undefined;
       // 任务进度照常推进；用户正在阅读的历史会议不被后台结果抢占。
       if (viewingHistoryRef.current) return;
+      const restoreAttempt = () => {
+        if (!attempt) return;
+        setResult(attempt.result);
+        setSelectedKind(attempt.kind);
+        setSelectedHistoryId(attempt.historyId);
+        manualResetRef.current = true;
+      };
       if (event.phase === "completed" && event.result) {
         const parsed = MeetingResultSchema.safeParse(event.result);
         if (parsed.success) {
+          if (attempt && !hasMinutes(parsed.data)) {
+            restoreAttempt();
+            setError(parsed.data.minutesError || "重新生成未返回纪要，已保留当前版本。");
+            return;
+          }
           setResult((previous) => ({
             ...parsed.data,
             minutesMarkdown:
@@ -183,9 +222,12 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
             })),
           }));
         } else {
-          setResult(undefined);
+          if (attempt) restoreAttempt();
+          else setResult(undefined);
           setError("会议纪要结果格式异常，请从任务历史打开输出文件。");
         }
+      } else if (attempt) {
+        if (terminal) restoreAttempt();
       } else if (event.phase !== "completed") {
         setResult(undefined);
       }
@@ -197,7 +239,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     onEvent: onJobEvent,
   });
   const busy =
-    generationStarting ||
+    generationStarting || restoringVersion ||
     (!!job && !["completed", "failed", "cancelled"].includes(job.phase));
 
   async function selectHistory(row: MeetingHistoryRow) {
@@ -364,6 +406,58 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   const displayedSource = minutesEditor.body == null ? undefined : withMeetingInfo(minutesEditor.body, recognizedSpeakerIds,
     result?.meetingStartedAt, result?.meetingEndedAt);
   const visibleMinutes = displayedSource == null ? undefined : replaceSpeakerNames(displayedSource, speakerNames, speakerShares.percentages);
+  const proof = useMeetingProofreading(document.key, displayedSource, !previewMode && selectedKind !== "transcript" && displayedSource != null, location.pathname);
+  const indexedHistoryId = selectedHistoryId || (!viewingHistoryRef.current ? history.find(row => row.jobId === job?.jobId)?.id : undefined);
+  const revisionSource = result && (indexedHistoryId || result.transcriptPath || result.audioPath);
+
+  function locateProof(task: ProofTask) {
+    const last = proofLocation.current;
+    const key = JSON.stringify([document.key, task.key]);
+    const index = last?.key === key ? (last.index + 1) % task.contexts.length : 0;
+    proofLocation.current = { key, index };
+    proofEditor.current?.locate(proof.match, task.key, index);
+  }
+
+  async function replaceProof(task: ProofTask, remember: boolean) {
+    const before = minutesEditor.body;
+    const after = proofEditor.current?.replace(proof.match, task.key);
+    if (before == null || after == null) return;
+    setProofUndo({ key: document.key, before, after });
+    setProofNotice({ key: document.key, text: "已替换正文中的匹配项。" });
+    if (remember) {
+      try {
+        await proof.remember(task);
+        setProofNotice({ key: document.key, text: "已替换正文，并将误写记入专有词库。" });
+      } catch (problem) {
+        setProofNotice({ key: document.key, text: `正文已替换，记入词库失败：${errorText(problem)}`, error: true });
+      }
+    }
+  }
+
+  async function restoreRevision(id: string) {
+    if (!revisionSource || busy || generationStartingRef.current || restoringVersionRef.current) return;
+    restoringVersionRef.current = true;
+    setRestoringVersion(true);
+    const selection = selectionVersion.current;
+    try {
+      await minutesEditor.flushDocuments(documents);
+      if (selection !== selectionVersion.current) return;
+      const restored = await meetingRevisionRestore(revisionSource, id);
+      if (selection !== selectionVersion.current) return;
+      const names = restored.speakerNames ?? restored.minutesVersions?.find(version => version.speakerNames)?.speakerNames ?? {};
+      const key = restored.transcriptPath || selectedHistoryId || restored.minutesPath || meetingKey;
+      setMeetingNames(current => new Map(current).set(key, names));
+      viewingHistoryRef.current = true;
+      manualResetRef.current = true;
+      setSelectedHistoryId(indexedHistoryId);
+      setResult(restored);
+      setError("");
+      void refreshHistory();
+    } finally {
+      restoringVersionRef.current = false;
+      setRestoringVersion(false);
+    }
+  }
 
   useEffect(() => {
     setPreviewError("");
@@ -446,12 +540,21 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
         await navigator.clipboard.writeText(transcript ?? "");
         if (request === mailRequest.current) setCopyStatus("已复制");
       } else {
+        if (proof.pending && (!await confirmUnreviewed("继续复制") || request !== mailRequest.current)) return;
         const rich = await copyFormattedMinutes(formatMeetingMinutes(visibleMinutes ?? ""));
         if (request === mailRequest.current) setCopyStatus(rich ? "已复制（含格式）" : "已复制纯文本，当前环境未能保留格式。");
       }
     } catch {
       if (request === mailRequest.current) setCopyStatus("复制失败，请选中正文后复制。");
     }
+  }
+
+  function confirmUnreviewed(confirmLabel: string) {
+    return confirmDialog({
+      title: `有 ${proof.pending} 项术语待校对`,
+      message: "可以先检查术语，也可以使用当前正文。",
+      confirmLabel,
+    });
   }
 
   async function createMailDraft() {
@@ -461,6 +564,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     setMailNotice(undefined);
     const request = mailRequest.current;
     try {
+      if (proof.pending && (!await confirmUnreviewed("继续生成草稿") || request !== mailRequest.current)) return;
       const formatted = formatMeetingMinutes(visibleMinutes, activeVersion?.title || result?.title);
       const created = await meetingCreateMailDraft(formatted.subject, formatted.html);
       if (request === mailRequest.current) setMailNotice({ message: created.message, error: false });
@@ -556,13 +660,34 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
     audioPath?: string;
     transcriptPath?: string;
   }) {
-    if (busy || generationStartingRef.current) return;
+    if (busy || generationStartingRef.current || restoringVersionRef.current) return;
     const previousResult = result;
     const previousHistoryId = selectedHistoryId;
     const previousKind = selectedKind;
     const previouslyViewingHistory = viewingHistoryRef.current;
     generationStartingRef.current = true;
     setGenerationStarting(true);
+    const beforeFlush = selectionVersion.current;
+    const sameMeeting = !!result && (extra.transcriptPath
+      ? extra.transcriptPath === result.transcriptPath : extra.audioPath === result.audioPath);
+    if (sameMeeting) {
+      try {
+        await minutesEditor.flushDocuments(documents);
+      } catch (problem) {
+        setError(`重新生成前无法保存现稿：${errorText(problem)}`);
+        generationStartingRef.current = false;
+        setGenerationStarting(false);
+        return;
+      }
+    }
+    if (selectionVersion.current !== beforeFlush) {
+      generationStartingRef.current = false;
+      setGenerationStarting(false);
+      return;
+    }
+    if (sameMeeting && previousResult && hasMinutes(previousResult)) {
+      regeneration.current = { result: previousResult, kind: previousKind, historyId: previousHistoryId };
+    }
     const generationVersion = ++jobVersion.current;
     autoRestoreRef.current = false;
     viewingHistoryRef.current = false;
@@ -584,6 +709,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
         extra.transcriptPath ? "meeting.summarize" : "meeting.generate",
         params,
       );
+      if (regeneration.current) regeneration.current.jobId = jobId;
       setJob((current) =>
         current?.jobId === jobId
           ? current
@@ -601,6 +727,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
       markToolPageLive(tool.id);
       void refreshHistory();
     } catch (e) {
+      regeneration.current = undefined;
       // No task event arrived: a launch error must leave the selected meeting
       // available for retry, rather than disabling generation with no input.
       if (selectionVersion.current === selection && jobVersion.current === generationVersion) {
@@ -619,6 +746,7 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
   /** 换/清录音＝换输入数据：上一轮纪要与转写稿不再属于当前录音，连同
    * 完成横幅一起撤下，并拦住后台快照把它刷回来。 */
   function resetForNewAudio() {
+    regeneration.current = undefined;
     autoRestoreRef.current = false;
     viewingHistoryRef.current = false;
     selectionVersion.current += 1;
@@ -1234,20 +1362,53 @@ export function MeetingMinutesPage({ tool }: { tool: ToolManifest }) {
                       </p>
                     ) : transcript === undefined ? (
                       <p role="status">正在读取转写稿…</p>
-                    ) : (
-                      <article
-                        className="meeting-transcript-content"
-                        aria-label="原始转写正文"
-                      >
-                        <pre>{transcript || "转写稿暂无正文。"}</pre>
-                      </article>
-                    )
+                    ) : location.pathname === tool.route ? (
+                      <MeetingTranscript key={JSON.stringify([transcriptKey, result.audioPath])}
+                        transcript={transcript} path={result.transcriptPath} audioPath={result.audioPath}
+                        names={speakerNames} preview={previewMode} />
+                    ) : null
                   ) : visibleMinutes != null ? (
-                    <MeetingMinutesInlineEditor key={document.key} source={displayedSource ?? ""}
-                      names={speakerNames} shares={speakerShares.percentages} onChange={minutesEditor.change} onBlur={minutesEditor.flush} />
+                    <>
+                      <MeetingMinutesInlineEditor key={document.key} source={displayedSource ?? ""}
+                        names={speakerNames} shares={speakerShares.percentages} onChange={minutesEditor.change} onBlur={minutesEditor.flush}
+                        readOnly={generationStarting || restoringVersion || (!!regeneration.current && busy)} proofRef={proofEditor} />
+                      {!previewMode && <details className="meeting-review-panel" open={proofOpen} onToggle={event => setProofOpen(event.currentTarget.open)}>
+                        <summary>术语校对{proof.pending > 0 ? `（${proof.pending} 项待确认）` : ""}</summary>
+                        {proofOpen && <div>
+                          {proof.loading && <p role="status">正在读取专有词库…</p>}
+                          {proof.error && <p role="alert" className="meeting-ask-error">{proof.error}</p>}
+                          {!proof.loading && !proof.error && !proof.tasks.length && <p>当前正文没有检测到词库中的待校对写法。</p>}
+                          {proof.tasks.map(task => {
+                            const confirmed = proof.confirmed.includes(confirmationKey(task));
+                            return <section key={task.key} className="meeting-proof-task">
+                              <p><strong>{task.observed}</strong> → {task.preferred} · {task.contexts.length} 处{confirmed ? " · 已确认" : ""}</p>
+                              {task.entry.definition && <p>{task.entry.definition}</p>}
+                              <p>{task.contexts[0]}</p>
+                              <div className="meeting-review-actions">
+                                <Button variant="ghost" onClick={() => locateProof(task)}>定位下一处</Button>
+                                <Button variant="ghost" onClick={() => proof.confirm(task, !confirmed)} disabled={busy}>
+                                  {confirmed ? "撤回确认" : "确认原写法"}
+                                </Button>
+                                <Button variant="secondary" disabled={busy} onClick={() => void replaceProof(task, false)}>全部替换</Button>
+                                {!task.entry.misspellings?.includes(task.observed) && task.preferred === task.entry.term &&
+                                  <Button variant="ghost" disabled={busy} onClick={() => void replaceProof(task, true)}>全部替换并记为误写</Button>}
+                              </div>
+                            </section>;
+                          })}
+                          {proofNotice?.key === document.key && <p role={proofNotice.error ? "alert" : "status"}>{proofNotice.text}</p>}
+                          {proofUndo?.key === document.key && proofUndo.after === minutesEditor.body && <Button variant="ghost" disabled={busy} onClick={() => {
+                            minutesEditor.change(proofUndo.before);
+                            setProofUndo(undefined);
+                            setProofNotice({ key: document.key, text: "已撤回上次正文替换。" });
+                          }}>撤回上次正文替换</Button>}
+                        </div>}
+                      </details>}
+                    </>
                   ) : minutesPath && !previewError ? (
                     <p role="status">正在读取纪要正文…</p>
                   ) : null}
+                  {!previewMode && revisionSource && <MeetingRevisionHistory key={`versions:${revisionSource}`} source={revisionSource}
+                    disabled={busy || recordBusy || !!recording || readingMinutes} jobPhase={job?.phase} onRestore={restoreRevision} />}
                   <div className="meeting-result-actions">
                     <Button
                       variant="secondary"

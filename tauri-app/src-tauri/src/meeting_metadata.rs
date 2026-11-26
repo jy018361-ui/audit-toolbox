@@ -1,10 +1,59 @@
 //! Facts from native recording/ASR. Never infer meeting dates from file mtimes or job dates.
 use crate::bailian_asr::TranscriptionResult;
 use chrono::{DateTime, Datelike, Local};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, io::Read, path::Path};
 
 pub(crate) const KEYS: [&str; 3] = ["meetingStartedAt", "meetingEndedAt", "speakerDurationsMs"];
+
+const SEGMENTS_LIMIT: u64 = 8 * 1024 * 1024;
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TranscriptSegment {
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    speaker_id: Option<i64>,
+    text: String,
+}
+
+pub(crate) fn write_segments(path: &Path, transcription: &TranscriptionResult) {
+    let segments: Vec<_> = transcription.sentences.iter()
+        .filter(|sentence| !sentence.text.trim().is_empty())
+        .map(|sentence| TranscriptSegment {
+            start_ms: (sentence.begin_ms >= 0).then_some(sentence.begin_ms),
+            end_ms: (sentence.begin_ms >= 0 && sentence.end_ms > sentence.begin_ms).then_some(sentence.end_ms),
+            speaker_id: (transcription.speakers > 0 && (0..999).contains(&sentence.speaker_id))
+                .then_some(sentence.speaker_id + 1),
+            text: sentence.text.clone(),
+        })
+        .collect();
+    if let Ok(bytes) = serde_json::to_vec(&segments) {
+        if bytes.len() as u64 <= SEGMENTS_LIMIT {
+            let _ = fs::write(path.with_extension("segments.json"), bytes);
+        }
+    }
+}
+
+pub(crate) fn read_segments(root: &Path, path: &Path) -> Option<Vec<TranscriptSegment>> {
+    let transcript = path.canonicalize().ok()?;
+    let parent = transcript.parent()?;
+    if parent.parent()? != root.canonicalize().ok()? ||
+        !transcript.file_name()?.to_str()?.starts_with("转写稿-")
+    {
+        return None;
+    }
+    let expected = transcript.with_extension("segments.json");
+    let segments = expected.canonicalize().ok()?;
+    if segments != expected {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(segments).ok()?.take(SEGMENTS_LIMIT + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= SEGMENTS_LIMIT).then_some(())?;
+    serde_json::from_slice(&bytes).ok()
+}
 
 pub(crate) fn recording(audio: &Path) -> Value {
     if audio.file_name().and_then(|v| v.to_str()) != Some("audio-mix.wav") {
@@ -166,6 +215,30 @@ pub(crate) fn apply(markdown: &str, metadata: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meeting_segments_are_bound_to_the_transcript_and_keep_timing_without_inventing_speakers() {
+        use crate::bailian_asr::Sentence;
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("record-example");
+        fs::create_dir(&folder).unwrap();
+        let path = folder.join("转写稿-example.txt");
+        fs::write(&path, "原文").unwrap();
+        let mut asr = TranscriptionResult {
+            speakers: 1,
+            billed_ms: 10_000,
+            sentences: vec![Sentence { speaker_id: 0, begin_ms: 400, end_ms: 1800, text: "确认金额。".into() }],
+        };
+        write_segments(&path, &asr);
+        let rows = read_segments(root.path(), &path).unwrap();
+        assert_eq!(rows[0].speaker_id, Some(1));
+        assert_eq!(rows[0].start_ms, Some(400));
+        assert_eq!(rows[0].end_ms, Some(1800));
+        assert!(read_segments(&folder, &path).is_none());
+        asr.speakers = 0;
+        write_segments(&path, &asr);
+        assert_eq!(read_segments(root.path(), &path).unwrap()[0].speaker_id, None);
+    }
     #[test]
     fn meeting_metadata_uses_actual_turn_durations_and_recording_dates() {
         use crate::bailian_asr::Sentence;

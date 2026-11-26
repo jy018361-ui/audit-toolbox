@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::Path};
 
 pub(crate) type SpeakerNames = BTreeMap<String, String>;
 
-fn path_key(path: &Path) -> String {
+pub(super) fn path_key(path: &Path) -> String {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy().replace('/', "\\").to_lowercase()
 }
@@ -39,20 +39,8 @@ impl Storage {
             rendered_markdown TEXT NOT NULL, speaker_names_json TEXT NOT NULL);").map_err(db_error)
     }
 
-    pub fn meeting_document_read(&self, path: &Path, mut result: Value) -> Result<Value, AppError> {
-        let stored: Option<(String, String, String)> = self.conn.lock().query_row(
-            "SELECT source_markdown,rendered_markdown,speaker_names_json FROM meeting_documents WHERE path_key=?1",
-            [path_key(path)], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        ).optional().map_err(db_error)?;
-        if let Some((source, rendered, names)) = stored {
-            // An external edit invalidates provenance. Never reverse-replace a
-            // person's name in arbitrary text or discard external changes.
-            if result["minutesMarkdown"].as_str() == Some(rendered.as_str()) {
-                result["sourceMarkdown"] = json!(source);
-                result["speakerNames"] = serde_json::from_str(&names).map_err(db_error)?;
-            }
-        }
-        Ok(result)
+    pub fn meeting_document_read(&self, path: &Path, result: Value) -> Result<Value, AppError> {
+        read_document(&self.conn.lock(), path, result)
     }
 
     pub fn meeting_document_save(&self, path: &Path, source: &str, expected: &str, names: &SpeakerNames) -> Result<Value, AppError> {
@@ -62,10 +50,7 @@ impl Storage {
         let rendered = render_names(source, names)?;
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_error)?;
-        tx.execute("INSERT INTO meeting_documents(path_key,source_markdown,rendered_markdown,speaker_names_json)
-            VALUES(?1,?2,?3,?4) ON CONFLICT(path_key) DO UPDATE SET source_markdown=excluded.source_markdown,
-            rendered_markdown=excluded.rendered_markdown,speaker_names_json=excluded.speaker_names_json",
-            params![path_key(path), source, rendered, serde_json::to_string(names).map_err(db_error)?]).map_err(db_error)?;
+        store_document(&tx, path, source, &rendered, &json!(names))?;
         let mut saved = meeting_minutes::save_minutes(path, &rendered, expected)?;
         if let Err(error) = tx.commit() {
             // Preserve the previous file when the metadata transaction fails;
@@ -77,6 +62,30 @@ impl Storage {
         saved["speakerNames"] = json!(names);
         Ok(saved)
     }
+}
+
+pub(super) fn read_document(conn: &rusqlite::Connection, path: &Path, mut result: Value) -> Result<Value, AppError> {
+    let stored: Option<(String, String, String)> = conn.query_row(
+        "SELECT source_markdown,rendered_markdown,speaker_names_json FROM meeting_documents WHERE path_key=?1",
+        [path_key(path)], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    ).optional().map_err(db_error)?;
+    if let Some((source, rendered, names)) = stored {
+        // An external edit invalidates provenance. Never reverse-replace a
+        // person's name in arbitrary text or discard external changes.
+        if result["minutesMarkdown"].as_str() == Some(rendered.as_str()) {
+            result["sourceMarkdown"] = json!(source);
+            result["speakerNames"] = serde_json::from_str(&names).map_err(db_error)?;
+        }
+    }
+    Ok(result)
+}
+
+pub(super) fn store_document(conn: &rusqlite::Connection, path: &Path, source: &str, rendered: &str, names: &Value) -> Result<(), AppError> {
+    conn.execute("INSERT INTO meeting_documents(path_key,source_markdown,rendered_markdown,speaker_names_json)
+            VALUES(?1,?2,?3,?4) ON CONFLICT(path_key) DO UPDATE SET source_markdown=excluded.source_markdown,
+            rendered_markdown=excluded.rendered_markdown,speaker_names_json=excluded.speaker_names_json",
+            params![path_key(path), source, rendered, serde_json::to_string(names).map_err(db_error)?]).map_err(db_error)?;
+    Ok(())
 }
 
 #[cfg(test)]

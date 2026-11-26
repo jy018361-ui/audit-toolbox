@@ -468,3 +468,79 @@ html.meeting-ask-root #root {
 .meeting-processing-card p { margin: 0; }
 .meeting-processing-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); }
 .meeting-processing-header strong { padding-top: var(--sp-1); }
+.meeting-transcript-content audio {
+  width: 100%;
+  margin-bottom: var(--sp-3);
+}
+
+.meeting-transcript-segments {
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.meeting-transcript-segments li {
+  display: grid;
+  grid-template-columns: minmax(3.7rem, max-content) minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--sp-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.meeting-segment-play,
+.meeting-transcript-segments time {
+  font-variant-numeric: tabular-nums;
+}
+
+.meeting-segment-play {
+  justify-self: start;
+  padding: 0 var(--sp-1);
+  border-radius: var(--r-sm);
+  color: var(--primary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.meeting-review-panel {
+  padding: var(--sp-2) var(--sp-3);
+  margin-block: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.meeting-review-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.meeting-review-panel > div,
+.meeting-proof-task,
+.meeting-revision-preview {
+  display: grid;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.meeting-proof-task {
+  border-top: 1px solid var(--border);
+  padding-top: var(--sp-2);
+}
+
+.meeting-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+
+.meeting-review-panel select {
+  display: block;
+  max-width: 100%;
+  padding: var(--sp-1);
+  margin-top: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--background);
+}

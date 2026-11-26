@@ -53,6 +53,7 @@ export function MeetingVocabularyPage() {
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState<MeetingVocabularyEntry>();
   const [aliases, setAliases] = useState("");
+  const [misspellings, setMisspellings] = useState("");
   const termInput = useRef<HTMLInputElement>(null);
   const mounted = useRef(false);
   const loadVersion = useRef(0);
@@ -114,6 +115,7 @@ export function MeetingVocabularyPage() {
   function edit(entry: MeetingVocabularyEntry) {
     setDraft({ ...entry, aliases: [...entry.aliases] });
     setAliases(entry.aliases.join("、"));
+    setMisspellings(entry.misspellings?.join("、") ?? "");
     setError("");
     setNotice("");
   }
@@ -121,14 +123,9 @@ export function MeetingVocabularyPage() {
   function save(event: FormEvent) {
     event.preventDefault();
     if (!draft || busyRef.current) return;
-    const parsedAliases = [
-      ...new Set(
-        aliases
-          .split(/[、,，;；\n]+/)
-          .map((value) => value.trim())
-          .filter(Boolean),
-      ),
-    ];
+    const splitNames = (text: string) => [...new Set(text.split(/[、,，;；\n]+/).map(value => value.trim()).filter(Boolean))];
+    const parsedAliases = splitNames(aliases);
+    const parsedMisspellings = splitNames(misspellings);
     if (!draft.term.trim()) {
       setError("请填写标准名称。");
       return;
@@ -140,11 +137,16 @@ export function MeetingVocabularyPage() {
       setError("每条最多填写 5 个简称，每个简称最多 40 字。");
       return;
     }
+    if (parsedMisspellings.length > 5 || parsedMisspellings.some(value => Array.from(value).length > 40)) {
+      setError("每条最多填写 5 个常见误写，每个误写最多 40 字。");
+      return;
+    }
     const entry = {
       ...draft,
       term: draft.term.trim(),
       definition: draft.definition.trim(),
       aliases: parsedAliases,
+      ...(parsedMisspellings.length || draft.misspellings ? { misspellings: parsedMisspellings } : {}),
     };
     void mutate(
       () => meetingVocabularySave(entry),
@@ -168,7 +170,7 @@ export function MeetingVocabularyPage() {
 
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filtered = entries.filter((entry) =>
-    [entry.term, ...entry.aliases, entry.definition].some((text) =>
+    [entry.term, ...entry.aliases, ...(entry.misspellings ?? []), entry.definition].some((text) =>
       text.toLocaleLowerCase().includes(normalizedQuery),
     ),
   );
@@ -375,6 +377,11 @@ export function MeetingVocabularyPage() {
                     onChange={(event) => setAliases(event.target.value)}
                     placeholder="最多 5 个，用顿号或逗号分隔"
                   />
+                </label>
+                <label className="meeting-vocabulary-wide">
+                  常见误写
+                  <input value={misspellings} onChange={event => setMisspellings(event.target.value)}
+                    placeholder="用于纪要校对，最多 5 个，用顿号或逗号分隔" />
                 </label>
                 <label className="meeting-vocabulary-wide">
                   含义 / 使用语境

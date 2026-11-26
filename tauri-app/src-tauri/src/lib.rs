@@ -37,6 +37,7 @@ mod lpr;
 mod meeting_audio;
 mod meeting_minutes;
 mod meeting_outlook;
+mod meeting_playback;
 mod meeting_record;
 mod meeting_notifications;
 mod meeting_watch;
@@ -762,6 +763,14 @@ async fn job_start_logged(
     params: Value,
 ) -> Result<String, AppError> {
     validate_ocr_paths(&allowed, &method, &params)?;
+    let meeting_source = match method.as_str() {
+        "meeting.generate" => params["audioPath"].as_str(),
+        "meeting.summarize" => params["transcriptPath"].as_str(),
+        _ => None,
+    };
+    if let Some(source) = meeting_source {
+        storage.meeting_archive_revision(source)?;
+    }
     // 历史记录「继续任务」要能还原现场：在注入 __settings/__llmOptions/
     // __dbPath/textPath 之前克隆用户原始参数存档。存档失败不拦任务本身，
     // 只是该条历史记录没有恢复按钮。
@@ -1467,10 +1476,44 @@ fn meeting_vocabulary_delete(storage: State<'_, Storage>, id: String) -> Result<
 }
 
 #[tauri::command]
+fn meeting_vocabulary_remember(storage: State<'_, Storage>, id: String, word: String) -> Result<Value, AppError> {
+    Ok(json!(storage.meeting_vocabulary_remember(&id, &word)?))
+}
+
+#[tauri::command]
 fn meeting_history_get(storage: State<'_, Storage>, allowed: State<'_, AllowedPaths>, id: String) -> Result<Value, AppError> {
     let result = storage.meeting_history_result(&id)?;
     authorize_meeting_history_files(&allowed, &result);
     Ok(result)
+}
+
+#[tauri::command]
+fn meeting_revision_list(storage: State<'_, Storage>, allowed: State<'_, AllowedPaths>, source: String) -> Result<Value, AppError> {
+    authorize_meeting_revision_source(&storage, &allowed, &source)?;
+    storage.meeting_revision_list(&source)
+}
+
+#[tauri::command]
+fn meeting_revision_get(storage: State<'_, Storage>, allowed: State<'_, AllowedPaths>, source: String, revision_id: String) -> Result<Value, AppError> {
+    authorize_meeting_revision_source(&storage, &allowed, &source)?;
+    storage.meeting_revision_get(&source, &revision_id)
+}
+
+#[tauri::command]
+fn meeting_revision_restore(storage: State<'_, Storage>, allowed: State<'_, AllowedPaths>, source: String, revision_id: String) -> Result<Value, AppError> {
+    authorize_meeting_revision_source(&storage, &allowed, &source)?;
+    let result = storage.meeting_revision_restore(&source, &revision_id)?;
+    authorize_meeting_history_files(&allowed, &result);
+    Ok(result)
+}
+
+fn authorize_meeting_revision_source(storage: &Storage, allowed: &AllowedPaths, source: &str) -> Result<(), AppError> {
+    let path = Path::new(source);
+    if path.is_absolute() {
+        return authorize_meeting_source(allowed, path);
+    }
+    // The history index itself is trusted, including meetings whose original recording has moved.
+    storage.meeting_history_result(source).map(|_| ())
 }
 
 // 从可信后台归档恢复确切文件授权；不把文件所在目录加入白名单。
@@ -1497,10 +1540,37 @@ fn meeting_read_transcript(allowed: State<'_, AllowedPaths>, path: String) -> Re
     read_authorized_meeting_transcript(&allowed, Path::new(&path))
 }
 
-fn read_authorized_meeting_transcript(allowed: &AllowedPaths, path: &Path) -> Result<String, AppError> {
+#[tauri::command]
+fn meeting_transcript_segments(allowed: State<'_, AllowedPaths>, path: String) -> Result<Vec<meeting_minutes::metadata::TranscriptSegment>, AppError> {
+    let path = Path::new(&path);
+    authorize_meeting_source(&allowed, path)?;
+    let segments = project_dirs().ok().and_then(|dirs| {
+        meeting_minutes::metadata::read_segments(&dirs.data_local_dir().join("meeting_records"), path)
+    });
+    Ok(segments.unwrap_or_default())
+}
+
+#[tauri::command]
+fn meeting_audio_playback(playback: State<'_, meeting_playback::Playback>, allowed: State<'_, AllowedPaths>, path: String) -> Result<String, AppError> {
+    let path = Path::new(&path);
+    authorize_meeting_source(&allowed, path)?;
+    playback.open(path)
+}
+
+#[tauri::command]
+fn meeting_audio_close(playback: State<'_, meeting_playback::Playback>, token: String) {
+    playback.close(&token);
+}
+
+fn authorize_meeting_source(allowed: &AllowedPaths, path: &Path) -> Result<(), AppError> {
     if !allowed.0.lock().iter().any(|selected| path_is_permitted(path, selected)) {
         return Err(AppError::new("PATH_NOT_AUTHORIZED", "请先选择要查看的会议记录。", false, None));
     }
+    Ok(())
+}
+
+fn read_authorized_meeting_transcript(allowed: &AllowedPaths, path: &Path) -> Result<String, AppError> {
+    authorize_meeting_source(allowed, path)?;
     if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("txt")) {
         return Err(AppError::new("MEETING_TRANSCRIPT_FORMAT", "转写稿需为 TXT 文本文件。", false, None));
     }
@@ -2232,6 +2302,16 @@ pub fn run() {
     let allowed = AllowedPaths(Arc::new(Mutex::new(HashSet::new())));
     let engine_allowed = allowed.clone();
     let builder = tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol("meeting-audio", |context, request, responder| {
+            if context.webview_label() != "main" {
+                responder.respond(meeting_playback::not_found());
+                return;
+            }
+            let app = context.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                responder.respond(app.state::<meeting_playback::Playback>().respond(request));
+            });
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
@@ -2254,6 +2334,7 @@ pub fn run() {
     builder
         .manage(storage)
         .manage(allowed)
+        .manage(meeting_playback::Playback::default())
         .manage(telemetry.clone())
         // 后台常驻开启时，关闭主窗口只是隐藏到托盘；检测与录音继续。
         // 常驻关闭则放行关闭，应用照旧退出。
@@ -2373,8 +2454,15 @@ pub fn run() {
             meeting_vocabulary_list,
             meeting_vocabulary_save,
             meeting_vocabulary_delete,
+            meeting_vocabulary_remember,
             meeting_history_get,
+            meeting_revision_list,
+            meeting_revision_get,
+            meeting_revision_restore,
             meeting_read_transcript,
+            meeting_transcript_segments,
+            meeting_audio_playback,
+            meeting_audio_close,
             meeting_detect_set_enabled,
             meeting_set_resident,
             meeting_autostart_status,

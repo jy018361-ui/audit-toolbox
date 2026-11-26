@@ -115,6 +115,18 @@ export class MeetingMinutesAutoSave {
     })().finally(() => { draft.running = undefined; });
     return draft.running;
   }
+  async flushDocuments(documents: MinutesDocument[]) {
+    await Promise.all(documents.map(({ key }) => this.loading.get(key)));
+    await Promise.all(documents.map(({ key }) => this.flush(key)));
+    for (const document of documents) {
+      const draft = this.drafts.get(document.key);
+      const error = draft?.error ?? this.loadErrors.get(document.key);
+      if (error) throw new Error(error);
+      if (this.enabled && draft?.state === "local" && this.dirty(draft)) {
+        throw new Error("当前纪要修改尚无文件可保存，请先复制正文保留修改。");
+      }
+    }
+  }
   async reload(document: MinutesDocument) {
     const draft = this.drafts.get(document.key);
     if (!document.path || draft?.running) return undefined;

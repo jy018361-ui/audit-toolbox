@@ -122,6 +122,19 @@ export const MeetingResultSchema = z.object({
 });
 export type MeetingResult = z.infer<typeof MeetingResultSchema>;
 
+export const MeetingTranscriptSegmentSchema = z.object({
+  startMs: z.number().int().nonnegative().nullish(),
+  endMs: z.number().int().positive().nullish(),
+  speakerId: z.number().int().positive().nullish(),
+  text: z.string(),
+});
+export type MeetingTranscriptSegment = z.infer<typeof MeetingTranscriptSegmentSchema>;
+
+export const MeetingRevisionSchema = z.object({
+  id: z.string(), createdAt: z.string(), title: z.string(),
+});
+export type MeetingRevision = z.infer<typeof MeetingRevisionSchema>;
+
 export const MeetingMailDraftSchema = z.object({
   saved: z.literal(true), displayed: z.boolean(), message: z.string(),
 });
@@ -137,6 +150,7 @@ export const MeetingVocabularyEntrySchema = z.object({
   term: z.string().min(1).max(40),
   category: z.enum(["company", "industry", "other"]),
   aliases: z.array(z.string().min(1).max(40)).max(5),
+  misspellings: z.array(z.string().min(1).max(40)).max(5).optional(),
   definition: z.string().max(200),
   enabled: z.boolean(),
 });

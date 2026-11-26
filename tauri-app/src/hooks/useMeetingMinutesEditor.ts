@@ -23,6 +23,7 @@ export function useMeetingMinutesEditor(document: MinutesDocument, names: Speake
     error: draft?.error,
     change: (body: string) => store.change(document, body, names),
     flush: () => { void store.flush(); },
+    flushDocuments: (documents: MinutesDocument[]) => store.flushDocuments(documents),
     retry: () => { void store.flush(); },
     setNames: (meeting: string, next: SpeakerNames, documents: MinutesDocument[]) => store.setNames(meeting, next, documents),
     errorsFor: (documents: MinutesDocument[]) => documents.flatMap(doc => {

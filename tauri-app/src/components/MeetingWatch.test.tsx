@@ -51,6 +51,7 @@ vi.mock("../api", () => ({
   meetingHistoryList: mocks.historyList,
   meetingHistoryGet: vi.fn(async () => ({})),
   meetingReadTranscript: vi.fn(async () => ""),
+  meetingVocabularyList: vi.fn(async () => []),
   jobCancel: vi.fn(), pickPath: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({

@@ -1,3 +1,11 @@
+## 2026-11-26 · 会议纪要回听、术语校对与版本恢复
+
+目标：从原始转写直接回听会议录音，复核词库术语，并在重新生成后找回人工稿。
+设计决策：时间戳入口放在原始转写，术语校对跟随当前纪要版本。复制正文及生成 Outlook 草稿时提示待校对项，用户可继续使用当前稿。历史版本支持在页内预览与恢复。
+已修改：原文分段播放器、术语定位与替换、专有词库常见误写、重生成前保存及版本记录入口。
+验证：`npx vitest run src/MeetingMinutesPage.test.tsx src/MeetingVocabularyPage.test.tsx src/components/MeetingWatch.test.tsx`、`npm run build`，原生回归见 `MEETING_MINUTES_PARITY.md`。
+待确认：实际安装版 WebView2 的各媒体格式回听。
+
 ## 2026-11-26 · Excel 合并文件源忽略临时锁文件
 目标：拖入目录时不把隐藏的 Office 锁文件列成读取失败的工作簿。
 用户反馈：选中的正常文件没有 `~$` 前缀，合并列表却出现约 1 KB 的同名锁文件。

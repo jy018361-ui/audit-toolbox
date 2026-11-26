@@ -7,15 +7,15 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::path::Path;
 
-fn text<'a>(value: &'a Value, key: &str) -> &'a str {
+pub(super) fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-fn path_key(path: &str) -> String {
+pub(super) fn path_key(path: &str) -> String {
     path.replace('/', "\\").to_lowercase()
 }
 
-fn archived_result(value: &Value) -> Value {
+pub(super) fn archived_result(value: &Value) -> Value {
     let mut result = json!({});
     for key in [
         "title",
@@ -55,6 +55,11 @@ fn archived_result(value: &Value) -> Value {
         );
     }
     result
+}
+
+pub(super) fn has_minutes(value: &Value) -> bool {
+    !text(value, "minutesPath").is_empty() || !text(value, "minutesMarkdown").is_empty()
+        || value["minutesVersions"].as_array().is_some_and(|versions| versions.iter().any(has_minutes))
 }
 
 impl Storage {
@@ -265,7 +270,11 @@ impl Storage {
                 || result.get("minutesVersions").is_some()
                 || result.get("transcriptPath").is_some()
             {
-                archived = archived_result(result);
+                if has_minutes(result) || !has_minutes(&archived) {
+                    archived = archived_result(result);
+                } else if let Some(message) = result.get("minutesError") {
+                    archived["minutesError"] = message.clone();
+                }
             }
         }
         if !audio.is_empty() {
@@ -294,6 +303,8 @@ impl Storage {
         } else {
             "导入时间"
         };
+        let archived_transcript = text(&archived, "transcriptPath");
+        let indexed_transcript_key = if archived_transcript.is_empty() { transcript_key } else { path_key(archived_transcript) };
         conn.execute("INSERT INTO meeting_history(id,job_id,audio_key,transcript_key,title,started_at,time_label,status,message,result_json)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET job_id=excluded.job_id,
             audio_key=CASE WHEN excluded.audio_key='' THEN meeting_history.audio_key ELSE excluded.audio_key END,
@@ -301,7 +312,7 @@ impl Storage {
             title=excluded.title,status=excluded.status,message=excluded.message,result_json=excluded.result_json,
             started_at=CASE WHEN excluded.time_label='会议时间' THEN excluded.started_at ELSE meeting_history.started_at END,
             time_label=CASE WHEN excluded.time_label='会议时间' THEN excluded.time_label ELSE meeting_history.time_label END",
-            params![id,job,audio_key,transcript_key,title,if meeting_started.is_empty() { &started_at } else { meeting_started },label,phase,text(event,"message"),archived.to_string()])
+            params![id,job,audio_key,indexed_transcript_key,title,if meeting_started.is_empty() { &started_at } else { meeting_started },label,phase,text(event,"message"),archived.to_string()])
             .map_err(db_error)?;
         Ok(())
     }
@@ -357,7 +368,13 @@ impl Storage {
         if path.trim().is_empty() {return Ok(json!({}));}
         let id: Option<String> = self.conn.lock().query_row("SELECT id FROM meeting_history WHERE transcript_key=?1 LIMIT 1",[path_key(path)],|row|row.get(0)).optional().map_err(db_error)?;
         let mut metadata=json!({});
-        if let Some(id)=id { crate::meeting_minutes::metadata::merge(&mut metadata,&self.meeting_history_result(&id)?); }
+        if let Some(id) = id {
+            let history = self.meeting_history_result(&id)?;
+            crate::meeting_minutes::metadata::merge(&mut metadata, &history);
+            if let Some(audio) = history["audioPath"].as_str() {
+                metadata["audioPath"] = json!(audio);
+            }
+        }
         Ok(metadata)
     }
 }

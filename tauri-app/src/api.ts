@@ -1,4 +1,5 @@
 import { diagnosticInvoke as invoke } from "./diagnostics";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ReleaseNotesSchema } from "./updateNotes";
@@ -18,6 +19,8 @@ import {
   MeetingRecordStopSchema,
   MeetingStatusSchema,
   MeetingResultSchema,
+  MeetingTranscriptSegmentSchema,
+  MeetingRevisionSchema,
   MeetingHistoryRowSchema,
   MeetingVocabularyEntrySchema,
   MeetingSpeakerNamesSchema,
@@ -430,6 +433,11 @@ export const meetingVocabularyDelete = async (id: string) => {
   return MeetingVocabularyEntrySchema.array().parse(await invoke("meeting_vocabulary_delete", { id }));
 };
 
+export const meetingVocabularyRemember = async (id: string, word: string) => {
+  if (!inTauri()) throw previewUnavailable("记入会议词库");
+  return MeetingVocabularyEntrySchema.array().parse(await invoke("meeting_vocabulary_remember", { id, word }));
+};
+
 export const meetingHistoryList = async () => {
   if (!inTauri()) return MeetingHistoryRowSchema.array().parse(demoLookup("meeting.history_list")?.({}) ?? []);
   return MeetingHistoryRowSchema.array().parse(await invoke("meeting_history_list"));
@@ -453,6 +461,36 @@ export const meetingReadTranscript = async (path: string) => {
   const value = await invoke("meeting_read_transcript", { path });
   if (typeof value !== "string") throw new Error("转写稿返回格式异常。");
   return value;
+};
+
+export const meetingTranscriptSegments = async (path: string) => {
+  if (!inTauri()) return [];
+  return MeetingTranscriptSegmentSchema.array().parse(await invoke("meeting_transcript_segments", { path }));
+};
+
+export const meetingAudioPlayback = async (path: string) => {
+  if (!inTauri()) throw previewUnavailable("试听会议录音");
+  const token = await invoke<string>("meeting_audio_playback", { path });
+  return { token, url: convertFileSrc(token, "meeting-audio") };
+};
+
+export const meetingAudioClose = async (token: string) => {
+  if (inTauri()) await invoke("meeting_audio_close", { token });
+};
+
+export const meetingRevisionList = async (source: string) => {
+  if (!inTauri()) return [];
+  return MeetingRevisionSchema.array().parse(await invoke("meeting_revision_list", { source }));
+};
+
+export const meetingRevisionGet = async (source: string, revisionId: string) => {
+  if (!inTauri()) throw previewUnavailable("读取纪要版本");
+  return MeetingResultSchema.parse(await invoke("meeting_revision_get", { source, revisionId }));
+};
+
+export const meetingRevisionRestore = async (source: string, revisionId: string) => {
+  if (!inTauri()) throw previewUnavailable("恢复纪要版本");
+  return MeetingResultSchema.parse(await invoke("meeting_revision_restore", { source, revisionId }));
 };
 
 export const meetingReadMinutes = async (path: string) => {

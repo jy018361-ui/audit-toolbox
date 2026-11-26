@@ -4,7 +4,7 @@ use chrono::Local;
 use directories::ProjectDirs;
 use polars::prelude::*;
 use rust_xlsxwriter::{
-    ConditionalFormatFormula, Format, FormatAlign, FormatBorder, Workbook, Worksheet,
+    ConditionalFormatFormula, Format, FormatAlign, FormatBorder, Note, Workbook, Worksheet,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
@@ -1753,54 +1753,56 @@ fn ledger_summary_sides(
     None
 }
 
+const LEDGER_SUMMARY_HEADERS: [&str; 5] = [
+    "科目名称",
+    "科目借方金额",
+    "对方贷方金额",
+    "科目贷方金额",
+    "对方借方金额",
+];
+
+fn ledger_summary_row(
+    account: String,
+    sides: Option<(f64, f64)>,
+    targets: &HashSet<String>,
+) -> Vec<String> {
+    let is_target = targets.is_empty() || targets.contains(&normalize_account_text(&account));
+    let (dr, cr) = sides
+        .map(|(dr, cr)| (format_number(dr), format_number(cr)))
+        .unwrap_or_default();
+    if is_target {
+        vec![account, dr, "0".into(), cr, "0".into()]
+    } else {
+        vec![account, "0".into(), cr, "0".into(), dr]
+    }
+}
+
 fn ledger_summary_from_amounts(
     rows: &[Vec<String>],
     account_indexes: &[usize],
     amounts: &[f64],
     headers: &[String],
     mapping: &LedgerMapping,
+    targets: &HashSet<String>,
+    cancel: &AtomicBool,
 ) -> Result<PivotResult, AppError> {
-    let mut grouped: BTreeMap<String, (f64, f64, f64, usize, bool)> = BTreeMap::new();
-    for (row, net) in rows.iter().zip(amounts) {
+    let mut grouped = BTreeMap::<String, Option<(f64, f64)>>::new();
+    for (index, (row, net)) in rows.iter().zip(amounts).enumerate() {
+        if index % 2000 == 0 {
+            check_cancel(cancel)?;
+        }
         let entry = grouped
             .entry(joined_account(row, account_indexes))
-            .or_default();
-        entry.2 += net;
-        entry.3 += 1;
-        if let Some((dr, cr)) = ledger_summary_sides(row, headers, mapping, *net) {
-            entry.0 += dr;
-            entry.1 += cr;
-        } else {
-            entry.4 = true;
-        }
+            .or_insert(Some((0.0, 0.0)));
+        *entry = entry
+            .zip(ledger_summary_sides(row, headers, mapping, *net))
+            .map(|((total_dr, total_cr), (dr, cr))| (total_dr + dr, total_cr + cr));
     }
     Ok(PivotResult {
-        headers: vec![
-            "科目名称".into(),
-            "借方金额".into(),
-            "贷方金额".into(),
-            "净额".into(),
-            "行数".into(),
-        ],
+        headers: LEDGER_SUMMARY_HEADERS.map(str::to_owned).to_vec(),
         rows: grouped
             .into_iter()
-            .map(|(account, (dr, cr, net, count, unknown))| {
-                vec![
-                    account,
-                    if unknown {
-                        String::new()
-                    } else {
-                        format_number(dr)
-                    },
-                    if unknown {
-                        String::new()
-                    } else {
-                        format_number(cr)
-                    },
-                    format_number(net),
-                    count.to_string(),
-                ]
-            })
+            .map(|(account, sides)| ledger_summary_row(account, sides, targets))
             .collect(),
         row_field_count: 1,
     })
@@ -2227,6 +2229,8 @@ fn analyze_ledger(
         &amounts.net,
         &table.headers,
         mapping,
+        &target_set,
+        cancel,
     )?;
     let key_label = voucher_key_label(&table.headers, &id_indexes);
     let voucher_pivot = build_voucher_pivot_rust(
@@ -4910,6 +4914,17 @@ fn is_month_header(value: &str) -> bool {
         && value[5..].bytes().all(|b| b.is_ascii_digit())
 }
 
+fn write_voucher_type_key_note(sheet: &mut Worksheet) -> Result<(), AppError> {
+    let note = Note::new(
+        "本列仅显示每个类型在源账中首次出现的代表凭证识别码（如制单日期和凭证 ID，以表头字段为准）。同类型其他凭证的日期及 ID 不在本列逐笔列示；金额和月份列汇总该类型的全部凭证。",
+    )
+    .set_author("审计工具箱")
+    .set_width(340)
+    .set_height(100);
+    sheet.insert_note(0, 1, &note).map_err(xlsx_error)?;
+    Ok(())
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum PivotSheetKind {
     /// 科目汇总、凭证：只要表头、金额格式和列宽
@@ -5064,6 +5079,7 @@ fn write_pivot_sheet(
         }
     }
     if voucher_type {
+        write_voucher_type_key_note(sheet)?;
         // 同一张凭证在类型表里会摊成多行（每个科目一行），旧版把识别码那一列
         // 纵向合并，读起来才是"一张凭证"而不是重复了五遍的编号。
         merge_repeated_column(sheet, &pivot.rows, 1)?;
@@ -11142,10 +11158,27 @@ mod tests {
             vec!["A".into(), "0".into(), "80".into()],
             vec!["A".into(), "0".into(), "-10".into()],
         ];
-        let summary =
-            ledger_summary_from_amounts(&rows, &[0], &[100.0, -80.0, 10.0], &headers, &mapping)
-                .unwrap();
-        assert_eq!(summary.rows[0], ["A", "100", "70", "30", "3"]);
+        let cancel = AtomicBool::new(false);
+        let summary = ledger_summary_from_amounts(
+            &rows,
+            &[0],
+            &[100.0, -80.0, 10.0],
+            &headers,
+            &mapping,
+            &HashSet::new(),
+            &cancel,
+        ).unwrap();
+        assert_eq!(summary.rows[0], ["A", "100", "0", "70", "0"]);
+        let unknown = ledger_summary_from_amounts(
+            &rows,
+            &[0],
+            &[100.0, -80.0, 10.0],
+            &headers,
+            &LedgerMapping::default(),
+            &HashSet::from(["b".into()]),
+            &cancel,
+        ).unwrap();
+        assert_eq!(unknown.rows[0], ["A", "0", "", "0", ""]);
         assert_eq!(
             ledger_summary_sides(&rows[0], &headers, &LedgerMapping::default(), 100.0),
             None
@@ -11199,12 +11232,16 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        assert_eq!(header, ["科目名称", "借方金额", "贷方金额", "净额", "行数"]);
+        assert_eq!(header, LEDGER_SUMMARY_HEADERS);
+        let targets = wb.worksheet_range("_targets").unwrap();
+        let targets = targets.rows().skip(1).map(|r| normalize_account_text(&r[0].to_string()))
+            .collect::<HashSet<_>>();
         for row in range.rows().skip(1) {
-            let dr: f64 = row[1].to_string().parse().unwrap();
-            let cr: f64 = row[2].to_string().parse().unwrap();
-            let net: f64 = row[3].to_string().parse().unwrap();
-            assert!((dr - cr - net).abs() < 0.01);
+            let target = targets.contains(&normalize_account_text(&row[0].to_string()));
+            let inactive = if target { [2, 4] } else { [1, 3] };
+            for col in inactive {
+                assert_eq!(row[col].to_string(), "0");
+            }
         }
         assert!(!wb.sheet_names().contains(&"LLM分析".to_owned()));
         println!("导出路径：{suite}");
@@ -11220,11 +11257,15 @@ mod tests {
             "凭证号,科目名称,借方金额,贷方金额,记账日期,借贷方向,摘要\n\
              1,收入,100,0,2026-01-01,借,摘要甲\n\
              1,银行,0,100,2026-01-01,贷,摘要甲\n\
+             1,收入,0,30,2026-01-01,贷,摘要甲\n\
+             1,银行,30,0,2026-01-01,借,摘要甲\n\
+             1,收入,0,-10,2026-01-01,贷,摘要甲\n\
+             1,银行,-10,0,2026-01-01,借,摘要甲\n\
              2,收入,50,0,2026-02-01,借,摘要乙\n\
              2,现金,0,50,2026-02-01,贷,摘要乙\n",
         )
         .unwrap();
-        let job: KanzhangParams = serde_json::from_value(json!({
+        let params = json!({
             "inputPath": input,
             "outputPath": output,
             "mapping": {
@@ -11235,14 +11276,25 @@ mod tests {
             "targetBatches": [{"name": "收入", "accounts": ["收入"]}],
             "includePivot": true, "includeVoucherTypes": true, "llmAnalysis": true,
             "__settings": {"llm": {"enabled": true}}
-        }))
-        .unwrap();
+        });
+        let job: KanzhangParams = serde_json::from_value(params.clone()).unwrap();
         let result = export_kanzhang_disk(&job, &|_, _, _, _| {}, &AtomicBool::new(false))
             .expect("批量聚合后应正常生成套表");
         assert_eq!(result["partial"], false);
         assert_eq!(result["batches"][0]["suiteGenerated"], true);
-        let mut workbook = open_workbook_auto(root.join("result_套表.xlsx")).unwrap();
+        let disk_suite = root.join("result_套表.xlsx");
+        let mut workbook = open_workbook_auto(&disk_suite).unwrap();
         let summary = workbook.worksheet_range("科目汇总").unwrap();
+        let mut params = params;
+        params["outputPath"] = json!(root.join("ordinary.csv"));
+        export_kanzhang(params, &|_, _, _, _| {}, &AtomicBool::new(false)).unwrap();
+        let ordinary_suite = root.join("ordinary_套表.xlsx");
+        let mut ordinary = open_workbook_auto(&ordinary_suite).unwrap();
+        assert_eq!(summary, ordinary.worksheet_range("科目汇总").unwrap());
+        assert_eq!(
+            summary.rows().next().unwrap().iter().map(ToString::to_string).collect::<Vec<_>>(),
+            LEDGER_SUMMARY_HEADERS
+        );
         let rows = summary
             .rows()
             .skip(1)
@@ -11250,18 +11302,28 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             rows.iter()
-                .any(|row| row == &["收入", "150", "0", "150", "2"])
+                .any(|row| row == &["收入", "150", "0", "20", "0"])
         );
         assert!(
             rows.iter()
-                .any(|row| row == &["银行", "0", "100", "-100", "1"])
+                .any(|row| row == &["银行", "0", "100", "0", "20"])
         );
         assert!(
             rows.iter()
-                .any(|row| row == &["现金", "0", "50", "-50", "1"])
+                .any(|row| row == &["现金", "0", "50", "0", "0"])
         );
         assert!(workbook.worksheet_range("凭证类型-严格").is_ok());
         assert!(!workbook.sheet_names().contains(&"LLM分析".to_owned()));
+        for path in [disk_suite, ordinary_suite] {
+            use std::io::Read;
+            let mut workbook_zip = ::zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
+            for entry in ["xl/comments1.xml", "xl/comments2.xml"] {
+                let mut xml = String::new();
+                workbook_zip.by_name(entry).unwrap().read_to_string(&mut xml).unwrap();
+                assert!(xml.contains("ref=\"B1\""));
+                assert!(xml.contains("首次出现的代表凭证识别码"));
+            }
+        }
         let _ = fs::remove_dir_all(root);
     }
 
